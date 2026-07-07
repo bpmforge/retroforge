@@ -1,0 +1,10 @@
+[package]
+name = "rf-renderer"
+description = "Renderer abstraction over wgpu: original + enhanced pipelines, shader chains"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "rf-profiles"
+description = "Game profile system: hash-keyed, versioned, data-driven decode rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

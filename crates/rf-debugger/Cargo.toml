@@ -1,0 +1,10 @@
+[package]
+name = "rf-debugger"
+description = "Debug/inspection: tracing, viewers' data providers, breakpoints, watchpoints"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

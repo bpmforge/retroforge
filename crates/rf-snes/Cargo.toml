@@ -1,0 +1,10 @@
+[package]
+name = "rf-snes"
+description = "SNES core: 5A22 CPU, PPU1/2, S-SMP/S-DSP, DMA/HDMA, LoROM/HiROM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

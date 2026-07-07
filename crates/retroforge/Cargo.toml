@@ -1,0 +1,13 @@
+[package]
+name = "retroforge"
+description = "RetroForge frontend application shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rf-core-api = { path = "../rf-core-api" }

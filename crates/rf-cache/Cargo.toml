@@ -1,0 +1,10 @@
+[package]
+name = "rf-cache"
+description = "Asset cache: decoded tiles/maps/AI outputs keyed by rom+asset hash"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

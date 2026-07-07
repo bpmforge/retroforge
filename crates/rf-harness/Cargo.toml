@@ -1,0 +1,10 @@
+[package]
+name = "rf-harness"
+description = "Test harness: test-ROM runner, golden-frame compare, determinism checks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
