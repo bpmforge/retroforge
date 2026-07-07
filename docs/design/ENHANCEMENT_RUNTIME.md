@@ -124,6 +124,19 @@ falls back to original — **zero AI on the frame path**.
   packs — one pipeline for AI packs and artist packs).
 - Later: widescreen outpainting (profile-gated, clearly labeled
   approximate), HUD/text detection for translation & accessibility overlays.
+- Sprite → animation-set grouping: cluster extracted sprites by OAM tile id
+  + adjacency-in-time (frames where one replaces another at the same entity
+  position) into animation sets, so a pack upscales a character coherently
+  instead of per-frame; sets are user-reviewable in the pack editor.
+- Object-aware enhancement: when a profile defines entity kinds
+  (`[entities]` table), packs may key variants per entity kind (e.g. distinct
+  treatment for player vs projectiles) — profile-gated, falls back to
+  tile-hash matching.
+- AI-assisted reverse engineering (P9+, assist-only): suggest labels for RAM
+  addresses from access-pattern traces and candidate level-data regions from
+  ROM entropy/structure scans, surfaced as *suggestions* in the debugger's
+  annotation store — a human accepts/rejects; profiles never ship
+  unreviewed AI output.
 - Never required; never cloud by default.
 
 ## 7. Scene graph (renderer contract)

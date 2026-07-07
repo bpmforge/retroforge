@@ -31,7 +31,8 @@ scanline_events = false  # costs perf; explicit
 draw_overlay = true
 replace_layers = false   # render override
 write_memory = false     # MOD-tier: requires per-plugin user opt-in + red badge
-filesystem = "cache_dir" # none | cache_dir
+input_bindings = false   # register hotkeys/virtual buttons; shown in the remap UI, conflict-checked
+filesystem = "cache_dir" # none | cache_dir; exports go through the host `export` API (user-picked destination), never raw fs access
 ```
 
 `write_memory` is the mod boundary: silently altering game behavior is

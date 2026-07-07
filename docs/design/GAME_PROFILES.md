@@ -25,6 +25,10 @@ region = "ntsc"
 authors = ["..."]
 sources = ["https://datacrystal.tcrf.net/wiki/..."]   # clean-room provenance REQUIRED
 
+[meta.requires]                       # optional assertions, validated against rf-cart detection at load
+mapper = "MMC1"                       # NES mapper name/id
+chips = []                            # SNES enhancement chips this profile assumes
+
 [[identity]]
 sha256 = "…normalized rom hash…"
 md5 = "…"                            # optional, RA cross-ref

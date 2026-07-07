@@ -69,7 +69,8 @@ full-map), then applies the camera transform and shader chain.
   tex_out`. Chain description is data (per-game/user settings): e.g.
   `[crt-easymode, vignette]` or `[xbrz4]` or `[]`.
 - Ship first-party: `nearest`, `sharp-bilinear`, `scanlines`,
-  `crt-easymode`-class, `xbrz`-class upscaler. Parameters exposed as typed
+  `crt-easymode`-class, `lcd-grid` (handheld/LCD look), `xbrz`-class
+  upscaler. Parameters exposed as typed
   UBO fields with UI-generated controls (name/range annotations in a small
   manifest per shader).
 - Not a goal: full RetroArch slang-shader compatibility. A converter for
