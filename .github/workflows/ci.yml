@@ -1,0 +1,24 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt, clippy" }
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: arch boundaries
+        run: scripts/validate-arch.sh
+      - name: tests
+        run: cargo test --workspace
+        env:
+          # headless GPU tests (from W3-01) use fallback adapter
+          WGPU_BACKEND: gl
+          LIBGL_ALWAYS_SOFTWARE: "1"

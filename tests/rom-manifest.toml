@@ -1,0 +1,7 @@
+# Test-ROM manifest — populated by ticket W0-03 from
+# docs/research/accuracy-and-testing.md. Format:
+# [[rom]]
+# name = "nestest"
+# url  = "https://…"
+# sha256 = "…"
+# dest = "roms/nes/nestest.nes"

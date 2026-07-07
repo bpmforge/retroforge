@@ -1,0 +1,28 @@
+# RetroForge — Risk Register
+
+Status: Phase 0 · 2026-07-06
+Expands `docs/ARCHITECTURE.md` §10. Review at each phase gate.
+
+| ID | Risk | L | I | Mitigation | Trigger to act |
+|---|---|---|---|---|---|
+| R-01 | **SNES accuracy is a multi-quarter effort** — 65C816/5A22 timing, PPU dot behavior, no mature Rust SNES core exists to study (`docs/research/rust-stack.md` §7) | H | H | NES first (Phases 1-5) reusing harness; SingleStepTests 65816/spc700 vectors before any ROM boots; bsnes/ares/Mesen2 C++ sources as behavioral reference; scope = plain LoROM/HiROM only | Phase 7 exit slips > 1 phase-duration |
+| R-02 | **SNES APU rabbit hole** — S-DSP (BRR, echo, gaussian) and SPC700 timing can consume months invisible to gameplay | M | H | SPC700 JSON vectors first; blargg SPC + gilyon spctest as the *only* accuracy bar; audio-hash CI not ear-tuning; defer mixer perfection past Phase 7 gate | APU work exceeds 2 tickets beyond gate |
+| R-03 | **De-flicker shows intentionally hidden sprites** (Mesen issues #60/#188 precedent) | H | M | Conservative defaults; auto-re-enable heuristic; per-game exclusions in profiles; side-by-side compare; blink-period respect (`docs/design/ENHANCEMENT_RUNTIME.md` §2) | Any bug report of wrong sprite visibility |
+| R-04 | **Enhancement leaks into determinism** | L | H | Mode-invariant hash test in CI from Phase 4 day one; StateView is read-only by construction; write path exists only behind mod ledger | Invariant test ever fails |
+| R-05 | **Scope explosion** (spec is a 10-phase platform) | H | H | plan.json phase gates — no Phase-N ticket starts before N-1 exit criteria pass; NON_GOALS.md is binding; MoSCoW in SCOPE.md | >10% of open tickets lack phase tags |
+| R-06 | **Plugin API churn** locks us into a bad ABI | M | M | Native plugins in-tree until Phase 9; only TOML profiles + Lua are public early; wasmtime tier waits for real third-party demand | External request to stabilize ABI pre-P9 |
+| R-07 | **wgpu quarterly breaking releases** (by design; v30 July 2026) | H | L | Pin majors; upgrade wgpu+egui in lockstep when egui catches up (~weeks); budget ½ day/quarter; changes are mechanical | Build breaks on dependabot bump |
+| R-08 | **egui limits for complex docking/panels** | M | M | egui_dock 0.20 proven shape; `egui_docking` (tear-off windows) as fallback; UI code isolated in frontend crate — swap doesn't touch cores | A required panel can't be built in a week |
+| R-09 | **Test-ROM link rot** (blargg's site already dead; mirrors drift) | M | M | Fetch manifest with SHA-256 pins + multiple mirror URLs (christopherpow, gitlab higan); CI caches; consider a private mirror bucket | Any manifest URL 404s |
+| R-10 | **Reference emulators are moving targets** (Mesen2 archived → MesenCE; ares v148 active) | L | L | Accuracy defined by *test ROMs*, not by matching another emulator; references cited by commit hash in design docs | — |
+| R-11 | **bincode 3 API trap for AI coding agents** (training data is full of 1.x idioms) | H | M | CONSTRAINTS §4 policy; envelope isolates codec; `docs/TECH_STACK.md` red-flags it; review checklist item | Any `bincode::serialize` (1.x API) in a PR |
+| R-12 | **Per-game profile authoring cost** underestimated — each flagship profile is real RE work | M | H | Authoring pipeline is a product feature (debugger→export); start with open-source games whose formats are in their build systems (Nova 1/2); import community docs (DataCrystal); decoder families shared across games | First profile takes > 2 weeks |
+| R-13 | **AI-agent code quality** — cheap coding model produces plausible-but-wrong emulation code | H | H | Emulation is uniquely testable: SingleStepTests vectors give per-instruction ground truth; every plan.json ticket has acceptance criteria = named tests; SRS traceability; CI blocks merge; architecture validator prevents layer violations | Ticket merged with failing/absent gate |
+| R-14 | **Solo-maintainer bus factor / burnout** (Mesen2's fate) | M | H | Permissive license, this doc set, handoff-ready plan.json; phases produce useful standalone artifacts (a good NES emulator exists even if SNES never lands) | 4 weeks without commits |
+| R-15 | **Audio latency/pacing problems** (cpal backend buffer quirks, e.g. cpal #902) | M | M | Dynamic rate control (rubato ratio nudging) per libretro reference; request-but-tolerate buffer sizes; audio-clock-driven pacing per ARCHITECTURE §8 | Audible crackle in 60 s soak test |
+| R-16 | **Nova the Squirrel dependency** (GPLv3 fetch-only fixture; asset terms unverified for redistribution) | L | M | Fetch-by-manifest only; Alter Ego (PD) as fallback demo; our own cc65/libSFX fixtures for CI; verify asset licensing before any bundling | License question raised; repo unreachable |
+| R-17 | **Stitcher false scene cuts** (wideNES's documented weakness: perceptual-hash thresholds are palette-dependent) | M | L | Scene id = perceptual hash *plus* mapper bank state (already designed, ENHANCEMENT_RUNTIME §3); per-game threshold overrides; worst case = extra canvases, not corruption | Demo game fragments into >2× expected canvases |
+
+L/I: likelihood/impact H-M-L. Top watch items: **R-01, R-05, R-13** — they
+compound (SNES scope pressure + agent-driven velocity without gates is how
+plausible-but-wrong cores ship).

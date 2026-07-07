@@ -1,0 +1,135 @@
+# RetroForge — Test Strategy
+
+Status: Phase 2 baseline · 2026-07-06
+Sources: `docs/research/accuracy-and-testing.md` (suite provenance + URLs),
+SRS verification column, `docs/design/SAVE_STATES.md`.
+
+## 1. Test pyramid
+
+| Level | What | Runner | Gate |
+|---|---|---|---|
+| 1. CPU vector tests | SingleStepTests JSON vectors (`nes6502`, `65816`, `spc700`): per-opcode state + cycle-by-cycle bus activity, no ROM loader needed | `cargo test` (native unit tests in rf-nes / rf-snes) | every PR |
+| 2. Trace conformance | nestest vs golden `nestest.log` (byte-exact PC/A/X/Y/P/SP/CYC) | rf-harness headless | every PR |
+| 3. Test-ROM integration | blargg / mmc3 / gilyon / PeterLemon / undisbeliever suites | rf-harness headless ($6000 protocol or golden frame) | every PR (tier A), nightly (tier B) |
+| 4. Golden-frame | Framebuffer SHA-256 vs checked-in golden PNGs at declared frame N | rf-harness | every PR |
+| 5. Determinism & replay | double-run state-hash equality; `.rfreplay` replay to final hash; save-state roundtrip; mode invariant | rf-harness | every PR — **release gate (NFR-001)** |
+| 6. Enhancement invariants | Accuracy-vs-Enhanced core-hash equality, anti-flicker goldens, stitcher determinism, profile validation | rf-harness + cargo test | every PR once rf-enhance exists |
+| 7. Perf benchmarks | criterion: ms/frame per core, enhancement frame budget | `cargo bench` + threshold script | nightly; regression >10% blocks merge |
+
+## 2. Harness protocols (rf-harness)
+
+- **$6000 protocol (NES/blargg)**: run headless N frames, poll $6000
+  (0x80=running, 0x00=pass, else fail code), read message text at $6004+.
+  Timeout = declared frame budget per ROM ⇒ fail.
+- **Golden-frame**: run to frame N (manifest-declared), hash framebuffer
+  (indexed buffer, pre-shader — host GPU never affects goldens), compare
+  SHA-256; on mismatch, dump PNG pair + diff heatmap as CI artifacts.
+- **Audio check**: capture ring-buffer output, compare per-channel RMS
+  envelope against known-good recording (blargg `apu_mixer`); exact
+  sample-hash for S-DSP BRR cases.
+- **Replay check**: play `.rfreplay`, assert periodic + final state hashes;
+  on divergence report first divergent frame (hashes every N frames make
+  bisection O(log) by re-run).
+
+## 3. Test-ROM acquisition (never committed — NFR-006)
+
+`tests/manifest.toml` lists every external artifact: URL, SHA-256, license
+note, unpack path. `scripts/fetch-test-roms.sh` downloads into gitignored
+`tests/roms/`, verifies hashes, and is idempotent; CI caches by manifest
+hash. Sources: christopherpow/nes-test-roms, SingleStepTests repos,
+gilyon/snes-tests releases, PeterLemon/SNES, undisbeliever/snes-test-roms.
+Homebrew fixtures we may vendor in-repo only with license files (GPLv3 Nova
+ROMs are fetched, not vendored; PD/MIT fixtures may be vendored or built from
+source via cc65/libSFX in CI).
+
+## 4. NES CI gates
+
+Tier A = every PR; Tier B = nightly (slow or visual-manual-once suites).
+
+| Suite | Verifies | SRS | Tier | Pass criteria |
+|---|---|---|---|---|
+| SingleStepTests `nes6502` | per-opcode state + bus cycles | FR-CORE-020 | A | 100% official ops; illegal-op subset tracked to 100% by Phase 2 |
+| nestest + `nestest.log` | whole-CPU conformance | FR-CORE-021 | A | byte-exact trace diff empty |
+| blargg `instr_test-v5` | official+unofficial instructions | FR-CORE-020 | A | $6000 = 0 all ROMs |
+| `cpu_timing_test6`, `instr_timing`, `branch_timing_tests` | cycle counts, page-cross, branches | FR-CORE-020 | A | $6000 = 0 |
+| `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A | $6000 = 0 |
+| `cpu_dummy_reads/writes`, `cpu_exec_space` | dummy bus cycles, open bus | FR-CORE-020 | B | $6000 = 0 |
+| blargg `ppu_vbl_nmi` (10 sub-ROMs) | VBL/NMI to the PPU cycle | FR-CORE-022 | A | $6000 = 0 |
+| `sprite_hit_tests`, `sprite_overflow_tests` | sprite-0 hit, overflow bug | FR-CORE-023 | A | $6000 = 0 |
+| `oam_read`, `oam_stress` | $2004 semantics | FR-CORE-023 | B | $6000 = 0 |
+| `full_palette`, `ppu_open_bus`, `ppu_read_buffer` | palette, open bus, $2007 buffer | FR-CORE-022 | B | golden frame / $6000 |
+| blargg `apu_test`, `apu_reset`, `dmc_dma_during_read4` | frame counter, IRQ, DMC DMA | FR-CORE-024 | A | $6000 = 0 |
+| blargg `apu_mixer` | non-linear mixer levels | FR-CORE-024 | B | RMS envelope match |
+| `mmc3_test_2` + IRQ tests | MMC3 A12 IRQ counter | FR-CORE-025 | A | $6000 = 0 |
+| Holy Diver Batman (28 ROMs) | mapper acid breadth | FR-CORE-025 | B | golden frame per ROM |
+| Nova the Squirrel 5-min replay | real-game regression | FR-CORE-026 | A | final-hash + 6 golden frames |
+
+## 5. SNES CI gates
+
+| Suite | Verifies | SRS | Tier | Pass criteria |
+|---|---|---|---|---|
+| SingleStepTests `65816` | CPU vectors | FR-CORE-030 | A | 100% ops |
+| SingleStepTests `spc700` | SPC vectors | FR-CORE-031 | A | 100% ops |
+| gilyon/snes-tests `cputest` | on-console CPU behavior | FR-CORE-030 | A | RAM result block matches shipped `tests.txt` |
+| gilyon `spctest` | SPC on-console | FR-CORE-031 | A | same |
+| undisbeliever DMA/HDMA ROMs | DMA/HDMA edges | FR-CORE-032 | A | golden frame |
+| PeterLemon PPU per-feature (modes 0-6, windows, mosaic, color math) | PPU features | FR-CORE-033 | A | golden frame (screen shows computed-vs-expected) |
+| PeterLemon Mode 7 set | Mode 7 + HDMA perspective | FR-CORE-034 | A | golden frame |
+| blargg SPC timing (higan mirror) | S-SMP/S-DSP timing | FR-CORE-036 | B | $-protocol / audio hash |
+| Nova the Squirrel 2 5-min replay | real-game regression | FR-CORE-037 | A | final-hash + goldens |
+
+Note (research-verified): neither bsnes nor Mesen2 publishes a golden-frame
+CI — this harness is our own build, and it doubles as the accuracy-table
+generator (TASVideos-style) for release notes.
+
+## 6. Determinism, state, and mode-invariant suites
+
+| Test | Assertion | SRS |
+|---|---|---|
+| Double-run | run N frames twice from same state + input log ⇒ per-frame state hashes identical | FR-CORE-002 |
+| Replay determinism | every test-ROM run is recorded and replayed; final hash equal | FR-STATE-006 |
+| State roundtrip | at frames {60, 600, 3600}: save → load → run 600 more ⇒ hash equals uninterrupted run | FR-STATE-002 |
+| Cross-mode state | Enhanced-mode state loads in Accuracy config (enhancement chunks skipped) and continues hash-identical | FR-STATE-007 |
+| Golden fixtures | every released `.rfstate`/`.rfreplay` fixture loads on current main | FR-STATE-005 |
+| **Mode invariant** | same ROM + log run in Accuracy and Enhanced (all features on) ⇒ identical core hashes every frame | FR-MODE-002 |
+| Wrong-ROM refusal | state with mismatched normalized hash refused with diagnostic | FR-STATE-003 |
+
+## 7. Enhancement feature tests
+
+- **Anti-flicker goldens**: homebrew scenes engineered to overflow sprite
+  limits (built with cc65 in CI): (a) limit-bypass shows all sprites, (b)
+  temporal mode reconstructs software-culled rotation, (c) intentional-blink
+  case is respected, (d) sprite-0-hit ROM still passes with bypass on.
+- **Stitcher**: deterministic canvas — same replay ⇒ byte-identical canvas;
+  HUD band exclusion on a scroll-split fixture; scene-change spawns new
+  canvas.
+- **Profile validation**: `retroforge-tool profile validate` over `/profiles`
+  in CI — schema, provenance (`source` required), no binary assets outside
+  licensed homebrew dirs (FR-PROF-003/006).
+- **Decoder goldens**: Nova level decode output (chunk grid PNG + collision
+  map) hashed against goldens; re-decode determinism.
+- **Plugin containment**: Lua script that errors every frame ⇒ script paused,
+  emulation unaffected; over-budget plugin throttled (FR-PLUG-004/005).
+
+## 8. Phase exit gates (roadmap enforcement)
+
+| Phase | Exit = all of |
+|---|---|
+| 1 (NES MVP) | nes6502 vectors 100% official · nestest diff empty · instr_test-v5 pass · NROM boots 2 homebrew titles · double-run + roundtrip + replay suites green |
+| 2 (NES compat) | Tier-A NES table fully green · mapper set complete · battery saves · Nova replay green |
+| 3 (renderer) | golden frames render identically through wgpu original pipeline (pre-shader hash unchanged) · fallback test green |
+| 4 (enhancement fw) | mode invariant green with runtime subscribed · overlay + profile-load demos · plugin containment tests |
+| 5 (game-aware) | Nova full-level decode goldens · E6-S1 acceptance demo recorded |
+| 6 (SNES MVP) | 65816 + spc700 vectors 100% · gilyon cputest/spctest green · LoROM homebrew boots |
+| 7 (SNES compat) | Tier-A SNES table fully green · Nova 2 replay green |
+| 8 (adv. enhance) | widescreen/fast-load cases green · rewind memory budget documented |
+| 9 (ecosystem) | profile/plugin CI checks green on example third-party submissions |
+
+## 9. Performance benchmarks
+
+criterion benches per core (`ms/frame`, Accuracy config, fixed replay
+workload) and per enhancement stage (de-flicker, stitcher, decoder, compose).
+Nightly CI compares against `benches/baseline.json`; >10% regression fails
+the run and blocks merge until re-baselined with justification in the PR.
+NFR-002 targets (NES ≤2 ms, SNES ≤8 ms per frame) are re-baselined after
+Phase 1/6 measurements — treat as budgets, not guesses, thereafter.

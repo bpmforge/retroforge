@@ -31,7 +31,7 @@ it.
 | Temporal de-flicker (alternating OAM reconstruction) | ✅ heuristic, imperfect | tuning/exclusions |
 | Map stitching from observed scroll (wideNES technique) | ✅ incremental, only shows *visited* areas | — |
 | Full-level render incl. unvisited areas | ❌ impossible generically | ✅ ROM level-format decoder |
-| Widescreen background extension | ❌ (PPU only renders ~1 screen + prefetch) | ✅ or AI outpainting (approximate) |
+| Widescreen background extension | NES: ❌ (nametables barely exceed viewport). SNES: ⚠️ semi-generic — bsnes-hd proves extra tilemap columns often already exist; artifacts (sprite pop-in, garbage tiles) without per-game policy | ✅ per-BG-layer policies, or AI outpainting (approximate) |
 | HUD separation | heuristic (split-screen IRQ/HDMA detection) | ✅ for reliability |
 | Loading-screen fast-forward | heuristic (idle-loop detection) is risky | ✅ known wait loops |
 | Smooth scrolling beyond 60 Hz game logic | ❌ game logic updates positions once per frame; true smoothing needs interpolation of *decoded* entity positions | ✅ entity table addresses |
