@@ -29,7 +29,7 @@ DB=design/DEBUGGER.md, SRS/TEST/ROAD/MVP/SCOPE/NG=docs/<name>.md.
 | Smoother scrolling where possible | RD §3 sub-pixel camera, RD §8 sync-to-display, SCOPE P8 smooth-camera | COVERED |
 | Full-level/extended-map visualization | ER §3/§4, FR-ENH-005/006 | COVERED |
 | Overlays + future AI features | FR-REND-006, FR-AI-*, ER §6 | COVERED |
-| Plugin architecture, evolvable без core rewrites | PL, FR-PLUG-*, one-way layering ARCH §3 | COVERED |
+| Plugin architecture, evolvable without core rewrites | PL, FR-PLUG-*, one-way layering ARCH §3 | COVERED |
 
 ## 2. Architecture layers (spec's 11-layer + 15-layer lists)
 
