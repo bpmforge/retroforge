@@ -73,7 +73,7 @@ RAM reads; enhancement state serializes into ENHC chunks.
 Goal: prove the thesis on open-source homebrew.
 Key tickets: W4-03 (scroll telemetry + IRQ split + scene hashing +
 re-entrant canvases), W5-03 (enhanced camera over stitched canvas),
-W5-01-profile (Nova the Squirrel: level decoder from its documented
+W5-01 (Nova the Squirrel: level decoder from its documented
 format, camera/entity addresses), W5-02 (decoded-level scene layer +
 live sprites over reconstruction), W5-04 (side-by-side demo mode +
 capture).
