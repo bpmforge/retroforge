@@ -98,6 +98,9 @@ warns on version-migrated states.
 │   [ ] Widescreen: decoded      (requires profile ✓ present)│
 │   [ ] Full-level view          (requires profile ✓ present)│
 │   rows disabled+explained when no profile capability      │
+│   ladder chip per heuristic: shadow/advisory/active +     │
+│   report-card link (D-004): contradiction events, would-  │
+│   have-done counts, suppression justifications            │
 │ Map: stitched/decoded canvas · fog for unvisited ·        │
 │   live player marker · original-viewport outline · export │
 └──────────────────────────────────────────────────────────┘

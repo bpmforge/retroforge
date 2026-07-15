@@ -104,6 +104,14 @@ Decoder families (`decode.kind`) are implemented once in `rf-enhance` and
 parameterized by data: `metatile_screens`, `room_grid`, `tilemap_direct`,
 plus `custom` (delegates to a named plugin). New families are added when ≥2
 games need the same shape — resist one-off engine code in the runtime.
+Families are **versioned** (schema v0.2 adds `decode.family_version`): a
+behavioral change to a family bumps its version; the loader refuses a
+newer major, mirroring `profile_version` semantics — profiles never
+silently re-decode differently under an upgraded emulator.
+
+Community-submitted profiles pass license-gated intake (D-005,
+FR-PROF-007): `[meta]` requires `license` (SPDX) alongside `sources`;
+deny-by-default at the Phase-9 submission CI.
 
 ## 3. Authoring pipeline
 

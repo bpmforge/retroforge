@@ -24,6 +24,11 @@ Hard lines. Violating one is an incident, not a trade-off.
   (`docs/design/SAVE_STATES.md`) — no mid-frame serialization complexity.
 - **No AI, no network, no blocking I/O on the frame path.** AI and decode
   jobs are async, cache-backed, droppable.
+- **Path containment (D-006).** Every externally influenced path — library
+  scan roots, `profiles.d` references, plugin `filesystem` caps, export
+  destinations, cache dir — is realpath-resolved and contained to its
+  declared root before use; symlink escapes are refused with a diagnostic;
+  directory walks are symlink-loop-safe (SRS NFR-010).
 
 ## 2. Legal constraints
 
@@ -44,8 +49,8 @@ Hard lines. Violating one is an incident, not a trade-off.
   source (DataCrystal URL, own debugger session, disassembly) —
   `docs/design/GAME_PROFILES.md` makes `sources` required. No decompiled
   copyrighted code is committed.
-- **Facts-only transcription policy** (design review G-41, 2026-07-15;
-  vetoable — FS-3). DataCrystal content is **GFDL 1.2** (copyleft).
+- **Facts-only transcription policy** (design review G-41; locked D-007,
+  2026-07-15). DataCrystal content is **GFDL 1.2** (copyleft).
   Profiles may take individual facts (addresses, sizes, enumerated
   values) — facts are not copyrightable — but: all prose descriptions
   are written fresh; never transcribe a full curated table verbatim

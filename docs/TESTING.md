@@ -92,6 +92,14 @@ Note (research-verified): neither bsnes nor Mesen2 publishes a golden-frame
 CI — this harness is our own build, and it doubles as the accuracy-table
 generator (TASVideos-style) for release notes.
 
+**Accuracy table + waivers (R-C1/R-D4):** the harness emits a
+machine-readable table (suite × ROM × pass/fail/frame JSON) per run. Raw
+and effective counts are reported separately: known-fails live in an
+explicit waiver file carrying justification + expiry date; an expired
+waiver reopens red; a red row with no open ticket fails the report step
+(suite→FR→ticket mapping is a lookup from the tables above, never a
+judgment call).
+
 ## 6. Determinism, state, and mode-invariant suites
 
 | Test | Assertion | SRS |
@@ -121,6 +129,12 @@ generator (TASVideos-style) for release notes.
   collision map) hashed against goldens; re-decode determinism.
 - **Plugin containment**: Lua script that errors every frame ⇒ script paused,
   emulation unaffected; over-budget plugin throttled (FR-PLUG-004/005).
+- **Red-fixture rule (FR-ENH-013, D-004)**: every shipped heuristic has a
+  fixture scene/ROM that MUST trigger it; CI fails when it stops firing.
+  The anti-flicker cases above are instances; the rule is general.
+- **Path containment (NFR-010)**: symlink-escape attempts on plugin
+  cache_dir, profiles.d references, and library scan roots are refused;
+  scan survives a symlink loop (unit tests per surface).
 
 ## 8. Phase exit gates (roadmap enforcement)
 

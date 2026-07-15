@@ -41,6 +41,16 @@ Anything in the right column flows through `rf-profiles`. The platform's
 value is making that column *cheap to author* (debugger → annotation →
 profile export) — not pretending it is free.
 
+**Trust ladder (D-004, 2026-07-15).** The honesty contract is enforced
+mechanically for every heuristic in the middle column: heuristics ship
+**shadow-first** (detect and record, never act), graduate to **advisory**
+(badge suggests) and **active** only per-game — by the user or a profile
+pin. Contradiction events (a safety auto-re-enable, a false scene cut)
+land in a local per-game report card; suppressing a safety requires a
+stored justification that auto-reopens on new evidence. No telemetry —
+trust is measured on the player's own machine (NFR-005). Details:
+`docs/design/ENHANCEMENT_RUNTIME.md` §2a.
+
 ## 3. Layer diagram
 
 ```mermaid

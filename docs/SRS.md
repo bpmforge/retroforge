@@ -93,6 +93,9 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 | FR-ENH-008 | Loading fast-forward shall trigger only on profile-declared wait loops (PC + condition), disabling frame pacing without altering simulation. | P2 | CI | rf-enhance |
 | FR-ENH-009 | Game-logic patches (mods) shall be off by default, individually user-enabled, ledger-logged, and recorded in save states. | P2 | UT | rf-enhance |
 | FR-ENH-010 | Every enhancement feature shall be independently toggleable at runtime without restart. | P1 | M | rf-enhance |
+| FR-ENH-011 | Every enhancement heuristic shall implement the trust ladder (D-004): states shadow (detect + record, never act) → advisory (badge suggests) → active; fresh install all-shadow; per-game state persisted by normalized hash; profiles may pin states. | P1 | UT | rf-enhance |
+| FR-ENH-012 | Heuristic contradiction events (safety auto-re-enable, scene-cut resets, blink-period violations) shall be recorded to a local per-game report card surfaced in the Enhance workspace; suppressing a safety heuristic per-game shall require a stored justification that auto-reopens when the trigger recurs in a new scene context. | P1 | UT + M | rf-enhance |
+| FR-ENH-013 | Every shipped heuristic shall have a red fixture (RF-Scroller scene or dedicated ROM) that MUST trigger it; a heuristic change that stops firing on its red fixture shall fail CI. | P1 | CI | rf-harness |
 
 ## 5. FR-PROF — Game profiles
 
@@ -104,6 +107,7 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 | FR-PROF-004 | The loader shall reject newer schema majors and warn on unknown keys. | P1 | UT | rf-profiles |
 | FR-PROF-005 | User overrides (`~/.retroforge/profiles.d/`) shall layer over shipped profiles with precedence visible in the profile inspector. | P2 | M | rf-profiles |
 | FR-PROF-006 | Profiles for commercial games shall contain only facts (addresses, rules) — CI shall reject binary assets in `/profiles` except under homebrew titles with license files. | P1 | CI | repo |
+| FR-PROF-007 | Community-submitted profiles/packs/plugins shall pass license-gated intake (D-005): SPDX license + provenance metadata required; missing/unknown licenses and denylisted content (NC assets, GFDL text, GPL-derived shader code) rejected; nothing activates without passing. | P3 | CI | repo |
 
 ## 6. FR-PLUG — Plugins and scripting
 
@@ -175,3 +179,4 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 | NFR-007 | `unsafe` code requires a `// SAFETY:` comment and is warned by workspace lints; hot-path exceptions need review sign-off. | MVP | CI |
 | NFR-008 | All public formats (profile schema, .rfstate, .rfreplay, plugin manifest) are versioned from first release. | MVP | CI |
 | NFR-009 | Platforms: macOS (primary dev), Windows, Linux — CI builds all three from Phase 3 onward. | P1 | CI |
+| NFR-010 | Path containment (D-006): every externally influenced path (library scan, profiles.d references, plugin filesystem caps, export destinations, cache dir) shall be realpath-resolved and contained to its declared root; symlink escapes refused with a diagnostic; library scan is symlink-loop-safe. | P1 | UT |

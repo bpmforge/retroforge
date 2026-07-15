@@ -52,7 +52,7 @@ Traces: SRS requirement IDs; roadmap phases per `docs/ROADMAP.md`.
 - **E4-S3** (3) As Priya, I want renderer problems to fall back to the original pipeline so that emulation never dies from GPU issues.
   - AC: simulated device-loss test recovers within 1 s (FR-REND-007).
 
-## E5 — Generic enhancements (Phases 3-4) — SRS: FR-ENH-001..004, FR-MODE-002/003
+## E5 — Generic enhancements (Phases 3-4) — SRS: FR-ENH-001..004, FR-ENH-011..013, FR-MODE-002/003
 
 - **E5-S1** (5) As Priya, I want sprite flicker reduced in busy scenes so that games look cleaner, without changing gameplay.
   - AC: limit-bypass + temporal modes independently toggleable; sprite-0 games unaffected (test ROM gate); mode invariant holds (FR-MODE-002).
@@ -60,6 +60,8 @@ Traces: SRS requirement IDs; roadmap phases per `docs/ROADMAP.md`.
   - AC: stitched canvas persists across sessions; unvisited area fogged (FR-ENH-004); HUD band excluded on a scroll-split game.
 - **E5-S3** (2) As Priya, I want enhancements off by default so that first run is authentic.
   - AC: fresh config boots Accuracy-equivalent (FR-MODE-003).
+- **E5-S4** (3) As Tomás, I want heuristics to prove themselves in shadow mode with a per-game report card so that I can see when they'd be wrong before I enable them.
+  - AC: trust-ladder states persist per game (FR-ENH-011); report card lists contradiction events (FR-ENH-012); suppressing a safety requires a reason and reopens on new-context triggers.
 
 ## E6 — Game-aware full level (Phase 5) — SRS: FR-ENH-005..007, FR-PROF-*
 
@@ -105,11 +107,13 @@ Traces: SRS requirement IDs; roadmap phases per `docs/ROADMAP.md`.
 - **E11-S1** (8) As Tomás, I want to generate an upscaled sprite pack locally overnight and review it before use so that AI art is my choice, not a surprise.
   - AC: job queue over extracted assets; review UI diffs original/enhanced; pack activates only after approval; fully offline.
 
-## E12 — Ecosystem (Phase 9) — SRS: FR-PLUG-006, FR-PROF-005/006
+## E12 — Ecosystem (Phase 9) — SRS: FR-PLUG-006, FR-PROF-005/006/007
 
 - **E12-S1** (5) As Kenji, I want a plugin SDK with docs and a sandboxed WASM host so that third-party plugins are safe to install.
 - **E12-S2** (3) As Ada, I want to publish profiles in a community-safe format (facts only, sources required) so that sharing never distributes copyrighted data.
   - AC: CI provenance/asset checks (FR-PROF-003/006) run on contributed profiles.
+- **E12-S3** (2) As Kenji, I want community submissions license-checked automatically so that installing ecosystem content never imports legal risk.
+  - AC: deny-by-default intake with SPDX + provenance required; denylist rejections explained (FR-PROF-007).
 
 ## Story map summary
 
@@ -119,14 +123,14 @@ Traces: SRS requirement IDs; roadmap phases per `docs/ROADMAP.md`.
 | E2 NES compatibility | 2 | 13 | — |
 | E3 Debug tooling | 2 | 13 | E3-S1 partial (2 viewers) |
 | E4 Modern renderer | 3 | 13 | E4-S1 partial (scaling) |
-| E5 Generic enhancements | 3-4 | 15 | E5-S3 + overlay demo |
+| E5 Generic enhancements | 3-4 | 18 | E5-S3 + overlay demo |
 | E6 Game-aware full level | 5 | 16 | — |
 | E7 Scripting & plugins | 4-5 | 8 | — |
 | E8 SNES baseline | 6 | 18 | — |
 | E9 SNES depth | 7 | 16 | — |
 | E10 Advanced enhancement | 8 | 18 | — |
 | E11 AI packs | future | 8 | — |
-| E12 Ecosystem | 9 | 8 | — |
+| E12 Ecosystem | 9 | 10 | — |
 
 MVP composition is defined in `docs/MVP.md`; it draws E1 fully plus slices of
 E3/E4/E5 to prove every architectural layer end-to-end.
