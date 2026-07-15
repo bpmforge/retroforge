@@ -1,63 +1,1422 @@
 {
-  "$schema_note": "RetroForge ticket board. Fields: id, title, phase (roadmap phase), crate (primary write scope), write_scope (globs the executor may touch), depends_on (ticket ids), acceptance (ALL must pass before status=done), points (fibonacci), status (todo|in_progress|done|blocked), notes (OPTIONAL array of strings, append-only: HANDOFF:/BLOCKED: entries). ALWAYS-WRITABLE SET (in addition to write_scope, for every ticket): this file's own-ticket status+notes fields; docs/STATUS.md (append one line per merged ticket); Cargo.lock; docs/TECH_STACK.md section-2 rows (new-dependency decision record). Claim rule: a ticket is claimable when all depends_on are done. Executors: work ONE ticket per session, run `cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace && scripts/validate-arch.sh` plus ticket acceptance before marking done. Never widen write_scope beyond the always-writable set without a HANDOFF note in the ticket's notes array.",
-  "version": 1,
-  "tickets": [
-    { "id": "W0-01", "title": "CI pipeline + arch validator", "phase": 0, "crate": "infra", "write_scope": [".github/**", "scripts/**"], "depends_on": [], "acceptance": ["CI runs fmt/clippy/test on push", "scripts/validate-arch.sh fails if rf-nes/rf-snes/rf-core-api depend on upper-layer crates"], "points": 2, "status": "done" },
-    { "id": "W0-02", "title": "rf-cart: header parsing, normalization, hashing", "phase": 0, "crate": "rf-cart", "write_scope": ["crates/rf-cart/**"], "depends_on": [], "acceptance": ["iNES + NES 2.0 + SNES (LoROM/HiROM heuristic, copier-header strip when size%8192==512) parsed with unit tests on synthetic images", "normalized CRC32/MD5/SHA-1/SHA-256 match RA convention (NES: skip 16-byte header) with fixture tests", "mapper id + PRG/CHR sizes + mirroring + battery flag exposed"], "points": 5, "status": "todo" },
-    { "id": "W0-03", "title": "rf-harness: test-ROM fetcher + blargg runner", "phase": 0, "crate": "rf-harness", "write_scope": ["crates/rf-harness/**", "tests/rom-manifest.toml", "scripts/fetch-test-roms.sh"], "depends_on": ["W0-02"], "acceptance": ["manifest (URL+sha256) fetch into gitignored roms/ with verification", "headless runner protocol for blargg $6000 status byte + $6004 text", "golden-frame hash compare helper", "populate manifest URLs from docs/research/accuracy-and-testing.md (accuracy oracles only — game fixtures are in-repo per fixture doctrine D-001)", "machine-readable accuracy table (suite x ROM x pass/fail/frame JSON) emitted per run; raw vs effective counts separated via waiver file with justification + expiry (TESTING.md section 5, R-C1/R-D4)"], "points": 5, "status": "todo" },
-    { "id": "W0-04", "title": "rf-core-api: core traits v0", "phase": 0, "crate": "rf-core-api", "write_scope": ["crates/rf-core-api/**"], "depends_on": [], "acceptance": ["EmulatorCore/CoreSink/StateView/CoreEvent/InputFrame/Step per docs/ARCHITECTURE.md §5", "indexed PpuPixel with layer/sprite-id/priority metadata", "EventMask subscription filtering", "mock core exercises the contract in tests"], "points": 5, "status": "todo" },
-    { "id": "W0-05", "title": "rf-state: TLV container + envelope", "phase": 0, "crate": "rf-state", "write_scope": ["crates/rf-state/**"], "depends_on": ["W0-04"], "acceptance": ["container per docs/design/SAVE_STATES.md (magic/version/rom-hash/chunks, zstd)", "bincode 3 Encode/Decode payloads (NOT 1.x serde API)", "roundtrip + unknown-chunk-skip + missing-required-chunk tests", "golden fixture harness"], "points": 5, "status": "todo" },
-
-    { "id": "W1-01", "title": "6502 CPU core (all opcodes incl. unofficial)", "phase": 1, "crate": "rf-nes", "write_scope": ["crates/rf-nes/src/cpu/**"], "depends_on": ["W0-04"], "acceptance": ["SingleStepTests nes6502 JSON vectors pass 100% including cycle-by-cycle bus activity", "criterion benchmark exists"], "points": 13, "status": "todo" },
-    { "id": "W1-02", "title": "NES bus + NROM + OAM DMA + controller strobe", "phase": 1, "crate": "rf-nes", "write_scope": ["crates/rf-nes/**"], "depends_on": ["W1-01", "W0-02"], "acceptance": ["memory map per nesdev (mirrors, PPU/APU regs stubbed as needed)", "NROM loads via rf-cart", "OAM DMA cycle-stealing correct", "controller read via strobe protocol"], "points": 8, "status": "todo" },
-    { "id": "W1-03", "title": "nestest golden trace match", "phase": 1, "crate": "rf-nes", "write_scope": ["crates/rf-nes/**", "crates/rf-harness/**"], "depends_on": ["W1-02", "W0-03"], "acceptance": ["trace logger in nestest.log format", "automated diff vs golden log passes from 0xC000 entry"], "points": 5, "status": "todo" },
-    { "id": "W1-04", "title": "PPU background per-dot pipeline", "phase": 1, "crate": "rf-nes", "write_scope": ["crates/rf-nes/src/ppu/**"], "depends_on": ["W1-02"], "acceptance": ["nametable/attribute/pattern fetch pipeline per nesdev dot diagram", "scroll regs (v/t/x/w) correct", "indexed pixels + metadata emitted via CoreSink", "odd/even frame idle skip", "renders correct BG for a known homebrew golden frame"], "points": 13, "status": "todo" },
-    { "id": "W1-05", "title": "PPU sprites + sprite-0 + evaluation", "phase": 1, "crate": "rf-nes", "write_scope": ["crates/rf-nes/src/ppu/**"], "depends_on": ["W1-04"], "acceptance": ["secondary OAM evaluation with 8-sprite limit + overflow flag behavior", "sprite-0 hit passes blargg sprite-hit suite", "ppu_vbl_nmi suite passes", "dropped_by_limit sprites flagged (not rendered in accuracy mode)"], "points": 13, "status": "todo" },
-    { "id": "W1-06", "title": "Frontend shell: window + frame blit + frame stepping", "phase": 1, "crate": "retroforge", "write_scope": ["crates/retroforge/**", "crates/rf-renderer/**"], "depends_on": ["W1-04"], "acceptance": ["winit+egui window shows live frames (CPU blit acceptable pre-W3)", "pause/step-frame/step-scanline controls", "ROM open dialog"], "points": 8, "status": "todo" },
-    { "id": "W1-07", "title": "Keyboard input + InputFrame + input log", "phase": 1, "crate": "rf-input", "write_scope": ["crates/rf-input/**", "crates/retroforge/**"], "depends_on": ["W1-06"], "acceptance": ["deterministic per-frame latch", "replay log records/plays back per docs/design/SAVE_STATES.md §3", "determinism CI: two runs same input log => identical state hashes"], "points": 5, "status": "todo" },
-
-    { "id": "W2-01", "title": "NES APU + DMC DMA", "phase": 2, "crate": "rf-nes", "write_scope": ["crates/rf-nes/src/apu/**"], "depends_on": ["W1-03"], "acceptance": ["blargg apu_test passes", "dmc_dma_during_read4 passes", "frame counter modes correct"], "points": 13, "status": "todo" },
-    { "id": "W2-02", "title": "Mappers: MMC1, UxROM, CNROM", "phase": 2, "crate": "rf-nes", "write_scope": ["crates/rf-nes/src/mappers/**", "crates/rf-cart/**"], "depends_on": ["W1-05"], "acceptance": ["Holy Diver Batman relevant sections pass", "3 known homebrew/test ROMs per mapper boot to golden frame"], "points": 8, "status": "todo" },
-    { "id": "W2-03", "title": "MMC3 + A12 IRQ filtering", "phase": 2, "crate": "rf-nes", "write_scope": ["crates/rf-nes/src/mappers/**"], "depends_on": ["W2-02"], "acceptance": ["mmc3_test_2 passes", "scanline IRQ demo golden frame"], "points": 8, "status": "todo" },
-    { "id": "W2-04", "title": "NES save states + SRAM persistence", "phase": 2, "crate": "rf-nes", "write_scope": ["crates/rf-nes/**", "crates/rf-state/**", "crates/retroforge/**"], "depends_on": ["W0-05", "W2-01"], "acceptance": ["frame-boundary snapshot/restore roundtrip: state->run N->hash == restore->run N->hash", "battery SRAM persisted to disk", "golden .rfstate fixture added", "Enhanced-mode state loads in Accuracy config and continues hash-identical (FR-STATE-007; enhancement chunks skipped with warning)", "save-state manager modal: 10 slots + auto-slots, screenshot thumbnails, mods-warning flag per docs/design/FRONTEND_UI.md section 3.2"], "points": 8, "status": "todo" },
-    { "id": "W2-05", "title": "Audio output: cpal + ring + rate control", "phase": 2, "crate": "rf-audio", "write_scope": ["crates/rf-audio/**", "crates/retroforge/**"], "depends_on": ["W2-01"], "acceptance": ["rtrb SPSC ring, rubato resampler with ±0.5% dynamic rate control against buffer fill", "no underruns over 5-min soak on dev machine", "audio-clock frame pacing per ARCHITECTURE §8"], "points": 8, "status": "todo" },
-    { "id": "W2-06", "title": "Gamepad support + remapping", "phase": 2, "crate": "rf-input", "write_scope": ["crates/rf-input/**", "crates/retroforge/**"], "depends_on": ["W1-07"], "acceptance": ["gilrs devices hotplug", "remap UI persists per-user config"], "points": 5, "status": "todo" },
-    { "id": "W2-07", "title": "ROM library + per-game settings store", "phase": 2, "crate": "retroforge", "write_scope": ["crates/retroforge/**"], "depends_on": ["W1-06", "W0-02"], "acceptance": ["library scans folders, identifies by normalized hash", "per-game settings persisted keyed by hash", "empty-library first-run state: folder-setup call-to-action per docs/design/FRONTEND_UI.md section 3.1", "scan is symlink-loop-safe and confined to configured roots (NFR-010)"], "points": 5, "status": "todo" },
-    { "id": "W2-08", "title": "App-wide settings screens (Video/Audio/Paths)", "phase": 2, "crate": "retroforge", "write_scope": ["crates/retroforge/**"], "depends_on": ["W1-06"], "acceptance": ["Video (scaling, shader selection, vsync), Audio (device, latency, volume), Paths (library folders, cache location + size cap) screens per docs/design/FRONTEND_UI.md section 2", "persisted to settings.toml under the platform config dir (FRONTEND_UI section 7)"], "points": 3, "status": "todo" },
-    { "id": "W2-09", "title": "Nightly CI tier: Tier-B suites + criterion baseline + regression threshold", "phase": 2, "crate": "infra", "write_scope": [".github/**", "scripts/**", "benches/**"], "depends_on": ["W0-03"], "acceptance": ["nightly workflow runs Tier-B suites from docs/TESTING.md section 4", "criterion benches compared against benches/baseline.json", "threshold script fails the run on >10% regression per docs/TESTING.md sections 7 and 9", "baseline.json carries meta (rebaselined_by, justification, pr); threshold script refuses a baseline change without it (R-C2)"], "points": 3, "status": "todo" },
-    { "id": "W2-10", "title": "RF-Scroller: in-repo NES fixture platformer (cc65/neslib)", "phase": 2, "crate": "fixtures", "write_scope": ["fixtures/**", ".github/**", "tests/rom-manifest.toml"], "depends_on": ["W0-03"], "acceptance": ["cc65/neslib source under fixtures/nes/rf-scroller with CC0/MIT-licensed assets (ours), deterministic CI build with checked-in ROM hash (fixture doctrine D-001)", "gameplay deliberately exercises: multi-screen horizontal scroll with wraparound, HUD IRQ split band, a >8-sprites-per-scanline scene, an intentional-blink enemy, a vertical sub-area — the red-fixture host for TESTING section 7 heuristic cases", "level format documented in fixtures/nes/rf-scroller/FORMAT.md and decodable by the metatile_screens family", "scripted 5-min input log + golden frames wired as the Tier-A replay regression (FR-CORE-026)"], "points": 8, "status": "todo" },
-
-    { "id": "W3-01", "title": "wgpu original pipeline + headless golden frames", "phase": 3, "crate": "rf-renderer", "write_scope": ["crates/rf-renderer/**"], "depends_on": ["W1-06"], "acceptance": ["indexed->palette LUT->RGB on GPU", "integer + aspect scaling", "headless render-to-buffer hashing used by rf-harness golden tests", "per docs/design/RENDERER.md", "device-loss/shader-compile failure falls back to the original pipeline within 1s, emulation uninterrupted (FR-REND-007; simulated device-loss test)", "console palette LUT .pal assets checked in + generator tool (RENDERER.md section 2)", "align CI software-GPU env naming (.github workflow vs RENDERER.md section 7) and document the chosen fallback adapter"], "points": 8, "status": "todo" },
-    { "id": "W3-02", "title": "Shader chain: CRT + scalers", "phase": 3, "crate": "rf-renderer", "write_scope": ["crates/rf-renderer/**"], "depends_on": ["W3-01"], "acceptance": ["WGSL pass chain with param UBOs", "at least CRT + sharp-bilinear + lcd-grid + xbr-class filter (MIT xBR basis; shader licensing law in RENDERER.md section 4 — no GPL ports)", "runtime selectable", "per-shader provenance recorded in its manifest"], "points": 8, "status": "todo" },
-    { "id": "W3-03", "title": "Layer/sprite extraction to separate textures", "phase": 3, "crate": "rf-renderer", "write_scope": ["crates/rf-renderer/**", "crates/rf-core-api/**"], "depends_on": ["W3-01"], "acceptance": ["BG and sprite layers renderable independently from CoreSink metadata", "debug view shows layers isolated"], "points": 5, "status": "todo" },
-    { "id": "W3-04", "title": "Side-by-side original/enhanced compare view", "phase": 3, "crate": "rf-renderer", "write_scope": ["crates/rf-renderer/**", "crates/retroforge/**"], "depends_on": ["W3-03"], "acceptance": ["synchronized dual viewport, same frame", "screenshot captures both"], "points": 3, "status": "todo" },
-    { "id": "W3-05", "title": "Sprite-limit bypass + temporal de-flicker prototype", "phase": 3, "crate": "rf-enhance", "write_scope": ["crates/rf-enhance/**", "crates/rf-nes/src/ppu/**"], "depends_on": ["W3-03", "W2-10"], "acceptance": ["per docs/design/ENHANCEMENT_RUNTIME.md §2: bypass renders dropped_by_limit sprites; sprite-0/overflow flags unchanged (CI mode-invariant test)", "SpriteHistorian ring + reconstruction behind toggle", "OAM diff debug panel", "red-fixture cases green on RF-Scroller scenes (TESTING section 7: overflow, intentional blink)", "trust ladder per ENHANCEMENT_RUNTIME.md section 2a: shadow/advisory/active states persisted per game (FR-ENH-011); contradiction events recorded to the local report card; safety suppression stores a justification and auto-reopens on new-context triggers (FR-ENH-012)"], "points": 8, "status": "todo" },
-    { "id": "W3-06", "title": "3-OS CI builds (macOS/Windows/Linux)", "phase": 3, "crate": "infra", "write_scope": [".github/**"], "depends_on": ["W3-01"], "acceptance": ["macOS + Windows + Linux build jobs green on every PR (NFR-009)", "build artifacts uploaded per-OS", "golden-frame suite runs headless on the Linux software rasterizer"], "points": 3, "status": "todo" },
-
-    { "id": "W4-01", "title": "Event bus + FrameBundle + subscriptions", "phase": 4, "crate": "rf-enhance", "write_scope": ["crates/rf-enhance/**", "crates/rf-core-api/**"], "depends_on": ["W0-04", "W1-05"], "acceptance": ["EventMask filtering measured ~zero-cost when unsubscribed (bench)", "triple-buffered FrameBundle to render/debug threads", "mode-invariant CI test: accuracy vs enhanced state hashes identical over test corpus", "on determinism/mode-invariant failure the harness dumps first-divergent-frame + both state hashes + replay slice as CI artifacts (R-F4)"], "points": 8, "status": "todo" },
-    { "id": "W4-02", "title": "Profile loader + schema v0 + validator tool", "phase": 4, "crate": "rf-profiles", "write_scope": ["crates/rf-profiles/**", "tools/**", "profiles/**"], "depends_on": ["W0-02"], "acceptance": ["TOML schema per docs/design/GAME_PROFILES.md parses into versioned structs", "hash match incl. md5/crc32 aliases", "retroforge-tool profile validate + hash subcommands", "unknown-key warnings, newer-major rejection"], "points": 8, "status": "todo" },
-    { "id": "W4-03", "title": "Scroll tracker + wideNES stitcher + ultrawide camera", "phase": 4, "crate": "rf-enhance", "write_scope": ["crates/rf-enhance/**", "crates/rf-cache/**"], "depends_on": ["W4-01", "W3-03", "W4-08"], "acceptance": ["per ENHANCEMENT_RUNTIME.md §3: scroll accumulation w/ wraparound heuristics, per-scanline bands, HUD band exclusion", "scene identity + canvas persistence in rf-cache across sessions", "ultrawide view on a scrolling homebrew with fog for unvisited", "stitcher determinism test"], "points": 13, "status": "todo" },
-    { "id": "W4-04", "title": "Lua script host (mlua) + overlay API", "phase": 4, "crate": "rf-plugin-sdk", "write_scope": ["crates/rf-plugin-sdk/**", "plugins/**", "crates/retroforge/**"], "depends_on": ["W4-01"], "acceptance": ["capability-gated rf.* API per docs/design/PLUGINS.md §3", "error containment: script fault pauses script not emulator", "example overlay script shipped in /plugins/examples", "per-frame budget throttling", "Lua console REPL panel docked in the Debug workspace (DEBUGGER.md section 5)", "cache_dir filesystem cap is realpath-contained; symlink-escape test refused with diagnostic (NFR-010)", "PLUGIN_AUTHORING.md minimal page ships with the host (R-A4)"], "points": 8, "status": "todo" },
-    { "id": "W4-05", "title": "Mode toggles + per-game enhancement settings UI", "phase": 4, "crate": "retroforge", "write_scope": ["crates/retroforge/**"], "depends_on": ["W4-02", "W3-05"], "acceptance": ["5 modes per ARCHITECTURE §4 as presets", "per-game overrides persisted", "enhancement never on silently (fresh install defaults to Accuracy)", "persistent ENHANCED status-bar badge with hover feature breakdown + hold-to-peek original (FRONTEND_UI.md section 1)", "Enhance workspace shows per-heuristic ladder chips + report card panel (FR-ENH-012, FRONTEND_UI.md section 3.3)"], "points": 5, "status": "todo" },
-    { "id": "W4-06", "title": "Debug viewers + annotation store + profile export", "phase": 4, "crate": "rf-debugger", "write_scope": ["crates/rf-debugger/**", "crates/retroforge/**"], "depends_on": ["W1-05", "W4-02"], "acceptance": ["pattern/nametable/palette/OAM viewers live", "memory viewer + watchpoints via core step()", "annotation store exports profile skeleton per GAME_PROFILES.md §3", "egui_dock panel layout persisted", "event viewer: frame-timeline scatter of register writes/IRQ/DMA (DEBUGGER.md section 3)", "DataCrystal TSV import dialog into the annotation store (DEBUGGER.md section 4)"], "points": 13, "status": "todo" },
-    { "id": "W4-07", "title": "retroforge-tool CLI core (inspect/dumps/trace/tilemap)", "phase": 4, "crate": "tools", "write_scope": ["tools/**"], "depends_on": ["W0-02", "W0-03"], "acceptance": ["rom hash + inspect + header parse subcommands (FR-DBG-007; RA-compatible hash output)", "VRAM/OAM/palette dump + tilemap export from a headless run at frame N", "trace capture to file in nestest format"], "points": 5, "status": "todo" },
-    { "id": "W4-08", "title": "rf-cache: content-addressed store + LRU size cap", "phase": 4, "crate": "rf-cache", "write_scope": ["crates/rf-cache/**"], "depends_on": ["W0-02"], "acceptance": ["content-addressed store keyed (rom_sha256, asset_hash, producer, settings_hash) per ARCHITECTURE §7", "LRU residency with configurable size cap (consumed by W2-08 Paths settings)", "eviction unit test + persistence-across-restart test", "cache paths realpath-contained to the cache root (NFR-010)"], "points": 5, "status": "todo" },
-    { "id": "W4-09", "title": "UI smoke test in CI (egui inspection protocol)", "phase": 4, "crate": "retroforge", "write_scope": ["crates/retroforge/**", ".github/**"], "depends_on": ["W4-05"], "acceptance": ["headless CI flow via egui 0.35 inspection protocol: boot -> open fixture ROM -> assert first frame + mode badge -> open/close each core dockable panel (R-A1)", "cold-start-to-interactive timing measured and reported against NFR-004"], "points": 3, "status": "todo" },
-
-    { "id": "W5-01", "title": "RF-Scroller profile: identity + RAM map", "phase": 5, "crate": "profiles", "write_scope": ["profiles/nes/rf-scroller/**"], "depends_on": ["W4-02", "W4-06", "W2-10"], "acceptance": ["identity block w/ normalized hashes of the CI-built fixture ROM", "camera/player/entity memory_map entries sourced from fixtures/nes/rf-scroller source (cite files in `sources`)", "validates with retroforge-tool"], "points": 5, "status": "todo" },
-    { "id": "W5-02", "title": "metatile_screens decoder family + level decode", "phase": 5, "crate": "rf-enhance", "write_scope": ["crates/rf-enhance/**", "profiles/nes/nova-the-squirrel/**"], "depends_on": ["W5-01", "W4-03"], "acceptance": ["decoder family per GAME_PROFILES.md §2 driven by profile data", "decodes at least 3 RF-Scroller levels to DecodedLevel scene layers matching in-game appearance (golden screenshots)", "pure function of ROM bytes (offline test, no emulation needed)"], "points": 13, "status": "todo" },
-    { "id": "W5-03", "title": "Full-level view + live player overlay demo", "phase": 5, "crate": "rf-enhance", "write_scope": ["crates/rf-enhance/**", "crates/retroforge/**"], "depends_on": ["W5-02"], "acceptance": ["full-map camera + ultrawide camera on decoded level", "live player + active sprites composited at profile-decoded positions", "original-viewport outline in enhanced view", "gameplay unchanged (mode-invariant test still green)"], "points": 8, "status": "todo" },
-    { "id": "W5-04", "title": "MVP acceptance pass", "phase": 5, "crate": "infra", "write_scope": ["docs/**"], "depends_on": ["W5-03", "W2-04", "W4-04", "W4-05", "W3-06"], "acceptance": ["every checkbox in docs/MVP.md checked with evidence links (CI runs, screenshots)", "demo capture recorded", "STATUS.md snapshot written"], "points": 3, "status": "todo" },
-    { "id": "W5-05", "title": "Release engineering v0: tagged 3-OS release + fixture archive", "phase": 5, "crate": "infra", "write_scope": [".github/**", "docs/**", "scripts/**"], "depends_on": ["W3-06", "W5-04"], "acceptance": ["tagged release produces macOS/Windows/Linux artifacts (SCOPE Distribution row)", "golden .rfstate/.rfreplay fixtures archived into the test suite at release time (FR-STATE-005)", "release notes include the accuracy table generated by rf-harness (TESTING.md section 5 note)", "EXECUTED migration drill: previous release's golden fixtures load on the release candidate, evidence recorded in the release checklist (R-F3)"], "points": 3, "status": "todo" },
-    { "id": "W5-06", "title": "Profile authoring loop: hot-reload + live decode preview", "phase": 5, "crate": "retroforge", "write_scope": ["crates/retroforge/**", "crates/rf-profiles/**", "crates/rf-enhance/**"], "depends_on": ["W4-02", "W4-06", "W5-02"], "acceptance": ["profile TOML file-watch hot-reloads on save (E6-S2)", "decode errors shown inline with ROM offsets", "level preview panel re-renders immediately per FRONTEND_UI.md section 3.5", "authoring walkthrough doc written end-to-end against RF-Scroller (annotate -> export -> decode -> validate -> golden), recording time-to-first-decoded-level (R-A2)"], "points": 5, "status": "todo" },
-
-    { "id": "W6-00", "title": "SNES phase 6 refinement planning ticket", "phase": 6, "crate": "infra", "write_scope": ["plan.json", "docs/ROADMAP.md"], "depends_on": ["W5-04"], "acceptance": ["refine ALL W6 tickets at phase entry per docs/ROADMAP.md + docs/design/EMULATION_CORES.md section 3 (split any remaining 13-point tickets)", "define + ticket RF-Scroller-S: in-repo libSFX SNES fixture with FORMAT.md and replay gate (FR-CORE-037, fixture doctrine D-001)"], "points": 2, "status": "todo" },
-    { "id": "W6-01", "title": "65C816 CPU core (SingleStepTests 65816 vectors)", "phase": 6, "crate": "rf-snes", "write_scope": ["crates/rf-snes/src/cpu/**"], "depends_on": ["W6-00"], "acceptance": ["65816 JSON vectors pass incl. emulation/native modes"], "points": 13, "status": "todo" },
-    { "id": "W6-02", "title": "SNES bus + LoROM/HiROM + 5A22 basics", "phase": 6, "crate": "rf-snes", "write_scope": ["crates/rf-snes/**"], "depends_on": ["W6-01"], "acceptance": ["memory map + auto-joypad + NMI/IRQ timing to pass gilyon snes-tests CPU set"], "points": 13, "status": "todo" },
-    { "id": "W6-03", "title": "SNES PPU modes 0/1 + OAM + first frames", "phase": 6, "crate": "rf-snes", "write_scope": ["crates/rf-snes/src/ppu/**"], "depends_on": ["W6-02"], "acceptance": ["BG modes 0/1, sprites with 32/34 line limits, golden frames on PeterLemon PPU tests subset"], "points": 13, "status": "todo" },
-    { "id": "W6-04", "title": "SPC700 + S-DSP skeleton", "phase": 6, "crate": "rf-snes", "write_scope": ["crates/rf-snes/src/apu/**"], "depends_on": ["W6-02"], "acceptance": ["spc700 JSON vectors pass", "CPU<->APU port protocol boots commercial-style init handshakes (test ROM)"], "points": 13, "status": "todo" },
-    { "id": "W7-01", "title": "SNES phase 7 planning ticket", "phase": 7, "crate": "infra", "write_scope": ["plan.json", "docs/ROADMAP.md"], "depends_on": ["W6-03", "W6-04"], "acceptance": ["expand W7 (DMA/HDMA, modes 2-7 incl. Mode 7, color math/windows/mosaic, save states, BRR/echo, PAL timing config per EMULATION_CORES.md section 3, NES AxROM+Action 53 mappers to ~96% coverage per FR-CORE-027) into tickets with acceptance from docs/design/EMULATION_CORES.md + TESTING.md gates"], "points": 2, "status": "todo" },
-    { "id": "W8-01", "title": "Advanced-enhancements planning ticket", "phase": 8, "crate": "infra", "write_scope": ["plan.json", "docs/ROADMAP.md"], "depends_on": ["W7-01"], "acceptance": ["expand W8 into tickets: rewind (SAVE_STATES.md §4 + FRONTEND_UI.md §5), video recording, screenshot polish, gamepad UI navigation + accessibility pass (FRONTEND_UI.md §4/§6), SNES widescreen per-BG policies (bsnes-hd model), HUD separation, smooth-camera experiments, frame-interpolation experiment (design first per TRACEABILITY G5), AI upscaling cache + replacement packs incl. animation-set grouping + pack manifest format (ENHANCEMENT_RUNTIME.md §6), HD-pack loader with Mesen-compatible tile identity + hires.txt import + pack builder record-while-playing (SCOPE asset-replacement row), translation/accessibility overlays"], "points": 2, "status": "todo" },
-    { "id": "W9-01", "title": "Modding/profile-ecosystem planning ticket", "phase": 9, "crate": "infra", "write_scope": ["plan.json", "docs/ROADMAP.md"], "depends_on": ["W8-01"], "acceptance": ["expand W9 into tickets: full profile editor GUI (FRONTEND_UI.md §3.5), plugin manager polish + WASM (wasmtime) sandbox tier (PLUGINS.md §1), plugin SDK docs + examples, map/sprite-sheet/tilemap export tools, community mod format + versioning, second + third game profiles"], "points": 2, "status": "todo" }
-  ]
+ "$schema_note": "RetroForge ticket board. Fields: id, title, phase (roadmap phase), crate (primary write scope), write_scope (globs the executor may touch), depends_on (ticket ids), acceptance (ALL must pass before status=done), points (fibonacci), status (todo|in_progress|done|blocked), notes (OPTIONAL array of strings, append-only: HANDOFF:/BLOCKED: entries). ALWAYS-WRITABLE SET (in addition to write_scope, for every ticket): this file's own-ticket status+notes fields; docs/STATUS.md (append one line per merged ticket); Cargo.lock; docs/TECH_STACK.md section-2 rows (new-dependency decision record). Claim rule: a ticket is claimable when all depends_on are done. Executors: work ONE ticket per session, run `cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace && scripts/validate-arch.sh` plus ticket acceptance before marking done. Never widen write_scope beyond the always-writable set without a HANDOFF note in the ticket's notes array.",
+ "version": 1,
+ "tickets": [
+  {
+   "id": "W0-01",
+   "title": "CI pipeline + arch validator",
+   "phase": 0,
+   "crate": "infra",
+   "write_scope": [
+    ".github/**",
+    "scripts/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "CI runs fmt/clippy/test on push",
+    "scripts/validate-arch.sh fails if rf-nes/rf-snes/rf-core-api depend on upper-layer crates"
+   ],
+   "points": 2,
+   "status": "done",
+   "stories": []
+  },
+  {
+   "id": "W0-02",
+   "title": "rf-cart: header parsing, normalization, hashing",
+   "phase": 0,
+   "crate": "rf-cart",
+   "write_scope": [
+    "crates/rf-cart/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "iNES + NES 2.0 + SNES (LoROM/HiROM heuristic, copier-header strip when size%8192==512) parsed with unit tests on synthetic images (FR-CORE-010)",
+    "normalized CRC32/MD5/SHA-1/SHA-256 match RA convention (NES: skip 16-byte header) with fixture tests (FR-CORE-011)",
+    "mapper id + PRG/CHR sizes + mirroring + battery flag exposed",
+    "unknown mapper/chip fails with a diagnostic naming it, never a crash (FR-CORE-013)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E2-S3"
+   ]
+  },
+  {
+   "id": "W0-03",
+   "title": "rf-harness: test-ROM fetcher + blargg runner",
+   "phase": 0,
+   "crate": "rf-harness",
+   "write_scope": [
+    "crates/rf-harness/**",
+    "tests/rom-manifest.toml",
+    "scripts/fetch-test-roms.sh"
+   ],
+   "depends_on": [
+    "W0-02"
+   ],
+   "acceptance": [
+    "manifest (URL+sha256) fetch into gitignored roms/ with verification (NFR-006)",
+    "headless runner protocol for blargg $6000 status byte + $6004 text",
+    "golden-frame hash compare helper",
+    "populate manifest URLs from docs/research/accuracy-and-testing.md (accuracy oracles only \u2014 game fixtures are in-repo per fixture doctrine D-001)",
+    "machine-readable accuracy table (suite x ROM x pass/fail/frame JSON) emitted per run; raw vs effective counts separated via waiver file with justification + expiry (TESTING.md section 5, R-C1/R-D4)",
+    "failure-mode rows FM-08 (divergence report) + FM-14 (manifest rot fails loud) implemented per docs/design/FAILURE_MODES.md"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W0-04",
+   "title": "rf-core-api: core traits v0",
+   "phase": 0,
+   "crate": "rf-core-api",
+   "write_scope": [
+    "crates/rf-core-api/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "EmulatorCore/CoreSink/StateView/CoreEvent/InputFrame/Step per docs/ARCHITECTURE.md \u00a75 + docs/design/CONTRACTS.md section 1 (FR-CORE-001, FR-CORE-005)",
+    "indexed PpuPixel with layer/sprite-id/priority metadata (FR-CORE-004)",
+    "EventMask subscription filtering (FR-CORE-006)",
+    "mock core exercises the contract in tests"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W0-05",
+   "title": "rf-state: TLV container + envelope",
+   "phase": 0,
+   "crate": "rf-state",
+   "write_scope": [
+    "crates/rf-state/**"
+   ],
+   "depends_on": [
+    "W0-04"
+   ],
+   "acceptance": [
+    "container per docs/design/SAVE_STATES.md (magic/version/rom-hash/chunks, zstd) (FR-STATE-001, NFR-008)",
+    "bincode 3 Encode/Decode payloads (NOT 1.x serde API)",
+    "roundtrip + unknown-chunk-skip + missing-required-chunk tests (FR-STATE-004)",
+    "golden fixture harness"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E1-S3"
+   ]
+  },
+  {
+   "id": "W1-01a",
+   "title": "6502 CPU: official opcodes + addressing + vectors harness",
+   "phase": 1,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/cpu/**"
+   ],
+   "depends_on": [
+    "W0-04"
+   ],
+   "acceptance": [
+    "SingleStepTests nes6502 JSON vectors pass for ALL official opcodes incl. cycle-by-cycle bus activity (FR-CORE-020)",
+    "criterion benchmark exists",
+    "any unsafe carries a SAFETY comment + a test exercising the invariant (NFR-007)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ]
+  },
+  {
+   "id": "W1-01b",
+   "title": "6502 CPU: unofficial opcodes + interrupt edges (vectors 100%)",
+   "phase": 1,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/cpu/**"
+   ],
+   "depends_on": [
+    "W1-01a"
+   ],
+   "acceptance": [
+    "nes6502 vectors 100% incl. stable illegal opcodes; unstable ops use observed constants, flagged in the trace (EMULATION_CORES.md section 2.1)",
+    "NMI edge / IRQ level polling on the penultimate cycle + interrupt hijacking per nesdev"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ]
+  },
+  {
+   "id": "W1-02",
+   "title": "NES bus + NROM + OAM DMA + controller strobe",
+   "phase": 1,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**"
+   ],
+   "depends_on": [
+    "W1-01b",
+    "W0-02"
+   ],
+   "acceptance": [
+    "memory map per nesdev (mirrors, PPU/APU regs stubbed as needed)",
+    "NROM loads via rf-cart",
+    "OAM DMA cycle-stealing correct",
+    "controller read via strobe protocol"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ]
+  },
+  {
+   "id": "W1-03",
+   "title": "nestest golden trace match",
+   "phase": 1,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-harness/**"
+   ],
+   "depends_on": [
+    "W1-02",
+    "W0-03"
+   ],
+   "acceptance": [
+    "trace logger in nestest.log format (FR-DBG-003)",
+    "automated diff vs golden log passes from 0xC000 entry (FR-CORE-021)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ]
+  },
+  {
+   "id": "W1-04a",
+   "title": "PPU background: loopy registers + fetch pipeline",
+   "phase": 1,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/ppu/**"
+   ],
+   "depends_on": [
+    "W1-02"
+   ],
+   "acceptance": [
+    "nametable/attribute/pattern fetch pipeline per nesdev dot diagram",
+    "scroll regs (v/t/x/w) correct",
+    "indexed pixels + metadata emitted via CoreSink"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ]
+  },
+  {
+   "id": "W1-04b",
+   "title": "PPU background: frame-timing edges + golden frame",
+   "phase": 1,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/ppu/**"
+   ],
+   "depends_on": [
+    "W1-04a"
+   ],
+   "acceptance": [
+    "odd/even frame idle skip + dots 321-336 prefetch correct",
+    "renders correct BG for a known homebrew golden frame"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ]
+  },
+  {
+   "id": "W1-05a",
+   "title": "PPU sprites: evaluation + secondary OAM + dropped_by_limit",
+   "phase": 1,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/ppu/**"
+   ],
+   "depends_on": [
+    "W1-04b"
+   ],
+   "acceptance": [
+    "secondary OAM evaluation with 8-sprite limit + buggy overflow-flag behavior",
+    "dropped_by_limit sprites flagged (not rendered in accuracy mode)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E1-S1",
+    "E5-S1"
+   ]
+  },
+  {
+   "id": "W1-05b",
+   "title": "PPU sprites: sprite-0 hit + alignment suites",
+   "phase": 1,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/ppu/**"
+   ],
+   "depends_on": [
+    "W1-05a"
+   ],
+   "acceptance": [
+    "sprite-0 hit passes blargg sprite_hit suite (FR-CORE-023)",
+    "ppu_vbl_nmi suite passes (FR-CORE-022)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E1-S1",
+    "E5-S1"
+   ]
+  },
+  {
+   "id": "W1-06",
+   "title": "Frontend shell: window + frame blit + frame stepping",
+   "phase": 1,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-renderer/**"
+   ],
+   "depends_on": [
+    "W1-04b"
+   ],
+   "acceptance": [
+    "winit+egui window shows live frames (CPU blit acceptable pre-W3)",
+    "pause/step-frame/step-scanline controls (FR-DBG-004)",
+    "ROM open dialog"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E1-S1",
+    "E1-S2"
+   ]
+  },
+  {
+   "id": "W1-07",
+   "title": "Keyboard input + InputFrame + input log",
+   "phase": 1,
+   "crate": "rf-input",
+   "write_scope": [
+    "crates/rf-input/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W1-06"
+   ],
+   "acceptance": [
+    "deterministic per-frame latch (FR-FE-003)",
+    "replay log records/plays back per docs/design/SAVE_STATES.md \u00a73 (FR-STATE-006)",
+    "determinism CI: two runs same input log => identical state hashes (FR-CORE-002, FR-CORE-003)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E1-S1",
+    "E1-S4"
+   ]
+  },
+  {
+   "id": "W2-01a",
+   "title": "NES APU: channels + frame counter",
+   "phase": 2,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/apu/**"
+   ],
+   "depends_on": [
+    "W1-03"
+   ],
+   "acceptance": [
+    "blargg apu_test passes (FR-CORE-024)",
+    "frame counter modes correct incl. $4017 delay"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ]
+  },
+  {
+   "id": "W2-01b",
+   "title": "NES APU: DMC DMA + non-linear mixer",
+   "phase": 2,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/apu/**"
+   ],
+   "depends_on": [
+    "W2-01a"
+   ],
+   "acceptance": [
+    "dmc_dma_during_read4 passes (FR-CORE-024)",
+    "non-linear mixer LUTs per nesdev APU_Mixer; apu_mixer RMS envelope match"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ]
+  },
+  {
+   "id": "W2-02",
+   "title": "Mappers: MMC1, UxROM, CNROM",
+   "phase": 2,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/mappers/**",
+    "crates/rf-cart/**"
+   ],
+   "depends_on": [
+    "W1-05b"
+   ],
+   "acceptance": [
+    "Holy Diver Batman relevant sections pass (FR-CORE-025)",
+    "3 known homebrew/test ROMs per mapper boot to golden frame"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E2-S1"
+   ]
+  },
+  {
+   "id": "W2-03",
+   "title": "MMC3 + A12 IRQ filtering",
+   "phase": 2,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/mappers/**"
+   ],
+   "depends_on": [
+    "W2-02"
+   ],
+   "acceptance": [
+    "mmc3_test_2 passes (FR-CORE-025)",
+    "scanline IRQ demo golden frame"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E2-S1"
+   ]
+  },
+  {
+   "id": "W2-04",
+   "title": "NES save states + SRAM persistence",
+   "phase": 2,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-state/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W0-05",
+    "W2-01b"
+   ],
+   "acceptance": [
+    "frame-boundary snapshot/restore roundtrip: state->run N->hash == restore->run N->hash (FR-STATE-002)",
+    "battery SRAM persisted to disk (FR-CORE-012)",
+    "golden .rfstate fixture added",
+    "Enhanced-mode state loads in Accuracy config and continues hash-identical (FR-STATE-007; enhancement chunks skipped with warning)",
+    "save-state manager modal: 10 slots + auto-slots, screenshot thumbnails, mods-warning flag per docs/design/FRONTEND_UI.md section 3.2",
+    "wrong-ROM state refused with diagnostic (FR-STATE-003)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E1-S3",
+    "E2-S1"
+   ]
+  },
+  {
+   "id": "W2-05",
+   "title": "Audio output: cpal + ring + rate control",
+   "phase": 2,
+   "crate": "rf-audio",
+   "write_scope": [
+    "crates/rf-audio/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W2-01b"
+   ],
+   "acceptance": [
+    "rtrb SPSC ring, rubato resampler with \u00b10.5% dynamic rate control against buffer fill (FR-FE-006)",
+    "no underruns over 5-min soak on dev machine",
+    "audio-clock frame pacing per ARCHITECTURE \u00a78"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ]
+  },
+  {
+   "id": "W2-06",
+   "title": "Gamepad support + remapping",
+   "phase": 2,
+   "crate": "rf-input",
+   "write_scope": [
+    "crates/rf-input/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W1-07"
+   ],
+   "acceptance": [
+    "gilrs devices hotplug (FR-FE-003)",
+    "remap UI persists per-user config"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E2-S2"
+   ]
+  },
+  {
+   "id": "W2-07",
+   "title": "ROM library + per-game settings store",
+   "phase": 2,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W1-06",
+    "W0-02"
+   ],
+   "acceptance": [
+    "library scans folders, identifies by normalized hash (FR-FE-001; NFR-005: no network fallback)",
+    "per-game settings persisted keyed by hash (FR-FE-002)",
+    "empty-library first-run state: folder-setup call-to-action per docs/design/FRONTEND_UI.md section 3.1",
+    "scan is symlink-loop-safe and confined to configured roots (NFR-010)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E2-S3"
+   ]
+  },
+  {
+   "id": "W2-08",
+   "title": "App-wide settings screens (Video/Audio/Paths)",
+   "phase": 2,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W1-06"
+   ],
+   "acceptance": [
+    "Video (scaling, shader selection, vsync), Audio (device, latency, volume), Paths (library folders, cache location + size cap) screens per docs/design/FRONTEND_UI.md section 2",
+    "persisted to settings.toml under the platform config dir (FRONTEND_UI section 7)"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": [
+    "E4-S1"
+   ]
+  },
+  {
+   "id": "W2-09",
+   "title": "Nightly CI tier: Tier-B suites + criterion baseline + regression threshold",
+   "phase": 2,
+   "crate": "infra",
+   "write_scope": [
+    ".github/**",
+    "scripts/**",
+    "benches/**"
+   ],
+   "depends_on": [
+    "W0-03"
+   ],
+   "acceptance": [
+    "nightly workflow runs Tier-B suites from docs/TESTING.md section 4 (NFR-001 release-gate suites included)",
+    "criterion benches compared against benches/baseline.json (NFR-002, NFR-003)",
+    "threshold script fails the run on >10% regression per docs/TESTING.md sections 7 and 9",
+    "baseline.json carries meta (rebaselined_by, justification, pr); threshold script refuses a baseline change without it (R-C2)",
+    "accuracy-vs-compatibility config diff run over the test-ROM suite per docs/design/EMULATION_CORES.md section 5 (FR-MODE-004)"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W2-10",
+   "title": "RF-Scroller: in-repo NES fixture platformer (cc65/neslib)",
+   "phase": 2,
+   "crate": "fixtures",
+   "write_scope": [
+    "fixtures/**",
+    ".github/**",
+    "tests/rom-manifest.toml"
+   ],
+   "depends_on": [
+    "W0-03"
+   ],
+   "acceptance": [
+    "cc65/neslib source under fixtures/nes/rf-scroller with CC0/MIT-licensed assets (ours), deterministic CI build with checked-in ROM hash (fixture doctrine D-001)",
+    "gameplay deliberately exercises: multi-screen horizontal scroll with wraparound, HUD IRQ split band, a >8-sprites-per-scanline scene, an intentional-blink enemy, a vertical sub-area \u2014 the red-fixture host for TESTING section 7 heuristic cases",
+    "level format documented in fixtures/nes/rf-scroller/FORMAT.md and decodable by the metatile_screens family",
+    "scripted 5-min input log + golden frames wired as the Tier-A replay regression (FR-CORE-026)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W3-01",
+   "title": "wgpu original pipeline + headless golden frames",
+   "phase": 3,
+   "crate": "rf-renderer",
+   "write_scope": [
+    "crates/rf-renderer/**"
+   ],
+   "depends_on": [
+    "W1-06"
+   ],
+   "acceptance": [
+    "indexed->palette LUT->RGB on GPU (FR-REND-001)",
+    "integer + aspect scaling (FR-REND-002)",
+    "headless render-to-buffer hashing used by rf-harness golden tests",
+    "per docs/design/RENDERER.md",
+    "device-loss/shader-compile failure falls back to the original pipeline within 1s, emulation uninterrupted (FR-REND-007; simulated device-loss test)",
+    "console palette LUT .pal assets checked in + generator tool (RENDERER.md section 2)",
+    "align CI software-GPU env naming (.github workflow vs RENDERER.md section 7) and document the chosen fallback adapter"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E4-S1",
+    "E4-S3"
+   ]
+  },
+  {
+   "id": "W3-02",
+   "title": "Shader chain: CRT + scalers",
+   "phase": 3,
+   "crate": "rf-renderer",
+   "write_scope": [
+    "crates/rf-renderer/**"
+   ],
+   "depends_on": [
+    "W3-01"
+   ],
+   "acceptance": [
+    "WGSL pass chain with param UBOs (FR-REND-003)",
+    "at least CRT + sharp-bilinear + lcd-grid + xbr-class filter (MIT xBR basis; shader licensing law in RENDERER.md section 4 \u2014 no GPL ports)",
+    "runtime selectable",
+    "per-shader provenance recorded in its manifest"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E4-S1"
+   ]
+  },
+  {
+   "id": "W3-03",
+   "title": "Layer/sprite extraction to separate textures",
+   "phase": 3,
+   "crate": "rf-renderer",
+   "write_scope": [
+    "crates/rf-renderer/**",
+    "crates/rf-core-api/**"
+   ],
+   "depends_on": [
+    "W3-01"
+   ],
+   "acceptance": [
+    "BG and sprite layers renderable independently from CoreSink metadata",
+    "debug view shows layers isolated"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E5-S1"
+   ]
+  },
+  {
+   "id": "W3-04",
+   "title": "Side-by-side original/enhanced compare view",
+   "phase": 3,
+   "crate": "rf-renderer",
+   "write_scope": [
+    "crates/rf-renderer/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W3-03"
+   ],
+   "acceptance": [
+    "synchronized dual viewport, same frame (FR-REND-005)",
+    "screenshot captures both (FR-FE-005)"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": [
+    "E4-S2"
+   ]
+  },
+  {
+   "id": "W3-05",
+   "title": "Sprite-limit bypass + temporal de-flicker prototype",
+   "phase": 3,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "crates/rf-nes/src/ppu/**"
+   ],
+   "depends_on": [
+    "W3-03",
+    "W2-10"
+   ],
+   "acceptance": [
+    "per docs/design/ENHANCEMENT_RUNTIME.md \u00a72: bypass renders dropped_by_limit sprites; sprite-0/overflow flags unchanged (CI mode-invariant test) (FR-ENH-001)",
+    "SpriteHistorian ring + reconstruction behind toggle (FR-ENH-002)",
+    "OAM diff debug panel (FR-DBG-006)",
+    "red-fixture cases green on RF-Scroller scenes (TESTING section 7: overflow, intentional blink) (FR-ENH-013)",
+    "trust ladder per ENHANCEMENT_RUNTIME.md section 2a: shadow/advisory/active states persisted per game (FR-ENH-011); contradiction events recorded to the local report card; safety suppression stores a justification and auto-reopens on new-context triggers (FR-ENH-012)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E5-S1",
+    "E5-S4"
+   ]
+  },
+  {
+   "id": "W3-06",
+   "title": "3-OS CI builds (macOS/Windows/Linux)",
+   "phase": 3,
+   "crate": "infra",
+   "write_scope": [
+    ".github/**"
+   ],
+   "depends_on": [
+    "W3-01"
+   ],
+   "acceptance": [
+    "macOS + Windows + Linux build jobs green on every PR (NFR-009)",
+    "build artifacts uploaded per-OS",
+    "golden-frame suite runs headless on the Linux software rasterizer"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W4-01",
+   "title": "Event bus + FrameBundle + subscriptions",
+   "phase": 4,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "crates/rf-core-api/**"
+   ],
+   "depends_on": [
+    "W0-04",
+    "W1-05b"
+   ],
+   "acceptance": [
+    "EventMask filtering measured ~zero-cost when unsubscribed (bench)",
+    "triple-buffered FrameBundle to render/debug threads",
+    "mode-invariant CI test: accuracy vs enhanced state hashes identical over test corpus (FR-MODE-002)",
+    "on determinism/mode-invariant failure the harness dumps first-divergent-frame + both state hashes + replay slice as CI artifacts (R-F4)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E5-S1"
+   ]
+  },
+  {
+   "id": "W4-02",
+   "title": "Profile loader + schema v0 + validator tool",
+   "phase": 4,
+   "crate": "rf-profiles",
+   "write_scope": [
+    "crates/rf-profiles/**",
+    "tools/**",
+    "profiles/**"
+   ],
+   "depends_on": [
+    "W0-02"
+   ],
+   "acceptance": [
+    "TOML schema per docs/design/GAME_PROFILES.md parses into versioned structs (FR-PROF-001)",
+    "hash match incl. md5/crc32 aliases (FR-PROF-002, FR-MODE-005)",
+    "retroforge-tool profile validate + hash subcommands",
+    "unknown-key warnings, newer-major rejection (FR-PROF-004, NFR-008)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E6-S2",
+    "E6-S3"
+   ]
+  },
+  {
+   "id": "W4-03a",
+   "title": "Scroll tracker + stitcher core",
+   "phase": 4,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "crates/rf-cache/**"
+   ],
+   "depends_on": [
+    "W4-01",
+    "W3-03"
+   ],
+   "acceptance": [
+    "per ENHANCEMENT_RUNTIME.md \u00a73: scroll accumulation w/ wraparound heuristics, per-scanline bands, HUD band exclusion (FR-ENH-003)",
+    "stitcher determinism test"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E5-S2"
+   ]
+  },
+  {
+   "id": "W4-03b",
+   "title": "Canvas persistence + ultrawide camera",
+   "phase": 4,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "crates/rf-cache/**"
+   ],
+   "depends_on": [
+    "W4-03a",
+    "W4-08"
+   ],
+   "acceptance": [
+    "scene identity + canvas persistence in rf-cache across sessions",
+    "ultrawide view on a scrolling fixture with fog for unvisited (FR-ENH-004, FR-REND-004)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E5-S2"
+   ]
+  },
+  {
+   "id": "W4-04",
+   "title": "Lua script host (mlua) + overlay API",
+   "phase": 4,
+   "crate": "rf-plugin-sdk",
+   "write_scope": [
+    "crates/rf-plugin-sdk/**",
+    "plugins/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W4-01"
+   ],
+   "acceptance": [
+    "capability-gated rf.* API per docs/design/PLUGINS.md \u00a73 (FR-PLUG-001, FR-PLUG-002)",
+    "error containment: script fault pauses script not emulator (FR-PLUG-004)",
+    "example overlay script shipped in /plugins/examples (FR-REND-006)",
+    "per-frame budget throttling (FR-PLUG-005)",
+    "Lua console REPL panel docked in the Debug workspace (DEBUGGER.md section 5)",
+    "cache_dir filesystem cap is realpath-contained; symlink-escape test refused with diagnostic (NFR-010)",
+    "PLUGIN_AUTHORING.md minimal page ships with the host (R-A4)",
+    "capability list shown at enable time; write ledger visible in UI (FR-PLUG-003)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E7-S1",
+    "E7-S2"
+   ]
+  },
+  {
+   "id": "W4-05",
+   "title": "Mode toggles + per-game enhancement settings UI",
+   "phase": 4,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W4-02",
+    "W3-05"
+   ],
+   "acceptance": [
+    "5 modes per ARCHITECTURE \u00a74 as presets (FR-MODE-001)",
+    "per-game overrides persisted (FR-ENH-010)",
+    "enhancement never on silently (fresh install defaults to Accuracy) (FR-MODE-003)",
+    "persistent ENHANCED status-bar badge with hover feature breakdown + hold-to-peek original (FRONTEND_UI.md section 1)",
+    "Enhance workspace shows per-heuristic ladder chips + report card panel (FR-ENH-012, FRONTEND_UI.md section 3.3)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E5-S3",
+    "E5-S4"
+   ]
+  },
+  {
+   "id": "W4-06a",
+   "title": "Debug viewers + event viewer + docking",
+   "phase": 4,
+   "crate": "rf-debugger",
+   "write_scope": [
+    "crates/rf-debugger/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W1-05b"
+   ],
+   "acceptance": [
+    "pattern/nametable/palette/OAM viewers live (FR-DBG-001)",
+    "event viewer: frame-timeline scatter of register writes/IRQ/DMA (DEBUGGER.md section 3)",
+    "egui_dock panel layout persisted (FR-FE-004)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E3-S1",
+    "E3-S2"
+   ]
+  },
+  {
+   "id": "W4-06b",
+   "title": "Memory viewer + watchpoints + annotation store + export",
+   "phase": 4,
+   "crate": "rf-debugger",
+   "write_scope": [
+    "crates/rf-debugger/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W4-06a",
+    "W4-02"
+   ],
+   "acceptance": [
+    "memory viewer + watchpoints via core step() (FR-DBG-002)",
+    "annotation store exports profile skeleton per GAME_PROFILES.md \u00a73 (FR-DBG-005)",
+    "DataCrystal TSV import dialog into the annotation store (DEBUGGER.md section 4)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E3-S2",
+    "E3-S3"
+   ]
+  },
+  {
+   "id": "W4-07",
+   "title": "retroforge-tool CLI core (inspect/dumps/trace/tilemap)",
+   "phase": 4,
+   "crate": "tools",
+   "write_scope": [
+    "tools/**"
+   ],
+   "depends_on": [
+    "W0-02",
+    "W0-03"
+   ],
+   "acceptance": [
+    "rom hash + inspect + header parse subcommands (FR-DBG-007; RA-compatible hash output)",
+    "VRAM/OAM/palette dump + tilemap export from a headless run at frame N",
+    "trace capture to file in nestest format"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W4-08",
+   "title": "rf-cache: content-addressed store + LRU size cap",
+   "phase": 4,
+   "crate": "rf-cache",
+   "write_scope": [
+    "crates/rf-cache/**"
+   ],
+   "depends_on": [
+    "W0-02"
+   ],
+   "acceptance": [
+    "content-addressed store keyed (rom_sha256, asset_hash, producer, settings_hash) per ARCHITECTURE \u00a77",
+    "LRU residency with configurable size cap (consumed by W2-08 Paths settings)",
+    "eviction unit test + persistence-across-restart test",
+    "cache paths realpath-contained to the cache root (NFR-010)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E5-S2"
+   ]
+  },
+  {
+   "id": "W4-09",
+   "title": "UI smoke test in CI (egui inspection protocol)",
+   "phase": 4,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    ".github/**"
+   ],
+   "depends_on": [
+    "W4-05"
+   ],
+   "acceptance": [
+    "headless CI flow via egui 0.35 inspection protocol: boot -> open fixture ROM -> assert first frame + mode badge -> open/close each core dockable panel (R-A1)",
+    "cold-start-to-interactive timing measured and reported against NFR-004"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W5-01",
+   "title": "RF-Scroller profile: identity + RAM map",
+   "phase": 5,
+   "crate": "profiles",
+   "write_scope": [
+    "profiles/nes/rf-scroller/**"
+   ],
+   "depends_on": [
+    "W4-02",
+    "W4-06b",
+    "W2-10"
+   ],
+   "acceptance": [
+    "identity block w/ normalized hashes of the CI-built fixture ROM",
+    "camera/player/entity memory_map entries sourced from fixtures/nes/rf-scroller source (cite files in `sources`) (FR-PROF-003)",
+    "validates with retroforge-tool"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E6-S1",
+    "E6-S3"
+   ]
+  },
+  {
+   "id": "W5-02a",
+   "title": "metatile_screens decoder family (offline, profile-driven)",
+   "phase": 5,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "profiles/nes/nova-the-squirrel/**"
+   ],
+   "depends_on": [
+    "W5-01"
+   ],
+   "acceptance": [
+    "decoder family per GAME_PROFILES.md \u00a72 driven by profile data (FR-ENH-005)",
+    "pure function of ROM bytes (offline test, no emulation needed)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E6-S1"
+   ]
+  },
+  {
+   "id": "W5-02b",
+   "title": "RF-Scroller level decode goldens",
+   "phase": 5,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "profiles/nes/nova-the-squirrel/**"
+   ],
+   "depends_on": [
+    "W5-02a",
+    "W4-03b"
+   ],
+   "acceptance": [
+    "decodes at least 3 RF-Scroller levels to DecodedLevel scene layers matching in-game appearance (golden screenshots)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E6-S1"
+   ]
+  },
+  {
+   "id": "W5-03",
+   "title": "Full-level view + live player overlay demo",
+   "phase": 5,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W5-02b"
+   ],
+   "acceptance": [
+    "full-map camera + ultrawide camera on decoded level (FR-ENH-006)",
+    "live player + active sprites composited at profile-decoded positions",
+    "original-viewport outline in enhanced view",
+    "gameplay unchanged (mode-invariant test still green)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E6-S1"
+   ]
+  },
+  {
+   "id": "W5-04",
+   "title": "MVP acceptance pass",
+   "phase": 5,
+   "crate": "infra",
+   "write_scope": [
+    "docs/**"
+   ],
+   "depends_on": [
+    "W5-03",
+    "W2-04",
+    "W4-04",
+    "W4-05",
+    "W3-06"
+   ],
+   "acceptance": [
+    "every checkbox in docs/MVP.md checked with evidence links (CI runs, screenshots)",
+    "demo capture recorded",
+    "STATUS.md snapshot written"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": [],
+   "hold": true
+  },
+  {
+   "id": "W5-05",
+   "title": "Release engineering v0: tagged 3-OS release + fixture archive",
+   "phase": 5,
+   "crate": "infra",
+   "write_scope": [
+    ".github/**",
+    "docs/**",
+    "scripts/**"
+   ],
+   "depends_on": [
+    "W3-06",
+    "W5-04"
+   ],
+   "acceptance": [
+    "tagged release produces macOS/Windows/Linux artifacts (SCOPE Distribution row)",
+    "golden .rfstate/.rfreplay fixtures archived into the test suite at release time (FR-STATE-005)",
+    "release notes include the accuracy table generated by rf-harness (TESTING.md section 5 note)",
+    "EXECUTED migration drill: previous release's golden fixtures load on the release candidate, evidence recorded in the release checklist (R-F3)"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": [],
+   "hold": true
+  },
+  {
+   "id": "W5-06",
+   "title": "Profile authoring loop: hot-reload + live decode preview",
+   "phase": 5,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-profiles/**",
+    "crates/rf-enhance/**"
+   ],
+   "depends_on": [
+    "W4-02",
+    "W4-06b",
+    "W5-02b"
+   ],
+   "acceptance": [
+    "profile TOML file-watch hot-reloads on save (E6-S2)",
+    "decode errors shown inline with ROM offsets",
+    "level preview panel re-renders immediately per FRONTEND_UI.md section 3.5",
+    "authoring walkthrough doc written end-to-end against RF-Scroller (annotate -> export -> decode -> validate -> golden), recording time-to-first-decoded-level (R-A2)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E6-S2"
+   ]
+  },
+  {
+   "id": "W6-00",
+   "title": "SNES phase 6 refinement planning ticket",
+   "phase": 6,
+   "crate": "infra",
+   "write_scope": [
+    "plan.json",
+    "docs/ROADMAP.md"
+   ],
+   "depends_on": [
+    "W5-04"
+   ],
+   "acceptance": [
+    "refine ALL W6 tickets at phase entry per docs/ROADMAP.md + docs/design/EMULATION_CORES.md section 3 (split any remaining 13-point tickets)",
+    "define + ticket RF-Scroller-S: in-repo libSFX SNES fixture with FORMAT.md and replay gate (FR-CORE-037, fixture doctrine D-001)"
+   ],
+   "points": 2,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W6-01a",
+   "title": "65C816: core ops, emulation/native modes, addressing",
+   "phase": 6,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/src/cpu/**"
+   ],
+   "depends_on": [
+    "W6-00"
+   ],
+   "acceptance": [
+    "65816 JSON vectors pass for the core op set incl. m/x width handling (FR-CORE-030)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E8-S1"
+   ]
+  },
+  {
+   "id": "W6-01b",
+   "title": "65C816: vectors 100% + master-cycle memory-speed model",
+   "phase": 6,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/src/cpu/**"
+   ],
+   "depends_on": [
+    "W6-01a"
+   ],
+   "acceptance": [
+    "65816 vectors 100% incl. emulation-mode quirks",
+    "bus access costs in master cycles by region per EMULATION_CORES.md section 3.1"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E8-S1"
+   ]
+  },
+  {
+   "id": "W6-02a",
+   "title": "SNES bus + LoROM/HiROM + 5A22 extras",
+   "phase": 6,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W6-01b"
+   ],
+   "acceptance": [
+    "memory map + LoROM/HiROM mapping; unsupported chips produce the FR-CORE-013 diagnostic (FR-CORE-035)",
+    "mul/div register latency + NMITIMEN + H/V IRQ + WRAM port per EMULATION_CORES.md section 3.1"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E8-S1"
+   ]
+  },
+  {
+   "id": "W6-02b",
+   "title": "Auto-joypad + interrupt timing: gilyon cputest green",
+   "phase": 6,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W6-02a"
+   ],
+   "acceptance": [
+    "auto-joypad read window + $4210/$4211 race behavior",
+    "gilyon snes-tests cputest RAM result block matches shipped tests.txt (FR-CORE-030)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E8-S1"
+   ]
+  },
+  {
+   "id": "W6-03a",
+   "title": "SNES PPU: modes 0/1 + OAM basics",
+   "phase": 6,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/src/ppu/**"
+   ],
+   "depends_on": [
+    "W6-02b"
+   ],
+   "acceptance": [
+    "BG modes 0/1 with per-BG char/tile sizes + BG3 priority",
+    "OBJ sprites with 32-sprite/34-sliver line limits + dropped_by_limit metadata"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E8-S1"
+   ]
+  },
+  {
+   "id": "W6-03b",
+   "title": "SNES PPU: first golden frames (PeterLemon subset)",
+   "phase": 6,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/src/ppu/**"
+   ],
+   "depends_on": [
+    "W6-03a"
+   ],
+   "acceptance": [
+    "golden frames green on the PeterLemon PPU tests subset (FR-CORE-033 subset)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E8-S1"
+   ]
+  },
+  {
+   "id": "W6-04a",
+   "title": "SPC700 core + ARAM + timers",
+   "phase": 6,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/src/apu/**"
+   ],
+   "depends_on": [
+    "W6-02b"
+   ],
+   "acceptance": [
+    "spc700 JSON vectors pass (FR-CORE-031)",
+    "64KB ARAM + IPL ROM banking via $F1 + timers T0-T2"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E8-S1"
+   ]
+  },
+  {
+   "id": "W6-04b",
+   "title": "CPU<->APU ports + boot handshake",
+   "phase": 6,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/src/apu/**"
+   ],
+   "depends_on": [
+    "W6-04a"
+   ],
+   "acceptance": [
+    "$2140-$2143 <-> $F4-$F7 port protocol in catch-up sync (never free-running)",
+    "commercial-style init handshake boots (test ROM)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E8-S1"
+   ]
+  },
+  {
+   "id": "W7-01",
+   "title": "SNES phase 7 planning ticket",
+   "phase": 7,
+   "crate": "infra",
+   "write_scope": [
+    "plan.json",
+    "docs/ROADMAP.md"
+   ],
+   "depends_on": [
+    "W6-03b",
+    "W6-04b"
+   ],
+   "acceptance": [
+    "expand W7 (DMA/HDMA, modes 2-7 incl. Mode 7, color math/windows/mosaic, save states, BRR/echo, PAL timing config per EMULATION_CORES.md section 3, NES AxROM+Action 53 mappers to ~96% coverage per FR-CORE-027) into tickets with acceptance from docs/design/EMULATION_CORES.md + TESTING.md gates"
+   ],
+   "points": 2,
+   "status": "todo",
+   "stories": [
+    "E8-S2",
+    "E9-S1",
+    "E9-S2"
+   ]
+  },
+  {
+   "id": "W8-01",
+   "title": "Advanced-enhancements planning ticket",
+   "phase": 8,
+   "crate": "infra",
+   "write_scope": [
+    "plan.json",
+    "docs/ROADMAP.md"
+   ],
+   "depends_on": [
+    "W7-01"
+   ],
+   "acceptance": [
+    "expand W8 into tickets: rewind (SAVE_STATES.md \u00a74 + FRONTEND_UI.md \u00a75, FR-STATE-008), video recording (FR-FE-007), screenshot polish, gamepad UI navigation + accessibility pass (FRONTEND_UI.md \u00a74/\u00a76), SNES widescreen per-BG policies (bsnes-hd model), HUD separation (FR-ENH-007), profile-declared loading fast-forward (FR-ENH-008), smooth-camera experiments, frame-interpolation experiment (design first per TRACEABILITY G5), AI upscaling cache + replacement packs (FR-AI-001/002/003/004) incl. animation-set grouping + pack manifest format (ENHANCEMENT_RUNTIME.md \u00a76), HD-pack loader with Mesen-compatible tile identity + hires.txt import + pack builder record-while-playing (SCOPE asset-replacement row), translation/accessibility overlays"
+   ],
+   "points": 2,
+   "status": "todo",
+   "stories": [
+    "E10-S1",
+    "E10-S2",
+    "E10-S3",
+    "E11-S1"
+   ]
+  },
+  {
+   "id": "W9-01",
+   "title": "Modding/profile-ecosystem planning ticket",
+   "phase": 9,
+   "crate": "infra",
+   "write_scope": [
+    "plan.json",
+    "docs/ROADMAP.md"
+   ],
+   "depends_on": [
+    "W8-01"
+   ],
+   "acceptance": [
+    "expand W9 into tickets: full profile editor GUI (FRONTEND_UI.md \u00a73.5), plugin manager polish + WASM (wasmtime) sandbox tier (PLUGINS.md \u00a71, FR-PLUG-006), plugin SDK docs + examples, map/sprite-sheet/tilemap export tools, community mod format + versioning (FR-ENH-009, FR-PROF-005/006/007 intake CI), second + third game profiles"
+   ],
+   "points": 2,
+   "status": "todo",
+   "stories": [
+    "E12-S1",
+    "E12-S2",
+    "E12-S3"
+   ]
+  }
+ ]
 }
