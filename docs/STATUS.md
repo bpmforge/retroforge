@@ -20,3 +20,5 @@
 - Alter Ego PD status is an informal source-zip claim (RISKS R-16 residual).
 
 **Board:** 64 tickets / 366 pts · statuses 1 done / 63 todo · vetoable decisions D-001..D-006 (Brad may veto any individually).
+
+2026-07-15 review arc MERGED to main (92cc3ce), both remotes; validators re-verified green post-merge. Resume point for implementation sessions: docs/work/HANDOFF.md (claimable: W0-02, W0-04).
