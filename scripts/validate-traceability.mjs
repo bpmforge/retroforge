@@ -119,8 +119,14 @@ for (const f of readdirSync(join(root, 'docs/design'))) {
 // ---- W3: story covered by zero tickets ----
 for (const s of storyDefs.keys()) if (!coveredStories.has(s)) warnings.push(`W3 ${s}: covered by no ticket's stories[]`);
 
+// ---- coverage honesty: stories covered ONLY by planning tickets ----
+// (a planning ticket's deliverable is other tickets — challenger 2026-07-15)
+const isPlanning = (t) => t.write_scope.includes('plan.json');
+const directCover = new Set(plan.tickets.filter((t) => !isPlanning(t)).flatMap((t) => t.stories ?? []));
+const planningOnly = [...storyDefs.keys()].filter((s) => coveredStories.has(s) && !directCover.has(s));
+
 // ---- report ----
-console.log(`traceability inventory: ${frDefs.size} FR/NFR defined · ${frCited.size} reachable · ${storyDefs.size} stories defined · ${[...storyDefs.keys()].filter((s) => coveredStories.has(s)).length} ticket-covered · ${dDefs.size} decisions`);
+console.log(`traceability inventory: ${frDefs.size} FR/NFR defined · ${frCited.size} reachable · ${storyDefs.size} stories defined · ${[...storyDefs.keys()].filter((s) => coveredStories.has(s)).length} ticket-covered (${planningOnly.length} of those planning-ticket-only: ${planningOnly.join(' ') || 'none'}) · ${dDefs.size} decisions`);
 for (const w of [...new Set(warnings)]) console.log('  WARN ' + w);
 if (failures.length) {
   console.error(`validate-traceability: ${failures.length} hard failure(s)`);
