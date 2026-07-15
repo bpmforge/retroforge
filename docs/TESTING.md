@@ -38,9 +38,11 @@ license note, unpack path. `scripts/fetch-test-roms.sh` downloads into
 gitignored `roms/`, verifies hashes, and is idempotent; CI caches by
 manifest hash. Sources: christopherpow/nes-test-roms, SingleStepTests repos,
 gilyon/snes-tests releases, PeterLemon/SNES, undisbeliever/snes-test-roms.
-Homebrew fixtures we may vendor in-repo only with license files (GPLv3 Nova
-ROMs are fetched, not vendored; PD/MIT fixtures may be vendored or built from
-source via cc65/libSFX in CI).
+**Fixture doctrine (D-001, 2026-07-15):** game-shaped fixtures the project
+demos or gates on are self-contained — in-repo source (RF-Scroller under
+`fixtures/`, cc65/libSFX-built in CI, CC0/MIT assets), never third-party
+content. Accuracy oracles above stay external fetch-only. Alter Ego (PD) is
+the one third-party smoke fixture (independent proof), fetched by manifest.
 **No-vendor/no-rehost rule (design review G-43):** sources with no license
 grant (SingleStepTests/65816, PeterLemon/SNES, christopherpow/nes-test-roms,
 nestest/.log) are fetch-from-origin only — never vendored, mirrored, or
@@ -68,8 +70,8 @@ Tier A = every PR; Tier B = nightly (slow or visual-manual-once suites).
 | blargg `apu_mixer` | non-linear mixer levels | FR-CORE-024 | B | RMS envelope match |
 | `mmc3_test_2` + IRQ tests | MMC3 A12 IRQ counter | FR-CORE-025 | A | $6000 = 0 |
 | Holy Diver Batman (28 ROMs) | mapper acid breadth | FR-CORE-025 | B | golden frame per ROM |
-| Nova the Squirrel 5-min replay | real-game regression | FR-CORE-026 | A | final-hash + 6 golden frames |
-| Alter Ego 5-min replay | real-game regression (PD fixture) | FR-CORE-026 | A | final-hash + golden frames |
+| RF-Scroller 5-min replay | real-game regression (in-repo fixture, D-001) | FR-CORE-026 | A | final-hash + 6 golden frames |
+| Alter Ego 5-min replay | independent-proof regression (PD fixture) | FR-CORE-026 | A | final-hash + golden frames |
 
 ## 5. SNES CI gates
 
@@ -84,7 +86,7 @@ Tier A = every PR; Tier B = nightly (slow or visual-manual-once suites).
 | PeterLemon Mode 7 set | Mode 7 + HDMA perspective | FR-CORE-034 | A | golden frame |
 | libSFX-built LoROM/HiROM mirror-map fixtures (ours) | cartridge address mapping incl. mirrors/banks | FR-CORE-035 | A | golden RAM result block |
 | blargg SPC timing (higan mirror) | S-SMP/S-DSP timing | FR-CORE-036 | B | $-protocol / audio hash |
-| Nova the Squirrel 2 5-min replay | real-game regression | FR-CORE-037 | A | final-hash + goldens |
+| RF-Scroller-S 5-min replay | real-game regression (in-repo fixture, D-001) | FR-CORE-037 | A | final-hash + goldens |
 
 Note (research-verified): neither bsnes nor Mesen2 publishes a golden-frame
 CI — this harness is our own build, and it doubles as the accuracy-table
@@ -104,18 +106,19 @@ generator (TASVideos-style) for release notes.
 
 ## 7. Enhancement feature tests
 
-- **Anti-flicker goldens**: homebrew scenes engineered to overflow sprite
-  limits (built with cc65 in CI): (a) limit-bypass shows all sprites, (b)
-  temporal mode reconstructs software-culled rotation, (c) intentional-blink
-  case is respected, (d) sprite-0-hit ROM still passes with bypass on.
+- **Anti-flicker goldens**: RF-Scroller scenes engineered to overflow sprite
+  limits (fixture doctrine D-001 — the fixture is the red-fixture host): (a)
+  limit-bypass shows all sprites, (b) temporal mode reconstructs
+  software-culled rotation, (c) intentional-blink case is respected, (d)
+  sprite-0-hit ROM still passes with bypass on.
 - **Stitcher**: deterministic canvas — same replay ⇒ byte-identical canvas;
   HUD band exclusion on a scroll-split fixture; scene-change spawns new
   canvas.
 - **Profile validation**: `retroforge-tool profile validate` over `/profiles`
   in CI — schema, provenance (`source` required), no binary assets outside
   licensed homebrew dirs (FR-PROF-003/006).
-- **Decoder goldens**: Nova level decode output (chunk grid PNG + collision
-  map) hashed against goldens; re-decode determinism.
+- **Decoder goldens**: RF-Scroller level decode output (chunk grid PNG +
+  collision map) hashed against goldens; re-decode determinism.
 - **Plugin containment**: Lua script that errors every frame ⇒ script paused,
   emulation unaffected; over-budget plugin throttled (FR-PLUG-004/005).
 
@@ -124,12 +127,12 @@ generator (TASVideos-style) for release notes.
 | Phase | Exit = all of |
 |---|---|
 | 1 (NES MVP) | nes6502 vectors 100% official · nestest diff empty · instr_test-v5 pass · NROM boots 2 homebrew titles · double-run + roundtrip + replay suites green |
-| 2 (NES compat) | Tier-A NES table fully green · mapper set complete · battery saves · Nova replay green |
+| 2 (NES compat) | Tier-A NES table fully green · mapper set complete · battery saves · RF-Scroller + Alter Ego replays green |
 | 3 (renderer) | golden frames render identically through wgpu original pipeline (pre-shader hash unchanged) · fallback test green |
 | 4 (enhancement fw) | mode invariant green with runtime subscribed · overlay + profile-load demos · plugin containment tests |
-| 5 (game-aware) | Nova full-level decode goldens · E6-S1 acceptance demo recorded |
+| 5 (game-aware) | RF-Scroller full-level decode goldens · E6-S1 acceptance demo recorded |
 | 6 (SNES MVP) | 65816 + spc700 vectors 100% · gilyon cputest/spctest green · LoROM homebrew boots |
-| 7 (SNES compat) | Tier-A SNES table fully green · Nova 2 replay green |
+| 7 (SNES compat) | Tier-A SNES table fully green · RF-Scroller-S replay green |
 | 8 (adv. enhance) | widescreen/fast-load cases green · rewind memory budget documented |
 | 9 (ecosystem) | profile/plugin CI checks green on example third-party submissions |
 

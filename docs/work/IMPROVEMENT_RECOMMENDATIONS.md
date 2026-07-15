@@ -1,5 +1,14 @@
 # RetroForge — P2 Domain Interrogations → Recommendation Index
 
+> **ADOPTED 2026-07-15 — fixture domain (Brad: "this should be self contained").** New domain §G
+> interrogated same day → **D-001** (self-contained fixture doctrine) recorded in docs/DECISIONS.md,
+> flagged vetoable. Threaded through: DECISIONS D-001 · SRS FR-CORE-026/037 · SCOPE game-aware +
+> MoSCoW rows · MVP claims/scope/checklist/anti-goals · VISION 6-month criteria · TESTING §3/§4/§5/§7/§8
+> · ROADMAP P2/P5/P7 · EMULATION_CORES §6 · CONSTRAINTS §2 · RISKS R-12/R-16 (resolved) · USER_STORIES
+> E6-S1/E6-S3 · PREREQUISITES HP-1/HP-2 (superseded) · plan.json (new **W2-10** RF-Scroller; W5-01/02,
+> W3-05, W6-00, W0-03 amended) · LESSONS RF-L-03/RF-L-07. **FS-1 and FS-2 are dissolved** — no Nova
+> permission needed. Still open at this STOP: **FS-3, AM-1..AM-5** (below).
+
 Date: 2026-07-15 · Branch: `review/design-review-hardening` · Follows docs/work/DESIGN_REVIEW.md (P1).
 Canon reference: bpm-opencode-experts at v2.15.0-in-flight (CHANGELOG trails HEAD by 2 releases; verified this session).
 Effort: S (≤half day) / M (1–2 days) / L (ticket-sized+). Wave = where it lands.
@@ -90,5 +99,36 @@ The enhancement heuristics — temporal de-flicker, HUD-split detection, scene-c
 | AM-5 | Adopt R-F2 path containment as a CONSTRAINTS security law | Adopt |
 
 Everything else in the index is acceptance-level threading I can apply without an amendment (they'll be threaded in P3 regardless of bundle-adoption, each recorded vetoable).
+
+---
+
+# Addendum 2026-07-15 (same day): follow-up interrogation from Brad's fixture question
+
+Brad asked what Nova the Squirrel is and directed: "is there any changes we should make to rest on
+others assets — this should be self contained." Interrogated as a first-class domain:
+
+## G. Self-contained fixtures
+
+**R-G1 (adopted → D-001) — Fixture doctrine, three tiers.** Tier 1 *accuracy oracles* (SingleStepTests
+vectors, blargg/gilyon/PeterLemon/undisbeliever suites, nestest+log): external, fetch-only, irreplaceable
+— community ground truth is the point; self-containing these would weaken accuracy claims. Tier 2
+*game fixtures* (demo content, replay regressions, flagship profile targets): **ours** — in-repo source,
+CI-built deterministically, CC0/MIT assets. Tier 3 *independent proof*: Alter Ego (PD) stays as the one
+third-party smoke fixture, because a pipeline proven only on content we designed proves less.
+**R-G2 (adopted, ticketed W2-10) — RF-Scroller**, a cc65/neslib NES platformer fixture engineered to
+exercise exactly what the product needs: multi-screen scroll + wraparound, HUD IRQ split,
+>8-sprites/line scene, intentional-blink enemy, vertical sub-area, documented decodable level format
+(FORMAT.md). It doubles as the red-fixture host (R-D3 synergy — the heuristic test scenes TESTING §7
+already wanted now live in one place we control).
+**R-G3 (adopted, via W6-00) — RF-Scroller-S**, the libSFX SNES sibling, defined+ticketed at phase-6
+entry; replaces Nova 2 in FR-CORE-037 and the P7 exit.
+**R-G4 (adopted, recorded) — Generality honesty.** A fixture we design to be decodable is a softer
+proof than decoding someone else's game. Recorded in RISKS R-16 residuals; mitigations: the unprofiled
+stitcher demo runs on content the profile never saw, Alter Ego is the independent check, and commercial-
+title profiles (SMB1-class, formats community-documented) remain a user-side path — facts only, user ROMs,
+never gate fixtures.
+
+Trade-off stated plainly: ~8 pts of new fixture work (W2-10) + SNES sibling later, in exchange for
+deleting the license-risk class entirely, removing two founder slates, and owning our red fixtures.
 
 **Rejected during interrogation (recorded so they aren't re-derived):** a full Improvement-Plans database (repopulse D-016 shape) — overkill for a desktop emulator with no warehouse; telemetry-based FP measurement — violates NFR-005, local report cards suffice; adopting a conductor harness *now* — premature until the board has >1 executor working concurrently, P7 revisits; WASM plugin tier pull-forward — no third-party demand exists, NON_GOALS #17 stands.

@@ -14,7 +14,9 @@ falsifiable by a demo + CI gate:
 3. **Generic enhancement is real**: ultrawide stitched terrain on a game we
    never profiled.
 4. **Game-aware enhancement is real**: full-level view with live sprites on
-   Nova the Squirrel, driven by profile data, not hardcoded logic.
+   RF-Scroller (our in-repo fixture platformer, W2-10), driven by profile
+   data, not hardcoded logic — plus the pipeline re-proven on Alter Ego
+   (PD, a game we didn't design) as the independent check.
 
 ## 2. MVP scope
 
@@ -26,7 +28,7 @@ falsifiable by a demo + CI gate:
 | Debug viewers: pattern, nametable, OAM, palette + frame stepping + trace log | Full event viewer, memory search |
 | Enhancement runtime + event bus + SceneGraph | Temporal de-flicker (bypass-only) |
 | Generic stitcher + ultrawide camera | Room stitching, widescreen policies |
-| Profile loader + Nova the Squirrel full-level profile | Profile editor UI, second profile |
+| Profile loader + RF-Scroller full-level profile | Profile editor UI, second profile |
 | Overlay API + one Lua overlay script | Plugin manager UI, wasmtime |
 | Side-by-side compare view | AI anything, HD packs |
 
@@ -41,7 +43,7 @@ Core/accuracy
 
 Boundary
 - [ ] Accuracy vs Enhanced: identical per-frame core state hashes over a
-      scripted 5k-frame Nova run (CI)
+      scripted 5k-frame RF-Scroller run (CI)
 - [ ] Enhancement crates absent from rf-nes dependency graph
       (validate-arch.sh)
 
@@ -50,7 +52,7 @@ Enhancement demos (recorded + reproducible via replay files in-repo)
       grows during play; ultrawide view shows visited terrain with fog
       beyond; scene changes create new canvases; canvases persist across
       restart via cache
-- [ ] Nova the Squirrel: full level rendered from ROM decode before
+- [ ] RF-Scroller: full level rendered from ROM decode before
       visiting it; player + active sprites drawn over reconstruction at
       correct positions; original-viewport outline toggle; camera modes
       (original / ultrawide / full-level)
@@ -75,4 +77,5 @@ screenshot-to-clipboard + PNG export of full stitched canvas.
 
 No SNES work before Phase 4 gates (R-01 discipline). No public plugin ABI.
 No AI pipeline code. No promising MVP demos on commercial ROMs — everything
-demonstrable must run on fetchable open fixtures (CONSTRAINTS §2).
+demonstrable runs on in-repo-built fixtures or PD content (fixture doctrine
+D-001, CONSTRAINTS §2).

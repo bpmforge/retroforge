@@ -41,7 +41,7 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 | FR-CORE-023 | Sprite evaluation shall replicate hardware (8-sprite/scanline limit, sprite-0 hit, buggy overflow flag), passing blargg sprite_hit and sprite_overflow suites. | P1 | TR | rf-nes |
 | FR-CORE-024 | The APU shall pass blargg `apu_test` and `dmc_dma_during_read4`; mixer shall implement the non-linear formulas (NESdev APU Mixer). | P1 | TR + audio RMS | rf-nes |
 | FR-CORE-025 | Mappers NROM(0), MMC1(1), UxROM(2), CNROM(3), MMC3(4) shall be supported — ≈91.5% of the licensed NA library. MMC3 shall pass `mmc3_test_2` IRQ suites. | MVP(NROM)/P1(rest) | TR | rf-nes |
-| FR-CORE-026 | The core shall run Nova the Squirrel and Alter Ego (homebrew fixtures) without visual or logic faults for a scripted 5-minute input log. | P1 | GF replay | rf-nes |
+| FR-CORE-026 | The core shall run RF-Scroller (in-repo fixture, W2-10) and Alter Ego (PD) without visual or logic faults for a scripted 5-minute input log. | P1 | GF replay | rf-nes |
 | FR-CORE-027 | AxROM(7) and Action 53(28) support shall extend coverage to ≈96%. | P2 | TR | rf-nes |
 
 ### 1.4 SNES core (rf-snes)
@@ -55,7 +55,7 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 | FR-CORE-034 | Mode 7 (incl. HDMA-driven perspective) shall pass PeterLemon Mode 7 ROMs. | P2 | GF | rf-snes |
 | FR-CORE-035 | LoROM and HiROM mapping shall be supported; enhancement chips (SA-1, Super FX, DSP-1, …) are explicitly deferred and shall produce the FR-CORE-013 diagnostic. | P2 | UT | rf-snes |
 | FR-CORE-036 | The S-DSP shall produce audio passing SPC timing suites; BRR decoding shall be sample-exact. | P2 | TR + audio RMS | rf-snes |
-| FR-CORE-037 | The core shall run Nova the Squirrel 2 without faults for a scripted 5-minute input log. | P2 | GF replay | rf-snes |
+| FR-CORE-037 | The core shall run RF-Scroller-S (in-repo SNES fixture, via W6-00) without faults for a scripted 5-minute input log. | P2 | GF replay | rf-snes |
 
 ## 2. FR-MODE — Operating modes
 

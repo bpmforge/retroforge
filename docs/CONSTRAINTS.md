@@ -30,17 +30,16 @@ Hard lines. Violating one is an incident, not a trade-off.
 - **No ROM data in the repository or releases.** Not commercial ROMs, not
   ROM-derived assets (tiles, maps, audio) for commercial games. Profiles for
   commercial games contain only facts: addresses, formats, rules.
-- **Test/demo ROMs arrive by fetch manifest** (`tests/rom-manifest.toml`:
+- **Test ROMs arrive by fetch manifest** (`tests/rom-manifest.toml`:
   URL + SHA-256 + license), downloaded by `scripts/fetch-test-roms.sh` into
-  a gitignored directory. This applies even to GPLv3 homebrew (Nova the
-  Squirrel 1/2): fetch, don't vendor — keeps the repo license clean
-  (GPLv3 fixtures must not link into our MIT/Apache tree) and every
-  fixture's provenance auditable. Public-domain fixtures we build from
-  source in CI (cc65/libSFX) are the exception and may live in-tree as
-  source. Before any demo *bundles* homebrew content (screenshots in docs
-  are fine), re-verify that title's asset licensing — code and assets are
-  sometimes licensed differently; Nova's asset terms must be confirmed
-  before redistribution beyond fetch-by-manifest.
+  a gitignored directory. Applies to all third-party content regardless of
+  license (GPL/NC homebrew included): fetch, don't vendor — keeps the repo
+  license clean and every artifact's provenance auditable. **Fixture
+  doctrine (D-001, 2026-07-15): demo/gate game fixtures are self-contained**
+  — our own source in-tree (`fixtures/`, cc65/libSFX, CC0/MIT assets), built
+  deterministically in CI. Third-party asset licensing is checked at design
+  time (code and assets are often licensed differently — the Nova the
+  Squirrel lesson, RISKS R-16 / LESSONS RF-L-03).
 - **Clean-room documentation.** Per-game knowledge in profiles cites its
   source (DataCrystal URL, own debugger session, disassembly) —
   `docs/design/GAME_PROFILES.md` makes `sources` required. No decompiled

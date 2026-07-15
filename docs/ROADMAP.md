@@ -41,7 +41,8 @@ Exit criteria:
 - blargg instr_test-v5, cpu_timing_test6, cpu_interrupts_v2, ppu_vbl_nmi,
   sprite_hit_tests, oam_read, apu_test, mmc3_test_2 all pass headless.
 - Save-state roundtrip + replay determinism suites green.
-- Nova the Squirrel plays start-to-level-3 by hand without visible faults.
+- RF-Scroller (in-repo fixture, W2-10) plays start-to-finish and Alter Ego
+  plays by hand without visible faults.
 
 ## Phase 3 — Renderer modernization (weeks)
 
@@ -73,12 +74,13 @@ RAM reads; enhancement state serializes into ENHC chunks.
 
 Goal: prove the thesis on open-source homebrew.
 Key tickets: W4-03 (scroll telemetry + IRQ split + scene hashing +
-re-entrant canvases), W5-01 (Nova the Squirrel: identity + RAM map),
+re-entrant canvases), W5-01 (RF-Scroller: identity + RAM map),
 W5-02 (level decoder family + decode goldens), W5-03 (full-level view +
 live overlay demo), W5-06 (authoring hot-reload loop), W5-04 (MVP
 acceptance pass), W5-05 (release v0).
-Exit criteria: MVP acceptance checklist (MVP.md) passes end-to-end on Nova
-the Squirrel + one non-profiled game (stitcher-only ultrawide).
+Exit criteria: MVP acceptance checklist (MVP.md) passes end-to-end on
+RF-Scroller + one non-profiled game (stitcher-only ultrawide; Alter Ego or
+a second fixture).
 
 ## Phase 6 — SNES core MVP (months — R-01)
 
@@ -101,7 +103,7 @@ NES AxROM/Action 53 (~96% coverage), PeterLemon/undisbeliever golden
 frames.
 Exit criteria: PeterLemon CPU/PPU/Mode-7 golden set green; 3 designated
 plain-LoROM commercial titles (user-supplied) playable start-to-credits
-sampled; Nova the Squirrel 2 plays; save states roundtrip.
+sampled; RF-Scroller-S (in-repo SNES fixture) plays; save states roundtrip.
 
 ## Phase 8 — Advanced enhancements (months, parallelizable)
 

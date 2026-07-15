@@ -63,12 +63,12 @@ Traces: SRS requirement IDs; roadmap phases per `docs/ROADMAP.md`.
 
 ## E6 — Game-aware full level (Phase 5) — SRS: FR-ENH-005..007, FR-PROF-*
 
-- **E6-S1** (8) As Tomás, I want Nova the Squirrel's current level rendered in full with the live game inside it so that I can see the whole level while playing.
+- **E6-S1** (8) As Tomás, I want the fixture platformer's (RF-Scroller) current level rendered in full with the live game inside it so that I can see the whole level while playing.
   - AC: level decoded from ROM (not stitched); player + active sprites drawn at correct positions; original-viewport outline; camera modes ultrawide/zoom/full-map.
 - **E6-S2** (5) As Ada, I want to iterate decode rules with live re-decode on file save so that authoring a profile takes hours, not days.
   - AC: profile file watch; decode errors shown inline with offsets; level preview panel.
 - **E6-S3** (3) As Kenji, I want a documented example profile and demo so that I can copy a working pattern.
-  - AC: `/profiles/nes/nova-the-squirrel/` ships with README, sources cited, golden screenshot test.
+  - AC: `/profiles/nes/rf-scroller/` ships with README, sources cited, golden screenshot test.
 
 ## E7 — Scripting & plugins (Phases 4-5) — SRS: FR-PLUG-001..005
 
