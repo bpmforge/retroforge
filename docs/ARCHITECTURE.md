@@ -106,7 +106,7 @@ perturb simulation).
 ## 5. Core API (`rf-core-api`)
 
 The contract every core implements. Sketch (authoritative version lands with
-ticket C-01):
+ticket W0-04):
 
 ```rust
 pub trait EmulatorCore {

@@ -1,3 +1,6 @@
 [toolchain]
-channel = "stable"
+# Pinned line, not floating stable: with `clippy -D warnings` in the gate, a
+# floating toolchain breaks every open ticket on each Rust release (L-15 kin).
+# Bump deliberately, one PR, gate green (see docs/TECH_STACK.md §4).
+channel = "1.94"
 components = ["rustfmt", "clippy"]

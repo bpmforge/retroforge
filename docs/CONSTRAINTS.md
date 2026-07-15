@@ -30,7 +30,7 @@ Hard lines. Violating one is an incident, not a trade-off.
 - **No ROM data in the repository or releases.** Not commercial ROMs, not
   ROM-derived assets (tiles, maps, audio) for commercial games. Profiles for
   commercial games contain only facts: addresses, formats, rules.
-- **Test/demo ROMs arrive by fetch manifest** (`tests/roms/manifest.toml`:
+- **Test/demo ROMs arrive by fetch manifest** (`tests/rom-manifest.toml`:
   URL + SHA-256 + license), downloaded by `scripts/fetch-test-roms.sh` into
   a gitignored directory. This applies even to GPLv3 homebrew (Nova the
   Squirrel 1/2): fetch, don't vendor — keeps the repo license clean
@@ -45,6 +45,15 @@ Hard lines. Violating one is an incident, not a trade-off.
   source (DataCrystal URL, own debugger session, disassembly) —
   `docs/design/GAME_PROFILES.md` makes `sources` required. No decompiled
   copyrighted code is committed.
+- **Facts-only transcription policy** (design review G-41, 2026-07-15;
+  vetoable — FS-3). DataCrystal content is **GFDL 1.2** (copyleft).
+  Profiles may take individual facts (addresses, sizes, enumerated
+  values) — facts are not copyrightable — but: all prose descriptions
+  are written fresh; never transcribe a full curated table verbatim
+  (selection/arrangement can be protected expression); restructure into
+  our own schema and grouping; the `source` URL is provenance, not
+  license inheritance; verify facts against the running game where
+  practical. Same policy applies to any copyleft wiki source.
 - **User-provided ROMs only.** The app never links to ROM sources. No
   circumvention features beyond standard emulation of unprotected dumps.
 - **Repo license: MIT OR Apache-2.0** (workspace manifest already declares

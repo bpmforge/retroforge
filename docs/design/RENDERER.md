@@ -69,10 +69,17 @@ full-map), then applies the camera transform and shader chain.
   tex_out`. Chain description is data (per-game/user settings): e.g.
   `[crt-easymode, vignette]` or `[xbrz4]` or `[]`.
 - Ship first-party: `nearest`, `sharp-bilinear`, `scanlines`,
-  `crt-easymode`-class, `lcd-grid` (handheld/LCD look), `xbrz`-class
-  upscaler. Parameters exposed as typed
-  UBO fields with UI-generated controls (name/range annotations in a small
-  manifest per shader).
+  `crt-easymode`-class, `lcd-grid` (handheld/LCD look), `xbr`-class
+  upscaler. Parameters exposed as typed UBO fields with UI-generated
+  controls (name/range annotations in a small manifest per shader).
+- **Shader licensing law (design review G-42):** the upscaler is based on
+  Hyllian's **xBR (MIT)** — never xBRZ (Zenju, GPL-3.0) or libretro GPL
+  ports. sharp-bilinear and lcd3x are public domain and may be ported
+  directly. The CRT and LCD-grid looks are **behavior-spec clean-room**:
+  whoever writes the WGSL must not have the GPL/unlicensed libretro
+  sources open; UI labels say "-class"/"-style", never claiming to *be*
+  the libretro shaders. Every shipped shader records its provenance in
+  its manifest.
 - Not a goal: full RetroArch slang-shader compatibility. A converter for
   simple single-pass GLSL presets is a Phase 8 stretch item; document this
   honestly in the UI.

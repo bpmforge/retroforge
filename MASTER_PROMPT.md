@@ -20,9 +20,13 @@ decided; your job is executing tickets, not redesigning. Read in this order
    `~/.cargo` sources. Known traps are listed in `docs/TECH_STACK.md`
    (bincode 3 ≠ bincode 1 idioms; wgpu 30 and egui 0.35 are post-training
    for most models).
-3. **Implement inside `write_scope`**. If you believe the scope must widen,
-   stop and write a `HANDOFF:` note in the ticket's `notes` field + commit —
-   do not silently touch other crates.
+3. **Implement inside `write_scope`**, plus the **always-writable set**
+   (plan.json schema note): your ticket's own `status`/`notes` fields in
+   plan.json, a one-line append to `docs/STATUS.md` on close, `Cargo.lock`,
+   and a new row in `docs/TECH_STACK.md` §2 when adding a dependency.
+   `notes` is an **array of strings**, append-only. If scope must widen
+   beyond that, stop and append a `HANDOFF:` note + commit — do not
+   silently touch other crates.
 4. **Test**: ticket acceptance criteria + full gate:
    `cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace`
    plus `scripts/validate-arch.sh`.

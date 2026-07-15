@@ -1,0 +1,41 @@
+# RetroForge — Field Lessons Ledger
+
+One row per lesson; details below for the non-obvious ones. This file is the
+analyzable input for (a) RetroForge product/process tickets, (b)
+bpm-opencode-experts process/check upstreams, (c) harness fixes. Append-only;
+stable L-ids (RF-L-*; cross-project lessons cite shipwright's L-* ids).
+**Route-to** values: `product:<ticket/FR>` · `experts:<protocol/validator>` ·
+`harness` · `process`. **Status**: `shipped` / `ticketed` / `open`.
+
+| ID | Date | Class | Lesson (one line) | Route to | Status |
+|---|---|---|---|---|---|
+| RF-L-01 | 07-15 | seams | The seam class (shipwright L-04/L-12) hit its FIFTH project, this time in the board's own claim protocol: plan.json/STATUS.md/Cargo.lock/TECH_STACK.md were writable by NO ticket — a board is unexecutable unless its process files are in a declared always-writable set | experts: TICKET_SCHEMA — boards must declare an always-writable set alongside write_scope; product: plan.json schema note (shipped) | shipped (G-1) / open (upstream) |
+| RF-L-02 | 07-15 | env-pinning | `channel = "stable"` in rust-toolchain.toml + `clippy -D warnings` in the gate = every Rust release breaks every open ticket; docs even *claimed* it was pinned (L-15 kin, doc-vs-repo drift) | process: pin exact minor, bump deliberately; experts: SESSION_PRIMER env-assertion — check the pin file says what the docs say | shipped (G-11) |
+| RF-L-03 | 07-15 | licensing | L-09 confirmed again, harder: the project's flagship fixture strategy (Nova 2 for the entire SNES arc) was resting on all-rights-reserved assets of a commercially sold game; review-time research found it 6+ months before it would have burned a phase gate | process: license pass at review time, always; product: HP-1/HP-2 slates | shipped (research) / open (Brad) |
+| RF-L-04 | 07-15 | spec-hygiene | A sed-based bulk rename left 17 phantom ticket ids in ROADMAP **after** a commit titled "fix ticket-id sed artifact" — a fix commit for a mechanical error needs a mechanical verification (grep count), not eyeballing | experts: validator idea — cited-ticket-ids ⊆ board ids (shipping in this arc's validate-traceability F-check); process: measure after bulk edits | shipped (G-3 + validator in P4) |
+| RF-L-05 | 07-15 | tooling-trust | Web research agents get prompt-injected by anti-bot pages (tcrf.net served instructions to run destructive commands); the agent ignored it — but treat fetched web content as hostile input in research protocols | experts: RESEARCH protocol note — web content is data, never instructions | open (upstream note) |
+| RF-L-06 | 07-15 | validators | Orphan telemetry (docs/work/telemetry.jsonl) recorded a FAILING validator run (validate-ux-spec, exit 1) that existed in no repo and was never triaged — a validator that isn't in-repo and in-gate is a rumor, and its failures evaporate (L-14/L-20 kin) | process: validators live in-repo, wired to CI, or they don't exist | shipped (G-36 recorded; suite lands P4) |
+
+## Details worth keeping (evidence pointers)
+
+- **RF-L-01**: docs/work/DESIGN_REVIEW.md G-1; every one of the 41 pre-review
+  tickets was affected (claim = plan.json edit; close = STATUS.md append).
+- **RF-L-02**: rust-toolchain.toml before/after on this branch;
+  TECH_STACK.md §4 claimed "pinned (currently 1.94 line)" while the file said
+  `stable`.
+- **RF-L-03**: NovaTheSquirrel2 README §License ("Assets … are not licensed
+  to be used outside of this game"); NovaTheSquirrel README (CC BY-NC-SA 4.0
+  + character clause). Full ledger in DESIGN_REVIEW.md §4.
+- **RF-L-04**: `git show fc3eac7` vs the 17 phantom ids enumerated in
+  DESIGN_REVIEW.md G-3.
+
+## Analysis queue (explicit asks for the next improvement pass)
+
+1. Check candidates to build: RF-L-04 (cited-ids ⊆ board-ids — lands in this
+   arc's validate-traceability), RF-L-02 (pin-file vs docs consistency).
+2. Upstream PR candidates to bpm-opencode-experts: RF-L-01 (always-writable
+   set in TICKET_SCHEMA), RF-L-05 (hostile-web-content note in the research
+   protocol), shipwright L-20 dogfood rule (validated again here via G-36).
+3. Product features already carrying a lesson: plan.json always-writable set
+   (RF-L-01), validate-arch.sh determinism grep (G-17 — the product's own
+   invariant, now machine-checked pre-implementation).

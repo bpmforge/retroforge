@@ -120,7 +120,7 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 
 | ID | Requirement | Pri | Verify | Crate |
 |---|---|---|---|---|
-| FR-DBG-001 | Viewers: pattern table, nametable/tilemap, palette, OAM/sprite (NES MVP; SNES adds Mode 7 and CGRAM viewers). | MVP/P2 | M | rf-debugger |
+| FR-DBG-001 | Viewers: pattern table, nametable/tilemap, palette, OAM/sprite (NES MVP; SNES adds Mode 7 and CGRAM viewers); event viewer (frame timeline) and audio channel scopes at P1 (DEBUGGER §3). | MVP/P1/P2 | M | rf-debugger |
 | FR-DBG-002 | Memory viewer with live edit (Research mode only), watchpoints (read/write/exec), and breakpoints driving core `step`. | MVP(view)/P1(watch) | UT | rf-debugger |
 | FR-DBG-003 | CPU trace logging in nestest format (NES) and analogous 65C816/SPC700 formats, with ring-buffer capture and export. | MVP | CI | rf-debugger |
 | FR-DBG-004 | Frame stepping and run-to-scanline from the UI. | MVP | M | rf-debugger |
@@ -148,7 +148,7 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 | FR-FE-001 | ROM library: scan user directories, identify by normalized hash, show profile/enhancement availability badges. | P1 | M | retroforge |
 | FR-FE-002 | Per-game settings persisted by normalized hash (mode, shaders, enhancement toggles, input map). | P1 | UT | retroforge |
 | FR-FE-003 | Input: keyboard (winit) + gamepads (gilrs) with remapping UI and per-game overrides. | MVP(kbd)/P1(pad) | M | rf-input |
-| FR-FE-004 | Dockable panels (egui_dock): game view, debug viewers, profile editor, plugin manager, compare view. | MVP(core set) | M | retroforge |
+| FR-FE-004 | Dockable panels (egui_dock): game view, debug viewers, compare view (MVP core set); profile editor and plugin manager panels at P1 (full editors P9 — MVP.md excludes plugin-manager UI). | MVP(core)/P1 | M | retroforge |
 | FR-FE-005 | Screenshot capture (original and enhanced buffers separately). | P1 | M | retroforge |
 | FR-FE-006 | Audio path: cpal stream + SPSC ring + rubato dynamic rate control; underruns surfaced as a diagnostic counter. | MVP | UT + M | rf-audio |
 | FR-FE-007 | Video recording of either pipeline. | P3 | M | retroforge |

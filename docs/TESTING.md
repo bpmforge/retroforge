@@ -33,14 +33,20 @@ SRS verification column, `docs/design/SAVE_STATES.md`.
 
 ## 3. Test-ROM acquisition (never committed — NFR-006)
 
-`tests/manifest.toml` lists every external artifact: URL, SHA-256, license
-note, unpack path. `scripts/fetch-test-roms.sh` downloads into gitignored
-`tests/roms/`, verifies hashes, and is idempotent; CI caches by manifest
-hash. Sources: christopherpow/nes-test-roms, SingleStepTests repos,
+`tests/rom-manifest.toml` lists every external artifact: URL, SHA-256,
+license note, unpack path. `scripts/fetch-test-roms.sh` downloads into
+gitignored `roms/`, verifies hashes, and is idempotent; CI caches by
+manifest hash. Sources: christopherpow/nes-test-roms, SingleStepTests repos,
 gilyon/snes-tests releases, PeterLemon/SNES, undisbeliever/snes-test-roms.
 Homebrew fixtures we may vendor in-repo only with license files (GPLv3 Nova
 ROMs are fetched, not vendored; PD/MIT fixtures may be vendored or built from
 source via cc65/libSFX in CI).
+**No-vendor/no-rehost rule (design review G-43):** sources with no license
+grant (SingleStepTests/65816, PeterLemon/SNES, christopherpow/nes-test-roms,
+nestest/.log) are fetch-from-origin only — never vendored, mirrored, or
+re-hosted; the CI cache is the only tolerated copy. Manifest entries record
+each artifact's license status; upstream grant requests tracked in
+docs/PREREQUISITES.md.
 
 ## 4. NES CI gates
 
@@ -63,6 +69,7 @@ Tier A = every PR; Tier B = nightly (slow or visual-manual-once suites).
 | `mmc3_test_2` + IRQ tests | MMC3 A12 IRQ counter | FR-CORE-025 | A | $6000 = 0 |
 | Holy Diver Batman (28 ROMs) | mapper acid breadth | FR-CORE-025 | B | golden frame per ROM |
 | Nova the Squirrel 5-min replay | real-game regression | FR-CORE-026 | A | final-hash + 6 golden frames |
+| Alter Ego 5-min replay | real-game regression (PD fixture) | FR-CORE-026 | A | final-hash + golden frames |
 
 ## 5. SNES CI gates
 

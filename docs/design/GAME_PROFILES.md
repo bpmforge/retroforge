@@ -108,7 +108,10 @@ games need the same shape — resist one-off engine code in the runtime.
 ## 3. Authoring pipeline
 
 1. Play in Research/Debug mode; label addresses in the debugger (watchpoints
-   + annotation store), or transcribe DataCrystal wiki tables.
+   + annotation store), or take facts from DataCrystal wiki tables under
+   the **facts-only transcription policy** (CONSTRAINTS §2: individual
+   addresses/sizes/values only, fresh prose, never verbatim whole tables —
+   DataCrystal is GFDL 1.2).
 2. Debugger exports annotations → profile skeleton (`memory_map`/`rom_map`
    pre-filled with sources).
 3. Iterate decode rules with the tilemap/level preview panel (live re-decode

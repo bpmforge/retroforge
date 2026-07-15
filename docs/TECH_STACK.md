@@ -62,6 +62,8 @@ manual chunk migrations become painful).
 
 - **Primary dev/CI**: Apple Silicon macOS (Metal). CI also Linux (Vulkan,
   software-rasterizer golden frames) + Windows (DX12) for releases.
-- Rust stable pinned by `rust-toolchain.toml` (currently 1.94 line);
+- Rust pinned by `rust-toolchain.toml` (`channel = "1.94"` — a pinned
+  line, never floating `stable`: the `-D warnings` gate would break on
+  every Rust release otherwise);
   MSRV = whatever egui 0.35/wgpu 30 require — record on first CI failure.
 - Distribution: GitHub releases, three OS targets; no package managers yet.
