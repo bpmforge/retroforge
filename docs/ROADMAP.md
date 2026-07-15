@@ -17,40 +17,41 @@ committed; workspace compiles; CI green. **Done 2026-07-06.**
 Goal: first pixels from a deterministic NROM machine.
 Key tickets: W0-02 (iNES/NES2.0 parse + normalized hashing), W1-01 (6502
 against SingleStepTests `nes6502` vectors — all official + illegal ops,
-cycle-by-cycle bus), W1-02, W1-04-bg (per-dot background), W1-04-spr
-(sprite eval + sprite-0), W1-02, W1-07, W0-03 (rf-harness runner
-+ $6000 protocol + golden-frame hash), W1-06-min (window + texture +
-frame stepping).
+cycle-by-cycle bus), W1-02 (bus + NROM + DMA), W1-03 (nestest golden
+trace), W1-04 (per-dot background PPU), W1-05 (sprite eval + sprite-0),
+W1-07 (input + replay log), W0-03 (rf-harness runner + $6000 protocol +
+golden-frame hash), W1-06 (window + frame blit + frame stepping).
 Exit criteria:
 - SingleStepTests nes6502 vectors 100% (official ops; illegal ops ≥ the set
   nestest covers).
 - **nestest golden log byte-exact** (PC/A/X/Y/P/SP/CYC vs nestest.log).
-- Alter Ego (PD) title screen renders; frame stepping works.
+- Two NROM homebrew titles boot (Alter Ego + a neslib fixture, per
+  TESTING §8); frame stepping works.
 - Determinism: 2× 10k-frame runs, identical per-frame state hashes.
 
 ## Phase 2 — NES compatibility (weeks)
 
 Goal: the ~91.5% mapper set + audio + states.
-Key tickets: W2-02, W2-02, W2-02, W2-03 (A12 IRQ), W2-01 (frame
-counter, channels, DMC DMA), W2-05-out (cpal + rtrb + rubato rate
-control), W2-04 (rfstate container + roundtrip tests), W2-04
-(rfreplay + divergence pinpointing), W2-07 (hash-identified ROM
-library UI), W2-06-remap.
+Key tickets: W2-02 (MMC1/UxROM/CNROM), W2-03 (MMC3 + A12 IRQ), W2-01
+(frame counter, channels, DMC DMA), W2-05 (cpal + rtrb + rubato rate
+control), W2-04 (rfstate container + roundtrip + save-state UI), W2-07
+(hash-identified ROM library), W2-06 (gamepad + remap), W2-08 (settings
+screens), W2-09 (nightly CI tier + bench baseline).
 Exit criteria:
 - blargg instr_test-v5, cpu_timing_test6, cpu_interrupts_v2, ppu_vbl_nmi,
   sprite_hit_tests, oam_read, apu_test, mmc3_test_2 all pass headless.
 - Save-state roundtrip + replay determinism suites green.
-- Nova the Squirrel plays start-to-level-3 by hand without visible faults.
+- RF-Scroller (in-repo fixture, W2-10) plays start-to-finish and Alter Ego
+  plays by hand without visible faults.
 
 ## Phase 3 — Renderer modernization (weeks)
 
 Goal: wgpu pipelines + the indexed-pixel contract paying off.
-Key tickets: W3-01-core (device/surface/original pipeline), W3-01
-(integer/aspect), W3-02 (WGSL chain: CRT, scanline, xBRZ-class),
-W3-03 (BG/sprite layer extraction from pixel metadata), W3-04
-(side-by-side original/enhanced), W3-05-1 (sprite-limit bypass +
-auto-re-enable heuristic), W3-01-gpu (golden frames on CI, software
-rasterizer on Linux runners).
+Key tickets: W3-01 (device/surface/original pipeline, integer/aspect,
+headless golden frames, device-loss fallback), W3-02 (WGSL chain: CRT,
+scanline, lcd-grid, xBRZ-class), W3-03 (BG/sprite layer extraction from
+pixel metadata), W3-04 (side-by-side original/enhanced), W3-05
+(sprite-limit bypass + de-flicker prototype), W3-06 (3-OS CI builds).
 Exit criteria: golden-frame suite runs on CI in both pipelines; bypass
 demonstrably removes flicker on a test scene while Accuracy mode is
 pixel-identical to Phase-2 goldens; 60 fps sustained with shader chain on
@@ -59,11 +60,12 @@ M-class hardware.
 ## Phase 4 — Enhancement framework (weeks)
 
 Goal: the platform part — events, profiles, overlays, invariant.
-Key tickets: W4-01 (CoreSink event bus + subscription masks), W4-03
-(runtime + SceneGraph composer), W4-02 (TOML schema v0 + loader +
-validator), W4-04 (draw-command API), W4-04 (mlua host + BizHawk-
-shaped bindings), W4-05-invariant (CI: Accuracy vs Enhanced state-hash
-equality), W4-05 (per-game settings persistence).
+Key tickets: W4-01 (CoreSink event bus + subscription masks + mode-
+invariant CI), W4-03 (runtime + SceneGraph composer + stitcher), W4-02
+(TOML schema v0 + loader + validator), W4-04 (mlua host + BizHawk-shaped
+bindings + Lua console), W4-05 (mode toggles + honesty badge + per-game
+settings), W4-06 (debug viewers + annotation store), W4-07 (retroforge-
+tool CLI), W4-08 (rf-cache store).
 Exit criteria: mode-invariant test green in CI; profile matches by
 normalized hash and toggles features; Lua script draws an overlay from live
 RAM reads; enhancement state serializes into ENHC chunks.
@@ -72,34 +74,36 @@ RAM reads; enhancement state serializes into ENHC chunks.
 
 Goal: prove the thesis on open-source homebrew.
 Key tickets: W4-03 (scroll telemetry + IRQ split + scene hashing +
-re-entrant canvases), W5-03 (enhanced camera over stitched canvas),
-W5-01 (Nova the Squirrel: level decoder from its documented
-format, camera/entity addresses), W5-02 (decoded-level scene layer +
-live sprites over reconstruction), W5-04 (side-by-side demo mode +
-capture).
-Exit criteria: MVP acceptance checklist (MVP.md) passes end-to-end on Nova
-the Squirrel + one non-profiled game (stitcher-only ultrawide).
+re-entrant canvases), W5-01 (RF-Scroller: identity + RAM map),
+W5-02 (level decoder family + decode goldens), W5-03 (full-level view +
+live overlay demo), W5-06 (authoring hot-reload loop), W5-04 (MVP
+acceptance pass), W5-05 (release v0).
+Exit criteria: MVP acceptance checklist (MVP.md) passes end-to-end on
+RF-Scroller + one non-profiled game (stitcher-only ultrawide; Alter Ego or
+a second fixture).
 
 ## Phase 6 — SNES core MVP (months — R-01)
 
 Goal: 65C816 machine boots test ROMs.
-Key tickets: W6-02-snes (headers, LoROM/HiROM, normalized hashing),
-W6-01-65816 (SingleStepTests vectors), W6-02 (MDMA/HDMA, auto-joypad),
-W6-03-basic (modes 0/1, OAM, windows deferred), W6-04 (vectors +
-boot ROM), W6-04-path, W6-03-snes (viewer providers).
+Key tickets: W6-00 (phase-entry refinement — splits the 13-pt set),
+W6-01 (65C816 SingleStepTests vectors), W6-02 (bus, LoROM/HiROM,
+MDMA/HDMA basics, auto-joypad), W6-03 (PPU modes 0/1, OAM, first
+frames), W6-04 (SPC700 vectors + boot-ROM handshake).
 Exit criteria: 65816 + spc700 vector suites 100%; gilyon cputest/spctest
 pass; libSFX-built fixture ROMs render golden frames; input works.
 
 ## Phase 7 — SNES compatibility (months)
 
 Goal: the commercial mainstream plays.
-Key tickets: W7-01-modes (2-6, mosaic, color math, windows), W7-01
-(+ HD-Mode-7-class internal resolution — same math, more samples), W7-01
-(S-DSP: BRR, echo, gaussian), W7-01-edge, W7-01-snes, W7-01
-(PeterLemon/undisbeliever golden frames).
+Key tickets: W7-01 is the phase-entry planning ticket — it expands into:
+PPU modes 2-6 + mosaic + color math + windows, Mode 7 (+ HD-Mode-7-class
+internal resolution — same math, more samples), S-DSP (BRR, echo,
+gaussian), DMA/HDMA edge cases, SNES save states, PAL timing config,
+NES AxROM/Action 53 (~96% coverage), PeterLemon/undisbeliever golden
+frames.
 Exit criteria: PeterLemon CPU/PPU/Mode-7 golden set green; 3 designated
 plain-LoROM commercial titles (user-supplied) playable start-to-credits
-sampled; Nova the Squirrel 2 plays; save states roundtrip.
+sampled; RF-Scroller-S (in-repo SNES fixture) plays; save states roundtrip.
 
 ## Phase 8 — Advanced enhancements (months, parallelizable)
 

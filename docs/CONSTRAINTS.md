@@ -24,27 +24,40 @@ Hard lines. Violating one is an incident, not a trade-off.
   (`docs/design/SAVE_STATES.md`) — no mid-frame serialization complexity.
 - **No AI, no network, no blocking I/O on the frame path.** AI and decode
   jobs are async, cache-backed, droppable.
+- **Path containment (D-006).** Every externally influenced path — library
+  scan roots, `profiles.d` references, plugin `filesystem` caps, export
+  destinations, cache dir — is realpath-resolved and contained to its
+  declared root before use; symlink escapes are refused with a diagnostic;
+  directory walks are symlink-loop-safe (SRS NFR-010).
 
 ## 2. Legal constraints
 
 - **No ROM data in the repository or releases.** Not commercial ROMs, not
   ROM-derived assets (tiles, maps, audio) for commercial games. Profiles for
   commercial games contain only facts: addresses, formats, rules.
-- **Test/demo ROMs arrive by fetch manifest** (`tests/roms/manifest.toml`:
+- **Test ROMs arrive by fetch manifest** (`tests/rom-manifest.toml`:
   URL + SHA-256 + license), downloaded by `scripts/fetch-test-roms.sh` into
-  a gitignored directory. This applies even to GPLv3 homebrew (Nova the
-  Squirrel 1/2): fetch, don't vendor — keeps the repo license clean
-  (GPLv3 fixtures must not link into our MIT/Apache tree) and every
-  fixture's provenance auditable. Public-domain fixtures we build from
-  source in CI (cc65/libSFX) are the exception and may live in-tree as
-  source. Before any demo *bundles* homebrew content (screenshots in docs
-  are fine), re-verify that title's asset licensing — code and assets are
-  sometimes licensed differently; Nova's asset terms must be confirmed
-  before redistribution beyond fetch-by-manifest.
+  a gitignored directory. Applies to all third-party content regardless of
+  license (GPL/NC homebrew included): fetch, don't vendor — keeps the repo
+  license clean and every artifact's provenance auditable. **Fixture
+  doctrine (D-001, 2026-07-15): demo/gate game fixtures are self-contained**
+  — our own source in-tree (`fixtures/`, cc65/libSFX, CC0/MIT assets), built
+  deterministically in CI. Third-party asset licensing is checked at design
+  time (code and assets are often licensed differently — the Nova the
+  Squirrel lesson, RISKS R-16 / LESSONS RF-L-03).
 - **Clean-room documentation.** Per-game knowledge in profiles cites its
   source (DataCrystal URL, own debugger session, disassembly) —
   `docs/design/GAME_PROFILES.md` makes `sources` required. No decompiled
   copyrighted code is committed.
+- **Facts-only transcription policy** (design review G-41; locked D-007,
+  2026-07-15). DataCrystal content is **GFDL 1.2** (copyleft).
+  Profiles may take individual facts (addresses, sizes, enumerated
+  values) — facts are not copyrightable — but: all prose descriptions
+  are written fresh; never transcribe a full curated table verbatim
+  (selection/arrangement can be protected expression); restructure into
+  our own schema and grouping; the `source` URL is provenance, not
+  license inheritance; verify facts against the running game where
+  practical. Same policy applies to any copyleft wiki source.
 - **User-provided ROMs only.** The app never links to ROM sources. No
   circumvention features beyond standard emulation of unprotected dumps.
 - **Repo license: MIT OR Apache-2.0** (workspace manifest already declares

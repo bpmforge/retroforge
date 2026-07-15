@@ -41,7 +41,7 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 | FR-CORE-023 | Sprite evaluation shall replicate hardware (8-sprite/scanline limit, sprite-0 hit, buggy overflow flag), passing blargg sprite_hit and sprite_overflow suites. | P1 | TR | rf-nes |
 | FR-CORE-024 | The APU shall pass blargg `apu_test` and `dmc_dma_during_read4`; mixer shall implement the non-linear formulas (NESdev APU Mixer). | P1 | TR + audio RMS | rf-nes |
 | FR-CORE-025 | Mappers NROM(0), MMC1(1), UxROM(2), CNROM(3), MMC3(4) shall be supported — ≈91.5% of the licensed NA library. MMC3 shall pass `mmc3_test_2` IRQ suites. | MVP(NROM)/P1(rest) | TR | rf-nes |
-| FR-CORE-026 | The core shall run Nova the Squirrel and Alter Ego (homebrew fixtures) without visual or logic faults for a scripted 5-minute input log. | P1 | GF replay | rf-nes |
+| FR-CORE-026 | The core shall run RF-Scroller (in-repo fixture, W2-10) and Alter Ego (PD) without visual or logic faults for a scripted 5-minute input log. | P1 | GF replay | rf-nes |
 | FR-CORE-027 | AxROM(7) and Action 53(28) support shall extend coverage to ≈96%. | P2 | TR | rf-nes |
 
 ### 1.4 SNES core (rf-snes)
@@ -55,7 +55,7 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 | FR-CORE-034 | Mode 7 (incl. HDMA-driven perspective) shall pass PeterLemon Mode 7 ROMs. | P2 | GF | rf-snes |
 | FR-CORE-035 | LoROM and HiROM mapping shall be supported; enhancement chips (SA-1, Super FX, DSP-1, …) are explicitly deferred and shall produce the FR-CORE-013 diagnostic. | P2 | UT | rf-snes |
 | FR-CORE-036 | The S-DSP shall produce audio passing SPC timing suites; BRR decoding shall be sample-exact. | P2 | TR + audio RMS | rf-snes |
-| FR-CORE-037 | The core shall run Nova the Squirrel 2 without faults for a scripted 5-minute input log. | P2 | GF replay | rf-snes |
+| FR-CORE-037 | The core shall run RF-Scroller-S (in-repo SNES fixture, via W6-00) without faults for a scripted 5-minute input log. | P2 | GF replay | rf-snes |
 
 ## 2. FR-MODE — Operating modes
 
@@ -93,6 +93,9 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 | FR-ENH-008 | Loading fast-forward shall trigger only on profile-declared wait loops (PC + condition), disabling frame pacing without altering simulation. | P2 | CI | rf-enhance |
 | FR-ENH-009 | Game-logic patches (mods) shall be off by default, individually user-enabled, ledger-logged, and recorded in save states. | P2 | UT | rf-enhance |
 | FR-ENH-010 | Every enhancement feature shall be independently toggleable at runtime without restart. | P1 | M | rf-enhance |
+| FR-ENH-011 | Every enhancement heuristic shall implement the trust ladder (D-004): states shadow (detect + record, never act) → advisory (badge suggests) → active; fresh install all-shadow; per-game state persisted by normalized hash; profiles may pin states. | P1 | UT | rf-enhance |
+| FR-ENH-012 | Heuristic contradiction events (safety auto-re-enable, scene-cut resets, blink-period violations) shall be recorded to a local per-game report card surfaced in the Enhance workspace; suppressing a safety heuristic per-game shall require a stored justification that auto-reopens when the trigger recurs in a new scene context. | P1 | UT + M | rf-enhance |
+| FR-ENH-013 | Every shipped heuristic shall have a red fixture (RF-Scroller scene or dedicated ROM) that MUST trigger it; a heuristic change that stops firing on its red fixture shall fail CI. | P1 | CI | rf-harness |
 
 ## 5. FR-PROF — Game profiles
 
@@ -104,6 +107,7 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 | FR-PROF-004 | The loader shall reject newer schema majors and warn on unknown keys. | P1 | UT | rf-profiles |
 | FR-PROF-005 | User overrides (`~/.retroforge/profiles.d/`) shall layer over shipped profiles with precedence visible in the profile inspector. | P2 | M | rf-profiles |
 | FR-PROF-006 | Profiles for commercial games shall contain only facts (addresses, rules) — CI shall reject binary assets in `/profiles` except under homebrew titles with license files. | P1 | CI | repo |
+| FR-PROF-007 | Community-submitted profiles/packs/plugins shall pass license-gated intake (D-005): SPDX license + provenance metadata required; missing/unknown licenses and denylisted content (NC assets, GFDL text, GPL-derived shader code) rejected; nothing activates without passing. | P3 | CI | repo |
 
 ## 6. FR-PLUG — Plugins and scripting
 
@@ -120,7 +124,7 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 
 | ID | Requirement | Pri | Verify | Crate |
 |---|---|---|---|---|
-| FR-DBG-001 | Viewers: pattern table, nametable/tilemap, palette, OAM/sprite (NES MVP; SNES adds Mode 7 and CGRAM viewers). | MVP/P2 | M | rf-debugger |
+| FR-DBG-001 | Viewers: pattern table, nametable/tilemap, palette, OAM/sprite (NES MVP; SNES adds Mode 7 and CGRAM viewers); event viewer (frame timeline) and audio channel scopes at P1 (DEBUGGER §3). | MVP/P1/P2 | M | rf-debugger |
 | FR-DBG-002 | Memory viewer with live edit (Research mode only), watchpoints (read/write/exec), and breakpoints driving core `step`. | MVP(view)/P1(watch) | UT | rf-debugger |
 | FR-DBG-003 | CPU trace logging in nestest format (NES) and analogous 65C816/SPC700 formats, with ring-buffer capture and export. | MVP | CI | rf-debugger |
 | FR-DBG-004 | Frame stepping and run-to-scanline from the UI. | MVP | M | rf-debugger |
@@ -148,7 +152,7 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 | FR-FE-001 | ROM library: scan user directories, identify by normalized hash, show profile/enhancement availability badges. | P1 | M | retroforge |
 | FR-FE-002 | Per-game settings persisted by normalized hash (mode, shaders, enhancement toggles, input map). | P1 | UT | retroforge |
 | FR-FE-003 | Input: keyboard (winit) + gamepads (gilrs) with remapping UI and per-game overrides. | MVP(kbd)/P1(pad) | M | rf-input |
-| FR-FE-004 | Dockable panels (egui_dock): game view, debug viewers, profile editor, plugin manager, compare view. | MVP(core set) | M | retroforge |
+| FR-FE-004 | Dockable panels (egui_dock): game view, debug viewers, compare view (MVP core set); profile editor and plugin manager panels at P1 (full editors P9 — MVP.md excludes plugin-manager UI). | MVP(core)/P1 | M | retroforge |
 | FR-FE-005 | Screenshot capture (original and enhanced buffers separately). | P1 | M | retroforge |
 | FR-FE-006 | Audio path: cpal stream + SPSC ring + rubato dynamic rate control; underruns surfaced as a diagnostic counter. | MVP | UT + M | rf-audio |
 | FR-FE-007 | Video recording of either pipeline. | P3 | M | retroforge |
@@ -175,3 +179,4 @@ Requirement convention: "shall" = binding; each row is testable in isolation.
 | NFR-007 | `unsafe` code requires a `// SAFETY:` comment and is warned by workspace lints; hot-path exceptions need review sign-off. | MVP | CI |
 | NFR-008 | All public formats (profile schema, .rfstate, .rfreplay, plugin manifest) are versioned from first release. | MVP | CI |
 | NFR-009 | Platforms: macOS (primary dev), Windows, Linux — CI builds all three from Phase 3 onward. | P1 | CI |
+| NFR-010 | Path containment (D-006): every externally influenced path (library scan, profiles.d references, plugin filesystem caps, export destinations, cache dir) shall be realpath-resolved and contained to its declared root; symlink escapes refused with a diagnostic; library scan is symlink-loop-safe. | P1 | UT |

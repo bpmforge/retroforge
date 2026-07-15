@@ -45,7 +45,9 @@ Rules:
 TASVideos-style movie: header (rom hash, initial state = power-on | embedded
 state, emu version, core config) + per-frame input records + periodic state
 hashes every N frames for divergence pinpointing. Used by: determinism CI,
-bug repros, TAS-style tooling later.
+bug repros, TAS-style tooling later. Interop commitment (R-A3, P9): the
+format stays BK2-shaped so BizHawk header import (v1) and best-effort export
+are cheap — community verification workflows transfer.
 
 ## 4. Rewind (Phase 8)
 

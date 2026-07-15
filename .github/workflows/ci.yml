@@ -16,6 +16,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: arch boundaries
         run: scripts/validate-arch.sh
+      - name: board validators (D-002)
+        run: node scripts/validate-plan.mjs && node scripts/validate-traceability.mjs
       - name: tests
         run: cargo test --workspace
         env:

@@ -39,6 +39,21 @@ filesystem = "cache_dir" # none | cache_dir; exports go through the host `export
 impossible because the host routes all writes through a ledger surfaced in
 the UI and recorded in save states (PROF/ENHC chunks).
 
+**Path containment (D-006, NFR-010):** the `filesystem = "cache_dir"` cap
+is realpath-enforced — every path a plugin opens is canonicalized and must
+resolve inside the plugin's cache dir; symlink escapes are refused with a
+diagnostic naming the offending path. The host `export` API writes only to
+a user-picked destination (native dialog), never a plugin-supplied path.
+The same containment law covers library scan roots, `profiles.d`
+references, and rf-cache (CONSTRAINTS §1).
+
+**Intake (D-005, FR-PROF-007):** community-distributed plugins/packs/
+profiles are deny-by-default — manifest requires SPDX `license` +
+`provenance` fields; unknown/missing licenses and denylisted content (NC
+assets, GFDL text, GPL-derived shader code) are rejected at install scan,
+before any capability prompt. Enforcement CI lands Phase 9; the manifest
+fields are schema-required from v0.
+
 ## 3. Host API (v0 sketch)
 
 ```rust

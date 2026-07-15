@@ -270,5 +270,5 @@ suite-visible, or the switch doesn't exist.
   Diver Batman golden frames match, determinism replay green.
 - SNES core exits Phase 6/7 when: 65816+spc700 vectors 100%, gilyon suites
   pass, PeterLemon/undisbeliever golden-frame set matches, DMA/HDMA suite
-  green, LoROM+HiROM commercial-shaped homebrew boots (Nova 2), determinism
+  green, LoROM+HiROM commercial-shaped fixture boots (RF-Scroller-S), determinism
   replay green.

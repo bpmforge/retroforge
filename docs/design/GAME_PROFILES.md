@@ -104,11 +104,22 @@ Decoder families (`decode.kind`) are implemented once in `rf-enhance` and
 parameterized by data: `metatile_screens`, `room_grid`, `tilemap_direct`,
 plus `custom` (delegates to a named plugin). New families are added when ≥2
 games need the same shape — resist one-off engine code in the runtime.
+Families are **versioned** (schema v0.2 adds `decode.family_version`): a
+behavioral change to a family bumps its version; the loader refuses a
+newer major, mirroring `profile_version` semantics — profiles never
+silently re-decode differently under an upgraded emulator.
+
+Community-submitted profiles pass license-gated intake (D-005,
+FR-PROF-007): `[meta]` requires `license` (SPDX) alongside `sources`;
+deny-by-default at the Phase-9 submission CI.
 
 ## 3. Authoring pipeline
 
 1. Play in Research/Debug mode; label addresses in the debugger (watchpoints
-   + annotation store), or transcribe DataCrystal wiki tables.
+   + annotation store), or take facts from DataCrystal wiki tables under
+   the **facts-only transcription policy** (CONSTRAINTS §2: individual
+   addresses/sizes/values only, fresh prose, never verbatim whole tables —
+   DataCrystal is GFDL 1.2).
 2. Debugger exports annotations → profile skeleton (`memory_map`/`rom_map`
    pre-filled with sources).
 3. Iterate decode rules with the tilemap/level preview panel (live re-decode

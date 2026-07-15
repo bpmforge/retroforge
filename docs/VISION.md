@@ -68,7 +68,8 @@ game looks like unchained" — and can trust both.
 - NES core passes the Phase-2 test gate (nestest golden log, blargg CPU +
   `ppu_vbl_nmi`; `docs/TESTING.md`).
 - Enhancement runtime demonstrates: generic map stitching with ultrawide
-  view on homebrew, and a full-level profile demo on Nova the Squirrel.
+  view on an unprofiled game, and a full-level profile demo on RF-Scroller
+  (our in-repo fixture platformer — self-contained fixture doctrine D-001).
 - Accuracy-vs-Enhanced state-hash invariant enforced in CI from day one.
 
 **18 months — platform real**

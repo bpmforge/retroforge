@@ -48,6 +48,40 @@ sprites deliberately: invisibility effects, damage blink — blink detection
 uses period regularity but is imperfect); (c) debug panel shows
 original-vs-reconstructed OAM diff per frame.
 
+## 2a. Heuristic trust ladder (D-004)
+
+Every heuristic in this document — temporal reconstruction, blink
+detection, HUD-band detection, scene-cut identity, idle-loop detection,
+sprite-limit auto-re-enable — runs the same lifecycle:
+
+```mermaid
+stateDiagram-v2
+    [*] --> shadow : fresh install (all heuristics)
+    shadow --> advisory : user enables suggestions / profile pin
+    advisory --> active : user enables / profile pin
+    active --> advisory : contradiction events accumulate (suggest review)
+    active --> shadow : safety trip + user demotion
+    note right of shadow : detect + record to report card, never act
+    note right of advisory : badge suggests, still never acts
+```
+
+- **Shadow**: the heuristic computes its verdicts and records them (plus
+  what it *would* have done) to the per-game report card. Zero render
+  effect.
+- **Advisory**: the ENHANCED badge / Enhance workspace suggests ("de-flicker
+  would reconstruct 12 sprites in this scene"), still no effect.
+- **Active**: acts; contradiction events (safety re-enable, scene-cut
+  reset, blink-period violation) still record.
+- **Report card** (FR-ENH-012): per-game, local, persisted by normalized
+  hash; shown in the Enhance workspace Features tab. Suppressing a safety
+  (e.g. "stop auto-re-enabling the sprite limit here") stores a
+  justification and auto-reopens if the trigger fires in a different scene
+  context.
+- **Red fixtures** (FR-ENH-013): each heuristic has an RF-Scroller scene or
+  dedicated ROM that MUST trigger it; CI fails if it stops firing.
+- Profile `[capabilities]`/`[antiflicker]` entries may pin ladder states —
+  that is precisely what a profile is for.
+
 ## 3. Generic map stitching (wideNES technique)
 
 Verified prior art: wideNES (Prilik) — sample PPU scroll registers each

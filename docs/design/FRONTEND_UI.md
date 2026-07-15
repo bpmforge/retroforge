@@ -63,6 +63,11 @@ App
 
 - Scans configured folders; identifies by normalized hash (rf-cart);
   unidentified ROMs still playable (shown with generic card).
+- **Empty/first-run state** (design review G-21): no folders configured ⇒
+  the grid area shows a single call-to-action card ("Add a ROM folder…" →
+  Paths settings) plus a drag-and-drop target; a folder with zero
+  recognized ROMs says so explicitly ("0 ROMs found in <path>") rather
+  than rendering an empty grid. No network fallback, ever (NON_GOALS #5).
 - Thumbnail = last save-state screenshot or first-frame capture. No
   box art scraping v1 (network-free principle).
 - Per-game context menu: settings, open file location, hash info (RA/No-Intro
@@ -93,6 +98,9 @@ warns on version-migrated states.
 │   [ ] Widescreen: decoded      (requires profile ✓ present)│
 │   [ ] Full-level view          (requires profile ✓ present)│
 │   rows disabled+explained when no profile capability      │
+│   ladder chip per heuristic: shadow/advisory/active +     │
+│   report-card link (D-004): contradiction events, would-  │
+│   have-done counts, suppression justifications            │
 │ Map: stitched/decoded canvas · fog for unvisited ·        │
 │   live player marker · original-viewport outline · export │
 └──────────────────────────────────────────────────────────┘
