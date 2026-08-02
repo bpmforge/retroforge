@@ -98,7 +98,7 @@
    ],
    "acceptance": [
     "container per docs/design/SAVE_STATES.md (magic/version/rom-hash/chunks, zstd) (FR-STATE-001, NFR-008)",
-    "bincode 3 Encode/Decode payloads (NOT 1.x serde API)",
+    "bincode 2 Encode/Decode payloads (NOT 1.x serde API; NOT bincode 3.0.0 — that version is a compile_error placeholder, see TECH_STACK section 2)",
     "roundtrip + unknown-chunk-skip + missing-required-chunk tests (FR-STATE-004)",
     "golden fixture harness"
    ],

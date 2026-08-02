@@ -123,6 +123,14 @@ exactly this stack — wgpu 29 + egui 0.34 + winit 0.30 + cpal 0.17 + gilrs 0.11
 - **bincode 3.0.0** (2025-12-16) — note bincode ≥2 has its own `Encode`/`Decode` derive traits; serde
   interop is behind the `serde` feature. Fastest option, non-self-describing.
   ([crates.io/crates/bincode](https://crates.io/crates/bincode))
+  > **Correction recorded 2026-08-02** (implementation-time verification, W0 run): the version
+  > number above is wrong in effect. `bincode 3.0.0` on crates.io is a **placeholder** published by
+  > bincode-org whose entire `src/lib.rs` is `compile_error!("https://xkcd.com/2347/")` — depending
+  > on it fails to build. The usable release providing the `Encode`/`Decode` derives described here
+  > is **2.0.1** (compile-verified: `encode_to_vec` / `decode_from_slice` + zstd roundtrip). The
+  > research claim about the ≥2 derive API is correct; only the version numeral was wrong.
+  > `bincode-next` 3.1.1 (Apich-Organization) and `oxicode` 0.2.5 (cool-japan) are third-party
+  > forks, rejected for a PUBLIC format. Normative pins corrected in TECH_STACK §2 + SAVE_STATES §2.
 - **postcard 1.1.3** — the alternative if you want a *documented, committed-stable* wire format
   (unchanged since 0.1) at ~70% of bincode's size, ~1.5x slower.
   ([postcard 1.0 post](https://jamesmunns.com/blog/postcard-1-0-run/))

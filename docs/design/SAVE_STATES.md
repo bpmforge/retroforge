@@ -36,9 +36,13 @@ Rules:
 - Chunk `version` bump requires a migration fn or an explicit
   "cannot migrate" error message. Golden `.rfstate` fixtures from each
   release are kept in the test suite; CI loads all of them.
-- Payload encoding: bincode 3 (`Encode`/`Decode` derives — NOT the 1.x serde
-  API; see docs/research/rust-stack.md) wrapped by the hand-rolled envelope
-  above, so the *container* is stable even if the codec changes.
+- Payload encoding: bincode **2** (`Encode`/`Decode` derives — NOT the 1.x
+  serde API; see docs/research/rust-stack.md) wrapped by the hand-rolled
+  envelope above, so the *container* is stable even if the codec changes.
+  Corrected 2026-08-02 (was "bincode 3"): `bincode 3.0.0` is a placeholder
+  crate whose entire source is `compile_error!("https://xkcd.com/2347/")` —
+  it cannot build. 2.0.1 provides the exact `Encode`/`Decode` derive API this
+  design assumes; the design intent is unchanged.
 
 ## 3. Replay logs (`.rfreplay`)
 
