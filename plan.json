@@ -63,7 +63,7 @@
     "failure-mode rows FM-08 (divergence report) + FM-14 (manifest rot fails loud) implemented per docs/design/FAILURE_MODES.md"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
