@@ -109,6 +109,33 @@
    ]
   },
   {
+   "id": "W0-06",
+   "title": "cargo-deny licence gate",
+   "phase": 0,
+   "crate": "infra",
+   "write_scope": [
+    "deny.toml",
+    ".github/**"
+   ],
+   "depends_on": [
+    "W0-02",
+    "W0-03",
+    "W0-04",
+    "W0-05"
+   ],
+   "acceptance": [
+    "deny.toml allowlist per NFR-011: MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, Zlib, ISC, Unlicense, CC0-1.0 — every other licence denied by default",
+    "copyleft (GPL/LGPL/AGPL/MPL/SSPL) and NC/ND Creative Commons denied explicitly, denial reason citing the design-review licensing ledger (docs/work/DESIGN_REVIEW.md section 4)",
+    "libzstd dual BSD-3/GPL-2 resolved to BSD-3 via an explicit deny.toml licence-election entry, else the gate false-positives on GPL",
+    "Apache-2.0-only dependencies (winit, cpal) carry NOTICE attribution in a checked-in THIRD-PARTY-NOTICES file (Apache-2.0 section 4 requirement)",
+    "CI job fails the build on any licence violation, wired into .github/workflows/ci.yml beside the existing fmt/clippy/arch/board-validator jobs",
+    "cargo-deny version pinned in CI (no floating install) so a registry change cannot silently alter gate results"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": []
+  },
+  {
    "id": "W1-01a",
    "title": "6502 CPU: official opcodes + addressing + vectors harness",
    "phase": 1,
