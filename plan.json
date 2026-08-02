@@ -36,7 +36,7 @@
     "unknown mapper/chip fails with a diagnostic naming it, never a crash (FR-CORE-013)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E2-S3"
    ]
