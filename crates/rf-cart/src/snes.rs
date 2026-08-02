@@ -278,6 +278,40 @@ mod tests {
     }
 
     #[test]
+    fn tie_break_prefers_lorom_by_policy_when_both_candidates_are_plausible() {
+        // Construct an image where *both* header locations pass every
+        // heuristic check (valid checksum/complement pair, sane RESET
+        // vector, self-consistent map-mode nibble) — a rare coincidence
+        // for a malformed/adversarial image, but the only situation where
+        // the tie-break actually matters. EMULATION_CORES.md §3.5
+        // specifies the scoring signals but not a tie-break; breaking
+        // ties toward LoROM is this crate's own policy, not a hardware
+        // fact, hence no external citation for the choice itself.
+        let mut data = vec![0u8; 0x10000];
+
+        let lo_base = LOROM_HEADER_OFFSET;
+        data[lo_base + 0x15] = 0x20; // LoROM, slow
+        set_checksum(&mut data, lo_base, 0x1111);
+        set_reset_vector(&mut data, lo_base, 0x8000);
+
+        let hi_base = HIROM_HEADER_OFFSET;
+        data[hi_base + 0x15] = 0x21; // HiROM, slow
+        set_checksum(&mut data, hi_base, 0x2222);
+        set_reset_vector(&mut data, hi_base, 0xC000);
+
+        let lo_score = score_candidate(&data, lo_base).unwrap().score;
+        let hi_score = score_candidate(&data, hi_base).unwrap().score;
+        assert_eq!(lo_score, hi_score, "fixture must produce an actual tie");
+
+        let header = parse_snes_header(&data).expect("valid header");
+        assert_eq!(
+            header.map_mode,
+            SnesMapMode::LoRom,
+            "ties break toward LoROM by policy"
+        );
+    }
+
+    #[test]
     fn battery_flag_set_for_rom_ram_battery_chipset() {
         let rom = lorom_image(0x20, 0x02); // ROM+RAM+Battery, no coprocessor
         let header = parse_snes_header(&rom).expect("valid header");

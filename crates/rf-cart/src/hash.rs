@@ -177,4 +177,46 @@ mod tests {
         assert_eq!(identity.normalized, hash_all(&[0x22u8; 8192]));
         assert_ne!(identity.raw.sha256, identity.normalized.sha256);
     }
+
+    /// FR-CORE-011's actual invariant: a headered dump and a headerless
+    /// dump of the *same game* must produce the same normalized hash (the
+    /// whole point of normalizing before hashing), while their raw hashes
+    /// correctly differ because the files themselves differ.
+    #[test]
+    fn nes_normalized_identity_is_packaging_independent() {
+        let mut headered = b"NES\x1a".to_vec();
+        headered.extend_from_slice(&[0u8; 12]);
+        headered.extend_from_slice(b"same-game-bytes");
+        let headerless = b"same-game-bytes".to_vec();
+
+        let a = identity_nes(&headered);
+        let b = identity_nes(&headerless);
+        assert_eq!(
+            a.normalized, b.normalized,
+            "headered vs headerless dumps must normalize identically"
+        );
+        assert_ne!(
+            a.raw, b.raw,
+            "raw hashes must still differ — the files are not identical"
+        );
+    }
+
+    #[test]
+    fn snes_normalized_identity_is_packaging_independent() {
+        let payload = vec![0x77u8; 8192];
+        let mut with_copier_header = vec![0x99u8; 512];
+        with_copier_header.extend_from_slice(&payload);
+        let without_copier_header = payload.clone();
+
+        let a = identity_snes(&with_copier_header);
+        let b = identity_snes(&without_copier_header);
+        assert_eq!(
+            a.normalized, b.normalized,
+            "copier-headered vs headerless dumps must normalize identically"
+        );
+        assert_ne!(
+            a.raw, b.raw,
+            "raw hashes must still differ — the files are not identical"
+        );
+    }
 }
