@@ -28,7 +28,7 @@ combination, validated for this exact workload.
 | Resampler | **rubato** | 3.0.0 | On-the-fly ratio adjustment (`set_resample_ratio_relative`) = dynamic rate control per libretro reference | Hand-rolled blip-buffer possible later for NES APU fidelity |
 | Gamepad | **gilrs** | 0.11.2 | Maintained; SDL mapping DB; hotplug | Wrap in thin adapter trait (SDL3 swap stays cheap) |
 | Scripting | **mlua** | 0.12.0 | Lua = emulator-community lingua franca (BizHawk/Mesen); in-process, ~zero per-frame overhead; sandbox knobs | Tier 2 = wasmtime 46 components, only when third-party demand is real |
-| Hashing | **sha2, md-5, crc32fast** | current | Normalized-ROM identity: SHA-256 primary, MD5 (RetroAchievements), CRC32 (No-Intro) | See docs/research/game-identity-and-re-data.md |
+| Hashing | **sha2, sha1, md-5, crc32fast** | sha2/sha1/md-5 0.11, crc32fast 1.5 | Normalized-ROM identity: SHA-256 primary, SHA-1 + MD5 (RetroAchievements), CRC32 (No-Intro) | RustCrypto 0.11 breaks the 0.10 `format!("{:x}", ...)` hex idiom (`finalize()` returns `Array<u8,N>`, no `LowerHex`) — rf-cart hex-encodes manually. See docs/research/game-identity-and-re-data.md |
 | Save states | **serde + bincode** | bincode 3.0 | Fastest; wrapped in hand-rolled versioned TLV envelope (design/SAVE_STATES.md) — the *container* is ours, codec is swappable | ⚠️ bincode ≥2 has own Encode/Decode derives; **never write bincode 1.x idioms** (R-11). postcard 1.1 is the alternative if wire-stability ever outranks speed |
 | Compression | **zstd** | current | State/canvas/cache compression | — |
 | Config/profiles | **toml** | current | Human-authored, diffable profiles (design/GAME_PROFILES.md) | serde-compatible |

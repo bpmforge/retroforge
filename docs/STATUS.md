@@ -22,3 +22,5 @@
 **Board:** 64 tickets / 366 pts · statuses 1 done / 63 todo · vetoable decisions D-001..D-006 (Brad may veto any individually).
 
 2026-07-15 review arc MERGED to main (92cc3ce), both remotes; validators re-verified green post-merge. Resume point for implementation sessions: docs/work/HANDOFF.md (claimable: W0-02, W0-04).
+
+2026-08-02 W0-02 done — rf-cart iNES/NES2.0/SNES parsing + RA-convention normalized CRC32/MD5/SHA-1/SHA-256 (+raw hash for diagnostics); typed CartError, no panics on malformed input. workspace: 47 passing (rf-cart 33). Gate re-run independently by conductor: fmt/clippy(--all-targets)/test/arch/plan/traceability all exit 0. Deps added: sha2+sha1+md-5 0.11, crc32fast 1.5 (TECH_STACK §2 row updated; RustCrypto 0.11 drops LowerHex on digest output — hex shim in hash.rs).
