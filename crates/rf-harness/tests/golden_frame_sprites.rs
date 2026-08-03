@@ -13,20 +13,28 @@
 //! 10 sprites, all sharing one Y-coordinate so they're all "in range" for
 //! the same target scanline, in ascending OAM order 0-9:
 //!
-//! | oam index | x   | palette group | in the first 8? |
-//! |-----------|-----|----------------|------------------|
-//! | 0-1,3-4,6 | 10,30,70,90,110 | 0 (-> palette value 0x01) | yes |
-//! | 2         | 50  | 1 (-> 0x02) | yes |
-//! | 5         | 50  | 2 (-> 0x03) | yes, but LOSES to index 2 at the same x |
-//! | 7         | 150 | 1 (-> 0x02) | yes |
-//! | 8         | 150 | 3 (-> 0x04) | **no** -- the 9th found, dropped by the cap |
-//! | 9         | 200 | 2 (-> 0x03) | **no** -- the 10th, dropped, and at an X no other sprite covers |
+//! | oam index | x   | palette group | priority | in the first 8? |
+//! |-----------|-----|----------------|----------|------------------|
+//! | 0-1,3-4   | 10,30,70,90 | 0 (-> 0x01) | front | yes |
+//! | 2         | 50  | 1 (-> 0x02) | front | yes |
+//! | 5         | 50  | 2 (-> 0x03) | front | yes, but LOSES to index 2 at the same x |
+//! | 6         | 112 | 0 (-> 0x01) | **behind** | yes, but LOSES to the opaque BG stripe there |
+//! | 7         | 150 | 1 (-> 0x02) | front | yes |
+//! | 8         | 150 | 3 (-> 0x04) | front | **no** -- the 9th found, dropped by the cap |
+//! | 9         | 200 | 2 (-> 0x03) | front | **no** -- the 10th, dropped, and at an X no other sprite covers |
 //!
-//! This gives three specific, independently-computed pixels that a bug
+//! This gives four specific, independently-computed pixels that a bug
 //! changes instead of aliasing away:
 //! - **x=50**: two IN-LIMIT sprites (2 and 5) fully overlap. A wrong
 //!   OAM-order priority (higher index winning) flips the expected value
 //!   from `0x02` to `0x03`.
+//! - **x=112**: an IN-LIMIT, behind-priority sprite (6) is fully covered by
+//!   an OPAQUE background tile (the only place this fixture turns
+//!   background rendering on -- see "the BG stripe" below). A flipped
+//!   sprite/background priority bit (nesdev.org/wiki/PPU_OAM attribute
+//!   byte bit 5, `crate::ppu::sprites::output_pixel`'s
+//!   `s.behind_background` branch) flips the expected value from `0x05`
+//!   (the opaque BG tile) to `0x01` (sprite 6's own color).
 //! - **x=150**: an in-limit sprite (7) is fully overlapped by a DROPPED
 //!   one (8, the 9th found). A wrong 8-sprite cutoff (e.g. "last 8 found"
 //!   instead of "first 8") flips the expected value from `0x02` to `0x04`.
@@ -34,6 +42,23 @@
 //!   The correct output is the plain backdrop (`0x3F`); any cutoff leak
 //!   turns this into `0x03` -- maximally visible, since nothing else could
 //!   produce that value there.
+//!
+//! ## The BG stripe (isolates sprite/background priority, not just
+//! sprite/sprite)
+//!
+//! To prove the sprite/background priority BIT (not just OAM-order
+//! sprite/sprite priority, which every other x in this fixture already
+//! covers with background rendering off), this fixture turns background
+//! rendering ON and makes the nametable transparent (tile 0, all-zero CHR)
+//! EVERYWHERE except one 8-pixel-wide tile column (x=112-119, `build_prg`'s
+//! `BG_STRIPE_COL`) using an opaque tile (30, pattern 1 everywhere) -- so
+//! `background_pixel` returns `None`/backdrop at every x this fixture's
+//! other assertions check (x=10..90, 150, 200), and only the x=112 column
+//! is affected. Sprite 6 sits entirely inside that column with
+//! `behind_background` set (nesdev.org/wiki/PPU_rendering's
+//! priority-multiplexer table: opaque BG + opaque sprite + priority=1 ->
+//! BG wins), so the correct output at x=112 is the BG stripe's own value,
+//! not sprite 6's.
 //!
 //! Sprite 8's Y-coordinate is *also* genuinely in range for the target
 //! scanline, so this fixture's evaluation trivially finds a real 9th
@@ -73,6 +98,16 @@ const GROUP0_VALUE: u8 = 0x01;
 const GROUP1_VALUE: u8 = 0x02;
 const GROUP2_VALUE: u8 = 0x03;
 const GROUP3_VALUE: u8 = 0x04; // only ever used by the dropped 9th sprite
+const BG_OPAQUE_VALUE: u8 = 0x05;
+
+/// The BG stripe's tile column (see module doc) -- x = 112..119 (8px,
+/// exactly one sprite width, exactly one tile column: `112 / 8 == 14`).
+const BG_STRIPE_COL: u16 = 14;
+const BG_STRIPE_X: u16 = BG_STRIPE_COL * 8;
+/// The tile index `build_chr`/`build_prg`'s nametable use for the opaque
+/// BG stripe -- distinct from sprite tile 1 and the (implicit, all-zero)
+/// transparent tile 0.
+const BG_OPAQUE_TILE: u8 = 30;
 
 // ---------------------------------------------------------------------
 // Oracle: closed-form, independent of rf_nes (a different crate -- same
@@ -80,34 +115,65 @@ const GROUP3_VALUE: u8 = 0x04; // only ever used by the dropped 9th sprite
 // wanted to).
 // ---------------------------------------------------------------------
 
-/// `(x, palette value)` for exactly the 8 sprites the 8-sprite cap keeps,
-/// in ascending-OAM-index (== priority) order. Indices 8 and 9 are
-/// deliberately absent -- the whole point of this fixture.
-const IN_LIMIT_SPRITES: [(u16, u8); 8] = [
-    (10, GROUP0_VALUE),  // oam index 0
-    (30, GROUP0_VALUE),  // 1
-    (50, GROUP1_VALUE),  // 2 -- must win over index 5 at the same x
-    (70, GROUP0_VALUE),  // 3
-    (90, GROUP0_VALUE),  // 4
-    (50, GROUP2_VALUE),  // 5 -- must LOSE to index 2 (later in this list)
-    (110, GROUP0_VALUE), // 6
-    (150, GROUP1_VALUE), // 7 -- must win over the dropped index 8
+/// `(x, palette value, behind_background)` for exactly the 8 sprites the
+/// 8-sprite cap keeps, in ascending-OAM-index (== priority) order. Indices
+/// 8 and 9 are deliberately absent -- the whole point of this fixture.
+const IN_LIMIT_SPRITES: [(u16, u8, bool); 8] = [
+    (10, GROUP0_VALUE, false),         // oam index 0
+    (30, GROUP0_VALUE, false),         // 1
+    (50, GROUP1_VALUE, false),         // 2 -- must win over index 5 at the same x
+    (70, GROUP0_VALUE, false),         // 3
+    (90, GROUP0_VALUE, false),         // 4
+    (50, GROUP2_VALUE, false),         // 5 -- must LOSE to index 2 (later in this list)
+    (BG_STRIPE_X, GROUP0_VALUE, true), // 6 -- behind priority; must LOSE to the opaque BG stripe
+    (150, GROUP1_VALUE, false),        // 7 -- must win over the dropped index 8
 ];
 
+/// The background layer's contribution at `x`, independent of any sprite:
+/// `Some(BG_OPAQUE_VALUE)` inside the BG stripe's tile column, `None`
+/// (transparent, falls through to backdrop) everywhere else -- module
+/// doc's "the BG stripe" section.
+fn bg_pixel(x: u16) -> Option<u8> {
+    if (BG_STRIPE_X..BG_STRIPE_X + 8).contains(&x) {
+        Some(BG_OPAQUE_VALUE)
+    } else {
+        None
+    }
+}
+
+/// Combines the background and sprite layers per nesdev.org/wiki/
+/// PPU_rendering's priority-multiplexer table (opaque beats transparent;
+/// among two opaques, the sprite's own priority bit decides) -- the SAME
+/// four-case table `crate::ppu::sprites::output_pixel`'s doc comment
+/// quotes, re-derived here independently rather than imported (a
+/// different crate -- nothing to call into even if this test wanted to).
 fn expected_pixel_at_target_row(x: u16) -> u8 {
-    for &(sx, value) in &IN_LIMIT_SPRITES {
-        if x >= sx && x < sx + 8 {
-            return value;
+    let bg = bg_pixel(x);
+    let sprite = IN_LIMIT_SPRITES
+        .iter()
+        .find(|&&(sx, _, _)| x >= sx && x < sx + 8);
+
+    match (bg, sprite) {
+        (None, None) => BACKDROP_VALUE,
+        (None, Some(&(_, value, _))) => value, // sprite always wins over transparent BG
+        (Some(bg_value), None) => bg_value,
+        (Some(bg_value), Some(&(_, value, behind))) => {
+            if behind {
+                bg_value
+            } else {
+                value
+            }
         }
     }
-    BACKDROP_VALUE
 }
 
 /// Every sprite in this fixture is the default 8x8 size and shares the
 /// same Y, so all of them cover the SAME 8-scanline band starting at
 /// `TARGET_ROW` -- `expected_pixel_at_target_row`'s per-column result
-/// applies unchanged to every row in that band; every row outside it is
-/// pure backdrop (no sprite anywhere covers it).
+/// applies unchanged to every row in that band. Outside that band, no
+/// sprite exists anywhere, so the pixel is just the (x-only) background
+/// contribution: the BG stripe's opaque value inside its column, backdrop
+/// elsewhere.
 fn expected_frame() -> Vec<Vec<u8>> {
     (0..SCREEN_HEIGHT)
         .map(|y| {
@@ -116,7 +182,7 @@ fn expected_frame() -> Vec<Vec<u8>> {
                     if (TARGET_ROW..TARGET_ROW + 8).contains(&y) {
                         expected_pixel_at_target_row(x)
                     } else {
-                        BACKDROP_VALUE
+                        bg_pixel(x).unwrap_or(BACKDROP_VALUE)
                     }
                 })
                 .collect()
@@ -138,6 +204,15 @@ fn build_chr() -> Vec<u8> {
     for row in 0..8 {
         chr[base + row] = 0xFF; // lo plane: pattern bit 0 set on every column
         chr[base + 8 + row] = 0x00; // hi plane: pattern stays 01, never 11
+    }
+    // The BG stripe's opaque tile (module doc's "the BG stripe" section) --
+    // same solid-fill shape as tile 1, just a distinct index. Tile 0 (the
+    // transparent tile the rest of the nametable uses) needs no fill: CHR
+    // defaults to all-zero, which is already pattern 0 everywhere.
+    let bg_base = BG_OPAQUE_TILE as usize * 16;
+    for row in 0..8 {
+        chr[bg_base + row] = 0xFF;
+        chr[bg_base + 8 + row] = 0x00;
     }
     chr
 }
@@ -168,20 +243,22 @@ fn jmp_abs(prg: &mut Vec<u8>, addr: u16) {
 /// index order 0-9 -- `y = TARGET_ROW - 1` for every one of them
 /// (nesdev.org/wiki/PPU_OAM's documented one-scanline delay), `tile = 1`
 /// (the one solid tile `build_chr` fills), `attr`'s low 2 bits select the
-/// sprite palette group.
+/// sprite palette group and bit 5 (`0x20`) is the behind-background
+/// priority bit (sprite 6 only -- see module doc's "the BG stripe").
 fn sprite_table() -> [(u8, u8, u8, u8); 10] {
     let y = (TARGET_ROW - 1) as u8;
+    let bg_stripe_x = BG_STRIPE_X as u8;
     [
-        (y, 1, 0, 10),  // 0
-        (y, 1, 0, 30),  // 1
-        (y, 1, 1, 50),  // 2
-        (y, 1, 0, 70),  // 3
-        (y, 1, 0, 90),  // 4
-        (y, 1, 2, 50),  // 5
-        (y, 1, 0, 110), // 6
-        (y, 1, 1, 150), // 7
-        (y, 1, 3, 150), // 8 -- the 9th found: dropped by the cap
-        (y, 1, 2, 200), // 9 -- the 10th found: dropped by the cap
+        (y, 1, 0, 10),             // 0
+        (y, 1, 0, 30),             // 1
+        (y, 1, 1, 50),             // 2
+        (y, 1, 0, 70),             // 3
+        (y, 1, 0, 90),             // 4
+        (y, 1, 2, 50),             // 5
+        (y, 1, 0x20, bg_stripe_x), // 6 -- behind priority, sits in the BG stripe's column
+        (y, 1, 1, 150),            // 7
+        (y, 1, 3, 150),            // 8 -- the 9th found: dropped by the cap
+        (y, 1, 2, 200),            // 9 -- the 10th found: dropped by the cap
     ]
 }
 
@@ -220,11 +297,44 @@ fn build_prg() -> (Vec<u8>, u16) {
         }
     }
 
+    // --- nametable: $2006 -> $2000, then 960 bytes (32 cols x 30 rows) --
+    // tile 0 (transparent, all-zero CHR) everywhere except the BG stripe's
+    // column (module doc's "the BG stripe"), which gets the opaque tile.
+    // Written per-row in 3 runs (before/stripe/after the column) rather
+    // than per-byte, since most of each row is the same constant. ---
+    lda_imm(&mut prg, 0x20);
+    sta_abs(&mut prg, 0x2006);
+    lda_imm(&mut prg, 0x00);
+    sta_abs(&mut prg, 0x2006);
+    for _row in 0..30u16 {
+        lda_imm(&mut prg, 0x00);
+        for _col in 0..BG_STRIPE_COL {
+            sta_abs(&mut prg, 0x2007);
+        }
+        lda_imm(&mut prg, BG_OPAQUE_TILE);
+        sta_abs(&mut prg, 0x2007);
+        lda_imm(&mut prg, 0x00);
+        for _col in (BG_STRIPE_COL + 1)..32 {
+            sta_abs(&mut prg, 0x2007);
+        }
+    }
+    // Auto-increment has now walked the PPU address from $2000 to exactly
+    // $23C0 (2000 + 30*32 = 23C0) -- the attribute table's own start
+    // (golden_frame_bg.rs's own finding), no extra $2006 write needed.
+
+    // --- attribute table: 64 bytes, all zero (every quadrant -> BG
+    // palette group 0 -- the only group this fixture's BG stripe uses) ---
+    lda_imm(&mut prg, 0x00);
+    for _ in 0..64 {
+        sta_abs(&mut prg, 0x2007);
+    }
+
     // --- palette: $2006 -> $3F00, then 32 bytes. Index 0 = backdrop;
-    // indices 0x11/0x15/0x19/0x1D = sprite palette groups 0-3's
-    // pattern-1 slot (never index 0x10/0x14/0x18/0x1C of each group --
-    // pattern is never 0 in this fixture, so those entry-0-aliased slots
-    // are never read and are left at 0). ---
+    // index 0x01 = BG palette group 0's pattern-1 slot (the BG stripe's
+    // own color); indices 0x11/0x15/0x19/0x1D = sprite palette groups
+    // 0-3's pattern-1 slot (never index 0x10/0x14/0x18/0x1C of each group
+    // -- pattern is never 0 in this fixture, so those entry-0-aliased
+    // slots are never read and are left at 0). ---
     lda_imm(&mut prg, 0x3F);
     sta_abs(&mut prg, 0x2006);
     lda_imm(&mut prg, 0x00);
@@ -236,6 +346,7 @@ fn build_prg() -> (Vec<u8>, u16) {
             // `crate::ppu::mem`'s tests) -- must agree with index 0's value
             // or this later write in the same loop clobbers it.
             0x00 | 0x10 => BACKDROP_VALUE,
+            0x01 => BG_OPAQUE_VALUE,
             0x11 => GROUP0_VALUE,
             0x15 => GROUP1_VALUE,
             0x19 => GROUP2_VALUE,
@@ -246,15 +357,30 @@ fn build_prg() -> (Vec<u8>, u16) {
         sta_abs(&mut prg, 0x2007);
     }
 
-    // --- PPUCTRL = 0 (8x8 sprites, sprite pattern table at $0000 --
-    // matches `build_chr`'s tile 1 placement) ---
+    // --- scroll reset: $2000 = 0 (clears t's nametable-select bits, which
+    // the palette $2006 write above left non-zero), then $2005 x2 = 0,0
+    // (t <- 0 entirely: coarse X/Y, fine X/Y all zero) -- the exact
+    // stale-t trap W1-04b's `golden_frame_bg.rs` found and fixed;
+    // background rendering is newly ON in this file (unlike this file's
+    // sprite-only design everywhere except the BG stripe), so unlike
+    // before, a wrong scroll here would now be visible. ---
+    lda_imm(&mut prg, 0x00);
+    sta_abs(&mut prg, 0x2000);
+    sta_abs(&mut prg, 0x2005); // A still 0
+    sta_abs(&mut prg, 0x2005);
+
+    // --- PPUCTRL = 0 (8x8 sprites, sprite pattern table at $0000, BG
+    // pattern table at $0000 -- matches `build_chr`'s tile placements) ---
     lda_imm(&mut prg, 0x00);
     sta_abs(&mut prg, 0x2000);
 
-    // --- PPUMASK: show sprites + show sprites in the leftmost 8 pixels.
-    // Background is deliberately left OFF -- this fixture is sprites-only,
-    // so every non-sprite pixel is unambiguously the backdrop. ---
-    lda_imm(&mut prg, 0x14);
+    // --- PPUMASK: show background + background-left8 + sprites +
+    // sprites-left8. Background is ON here (unlike golden_frame_bg.rs's
+    // pure-BG fixture and this file's own sprite-only design elsewhere)
+    // specifically so the BG stripe can exist -- module doc explains why
+    // every OTHER x in this fixture still resolves as if BG were off (the
+    // nametable is transparent everywhere except that one column). ---
+    lda_imm(&mut prg, 0x1E);
     sta_abs(&mut prg, 0x2001);
 
     // --- idle loop ---

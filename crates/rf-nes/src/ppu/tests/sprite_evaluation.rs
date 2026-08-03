@@ -411,49 +411,102 @@ fn left8_mask_hides_sprites_only_in_the_leftmost_8_pixels() {
 }
 
 /// nesdev.org/wiki/PPU_OAM's attribute-byte bit 5: "Priority (0: in front
-/// of background; 1: behind background)". An opaque BG pixel plus an
-/// opaque, behind-priority sprite at the same x must show the BACKGROUND,
-/// not the sprite.
+/// of background; 1: behind background)" -- the FULL truth table at a
+/// pixel where a sprite is present, not just the one entry a single case
+/// can vacuously satisfy:
+/// - front-priority sprite + opaque BG -> **sprite** wins (bit clear).
+/// - behind-priority sprite + opaque BG -> **BG** wins (bit set).
+/// - behind-priority sprite + TRANSPARENT BG -> **sprite** still wins --
+///   "behind background" loses only to an OPAQUE background pixel
+///   (nesdev.org/wiki/PPU_rendering's priority-multiplexer table, quoted
+///   in `crate::ppu::sprites::output_pixel`'s doc), not unconditionally;
+///   this is the case that would fail against a naive implementation that
+///   treats the priority bit as "never show" instead of "loses only to
+///   opaque BG".
+///
+/// CONDUCTOR CAUGHT (2026-08-03): this test used to cover ONLY the first
+/// case, and did so at scanline 0 with the sprite's own Y=0 -- but
+/// `sprites.rs`'s one-scanline pipeline delay (module doc) means
+/// scanline 0 NEVER renders any sprite (evaluation for scanline 0 would
+/// have to happen on the pre-render line, which never evaluates), so
+/// `active_sprite_count` was 0 for the whole scanline being checked and
+/// the sprite compositing branch this test claimed to cover was never
+/// even reached -- inverting `behind_background` at the call site made
+/// zero tests fail. Fixed by evaluating on scanline 0 (Y=0 sprites) and
+/// checking the render on scanline 1, matching the delay for real.
 #[test]
-fn priority_bit_puts_the_sprite_behind_an_opaque_background_pixel() {
+fn priority_bit_full_truth_table_at_opaque_and_transparent_background() {
     let mut ppu = test_ppu();
-    fill_solid_tiles(&mut ppu.chr);
+    fill_solid_tiles(&mut ppu.chr); // tiles 1-10: sprite tiles, opaque
     ppu.write_register(1, 0x1C); // show bg + bg-left8 + sprites + sprites-left8
     ppu.scanline = 0;
     ppu.dot = 0;
-    // Uniform opaque background: every nametable byte = tile 5, every
-    // attribute quadrant = 0, tile 5's pattern = 1 everywhere (needs its
-    // own CHR bytes -- distinct from the sprite tiles `fill_solid_tiles`
-    // already filled at indices 1-10, so use tile 20 for BG instead).
-    for addr in 0x2000u16..=0x23BFu16 {
-        ppu.mem_write(addr, 20);
+
+    // Background: tile 20 (opaque, pattern 1) everywhere except nametable
+    // column 7 (screen x 56-63), which gets tile 21 -- left at its
+    // `Ppu::new` default all-zero CHR, i.e. genuinely transparent (pattern
+    // 0), not just "not covered by fill_solid_tiles".
+    for row in 0u16..30 {
+        for col in 0u16..32 {
+            let tile = if col == 7 { 21 } else { 20 };
+            ppu.mem_write(0x2000 + row * 32 + col, tile);
+        }
     }
     for addr in 0x23C0u16..=0x23FFu16 {
         ppu.mem_write(addr, 0x00);
     }
-    ppu.chr[20 * 16] = 0xFF;
-    ppu.chr[20 * 16 + 8] = 0x00;
+    // Tile 20: opaque at EVERY row (screen row 1 is checked here, not row
+    // 0 -- the one-scanline delay means these sprites render on scanline
+    // 1, which reads the BG tile's row 1, not row 0; filling only row 0
+    // was this test's own earlier bug, caught by the very failure this
+    // fix responds to).
+    for row in 0..8 {
+        ppu.chr[20 * 16 + row] = 0xFF;
+        ppu.chr[20 * 16 + 8 + row] = 0x00;
+    }
+    // tile 21 (x=56-63's column): left all-zero -- transparent, every row.
+
     ppu.palette[0] = 0x01; // backdrop (never expected here)
-    ppu.palette[1] = 0x02; // BG palette 0, pattern 1
-    ppu.palette[0x11] = 0x03; // sprite palette 0, pattern 1 (0x10 | 0<<2 | 1)
+    ppu.palette[1] = 0x02; // BG palette group 0, pattern 1 (tile 20's value)
+    ppu.palette[0x11] = 0x03; // sprite palette group 0, pattern 1
 
-    poke_sprite(&mut ppu.oam, 0, 0, 1, 0x20, 20); // attr bit 5: behind background
+    poke_sprite(&mut ppu.oam, 0, 0, 1, 0x00, 20); // front priority, over opaque BG (col 2)
+    poke_sprite(&mut ppu.oam, 1, 0, 1, 0x20, 40); // behind priority, over opaque BG (col 5)
+    poke_sprite(&mut ppu.oam, 2, 0, 1, 0x20, 56); // behind priority, over TRANSPARENT BG (col 7)
 
-    // Run one full scanline through the real tick-driven pipeline so the
-    // BG shift registers are actually populated (unlike the direct-call
-    // sprite-only tests above, this one needs `output_pixel`'s BG half to
-    // be real, not a zeroed shift register that reads as transparent).
-    for _ in 0..341u32 {
+    // Run scanline 0 (evaluates these Y=0 sprites for scanline 1's
+    // rendering) THEN scanline 1 (where they actually render) -- the real
+    // one-scanline delay, not a direct-call shortcut, since this test is
+    // specifically about a compositing branch reached through the
+    // dot-driven pipeline.
+    for _ in 0..(341u32 * 2) {
         ppu.tick();
     }
 
-    let px = ppu.line_buffer[20];
+    let front_over_opaque = ppu.line_buffer[20];
     assert_eq!(
-        px.layer,
-        PixelLayer::Background(0),
-        "an opaque behind-priority sprite must lose to an opaque background pixel"
+        front_over_opaque.layer,
+        PixelLayer::Sprite,
+        "front-priority sprite must win over an opaque background pixel"
     );
-    assert_eq!(px.palette_index, 0x02);
+    assert_eq!(front_over_opaque.palette_index, 0x03);
+
+    let behind_over_opaque = ppu.line_buffer[40];
+    assert_eq!(
+        behind_over_opaque.layer,
+        PixelLayer::Background(0),
+        "behind-priority sprite must lose to an opaque background pixel"
+    );
+    assert_eq!(behind_over_opaque.palette_index, 0x02);
+
+    let behind_over_transparent = ppu.line_buffer[56];
+    assert_eq!(
+        behind_over_transparent.layer,
+        PixelLayer::Sprite,
+        "behind-priority sprite must still win over a TRANSPARENT background pixel -- \
+         \"behind background\" loses only to an opaque BG pixel, not unconditionally"
+    );
+    assert_eq!(behind_over_transparent.palette_index, 0x03);
 }
 
 /// nesdev.org/wiki/PPU_sprite_evaluation's Notes: "no sprites will be
