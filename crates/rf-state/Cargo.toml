@@ -8,3 +8,8 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+bincode = "2"
+sha2 = "0.11"
+zstd = "0.13.3"
