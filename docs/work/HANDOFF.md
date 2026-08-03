@@ -8,13 +8,13 @@ a time.** Do not redesign anything.
 
 1. `CLAUDE.md` — the laws (short, mandatory)
 2. `MASTER_PROMPT.md` — session protocol incl. the **always-writable set**
-3. `plan.json` — the board (65 tickets; schema note at top is authoritative)
+3. `plan.json` — the board (66 tickets; schema note at top is authoritative)
 4. `PLAYBOOK.md` — per-ticket loop, gate command, block-note discipline
 5. The tail of `docs/STATUS.md` — per-ticket evidence for everything below
 
-## Current state (verified 2026-08-03, W0-07 closed on main, both remotes)
+## Current state (verified 2026-08-03, W1-02 closed on main, both remotes)
 
-**9 tickets done. Workspace tests: 185 passing** (with the 1 GB vector set
+**10 tickets done. Workspace tests: 213 passing** (with the 1 GB vector set
 absent — see "Large test data" below).
 
 | Ticket | What landed |
@@ -28,13 +28,14 @@ absent — see "Large test data" below).
 | W1-01a | 6502: 151 official opcodes, cycle-stepped |
 | W1-01b | 6502: 105 unofficial opcodes + interrupt edges |
 | W0-07 | manifest `[[git_artifact]]` kind + local evidence gate |
+| W1-02 | NES bus + NROM + OAM DMA + controller strobe |
 
 **The 6502 is feature-complete for Phase 1**: all 256 opcodes pass
 SingleStepTests `nes6502` — **2,560,000/2,560,000 cases**, state + RAM +
 cycle-by-cycle bus trace. Zero `unsafe` in rf-nes.
 
-Full gate GREEN:
-`cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace && scripts/validate-arch.sh && node scripts/validate-plan.mjs && node scripts/validate-traceability.mjs`
+Full gate GREEN (**seven** commands since W0-07):
+`cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace && scripts/validate-arch.sh && node scripts/validate-plan.mjs && node scripts/validate-traceability.mjs && node scripts/validate-evidence.mjs`
 
 Toolchain pinned **1.94** (rust-toolchain.toml — never change to "stable").
 Board: 66 tickets / 374 pts · validators green · traceability 101/101.
@@ -44,10 +45,13 @@ joined it in W0-07.
 
 ## START HERE — recommended order
 
-1. **W1-02** — bus + NROM + DMA. Claimable now. This is where the DMC-DMA
-   seam gets proven (see "Known risk").
-2. **W1-03** — nestest golden trace; consumes W1-01b's `Cpu::unstable_op`
-   marker.
+1. **W1-03** — nestest golden trace; consumes W1-01b's `Cpu::unstable_op`
+   marker. **Must also build the reset/power-on sequence** — W1-02 left it
+   out deliberately (see its ticket notes); without it nestest's CYC column
+   is offset from line one.
+2. **W1-04a** — PPU background. **Check its `write_scope` first**: it still
+   carries the self-blocking `ppu/**` defect (needs `crates/rf-nes/src/lib.rs`
+   for `mod ppu;` wiring).
 
 Claim = set `in_progress` in plan.json + commit that change first.
 
@@ -56,7 +60,7 @@ Claim = set `in_progress` in plan.json + commit that change first.
 Conductor in the main session; **Sonnet** subagents implement ONE ticket each,
 **strictly serial** (WIP=1 is law; tickets share Cargo.lock and target/, so
 parallel gates collide). The conductor owns all status mutation: claim before
-spawning, set `done` only after an **independent** six-command gate re-run.
+spawning, set `done` only after an **independent** seven-command gate re-run.
 Never accept a subagent's "gate is green" — RF-L-08 is this project's own
 lesson that a green report hid 17 real gaps. That has already paid off
 repeatedly.
@@ -122,16 +126,22 @@ Touch `crates/rf-nes/src/cpu` and the gate goes red until you re-run
 CI checks out with `fetch-depth: 0` and the validator refuses to run on a
 shallow clone — without both, it would pass while enforcing nothing.
 
-## Known risk for W1-02
+## The DMA seam — RESOLVED in W1-02, and the pattern to keep
 
-`Cpu::step` is **instruction-granular** — it issues every bus cycle in exact
-hardware order, but steps one instruction per call. Per-cycle PPU/APU
-interleaving is intended to come from the `CpuBus` impl ticking chips inside
-`read`/`write`. Conductor analysis says this **holds**: the bus owns the master
-clock, so it can insert DMC stall cycles and perform the `$2007`/`$4016` read
-twice internally to produce the RDY double-read side effect, returning the
-second value. Verify that in practice early in W1-02 — if it doesn't hold,
-W1-02 becomes a rewrite rather than an addition.
+The risk was that `Cpu::step` is **instruction-granular** (it issues every bus
+cycle in exact hardware order but returns after one instruction), so DMA
+cycle-stealing might not fit. It fits. **The master clock lives in the bus**:
+`NesBus::master_cycle` is advanced inside `CpuBus::read`/`write`, one tick per
+bus op — never by summing `step()`'s return. Bus-inserted stall cycles
+therefore land in the master clock for free. Verified structurally at close:
+`grep -rn 'stall|dma' crates/rf-nes/src/cpu/` returns nothing — the CPU has no
+knowledge of DMA at all.
+
+**Keep this invariant.** DMC DMA (W1-06+) and the `$2007`/`$4016` RDY
+double-read glitch are meant to arrive the same way: the bus stalls, or
+internally performs the read twice and returns the second value. If a future
+ticket needs to tell `Cpu` about stall cycles, that is the signal something
+went wrong — stop and escalate.
 
 ## Open items needing Brad
 

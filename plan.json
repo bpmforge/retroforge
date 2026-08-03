@@ -235,11 +235,12 @@
     "controller read via strobe protocol"
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E1-S1"
    ],
    "notes": [
+    "CLOSED 2026-08-03 (conductor). All four acceptance criteria verified INDEPENDENTLY (RF-L-08): full seven-command gate re-run by the conductor, all exit 0, 213 passed / 0 failed / 1 ignored with vectors absent. THE SEAM HELD — verified structurally, not on the agent's word: `master_cycle` is mutated only inside crates/rf-nes/src/system/mod.rs (CpuBus::read, CpuBus::write, run_oam_dma), and `grep -rn 'stall|dma' crates/rf-nes/src/cpu/` returns NOTHING, so the CPU has no knowledge of DMA at all. W1-02 was therefore an addition, not the rewrite the risk note feared. OAM DMA cycle counts re-derived by the conductor against nesdev: 1 dummy + (0 or 1) alignment + 256 get/put pairs (512) = 513/514, and the tests assert master_cycle parity as an explicit PRECONDITION before triggering, so neither branch can silently be exercised twice.",
     "PRE-FLIGHT 2026-08-03 (conductor): the DMC/OAM-DMA seam flagged in HANDOFF resolves in favour of the current design, and EMULATION_CORES.md section 1 is the authority: 'CPU is the master clock. Each chip keeps its own cycle counter; when the CPU touches a register another chip owns, that chip runs catch_up(to_master_cycle) first.' So the master cycle counter must live in the SYSTEM BUS and be advanced inside CpuBus::read/write (one tick per bus op), NEVER by summing Cpu::step's u32 return afterwards. Only then do bus-inserted stall cycles (OAM DMA's 513/514, later DMC) land in the master clock for free, and the $2007/$4016 RDY double-read glitch becomes expressible as the bus performing the read twice internally and returning the second value. If the executor finds itself needing to add DMA cycles to step()'s return value, that is the signal the seam did NOT hold — stop and escalate rather than papering over it.",
     "PRE-FLIGHT 2026-08-03 (conductor): rf-nes has NO dependency on rf-cart today and must add one (path dep; permitted — validate-arch.sh rule 1 forbids only upper-layer crates and rf-cart is a peer core crate, rule 3 exempts rf-nes). Note rf-cart exposes cartridge METADATA only: `Cartridge::load(&[u8]) -> Result<Cartridge, CartError>` yielding `Cartridge::Nes { header: NesHeader, identity: RomIdentity }`, where NesHeader carries format/mapper/submapper/prg_rom_size/chr_rom_size/prg_ram_size/mirroring/battery/trainer — but NOT the PRG/CHR bytes. rf-nes must slice those out of the raw image itself (16-byte header + optional 512-byte trainer offset). rf-cart is outside this ticket's write scope, so do not 'fix' it there.",
     "PRE-FLIGHT 2026-08-03 (conductor): crates/rf-nes/Cargo.toml's description and src/lib.rs's module doc both claim rf-nes 'consumes rf-core-api only'. That is already inaccurate (there is no rf-core-api dependency either) and adding rf-cart makes it more so — update both in this ticket (they are in scope) rather than leaving an R-15 stale-comment."
@@ -266,6 +267,9 @@
    "status": "todo",
    "stories": [
     "E1-S1"
+   ],
+   "notes": [
+    "HANDOFF 2026-08-03 (conductor, from W1-02): W1-02 deliberately did NOT build a reset sequence — `NesBus::new` starts `master_cycle` at 0 and W1-02's tests set `cpu.pc` directly. Two consequences this ticket must absorb, both already documented in crates/rf-nes/src/system/mod.rs's `run_oam_dma` doc: (1) nestest's $C000 entry needs a real reset/power-on sequence (reset vector fetch, correct initial SP/P, and the 7-cycle reset timing) or the CYC column will be offset from the golden log from the first line; (2) until that sequence anchors the master-clock PHASE to hardware, OAM DMA's get/put parity is an internal bookkeeping convention rather than a hardware-true absolute — so a real ROM's DMA cost can differ from the model by exactly one cycle. Scoping the reset sequence into this ticket is the intended fix. Both are honest documented deferrals, not defects."
    ]
   },
   {
@@ -453,6 +457,8 @@
    "crate": "rf-nes",
    "write_scope": [
     "crates/rf-nes/src/mappers/**",
+    "crates/rf-nes/src/system/mod.rs",
+    "crates/rf-nes/src/lib.rs",
     "crates/rf-cart/**"
    ],
    "depends_on": [
@@ -466,6 +472,9 @@
    "status": "todo",
    "stories": [
     "E2-S1"
+   ],
+   "notes": [
+    "SCOPE-FIX 2026-08-03 (conductor, from W1-02): the original write_scope (mappers/** + rf-cart/**) made this ticket's own acceptance impossible — the same self-blocking-scope defect fixed on W1-01a and W0-07. W1-02 implemented NROM read/mirroring INLINE in crates/rf-nes/src/system/mod.rs (deliberately: NROM has zero mapper registers, and MapperBus/BusValue/MapperState do not exist anywhere yet, so building the EMULATION_CORES.md section 2.4 trait then would have been unvalidated scaffolding). This ticket is the first with two real mappers to generalize from, so it owns introducing that trait AND extracting NROM into it — which needs system/mod.rs (the inline NROM code and its call sites) and lib.rs (`mod mappers;` wiring). Added those two exact paths rather than widening to crates/rf-nes/** (Brad's ruling on W1-01a: exact paths, not wider globs). W2-03 (MMC3) inherits mappers/**-only and will need the same treatment IF it must touch the trait definition or wiring; check scope-vs-acceptance before claiming it."
    ]
   },
   {
