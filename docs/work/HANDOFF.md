@@ -12,9 +12,9 @@ a time.** Do not redesign anything.
 4. `PLAYBOOK.md` — per-ticket loop, gate command, block-note discipline
 5. The tail of `docs/STATUS.md` — per-ticket evidence for everything below
 
-## Current state (verified 2026-08-03, W1-04a closed on main, both remotes)
+## Current state (verified 2026-08-03, W1-04b closed on main, both remotes)
 
-**12 tickets done. Workspace tests: 281 passing** (with the 1 GB vector set
+**13 tickets done. Workspace tests: 288 passing** (with the 1 GB vector set
 absent — see "Large test data" below).
 
 | Ticket | What landed |
@@ -31,6 +31,7 @@ absent — see "Large test data" below).
 | W1-02 | NES bus + NROM + OAM DMA + controller strobe |
 | W1-03 | nestest golden trace: 8991/8991 lines byte-exact + reset sequence |
 | W1-04a | PPU background: loopy regs + fetch pipeline + CoreSink emission |
+| W1-04b | PPU frame-timing edges + analytic golden frame (found+fixed a real scroll bug) |
 
 **The 6502 is feature-complete for Phase 1**: all 256 opcodes pass
 SingleStepTests `nes6502` — **2,560,000/2,560,000 cases**, state + RAM +
@@ -47,12 +48,13 @@ joined it in W0-07.
 
 ## START HERE — recommended order
 
-1. **W1-04b** — PPU frame-timing edges + golden frame. **This is the oracle
-   W1-04a never had** — read its ticket notes first: W1-04a's shift-register
-   pipeline latency is genuinely unverified, so if the golden frame is off by
-   about one tile horizontally, start there.
-2. **W1-05a / W1-05b** — PPU sprites. Both still carry the `ppu/**` scope
-   defect; derive paths from each ticket's own acceptance before claiming.
+1. **W1-05a** — PPU sprites: evaluation + secondary OAM + `dropped_by_limit`.
+   Still carries the `ppu/**` scope defect — derive real paths from its own
+   acceptance before claiming (W1-04b needed `crates/rf-harness/**` added for
+   its golden frame; sprites will likely need the same).
+2. **W1-05b** — sprite-0 hit + `ppu_vbl_nmi`. First ticket with real PPU test
+   ROMs as its oracle; note `NesBus::nmi_line`/`irq_line` are still at the
+   `CpuBus` default and VBL/NMI timing is deliberately unbuilt.
 
 Claim = set `in_progress` in plan.json + commit that change first.
 
@@ -107,6 +109,17 @@ would each have burned a session (below).
   breaking the coarse-X wrap and watching the right test fail. Mutate *code* —
   `ppu/scroll.rs` quotes nesdev pseudocode in doc comments that looks exactly
   like the logic beneath it.
+- **Goldens must be ANALYTIC, never recorded.** W1-04b computes its expected
+  frame from a closed-form formula and contains zero hash constants, so it
+  cannot be regenerated to match buggy output. It immediately caught a real
+  `write_scroll` mask bug W1-04a had shipped. A golden captured by running the
+  emulator once and saving the result would have baked that bug in and looked
+  just as green. Design fixtures so an off-by-one *changes* the expected value
+  rather than aliasing away (W1-04b used multipliers coprime with 256).
+- **Tests that all start from a zero state hide whole bug classes.** The
+  `write_scroll` bug was invisible to every pre-existing test because they all
+  began at `t=0`, where OR-ing and replacing are indistinguishable. When a
+  write should *replace* a field, test it from a dirty starting state.
 
 ## Large test data (shapes every CPU/PPU ticket)
 
