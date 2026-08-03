@@ -20,4 +20,34 @@ pub trait CpuBus {
     /// One CPU write cycle at `addr`. Called for every write, including
     /// the RMW "write back the unmodified value" cycle.
     fn write(&mut self, addr: u16, value: u8);
+
+    /// Whether the NMI line is currently **asserted** (ticket W1-01b).
+    /// This is the logical/asserted state, not the raw electrical level —
+    /// NMI is active-low on real hardware (nesdev.org/wiki/CPU_interrupts:
+    /// "reacts to high-to-low transitions"), but callers here only ever
+    /// need "is a non-maskable interrupt being requested right now", so
+    /// this method returns `true` for that. [`Cpu`](super::Cpu) polls this
+    /// once per bus cycle and edge-detects the false->true transition
+    /// itself (see `cpu/exec.rs`'s `CountingBus`).
+    ///
+    /// Defaults to `false` (never asserted) so existing `CpuBus`
+    /// implementors — `RecordingBus`/`SinkBus` in `cpu::tests`, and any
+    /// bus that predates interrupt support — keep compiling unchanged; a
+    /// real system bus (W1-02+) overrides this to reflect the PPU's NMI
+    /// output and any other NMI sources.
+    fn nmi_line(&self) -> bool {
+        false
+    }
+
+    /// Whether the IRQ line is currently **asserted** (same
+    /// asserted-not-electrical convention as [`CpuBus::nmi_line`]). IRQ is
+    /// level-sensitive (nesdev.org/wiki/CPU_interrupts: "reacts to a low
+    /// signal level") and shared by every IRQ source on the real bus (APU
+    /// frame counter/DMC, mapper IRQs, ...) — this method reports whether
+    /// *any* of them currently hold the line low; a real bus ORs its
+    /// sources together here. Defaults to `false` for the same
+    /// mock-bus-compatibility reason as `nmi_line`.
+    fn irq_line(&self) -> bool {
+        false
+    }
 }
