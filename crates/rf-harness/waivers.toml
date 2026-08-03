@@ -1,0 +1,25 @@
+# Canonical waiver file (ticket W0-03; TESTING.md §5, R-C1/R-D4).
+#
+# This file is an ENFORCEMENT mechanism, not a TODO list (TESTING.md §5,
+# verbatim): every known-fail carries a justification AND an expiry date;
+# an expired waiver reopens red; a red row with no valid waiver here fails
+# the accuracy-report step outright (see `rf_harness::accuracy::build_report`).
+#
+# Lives under `crates/rf-harness/` (not `tests/`) because `tests/` is
+# outside this ticket's write scope — only `tests/rom-manifest.toml` is
+# listed there. Test fixtures that need their own waiver documents live
+# under `crates/rf-harness/tests/` as separate files/inline strings, never
+# by hand-editing this one.
+#
+# Schema — one [[waiver]] per known-fail:
+#   suite          suite id (matches [[suite]].id in tests/rom-manifest.toml)
+#   rom            ROM label to waive, or "*" to waive every ROM in `suite`
+#   justification  why this is currently expected to fail (non-empty)
+#   expiry         ISO YYYY-MM-DD; valid through and including this date
+#   ticket         tracking ticket id (^W\d+-\d{2}[a-c]?$), MUST be open —
+#                  a closed/nonexistent ticket fails the report step too
+#
+# No rows below: as of this ticket, no suite has ever actually been run
+# (there is no core yet — W1-01 hasn't started), so there is nothing to
+# waive. The first real waiver lands with whichever ticket first runs a
+# suite against a real core and finds a known, tracked gap.
