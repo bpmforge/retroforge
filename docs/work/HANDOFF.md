@@ -12,9 +12,9 @@ a time.** Do not redesign anything.
 4. `PLAYBOOK.md` — per-ticket loop, gate command, block-note discipline
 5. The tail of `docs/STATUS.md` — per-ticket evidence for everything below
 
-## Current state (verified 2026-08-03, W1-05a closed on main, both remotes)
+## Current state (verified 2026-08-03, W1-05b closed on main, both remotes)
 
-**14 tickets done. Workspace tests: 305 passing** (with the 1 GB vector set
+**15 tickets done. Workspace tests: 330 passing** (with the 1 GB vector set
 absent — see "Large test data" below).
 
 | Ticket | What landed |
@@ -33,6 +33,7 @@ absent — see "Large test data" below).
 | W1-04a | PPU background: loopy regs + fetch pipeline + CoreSink emission |
 | W1-04b | PPU frame-timing edges + analytic golden frame (found+fixed a real scroll bug) |
 | W1-05a | PPU sprites: secondary OAM, 8-sprite limit, buggy overflow flag |
+| W1-05b | sprite-0 hit (blargg sprite_hit 11/11) + VBL/NMI wiring (ppu_vbl_nmi 4/10) |
 
 **The 6502 is feature-complete for Phase 1**: all 256 opcodes pass
 SingleStepTests `nes6502` — **2,560,000/2,560,000 cases**, state + RAM +
@@ -42,20 +43,20 @@ Full gate GREEN (**seven** commands since W0-07):
 `cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace && scripts/validate-arch.sh && node scripts/validate-plan.mjs && node scripts/validate-traceability.mjs && node scripts/validate-evidence.mjs`
 
 Toolchain pinned **1.94** (rust-toolchain.toml — never change to "stable").
-Board: 66 tickets / 374 pts · validators green · traceability 101/101.
+Board: 67 tickets / 379 pts · validators green · traceability 101/101.
 
 The gate is now **seven** commands — `node scripts/validate-evidence.mjs`
 joined it in W0-07.
 
 ## START HERE — recommended order
 
-1. **W1-05b** — sprite-0 hit + `ppu_vbl_nmi`. First ticket with real PPU test
-   ROMs as its oracle. Note `NesBus::nmi_line`/`irq_line` are still at the
-   `CpuBus` default and VBL/NMI timing is deliberately unbuilt, so this ticket
-   owns wiring the PPU's NMI output to the bus — check whether `ppu/**` alone
-   can do that (it likely needs `crates/rf-nes/src/system/mod.rs`).
-   The blargg ROMs are fetched, gitignored artifacts, so this is probably the
-   **third Tier-A-local suite** and needs an evidence row like nestest's.
+1. **W1-06** — next in the W1 chain, claimable now.
+2. **W1-05c** — the sub-cycle VBL/NMI ceiling (see below). Higher risk than
+   its 5 points suggest: it changes when `CountingBus` samples `nmi_line()`,
+   which is the seam the DMA model and both byte-exact suites sit on. Do it
+   deliberately, not opportunistically.
+3. **W2-02** — mappers; its scope was already fixed, and it owns extracting
+   NROM into a real `Mapper` trait.
 
 Claim = set `in_progress` in plan.json + commit that change first.
 
@@ -167,6 +168,21 @@ Touch `crates/rf-nes/src/cpu` and the gate goes red until you re-run
 `scripts/local-gate.sh`; that is intended, and it has already fired for real.
 CI checks out with `fetch-depth: 0` and the validator refuses to run on a
 shallow clone — without both, it would pass while enforcing nothing.
+
+## The seam's first real ceiling (W1-05b -> W1-05c)
+
+The bus-owns-the-master-clock model below is sound and has held for four
+tickets, but W1-05b found where it stops: `cpu::exec::CountingBus` samples
+`nmi_line()` **once per whole bus op**, and `NesBus` ticks the PPU's 3 dots
+strictly *after* a register read completes. So nesdev's sub-CPU-cycle "read
+`$2002` on the very PPU clock the flag is set" race is **unreachable** — the
+one-clock-*early* case is reachable and is implemented. That costs 6 of 10
+`ppu_vbl_nmi` sub-ROMs, waived to **W1-05c**, which owns the fix.
+
+Treat W1-05c as the highest-risk ticket in Phase 1: its blast radius is the
+2,560,000-case vector suite and the 8991-line byte-exact nestest trace. Those
+two are the guardrails — a regression in either is a stop, not a re-baseline.
+Waivers expire **2026-11-01** and turn the gate red on their own if ignored.
 
 ## The DMA seam — RESOLVED in W1-02, and the pattern to keep
 

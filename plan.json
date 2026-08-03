@@ -401,7 +401,7 @@
     "ppu_vbl_nmi suite passes (FR-CORE-022)"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "BLOCKER FOUND AND RESOLVED IN PRE-FLIGHT 2026-08-03 (conductor): acceptance criterion 2 was UNRUNNABLE as the board stood. The manifest's `ppu-vbl-nmi` artifact is blargg's COMBINED build \u2014 256 KB PRG, iNES mapper 1 (MMC1), verified by parsing the fetched header. Only NROM exists today (W1-02); MMC1 is W2-02, two phases away, so this ticket would have blocked on a dependency the board never recorded. THE FIX: docs/TESTING.md section 4 already describes this suite as 'blargg ppu_vbl_nmi (10 sub-ROMs)' \u2014 the singles live upstream at ppu_vbl_nmi/rom_singles/ and the conductor verified by fetching them that all ten are 32 KB PRG + 8 KB CHR, iNES MAPPER 0 (NROM-256), i.e. runnable on today's core. Replace the single combined artifact with the ten singles; that also makes the manifest match TESTING.md instead of contradicting it.",
     "PRE-FLIGHT 2026-08-03 (conductor): sha256 of all ten singles, computed live from the pinned commit 95d8f621ae55cee0d09b91519a8989ae0e64753b (each 40976 bytes) so NO 'TODO-' placeholder is needed \u2014 01-vbl_basics=06aea5af4edab4e3141c939cd5ac9936f8758203b25dcaf84ae1a09db49e024a; 02-vbl_set_time=dd98856130078844e3aa4bd95a9be8ab501ea84c089f1d8ad49a1b20af4b3a80; 03-vbl_clear_time=787fdaa4dd6c5b6df5f4308fb6d55b57e2c2f69bd5ecdf8ad5c69735db4fcc72; 04-nmi_control=84722c75b896c47c8642f83220230fe14f0a31e55e26ecb83c400e6a26d91b32; 05-nmi_timing=72e515d689d7404ae5779b8c9c4c7b3563a755a94bd44864516f1b03df044482; 06-suppression=811dd5997bbf48c2e5687ab06845f17ea76b2be472786596c334137582cc72aa; 07-nmi_on_timing=1ed154363660b5775b112ae63ce9bb4e400ebde2afef4d0ac12fc433efda3702; 08-nmi_off_timing=1d2a4093091c8e58a7f99d6a3531bbc6346b52cfc59bcb17ca04c1f2376cf2fc; 09-even_odd_frames=1ac04283021ddd9294cc74ee709c55e20a350dc4815c15a8a93b3654837e858d; 10-even_odd_timing=7217d2d172ce11ad45c4da40c2f22201cf0eb758bc2cd8dd39d2cf0a7d4ca83e. Base URL: https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/ppu_vbl_nmi/rom_singles/<name>.nes",
@@ -412,6 +412,39 @@
    "stories": [
     "E1-S1",
     "E5-S1"
+   ]
+  },
+  {
+   "id": "W1-05c",
+   "title": "sub-cycle VBL/NMI suppression timing (unwaive ppu_vbl_nmi)",
+   "phase": 1,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/cpu/**",
+    "crates/rf-nes/src/ppu/**",
+    "crates/rf-nes/src/system/mod.rs",
+    "crates/rf-harness/**",
+    "docs/evidence/local-gate.json",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [
+    "W1-05b"
+   ],
+   "acceptance": [
+    "the 6 waived ppu_vbl_nmi sub-ROMs pass (02-vbl_set_time, 05-nmi_timing, 06-suppression, 07-nmi_on_timing, 08-nmi_off_timing, 10-even_odd_timing), so ppu_vbl_nmi is 10/10 and every waiver naming W1-05c is deleted rather than re-dated (FR-CORE-022)",
+    "nes6502 vectors still 2,560,000/2,560,000 and nestest still 8991/8991 byte-exact \u2014 these are the guardrails on a change to when CountingBus samples nmi_line() relative to NesBus::tick_master's 3-dot batching, and a regression in either is a stop, not a re-baseline",
+    "the OAM DMA master-clock seam still holds: master_cycle mutated only inside crates/rf-nes/src/system, and no DMA/stall reference appears in crates/rf-nes/src/cpu",
+    "crate::ppu's module doc section 'A sub-CPU-cycle timing ceiling this module does NOT reach' is deleted or rewritten to describe what was actually achieved"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ],
+   "notes": [
+    "ORIGIN 2026-08-03 (Brad's ruling, raised by the conductor at W1-05b's close): W1-05b delivered sprite_hit 11/11 but ppu_vbl_nmi only 4/10. The cause is architectural, diagnosed against the real fetched ROMs rather than guessed: cpu::exec::CountingBus samples nmi_line() ONCE per whole bus op, and NesBus ticks the PPU's 3 dots strictly after a register read completes, so the sub-CPU-cycle race nesdev's 'VBL Flag Timing' table describes (reading $2002 on the very PPU clock the flag is set) is unreachable. The one-clock-EARLY case is reachable and already implemented; the same-clock case is not. Five of the six failures show one identical signature \u2014 a suppression boundary exactly one CPU cycle / 3 PPU dots early \u2014 cross-checked against a matching independently-reported symptom at forums.nesdev.org/viewtopic.php?t=17682, which is strong evidence of one shared root cause rather than six bugs. 10-even_odd_timing fails separately at a $2001-write-timing sub-test and was deliberately NOT claimed to share that root cause.",
+    "WHY THIS IS ITS OWN TICKET, not a W1-05b fix: the change is CPU-crate-adjacent and lands on the exact seam W1-02 established and W1-04a improved (master clock in the bus, single tick_master mutation site, zero PPU/DMA awareness in cpu/). Its blast radius is the 2,560,000-case nes6502 vector suite and the byte-exact 8991-line nestest trace. It needs to be scoped and gated deliberately with those two suites as guardrails \u2014 not attempted as an unscoped widening at the end of another ticket.",
+    "MECHANICAL NOTE: the six waivers in crates/rf-harness/waivers.toml name THIS ticket and rf_harness::accuracy::build_report refuses to build a report whose waiver names a non-open ticket \u2014 verified empirically 2026-08-03 by temporarily closing W1-05b, which made scripts/local-gate.sh fail with 'waiver for ppu_vbl_nmi/02-vbl_set_time names ticket W1-05b, which is not open'. So this ticket cannot be closed by waiving harder: closing it REQUIRES deleting those waivers, which requires the ROMs actually passing. Waiver expiry is 2026-11-01 \u2014 if this ticket is still open then, the gate goes red on its own."
    ]
   },
   {
