@@ -253,7 +253,11 @@
    "crate": "rf-nes",
    "write_scope": [
     "crates/rf-nes/**",
-    "crates/rf-harness/**"
+    "crates/rf-harness/**",
+    "scripts/local-gate.sh",
+    "scripts/validate-evidence.mjs",
+    "docs/evidence/local-gate.json",
+    "docs/TESTING.md"
    ],
    "depends_on": [
     "W1-02",
@@ -264,11 +268,14 @@
     "automated diff vs golden log passes from 0xC000 entry (FR-CORE-021)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ],
    "notes": [
+    "SCOPE-ADD 2026-08-03 (conductor): nestest's ROM and golden log are fetched, gitignored artifacts (NFR-006), so like the nes6502 vectors this suite CANNOT run in CI and `cargo test --workspace` must pass when they are absent. That makes it the second Tier-A-local suite and exactly what W0-07's evidence gate exists for — without an evidence row, a passing nestest is invisible to CI and unverifiable. Added the four exact paths needed to register it (scripts/local-gate.sh, scripts/validate-evidence.mjs, docs/evidence/local-gate.json, docs/TESTING.md) rather than widening to scripts/** or docs/**. CI still never fetches anything (HP-4: Brad is GitHub-Actions-constrained).",
+    "PRE-FLIGHT 2026-08-03 (conductor, verified against the real fetched log): nestest.log is 8991 lines and CRLF-terminated — strip the trailing \\r or every single line diff fails. The register block begins at byte offset 48; the disassembly field is columns 0..47, space-padded. First line is `C000  4C F5 C5  JMP $C5F5` with A:00 X:00 Y:00 P:24 SP:FD PPU:  0, 21 CYC:7 — i.e. the trace starts AFTER a 7-cycle reset, which is why this ticket must build the reset sequence W1-02 deferred. PPU column format is `PPU:%3d,%3d` (space-padded, e.g. 'PPU:  0, 21' and 'PPU:233,209').",
+    "PRE-FLIGHT 2026-08-03 (conductor): THE PPU COLUMN NEEDS NO PPU. Verified arithmetically over all 8991 lines with ZERO mismatches: scanline == (CYC*3)//341 and dot == (CYC*3)%341, exactly. So the trace logger can emit a byte-exact PPU column from the CPU cycle count alone. Do NOT build or stub a PPU to satisfy it — the PPU is W1-04a, and this holds only because nestest's automated mode leaves rendering disabled (no odd-frame skipped dot).",
     "HANDOFF 2026-08-03 (conductor, from W1-02): W1-02 deliberately did NOT build a reset sequence — `NesBus::new` starts `master_cycle` at 0 and W1-02's tests set `cpu.pc` directly. Two consequences this ticket must absorb, both already documented in crates/rf-nes/src/system/mod.rs's `run_oam_dma` doc: (1) nestest's $C000 entry needs a real reset/power-on sequence (reset vector fetch, correct initial SP/P, and the 7-cycle reset timing) or the CYC column will be offset from the golden log from the first line; (2) until that sequence anchors the master-clock PHASE to hardware, OAM DMA's get/put parity is an internal bookkeeping convention rather than a hardware-true absolute — so a real ROM's DMA cost can differ from the model by exactly one cycle. Scoping the reset sequence into this ticket is the intended fix. Both are honest documented deferrals, not defects."
    ]
   },
