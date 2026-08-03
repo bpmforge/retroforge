@@ -4,42 +4,26 @@
 //! Replays every official-opcode test case from
 //! `SingleStepTests/ProcessorTests` (pinned commit
 //! `bb11756436da8fd16cce86aef63dc6725f48836f`, `tests/rom-manifest.toml`
-//! artifact `singlestep-nes6502`) against [`Cpu::step`] and diffs both the
-//! final register/RAM state *and* the cycle-by-cycle bus trace.
+//! git-artifact `singlestep-nes6502-src`) against [`Cpu::step`] and diffs
+//! both the final register/RAM state *and* the cycle-by-cycle bus trace.
 //!
 //! ## Vector availability (gitignored `roms/`, NFR-006)
 //!
-//! `tests/rom-manifest.toml`'s pinned hash for artifact `singlestep-nes6502`
-//! does not match the bytes `codeload.github.com` actually serves for that
-//! commit today: verified this session, the manifest declares
-//! `ed89588aa3de8cf087861de57f079f3a5ab050dd9de3dfcfa07598b65db6cf75`, the
-//! real download from the pinned-commit URL hashes to
-//! `05b602aeb508c62c5aaee259475f8d5e949ed4a9aba0f8220b67ba78708d2d71` —
-//! `scripts/fetch-test-roms.sh singlestep-nes6502` fails closed on that
-//! mismatch for anyone who runs the documented path. `tests/rom-manifest.toml`
-//! is outside this ticket's write scope to fix.
+//! Fetch with `scripts/fetch-test-roms.sh singlestep-nes6502-src`. That id
+//! is a `[[git_artifact]]` (ticket W0-07): a `--filter=blob:none` sparse
+//! checkout of `nes6502/v1` alone at the pinned commit, whose integrity
+//! check is `git rev-parse HEAD` equaling that commit rather than an
+//! archive sha256 — a commit SHA is itself a content hash. `roms/` is
+//! gitignored regardless of which path populates it.
 //!
-//! Separately, that artifact is a zip of the *entire* `ProcessorTests` repo
-//! (every CPU architecture the SingleStepTests project covers), which is
-//! far larger than needed — `nes6502/v1` alone is already ~1.0 GB
-//! uncompressed at this commit (measured this session via `du -sh` after
-//! extraction). Given both the hash mismatch and the whole-repo zip's size,
-//! fetch only the `nes6502/v1` subset with a partial+sparse git clone:
-//!
-//! ```sh
-//! mkdir -p roms/nes/singlestep-nes6502-src
-//! cd roms/nes/singlestep-nes6502-src
-//! git init -q
-//! git remote add origin https://github.com/SingleStepTests/ProcessorTests.git
-//! git sparse-checkout init --cone
-//! git sparse-checkout set nes6502/v1
-//! git fetch --depth 1 --filter=blob:none origin bb11756436da8fd16cce86aef63dc6725f48836f
-//! git checkout FETCH_HEAD
-//! ```
-//!
-//! That reproduces exactly the commit the manifest pins, without the
-//! per-artifact hash gate. `roms/` is gitignored (`.gitignore` line 5,
-//! NFR-006) regardless of which path populates it.
+//! Historical note (settled by W0-07 — do not re-litigate): this used to be
+//! a whole-repo zip from `codeload.github.com` whose pinned sha256 never
+//! matched, and this doc used to carry a manual `git clone` workaround. The
+//! root cause was *not* an unstable archive: codeload streams with no
+//! `Content-Length`, so the multi-GB transfer truncated silently into a
+//! valid-looking file. The sparse checkout is better regardless, and is
+//! narrower too — `nes6502/v1` alone is ~1.0 GB, a fraction of a whole-repo
+//! zip covering every CPU architecture SingleStepTests targets.
 //!
 //! `RF_NES6502_VECTORS` overrides the vector directory; the default is
 //! `<CARGO_MANIFEST_DIR>/../../roms/nes/singlestep-nes6502-src/nes6502/v1`
