@@ -12,9 +12,9 @@ a time.** Do not redesign anything.
 4. `PLAYBOOK.md` — per-ticket loop, gate command, block-note discipline
 5. The tail of `docs/STATUS.md` — per-ticket evidence for everything below
 
-## Current state (verified 2026-08-03, W1-03 closed on main, both remotes)
+## Current state (verified 2026-08-03, W1-04a closed on main, both remotes)
 
-**11 tickets done. Workspace tests: 238 passing** (with the 1 GB vector set
+**12 tickets done. Workspace tests: 281 passing** (with the 1 GB vector set
 absent — see "Large test data" below).
 
 | Ticket | What landed |
@@ -30,6 +30,7 @@ absent — see "Large test data" below).
 | W0-07 | manifest `[[git_artifact]]` kind + local evidence gate |
 | W1-02 | NES bus + NROM + OAM DMA + controller strobe |
 | W1-03 | nestest golden trace: 8991/8991 lines byte-exact + reset sequence |
+| W1-04a | PPU background: loopy regs + fetch pipeline + CoreSink emission |
 
 **The 6502 is feature-complete for Phase 1**: all 256 opcodes pass
 SingleStepTests `nes6502` — **2,560,000/2,560,000 cases**, state + RAM +
@@ -46,11 +47,12 @@ joined it in W0-07.
 
 ## START HERE — recommended order
 
-1. **W1-04a** — PPU background: loopy registers + fetch pipeline. **Fix its
-   `write_scope` before claiming**: it still carries the self-blocking
-   `ppu/**` defect (needs `crates/rf-nes/src/lib.rs` for `mod ppu;` wiring,
-   and likely `crates/rf-nes/src/system/mod.rs` to replace the PPU stub).
-2. **W1-04b / W1-05a** — rest of the PPU. W1-05a has the same scope defect.
+1. **W1-04b** — PPU frame-timing edges + golden frame. **This is the oracle
+   W1-04a never had** — read its ticket notes first: W1-04a's shift-register
+   pipeline latency is genuinely unverified, so if the golden frame is off by
+   about one tile horizontally, start there.
+2. **W1-05a / W1-05b** — PPU sprites. Both still carry the `ppu/**` scope
+   defect; derive paths from each ticket's own acceptance before claiming.
 
 Claim = set `in_progress` in plan.json + commit that change first.
 
@@ -89,11 +91,22 @@ would each have burned a session (below).
 - **validate-traceability ordering**: F2 (ticket cites undefined FR/NFR) is a
   HARD failure; W1 (FR/NFR no ticket cites) is only a warning. So an SRS row
   must land in the same commit as — or before — the ticket citing it.
-- **Board defect pattern**: some tickets have a `write_scope` that makes their
-  own acceptance impossible. W1-01a's did (fixed 2026-08-03 by adding the
-  exact paths, not widening the glob — Brad's ruling). **W1-04a and W1-05a
-  have the same defect with `ppu/**`** and need `crates/rf-nes/src/lib.rs`
-  added for `mod ppu;` wiring. Check scope-vs-acceptance BEFORE claiming.
+- **Board defect pattern** — the most common defect on this board, now hit
+  **four** times (W1-01a, W0-07, W2-02, W1-04a): a `write_scope` that makes
+  the ticket's own acceptance impossible. Always fix by adding **exact paths**,
+  never by widening the glob (Brad's W1-01a ruling). **W1-04b, W1-05a and
+  W1-05b still carry `ppu/**` alone** and are annotated to derive their real
+  paths at claim time. Check scope-vs-acceptance BEFORE claiming, every time.
+- **Conductor may fix real defects, not just fmt/clippy nits.** Precedent set
+  2026-08-03 (the `tempdir()` parallel-thread race behind two "non-reproducible"
+  flakes): in-scope, small, verified, and left red would corrode the
+  independent-verification discipline everything else depends on. Record the
+  fix in the ticket notes and STATUS.
+- **Mutation-test tickets that have no test-ROM oracle.** Green unit tests
+  prove little by themselves; W1-04a's scroll tests were confirmed to bite by
+  breaking the coarse-X wrap and watching the right test fail. Mutate *code* —
+  `ppu/scroll.rs` quotes nesdev pseudocode in doc comments that looks exactly
+  like the logic beneath it.
 
 ## Large test data (shapes every CPU/PPU ticket)
 
