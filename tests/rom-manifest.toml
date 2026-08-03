@@ -1,7 +1,1139 @@
-# Test-ROM manifest — populated by ticket W0-03 from
-# docs/research/accuracy-and-testing.md. Format:
-# [[rom]]
-# name = "nestest"
-# url  = "https://…"
-# sha256 = "…"
-# dest = "roms/nes/nestest.nes"
+# Test-ROM manifest (ticket W0-03; NFR-006, TESTING.md §3, FAILURE_MODES.md
+# FM-14). Parsed by `rf_harness::manifest`; fetched by
+# `scripts/fetch-test-roms.sh` (a thin wrapper over the `fetch-test-roms`
+# binary in `crates/rf-harness`) into the gitignored `roms/` directory.
+# NEVER add a ROM binary to git — this file records where to get one and
+# what its verified hash is, nothing else.
+#
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
+#
+# [[artifact]] — one fetchable, byte-identical unit (always a single file;
+#   this manifest deliberately has no archive-unpack step — see
+#   crates/rf-harness/src/fetch.rs module doc for why).
+#   id              unique key, referenced by [[suite.roms]].artifact
+#   license_status  "no-license-grant-fetch-only" | "public-domain" |
+#                    "permissive" — no-vendor/no-rehost rule (TESTING.md §3,
+#                    design-review G-43): no-license-grant artifacts are
+#                    fetch-from-origin only, never vendored/mirrored/
+#                    re-hosted; the CI cache is the only tolerated copy.
+#   sha256          one hash; EVERY URL in `mirrors` must serve exactly
+#                    these bytes. "TODO-<reason>" is an honest placeholder
+#                    for a hash not yet computed (network-unreachable during
+#                    authoring, or the artifact is a multi-hundred-MB
+#                    archive not worth downloading just to prove the
+#                    pattern) — never a fabricated value.
+#   mirrors         ordered list of alternate-origin URLs (FM-14 mitigation:
+#                    "multiple mirrors pre-listed"). The fetcher tries them
+#                    in order and accepts the first whose bytes hash to
+#                    `sha256`; all failing is a loud error naming the
+#                    artifact id (FM-14). A URL belongs in this list ONLY
+#                    if it has been verified to serve byte-identical
+#                    content — see the nestest-log entry below for a
+#                    real counterexample (two real-looking "mirrors" that
+#                    turned out to differ by line-ending normalization and
+#                    therefore are two different artifacts, not one).
+#   dest            path under `roms/` (gitignored — NFR-006) the verified
+#                    bytes are written to.
+#
+# [[suite]] — the accuracy-table / waiver lookup key. `id`+`fr`+`tier` are
+#   copied verbatim from docs/TESTING.md §4 (NES) / §5 (SNES); this pairing
+#   is DATA, never inferred at runtime (TESTING.md §5: "a lookup from the
+#   tables above, never a judgment call"). Suite rows in TESTING.md that
+#   bundle several named blargg test programs into one FR/tier cell (e.g.
+#   "cpu_timing_test6/instr_timing/branch_timing_tests") are split here
+#   into one [[suite]] per named program, each carrying the identical
+#   FR/tier the bundled row specifies — this is finer accuracy-table
+#   granularity, not a different mapping.
+#   id        suite id (accuracy-table + waiver key)
+#   console   "nes" | "snes"
+#   fr        FR-CORE-xxx from TESTING.md
+#   tier      "A" (every PR) | "B" (nightly)
+#   protocol  "six_thousand" (blargg $6000/$6004) | "trace_log" (nestest) |
+#             "vector" (SingleStepTests JSON, no ROM run) | "golden_frame" |
+#             "ram_result" (RAM block vs shipped expected-value file) |
+#             "audio_rms"
+#   [[suite.roms]]  one row per accuracy-table ROM
+#     artifact       artifact id above
+#     rom            accuracy-table row label (not necessarily the filename)
+#     frame_budget   declared timeout in frames (TESTING.md §2); 0 for
+#                    protocols with no frame concept (vector)
+#
+# In-repo fixtures (RF-Scroller, RF-Scroller-S, libSFX LoROM/HiROM maps) are
+# built from source in CI, never fetched externally (fixture doctrine
+# D-001) — they have no entry here by design; see FR-CORE-026/035/037 in
+# TESTING.md (FR-CORE-026 here is the Alter Ego row, the one FR-CORE-026
+# source that IS external; the RF-Scroller replay half of that same FR is
+# the in-repo one and stays out of this manifest).
+#
+# Known gaps (blocked-with-evidence, not silently dropped):
+#  - Holy Diver Batman (FR-CORE-025, tier B): docs/research/
+#    accuracy-and-testing.md already flags this "[thin on exact repo
+#    path]". No GitHub repo, release, or author mirror was located this
+#    session (rainwarrior has no public repo by that name; pinobatch/
+#    holy-mapperel is a *different* project — NES cartridge PCB
+#    manufacturing test, not the mapper acid-test ROM).
+#  - blargg SPC timing / spc_timing (FR-CORE-036, tier B): research doc
+#    flags the canonical (blargg.org) home as dead and names
+#    gitlab.com/higan/snes-test-roms as a "[thin]" candidate mirror; the
+#    conductor's URL-liveness pass confirmed that host responds, but the
+#    exact ROM path/filename inside it was not located this session.
+# Neither has a [[suite]] row below; both are pre-existing "thin" flags
+# from the research doc, not new rot introduced by this ticket.
+
+# ---------------------------------------------------------------------------
+# Artifacts — NES, christopherpow/nes-test-roms aggregator
+# (no license grant; fetch-from-origin only). Pinned to commit
+# 95d8f621ae55cee0d09b91519a8989ae0e64753b (verified live 2026-08-02) so a
+# manifest re-run never silently picks up an upstream rewrite.
+# ---------------------------------------------------------------------------
+
+[[artifact]]
+id = "nestest-rom"
+license_status = "no-license-grant-fetch-only"
+sha256 = "f67d55fd6b3cf0bad1cc85f1df0d739c65b53e79cecb7fea8f77ec0eadab0004"
+mirrors = [
+  "https://www.qmtpro.com/~nes/misc/nestest.nes",
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/other/nestest.nes",
+]
+dest = "roms/nes/other/nestest.nes"
+
+# NOTE on nestest-log: qmtpro.com (kevtris's own host, the log's original
+# author) and christopherpow's repository copy LOOK like mirrors of the
+# same file but are NOT byte-identical — verified this session: qmtpro's
+# copy is 868158 bytes, christopherpow's is 859167 bytes, a difference of
+# exactly 8991 bytes across exactly 8991 lines (CRLF vs LF line endings).
+# Listing both under one `sha256` would make the fetcher reject whichever
+# mirror doesn't match, defeating the point of a mirror list. Only the
+# verified-original host is listed; the LF-normalized copy is a distinct
+# artifact this manifest does not currently reference.
+[[artifact]]
+id = "nestest-log"
+license_status = "no-license-grant-fetch-only"
+sha256 = "627c8e180b1a924dfa705c5dc6958fad7ab75a62de556173caf880ccc1337540"
+mirrors = [
+  "https://www.qmtpro.com/~nes/misc/nestest.log",
+]
+dest = "roms/nes/other/nestest.log"
+
+[[artifact]]
+id = "instr-test-v5-all-instrs"
+license_status = "no-license-grant-fetch-only"
+sha256 = "353870c157242e3d428ef7387109deaee0d2e158bdb432ab9aae4e657072c785"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/instr_test-v5/all_instrs.nes",
+]
+dest = "roms/nes/instr_test-v5/all_instrs.nes"
+
+[[artifact]]
+id = "cpu-timing-test6"
+license_status = "no-license-grant-fetch-only"
+sha256 = "6ab4fe8af23b12ca0dfccfc030de3d4069bf2498e3ef20ddcf1ca75555065b85"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/cpu_timing_test6/cpu_timing_test.nes",
+]
+dest = "roms/nes/cpu_timing_test6/cpu_timing_test.nes"
+
+[[artifact]]
+id = "instr-timing"
+license_status = "no-license-grant-fetch-only"
+sha256 = "3d1bca14266f1e25b75a34ddd29c9df1ce9c6d990c8663a218f72e7861660fb0"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/instr_timing/instr_timing.nes",
+]
+dest = "roms/nes/instr_timing/instr_timing.nes"
+
+[[artifact]]
+id = "branch-timing-1-basics"
+license_status = "no-license-grant-fetch-only"
+sha256 = "7b69e3044eaeb86317147a900d1f4a467b666f59d375ec1ba6658233f23786cd"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/branch_timing_tests/1.Branch_Basics.nes",
+]
+dest = "roms/nes/branch_timing_tests/1.Branch_Basics.nes"
+
+[[artifact]]
+id = "branch-timing-2-backward"
+license_status = "no-license-grant-fetch-only"
+sha256 = "f7966e9b86b04b4adb987439a442e926e9cfe6bb71436dd5dd56f41f9eb029a4"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/branch_timing_tests/2.Backward_Branch.nes",
+]
+dest = "roms/nes/branch_timing_tests/2.Backward_Branch.nes"
+
+[[artifact]]
+id = "branch-timing-3-forward"
+license_status = "no-license-grant-fetch-only"
+sha256 = "d0fbc6b1899bc948172c45f37a981eb0dade212d7e807cc56efedae93d6f9c9b"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/branch_timing_tests/3.Forward_Branch.nes",
+]
+dest = "roms/nes/branch_timing_tests/3.Forward_Branch.nes"
+
+[[artifact]]
+id = "cpu-interrupts-v2"
+license_status = "no-license-grant-fetch-only"
+sha256 = "ccbac4e824eb96ecfe8b82d331a083be186eb6776aa57e25c52251eaf7df9c4f"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/cpu_interrupts_v2/cpu_interrupts.nes",
+]
+dest = "roms/nes/cpu_interrupts_v2/cpu_interrupts.nes"
+
+[[artifact]]
+id = "cpu-dummy-reads"
+license_status = "no-license-grant-fetch-only"
+sha256 = "db4f91b80c5fbc123e7dcb420fb7fea9b8a18613edf4de7f3d1e3ed95e3117c9"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/cpu_dummy_reads/cpu_dummy_reads.nes",
+]
+dest = "roms/nes/cpu_dummy_reads/cpu_dummy_reads.nes"
+
+[[artifact]]
+id = "cpu-dummy-writes-oam"
+license_status = "no-license-grant-fetch-only"
+sha256 = "7c1d71a38b2e873d0874add8b823ff39b99151bb29f50096d8021787020c566c"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/cpu_dummy_writes/cpu_dummy_writes_oam.nes",
+]
+dest = "roms/nes/cpu_dummy_writes/cpu_dummy_writes_oam.nes"
+
+[[artifact]]
+id = "cpu-dummy-writes-ppumem"
+license_status = "no-license-grant-fetch-only"
+sha256 = "f59ac329f4872277ccbeff9dd595b901d861af8d53e8a43dcca93bb86752a6b3"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/cpu_dummy_writes/cpu_dummy_writes_ppumem.nes",
+]
+dest = "roms/nes/cpu_dummy_writes/cpu_dummy_writes_ppumem.nes"
+
+[[artifact]]
+id = "cpu-exec-space-apu"
+license_status = "no-license-grant-fetch-only"
+sha256 = "9036b3d64b7f4e0ac7d44ed85eafb4b2f93ffd2ca2ddecc19f1e0d2bec3574fe"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/cpu_exec_space/test_cpu_exec_space_apu.nes",
+]
+dest = "roms/nes/cpu_exec_space/test_cpu_exec_space_apu.nes"
+
+[[artifact]]
+id = "cpu-exec-space-ppuio"
+license_status = "no-license-grant-fetch-only"
+sha256 = "9f7f24d420033e032f5da0e1eb721cce1d843e032b31973acddb0255ef479251"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/cpu_exec_space/test_cpu_exec_space_ppuio.nes",
+]
+dest = "roms/nes/cpu_exec_space/test_cpu_exec_space_ppuio.nes"
+
+[[artifact]]
+id = "ppu-vbl-nmi"
+license_status = "no-license-grant-fetch-only"
+sha256 = "8dbab1be785585c399cf055ef02147b788ab75fd80e81cf9568a2feafc03fb7d"
+mirrors = [
+  "https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/ppu_vbl_nmi/ppu_vbl_nmi.nes",
+]
+dest = "roms/nes/ppu_vbl_nmi/ppu_vbl_nmi.nes"
+
+[[artifact]]
+id = "sprite-hit-01-basics"
+license_status = "no-license-grant-fetch-only"
+sha256 = "51819e8e502bd88fe3b7244198a074dbeef2e848f66c587be04b04f1f0d4bb52"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_hit_tests_2005.10.05/01.basics.nes"]
+dest = "roms/nes/sprite_hit_tests_2005.10.05/01.basics.nes"
+
+[[artifact]]
+id = "sprite-hit-02-alignment"
+license_status = "no-license-grant-fetch-only"
+sha256 = "125bbb3ce1e67370f1f4559c2ad3221e52a3e98880b9789400292b5f3a8b39e6"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_hit_tests_2005.10.05/02.alignment.nes"]
+dest = "roms/nes/sprite_hit_tests_2005.10.05/02.alignment.nes"
+
+[[artifact]]
+id = "sprite-hit-03-corners"
+license_status = "no-license-grant-fetch-only"
+sha256 = "9dd57776bc6267fe6183c5521d67cbe3fccc6662ae545eb2c419949bf39644d3"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_hit_tests_2005.10.05/03.corners.nes"]
+dest = "roms/nes/sprite_hit_tests_2005.10.05/03.corners.nes"
+
+[[artifact]]
+id = "sprite-hit-04-flip"
+license_status = "no-license-grant-fetch-only"
+sha256 = "5f7142bddb51b7577f93fa22f9f668efebbeea00346d7255089e1863acb9d46a"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_hit_tests_2005.10.05/04.flip.nes"]
+dest = "roms/nes/sprite_hit_tests_2005.10.05/04.flip.nes"
+
+[[artifact]]
+id = "sprite-hit-05-left-clip"
+license_status = "no-license-grant-fetch-only"
+sha256 = "69b329658c17b953f149c2f0de77eb272089df22c815bd2fd3d6f43206791c13"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_hit_tests_2005.10.05/05.left_clip.nes"]
+dest = "roms/nes/sprite_hit_tests_2005.10.05/05.left_clip.nes"
+
+[[artifact]]
+id = "sprite-hit-06-right-edge"
+license_status = "no-license-grant-fetch-only"
+sha256 = "8e6653fcb869e06873e29e5e4423122ea72ba0bf38f3ba9e39f471420db759a4"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_hit_tests_2005.10.05/06.right_edge.nes"]
+dest = "roms/nes/sprite_hit_tests_2005.10.05/06.right_edge.nes"
+
+[[artifact]]
+id = "sprite-hit-07-screen-bottom"
+license_status = "no-license-grant-fetch-only"
+sha256 = "05849956f80267838c5b6556310266b794078a4300841cbb36339fd141905a0b"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_hit_tests_2005.10.05/07.screen_bottom.nes"]
+dest = "roms/nes/sprite_hit_tests_2005.10.05/07.screen_bottom.nes"
+
+[[artifact]]
+id = "sprite-hit-08-double-height"
+license_status = "no-license-grant-fetch-only"
+sha256 = "127fd966b6b32d6d88a53c5f59d7e938827783c9ad056091f119be1c4ab21c71"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_hit_tests_2005.10.05/08.double_height.nes"]
+dest = "roms/nes/sprite_hit_tests_2005.10.05/08.double_height.nes"
+
+[[artifact]]
+id = "sprite-hit-09-timing-basics"
+license_status = "no-license-grant-fetch-only"
+sha256 = "311698c717e50150edd0b5fd0016c41de686463205c20efb5630d6adb90859fd"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_hit_tests_2005.10.05/09.timing_basics.nes"]
+dest = "roms/nes/sprite_hit_tests_2005.10.05/09.timing_basics.nes"
+
+[[artifact]]
+id = "sprite-hit-10-timing-order"
+license_status = "no-license-grant-fetch-only"
+sha256 = "0f36bc07bfe51c416e3cc1a5231053572aa6b15aa60e6d2fd0568be49b6dc2e9"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_hit_tests_2005.10.05/10.timing_order.nes"]
+dest = "roms/nes/sprite_hit_tests_2005.10.05/10.timing_order.nes"
+
+[[artifact]]
+id = "sprite-hit-11-edge-timing"
+license_status = "no-license-grant-fetch-only"
+sha256 = "5a7c121f6e76617be88a0a7035c0e402293be5c685c95b97190a8d70835736ab"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_hit_tests_2005.10.05/11.edge_timing.nes"]
+dest = "roms/nes/sprite_hit_tests_2005.10.05/11.edge_timing.nes"
+
+[[artifact]]
+id = "sprite-overflow-1-basics"
+license_status = "no-license-grant-fetch-only"
+sha256 = "1a6782f63ccb3a3dd1aa6a24272036c9c3aa232c2d1ff0b21e872741a3ee4fe2"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_overflow_tests/1.Basics.nes"]
+dest = "roms/nes/sprite_overflow_tests/1.Basics.nes"
+
+[[artifact]]
+id = "sprite-overflow-2-details"
+license_status = "no-license-grant-fetch-only"
+sha256 = "6405a7ff1042fe7a50d9bfe521e43460a3251799425bd3e1863b29b67e7cd587"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_overflow_tests/2.Details.nes"]
+dest = "roms/nes/sprite_overflow_tests/2.Details.nes"
+
+[[artifact]]
+id = "sprite-overflow-3-timing"
+license_status = "no-license-grant-fetch-only"
+sha256 = "2252ec8fc35932b408f409ef9b6863edf084aa871fc10ad180b0ac4c2468ef8c"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_overflow_tests/3.Timing.nes"]
+dest = "roms/nes/sprite_overflow_tests/3.Timing.nes"
+
+[[artifact]]
+id = "sprite-overflow-4-obscure"
+license_status = "no-license-grant-fetch-only"
+sha256 = "aebf2199344321465ae0d8dcd81f6c528c7f661f31f1814711365b4e573a8263"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_overflow_tests/4.Obscure.nes"]
+dest = "roms/nes/sprite_overflow_tests/4.Obscure.nes"
+
+[[artifact]]
+id = "sprite-overflow-5-emulator"
+license_status = "no-license-grant-fetch-only"
+sha256 = "cf994454219696de82794f0b84f2bd63458444d12a1171c85bba8697ab94acb4"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/sprite_overflow_tests/5.Emulator.nes"]
+dest = "roms/nes/sprite_overflow_tests/5.Emulator.nes"
+
+[[artifact]]
+id = "oam-read"
+license_status = "no-license-grant-fetch-only"
+sha256 = "f298973dabeb61ca35007445f7a615f77e87703c958c870986af83b1aabde926"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/oam_read/oam_read.nes"]
+dest = "roms/nes/oam_read/oam_read.nes"
+
+[[artifact]]
+id = "oam-stress"
+license_status = "no-license-grant-fetch-only"
+sha256 = "95882d72a7acabe928fd277e3b3e0372f21ef3d41e36d7d8fb17fc017a356f70"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/oam_stress/oam_stress.nes"]
+dest = "roms/nes/oam_stress/oam_stress.nes"
+
+[[artifact]]
+id = "full-palette"
+license_status = "no-license-grant-fetch-only"
+sha256 = "7924ba0a808fb1b7029fab5b3fcfe08c8a318a9bdae2948258ffdcbb8d99b657"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/full_palette/full_palette.nes"]
+dest = "roms/nes/full_palette/full_palette.nes"
+
+[[artifact]]
+id = "ppu-open-bus"
+license_status = "no-license-grant-fetch-only"
+sha256 = "d4208a3ff6340532dd0fced7f9d408d5b6585853a0ddc9c1f64ee1722ef08e67"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/ppu_open_bus/ppu_open_bus.nes"]
+dest = "roms/nes/ppu_open_bus/ppu_open_bus.nes"
+
+[[artifact]]
+id = "ppu-read-buffer"
+license_status = "no-license-grant-fetch-only"
+sha256 = "230a52fc557c098eba163801d1b6bbf9f57fe8c5ff79a3f968c804dedb1290ba"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/ppu_read_buffer/test_ppu_read_buffer.nes"]
+dest = "roms/nes/ppu_read_buffer/test_ppu_read_buffer.nes"
+
+[[artifact]]
+id = "apu-test"
+license_status = "no-license-grant-fetch-only"
+sha256 = "00d4722bae1c82a14528dd3220462d3fb9ce4b14b8cec996619dea23e07fef0a"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/apu_test/apu_test.nes"]
+dest = "roms/nes/apu_test/apu_test.nes"
+
+[[artifact]]
+id = "apu-reset-4015-cleared"
+license_status = "no-license-grant-fetch-only"
+sha256 = "ef83bc2831f0ddb9e563ac5cbcfa21b129f092911ef42adabae7d47b3e990d95"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/apu_reset/4015_cleared.nes"]
+dest = "roms/nes/apu_reset/4015_cleared.nes"
+
+[[artifact]]
+id = "apu-reset-4017-timing"
+license_status = "no-license-grant-fetch-only"
+sha256 = "0e6072c6dcee98fb73dc7f3af2e48face78be300e8510515ed48dc75d15c1f13"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/apu_reset/4017_timing.nes"]
+dest = "roms/nes/apu_reset/4017_timing.nes"
+
+[[artifact]]
+id = "apu-reset-4017-written"
+license_status = "no-license-grant-fetch-only"
+sha256 = "022bd3b45a733179d9a0a9bf0311d09ca81419d7e7434e6f559e42650b39616b"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/apu_reset/4017_written.nes"]
+dest = "roms/nes/apu_reset/4017_written.nes"
+
+[[artifact]]
+id = "apu-reset-irq-flag-cleared"
+license_status = "no-license-grant-fetch-only"
+sha256 = "e2435b213bf21065b7c9c645359500c1c860a7395d12d051232ab14dad1b0bb5"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/apu_reset/irq_flag_cleared.nes"]
+dest = "roms/nes/apu_reset/irq_flag_cleared.nes"
+
+[[artifact]]
+id = "apu-reset-len-ctrs-enabled"
+license_status = "no-license-grant-fetch-only"
+sha256 = "e05546cbfaa1414d9193b0212084b324ea6b13130af5f171a34c9e574f5ac373"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/apu_reset/len_ctrs_enabled.nes"]
+dest = "roms/nes/apu_reset/len_ctrs_enabled.nes"
+
+[[artifact]]
+id = "apu-reset-works-immediately"
+license_status = "no-license-grant-fetch-only"
+sha256 = "c750113762ee375319b1bfbf65c457875dbb194649d7e7b3594fba38eb8eefa1"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/apu_reset/works_immediately.nes"]
+dest = "roms/nes/apu_reset/works_immediately.nes"
+
+[[artifact]]
+id = "dmc-dma-2007-read"
+license_status = "no-license-grant-fetch-only"
+sha256 = "a2e0fa3f6f155cbe0b8c9517b2f6a57f1fd68f13711c11d6d2fe5676c522d7b2"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/dmc_dma_during_read4/dma_2007_read.nes"]
+dest = "roms/nes/dmc_dma_during_read4/dma_2007_read.nes"
+
+[[artifact]]
+id = "dmc-dma-2007-write"
+license_status = "no-license-grant-fetch-only"
+sha256 = "54c75d491c685fb4cfff281bcf3e199a41e95f6c523e2b0607d67ba039f19f84"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/dmc_dma_during_read4/dma_2007_write.nes"]
+dest = "roms/nes/dmc_dma_during_read4/dma_2007_write.nes"
+
+[[artifact]]
+id = "dmc-dma-4016-read"
+license_status = "no-license-grant-fetch-only"
+sha256 = "c6af72e11c197b449129921a9992db2351d9121bb593b3d0ab71895b646b0ebe"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/dmc_dma_during_read4/dma_4016_read.nes"]
+dest = "roms/nes/dmc_dma_during_read4/dma_4016_read.nes"
+
+[[artifact]]
+id = "dmc-dma-double-2007-read"
+license_status = "no-license-grant-fetch-only"
+sha256 = "779e6e7db863a7405a3dda8723b8517a23d271e78ce4802970fb0a7d3039ce6b"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/dmc_dma_during_read4/double_2007_read.nes"]
+dest = "roms/nes/dmc_dma_during_read4/double_2007_read.nes"
+
+[[artifact]]
+id = "dmc-dma-read-write-2007"
+license_status = "no-license-grant-fetch-only"
+sha256 = "bc5281ca3f12a6d0ac9fe1a5e727ecc3cac5fc6a47f45ac130d644f0dbd522cf"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/dmc_dma_during_read4/read_write_2007.nes"]
+dest = "roms/nes/dmc_dma_during_read4/read_write_2007.nes"
+
+[[artifact]]
+id = "apu-mixer-square"
+license_status = "no-license-grant-fetch-only"
+sha256 = "b16e333a2d3698201fc45c21375507a80981928562d3b10f865e23da3922696a"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/apu_mixer/square.nes"]
+dest = "roms/nes/apu_mixer/square.nes"
+
+[[artifact]]
+id = "apu-mixer-triangle"
+license_status = "no-license-grant-fetch-only"
+sha256 = "3756d4be75126ab51b40e013e60a125e0f6f198307dcfb9612cd4477f6762279"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/apu_mixer/triangle.nes"]
+dest = "roms/nes/apu_mixer/triangle.nes"
+
+[[artifact]]
+id = "apu-mixer-noise"
+license_status = "no-license-grant-fetch-only"
+sha256 = "47b637cc911dc4416f55891c67976780e0985b6729b339a3f1db277ef6bd4910"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/apu_mixer/noise.nes"]
+dest = "roms/nes/apu_mixer/noise.nes"
+
+[[artifact]]
+id = "apu-mixer-dmc"
+license_status = "no-license-grant-fetch-only"
+sha256 = "036e7a3222f56e7a823b693bae0243e6c8c7ae032defbbd15c8631da468d6ea7"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/apu_mixer/dmc.nes"]
+dest = "roms/nes/apu_mixer/dmc.nes"
+
+[[artifact]]
+id = "mmc3-test-2-1-clocking"
+license_status = "no-license-grant-fetch-only"
+sha256 = "b06d8a97f0ca672be92c841d6af7d1e650696e86e9cc0cf6eeb90d67a6ab499b"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_test_2/rom_singles/1-clocking.nes"]
+dest = "roms/nes/mmc3_test_2/rom_singles/1-clocking.nes"
+
+[[artifact]]
+id = "mmc3-test-2-2-details"
+license_status = "no-license-grant-fetch-only"
+sha256 = "e7af16c764b119e60effb7b1cfeec3dd8e2e657041283693cdbbeedb4081f1e3"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_test_2/rom_singles/2-details.nes"]
+dest = "roms/nes/mmc3_test_2/rom_singles/2-details.nes"
+
+[[artifact]]
+id = "mmc3-test-2-3-a12-clocking"
+license_status = "no-license-grant-fetch-only"
+sha256 = "b375f15b9f9d372c8084b9c50928be9e41a3ac48be831ce82d203c18891433ad"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_test_2/rom_singles/3-A12_clocking.nes"]
+dest = "roms/nes/mmc3_test_2/rom_singles/3-A12_clocking.nes"
+
+[[artifact]]
+id = "mmc3-test-2-4-scanline-timing"
+license_status = "no-license-grant-fetch-only"
+sha256 = "14a220b9d1272acc7a820ab38e9762a7cdf2d54c65e753be87f23dfcaf1bb845"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_test_2/rom_singles/4-scanline_timing.nes"]
+dest = "roms/nes/mmc3_test_2/rom_singles/4-scanline_timing.nes"
+
+[[artifact]]
+id = "mmc3-test-2-5-mmc3"
+license_status = "no-license-grant-fetch-only"
+sha256 = "e0824123d60b83868dac1189b28250f8e10376a01be468a5a74aa59937cb32ca"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_test_2/rom_singles/5-MMC3.nes"]
+dest = "roms/nes/mmc3_test_2/rom_singles/5-MMC3.nes"
+
+[[artifact]]
+id = "mmc3-test-2-6-mmc3-alt"
+license_status = "no-license-grant-fetch-only"
+sha256 = "56698b6918453d161a8d4e51f66e363d6966b054939c8176c53c401a6b55269b"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_test_2/rom_singles/6-MMC3_alt.nes"]
+dest = "roms/nes/mmc3_test_2/rom_singles/6-MMC3_alt.nes"
+
+# ---------------------------------------------------------------------------
+# Artifacts — CPU/APU vector suites (SingleStepTests). No license grant
+# (verified via GitHub API this session: SingleStepTests/65816 and
+# christopherpow/nes-test-roms both report no `license` field).
+# Whole-repo snapshots at a pinned commit — hundreds of per-opcode JSON
+# files each; per-file manifest entries would be impractical to author and
+# review by hand (archive-shaped is the right grain here; real hash where
+# the download was actually feasible this session, TODO where the archive
+# was too large to responsibly fetch just to prove a pattern the NES
+# entries above already prove). rf-harness does not implement archive
+# extraction (see fetch.rs module doc) — these land in `roms/` as the
+# downloaded file itself; unpacking is a future ticket (consumed by
+# rf-nes/rf-snes's own vector-test runner, not rf-harness).
+# ---------------------------------------------------------------------------
+
+[[artifact]]
+id = "singlestep-nes6502"
+license_status = "no-license-grant-fetch-only"
+sha256 = "ed89588aa3de8cf087861de57f079f3a5ab050dd9de3dfcfa07598b65db6cf75"
+mirrors = [
+  "https://codeload.github.com/SingleStepTests/ProcessorTests/zip/bb11756436da8fd16cce86aef63dc6725f48836f",
+]
+dest = "roms/nes/singlestep-processortests-bb11756.zip"
+
+[[artifact]]
+id = "singlestep-65816"
+license_status = "no-license-grant-fetch-only"
+# This repo's snapshot at commit db6b10401729d5f20f2181dde5d3d7b037093a4a
+# was downloaded and hashed this session
+# (0cd1613c2373836bff01cb60eb41cafd71c7b994536848915788e5ffb68db7e1,
+# 490157719 bytes) then discarded rather than kept as a huge scratch file.
+# Left as TODO here pending a decision on whether rf-harness should really
+# fetch a 490MB archive per CI run, or a leaner per-opcode subset should be
+# curated instead — follow-up for the ticket that actually consumes these
+# vectors (rf-nes CPU work). The commit-pinned URL below is verified live
+# and the real hash above can be pasted in once that decision is made.
+sha256 = "TODO-490mb-archive-real-hash-computed-but-not-committed-here"
+mirrors = [
+  "https://codeload.github.com/SingleStepTests/65816/zip/db6b10401729d5f20f2181dde5d3d7b037093a4a",
+]
+dest = "roms/snes/singlestep-65816-db6b104.zip"
+
+[[artifact]]
+id = "singlestep-spc700"
+license_status = "permissive"
+sha256 = "46729b72547226768c5585c61fc6016d702a9d2b6f3d6e9c508feee8c5b358ad"
+mirrors = [
+  "https://codeload.github.com/SingleStepTests/spc700/zip/67d15f492b2740964abd4efd1229e0ec9c342228",
+]
+dest = "roms/snes/singlestep-spc700-67d15f4.zip"
+
+# ---------------------------------------------------------------------------
+# Artifacts — SNES on-console test suites (gilyon, undisbeliever). Both
+# ship versioned GitHub *release* assets rather than branch snapshots, so
+# the download URL is already commit-stable (a release tag never moves).
+# ---------------------------------------------------------------------------
+
+[[artifact]]
+id = "gilyon-snes-tests"
+license_status = "permissive"
+sha256 = "c3a39e15a9f3789fe143e54dfa035c988204576eafacf97df8ff3546a917c5e9"
+mirrors = [
+  "https://github.com/gilyon/snes-tests/releases/download/v1.4/snes-tests.zip",
+]
+dest = "roms/snes/gilyon-snes-tests-v1.4.zip"
+
+[[artifact]]
+id = "undisbeliever-snes-test-roms"
+license_status = "permissive"
+sha256 = "00945927bee494317663accaeb21d854b6cdfef674813e6c119877a8eeacb1c4"
+mirrors = [
+  "https://github.com/undisbeliever/snes-test-roms/releases/download/v20210217/snes-test-roms-20210217.zip",
+]
+dest = "roms/snes/undisbeliever-snes-test-roms-20210217.zip"
+
+[[artifact]]
+id = "peterlemon-snes"
+license_status = "no-license-grant-fetch-only"
+# TODO-network-not-attempted: PeterLemon/SNES is an active, asset-heavy
+# assembly project; its whole-repo snapshot size was not checked this
+# session (both SingleStepTests archives above turned out to be 16MB and
+# 490MB respectively, so size is not predictable from repo description
+# alone) and downloading it just to compute a hash was not attempted given
+# the time already spent proving the pattern on smaller archives.
+sha256 = "TODO-network-not-attempted"
+mirrors = [
+  "https://codeload.github.com/PeterLemon/SNES/zip/350b394e86ec5d62f600b5cbf64cdce3721bb6ef",
+]
+dest = "roms/snes/peterlemon-snes-350b394.zip"
+
+# ---------------------------------------------------------------------------
+# Artifacts — Alter Ego (Shiru, PD), the one third-party smoke fixture
+# (D-001). Fetched directly from the author's own site, the most
+# authoritative source available (better provenance than any bundler).
+# ---------------------------------------------------------------------------
+
+[[artifact]]
+id = "alter-ego-rom"
+license_status = "public-domain"
+sha256 = "c7dc651d06aa7aee830d7c1d4563c9347bd724ad9de44dde7f459090b466cdc8"
+mirrors = [
+  "https://shiru.untergrund.net/files/nes/alter_ego.zip",
+]
+dest = "roms/nes/alter-ego/alter_ego.zip"
+
+[[artifact]]
+id = "alter-ego-src"
+license_status = "public-domain"
+sha256 = "bee5569e4a38b574479f8a5f2731ffc55bcccd277b577aad9fc568ba0f015c3b"
+mirrors = [
+  "https://shiru.untergrund.net/files/src/alter_ego_src.zip",
+]
+dest = "roms/nes/alter-ego/alter_ego_src.zip"
+
+# ---------------------------------------------------------------------------
+# Suites — NES (docs/TESTING.md §4)
+# ---------------------------------------------------------------------------
+
+[[suite]]
+id = "nes6502"
+console = "nes"
+fr = "FR-CORE-020"
+tier = "A"
+protocol = "vector"
+[[suite.roms]]
+artifact = "singlestep-nes6502"
+rom = "nes6502-vectors"
+frame_budget = 0
+
+[[suite]]
+id = "nestest"
+console = "nes"
+fr = "FR-CORE-021"
+tier = "A"
+protocol = "trace_log"
+[[suite.roms]]
+artifact = "nestest-rom"
+rom = "nestest"
+frame_budget = 0
+
+[[suite]]
+id = "instr_test-v5"
+console = "nes"
+fr = "FR-CORE-020"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "instr-test-v5-all-instrs"
+rom = "all_instrs"
+frame_budget = 3600
+
+[[suite]]
+id = "cpu_timing_test6"
+console = "nes"
+fr = "FR-CORE-020"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "cpu-timing-test6"
+rom = "cpu_timing_test"
+frame_budget = 3600
+
+[[suite]]
+id = "instr_timing"
+console = "nes"
+fr = "FR-CORE-020"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "instr-timing"
+rom = "instr_timing"
+frame_budget = 3600
+
+[[suite]]
+id = "branch_timing_tests"
+console = "nes"
+fr = "FR-CORE-020"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "branch-timing-1-basics"
+rom = "1.Branch_Basics"
+frame_budget = 600
+[[suite.roms]]
+artifact = "branch-timing-2-backward"
+rom = "2.Backward_Branch"
+frame_budget = 600
+[[suite.roms]]
+artifact = "branch-timing-3-forward"
+rom = "3.Forward_Branch"
+frame_budget = 600
+
+[[suite]]
+id = "cpu_interrupts_v2"
+console = "nes"
+fr = "FR-CORE-022"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "cpu-interrupts-v2"
+rom = "cpu_interrupts"
+frame_budget = 3600
+
+[[suite]]
+id = "cpu_dummy_reads"
+console = "nes"
+fr = "FR-CORE-020"
+tier = "B"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "cpu-dummy-reads"
+rom = "cpu_dummy_reads"
+frame_budget = 600
+
+[[suite]]
+id = "cpu_dummy_writes"
+console = "nes"
+fr = "FR-CORE-020"
+tier = "B"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "cpu-dummy-writes-oam"
+rom = "cpu_dummy_writes_oam"
+frame_budget = 600
+[[suite.roms]]
+artifact = "cpu-dummy-writes-ppumem"
+rom = "cpu_dummy_writes_ppumem"
+frame_budget = 600
+
+[[suite]]
+id = "cpu_exec_space"
+console = "nes"
+fr = "FR-CORE-020"
+tier = "B"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "cpu-exec-space-apu"
+rom = "test_cpu_exec_space_apu"
+frame_budget = 600
+[[suite.roms]]
+artifact = "cpu-exec-space-ppuio"
+rom = "test_cpu_exec_space_ppuio"
+frame_budget = 600
+
+[[suite]]
+id = "ppu_vbl_nmi"
+console = "nes"
+fr = "FR-CORE-022"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "ppu-vbl-nmi"
+rom = "ppu_vbl_nmi"
+frame_budget = 3600
+
+[[suite]]
+id = "sprite_hit_tests"
+console = "nes"
+fr = "FR-CORE-023"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "sprite-hit-01-basics"
+rom = "01.basics"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-hit-02-alignment"
+rom = "02.alignment"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-hit-03-corners"
+rom = "03.corners"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-hit-04-flip"
+rom = "04.flip"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-hit-05-left-clip"
+rom = "05.left_clip"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-hit-06-right-edge"
+rom = "06.right_edge"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-hit-07-screen-bottom"
+rom = "07.screen_bottom"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-hit-08-double-height"
+rom = "08.double_height"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-hit-09-timing-basics"
+rom = "09.timing_basics"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-hit-10-timing-order"
+rom = "10.timing_order"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-hit-11-edge-timing"
+rom = "11.edge_timing"
+frame_budget = 600
+
+[[suite]]
+id = "sprite_overflow_tests"
+console = "nes"
+fr = "FR-CORE-023"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "sprite-overflow-1-basics"
+rom = "1.Basics"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-overflow-2-details"
+rom = "2.Details"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-overflow-3-timing"
+rom = "3.Timing"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-overflow-4-obscure"
+rom = "4.Obscure"
+frame_budget = 600
+[[suite.roms]]
+artifact = "sprite-overflow-5-emulator"
+rom = "5.Emulator"
+frame_budget = 600
+
+[[suite]]
+id = "oam_read"
+console = "nes"
+fr = "FR-CORE-023"
+tier = "B"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "oam-read"
+rom = "oam_read"
+frame_budget = 600
+
+[[suite]]
+id = "oam_stress"
+console = "nes"
+fr = "FR-CORE-023"
+tier = "B"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "oam-stress"
+rom = "oam_stress"
+frame_budget = 3600
+
+[[suite]]
+id = "full_palette"
+console = "nes"
+fr = "FR-CORE-022"
+tier = "B"
+protocol = "golden_frame"
+[[suite.roms]]
+artifact = "full-palette"
+rom = "full_palette"
+frame_budget = 120
+
+[[suite]]
+id = "ppu_open_bus"
+console = "nes"
+fr = "FR-CORE-022"
+tier = "B"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "ppu-open-bus"
+rom = "ppu_open_bus"
+frame_budget = 600
+
+[[suite]]
+id = "ppu_read_buffer"
+console = "nes"
+fr = "FR-CORE-022"
+tier = "B"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "ppu-read-buffer"
+rom = "test_ppu_read_buffer"
+frame_budget = 600
+
+[[suite]]
+id = "apu_test"
+console = "nes"
+fr = "FR-CORE-024"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "apu-test"
+rom = "apu_test"
+frame_budget = 3600
+
+[[suite]]
+id = "apu_reset"
+console = "nes"
+fr = "FR-CORE-024"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "apu-reset-4015-cleared"
+rom = "4015_cleared"
+frame_budget = 600
+[[suite.roms]]
+artifact = "apu-reset-4017-timing"
+rom = "4017_timing"
+frame_budget = 600
+[[suite.roms]]
+artifact = "apu-reset-4017-written"
+rom = "4017_written"
+frame_budget = 600
+[[suite.roms]]
+artifact = "apu-reset-irq-flag-cleared"
+rom = "irq_flag_cleared"
+frame_budget = 600
+[[suite.roms]]
+artifact = "apu-reset-len-ctrs-enabled"
+rom = "len_ctrs_enabled"
+frame_budget = 600
+[[suite.roms]]
+artifact = "apu-reset-works-immediately"
+rom = "works_immediately"
+frame_budget = 600
+
+[[suite]]
+id = "dmc_dma_during_read4"
+console = "nes"
+fr = "FR-CORE-024"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "dmc-dma-2007-read"
+rom = "dma_2007_read"
+frame_budget = 600
+[[suite.roms]]
+artifact = "dmc-dma-2007-write"
+rom = "dma_2007_write"
+frame_budget = 600
+[[suite.roms]]
+artifact = "dmc-dma-4016-read"
+rom = "dma_4016_read"
+frame_budget = 600
+[[suite.roms]]
+artifact = "dmc-dma-double-2007-read"
+rom = "double_2007_read"
+frame_budget = 600
+[[suite.roms]]
+artifact = "dmc-dma-read-write-2007"
+rom = "read_write_2007"
+frame_budget = 600
+
+[[suite]]
+id = "apu_mixer"
+console = "nes"
+fr = "FR-CORE-024"
+tier = "B"
+protocol = "audio_rms"
+[[suite.roms]]
+artifact = "apu-mixer-square"
+rom = "square"
+frame_budget = 600
+[[suite.roms]]
+artifact = "apu-mixer-triangle"
+rom = "triangle"
+frame_budget = 600
+[[suite.roms]]
+artifact = "apu-mixer-noise"
+rom = "noise"
+frame_budget = 600
+[[suite.roms]]
+artifact = "apu-mixer-dmc"
+rom = "dmc"
+frame_budget = 600
+
+[[suite]]
+id = "mmc3_test_2"
+console = "nes"
+fr = "FR-CORE-025"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "mmc3-test-2-1-clocking"
+rom = "1-clocking"
+frame_budget = 600
+[[suite.roms]]
+artifact = "mmc3-test-2-2-details"
+rom = "2-details"
+frame_budget = 600
+[[suite.roms]]
+artifact = "mmc3-test-2-3-a12-clocking"
+rom = "3-A12_clocking"
+frame_budget = 600
+[[suite.roms]]
+artifact = "mmc3-test-2-4-scanline-timing"
+rom = "4-scanline_timing"
+frame_budget = 600
+[[suite.roms]]
+artifact = "mmc3-test-2-5-mmc3"
+rom = "5-MMC3"
+frame_budget = 600
+[[suite.roms]]
+artifact = "mmc3-test-2-6-mmc3-alt"
+rom = "6-MMC3_alt"
+frame_budget = 600
+
+[[suite]]
+id = "alter_ego"
+console = "nes"
+fr = "FR-CORE-026"
+tier = "A"
+protocol = "golden_frame"
+[[suite.roms]]
+artifact = "alter-ego-rom"
+rom = "alter_ego"
+frame_budget = 18000
+
+# ---------------------------------------------------------------------------
+# Suites — SNES (docs/TESTING.md §5)
+# ---------------------------------------------------------------------------
+
+[[suite]]
+id = "singlestep_65816"
+console = "snes"
+fr = "FR-CORE-030"
+tier = "A"
+protocol = "vector"
+[[suite.roms]]
+artifact = "singlestep-65816"
+rom = "65816-vectors"
+frame_budget = 0
+
+[[suite]]
+id = "singlestep_spc700"
+console = "snes"
+fr = "FR-CORE-031"
+tier = "A"
+protocol = "vector"
+[[suite.roms]]
+artifact = "singlestep-spc700"
+rom = "spc700-vectors"
+frame_budget = 0
+
+[[suite]]
+id = "gilyon_cputest"
+console = "snes"
+fr = "FR-CORE-030"
+tier = "A"
+protocol = "ram_result"
+[[suite.roms]]
+artifact = "gilyon-snes-tests"
+rom = "cputest-full"
+frame_budget = 3600
+
+[[suite]]
+id = "gilyon_spctest"
+console = "snes"
+fr = "FR-CORE-031"
+tier = "A"
+protocol = "ram_result"
+[[suite.roms]]
+artifact = "gilyon-snes-tests"
+rom = "spctest"
+frame_budget = 3600
+
+[[suite]]
+id = "undisbeliever_dma_hdma"
+console = "snes"
+fr = "FR-CORE-032"
+tier = "A"
+protocol = "golden_frame"
+[[suite.roms]]
+artifact = "undisbeliever-snes-test-roms"
+rom = "dma-hdma-suite"
+frame_budget = 600
+
+[[suite]]
+id = "peterlemon_ppu"
+console = "snes"
+fr = "FR-CORE-033"
+tier = "A"
+protocol = "golden_frame"
+[[suite.roms]]
+artifact = "peterlemon-snes"
+rom = "ppu-per-feature-suite"
+frame_budget = 600
+
+[[suite]]
+id = "peterlemon_mode7"
+console = "snes"
+fr = "FR-CORE-034"
+tier = "A"
+protocol = "golden_frame"
+[[suite.roms]]
+artifact = "peterlemon-snes"
+rom = "mode7-suite"
+frame_budget = 600

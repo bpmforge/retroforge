@@ -8,3 +8,13 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+rf-core-api = { path = "../rf-core-api" }
+sha2 = "0.11"
+toml = "1"
+serde = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "fetch-test-roms"
+path = "src/bin/fetch_test_roms.rs"
