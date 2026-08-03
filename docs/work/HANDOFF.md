@@ -12,9 +12,9 @@ a time.** Do not redesign anything.
 4. `PLAYBOOK.md` — per-ticket loop, gate command, block-note discipline
 5. The tail of `docs/STATUS.md` — per-ticket evidence for everything below
 
-## Current state (verified 2026-08-03, W1-04b closed on main, both remotes)
+## Current state (verified 2026-08-03, W1-05a closed on main, both remotes)
 
-**13 tickets done. Workspace tests: 288 passing** (with the 1 GB vector set
+**14 tickets done. Workspace tests: 305 passing** (with the 1 GB vector set
 absent — see "Large test data" below).
 
 | Ticket | What landed |
@@ -32,6 +32,7 @@ absent — see "Large test data" below).
 | W1-03 | nestest golden trace: 8991/8991 lines byte-exact + reset sequence |
 | W1-04a | PPU background: loopy regs + fetch pipeline + CoreSink emission |
 | W1-04b | PPU frame-timing edges + analytic golden frame (found+fixed a real scroll bug) |
+| W1-05a | PPU sprites: secondary OAM, 8-sprite limit, buggy overflow flag |
 
 **The 6502 is feature-complete for Phase 1**: all 256 opcodes pass
 SingleStepTests `nes6502` — **2,560,000/2,560,000 cases**, state + RAM +
@@ -48,13 +49,13 @@ joined it in W0-07.
 
 ## START HERE — recommended order
 
-1. **W1-05a** — PPU sprites: evaluation + secondary OAM + `dropped_by_limit`.
-   Still carries the `ppu/**` scope defect — derive real paths from its own
-   acceptance before claiming (W1-04b needed `crates/rf-harness/**` added for
-   its golden frame; sprites will likely need the same).
-2. **W1-05b** — sprite-0 hit + `ppu_vbl_nmi`. First ticket with real PPU test
-   ROMs as its oracle; note `NesBus::nmi_line`/`irq_line` are still at the
-   `CpuBus` default and VBL/NMI timing is deliberately unbuilt.
+1. **W1-05b** — sprite-0 hit + `ppu_vbl_nmi`. First ticket with real PPU test
+   ROMs as its oracle. Note `NesBus::nmi_line`/`irq_line` are still at the
+   `CpuBus` default and VBL/NMI timing is deliberately unbuilt, so this ticket
+   owns wiring the PPU's NMI output to the bus — check whether `ppu/**` alone
+   can do that (it likely needs `crates/rf-nes/src/system/mod.rs`).
+   The blargg ROMs are fetched, gitignored artifacts, so this is probably the
+   **third Tier-A-local suite** and needs an evidence row like nestest's.
 
 Claim = set `in_progress` in plan.json + commit that change first.
 
@@ -120,6 +121,20 @@ would each have burned a session (below).
   `write_scroll` bug was invisible to every pre-existing test because they all
   began at `t=0`, where OR-ing and replacing are indistinguishable. When a
   write should *replace* a field, test it from a dirty starting state.
+- **A vacuous test looks exactly like a passing one.** Three times now a test
+  never reached the code it claimed to cover: W1-05a's sprite/background
+  priority test asserted on scanline 0, which renders no sprites at all
+  because evaluation on line N feeds rendering on line N+1; its overflow
+  assertion was tripped by phantom Y=0 sprites in zero-filled OAM. **When a
+  pipeline has a delay, assert on the scanline where the effect lands, not
+  where the input was written**, and pad unused fixture state with `$FF`
+  rather than leaving it zeroed.
+- **Ruling (Brad, 2026-08-03): the sink is ACCURACY-EXACT.** `CoreSink`
+  always carries the true hardware framebuffer; `dropped_by_limit` is always
+  `false` on the NES path; W3-05's limit bypass reconstructs dropped sprites
+  from OAM via `StateView`/SpriteHistorian. `crates/rf-core-api/src/video.rs`
+  carries the full reasoning; `EMULATION_CORES.md` §1 and §2.2 were both
+  corrected to match. Do not "restore" the old wording.
 
 ## Large test data (shapes every CPU/PPU ticket)
 

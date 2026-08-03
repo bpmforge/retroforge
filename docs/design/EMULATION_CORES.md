@@ -69,10 +69,19 @@ Per-dot pipeline, 341 dots × 262 scanlines (NTSC):
 - Sprite evaluation (dots 65-256): the real 2-phase OAM scan into secondary
   OAM, 8-sprite limit, and the *buggy* overflow-flag diagonal scan —
   emulated as hardware does, bugs included. Sprite fetches at dots 257-320.
-  Sprites evaluated with the `dropped_by_limit` flag: in Enhanced mode the
-  scanline emit includes dropped sprites (evaluation itself is unchanged —
-  sprite-0 hit and overflow flags always reflect hardware behavior; see
-  ENHANCEMENT_RUNTIME.md §2).
+  **The scanline emit is accuracy-exact in BOTH modes** — it always carries
+  the true hardware framebuffer, so a limit-dropped sprite is never emitted
+  and `dropped_by_limit` is always `false` on the NES path. The sprite-limit
+  bypass (W3-05) reconstructs dropped sprites from OAM via `StateView` /
+  its SpriteHistorian, which its own acceptance criteria already assume.
+  Evaluation is unchanged either way — sprite-0 hit and overflow flags
+  always reflect hardware behavior; see ENHANCEMENT_RUNTIME.md §2.
+  *(Corrected 2026-08-03 by Brad's ruling during W1-05a: this previously
+  said "in Enhanced mode the scanline emit includes dropped sprites", which
+  is unachievable — `CoreSink::video_scanline` carries exactly one
+  `PpuPixel` per x, so emitting a dropped sprite would displace the pixel
+  the CRT actually showed, violating law 6 and FR-MODE-002's mode
+  invariant. `crates/rf-core-api/src/video.rs` carries the full ruling.)*
 - Sprite-0 hit: opaque BG ∩ opaque sprite-0 pixel, not at x=255, not in the
   left-8-pixel column when masked by $2001; set at the exact dot.
 - VBlank/NMI: flag set at dot 1 of scanline 241; reading $2002 near that dot
