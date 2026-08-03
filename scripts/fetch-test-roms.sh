@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 # Fetch + verify test ROMs per tests/rom-manifest.toml into gitignored roms/.
-# Implemented by ticket W0-03 (rf-harness owns the parsing; this is the CLI).
+# Ticket W0-03: rf-harness owns manifest parsing + mirror/hash verification
+# (crates/rf-harness/src/manifest.rs, fetch.rs); this script is a thin
+# wrapper that builds/runs the `fetch-test-roms` binary against the repo's
+# real manifest. No unzip/archive-extraction step here or in the binary —
+# see crates/rf-harness/src/fetch.rs module doc for why.
+#
+# Usage:
+#   scripts/fetch-test-roms.sh                 # fetch every real-hash artifact
+#   scripts/fetch-test-roms.sh nestest-rom ...  # fetch only the named artifact id(s)
+#
+# POSIX-ish, macOS (BSD userland, no `timeout`) and Linux CI compatible —
+# no BSD/GNU-specific flags used here; the actual fetch/hash logic lives in
+# Rust (crates/rf-harness), not in this script.
 set -euo pipefail
-echo "W0-03 not yet implemented — see tests/rom-manifest.toml" >&2
-exit 1
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+
+exec cargo run --quiet --manifest-path "$repo_root/Cargo.toml" \
+  -p rf-harness --bin fetch-test-roms -- \
+  --manifest "$repo_root/tests/rom-manifest.toml" \
+  --repo-root "$repo_root" \
+  "$@"
