@@ -46,11 +46,17 @@
 //! is exactly the class of wiring bug (not algorithm bug) this file exists
 //! to catch.
 //!
-//! OAM is populated through 40 real `$2004` writes starting from
-//! `OAMADDR=0` (`$2003`), which leaves `OAMADDR` at `0x28` (non-zero) once
-//! setup finishes -- the ticket's own "non-empty, non-zero starting OAM...
-//! non-zero OAMADDR" trap, satisfied by construction rather than added on
-//! as an afterthought.
+//! OAM is populated through real `$2003`/`$2004` writes in two passes (see
+//! `build_prg`): the 54 primary-OAM entries this fixture doesn't use are
+//! first filled with `$FF` (never in range for any visible scanline),
+//! THEN the 10 real sprites are written -- in that order so `OAMADDR` ends
+//! non-zero (`0x28`), the ticket's own "non-empty, non-zero starting OAM...
+//! non-zero OAMADDR" trap, satisfied by construction. The `$FF` fill isn't
+//! just tidiness: `Ppu::new`'s zero-filled OAM leaves every unused index at
+//! Y=0, which IS "in range" at scanline 0, so without it the overflow flag
+//! would already be set by phantom sprites before this fixture's real
+//! sprites are ever evaluated -- which would make this file's overflow-flag
+//! assertion pass even with the real 8-sprite-cap/overflow code deleted.
 use rf_core_api::{CoreEvent, CoreSink, PpuPixel};
 use rf_harness::{find_first_divergence, hash_frame_palette_indices};
 use rf_nes::{Cpu, NesBus};
@@ -183,8 +189,28 @@ fn build_prg() -> (Vec<u8>, u16) {
     const PRG_BASE: u16 = 0x8000;
     let mut prg = Vec::new();
 
-    // --- OAM: $2003 <- 0, then 40 bytes via $2004 (auto-increments OAMADDR,
-    // leaving it at 0x28 -- non-zero, the ticket's trap) ---
+    // --- OAM, in two passes (a real "clear off-screen, then populate"
+    // pattern, not just a test convenience):
+    //
+    // Pass 1: $2003 <- 40 (this fixture's 10 real sprites occupy bytes
+    // 0-39), then $FF into the remaining 216 bytes via $2004. Y=$FF is
+    // never in range for any visible scanline (255 > the max scanline,
+    // 239, regardless of 8x8/8x16 height) -- without this, `Ppu::new`'s
+    // zero-filled OAM leaves primary indices 10-63 at Y=0, which IS
+    // "in range" at scanline 0 (0 >= 0 && 0 < 0+8), quietly finding 8+
+    // phantom sprites and setting the overflow flag for a reason that has
+    // nothing to do with this fixture's real 9th sprite -- which would
+    // make this file's overflow-flag assertion pass even if the real
+    // 8-sprite-cap/overflow-scan code were deleted outright.
+    //
+    // Pass 2: $2003 <- 0, then the 10 real sprites via $2004, ending
+    // OAMADDR at 0x28 (40) -- non-zero, the ticket's own trap.
+    lda_imm(&mut prg, 40);
+    sta_abs(&mut prg, 0x2003);
+    lda_imm(&mut prg, 0xFF);
+    for _ in 0..(256 - 40) {
+        sta_abs(&mut prg, 0x2004);
+    }
     lda_imm(&mut prg, 0x00);
     sta_abs(&mut prg, 0x2003);
     for &(y, tile, attr, x) in &sprite_table() {
@@ -321,8 +347,21 @@ fn synthetic_nrom_sprites_match_the_analytically_computed_golden_frame() {
     let mut discard = PermissiveSink::default();
     bus.drain_video(&mut discard);
 
-    for _ in 0..60_000 {
-        cpu.step(&mut bus);
+    // Sampled (not a single peek at the end): the overflow flag is only
+    // held from sprite 8's own scanline-99 phase-2 check through the NEXT
+    // pre-render line's dot-1 auto-clear -- most, but not all, of a
+    // frame's dot span. A single peek after a fixed step count can land in
+    // the brief cleared window and prove nothing; sampling across ~5
+    // frames' worth of steps (60,000 CPU steps, chunked) makes landing
+    // inside the SET window ~5x over, not a coin flip.
+    let mut overflow_ever_observed = false;
+    for _ in 0..60 {
+        for _ in 0..1_000 {
+            cpu.step(&mut bus);
+        }
+        if bus.peek(0x2002) & 0x20 != 0 {
+            overflow_ever_observed = true;
+        }
     }
 
     let mut capture = PermissiveSink::default();
@@ -370,11 +409,9 @@ fn synthetic_nrom_sprites_match_the_analytically_computed_golden_frame() {
     // sprite 8's real Y is genuinely in range, so the very first
     // overflow-phase check (m=0) finds it directly -- no drift needed to
     // demonstrate the flag firing end-to-end through the real pipeline.
-    let status = bus.peek(0x2002);
-    assert_eq!(
-        status & 0x20,
-        0x20,
-        "sprite overflow flag must be set: a genuine 9th in-range sprite exists"
+    assert!(
+        overflow_ever_observed,
+        "sprite overflow flag must be set at some point: a genuine 9th in-range sprite exists"
     );
 
     // Static-scene stability, using `find_first_divergence` as its own

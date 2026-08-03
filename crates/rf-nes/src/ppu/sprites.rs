@@ -268,9 +268,27 @@ impl Ppu {
             // `self.scanline` here is the SAME scanline `evaluate_sprites`
             // used as its in-range comparison a moment ago (dot 65 of this
             // scanline) — module doc: that already guarantees
-            // `sprite.y <= self.scanline < sprite.y + height`, so this is
-            // already the correct 0-indexed row for the scanline these
-            // units render NEXT.
+            // `sprite.y <= self.scanline < sprite.y + height`, so
+            // `self.scanline - sprite.y` is already the correct 0-indexed
+            // row for the scanline these units render NEXT.
+            //
+            // That guarantee holds ONLY if `evaluate_sprites` actually ran
+            // on THIS scanline. It doesn't if rendering was toggled off at
+            // dot 65 (skipping evaluation) and back on before dot 257 (a
+            // normal mid-scanline raster-effect pattern) — `secondary_oam`
+            // is then stale from whatever earlier scanline last evaluated,
+            // and `sprite.y` may not satisfy the invariant against the
+            // CURRENT `self.scanline` at all (row could be `>= height`, or
+            // `sprite.y > self.scanline` entirely, which would underflow
+            // the subtraction below). Re-checking with the same
+            // `sprite_in_range` evaluation uses, and simply not latching a
+            // sprite that fails it, turns that stale-data case into "this
+            // sprite doesn't render this frame" instead of a wrong pixel
+            // (leftover `EMPTY_SPRITE_UNIT` is fully transparent) or a
+            // panic.
+            if !self.sprite_in_range(sprite.y) {
+                continue;
+            }
             let mut row = self.scanline - sprite.y as u16;
             let flip_v = sprite.attr & 0x80 != 0;
             if flip_v {
