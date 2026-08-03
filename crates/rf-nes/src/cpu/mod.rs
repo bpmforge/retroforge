@@ -7,12 +7,10 @@
 //! modes, per-cycle bus behavior including dummy reads/writes — matches the
 //! NMOS 6502 exactly (EMULATION_CORES.md §2.1).
 //!
-//! Scope (ticket W1-01a): the 256 **official** opcodes, all addressing
-//! modes, and the cycle-accurate bus trace they produce. Unofficial/illegal
-//! opcodes and hardware interrupt polling (NMI edge, IRQ level, BRK/IRQ
-//! hijacking) are ticket W1-01b — [`Cpu::step`] panics with a named-opcode
-//! message if it ever decodes one of those bytes, which is a deliberate
-//! seam, not a bug.
+//! Scope: the 256 official opcodes (ticket W1-01a) plus the 105
+//! unofficial/illegal opcodes and hardware interrupt polling — NMI edge,
+//! IRQ level, BRK/IRQ hijacking (ticket W1-01b, see `cpu/exec.rs` and
+//! `cpu/ops.rs` module docs for the per-opcode citations).
 //!
 //! Verified against nesdev.org/6502_cpu.txt (the classic cycle-by-cycle
 //! bus-operation reference, also mirrored as the "64doc" NMOS 6502/6510
@@ -78,9 +76,62 @@ pub const FLAG_V: u8 = 0x40;
 /// Negative flag: copy of bit 7 of the last loaded/computed value.
 pub const FLAG_N: u8 = 0x80;
 
+/// Which "unstable" unofficial opcode last executed and had to fall back
+/// to a commonly-observed hardware constant rather than a value fully
+/// determined by documented logic (EMULATION_CORES.md §2.1: "Unstable ops
+/// ... get the commonly-observed constants; flag them in the trace log").
+///
+/// This is the *marker*, not the logger: ticket W1-01b exposes this field
+/// so a future trace logger can flag these instructions; it does not
+/// itself write a trace (that's W1-03, `trace logger in nestest.log
+/// format`, FR-DBG-003 — see `cpu/exec.rs` module doc for why building
+/// one here would be out of scope).
+///
+/// Includes `Shx`/`Shy` even though EMULATION_CORES.md §2.1's example
+/// list names only `XAA/ANE, LXA, AHX/SHA, TAS, LAS` — that parenthetical
+/// is illustrative (the same paragraph's *stable*-illegal list is equally
+/// non-exhaustive, omitting `ANC`/`ALR`/`ARR`/`SBX`). This implementation's
+/// own reasoning for including them: `am_absi_unstable`'s page-cross
+/// corruption formula (`cpu/addressing.rs`) is *identical* for
+/// `SHA`/`SHX`/`SHY`/`TAS` — same "AND with base-high-byte+1, then on a
+/// page cross substitute that value for the target's high byte" mechanism
+/// — verified independently against the nes6502 SingleStepTests vectors
+/// for all four (`$93`/`$9F`, `$9E`, `$9C`, `$9B`) this session; nesdev's
+/// unofficial-opcode reference pages list `SHX`/`SHY`'s mnemonics but
+/// don't group them with `SHA`/`TAS` in prose, so this classification is
+/// this implementation's conclusion from the shared mechanism, not a
+/// nesdev claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnstableOp {
+    /// `ANE`/`XAA` (`$8B`).
+    Ane,
+    /// `LXA` (`$AB`).
+    Lxa,
+    /// `SHA`/`AHX` (`$93`, `$9F`).
+    Sha,
+    /// `SHX`/`SXA` (`$9E`).
+    Shx,
+    /// `SHY`/`SYA` (`$9C`).
+    Shy,
+    /// `TAS`/`SHS` (`$9B`).
+    Tas,
+    /// `LAS`/`LAR` (`$BB`).
+    Las,
+}
+
 /// The 6502/2A03 register file plus the cycle-stepped instruction
 /// dispatcher. Holds no bus/memory state of its own — every access crosses
 /// [`CpuBus`].
+///
+/// Besides the six architectural registers, this carries interrupt-line
+/// bookkeeping (NMI edge latch, penultimate-cycle poll results — see
+/// `cpu/exec.rs`'s `CountingBus`/`run_cycled` module docs) and the
+/// unstable-op/JAM markers. All of it derives `PartialEq`/`Eq` and will
+/// participate in state comparisons and (eventually) save-state
+/// (FR-CORE-002/003) — that's intentional: every one of these fields is
+/// fully determined by prior register state, the executed opcode, and the
+/// bus's line state, so two `Cpu`s reaching the same point via the same
+/// inputs are still bit-identical, which is what determinism requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cpu {
     pub a: u8,
@@ -93,6 +144,50 @@ pub struct Cpu {
     /// always reads as 0 — see [`FLAG_B`]/[`FLAG_U`]; use [`Cpu::set_p`]
     /// rather than assigning this field directly so that invariant holds.
     pub p: u8,
+
+    /// Set by the just-executed instruction if it was an unstable
+    /// unofficial opcode (see [`UnstableOp`]); cleared to `None` at the
+    /// start of every instruction (including hardware interrupt entries,
+    /// which are never unstable).
+    pub unstable_op: Option<UnstableOp>,
+    /// Set when the just-executed instruction was a `JAM`/`KIL` opcode
+    /// (ticket W1-01b decision: represented by leaving `pc` pointing back
+    /// at the `JAM` byte — see `cpu/exec.rs`'s `jam` doc comment — rather
+    /// than a separate "don't execute" short-circuit, so the bus trace
+    /// stays correct on every subsequent `step`). This field is purely
+    /// informational, e.g. for a future debugger; nothing in `cpu/**`
+    /// reads it to change behavior. Cleared to `false` at the start of
+    /// every instruction.
+    pub jammed: bool,
+
+    /// Edge-detector raw-level bookkeeping and interrupt-poll state —
+    /// private, see `cpu/exec.rs`'s `CountingBus`/`run_cycled` module docs
+    /// for the full model. `nmi_prev_asserted` is the NMI line's asserted
+    /// state as of the most recent sample (carried across instructions so
+    /// a transition spanning an instruction boundary is still caught);
+    /// `nmi_edge_latched` is the sticky "an edge occurred and hasn't been
+    /// serviced yet" latch; `pending_nmi_after`/`pending_irq_after` are
+    /// the penultimate-cycle poll results from the *last* instruction,
+    /// consulted by `Cpu::step` to decide whether the next thing to run is
+    /// an interrupt sequence; `i_flag_poll_snapshot` is the `I` flag value
+    /// used to gate that IRQ poll (nesdev.org/wiki/CPU_interrupts: most
+    /// instructions poll using the *pre*-instruction `I`; `RTI` is the one
+    /// exception, polling with the newly-restored value, and `BRK`/`IRQ`/
+    /// `NMI` entry itself is another, re-snapshotting right after setting
+    /// `I` — see `exec.rs`). `nmi_hijack_consumed` is set mid-instruction
+    /// by a `BRK`/`IRQ` entry's hijack decision (also `exec.rs`) to tell
+    /// `run_cycled`'s post-instruction commit "this edge was just
+    /// serviced by the hijack — don't also leave it latched or schedule a
+    /// further NMI from it", since a plain field write from inside the
+    /// `body` closure can't reach the `CountingBus`-derived commit values
+    /// directly (mirrors the `i_flag_poll_snapshot`-override pattern used
+    /// for `RTI`).
+    nmi_prev_asserted: bool,
+    nmi_edge_latched: bool,
+    pending_nmi_after: bool,
+    pending_irq_after: bool,
+    i_flag_poll_snapshot: bool,
+    nmi_hijack_consumed: bool,
 }
 
 /// A plausible cold-boot register file (`S=$FD`, `I` set, matching the
@@ -111,6 +206,14 @@ impl Default for Cpu {
             s: 0xFD,
             pc: 0,
             p: FLAG_I | FLAG_U,
+            unstable_op: None,
+            jammed: false,
+            nmi_prev_asserted: false,
+            nmi_edge_latched: false,
+            pending_nmi_after: false,
+            pending_irq_after: false,
+            i_flag_poll_snapshot: false,
+            nmi_hijack_consumed: false,
         }
     }
 }
@@ -183,10 +286,36 @@ impl Cpu {
     /// in hardware order (opcode fetch through the last write-back), and
     /// return the number of bus cycles it consumed.
     ///
-    /// Interrupt polling (NMI/IRQ) is out of scope for this ticket (see
-    /// module doc) — this only ever executes the instruction already at
-    /// `PC`.
+    /// Before fetching a normal opcode, checks whether the *previous*
+    /// instruction's penultimate-cycle poll (nesdev.org/wiki/CPU_interrupts)
+    /// found a pending interrupt; if so, this call instead runs that
+    /// hardware-forced NMI/IRQ entry sequence (NMI takes priority when
+    /// both are pending). Either way, the first bus cycle is a real
+    /// `bus.read` at `PC` — for a hardware interrupt it's the "fetch
+    /// opcode (discarded, $00 forced)" cycle nesdev's IRQ/NMI table
+    /// describes, done here (rather than inside `exec::nmi_sequence`/
+    /// `irq_sequence`) so it participates in interrupt-line sampling the
+    /// same way the normal opcode fetch does — see `cpu/exec.rs`'s
+    /// `CountingBus` doc.
     pub fn step(&mut self, bus: &mut dyn CpuBus) -> u32 {
+        if self.pending_nmi_after {
+            self.pending_nmi_after = false;
+            // Servicing consumes the latch. Done *here*, before
+            // `nmi_sequence`'s `run_cycled` seeds its `CountingBus` from
+            // `nmi_edge_latched`, not inside the sequence's own body —
+            // the latch is `cb`'s for the duration of that call, so a
+            // write to `self.nmi_edge_latched` from inside the body would
+            // just be overwritten by `run_cycled`'s post-instruction
+            // commit (`cpu.nmi_edge_latched = cb.edge_latched_curr`).
+            self.nmi_edge_latched = false;
+            bus.read(self.pc);
+            return exec::nmi_sequence(self, bus);
+        }
+        if self.pending_irq_after {
+            self.pending_irq_after = false;
+            bus.read(self.pc);
+            return exec::irq_sequence(self, bus);
+        }
         let opcode = self.fetch(bus);
         exec::execute(self, bus, opcode)
     }

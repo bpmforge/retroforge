@@ -124,6 +124,53 @@ impl Cpu {
         base.wrapping_add(self.y as u16)
     }
 
+    /// Absolute indexed addressing for the "unstable" store family
+    /// (`SHA`/`SHX`/`SHY`/`TAS`, ticket W1-01b): same fetch + unconditional
+    /// dummy-read timing as [`Cpu::am_absi_addr_slow`], but these ops also
+    /// need the *base* address's high byte (to compute the stored value)
+    /// and whether the index addition crossed a page (since on a real
+    /// 6502 that crossing corrupts the target address's high byte with
+    /// the stored value itself — the classic "unstable" quirk). Returns
+    /// `(effective_addr, base_hi, crossed)`; the caller combines
+    /// `base_hi` with the relevant registers to get the value (see
+    /// `ops.rs`'s `op_sha_value`/`op_shx_value`/`op_shy_value`/
+    /// `op_tas_value`) and, if `crossed`, must itself substitute that
+    /// value for `effective_addr`'s high byte before writing — verified
+    /// directly against the nes6502 SingleStepTests vectors for
+    /// `$9F`/`$9E`/`$9C`/`$9B` this session. nesdev's unofficial-opcode
+    /// reference pages (`CPU_unofficial_opcodes`,
+    /// `Programming_with_unofficial_opcodes`) list these opcodes' mnemonics
+    /// and addressing modes but don't spell out the page-cross corruption
+    /// formula in prose, so this implementation follows the vectors
+    /// directly for that specific mechanism rather than a nesdev citation
+    /// — see `cpu/exec.rs` module doc.
+    pub(super) fn am_absi_unstable(&mut self, bus: &mut dyn CpuBus, index: u8) -> (u16, u8, bool) {
+        let lo = self.fetch(bus);
+        let hi = self.fetch(bus);
+        let base = u16::from_le_bytes([lo, hi]);
+        let partial_lo = lo.wrapping_add(index);
+        let partial = u16::from_le_bytes([partial_lo, hi]);
+        bus.read(partial); // dummy, unconditional
+        let crossed = lo as u16 + index as u16 > 0xFF;
+        let effective = base.wrapping_add(index as u16);
+        (effective, hi, crossed)
+    }
+
+    /// `(zp),Y` counterpart of [`Cpu::am_absi_unstable`], used only by
+    /// `SHA $93`.
+    pub(super) fn am_indy_unstable(&mut self, bus: &mut dyn CpuBus) -> (u16, u8, bool) {
+        let ptr = self.fetch(bus);
+        let lo = bus.read(ptr as u16);
+        let hi = bus.read(ptr.wrapping_add(1) as u16);
+        let base = u16::from_le_bytes([lo, hi]);
+        let partial_lo = lo.wrapping_add(self.y);
+        let partial = u16::from_le_bytes([partial_lo, hi]);
+        bus.read(partial); // dummy, unconditional
+        let crossed = lo as u16 + self.y as u16 > 0xFF;
+        let effective = base.wrapping_add(self.y as u16);
+        (effective, hi, crossed)
+    }
+
     /// Read-modify-write: read the old value, write it back unmodified
     /// (the real hardware side effect this exists to model — e.g. LSR
     /// $D019 acknowledging a C64 CIA interrupt on the write-back), then
