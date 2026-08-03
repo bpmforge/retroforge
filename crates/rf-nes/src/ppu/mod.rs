@@ -50,13 +50,20 @@
 //! `crate::cpu::tests` needs one too, and would be the first step toward
 //! `Cpu` knowing about video output at all). So ticking and sink emission
 //! are decoupled: [`Ppu::tick`] appends each completed visible scanline (256
-//! [`rf_core_api::PpuPixel`]s) to an internal, bounded queue
-//! (`completed`, capacity one frame — 240 rows — since a real integration
-//! drains at each frame boundary, matching the "frame-boundary
-//! `save_state`" convention `EMULATION_CORES.md` §1 already establishes);
-//! [`Ppu::drain`] (called by [`crate::system::NesBus::drain_video`]) flushes
-//! that queue through a real `&mut dyn CoreSink`, one `video_scanline` call
-//! per row, oldest first. No `EmulatorCore` implementation exists in this
+//! [`rf_core_api::PpuPixel`]s) to an internal queue (`completed`), whose
+//! capacity is *preallocated* for one frame (240 rows), matching the
+//! "frame-boundary `save_state`" convention `EMULATION_CORES.md` §1 already
+//! establishes — but that preallocation is a hint, not an enforced cap: the
+//! queue is **not** bounded, and [`Ppu::tick`] never drops a row. A caller
+//! that goes more than one frame without draining grows it further (240
+//! more rows per undrained frame) rather than silently losing scanlines —
+//! silently dropping frames would be exactly the kind of defect W1-04b's
+//! golden-frame comparison exists to catch, so this module refuses to
+//! guess at a cap instead. [`Ppu::drain`] (called by
+//! [`crate::system::NesBus::drain_video`]) flushes the queue through a real
+//! `&mut dyn CoreSink`, one `video_scanline` call per row, oldest first; a
+//! real integration is expected to call it once per frame, but nothing
+//! here enforces that cadence. No `EmulatorCore` implementation exists in this
 //! crate yet (out of this ticket's write scope) — a later ticket wires
 //! `run_frame` to call `drain_video` once per frame; this ticket proves the
 //! mechanism with a test-only `CoreSink` that records the calls it
