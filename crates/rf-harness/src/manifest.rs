@@ -10,6 +10,33 @@
 //! mirror is only a mirror if it serves the exact bytes the artifact's one
 //! hash names. Splitting the hash per-mirror would let a stale or
 //! re-encoded "mirror" silently verify against itself, defeating FM-14.
+//!
+//! ## `[[git_artifact]]` (ticket W0-07)
+//!
+//! A second, deliberately separate table array for artifacts that are a
+//! pinned commit of a *sparse subpath* of a git repo rather than one
+//! fetchable file — e.g. `SingleStepTests/ProcessorTests`' `nes6502/v1`
+//! directory (256 JSON files), which replaces the old
+//! `singlestep-nes6502` whole-repo-zip [`Artifact`] entry: codeload zips
+//! stream without a `Content-Length` header, so a multi-GB transfer can
+//! truncate silently into bytes that still unzip and still "look like" a
+//! ROM-test archive — exactly the FM-14 shape [`Artifact::sha256`] exists
+//! to catch, except an archive sha256 for a whole-repo snapshot is itself
+//! fragile (GitHub's generated zips are not byte-stable across requests
+//! for the same commit — verified empirically at W1-01a/b).
+//!
+//! [`GitArtifact`] has **no `sha256` field** — this is intentional, not an
+//! oversight, and not a weakening of [`Artifact`]'s invariant (that
+//! struct, and `fetch_artifact`'s [`crate::fetch::FetchError::PlaceholderHash`]
+//! refusal, are both untouched). A git commit SHA already *is* a content
+//! hash: `git -C <dest> rev-parse HEAD` equaling [`GitArtifact::commit`]
+//! after a `--filter=blob:none` sparse fetch proves the checked-out tree
+//! is bit-identical to what that commit names, for exactly the same
+//! reason a Merkle-tree hash proves it — see
+//! [`crate::fetch::fetch_git_artifact`]. It does **not** independently
+//! attest the *subpath*'s content beyond what the commit itself already
+//! guarantees; that's the point, not a gap — a future reader should not
+//! "fix" this by bolting on a redundant sha256 of the checked-out tree.
 
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -21,6 +48,10 @@ pub struct Manifest {
     /// One entry per fetchable file (see module doc).
     #[serde(default, rename = "artifact")]
     pub artifacts: Vec<Artifact>,
+    /// One entry per pinned-commit/sparse-subpath git checkout (module doc,
+    /// ticket W0-07).
+    #[serde(default, rename = "git_artifact")]
+    pub git_artifacts: Vec<GitArtifact>,
     /// One entry per accuracy-table suite (see module doc).
     #[serde(default, rename = "suite")]
     pub suites: Vec<Suite>,
@@ -51,6 +82,30 @@ impl Artifact {
     pub fn is_hash_placeholder(&self) -> bool {
         self.sha256.starts_with("TODO-")
     }
+}
+
+/// A single pinned-commit, sparse-subpath git checkout (module doc, ticket
+/// W0-07). Unlike [`Artifact`], integrity comes from [`GitArtifact::commit`]
+/// alone — see module doc for why there is no `sha256` field here.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitArtifact {
+    /// Unique key referenced by [`SuiteRom::artifact`] — shares its
+    /// namespace with [`Artifact::id`] (see [`Manifest::validate`]).
+    pub id: String,
+    /// Same posture/rule as [`Artifact::license_status`].
+    pub license_status: LicenseStatus,
+    /// Clone URL, e.g. `https://github.com/<org>/<repo>.git`.
+    pub repo: String,
+    /// 40 lowercase hex chars. The integrity check: after fetching, `git
+    /// -C <dest> rev-parse HEAD` must equal this value exactly (see
+    /// [`crate::fetch::fetch_git_artifact`]).
+    pub commit: String,
+    /// Path within the repo passed to `git sparse-checkout set --cone`.
+    pub subpath: String,
+    /// Path under `roms/` (gitignored, NFR-006) the checkout lands at —
+    /// a directory, not a file (see module doc: this is the one
+    /// deliberate exception to `fetch.rs`'s "every artifact is one file").
+    pub dest: String,
 }
 
 /// License posture of an [`Artifact`] (no-vendor/no-rehost rule).
@@ -154,11 +209,14 @@ impl Manifest {
     }
 
     /// Structural self-consistency checks that TOML deserialization alone
-    /// cannot express: unique ids, every `dest` really lives under `roms/`
-    /// (the testable form of NFR-006 — "the repo shall never contain
-    /// ROMs"), every mirror list non-empty, every `sha256` either a real
-    /// lowercase-hex digest or an honest `TODO-` placeholder, and every
-    /// `[[suite.roms]]` reference resolves to a declared artifact.
+    /// cannot express: unique ids (shared namespace across [`Artifact`]
+    /// and [`GitArtifact`] — both are things a `[[suite.roms]]` row can
+    /// name), every `dest` really lives under `roms/` (the testable form
+    /// of NFR-006 — "the repo shall never contain ROMs"), every mirror
+    /// list non-empty, every `sha256` either a real lowercase-hex digest
+    /// or an honest `TODO-` placeholder, every [`GitArtifact::commit`] a
+    /// real 40-lowercase-hex commit SHA, and every `[[suite.roms]]`
+    /// reference resolves to a declared artifact of either kind.
     ///
     /// # Errors
     /// Returns every violation found, not just the first.
@@ -186,6 +244,27 @@ impl Manifest {
                 errors.push(ValidationError(format!(
                     "artifact {}: sha256 {:?} is neither 64 lowercase hex chars nor a TODO- placeholder",
                     a.id, a.sha256
+                )));
+            }
+        }
+
+        for g in &self.git_artifacts {
+            if !artifact_ids.insert(g.id.as_str()) {
+                errors.push(ValidationError(format!(
+                    "duplicate artifact id: {} (shared namespace between [[artifact]] and [[git_artifact]])",
+                    g.id
+                )));
+            }
+            if !g.dest.starts_with("roms/") {
+                errors.push(ValidationError(format!(
+                    "git_artifact {}: dest {:?} must start with \"roms/\" (NFR-006)",
+                    g.id, g.dest
+                )));
+            }
+            if !is_lowercase_commit_hex(&g.commit) {
+                errors.push(ValidationError(format!(
+                    "git_artifact {}: commit {:?} is not 40 lowercase hex chars",
+                    g.id, g.commit
                 )));
             }
         }
@@ -224,6 +303,12 @@ impl Manifest {
         self.artifacts.iter().find(|a| a.id == id)
     }
 
+    /// Look up a git artifact by id.
+    #[must_use]
+    pub fn git_artifact(&self, id: &str) -> Option<&GitArtifact> {
+        self.git_artifacts.iter().find(|g| g.id == id)
+    }
+
     /// Look up a suite by id.
     #[must_use]
     pub fn suite(&self, id: &str) -> Option<&Suite> {
@@ -241,6 +326,12 @@ impl Suite {
 
 fn is_lowercase_sha256_hex(s: &str) -> bool {
     s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+fn is_lowercase_commit_hex(s: &str) -> bool {
+    s.len() == 40
         && s.bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
@@ -302,6 +393,7 @@ mod tests {
                 mirrors: vec!["https://example.invalid".into()],
                 dest: "not-roms/a1.nes".into(),
             }],
+            git_artifacts: vec![],
             suites: vec![],
         };
         let errs = m.validate().unwrap_err();
@@ -318,6 +410,7 @@ mod tests {
                 mirrors: vec![],
                 dest: "roms/nes/a1.nes".into(),
             }],
+            git_artifacts: vec![],
             suites: vec![],
         };
         let errs = m.validate().unwrap_err();
@@ -328,6 +421,7 @@ mod tests {
     fn rejects_suite_rom_referencing_unknown_artifact() {
         let m = Manifest {
             artifacts: vec![],
+            git_artifacts: vec![],
             suites: vec![Suite {
                 id: "s1".into(),
                 console: Console::Nes,
@@ -355,6 +449,7 @@ mod tests {
                 mirrors: vec!["https://example.invalid".into()],
                 dest: "roms/nes/a1.nes".into(),
             }],
+            git_artifacts: vec![],
             suites: vec![],
         };
         m.validate().unwrap();
@@ -371,9 +466,124 @@ mod tests {
                 mirrors: vec!["https://example.invalid".into()],
                 dest: "roms/nes/a1.nes".into(),
             }],
+            git_artifacts: vec![],
             suites: vec![],
         };
         let errs = m.validate().unwrap_err();
         assert!(errs.iter().any(|e| e.0.contains("sha256")));
+    }
+
+    fn sample_git_artifact() -> GitArtifact {
+        GitArtifact {
+            id: "g1".into(),
+            license_status: LicenseStatus::NoLicenseGrantFetchOnly,
+            repo: "https://example.invalid/repo.git".into(),
+            commit: "b".repeat(40),
+            subpath: "sub/dir".into(),
+            dest: "roms/nes/g1-src".into(),
+        }
+    }
+
+    #[test]
+    fn git_artifact_parses_and_validates() {
+        let text = r#"
+            [[git_artifact]]
+            id = "g1"
+            license_status = "no-license-grant-fetch-only"
+            repo = "https://example.invalid/repo.git"
+            commit = "bb11756436da8fd16cce86aef63dc6725f48836f"
+            subpath = "nes6502/v1"
+            dest = "roms/nes/g1-src"
+        "#;
+        let manifest = Manifest::parse(text).unwrap();
+        assert_eq!(manifest.git_artifacts.len(), 1);
+        manifest.validate().unwrap();
+        assert_eq!(
+            manifest.git_artifact("g1").unwrap().commit,
+            "bb11756436da8fd16cce86aef63dc6725f48836f"
+        );
+    }
+
+    #[test]
+    fn git_artifact_rejects_dest_outside_roms() {
+        let m = Manifest {
+            artifacts: vec![],
+            git_artifacts: vec![GitArtifact {
+                dest: "not-roms/g1-src".into(),
+                ..sample_git_artifact()
+            }],
+            suites: vec![],
+        };
+        let errs = m.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.0.contains("must start with")));
+    }
+
+    #[test]
+    fn git_artifact_rejects_malformed_commit() {
+        let m = Manifest {
+            artifacts: vec![],
+            git_artifacts: vec![GitArtifact {
+                commit: "not-40-hex-chars".into(),
+                ..sample_git_artifact()
+            }],
+            suites: vec![],
+        };
+        let errs = m.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.0.contains("40 lowercase hex")));
+    }
+
+    #[test]
+    fn git_artifact_rejects_uppercase_commit() {
+        let m = Manifest {
+            artifacts: vec![],
+            git_artifacts: vec![GitArtifact {
+                commit: "B".repeat(40),
+                ..sample_git_artifact()
+            }],
+            suites: vec![],
+        };
+        let errs = m.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.0.contains("40 lowercase hex")));
+    }
+
+    #[test]
+    fn duplicate_id_across_artifact_and_git_artifact_kinds_is_rejected() {
+        let m = Manifest {
+            artifacts: vec![Artifact {
+                id: "shared-id".into(),
+                license_status: LicenseStatus::PublicDomain,
+                sha256: "TODO-test".into(),
+                mirrors: vec!["https://example.invalid".into()],
+                dest: "roms/nes/a1.nes".into(),
+            }],
+            git_artifacts: vec![GitArtifact {
+                id: "shared-id".into(),
+                ..sample_git_artifact()
+            }],
+            suites: vec![],
+        };
+        let errs = m.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.0.contains("duplicate artifact id")));
+    }
+
+    #[test]
+    fn suite_rom_may_reference_a_git_artifact_id() {
+        let m = Manifest {
+            artifacts: vec![],
+            git_artifacts: vec![sample_git_artifact()],
+            suites: vec![Suite {
+                id: "s1".into(),
+                console: Console::Nes,
+                fr: "FR-CORE-999".into(),
+                tier: Tier::A,
+                protocol: Protocol::Vector,
+                roms: vec![SuiteRom {
+                    artifact: "g1".into(),
+                    rom: "r1".into(),
+                    frame_budget: 0,
+                }],
+            }],
+        };
+        m.validate().unwrap();
     }
 }

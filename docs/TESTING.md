@@ -38,6 +38,15 @@ license note, unpack path. `scripts/fetch-test-roms.sh` downloads into
 gitignored `roms/`, verifies hashes, and is idempotent; CI caches by
 manifest hash. Sources: christopherpow/nes-test-roms, SingleStepTests repos,
 gilyon/snes-tests releases, PeterLemon/SNES, undisbeliever/snes-test-roms.
+**`[[git_artifact]]` (ticket W0-07):** a second manifest table for sources
+that are naturally a pinned commit + sparse subpath of a git repo rather
+than one fetchable file (e.g. SingleStepTests' per-opcode vector JSON
+directories) — integrity comes from the commit SHA itself
+(`git rev-parse HEAD` after a `--filter=blob:none` sparse checkout), not a
+sha256, since a commit SHA already is a content hash and archive zips of
+these repos are not byte-stable across requests (see
+`crates/rf-harness/src/manifest.rs` module doc). §4 below records the
+protocol this replaced for `nes6502`.
 **Fixture doctrine (D-001, 2026-07-15):** game-shaped fixtures the project
 demos or gates on are self-contained — in-repo source (RF-Scroller under
 `fixtures/`, cc65/libSFX-built in CI, CC0/MIT assets), never third-party
@@ -53,10 +62,17 @@ docs/PREREQUISITES.md.
 ## 4. NES CI gates
 
 Tier A = every PR; Tier B = nightly (slow or visual-manual-once suites).
+**Tier A-local (ticket W0-07):** a suite whose full 100%-conformance run is
+too heavy to repeat on every PR (the nes6502 vector suite is 2,560,000
+cases across all 256 opcodes) is verified locally instead — see "Local
+evidence gate" below — and CI checks the resulting evidence file rather
+than re-running the suite. It is still a hard release gate, not an
+optional one: it is just verified on a different cadence/machine than
+Tier A/B.
 
 | Suite | Verifies | SRS | Tier | Pass criteria |
 |---|---|---|---|---|
-| SingleStepTests `nes6502` | per-opcode state + bus cycles | FR-CORE-020 | A | 100% official ops; illegal-op subset tracked to 100% by Phase 2 |
+| SingleStepTests `nes6502` | per-opcode state + bus cycles | FR-CORE-020 | A-local | 100% of all 256 opcodes (151 official + 105 unofficial/illegal) — 2,560,000 cases |
 | nestest + `nestest.log` | whole-CPU conformance | FR-CORE-021 | A | byte-exact trace diff empty |
 | blargg `instr_test-v5` | official+unofficial instructions | FR-CORE-020 | A | $6000 = 0 all ROMs |
 | `cpu_timing_test6`, `instr_timing`, `branch_timing_tests` | cycle counts, page-cross, branches | FR-CORE-020 | A | $6000 = 0 |
@@ -72,6 +88,32 @@ Tier A = every PR; Tier B = nightly (slow or visual-manual-once suites).
 | Holy Diver Batman (28 ROMs) | mapper acid breadth | FR-CORE-025 | B | golden frame per ROM |
 | RF-Scroller 5-min replay | real-game regression (in-repo fixture, D-001) | FR-CORE-026 | A | final-hash + 6 golden frames |
 | Alter Ego 5-min replay | independent-proof regression (PD fixture) | FR-CORE-026 | A | final-hash + golden frames |
+
+**Local evidence gate (ticket W0-07):** `nes6502` is the first Tier A-local
+suite. Protocol:
+
+1. Vectors are fetched once via `scripts/fetch-test-roms.sh
+   singlestep-nes6502-src` (a `[[git_artifact]]` manifest entry, §3) into
+   gitignored `roms/nes/singlestep-nes6502-src/nes6502/v1` — never
+   committed (NFR-006).
+2. `scripts/local-gate.sh` runs the full suite locally (via
+   `crates/rf-harness/src/bin/local_gate_evidence.rs`, which depends on
+   `rf-nes` directly — `scripts/validate-arch.sh` exempts "the test
+   harness" from the cores-via-`rf-core-api`-only rule) and writes the
+   result to the single rolling file `docs/evidence/local-gate.json`
+   (committed; git history is the audit trail) — the current retroforge
+   commit, toolchain version, the vector source's own commit SHA, and the
+   W0-03 accuracy-table row (raw/effective pass-fail) for `nes6502`.
+3. `node scripts/validate-evidence.mjs` — cheap (reads a few KB of JSON,
+   no ROM/vector bytes) — runs in CI on every PR and fails the build if:
+   evidence is missing for a Tier A-local suite; the working tree was
+   dirty when the evidence was generated; or the evidence is **stale**
+   (a later commit touches `crates/rf-nes/src/cpu` than the commit the
+   evidence was generated against — checked via `git rev-list`/`git
+   merge-base --is-ancestor` on FULL history, never timestamps: mtimes
+   aren't in git and committer dates are rewritable/non-monotonic across
+   merges). CI never fetches the vectors themselves — that cost stays
+   local-only, which is the entire point of this tier.
 
 ## 5. SNES CI gates
 

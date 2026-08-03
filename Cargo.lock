@@ -596,6 +596,7 @@ name = "rf-harness"
 version = "0.1.0"
 dependencies = [
  "rf-core-api",
+ "rf-nes",
  "serde",
  "sha2",
  "toml",

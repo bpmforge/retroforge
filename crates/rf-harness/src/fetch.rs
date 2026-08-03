@@ -1,16 +1,23 @@
 //! Mirror-list fetch + hash verification (ticket W0-03; NFR-006,
-//! FAILURE_MODES.md FM-14).
+//! FAILURE_MODES.md FM-14), plus pinned-commit git-subpath checkout
+//! (ticket W0-07).
 //!
-//! Deliberately has **no archive-unpack step**. Every [`crate::manifest::Artifact`]
-//! is one file; the fetcher writes exactly the bytes it verified to `dest`
-//! and stops. Where an upstream source is naturally a whole-repo archive
-//! (e.g. SingleStepTests' hundreds of per-opcode JSON files), the manifest
-//! records the archive itself as the artifact — this crate does not
-//! extract it. Reasons: (1) extraction needs either a new `zip` crate
-//! dependency (a whole new TECH_STACK decision, unverified API) or
-//! shelling out to `unzip`, which is not guaranteed present on minimal CI
-//! images; (2) nothing in this ticket's scope consumes the extracted form
-//! — that's a future ticket (rf-nes/rf-snes's own vector-test runner).
+//! [`crate::manifest::Artifact`] (fetched by [`fetch_artifact`])
+//! deliberately has **no archive-unpack step**: every `Artifact` is one
+//! file, and the fetcher writes exactly the bytes it verified to `dest`
+//! and stops. Extraction would need either a new `zip` crate dependency
+//! (a whole new TECH_STACK decision, unverified API) or shelling out to
+//! `unzip`, which is not guaranteed present on minimal CI images.
+//!
+//! [`crate::manifest::GitArtifact`] (fetched by [`fetch_git_artifact`],
+//! ticket W0-07) is the one deliberate exception to "every artifact is one
+//! file": its `dest` is a directory — a `git sparse-checkout` of one
+//! subpath at one pinned commit. This isn't the archive-unpack step the
+//! paragraph above says this crate doesn't have; `git` itself is the
+//! selection mechanism (`sparse-checkout set --cone <subpath>`), not a
+//! zip/tar extractor this crate would need to implement or depend on, and
+//! the result is verified by `git rev-parse HEAD` equaling the pinned
+//! commit rather than a content hash this crate computes.
 //!
 //! The real network transport ([`CurlDownloader`]) shells out to the
 //! system `curl` rather than pulling in an HTTP client crate — `curl` is
@@ -18,8 +25,11 @@
 //! here has it) and is not unit-testable IO, so it stays a thin,
 //! deliberately-untested edge. All the logic that *is* unit tested
 //! ([`fetch_artifact`]) is decoupled from it via the [`Downloader`] trait.
+//! [`fetch_git_artifact`] follows the identical shape with [`GitRunner`]
+//! standing in for `Downloader` and [`SystemGitRunner`] shelling out to
+//! the system `git` (also already required by project law).
 
-use crate::manifest::Artifact;
+use crate::manifest::{Artifact, GitArtifact};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fs;
@@ -226,6 +236,244 @@ fn write_verified(artifact_id: &str, dest_path: &Path, bytes: &[u8]) -> Result<(
     })
 }
 
+/// Abstracts "run `git` with these arguments", so [`fetch_git_artifact`]
+/// (and the small `git_rev_parse_head`/`git_tree_is_clean` helpers below)
+/// are testable without a real git binary or network access — the same
+/// role [`Downloader`] plays for [`fetch_artifact`].
+pub trait GitRunner {
+    /// Run `git <args>`, returning trimmed stdout on success or a
+    /// human-readable message (stderr, or the spawn error) on failure.
+    ///
+    /// # Errors
+    /// Returns `Err` if the process can't be spawned or exits non-zero.
+    fn run(&self, args: &[&str]) -> Result<String, String>;
+}
+
+/// Production [`GitRunner`]: shells out to the system `git` binary.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemGitRunner;
+
+impl GitRunner for SystemGitRunner {
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        let output = Command::new("git")
+            .args(args)
+            .output()
+            .map_err(|e| format!("failed to spawn git {}: {e}", args.join(" ")))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git {} exited with {}: {}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+}
+
+/// [`fetch_git_artifact`] failure modes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitFetchError {
+    /// One of the `git` invocations that builds the checkout failed.
+    CommandFailed {
+        artifact_id: String,
+        step: &'static str,
+        message: String,
+    },
+    /// The fresh checkout's `git rev-parse HEAD` didn't equal
+    /// [`GitArtifact::commit`] — the integrity check (module doc) failed.
+    IntegrityCheckFailed {
+        artifact_id: String,
+        expected: String,
+        actual: String,
+    },
+    /// `dest` already exists (module doc: pre-existing checkouts are
+    /// never deleted or re-cloned) but is at the wrong commit, or isn't a
+    /// git repository at all — either way this is a hard error, not
+    /// something this function will silently "fix" by mutating `dest`.
+    ExistingDestMismatch {
+        artifact_id: String,
+        dest: PathBuf,
+        detail: String,
+    },
+}
+
+impl fmt::Display for GitFetchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GitFetchError::CommandFailed {
+                artifact_id,
+                step,
+                message,
+            } => write!(
+                f,
+                "git_artifact '{artifact_id}': {step} failed: {message}"
+            ),
+            GitFetchError::IntegrityCheckFailed {
+                artifact_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "git_artifact '{artifact_id}': integrity check failed: rev-parse HEAD = {actual}, want {expected}"
+            ),
+            GitFetchError::ExistingDestMismatch {
+                artifact_id,
+                dest,
+                detail,
+            } => write!(
+                f,
+                "git_artifact '{artifact_id}': existing dest {} does not match the pinned commit and was left untouched: {detail}",
+                dest.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GitFetchError {}
+
+/// Fetch `git_artifact`, writing (or verifying an already-correct)
+/// checkout at `<repo_root>/<git_artifact.dest>`.
+///
+/// If `dest` already exists, it is **only ever read, never deleted or
+/// re-cloned or otherwise mutated**: this function runs `git -C <dest>
+/// rev-parse HEAD` and either returns `Ok` immediately (already at the
+/// pinned commit — nothing to do) or [`GitFetchError::ExistingDestMismatch`]
+/// (wrong commit, or not a git repository) without touching `dest` at
+/// all. Only when `dest` doesn't exist yet does this perform the fresh
+/// `init`/`remote add`/`sparse-checkout`/`fetch`/`checkout` sequence, each
+/// step exactly as verified live against a real upstream repo (see
+/// `plan.json` ticket W0-07 pre-flight notes), followed by the same
+/// `rev-parse HEAD` integrity check.
+///
+/// # Errors
+/// See [`GitFetchError`].
+pub fn fetch_git_artifact(
+    git_artifact: &GitArtifact,
+    runner: &dyn GitRunner,
+    repo_root: &Path,
+) -> Result<PathBuf, GitFetchError> {
+    let dest = repo_root.join(&git_artifact.dest);
+    let dest_str = dest.to_string_lossy().into_owned();
+
+    if dest.is_dir() {
+        return match runner.run(&["-C", &dest_str, "rev-parse", "HEAD"]) {
+            Ok(head) if head == git_artifact.commit => Ok(dest),
+            Ok(head) => Err(GitFetchError::ExistingDestMismatch {
+                artifact_id: git_artifact.id.clone(),
+                dest,
+                detail: format!(
+                    "at commit {head}, want {} — refusing to delete/re-clone",
+                    git_artifact.commit
+                ),
+            }),
+            Err(message) => Err(GitFetchError::ExistingDestMismatch {
+                artifact_id: git_artifact.id.clone(),
+                dest,
+                detail: format!(
+                    "not a readable git repository ({message}) — refusing to delete/re-clone"
+                ),
+            }),
+        };
+    }
+
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| GitFetchError::CommandFailed {
+            artifact_id: git_artifact.id.clone(),
+            step: "mkdir parent",
+            message: e.to_string(),
+        })?;
+    }
+
+    let run = |step: &'static str, args: &[&str]| -> Result<String, GitFetchError> {
+        runner
+            .run(args)
+            .map_err(|message| GitFetchError::CommandFailed {
+                artifact_id: git_artifact.id.clone(),
+                step,
+                message,
+            })
+    };
+
+    run("init", &["init", "-q", &dest_str])?;
+    run(
+        "remote add",
+        &[
+            "-C",
+            &dest_str,
+            "remote",
+            "add",
+            "origin",
+            &git_artifact.repo,
+        ],
+    )?;
+    run(
+        "sparse-checkout set",
+        &[
+            "-C",
+            &dest_str,
+            "sparse-checkout",
+            "set",
+            "--cone",
+            &git_artifact.subpath,
+        ],
+    )?;
+    run(
+        "fetch",
+        &[
+            "-C",
+            &dest_str,
+            "fetch",
+            "--depth",
+            "1",
+            "--filter=blob:none",
+            "origin",
+            &git_artifact.commit,
+        ],
+    )?;
+    run(
+        "checkout",
+        &["-C", &dest_str, "checkout", "-q", "FETCH_HEAD"],
+    )?;
+    let head = run("rev-parse HEAD", &["-C", &dest_str, "rev-parse", "HEAD"])?;
+
+    if head != git_artifact.commit {
+        return Err(GitFetchError::IntegrityCheckFailed {
+            artifact_id: git_artifact.id.clone(),
+            expected: git_artifact.commit.clone(),
+            actual: head,
+        });
+    }
+
+    Ok(dest)
+}
+
+/// `git -C <dir> rev-parse HEAD`, trimmed. Shared by [`fetch_git_artifact`]
+/// and the local-gate evidence generator (ticket W0-07), which uses it to
+/// record which commit of a directory (the repo root itself, or a fetched
+/// vector-source checkout) was actually exercised.
+///
+/// # Errors
+/// Returns `Err` if `dir` isn't inside a git repository or the process
+/// can't be run.
+pub fn git_rev_parse_head(runner: &dyn GitRunner, dir: &Path) -> Result<String, String> {
+    runner.run(&["-C", &dir.to_string_lossy(), "rev-parse", "HEAD"])
+}
+
+/// `true` iff `git -C <dir> status --porcelain` prints nothing, i.e. the
+/// working tree is clean. The local-gate evidence generator (ticket
+/// W0-07) records this — never a wall-clock mtime — so evidence generated
+/// against uncommitted changes can't silently claim authority for a
+/// `retroforge_commit` value it doesn't actually reflect.
+///
+/// # Errors
+/// Returns `Err` if `dir` isn't inside a git repository or the process
+/// can't be run.
+pub fn git_tree_is_clean(runner: &dyn GitRunner, dir: &Path) -> Result<bool, String> {
+    let out = runner.run(&["-C", &dir.to_string_lossy(), "status", "--porcelain"])?;
+    Ok(out.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,5 +674,223 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Test double for [`GitRunner`]: a fixed queue of canned responses,
+    /// consumed in call order (the real sequence is always linear), and a
+    /// record of every `args` list it was asked to run so tests can assert
+    /// both "did the right commands run" and — just as important for the
+    /// "never disturb an existing checkout" invariant — "did NO further
+    /// commands run".
+    struct ScriptedGitRunner {
+        responses: RefCell<std::collections::VecDeque<Result<String, String>>>,
+        calls: RefCell<Vec<Vec<String>>>,
+    }
+
+    impl ScriptedGitRunner {
+        fn new(responses: Vec<Result<&str, &str>>) -> Self {
+            ScriptedGitRunner {
+                responses: RefCell::new(
+                    responses
+                        .into_iter()
+                        .map(|r| r.map(str::to_string).map_err(str::to_string))
+                        .collect(),
+                ),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.borrow().len()
+        }
+    }
+
+    impl GitRunner for ScriptedGitRunner {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|s| s.to_string()).collect());
+            self.responses
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| Err("ScriptedGitRunner: no more canned responses".to_string()))
+        }
+    }
+
+    fn git_artifact(dest: &str, commit: &str) -> GitArtifact {
+        GitArtifact {
+            id: "test-git-artifact".into(),
+            license_status: LicenseStatus::NoLicenseGrantFetchOnly,
+            repo: "https://example.invalid/repo.git".into(),
+            commit: commit.into(),
+            subpath: "sub/dir".into(),
+            dest: dest.into(),
+        }
+    }
+
+    #[test]
+    fn fresh_clone_issues_the_documented_command_sequence_and_verifies_head() {
+        let commit = "b".repeat(40);
+        let runner = ScriptedGitRunner::new(vec![
+            Ok(""),      // init
+            Ok(""),      // remote add
+            Ok(""),      // sparse-checkout set
+            Ok(""),      // fetch
+            Ok(""),      // checkout
+            Ok(&commit), // rev-parse HEAD
+        ]);
+        let tmp = tempdir();
+        let a = git_artifact("roms/nes/g1-src", &commit);
+
+        let dest = fetch_git_artifact(&a, &runner, &tmp).expect("fresh clone should succeed");
+        assert_eq!(dest, tmp.join("roms/nes/g1-src"));
+
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 6);
+        assert_eq!(calls[0][0], "init");
+        assert_eq!(calls[1][2], "remote");
+        assert_eq!(calls[2][2], "sparse-checkout");
+        assert_eq!(calls[3][2], "fetch");
+        assert_eq!(calls[4][2], "checkout");
+        assert_eq!(calls[5][2], "rev-parse");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn integrity_check_failure_is_reported_when_head_does_not_match_pinned_commit() {
+        let commit = "c".repeat(40);
+        let wrong_head = "d".repeat(40);
+        let runner = ScriptedGitRunner::new(vec![
+            Ok(""),
+            Ok(""),
+            Ok(""),
+            Ok(""),
+            Ok(""),
+            Ok(&wrong_head),
+        ]);
+        let tmp = tempdir();
+        let a = git_artifact("roms/nes/g1-src", &commit);
+
+        let err = fetch_git_artifact(&a, &runner, &tmp).unwrap_err();
+        match err {
+            GitFetchError::IntegrityCheckFailed {
+                expected, actual, ..
+            } => {
+                assert_eq!(expected, commit);
+                assert_eq!(actual, wrong_head);
+            }
+            other => panic!("expected IntegrityCheckFailed, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn command_failure_names_the_failing_step() {
+        let commit = "e".repeat(40);
+        let runner = ScriptedGitRunner::new(vec![
+            Ok(""),                             // init
+            Ok(""),                             // remote add
+            Err("cone mode rejected the path"), // sparse-checkout set
+        ]);
+        let tmp = tempdir();
+        let a = git_artifact("roms/nes/g1-src", &commit);
+
+        let err = fetch_git_artifact(&a, &runner, &tmp).unwrap_err();
+        match err {
+            GitFetchError::CommandFailed { step, message, .. } => {
+                assert_eq!(step, "sparse-checkout set");
+                assert!(message.contains("cone mode rejected the path"));
+            }
+            other => panic!("expected CommandFailed, got {other:?}"),
+        }
+        assert_eq!(runner.call_count(), 3);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn existing_dest_at_correct_commit_short_circuits_without_further_commands() {
+        let commit = "f".repeat(40);
+        let tmp = tempdir();
+        let dest = tmp.join("roms/nes/g1-src");
+        fs::create_dir_all(&dest).unwrap();
+        let runner = ScriptedGitRunner::new(vec![Ok(&commit)]); // rev-parse HEAD only
+        let a = git_artifact("roms/nes/g1-src", &commit);
+
+        let result = fetch_git_artifact(&a, &runner, &tmp).expect("already-correct dest is Ok");
+        assert_eq!(result, dest);
+        // Exactly one command (the verifying rev-parse) — no init/remote/
+        // fetch/checkout ever ran against a directory that already existed.
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(runner.calls.borrow()[0][2], "rev-parse");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The "never disturb an existing checkout" invariant (module doc):
+    /// a dest that exists but is at the WRONG commit must be reported as
+    /// an error, and — just as important — must not trigger any
+    /// mutating command (no delete, no re-init, no re-fetch).
+    #[test]
+    fn existing_dest_at_wrong_commit_errors_and_never_mutates() {
+        let pinned = "1".repeat(40);
+        let actual = "2".repeat(40);
+        let tmp = tempdir();
+        let dest = tmp.join("roms/nes/g1-src");
+        fs::create_dir_all(&dest).unwrap();
+        let runner = ScriptedGitRunner::new(vec![Ok(&actual)]);
+        let a = git_artifact("roms/nes/g1-src", &pinned);
+
+        let err = fetch_git_artifact(&a, &runner, &tmp).unwrap_err();
+        assert!(matches!(err, GitFetchError::ExistingDestMismatch { .. }));
+        assert_eq!(
+            runner.call_count(),
+            1,
+            "must never issue a mutating command against a pre-existing wrong-commit dest"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn existing_dest_that_is_not_a_git_repo_errors_and_never_mutates() {
+        let tmp = tempdir();
+        let dest = tmp.join("roms/nes/g1-src");
+        fs::create_dir_all(&dest).unwrap();
+        let runner = ScriptedGitRunner::new(vec![Err("not a git repository")]);
+        let a = git_artifact("roms/nes/g1-src", &"3".repeat(40));
+
+        let err = fetch_git_artifact(&a, &runner, &tmp).unwrap_err();
+        assert!(matches!(err, GitFetchError::ExistingDestMismatch { .. }));
+        assert_eq!(runner.call_count(), 1);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn git_rev_parse_head_forwards_the_runners_output() {
+        // The trim contract lives on `GitRunner::run` itself (SystemGitRunner
+        // trims); this just checks git_rev_parse_head builds the right
+        // argv and passes the result through unmodified.
+        let runner = ScriptedGitRunner::new(vec![Ok("abc123")]);
+        let dir = PathBuf::from("/some/dir");
+        assert_eq!(git_rev_parse_head(&runner, &dir).unwrap(), "abc123");
+        assert_eq!(runner.calls.borrow()[0][2], "rev-parse");
+    }
+
+    #[test]
+    fn git_tree_is_clean_true_when_porcelain_output_empty() {
+        let runner = ScriptedGitRunner::new(vec![Ok("")]);
+        let dir = PathBuf::from("/some/dir");
+        assert!(git_tree_is_clean(&runner, &dir).unwrap());
+    }
+
+    #[test]
+    fn git_tree_is_clean_false_when_porcelain_output_nonempty() {
+        let runner = ScriptedGitRunner::new(vec![Ok(" M some/file.rs\n")]);
+        let dir = PathBuf::from("/some/dir");
+        assert!(!git_tree_is_clean(&runner, &dir).unwrap());
     }
 }

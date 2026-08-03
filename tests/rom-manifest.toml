@@ -37,6 +37,27 @@
 #   dest            path under `roms/` (gitignored — NFR-006) the verified
 #                    bytes are written to.
 #
+# [[git_artifact]] — a pinned-commit, sparse-subpath git checkout (ticket
+#   W0-07). The one deliberate exception to "[[artifact]] is always a
+#   single file": used where the upstream source is naturally a directory
+#   of many small files (e.g. SingleStepTests' per-opcode vector JSON) and
+#   a whole-repo zip [[artifact]] would be both wasteful and, for
+#   codeload.github.com specifically, silently truncatable (no
+#   Content-Length on the stream — see the singlestep-nes6502-src entry
+#   below for the real incident this replaced). Integrity comes from
+#   `commit` alone, NOT a sha256 — see crates/rf-harness/src/manifest.rs
+#   module doc for why an archive-style hash would be redundant here.
+#   id              unique key, referenced by [[suite.roms]].artifact —
+#                    shares one namespace with [[artifact]].id
+#   license_status   same vocabulary/rule as [[artifact]].license_status
+#   repo             git clone URL
+#   commit           40 lowercase hex chars, the pinned commit SHA; after
+#                    fetch, `git -C <dest> rev-parse HEAD` must equal this
+#   subpath          path within the repo passed to
+#                    `git sparse-checkout set --cone`
+#   dest             path under `roms/` (gitignored) the checkout lands at
+#                    — a DIRECTORY, not a file
+#
 # [[suite]] — the accuracy-table / waiver lookup key. `id`+`fr`+`tier` are
 #   copied verbatim from docs/TESTING.md §4 (NES) / §5 (SNES); this pairing
 #   is DATA, never inferred at runtime (TESTING.md §5: "a lookup from the
@@ -550,14 +571,28 @@ dest = "roms/nes/mmc3_test_2/rom_singles/6-MMC3_alt.nes"
 # rf-nes/rf-snes's own vector-test runner, not rf-harness).
 # ---------------------------------------------------------------------------
 
-[[artifact]]
-id = "singlestep-nes6502"
+# nes6502 (ticket W0-07): this used to be a whole-repo-zip [[artifact]]
+# (id "singlestep-nes6502") fetched from codeload.github.com. Retired: (1)
+# the pinned sha256 never matched what codeload actually served for that
+# commit — codeload streams with no `Content-Length` header, so a
+# multi-GB transfer can truncate silently into a still-valid-looking zip
+# (verified at W1-01a: manifest declared
+# ed89588aa3de8cf087861de57f079f3a5ab050dd9de3dfcfa07598b65db6cf75, the
+# real download hashed to
+# 05b602aeb508c62c5aaee259475f8d5e949ed4a9aba0f8220b67ba78708d2d71); (2)
+# it fetched the entire multi-architecture ProcessorTests repo when only
+# nes6502/v1 (~1.0 GB uncompressed) was ever needed. Replaced by the
+# [[git_artifact]] below: a `--filter=blob:none` sparse-checkout at the
+# same pinned commit, verified live (git 2.55.0) to work by bare SHA
+# fetch, whose integrity check is the commit SHA itself rather than an
+# archive hash — see crates/rf-harness/src/manifest.rs module doc.
+[[git_artifact]]
+id = "singlestep-nes6502-src"
 license_status = "no-license-grant-fetch-only"
-sha256 = "ed89588aa3de8cf087861de57f079f3a5ab050dd9de3dfcfa07598b65db6cf75"
-mirrors = [
-  "https://codeload.github.com/SingleStepTests/ProcessorTests/zip/bb11756436da8fd16cce86aef63dc6725f48836f",
-]
-dest = "roms/nes/singlestep-processortests-bb11756.zip"
+repo = "https://github.com/SingleStepTests/ProcessorTests.git"
+commit = "bb11756436da8fd16cce86aef63dc6725f48836f"
+subpath = "nes6502/v1"
+dest = "roms/nes/singlestep-nes6502-src"
 
 [[artifact]]
 id = "singlestep-65816"
@@ -660,7 +695,7 @@ fr = "FR-CORE-020"
 tier = "A"
 protocol = "vector"
 [[suite.roms]]
-artifact = "singlestep-nes6502"
+artifact = "singlestep-nes6502-src"
 rom = "nes6502-vectors"
 frame_budget = 0
 

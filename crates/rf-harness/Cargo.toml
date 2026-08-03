@@ -11,6 +11,11 @@ workspace = true
 
 [dependencies]
 rf-core-api = { path = "../rf-core-api" }
+# rf-nes: only for the nes6502-vectors local-gate evidence runner (ticket
+# W0-07, src/nes6502_evidence.rs) — rf-harness is exempted from the
+# "console cores only via rf-core-api" layer rule as "the test harness"
+# itself (scripts/validate-arch.sh rule 3).
+rf-nes = { path = "../rf-nes" }
 sha2 = "0.11"
 toml = "1"
 serde = { version = "1", features = ["derive"] }
@@ -18,3 +23,7 @@ serde = { version = "1", features = ["derive"] }
 [[bin]]
 name = "fetch-test-roms"
 path = "src/bin/fetch_test_roms.rs"
+
+[[bin]]
+name = "local-gate-evidence"
+path = "src/bin/local_gate_evidence.rs"

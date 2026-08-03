@@ -1,17 +1,20 @@
 //! `fetch-test-roms` — the binary `scripts/fetch-test-roms.sh` wraps.
-//! Reads `tests/rom-manifest.toml`, fetches every artifact with a real
-//! (non-placeholder) `sha256` into gitignored `roms/`, verifying hashes
-//! and trying mirrors in order (FM-14). Placeholder-hash artifacts are
-//! skipped with a warning, not treated as failures — see
-//! `rf_harness::manifest` module doc for why some entries are still
-//! `TODO-`.
+//! Reads `tests/rom-manifest.toml` and fetches every artifact of either
+//! kind into gitignored `roms/`: `[[artifact]]` entries with a real
+//! (non-placeholder) `sha256`, verifying hashes and trying mirrors in
+//! order (FM-14); `[[git_artifact]]` entries (ticket W0-07) via a pinned
+//! commit + sparse checkout, verified by `git rev-parse HEAD` rather than
+//! a hash. Placeholder-hash `[[artifact]]` entries are skipped with a
+//! warning, not treated as failures — see `rf_harness::manifest` module
+//! doc for why some entries are still `TODO-`.
 //!
 //! Usage: `fetch-test-roms [--manifest PATH] [--repo-root PATH] [ID...]`
-//! With no `ID` arguments, fetches every real-hash artifact in the
-//! manifest. With one or more `ID` arguments, fetches only those
-//! artifacts (unknown ids are a loud error, not a silent no-op).
+//! With no `ID` arguments, fetches every real-hash artifact and every
+//! git_artifact in the manifest. With one or more `ID` arguments, fetches
+//! only those (ids may name either kind — they share one namespace, see
+//! `Manifest::validate`); unknown ids are a loud error, not a silent no-op.
 
-use rf_harness::{fetch_artifact, CurlDownloader, Manifest};
+use rf_harness::{fetch_artifact, fetch_git_artifact, CurlDownloader, Manifest, SystemGitRunner};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -75,30 +78,43 @@ fn run(manifest_path: &Path, repo_root: &Path, requested_ids: &[String]) -> Exit
         return ExitCode::FAILURE;
     }
 
-    let targets: Vec<&rf_harness::Artifact> = if requested_ids.is_empty() {
-        manifest.artifacts.iter().collect()
-    } else {
-        let mut selected = Vec::new();
-        let mut unknown = Vec::new();
-        for id in requested_ids {
-            match manifest.artifact(id) {
-                Some(a) => selected.push(a),
-                None => unknown.push(id.clone()),
+    // Ids share one namespace across [[artifact]] and [[git_artifact]]
+    // (Manifest::validate enforces uniqueness) — resolve each requested id
+    // against whichever kind actually declares it.
+    let (plain_targets, git_targets): (Vec<&rf_harness::Artifact>, Vec<&rf_harness::GitArtifact>) =
+        if requested_ids.is_empty() {
+            (
+                manifest.artifacts.iter().collect(),
+                manifest.git_artifacts.iter().collect(),
+            )
+        } else {
+            let mut plain = Vec::new();
+            let mut git = Vec::new();
+            let mut unknown = Vec::new();
+            for id in requested_ids {
+                match (manifest.artifact(id), manifest.git_artifact(id)) {
+                    (Some(a), None) => plain.push(a),
+                    (None, Some(g)) => git.push(g),
+                    (None, None) => unknown.push(id.clone()),
+                    (Some(_), Some(_)) => unreachable!(
+                        "Manifest::validate rejects duplicate ids across artifact kinds"
+                    ),
+                }
             }
-        }
-        if !unknown.is_empty() {
-            eprintln!("unknown artifact id(s): {}", unknown.join(", "));
-            return ExitCode::FAILURE;
-        }
-        selected
-    };
+            if !unknown.is_empty() {
+                eprintln!("unknown artifact id(s): {}", unknown.join(", "));
+                return ExitCode::FAILURE;
+            }
+            (plain, git)
+        };
 
     let downloader = CurlDownloader;
+    let git_runner = SystemGitRunner;
     let mut fetched = 0usize;
     let mut skipped_placeholder = 0usize;
     let mut failed = 0usize;
 
-    for artifact in targets {
+    for artifact in plain_targets {
         if artifact.is_hash_placeholder() {
             println!(
                 "SKIP  {} (placeholder sha256: {})",
@@ -110,6 +126,19 @@ fn run(manifest_path: &Path, repo_root: &Path, requested_ids: &[String]) -> Exit
         match fetch_artifact(artifact, &downloader, repo_root) {
             Ok(path) => {
                 println!("OK    {} -> {}", artifact.id, path.display());
+                fetched += 1;
+            }
+            Err(e) => {
+                eprintln!("FAIL  {e}");
+                failed += 1;
+            }
+        }
+    }
+
+    for git_artifact in git_targets {
+        match fetch_git_artifact(git_artifact, &git_runner, repo_root) {
+            Ok(path) => {
+                println!("OK    {} -> {}", git_artifact.id, path.display());
                 fetched += 1;
             }
             Err(e) => {
