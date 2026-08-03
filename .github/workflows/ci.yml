@@ -24,3 +24,13 @@ jobs:
           # headless GPU tests (from W3-01) use fallback adapter
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
+      - name: licence gate (NFR-011, W0-06)
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          # cargo-deny version is pinned by this action tag, not floating:
+          # v2.1.1's Dockerfile bakes in deny_version=0.20.2, the same
+          # version verified against deny.toml's schema locally. Bump both
+          # together — see deny.toml's header comment.
+          command: check
+          arguments: ""
+          command-arguments: licenses
