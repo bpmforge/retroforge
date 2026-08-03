@@ -4,12 +4,14 @@
 //!
 //! ## Scope fence (this ticket vs. later ones)
 //!
-//! This module implements **background rendering only**. It deliberately
-//! does NOT implement:
-//! - Sprite evaluation, secondary OAM, the 8-sprite limit, or sprite-0 hit
-//!   (ticket W1-05a/W1-05b) — every emitted pixel this ticket produces is
-//!   [`rf_core_api::PixelLayer::Background`] or
-//!   [`rf_core_api::PixelLayer::Backdrop`], never `Sprite`.
+//! This module implements **background rendering** (W1-04a/W1-04b) and, as
+//! of ticket W1-05a, **sprite evaluation + compositing** (see `sprites.rs`
+//! for the sprite-specific module doc: secondary OAM evaluation, the
+//! 8-sprite-per-scanline limit, the buggy overflow-flag diagonal scan, and
+//! the BG/sprite priority multiplexer). It deliberately does NOT implement:
+//! - **Sprite-0 hit** (`STATUS_SPRITE0_HIT`) — ticket W1-05b. The status
+//!   bit is still only ever cleared (pre-render dot 1), never set, exactly
+//!   as before this ticket.
 //! - The exact VBlank/NMI edge-suppression races `ppu_vbl_nmi` tests
 //!   (ticket W1-05b per the conductor's W1-04a pre-flight notes; the
 //!   odd-frame dot-339 skip itself now IS implemented here — ticket
@@ -27,6 +29,22 @@
 //!   mapper ticket exists yet to inform a trait's shape — see
 //!   `crate::system` module doc's "Mapper scope" section for the precedent
 //!   this follows).
+//! - The 2C02G/H "`OAMADDR` nonzero when rendering starts corrupts the
+//!   first 8 OAM bytes" errata (nesdev.org/wiki/PPU_registers: "if the
+//!   sprite address (`OAMADDR`, `$2003`) is not zero, the process of
+//!   starting sprite evaluation triggers an OAM hardware refresh bug...").
+//!   This is a distinct, chip-revision-specific quirk from the
+//!   `OAMADDR`-reset-at-dots-257-320 behavior this ticket DOES implement
+//!   (see `sprites.rs`); it is not in this ticket's acceptance criteria,
+//!   not test-ROM-verified here, and deliberately unimplemented rather than
+//!   guessed at.
+//! - **`dropped_by_limit` is always `false`** on every pixel this core
+//!   emits — see [`rf_core_api::video::PpuPixel::dropped_by_limit`]'s doc
+//!   for the full ruling (Brad, 2026-08-03): the sink is accuracy-exact, so
+//!   a limit-dropped sprite (excluded from `sprites.rs`'s `active_sprites`
+//!   by the 8-sprite cap) never reaches [`Ppu::output_pixel`] at all. Do
+//!   not "fix" this to ride the flag on a displaced pixel — that is exactly
+//!   what the ruling forbids.
 //!
 //! ## Scheduling: lock-step, not catch-up (`docs/design/EMULATION_CORES.md`
 //! §1)
@@ -106,10 +124,28 @@
 //!   the 32-byte palette RAM mirror and the entry-0-shared-between-
 //!   background-and-sprite-palettes quirk ($3F10 aliases $3F00, and by the
 //!   same documented mechanism $3F14/$3F18/$3F1C alias $3F04/$3F08/$3F0C).
+//! - [nesdev.org/wiki/PPU_sprite_evaluation](https://www.nesdev.org/wiki/PPU_sprite_evaluation) —
+//!   the two-phase secondary-OAM scan, the 8-sprite limit, and the buggy
+//!   overflow-flag diagonal scan (`sprites.rs`'s own doc quotes its
+//!   numbered algorithm, wording normalized, retrieved 2026-08-03, and
+//!   cross-checks the overflow bug's mechanics against a second
+//!   independent source).
+//! - [nesdev.org/wiki/PPU_OAM](https://www.nesdev.org/wiki/PPU_OAM) — the 4
+//!   OAM byte layout (Y, tile index incl. 8x16 mode's bank/top-tile split,
+//!   attribute bits incl. flip/priority, X), and "Sprite data is delayed by
+//!   one scanline; you must subtract 1 from the sprite's Y coordinate
+//!   before writing it here" (the one-scanline pipeline delay `sprites.rs`
+//!   models as two buffers — see its module doc).
+//! - [nesdev.org/wiki/PPU_registers](https://www.nesdev.org/wiki/PPU_registers) —
+//!   PPUCTRL bit 5 (sprite size) and bit 3 (8x8 sprite pattern table),
+//!   PPUMASK bits 2/4 (show sprites / show sprites in the left 8 pixels),
+//!   and "`OAMADDR` is set to 0 during each of ticks 257-320 (the sprite
+//!   tile loading interval) of the pre-render and visible scanlines".
 
 mod background;
 mod mem;
 mod scroll;
+mod sprites;
 
 #[cfg(test)]
 mod tests;
@@ -138,6 +174,51 @@ struct CompletedScanline {
     y: u16,
     pixels: [PpuPixel; 256],
 }
+
+/// One sprite copied into secondary OAM by [`Ppu::evaluate_sprites`]
+/// (`sprites.rs`): the 4 raw OAM bytes plus the primary-OAM index it came
+/// from (needed for [`rf_core_api::PpuPixel::sprite_id`] and OAM-order
+/// priority). `y == 0xFF` marks an empty slot, matching hardware's
+/// documented "$FF"-initialized secondary OAM (nesdev.org/wiki/PPU_sprite_evaluation).
+#[derive(Clone, Copy)]
+struct EvaluatedSprite {
+    y: u8,
+    tile: u8,
+    attr: u8,
+    x: u8,
+    oam_index: u8,
+}
+
+const EMPTY_EVALUATED_SPRITE: EvaluatedSprite = EvaluatedSprite {
+    y: 0xFF,
+    tile: 0,
+    attr: 0,
+    x: 0,
+    oam_index: 0xFF,
+};
+
+/// One of the (at most) 8 sprite "output units" [`Ppu::load_sprite_units`]
+/// (`sprites.rs`) latches at dot 257 of the PRECEDING scanline: CHR pattern
+/// bytes already fetched (not re-read per pixel) — see `sprites.rs`'s
+/// module doc "one-scanline pipeline delay" section for why latching here,
+/// rather than re-deriving a row from `self.scanline` at arbitrary render
+/// time, is deliberate.
+#[derive(Clone, Copy)]
+struct SpriteUnit {
+    pattern_lo: u8,
+    pattern_hi: u8,
+    attr: u8,
+    x: u8,
+    oam_index: u8,
+}
+
+const EMPTY_SPRITE_UNIT: SpriteUnit = SpriteUnit {
+    pattern_lo: 0,
+    pattern_hi: 0,
+    attr: 0,
+    x: 0xFF,
+    oam_index: 0xFF,
+};
 
 /// The 2C02 PPU. See the module doc for scope, the `CoreSink` emission
 /// seam, and the `palette_index` semantics commitment.
@@ -197,6 +278,19 @@ pub struct Ppu {
     /// choice.
     pub(super) frame_is_odd: bool,
 
+    // ---- sprite evaluation + output units (ticket W1-05a; see
+    // `sprites.rs` module doc) ----
+    /// Filled by [`Ppu::evaluate_sprites`] during dots 65-256 of a visible
+    /// scanline (or cleared without evaluation at pre-render dot 1) — the
+    /// sprites that will be rendered on the *next* scanline.
+    secondary_oam: [EvaluatedSprite; 8],
+    secondary_oam_count: u8,
+    /// The render-ready snapshot [`Ppu::load_sprite_units`] latches at dot
+    /// 257, used by [`Ppu::output_pixel`]'s sprite compositing while
+    /// drawing the CURRENT scanline.
+    active_sprites: [SpriteUnit; 8],
+    active_sprite_count: u8,
+
     // ---- scanline output ----
     line_buffer: [PpuPixel; 256],
     completed: Vec<CompletedScanline>,
@@ -250,6 +344,10 @@ impl Ppu {
             scanline: PRERENDER_SCANLINE,
             dot: 0,
             frame_is_odd: false,
+            secondary_oam: [EMPTY_EVALUATED_SPRITE; 8],
+            secondary_oam_count: 0,
+            active_sprites: [EMPTY_SPRITE_UNIT; 8],
+            active_sprite_count: 0,
             line_buffer: [BLANK_PIXEL; 256],
             completed: Vec::with_capacity(240),
         }
@@ -374,8 +472,14 @@ impl Ppu {
         self.mask & 0x02 != 0
     }
 
-    fn mask_show_sprites(&self) -> bool {
+    pub(super) fn mask_show_sprites(&self) -> bool {
         self.mask & 0x10 != 0
+    }
+
+    /// PPUMASK ($2001) bit 2: "Show sprites in leftmost 8 pixels of
+    /// screen" (nesdev.org/wiki/PPU_registers).
+    pub(super) fn mask_show_sprites_left8(&self) -> bool {
+        self.mask & 0x04 != 0
     }
 
     /// Queue every completed-but-undrained scanline through `sink`, oldest

@@ -25,9 +25,10 @@
 //! line) and dots 321-336 (2 tiles prefetched for the *next* line) —
 //! nesdev's own text for the second window: "the first two tiles for the
 //! next scanline are fetched, and loaded into the shift registers." Dots
-//! 257-320 are the sprite-fetch window (ticket W1-05a; nothing BG-related
-//! happens here) and 337-340 are two documented "unused nametable fetches"
-//! (nesdev: "the purpose for this is unknown") — neither is modeled.
+//! 257-320 are the sprite-fetch window (`sprites.rs`, ticket W1-05a;
+//! nothing BG-related happens there) and 337-340 are two documented
+//! "unused nametable fetches" (nesdev: "the purpose for this is unknown")
+//! — neither is modeled.
 //!
 //! ## Reload and coarse-X-increment dots
 //!
@@ -55,7 +56,7 @@
 //! occupying 2 bits of the byte: `shift = (row_quadrant << 1 |
 //! col_quadrant) * 2`.
 use super::Ppu;
-use rf_core_api::{PixelLayer, PpuPixel};
+use rf_core_api::PixelLayer;
 
 /// Which 2-dot memory access phase (0-7) `dot` falls in, if any — `None`
 /// outside the two BG-fetch windows (1..=256, 321..=336). See this module's
@@ -125,6 +126,33 @@ impl Ppu {
             if !is_visible && (280..=304).contains(&dot) {
                 self.copy_vertical();
             }
+            // ---- sprites (ticket W1-05a; see `sprites.rs` module doc) ----
+            // Dots 65-256, visible scanlines only: nesdev.org/wiki/
+            // PPU_sprite_evaluation, "Sprite evaluation does not happen on
+            // the pre-render scanline."
+            if is_visible && dot == 65 {
+                self.evaluate_sprites();
+            }
+            // "OAMADDR is set to 0 during each of ticks 257-320... of the
+            // pre-render and visible scanlines" (nesdev.org/wiki/
+            // PPU_registers) -- both line kinds, so re-checked every dot in
+            // range rather than once.
+            if (257..=320).contains(&dot) {
+                self.oam_addr = 0;
+            }
+            // Same "sprite tile loading interval" window's other half:
+            // latch this scanline's evaluated sprites into render-ready
+            // units for the NEXT scanline.
+            if dot == 257 {
+                self.load_sprite_units();
+            }
+        }
+        // Pre-render dot 1: unconditional, NOT gated on `rendering_enabled`
+        // above, so a mid-frame rendering toggle can never leave a stale
+        // sprite set behind for scanline 0 -- see `sprites.rs` module doc's
+        // "one-scanline pipeline delay" section.
+        if !is_visible && dot == 1 {
+            self.clear_sprite_units();
         }
         if is_visible && (1..=256).contains(&dot) {
             self.output_pixel(dot - 1);
@@ -224,28 +252,27 @@ impl Ppu {
         Some((attr << 2) | pattern)
     }
 
-    /// Write `line_buffer[x]` for visible-scanline dot `x + 1` (module doc:
-    /// `crate::ppu`'s `palette_index` semantics commitment — the emitted
-    /// value is the resolved 6-bit palette-RAM byte, not the 0-31 address).
-    pub(super) fn output_pixel(&mut self, x: u16) {
+    /// Resolve the background layer's contribution at visible-scanline dot
+    /// `x + 1`: `Some(addr)` (a 0-15 palette-RAM address, module doc's
+    /// `palette_index` semantics commitment — the caller resolves this
+    /// through [`Ppu::palette_read`] itself) plus [`PixelLayer::Background`]
+    /// if this pixel is opaque, or `None` plus [`PixelLayer::Backdrop`] if
+    /// transparent. Pure/side-effect-free — ticket W1-05a split the old
+    /// `output_pixel` (which wrote `line_buffer` directly) into this
+    /// resolver plus [`Ppu::output_pixel`] (now in `sprites.rs`), because
+    /// sprites now also contribute to the same pixel and compositing them
+    /// needs both layers resolved before anything is written.
+    pub(super) fn background_pixel(&self, x: u16) -> (Option<u8>, PixelLayer) {
         let mut addr = self.background_palette_addr();
         // $2001 bit 1: "Show background in leftmost 8 pixels" — forced to
         // backdrop when clear, regardless of the fetched tile.
         if x < 8 && !self.mask_show_background_left8() {
             addr = None;
         }
-        let (palette_addr, layer) = match addr {
-            Some(a) => (a as u16, PixelLayer::Background(0)),
-            None => (0, PixelLayer::Backdrop),
-        };
-        let palette_index = self.palette_read(palette_addr) & 0x3F;
-        self.line_buffer[x as usize] = PpuPixel {
-            palette_index,
-            layer,
-            sprite_id: None,
-            priority: 0,
-            dropped_by_limit: false,
-        };
+        match addr {
+            Some(a) => (Some(a), PixelLayer::Background(0)),
+            None => (None, PixelLayer::Backdrop),
+        }
     }
 }
 

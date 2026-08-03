@@ -14,6 +14,14 @@
 //!   tests explicitly left unproven (see that file's module doc).
 //! - `sink_emission` — criterion 3: `Ppu::drain` actually calls
 //!   `CoreSink::video_scanline` with the expected per-pixel data.
+//! - `sprite_evaluation` — ticket W1-05a: secondary OAM evaluation, the
+//!   8-sprite limit (and that it's genuinely invisible in the *rendered*
+//!   output, not just in a count), the buggy overflow-flag diagonal scan
+//!   (with tests specifically discriminating it from a naive "9th sprite
+//!   exists" implementation), the `OAMADDR` dots-257-320 reset, sprite
+//!   compositing (flip, 8x16 mode, left-8-px mask, BG/sprite priority),
+//!   and the one-scanline pipeline delay. `crate::ppu::sprites`'s own
+//!   module doc is this test module's source-citation authority.
 //!
 //! nesdev source for every derived `v`/`t` bit pattern below:
 //! [nesdev.org/wiki/PPU_scrolling](https://www.nesdev.org/wiki/PPU_scrolling)
@@ -24,6 +32,7 @@ mod frame_timing;
 mod read_buffer;
 mod scroll_registers;
 mod sink_emission;
+mod sprite_evaluation;
 
 use super::Ppu;
 use rf_cart::Mirroring;
