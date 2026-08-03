@@ -466,7 +466,13 @@
     "FM-01 core-panic containment: catch_unwind at the core-thread boundary, error dialog with trace tail, injected-panic test (docs/design/FAILURE_MODES.md)"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
+   "notes": [
+    "PRE-FLIGHT 2026-08-03 (conductor) \u2014 THE PINNED GPU STACK WAS IMPOSSIBLE, verified by compile-probe, not by reading. docs/TECH_STACK.md pinned wgpu 30.0 AND egui/eframe 0.35.0 and mandates bumping them only in lockstep. But resolving eframe 0.35.0 in a scratch crate shows egui-wgpu 0.35.0 depends on wgpu 29.0.4, and 0.35.0 is the NEWEST egui/eframe published; wgpu 30.0.0 exists but no egui release pairs with it. Declaring both would put TWO wgpu versions in the dependency tree and silently break the 'egui first-party backend shares device/queue' design, because wgpu30::Device and wgpu29::Device are distinct types. TECH_STACK's GPU row and its 'wgpu 30 specifics' rule were corrected at the source in the same commit as this claim.",
+    "DECISION 2026-08-03 (conductor): W1-06 takes NO direct wgpu dependency at all. Its own acceptance says 'CPU blit acceptable pre-W3', so the shell needs eframe + egui only \u2014 upload the core's indexed frame as an egui texture and paint it. That keeps exactly one wgpu in the tree (eframe's), and defers the wgpu-version question to W3-01 (renderer), by which time an egui release may have moved to 30. If a direct wgpu dep ever becomes necessary, it must come through `eframe::wgpu` rather than a separate Cargo entry.",
+    "PRE-FLIGHT 2026-08-03 (conductor): crates/retroforge currently depends ONLY on rf-core-api and is a bare skeleton (src/main.rs), as is crates/rf-renderer (src/lib.rs). This ticket must add rf-nes (to run a core) and rf-cart (for the ROM open dialog) to crates/retroforge/Cargo.toml. That is PERMITTED: scripts/validate-arch.sh rule 3 exempts the app shell (`retroforge`) and rf-harness from the 'cores only via rf-core-api' rule. Run the validator to confirm rather than reasoning about it.",
+    "UI-TICKET ACCEPTANCE 2026-08-03 (conductor): a winit window cannot open in headless CI, so per PLAYBOOK ('For UI tickets, acceptance is a manual checklist in the commit body plus any headless assertions possible') the window/blit/dialog criteria are a manual checklist. What IS mechanically testable and must be: FM-01 core-panic containment (inject a panic on the core thread, assert catch_unwind contains it, the app survives, and the error carries a trace tail) and the frame-stepping state machine (pause/step-frame/step-scanline as pure state transitions, tested without a window). Do not let 'it is a GUI ticket' become a reason for zero tests."
+   ],
    "stories": [
     "E1-S1",
     "E1-S2"

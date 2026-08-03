@@ -19,7 +19,7 @@ combination, validated for this exact workload.
 
 | Concern | Crate | Version (2026-07-06) | Rationale | Risk / note |
 |---|---|---|---|---|
-| GPU | **wgpu** | 30.0 | One abstraction → Vulkan/Metal/DX12/GL/WebGPU; egui first-party backend shares device/queue | Breaking major ~quarterly (mechanical); upgrade in lockstep with egui (RISKS R-07) |
+| GPU | **wgpu** | **29.0.4 — via `eframe::wgpu`, NOT a direct dep** | One abstraction → Vulkan/Metal/DX12/GL/WebGPU; egui first-party backend shares device/queue | **Corrected 2026-08-03 (W1-06 pre-flight): this row said 30.0, which is impossible today.** `egui-wgpu 0.35.0` depends on `wgpu 29.0.4`, and 0.35.0 is the newest egui/eframe published; wgpu 30.0.0 exists but no egui release pairs with it. Verified by resolving eframe 0.35.0 in a scratch crate. Pinning both would put **two** wgpu versions in the tree and break the shared-device/queue design, since `wgpu30::Device` and `wgpu29::Device` are distinct types. Take wgpu through `eframe::wgpu` so exactly one version can ever be present; bump to 30 only when an egui release requires it (rule 2 below) |
 | Window/events | **winit** | 0.30.13 | De-facto standard; eframe wraps it | — |
 | UI | **egui + eframe** | 0.35.0 | Immediate mode fits per-frame debug views; what real Rust emulators use; 0.35 inspection protocol enables agent-driven UI tests | Complex docking edge cases → R-08 |
 | Docking | **egui_dock** | 0.20.1 | Mesen-style dockable viewer layout | Fallback: egui_docking (tear-off windows) |
@@ -54,9 +54,13 @@ manual chunk migrations become painful).
    invariant.
 5. **Frame path discipline**: no allocation in the cpal callback; no locks
    shared with the core thread; async work goes through the job system.
-6. **wgpu 30 specifics** (from release notes): `VertexState::buffers` is
-   `&[Option<VertexBufferLayout>]`; integer shader inputs need explicit
-   `@interpolate(flat)`; WGSL `i16`/`u16` behind `SHADER_I16` feature.
+6. **wgpu 30 specifics** (from release notes) — **these apply to wgpu 30,
+   which this project is NOT on yet** (see the GPU row: egui 0.35 pins wgpu
+   29). Keep them here for the eventual lockstep bump, and re-verify against
+   the release notes then rather than trusting this list:
+   `VertexState::buffers` is `&[Option<VertexBufferLayout>]`; integer shader
+   inputs need explicit `@interpolate(flat)`; WGSL `i16`/`u16` behind the
+   `SHADER_I16` feature.
 
 ## 4. Platform targets
 
