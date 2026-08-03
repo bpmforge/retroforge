@@ -145,7 +145,8 @@
     "tests/rom-manifest.toml",
     "scripts/**",
     ".github/**",
-    "docs/TESTING.md"
+    "docs/TESTING.md",
+    "docs/evidence/local-gate.json"
    ],
    "depends_on": [
     "W0-03"
@@ -159,8 +160,13 @@
     "CI runs validate-evidence.mjs (cheap, reads a few KB of JSON) but never fetches vectors, so GitHub Actions cost is unchanged"
    ],
    "points": 5,
-   "status": "todo",
-   "stories": []
+   "status": "in_progress",
+   "stories": [],
+   "notes": [
+    "SCOPE-FIX 2026-08-03 (conductor): acceptance criteria 2–4 require a committed evidence file, but no original write_scope glob contained a home for one — the same self-blocking-scope defect fixed on W1-01a. Added the exact path docs/evidence/local-gate.json, not a widened docs/** glob (Brad's ruling). W1-04a and W1-05a still carry the sibling defect (ppu/** without crates/rf-nes/src/lib.rs for mod ppu; wiring).",
+    "PRE-FLIGHT 2026-08-03 (conductor, verified empirically before briefing): git-artifact fetch shape is `git init` + `remote add` + `sparse-checkout set --cone <subpath>` + `fetch --depth 1 --filter=blob:none origin <sha>` + `checkout FETCH_HEAD`, then `rev-parse HEAD` must equal the pinned sha. Probed live against SingleStepTests/spc700 (git 2.55.0): fetch-by-bare-SHA is allowed by GitHub, 1.4s/96MB. The existing roms/nes/singlestep-nes6502-src clone is already in exactly this configuration (blob:none + sparse nes6502/v1 + shallow, HEAD=bb11756436da8fd16cce86aef63dc6725f48836f, 185M .git / 1.2G total / 256 files), so the manifest kind codifies a proven shape rather than a guess.",
+    "PRE-FLIGHT 2026-08-03 (conductor): staleness check plumbing verified in this repo — `git rev-list -1 HEAD -- <paths>` yields the last commit touching covered code and `git merge-base --is-ancestor A B` discriminates correctly in both directions. Timestamps must NOT be used (mtimes are not in git; committer dates are rewritable and non-monotonic across merges). CI TRAP: actions/checkout@v4 defaults to fetch-depth 1, and on a shallow clone these commands silently degrade — validate-evidence.mjs would pass while enforcing nothing, which is this project's known fake-success failure mode. fetch-depth: 0 plus an explicit `git rev-parse --is-shallow-repository` guard are acceptance requirements, not niceties."
+   ]
   },
   {
    "id": "W1-01a",
