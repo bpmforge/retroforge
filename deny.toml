@@ -1,0 +1,86 @@
+# cargo-deny configuration — licence gate (NFR-011, ticket W0-06)
+#
+# Schema verified against cargo-deny 0.20.2 (`cargo deny init` template +
+# src/licenses/cfg.rs in the installed crate source). As of 0.20.x the
+# `[licenses]` table is allow-list-only: `unlicensed`, `allow-osi-fsf-free`,
+# `copyleft` and `deny` were removed in cargo-deny 0.14 (see
+# https://github.com/EmbarkStudios/cargo-deny/pull/611) and now hard-ERROR if
+# present in config. Do not add them back.
+#
+# Policy (NFR-011, docs/SRS.md): permissive-only, zero copyleft. Every
+# licence not explicitly allowed below is denied by default — that is the
+# only denial mechanism this schema version has, so the allow-list below IS
+# the enforcement of the copyleft ban.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[licenses]
+# Allowlist per NFR-011. Copyleft (GPL/LGPL/AGPL/MPL/SSPL) and NC/ND
+# Creative Commons licences are DENIED BY DEFAULT by omission from this
+# list — see docs/work/DESIGN_REVIEW.md §4 (Licensing ledger) for the
+# design-review record of this policy and G-42's resolution (first-party
+# code must not carry GPL-derived material into an MIT/Apache repo).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "ISC",
+    "Unlicense",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+# NFR-011 says "every third-party dependency" with no dev/build carve-out;
+# cargo-deny's own default is include-dev = false (dev-deps skipped), which
+# is narrower than the spec. Force it on so `cargo test`-only tooling is
+# covered too, not just what ships in a release binary.
+include-dev = true
+# unicode-ident (transitive: serde -> serde_derive -> proc-macro2 ->
+# unicode-ident; already in the tree via W0's `serde` dependency, not added
+# by this ticket) declares `(MIT OR Apache-2.0) AND Unicode-3.0` — an AND
+# expression, so every component must be allowed. Unicode-3.0 is an
+# OSI-approved permissive licence (the Unicode Character Database licence)
+# but isn't in NFR-011's enumerated list, so it is scoped to this one crate
+# via an exception rather than widened onto the global allow-list above.
+[[licenses.exceptions]]
+crate = "unicode-ident"
+allow = ["Unicode-3.0"]
+# Crates whose `license` metadata cannot be trusted as-is get an explicit
+# election here instead of being silently allowed/denied by file-scan guess.
+#
+# libzstd (vendored inside zstd-sys, which zstd -> zstd-safe -> zstd-sys
+# pulls in via rf-state's zstd 0.13.3 dependency) is dual-licensed
+# BSD-3-Clause OR GPL-2.0 upstream (Meta's C library: zstd/LICENSE is the
+# BSD text, zstd/COPYING is GPL-2.0 — both files ship in the zstd-sys
+# source distribution). We elect BSD-3-Clause, the permissive half of the
+# dual grant, per NFR-011's "libzstd -> BSD-3" instruction. Verified against
+# zstd-sys 2.0.16+zstd.1.5.7 as fetched into the local registry cache; if
+# this clarification's `license-files` hash stops matching (crate content
+# changed), cargo-deny will fall back to normal scanning and this election
+# will no longer apply — that's the intended fail-safe.
+[[licenses.clarify]]
+crate = "zstd-sys"
+expression = "BSD-3-Clause"
+license-files = [
+    { path = "zstd/LICENSE", hash = 0x3bfe1fb1 },
+]
+
+[licenses.private]
+ignore = false
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
