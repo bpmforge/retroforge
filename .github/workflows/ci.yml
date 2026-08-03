@@ -25,12 +25,18 @@ jobs:
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
       - name: licence gate (NFR-011, W0-06)
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
-        with:
-          # cargo-deny version is pinned by this action tag, not floating:
-          # v2.1.1's Dockerfile bakes in deny_version=0.20.2, the same
-          # version verified against deny.toml's schema locally. Bump both
-          # together — see deny.toml's header comment.
-          command: check
-          arguments: ""
-          command-arguments: licenses
+        # Installed via `cargo install --locked --version`, not the
+        # EmbarkStudios/cargo-deny-action Docker action: that action's image
+        # is rust:*-alpine (musl host) and its entrypoint cd's into the repo
+        # and runs `rustup show || rustup toolchain install` against
+        # rust-toolchain.toml's pinned channel (1.94) before cargo-deny runs
+        # at all — an extra, untested toolchain-resolution path on a musl
+        # host distinct from what the rest of this job already exercises on
+        # the (floating, out-of-scope-to-fix) dtolnay/rust-toolchain@stable
+        # glibc host. Installing in-job on the toolchain this job already
+        # set up avoids that risk entirely. Version is still hard-pinned
+        # (no floating `latest`) — bump in lockstep with deny.toml's header
+        # comment when upgrading.
+        run: |
+          cargo install cargo-deny --locked --version 0.20.2
+          cargo deny check licenses
