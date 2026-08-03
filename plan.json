@@ -235,9 +235,14 @@
     "controller read via strobe protocol"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
+   ],
+   "notes": [
+    "PRE-FLIGHT 2026-08-03 (conductor): the DMC/OAM-DMA seam flagged in HANDOFF resolves in favour of the current design, and EMULATION_CORES.md section 1 is the authority: 'CPU is the master clock. Each chip keeps its own cycle counter; when the CPU touches a register another chip owns, that chip runs catch_up(to_master_cycle) first.' So the master cycle counter must live in the SYSTEM BUS and be advanced inside CpuBus::read/write (one tick per bus op), NEVER by summing Cpu::step's u32 return afterwards. Only then do bus-inserted stall cycles (OAM DMA's 513/514, later DMC) land in the master clock for free, and the $2007/$4016 RDY double-read glitch becomes expressible as the bus performing the read twice internally and returning the second value. If the executor finds itself needing to add DMA cycles to step()'s return value, that is the signal the seam did NOT hold — stop and escalate rather than papering over it.",
+    "PRE-FLIGHT 2026-08-03 (conductor): rf-nes has NO dependency on rf-cart today and must add one (path dep; permitted — validate-arch.sh rule 1 forbids only upper-layer crates and rf-cart is a peer core crate, rule 3 exempts rf-nes). Note rf-cart exposes cartridge METADATA only: `Cartridge::load(&[u8]) -> Result<Cartridge, CartError>` yielding `Cartridge::Nes { header: NesHeader, identity: RomIdentity }`, where NesHeader carries format/mapper/submapper/prg_rom_size/chr_rom_size/prg_ram_size/mirroring/battery/trainer — but NOT the PRG/CHR bytes. rf-nes must slice those out of the raw image itself (16-byte header + optional 512-byte trainer offset). rf-cart is outside this ticket's write scope, so do not 'fix' it there.",
+    "PRE-FLIGHT 2026-08-03 (conductor): crates/rf-nes/Cargo.toml's description and src/lib.rs's module doc both claim rf-nes 'consumes rf-core-api only'. That is already inaccurate (there is no rf-core-api dependency either) and adding rf-cart makes it more so — update both in this ticket (they are in scope) rather than leaving an R-15 stale-comment."
    ]
   },
   {
