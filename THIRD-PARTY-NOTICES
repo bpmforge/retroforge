@@ -1,0 +1,104 @@
+THIRD-PARTY-NOTICES
+====================
+
+RetroForge itself is licensed under MIT OR Apache-2.0 (see LICENSE-MIT and
+LICENSE-APACHE at the repository root).
+
+This file exists to satisfy Apache License 2.0 §4(d): when redistributing a
+Derivative Work that includes material licensed under Apache-2.0, any NOTICE
+text attached to that material's original distribution must be reproduced
+"within such Derivative Works... in at least one of the following places...
+a text file distributed as part of the Derivative Works." It is generated
+and maintained for ticket W0-06 (NFR-011, docs/SRS.md) and should be updated
+whenever a new Apache-2.0-only dependency enters the tree — check with
+`cargo deny check licenses` (see deny.toml) and `cargo deny list`.
+
+------------------------------------------------------------------------
+STATUS AS OF THIS TICKET (W0-06)
+------------------------------------------------------------------------
+
+Every Apache-2.0-licensed crate presently resolved into the workspace's
+dependency graph (see `cargo deny list` output, or `Cargo.lock`) is
+dual-licensed "MIT OR Apache-2.0" (a few, transitively via r-efi, are
+triple-licensed "MIT OR Apache-2.0 OR LGPL-2.1-or-later"). RetroForge elects
+the MIT grant for all of them, consistent with the workspace's own
+"MIT OR Apache-2.0" licensing. None of them ship a NOTICE file in their
+published crate source as of the versions in Cargo.lock at the time of this
+ticket. Consequently there is currently no third-party NOTICE text that
+Apache-2.0 §4(d) obligates this repository to reproduce.
+
+The two dependencies RetroForge is known to need that ARE Apache-2.0-only
+(no MIT alternative) — winit (windowing, arrives with the renderer ticket,
+W1) and cpal (audio I/O, arrives with the audio ticket, W2) — are NOT YET
+dependencies of this workspace. The entries below are placeholders reserving
+their place in this file's structure; they intentionally carry no
+attribution text yet because there is no resolved version to attribute and
+fabricating one would misrepresent what is actually in the dependency tree.
+When winit and/or cpal are added as real dependencies, this file must be
+updated in the same ticket that adds them:
+
+  1. Pull the exact resolved version's source (crates.io or vendored copy).
+  2. Copy that version's NOTICE file verbatim below, if it ships one.
+  3. If it ships no NOTICE file, record "no NOTICE file in upstream
+     distribution" explicitly rather than leaving the section silently
+     empty, so the omission is a recorded fact, not an oversight.
+
+------------------------------------------------------------------------
+winit — PLACEHOLDER, not yet a dependency
+------------------------------------------------------------------------
+
+(Reserved. Fill in when winit is added to the dependency tree — W1 renderer
+ticket. Do not fill this in speculatively.)
+
+------------------------------------------------------------------------
+cpal — PLACEHOLDER, not yet a dependency
+------------------------------------------------------------------------
+
+(Reserved. Fill in when cpal is added to the dependency tree — W2 audio
+ticket. Do not fill this in speculatively.)
+
+------------------------------------------------------------------------
+libzstd (vendored C library inside the zstd-sys crate)
+------------------------------------------------------------------------
+
+Not an Apache-2.0 notice, recorded here for completeness alongside the
+other third-party attribution material: libzstd (bundled inside zstd-sys,
+pulled in via rf-state -> zstd 0.13.3 -> zstd-safe -> zstd-sys) is
+dual-licensed BSD-3-Clause OR GPL-2.0 upstream by Meta Platforms, Inc.
+RetroForge elects the BSD-3-Clause grant; see the `[[licenses.clarify]]`
+entry for `zstd-sys` in deny.toml for the mechanical enforcement of that
+election, and docs/work/DESIGN_REVIEW.md §4 for the design-review record.
+
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+(Reproduced verbatim from zstd/LICENSE inside zstd-sys 2.0.16+zstd.1.5.7,
+the version resolved in Cargo.lock at the time of this ticket.)
