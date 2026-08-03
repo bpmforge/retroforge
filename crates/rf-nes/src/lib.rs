@@ -9,12 +9,20 @@
 //! the raw ROM image itself. `rf-cart` is a peer core crate, not an upper
 //! layer, so this is exempt from `scripts/validate-arch.sh` rule 1 (see
 //! that script's `CORE_CRATES`/`FORBIDDEN` lists).
+//!
+//! Dependency note (ticket W1-04a): this crate also depends on
+//! `rf-core-api` for the cross-core contract types [`ppu`] emits pixels
+//! through (`CoreSink`/`PpuPixel`/`PixelLayer`) — also exempt from rule 1,
+//! since `rf-core-api` is the shared contract crate every core is expected
+//! to depend on, not an upper layer.
 
 pub mod cpu;
+pub mod ppu;
 pub mod system;
 pub mod trace;
 
 pub use cpu::{Cpu, CpuBus};
+pub use ppu::Ppu;
 pub use system::{NesBus, NesLoadError, NesRom};
 pub use trace::{format_trace_line, TracePeek};
 

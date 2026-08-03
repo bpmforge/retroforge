@@ -18,13 +18,30 @@
 //! its `STA $4014` instruction issued. Nothing here ever feeds cycles back
 //! into `Cpu` — if it needed to, this seam would have failed.
 //!
+//! ## The PPU tick seam (ticket W1-04a)
+//!
+//! `docs/design/EMULATION_CORES.md` §1 calls for the PPU to run either
+//! catch-up-scheduled or "in lock-step per CPU cycle" in Accuracy mode;
+//! this crate builds lock-step only (see [`crate::ppu`]'s module doc for
+//! why, and the debt that choice owes a later ticket). Lock-step means the
+//! real [`crate::ppu::Ppu`] must advance exactly 3 dots for every one
+//! master cycle the bus itself advances — so `tick_master` (below), the one
+//! private helper every `master_cycle` increment in this file now goes
+//! through, does both in one place: `self.master_cycle += cycles` and
+//! `self.ppu.tick()` x3 per cycle. This preserves the master-clock seam
+//! above unchanged (`master_cycle` still only ever changes inside this
+//! file, at the same call sites as before) while guaranteeing the PPU can
+//! never drift out of lock-step with it, including during OAM DMA's
+//! stolen cycles (`run_oam_dma` ticks the PPU right along with them, which
+//! is correct hardware behavior — DMA doesn't pause the PPU).
+//!
 //! ## Memory map (nesdev.org/wiki/CPU_memory_map)
 //!
 //! | Range | Contents |
 //! |---|---|
 //! | `$0000-$07FF` | 2 KiB internal RAM |
 //! | `$0800-$1FFF` | mirrors of `$0000-$07FF`, every `$0800` |
-//! | `$2000-$2007` | PPU registers (stub — see [`ppu_stub`]) |
+//! | `$2000-$2007` | PPU registers (real 2C02 — see [`crate::ppu`]) |
 //! | `$2008-$3FFF` | mirrors of `$2000-$2007`, every `$0008` |
 //! | `$4000-$4013` | APU registers (stub — dropped/open-bus) |
 //! | `$4014` | OAM DMA trigger |
@@ -67,17 +84,17 @@
 //! and correct for the one bit every acceptance test actually checks (D0).
 mod cartridge;
 mod controller;
-mod ppu_stub;
 
 #[cfg(test)]
 mod tests;
 
 pub use cartridge::{NesLoadError, NesRom};
 pub use controller::Controller;
-pub use ppu_stub::PpuStub;
 
 use crate::cpu::CpuBus;
+use crate::ppu::Ppu;
 use rf_cart::NesHeader;
+use rf_core_api::CoreSink;
 
 const RAM_SIZE: usize = 0x0800;
 const PRG_RAM_SIZE: usize = 0x2000;
@@ -90,7 +107,7 @@ pub struct NesBus {
     master_cycle: u64,
     ram: [u8; RAM_SIZE],
     open_bus: u8,
-    ppu: PpuStub,
+    ppu: Ppu,
     controllers: [Controller; 2],
     prg_ram: [u8; PRG_RAM_SIZE],
     rom: NesRom,
@@ -105,11 +122,19 @@ impl NesBus {
     /// Build a bus from an already-loaded [`NesRom`] (mapper 0 / NROM
     /// only — see [`NesRom::from_ines_bytes`]).
     pub fn new(rom: NesRom) -> Self {
+        // Built from `rom`'s own CHR bytes/mirroring before `rom` moves
+        // into the struct below — no `Mapper` trait exists yet (mapper 0
+        // has no CHR banking), so the PPU just owns a flat copy.
+        let ppu = Ppu::new(
+            rom.chr_rom().to_vec(),
+            rom.chr_is_ram(),
+            rom.header().mirroring,
+        );
         NesBus {
             master_cycle: 0,
             ram: [0; RAM_SIZE],
             open_bus: 0,
-            ppu: PpuStub::new(),
+            ppu,
             controllers: [Controller::new(), Controller::new()],
             prg_ram: [0; PRG_RAM_SIZE],
             rom,
@@ -142,6 +167,17 @@ impl NesBus {
         self.ppu.oam()
     }
 
+    /// Flush every completed-but-undrained scanline the PPU has produced
+    /// through `sink` (acceptance criterion 3: "indexed pixels + metadata
+    /// emitted via CoreSink") — see [`crate::ppu`]'s module doc for why
+    /// this is a separate call rather than something `CpuBus::read`/`write`
+    /// do inline. No `EmulatorCore` exists in this crate yet to call this
+    /// once per frame automatically (out of this ticket's write scope);
+    /// callers (today: tests) drive it directly.
+    pub fn drain_video(&mut self, sink: &mut dyn CoreSink) {
+        self.ppu.drain(sink);
+    }
+
     /// Stall length (513 or 514) of the most recently completed OAM DMA,
     /// counted the way nesdev describes it: the number of cycles the CPU
     /// is halted for, *after* the `$4014` write's own bus cycle has
@@ -169,7 +205,7 @@ impl NesBus {
     fn read_untimed(&mut self, addr: u16) -> u8 {
         let value = match addr {
             0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)],
-            0x2000..=0x3FFF => self.ppu.read((addr & 0x0007) as u8, self.open_bus),
+            0x2000..=0x3FFF => self.ppu.read_register((addr & 0x0007) as u8, self.open_bus),
             0x4016 => self.controllers[0].read_bit() | (self.open_bus & !0x01),
             0x4017 => self.controllers[1].read_bit() | (self.open_bus & !0x01),
             0x4000..=0x4015 | 0x4018..=0x401F => self.open_bus,
@@ -235,10 +271,23 @@ impl NesBus {
     /// controller either, so there is no golden-log evidence either way
     /// for them, and passthrough is the conservative default absent a
     /// reason to change it.
+    ///
+    /// ## PPU registers (ticket W1-04a)
+    ///
+    /// [`Ppu::read_register`] has real side effects for `$2002`/`$2007`
+    /// (clearing the vblank flag/`w` latch, advancing the delayed-read
+    /// buffer/`v`) — using it here would violate this method's own
+    /// no-side-effects contract. [`Ppu::peek_register`] is the
+    /// side-effect-free counterpart (same convention as
+    /// [`Controller::peek_bit`] vs. `read_bit` above). nestest never
+    /// touches `$2000-$3FFF` at all (verified against the real fetched
+    /// `nestest.log`: zero lines disassemble an operand in that range), so
+    /// this arm's correctness has no golden-trace coverage either way —
+    /// see `crate::ppu`'s own test suite for its behavior instead.
     pub fn peek(&self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)],
-            0x2000..=0x3FFF => self.ppu.read((addr & 0x0007) as u8, self.open_bus),
+            0x2000..=0x3FFF => self.ppu.peek_register((addr & 0x0007) as u8, self.open_bus),
             0x4016 => self.controllers[0].peek_bit() | (self.open_bus & !0x01),
             0x4017 => self.controllers[1].peek_bit() | (self.open_bus & !0x01),
             0x4000..=0x4015 | 0x4018..=0x401F => 0xFF,
@@ -266,7 +315,7 @@ impl NesBus {
         self.open_bus = value;
         match addr {
             0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)] = value,
-            0x2000..=0x3FFF => self.ppu.write((addr & 0x0007) as u8, value),
+            0x2000..=0x3FFF => self.ppu.write_register((addr & 0x0007) as u8, value),
             0x4016 => {
                 // Both controllers share the one strobe line (nesdev.org/
                 // wiki/Standard_controller): a $4016 write reaches both.
@@ -321,14 +370,14 @@ impl NesBus {
         let mut stall = 0u32;
 
         // 1 dummy read cycle while the DMA controller takes over the bus.
-        self.master_cycle += 1;
+        self.tick_master(1);
         stall += 1;
 
         // +1 extra alignment cycle if the write that triggered this landed
         // on an odd cycle, so the first "get" cycle below lines up on an
         // even one (the "get/put alignment" EMULATION_CORES.md §2.5 cites).
         if start_cycle_odd {
-            self.master_cycle += 1;
+            self.tick_master(1);
             stall += 1;
         }
 
@@ -339,23 +388,35 @@ impl NesBus {
             // *not* `CpuBus::read`, so this loop's 256 cycles are counted
             // exactly once each (see `read_untimed`'s doc).
             let byte = self.read_untimed(src);
-            self.master_cycle += 1;
+            self.tick_master(1);
             stall += 1;
 
             // "put": write the byte into OAM via the OAMDATA path.
             self.ppu.write_oam_data(byte);
-            self.master_cycle += 1;
+            self.tick_master(1);
             stall += 1;
         }
 
         stall
+    }
+
+    /// The single place `master_cycle` is ever mutated (module doc's "PPU
+    /// tick seam"): advances the master clock by `cycles` and ticks the PPU
+    /// exactly `3 * cycles` dots, keeping it in permanent lock-step with
+    /// the bus regardless of which call site (a plain read/write or one of
+    /// `run_oam_dma`'s stolen cycles) is advancing time.
+    fn tick_master(&mut self, cycles: u32) {
+        self.master_cycle += cycles as u64;
+        for _ in 0..cycles * 3 {
+            self.ppu.tick();
+        }
     }
 }
 
 impl CpuBus for NesBus {
     fn read(&mut self, addr: u16) -> u8 {
         let value = self.read_untimed(addr);
-        self.master_cycle += 1;
+        self.tick_master(1);
         value
     }
 
@@ -363,18 +424,23 @@ impl CpuBus for NesBus {
         if addr == 0x4014 {
             let start_cycle_odd = self.master_cycle % 2 == 1;
             self.open_bus = value;
-            self.master_cycle += 1; // the $4014 write's own cycle
+            self.tick_master(1); // the $4014 write's own cycle
             let stall = self.run_oam_dma(value, start_cycle_odd);
             self.last_oam_dma_stall = Some(stall);
             return;
         }
         self.write_untimed(addr, value);
-        self.master_cycle += 1;
+        self.tick_master(1);
     }
 
     // `nmi_line`/`irq_line` intentionally left at the `CpuBus` trait's
-    // default (`false`): neither the PPU nor APU stub above has any
-    // ability to assert an interrupt yet (both are pure register stubs).
-    // A later ticket overrides these once the PPU has a real VBlank/NMI
-    // output and the APU has a real frame-counter/DMC IRQ.
+    // default (`false`): the PPU now has real vblank/NMI-enable state
+    // (`$2000` bit 7, `$2002` bit 7), but nothing connects it to this trait
+    // method yet — the exact VBlank/NMI edge-suppression timing
+    // (`ppu_vbl_nmi`) is a later ticket's acceptance criterion, not this
+    // one's, and a half-modeled NMI with no test-ROM oracle to check it
+    // against would risk silently perturbing every ROM this crate runs
+    // (see `crate::ppu`'s module doc scope fence). The APU stub still has
+    // no interrupt source either. A later ticket overrides this once both
+    // are ready.
 }

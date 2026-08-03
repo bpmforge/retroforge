@@ -613,6 +613,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "rf-cart",
+ "rf-core-api",
 ]
 
 [[package]]

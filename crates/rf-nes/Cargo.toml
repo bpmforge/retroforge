@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 rf-cart = { path = "../rf-cart" }
+rf-core-api = { path = "../rf-core-api" }
 
 [dev-dependencies]
 criterion = "0.8.2"
