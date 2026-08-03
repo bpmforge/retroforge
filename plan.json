@@ -136,6 +136,33 @@
    "stories": []
   },
   {
+   "id": "W0-07",
+   "title": "local evidence gate + manifest git-artifact kind",
+   "phase": 0,
+   "crate": "infra",
+   "write_scope": [
+    "crates/rf-harness/**",
+    "tests/rom-manifest.toml",
+    "scripts/**",
+    ".github/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [
+    "W0-03"
+   ],
+   "acceptance": [
+    "manifest gains a git-artifact kind (repo + pinned commit + sparse subpath) whose integrity comes from the commit SHA rather than an archive sha256; replaces the broken singlestep-nes6502 whole-repo zip entry (codeload streams with no Content-Length, so a multi-GB transfer truncates silently into a valid-looking file)",
+    "scripts/local-gate.sh runs the heavy local-only suites and emits the W0-03 accuracy table as a committed evidence file (small JSON, no ROM bytes, NFR-006 preserved)",
+    "evidence records the git commit, toolchain version, per-suite raw/effective counts, and the vector-source commit SHA so inputs are pinned too; single rolling file (git history is the audit trail)",
+    "scripts/validate-evidence.mjs fails when a Tier-A-local suite has no evidence, or when the evidence predates the last change to the code it covers, so staleness is detected mechanically rather than remembered",
+    "docs/TESTING.md section 4 gains an explicit Tier A-local classification for nes6502 with the evidence protocol recorded",
+    "CI runs validate-evidence.mjs (cheap, reads a few KB of JSON) but never fetches vectors, so GitHub Actions cost is unchanged"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
    "id": "W1-01a",
    "title": "6502 CPU: official opcodes + addressing + vectors harness",
    "phase": 1,
