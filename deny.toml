@@ -72,6 +72,107 @@ license-files = [
     { path = "zstd/LICENSE", hash = 0x3bfe1fb1 },
 ]
 
+
+# ---------------------------------------------------------------------------
+# W1-06 (frontend shell) exceptions — Brad's ruling 2026-08-03.
+#
+# NFR-011: "A permissive licence outside the enumerated list may be admitted
+# only as a documented per-crate exception naming the crate and the reason
+# (never by widening the global allowlist)". These follow the unicode-ident
+# precedent above. All are permissive; none is GPL/LGPL/AGPL/MPL/SSPL and
+# none is an NC/ND-restricted asset, so the copyleft ban is untouched.
+#
+# A feature-trim was evaluated FIRST and rejected on evidence, not taste:
+# eframe 0.35.0 declares egui-winit with `default-features = false` but then
+# hard-enables "clipboard" and "links" itself (eframe's Cargo.toml, the
+# cfg(not(wasm32)) egui-winit dependency block), so `arboard` and
+# `webbrowser` arrive regardless of eframe's own feature flags. Verified by
+# resolving eframe with default-features=false in a scratch crate: the
+# offending crates were still present. Dropping them would mean dropping
+# eframe itself and owning the winit event loop + wgpu surface setup.
+# ---------------------------------------------------------------------------
+
+# BSL-1.0 (Boost Software Licence 1.0) — permissive, OSI-approved, no
+# reciprocal obligation. Reached via egui-winit's "clipboard" feature ->
+# arboard -> clipboard-win. Windows-only crates; they appear in the graph
+# because deny.toml evaluates all targets.
+[[licenses.exceptions]]
+crate = "clipboard-win"
+allow = ["BSL-1.0"]
+[[licenses.exceptions]]
+crate = "error-code"
+allow = ["BSL-1.0"]
+
+# Unicode-3.0 — the Unicode Character Database licence: permissive, and
+# already admitted for `unicode-ident` above by NFR-011's own worked example.
+# Reached via egui-winit's "links" feature -> webbrowser -> url -> idna ->
+# the ICU4X crates below.
+[[licenses.exceptions]]
+crate = "icu_collections"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "icu_locale_core"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "icu_normalizer"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "icu_normalizer_data"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "icu_properties"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "icu_properties_data"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "icu_provider"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "litemap"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "potential_utf"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "tinystr"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "writeable"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "yoke"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "yoke-derive"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "zerofrom"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "zerofrom-derive"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "zerotrie"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "zerovec"
+allow = ["Unicode-3.0"]
+[[licenses.exceptions]]
+crate = "zerovec-derive"
+allow = ["Unicode-3.0"]
+
+# egui's bundled default fonts. OFL-1.1 (SIL Open Font Licence) and
+# Ubuntu-font-1.0 are FONT licences: their reciprocal clauses bind derived
+# *fonts* only and explicitly do not extend to documents or software that
+# merely embed or render them, so neither is copyleft in NFR-011's sense and
+# neither is NC/ND. Kept rather than trimmed because disabling
+# `default_fonts` leaves egui with no font at all, which would mean sourcing
+# and licence-reviewing our own.
+[[licenses.exceptions]]
+crate = "epaint_default_fonts"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
+
 [licenses.private]
 ignore = false
 

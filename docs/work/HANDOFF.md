@@ -12,9 +12,9 @@ a time.** Do not redesign anything.
 4. `PLAYBOOK.md` — per-ticket loop, gate command, block-note discipline
 5. The tail of `docs/STATUS.md` — per-ticket evidence for everything below
 
-## Current state (verified 2026-08-03, W1-05b closed on main, both remotes)
+## Current state (verified 2026-08-03, W1-06 closed on main, both remotes)
 
-**15 tickets done. Workspace tests: 330 passing** (with the 1 GB vector set
+**16 tickets done. Workspace tests: 358 passing** (with the 1 GB vector set
 absent — see "Large test data" below).
 
 | Ticket | What landed |
@@ -34,6 +34,7 @@ absent — see "Large test data" below).
 | W1-04b | PPU frame-timing edges + analytic golden frame (found+fixed a real scroll bug) |
 | W1-05a | PPU sprites: secondary OAM, 8-sprite limit, buggy overflow flag |
 | W1-05b | sprite-0 hit (blargg sprite_hit 11/11) + VBL/NMI wiring (ppu_vbl_nmi 4/10) |
+| W1-06 | frontend shell: eframe window, CPU blit, frame stepping, FM-01 containment |
 
 **The 6502 is feature-complete for Phase 1**: all 256 opcodes pass
 SingleStepTests `nes6502` — **2,560,000/2,560,000 cases**, state + RAM +
@@ -50,7 +51,8 @@ joined it in W0-07.
 
 ## START HERE — recommended order
 
-1. **W1-06** — next in the W1 chain, claimable now.
+1. **W1-07** — keyboard input + InputFrame + replay log. Needs a human to
+   confirm W1-06's unverified visual criteria first if you can (below).
 2. **W1-05c** — the sub-cycle VBL/NMI ceiling (see below). Higher risk than
    its 5 points suggest: it changes when `CountingBus` samples `nmi_line()`,
    which is the seam the DMA model and both byte-exact suites sit on. Do it
@@ -130,6 +132,22 @@ would each have burned a session (below).
   pipeline has a delay, assert on the scanline where the effect lands, not
   where the input was written**, and pad unused fixture state with `$FF`
   rather than leaving it zeroed.
+- **The GPU stack pins are NOT what TECH_STACK originally said.** It pinned
+  wgpu 30.0 + egui/eframe 0.35.0 while mandating lockstep; that pairing is
+  impossible — `egui-wgpu 0.35.0` needs **wgpu 29.0.4**, and 0.35.0 is the
+  newest egui published. Corrected 2026-08-03. **Take wgpu through
+  `eframe::wgpu`, never a direct Cargo entry**, or you get two wgpu versions
+  and `wgpu30::Device != wgpu29::Device`. Check `grep -c '^name = "wgpu"$'
+  Cargo.lock == 1` after any GUI dependency change.
+- **`cargo deny check licenses` is part of CI but NOT of the seven-command
+  gate.** A GUI dependency change can leave the local gate green and CI red.
+  Run it explicitly. NFR-011 admits new permissive licences only as
+  **documented per-crate exceptions**, never by widening the allowlist —
+  deny.toml now carries 21 of them from W1-06.
+- **W1-06's visual criteria are UNVERIFIED**: the window painting, the ROM
+  picker and transport-button response could not be checked in a sandboxed
+  macOS session. The binary runs clean as a GUI process, but a human with a
+  desktop session should confirm before W1-07 builds input on top.
 - **Ruling (Brad, 2026-08-03): the sink is ACCURACY-EXACT.** `CoreSink`
   always carries the true hardware framebuffer; `dropped_by_limit` is always
   `false` on the NES path; W3-05's limit bypass reconstructs dropped sprites
