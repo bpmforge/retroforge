@@ -20,6 +20,35 @@ header:  magic "RFST" | container_version u16 | console u8 | flags u16
 chunks:  [ tag: [u8;4] | version: u16 | len: u32 | payload ]*
 ```
 
+**Wire encoding, normative as of W0-05 (2026-08-02).** The sketch above left
+two fields unspecified; the shipped implementation had to choose, and under
+NFR-008 those choices are public commitments from first release. All
+multi-byte fields are **little-endian**. The header is **uncompressed**; a
+single zstd stream (level 3) covers the chunk body only.
+
+| Field | Encoding |
+|---|---|
+| `magic` | `[u8;4]` = `"RFST"` |
+| `container_version` | `u16` — only `1` exists; any other value is refused **in both directions** (older and newer), deliberately |
+| `console` | `u8` |
+| `flags` | `u16` — must be `0` in v1 |
+| `rom_sha256` | `[u8;32]` |
+| `emu_version` | `u16` byte-length prefix, then that many UTF-8 bytes; **length capped at 128** |
+| `timestamp` | `u64` — Unix seconds |
+| chunk | `tag [u8;4]` \| `version u16` \| `len u32` \| `payload[len]` |
+
+**Determinism rule (FR-STATE-002, gated by NFR-001):** `timestamp` and
+`emu_version` are metadata ONLY and are **excluded from any state hash**. Two
+containers holding identical chunk payloads but different timestamps MUST hash
+equal while their encoded bytes differ. The container is byte-deterministic for
+a fixed input, which is what makes the golden fixtures meaningful — so the
+timestamp is a caller-supplied constructor argument, never read from the clock
+inside the writer.
+
+**Robustness (untrusted input):** a declared chunk `len` is bounds-checked
+against remaining input *before* allocating, and decompression is capped
+(64 MiB in v1) because the wire format carries no decompressed-size field.
+
 Chunk ownership — each crate serializes/deserializes only its own chunks:
 
 | Tag | Owner | Contents |
