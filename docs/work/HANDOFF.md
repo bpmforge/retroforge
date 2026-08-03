@@ -12,9 +12,9 @@ a time.** Do not redesign anything.
 4. `PLAYBOOK.md` — per-ticket loop, gate command, block-note discipline
 5. The tail of `docs/STATUS.md` — per-ticket evidence for everything below
 
-## Current state (verified 2026-08-03, commit 0eb2b69 on main, both remotes)
+## Current state (verified 2026-08-03, W0-07 closed on main, both remotes)
 
-**8 tickets done. Workspace tests: 162 passing** (with the 1 GB vector set
+**9 tickets done. Workspace tests: 185 passing** (with the 1 GB vector set
 absent — see "Large test data" below).
 
 | Ticket | What landed |
@@ -27,6 +27,7 @@ absent — see "Large test data" below).
 | W0-06 | cargo-deny licence gate (NFR-011) |
 | W1-01a | 6502: 151 official opcodes, cycle-stepped |
 | W1-01b | 6502: 105 unofficial opcodes + interrupt edges |
+| W0-07 | manifest `[[git_artifact]]` kind + local evidence gate |
 
 **The 6502 is feature-complete for Phase 1**: all 256 opcodes pass
 SingleStepTests `nes6502` — **2,560,000/2,560,000 cases**, state + RAM +
@@ -36,16 +37,16 @@ Full gate GREEN:
 `cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace && scripts/validate-arch.sh && node scripts/validate-plan.mjs && node scripts/validate-traceability.mjs`
 
 Toolchain pinned **1.94** (rust-toolchain.toml — never change to "stable").
-Board: 65 tickets / 369 pts · validators green · traceability 101/101.
+Board: 66 tickets / 374 pts · validators green · traceability 101/101.
+
+The gate is now **seven** commands — `node scripts/validate-evidence.mjs`
+joined it in W0-07.
 
 ## START HERE — recommended order
 
-1. **W0-07** — local evidence gate + manifest git-artifact kind. **Not yet on
-   the board**; a schema-checked draft exists (see "Open items"). Should land
-   before Phase 1 exit depends on it.
-2. **W1-02** — bus + NROM + DMA. Claimable now. This is where the DMC-DMA
+1. **W1-02** — bus + NROM + DMA. Claimable now. This is where the DMC-DMA
    seam gets proven (see "Known risk").
-3. **W1-03** — nestest golden trace; consumes W1-01b's `Cpu::unstable_op`
+2. **W1-03** — nestest golden trace; consumes W1-01b's `Cpu::unstable_op`
    marker.
 
 Claim = set `in_progress` in plan.json + commit that change first.
@@ -103,13 +104,23 @@ cleanly). CI and any fresh machine won't have them. But that skip path is also
 the obvious way to fake success — always require real per-opcode counts as
 evidence, and re-run them yourself.
 
-**Broken manifest entry**: `singlestep-nes6502`'s pinned sha256 does not match
-what codeload serves. Root cause (verified): codeload sends **no
-`Content-Length`** and streams, so a multi-GB transfer truncates silently into
-a valid-looking file. codeload IS byte-stable per commit — `singlestep-spc700`
-(15 MB) hashes exactly right — so this is one broken entry, not a systemic
-format problem. Fix in W0-07: use a partial+sparse **git clone at a pinned
-commit** (a commit SHA is itself a content hash), not an archive sha256.
+**FIXED in W0-07** (was: `singlestep-nes6502`'s pinned sha256 never matched
+what codeload serves). Root cause was never an unstable archive — codeload
+streams with **no `Content-Length`**, so a multi-GB transfer truncated
+silently into a valid-looking file; codeload IS byte-stable per commit
+(`singlestep-spc700`, 15 MB, hashes exactly right). The manifest now has a
+`[[git_artifact]]` kind: `singlestep-nes6502-src`, a `--filter=blob:none`
+sparse checkout of `nes6502/v1` at a pinned commit, integrity checked by
+`git rev-parse HEAD` — a commit SHA is itself a content hash.
+
+**Evidence gate (W0-07)**: `scripts/local-gate.sh` runs the heavy suite and
+writes `docs/evidence/local-gate.json`; `scripts/validate-evidence.mjs` runs
+in CI and fails if evidence is missing, generated from a dirty tree, or
+**stale** — staleness is `git merge-base --is-ancestor`, never timestamps.
+Touch `crates/rf-nes/src/cpu` and the gate goes red until you re-run
+`scripts/local-gate.sh`; that is intended, and it has already fired for real.
+CI checks out with `fetch-depth: 0` and the validator refuses to run on a
+shallow clone — without both, it would pass while enforcing nothing.
 
 ## Known risk for W1-02
 
@@ -124,8 +135,13 @@ W1-02 becomes a rewrite rather than an addition.
 
 ## Open items needing Brad
 
-- Evidence file format for W0-07: single **rolling** file (recommended) vs
-  per-run files.
+- **Duplicate vector runner (new debt, not blocking)**: rf-harness's
+  `nes6502_evidence.rs` + `vector_json.rs` (~23 KB) is a peer implementation
+  of rf-nes's `vectors.rs` + `json.rs` — forced, because rf-nes's test code is
+  `#[cfg(test)]`-gated and `crates/rf-nes/**` was outside W0-07's scope. Both
+  agree exactly today (verified: 2,560,000 either way) but nothing mechanically
+  stops drift. A follow-up ticket should promote one to a shared non-test
+  module and delete the other.
 - **Holy Diver Batman contradiction**: DESIGN_REVIEW §4 records it as
   pinobatch/holy-mapperel; W0-03's research says that is a different project
   (PCB manufacturing test). One is wrong. Tier-B/nightly, not blocking.
