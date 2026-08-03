@@ -176,7 +176,7 @@
     "NMI edge / IRQ level polling on the penultimate cycle + interrupt hijacking per nesdev"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E1-S1"
    ]
