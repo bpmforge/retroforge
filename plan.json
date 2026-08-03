@@ -141,7 +141,10 @@
    "phase": 1,
    "crate": "rf-nes",
    "write_scope": [
-    "crates/rf-nes/src/cpu/**"
+    "crates/rf-nes/src/cpu/**",
+    "crates/rf-nes/src/lib.rs",
+    "crates/rf-nes/Cargo.toml",
+    "crates/rf-nes/benches/**"
    ],
    "depends_on": [
     "W0-04"
