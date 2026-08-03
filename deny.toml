@@ -37,6 +37,11 @@ allow = [
     "CC0-1.0",
 ]
 confidence-threshold = 0.8
+# NFR-011 says "every third-party dependency" with no dev/build carve-out;
+# cargo-deny's own default is include-dev = false (dev-deps skipped), which
+# is narrower than the spec. Force it on so `cargo test`-only tooling is
+# covered too, not just what ships in a release binary.
+include-dev = true
 # unicode-ident (transitive: serde -> serde_derive -> proc-macro2 ->
 # unicode-ident; already in the tree via W0's `serde` dependency, not added
 # by this ticket) declares `(MIT OR Apache-2.0) AND Unicode-3.0` — an AND
