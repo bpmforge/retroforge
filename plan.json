@@ -288,7 +288,11 @@
    "phase": 1,
    "crate": "rf-nes",
    "write_scope": [
-    "crates/rf-nes/src/ppu/**"
+    "crates/rf-nes/src/ppu/**",
+    "crates/rf-nes/src/lib.rs",
+    "crates/rf-nes/src/system/mod.rs",
+    "crates/rf-nes/src/system/ppu_stub.rs",
+    "crates/rf-nes/Cargo.toml"
    ],
    "depends_on": [
     "W1-02"
@@ -299,7 +303,13 @@
     "indexed pixels + metadata emitted via CoreSink"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
+   "notes": [
+    "SCOPE-FIX 2026-08-03 (conductor): the original write_scope (ppu/** alone) made this ticket's own acceptance impossible — the fourth instance of this board defect after W1-01a, W0-07 and W2-02. Criterion 3 ('emitted via CoreSink') needs `rf-core-api`, which rf-nes does NOT depend on today, so Cargo.toml is required; `mod ppu;` needs lib.rs; and W1-02's deliberate ppu_stub.rs seam must be DELETED and its call sites in system/mod.rs repointed. Added those four exact paths (ppu_stub.rs named explicitly because it is a deletion, which globs handle badly) rather than widening to crates/rf-nes/** — Brad's W1-01a ruling.",
+    "PRE-FLIGHT 2026-08-03 (conductor): THE DESIGN DOC IS STALE ON THIS — docs/design/EMULATION_CORES.md section 1 describes `PpuPixel { color_index, palette_group, layer, priority, dropped_by_limit }`, but the REAL struct shipped by W0-04 in crates/rf-core-api/src/video.rs is `PpuPixel { palette_index: u8, layer: PixelLayer, sprite_id: Option<u8>, priority: u8, dropped_by_limit: bool }` — no `color_index`, no `palette_group`, plus a `sprite_id` the doc omits. It derives Copy. The sink method is `CoreSink::video_scanline(&mut self, y: u16, pixels: &[PpuPixel])` — per SCANLINE, not per dot, so the PPU needs an internal 256-entry scanline buffer and emits once per line. Use the real struct; do not code from the design doc's field names.",
+    "DEFERRAL OWED 2026-08-03 (conductor): EMULATION_CORES.md section 1 permits either catch-up scheduling or lock-step-per-CPU-cycle in Accuracy mode and requires that 'both paths must produce identical state, and CI diffs them on the test-ROM suite.' This ticket builds LOCK-STEP only (the doc itself calls it 'simpler to reason about'). The catch-up path and the CI diff between them are therefore an explicit debt owed by a later ticket — recorded here so the requirement does not silently evaporate, the same way W1-02's mapper trait and reset sequence were routed rather than dropped.",
+    "REGRESSION CANARY 2026-08-03 (conductor): this ticket touches crates/rf-nes/src/system, which is in nestest's evidence covered-paths, so the evidence gate WILL fire — that is intended, regenerate it. But specifically re-confirm nestest is still 8991/8991 AFTER the PPU replaces the stub: NesBus::peek's $FF behaviour for the APU stub range and the PPU register read path are exactly the surface that could shift the disassembly annotations. If the PPU cannot work without changing peek's semantics, that is a STOP-AND-REPORT, not a 'regenerate the evidence and move on'."
+   ],
    "stories": [
     "E1-S1"
    ]
@@ -321,6 +331,9 @@
    ],
    "points": 5,
    "status": "todo",
+   "notes": [
+    "HANDOFF 2026-08-03 (conductor): check scope-vs-acceptance BEFORE claiming. This ticket carries write_scope ppu/** alone, the board defect already hit on W1-01a, W0-07, W2-02 and W1-04a. W1-04a's wiring (lib.rs, system/mod.rs, Cargo.toml, ppu_stub.rs deletion) may or may not have already covered what this ticket needs — deliberately NOT pre-fixed here, because a speculative scope that looks authoritative is worse than an obviously-missing one. Derive the paths from this ticket's own acceptance at claim time."
+   ],
    "stories": [
     "E1-S1"
    ]
@@ -342,6 +355,9 @@
    ],
    "points": 8,
    "status": "todo",
+   "notes": [
+    "HANDOFF 2026-08-03 (conductor): check scope-vs-acceptance BEFORE claiming. This ticket carries write_scope ppu/** alone, the board defect already hit on W1-01a, W0-07, W2-02 and W1-04a. W1-04a's wiring (lib.rs, system/mod.rs, Cargo.toml, ppu_stub.rs deletion) may or may not have already covered what this ticket needs — deliberately NOT pre-fixed here, because a speculative scope that looks authoritative is worse than an obviously-missing one. Derive the paths from this ticket's own acceptance at claim time."
+   ],
    "stories": [
     "E1-S1",
     "E5-S1"
@@ -364,6 +380,9 @@
    ],
    "points": 5,
    "status": "todo",
+   "notes": [
+    "HANDOFF 2026-08-03 (conductor): check scope-vs-acceptance BEFORE claiming. This ticket carries write_scope ppu/** alone, the board defect already hit on W1-01a, W0-07, W2-02 and W1-04a. W1-04a's wiring (lib.rs, system/mod.rs, Cargo.toml, ppu_stub.rs deletion) may or may not have already covered what this ticket needs — deliberately NOT pre-fixed here, because a speculative scope that looks authoritative is worse than an obviously-missing one. Derive the paths from this ticket's own acceptance at claim time."
+   ],
    "stories": [
     "E1-S1",
     "E5-S1"
