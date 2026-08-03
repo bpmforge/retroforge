@@ -12,9 +12,9 @@ a time.** Do not redesign anything.
 4. `PLAYBOOK.md` — per-ticket loop, gate command, block-note discipline
 5. The tail of `docs/STATUS.md` — per-ticket evidence for everything below
 
-## Current state (verified 2026-08-03, W1-02 closed on main, both remotes)
+## Current state (verified 2026-08-03, W1-03 closed on main, both remotes)
 
-**10 tickets done. Workspace tests: 213 passing** (with the 1 GB vector set
+**11 tickets done. Workspace tests: 238 passing** (with the 1 GB vector set
 absent — see "Large test data" below).
 
 | Ticket | What landed |
@@ -29,6 +29,7 @@ absent — see "Large test data" below).
 | W1-01b | 6502: 105 unofficial opcodes + interrupt edges |
 | W0-07 | manifest `[[git_artifact]]` kind + local evidence gate |
 | W1-02 | NES bus + NROM + OAM DMA + controller strobe |
+| W1-03 | nestest golden trace: 8991/8991 lines byte-exact + reset sequence |
 
 **The 6502 is feature-complete for Phase 1**: all 256 opcodes pass
 SingleStepTests `nes6502` — **2,560,000/2,560,000 cases**, state + RAM +
@@ -45,13 +46,11 @@ joined it in W0-07.
 
 ## START HERE — recommended order
 
-1. **W1-03** — nestest golden trace; consumes W1-01b's `Cpu::unstable_op`
-   marker. **Must also build the reset/power-on sequence** — W1-02 left it
-   out deliberately (see its ticket notes); without it nestest's CYC column
-   is offset from line one.
-2. **W1-04a** — PPU background. **Check its `write_scope` first**: it still
-   carries the self-blocking `ppu/**` defect (needs `crates/rf-nes/src/lib.rs`
-   for `mod ppu;` wiring).
+1. **W1-04a** — PPU background: loopy registers + fetch pipeline. **Fix its
+   `write_scope` before claiming**: it still carries the self-blocking
+   `ppu/**` defect (needs `crates/rf-nes/src/lib.rs` for `mod ppu;` wiring,
+   and likely `crates/rf-nes/src/system/mod.rs` to replace the PPU stub).
+2. **W1-04b / W1-05a** — rest of the PPU. W1-05a has the same scope defect.
 
 Claim = set `in_progress` in plan.json + commit that change first.
 
@@ -117,8 +116,10 @@ silently into a valid-looking file; codeload IS byte-stable per commit
 sparse checkout of `nes6502/v1` at a pinned commit, integrity checked by
 `git rev-parse HEAD` — a commit SHA is itself a content hash.
 
-**Evidence gate (W0-07)**: `scripts/local-gate.sh` runs the heavy suite and
-writes `docs/evidence/local-gate.json`; `scripts/validate-evidence.mjs` runs
+**Evidence gate (W0-07)**: now covers **two** Tier-A-local suites — nes6502
+(2,560,000 vector cases) and nestest (8991 golden-trace lines), both of whose
+inputs are gitignored and therefore invisible to CI.
+`scripts/local-gate.sh` runs them and writes `docs/evidence/local-gate.json`; `scripts/validate-evidence.mjs` runs
 in CI and fails if evidence is missing, generated from a dirty tree, or
 **stale** — staleness is `git merge-base --is-ancestor`, never timestamps.
 Touch `crates/rf-nes/src/cpu` and the gate goes red until you re-run

@@ -106,13 +106,20 @@ mod tests {
     use std::fs;
 
     fn tempdir() -> std::path::PathBuf {
+        // Tests in one binary run in PARALLEL THREADS sharing a process
+        // id, and two threads can observe the same `SystemTime` tick, so
+        // pid+nanos alone is NOT unique — a collision makes one test's
+        // cleanup delete another's working directory. Observed twice as a
+        // one-off flake during W1-03. The atomic counter closes the race.
+        static TEMPDIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "rf-harness-nestest-evidence-test-{}-{}",
+            "rf-harness-nestest-evidence-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            TEMPDIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
