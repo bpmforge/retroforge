@@ -132,7 +132,7 @@
     "cargo-deny version pinned in CI (no floating install) so a registry change cannot silently alter gate results"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
