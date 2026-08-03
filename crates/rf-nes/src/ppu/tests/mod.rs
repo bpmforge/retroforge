@@ -5,10 +5,13 @@
 //!   `$2000`/`$2005`/`$2006`/`$2002` write/read sequences.
 //! - `read_buffer` — the `$2007` delayed-read/palette-bypass quirk the
 //!   ticket brief calls out by name as "a classic silent-wrongness source".
-//! - `fetch_pipeline` — criterion 1: an end-to-end tick-driven proof that
-//!   the dot table in `background.rs` (unit-tested there in isolation)
-//!   actually fetches real NT/AT/pattern bytes and reloads the shift
-//!   registers at the right dots.
+//! - `fetch_pipeline` — criterion 1 (W1-04a half): an end-to-end
+//!   tick-driven proof that the dot table in `background.rs` (unit-tested
+//!   there in isolation) actually fetches real NT/AT/pattern bytes and
+//!   reloads the shift registers at the right dots.
+//! - `frame_timing` — criterion 1 (W1-04b half): the odd/even-frame
+//!   idle-dot skip, and the scanline-boundary prefetch oracle W1-04a's own
+//!   tests explicitly left unproven (see that file's module doc).
 //! - `sink_emission` — criterion 3: `Ppu::drain` actually calls
 //!   `CoreSink::video_scanline` with the expected per-pixel data.
 //!
@@ -17,6 +20,7 @@
 //! (`crate::ppu::scroll`'s module doc quotes the same pseudocode this test
 //! module's expected values are hand-computed from).
 mod fetch_pipeline;
+mod frame_timing;
 mod read_buffer;
 mod scroll_registers;
 mod sink_emission;

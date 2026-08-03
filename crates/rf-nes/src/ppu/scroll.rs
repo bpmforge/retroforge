@@ -85,12 +85,29 @@ impl Ppu {
     /// first write  (w=0): t: ....... ...HGFED <- d: HGFEDCBA[7:3]; x <- d[2:0]; w <- 1
     /// second write (w=1): t: CBA..HG FED..... <- d: HGFEDCBA;      w <- 0
     /// ```
+    /// The second write's mask must clear fine Y (t bits 12-14) **and**
+    /// coarse Y (t bits 5-9) before OR-ing the new bits in — those are
+    /// exactly the fields the `CBA..HGFED.....` diagram marks as replaced;
+    /// `..` (bits 10-11, nametable select) and `.....` (bits 0-4, coarse X)
+    /// must survive untouched. That clear-mask is `0x03E0 | 0x7000 =
+    /// 0x73E0`; keep-mask (ticket W1-04b fix — re-verified against
+    /// [nesdev.org/wiki/PPU_scrolling](https://www.nesdev.org/wiki/PPU_scrolling)'s
+    /// literal second-write diagram while building this ticket's golden
+    /// frame): `!0x73E0 = 0x8C1F`. The keep-mask this replaced, `0x8FFF`,
+    /// left bits 5-9 (coarse Y) set instead of clearing them, so a second
+    /// write OR'd its new coarse Y onto whatever coarse Y bits `t` already
+    /// held (from an earlier `$2005`/`$2006` write) instead of replacing
+    /// them — invisible in every existing test here because they all start
+    /// from `t == 0`, where OR and replace give the same result, but a real
+    /// scroll-reset sequence starting from a nonzero `t` (e.g. right after
+    /// pointing `$2006` at a palette address to seed VRAM, as this ticket's
+    /// golden-frame fixture does) would leave stale coarse-Y bits behind.
     fn write_scroll(&mut self, value: u8) {
         if !self.w {
             self.t = (self.t & 0xFFE0) | ((value >> 3) as u16);
             self.x = value & 0x07;
         } else {
-            self.t = (self.t & 0x8FFF)
+            self.t = (self.t & 0x8C1F)
                 | (((value & 0x07) as u16) << 12)
                 | (((value & 0xF8) as u16) << 2);
         }

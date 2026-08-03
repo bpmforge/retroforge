@@ -10,17 +10,18 @@
 //!   (ticket W1-05a/W1-05b) — every emitted pixel this ticket produces is
 //!   [`rf_core_api::PixelLayer::Background`] or
 //!   [`rf_core_api::PixelLayer::Backdrop`], never `Sprite`.
-//! - The odd-frame dot-339 skip, and the exact VBlank/NMI edge-suppression
-//!   races `ppu_vbl_nmi` tests (ticket W1-04b/W1-05b per the conductor's
-//!   W1-04a pre-flight notes). The VBlank/sprite0/overflow flag bits of
-//!   `$2002` exist and are set/cleared at the dots nesdev documents (see
-//!   [`tick`](Ppu::tick)'s doc), but nothing here connects them to
-//!   [`crate::cpu::CpuBus::nmi_line`] — [`crate::system::NesBus`] still
-//!   returns that trait method's `false` default, unchanged. A half-modeled
-//!   NMI with no golden-frame oracle to check it against would risk
-//!   silently perturbing CPU-visible behavior for a criterion this ticket
-//!   doesn't claim; wiring it up belongs to whichever later ticket actually
-//!   gets a test-ROM oracle for it.
+//! - The exact VBlank/NMI edge-suppression races `ppu_vbl_nmi` tests
+//!   (ticket W1-05b per the conductor's W1-04a pre-flight notes; the
+//!   odd-frame dot-339 skip itself now IS implemented here — ticket
+//!   W1-04b — see [`tick`](Ppu::tick)'s doc). The VBlank/sprite0/overflow
+//!   flag bits of `$2002` exist and are set/cleared at the dots nesdev
+//!   documents (see [`tick`](Ppu::tick)'s doc), but nothing here connects
+//!   them to [`crate::cpu::CpuBus::nmi_line`] — [`crate::system::NesBus`]
+//!   still returns that trait method's `false` default, unchanged. A
+//!   half-modeled NMI with no golden-frame oracle to check it against would
+//!   risk silently perturbing CPU-visible behavior for a criterion this
+//!   ticket doesn't claim; wiring it up belongs to whichever later ticket
+//!   actually gets a test-ROM oracle for it.
 //! - A `Mapper` trait / CHR bank switching (routed the same way W1-02
 //!   routed NROM's PRG logic: mapper 0 has no CHR banking, and no second
 //!   mapper ticket exists yet to inform a trait's shape — see
@@ -184,6 +185,17 @@ pub struct Ppu {
     // ---- dot/scanline counters ----
     pub(super) scanline: u16,
     pub(super) dot: u16,
+    /// Frame parity for the odd-frame idle-dot skip (ticket W1-04b; see
+    /// [`tick`](Ppu::tick)'s doc and
+    /// [nesdev.org/wiki/PPU_rendering](https://www.nesdev.org/wiki/PPU_rendering)'s
+    /// "Odd frame" note). Toggles every time the pre-render line wraps to
+    /// scanline 0 (`advance_counters`), regardless of whether that
+    /// particular wrap was itself skip-shortened. Not power-on-verified
+    /// which parity real hardware starts on (no oracle for that exists
+    /// yet — same caveat as this struct's other un-power-on-verified
+    /// fields); `false` (even) is this module's arbitrary but documented
+    /// choice.
+    pub(super) frame_is_odd: bool,
 
     // ---- scanline output ----
     line_buffer: [PpuPixel; 256],
@@ -237,6 +249,7 @@ impl Ppu {
             pt_hi_latch: 0,
             scanline: PRERENDER_SCANLINE,
             dot: 0,
+            frame_is_odd: false,
             line_buffer: [BLANK_PIXEL; 256],
             completed: Vec::with_capacity(240),
         }
@@ -282,8 +295,19 @@ impl Ppu {
     /// line's dot 1 clears the vblank/sprite-0-hit/overflow status bits
     /// ("automatically cleared on dot 1 of the prerender scanline" per
     /// nesdev.org/wiki/PPU_registers); scanline 241's dot 1 sets the vblank
-    /// bit. The dot-339 odd-frame skip is NOT implemented (module doc's
-    /// scope fence; W1-04b).
+    /// bit. **Odd-frame idle-dot skip** (ticket W1-04b) — nesdev.org/wiki/
+    /// PPU_rendering, verbatim: "This scanline varies in length, depending
+    /// on whether an even or an odd frame is being rendered. For odd
+    /// frames, the cycle at the end of the scanline is skipped (this is
+    /// done internally by jumping directly from (339,261) to (0,0)...)."
+    /// and "this behavior can be bypassed by keeping rendering disabled
+    /// until after this scanline has passed" — i.e. the skip only fires
+    /// when [`Ppu::rendering_enabled`] is true at dot 339 of the pre-render
+    /// line; with rendering disabled every pre-render line is the full 341
+    /// dots on every frame. When it fires, dot 339 is followed directly by
+    /// dot 0 of scanline 0 (dot 340 never happens that frame: 340 dots
+    /// instead of 341, 89341 dots that whole frame instead of 89342). See
+    /// [`Ppu::advance_counters`] for the implementation.
     pub fn tick(&mut self) {
         self.process_dot();
         self.advance_counters();
@@ -308,10 +332,27 @@ impl Ppu {
         }
     }
 
+    /// Odd-frame idle-dot skip dot (see [`Ppu::tick`]'s doc): the
+    /// pre-render line's dot immediately before the one nesdev's diagram
+    /// jumps past when the skip fires.
+    const ODD_FRAME_SKIP_DOT: u16 = 339;
+
     fn advance_counters(&mut self) {
-        if self.dot >= DOTS_PER_SCANLINE - 1 {
+        // With rendering enabled, dot 339 of an odd-frame pre-render line
+        // jumps straight to (0,0) — dot 340 never happens. Folding this
+        // into the same wrap-condition as the ordinary end-of-scanline
+        // check below (rather than a separate early return) means the
+        // frame-parity toggle only needs to live in the one place both
+        // paths already share (`self.scanline == PRERENDER_SCANLINE`).
+        let odd_frame_skip = self.scanline == PRERENDER_SCANLINE
+            && self.dot == Self::ODD_FRAME_SKIP_DOT
+            && self.frame_is_odd
+            && self.rendering_enabled();
+
+        if odd_frame_skip || self.dot >= DOTS_PER_SCANLINE - 1 {
             self.dot = 0;
             self.scanline = if self.scanline == PRERENDER_SCANLINE {
+                self.frame_is_odd = !self.frame_is_odd;
                 0
             } else {
                 self.scanline + 1

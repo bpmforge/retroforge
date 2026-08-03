@@ -48,6 +48,34 @@ fn write_2005_second_write_sets_fine_y_and_coarse_y_and_resets_w() {
 }
 
 #[test]
+fn write_2005_second_write_replaces_stale_coarse_y_instead_of_oring_onto_it() {
+    // ticket W1-04b regression: a `$2006` write to a palette address (e.g.
+    // $3F00) leaves t's coarse-Y bits (5-9) nonzero (0x3F00's coarse Y is
+    // 0b11000 = 24 -- see `write_scroll`'s doc). A subsequent $2005/$2005
+    // scroll-reset sequence with value=0 must REPLACE those bits with 0,
+    // not OR 0 onto them (which would trivially leave them unchanged and
+    // was invisible in every pre-existing test here, all of which start
+    // from t=0). This is exactly the sequence this ticket's golden-frame
+    // fixture performs (seed palette via $2006/$2007, then reset scroll).
+    let mut ppu = test_ppu();
+    ppu.write_register(6, 0x3F); // $2006 first write
+    ppu.write_register(6, 0x00); // $2006 second write: t = v = 0x3F00
+    assert_eq!(ppu.t & 0x03E0, 24 << 5, "precondition: coarse Y is nonzero");
+
+    ppu.write_register(5, 0x00); // $2005 first write: coarse X <- 0, x <- 0
+    ppu.write_register(5, 0x00); // $2005 second write: fine Y/coarse Y <- 0
+    assert_eq!(
+        ppu.t & 0x03E0,
+        0,
+        "coarse Y must be replaced with 0, not OR'd onto the stale value"
+    );
+    assert_eq!(
+        ppu.t, 0x0C00,
+        "nametable-select bits (10-11) survive both $2005 writes untouched"
+    );
+}
+
+#[test]
 fn write_2006_first_write_masks_to_6_bits_into_t_high_byte() {
     // First write: t[13:8] <- value & 0x3F, t[14] forced to 0. value=0xFF
     // proves the top 2 bits are masked away: t = (0xFF & 0x3F) << 8 = 0x3F00.
