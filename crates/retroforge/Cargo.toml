@@ -11,3 +11,16 @@ workspace = true
 
 [dependencies]
 rf-core-api = { path = "../rf-core-api" }
+# rf-nes: to actually run a core (pre-flight note, ticket W1-06 plan.json
+# entry) — exempt from "cores only via rf-core-api" as the app shell
+# itself (scripts/validate-arch.sh rule 3).
+rf-nes = { path = "../rf-nes" }
+# rf-cart: console-agnostic cartridge sniff/validate for the ROM open
+# dialog (pre-flight note) — lets "wrong console" be reported before ever
+# handing bytes to rf-nes, and is what the synthetic-NROM test fixtures
+# below build against (same pattern as rf-harness's own dev-dependency use
+# of rf-cart).
+rf-cart = { path = "../rf-cart" }
+rf-renderer = { path = "../rf-renderer" }
+eframe = "0.35.0"
+rfd = "0.17.2"

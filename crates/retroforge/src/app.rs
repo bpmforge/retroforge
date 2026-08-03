@@ -1,0 +1,230 @@
+//! `eframe::App` implementation (ticket W1-06 acceptance criteria 1-4).
+//!
+//! This is the **only** module in this crate allowed to depend on
+//! `egui`/`eframe` (crate-level doc) — it is a thin presentation layer over
+//! [`crate::core_thread`] (FM-01 containment, panic-guarded core thread)
+//! and [`crate::rom_open`] (the file dialog). It owns no NES/6502 state
+//! directly; [`crate::stepper::EmuStepper`] lives entirely on the core
+//! thread.
+//!
+//! `egui`/`eframe` 0.35 API notes (verified against the pinned version's
+//! source in `~/.cargo/registry`, not training data — both changed
+//! recently):
+//! - [`eframe::App::ui`] takes `&mut egui::Ui` directly (no
+//!   `CentralPanel`/margin), not the older `update(&mut self, ctx:
+//!   &Context, ...)` shape.
+//! - `egui::TopBottomPanel`/`SidePanel` no longer exist; panels are all
+//!   `egui::Panel::top/bottom/left/right(id).show(ui, |ui| ...)`, taking a
+//!   `&mut Ui` like every other panel now.
+//! - `ui.close_menu()` was renamed `ui.close()`.
+use eframe::egui;
+
+use crate::core_thread::{self, CoreCommand, CoreCrashReport, CoreEvent, CoreHandle};
+use crate::rom_open;
+
+/// The whole application's UI-thread-owned state.
+pub struct RetroForgeApp {
+    core: Option<CoreHandle>,
+    texture: Option<egui::TextureHandle>,
+    status: String,
+    crash: Option<CoreCrashReport>,
+    /// Mirrors the core thread's run state for button labels/enablement;
+    /// the core thread itself (`EmuStepper::state`) is the source of
+    /// truth — this is only ever set right after sending a command, so it
+    /// can't drift for more than one repaint.
+    running: bool,
+}
+
+impl RetroForgeApp {
+    #[must_use]
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        RetroForgeApp {
+            core: None,
+            texture: None,
+            status: "No ROM loaded \u{2014} File > Open ROM...".to_string(),
+            crash: None,
+            running: false,
+        }
+    }
+
+    fn open_rom(&mut self) {
+        let Some(path) = rom_open::pick_rom_file() else {
+            return; // user cancelled the dialog
+        };
+        let bytes = match rom_open::load_rom_bytes(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.status = format!("Failed to open ROM: {e}");
+                return;
+            }
+        };
+        match core_thread::spawn(bytes) {
+            Ok(handle) => {
+                self.core = Some(handle);
+                self.crash = None;
+                self.texture = None;
+                self.running = false;
+                self.status = format!("Loaded {}", path.display());
+            }
+            Err(e) => {
+                self.status = format!("Failed to load ROM: {e}");
+            }
+        }
+    }
+
+    fn send_command(&self, cmd: CoreCommand) {
+        if let Some(core) = &self.core {
+            // The core thread only ever disappears if it already crashed
+            // (FM-01) and drained its channel; a send failing here just
+            // means the crash report is already on its way/arrived.
+            let _ = core.cmd_tx.send(cmd);
+        }
+    }
+
+    /// Drain every pending [`CoreEvent`] this repaint, keeping only the
+    /// latest frame (older ones are stale by the time we'd paint them) and
+    /// latching a crash report the moment one arrives.
+    fn pump_core_events(&mut self, ctx: &egui::Context) {
+        let Some(core) = &self.core else { return };
+        let mut latest_frame = None;
+        let mut crashed = false;
+        while let Ok(evt) = core.evt_rx.try_recv() {
+            match evt {
+                CoreEvent::Frame(msg) => latest_frame = Some(msg),
+                CoreEvent::Crashed(report) => {
+                    self.crash = Some(report);
+                    self.running = false;
+                    crashed = true;
+                    break;
+                }
+            }
+        }
+        if crashed {
+            // FM-01's recovery row is "Reload ROM / load last state" — the
+            // core thread has already halted for good (`run_guarded_loop`
+            // never retries), so drop the dead handle now rather than
+            // leaving `self.core` pointing at a channel nobody reads.
+            // `has_core` in `controls_bar` then goes false on its own,
+            // which disables Run/Step Frame/Step Scanline until the user
+            // opens a ROM again — no separate "is there a live core"
+            // check needed anywhere else.
+            self.core = None;
+            self.status = "Core crashed (FM-01) — open a ROM to start a fresh session".to_string();
+            return;
+        }
+        if let Some(msg) = latest_frame {
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([msg.width, msg.height], &msg.rgba);
+            match &mut self.texture {
+                Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
+                None => {
+                    self.texture =
+                        Some(ctx.load_texture("nes-frame", image, egui::TextureOptions::NEAREST));
+                }
+            }
+        }
+        if self.running {
+            // Keep repainting while running so the core thread's frames
+            // keep getting picked up (CPU blit, "live frames" criterion).
+            ctx.request_repaint();
+        }
+    }
+
+    fn menu_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("menu_bar").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open ROM...").clicked() {
+                        self.open_rom();
+                        ui.close();
+                    }
+                });
+            });
+        });
+    }
+
+    fn controls_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("controls").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let has_core = self.core.is_some();
+                let run_label = if self.running { "Pause" } else { "Run" };
+                if ui
+                    .add_enabled(has_core, egui::Button::new(run_label))
+                    .clicked()
+                {
+                    self.running = !self.running;
+                    self.send_command(if self.running {
+                        CoreCommand::Resume
+                    } else {
+                        CoreCommand::Pause
+                    });
+                }
+                if ui
+                    .add_enabled(has_core, egui::Button::new("Step Frame"))
+                    .clicked()
+                {
+                    self.running = false;
+                    self.send_command(CoreCommand::StepFrame);
+                }
+                if ui
+                    .add_enabled(has_core, egui::Button::new("Step Scanline"))
+                    .clicked()
+                {
+                    self.running = false;
+                    self.send_command(CoreCommand::StepScanline);
+                }
+                ui.separator();
+                ui.label(&self.status);
+            });
+        });
+    }
+
+    fn crash_dialog(&mut self, ctx: &egui::Context) {
+        let Some(report) = self.crash.clone() else {
+            return;
+        };
+        egui::Window::new("Core crashed")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("The emulator core panicked and was contained (FM-01); the core thread has halted.");
+                ui.label(format!("Message: {}", report.message));
+                if let Some(loc) = &report.location {
+                    ui.label(format!("Location: {loc}"));
+                }
+                ui.separator();
+                ui.label("Trace tail:");
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    ui.monospace(&report.trace_tail);
+                });
+                ui.separator();
+                if ui.button("Dismiss").clicked() {
+                    self.crash = None;
+                }
+            });
+    }
+
+    fn video_panel(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show(ui, |ui| {
+            if let Some(texture) = &self.texture {
+                ui.add(egui::Image::from_texture(texture).shrink_to_fit());
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label(&self.status);
+                });
+            }
+        });
+    }
+}
+
+impl eframe::App for RetroForgeApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.pump_core_events(&ctx);
+
+        self.menu_bar(ui);
+        self.controls_bar(ui);
+        self.video_panel(ui);
+        self.crash_dialog(&ctx);
+    }
+}

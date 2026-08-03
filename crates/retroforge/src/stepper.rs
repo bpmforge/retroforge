@@ -1,0 +1,510 @@
+//! Windowless, testable pause/step-frame/step-scanline state machine
+//! (ticket W1-06 acceptance criterion 2, FR-DBG-004).
+//!
+//! `PLAYBOOK.md`/the ticket notes are explicit that this logic must be
+//! testable *without a window*: [`EmuStepper`] owns an [`rf_nes::NesBus`] +
+//! [`rf_nes::Cpu`] and exposes pause/resume/step as plain method calls with
+//! no `egui`/`eframe` dependency anywhere in this module. `crates::app`
+//! (the `eframe::App` impl) is the only thing that ever touches a window,
+//! and it only ever calls into this type — never the other way around.
+//!
+//! ## Why `step_scanline` can occasionally over-shoot by more than one
+//!
+//! [`rf_nes::Cpu::step`] is instruction-granular (module doc,
+//! `crates/rf-nes/src/cpu/mod.rs`): there is no way to stop it mid
+//! instruction. For every opcode except the OAM-DMA-triggering `$4014`
+//! write, one instruction (at most ~8 CPU cycles = 24 PPU dots) can never
+//! cross more than one scanline boundary (341 dots/scanline), so
+//! [`EmuStepper::step_scanline`] stopping "as soon as at least one
+//! scanline has been drained" is exact in the overwhelmingly common case.
+//! An instruction whose bus write triggers OAM DMA burns 513-514 cycles
+//! (~1541 dots, ~4.5 scanlines) *inside that one `Cpu::step` call*
+//! (`NesBus`'s module doc, "the master-clock seam") — during that one
+//! step, more than one scanline can complete before `step_scanline` gets a
+//! chance to check. Fixing this exactly would mean cycle-granular CPU
+//! stepping, which is out of this ticket's write scope (`rf-nes` is
+//! explicitly off limits — see the ticket's "DO NOT touch" list) and does
+//! not exist in this crate yet. This is documented, not hidden: the return
+//! value is the *actual* scanline count observed, not hard-coded to 1.
+//!
+//! ## Why every loop in here is cycle-bounded
+//!
+//! `step_frame`/`step_scanline`/`tick_running` all run `Cpu::step` in a
+//! `loop` until a PPU-observable condition fires (a frame or scanline
+//! boundary). Nothing in `rf-nes`'s public API *guarantees* that condition
+//! is reachable from an arbitrary machine state — a `JAM`/`KIL` opcode
+//! parks the CPU re-executing the same opcode forever (`cpu/exec.rs`'s
+//! `jam` doc: "an actual unbounded loop inside one call" is avoided only
+//! at the single-`Cpu::step`-call granularity, not across repeated calls),
+//! and nothing rules out a future core bug doing something similar. This
+//! type is called from `crate::core_thread`'s guarded loop body, whose
+//! *own* liveness (draining `CoreCommand::Shutdown` etc.) depends on each
+//! call into `EmuStepper` returning in bounded time — an unbounded loop
+//! here would hang the whole core thread, including its ability to ever
+//! see a Shutdown command, which is a worse failure than FM-01 was written
+//! to contain. [`CYCLE_BUDGET`] bounds every loop below by elapsed
+//! `NesBus::master_cycle`, generous enough (four NTSC frames' worth) that
+//! it can never fire for any ROM this crate can actually run correctly —
+//! its only job is to guarantee termination, not to be a normal exit path.
+use rf_core_api::CoreSink;
+use rf_nes::{Cpu, NesBus, NesLoadError};
+
+/// One NTSC frame is `341 * 262 / 3` = 29,781 master (CPU) cycles
+/// (`crate::ppu`'s dot-diagram doc, `DOTS_PER_SCANLINE * scanlines /
+/// dots-per-cycle`). Four frames' worth gives generous headroom for
+/// OAM-DMA-heavy frames while still bounding every loop in this module to
+/// a small, fixed amount of work — see module doc's "Why every loop in
+/// here is cycle-bounded".
+const CYCLE_BUDGET: u64 = 4 * 29_781;
+
+/// Whether the emulator is advancing on its own each repaint, or holding
+/// still until the debugger asks for another step (FR-DBG-004).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunState {
+    /// Not advancing; only `step_frame`/`step_scanline` move time forward.
+    Paused,
+    /// Advancing by one frame per [`EmuStepper::tick_running`] call (the
+    /// app layer calls that once per repaint while running).
+    Running,
+}
+
+/// A `CoreSink` wrapper that both forwards to an inner sink (so callers
+/// still see real pixel data) and counts how many `video_scanline` calls
+/// went through it, so [`EmuStepper::step_scanline`] can detect "at least
+/// one scanline completed" without reaching into `rf-nes`-internal PPU
+/// state (which this crate cannot touch — see module doc).
+struct CountingSink<'a> {
+    inner: &'a mut dyn CoreSink,
+    scanlines: u32,
+}
+
+impl CoreSink for CountingSink<'_> {
+    fn video_scanline(&mut self, y: u16, pixels: &[rf_core_api::PpuPixel]) {
+        self.scanlines += 1;
+        self.inner.video_scanline(y, pixels);
+    }
+
+    fn audio(&mut self, samples: &[i16]) {
+        self.inner.audio(samples);
+    }
+
+    fn event(&mut self, ev: rf_core_api::CoreEvent) {
+        self.inner.event(ev);
+    }
+}
+
+/// Owns one running NES machine and the run/paused state a debugger UI
+/// drives it through. See module doc.
+pub struct EmuStepper {
+    bus: NesBus,
+    cpu: Cpu,
+    state: RunState,
+    /// Defensive loop bound in master cycles — [`CYCLE_BUDGET`] in
+    /// production, overridden much smaller by tests that need to prove the
+    /// bound actually terminates a loop rather than merely existing in the
+    /// source.
+    cycle_budget: u64,
+}
+
+impl EmuStepper {
+    /// Parse `raw` as an iNES/NES 2.0 image and power on a fresh machine
+    /// from it, starting [`RunState::Paused`] (a freshly opened ROM waits
+    /// for the user to press Run, matching a debugger-first workflow).
+    ///
+    /// # Errors
+    /// Returns [`NesLoadError`] for anything `NesBus::from_ines_bytes`
+    /// rejects (bad magic, unimplemented mapper, ...).
+    pub fn from_ines_bytes(raw: &[u8]) -> Result<Self, NesLoadError> {
+        let mut bus = NesBus::from_ines_bytes(raw)?;
+        let cpu = Cpu::power_on(&mut bus);
+        Ok(EmuStepper {
+            bus,
+            cpu,
+            state: RunState::Paused,
+            cycle_budget: CYCLE_BUDGET,
+        })
+    }
+
+    /// Test-only hook to prove [`CYCLE_BUDGET`]'s termination guarantee
+    /// without waiting out the production budget — see module doc's "Why
+    /// every loop in here is cycle-bounded".
+    #[cfg(test)]
+    fn set_cycle_budget_for_test(&mut self, budget: u64) {
+        self.cycle_budget = budget;
+    }
+
+    /// Current run/paused state.
+    #[must_use]
+    pub fn state(&self) -> RunState {
+        self.state
+    }
+
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.state == RunState::Paused
+    }
+
+    /// Total frames completed since power-on (`NesBus::frame_count`).
+    #[must_use]
+    pub fn frame_count(&self) -> u64 {
+        self.bus.frame_count()
+    }
+
+    /// Stop advancing on repaint ticks. Idempotent.
+    pub fn pause(&mut self) {
+        self.state = RunState::Paused;
+    }
+
+    /// Start advancing one frame per [`Self::tick_running`] call.
+    /// Idempotent.
+    pub fn resume(&mut self) {
+        self.state = RunState::Running;
+    }
+
+    /// Run exactly one whole frame's worth of instructions, streaming
+    /// scanlines to `sink` as they complete, regardless of the current run
+    /// state — then force [`RunState::Paused`] (stepping is a debugger
+    /// action; it always leaves the machine stopped so the next click is
+    /// unambiguous, FR-DBG-004). Returns the number of frames completed:
+    /// always exactly 1 under normal operation (`NesBus::frame_count`
+    /// cannot advance by more than 1 within a single `Cpu::step` — even
+    /// OAM DMA's ~4.5-scanline stall is far short of one full 262-scanline
+    /// frame), or 0 only if [`CYCLE_BUDGET`]'s defensive bound fired
+    /// first (module doc's "Why every loop in here is cycle-bounded") —
+    /// which should never happen for any ROM this emulator runs correctly.
+    pub fn step_frame(&mut self, sink: &mut dyn CoreSink) -> u64 {
+        let advanced = self.run_until_next_frame(sink);
+        self.state = RunState::Paused;
+        advanced
+    }
+
+    /// Run until at least one more scanline has been drained through
+    /// `sink`, then stop and force [`RunState::Paused`] (FR-DBG-004). See
+    /// module doc for the one case (an OAM-DMA-triggering instruction)
+    /// where more than one scanline can complete in a single call. Returns
+    /// the actual number of scanlines drained: normally 1 (occasionally
+    /// more, see module doc), or 0 only if [`CYCLE_BUDGET`]'s defensive
+    /// bound fired before any scanline completed.
+    pub fn step_scanline(&mut self, sink: &mut dyn CoreSink) -> u32 {
+        let deadline = self.bus.master_cycle() + self.cycle_budget;
+        let mut counting = CountingSink {
+            inner: sink,
+            scanlines: 0,
+        };
+        while self.bus.master_cycle() < deadline {
+            self.cpu.step(&mut self.bus);
+            self.bus.drain_video(&mut counting);
+            if counting.scanlines > 0 {
+                break;
+            }
+        }
+        let n = counting.scanlines;
+        self.state = RunState::Paused;
+        n
+    }
+
+    /// Called once per UI repaint. If [`RunState::Running`], advances
+    /// exactly one frame (streaming scanlines to `sink`) and returns
+    /// `true` if a whole frame actually completed (the ordinary case);
+    /// returns `false` if [`RunState::Paused`] (nothing to do) or if
+    /// [`CYCLE_BUDGET`]'s defensive bound fired before a frame boundary
+    /// was reached (module doc) — either way, `false` means `sink` may
+    /// hold a partial/no frame and the caller should not treat it as a
+    /// fresh one to paint. Unlike [`Self::step_frame`], this does not
+    /// change `state` — running stays running even if the budget fired.
+    pub fn tick_running(&mut self, sink: &mut dyn CoreSink) -> bool {
+        if self.state != RunState::Running {
+            return false;
+        }
+        self.run_until_next_frame(sink) > 0
+    }
+
+    /// Shared by `step_frame`/`tick_running`: run instructions, draining
+    /// video after each one, until `NesBus::frame_count` has advanced by
+    /// exactly one, or [`CYCLE_BUDGET`]'s defensive bound elapses first
+    /// (module doc). Never touches `self.state`. Returns the number of
+    /// frames completed (0 or 1 — see the two public callers' docs).
+    fn run_until_next_frame(&mut self, sink: &mut dyn CoreSink) -> u64 {
+        let start = self.bus.frame_count();
+        let deadline = self.bus.master_cycle() + self.cycle_budget;
+        while self.bus.master_cycle() < deadline {
+            self.cpu.step(&mut self.bus);
+            self.bus.drain_video(sink);
+            let now = self.bus.frame_count();
+            if now != start {
+                debug_assert_eq!(
+                    now,
+                    start + 1,
+                    "a single Cpu::step must not be able to cross a whole frame boundary twice"
+                );
+                return now - start;
+            }
+        }
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rf_core_api::PpuPixel;
+
+    /// Minimal synthetic NROM iNES image (mapper 0), same layout
+    /// `crates/rf-nes/src/system/tests/mod.rs::build_nrom_ines` uses --
+    /// that helper is `pub(super)` (test-only, private to `rf-nes`'s own
+    /// test tree) so it isn't reachable from here; this crate is outside
+    /// `rf-nes`'s write scope, so the ~10 lines are duplicated rather than
+    /// widening that crate's public API for a test fixture. All-zero
+    /// PRG/CHR means the reset and IRQ/BRK vectors all resolve to
+    /// `$0000`, which is zeroed RAM (opcode `$00` = `BRK`) -- a
+    /// deterministic, infinite, 7-cycles-per-instruction loop that never
+    /// needs real game code to drive stepping.
+    fn synthetic_nrom() -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
+        data.push(1); // 1x16KiB PRG
+        data.push(1); // 1x8KiB CHR
+        data.extend_from_slice(&[0u8; 10]); // flags6/7 + 8 reserved => mapper 0, iNES 1.0
+        data.extend(vec![0u8; 16 * 1024]);
+        data.extend(vec![0u8; 8 * 1024]);
+        data
+    }
+
+    struct NullSink;
+    impl CoreSink for NullSink {
+        fn video_scanline(&mut self, _y: u16, _pixels: &[PpuPixel]) {}
+        fn audio(&mut self, _samples: &[i16]) {}
+        fn event(&mut self, _ev: rf_core_api::CoreEvent) {}
+    }
+
+    fn stepper() -> EmuStepper {
+        EmuStepper::from_ines_bytes(&synthetic_nrom()).expect("valid synthetic NROM image")
+    }
+
+    #[test]
+    fn starts_paused() {
+        assert!(stepper().is_paused());
+    }
+
+    #[test]
+    fn resume_then_pause_round_trip() {
+        let mut s = stepper();
+        s.resume();
+        assert_eq!(s.state(), RunState::Running);
+        assert!(!s.is_paused());
+        s.pause();
+        assert_eq!(s.state(), RunState::Paused);
+        assert!(s.is_paused());
+    }
+
+    #[test]
+    fn resume_is_idempotent() {
+        let mut s = stepper();
+        s.resume();
+        s.resume();
+        assert_eq!(s.state(), RunState::Running);
+    }
+
+    #[test]
+    fn step_frame_advances_exactly_one_frame_and_ends_paused() {
+        let mut s = stepper();
+        let mut sink = NullSink;
+        let before = s.frame_count();
+        let advanced = s.step_frame(&mut sink);
+        assert_eq!(advanced, 1, "step_frame must report exactly one frame");
+        assert_eq!(
+            s.frame_count(),
+            before + 1,
+            "frame_count must have advanced by exactly one"
+        );
+        assert!(s.is_paused(), "stepping always leaves the machine paused");
+    }
+
+    #[test]
+    fn step_frame_from_running_still_stops_after_exactly_one_frame() {
+        let mut s = stepper();
+        s.resume();
+        let mut sink = NullSink;
+        let before = s.frame_count();
+        s.step_frame(&mut sink);
+        assert_eq!(
+            s.frame_count(),
+            before + 1,
+            "must not run past one frame even though state was Running when step_frame was called"
+        );
+        assert!(
+            s.is_paused(),
+            "step_frame forces Paused regardless of prior state"
+        );
+    }
+
+    #[test]
+    fn two_consecutive_step_frames_advance_two_separate_frames() {
+        let mut s = stepper();
+        let mut sink = NullSink;
+        let before = s.frame_count();
+        s.step_frame(&mut sink);
+        s.step_frame(&mut sink);
+        assert_eq!(s.frame_count(), before + 2);
+    }
+
+    #[test]
+    fn step_scanline_advances_exactly_one_scanline_and_stops() {
+        let mut s = stepper();
+        let mut sink = NullSink;
+        let n = s.step_scanline(&mut sink);
+        assert_eq!(
+            n, 1,
+            "an ordinary (non-DMA) instruction step must not cross more than one scanline boundary"
+        );
+        assert!(s.is_paused());
+    }
+
+    /// The defensive cycle-budget bound (module doc's "Why every loop in
+    /// here is cycle-bounded") must actually terminate a loop that would
+    /// otherwise run forever, not just exist unreachably in the source. A
+    /// single scanline needs ~114 CPU cycles (341 dots / 3); a budget of
+    /// 10 guarantees `step_scanline` cannot possibly reach one before the
+    /// bound fires. If this test hangs (rather than completing), the
+    /// bound isn't wired into the loop condition.
+    #[test]
+    fn step_scanline_cycle_budget_terminates_before_a_scanline_completes() {
+        let mut s = stepper();
+        s.set_cycle_budget_for_test(10);
+        let mut sink = NullSink;
+        let n = s.step_scanline(&mut sink);
+        assert_eq!(
+            n, 0,
+            "a 10-cycle budget cannot reach a scanline boundary (~114 cycles) — must return 0, not hang"
+        );
+        assert!(
+            s.is_paused(),
+            "the budget firing must still leave the machine Paused, not Running"
+        );
+    }
+
+    /// Same guarantee for `step_frame`'s shared `run_until_next_frame`
+    /// path. Budget chosen as 50 (< ~114 cycles), not some large-but-still
+    /// -short-of-a-frame number: a fresh `EmuStepper` starts mid-way
+    /// through the pre-render scanline (see the
+    /// `step_scanline_calls_accumulate_a_full_visible_frame_between_frame_boundaries`
+    /// test's doc for why), so the very *first* frame boundary is only
+    /// ~114 cycles away, not the ~29,781 a steady-state frame needs — a
+    /// budget merely "far short of 29,781" could still accidentally clear
+    /// that first, short boundary and pass for the wrong reason.
+    #[test]
+    fn step_frame_cycle_budget_terminates_before_a_frame_completes() {
+        let mut s = stepper();
+        s.set_cycle_budget_for_test(50);
+        let mut sink = NullSink;
+        let before = s.frame_count();
+        let advanced = s.step_frame(&mut sink);
+        assert_eq!(
+            advanced, 0,
+            "a 50-cycle budget cannot reach even the nearest possible frame boundary (~114 cycles) — must return 0, not hang"
+        );
+        assert_eq!(s.frame_count(), before, "no frame actually completed");
+        assert!(s.is_paused());
+    }
+
+    /// `tick_running` must inherit the same bound (it shares
+    /// `run_until_next_frame`) — a stuck Running machine must not hang the
+    /// caller either. Same budget-choice reasoning as the `step_frame`
+    /// test above.
+    #[test]
+    fn tick_running_cycle_budget_terminates_before_a_frame_completes() {
+        let mut s = stepper();
+        s.set_cycle_budget_for_test(50);
+        s.resume();
+        let mut sink = NullSink;
+        let before = s.frame_count();
+        let produced = s.tick_running(&mut sink);
+        assert!(
+            !produced,
+            "tick_running must report false when the budget fires before a frame completes \
+             (the caller must not treat a partial frame as fresh)"
+        );
+        assert_eq!(
+            s.frame_count(),
+            before,
+            "no frame actually completed under the tiny budget"
+        );
+        assert_eq!(
+            s.state(),
+            RunState::Running,
+            "unlike step_frame, tick_running must not force-pause even when the budget fires"
+        );
+    }
+
+    #[test]
+    fn step_scanline_calls_accumulate_a_full_visible_frame_between_frame_boundaries() {
+        // `Ppu::new` starts mid-way through the pre-render scanline
+        // (`crate::ppu`'s `scanline: PRERENDER_SCANLINE` initial value —
+        // see that module doc's dot diagram), so the very *first*
+        // `frame_count` tick (0 -> 1) is a boot-state artifact: it fires
+        // after only that partial initial sweep, with zero *visible*
+        // scanlines drained yet (only visible lines 0-239 call
+        // `CoreSink::video_scanline`, via `finish_scanline` in
+        // `crate::ppu::background` — pre-render/post-render/vblank lines
+        // never do). Skip past that one artifact transition so this test
+        // checks a steady-state frame instead.
+        let mut s = stepper();
+        let mut sink = NullSink;
+
+        let boot_frame = s.frame_count();
+        loop {
+            s.step_scanline(&mut sink);
+            if s.frame_count() != boot_frame {
+                break;
+            }
+        }
+
+        let before = s.frame_count();
+        let mut total_scanlines = 0u32;
+        for _ in 0..300 {
+            total_scanlines += s.step_scanline(&mut sink);
+            if s.frame_count() != before {
+                break;
+            }
+        }
+        assert_eq!(
+            s.frame_count(),
+            before + 1,
+            "one steady-state frame must complete within 300 scanline-steps"
+        );
+        assert_eq!(
+            total_scanlines, 240,
+            "a steady-state NTSC frame must drain exactly the 240 visible scanlines, got {total_scanlines}"
+        );
+    }
+
+    #[test]
+    fn tick_running_is_a_noop_while_paused() {
+        let mut s = stepper();
+        let mut sink = NullSink;
+        let before = s.frame_count();
+        let produced = s.tick_running(&mut sink);
+        assert!(!produced, "tick_running must do nothing while Paused");
+        assert_eq!(s.frame_count(), before);
+        assert!(s.is_paused());
+    }
+
+    #[test]
+    fn tick_running_advances_one_frame_per_call_while_running_and_stays_running() {
+        let mut s = stepper();
+        s.resume();
+        let mut sink = NullSink;
+        let before = s.frame_count();
+        let produced = s.tick_running(&mut sink);
+        assert!(
+            produced,
+            "tick_running must report a completed frame while Running"
+        );
+        assert_eq!(s.frame_count(), before + 1);
+        assert_eq!(
+            s.state(),
+            RunState::Running,
+            "tick_running must not force-pause, unlike step_frame/step_scanline"
+        );
+    }
+}

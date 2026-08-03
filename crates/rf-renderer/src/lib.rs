@@ -2,6 +2,23 @@
 //!
 //! See /docs/MODULE_DESIGN.md and /docs/design/ for the contract this crate
 //! must implement. Do not add public API here without a ticket in plan.json.
+//!
+//! Ticket W1-06 scope: this crate holds the pieces the app shell
+//! (`crates/retroforge`) needs to turn a core's indexed video output into
+//! something paintable, without pulling display-color knowledge into
+//! `rf-nes`/`rf-core-api` (project law — cores emit indexed pixels, never
+//! RGB). [`palette`] is the NES 2C02 palette LUT; [`frame`] is the
+//! `CoreSink` that resolves a whole frame's worth of indexed scanlines
+//! into RGBA using it. No `wgpu`/`egui` dependency lives here yet — the
+//! real GPU pipeline this crate's doc-comment describes is W3-01's ticket;
+//! today this crate is deliberately GPU-API-free so `cargo test -p
+//! rf-renderer` never needs a display or device.
+
+pub mod frame;
+pub mod palette;
+
+pub use frame::FrameBuffer;
+pub use palette::{palette_index_to_rgb, NES_PALETTE};
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-renderer";
