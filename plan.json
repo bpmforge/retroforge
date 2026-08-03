@@ -384,7 +384,14 @@
    "phase": 1,
    "crate": "rf-nes",
    "write_scope": [
-    "crates/rf-nes/src/ppu/**"
+    "crates/rf-nes/src/ppu/**",
+    "crates/rf-nes/src/system/mod.rs",
+    "crates/rf-harness/**",
+    "tests/rom-manifest.toml",
+    "scripts/local-gate.sh",
+    "scripts/validate-evidence.mjs",
+    "docs/evidence/local-gate.json",
+    "docs/TESTING.md"
    ],
    "depends_on": [
     "W1-05a"
@@ -394,8 +401,12 @@
     "ppu_vbl_nmi suite passes (FR-CORE-022)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
+    "BLOCKER FOUND AND RESOLVED IN PRE-FLIGHT 2026-08-03 (conductor): acceptance criterion 2 was UNRUNNABLE as the board stood. The manifest's `ppu-vbl-nmi` artifact is blargg's COMBINED build \u2014 256 KB PRG, iNES mapper 1 (MMC1), verified by parsing the fetched header. Only NROM exists today (W1-02); MMC1 is W2-02, two phases away, so this ticket would have blocked on a dependency the board never recorded. THE FIX: docs/TESTING.md section 4 already describes this suite as 'blargg ppu_vbl_nmi (10 sub-ROMs)' \u2014 the singles live upstream at ppu_vbl_nmi/rom_singles/ and the conductor verified by fetching them that all ten are 32 KB PRG + 8 KB CHR, iNES MAPPER 0 (NROM-256), i.e. runnable on today's core. Replace the single combined artifact with the ten singles; that also makes the manifest match TESTING.md instead of contradicting it.",
+    "PRE-FLIGHT 2026-08-03 (conductor): sha256 of all ten singles, computed live from the pinned commit 95d8f621ae55cee0d09b91519a8989ae0e64753b (each 40976 bytes) so NO 'TODO-' placeholder is needed \u2014 01-vbl_basics=06aea5af4edab4e3141c939cd5ac9936f8758203b25dcaf84ae1a09db49e024a; 02-vbl_set_time=dd98856130078844e3aa4bd95a9be8ab501ea84c089f1d8ad49a1b20af4b3a80; 03-vbl_clear_time=787fdaa4dd6c5b6df5f4308fb6d55b57e2c2f69bd5ecdf8ad5c69735db4fcc72; 04-nmi_control=84722c75b896c47c8642f83220230fe14f0a31e55e26ecb83c400e6a26d91b32; 05-nmi_timing=72e515d689d7404ae5779b8c9c4c7b3563a755a94bd44864516f1b03df044482; 06-suppression=811dd5997bbf48c2e5687ab06845f17ea76b2be472786596c334137582cc72aa; 07-nmi_on_timing=1ed154363660b5775b112ae63ce9bb4e400ebde2afef4d0ac12fc433efda3702; 08-nmi_off_timing=1d2a4093091c8e58a7f99d6a3531bbc6346b52cfc59bcb17ca04c1f2376cf2fc; 09-even_odd_frames=1ac04283021ddd9294cc74ee709c55e20a350dc4815c15a8a93b3654837e858d; 10-even_odd_timing=7217d2d172ce11ad45c4da40c2f22201cf0eb758bc2cd8dd39d2cf0a7d4ca83e. Base URL: https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/ppu_vbl_nmi/rom_singles/<name>.nes",
+    "SCOPE-DERIVED 2026-08-03 (conductor), fifth instance of the board's self-blocking-scope defect. ppu/** alone cannot satisfy either criterion. Added, each justified by acceptance: crates/rf-nes/src/system/mod.rs (line ~436 explicitly leaves nmi_line/irq_line at the CpuBus default 'intentionally' \u2014 this ticket owns wiring the PPU's NMI output to the bus, without which no ppu_vbl_nmi ROM can pass); crates/rf-harness/** (the blargg $6000 runner from W0-03 must now drive a REAL core instead of the mock it was built against); tests/rom-manifest.toml (the sub-ROM replacement above); and scripts/local-gate.sh + scripts/validate-evidence.mjs + docs/evidence/local-gate.json + docs/TESTING.md because these ROMs are fetched, gitignored artifacts, making this the THIRD Tier-A-local suite \u2014 same treatment nestest got in W1-03, or a passing suite is invisible to CI.",
+    "PRE-FLIGHT 2026-08-03 (conductor): the 11 sprite_hit ROMs ARE mapper 0 / 16 KB PRG and run on the current core \u2014 criterion 1 has no such blocker. All 64 real-hash manifest artifacts fetched cleanly this session (0 failed), which also re-proves W0-07's git-artifact path: the 1.2 GB vector checkout short-circuited on a matching rev-parse rather than re-cloning.",
     "HANDOFF 2026-08-03 (conductor): check scope-vs-acceptance BEFORE claiming. This ticket carries write_scope ppu/** alone, the board defect already hit on W1-01a, W0-07, W2-02 and W1-04a. W1-04a's wiring (lib.rs, system/mod.rs, Cargo.toml, ppu_stub.rs deletion) may or may not have already covered what this ticket needs — deliberately NOT pre-fixed here, because a speculative scope that looks authoritative is worse than an obviously-missing one. Derive the paths from this ticket's own acceptance at claim time."
    ],
    "stories": [
