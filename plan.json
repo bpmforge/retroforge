@@ -353,7 +353,8 @@
    "phase": 1,
    "crate": "rf-nes",
    "write_scope": [
-    "crates/rf-nes/src/ppu/**"
+    "crates/rf-nes/src/ppu/**",
+    "crates/rf-harness/**"
    ],
    "depends_on": [
     "W1-04b"
@@ -363,8 +364,10 @@
     "dropped_by_limit sprites flagged (not rendered in accuracy mode)"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
+    "RULING 2026-08-03 (Brad, raised by the conductor during pre-flight): PpuPixel.dropped_by_limit could not satisfy three constraints at once — the flag may only ride on a Sprite-layer pixel, rf-core-api's doc promised W3-05 would read the emitted dropped sprite, and CLAUDE.md law 6 plus FR-MODE-002 require Accuracy output to equal the hardware framebuffer exactly. CoreSink::video_scanline carries ONE PpuPixel per x, so emitting a dropped sprite displaces what the CRT really showed. DECISION: THE SINK IS ACCURACY-EXACT. dropped_by_limit stays false on the NES path; the sink always carries true hardware output; W3-05 reconstructs dropped sprites from OAM via StateView/SpriteHistorian, which its own acceptance already implies. rf-core-api's now-incorrect doc comment was corrected at the source in the same commit as this claim.",
+    "SCOPE-DERIVED 2026-08-03 (conductor): added crates/rf-harness/** so this ticket gets an ORACLE. Criterion 1 (secondary OAM, 8-sprite limit, buggy overflow) is fully specified but has no test ROM until W1-05b — exactly the position W1-04a was in when it shipped a real write_scroll bug that survived undetected until W1-04b's golden frame caught it. Extend W1-04b's ANALYTIC golden-frame pattern (crates/rf-harness/tests/golden_frame_bg.rs: closed-form expected values, zero recorded hashes, multipliers coprime with 256) to sprites, so a wrong 8-sprite cutoff or a wrong priority resolution changes the expected value instead of being discovered two tickets later.",
     "HANDOFF 2026-08-03 (conductor): check scope-vs-acceptance BEFORE claiming. This ticket carries write_scope ppu/** alone, the board defect already hit on W1-01a, W0-07, W2-02 and W1-04a. W1-04a's wiring (lib.rs, system/mod.rs, Cargo.toml, ppu_stub.rs deletion) may or may not have already covered what this ticket needs — deliberately NOT pre-fixed here, because a speculative scope that looks authoritative is worse than an obviously-missing one. Derive the paths from this ticket's own acceptance at claim time."
    ],
    "stories": [

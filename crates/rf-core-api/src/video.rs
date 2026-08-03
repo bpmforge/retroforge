@@ -41,11 +41,26 @@ pub struct PpuPixel {
     /// Core-defined priority value used to resolve BG/sprite overlap
     /// (hardware priority bits, not a rendering hint).
     pub priority: u8,
-    /// `true` if this pixel represents a sprite that hardware's
-    /// per-scanline sprite limit would drop (accurate CRT behavior:
-    /// flicker/disappearance). Accuracy Mode renders it dropped either way;
-    /// an enhancement that bypasses the limit (W3-05) uses this flag to
-    /// decide whether to draw it anyway. Always `false` for non-sprite
-    /// pixels.
+    /// Whether this pixel represents a sprite that hardware's per-scanline
+    /// sprite limit would drop (accurate CRT behavior: flicker /
+    /// disappearance). **On the NES path this is always `false`** — see the
+    /// ruling below. Always `false` for non-sprite pixels.
+    ///
+    /// # Ruling (Brad, 2026-08-03, raised during W1-05a)
+    ///
+    /// This doc previously said an enhancement bypassing the limit (W3-05)
+    /// "uses this flag to decide whether to draw it anyway". That is not
+    /// achievable through this struct: [`crate::CoreSink::video_scanline`]
+    /// carries exactly **one** `PpuPixel` per x, so emitting a limit-dropped
+    /// sprite there would displace the background or lower-index sprite the
+    /// CRT actually showed — which CLAUDE.md law 6 ("Accuracy Mode is the
+    /// reference") and FR-MODE-002's mode invariant both forbid.
+    ///
+    /// **The sink is therefore accuracy-exact**: it always carries the true
+    /// hardware framebuffer. W3-05's sprite-limit bypass reconstructs dropped
+    /// sprites from OAM (via [`crate::StateView`] / its SpriteHistorian),
+    /// which its own acceptance criteria already imply, not from this flag.
+    /// The field is retained for cores that can express a suppressed sprite
+    /// without displacing a real pixel.
     pub dropped_by_limit: bool,
 }
