@@ -611,6 +611,7 @@ name = "rf-nes"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "rf-cart",
 ]
 
 [[package]]

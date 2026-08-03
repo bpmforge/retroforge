@@ -1,6 +1,6 @@
 [package]
 name = "rf-nes"
-description = "NES core: 2A03 CPU, PPU, APU, mappers (consumes rf-core-api only)"
+description = "NES core: 2A03 CPU, PPU, APU, mappers (consumes rf-cart for cartridge metadata)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,9 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+rf-cart = { path = "../rf-cart" }
 
 [dev-dependencies]
 criterion = "0.8.2"

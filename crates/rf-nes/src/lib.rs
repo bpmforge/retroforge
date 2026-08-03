@@ -1,11 +1,20 @@
-//! NES core: 2A03 CPU, PPU, APU, mappers (consumes rf-core-api only)
+//! NES core: 2A03 CPU, PPU, APU, mappers.
 //!
 //! See /docs/MODULE_DESIGN.md and /docs/design/ for the contract this crate
 //! must implement. Do not add public API here without a ticket in plan.json.
+//!
+//! Dependency note (ticket W1-02): this crate depends on `rf-cart` for
+//! cartridge *metadata* (parsed iNES/NES 2.0 header, hashes) only — it does
+//! not hand over PRG/CHR bytes, so `system::cartridge` slices those out of
+//! the raw ROM image itself. `rf-cart` is a peer core crate, not an upper
+//! layer, so this is exempt from `scripts/validate-arch.sh` rule 1 (see
+//! that script's `CORE_CRATES`/`FORBIDDEN` lists).
 
 pub mod cpu;
+pub mod system;
 
 pub use cpu::{Cpu, CpuBus};
+pub use system::{NesBus, NesLoadError, NesRom};
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-nes";

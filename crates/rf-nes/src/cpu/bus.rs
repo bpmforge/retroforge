@@ -8,9 +8,13 @@
 //! instruction-accurate: a wrong dummy read is a wrong bus trace even if
 //! every register ends up correct.
 //!
-//! A real system bus (mappers, PPU/APU registers, OAM DMA) is a later
-//! ticket (W1-02); this crate only defines the seam plus a recording mock
-//! for the vector-test harness (see `cpu::tests::vectors`).
+//! The real system bus (mappers, PPU/APU registers, OAM DMA) is
+//! [`crate::system::NesBus`] (ticket W1-02); this module only defines the
+//! seam plus a recording mock for the vector-test harness (see
+//! `cpu::tests::vectors`). `NesBus` is exactly the "future `CpuBus`
+//! implementor" the module doc above describes: OAM DMA's stolen cycles
+//! and the master cycle counter both live there, advanced inside its
+//! `read`/`write`, never inside `Cpu::step`.
 pub trait CpuBus {
     /// One CPU read cycle at `addr`. Called for every read, including
     /// "dummy" reads whose value is discarded (e.g. absolute,X page-cross
