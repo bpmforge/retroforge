@@ -32,7 +32,7 @@ combination, validated for this exact workload.
 | Save states | **serde + bincode** | bincode **2.0.1** | Fastest; wrapped in hand-rolled versioned TLV envelope (design/SAVE_STATES.md) — the *container* is ours, codec is swappable | ⚠️ bincode ≥2 has own Encode/Decode derives; **never write bincode 1.x idioms** (R-11). ⚠️ **`bincode 3.0.0` is NOT a release** — bincode-org published it as a placeholder whose entire `lib.rs` is `compile_error!("https://xkcd.com/2347/")`; pinning `"3"` fails the build (corrected 2026-08-02, was pinned 3.0 from 2026-07-06 research). Do not "upgrade" to it. `bincode-next`/`oxicode` are third-party forks — rejected for a PUBLIC format (CONTRACTS §3). postcard 1.1 remains the sanctioned alternative if wire-stability ever outranks speed |
 | Compression | **zstd** | 0.13.3 | State/canvas/cache compression | — |
 | Config/profiles | **toml** | **1** (1.1.4+, spec 1.1.0) | Human-authored, diffable profiles (design/GAME_PROFILES.md); also the test-ROM manifest (tests/rom-manifest.toml, W0-03) | serde-compatible. Pinned to major `1` at W0-03 (was "current") |
-| Benchmarks | **criterion** | current | Perf gates in CI (TESTING.md §7) | — |
+| Benchmarks | **criterion** | 0.8.2 | Perf gates in CI (TESTING.md §7); first real usage: `rf-nes` dev-dependency, `crates/rf-nes/benches/cpu_step.rs` (W1-01a) | `criterion::black_box` is deprecated in 0.8 in favor of `std::hint::black_box` — use the latter |
 | Future AI | **ort** (ONNX Runtime) | Phase 8+ | Local-first offline pack generation | Not a dependency until Phase 8 |
 
 Deliberately **not** used: SDL2 (C dependency for little gain over
