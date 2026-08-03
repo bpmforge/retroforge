@@ -158,11 +158,15 @@ impl NesBus {
         self.controllers[index].set_buttons(buttons);
     }
 
-    /// One CPU-visible read with no cycle/open-bus side effects — used
+    /// One CPU-visible read with no `master_cycle` side effect (it still
+    /// updates `open_bus`, exactly like a real read would) — used
     /// internally by OAM DMA, which issues its own 256 "get" cycles by
     /// hand rather than recursing into [`CpuBus::read`] (module doc: OAM
-    /// DMA's cycles must be counted exactly once).
-    fn read_no_tick(&mut self, addr: u16) -> u8 {
+    /// DMA's cycles must be counted exactly once). Callers other than
+    /// `CpuBus::read`/`run_oam_dma` MUST tick `master_cycle` themselves —
+    /// nothing enforces that mechanically, so a future ticket reusing this
+    /// (e.g. DMC DMA) needs to preserve the same discipline.
+    fn read_untimed(&mut self, addr: u16) -> u8 {
         let value = match addr {
             0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)],
             0x2000..=0x3FFF => self.ppu.read((addr & 0x0007) as u8, self.open_bus),
@@ -188,10 +192,10 @@ impl NesBus {
         prg[offset]
     }
 
-    /// One CPU-visible write with no cycle side effects (see
-    /// `read_no_tick`'s doc — the same reasoning applies to OAM DMA's
-    /// "put" cycles).
-    fn write_no_tick(&mut self, addr: u16, value: u8) {
+    /// One CPU-visible write with no `master_cycle` side effect (see
+    /// `read_untimed`'s doc — the same reasoning, and the same
+    /// caller-must-tick obligation, applies to OAM DMA's "put" cycles).
+    fn write_untimed(&mut self, addr: u16, value: u8) {
         self.open_bus = value;
         match addr {
             0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)] = value,
@@ -233,7 +237,19 @@ impl NesBus {
     /// external reset-sequence anchor tying our `master_cycle` phase to
     /// real hardware's yet), not a claim about a specific absolute cycle
     /// number; what matters, and what the acceptance tests check, is that
-    /// the two cases differ by exactly one cycle.
+    /// the two cases differ by exactly one cycle. Concretely,
+    /// `master_cycle` starts at 0 in `NesBus::new` with no reset sequence
+    /// run yet (out of this ticket's scope — see the `system` module doc
+    /// and `crate::cpu::mod`'s `Default for Cpu` doc), so today the parity
+    /// a real ROM sees depends on however many bus ops happened before its
+    /// first `$4014` write; this is the one place a real ROM's DMA cost
+    /// could disagree with this model by exactly one cycle until a reset
+    /// sequence anchors the phase (W1-03+).
+    ///
+    /// Each of the 256 "get" reads below also updates `open_bus` (via
+    /// `read_untimed`) to that source byte, same as a real CPU read would
+    /// — so after a DMA, `open_bus` holds the *last PRG/RAM byte DMA
+    /// fetched*, not the `$XX` page value that triggered it.
     fn run_oam_dma(&mut self, page: u8, start_cycle_odd: bool) -> u32 {
         let mut stall = 0u32;
 
@@ -254,8 +270,8 @@ impl NesBus {
             // "get": read one byte from the source page. Uses the
             // non-ticking internal read plus a manual tick, deliberately
             // *not* `CpuBus::read`, so this loop's 256 cycles are counted
-            // exactly once each (see `read_no_tick`'s doc).
-            let byte = self.read_no_tick(src);
+            // exactly once each (see `read_untimed`'s doc).
+            let byte = self.read_untimed(src);
             self.master_cycle += 1;
             stall += 1;
 
@@ -271,7 +287,7 @@ impl NesBus {
 
 impl CpuBus for NesBus {
     fn read(&mut self, addr: u16) -> u8 {
-        let value = self.read_no_tick(addr);
+        let value = self.read_untimed(addr);
         self.master_cycle += 1;
         value
     }
@@ -285,7 +301,7 @@ impl CpuBus for NesBus {
             self.last_oam_dma_stall = Some(stall);
             return;
         }
-        self.write_no_tick(addr, value);
+        self.write_untimed(addr, value);
         self.master_cycle += 1;
     }
 
