@@ -4,26 +4,66 @@
 //!
 //! ## Scope fence (this ticket vs. later ones)
 //!
-//! This module implements **background rendering** (W1-04a/W1-04b) and, as
-//! of ticket W1-05a, **sprite evaluation + compositing** (see `sprites.rs`
+//! This module implements **background rendering** (W1-04a/W1-04b),
+//! **sprite evaluation + compositing** (ticket W1-05a; see `sprites.rs`
 //! for the sprite-specific module doc: secondary OAM evaluation, the
 //! 8-sprite-per-scanline limit, the buggy overflow-flag diagonal scan, and
-//! the BG/sprite priority multiplexer). It deliberately does NOT implement:
-//! - **Sprite-0 hit** (`STATUS_SPRITE0_HIT`) — ticket W1-05b. The status
-//!   bit is still only ever cleared (pre-render dot 1), never set, exactly
-//!   as before this ticket.
-//! - The exact VBlank/NMI edge-suppression races `ppu_vbl_nmi` tests
-//!   (ticket W1-05b per the conductor's W1-04a pre-flight notes; the
-//!   odd-frame dot-339 skip itself now IS implemented here — ticket
-//!   W1-04b — see [`tick`](Ppu::tick)'s doc). The VBlank/sprite0/overflow
-//!   flag bits of `$2002` exist and are set/cleared at the dots nesdev
-//!   documents (see [`tick`](Ppu::tick)'s doc), but nothing here connects
-//!   them to [`crate::cpu::CpuBus::nmi_line`] — [`crate::system::NesBus`]
-//!   still returns that trait method's `false` default, unchanged. A
-//!   half-modeled NMI with no golden-frame oracle to check it against would
-//!   risk silently perturbing CPU-visible behavior for a criterion this
-//!   ticket doesn't claim; wiring it up belongs to whichever later ticket
-//!   actually gets a test-ROM oracle for it.
+//! the BG/sprite priority multiplexer), and, as of ticket W1-05b,
+//! **sprite-0 hit** (`STATUS_SPRITE0_HIT`, `sprites.rs`'s `output_pixel`)
+//! and **VBlank/NMI wiring**: [`Ppu::nmi_line`] is the combinatorial
+//! `$2000` bit 7 (NMI enable) AND `$2002` bit 7 (VBlank flag) level
+//! [`crate::system::NesBus`] now forwards through
+//! [`crate::cpu::CpuBus::nmi_line`] — the CPU already edge-detects that
+//! level once per bus cycle (W1-01b's `CountingBus`), which is exactly
+//! what reproduces nesdev.org/wiki/NMI's documented "By toggling
+//! `NMI_output` (`PPUCTRL.7`) during vertical blank without reading
+//! `PPUSTATUS`, a program can cause `/NMI` to be pulled low multiple
+//! times" behavior for free: no separate multi-fire bookkeeping is needed
+//! here, only an honest level.
+//!
+//! **A sub-CPU-cycle timing ceiling this module does NOT reach — a
+//! documented architectural limit, measured against real ROMs, not an
+//! oversight:** nesdev.org/wiki/PPU_frame_timing's "VBL Flag Timing" table
+//! describes a **sub-CPU-cycle** race — reading `$2002` exactly on the PPU
+//! clock the flag is set (or one clock later) still reads it as set and
+//! clears it, but suppresses that frame's NMI because the CPU's own
+//! edge-detector never gets to sample the momentarily-true level before
+//! the read clears it. [`crate::system::NesBus`] ticks this PPU's 3
+//! dots-per-cycle strictly *after* a register read completes and strictly
+//! *before* a register write's own 3 dots (`write_untimed` sets the new
+//! value, `tick_master` runs only afterward — `NesBus::tick_master`'s doc),
+//! and `crate::cpu::exec::CountingBus` (out of this ticket's write scope)
+//! samples `nmi_line()` once, after the whole bus op — so neither a read
+//! nor a write can ever interleave with the *current* cycle's own dots,
+//! only see-or-affect state as of a whole-cycle boundary. The
+//! **one-clock-early** read case (nesdev: "reading one PPU clock before
+//! reads it as clear and never sets the flag... for that frame") IS
+//! reachable under that ordering — see `scroll.rs`'s `read_status` doc
+//! (`suppress_vblank_this_frame`) — and is implemented; the same-clock
+//! read case is not. Fixing either would require restructuring when
+//! register access is sequenced relative to `tick_master`'s 3-dot
+//! batching, which is CPU-crate-adjacent territory this ticket's write
+//! scope (`crates/rf-nes/src/ppu/**` plus `system/mod.rs`, not `cpu/**`)
+//! doesn't reach without risking the byte-exact nestest/vector suites.
+//!
+//! Measured against the real, fetched `ppu_vbl_nmi` ROMs (not guessed):
+//! `01-vbl_basics`, `03-vbl_clear_time`, `04-nmi_control`,
+//! `09-even_odd_frames` pass; `02-vbl_set_time`, `05-nmi_timing`,
+//! `06-suppression`, `07-nmi_on_timing`, `08-nmi_off_timing` all show the
+//! *same* signature — a one-CPU-cycle-early suppression boundary relative
+//! to the real fetched expected table (cross-checked against a matching
+//! "fails at row 03 instead of 04" symptom independently reported by
+//! another emulator author, forums.nesdev.org/viewtopic.php?t=17682) —
+//! strong evidence for one shared root cause, this read-side ceiling.
+//! `10-even_odd_timing` fails separately, at "Clock is skipped too late,
+//! relative to enabling BG" (its sub-test #3 of 4; #2 and #4 pass) — a
+//! `$2001`-write-timing question this module doc does NOT claim the same
+//! root cause for with the same confidence (not A/B-isolated the way the
+//! read-side suppression window was — see `docs/STATUS.md`'s W1-05b entry
+//! for exactly what was and wasn't verified). `crates/rf-harness/
+//! waivers.toml` and that STATUS.md entry carry the full per-ROM evidence.
+//!
+//! It deliberately does NOT implement:
 //! - A `Mapper` trait / CHR bank switching (routed the same way W1-02
 //!   routed NROM's PRG logic: mapper 0 has no CHR banking, and no second
 //!   mapper ticket exists yet to inform a trait's shape — see
@@ -277,6 +317,28 @@ pub struct Ppu {
     /// fields); `false` (even) is this module's arbitrary but documented
     /// choice.
     pub(super) frame_is_odd: bool,
+    /// Total frames completed since this PPU was constructed (ticket
+    /// W1-05b) — incremented exactly once per frame, alongside
+    /// `frame_is_odd`'s toggle in [`Ppu::advance_counters`], regardless of
+    /// whether that particular pre-render line was skip-shortened. Exists
+    /// so a caller driving a real ROM (`rf-harness`'s blargg-protocol
+    /// runner, `crate::system::NesBus::frame_count`) can detect "one whole
+    /// frame elapsed" without reaching into `scanline`/`dot` directly —
+    /// this module's only externally-meaningful frame-boundary signal.
+    frame_count: u64,
+    /// Sticky per-frame latch (ticket W1-05b) implementing the *reachable*
+    /// half of nesdev.org/wiki/PPU_frame_timing's `$2002`-read VBlank race
+    /// (see this module's doc "One VBlank/NMI race this module does NOT
+    /// reach" section for the half that ISN'T reachable, and why): set by
+    /// `scroll.rs`'s `read_status` when a `$2002` read happens exactly one
+    /// dot before the VBlank-set dot (scanline 241, dot 1) — nesdev,
+    /// verbatim, "Reading one PPU clock before reads it as clear and never
+    /// sets the flag or generates NMI for that frame." Checked (and, if
+    /// set, suppresses the flag-set) in [`Ppu::process_dot`] at exactly
+    /// that dot; cleared again at the pre-render line's dot 1 alongside the
+    /// other per-frame status-bit resets, so it can never leak into a later
+    /// frame's own VBlank window.
+    suppress_vblank_this_frame: bool,
 
     // ---- sprite evaluation + output units (ticket W1-05a; see
     // `sprites.rs` module doc) ----
@@ -344,6 +406,8 @@ impl Ppu {
             scanline: PRERENDER_SCANLINE,
             dot: 0,
             frame_is_odd: false,
+            frame_count: 0,
+            suppress_vblank_this_frame: false,
             secondary_oam: [EMPTY_EVALUATED_SPRITE; 8],
             secondary_oam_count: 0,
             active_sprites: [EMPTY_SPRITE_UNIT; 8],
@@ -417,11 +481,22 @@ impl Ppu {
             PRERENDER_SCANLINE => {
                 if self.dot == 1 {
                     self.status &= !(STATUS_VBLANK | STATUS_SPRITE0_HIT | STATUS_SPRITE_OVERFLOW);
+                    // Ticket W1-05b: a suppression latched during the frame
+                    // that's ending must not leak into the frame about to
+                    // start — see `suppress_vblank_this_frame`'s doc.
+                    self.suppress_vblank_this_frame = false;
                 }
                 self.process_render_dot(false);
             }
+            // Ticket W1-05b: `suppress_vblank_this_frame` (set by
+            // `scroll.rs`'s `read_status` when a `$2002` read lands exactly
+            // one dot early) skips only the flag *set* — nesdev: "never
+            // sets the flag or generates NMI for that frame". Everything
+            // else about this dot (there is nothing else) is unaffected.
             VBLANK_START_SCANLINE if self.dot == 1 => {
-                self.status |= STATUS_VBLANK;
+                if !self.suppress_vblank_this_frame {
+                    self.status |= STATUS_VBLANK;
+                }
             }
             // Post-render (240) and the rest of vblank (241-260, beyond
             // dot 1): genuinely idle, nothing to do.
@@ -451,6 +526,7 @@ impl Ppu {
             self.dot = 0;
             self.scanline = if self.scanline == PRERENDER_SCANLINE {
                 self.frame_is_odd = !self.frame_is_odd;
+                self.frame_count += 1;
                 0
             } else {
                 self.scanline + 1
@@ -458,6 +534,28 @@ impl Ppu {
         } else {
             self.dot += 1;
         }
+    }
+
+    /// Total frames completed since construction (see `frame_count`'s
+    /// field doc) — [`crate::system::NesBus::frame_count`] forwards this.
+    pub fn frame_count(&self) -> u64 {
+        self.frame_count
+    }
+
+    /// The PPU's NMI output level (ticket W1-05b): asserted iff `$2000`
+    /// bit 7 (NMI enable, "Generate an NMI at the start of the vertical
+    /// blanking interval") AND `$2002` bit 7 (the VBlank flag) are both
+    /// currently true — nesdev.org/wiki/NMI, verbatim: "The PPU pulls /NMI
+    /// low if and only if both `vblank_flag` and `NMI_output` are true."
+    /// Pure/combinatorial, no side effects — [`crate::system::NesBus`]
+    /// (the [`crate::cpu::CpuBus`] implementor) forwards this directly
+    /// through [`crate::cpu::CpuBus::nmi_line`], and the CPU's own
+    /// edge-detector (W1-01b, `cpu::exec::CountingBus`, sampled once per
+    /// bus cycle) is what turns this level into "multiple NMIs fire if
+    /// `NMI_output` is toggled off/on while `vblank_flag` is still set" —
+    /// see this module's doc "Scope fence" section.
+    pub fn nmi_line(&self) -> bool {
+        self.ctrl & 0x80 != 0 && self.status & STATUS_VBLANK != 0
     }
 
     fn rendering_enabled(&self) -> bool {

@@ -49,6 +49,34 @@ const TIER_A_LOCAL_SUITES = {
       'crates/rf-nes/src/trace.rs',
     ],
   },
+  // ppu_vbl_nmi (ticket W1-05b, third Tier-A-local suite): VBlank/NMI
+  // wiring lives in ppu/** and the CpuBus::nmi_line passthrough in
+  // system/mod.rs; crates/rf-nes/src/cpu is ALSO covered here (not for
+  // sprite_hit_tests below) because the NMI edge-detector this suite
+  // exercises heavily (cpu::exec::CountingBus) lives there — a change to
+  // it is directly load-bearing for this suite's real pass/fail outcome,
+  // unlike sprite_hit_tests, which never triggers an NMI. Deliberately NOT
+  // crates/rf-harness/** (same reason as nes6502/nestest above).
+  ppu_vbl_nmi: {
+    coveredPaths: ['crates/rf-nes/src/ppu', 'crates/rf-nes/src/system', 'crates/rf-nes/src/cpu'],
+  },
+  // sprite_hit_tests (ticket W1-05b, fourth Tier-A-local suite):
+  // sprite-0-hit lives in ppu/** (sprites.rs's output_pixel); system/mod.rs
+  // for the bus plumbing (prg_ram/frame_count accessors) rf-harness's
+  // RAM-result reader depends on.
+  sprite_hit_tests: {
+    coveredPaths: ['crates/rf-nes/src/ppu', 'crates/rf-nes/src/system'],
+  },
+};
+
+// Suite -> expected [[suite.roms]] row count DATA table (ticket W1-05b) —
+// the multi-row analog of nes6502's `opcodes_tested !== 256` / nestest's
+// `lines_compared !== 8991` anti-placeholder guards below: a manifest edit
+// that silently shrinks one of these suites must fail loudly here, not
+// quietly under-report coverage.
+const EXPECTED_ROM_COUNTS = {
+  ppu_vbl_nmi: 10,
+  sprite_hit_tests: 11,
 };
 
 const errors = [];
@@ -112,15 +140,31 @@ if (typeof evidence.toolchain !== 'string' || evidence.toolchain.trim() === '') 
 }
 
 // ---- 5. per-Tier-A-local-suite: evidence present, staleness ----
+// `.filter()`, not `.find()`: nes6502/nestest each have exactly one
+// aggregate row, but ppu_vbl_nmi/sprite_hit_tests (ticket W1-05b) have one
+// row PER named sub-ROM (10 and 11 respectively) — `.find()` would only
+// ever check the first of those, silently ignoring the other 9/10.
 const rows = Array.isArray(evidence.accuracy_table?.rows) ? evidence.accuracy_table.rows : [];
 for (const [suiteId, { coveredPaths }] of Object.entries(TIER_A_LOCAL_SUITES)) {
-  const row = rows.find((r) => r.suite === suiteId);
-  if (!row) {
-    err(`Tier-A-local suite '${suiteId}' has no evidence row in ${EVIDENCE_PATH}`);
+  const suiteRows = rows.filter((r) => r.suite === suiteId);
+  if (suiteRows.length === 0) {
+    err(`Tier-A-local suite '${suiteId}' has no evidence row(s) in ${EVIDENCE_PATH}`);
     continue;
   }
-  if (row.status !== 'pass' && row.status !== 'waived') {
-    err(`Tier-A-local suite '${suiteId}' evidence row has status ${JSON.stringify(row.status)}, expected pass or waived`);
+  const expectedCount = EXPECTED_ROM_COUNTS[suiteId];
+  if (expectedCount !== undefined && suiteRows.length !== expectedCount) {
+    err(
+      `Tier-A-local suite '${suiteId}' has ${suiteRows.length} evidence row(s), expected ${expectedCount} — ` +
+        'a partial/edited manifest or evidence run would silently under-report coverage'
+    );
+  }
+  for (const row of suiteRows) {
+    if (row.status !== 'pass' && row.status !== 'waived') {
+      err(
+        `Tier-A-local suite '${suiteId}' rom ${JSON.stringify(row.rom)} evidence row has status ` +
+          `${JSON.stringify(row.status)}, expected pass or waived`
+      );
+    }
   }
 
   if (!Array.isArray(coveredPaths) || coveredPaths.length === 0) {
@@ -223,6 +267,47 @@ if (!nt || typeof nt !== 'object') {
   }
 }
 
+// ---- 6c/6d. ppu_vbl_nmi / sprite_hit_tests summary consistency
+// (anti-placeholder, ticket W1-05b) — same shape check as vectors/nestest
+// above, applied to both new Tier-A-local suites' top-level summary
+// objects (`{suite, roms_tested, roms_passed, roms_failed, failing[]}`,
+// see `crates/rf-harness/src/bin/local_gate_evidence.rs`'s
+// `suite_summary_json`).
+for (const suiteId of ['ppu_vbl_nmi', 'sprite_hit_tests']) {
+  const s = evidence[suiteId];
+  const expectedCount = EXPECTED_ROM_COUNTS[suiteId];
+  if (!s || typeof s !== 'object') {
+    err(`evidence.${suiteId} is missing`);
+    continue;
+  }
+  if (s.roms_tested !== expectedCount) {
+    err(`evidence.${suiteId}.roms_tested is ${JSON.stringify(s.roms_tested)}, expected ${expectedCount}`);
+  }
+  if (!(typeof s.roms_passed === 'number' && s.roms_passed >= 0)) {
+    err(`evidence.${suiteId}.roms_passed is ${JSON.stringify(s.roms_passed)} — looks like a placeholder, not a real run`);
+  }
+  if (!(typeof s.roms_failed === 'number' && s.roms_failed >= 0)) {
+    err(`evidence.${suiteId}.roms_failed is ${JSON.stringify(s.roms_failed)} — looks like a placeholder, not a real run`);
+  }
+  if (
+    typeof s.roms_tested === 'number' &&
+    typeof s.roms_passed === 'number' &&
+    typeof s.roms_failed === 'number' &&
+    s.roms_passed + s.roms_failed !== s.roms_tested
+  ) {
+    err(
+      `evidence.${suiteId}: roms_passed (${s.roms_passed}) + roms_failed (${s.roms_failed}) != ` +
+        `roms_tested (${s.roms_tested})`
+    );
+  }
+  if (!Array.isArray(s.failing) || s.failing.length !== s.roms_failed) {
+    err(
+      `evidence.${suiteId}.failing has ${Array.isArray(s.failing) ? s.failing.length : 'non-array'} ` +
+        `entries, expected ${s.roms_failed} (roms_failed) — a failure must be named, not only counted`
+    );
+  }
+}
+
 // ---- 7. accuracy_table shape sanity (reuses Report::to_json's own keys) ----
 if (!evidence.accuracy_table || !Array.isArray(evidence.accuracy_table.rows)) {
   err('evidence.accuracy_table.rows is missing or not an array');
@@ -247,5 +332,7 @@ console.log(
   `validate-evidence OK — ${Object.keys(TIER_A_LOCAL_SUITES).length} Tier-A-local suite(s) covered, ` +
     `retroforge_commit=${evidence.retroforge_commit}, tree_clean=${evidence.tree_clean}, ` +
     `nes6502: ${evidence.vectors.total_pass}/${evidence.vectors.total_pass + evidence.vectors.total_fail} cases, ` +
-    `nestest: ${evidence.nestest.lines_matched}/${evidence.nestest.lines_compared} lines`
+    `nestest: ${evidence.nestest.lines_matched}/${evidence.nestest.lines_compared} lines, ` +
+    `ppu_vbl_nmi: ${evidence.ppu_vbl_nmi.roms_passed}/${evidence.ppu_vbl_nmi.roms_tested} ROMs, ` +
+    `sprite_hit_tests: ${evidence.sprite_hit_tests.roms_passed}/${evidence.sprite_hit_tests.roms_tested} ROMs`
 );

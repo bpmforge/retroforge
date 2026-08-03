@@ -126,13 +126,52 @@
 //! in the first place, so it never reaches [`Ppu::output_pixel`] to be
 //! flagged at all. Do not add code that sets this flag on a `Sprite`-layer
 //! pixel; the sink is accuracy-exact by design (see the ruling).
+//!
+//! ## Sprite-0 hit (ticket W1-05b)
+//!
+//! nesdev.org/wiki/PPU_OAM's "Sprite zero hits" section, condensed to its
+//! defining conditions (verified live 2026-08-03, quoted where load-bearing):
+//! "When an opaque pixel of sprite 0 overlaps an opaque pixel of the
+//! background, this is a sprite 0 hit" — set starting at that pixel's own
+//! dot — and does NOT occur:
+//! - "If background or sprite rendering is disabled in PPUMASK" — already
+//!   guaranteed by reusing [`Ppu::background_pixel`]/[`Ppu::sprite_pixel`]
+//!   below, both of which already return "transparent" whenever their own
+//!   `$2001` show-bit is off.
+//! - "At x=0 to x=7 if the left-side clipping window is enabled (if bit 2
+//!   or bit 1 of PPUMASK is 0)" — also already covered by reusing those
+//!   same two resolvers: each already forces its own layer transparent in
+//!   x<8 when ITS OWN left-8 mask bit is clear, so "either bit clear
+//!   suppresses the hit" falls out of the AND automatically, without a
+//!   separate x<8 branch here.
+//! - "At x=255, for an obscure reason related to the pixel pipeline" —
+//!   handled by an explicit `x != 255` check, since neither resolver above
+//!   has any other reason to treat x=255 specially.
+//! - "At any pixel where the background or sprite pixel is transparent" —
+//!   same reuse as the rendering-disabled case.
+//! - Sprite priority, pixel colors, and palette contents do NOT gate it —
+//!   sprite 0 can hit "from behind" the background. [`Ppu::sprite_pixel`]
+//!   never consults `behind_background` while searching for an opaque
+//!   match, so checking its result's `oam_index` below is priority-blind
+//!   by construction, matching this rule for free.
+//!
+//! [`Ppu::sprite_pixel`]'s OAM-order search means sprite 0 (`oam_index ==
+//! 0`, the lowest possible index) is always the first candidate checked
+//! whenever it is present and opaque at a given x — so `sprite.oam_index
+//! == 0` on its `Some` result is exactly "sprite 0's own opaque pixel is
+//! the one that would be drawn here", the same "opaque sprite-0 pixel"
+//! nesdev's condition names.
 use super::{EvaluatedSprite, Ppu, SpriteUnit, EMPTY_EVALUATED_SPRITE, EMPTY_SPRITE_UNIT};
-use crate::ppu::STATUS_SPRITE_OVERFLOW;
+use crate::ppu::{STATUS_SPRITE0_HIT, STATUS_SPRITE_OVERFLOW};
 use rf_core_api::{PixelLayer, PpuPixel};
 
 /// The resolved sprite-layer contribution at one screen x, from
 /// [`Ppu::sprite_pixel`] — the winning (highest-priority, first opaque)
-/// active sprite, if any.
+/// active sprite, if any. `Copy`: [`Ppu::output_pixel`] (ticket W1-05b)
+/// needs the same value both for the sprite-0-hit check and the
+/// BG/sprite priority mux, and re-deriving it twice would risk the two
+/// call sites silently disagreeing about which sprite "won" a pixel.
+#[derive(Clone, Copy)]
 struct SpritePixel {
     /// 0x10-0x1F: a sprite-palette-group address, ready for
     /// [`Ppu::palette_read`].
@@ -396,6 +435,16 @@ impl Ppu {
     pub(super) fn output_pixel(&mut self, x: u16) {
         let (bg_addr, bg_layer) = self.background_pixel(x);
         let sprite = self.sprite_pixel(x);
+
+        // Sprite-0 hit (ticket W1-05b, nesdev.org/wiki/PPU_OAM "Sprite zero
+        // hits" — see this module's doc for the full condition-by-condition
+        // derivation): opaque BG (`bg_addr.is_some()`, already left-8/
+        // rendering-gated by `background_pixel`) AND sprite 0 is the opaque
+        // winner here (already left-8/rendering-gated by `sprite_pixel`,
+        // and priority-blind by construction), except at x=255.
+        if x != 255 && bg_addr.is_some() && matches!(sprite, Some(s) if s.oam_index == 0) {
+            self.status |= STATUS_SPRITE0_HIT;
+        }
 
         let (palette_addr, layer, sprite_id, priority) = match (bg_addr, sprite) {
             (None, None) => (0u16, bg_layer, None, 0u8),

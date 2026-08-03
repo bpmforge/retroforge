@@ -1,13 +1,21 @@
 //! `local-gate-evidence` — the binary `scripts/local-gate.sh` wraps
 //! (ticket W0-07, extended by ticket W1-03 for the second Tier-A-local
-//! suite).
+//! suite, and by ticket W1-05b for the third and fourth).
 //!
 //! Runs the nes6502 SingleStepTests vector suite via
-//! [`rf_harness::nes6502_evidence::run_all`] and the nestest golden-trace
-//! diff via [`rf_harness::nestest_evidence::run`], builds the W0-03
-//! accuracy report ([`rf_harness::build_report`]) covering both, and prints
-//! the combined evidence as JSON on stdout — `docs/evidence/local-gate.json`'s
-//! exact contents, one rolling file (git history is the audit trail).
+//! [`rf_harness::nes6502_evidence::run_all`], the nestest golden-trace
+//! diff via [`rf_harness::nestest_evidence::run`], and (ticket W1-05b) the
+//! `ppu_vbl_nmi` (10 ROMs, blargg `$6000` protocol, via
+//! [`rf_harness::blargg_evidence::run`]) and `sprite_hit_tests` (11 ROMs,
+//! RAM-result-byte protocol, via
+//! [`rf_harness::blargg_evidence::run_ram_result`] — see
+//! `tests/rom-manifest.toml`'s comment on that suite for why it isn't the
+//! `$6000` protocol too) suites — see [`SuiteResult`]'s doc for why those
+//! two get per-ROM rows instead of nes6502/nestest's one-row-per-suite
+//! shape. Builds the W0-03 accuracy report ([`rf_harness::build_report`])
+//! covering all of the above, and prints the combined evidence as JSON on
+//! stdout — `docs/evidence/local-gate.json`'s exact contents, one rolling
+//! file (git history is the audit trail).
 //!
 //! This binary deliberately never reads `plan.json` — `today` and the
 //! open-ticket-id list are supplied by the caller (`scripts/local-gate.sh`,
@@ -20,14 +28,15 @@
 //! for real evidence (mirrors `fetch_artifact`'s "verify before writing"
 //! discipline, applied to this binary's own output instead of a
 //! downloaded file).
+use rf_harness::blargg_evidence::{self, RamResultOutcome};
 use rf_harness::nes6502_evidence::run_all;
 use rf_harness::nestest_evidence;
 use rf_harness::{
-    build_report, git_rev_parse_head, git_tree_is_clean, AccuracyRow, Json, Manifest, RowStatus,
-    SystemGitRunner, WaiverFile,
+    build_report, git_rev_parse_head, git_tree_is_clean, AccuracyRow, BlarggStatus, Json, Manifest,
+    RowStatus, SystemGitRunner, WaiverFile,
 };
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 struct Args {
@@ -100,6 +109,215 @@ fn main() -> ExitCode {
         }
     };
     run(&args)
+}
+
+/// Per-ROM outcome + accuracy row for one manifest suite driven against a
+/// real `NesBus` (ticket W1-05b) — shared shape for both
+/// `protocol = "six_thousand"` (`ppu_vbl_nmi`) and `protocol = "ram_result"`
+/// (`sprite_hit_tests`, see `tests/rom-manifest.toml`'s comment on that
+/// suite for why it isn't `six_thousand` too).
+///
+/// Unlike nes6502/nestest (one aggregate row each — "did every case pass"
+/// is the only question those two suites' accuracy-table entry needs to
+/// answer), `sprite_hit_tests`/`ppu_vbl_nmi` already have one
+/// `[[suite.roms]]` entry per named sub-ROM in `tests/rom-manifest.toml`
+/// (matching `docs/TESTING.md` §4's own per-suite rows), so this emits one
+/// [`AccuracyRow`] per ROM — the finer grain the manifest schema doc
+/// already calls for ("Suite rows in TESTING.md that bundle several named
+/// blargg test programs into one FR/tier cell are split here into one
+/// `[[suite]]` per named program"). A future waiver for exactly one failing
+/// sub-ROM (not the whole suite) needs this grain to be expressible at all.
+struct SuiteResult {
+    rows: Vec<AccuracyRow>,
+    roms_tested: usize,
+    roms_passed: usize,
+    roms_failed: usize,
+    /// `(rom label, human-readable reason)` — printed by the caller and
+    /// folded into this suite's JSON summary object, so a failure is named
+    /// rather than only counted.
+    failing: Vec<(String, String)>,
+}
+
+/// Drives every `[[suite.roms]]` row of manifest suite `suite_id` through
+/// `run_rom` (`(rom_path, frame_budget) -> (status, frame, note)`),
+/// refusing (an `Err`, not a partial result) if the suite is missing or its
+/// row count doesn't match `expected_roms` — a silent manifest edit
+/// shrinking this suite would otherwise under-report coverage exactly the
+/// way `nes6502`'s `opcodes_tested != 256` guard and `nestest`'s
+/// `lines_compared != 8991` guard both exist to catch for their own
+/// suites. Protocol-specific (blargg `$6000` vs. RAM-result-byte) logic
+/// lives in `run_rom`, supplied by [`run_six_thousand_suite`]/
+/// [`run_ram_result_suite`] — this function only owns the shared
+/// bookkeeping (row-count guard, per-ROM `AccuracyRow` construction,
+/// pass/fail tallying, per-ROM `eprintln!`).
+fn run_suite(
+    manifest: &Manifest,
+    suite_id: &str,
+    expected_roms: usize,
+    repo_root: &Path,
+    mut run_rom: impl FnMut(&Path, u32) -> (RowStatus, u32, String),
+) -> Result<SuiteResult, String> {
+    let suite = manifest
+        .suite(suite_id)
+        .ok_or_else(|| format!("manifest has no suite named {suite_id:?}"))?;
+    if suite.roms.len() != expected_roms {
+        return Err(format!(
+            "suite {suite_id:?} has {} rom row(s) in the manifest, expected {expected_roms} — \
+             a partial/edited manifest would silently under-report coverage",
+            suite.roms.len()
+        ));
+    }
+
+    let mut rows = Vec::with_capacity(suite.roms.len());
+    let mut roms_passed = 0usize;
+    let mut roms_failed = 0usize;
+    let mut failing = Vec::new();
+
+    for suite_rom in &suite.roms {
+        let artifact = manifest.artifact(&suite_rom.artifact).ok_or_else(|| {
+            format!(
+                "suite {suite_id:?} rom {:?}: unknown artifact id {:?}",
+                suite_rom.rom, suite_rom.artifact
+            )
+        })?;
+        let rom_path = repo_root.join(&artifact.dest);
+
+        let (status, frame, note) = run_rom(&rom_path, suite_rom.frame_budget);
+
+        eprintln!(
+            "{suite_id}/{}: {} (frame {frame}) {note}",
+            suite_rom.rom,
+            if status == RowStatus::Pass {
+                "PASS"
+            } else {
+                "FAIL"
+            },
+        );
+
+        match status {
+            RowStatus::Pass => roms_passed += 1,
+            RowStatus::Fail => {
+                roms_failed += 1;
+                failing.push((suite_rom.rom.clone(), note));
+            }
+        }
+
+        let row = AccuracyRow::from_manifest(manifest, suite_id, &suite_rom.rom, status, frame)
+            .map_err(|e| {
+                format!(
+                    "failed to build accuracy row for {suite_id}/{}: {e}",
+                    suite_rom.rom
+                )
+            })?;
+        rows.push(row);
+    }
+
+    Ok(SuiteResult {
+        rows,
+        roms_tested: suite.roms.len(),
+        roms_passed,
+        roms_failed,
+        failing,
+    })
+}
+
+/// `protocol = "six_thousand"` suites (`ppu_vbl_nmi`) via
+/// [`blargg_evidence::run`].
+fn run_six_thousand_suite(
+    manifest: &Manifest,
+    suite_id: &str,
+    expected_roms: usize,
+    repo_root: &Path,
+) -> Result<SuiteResult, String> {
+    run_suite(
+        manifest,
+        suite_id,
+        expected_roms,
+        repo_root,
+        |rom_path, frame_budget| match blargg_evidence::run(rom_path, frame_budget) {
+            Ok(outcome) => match outcome.status {
+                BlarggStatus::Passed => (RowStatus::Pass, outcome.frames_run, outcome.message),
+                BlarggStatus::Failed(code) => (
+                    RowStatus::Fail,
+                    outcome.frames_run,
+                    format!("failed with code ${code:02X}: {}", outcome.message),
+                ),
+                BlarggStatus::NeedsReset => (
+                    RowStatus::Fail,
+                    outcome.frames_run,
+                    "protocol requested a reset button press, which this runner does not honor"
+                        .to_string(),
+                ),
+            },
+            Err(e) => (RowStatus::Fail, 0, e),
+        },
+    )
+}
+
+/// `protocol = "ram_result"` suites (`sprite_hit_tests`) via
+/// [`blargg_evidence::run_ram_result`]. `result_addr` is the suite-specific
+/// RAM location (e.g. `0x00F8` for `sprite_hit_tests`' `validation.a`
+/// `result` symbol — see that function's doc). `frame` is always
+/// `frame_budget` (the protocol has no earlier-completion signal by
+/// design — see `run_ram_result`'s doc for why running the full budget is
+/// deliberate, not a missed optimization).
+fn run_ram_result_suite(
+    manifest: &Manifest,
+    suite_id: &str,
+    expected_roms: usize,
+    repo_root: &Path,
+    result_addr: u16,
+) -> Result<SuiteResult, String> {
+    run_suite(
+        manifest,
+        suite_id,
+        expected_roms,
+        repo_root,
+        |rom_path, frame_budget| match blargg_evidence::run_ram_result(
+            rom_path,
+            frame_budget,
+            result_addr,
+        ) {
+            Ok(RamResultOutcome::Passed) => (RowStatus::Pass, frame_budget, "Passed".to_string()),
+            Ok(RamResultOutcome::Failed(0)) => (
+                RowStatus::Fail,
+                frame_budget,
+                format!(
+                    "result byte at ${result_addr:04X} was still 0 after the full frame \
+                     budget -- test likely never started or never finished"
+                ),
+            ),
+            Ok(RamResultOutcome::Failed(code)) => (
+                RowStatus::Fail,
+                frame_budget,
+                format!("result byte at ${result_addr:04X} = {code} (blargg error code)"),
+            ),
+            Err(e) => (RowStatus::Fail, 0, e),
+        },
+    )
+}
+
+fn suite_summary_json(suite_id: &str, r: &SuiteResult) -> Json {
+    Json::object(vec![
+        ("suite", Json::str(suite_id)),
+        ("roms_tested", Json::Int(r.roms_tested as i64)),
+        ("roms_passed", Json::Int(r.roms_passed as i64)),
+        ("roms_failed", Json::Int(r.roms_failed as i64)),
+        (
+            "failing",
+            Json::Array(
+                r.failing
+                    .iter()
+                    .map(|(rom, reason)| {
+                        Json::object(vec![
+                            ("rom", Json::str(rom.clone())),
+                            ("reason", Json::str(reason.clone())),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+    ])
 }
 
 fn run(args: &Args) -> ExitCode {
@@ -223,13 +441,40 @@ fn run(args: &Args) -> ExitCode {
             }
         };
 
+    // --- sprite_hit_tests (11 ROMs) + ppu_vbl_nmi (10 ROMs), ticket W1-05b
+    // ------------------------------------------------------------------
+    let sprite_hit =
+        match run_ram_result_suite(&manifest, "sprite_hit_tests", 11, &args.repo_root, 0x00F8) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("sprite_hit_tests run failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+    eprintln!(
+        "sprite_hit_tests: {}/{} ROMs passed",
+        sprite_hit.roms_passed, sprite_hit.roms_tested
+    );
+
+    let ppu_vbl_nmi = match run_six_thousand_suite(&manifest, "ppu_vbl_nmi", 10, &args.repo_root) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("ppu_vbl_nmi run failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!(
+        "ppu_vbl_nmi: {}/{} ROMs passed",
+        ppu_vbl_nmi.roms_passed, ppu_vbl_nmi.roms_tested
+    );
+
     let open_tickets = args.open_tickets.clone();
-    let report = match build_report(
-        &[row, nestest_row],
-        &waiver_file.waivers,
-        &args.today,
-        |t| open_tickets.iter().any(|o| o == t),
-    ) {
+    let mut all_rows = vec![row, nestest_row];
+    all_rows.extend(sprite_hit.rows.iter().cloned());
+    all_rows.extend(ppu_vbl_nmi.rows.iter().cloned());
+    let report = match build_report(&all_rows, &waiver_file.waivers, &args.today, |t| {
+        open_tickets.iter().any(|o| o == t)
+    }) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("accuracy report refused to build: {e}");
@@ -303,6 +548,14 @@ fn run(args: &Args) -> ExitCode {
                 ),
                 ("first_divergence", first_divergence_json),
             ]),
+        ),
+        (
+            "sprite_hit_tests",
+            suite_summary_json("sprite_hit_tests", &sprite_hit),
+        ),
+        (
+            "ppu_vbl_nmi",
+            suite_summary_json("ppu_vbl_nmi", &ppu_vbl_nmi),
         ),
         ("accuracy_table", report.to_json()),
     ]);

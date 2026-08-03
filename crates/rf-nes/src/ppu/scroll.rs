@@ -10,7 +10,7 @@
 //! ||| ++-------------- nametable select
 //! +++----------------- fine Y scroll
 //! ```
-use super::{Ppu, STATUS_VBLANK};
+use super::{Ppu, STATUS_VBLANK, VBLANK_START_SCANLINE};
 
 impl Ppu {
     /// Dispatch a real (side-effecting) CPU read of register `index`
@@ -72,10 +72,33 @@ impl Ppu {
     /// the current state of this flag and then clear[s] it". Sprite-0-hit
     /// and overflow are NOT cleared by this read (only by the pre-render
     /// line's dot-1 auto-clear — see [`Ppu::tick`]'s doc).
+    ///
+    /// ## The one-dot-early VBlank-read race (ticket W1-05b)
+    ///
+    /// nesdev.org/wiki/PPU_frame_timing's "VBL Flag Timing" table, verbatim:
+    /// "Reading `$2002` within a few PPU clocks of when VBL is set results
+    /// in special-case behavior. Reading one PPU clock before reads it as
+    /// clear and never sets the flag or generates NMI for that frame."
+    /// `self.scanline`/`self.dot` here reflect PPU state as of the end of
+    /// the *previous* bus cycle's ticks (`crate::system::NesBus::read`
+    /// calls the register read before `tick_master` advances this cycle's
+    /// 3 dots — see `crate::ppu`'s module doc "Scope fence" section for the
+    /// full ordering argument and its limits). So a read landing exactly at
+    /// (scanline 241, dot 0) — one dot before the (241, 1) VBlank-set dot —
+    /// is observably "the read that happens one PPU clock before the set":
+    /// this method both returns the not-yet-set flag (already correct,
+    /// unconditionally, since the set hasn't run yet) AND latches
+    /// `suppress_vblank_this_frame` so [`Ppu::process_dot`]'s upcoming
+    /// (241, 1) tick — due to run later in this SAME bus cycle's 3-dot
+    /// batch — skips the set entirely, matching "never sets the flag...
+    /// for that frame" rather than merely reading stale-clear once.
     fn read_status(&mut self, open_bus: u8) -> u8 {
         let result = (self.status & 0xE0) | (open_bus & 0x1F);
         self.status &= !STATUS_VBLANK;
         self.w = false;
+        if self.scanline == VBLANK_START_SCANLINE && self.dot == 0 {
+            self.suppress_vblank_this_frame = true;
+        }
         result
     }
 

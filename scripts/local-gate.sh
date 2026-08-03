@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Local evidence gate (tickets W0-07, W1-03): runs the heavy, local-only
-# nes6502 SingleStepTests vector suite (2,560,000 cases; too expensive for
-# every CI run — that's the entire reason this exists) plus the nestest
-# golden-trace diff (8991 lines against a fetched golden log — also
-# gitignored, NFR-006), and writes the combined result as a small,
+# Local evidence gate (tickets W0-07, W1-03, W1-05b): runs the heavy,
+# local-only nes6502 SingleStepTests vector suite (2,560,000 cases; too
+# expensive for every CI run — that's the entire reason this exists), the
+# nestest golden-trace diff (8991 lines against a fetched golden log), and
+# the real, fetched ppu_vbl_nmi (10 ROMs)/sprite_hit_tests (11 ROMs) suites
+# — all gitignored, NFR-006 — and writes the combined result as a small,
 # committed JSON evidence file at docs/evidence/local-gate.json. CI never
 # runs this script; it only validates the evidence file
 # (scripts/validate-evidence.mjs) — see docs/TESTING.md §4.
@@ -17,6 +18,12 @@
 #     RF_NESTEST_ROM / RF_NESTEST_LOG (same convention as
 #       crates/rf-nes/src/system/tests/nestest.rs; fetch with
 #       `scripts/fetch-test-roms.sh nestest-rom nestest-log`).
+#   No overrides for the ppu_vbl_nmi/sprite_hit_tests ROM directories below
+#   — `local_gate_evidence.rs` resolves each ROM's path itself from
+#   `tests/rom-manifest.toml` plus `--repo-root`, the same way it already
+#   does for every other manifest-declared artifact; this script only
+#   pre-checks that the expected directories exist, for the same fast/
+#   friendly-error reason the vectors/nestest checks below do.
 #
 # POSIX-ish, macOS (BSD userland, no `timeout`) and Linux CI-image
 # compatible — matches scripts/fetch-test-roms.sh's portability contract,
@@ -30,6 +37,8 @@ cd "$repo_root"
 vectors_dir="${RF_NES6502_VECTORS:-$repo_root/roms/nes/singlestep-nes6502-src/nes6502/v1}"
 nestest_rom="${RF_NESTEST_ROM:-$repo_root/roms/nes/other/nestest.nes}"
 nestest_log="${RF_NESTEST_LOG:-$repo_root/roms/nes/other/nestest.log}"
+ppu_vbl_nmi_dir="$repo_root/roms/nes/ppu_vbl_nmi/rom_singles"
+sprite_hit_dir="$repo_root/roms/nes/sprite_hit_tests_2005.10.05"
 
 if [ ! -d "$vectors_dir" ]; then
   echo "local-gate: nes6502 vectors not found at $vectors_dir" >&2
@@ -42,6 +51,18 @@ if [ ! -f "$nestest_rom" ] || [ ! -f "$nestest_log" ]; then
   echo "local-gate: nestest ROM/log not found ($nestest_rom / $nestest_log)" >&2
   echo "Fetch them first: scripts/fetch-test-roms.sh nestest-rom nestest-log" >&2
   echo "(or set RF_NESTEST_ROM/RF_NESTEST_LOG to point at existing files)" >&2
+  exit 1
+fi
+
+if [ ! -d "$ppu_vbl_nmi_dir" ]; then
+  echo "local-gate: ppu_vbl_nmi ROMs not found at $ppu_vbl_nmi_dir" >&2
+  echo "Fetch them first: scripts/fetch-test-roms.sh" >&2
+  exit 1
+fi
+
+if [ ! -d "$sprite_hit_dir" ]; then
+  echo "local-gate: sprite_hit_tests ROMs not found at $sprite_hit_dir" >&2
+  echo "Fetch them first: scripts/fetch-test-roms.sh" >&2
   exit 1
 fi
 

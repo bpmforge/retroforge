@@ -171,8 +171,17 @@ pub fn run_blargg_protocol(
 }
 
 /// Decode a NUL-terminated (or unterminated, if truncated) byte slice as
-/// the `$6004+` message text.
-fn decode_message(bytes: &[u8]) -> String {
+/// the `$6004+` message text. `pub(crate)` (ticket W1-05b) so
+/// `crate::blargg_evidence`'s real-`NesBus` driver can reuse this same
+/// NUL-scan instead of duplicating it — both live in this crate, so this is
+/// ordinary same-crate reuse, unlike the deliberately-independent
+/// rf-nes-cargo-test-vs-rf-harness-evidence-generator pairing
+/// [`crate::nestest_evidence`]'s module doc describes (that duplication is
+/// the point there; here it isn't, since `blargg_evidence` isn't the
+/// "second peer" of anything — `crates/rf-nes/src/ppu/tests/blargg_roms.rs`
+/// is, and it independently reimplements this same tiny NUL-scan rather
+/// than reaching across the crate boundary).
+pub(crate) fn decode_message(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }

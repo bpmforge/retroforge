@@ -62,7 +62,7 @@ docs/PREREQUISITES.md.
 ## 4. NES CI gates
 
 Tier A = every PR; Tier B = nightly (slow or visual-manual-once suites).
-**Tier A-local (tickets W0-07, W1-03):** a suite whose full
+**Tier A-local (tickets W0-07, W1-03, W1-05b):** a suite whose full
 100%-conformance run is too heavy — or whose fixture is a gitignored
 fetched artifact CI never has (NFR-006) — to repeat on every PR (the
 nes6502 vector suite is 2,560,000 cases across all 256 opcodes; nestest is
@@ -80,8 +80,9 @@ cadence/machine than Tier A/B.
 | `cpu_timing_test6`, `instr_timing`, `branch_timing_tests` | cycle counts, page-cross, branches | FR-CORE-020 | A | $6000 = 0 |
 | `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A | $6000 = 0 |
 | `cpu_dummy_reads/writes`, `cpu_exec_space` | dummy bus cycles, open bus | FR-CORE-020 | B | $6000 = 0 |
-| blargg `ppu_vbl_nmi` (10 sub-ROMs) | VBL/NMI to the PPU cycle | FR-CORE-022 | A | $6000 = 0 |
-| `sprite_hit_tests`, `sprite_overflow_tests` | sprite-0 hit, overflow bug | FR-CORE-023 | A | $6000 = 0 |
+| blargg `ppu_vbl_nmi` (10 sub-ROMs, `rom_singles/`) | VBL/NMI to the PPU cycle | FR-CORE-022 | A-local | $6000 = 0 — 4/10 clean (`01`,`03`,`04`,`09`); 6/10 (`02`,`05`,`06`,`07`,`08`,`10`) waived, sub-CPU-cycle timing ceiling, see `crate::ppu`'s module doc + `crates/rf-harness/waivers.toml` |
+| `sprite_hit_tests` | sprite-0 hit | FR-CORE-023 | A-local | RAM-result byte (`$00F8`) = 1 — NOT `$6000` (ticket W1-05b correction; this ROM generation predates blargg's `$6000` runtime, see `tests/rom-manifest.toml`'s comment on this suite) |
+| `sprite_overflow_tests` | overflow bug | FR-CORE-023 | A | $6000 = 0 — **unverified as of W1-05b**: shares `sprite_hit_tests`' pre-`$6000` ROM family and almost certainly has the same protocol mistag; out of this ticket's scope, flagged in `tests/rom-manifest.toml` for whichever ticket implements this suite |
 | `oam_read`, `oam_stress` | $2004 semantics | FR-CORE-023 | B | $6000 = 0 |
 | `full_palette`, `ppu_open_bus`, `ppu_read_buffer` | palette, open bus, $2007 buffer | FR-CORE-022 | B | golden frame / $6000 |
 | blargg `apu_test`, `apu_reset`, `dmc_dma_during_read4` | frame counter, IRQ, DMC DMA | FR-CORE-024 | A | $6000 = 0 |
@@ -91,37 +92,72 @@ cadence/machine than Tier A/B.
 | RF-Scroller 5-min replay | real-game regression (in-repo fixture, D-001) | FR-CORE-026 | A | final-hash + 6 golden frames |
 | Alter Ego 5-min replay | independent-proof regression (PD fixture) | FR-CORE-026 | A | final-hash + golden frames |
 
-**Local evidence gate (tickets W0-07, W1-03):** `nes6502` is the first Tier
-A-local suite; `nestest` (ticket W1-03) is the second. Protocol:
+**Local evidence gate (tickets W0-07, W1-03, W1-05b):** `nes6502` is the
+first Tier A-local suite; `nestest` (ticket W1-03) is the second;
+`ppu_vbl_nmi` and `sprite_hit_tests` (ticket W1-05b) are the third and
+fourth — both real, fetched, gitignored ROM sets, unrunnable in CI the same
+way. Protocol:
 
 1. Vectors are fetched once via `scripts/fetch-test-roms.sh
    singlestep-nes6502-src` (a `[[git_artifact]]` manifest entry, §3) into
    gitignored `roms/nes/singlestep-nes6502-src/nes6502/v1` — never
    committed (NFR-006). The nestest ROM/log are fetched via
    `scripts/fetch-test-roms.sh nestest-rom nestest-log` into gitignored
-   `roms/nes/other/{nestest.nes,nestest.log}` — also never committed.
-2. `scripts/local-gate.sh` runs both suites locally (via
+   `roms/nes/other/{nestest.nes,nestest.log}` — also never committed. The
+   10 `ppu_vbl_nmi` singles and 11 `sprite_hit_tests` ROMs fetch the same
+   way (`scripts/fetch-test-roms.sh` with no arguments fetches everything,
+   including these) into `roms/nes/ppu_vbl_nmi/rom_singles/` and
+   `roms/nes/sprite_hit_tests_2005.10.05/`.
+2. `scripts/local-gate.sh` runs all four suites locally (via
    `crates/rf-harness/src/bin/local_gate_evidence.rs`, which depends on
    `rf-nes` directly — `scripts/validate-arch.sh` exempts "the test
    harness" from the cores-via-`rf-core-api`-only rule) and writes the
    combined result to the single rolling file `docs/evidence/local-gate.json`
    (committed; git history is the audit trail) — the current retroforge
    commit, toolchain version, the vector source's own commit SHA, the
-   nestest lines-compared/lines-matched/first-divergence, and the W0-03
-   accuracy-table rows (raw/effective pass-fail) for both `nes6502` and
-   `nestest`.
+   nestest lines-compared/lines-matched/first-divergence, per-ROM
+   pass/fail for `ppu_vbl_nmi`/`sprite_hit_tests` (via
+   `rf_harness::blargg_evidence::run`/`run_ram_result`, which drive a real
+   `NesBus`+`Cpu` rather than the `run_blargg_protocol`/`EmulatorCore`-mock
+   path `blargg.rs` was built against — no `EmulatorCore` impl exists yet),
+   and the W0-03 accuracy-table rows (raw/effective pass-fail, one row per
+   ROM for the two new suites — see `docs/TESTING.md` §3's note on splitting
+   bundled blargg programs into one `[[suite]]` row each) for all four
+   suites.
 3. `node scripts/validate-evidence.mjs` — cheap (reads a few KB of JSON,
    no ROM/vector/log bytes) — runs in CI on every PR and fails the build
    if: evidence is missing for a Tier A-local suite; the working tree was
-   dirty when the evidence was generated; or the evidence is **stale**
-   (a later commit touches that suite's covered paths — `crates/rf-nes/src/cpu`
-   for `nes6502`; `crates/rf-nes/src/cpu`, `crates/rf-nes/src/system`, and
-   `crates/rf-nes/src/trace.rs` for `nestest` — than the commit the
-   evidence was generated against — checked via `git rev-list`/`git
-   merge-base --is-ancestor` on FULL history, never timestamps: mtimes
-   aren't in git and committer dates are rewritable/non-monotonic across
-   merges). CI never fetches the vectors or the nestest ROM/log themselves
-   — that cost stays local-only, which is the entire point of this tier.
+   dirty when the evidence was generated; the per-ROM counts don't match
+   the expected 10/11; or the evidence is **stale** (a later commit touches
+   that suite's covered paths — `crates/rf-nes/src/cpu` for `nes6502`;
+   `crates/rf-nes/src/cpu`, `crates/rf-nes/src/system`, and
+   `crates/rf-nes/src/trace.rs` for `nestest`; `crates/rf-nes/src/ppu`,
+   `crates/rf-nes/src/system`, and `crates/rf-nes/src/cpu` for
+   `ppu_vbl_nmi`; `crates/rf-nes/src/ppu` and `crates/rf-nes/src/system`
+   for `sprite_hit_tests` — than the commit the evidence was generated
+   against — checked via `git rev-list`/`git merge-base --is-ancestor` on
+   FULL history, never timestamps: mtimes aren't in git and committer dates
+   are rewritable/non-monotonic across merges). CI never fetches any of
+   these ROMs/vectors/logs itself — that cost stays local-only, which is
+   the entire point of this tier.
+
+**`ppu_vbl_nmi`/`sprite_hit_tests` findings (ticket W1-05b):**
+- `sprite_hit_tests_2005.10.05` predates blargg's shared `$6000`/`$6004`
+  runtime; it reports results via an on-screen text console + beep count
+  (`readme.txt`, verbatim: "reports the result on screen and by beeping a
+  number of times") and a RAM-resident result byte at `$00F8`
+  (`source/runtime/validation.a`: `result = $f8`) instead. All 11 ROMs pass
+  against this crate's real sprite-0-hit implementation once read via the
+  correct protocol.
+- Six of the ten real `ppu_vbl_nmi` sub-ROMs (`02-vbl_set_time`,
+  `05-nmi_timing`, `06-suppression`, `07-nmi_on_timing`,
+  `08-nmi_off_timing`, `10-even_odd_timing`) fail against a sub-CPU-cycle
+  timing ceiling this crate's lock-step tick-after-register-access
+  architecture cannot reach without CPU-crate changes — see `crate::ppu`'s
+  module doc "Scope fence" section for the full derivation (cross-checked
+  against the real fetched ROMs' own expected tables and an independently
+  reported matching symptom on forums.nesdev.org) and
+  `crates/rf-harness/waivers.toml` for the tracked, ticketed waivers.
 
 **nestest disassembly-column finding (ticket W1-03):** both halves of the
 trace are byte-exact over all 8991 lines, but the disassembly-annotation

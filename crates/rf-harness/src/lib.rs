@@ -10,9 +10,11 @@
 //! and `crates/rf-core-api/tests/mock_core.rs` for that pattern) rather
 //! than a real ROM. `rf-nes`'s 6502 CPU landed at W1-01a/b; this crate now
 //! depends on it directly for [`nes6502_evidence::run_all`] (the local
-//! evidence generator, ticket W0-07) and, since W1-03,
-//! [`nestest_evidence::run`] (the second Tier-A-local suite's local
-//! evidence generator, the nestest golden-trace diff) -
+//! evidence generator, ticket W0-07), [`nestest_evidence::run`] (the second
+//! Tier-A-local suite's local evidence generator, the nestest golden-trace
+//! diff, ticket W1-03), and, since W1-05b, [`blargg_evidence::run`] (the
+//! third/fourth Tier-A-local suites — `sprite_hit_tests`/`ppu_vbl_nmi` — a
+//! real-`NesBus` blargg-protocol driver) -
 //! `scripts/validate-arch.sh`'s layer rule exempts "the test harness"
 //! from the "cores only via rf-core-api" restriction by name, alongside
 //! the app shell and the cores themselves.
@@ -21,6 +23,7 @@
 
 mod accuracy;
 mod blargg;
+pub mod blargg_evidence;
 mod fetch;
 mod golden_frame;
 mod json;

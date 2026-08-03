@@ -178,6 +178,32 @@ impl NesBus {
         self.ppu.drain(sink);
     }
 
+    /// Total PPU frames completed since this bus was created (ticket
+    /// W1-05b) — forwards [`Ppu::frame_count`]. `rf-harness`'s blargg-
+    /// protocol runner (driving a real [`Cpu`](crate::Cpu) + `NesBus`, not
+    /// the `EmulatorCore`-mock path `crate::system` module doc's tick seam
+    /// describes) uses this to detect "one whole frame elapsed" without
+    /// reaching into PPU-internal `scanline`/`dot` state: run instructions
+    /// until this value increments, then inspect `$6000+` — the same
+    /// frame-boundary contract the (not-yet-built) `EmulatorCore::run_frame`
+    /// will eventually offer.
+    pub fn frame_count(&self) -> u64 {
+        self.ppu.frame_count()
+    }
+
+    /// The cartridge PRG-RAM window (`$6000-$7FFF`, 8 KiB), side-effect-free
+    /// and read-only (ticket W1-05b) — for `rf-harness`'s blargg-protocol
+    /// runner, which needs the whole `$6000+` region (status byte, 3-byte
+    /// validity signature, NUL-terminated message text) every frame rather
+    /// than one address at a time. `crate::system` module doc's memory map:
+    /// PRG-RAM is "always backed, 8 KiB" for every cartridge this crate
+    /// loads (mapper 0 has no PRG-RAM-disable register), so this is a
+    /// direct slice of `prg_ram`, not a `peek`-style dispatch through the
+    /// full memory map.
+    pub fn prg_ram(&self) -> &[u8; PRG_RAM_SIZE] {
+        &self.prg_ram
+    }
+
     /// Stall length (513 or 514) of the most recently completed OAM DMA,
     /// counted the way nesdev describes it: the number of cycles the CPU
     /// is halted for, *after* the `$4014` write's own bus cycle has
@@ -433,14 +459,22 @@ impl CpuBus for NesBus {
         self.tick_master(1);
     }
 
-    // `nmi_line`/`irq_line` intentionally left at the `CpuBus` trait's
-    // default (`false`): the PPU now has real vblank/NMI-enable state
-    // (`$2000` bit 7, `$2002` bit 7), but nothing connects it to this trait
-    // method yet — the exact VBlank/NMI edge-suppression timing
-    // (`ppu_vbl_nmi`) is a later ticket's acceptance criterion, not this
-    // one's, and a half-modeled NMI with no test-ROM oracle to check it
-    // against would risk silently perturbing every ROM this crate runs
-    // (see `crate::ppu`'s module doc scope fence). The APU stub still has
-    // no interrupt source either. A later ticket overrides this once both
-    // are ready.
+    /// Ticket W1-05b: forwards [`Ppu::nmi_line`] directly — `$2000` bit 7
+    /// (NMI enable) AND `$2002` bit 7 (VBlank flag), the exact level real
+    /// hardware pulls `/NMI` low with (nesdev.org/wiki/NMI). Pure
+    /// passthrough, no bus-side state: the CPU (W1-01b, `cpu::exec::
+    /// CountingBus`) already samples this once per bus cycle and
+    /// edge-detects it, which is what turns a bare level into "reset once
+    /// per VBlank, retriggerable by toggling `$2000` bit 7" — see
+    /// `crate::ppu`'s module doc for the one narrow race this crate's
+    /// tick-then-register-access ordering cannot reach.
+    fn nmi_line(&self) -> bool {
+        self.ppu.nmi_line()
+    }
+
+    // `irq_line` stays at the `CpuBus` trait's default (`false`): the APU
+    // stub (out of this crate's scope so far) has no interrupt source, and
+    // NROM (this crate's only mapper, W1-02) has no mapper IRQ either —
+    // nothing else on this bus can assert IRQ yet. A later ticket overrides
+    // this once a real IRQ source exists.
 }

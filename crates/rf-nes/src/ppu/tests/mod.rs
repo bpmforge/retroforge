@@ -22,17 +22,25 @@
 //!   compositing (flip, 8x16 mode, left-8-px mask, BG/sprite priority),
 //!   and the one-scanline pipeline delay. `crate::ppu::sprites`'s own
 //!   module doc is this test module's source-citation authority.
+//! - `sprite_zero_hit` — ticket W1-05b: `STATUS_SPRITE0_HIT` (x=255
+//!   exclusion, left-8 masking, priority-blindness, opacity, clear timing).
+//! - `nmi` — ticket W1-05b: [`Ppu::nmi_line`]'s `$2000`-bit-7-AND-`$2002`-
+//!   bit-7 level, `frame_count`, and the reachable half of the `$2002`-read
+//!   VBlank-set race (`crate::ppu`'s module doc "Scope fence" section).
 //!
 //! nesdev source for every derived `v`/`t` bit pattern below:
 //! [nesdev.org/wiki/PPU_scrolling](https://www.nesdev.org/wiki/PPU_scrolling)
 //! (`crate::ppu::scroll`'s module doc quotes the same pseudocode this test
 //! module's expected values are hand-computed from).
+mod blargg_roms;
 mod fetch_pipeline;
 mod frame_timing;
+mod nmi;
 mod read_buffer;
 mod scroll_registers;
 mod sink_emission;
 mod sprite_evaluation;
+mod sprite_zero_hit;
 
 use super::Ppu;
 use rf_cart::Mirroring;
