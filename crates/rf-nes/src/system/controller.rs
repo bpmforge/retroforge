@@ -102,4 +102,20 @@ impl Controller {
         self.shift_index += 1;
         bit
     }
+
+    /// Side-effect-free counterpart of [`Controller::read_bit`] — same
+    /// value a real read would return, but the shift register never
+    /// advances. Exists only for ticket W1-03's trace-logger disassembly
+    /// peek (`crate::trace`), which must never perturb the state it is
+    /// describing; a real CPU read must go through `read_bit` so the shift
+    /// register actually advances.
+    pub fn peek_bit(&self) -> u8 {
+        if self.strobe {
+            return self.buttons & 0x01;
+        }
+        if self.shift_index >= 8 {
+            return 1;
+        }
+        (self.latched >> self.shift_index) & 0x01
+    }
 }

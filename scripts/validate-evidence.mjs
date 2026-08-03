@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-// Local-evidence-gate validator (ticket W0-07). Reads the committed
-// docs/evidence/local-gate.json (a few KB — this is the "cheap" half of
-// the gate; the expensive half, scripts/local-gate.sh, runs the heavy
-// nes6502 vector suite locally and is never invoked in CI, see
-// docs/TESTING.md §4) and mechanically checks that it is (a) present for
-// every Tier-A-local suite, (b) not stale relative to the code it covers,
-// and (c) was generated against a clean working tree. Exit 1 on any
-// violation, matching validate-plan.mjs/validate-traceability.mjs style.
+// Local-evidence-gate validator (tickets W0-07, W1-03). Reads the
+// committed docs/evidence/local-gate.json (a few KB — this is the "cheap"
+// half of the gate; the expensive half, scripts/local-gate.sh, runs the
+// heavy nes6502 vector suite plus the nestest golden-trace diff locally
+// and is never invoked in CI, see docs/TESTING.md §4) and mechanically
+// checks that it is (a) present for every Tier-A-local suite, (b) not
+// stale relative to the code it covers, and (c) was generated against a
+// clean working tree. Exit 1 on any violation, matching
+// validate-plan.mjs/validate-traceability.mjs style.
 //
 // CRITICAL TRAP this script exists to close (plan.json W0-07 pre-flight
 // notes): `actions/checkout@v4` defaults to `fetch-depth: 1`. On a
@@ -35,6 +36,18 @@ const MANIFEST_PATH = join(root, 'tests/rom-manifest.toml');
 const TIER_A_LOCAL_SUITES = {
   nes6502: {
     coveredPaths: ['crates/rf-nes/src/cpu'],
+  },
+  // nestest (ticket W1-03): the golden-trace diff needs the CPU (opcode
+  // execution + the reset/power-on sequence lives in cpu/mod.rs), the
+  // system bus (peek + memory map), and the trace-logger module itself —
+  // deliberately NOT crates/rf-harness/** for the same reason nes6502
+  // excludes it (see the comment above the constant).
+  nestest: {
+    coveredPaths: [
+      'crates/rf-nes/src/cpu',
+      'crates/rf-nes/src/system',
+      'crates/rf-nes/src/trace.rs',
+    ],
   },
 };
 
@@ -188,6 +201,28 @@ if (!v || typeof v !== 'object') {
   }
 }
 
+// ---- 6b. nestest-specific consistency (anti-placeholder, ticket W1-03) ----
+const nt = evidence.nestest;
+if (!nt || typeof nt !== 'object') {
+  err('evidence.nestest is missing');
+} else {
+  if (nt.lines_compared !== 8991) {
+    err(`evidence.nestest.lines_compared is ${JSON.stringify(nt.lines_compared)}, expected 8991`);
+  }
+  if (!(typeof nt.lines_matched === 'number' && nt.lines_matched > 0)) {
+    err(`evidence.nestest.lines_matched is ${JSON.stringify(nt.lines_matched)} — looks like a placeholder, not a real run`);
+  }
+  if (nt.lines_matched !== nt.lines_compared) {
+    err(
+      `evidence.nestest.lines_matched (${nt.lines_matched}) !== lines_compared (${nt.lines_compared}) — ` +
+        `nestest is not byte-exact yet`
+    );
+  }
+  if (nt.first_divergence !== null) {
+    err(`evidence.nestest.first_divergence is ${JSON.stringify(nt.first_divergence)}, expected null (no divergence)`);
+  }
+}
+
 // ---- 7. accuracy_table shape sanity (reuses Report::to_json's own keys) ----
 if (!evidence.accuracy_table || !Array.isArray(evidence.accuracy_table.rows)) {
   err('evidence.accuracy_table.rows is missing or not an array');
@@ -211,5 +246,6 @@ if (errors.length) {
 console.log(
   `validate-evidence OK — ${Object.keys(TIER_A_LOCAL_SUITES).length} Tier-A-local suite(s) covered, ` +
     `retroforge_commit=${evidence.retroforge_commit}, tree_clean=${evidence.tree_clean}, ` +
-    `nes6502: ${evidence.vectors.total_pass}/${evidence.vectors.total_pass + evidence.vectors.total_fail} cases`
+    `nes6502: ${evidence.vectors.total_pass}/${evidence.vectors.total_pass + evidence.vectors.total_fail} cases, ` +
+    `nestest: ${evidence.nestest.lines_matched}/${evidence.nestest.lines_compared} lines`
 );

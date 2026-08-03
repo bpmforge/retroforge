@@ -114,3 +114,38 @@ fn disabled_test_registers_and_unmapped_expansion_are_open_bus() {
         "open-bus latch tracks whatever was driven most recently"
     );
 }
+
+/// Ticket W1-03: `NesBus::peek` (the trace logger's disassembly-only read)
+/// returns a fixed `$FF` for the write-only/internal APU register stub
+/// range, distinct from the real `open_bus`-tracking `read`/`write` path
+/// above — verified against the real fetched `nestest.log`'s `$4004`,
+/// `$4005`, `$4006`, `$4007`, and `$4015` occurrences (see `NesBus::peek`'s
+/// doc comment); this test is the ROM/log-independent regression for that
+/// finding, run on every machine regardless of whether the golden log is
+/// fetched.
+#[test]
+fn peek_returns_fixed_ff_for_the_apu_stub_range_and_never_ticks_the_clock() {
+    let mut bus = bus_with_pattern_rom(1, 1);
+    bus.write(0x0000, 0x37); // drive open_bus to a known, distinct byte
+    let before = bus.master_cycle();
+
+    for addr in [0x4004u16, 0x4005, 0x4006, 0x4007, 0x4014, 0x4015, 0x401F] {
+        assert_eq!(
+            bus.peek(addr),
+            0xFF,
+            "peek(${addr:04X}) must be the fixed $FF disassembly placeholder, not open_bus (0x37)"
+        );
+    }
+    assert_eq!(
+        bus.master_cycle(),
+        before,
+        "peek must never advance the master clock"
+    );
+    // The real emulation path is unaffected: an actual read still returns
+    // the tracked open-bus latch, not the peek-only placeholder.
+    assert_eq!(
+        bus.read(0x4015),
+        0x37,
+        "read_untimed (real emulation) must still return the tracked open_bus latch"
+    );
+}

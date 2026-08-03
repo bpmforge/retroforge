@@ -181,6 +181,73 @@ impl NesBus {
         value
     }
 
+    /// Side-effect-free, cycle-free memory read (ticket W1-03): never
+    /// advances `master_cycle`, never mutates controller shift-register
+    /// state (`Controller::peek_bit`, not `read_bit`), never updates
+    /// `open_bus`. Exists only for `crate::trace`'s disassembly-annotation
+    /// column — nestest.log's `@ 80 = 0200 = 5A`-style operand annotations
+    /// are computed by peeking memory *before* the traced instruction
+    /// executes, and must never perturb the very state the trace is
+    /// describing. This is not a general emulation primitive: every real
+    /// CPU access must go through [`CpuBus::read`]/[`CpuBus::write`]
+    /// instead.
+    ///
+    /// ## `$4000-$4015`/`$4018-$401F` disassemble as `$FF`, not tracked
+    /// `open_bus` (ticket W1-03 finding)
+    ///
+    /// `read_untimed` (the *real* emulation path, used by
+    /// [`CpuBus::read`]) still returns the tracked `open_bus` latch for
+    /// this range, unchanged. This peek-only override is narrower, and its
+    /// necessity is directly **verified** for exactly five addresses
+    /// against the real, fetched `nestest.log`: its last few lines
+    /// disassemble `STA` to `$4004`, `$4005`, `$4006`, `$4007` (write-only
+    /// APU pulse2 registers — no circuit ever drives them back onto the
+    /// bus) and `$4015` (APU status; nesdev.org/wiki/APU: *"This register
+    /// is internal to the CPU, so the external CPU data bus is
+    /// disconnected when reading it"* — i.e. a real `$4015` read cannot be
+    /// `open_bus` passthrough at all) all as `= FF`, regardless of the
+    /// actual preceding bus traffic (verified: the immediately-preceding
+    /// instructions in that sequence are ordinary immediate-mode ROM
+    /// fetches whose values do **not** match `FF`, so this is not our
+    /// `open_bus` model coincidentally agreeing with real hardware). No
+    /// combination of real emulated APU state or open-bus tracking
+    /// produces `FF` from either of those two independent causes at that
+    /// point — the parsimonious explanation, and the one that makes every
+    /// one of nestest.log's 8991 lines byte-exact, is that nestest's own
+    /// disassembler (like many generic 6502 disassemblers) prints a fixed
+    /// `$FF` placeholder for any address it cannot resolve to real
+    /// backing memory (RAM/ROM/PRG-RAM), rather than attempting to model
+    /// MMIO/open-bus content at disassembly time. This crate has no APU
+    /// (out of scope, a later ticket) to model `$4015`'s real status bits
+    /// correctly anyway, so matching that same placeholder convention
+    /// here — for the disassembly annotation only, never for real
+    /// emulation — is the honest fix rather than a curve-fit.
+    ///
+    /// The rest of this arm's range — `$4000`-`$4013` (the other APU
+    /// write-only registers), `$4014` (the OAM DMA trigger, also
+    /// write-only), and `$4018`-`$401F` (disabled test registers) — is
+    /// **extrapolated** by the same reasoning (stubbed, unreadable,
+    /// nothing ever drives them back), not independently confirmed against
+    /// the log: nestest.log never disassembles a read of any of those
+    /// specific addresses. `$4016`/`$4017` (the controller ports) are
+    /// deliberately *not* included here and stay on `open_bus` passthrough
+    /// (combined with [`Controller::peek_bit`]) — nestest never reads a
+    /// controller either, so there is no golden-log evidence either way
+    /// for them, and passthrough is the conservative default absent a
+    /// reason to change it.
+    pub fn peek(&self, addr: u16) -> u8 {
+        match addr {
+            0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)],
+            0x2000..=0x3FFF => self.ppu.read((addr & 0x0007) as u8, self.open_bus),
+            0x4016 => self.controllers[0].peek_bit() | (self.open_bus & !0x01),
+            0x4017 => self.controllers[1].peek_bit() | (self.open_bus & !0x01),
+            0x4000..=0x4015 | 0x4018..=0x401F => 0xFF,
+            0x4020..=0x5FFF => self.open_bus,
+            0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000],
+            0x8000..=0xFFFF => self.read_prg(addr),
+        }
+    }
+
     /// NROM PRG read: a 16 KiB image is mirrored into both `$8000-$BFFF`
     /// and `$C000-$FFFF`; a 32 KiB image is mapped straight through.
     /// `% prg_rom.len()` implements both in one line since 16 KiB and
@@ -233,18 +300,18 @@ impl NesBus {
     /// is halted (see `CpuBus::write`'s call site: it ticks once for the
     /// write, *then* calls this). `start_cycle_odd` is whether the
     /// `$4014` write itself landed on an odd `master_cycle` (get/put
-    /// phase alignment) — an internal bookkeeping convention (there is no
-    /// external reset-sequence anchor tying our `master_cycle` phase to
-    /// real hardware's yet), not a claim about a specific absolute cycle
-    /// number; what matters, and what the acceptance tests check, is that
-    /// the two cases differ by exactly one cycle. Concretely,
-    /// `master_cycle` starts at 0 in `NesBus::new` with no reset sequence
-    /// run yet (out of this ticket's scope — see the `system` module doc
-    /// and `crate::cpu::mod`'s `Default for Cpu` doc), so today the parity
-    /// a real ROM sees depends on however many bus ops happened before its
-    /// first `$4014` write; this is the one place a real ROM's DMA cost
-    /// could disagree with this model by exactly one cycle until a reset
-    /// sequence anchors the phase (W1-03+).
+    /// phase alignment) — an internal bookkeeping convention when no reset
+    /// has run, not a claim about a specific absolute cycle number; what
+    /// matters, and what the acceptance tests check, is that the two cases
+    /// differ by exactly one cycle. Concretely, `master_cycle` starts at 0
+    /// in `NesBus::new`, so a caller that skips `Cpu::power_on` (ticket
+    /// W1-03) and sets `cpu.pc` directly — as this crate's own bus-level
+    /// unit tests still do — sees a parity that depends on however many
+    /// bus ops happened before the first `$4014` write; this is the one
+    /// place such a caller's DMA cost could disagree with a real console
+    /// by exactly one cycle. A caller that runs `Cpu::power_on` first
+    /// (which burns exactly 7 cycles, an odd count) gets the phase
+    /// anchored to hardware from then on.
     ///
     /// Each of the 256 "get" reads below also updates `open_bus` (via
     /// `read_untimed`) to that source byte, same as a real CPU read would

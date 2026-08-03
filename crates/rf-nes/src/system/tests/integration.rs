@@ -4,6 +4,13 @@
 //! with `Cpu::step`'s own returned cycle count; during DMA, the stolen
 //! cycles land in the bus's clock without ever being reported through any
 //! `Cpu`-facing API.
+//!
+//! `power_on_*` below is ticket W1-03's own ROM/log-independent proof for
+//! `Cpu::power_on` — the reset sequence itself (as opposed to the golden
+//! nestest trace diff, `system::tests::nestest`, which needs the real
+//! fetched ROM/log and skips cleanly without them). A conductor re-deriving
+//! "does the reset land on CYC=7 exactly" can run this test on any machine,
+//! no fetch required.
 use super::build_nrom_ines;
 use crate::cpu::{Cpu, CpuBus};
 use crate::system::{NesBus, NesRom};
@@ -52,5 +59,33 @@ fn oam_dma_stolen_cycles_never_flow_through_any_cpu_api() {
     assert!(
         delta > 513,
         "DMA's stolen cycles landed in the bus's own master clock with zero Cpu involvement"
+    );
+}
+
+#[test]
+fn power_on_burns_exactly_seven_cycles_and_vectors_through_fffc_fffd() {
+    // Hand-derived reset vector ($1234, deliberately outside PRG ROM space
+    // — this test only checks the reset sequence's own bus behavior, not
+    // whether the resulting PC is a runnable address).
+    let raw = build_nrom_ines(1, 1, |i| match i {
+        0x3FFC => 0x34, // vector low byte (mirrors to $FFFC on a 16 KiB image)
+        0x3FFD => 0x12, // vector high byte ($FFFD)
+        _ => 0x00,
+    });
+    let rom = NesRom::from_ines_bytes(&raw).expect("valid NROM image");
+    let mut bus = NesBus::new(rom);
+
+    let cpu = Cpu::power_on(&mut bus);
+
+    assert_eq!(
+        bus.master_cycle(),
+        7,
+        "reset/power-on burns exactly 7 bus cycles (nesdev.org/6502_cpu.txt RESET)"
+    );
+    assert_eq!(cpu.pc, 0x1234, "PC vectors through $FFFC/$FFFD");
+    assert_eq!((cpu.a, cpu.x, cpu.y, cpu.s), (0, 0, 0, 0xFD));
+    assert_eq!(
+        cpu.p, 0x24,
+        "I set, U set, matching nestest.log's documented initial P:24"
     );
 }

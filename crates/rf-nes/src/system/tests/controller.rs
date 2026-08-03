@@ -136,3 +136,34 @@ fn open_bus_upper_bits_reflect_the_last_driven_byte_not_a_hardcoded_constant() {
         "D1-D7 carry the open-bus latch, not a magic constant"
     );
 }
+
+/// Ticket W1-03: `peek` (the trace logger's disassembly read, via
+/// `Controller::peek_bit`) must never advance the shift register — unlike
+/// a real `CpuBus::read`, which shifts one bit out per call. This is the
+/// load-bearing regression for that distinction: nothing else fails if a
+/// future edit "simplifies" `peek_bit` into calling `read_bit`, and that
+/// would silently corrupt controller state every time a trace line is
+/// rendered.
+#[test]
+fn peek_never_advances_the_shift_register_unlike_a_real_read() {
+    let mut bus = bus_with_pattern_rom(1, 1);
+    // A pressed (bit 0 = 1), B released (bit 1 = 0) — first two shifted
+    // bits differ, so an accidental advance is observable.
+    bus.set_controller_buttons(0, A);
+    bus.write(0x4016, 1);
+    bus.write(0x4016, 0); // latches
+
+    let first_peek = bus.peek(0x4016) & 1;
+    let second_peek = bus.peek(0x4016) & 1;
+    let third_peek = bus.peek(0x4016) & 1;
+    assert_eq!(
+        (first_peek, second_peek, third_peek),
+        (1, 1, 1),
+        "peek must keep reporting the same (first) bit — the shift register never advances"
+    );
+
+    // A real read, by contrast, does advance: first bit is A (1), second is
+    // B (0).
+    assert_eq!(bus.read(0x4016) & 1, 1, "real read: first bit is A");
+    assert_eq!(bus.read(0x4016) & 1, 0, "real read: second bit is B");
+}

@@ -1,11 +1,13 @@
 //! `local-gate-evidence` — the binary `scripts/local-gate.sh` wraps
-//! (ticket W0-07).
+//! (ticket W0-07, extended by ticket W1-03 for the second Tier-A-local
+//! suite).
 //!
 //! Runs the nes6502 SingleStepTests vector suite via
-//! [`rf_harness::nes6502_evidence::run_all`], builds the W0-03 accuracy
-//! report ([`rf_harness::build_report`]) for it, and prints the combined
-//! evidence as JSON on stdout — `docs/evidence/local-gate.json`'s exact
-//! contents, one rolling file (git history is the audit trail).
+//! [`rf_harness::nes6502_evidence::run_all`] and the nestest golden-trace
+//! diff via [`rf_harness::nestest_evidence::run`], builds the W0-03
+//! accuracy report ([`rf_harness::build_report`]) covering both, and prints
+//! the combined evidence as JSON on stdout — `docs/evidence/local-gate.json`'s
+//! exact contents, one rolling file (git history is the audit trail).
 //!
 //! This binary deliberately never reads `plan.json` — `today` and the
 //! open-ticket-id list are supplied by the caller (`scripts/local-gate.sh`,
@@ -19,6 +21,7 @@
 //! discipline, applied to this binary's own output instead of a
 //! downloaded file).
 use rf_harness::nes6502_evidence::run_all;
+use rf_harness::nestest_evidence;
 use rf_harness::{
     build_report, git_rev_parse_head, git_tree_is_clean, AccuracyRow, Json, Manifest, RowStatus,
     SystemGitRunner, WaiverFile,
@@ -32,6 +35,8 @@ struct Args {
     waivers: PathBuf,
     repo_root: PathBuf,
     vectors_dir: PathBuf,
+    nestest_rom: PathBuf,
+    nestest_log: PathBuf,
     today: String,
     generated_at: String,
     open_tickets: Vec<String>,
@@ -42,6 +47,8 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
     let mut waivers = PathBuf::from("crates/rf-harness/waivers.toml");
     let mut repo_root = PathBuf::from(".");
     let mut vectors_dir = None;
+    let mut nestest_rom = None;
+    let mut nestest_log = None;
     let mut today = None;
     let mut generated_at = None;
     let mut open_tickets = Vec::new();
@@ -60,6 +67,8 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--waivers" => waivers = PathBuf::from(next()?),
             "--repo-root" => repo_root = PathBuf::from(next()?),
             "--vectors-dir" => vectors_dir = Some(PathBuf::from(next()?)),
+            "--nestest-rom" => nestest_rom = Some(PathBuf::from(next()?)),
+            "--nestest-log" => nestest_log = Some(PathBuf::from(next()?)),
             "--today" => today = Some(next()?),
             "--generated-at" => generated_at = Some(next()?),
             "--open-ticket" => open_tickets.push(next()?),
@@ -73,6 +82,8 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
         waivers,
         repo_root,
         vectors_dir: vectors_dir.ok_or("--vectors-dir is required")?,
+        nestest_rom: nestest_rom.ok_or("--nestest-rom is required")?,
+        nestest_log: nestest_log.ok_or("--nestest-log is required")?,
         today: today.ok_or("--today is required")?,
         generated_at: generated_at.ok_or("--generated-at is required")?,
         open_tickets,
@@ -173,10 +184,52 @@ fn run(args: &Args) -> ExitCode {
             }
         };
 
+    // --- nestest golden-trace diff ---------------------------------------
+    let nestest_summary = match nestest_evidence::run(&args.nestest_rom, &args.nestest_log) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("nestest run failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!(
+        "nestest: {} lines compared, {} matched",
+        nestest_summary.lines_compared, nestest_summary.lines_matched
+    );
+    if let Some(d) = &nestest_summary.first_divergence {
+        eprintln!("  first divergence at line {}:", d.line_number);
+        eprintln!("    expected: {}", d.expected);
+        eprintln!("    got:      {}", d.got);
+    }
+    if nestest_summary.lines_compared != 8991 {
+        eprintln!(
+            "refusing to emit evidence: expected 8991 lines in nestest.log, found {} — a \
+             truncated/wrong log would silently under-report coverage",
+            nestest_summary.lines_compared
+        );
+        return ExitCode::FAILURE;
+    }
+    let nestest_row_status = if nestest_summary.lines_matched == nestest_summary.lines_compared {
+        RowStatus::Pass
+    } else {
+        RowStatus::Fail
+    };
+    let nestest_row =
+        match AccuracyRow::from_manifest(&manifest, "nestest", "nestest", nestest_row_status, 0) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("failed to build accuracy row: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+
     let open_tickets = args.open_tickets.clone();
-    let report = match build_report(&[row], &waiver_file.waivers, &args.today, |t| {
-        open_tickets.iter().any(|o| o == t)
-    }) {
+    let report = match build_report(
+        &[row, nestest_row],
+        &waiver_file.waivers,
+        &args.today,
+        |t| open_tickets.iter().any(|o| o == t),
+    ) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("accuracy report refused to build: {e}");
@@ -213,6 +266,15 @@ fn run(args: &Args) -> ExitCode {
 
     let toolchain = rustc_version();
 
+    let first_divergence_json = match &nestest_summary.first_divergence {
+        None => Json::Null,
+        Some(d) => Json::object(vec![
+            ("line_number", Json::Int(d.line_number as i64)),
+            ("expected", Json::str(d.expected.clone())),
+            ("got", Json::str(d.got.clone())),
+        ]),
+    };
+
     let evidence = Json::object(vec![
         ("generated_at", Json::str(args.generated_at.clone())),
         ("retroforge_commit", Json::str(retroforge_commit)),
@@ -226,6 +288,20 @@ fn run(args: &Args) -> ExitCode {
                 ("opcodes_tested", Json::Int(summary.opcodes_tested as i64)),
                 ("total_pass", Json::Int(summary.total_pass as i64)),
                 ("total_fail", Json::Int(summary.total_fail as i64)),
+            ]),
+        ),
+        (
+            "nestest",
+            Json::object(vec![
+                (
+                    "lines_compared",
+                    Json::Int(nestest_summary.lines_compared as i64),
+                ),
+                (
+                    "lines_matched",
+                    Json::Int(nestest_summary.lines_matched as i64),
+                ),
+                ("first_divergence", first_divergence_json),
             ]),
         ),
         ("accuracy_table", report.to_json()),

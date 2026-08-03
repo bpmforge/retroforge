@@ -319,4 +319,58 @@ impl Cpu {
         let opcode = self.fetch(bus);
         exec::execute(self, bus, opcode)
     }
+
+    /// Hardware reset/power-on sequence (ticket W1-03; nesdev.org/6502_cpu.txt
+    /// "RESET": the reset line performs an interrupt-shaped sequence with
+    /// writes turned into reads (`R/W` held high, since nothing may
+    /// actually be written while the machine is resetting) and a fixed
+    /// `$FFFC`/`$FFFD` vector instead of `$FFFA`/`$FFFB`/`$FFFE`/`$FFFF`,
+    /// taking the same 7 cycles as `BRK`/`IRQ`/`NMI` entry).
+    ///
+    /// Starts from [`Cpu::default`]'s cold-boot register file — see that
+    /// impl's doc for why `S` is *already* the conventional post-reset
+    /// value ($FD) and this function must not decrement it a second time —
+    /// then burns exactly the 7 bus-visible cycles real hardware does: two
+    /// dummy opcode-fetch-shaped reads, three dummy "phantom push" reads at
+    /// the addresses the conventional pre-reset stack pointer ($00,
+    /// decrementing to $FD over the three cycles — the same convention
+    /// [`Cpu::default`]'s doc cites) would have touched, then the real
+    /// two-byte vector fetch. The `debug_assert_eq!` below is not a fixup:
+    /// it's a self-check that the two conventions ($00-before,
+    /// $FD-after) agree, so a future edit to either doesn't silently
+    /// desync them.
+    ///
+    /// Ticket W1-03: this is nestest's own reset exit condition —
+    /// `nestest.log`'s first line reads `PC=$C000 ... CYC:7`, documented
+    /// as "the trace starts after a 7-cycle reset" — and W1-02 deliberately
+    /// deferred building it (see `crate::system` module doc's "master-clock
+    /// seam" section and `NesBus::run_oam_dma`'s doc on the DMA get/put
+    /// phase anchor this also fixes for any caller that runs this before
+    /// its first `$4014` write).
+    ///
+    /// Callers that need nestest's automated-test-mode entry (which
+    /// bypasses the ROM's own reset-vector code and jumps straight to
+    /// `$C000`) must override `pc` themselves *after* calling this — that
+    /// override is nestest-specific test-harness behavior, not a general
+    /// reset semantic, so it does not belong in this function.
+    pub fn power_on(bus: &mut dyn CpuBus) -> Cpu {
+        let mut cpu = Cpu::default();
+        bus.read(cpu.pc); // cycle 1: dummy opcode-fetch-shaped read
+        bus.read(cpu.pc); // cycle 2: dummy opcode-fetch-shaped read
+        let mut phantom_s: u8 = 0; // conventional pre-reset S (see doc)
+        for _ in 0..3 {
+            // cycles 3-5: phantom "push" reads (R/W held high -> reads,
+            // never writes, during reset).
+            bus.read(0x0100 | phantom_s as u16);
+            phantom_s = phantom_s.wrapping_sub(1);
+        }
+        debug_assert_eq!(
+            phantom_s, cpu.s,
+            "phantom pre-reset S convention must land on Cpu::default's S"
+        );
+        let lo = bus.read(0xFFFC); // cycle 6: reset vector low byte
+        let hi = bus.read(0xFFFD); // cycle 7: reset vector high byte
+        cpu.pc = u16::from_le_bytes([lo, hi]);
+        cpu
+    }
 }

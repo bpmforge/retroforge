@@ -9,7 +9,7 @@ SRS verification column, `docs/design/SAVE_STATES.md`.
 | Level | What | Runner | Gate |
 |---|---|---|---|
 | 1. CPU vector tests | SingleStepTests JSON vectors (`nes6502`, `65816`, `spc700`): per-opcode state + cycle-by-cycle bus activity, no ROM loader needed | `cargo test` (native unit tests in rf-nes / rf-snes) | every PR |
-| 2. Trace conformance | nestest vs golden `nestest.log` (byte-exact PC/A/X/Y/P/SP/CYC) | rf-harness headless | every PR |
+| 2. Trace conformance | nestest vs golden `nestest.log` (byte-exact PC/A/X/Y/P/SP/CYC + disassembly, `rf_nes::trace::format_trace_line`) | `cargo test` (rf-nes) + rf-harness local-gate evidence | Tier A-local (see §4) |
 | 3. Test-ROM integration | blargg / mmc3 / gilyon / PeterLemon / undisbeliever suites | rf-harness headless ($6000 protocol or golden frame) | every PR (tier A), nightly (tier B) |
 | 4. Golden-frame | Framebuffer SHA-256 vs checked-in golden PNGs at declared frame N | rf-harness | every PR |
 | 5. Determinism & replay | double-run state-hash equality; `.rfreplay` replay to final hash; save-state roundtrip; mode invariant | rf-harness | every PR — **release gate (NFR-001)** |
@@ -62,18 +62,20 @@ docs/PREREQUISITES.md.
 ## 4. NES CI gates
 
 Tier A = every PR; Tier B = nightly (slow or visual-manual-once suites).
-**Tier A-local (ticket W0-07):** a suite whose full 100%-conformance run is
-too heavy to repeat on every PR (the nes6502 vector suite is 2,560,000
-cases across all 256 opcodes) is verified locally instead — see "Local
-evidence gate" below — and CI checks the resulting evidence file rather
-than re-running the suite. It is still a hard release gate, not an
-optional one: it is just verified on a different cadence/machine than
-Tier A/B.
+**Tier A-local (tickets W0-07, W1-03):** a suite whose full
+100%-conformance run is too heavy — or whose fixture is a gitignored
+fetched artifact CI never has (NFR-006) — to repeat on every PR (the
+nes6502 vector suite is 2,560,000 cases across all 256 opcodes; nestest is
+8991 golden-log lines against a fetched ROM+log pair) is verified locally
+instead — see "Local evidence gate" below — and CI checks the resulting
+evidence file rather than re-running the suite. It is still a hard release
+gate, not an optional one: it is just verified on a different
+cadence/machine than Tier A/B.
 
 | Suite | Verifies | SRS | Tier | Pass criteria |
 |---|---|---|---|---|
 | SingleStepTests `nes6502` | per-opcode state + bus cycles | FR-CORE-020 | A-local | 100% of all 256 opcodes (151 official + 105 unofficial/illegal) — 2,560,000 cases |
-| nestest + `nestest.log` | whole-CPU conformance | FR-CORE-021 | A | byte-exact trace diff empty |
+| nestest + `nestest.log` | whole-CPU conformance (register/CYC + disassembly) | FR-CORE-021 | A-local | byte-exact trace diff empty over all 8991 lines |
 | blargg `instr_test-v5` | official+unofficial instructions | FR-CORE-020 | A | $6000 = 0 all ROMs |
 | `cpu_timing_test6`, `instr_timing`, `branch_timing_tests` | cycle counts, page-cross, branches | FR-CORE-020 | A | $6000 = 0 |
 | `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A | $6000 = 0 |
@@ -89,31 +91,51 @@ Tier A/B.
 | RF-Scroller 5-min replay | real-game regression (in-repo fixture, D-001) | FR-CORE-026 | A | final-hash + 6 golden frames |
 | Alter Ego 5-min replay | independent-proof regression (PD fixture) | FR-CORE-026 | A | final-hash + golden frames |
 
-**Local evidence gate (ticket W0-07):** `nes6502` is the first Tier A-local
-suite. Protocol:
+**Local evidence gate (tickets W0-07, W1-03):** `nes6502` is the first Tier
+A-local suite; `nestest` (ticket W1-03) is the second. Protocol:
 
 1. Vectors are fetched once via `scripts/fetch-test-roms.sh
    singlestep-nes6502-src` (a `[[git_artifact]]` manifest entry, §3) into
    gitignored `roms/nes/singlestep-nes6502-src/nes6502/v1` — never
-   committed (NFR-006).
-2. `scripts/local-gate.sh` runs the full suite locally (via
+   committed (NFR-006). The nestest ROM/log are fetched via
+   `scripts/fetch-test-roms.sh nestest-rom nestest-log` into gitignored
+   `roms/nes/other/{nestest.nes,nestest.log}` — also never committed.
+2. `scripts/local-gate.sh` runs both suites locally (via
    `crates/rf-harness/src/bin/local_gate_evidence.rs`, which depends on
    `rf-nes` directly — `scripts/validate-arch.sh` exempts "the test
    harness" from the cores-via-`rf-core-api`-only rule) and writes the
-   result to the single rolling file `docs/evidence/local-gate.json`
+   combined result to the single rolling file `docs/evidence/local-gate.json`
    (committed; git history is the audit trail) — the current retroforge
-   commit, toolchain version, the vector source's own commit SHA, and the
-   W0-03 accuracy-table row (raw/effective pass-fail) for `nes6502`.
+   commit, toolchain version, the vector source's own commit SHA, the
+   nestest lines-compared/lines-matched/first-divergence, and the W0-03
+   accuracy-table rows (raw/effective pass-fail) for both `nes6502` and
+   `nestest`.
 3. `node scripts/validate-evidence.mjs` — cheap (reads a few KB of JSON,
-   no ROM/vector bytes) — runs in CI on every PR and fails the build if:
-   evidence is missing for a Tier A-local suite; the working tree was
+   no ROM/vector/log bytes) — runs in CI on every PR and fails the build
+   if: evidence is missing for a Tier A-local suite; the working tree was
    dirty when the evidence was generated; or the evidence is **stale**
-   (a later commit touches `crates/rf-nes/src/cpu` than the commit the
+   (a later commit touches that suite's covered paths — `crates/rf-nes/src/cpu`
+   for `nes6502`; `crates/rf-nes/src/cpu`, `crates/rf-nes/src/system`, and
+   `crates/rf-nes/src/trace.rs` for `nestest` — than the commit the
    evidence was generated against — checked via `git rev-list`/`git
    merge-base --is-ancestor` on FULL history, never timestamps: mtimes
    aren't in git and committer dates are rewritable/non-monotonic across
-   merges). CI never fetches the vectors themselves — that cost stays
-   local-only, which is the entire point of this tier.
+   merges). CI never fetches the vectors or the nestest ROM/log themselves
+   — that cost stays local-only, which is the entire point of this tier.
+
+**nestest disassembly-column finding (ticket W1-03):** both halves of the
+trace are byte-exact over all 8991 lines, but the disassembly-annotation
+half (`FR-DBG-003`) needed one narrow fix beyond straightforward peeking:
+nestest.log's handful of `STA` lines targeting write-only/internal APU
+registers (`$4004`-`$4007`, `$4015`) disassemble as `= FF` regardless of
+actual prior bus traffic — `NesBus::peek` (the disassembly-only,
+side-effect-free read) returns a fixed `$FF` for the whole
+`$4000-$4015`/`$4018-$401F` stub range rather than the tracked `open_bus`
+latch `read_untimed` (the real emulation path) still uses; see that
+method's doc comment for the full reasoning (nesdev.org/wiki/APU: `$4015`
+reads disconnect the external bus entirely, so `open_bus` passthrough was
+never correct there regardless). This is a disassembly-display convention,
+not a change to real emulated open-bus behavior.
 
 ## 5. SNES CI gates
 

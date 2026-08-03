@@ -595,6 +595,7 @@ version = "0.1.0"
 name = "rf-harness"
 version = "0.1.0"
 dependencies = [
+ "rf-cart",
  "rf-core-api",
  "rf-nes",
  "serde",

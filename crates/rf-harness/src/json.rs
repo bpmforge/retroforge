@@ -11,14 +11,17 @@
 
 use std::fmt::Write as _;
 
-/// A JSON value restricted to what the accuracy table needs: no floats, no
-/// null — every field in the accuracy-table schema is a string, integer,
-/// bool, or nested array/object.
+/// A JSON value restricted to what the local-gate evidence file needs: no
+/// floats — every field is a string, integer, bool, null, or nested
+/// array/object. `Null` was added by ticket W1-03 for
+/// `local_gate_evidence`'s nestest row (`first_divergence: null` when every
+/// line matched) — the original W0-03 accuracy-table shape never needed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Json {
     Str(String),
     Int(i64),
     Bool(bool),
+    Null,
     Array(Vec<Json>),
     Object(Vec<(String, Json)>),
 }
@@ -56,6 +59,7 @@ impl Json {
             Json::Bool(b) => {
                 out.push_str(if *b { "true" } else { "false" });
             }
+            Json::Null => out.push_str("null"),
             Json::Array(items) => {
                 out.push('[');
                 for (i, item) in items.iter().enumerate() {
@@ -146,5 +150,12 @@ mod tests {
         assert_eq!(Json::str("").to_json_string(), "\"\"");
         assert_eq!(Json::object(vec![]).to_json_string(), "{}");
         assert_eq!(Json::Array(vec![]).to_json_string(), "[]");
+    }
+
+    #[test]
+    fn null_renders_as_the_bare_json_literal() {
+        assert_eq!(Json::Null.to_json_string(), "null");
+        let v = Json::object(vec![("first_divergence", Json::Null)]);
+        assert_eq!(v.to_json_string(), r#"{"first_divergence":null}"#);
     }
 }

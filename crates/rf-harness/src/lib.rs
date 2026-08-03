@@ -10,10 +10,12 @@
 //! and `crates/rf-core-api/tests/mock_core.rs` for that pattern) rather
 //! than a real ROM. `rf-nes`'s 6502 CPU landed at W1-01a/b; this crate now
 //! depends on it directly for [`nes6502_evidence::run_all`] (the local
-//! evidence generator, ticket W0-07) — `scripts/validate-arch.sh`'s
-//! layer rule exempts "the test harness" from the "cores only via
-//! rf-core-api" restriction by name, alongside the app shell and the
-//! cores themselves.
+//! evidence generator, ticket W0-07) and, since W1-03,
+//! [`nestest_evidence::run`] (the second Tier-A-local suite's local
+//! evidence generator, the nestest golden-trace diff) -
+//! `scripts/validate-arch.sh`'s layer rule exempts "the test harness"
+//! from the "cores only via rf-core-api" restriction by name, alongside
+//! the app shell and the cores themselves.
 //!
 //! Do not add public API here without a ticket in plan.json.
 
@@ -24,6 +26,7 @@ mod golden_frame;
 mod json;
 mod manifest;
 pub mod nes6502_evidence;
+pub mod nestest_evidence;
 mod vector_json;
 
 pub use accuracy::{

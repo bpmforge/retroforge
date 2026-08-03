@@ -20,6 +20,13 @@ sha2 = "0.11"
 toml = "1"
 serde = { version = "1", features = ["derive"] }
 
+[dev-dependencies]
+# rf-cart: only for nestest_evidence.rs's own unit tests, which build a
+# minimal synthetic NROM image the same way crates/rf-nes/src/system/tests
+# already does (rf_cart::nes::INES_MAGIC) rather than vendoring any real
+# nestest.nes bytes (TESTING.md §3 G-43).
+rf-cart = { path = "../rf-cart" }
+
 [[bin]]
 name = "fetch-test-roms"
 path = "src/bin/fetch_test_roms.rs"
