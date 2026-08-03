@@ -155,7 +155,7 @@
     "any unsafe carries a SAFETY comment + a test exercising the invariant (NFR-007)"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ]
