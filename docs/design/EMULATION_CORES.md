@@ -18,10 +18,17 @@ test ROMs that gate each subsystem. The cross-core contract (`EmulatorCore`,
   frame boundaries (after the last visible scanline's end-of-frame event).
   No mid-instruction or mid-scanline serialization; this keeps chunk formats
   small and removes an entire class of determinism bugs.
-- **Indexed pixels + metadata.** Cores emit `PpuPixel { color_index,
-  palette_group, layer: Bg0..Bg3|ObjN, priority, dropped_by_limit: bool }`
-  per dot via `CoreSink::video_scanline`. RGB conversion happens in the
-  renderer (palette LUT), never in the core.
+- **Indexed pixels + metadata.** Cores emit `PpuPixel { palette_index: u8,
+  layer: PixelLayer, sprite_id: Option<u8>, priority: u8,
+  dropped_by_limit: bool }` — where `PixelLayer` is
+  `Backdrop | Background(u8) | Sprite` — a **scanline at a time** via
+  `CoreSink::video_scanline(y: u16, pixels: &[PpuPixel])`. RGB conversion
+  happens in the renderer (palette LUT), never in the core.
+  *(Corrected 2026-08-03: this bullet previously described a `color_index`
+  and `palette_group` that the shipped `rf-core-api` struct does not have,
+  omitted `sprite_id`, and said "per dot" where the sink is per scanline.
+  `crates/rf-core-api/src/video.rs` is the authority — W0-04 shipped it and
+  W1-04a consumes it.)*
 - **No wall clock, no RNG, no floats** in core state or timing paths.
   (Mode 7 matrix math is fixed-point, matching hardware — see §3.4.)
 

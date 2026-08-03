@@ -322,7 +322,8 @@
    "phase": 1,
    "crate": "rf-nes",
    "write_scope": [
-    "crates/rf-nes/src/ppu/**"
+    "crates/rf-nes/src/ppu/**",
+    "crates/rf-harness/**"
    ],
    "depends_on": [
     "W1-04a"
@@ -332,8 +333,10 @@
     "renders correct BG for a fixture golden frame"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
+    "SCOPE-DERIVED 2026-08-03 (conductor): criterion 1 (frame-timing edges) is ppu/** alone, but criterion 2 (golden frame) needs somewhere to RUN a ROM and hash the output. Added crates/rf-harness/** because that is where the golden-frame machinery already lives (FrameCapture, hash_frame_palette_indices, find_first_divergence in golden_frame.rs) and rf-harness ALREADY depends on rf-nes (added in W0-07, permitted by validate-arch.sh rule 3's test-harness exemption). Deliberately did NOT add crates/rf-nes/src/system/mod.rs: every API the test needs is already public — NesBus::from_ines_bytes, NesBus::drain_video(&mut dyn CoreSink), Ppu::drain, Cpu::power_on. If a NesBus API change turns out to be genuinely necessary, that is a stop-and-report so the conductor widens scope deliberately rather than the executor doing it silently.",
+    "PRE-FLIGHT 2026-08-03 (conductor): this is NOT a Tier-A-local suite and must NOT get an evidence row. Unlike nes6502 and nestest, the fixture here is synthetic (a minimal NROM image assembled in-test — crates/rf-harness/Cargo.toml's own comment notes it already builds one this way, and crates/rf-nes/src/system/tests does too), so it needs no gitignored external artifact and therefore runs in normal CI. Keep it that way: do not add it to scripts/validate-evidence.mjs, and do not make the golden depend on a fetched ROM.",
     "HANDOFF 2026-08-03 (conductor, from W1-04a): THIS TICKET IS THE ORACLE W1-04a NEVER HAD. W1-04a's agent was explicit that one thing is genuinely unverified: which pixel first displays which tile — the shift-register pipeline's exact latency across a scanline boundary. Its unit tests deliberately skip pixels 0-15 because they start from an artificial scanline=0/dot=0 with no preceding pre-render-line prefetch. In real frame operation the pre-render line's dots 321-336 do prime the registers and that path runs, so pixel 0 should be right — but that is inference, not proof. If this ticket's golden frame is off by roughly one tile horizontally, that is the first place to look. Also re-validate three facts W1-04a derived rather than quoted (flagged honestly, not hidden): the coarse-X increment dots 8/16/../256/328/336 (nesdev states the RELOAD dots 9/17/../257 verbatim, the increment dots were inferred), the attribute-quadrant bit-shift selection (nesdev gives the AT address formula but not which 2 bits to pick), and $2007 palette-read buffer refill using addr & 0x2FFF (reference-emulator convention, no nesdev formula).",
     "HANDOFF 2026-08-03 (conductor): check scope-vs-acceptance BEFORE claiming. This ticket carries write_scope ppu/** alone, the board defect already hit on W1-01a, W0-07, W2-02 and W1-04a. W1-04a's wiring (lib.rs, system/mod.rs, Cargo.toml, ppu_stub.rs deletion) may or may not have already covered what this ticket needs — deliberately NOT pre-fixed here, because a speculative scope that looks authoritative is worse than an obviously-missing one. Derive the paths from this ticket's own acceptance at claim time."
    ],
