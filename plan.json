@@ -489,7 +489,9 @@
    "crate": "rf-input",
    "write_scope": [
     "crates/rf-input/**",
-    "crates/retroforge/**"
+    "crates/retroforge/**",
+    "docs/design/SAVE_STATES.md",
+    "docs/TESTING.md"
    ],
    "depends_on": [
     "W1-06"
@@ -500,10 +502,18 @@
     "determinism CI: two runs same input log => identical state hashes (FR-CORE-002, FR-CORE-003)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1",
     "E1-S4"
+   ],
+   "notes": [
+    "HANDOFF 2026-08-05 (conductor): write_scope widened by TWO EXACT PATHS, never a glob (Brad's W1-01a ruling). (1) docs/design/SAVE_STATES.md \u2014 \u00a73 is a four-line sketch, not a wire spec, exactly as \u00a72 was before W0-05 made it normative; this ticket ships the first .rfreplay writer/reader, so under NFR-008 its field choices become public commitments and must land in the doc in the same commit. Same precedent and same marker style as W0-05's 'normative as of W0-05' table. (2) docs/TESTING.md \u2014 \u00a76's 'Double-run' and 'Replay determinism' rows attribute the suite to rf-harness, but this ticket's write_scope is rf-input + retroforge and rf-harness cannot depend on rf-input under scripts/validate-arch.sh reasoning; leaving those rows pointing at the wrong crate is doc drift. Precedent for exact doc paths in a write_scope: W1-05c already carries docs/TESTING.md and docs/evidence/local-gate.json.",
+    "PRE-FLIGHT 2026-08-05 (conductor) \u2014 ACCEPTANCE CRITERION 3 WOULD HAVE PASSED VACUOUSLY. The obvious fixture is stepper.rs's synthetic_nrom (all-zero PRG => reset vector $0000 => BRK forever in zeroed RAM). That ROM NEVER READS $4016, so 'two runs, same input log => identical state hashes' is byte-identically true with the input wiring absent, the keymap broken, or the latch never called \u2014 the same shape as the three vacuous tests found in W1-04a/W1-05a. The fixture MUST be a hand-assembled NROM that strobes $4016 (write 1, write 0), reads it 8 times, and stores the assembled byte into WRAM every frame. Criterion 3 needs the anti-vacuity half too: two DIFFERENT logs must produce DIFFERENT hash sequences, plus one positive assertion that a known button byte lands at a known WRAM address. Same discipline as corrupting one line of nestest.log to prove the diff is real.",
+    "PRE-FLIGHT 2026-08-05 (conductor): the state hash reachable from this ticket's write_scope is NOT a full-machine hash and must not be named one. rf-nes does not implement rf_core_api::EmulatorCore at all (no save_state/state_view \u2014 grep confirms), and serializing NES state is W2-04's job (write_scope rf-nes + rf-state + retroforge, depends_on W0-05 + W2-01b). Reachable today from retroforge: Cpu{a,x,y,s,pc,p,jammed} (public fields), NesBus::oam(), prg_ram(), master_cycle(), frame_count(), and peek() for $0000-$07FF WRAM. PPU internals (VRAM, palette RAM, loopy regs) and APU are NOT reachable. Hash those explicit regions \u2014 enumerated, never a 64KB peek sweep, which would drag in constant PRG ROM for nothing \u2014 and carry the framebuffer digest as a SEPARATELY NAMED component, because it is output, not state: it proves double-run reproducibility but cannot catch PPU-internal divergence that happens to render identically. Upgrading to a true full-state hash is owed to W2-04.",
+    "PRE-FLIGHT 2026-08-05 (conductor): NesBus::set_controller_buttons(index, buttons) already exists (W1-02) \u2014 the host-side latch hook this ticket needs is present and rf-nes needs no change. Note the two DIFFERENT latches: the host latch (set_controller_buttons, once per frame, FR-FE-003's 'deterministic per-frame latch') versus the controller's own 1->0 strobe latch (done by the running game, crates/rf-nes/src/system/controller.rs, correct and out of scope). Under scripts/validate-arch.sh rule 3, rf-input MUST NOT depend on rf-nes; it depends on rf-core-api only (for InputFrame) and stays host-agnostic, with the egui::Key -> rf_input::Key table living in crates/retroforge.",
+    "FORMAT DECISION 2026-08-05 (conductor), not a new choice \u2014 read off three existing commitments: docs/design/CONTRACTS.md \u00a73 'Replays are BK2-shaped (header + per-frame inputs + periodic hashes)', docs/SCOPE.md 'BK2-style input-log replay (.rfreplay)', and docs/research/accuracy-and-testing.md \u00a75, which describes BK2 as UTF-8 with one |-delimited line per frame and a first-line log key and calls it 'excellent model for our input-log format'. So .rfreplay is a SINGLE UTF-8 TEXT FILE (header key=value block + log-key line + per-frame lines + periodic hash lines), NOT a binary TLV like .rfstate and NOT a literal BizHawk zip. Text keeps it diffable, hand-editable for TAS/bug repro, dependency-free, and makes the R-A3/P9 'BizHawk header import (v1)' commitment cheap.",
+    "PRE-FLIGHT 2026-08-05 (conductor): scripts/validate-evidence.mjs's coveredPaths table is rf-nes-only (crates/rf-nes/src/{cpu,ppu,system,trace.rs}), so a rf-input/retroforge-only change does NOT make docs/evidence/local-gate.json stale \u2014 no local-gate.sh re-run needed and that file stays out of write_scope. Verify with the validator at close rather than trusting this note. Also pre-paid: RustCrypto 0.11's Digest::finalize() returns Array<u8,N> with no LowerHex, so format!(\"{:x}\", ..) is E0277 \u2014 crates/rf-cart/src/hash.rs:44 has the 4-line hex() helper to copy."
    ]
   },
   {
