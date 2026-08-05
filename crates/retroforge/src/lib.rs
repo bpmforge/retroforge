@@ -6,12 +6,21 @@
 //! Library/binary split exists purely for testability: [`stepper`] and
 //! [`core_thread`] have zero `egui`/`eframe`/`winit` dependency and are
 //! exercised headlessly by `cargo test --workspace` (no window, no GPU
-//! device — see each module's doc for why). [`app`] is the only module
-//! that touches `eframe`/`egui`, and `src/main.rs`'s `fn main` is the only
-//! place `eframe::run_native` is ever called — never from a test.
+//! device — see each module's doc for why). Two modules touch
+//! `egui`/`eframe` (ticket W1-07 widened this from one): [`app`] is the
+//! `eframe::App` implementation itself, and [`input_map`] is the
+//! `egui::Key -> rf_input::Key` translation table — `egui::Key` is an
+//! egui type, so naming it requires the dependency, but `input_map` is
+//! otherwise a plain, headlessly-testable function. `rf-input` itself
+//! (the crate `input_map` translates *into*) has no `egui` dependency at
+//! all (`scripts/validate-arch.sh` + that crate's own doc). `src/main.rs`'s
+//! `fn main` is the only place `eframe::run_native` is ever called — never
+//! from a test.
 
 pub mod app;
 pub mod core_thread;
+pub mod hash;
+pub mod input_map;
 pub mod rom_open;
 pub mod stepper;
 

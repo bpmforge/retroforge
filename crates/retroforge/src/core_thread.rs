@@ -31,14 +31,67 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{mpsc, Once};
+use std::sync::{mpsc, Arc, Once};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use rf_core_api::InputFrame;
 use rf_nes::NesLoadError;
 
 use crate::stepper::EmuStepper;
+
+/// The UI thread's latest held-input sample, shared with the core thread
+/// (ticket W1-07's live wiring). One `AtomicU64` packing all four
+/// [`InputFrame`] ports (16 bits each) — not four separate atomics, which
+/// could tear across ports and hand the core a frame that never actually
+/// existed on either side. No mutex: the UI thread stores a fresh sample
+/// every repaint and the core thread loads it once per frame (module doc
+/// "one shared latch-then-advance path" in `crate::stepper`); a lock here
+/// would mean the higher-priority core thread's frame loop contending with
+/// the UI thread on every single frame for no benefit — the atomic already
+/// gives torn-free "latest value wins" semantics, which is exactly what a
+/// per-frame sample needs.
+#[derive(Debug, Default)]
+pub struct SharedInputFrame(AtomicU64);
+
+impl SharedInputFrame {
+    #[must_use]
+    pub fn new() -> Self {
+        SharedInputFrame(AtomicU64::new(0))
+    }
+
+    fn pack(frame: InputFrame) -> u64 {
+        u64::from(frame.ports[0])
+            | u64::from(frame.ports[1]) << 16
+            | u64::from(frame.ports[2]) << 32
+            | u64::from(frame.ports[3]) << 48
+    }
+
+    fn unpack(bits: u64) -> InputFrame {
+        InputFrame {
+            ports: [
+                (bits & 0xFFFF) as u16,
+                ((bits >> 16) & 0xFFFF) as u16,
+                ((bits >> 32) & 0xFFFF) as u16,
+                ((bits >> 48) & 0xFFFF) as u16,
+            ],
+        }
+    }
+
+    /// Called by the UI thread once per repaint with the latest sampled
+    /// [`InputFrame`] (`rf_input::InputLatch::sample`).
+    pub fn store(&self, frame: InputFrame) {
+        self.0.store(Self::pack(frame), Ordering::Relaxed);
+    }
+
+    /// Called by the core thread once per frame, at the top of the shared
+    /// latch-then-advance path.
+    pub fn load(&self) -> InputFrame {
+        Self::unpack(self.0.load(Ordering::Relaxed))
+    }
+}
 
 thread_local! {
     /// Set by the panic hook installed by [`install_panic_capture_hook`],
@@ -200,11 +253,14 @@ pub fn spawn(rom: Vec<u8>) -> Result<CoreHandle, NesLoadError> {
 
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (evt_tx, evt_rx) = mpsc::channel();
-    let handle = thread::spawn(move || core_thread_main(rom, cmd_rx, evt_tx));
+    let input = Arc::new(SharedInputFrame::new());
+    let thread_input = Arc::clone(&input);
+    let handle = thread::spawn(move || core_thread_main(rom, cmd_rx, evt_tx, thread_input));
     Ok(CoreHandle {
         cmd_tx,
         evt_rx,
         join_handle: handle,
+        input,
     })
 }
 
@@ -213,9 +269,17 @@ pub struct CoreHandle {
     pub cmd_tx: Sender<CoreCommand>,
     pub evt_rx: Receiver<CoreEvent>,
     pub join_handle: JoinHandle<()>,
+    /// The UI thread's write side of the live input latch (ticket W1-07):
+    /// call `input.store(latch.sample(&keymap))` once per repaint.
+    pub input: Arc<SharedInputFrame>,
 }
 
-fn core_thread_main(rom: Vec<u8>, cmd_rx: Receiver<CoreCommand>, evt_tx: Sender<CoreEvent>) {
+fn core_thread_main(
+    rom: Vec<u8>,
+    cmd_rx: Receiver<CoreCommand>,
+    evt_tx: Sender<CoreEvent>,
+    input: Arc<SharedInputFrame>,
+) {
     install_panic_capture_hook();
 
     // Re-parse inside the thread too: `spawn`'s pre-check already proved
@@ -246,7 +310,12 @@ fn core_thread_main(rom: Vec<u8>, cmd_rx: Receiver<CoreCommand>, evt_tx: Sender<
             }
         }
 
-        if stepper.tick_running(&mut sink) {
+        // Live wiring (ticket W1-07): latch the UI thread's most recent
+        // held-key sample and advance through the one shared
+        // latch-then-advance path (`EmuStepper::tick_running_with_input`,
+        // `crate::stepper` module doc) — same function the determinism/
+        // replay test suite drives directly via `latch_and_advance_frame`.
+        if stepper.tick_running_with_input(input.load(), &mut sink) {
             let msg = FrameMsg {
                 rgba: sink.to_vec(),
                 width: sink.width(),
@@ -268,6 +337,28 @@ fn core_thread_main(rom: Vec<u8>, cmd_rx: Receiver<CoreCommand>, evt_tx: Sender<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_input_frame_defaults_to_empty() {
+        let shared = SharedInputFrame::new();
+        assert_eq!(shared.load(), InputFrame::empty());
+    }
+
+    #[test]
+    fn shared_input_frame_store_load_round_trips_all_four_ports() {
+        let shared = SharedInputFrame::new();
+        let frame = InputFrame {
+            ports: [0x00FF, 0xABCD, 0x1234, 0xFFFF],
+        };
+        shared.store(frame);
+        assert_eq!(shared.load(), frame);
+    }
+
+    #[test]
+    fn shared_input_frame_default_trait_matches_new() {
+        let shared = SharedInputFrame::default();
+        assert_eq!(shared.load(), InputFrame::empty());
+    }
 
     #[test]
     fn guarded_loop_stop_sends_no_crash_report() {

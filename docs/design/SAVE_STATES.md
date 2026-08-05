@@ -82,6 +82,59 @@ bug repros, TAS-style tooling later. Interop commitment (R-A3, P9): the
 format stays BK2-shaped so BizHawk header import (v1) and best-effort export
 are cheap — community verification workflows transfer.
 
+**Wire encoding, normative as of W1-07 (2026-08-05).** Unlike `.rfstate`,
+`.rfreplay` is a single **UTF-8 text file**, not a binary TLV container —
+text keeps a replay diffable and hand-editable for TAS/bug repro, needs no
+new dependency, and keeps the BizHawk-header-import commitment above cheap
+(`docs/research/accuracy-and-testing.md` §5 calls BK2's `Input Log.txt`
+shape, header key=value block + first-line log key + one line per frame,
+"excellent model for our input-log format"). Shape:
+
+```
+RFREPLAY 1
+[Header]
+console=nes
+rom_sha256=<64 lowercase hex>
+emu_version=<semver>
+core_config=accuracy
+start_type=power-on
+hash_kind=reachable-v1
+hash_interval=<u64>
+[LogKey]
+P1:A,B,Select,Start,Up,Down,Left,Right
+P2:A,B,Select,Start,Up,Down,Left,Right
+[Input]
+|........|........|
+|A..S....|........|
+[Hashes]
+59=<64 lowercase hex>
+119=<64 lowercase hex>
+```
+
+| Field | Encoding |
+|---|---|
+| Line endings | LF only — a CRLF file is refused outright, not silently normalized |
+| Character set | ASCII only — non-ASCII content is refused |
+| `[Header]` | `key=value` lines, one per field, all seven required; an unrecognized key is refused (v1 has no forward-compat skip-unknown for `[Header]`, unlike `.rfstate`'s chunk-level "unknown ⇒ skip with a warning" — a BizHawk-header-import reader inherits a header field this crate doesn't know and must decide explicitly, not silently drop it) |
+| `rom_sha256` | 64 lowercase hex chars — same normalized-hash convention `.rfstate` uses (§2); mismatch against the loaded ROM is refused |
+| `start_type` | only `power-on` is accepted as of W1-07; any other value (e.g. a future savestate-anchored start) is refused with a "not supported until W2-04" message |
+| `hash_kind` | names *what* was hashed — `reachable-v1` today (see `crates/retroforge/src/stepper.rs`'s `EmuStepper::state_hash` doc for the exact field list); a full-machine hash is a later ticket's upgrade, not a silent redefinition of this field |
+| `[LogKey]` | one `P<n>:<button>,<button>,...` line per controller port, declaring both the port count and the per-port button order used by `[Input]` |
+| `[Input]` | one `\|...\|...\|` line per frame, 0-indexed by line position; each port group has one char per `[LogKey]` button: `.` = unpressed, else that button's BizHawk-compatible mnemonic (`A`=A, `B`=B, `s`=Select, `S`=Start, `U`=Up, `D`=Down, `L`=Left, `R`=Right) |
+| `[Hashes]` | `frame=hex` lines, emitted every `hash_interval` frames **and always for the final frame** |
+
+Sections appear in exactly this order (`[Header]`, `[LogKey]`, `[Input]`,
+`[Hashes]`) and all four are required. Refusals are always a diagnostic,
+never a panic: unknown magic/version, an unrecognized `[Header]` key,
+`rom_sha256` mismatch, unsupported `start_type`, a malformed `[Input]`
+line, a port-count mismatch between `[LogKey]` and an `[Input]` line,
+CRLF, and non-ASCII content are all rejected with a specific reason
+(`rf_input::ReplayError`). Record and
+playback both go through one shared "latch input, then advance one frame"
+function (`EmuStepper::latch_and_advance_frame`,
+`crates/retroforge/src/stepper.rs`) so the two paths cannot silently
+diverge in *how* input is applied.
+
 ## 4. Rewind (Phase 8)
 
 Ring of delta-compressed snapshots (XOR against previous + zstd) every k

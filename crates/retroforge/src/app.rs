@@ -17,10 +17,35 @@
 //!   `egui::Panel::top/bottom/left/right(id).show(ui, |ui| ...)`, taking a
 //!   `&mut Ui` like every other panel now.
 //! - `ui.close_menu()` was renamed `ui.close()`.
+//!
+//! ## Keyboard input (ticket W1-07)
+//!
+//! `poll_input` samples `egui::InputState::key_down` once per repaint for
+//! the fixed handful of keys [`crate::input_map::map_key`] knows, pushes
+//! each into an [`rf_input::InputLatch`] (translated via that map — the
+//! only place `egui::Key` and `rf_input::Key` ever meet), and stores the
+//! resulting `InputFrame` into the core thread's `SharedInputFrame`
+//! (`crate::core_thread`'s module doc: one atomic, no mutex in the frame
+//! loop). This module never talks to `rf_nes` directly — the core thread
+//! is the only thing that latches input into a running machine.
 use eframe::egui;
 
 use crate::core_thread::{self, CoreCommand, CoreCrashReport, CoreEvent, CoreHandle};
+use crate::input_map;
 use crate::rom_open;
+
+/// Every host key the default NES keymap binds — the fixed poll list
+/// `poll_input` checks each repaint (module doc).
+const POLLED_KEYS: [egui::Key; 8] = [
+    egui::Key::ArrowUp,
+    egui::Key::ArrowDown,
+    egui::Key::ArrowLeft,
+    egui::Key::ArrowRight,
+    egui::Key::Z,
+    egui::Key::X,
+    egui::Key::Enter,
+    egui::Key::ShiftRight,
+];
 
 /// The whole application's UI-thread-owned state.
 pub struct RetroForgeApp {
@@ -33,6 +58,11 @@ pub struct RetroForgeApp {
     /// truth — this is only ever set right after sending a command, so it
     /// can't drift for more than one repaint.
     running: bool,
+    /// Host-agnostic per-frame input latch (`rf_input`, FR-FE-003) — the
+    /// UI thread's write side; `poll_input` samples it every repaint into
+    /// the core thread's `SharedInputFrame` (module doc).
+    input_latch: rf_input::InputLatch,
+    keymap: rf_input::KeyMap,
 }
 
 impl RetroForgeApp {
@@ -44,6 +74,30 @@ impl RetroForgeApp {
             status: "No ROM loaded \u{2014} File > Open ROM...".to_string(),
             crash: None,
             running: false,
+            input_latch: rf_input::InputLatch::new(),
+            keymap: rf_input::KeyMap::default_nes(),
+        }
+    }
+
+    /// Sample the fixed [`POLLED_KEYS`] list once per repaint into
+    /// [`Self::input_latch`], then publish the resulting `InputFrame` to
+    /// the core thread (module doc). A no-op if no core is loaded — there
+    /// is nothing to publish to.
+    fn poll_input(&mut self, ctx: &egui::Context) {
+        ctx.input(|input_state| {
+            for key in POLLED_KEYS {
+                let Some(mapped) = input_map::map_key(key) else {
+                    continue;
+                };
+                if input_state.key_down(key) {
+                    self.input_latch.key_down(mapped);
+                } else {
+                    self.input_latch.key_up(mapped);
+                }
+            }
+        });
+        if let Some(core) = &self.core {
+            core.input.store(self.input_latch.sample(&self.keymap));
         }
     }
 
@@ -220,6 +274,7 @@ impl RetroForgeApp {
 impl eframe::App for RetroForgeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_input(&ctx);
         self.pump_core_events(&ctx);
 
         self.menu_bar(ui);

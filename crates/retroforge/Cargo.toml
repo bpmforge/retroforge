@@ -22,5 +22,11 @@ rf-nes = { path = "../rf-nes" }
 # of rf-cart).
 rf-cart = { path = "../rf-cart" }
 rf-renderer = { path = "../rf-renderer" }
+# rf-input: host-agnostic Key/KeyMap/InputLatch + .rfreplay (ticket W1-07).
+rf-input = { path = "../rf-input" }
 eframe = "0.35.0"
 rfd = "0.17.2"
+# sha2: reachable-state hash for the determinism/replay suite (ticket
+# W1-07) — already an approved dependency (docs/TECH_STACK.md §2 row
+# exists via rf-cart's use of it).
+sha2 = "0.11"

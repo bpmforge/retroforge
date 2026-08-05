@@ -2924,9 +2924,11 @@ dependencies = [
  "eframe",
  "rf-cart",
  "rf-core-api",
+ "rf-input",
  "rf-nes",
  "rf-renderer",
  "rfd",
+ "sha2",
 ]
 
 [[package]]
@@ -2978,6 +2980,9 @@ dependencies = [
 [[package]]
 name = "rf-input"
 version = "0.1.0"
+dependencies = [
+ "rf-core-api",
+]
 
 [[package]]
 name = "rf-nes"

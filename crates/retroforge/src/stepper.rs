@@ -46,7 +46,36 @@
 //! `NesBus::master_cycle`, generous enough (four NTSC frames' worth) that
 //! it can never fire for any ROM this crate can actually run correctly —
 //! its only job is to guarantee termination, not to be a normal exit path.
-use rf_core_api::CoreSink;
+//!
+//! ## The one shared latch-then-advance path (ticket W1-07)
+//!
+//! [`EmuStepper::latch_and_advance_frame`] is the single function every
+//! input-driven caller — live gameplay (`crate::core_thread`, from the UI
+//! thread's held-key atomic), `.rfreplay` recording, and `.rfreplay`
+//! playback — goes through. It latches the given [`rf_core_api::InputFrame`]
+//! into both controller ports *before* running a single instruction, then
+//! advances exactly one frame. Two call sites that each "latch then
+//! advance" separately is exactly how replay divergence gets built in
+//! (record and playback silently doing the latch at different points), so
+//! there is deliberately only one.
+//!
+//! ## The reachable-state hash (ticket W1-07)
+//!
+//! [`EmuStepper::state_hash`] is **not** a full-machine hash and must never
+//! be described as one: `rf-nes` does not implement
+//! `rf_core_api::EmulatorCore` (no `save_state`/`state_view`) — NES state
+//! serialization is ticket W2-04's job. What's reachable from this crate
+//! today, and exactly what the hash covers (enumerated, not a 64 KiB
+//! `peek` sweep, which would drag in constant PRG ROM for nothing):
+//! WRAM `$0000-$07FF` (the real 2 KiB, not its `$0800`-stepped mirrors),
+//! OAM (`NesBus::oam`), PRG-RAM (`NesBus::prg_ram`), CPU `a, x, y, s, pc,
+//! p, jammed`, and `NesBus::master_cycle`/`frame_count`. PPU-internal state
+//! (VRAM, palette RAM, loopy `v`/`t`/`x`/`w`) and APU state are **not**
+//! reachable and are not covered — a PPU-internal divergence that happens
+//! to render identically would not be caught by this hash. The rendered
+//! framebuffer is a separate, separately-named digest the test suite
+//! computes on its own (never folded in here): it is *output*, not state.
+use rf_core_api::{CoreSink, InputFrame};
 use rf_nes::{Cpu, NesBus, NesLoadError};
 
 /// One NTSC frame is `341 * 262 / 3` = 29,781 master (CPU) cycles
@@ -150,6 +179,14 @@ impl EmuStepper {
         self.bus.frame_count()
     }
 
+    /// Side-effect-free memory peek (`NesBus::peek`) — a debugger memory
+    /// view, and what the determinism suite's positive WRAM assertion
+    /// reads (ticket W1-07).
+    #[must_use]
+    pub fn peek(&self, addr: u16) -> u8 {
+        self.bus.peek(addr)
+    }
+
     /// Stop advancing on repaint ticks. Idempotent.
     pub fn pause(&mut self) {
         self.state = RunState::Paused;
@@ -217,6 +254,70 @@ impl EmuStepper {
             return false;
         }
         self.run_until_next_frame(sink) > 0
+    }
+
+    /// Set both controller ports' live button bytes from `frame` — the
+    /// host-side per-frame latch hook (FR-FE-003), forwarding to
+    /// `NesBus::set_controller_buttons`. Only the low 8 bits of each port
+    /// are meaningful (a real NES pad has 8 buttons); `InputFrame` carries
+    /// `u16`/4 ports for future consoles, so this truncates and only reads
+    /// ports 0-1. Private: every real caller goes through
+    /// [`Self::latch_and_advance_frame`], never this alone (module doc's
+    /// "one shared latch-then-advance path").
+    fn latch_input(&mut self, frame: InputFrame) {
+        self.bus.set_controller_buttons(0, frame.ports[0] as u8);
+        self.bus.set_controller_buttons(1, frame.ports[1] as u8);
+    }
+
+    /// THE one shared latch-then-advance path (module doc, ticket W1-07):
+    /// latch `frame` into both controller ports, then run until the next
+    /// frame boundary (like [`Self::step_frame`], but does not touch
+    /// `state` — callers that need the FR-DBG-004 "stepping always leaves
+    /// the machine paused" behavior call [`Self::pause`] themselves).
+    /// Returns the number of frames completed (0 or 1, see
+    /// `run_until_next_frame`'s doc).
+    pub fn latch_and_advance_frame(&mut self, frame: InputFrame, sink: &mut dyn CoreSink) -> u64 {
+        self.latch_input(frame);
+        self.run_until_next_frame(sink)
+    }
+
+    /// Live-gameplay entry to the shared latch-then-advance path: behaves
+    /// exactly like [`Self::tick_running`] (a no-op returning `false`
+    /// unless [`RunState::Running`], never touching `state`), but latches
+    /// `frame` first via [`Self::latch_and_advance_frame`] — used by
+    /// `crate::core_thread`'s live wiring.
+    pub fn tick_running_with_input(&mut self, frame: InputFrame, sink: &mut dyn CoreSink) -> bool {
+        if self.state != RunState::Running {
+            return false;
+        }
+        self.latch_and_advance_frame(frame, sink) > 0
+    }
+
+    /// The reachable-state hash (module doc's "The reachable-state hash"
+    /// section — read it before using this for anything: it is explicitly
+    /// **not** a full-machine hash). SHA-256 over, in order: WRAM
+    /// `$0000-$07FF` (2048 bytes via [`NesBus::peek`], side-effect-free),
+    /// OAM, PRG-RAM, `Cpu::{a,x,y,s,p}`, `Cpu::pc` (little-endian),
+    /// `Cpu::jammed`, `NesBus::master_cycle` (little-endian),
+    /// `NesBus::frame_count` (little-endian).
+    #[must_use]
+    pub fn state_hash(&self) -> String {
+        let mut buf = Vec::with_capacity(0x0800 + 256 + 0x2000 + 32);
+        for addr in 0x0000u16..=0x07FF {
+            buf.push(self.bus.peek(addr));
+        }
+        buf.extend_from_slice(self.bus.oam());
+        buf.extend_from_slice(self.bus.prg_ram());
+        buf.push(self.cpu.a);
+        buf.push(self.cpu.x);
+        buf.push(self.cpu.y);
+        buf.push(self.cpu.s);
+        buf.push(self.cpu.p);
+        buf.extend_from_slice(&self.cpu.pc.to_le_bytes());
+        buf.push(u8::from(self.cpu.jammed));
+        buf.extend_from_slice(&self.bus.master_cycle().to_le_bytes());
+        buf.extend_from_slice(&self.bus.frame_count().to_le_bytes());
+        crate::hash::sha256_hex(&buf)
     }
 
     /// Shared by `step_frame`/`tick_running`: run instructions, draining
@@ -506,5 +607,84 @@ mod tests {
             RunState::Running,
             "tick_running must not force-pause, unlike step_frame/step_scanline"
         );
+    }
+
+    #[test]
+    fn latch_and_advance_frame_advances_and_does_not_touch_state() {
+        let mut s = stepper();
+        let mut sink = NullSink;
+        let before = s.frame_count();
+        s.latch_and_advance_frame(InputFrame::empty(), &mut sink);
+        assert_eq!(s.frame_count(), before + 1);
+        assert!(
+            s.is_paused(),
+            "state started Paused and latch_and_advance_frame must not change it either way"
+        );
+
+        s.resume();
+        let before = s.frame_count();
+        s.latch_and_advance_frame(InputFrame::empty(), &mut sink);
+        assert_eq!(s.frame_count(), before + 1);
+        assert_eq!(
+            s.state(),
+            RunState::Running,
+            "latch_and_advance_frame must not force-pause, unlike step_frame"
+        );
+    }
+
+    #[test]
+    fn tick_running_with_input_is_a_noop_while_paused() {
+        let mut s = stepper();
+        let mut sink = NullSink;
+        let before = s.frame_count();
+        let produced = s.tick_running_with_input(InputFrame::empty(), &mut sink);
+        assert!(!produced);
+        assert_eq!(s.frame_count(), before);
+    }
+
+    #[test]
+    fn tick_running_with_input_advances_while_running() {
+        let mut s = stepper();
+        s.resume();
+        let mut sink = NullSink;
+        let before = s.frame_count();
+        let produced = s.tick_running_with_input(InputFrame::empty(), &mut sink);
+        assert!(produced);
+        assert_eq!(s.frame_count(), before + 1);
+    }
+
+    #[test]
+    fn state_hash_is_stable_across_repeated_calls_with_no_intervening_advance() {
+        let s = stepper();
+        assert_eq!(
+            s.state_hash(),
+            s.state_hash(),
+            "hashing must be a pure read, not itself mutate state"
+        );
+    }
+
+    #[test]
+    fn state_hash_changes_after_advancing() {
+        let mut s = stepper();
+        let mut sink = NullSink;
+        let before = s.state_hash();
+        s.step_frame(&mut sink);
+        assert_ne!(
+            before,
+            s.state_hash(),
+            "frame_count alone (part of the hashed state) must change after a frame"
+        );
+    }
+
+    #[test]
+    fn peek_reads_wram_written_by_a_previous_write() {
+        // The all-zero synthetic NROM never writes WRAM itself (BRK-forever
+        // from a zeroed reset vector), so freshly-peeked WRAM is 0 — this
+        // just proves `EmuStepper::peek` reaches through to `NesBus::peek`
+        // without panicking, matching that method's own side-effect-free
+        // contract.
+        let s = stepper();
+        assert_eq!(s.peek(0x0000), 0);
+        assert_eq!(s.peek(0x07FF), 0);
     }
 }
