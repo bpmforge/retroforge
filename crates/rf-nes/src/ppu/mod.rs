@@ -12,56 +12,108 @@
 //! **sprite-0 hit** (`STATUS_SPRITE0_HIT`, `sprites.rs`'s `output_pixel`)
 //! and **VBlank/NMI wiring**: [`Ppu::nmi_line`] is the combinatorial
 //! `$2000` bit 7 (NMI enable) AND `$2002` bit 7 (VBlank flag) level
-//! [`crate::system::NesBus`] now forwards through
-//! [`crate::cpu::CpuBus::nmi_line`] — the CPU already edge-detects that
-//! level once per bus cycle (W1-01b's `CountingBus`), which is exactly
-//! what reproduces nesdev.org/wiki/NMI's documented "By toggling
-//! `NMI_output` (`PPUCTRL.7`) during vertical blank without reading
-//! `PPUSTATUS`, a program can cause `/NMI` to be pulled low multiple
-//! times" behavior for free: no separate multi-fire bookkeeping is needed
-//! here, only an honest level.
+//! [`crate::system::NesBus`] forwards through
+//! [`crate::cpu::CpuBus::nmi_line`] — as of ticket W1-05c, through a
+//! one-PPU-dot-delayed latch rather than a live passthrough (see this
+//! module's "Sub-CPU-cycle VBlank/NMI race timing" section below and
+//! `NesBus::tick_master`'s doc for why). The CPU still edge-detects
+//! whatever level it forwards once per bus cycle (W1-01b's `CountingBus`),
+//! which is exactly what reproduces nesdev.org/wiki/NMI's documented "By
+//! toggling `NMI_output` (`PPUCTRL.7`) during vertical blank without
+//! reading `PPUSTATUS`, a program can cause `/NMI` to be pulled low
+//! multiple times" behavior for free: no separate multi-fire bookkeeping
+//! is needed here, only an honest (if slightly delayed) level.
 //!
-//! **A sub-CPU-cycle timing ceiling this module does NOT reach — a
-//! documented architectural limit, measured against real ROMs, not an
-//! oversight:** nesdev.org/wiki/PPU_frame_timing's "VBL Flag Timing" table
-//! describes a **sub-CPU-cycle** race — reading `$2002` exactly on the PPU
-//! clock the flag is set (or one clock later) still reads it as set and
-//! clears it, but suppresses that frame's NMI because the CPU's own
-//! edge-detector never gets to sample the momentarily-true level before
-//! the read clears it. [`crate::system::NesBus`] ticks this PPU's 3
-//! dots-per-cycle strictly *after* a register read completes and strictly
-//! *before* a register write's own 3 dots (`write_untimed` sets the new
-//! value, `tick_master` runs only afterward — `NesBus::tick_master`'s doc),
-//! and `crate::cpu::exec::CountingBus` (out of this ticket's write scope)
-//! samples `nmi_line()` once, after the whole bus op — so neither a read
-//! nor a write can ever interleave with the *current* cycle's own dots,
-//! only see-or-affect state as of a whole-cycle boundary. The
-//! **one-clock-early** read case (nesdev: "reading one PPU clock before
-//! reads it as clear and never sets the flag... for that frame") IS
-//! reachable under that ordering — see `scroll.rs`'s `read_status` doc
-//! (`suppress_vblank_this_frame`) — and is implemented; the same-clock
-//! read case is not. Fixing either would require restructuring when
-//! register access is sequenced relative to `tick_master`'s 3-dot
-//! batching, which is CPU-crate-adjacent territory this ticket's write
-//! scope (`crates/rf-nes/src/ppu/**` plus `system/mod.rs`, not `cpu/**`)
-//! doesn't reach without risking the byte-exact nestest/vector suites.
+//! ## Sub-CPU-cycle VBlank/NMI race timing (ticket W1-05c) — reachable
+//! after all, at genuine PPU-dot resolution
 //!
-//! Measured against the real, fetched `ppu_vbl_nmi` ROMs (not guessed):
-//! `01-vbl_basics`, `03-vbl_clear_time`, `04-nmi_control`,
-//! `09-even_odd_frames` pass; `02-vbl_set_time`, `05-nmi_timing`,
-//! `06-suppression`, `07-nmi_on_timing`, `08-nmi_off_timing` all show the
-//! *same* signature — a one-CPU-cycle-early suppression boundary relative
-//! to the real fetched expected table (cross-checked against a matching
-//! "fails at row 03 instead of 04" symptom independently reported by
-//! another emulator author, forums.nesdev.org/viewtopic.php?t=17682) —
-//! strong evidence for one shared root cause, this read-side ceiling.
-//! `10-even_odd_timing` fails separately, at "Clock is skipped too late,
-//! relative to enabling BG" (its sub-test #3 of 4; #2 and #4 pass) — a
-//! `$2001`-write-timing question this module doc does NOT claim the same
-//! root cause for with the same confidence (not A/B-isolated the way the
-//! read-side suppression window was — see `docs/STATUS.md`'s W1-05b entry
-//! for exactly what was and wasn't verified). `crates/rf-harness/
-//! waivers.toml` and that STATUS.md entry carry the full per-ROM evidence.
+//! nesdev.org/wiki/PPU_frame_timing's "VBL Flag Timing" table describes a
+//! **sub-CPU-cycle** race — reading `$2002` one PPU dot before the flag is
+//! set, on the same dot, or one dot later each has different, specific
+//! read-value/suppression behavior. W1-05b's module doc (superseded by
+//! this section) claimed this was architecturally unreachable because
+//! [`crate::system::NesBus`] only ever samples register state at whole
+//! *CPU-cycle* (3-PPU-dot) boundaries. That claim was correct about the
+//! mechanism and wrong about the conclusion: **register access never
+//! needed sub-cycle placement, because the race window itself visits every
+//! possible dot residue across successive frames for free.**
+//!
+//! With rendering disabled (every `ppu_vbl_nmi` sub-ROM's own precondition
+//! for its precision-sync routine, `sync_vbl`), a frame is always exactly
+//! 341 × 262 = 89342 dots — and 89342 mod 3 = 2, not 0. So the absolute-dot
+//! position of any fixed (scanline, dot) target, expressed relative to
+//! this crate's CPU-cycle window boundaries (which stay fixed, 3 dots
+//! apart, for the life of the `Ppu`), shifts by 2 (mod 3) every frame.
+//! Since gcd(2, 3) = 1, that shift visits residues 0, 2, 1, 0, 2, 1, ...
+//! over successive frames — every possible alignment, eventually. The real,
+//! fetched sub-ROMs exploit exactly this: `common/sync_vbl.s`'s own doc
+//! comment says outright "VBL occurs every 29780.67 [CPU] clocks... the
+//! loop will effectively read `$2002` one PPU clock later each frame."
+//! **Genuine PPU-dot resolution was therefore available the whole time,
+//! achieved BY the ROMs' own multi-frame convergence loops, not by this
+//! engine splitting a cycle** — this module needed only to correctly model
+//! what a register access sees at each of the three reachable residues, not
+//! change when access happens relative to `tick_master`.
+//!
+//! ### The three-part fix
+//!
+//! 1. **`scroll.rs`'s `read_status`**, at `(VBLANK_START_SCANLINE, dot)`:
+//!    `dot == 0` (one PPU clock before the set) returns the not-yet-set
+//!    flag and latches `suppress_vblank_this_frame`, canceling the set for
+//!    the rest of the frame (W1-05b, unchanged). `dot == 1` (the same PPU
+//!    clock as the set) additionally forces the *returned* value to read
+//!    as set — nesdev: "the same PPU clock or one later reads it as set" —
+//!    while still latching the same suppression (`self.status` itself
+//!    never really holds the bit; there is nothing to "un-set" later).
+//! 2. **`scroll.rs`'s `read_status`**, at `(PRERENDER_SCANLINE, 1)`: masks
+//!    the VBlank bit *out of the returned value only* (the unconditional
+//!    `self.status &= !STATUS_VBLANK` at the top of every `$2002` read
+//!    already handles real state). This is the clear-side twin of (1)'s
+//!    fencepost — `Ppu::tick` runs `process_dot` (which does the real
+//!    auto-clear) *before* `advance_counters`, so a read observing
+//!    `self.dot == 1` is happening at the same instant as that auto-clear,
+//!    before it has executed. Without this, `02-vbl_set_time` and
+//!    `03-vbl_clear_time` — which share one `sync_vbl_delay` reference
+//!    point 20 scanlines apart (nesdev: the flag "is cleared exactly 20
+//!    scanlines after being set") — go one dot out of alignment with each
+//!    other: fixing (1) alone passed `02` but broke a previously-passing
+//!    `03`. Nesdev's own wiki text doesn't describe this half of the race;
+//!    it's justified directly against `03-vbl_clear_time.s`'s own expected
+//!    table (christopherpow/nes-test-roms), per MASTER_PROMPT's "the test
+//!    ROM wins" rule.
+//! 3. **`crate::system::NesBus`'s `nmi_level_latch`** (that module's
+//!    `tick_master`/`nmi_line` docs): (1) and (2) are exclusively about
+//!    `$2002`'s *read value*; nesdev's "same clock or one later" row is
+//!    also about suppressing that frame's NMI, which is a property of when
+//!    `crate::cpu::exec::CountingBus` (out of this ticket's write scope)
+//!    samples the `/NMI` level, not of anything `read_status` touches. The
+//!    VBlank set can land in a bus cycle that isn't a `$2002` access at
+//!    all — an intervening `NOP`, say — so `read_status` never gets a
+//!    chance to intervene there. `NesBus::tick_master` now snapshots
+//!    [`Ppu::nmi_line`] once *per PPU dot* (not once per cycle — a
+//!    whole-cycle-wide version was tried first and measured exactly 2 rows
+//!    too wide against `05`-`08`'s own tables), so a set landing on a
+//!    cycle's last dot stays invisible to that same cycle's end-of-op
+//!    sample, matching "one clock later" without `cpu/**` needing to know
+//!    anything happened.
+//!
+//! ### Result: 9/10, `10-even_odd_timing` excepted
+//!
+//! Measured against the real, fetched `ppu_vbl_nmi` ROMs: `01-vbl_basics`,
+//! `02-vbl_set_time`, `03-vbl_clear_time`, `04-nmi_control`,
+//! `05-nmi_timing`, `06-suppression`, `07-nmi_on_timing`,
+//! `08-nmi_off_timing`, `09-even_odd_frames` all pass. `10-even_odd_timing`
+//! still fails, at the same "Clock is skipped too late, relative to
+//! enabling BG" sub-test (#3 of 4; #2 and #4 pass) W1-05b originally
+//! measured — byte-identical across every experiment this ticket ran
+//! (both `CpuBus::read` orderings, every `read_status` model tried),
+//! confirming W1-05b's own prediction that it does not share this root
+//! cause: it needs a `$2001`-write EFFECT to land earlier, and
+//! `write_untimed` already runs before its own cycle's dots — the earliest
+//! position reachable without literally moving `master_cycle`'s own
+//! per-write increment, which none of this ticket's fixes touch.
+//! `crates/rf-harness/waivers.toml` and `docs/STATUS.md`'s W1-05c entry
+//! carry the full per-ROM evidence.
 //!
 //! It deliberately does NOT implement:
 //! - A `Mapper` trait / CHR bank switching (routed the same way W1-02
@@ -326,18 +378,20 @@ pub struct Ppu {
     /// frame elapsed" without reaching into `scanline`/`dot` directly —
     /// this module's only externally-meaningful frame-boundary signal.
     frame_count: u64,
-    /// Sticky per-frame latch (ticket W1-05b) implementing the *reachable*
-    /// half of nesdev.org/wiki/PPU_frame_timing's `$2002`-read VBlank race
-    /// (see this module's doc "One VBlank/NMI race this module does NOT
-    /// reach" section for the half that ISN'T reachable, and why): set by
-    /// `scroll.rs`'s `read_status` when a `$2002` read happens exactly one
-    /// dot before the VBlank-set dot (scanline 241, dot 1) — nesdev,
-    /// verbatim, "Reading one PPU clock before reads it as clear and never
-    /// sets the flag or generates NMI for that frame." Checked (and, if
-    /// set, suppresses the flag-set) in [`Ppu::process_dot`] at exactly
-    /// that dot; cleared again at the pre-render line's dot 1 alongside the
-    /// other per-frame status-bit resets, so it can never leak into a later
-    /// frame's own VBlank window.
+    /// Sticky per-frame latch (ticket W1-05b, extended W1-05c) implementing
+    /// nesdev.org/wiki/PPU_frame_timing's `$2002`-read VBlank race (see
+    /// this module's doc "Sub-CPU-cycle VBlank/NMI race timing" section):
+    /// set by `scroll.rs`'s `read_status` both when a `$2002` read happens
+    /// exactly one dot before the VBlank-set dot (scanline 241, dot 1) —
+    /// nesdev, verbatim, "Reading one PPU clock before reads it as clear
+    /// and never sets the flag or generates NMI for that frame" — and when
+    /// it happens on that same dot (nesdev: "reading on the same PPU clock
+    /// ... reads it as set, clears it"; `read_status` forces the returned
+    /// value in that second case, since `self.status` itself never really
+    /// holds the bit). Checked (and, if set, suppresses the flag-set) in
+    /// [`Ppu::process_dot`] at exactly that dot; cleared again at the
+    /// pre-render line's dot 1 alongside the other per-frame status-bit
+    /// resets, so it can never leak into a later frame's own VBlank window.
     suppress_vblank_this_frame: bool,
 
     // ---- sprite evaluation + output units (ticket W1-05a; see

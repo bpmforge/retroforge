@@ -15,17 +15,22 @@
 //! absent, so these tests print why and return rather than failing or
 //! hanging.
 //!
-//! ## Why `ppu_vbl_nmi` doesn't assert 10/10
+//! ## Why `ppu_vbl_nmi` doesn't assert 10/10 (ticket W1-05c)
 //!
-//! Six of the ten real `ppu_vbl_nmi` sub-ROMs fail against this crate for a
-//! documented, investigated reason (`crate::ppu`'s module doc "Scope
-//! fence" section; `crates/rf-harness/waivers.toml`'s six matching
-//! entries) — a sub-CPU-cycle timing ceiling, not a regression. Asserting
-//! 10/10 here would make `cargo test --workspace` permanently fail for
-//! every contributor who fetches these ROMs, for a gap this ticket already
-//! tracks as evidence, not silently. This test instead asserts only that
-//! the four ROMs known to pass keep passing (a regression there IS a real
-//! bug), and reports the other six's status without asserting on it.
+//! W1-05b left only 4 of the 10 real `ppu_vbl_nmi` sub-ROMs passing.
+//! W1-05c's sub-CPU-cycle fix (`crate::ppu`'s module doc "Reachable and
+//! unreachable races" section; `crate::system::NesBus::tick_master`'s
+//! `nmi_level_latch` doc) brings that to 9/10 — every sub-ROM except
+//! `10-even_odd_timing`, which fails for a *separate, independently
+//! investigated* reason (a `$2001`-write-timing question, not the
+//! `$2002`-read/NMI-edge race the other nine share — see
+//! `crates/rf-harness/waivers.toml`'s one remaining entry for the specific
+//! symptom and why W1-05c's fix cannot reach it). Asserting 10/10 here
+//! would make `cargo test --workspace` permanently fail for every
+//! contributor who fetches these ROMs, for a gap this ticket tracks as
+//! evidence, not silently. This test instead asserts that the nine ROMs
+//! known to pass keep passing (a regression there IS a real bug), and
+//! reports `10-even_odd_timing`'s status without asserting on it.
 use std::path::{Path, PathBuf};
 
 use crate::cpu::Cpu;
@@ -149,13 +154,13 @@ fn ppu_vbl_nmi_known_good_roms_still_pass() {
     // investigated evidence -- see this file's module doc).
     let roms: [(&str, u32, bool); 10] = [
         ("01-vbl_basics", 3600, true),
-        ("02-vbl_set_time", 3600, false),
+        ("02-vbl_set_time", 3600, true),
         ("03-vbl_clear_time", 3600, true),
         ("04-nmi_control", 3600, true),
-        ("05-nmi_timing", 3600, false),
-        ("06-suppression", 3600, false),
-        ("07-nmi_on_timing", 3600, false),
-        ("08-nmi_off_timing", 3600, false),
+        ("05-nmi_timing", 3600, true),
+        ("06-suppression", 3600, true),
+        ("07-nmi_on_timing", 3600, true),
+        ("08-nmi_off_timing", 3600, true),
         ("09-even_odd_frames", 3600, true),
         ("10-even_odd_timing", 3600, false),
     ];

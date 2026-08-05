@@ -80,7 +80,7 @@ cadence/machine than Tier A/B.
 | `cpu_timing_test6`, `instr_timing`, `branch_timing_tests` | cycle counts, page-cross, branches | FR-CORE-020 | A | $6000 = 0 |
 | `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A | $6000 = 0 |
 | `cpu_dummy_reads/writes`, `cpu_exec_space` | dummy bus cycles, open bus | FR-CORE-020 | B | $6000 = 0 |
-| blargg `ppu_vbl_nmi` (10 sub-ROMs, `rom_singles/`) | VBL/NMI to the PPU cycle | FR-CORE-022 | A-local | $6000 = 0 — 4/10 clean (`01`,`03`,`04`,`09`); 6/10 (`02`,`05`,`06`,`07`,`08`,`10`) waived, sub-CPU-cycle timing ceiling, see `crate::ppu`'s module doc + `crates/rf-harness/waivers.toml` |
+| blargg `ppu_vbl_nmi` (10 sub-ROMs, `rom_singles/`) | VBL/NMI to the PPU cycle | FR-CORE-022 | A-local | $6000 = 0 — 9/10 clean (all but `10-even_odd_timing`, ticket W1-05c); `10` waived, a separate `$2001`-write-timing cause, see `crate::ppu`'s module doc + `crates/rf-harness/waivers.toml` |
 | `sprite_hit_tests` | sprite-0 hit | FR-CORE-023 | A-local | RAM-result byte (`$00F8`) = 1 — NOT `$6000` (ticket W1-05b correction; this ROM generation predates blargg's `$6000` runtime, see `tests/rom-manifest.toml`'s comment on this suite) |
 | `sprite_overflow_tests` | overflow bug | FR-CORE-023 | A | $6000 = 0 — **unverified as of W1-05b**: shares `sprite_hit_tests`' pre-`$6000` ROM family and almost certainly has the same protocol mistag; out of this ticket's scope, flagged in `tests/rom-manifest.toml` for whichever ticket implements this suite |
 | `oam_read`, `oam_stress` | $2004 semantics | FR-CORE-023 | B | $6000 = 0 |
@@ -151,13 +151,30 @@ way. Protocol:
   correct protocol.
 - Six of the ten real `ppu_vbl_nmi` sub-ROMs (`02-vbl_set_time`,
   `05-nmi_timing`, `06-suppression`, `07-nmi_on_timing`,
-  `08-nmi_off_timing`, `10-even_odd_timing`) fail against a sub-CPU-cycle
-  timing ceiling this crate's lock-step tick-after-register-access
-  architecture cannot reach without CPU-crate changes — see `crate::ppu`'s
-  module doc "Scope fence" section for the full derivation (cross-checked
-  against the real fetched ROMs' own expected tables and an independently
-  reported matching symptom on forums.nesdev.org) and
-  `crates/rf-harness/waivers.toml` for the tracked, ticketed waivers.
+  `08-nmi_off_timing`, `10-even_odd_timing`) failed against what W1-05b's
+  own investigation believed was a sub-CPU-cycle timing ceiling this
+  crate's architecture couldn't reach without CPU-crate changes.
+
+**`ppu_vbl_nmi` W1-05c follow-up: the ceiling was real but narrower than
+W1-05b thought.** Register access never needed sub-CPU-cycle placement —
+with rendering disabled (every sub-ROM's own precondition), a frame is
+89342 dots and 89342 mod 3 = 2, so the ROMs' own multi-frame
+`sync_vbl`/`sync_vbl_delay` convergence loops visit every PPU-dot residue
+against this crate's fixed CPU-cycle window boundaries for free (see
+`crate::ppu`'s module doc "Sub-CPU-cycle VBlank/NMI race timing" section
+for the full derivation). The fix was three narrow, still-whole-cycle
+changes: `scroll.rs::read_status` handling two more `(scanline, dot)`
+positions (the "same PPU clock as the set" and the pre-render "same clock
+as the auto-clear" fenceposts) plus a one-PPU-*dot* NMI-visibility latch in
+`crate::system::NesBus::tick_master` (a genuine dot-loop split, not a
+`master_cycle` one — see that method's doc). Result: 9/10 —
+`02`/`05`/`06`/`07`/`08` all pass now. `10-even_odd_timing` still fails, at
+the same "Clock is skipped too late, relative to enabling BG" sub-test
+W1-05b measured, byte-identical across every experiment W1-05c ran
+(multiple `read_status` models, both `CpuBus::read` orderings) — confirming
+W1-05b's own prediction that it's a separate, `$2001`-write-timing cause,
+not this read-side/NMI-edge race. `crates/rf-harness/waivers.toml` carries
+the one remaining tracked waiver.
 
 **nestest disassembly-column finding (ticket W1-03):** both halves of the
 trace are byte-exact over all 8991 lines, but the disassembly-annotation

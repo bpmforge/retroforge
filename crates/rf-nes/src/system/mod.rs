@@ -116,6 +116,12 @@ pub struct NesBus {
     /// `run_oam_dma`'s doc for the exact accounting). `None` until the
     /// first DMA runs.
     last_oam_dma_stall: Option<u32>,
+    /// The `/NMI` level [`CpuBus::nmi_line`] reports, latched once per bus
+    /// cycle inside `tick_master` rather than read live from the PPU — see
+    /// that method's doc for why this one-cycle-delayed snapshot (not
+    /// `self.ppu.nmi_line()` directly) is what reproduces nesdev's "same
+    /// PPU clock or one clock later" VBlank-race row.
+    nmi_level_latch: bool,
 }
 
 impl NesBus {
@@ -139,6 +145,7 @@ impl NesBus {
             prg_ram: [0; PRG_RAM_SIZE],
             rom,
             last_oam_dma_stall: None,
+            nmi_level_latch: false,
         }
     }
 
@@ -431,9 +438,32 @@ impl NesBus {
     /// exactly `3 * cycles` dots, keeping it in permanent lock-step with
     /// the bus regardless of which call site (a plain read/write or one of
     /// `run_oam_dma`'s stolen cycles) is advancing time.
+    ///
+    /// ## The `nmi_level_latch` snapshot (ticket W1-05c) — a genuine
+    /// one-PPU-*dot* lag, deliberately splitting this dot loop rather than
+    /// widening it to a whole cycle
+    ///
+    /// Snapshots [`Ppu::nmi_line`] *before each individual dot ticks*, not
+    /// once per `tick_master` call — so after this method returns,
+    /// `nmi_level_latch` holds the level as of one PPU dot (not one CPU
+    /// cycle) before the last dot just ticked. `master_cycle` is still
+    /// mutated exactly once per call (the invariant `CpuBus::nmi_line`'s
+    /// doc and this ticket's acceptance criteria both depend on) — only the
+    /// dot loop itself is split into per-dot snapshot-then-tick steps,
+    /// which is the narrower operation the ticket's pre-flight permitted
+    /// ("split only the dot loop; never make `master_cycle` sub-cycle").
+    ///
+    /// A whole-cycle-wide snapshot (captured once, before all 3 dots) was
+    /// tried first and measured wrong: every one of `05`/`06`/`07`/`08`'s
+    /// NMI-suppression windows came out exactly 2 rows (2 PPU dots, per
+    /// `06-suppression.s`'s own "one PPU clock later each line" comment)
+    /// too wide. The per-dot version is the fix — see `CpuBus::nmi_line`'s
+    /// doc for why a 1-dot lag, not 0 or 3, is what nesdev's "one clock
+    /// later" row needs.
     fn tick_master(&mut self, cycles: u32) {
         self.master_cycle += cycles as u64;
         for _ in 0..cycles * 3 {
+            self.nmi_level_latch = self.ppu.nmi_line();
             self.ppu.tick();
         }
     }
@@ -459,17 +489,52 @@ impl CpuBus for NesBus {
         self.tick_master(1);
     }
 
-    /// Ticket W1-05b: forwards [`Ppu::nmi_line`] directly — `$2000` bit 7
-    /// (NMI enable) AND `$2002` bit 7 (VBlank flag), the exact level real
-    /// hardware pulls `/NMI` low with (nesdev.org/wiki/NMI). Pure
-    /// passthrough, no bus-side state: the CPU (W1-01b, `cpu::exec::
-    /// CountingBus`) already samples this once per bus cycle and
-    /// edge-detects it, which is what turns a bare level into "reset once
-    /// per VBlank, retriggerable by toggling `$2000` bit 7" — see
-    /// `crate::ppu`'s module doc for the one narrow race this crate's
-    /// tick-then-register-access ordering cannot reach.
+    /// Ticket W1-05b/W1-05c: `$2000` bit 7 (NMI enable) AND `$2002` bit 7
+    /// (VBlank flag), the exact level real hardware pulls `/NMI` low with
+    /// (nesdev.org/wiki/NMI) — but a one-PPU-*dot*-delayed latch, not
+    /// [`Ppu::nmi_line`] read live.
+    ///
+    /// ## Why a latch, not a passthrough (ticket W1-05c)
+    ///
+    /// `cpu::exec::CountingBus` (out of this ticket's write scope) samples
+    /// this once per bus cycle, strictly *after* the whole `read`/`write`
+    /// call returns — i.e., after this cycle's own register access AND
+    /// this cycle's own 3 PPU dots have both already run. A live
+    /// `self.ppu.nmi_line()` read at that point sees VBlank exactly as of
+    /// the END of this cycle, which is too late for nesdev.org/wiki/
+    /// PPU_frame_timing's "VBL Flag Timing" row that isn't about the flag's
+    /// *value* at all: "reading on the same PPU clock or one [PPU clock]
+    /// later reads it as set, clears it, and suppresses the NMI for that
+    /// frame." The "same clock" half is already handled by
+    /// `scroll.rs::read_status`'s dot-1 branch (the flag never really
+    /// becomes visible to `self.status` at all that frame). The "one clock
+    /// later" half needs something different: the VBlank-set can land in a
+    /// bus cycle that ISN'T a `$2002` access at all — an intervening `NOP`
+    /// mid-instruction-stream, say — so `read_status` (which only runs on
+    /// `$2002` accesses) never gets a chance to intervene, and a live
+    /// `nmi_line()` read right after THAT cycle would see the freshly-set
+    /// flag and latch a real edge, before some LATER cycle's `$2002` read
+    /// ever gets to clear it.
+    ///
+    /// `nmi_level_latch` (`tick_master`'s doc) fixes exactly this with a
+    /// **one-PPU-dot** lag, not a whole-cycle one: it's snapshotted right
+    /// before each individual dot ticks, so after any `tick_master` call it
+    /// holds the level as of one dot before the last dot that ran. A VBlank
+    /// set that lands on the FINAL dot of some cycle's 3-dot batch is
+    /// therefore still invisible to that cycle's own end-of-op sample (the
+    /// snapshot taken for that last dot was captured one dot earlier, still
+    /// clear) — matching nesdev's "one clock later" suppression exactly,
+    /// and no wider: a set on the *first or second* dot of a batch IS
+    /// visible by that same batch's last snapshot, so `CountingBus::sample`
+    /// (called once the whole op — all 3 dots — completes) still catches
+    /// it, matching "two or more PPU clocks... doesn't affect NMI
+    /// operation" for the normal case. Measured, not assumed: a
+    /// whole-cycle-wide version of this latch (snapshot once per
+    /// `tick_master` call rather than once per dot) was tried first and
+    /// over-suppressed every one of `05`/`06`/`07`/`08` by exactly 2 rows
+    /// (2 PPU dots) — see `tick_master`'s doc.
     fn nmi_line(&self) -> bool {
-        self.ppu.nmi_line()
+        self.nmi_level_latch
     }
 
     // `irq_line` stays at the `CpuBus` trait's default (`false`): the APU

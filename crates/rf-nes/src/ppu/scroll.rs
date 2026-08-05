@@ -10,7 +10,7 @@
 //! ||| ++-------------- nametable select
 //! +++----------------- fine Y scroll
 //! ```
-use super::{Ppu, STATUS_VBLANK, VBLANK_START_SCANLINE};
+use super::{Ppu, PRERENDER_SCANLINE, STATUS_VBLANK, VBLANK_START_SCANLINE};
 
 impl Ppu {
     /// Dispatch a real (side-effecting) CPU read of register `index`
@@ -73,31 +73,68 @@ impl Ppu {
     /// and overflow are NOT cleared by this read (only by the pre-render
     /// line's dot-1 auto-clear — see [`Ppu::tick`]'s doc).
     ///
-    /// ## The one-dot-early VBlank-read race (ticket W1-05b)
+    /// ## The VBlank-read races (tickets W1-05b, extended W1-05c)
     ///
     /// nesdev.org/wiki/PPU_frame_timing's "VBL Flag Timing" table, verbatim:
     /// "Reading `$2002` within a few PPU clocks of when VBL is set results
     /// in special-case behavior. Reading one PPU clock before reads it as
-    /// clear and never sets the flag or generates NMI for that frame."
-    /// `self.scanline`/`self.dot` here reflect PPU state as of the end of
-    /// the *previous* bus cycle's ticks (`crate::system::NesBus::read`
-    /// calls the register read before `tick_master` advances this cycle's
-    /// 3 dots — see `crate::ppu`'s module doc "Scope fence" section for the
-    /// full ordering argument and its limits). So a read landing exactly at
-    /// (scanline 241, dot 0) — one dot before the (241, 1) VBlank-set dot —
-    /// is observably "the read that happens one PPU clock before the set":
-    /// this method both returns the not-yet-set flag (already correct,
-    /// unconditionally, since the set hasn't run yet) AND latches
-    /// `suppress_vblank_this_frame` so [`Ppu::process_dot`]'s upcoming
-    /// (241, 1) tick — due to run later in this SAME bus cycle's 3-dot
-    /// batch — skips the set entirely, matching "never sets the flag...
-    /// for that frame" rather than merely reading stale-clear once.
+    /// clear and never sets the flag or generates NMI for that frame.
+    /// Reading on the same PPU clock or one later reads it as set, clears
+    /// it, and suppresses the NMI for that frame." `self.scanline`/
+    /// `self.dot` here reflect PPU state as of the end of the *previous*
+    /// bus cycle's ticks (`crate::system::NesBus::read` calls the register
+    /// read before `tick_master` advances this cycle's 3 dots) — see
+    /// `crate::ppu`'s module doc "Sub-CPU-cycle VBlank/NMI race timing"
+    /// section for why this whole-cycle-granular access turns out to still
+    /// reach genuine per-dot resolution (the ROMs' own multi-frame
+    /// convergence loops visit every reachable residue, this method just
+    /// has to answer correctly at each one) and for the NMI-suppression
+    /// half, which lives bus-side in `NesBus::nmi_level_latch` instead of
+    /// here (this method only ever affects `$2002`'s *read value* and the
+    /// flag's own future set/clear, never `nmi_line()` directly).
+    ///
+    /// - `(VBLANK_START_SCANLINE, 0)` — one PPU clock before the set:
+    ///   returns the not-yet-set flag (already correct, unconditionally,
+    ///   since the set hasn't run yet) and latches
+    ///   `suppress_vblank_this_frame` so [`Ppu::process_dot`]'s upcoming
+    ///   (241, 1) tick — due to run later in this SAME bus cycle's 3-dot
+    ///   batch — skips the set entirely, matching "never sets the flag...
+    ///   for that frame" rather than merely reading stale-clear once.
+    /// - `(VBLANK_START_SCANLINE, 1)` — the same PPU clock as the set: the
+    ///   read wins the race, so the *returned* value is forced to show set
+    ///   even though `self.status` doesn't have the bit yet (the real set,
+    ///   due to run later in this same 3-dot batch, is suppressed the same
+    ///   way — there is nothing left to "clear" in `self.status` for a bit
+    ///   it never really held this frame).
+    /// - `(PRERENDER_SCANLINE, 1)` — the pre-render line's own auto-clear
+    ///   dot (`Ppu::process_dot`'s `PRERENDER_SCANLINE` arm, which runs
+    ///   *after* this read in the same batch, same fencepost as the set
+    ///   dot above): masks the VBlank bit out of the *returned* value only
+    ///   — `self.status`'s real bit is already handled by the unconditional
+    ///   clear at the top of this method, identical to any other `$2002`
+    ///   read. Not from the nesdev wiki text (which doesn't describe a
+    ///   read-vs-clear race) — justified directly against
+    ///   `03-vbl_clear_time.s`'s own expected table instead (per
+    ///   MASTER_PROMPT's "the test ROM wins" rule): `02-vbl_set_time` and
+    ///   `03-vbl_clear_time` share one `sync_vbl_delay`-established
+    ///   reference point 20 scanlines apart (nesdev: the flag "is cleared
+    ///   exactly 20 scanlines after being set"), so leaving this fencepost
+    ///   asymmetric with the set-side one above shifted the two ROMs one
+    ///   dot out of alignment with each other — fixing only the set side
+    ///   passed `02` but broke a previously-passing `03`, measured, not
+    ///   theorized.
     fn read_status(&mut self, open_bus: u8) -> u8 {
-        let result = (self.status & 0xE0) | (open_bus & 0x1F);
+        let mut result = (self.status & 0xE0) | (open_bus & 0x1F);
         self.status &= !STATUS_VBLANK;
         self.w = false;
-        if self.scanline == VBLANK_START_SCANLINE && self.dot == 0 {
-            self.suppress_vblank_this_frame = true;
+        match (self.scanline, self.dot) {
+            (VBLANK_START_SCANLINE, 0) => self.suppress_vblank_this_frame = true,
+            (VBLANK_START_SCANLINE, 1) => {
+                result |= STATUS_VBLANK;
+                self.suppress_vblank_this_frame = true;
+            }
+            (PRERENDER_SCANLINE, 1) => result &= !STATUS_VBLANK,
+            _ => {}
         }
         result
     }

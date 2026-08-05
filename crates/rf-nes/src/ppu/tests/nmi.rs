@@ -167,6 +167,100 @@ fn reading_2002_after_the_set_dot_does_not_suppress_it() {
     );
 }
 
+/// The reachable "same PPU clock as the set" half of the race (ticket
+/// W1-05c; `scroll.rs`'s `read_status` doc): a `$2002` read landing exactly
+/// at (scanline 241, dot 1) -- the SAME dot the set itself is about to
+/// process on -- must read the flag AS SET (the read wins the race,
+/// nesdev.org/wiki/PPU_frame_timing verbatim: "Reading on the same PPU
+/// clock or one later reads it as set, clears it, and suppresses the NMI
+/// for that frame") while still suppressing the real set for the rest of
+/// the frame, exactly like the one-dot-earlier case above -- verified
+/// against `02-vbl_set_time.s`'s own expected table (row 4, "flag setting
+/// is suppressed"), which this exact dot/value combination reproduces
+/// byte-for-byte.
+#[test]
+fn reading_2002_on_the_same_dot_as_the_set_reads_it_as_set_and_still_suppresses_it() {
+    let mut ppu = test_ppu();
+    ppu.scanline = VBLANK_START_SCANLINE;
+    ppu.dot = 1;
+
+    let result = ppu.read_register(2, 0);
+    assert_eq!(
+        result & STATUS_VBLANK,
+        STATUS_VBLANK,
+        "the read wins the race and observes the flag as freshly set"
+    );
+    assert_eq!(
+        ppu.status & STATUS_VBLANK,
+        0,
+        "self.status itself never really holds the bit -- this read's own \
+         unconditional clear (identical to any $2002 read) already covers it"
+    );
+
+    // The real set-processing for dot 1 hasn't run yet (nothing has ticked
+    // since we set `ppu.dot` by hand) -- confirm it stays suppressed once
+    // it does, and for the rest of the vblank window, not just this read.
+    ppu.tick(); // processes dot 1: the real set, gated by suppression
+    assert_eq!(ppu.status & STATUS_VBLANK, 0);
+    for _ in 0..30u32 {
+        ppu.tick();
+        assert_eq!(ppu.status & STATUS_VBLANK, 0);
+    }
+}
+
+/// The clear-side fencepost symmetric with the set-side race above (ticket
+/// W1-05c): a `$2002` read landing exactly at (scanline 261, dot 1) -- the
+/// SAME dot the pre-render auto-clear itself is about to process on -- must
+/// read the flag as ALREADY clear, simultaneous with that auto-clear,
+/// rather than the stale still-set value `self.status` holds until
+/// `Ppu::process_dot`'s prerender-dot-1 arm actually runs.
+///
+/// Nesdev's own "VBL Flag Timing" table (`crate::ppu`'s module doc cites
+/// the URL) describes the SET-side race explicitly but says nothing about
+/// an analogous read-vs-clear race -- this fencepost is instead justified
+/// directly by `03-vbl_clear_time.s`'s own expected table (christopherpow/
+/// nes-test-roms, `ppu_vbl_nmi/source/03-vbl_clear_time.s`), which shares
+/// ONE `sync_vbl_delay`-established reference point with `02-vbl_set_time`
+/// (nesdev: the flag "is cleared exactly 20 scanlines after being set", so
+/// the two boundaries are locked together) -- fixing only the set-side
+/// fencepost and leaving this one asymmetric measurably shifted
+/// `03-vbl_clear_time`'s own table by one dot against `02`'s, breaking a
+/// previously-passing ROM. Per MASTER_PROMPT's "the test ROM wins" rule
+/// where the wiki is silent and the fetched ROM has an opinion.
+#[test]
+fn reading_2002_on_the_same_dot_as_the_clear_reads_it_as_already_clear() {
+    let mut ppu = test_ppu();
+    ppu.status = STATUS_VBLANK; // set from the frame that's ending
+    ppu.scanline = PRERENDER_SCANLINE;
+    ppu.dot = 1;
+
+    let result = ppu.read_register(2, 0);
+    assert_eq!(
+        result & STATUS_VBLANK,
+        0,
+        "the read observes the flag as already cleared, simultaneous with the real auto-clear"
+    );
+}
+
+/// Contrast for the test above: one dot EARLIER (before the auto-clear's
+/// own dot), a `$2002` read must still see the flag as genuinely set --
+/// proving the masking is specific to dot 1, not every prerender-scanline
+/// read.
+#[test]
+fn reading_2002_one_dot_before_the_clear_still_reads_it_as_set() {
+    let mut ppu = test_ppu();
+    ppu.status = STATUS_VBLANK;
+    ppu.scanline = PRERENDER_SCANLINE;
+    ppu.dot = 0;
+
+    let result = ppu.read_register(2, 0);
+    assert_eq!(
+        result & STATUS_VBLANK,
+        STATUS_VBLANK,
+        "one dot before the clear dot, the flag reads normally as still set"
+    );
+}
+
 /// The suppression latch must not leak into the NEXT frame's own VBlank
 /// window -- `process_dot`'s pre-render dot-1 arm resets it alongside the
 /// other per-frame status-bit clears.
