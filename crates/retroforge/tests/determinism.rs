@@ -357,6 +357,42 @@ fn positive_known_button_byte_lands_at_expected_wram_address() {
     );
 }
 
+/// The debugger single-step path must apply held input too (ticket W1-07
+/// conductor fix). `crate::core_thread`'s `CoreCommand::StepFrame` arm is
+/// `latch_and_advance_frame(input.load(), ..)` followed by `pause()`; this
+/// pins the two properties that arm depends on — the latched button
+/// actually reaches the machine, and the machine ends up `Paused` per
+/// FR-DBG-004 ("stepping always leaves the machine stopped"). The arm
+/// itself is one line of channel wiring over exactly this pair: a frame
+/// stepped through the channel emits no `CoreEvent::Frame` (only
+/// `tick_running_with_input` does) and WRAM is not observable from the UI
+/// side, so the semantics are pinned here rather than through the
+/// timing-dependent mpsc path (module doc).
+#[test]
+fn step_frame_semantics_latch_input_and_leave_the_machine_paused() {
+    let mut stepper = EmuStepper::from_ines_bytes(&controller_reader_rom())
+        .expect("fixture ROM must be a valid iNES image");
+    let mut sink = rf_renderer::FrameBuffer::new();
+
+    // Boot-artifact call, same as the positive test above.
+    stepper.latch_and_advance_frame(InputFrame::empty(), &mut sink);
+    stepper.resume(); // a stepped frame must force Paused even from Running
+
+    stepper.latch_and_advance_frame(frame(0b0000_0001), &mut sink); // A held
+    stepper.pause();
+
+    assert_eq!(
+        stepper.peek(0x0010),
+        1,
+        "a button held while single-stepping a frame must reach the machine — \
+         without the latch, holding a key and pressing Step Frame is silently ignored"
+    );
+    assert!(
+        stepper.is_paused(),
+        "FR-DBG-004: stepping always leaves the machine stopped"
+    );
+}
+
 /// Criterion 2 (FR-STATE-006): record a run through
 /// `ReplayRecorder`/`EmuStepper::latch_and_advance_frame` — the one
 /// shared latch-then-advance path (`crate::stepper` module doc) — then

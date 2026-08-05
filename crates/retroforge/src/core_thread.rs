@@ -300,9 +300,28 @@ fn core_thread_main(
             match cmd {
                 CoreCommand::Pause => stepper.pause(),
                 CoreCommand::Resume => stepper.resume(),
+                // Debugger single-step latches held keys too (ticket
+                // W1-07 conductor fix): a stepped frame is still a whole
+                // frame, so it goes through the same shared
+                // latch-then-advance path as live gameplay
+                // (`crate::stepper`'s module doc says that path is the
+                // ONLY one, and this arm advancing a frame outside it
+                // would make that doc false), then force-pauses exactly
+                // as `EmuStepper::step_frame` does (FR-DBG-004:
+                // "stepping always leaves the machine stopped"). Without
+                // this, holding a key and pressing Step Frame would be
+                // ignored — which is precisely the case a debugger user
+                // steps a frame to inspect.
                 CoreCommand::StepFrame => {
-                    stepper.step_frame(&mut sink);
+                    stepper.latch_and_advance_frame(input.load(), &mut sink);
+                    stepper.pause();
                 }
+                // Deliberately does NOT latch, and the asymmetry with
+                // StepFrame above is intentional — do not "fix" it. A
+                // scanline step stops *mid-frame*, so latching here would
+                // apply input at a non-frame boundary, violating
+                // ARCHITECTURE §6's determinism rule that input only ever
+                // takes effect at frame boundaries.
                 CoreCommand::StepScanline => {
                     stepper.step_scanline(&mut sink);
                 }
