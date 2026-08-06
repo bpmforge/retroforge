@@ -35,11 +35,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{mpsc, Arc, Once};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rf_core_api::InputFrame;
 use rf_nes::NesLoadError;
 
+use crate::pacer::FramePacer;
 use crate::stepper::EmuStepper;
 
 /// The UI thread's latest held-input sample, shared with the core thread
@@ -302,6 +303,10 @@ fn core_thread_main(
     // the same time the loop body needs to *own* a sender to `send` frames
     // from inside a `move` closure — clone rather than fight the borrow.
     let frame_tx = evt_tx.clone();
+    // Ticket W2-18: without this the loop free-runs — 18.8x real speed in
+    // a release build. See `crate::pacer` for why it is deadline-based
+    // rather than a fixed sleep, and why it cannot affect determinism.
+    let mut pacer = FramePacer::new();
     run_guarded_loop(&evt_tx, move || {
         // Ticket W2-14: a stepped frame must be SENT, not just rendered.
         // Before this flag existed the only `CoreEvent::Frame` send site
@@ -359,6 +364,19 @@ fn core_thread_main(
         // step. That is correct for a scanline stepper, and it is why one
         // scanline step looks almost identical: Step Frame is the visible
         // one.
+        // Pace BEFORE advancing, so the sleep replaces idle spinning
+        // rather than being added on top of a frame's work. Only while
+        // actually running: a paused core falls through to the 5 ms idle
+        // sleep below, and `resync` stops that pause from later looking
+        // like a backlog to repay (`crate::pacer`).
+        if stepper.is_paused() {
+            pacer.resync();
+        } else {
+            let delay = pacer.next_delay(Instant::now());
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+        }
         let ran = stepper.tick_running_with_input(input.load(), &mut sink);
         if ran || stepped {
             let msg = FrameMsg {

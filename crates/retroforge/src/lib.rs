@@ -21,6 +21,7 @@ pub mod app;
 pub mod core_thread;
 pub mod hash;
 pub mod input_map;
+pub mod pacer;
 pub mod rom_open;
 pub mod stepper;
 

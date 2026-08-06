@@ -1121,6 +1121,39 @@
    ]
   },
   {
+   "id": "W2-18",
+   "title": "Frame pacing: run at NTSC speed instead of as fast as the host can",
+   "phase": 2,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W2-14"
+   ],
+   "acceptance": [
+    "a running core advances at the NTSC rate (60.0988 Hz) rather than free-running -- measured today at 113 fps in debug (1.9x too fast) and 1132 fps in release (18.8x too fast), i.e. unusable in a release build",
+    "pacing NEVER affects simulation: it decides WHEN a frame runs, never WHAT it computes, so the determinism suites are untouched -- proven by a mutation, not asserted",
+    "the pacer does not accumulate drift (a fixed sleep-per-frame would) and does not death-spiral after a stall (unbounded catch-up would) -- both asserted headlessly with synthetic timestamps, no real sleeping in tests",
+    "pacing is switchable off, because FR-ENH-008 defines loading-skip fast-forward as 'disabling frame pacing without altering simulation' and cannot be built on something with no off switch"
+   ],
+   "points": 2,
+   "status": "done",
+   "stories": [
+    "E1-S2"
+   ],
+   "notes": [
+    "RAISED BY BRAD 2026-08-06: 'what about speed do we keep the global timers accurate'. Two different things had quietly diverged and the distinction is worth keeping straight. EMULATED timing is accurate and proven -- nestest 8991/8991 byte-exact, nes6502 2,560,000/2,560,000, mmc3_test_2 6/6 including the A12 filter, master_cycle advancing exactly once per bus op. WALL-CLOCK pacing did not exist AT ALL: crates/retroforge/src/core_thread.rs's loop emulated a frame, sent it, and immediately started the next; the only sleep in it was the PAUSED idle path. Measured on Alter Ego: 113 fps debug (1.9x real speed, which matches Brad's report of a playable but quick game) and 1132 fps release (18.8x -- unusable).",
+    "PRE-FLIGHT 2026-08-06 (conductor) -- FRAME PACING IS ASSUMED BY THE DESIGN DOCS IN FOUR PLACES AND IMPLEMENTED IN NONE. docs/design/FAILURE_MODES.md FM-07 throttles a plugin to 'protect frame pacing'; docs/design/PLUGINS.md repeats it; docs/design/RENDERER.md prefers Fifo/vsync present mode; and FR-ENH-008 literally DEFINES loading-skip as 'disabling frame pacing without altering simulation' -- you cannot disable what was never built. Same class of defect as R-05's phase gate: a control that exists in prose and nowhere in code.",
+    "DESIGN RULING 2026-08-06 (conductor): this is the INTERIM mechanism and says so in its own module doc. The documented end-state is an AUDIO-DRIVEN clock -- rf-audio's cpal ring plus dynamic rate control resampling within +/-0.5% against buffer fill (W2-05, behind W2-01a -> W2-01b) -- which is the right long-term answer because it self-corrects drift and prevents the underrun cascade FM-02 describes. A wall-clock sleep cannot do that. But W2-05 is three tickets away and the emulator is 18.8x too fast in release TODAY, so a host-clock pacer lands now and W2-05 subsumes it. Deliberately NOT waiting: an unusable release build is a worse state than a mechanism that gets replaced.",
+    "DETERMINISM NOTE 2026-08-06 (conductor), stated because it looks scarier than it is: pacing introduces wall-clock reads (Instant::now) into the emulator's run loop, which sounds like it violates FR-CORE-003 'cores shall contain no wall-clock reads'. It does not, and the boundary is mechanical rather than a judgement call: scripts/validate-arch.sh's determinism lint greps ONLY crates/rf-{core-api,nes,snes,cart}/src for std::time/Instant::now, and this lives in crates/retroforge, the app shell. More fundamentally, pacing gates WHEN tick_running_with_input is called and never touches its arguments or the machine, so identical input logs still produce identical state -- which the 10k-frame double-run suite continues to prove because it drives EmuStepper directly and never goes near the pacer.",
+    "CLOSED 2026-08-06 (conductor). MEASURED BEFORE AND AFTER through the real core thread, not just the unit: release went 1132 fps (18.8x NTSC) -> 60.3 fps (1.00x), debug 113 fps (1.9x) -> 60.0 fps (1.00x). Gate all seven exit 0, 495 passed / 0 failed / 3 ignored (was 487). validate-evidence stayed green with NO regeneration, which is itself the check that this touched nothing under crates/rf-nes.",
+    "DESIGN 2026-08-06: deadline-based, not sleep-per-frame, because the two obvious failure modes pull in opposite directions and a naive implementation hits one or the other. DRIFT: a fixed sleep(period) keeps every scheduler overshoot forever, so the emulator runs perpetually slow and the error compounds -- avoided by advancing an absolute deadline by exactly one period, so an overrun on one frame is repaid by a shorter sleep on the next. DEATH SPIRAL: a pure deadline scheme owes hundreds of frames after a stall (breakpoint, laptop suspend) and then runs flat-out repaying them, which the user sees as an unwanted fast-forward exactly when they least want it -- avoided by MAX_LAG (34ms, two frames), past which the debt is dropped and the schedule resyncs. The pacer holds NO clock of its own (every method takes `now`), so all eight tests use synthetic timestamps and none of them sleeps.",
+    "MUTATION-TESTED 2026-08-06 (conductor): deleting the MAX_LAG resync branch -- i.e. reverting to the pure deadline scheme -- fails a_long_stall_resyncs_instead_of_fast_forwarding, which simulates a one-second host stall and asserts the very next frame is paced normally rather than being one of ~60 free-running catch-up frames. Restored, verified byte-identical by checksum. Determinism independence confirmed separately by running the release 10k-frame double-run pair after the change: 2 passed, unchanged -- the suite drives EmuStepper directly and never constructs a pacer, so the independence is structural rather than incidental.",
+    "FOUR TESTS WERE NAIVE, NOT THE CODE -- the same trap as W2-15's, recorded again because it recurred within a day. The first drafts called next_delay exactly AT the deadline and expected a full period back; that is wrong, because the returned value is time-UNTIL-DUE, not time-between-frames, so arriving exactly on time correctly means 'run now, wait zero'. Rewritten to model how the loop actually calls it -- sleep the delay, do a frame's work, ask again -- and the reasoning is kept in the test's own doc comment so the next reader does not 'fix' the pacer to match the wrong mental model."
+   ]
+  },
+  {
    "id": "W3-01",
    "title": "wgpu original pipeline + headless golden frames",
    "phase": 3,
