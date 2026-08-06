@@ -180,6 +180,27 @@
 //! mechanism with a test-only `CoreSink` that records the calls it
 //! receives.
 //!
+//! ## Sprite-limit-bypass overlay (ticket W3-05a) — a staging decision, not
+//! where the reconstruction belongs long-term
+//!
+//! Brad's 2026-08-03 sink ruling says the bypass reconstructs dropped
+//! sprites from OAM via `StateView`/`SpriteHistorian` in `rf-enhance`. That
+//! is the right END state and was NOT reachable when this ticket landed:
+//! `rf-nes` implemented no `EmulatorCore::state_view` (W2-04's job), and
+//! nothing outside this crate could reach CHR pattern data or palette RAM —
+//! `rf-enhance` could see *which* sprites OAM held but not render one. So
+//! this ticket records the dropped sprites' pixels HERE, inside the PPU,
+//! where the pattern/palette data already live, into a side buffer
+//! (`sprites.rs`'s `overlay_sprites`/`overlay_line_buffer`) the app
+//! composites via a second, independent [`CoreSink::overlay_scanline`]
+//! channel — never through [`PpuPixel`]/`video_scanline`, which stays
+//! accuracy-exact (`PpuPixel::dropped_by_limit`'s doc). When `StateView`
+//! lands, W3-05 is expected to move this to `rf-enhance` per the ruling;
+//! this is documented here so a later reader finds a staging decision, not
+//! a mistake. See `sprites.rs`'s own doc for the recording/compositing
+//! design and the pure-observation argument (must not perturb
+//! `self.status`, secondary OAM, the fetch pipeline, or timing, on or off).
+//!
 //! ## `palette_index` semantics (public commitment, binds W1-04b/W3-xx)
 //!
 //! Each emitted [`rf_core_api::PpuPixel::palette_index`] is the raw 6-bit
@@ -243,7 +264,7 @@ mod sprites;
 mod tests;
 
 use rf_cart::Mirroring;
-use rf_core_api::{CoreSink, PixelLayer, PpuPixel};
+use rf_core_api::{CoreSink, OverlayPixel, PixelLayer, PpuPixel};
 
 /// Scanline 261 is the pre-render line (some sources call it -1);
 /// represented as an unsigned value here purely to avoid a signed
@@ -265,6 +286,13 @@ const STATUS_SPRITE_OVERFLOW: u8 = 0x20;
 struct CompletedScanline {
     y: u16,
     pixels: [PpuPixel; 256],
+    /// The overlay layer for this same row (ticket W3-05a; module doc's
+    /// "Sprite-limit-bypass overlay" section) — all-transparent whenever
+    /// `sprite_overlay_enabled` was `false` for this scanline, since
+    /// `sprites.rs`'s `record_overlay_sprites` never populates
+    /// `overlay_sprites` in that case. Always present (not `Option`) so
+    /// `finish_scanline` never needs to branch on the flag.
+    overlay: [OverlayPixel; 256],
 }
 
 /// One sprite copied into secondary OAM by [`Ppu::evaluate_sprites`]
@@ -415,6 +443,44 @@ pub struct Ppu {
     /// across real dots instead of computed all at once.
     sprite_pattern_lo_latch: u8,
 
+    // ---- sprite-limit-bypass overlay (ticket W3-05a; module doc's
+    // "Sprite-limit-bypass overlay" section, `sprites.rs`'s module doc) ----
+    /// Opt-in switch (default `false` — CLAUDE.md law 6, FR-MODE-002).
+    /// Gates only whether [`sprites::Ppu::record_overlay_sprites`] (called
+    /// from `evaluate_sprites`) does its extra OAM scan/CHR fetch work each
+    /// scanline — never anything in the accuracy path itself.
+    sprite_overlay_enabled: bool,
+    /// The sprites the 8-per-scanline limit dropped, as evaluated during
+    /// THIS scanline's dot 65 (empty whenever `sprite_overlay_enabled` was
+    /// `false` at record time) — the overlay's analogue of `secondary_oam`,
+    /// with the exact same one-scanline-pipeline-delay relationship to
+    /// [`overlay_active_sprites`] that `secondary_oam` has to
+    /// `active_sprites` (`sprites.rs` module doc's "one-scanline pipeline
+    /// delay" section): NOT read directly by [`Ppu::output_pixel`], which
+    /// would otherwise see this scanline's own dot-65 write partway through
+    /// its own dot 1-256 pixel loop (dots 1-64 before the write, 65-256
+    /// after) — a genuine mid-scanline tear, not a one-scanline-early
+    /// symptom. [`Ppu::reset_sprite_output_units`] copies this into
+    /// `overlay_active_sprites` at dot 257, the same latch point
+    /// `active_sprite_count = secondary_oam_count` already uses, so by the
+    /// time the scanline that renders it starts, the render-time copy is
+    /// frozen and uniform across every x.
+    overlay_sprites: Vec<SpriteUnit>,
+    /// The render-ready snapshot of `overlay_sprites`, latched by
+    /// [`Ppu::reset_sprite_output_units`] at dot 257 of the PRECEDING
+    /// scanline — [`Ppu::overlay_pixel`]'s only reader, mirroring
+    /// `active_sprites`'s own role for the accuracy sprite layer (see
+    /// `overlay_sprites`'s doc for why reading `overlay_sprites` directly
+    /// would tear mid-scanline).
+    overlay_active_sprites: Vec<SpriteUnit>,
+    /// The overlay layer being built for the CURRENT scanline, written
+    /// pixel-by-pixel by `sprites.rs`'s `output_pixel` alongside (never
+    /// instead of) `line_buffer` — a brand-new field nothing on the
+    /// accuracy path reads, which is exactly what makes writing it
+    /// structurally incapable of perturbing `self.status`/`line_buffer`/
+    /// timing.
+    overlay_line_buffer: [OverlayPixel; 256],
+
     // ---- scanline output ----
     line_buffer: [PpuPixel; 256],
     completed: Vec<CompletedScanline>,
@@ -446,6 +512,13 @@ const BLANK_PIXEL: PpuPixel = PpuPixel {
     sprite_id: None,
     priority: 0,
     dropped_by_limit: false,
+};
+
+/// A transparent overlay pixel — [`Ppu::new`]'s initial `overlay_line_buffer`
+/// fill and `sprites.rs`'s `overlay_pixel`'s "nothing to draw" result.
+const BLANK_OVERLAY_PIXEL: OverlayPixel = OverlayPixel {
+    palette_index: 0,
+    opaque: false,
 };
 
 impl Ppu {
@@ -490,6 +563,10 @@ impl Ppu {
             active_sprites: [EMPTY_SPRITE_UNIT; 8],
             active_sprite_count: 0,
             sprite_pattern_lo_latch: 0,
+            sprite_overlay_enabled: false,
+            overlay_sprites: Vec::new(),
+            overlay_active_sprites: Vec::new(),
+            overlay_line_buffer: [BLANK_OVERLAY_PIXEL; 256],
             line_buffer: [BLANK_PIXEL; 256],
             completed: Vec::with_capacity(240),
             dot_clock: 0,
@@ -508,6 +585,23 @@ impl Ppu {
     /// `ppu_stub` this ticket replaces).
     pub fn oam_addr(&self) -> u8 {
         self.oam_addr
+    }
+
+    /// Whether the sprite-limit-bypass overlay is currently recording
+    /// (ticket W3-05a; module doc's "Sprite-limit-bypass overlay" section).
+    /// `false` on a freshly constructed `Ppu` (law 6: a fresh install boots
+    /// in Accuracy Mode).
+    #[must_use]
+    pub fn sprite_overlay_enabled(&self) -> bool {
+        self.sprite_overlay_enabled
+    }
+
+    /// Opt into (or out of) the sprite-limit-bypass overlay. Pure
+    /// state-toggle — see module doc: turning this on or off never touches
+    /// `self.status`, secondary OAM, the fetch pipeline, or timing, either
+    /// at the moment of the call or on any later scanline.
+    pub fn set_sprite_overlay_enabled(&mut self, enabled: bool) {
+        self.sprite_overlay_enabled = enabled;
     }
 
     /// The exact side effect of one `OAMDATA` write — factored out because
@@ -667,8 +761,18 @@ impl Ppu {
     /// seam"). Safe to call at any time, including mid-frame; a real
     /// integration is expected to call it once per frame.
     pub fn drain(&mut self, sink: &mut dyn CoreSink) {
+        // Ticket W3-05a: the overlay channel is gated on the CURRENT flag
+        // (not a per-scanline stored one) so the default accuracy path
+        // (overlay never enabled) pays for exactly zero extra `CoreSink`
+        // calls — `line.overlay` is already guaranteed all-transparent
+        // whenever the overlay was off at RECORD time (module doc), so
+        // this gate is a pure perf skip, never a correctness difference.
+        let overlay_on = self.sprite_overlay_enabled;
         for line in self.completed.drain(..) {
             sink.video_scanline(line.y, &line.pixels);
+            if overlay_on {
+                sink.overlay_scanline(line.y, &line.overlay);
+            }
         }
     }
 
@@ -676,6 +780,7 @@ impl Ppu {
         self.completed.push(CompletedScanline {
             y: self.scanline,
             pixels: self.line_buffer,
+            overlay: self.overlay_line_buffer,
         });
     }
 }

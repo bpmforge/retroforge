@@ -27,7 +27,7 @@ pub use error::{CoreError, StateError};
 pub use event::{CoreEvent, EventMask};
 pub use input::{InputFrame, MAX_INPUT_PORTS};
 pub use state_view::{StateReader, StateView, StateWriter};
-pub use video::{PixelLayer, PpuPixel};
+pub use video::{OverlayPixel, PixelLayer, PpuPixel};
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-core-api";

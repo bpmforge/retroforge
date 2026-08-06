@@ -78,6 +78,13 @@ pub struct RetroForgeApp {
     /// the core thread's `SharedInputFrame` (module doc).
     input_latch: rf_input::InputLatch,
     keymap: rf_input::KeyMap,
+    /// UI-thread mirror of the core thread's overlay setting (ticket
+    /// W3-05a) — same "set right after sending a command" pattern
+    /// `running` above uses, for the same reason (the checkbox needs
+    /// something to read/write; the core thread's `EmuStepper` is the real
+    /// source of truth). `false` by default: a freshly opened ROM boots in
+    /// Accuracy Mode (law 6).
+    sprite_overlay: bool,
 }
 
 impl RetroForgeApp {
@@ -93,6 +100,7 @@ impl RetroForgeApp {
             position: None,
             input_latch: rf_input::InputLatch::new(),
             keymap: rf_input::KeyMap::default_nes(),
+            sprite_overlay: false,
         }
     }
 
@@ -135,6 +143,11 @@ impl RetroForgeApp {
                 self.crash = None;
                 self.texture = None;
                 self.running = false;
+                // A freshly loaded ROM's core boots in Accuracy Mode (law
+                // 6) — mirror that in the checkbox too, rather than leaving
+                // a previous ROM's overlay choice looking still-checked
+                // against a core that just reset it.
+                self.sprite_overlay = false;
                 self.status = format!("Loaded {}", path.display());
             }
             Err(e) => {
@@ -252,6 +265,21 @@ impl RetroForgeApp {
                     self.running = false;
                     self.awaiting_stepped_frame = true;
                     self.send_command(CoreCommand::StepScanline);
+                }
+                ui.separator();
+                // Ticket W3-05a, FR-ENH-001: opt-in only, off by default
+                // (law 6) — checking this does not touch the accuracy
+                // simulation, only whether the dropped-sprite overlay gets
+                // composited on top of it (`Ppu`'s module doc, "Sprite-
+                // limit-bypass overlay" section).
+                if ui
+                    .add_enabled(
+                        has_core,
+                        egui::Checkbox::new(&mut self.sprite_overlay, "De-flicker overlay"),
+                    )
+                    .changed()
+                {
+                    self.send_command(CoreCommand::SetSpriteOverlay(self.sprite_overlay));
                 }
                 ui.separator();
                 ui.label(&self.status);

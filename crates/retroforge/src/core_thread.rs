@@ -208,6 +208,11 @@ pub enum CoreCommand {
     Resume,
     StepFrame,
     StepScanline,
+    /// Ticket W3-05a: opt into (or out of) the sprite-limit-bypass overlay.
+    /// A pure state toggle, not a stepping action — it does not itself
+    /// produce a `CoreEvent::Frame`; the next running/stepped frame simply
+    /// reflects the new setting.
+    SetSpriteOverlay(bool),
     Shutdown,
 }
 
@@ -346,6 +351,9 @@ fn core_thread_main(
                 CoreCommand::StepScanline => {
                     stepper.step_scanline(&mut sink);
                     stepped = true;
+                }
+                CoreCommand::SetSpriteOverlay(enabled) => {
+                    stepper.set_sprite_overlay_enabled(enabled);
                 }
                 CoreCommand::Shutdown => return LoopControl::Stop,
             }
@@ -572,6 +580,29 @@ mod tests {
             .evt_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("a stepped scanline must also deliver a frame to the UI");
+        assert!(matches!(evt, CoreEvent::Frame(_)));
+
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+    }
+
+    /// Ticket W3-05a: `SetSpriteOverlay` must be accepted like any other
+    /// command and must not itself break the ordinary step pipeline — sent
+    /// immediately before a `StepFrame`, the frame must still arrive.
+    #[test]
+    fn set_sprite_overlay_command_does_not_disrupt_stepping() {
+        let core = spawn(synthetic_nrom()).expect("synthetic NROM must spawn a core thread");
+        core.cmd_tx
+            .send(CoreCommand::SetSpriteOverlay(true))
+            .expect("core thread must accept SetSpriteOverlay");
+        core.cmd_tx
+            .send(CoreCommand::StepFrame)
+            .expect("core thread must still accept StepFrame afterward");
+
+        let evt = core
+            .evt_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a stepped frame must still be delivered after toggling the overlay");
         assert!(matches!(evt, CoreEvent::Frame(_)));
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);

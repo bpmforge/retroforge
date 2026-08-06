@@ -5,7 +5,7 @@ use crate::error::{CoreError, StateError};
 use crate::event::{CoreEvent, EventMask};
 use crate::input::InputFrame;
 use crate::state_view::{StateReader, StateView, StateWriter};
-use crate::video::PpuPixel;
+use crate::video::{OverlayPixel, PpuPixel};
 
 /// How [`EmulatorCore::reset`] should behave.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +90,21 @@ pub trait CoreSink {
     /// One fully-rendered scanline of indexed pixels (FR-CORE-004). Never
     /// RGB — see [`crate::video`].
     fn video_scanline(&mut self, y: u16, pixels: &[PpuPixel]);
+
+    /// One scanline's worth of overlay-only pixels (ticket W3-05a; see
+    /// [`crate::video::OverlayPixel`]'s doc) — sprites the hardware
+    /// per-scanline limit dropped, for a consumer that opted into drawing
+    /// them anyway. A **separate** channel from [`Self::video_scanline`],
+    /// never a replacement for it: [`PpuPixel`] stays accuracy-exact
+    /// regardless of whether a core ever calls this.
+    ///
+    /// Defaulted to a no-op so every existing [`CoreSink`] implementor
+    /// (test mocks included) keeps compiling unchanged — a sink that wants
+    /// the overlay (e.g. `rf-renderer`'s `FrameBuffer`) overrides it; one
+    /// that wraps another sink (e.g. `retroforge::stepper`'s
+    /// `CountingSink`) MUST forward it explicitly, or the overlay silently
+    /// vanishes at that wrapper regardless of what the core emitted.
+    fn overlay_scanline(&mut self, _y: u16, _pixels: &[OverlayPixel]) {}
 
     /// A block of interleaved audio samples produced since the last call.
     fn audio(&mut self, samples: &[i16]);

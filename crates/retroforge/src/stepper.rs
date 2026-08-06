@@ -120,6 +120,17 @@ impl CoreSink for CountingSink<'_> {
         self.inner.video_scanline(y, pixels);
     }
 
+    /// Ticket W3-05a: MUST forward explicitly, not rely on
+    /// `CoreSink::overlay_scanline`'s default no-op — this wrapper sits
+    /// between every `EmuStepper` caller and the real sink (`FrameBuffer`
+    /// in production), so an unforwarded default here would silently
+    /// discard the overlay at this seam regardless of what `Ppu::drain`
+    /// emitted, with no test above this layer able to tell the difference
+    /// (`inner` would just never see a call).
+    fn overlay_scanline(&mut self, y: u16, pixels: &[rf_core_api::OverlayPixel]) {
+        self.inner.overlay_scanline(y, pixels);
+    }
+
     fn audio(&mut self, samples: &[i16]) {
         self.inner.audio(samples);
     }
@@ -214,6 +225,29 @@ impl EmuStepper {
     #[must_use]
     pub fn peek(&self, addr: u16) -> u8 {
         self.bus.peek(addr)
+    }
+
+    /// The full 256-byte OAM as last written — forwards `NesBus::oam`
+    /// (ticket W3-05a: the mode-invariant test suite's fixture-sanity
+    /// check reads this to prove its sprite table actually landed).
+    #[must_use]
+    pub fn oam(&self) -> &[u8; 256] {
+        self.bus.oam()
+    }
+
+    /// Whether the sprite-limit-bypass overlay is currently recording
+    /// (ticket W3-05a) — forwards `NesBus::sprite_overlay_enabled`. `false`
+    /// on a freshly opened ROM (law 6: a fresh install boots in Accuracy
+    /// Mode).
+    #[must_use]
+    pub fn sprite_overlay_enabled(&self) -> bool {
+        self.bus.sprite_overlay_enabled()
+    }
+
+    /// Opt into (or out of) the sprite-limit-bypass overlay (ticket
+    /// W3-05a) — forwards `NesBus::set_sprite_overlay_enabled`.
+    pub fn set_sprite_overlay_enabled(&mut self, enabled: bool) {
+        self.bus.set_sprite_overlay_enabled(enabled);
     }
 
     /// Stop advancing on repaint ticks. Idempotent.

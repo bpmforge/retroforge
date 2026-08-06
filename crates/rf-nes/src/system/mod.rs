@@ -259,6 +259,20 @@ impl NesBus {
         self.ppu.oam()
     }
 
+    /// Whether the sprite-limit-bypass overlay is currently recording
+    /// (ticket W3-05a) — forwards [`Ppu::sprite_overlay_enabled`].
+    #[must_use]
+    pub fn sprite_overlay_enabled(&self) -> bool {
+        self.ppu.sprite_overlay_enabled()
+    }
+
+    /// Opt into (or out of) the sprite-limit-bypass overlay (ticket
+    /// W3-05a) — forwards [`Ppu::set_sprite_overlay_enabled`]. `false` by
+    /// default (a freshly built `NesBus` boots in Accuracy Mode, law 6).
+    pub fn set_sprite_overlay_enabled(&mut self, enabled: bool) {
+        self.ppu.set_sprite_overlay_enabled(enabled);
+    }
+
     /// Flush every completed-but-undrained scanline the PPU has produced
     /// through `sink` (acceptance criterion 3: "indexed pixels + metadata
     /// emitted via CoreSink") — see [`crate::ppu`]'s module doc for why

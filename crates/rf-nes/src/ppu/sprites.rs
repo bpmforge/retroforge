@@ -127,6 +127,53 @@
 //! flagged at all. Do not add code that sets this flag on a `Sprite`-layer
 //! pixel; the sink is accuracy-exact by design (see the ruling).
 //!
+//! ## Sprite-limit-bypass overlay (ticket W3-05a)
+//!
+//! `crate::ppu`'s module doc ("Sprite-limit-bypass overlay" section) has
+//! the staging rationale (why this lives here instead of `rf-enhance`).
+//! This file adds four pieces, all gated by [`Ppu::sprite_overlay_enabled`]
+//! at the recording end only:
+//! - [`Ppu::record_overlay_sprites`], called from the end of
+//!   [`Ppu::evaluate_sprites`] (dot 65) — an independent, un-buggy full OAM
+//!   scan that finds every in-range sprite the accuracy 8-cap dropped,
+//!   fetching each one's pattern bytes via [`Ppu::chr_peek`](super::mem)
+//!   (NOT [`Ppu::mem_read`] — see that method's doc for why: `mem_read`'s
+//!   A12 bus-observation side effect must never fire for an overlay-only
+//!   fetch), writing `overlay_sprites`.
+//! - [`Ppu::reset_sprite_output_units`]'s one added line (dot 257): copies
+//!   `overlay_sprites` into `overlay_active_sprites` — the overlay's
+//!   analogue of `active_sprite_count = secondary_oam_count` on the very
+//!   same line, and NOT optional (found by conductor review, before this
+//!   ticket closed): without this latch, [`Ppu::overlay_pixel`] reading
+//!   `overlay_sprites` directly mid-scanline would see dot 65's write
+//!   partway through that SAME scanline's own dot 1-256 pixel loop — x=0-63
+//!   (dots 1-64, before the write) stale from the previous scanline, x=64+
+//!   (after) fresh — a mid-scanline tear, not merely "one scanline early".
+//!   See `overlay_sprites`'s own field doc (`ppu/mod.rs`) for the full
+//!   argument; [`overlay_recording_stays_in_phase_across_a_scanline_tear_boundary`](super::tests::sprite_overlay)
+//!   is the dot-driven regression test for it.
+//! - [`Ppu::overlay_pixel`], [`Ppu::sprite_pixel`]'s overlay-layer twin —
+//!   reads `overlay_active_sprites` (never `overlay_sprites`), same
+//!   OAM-order/transparency/masking rules, plus the two priority checks
+//!   needed because this layer competes against pixels already resolved
+//!   for real (see its own doc).
+//! - [`Ppu::output_pixel`]'s last few lines, which write the resolved
+//!   overlay pixel into `overlay_line_buffer` — a field nothing on the
+//!   accuracy path reads, so this write is structurally incapable of
+//!   perturbing `line_buffer`, `self.status`, or anything else the
+//!   accuracy simulation depends on, on or off.
+//!
+//! **Pure observation, the load-bearing property**: every one of the four
+//! pieces above only ever *reads* accuracy-path state (`self.oam`,
+//! `active_sprites`/`sprite_pixel`'s result, `background_pixel`'s result,
+//! `self.mask`, `secondary_oam_count`) and only ever *writes* to fields
+//! (`overlay_sprites`, `overlay_active_sprites`, `overlay_line_buffer`) the
+//! accuracy path never reads back. That structural separation — not a
+//! promise to "be careful" — is why turning the overlay on or off cannot
+//! change `self.status` (sprite-0 hit, overflow), secondary OAM,
+//! `active_sprites`, or any dot/scanline timing: there is no code path from
+//! the overlay's writes back into any of those.
+//!
 //! ## Sprite-0 hit (ticket W1-05b)
 //!
 //! nesdev.org/wiki/PPU_OAM's "Sprite zero hits" section, condensed to its
@@ -163,7 +210,7 @@
 //! nesdev's condition names.
 use super::{EvaluatedSprite, Ppu, SpriteUnit, EMPTY_EVALUATED_SPRITE, EMPTY_SPRITE_UNIT};
 use crate::ppu::{STATUS_SPRITE0_HIT, STATUS_SPRITE_OVERFLOW};
-use rf_core_api::{PixelLayer, PpuPixel};
+use rf_core_api::{OverlayPixel, PixelLayer, PpuPixel};
 
 /// The resolved sprite-layer contribution at one screen x, from
 /// [`Ppu::sprite_pixel`] — the winning (highest-priority, first opaque)
@@ -274,6 +321,74 @@ impl Ppu {
                 m = (m + 1) & 3;
             }
         }
+
+        // Ticket W3-05a (module doc's "Sprite-limit-bypass overlay"
+        // section): runs strictly AFTER both phases above have finished
+        // and touches none of their outputs (`self.status`,
+        // `secondary_oam`, `secondary_oam_count`) — pure observation, not
+        // a third phase of the real algorithm. Gated on the opt-in flag so
+        // the accuracy-only default path does none of this extra work.
+        if self.sprite_overlay_enabled {
+            self.record_overlay_sprites();
+        }
+    }
+
+    /// Pure-observation companion to the two phases above (ticket W3-05a):
+    /// an independent, UN-buggy full scan of primary OAM (n = 0..64) using
+    /// the exact same [`Ppu::sprite_in_range`] test `evaluate_sprites`'s
+    /// phase 1 uses, collecting every in-range sprite in ascending OAM-index
+    /// order — but, unlike phase 1, never stopping at 8. The first 8
+    /// in-range sprites found (by construction, the SAME 8 phase 1 just
+    /// wrote into `secondary_oam`, since both loops walk `n` from 0 in the
+    /// same order under the same range test) are skipped as already
+    /// accuracy-rendered; every one after that is a sprite the hardware
+    /// limit actually drops, and only OAM-index order guarantees every
+    /// skipped sprite's index is lower than every recorded one — which is
+    /// exactly what makes `Ppu::overlay_pixel`'s "a real sprite already
+    /// opaque here always outranks the overlay" shortcut correct (lower
+    /// OAM index wins, applied across the real+overlay sets at once).
+    ///
+    /// Only reads `self.oam` (never mutates it) and calls
+    /// [`Ppu::sprite_fetch_address_parts`] (pure) and
+    /// [`Ppu::chr_peek`](super::mem) — the side-effect-free CHR reader,
+    /// deliberately NOT `Ppu::mem_read`, whose A12-bus-observation side
+    /// effect would otherwise perturb MMC3's real scanline-IRQ timing (see
+    /// `mem.rs`'s `chr_peek` doc). The only field this writes is
+    /// `overlay_sprites`, which nothing on the accuracy path reads.
+    fn record_overlay_sprites(&mut self) {
+        self.overlay_sprites.clear();
+        let mut found_in_range: u16 = 0;
+        for n in 0..64u16 {
+            let base = (n as usize) * 4;
+            let y = self.oam[base];
+            if !self.sprite_in_range(y) {
+                continue;
+            }
+            found_in_range += 1;
+            if found_in_range <= 8 {
+                // Already rendered by the accuracy path (secondary_oam /
+                // active_sprites) — not dropped, nothing to record.
+                continue;
+            }
+            let candidate = EvaluatedSprite {
+                y,
+                tile: self.oam[base + 1],
+                attr: self.oam[base + 2],
+                x: self.oam[base + 3],
+                oam_index: n as u8,
+            };
+            let (bank, tile_index, fine_row) = self.sprite_fetch_address_parts(candidate, true);
+            let addr_lo = bank | ((tile_index as u16) << 4) | fine_row;
+            let pattern_lo = self.chr_peek(addr_lo);
+            let pattern_hi = self.chr_peek(addr_lo | 0x08);
+            self.overlay_sprites.push(SpriteUnit {
+                pattern_lo,
+                pattern_hi,
+                attr: candidate.attr,
+                x: candidate.x,
+                oam_index: candidate.oam_index,
+            });
+        }
     }
 
     /// Pre-render dot 1 (unconditional — see module doc): reset both sprite
@@ -285,6 +400,13 @@ impl Ppu {
         self.secondary_oam_count = 0;
         self.active_sprites = [EMPTY_SPRITE_UNIT; 8];
         self.active_sprite_count = 0;
+        // Ticket W3-05a: same hygiene as the two clears above, applied to
+        // both overlay side buffers — brand-new fields this clear touches
+        // unconditionally (whether or not the overlay is enabled), which
+        // is safe by construction since nothing on the accuracy path ever
+        // reads them.
+        self.overlay_sprites.clear();
+        self.overlay_active_sprites.clear();
     }
 
     /// A garbage sprite standing in for an unused output-unit slot (ticket
@@ -354,6 +476,18 @@ impl Ppu {
     pub(super) fn reset_sprite_output_units(&mut self) {
         self.active_sprites = [EMPTY_SPRITE_UNIT; 8];
         self.active_sprite_count = self.secondary_oam_count;
+        // Ticket W3-05a: the overlay's own latch, at the exact same dot,
+        // for the exact same reason -- `overlay_sprites`'s doc explains why
+        // `Ppu::overlay_pixel` must never read `overlay_sprites` directly
+        // (it would tear mid-scanline: dots 1-64 stale, 65-256 fresh).
+        // `.clone()`, not a swap/take: `overlay_sprites` is unconditionally
+        // rebuilt from scratch by `record_overlay_sprites` at the NEXT
+        // scanline's dot 65 regardless of this clone's contents, so no
+        // sharing/aliasing concern exists either way -- this is simply the
+        // simplest correct option for a `Vec` this small (at most 56
+        // entries).
+        self.overlay_active_sprites
+            .clone_from(&self.overlay_sprites);
     }
 
     /// One dot of the sprite-fetch window (`dot` in `257..=320`) — see
@@ -535,6 +669,78 @@ impl Ppu {
         None
     }
 
+    /// Resolve the overlay layer's contribution at screen x (ticket
+    /// W3-05a): the highest-priority (lowest OAM index) opaque sprite among
+    /// `overlay_active_sprites` (NOT `overlay_sprites` — see that field's
+    /// doc for why reading the evaluation-time buffer directly here would
+    /// tear mid-scanline) — the ones the 8-sprite limit dropped for the
+    /// PRECEDING scanline's dot 65 — honoring the exact same rules
+    /// [`Ppu::sprite_pixel`] above
+    /// does (transparent pattern draws nothing, OAM-order = first-opaque-
+    /// wins, `x`/left-8/show-sprites masking), deliberately NOT invented
+    /// fresh — module doc: "match `sprite_pixel`'s semantics rather than
+    /// inventing parallel logic".
+    ///
+    /// Two additional priority checks a bare copy of `sprite_pixel` would
+    /// miss, both needed because this layer competes against pixels
+    /// `sprite_pixel`/`background_pixel` already resolved for the SAME x:
+    /// - `real_sprite_opaque`: every recorded overlay sprite's OAM index is
+    ///   strictly higher than every real (accuracy-rendered) sprite's index
+    ///   (`record_overlay_sprites`'s doc) — so a real opaque sprite pixel
+    ///   here always wins by the same "lower OAM index wins" rule, exactly
+    ///   as if the overlay sprite had lost during evaluation. Checked FIRST
+    ///   and unconditionally, matching a real sprite's priority never
+    ///   depending on its OWN behind-background bit (`sprite_pixel`'s own
+    ///   doc: priority-blind by construction).
+    /// - `bg_opaque`: an overlay sprite whose own attribute bit 5
+    ///   ("behind background") is set loses to an opaque background pixel —
+    ///   the identical BG/sprite priority rule `Ppu::output_pixel`'s table
+    ///   applies to real sprites, applied here to overlay ones.
+    fn overlay_pixel(
+        &self,
+        x: u16,
+        bg_opaque: bool,
+        real_sprite_opaque: bool,
+    ) -> Option<OverlayPixel> {
+        if !self.mask_show_sprites() {
+            return None;
+        }
+        if x < 8 && !self.mask_show_sprites_left8() {
+            return None;
+        }
+        if real_sprite_opaque {
+            return None;
+        }
+        for sprite in &self.overlay_active_sprites {
+            let sprite_x = sprite.x as u16;
+            if x < sprite_x || x >= sprite_x + 8 {
+                continue;
+            }
+            let mut col = x - sprite_x;
+            if sprite.attr & 0x40 != 0 {
+                col = 7 - col;
+            }
+            let bit = 7 - col;
+            let p0 = (sprite.pattern_lo >> bit) & 1;
+            let p1 = (sprite.pattern_hi >> bit) & 1;
+            let pattern = (p1 << 1) | p0;
+            if pattern == 0 {
+                continue;
+            }
+            let behind_background = sprite.attr & 0x20 != 0;
+            if behind_background && bg_opaque {
+                return None;
+            }
+            let palette_group = sprite.attr & 0x03;
+            let palette_addr = 0x10 | (palette_group << 2) | pattern;
+            return Some(OverlayPixel {
+                palette_index: self.palette_read(palette_addr as u16) & 0x3F,
+                opaque: true,
+            });
+        }
+        None
+    }
+
     /// Write `line_buffer[x]` for visible-scanline dot `x + 1`: combines
     /// [`Ppu::background_pixel`] and [`Ppu::sprite_pixel`] per nesdev.org/
     /// wiki/PPU_rendering's "Priority multiplexer decision table" (BG
@@ -600,6 +806,20 @@ impl Ppu {
             priority,
             dropped_by_limit: false,
         };
+
+        // Ticket W3-05a: the overlay layer, read-only over everything
+        // computed above (`bg_addr`/`sprite`, both `Copy`) and written only
+        // to `overlay_line_buffer` — never back into `line_buffer` or
+        // `self.status`, so this cannot feed back into the accuracy pixel
+        // or flags just computed. Unconditional (not gated on
+        // `sprite_overlay_enabled`): `overlay_sprites` is only ever
+        // non-empty when the flag was on at record time
+        // (`record_overlay_sprites`), so this resolves to
+        // `BLANK_OVERLAY_PIXEL` for free whenever the overlay is off,
+        // without a second flag check here.
+        self.overlay_line_buffer[x as usize] = self
+            .overlay_pixel(x, bg_addr.is_some(), sprite.is_some())
+            .unwrap_or(super::BLANK_OVERLAY_PIXEL);
     }
 }
 

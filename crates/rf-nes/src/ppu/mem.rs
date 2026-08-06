@@ -185,6 +185,21 @@ impl Ppu {
         self.chr[addr as usize % self.chr.len()]
     }
 
+    /// CHR pattern-table byte, side-effect-free (ticket W3-05a) — for the
+    /// sprite-limit-bypass overlay's pattern fetch (`sprites.rs`'s
+    /// `record_overlay_sprites`), which must NOT go through [`Ppu::mem_read`].
+    /// `mem_read` unconditionally feeds [`Ppu::observe_ppu_bus_address`],
+    /// the A12-rising-edge filter MMC3's scanline IRQ counter depends on
+    /// (this module's doc, "A12 rising-edge detection" section) — an
+    /// overlay pattern fetch through `mem_read` would perturb real A12 edge
+    /// timing and, through it, MMC3 IRQ delivery, exactly the kind of
+    /// simulation perturbation the ticket's mode invariant forbids. This is
+    /// the same masked-`chr_read` path `mem_read` itself uses, just without
+    /// the bus-address observation call.
+    pub(super) fn chr_peek(&self, addr: u16) -> u8 {
+        self.chr_read(addr & 0x1FFF)
+    }
+
     /// CHR ROM writes have no effect (no mapper registers exist for mapper
     /// 0, and real ROM can't be written); CHR RAM cartridges (`chr_is_ram`)
     /// accept them.

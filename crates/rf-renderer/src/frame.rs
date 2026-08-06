@@ -10,7 +10,7 @@
 //! acceptable pre-W3"). It does not touch the network, a GPU device, or
 //! `egui` at all — the `retroforge` crate's app layer is the only thing
 //! that turns [`FrameBuffer::rgba`] into an `egui::ColorImage`/texture.
-use rf_core_api::{CoreEvent, CoreSink, PpuPixel};
+use rf_core_api::{CoreEvent, CoreSink, OverlayPixel, PpuPixel};
 
 use crate::palette::palette_index_to_rgb;
 
@@ -93,6 +93,33 @@ impl CoreSink for FrameBuffer {
         }
     }
 
+    /// Ticket W3-05a: composite the sprite-limit-bypass overlay on top of
+    /// whatever [`Self::video_scanline`] already resolved for this same row
+    /// — `drain()`'s call ordering (`crate::ppu`'s `Ppu::drain`) guarantees
+    /// `video_scanline` for row `y` always runs first, so this always has
+    /// the accuracy pixel already in place to paint over. Only `opaque`
+    /// pixels write anything; a transparent one leaves the accuracy pixel
+    /// (background or backdrop — never a real sprite, `Ppu::overlay_pixel`'s
+    /// own priority rules already guarantee that) untouched.
+    fn overlay_scanline(&mut self, y: u16, pixels: &[OverlayPixel]) {
+        let row = y as usize;
+        if row >= NES_HEIGHT {
+            return; // same "degrade, never crash" stance as video_scanline.
+        }
+        let row_start = row * NES_WIDTH * 4;
+        for (x, pixel) in pixels.iter().enumerate().take(NES_WIDTH) {
+            if !pixel.opaque {
+                continue;
+            }
+            let [r, g, b] = palette_index_to_rgb(pixel.palette_index);
+            let offset = row_start + x * 4;
+            self.rgba[offset] = r;
+            self.rgba[offset + 1] = g;
+            self.rgba[offset + 2] = b;
+            self.rgba[offset + 3] = 0xFF;
+        }
+    }
+
     fn audio(&mut self, _samples: &[i16]) {
         // Video-only sink (ticket W1-06 scope); audio output is a later
         // ticket (rf-audio).
@@ -164,5 +191,75 @@ mod tests {
         });
         // Must not panic despite `row.len() == NES_WIDTH + 1`.
         fb.video_scanline(0, &row);
+    }
+
+    fn transparent_overlay_row() -> Vec<OverlayPixel> {
+        vec![
+            OverlayPixel {
+                palette_index: 0,
+                opaque: false
+            };
+            NES_WIDTH
+        ]
+    }
+
+    /// Ticket W3-05a: an opaque overlay pixel must paint OVER whatever
+    /// `video_scanline` already resolved for that row — the visible
+    /// "de-flicker" behavior this whole ticket exists for.
+    #[test]
+    fn overlay_scanline_paints_opaque_pixels_over_the_accuracy_frame() {
+        let mut fb = FrameBuffer::new();
+        fb.video_scanline(5, &solid_row(0x20)); // accuracy frame: white
+        let mut overlay = transparent_overlay_row();
+        overlay[3] = OverlayPixel {
+            palette_index: 0x16,
+            opaque: true,
+        };
+        fb.overlay_scanline(5, &overlay);
+
+        let row_start = 5 * NES_WIDTH * 4;
+        let expected = palette_index_to_rgb(0x16);
+        assert_eq!(
+            &fb.rgba()[row_start + 3 * 4..row_start + 3 * 4 + 3],
+            &expected,
+            "the one opaque overlay pixel must overwrite the accuracy pixel underneath"
+        );
+        // Every other x on the row is untouched (still the accuracy white).
+        assert_eq!(&fb.rgba()[row_start..row_start + 4], &[255, 255, 255, 255]);
+        assert_eq!(
+            &fb.rgba()[row_start + 4 * 4..row_start + 4 * 4 + 4],
+            &[255, 255, 255, 255]
+        );
+    }
+
+    /// An all-transparent overlay row (the default when the overlay is
+    /// disabled — `Ppu`'s own module doc) must leave the accuracy frame
+    /// completely unchanged, proving `opaque: false` never becomes a
+    /// sentinel color drawn anyway.
+    #[test]
+    fn overlay_scanline_all_transparent_leaves_the_accuracy_frame_untouched() {
+        let mut fb = FrameBuffer::new();
+        fb.video_scanline(5, &solid_row(0x20));
+        let before = fb.to_vec();
+        fb.overlay_scanline(5, &transparent_overlay_row());
+        assert_eq!(
+            fb.to_vec(),
+            before,
+            "an all-transparent overlay row must not change a single byte"
+        );
+    }
+
+    #[test]
+    fn overlay_scanline_out_of_range_is_dropped_not_panicking() {
+        let mut fb = FrameBuffer::new();
+        let mut overlay = transparent_overlay_row();
+        overlay[0] = OverlayPixel {
+            palette_index: 0x16,
+            opaque: true,
+        };
+        fb.overlay_scanline(NES_HEIGHT as u16, &overlay);
+        fb.overlay_scanline(u16::MAX, &overlay);
+        // No panic reaching here is the assertion; buffer stays untouched.
+        assert_eq!(fb.rgba()[3], 0xFF);
     }
 }

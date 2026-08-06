@@ -24,6 +24,11 @@
 //!   module doc is this test module's source-citation authority.
 //! - `sprite_zero_hit` — ticket W1-05b: `STATUS_SPRITE0_HIT` (x=255
 //!   exclusion, left-8 masking, priority-blindness, opacity, clear timing).
+//! - `sprite_overlay` — ticket W3-05a: the sprite-limit-bypass overlay
+//!   (`sprites.rs`'s `record_overlay_sprites`/`overlay_pixel`) — the
+//!   ticket's own >8-sprites-at-once acceptance test, plus a dedicated
+//!   A12-edge-timing regression test the project's six canaries don't
+//!   otherwise cover.
 //! - `nmi` — ticket W1-05b: [`Ppu::nmi_line`]'s `$2000`-bit-7-AND-`$2002`-
 //!   bit-7 level, `frame_count`, and the reachable half of the `$2002`-read
 //!   VBlank-set race (`crate::ppu`'s module doc "Scope fence" section).
@@ -40,6 +45,7 @@ mod read_buffer;
 mod scroll_registers;
 mod sink_emission;
 mod sprite_evaluation;
+mod sprite_overlay;
 mod sprite_zero_hit;
 
 use super::Ppu;

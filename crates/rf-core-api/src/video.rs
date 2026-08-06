@@ -62,5 +62,44 @@ pub struct PpuPixel {
     /// which its own acceptance criteria already imply, not from this flag.
     /// The field is retained for cores that can express a suppressed sprite
     /// without displacing a real pixel.
+    ///
+    /// # Update (W3-05a, 2026-08-06)
+    ///
+    /// [`OverlayPixel`]/[`crate::CoreSink::overlay_scanline`] is that
+    /// mechanism, landed as a spike beneath the `StateView`-based route this
+    /// doc still names as the eventual (W3-05) destination — see
+    /// `rf-nes/src/ppu/sprites.rs`'s module doc for why the reconstruction
+    /// lives in `rf-nes` today rather than `rf-enhance`. Do not read this as
+    /// evidence `dropped_by_limit` was the intended carrier after all; it
+    /// remains always `false` on the NES path and is not used by the
+    /// sprite-limit bypass.
     pub dropped_by_limit: bool,
+}
+
+/// One overlay-only pixel: a sprite the hardware's per-scanline sprite limit
+/// dropped, recorded separately from the accuracy-exact [`PpuPixel`] sink so
+/// it can never displace a real pixel (see [`PpuPixel::dropped_by_limit`]'s
+/// doc for why that displacement is forbidden). Carried through
+/// [`crate::CoreSink::overlay_scanline`], a channel independent of
+/// [`crate::CoreSink::video_scanline`] — ticket W3-05a.
+///
+/// Unlike [`PpuPixel`], this carries no layer/priority/sprite-id: by the
+/// time a core emits one, it has already resolved sprite-vs-sprite (lower
+/// OAM index wins) and sprite-behind-background priority against the real,
+/// already-rendered frame — the same rules [`PixelLayer`]/`PpuPixel`
+/// document, applied by the core before this struct exists at all. A
+/// consumer's only remaining job is: if `opaque`, paint `palette_index` over
+/// whatever [`PpuPixel`] already resolved at this position; if not, leave it
+/// alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayPixel {
+    /// Same semantics as [`PpuPixel::palette_index`] (raw 6-bit palette-RAM
+    /// value, not an address) — meaningless when `opaque` is `false`.
+    pub palette_index: u8,
+    /// Whether a dropped sprite actually won this pixel. `false` means
+    /// "draw nothing here" (either no dropped sprite reaches this x, its
+    /// pattern bit is transparent, a higher-priority real sprite already
+    /// claims it, or an opaque background pixel outranks a
+    /// behind-background dropped sprite) — never a sentinel palette index.
+    pub opaque: bool,
 }
