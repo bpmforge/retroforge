@@ -920,6 +920,36 @@
    ]
   },
   {
+   "id": "W2-13",
+   "title": "Open a zipped ROM: resolve the ROM inside a .zip",
+   "phase": 2,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "docs/TECH_STACK.md"
+   ],
+   "depends_on": [
+    "W1-06"
+   ],
+   "acceptance": [
+    "opening a .zip containing exactly one valid ROM loads it, and a bare .nes file still loads unchanged (FR-FE-002)",
+    "a zip with NO valid ROM, and a zip with MORE THAN ONE, are both refused with a diagnostic naming what was found -- never a silent pick, since zip entry order is not a meaningful ordering",
+    "untreated as trusted input: bytes actually READ are capped (never the central directory's attacker-controlled size field), cumulative read across entries is capped, nested archives are refused rather than recursed, and no entry is ever written to disk",
+    "the file dialog's filter offers zip alongside nes -- a user must be able to SELECT the file the loader can now read"
+   ],
+   "points": 2,
+   "status": "in_progress",
+   "stories": [
+    "E1-S2"
+   ],
+   "notes": [
+    "REQUESTED DIRECTLY BY BRAD 2026-08-06, out of phase order, recorded plainly rather than quietly renumbered: Phase 1 has not exited, and PLAYBOOK's gate rule says no Phase-N+1 ticket starts before N's exit criteria pass. That rule exists to stop scope drift in UNATTENDED builds; it is not a veto on the product owner asking for a feature. Filed as phase 2 because it is new scope beyond Phase 1's exit criteria, not because it waits for them.",
+    "PLACEMENT RULING 2026-08-06 (conductor, after being talked out of the wrong answer): this lives in crates/retroforge ONLY -- NOT in rf-cart. The tempting argument was that rf-cart owns cartridge identity and RA/No-Intro convention hashes the ROM INSIDE an archive, and that W2-11 (Alter Ego, fetched as alter_ego.zip) plus W2-07 (ROM library) would reuse it. Two things kill that: (1) rf-nes depends on rf-cart, so an unconditional zip dep drags flate2/zlib-rs and zopfli -- a COMPRESSOR -- into the NES core, and the mitigation (a default-off `archive` feature) is itself the tell that the placement is fighting the architecture rather than fitting it; (2) this project already recorded the same reasoning in crate::system's 'Mapper scope' note, which defers a Mapper trait because no second consumer exists yet to inform its shape. No second archive consumer exists yet either -- W2-11 can equally unzip in the fetch script, and W2-07 is speculative. Promoting a working, tested 40-line function later is cheap; unwinding a core-crate charter expansion is not. ARCHITECTURE section 7 gives rf-cart four responsibilities and archives is not among them.",
+    "PRE-FLIGHT 2026-08-06 (conductor), compile-probed in a scratch crate rather than read off docs: zip 8.6.0 with default-features=false, features=[\"deflate\"] compiles against ZipArchive::new(Cursor)/len()/by_index()/is_file()/name()/size() and Read+take(). LICENCE PRE-CLEARED, which is the check the seven-command gate does NOT make: the whole 16-crate tree resolves to MIT / Apache-2.0 / Zlib / Unlicense / 0BSD-or-MIT-or-Apache -- every one already on deny.toml's allowlist, so NO new per-crate exception is needed. W1-06 lost a round-trip to exactly this class of surprise; still re-run `cargo deny check licenses` in the REAL tree after Cargo.lock moves, because a probe is encouraging, not the gate.",
+    "DESIGN 2026-08-06 (conductor): detect the ROM inside by SNIFFING each entry's bytes through rf_cart::Cartridge::load, never by file extension -- that is what makes an arbitrarily-named entry inside alter_ego.zip work, and it reuses the console-agnostic path load_rom_bytes already takes. Structure it as a pure resolve_rom_bytes(&[u8]) so the zip logic is testable with in-memory archives: this module's existing write_temp helper keys a temp path on std::process::id() alone, which is the racy pattern this project was already burned by (libtest runs a binary's tests in parallel threads sharing a pid), so adding more filesystem tests here would compound a known hazard."
+   ]
+  },
+  {
    "id": "W3-01",
    "title": "wgpu original pipeline + headless golden frames",
    "phase": 3,
