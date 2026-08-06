@@ -19,62 +19,33 @@
 #   ticket         tracking ticket id (^W\d+-\d{2}[a-c]?$), MUST be open —
 #                  a closed/nonexistent ticket fails the report step too
 #
-# First real waivers (raised by ticket W1-05b, OWNED by W1-05c, 2026-08-03): 6 of the 10 real,
-# fetched `ppu_vbl_nmi` sub-ROMs fail against this crate's real NesBus+Cpu.
-# Investigated, not guessed at: `crate::ppu`'s module doc "One VBlank/NMI
-# race this module does NOT reach" section derives the architectural
-# ceiling this crate's lock-step tick-after-register-access ordering hits
-# (verified against nesdev.org/wiki/PPU_frame_timing's "VBL Flag Timing"
-# table and nesdev.org/wiki/NMI, cross-checked against a matching
-# "fails at row 03" symptom independently reported by another emulator
-# author on forums.nesdev.org/viewtopic.php?t=17682). All 6 failures below
-# show the SAME signature against the real, fetched expected tables (a
-# discrepancy of exactly one CPU cycle / 3 PPU dots at the suppression/
-# skip boundary, not a wrong transition point or wrong logic), consistent
-# with one shared root cause rather than six independent bugs. Fixing it
-# would require restructuring when `nmi_line()`/mask-write-timing are
-# sampled relative to `NesBus::tick_master`'s 3-dots-per-cycle batching —
-# CPU-crate-adjacent territory outside this ticket's `crates/rf-nes/src/
-# ppu/**`-plus-`system/mod.rs` write scope, and a real risk to the
-# already-byte-exact nestest/vector suites if attempted carelessly.
-[[waiver]]
-suite = "ppu_vbl_nmi"
-rom = "02-vbl_set_time"
-justification = "VBL-flag-set suppression fires one CPU cycle (3 PPU dots) earlier than the real fetched ROM's expected table (suppression row 03 vs. expected row 04); column 1's own set-transition point matches real hardware exactly, isolating the discrepancy to the read-vs-tick sub-cycle race documented in crate::ppu's module doc. See docs/STATUS.md's W1-05b entry for the full investigation."
-expiry = "2026-11-01"
-ticket = "W1-05c"
-
-[[waiver]]
-suite = "ppu_vbl_nmi"
-rom = "05-nmi_timing"
-justification = "Same one-CPU-cycle suppression-boundary discrepancy as 02-vbl_set_time (nmi_timing exercises the identical underlying VBL-set/read race, just via NMI firing instead of a direct $2002 poll). See docs/STATUS.md's W1-05b entry."
-expiry = "2026-11-01"
-ticket = "W1-05c"
-
-[[waiver]]
-suite = "ppu_vbl_nmi"
-rom = "06-suppression"
-justification = "This suite's own name-sake case: the suppression-window race (crate::ppu module doc's documented architectural limit). Table shows the exact same one-row-early pattern as 02/05. See docs/STATUS.md's W1-05b entry."
-expiry = "2026-11-01"
-ticket = "W1-05c"
-
-[[waiver]]
-suite = "ppu_vbl_nmi"
-rom = "07-nmi_on_timing"
-justification = "Same suppression-boundary-class discrepancy as 02/05/06 (toggling $2000 bit 7 near the VBL-set/suppression window). See docs/STATUS.md's W1-05b entry."
-expiry = "2026-11-01"
-ticket = "W1-05c"
-
-[[waiver]]
-suite = "ppu_vbl_nmi"
-rom = "08-nmi_off_timing"
-justification = "Same suppression-boundary-class discrepancy as 02/05/06/07. See docs/STATUS.md's W1-05b entry."
-expiry = "2026-11-01"
-ticket = "W1-05c"
-
+# Waiver history for `ppu_vbl_nmi` (raised by W1-05b at 6 of 10 failing,
+# 2026-08-03; reduced to 1 of 10 by W1-05c, 2026-08-05).
+#
+# W1-05b's five read-side waivers (02-vbl_set_time, 05-nmi_timing,
+# 06-suppression, 07-nmi_on_timing, 08-nmi_off_timing) are DELETED, not
+# re-dated: W1-05c made those ROMs actually pass, via two separable
+# mechanisms — `Ppu::read_status` answering more rows of nesdev's "VBL Flag
+# Timing" table (the same-clock (241,1) case and its (261,1) clear-side
+# mirror), and `NesBus::nmi_level_latch`, a one-PPU-DOT-delayed snapshot of
+# the NMI level. Both are mutation-verified as separable: reverting the
+# read_status arm alone breaks 02/03/05/06/07/08, reverting the latch alone
+# breaks only 05/06/07/08.
+#
+# W1-05b's ONE-SHARED-ROOT-CAUSE HYPOTHESIS IS NOW PARTLY REFUTED, and this
+# comment is corrected rather than left to rot. That hypothesis grouped all
+# six failures — including 10-even_odd_timing — under a single "one CPU
+# cycle / 3 PPU dots early" signature. It held for the five read-side ROMs.
+# It did NOT hold for 10-even_odd_timing, whose waiver below is rewritten
+# accordingly: W1-05c tried both `CpuBus::read` orderings and every
+# `read_status` model that fixed the other five, and 10 failed identically
+# under all of them. Its symptom needs a `$2001` write to take effect
+# EARLIER, while every mechanism W1-05c introduced moves effects LATER, so
+# no single uniform shift can satisfy both — which is why one ticket could
+# not close both defects.
 [[waiver]]
 suite = "ppu_vbl_nmi"
 rom = "10-even_odd_timing"
-justification = "Fails specifically at 'Clock is skipped too late, relative to enabling BG' (test #3 of 4; #2 and #4 pass) -- off by exactly one busy-poll loop iteration, consistent with the same class of sub-CPU-cycle read/write-vs-tick_master ordering limit as 02/05/06/07/08, this time on the $2001-write side of the odd-frame dot-339 skip rather than the $2002-read side. See docs/STATUS.md's W1-05b entry."
+justification = "Fails at 'Clock is skipped too late, relative to enabling BG' (sub-test #3 of 4; #2 and #4 pass) -- off by one busy-poll loop iteration on the $2001-write side of the odd-frame dot-339 skip. CORRECTED 2026-08-05 (W1-05c): this is NOT the same root cause as the five read-side ROMs W1-05b grouped it with -- that grouping is refuted, not merely unproven. W1-05c fixed all five and 10 failed IDENTICALLY under every variant tried (both CpuBus::read orderings, every read_status model). Direction of error is the discriminator: the read-side five needed effects to land one cycle LATER, while this needs a $2001 write to land EARLIER, so no uniform re-sequencing satisfies both. Remaining work: model when a $2001 mask write takes effect relative to the pre-render line's dot-339/340 odd-frame skip decision. Do not retry by re-sequencing register access globally -- that is measured to not work."
 expiry = "2026-11-01"
 ticket = "W1-05c"
