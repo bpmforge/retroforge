@@ -30,3 +30,4 @@ rfd = "0.17.2"
 # W1-07) — already an approved dependency (docs/TECH_STACK.md §2 row
 # exists via rf-cart's use of it).
 sha2 = "0.11"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
