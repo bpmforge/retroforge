@@ -693,19 +693,33 @@
    "phase": 2,
    "crate": "rf-nes",
    "write_scope": [
-    "crates/rf-nes/src/mappers/**"
+    "crates/rf-nes/src/mappers/**",
+    "crates/rf-nes/src/system/mod.rs",
+    "crates/rf-nes/src/system/cartridge.rs",
+    "crates/rf-nes/src/system/tests/**",
+    "crates/rf-nes/src/ppu/**",
+    "tests/rom-manifest.toml",
+    "docs/evidence/local-gate.json"
    ],
    "depends_on": [
     "W2-02"
    ],
    "acceptance": [
-    "mmc3_test_2 + mmc3_irq_tests pass (FR-CORE-025, EMULATION_CORES.md section 2.4)",
-    "scanline IRQ demo golden frame"
+    "all 6 fetched mmc3_test_2 sub-ROMs pass (1-clocking, 2-details, 3-A12_clocking, 4-scanline_timing, 5-MMC3, 6-MMC3_alt), asserted in-crate the same way ppu_vbl_nmi and sprite_hit_tests already are (FR-CORE-025, EMULATION_CORES.md section 2.4)",
+    "mmc3_irq_tests added to tests/rom-manifest.toml and wired the same way -- it lives in the ALREADY-PINNED christopherpow/nes-test-roms aggregator (verified present in its tree at the pinned commit) but has no manifest entry today, so it is obtainable rather than missing",
+    "the MMC3 scanline IRQ fires on the EXACT scanline programmed, proven by an ANALYTIC assertion (compute the expected scanline from the latch value and assert the IRQ lands there) rather than a recorded golden frame -- W1-04b's law: a golden captured by running the emulator once would bake in whatever bug it had and look just as green",
+    "the six canaries are unregressed -- nes6502 2,560,000/2,560,000, nestest 8991/8991 byte-exact, golden_frame_bg, golden_frame_sprites, sprite_hit_tests 11/11, ppu_vbl_nmi 9/10 -- and mapper 4 is added to EMULATED_MAPPERS in the same commit as its NesBus::new arm"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E2-S1"
+   ],
+   "notes": [
+    "PRE-FLIGHT 2026-08-06 (conductor) -- TENTH SELF-BLOCKING WRITE_SCOPE, and W2-02's own note predicted this one by name ('W2-03 inherits mappers/**-only and will need the same treatment IF it must touch the trait definition or wiring; check scope-vs-acceptance before claiming it'). It does, comprehensively. MMC3's defining feature is a scanline IRQ counter clocked by PPU A12 rising edges, so it needs: crates/rf-nes/src/ppu/** (nothing detects A12 today -- ppu/mem.rs's own doc even anticipates it, 'A12 IRQ hook will likely have to do differently'), system/mod.rs (CpuBus::irq_line is still the trait default false, with a comment reading 'A later ticket overrides this once a real IRQ source exists' -- that ticket is this one), system/cartridge.rs (EMULATED_MAPPERS must gain 4 or every MMC3 ROM stays rejected, exactly the dead-code trap W2-02 hit), system/tests/**, and docs/evidence/local-gate.json (touching ppu/ and system/ makes three Tier-A-local suites stale). Six exact paths added, never a widened glob (Brad's W1-01a ruling).",
+    "PRE-FLIGHT 2026-08-06 (conductor) -- THE ORACLE SITUATION IS MUCH BETTER THAN W2-02's, verified on disk rather than assumed. mmc3_test_2 IS fetched: roms/nes/mmc3_test_2/rom_singles/ holds all 6 sub-ROMs (1-clocking, 2-details, 3-A12_clocking, 4-scanline_timing, 5-MMC3, 6-MMC3_alt). So unlike W2-02 -- where no third-party oracle existed at all and everything had to be synthetic -- this ticket has a real, authoritative test suite, and 3-A12_clocking plus 4-scanline_timing target precisely the hardest part. mmc3_irq_tests is NOT fetched and has no manifest entry, but it is NOT missing either: it is a top-level directory in the already-pinned christopherpow/nes-test-roms aggregator (confirmed in the tree walk done for W2-02). Adding one manifest entry against a commit this project already pins is cheap, so it is in acceptance rather than deferred.",
+    "ACCEPTANCE AMENDED 2026-08-06 (conductor), one criterion made concrete rather than dropped: 'scanline IRQ demo golden frame' named no fixture and no expected value, and a recorded golden frame is precisely what docs/STATUS.md's W1-04b entry forbids -- 'Goldens must be ANALYTIC, never recorded... a golden captured by running the emulator once and saving the output would have baked that bug in and looked just as green'. Replaced with an analytic assertion: program the IRQ latch to a known value, compute the scanline the IRQ must fire on, and assert it fires there. That tests the same behaviour with an oracle that cannot silently absorb an off-by-one.",
+    "PRE-FLIGHT 2026-08-06 (conductor) -- SEQUENCING WARNING for whoever implements. The A12 filter is a timing-sensitive change to the PPU/bus seam, i.e. the same seam W1-05c spent a whole ticket on, and its guardrails are the same: nestest is byte-exact over 8991 lines and the vector suite is 2,560,000 cases. Those two are structurally insensitive to PPU-internal changes (trace.rs's ppu_columns is arithmetic from master_cycle; the vector suite runs on a PPU-free mock) PROVIDED master_cycle still advances exactly once per bus op -- but golden_frame_bg, golden_frame_sprites, sprite_hit_tests and ppu_vbl_nmi are NOT insensitive, because they exercise real PPU timing. Run mmc3_test_2's 3-A12_clocking FIRST and alone: it isolates the A12 edge-detection question from the counter-reload and IRQ-delivery questions, the same discriminator strategy that made W1-05c tractable."
    ]
   },
   {
