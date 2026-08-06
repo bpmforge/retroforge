@@ -105,11 +105,18 @@ pub enum RunState {
 struct CountingSink<'a> {
     inner: &'a mut dyn CoreSink,
     scanlines: u32,
+    /// Last line number seen through [`CoreSink::video_scanline`] (ticket
+    /// W2-15). This is where the position readout comes from: the sink
+    /// contract already hands us `y`, so no `rf-nes` accessor is needed —
+    /// which also keeps `docs/evidence/local-gate.json` from going stale
+    /// over a status-bar feature.
+    last_scanline: Option<u16>,
 }
 
 impl CoreSink for CountingSink<'_> {
     fn video_scanline(&mut self, y: u16, pixels: &[rf_core_api::PpuPixel]) {
         self.scanlines += 1;
+        self.last_scanline = Some(y);
         self.inner.video_scanline(y, pixels);
     }
 
@@ -133,6 +140,10 @@ pub struct EmuStepper {
     /// bound actually terminates a loop rather than merely existing in the
     /// source.
     cycle_budget: u64,
+    /// Last visible scanline drawn, for the transport position readout
+    /// (ticket W2-15). `None` until the first visible line completes.
+    /// See [`Self::last_scanline`] for the deliberate limitation.
+    last_scanline: Option<u16>,
 }
 
 impl EmuStepper {
@@ -151,6 +162,7 @@ impl EmuStepper {
             cpu,
             state: RunState::Paused,
             cycle_budget: CYCLE_BUDGET,
+            last_scanline: None,
         })
     }
 
@@ -177,6 +189,23 @@ impl EmuStepper {
     #[must_use]
     pub fn frame_count(&self) -> u64 {
         self.bus.frame_count()
+    }
+
+    /// Last visible scanline drawn, for the transport position readout
+    /// (ticket W2-15). `None` until the first visible line completes.
+    ///
+    /// **Deliberate limitation, documented rather than papered over:**
+    /// `CoreSink::video_scanline` only fires for the 240 *visible* lines,
+    /// so this reports the last visible line and does not tick through
+    /// vblank (lines 240-260). That matches what
+    /// [`Self::step_scanline`] actually does — it runs until a visible
+    /// scanline completes, so a single press during vblank advances
+    /// through the rest of vblank into line 0 rather than one line. That
+    /// quirk is `step_scanline`'s, not this readout's; this method simply
+    /// does not lie about it.
+    #[must_use]
+    pub fn last_scanline(&self) -> Option<u16> {
+        self.last_scanline
     }
 
     /// Side-effect-free memory peek (`NesBus::peek`) — a debugger memory
@@ -227,6 +256,7 @@ impl EmuStepper {
         let mut counting = CountingSink {
             inner: sink,
             scanlines: 0,
+            last_scanline: self.last_scanline,
         };
         while self.bus.master_cycle() < deadline {
             self.cpu.step(&mut self.bus);
@@ -236,6 +266,7 @@ impl EmuStepper {
             }
         }
         let n = counting.scanlines;
+        self.last_scanline = counting.last_scanline;
         self.state = RunState::Paused;
         n
     }
@@ -328,9 +359,18 @@ impl EmuStepper {
     fn run_until_next_frame(&mut self, sink: &mut dyn CoreSink) -> u64 {
         let start = self.bus.frame_count();
         let deadline = self.bus.master_cycle() + self.cycle_budget;
+        // Wrapped so the position readout keeps updating while running,
+        // not only when single-stepping (ticket W2-15) — a readout that
+        // froze during Run would be worse than none.
+        let mut counting = CountingSink {
+            inner: sink,
+            scanlines: 0,
+            last_scanline: self.last_scanline,
+        };
+        let mut advanced = 0;
         while self.bus.master_cycle() < deadline {
             self.cpu.step(&mut self.bus);
-            self.bus.drain_video(sink);
+            self.bus.drain_video(&mut counting);
             let now = self.bus.frame_count();
             if now != start {
                 debug_assert_eq!(
@@ -338,10 +378,12 @@ impl EmuStepper {
                     start + 1,
                     "a single Cpu::step must not be able to cross a whole frame boundary twice"
                 );
-                return now - start;
+                advanced = now - start;
+                break;
             }
         }
-        0
+        self.last_scanline = counting.last_scanline;
+        advanced
     }
 }
 
@@ -673,6 +715,69 @@ mod tests {
             before,
             s.state_hash(),
             "frame_count alone (part of the hashed state) must change after a frame"
+        );
+    }
+
+    /// Ticket W2-15: the readout must actually advance when you step a
+    /// scanline — this is the assertion that replaces "take it on faith",
+    /// which is how a working Step Scanline came to look like a dead
+    /// button.
+    #[test]
+    fn step_scanline_advances_the_reported_scanline() {
+        let mut s = stepper();
+        let mut sink = NullSink;
+        // Get past the boot-artifact partial frame (see the 240-scanline
+        // test's doc) so we are stepping inside a steady-state frame.
+        let boot = s.frame_count();
+        while s.frame_count() == boot {
+            s.step_scanline(&mut sink);
+        }
+        s.step_scanline(&mut sink);
+        let first = s
+            .last_scanline()
+            .expect("a visible scanline has been drawn");
+        s.step_scanline(&mut sink);
+        let second = s.last_scanline().expect("still drawing visible scanlines");
+        assert_eq!(
+            second,
+            first + 1,
+            "each Step Scanline must advance the reported line by exactly one \
+             (got {first} then {second})"
+        );
+    }
+
+    #[test]
+    fn a_fresh_stepper_reports_no_scanline_yet() {
+        assert_eq!(
+            stepper().last_scanline(),
+            None,
+            "before any visible line is drawn the readout must say so, not invent a 0"
+        );
+    }
+
+    /// The readout must keep moving while *running*, not only while
+    /// single-stepping — a position display that froze during Run would
+    /// be worse than none.
+    ///
+    /// Note the deliberate *second* `tick_running`: a fresh `EmuStepper`
+    /// starts mid pre-render scanline, so its very first `frame_count`
+    /// tick is the boot-state artifact this module's other tests already
+    /// document — it completes with **zero visible scanlines drawn**, so
+    /// `last_scanline` is legitimately still `None` at that point. The
+    /// first draft of this test asserted after one tick and failed for
+    /// exactly that reason: the test was naive, the readout was right.
+    #[test]
+    fn running_keeps_the_reported_scanline_updating() {
+        let mut s = stepper();
+        s.resume();
+        let mut sink = NullSink;
+        s.tick_running(&mut sink); // boot-artifact frame: no visible lines
+        s.tick_running(&mut sink); // first steady-state frame
+        assert_eq!(
+            s.last_scanline(),
+            Some(239),
+            "a steady-state frame while Running must leave the readout on the \
+             last visible line (239), not frozen at None"
         );
     }
 

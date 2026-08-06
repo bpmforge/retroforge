@@ -182,6 +182,13 @@ pub struct FrameMsg {
     pub rgba: Vec<u8>,
     pub width: usize,
     pub height: usize,
+    /// Machine position when this frame was produced (ticket W2-15):
+    /// completed-frame count, and the last visible scanline drawn.
+    /// Carried on the frame itself rather than as a separate event —
+    /// every advance path already sends exactly one frame (W2-14), so
+    /// there is no position change the UI could miss.
+    pub frame_count: u64,
+    pub last_scanline: Option<u16>,
 }
 
 /// What the core thread reports back to the UI thread.
@@ -358,6 +365,8 @@ fn core_thread_main(
                 rgba: sink.to_vec(),
                 width: sink.width(),
                 height: sink.height(),
+                frame_count: stepper.frame_count(),
+                last_scanline: stepper.last_scanline(),
             };
             if frame_tx.send(CoreEvent::Frame(msg)).is_err() {
                 // UI thread hung up; nothing left to serve.

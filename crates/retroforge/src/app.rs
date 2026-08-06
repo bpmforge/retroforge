@@ -65,6 +65,14 @@ pub struct RetroForgeApp {
     /// move) happened to wake the UI — a "works if you jiggle the mouse"
     /// bug. Set when a step is requested, cleared when a frame lands.
     awaiting_stepped_frame: bool,
+    /// Latest machine position from the core thread, rendered in the
+    /// status bar (ticket W2-15). `None` until the first frame lands.
+    /// This is what makes Step Frame and Step Scanline observable: a
+    /// scanline step changes 1/240th of the picture over a framebuffer
+    /// that deliberately persists, so without a readout a correct step is
+    /// indistinguishable from a dead button — which is exactly how it was
+    /// first reported.
+    position: Option<(u64, Option<u16>)>,
     /// Host-agnostic per-frame input latch (`rf_input`, FR-FE-003) — the
     /// UI thread's write side; `poll_input` samples it every repaint into
     /// the core thread's `SharedInputFrame` (module doc).
@@ -82,6 +90,7 @@ impl RetroForgeApp {
             crash: None,
             running: false,
             awaiting_stepped_frame: false,
+            position: None,
             input_latch: rf_input::InputLatch::new(),
             keymap: rf_input::KeyMap::default_nes(),
         }
@@ -177,6 +186,8 @@ impl RetroForgeApp {
         if let Some(msg) = latest_frame {
             // Ticket W2-14: a stepped frame has now been consumed.
             self.awaiting_stepped_frame = false;
+            // Ticket W2-15: position travels with the frame.
+            self.position = Some((msg.frame_count, msg.last_scanline));
             let image =
                 egui::ColorImage::from_rgba_unmultiplied([msg.width, msg.height], &msg.rgba);
             match &mut self.texture {
@@ -244,6 +255,13 @@ impl RetroForgeApp {
                 }
                 ui.separator();
                 ui.label(&self.status);
+                if let Some((frame, scanline)) = self.position {
+                    ui.separator();
+                    ui.monospace(match scanline {
+                        Some(y) => format!("frame {frame} \u{b7} scanline {y}"),
+                        None => format!("frame {frame} \u{b7} scanline --"),
+                    });
+                }
             });
         });
     }
