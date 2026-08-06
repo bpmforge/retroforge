@@ -1154,6 +1154,43 @@
    ]
   },
   {
+   "id": "W3-05a",
+   "title": "Sprite-limit bypass: minimal visual prototype (stop the flicker)",
+   "phase": 3,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/ppu/**",
+    "crates/rf-nes/src/system/mod.rs",
+    "crates/rf-core-api/**",
+    "crates/rf-renderer/**",
+    "crates/retroforge/**",
+    "docs/evidence/local-gate.json"
+   ],
+   "depends_on": [
+    "W1-05a"
+   ],
+   "acceptance": [
+    "an OPT-IN enhanced overlay draws the sprites the 8-per-scanline limit dropped, so a scanline with more than 8 sprites stops flickering (FR-ENH-001)",
+    "MODE INVARIANT enforced mechanically, not asserted: core state hashes are IDENTICAL with the overlay on and off over the same input log (FR-MODE-002), and sprite-0 hit plus the sprite-overflow flag are bit-identical either way -- the accuracy simulation must not be perturbed by observing it",
+    "overlay is OFF by default (CLAUDE.md law 6: a fresh install boots in Accuracy Mode; enhancements are opt-in overlays over an unmodified simulation)",
+    "a test constructs MORE THAN 8 sprites on one scanline and asserts all four things at once: the accuracy path still drops the 9th onward, the overlay contains it, the overflow flag still sets, and the state hash is unchanged -- a bypass that quietly disabled the limit in the core would pass a naive version of this and must fail here"
+   ],
+   "points": 5,
+   "status": "in_progress",
+   "stories": [
+    "E5-S1"
+   ],
+   "notes": [
+    "REQUESTED BY BRAD 2026-08-06: 'we are looking to enhance the screen, sprites and all that as not needing to be accurate and no flashing'. This is the visual half of W3-05, split out so it can land now.",
+    "PRE-FLIGHT 2026-08-06 (conductor) -- THE PLANNED ROUTE IS 29 POINTS AND ONE OF THEM IS WRITING A GAME. W3-05's real dependency closure is W2-10 (8pts, author a cc65/neslib platformer from scratch) + W3-01 (8pts, wgpu pipeline) + W3-03 (5pts, layer extraction) + W3-05 (8pts). W2-10 is there as the ORACLE: a fixture engineered to produce sprite overflow AND intentional blink, so de-flicker can be proven not to erase blinking that is supposed to happen. That is good design and expensive. Brad chose the prototype route knowing the trade.",
+    "SCOPE FENCE, explicit so W3-05 is not quietly gutted: this ticket delivers ONLY the visible bypass plus the mode invariant. DEFERRED TO W3-05 and NOT to be attempted here: the SpriteHistorian ring (FR-ENH-002), the OAM diff debug panel (FR-DBG-006), the trust ladder with shadow/advisory/active states persisted per game (FR-ENH-011), contradiction events and the report card (FR-ENH-012), and RF-Scroller red-fixture verification (FR-ENH-013). W3-05 keeps its points and its acceptance; this is a spike beneath it, not a replacement.",
+    "ARCHITECTURE RULING 2026-08-06 (conductor) -- WHERE THE RECONSTRUCTION LIVES, AND WHY IT IS NOT WHERE THE RULING SAYS. Brad's 2026-08-03 sink ruling states the bypass 'reconstructs dropped sprites from OAM via StateView/SpriteHistorian' in rf-enhance. That is the right END state and is NOT REACHABLE TODAY, verified rather than assumed: CHR pattern data and palette RAM are unreachable from outside rf-nes (crates/rf-nes/src/ppu/mem.rs exposes NO pub fn at all; NesBus exposes only oam() and a CPU-space peek()), and rf-nes implements no EmulatorCore::state_view -- that is W2-04's. rf-enhance therefore CANNOT render a sprite pixel: it can see which sprites exist but not what they look like. So this prototype records the dropped sprites' pixels INSIDE the PPU, where the pattern and palette data already are, into a side buffer the app composites. When W2-04 lands StateView, W3-05 moves it to rf-enhance as the ruling intends. Recorded here so the divergence is a documented staging decision rather than someone later finding the enhancement in the wrong crate.",
+    "THE INVARIANT THAT MATTERS, and the one thing that must not be got wrong: recording the overflow sprites must be PURE OBSERVATION. It must not touch self.status (sprite-0 hit, overflow flag), secondary OAM, the fetch pipeline, or timing -- neither when the overlay is off NOR when it is on. The mode-invariant test is the mechanical proof, and it is why this is safe to build before the governance machinery: the simulation is provably unperturbed whether or not anyone is watching the overlay. Note the canaries are the real guard on the PPU edit -- sprite_hit_tests 11/11 and both golden frames exercise exactly this code.",
+    "KNOWN LIMIT OF THIS ROUTE, told to Brad up front rather than discovered later: without RF-Scroller's engineered scenes there is NO automated check that INTENTIONAL blink is preserved. Some games flicker on purpose (invincibility frames, low-health warnings) and a naive bypass erases that too. Under this ticket that check is Brad's eyes on a real ROM; W3-05 + W2-10 make it automated. Do not claim intentional-blink preservation as verified.",
+    "PHASE ORDER 2026-08-06: this is Phase 3 work starting before Phase 2 exits, authorized by Brad directly. Same standing as W2-13 -- PLAYBOOK's gate rule exists to stop scope drift in unattended builds, not to veto the product owner. Recorded rather than renumbered."
+   ]
+  },
+  {
    "id": "W3-01",
    "title": "wgpu original pipeline + headless golden frames",
    "phase": 3,
