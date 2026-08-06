@@ -955,6 +955,38 @@
    ]
   },
   {
+   "id": "W2-14",
+   "title": "Fix: a stepped frame never reaches the UI (Step Frame/Scanline appear dead)",
+   "phase": 2,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W1-06"
+   ],
+   "acceptance": [
+    "pressing Step Frame visibly advances the picture by one frame, and Step Scanline by one scanline, instead of appearing to do nothing (FR-DBG-004)",
+    "a headless test spawns a real core thread, sends CoreCommand::StepFrame, and asserts a CoreEvent::Frame actually arrives on the channel -- the test whose absence let this ship",
+    "the UI keeps repainting until a stepped frame has been consumed, so a frame delivered after the click's own repaint is not stranded in the channel"
+   ],
+   "points": 2,
+   "status": "done",
+   "stories": [
+    "E1-S2"
+   ],
+   "notes": [
+    "REPORTED BY BRAD 2026-08-06 from the first real desktop session: 'run works and can play game, the step frame and scanline seem to pause and do nothing'. Diagnosed before touching code, per the bug-fix discipline (rank causes, show how each is verified, only then fix).",
+    "ROOT CAUSE 1 (PRIMARY, confirmed by inspection): crates/retroforge/src/core_thread.rs's loop sends CoreEvent::Frame from EXACTLY ONE place -- inside `if stepper.tick_running_with_input(...)`. That call returns false whenever the machine is Paused. StepFrame/StepScanline advance the emulator and render into `sink`, then force Paused, so the freshly rendered frame is computed and then silently DISCARDED, never sent. The machine really does step (state advances correctly); the user just never sees it. Verification: read the single send site; confirmed by the new headless test in acceptance criterion 2, which fails before the fix.",
+    "ROOT CAUSE 2 (COMPOUNDING, confirmed by inspection): crates/retroforge/src/app.rs's pump_core_events only calls ctx.request_repaint() when self.running. Even once root cause 1 is fixed, a stepped frame arrives over the channel a few ms AFTER the button click's own repaint has already completed, so with no repaint scheduled the frame would sit unconsumed until some unrelated event (a mouse move) happened to wake the UI. Fixing only root cause 1 would produce a maddening 'sometimes works if you jiggle the mouse' bug. Both must be fixed together.",
+    "NOT A BUG, recorded so it is not 'fixed' later: rf_renderer::FrameBuffer has no clear step -- video_scanline writes rows in place, so the buffer persists between frames. A scanline step therefore paints the new scanline over the previous frame's content, which is correct debugger behaviour; it also means a single scanline step is nearly imperceptible by design. Step Frame is the visible one.",
+    "WHY THIS SHIPPED, worth more than the fix itself: EmuStepper's state machine was thoroughly unit-tested (13 tests: pause/resume/step-frame/step-scanline/cycle budgets) and the core thread's FM-01 panic path was tested, but NOTHING tested the seam between them -- that a CoreCommand produces a CoreEvent::Frame. W1-06's own notes predicted exactly this: it classified the transport buttons as part of the MANUAL checklist and warned 'do not let it is a GUI ticket become a reason for zero tests', then tested the state machine and the panic path while leaving the command->frame wiring to a manual pass that could not be run in a sandbox. The W1-07 conductor fix touched this very StepFrame arm and its mutation proved the LATCH worked -- not that a frame was delivered. Lesson: when a manual checklist is known to be unrunnable, the mechanically-testable seam next to it deserves MORE coverage, not the same amount.",
+    "CLOSED 2026-08-06 (conductor), implemented directly rather than delegated (2 files, ~15 lines of logic plus tests). BOTH root causes fixed together, because fixing only the first would have produced an intermittent 'works if you jiggle the mouse' bug: core_thread now tracks a `stepped` flag and sends the frame when EITHER the running tick produced one OR a step command did; app.rs tracks `awaiting_stepped_frame`, set on a step request and cleared when a frame lands, and keeps requesting repaints while it is outstanding so the UI stays awake to consume a frame that arrives after the click's own repaint has finished.",
+    "MUTATION-TESTED 2026-08-06 (conductor), BOTH DIRECTIONS -- a one-sided mutation would not show the fix is bounded rather than merely permissive. (1) Reverting the send condition to the shipped `if ran` reintroduces the exact reported bug: both new seam tests FAIL by timing out after 5s, which is the defect reproduced mechanically rather than described. (2) Widening it to `if true` (always send) makes a_paused_core_with_no_command_sends_no_frames FAIL, proving the fix does not over-correct into busy-spinning and flooding the channel while paused. Restored, verified byte-identical by checksum. Gate: all seven exit 0, 420 passed / 0 failed / 3 ignored (was 417).",
+    "FIELD VERIFICATION 2026-08-06 (Brad, first real desktop session) -- the evidence W1-06's manual checklist has been waiting on since 2026-08-03, recorded precisely rather than rounded up. CONFIRMED WORKING: the window opens and paints live frames, a ROM loads, the game is PLAYABLE, and W1-07's keyboard input drives it. That discharges W1-06 criteria 1 and 3 and W1-07's live-input path outright. ALSO confirmed earlier in the same session, via an unrelated error reaching the status line ('mapper 2 is not implemented by rf-nes yet'), that the native file dialog opens, a file can be picked, rf-cart parses it, and rf-nes's diagnostic surfaces into the UI -- FR-CORE-013 behaving exactly as specified. STILL OUTSTANDING: that Step Frame/Step Scanline now VISIBLY advance the picture needs one more look, because this fix landed after the report."
+   ]
+  },
+  {
    "id": "W3-01",
    "title": "wgpu original pipeline + headless golden frames",
    "phase": 3,

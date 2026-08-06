@@ -296,6 +296,14 @@ fn core_thread_main(
     // from inside a `move` closure — clone rather than fight the borrow.
     let frame_tx = evt_tx.clone();
     run_guarded_loop(&evt_tx, move || {
+        // Ticket W2-14: a stepped frame must be SENT, not just rendered.
+        // Before this flag existed the only `CoreEvent::Frame` send site
+        // was inside `tick_running_with_input`'s `true` branch, which is
+        // unreachable while Paused — so Step Frame/Step Scanline advanced
+        // the machine correctly, drew into `sink`, and then silently
+        // discarded the result. The emulator stepped; the user just never
+        // saw it.
+        let mut stepped = false;
         for cmd in cmd_rx.try_iter() {
             match cmd {
                 CoreCommand::Pause => stepper.pause(),
@@ -315,6 +323,7 @@ fn core_thread_main(
                 CoreCommand::StepFrame => {
                     stepper.latch_and_advance_frame(input.load(), &mut sink);
                     stepper.pause();
+                    stepped = true;
                 }
                 // Deliberately does NOT latch, and the asymmetry with
                 // StepFrame above is intentional — do not "fix" it. A
@@ -324,6 +333,7 @@ fn core_thread_main(
                 // takes effect at frame boundaries.
                 CoreCommand::StepScanline => {
                     stepper.step_scanline(&mut sink);
+                    stepped = true;
                 }
                 CoreCommand::Shutdown => return LoopControl::Stop,
             }
@@ -334,7 +344,16 @@ fn core_thread_main(
         // latch-then-advance path (`EmuStepper::tick_running_with_input`,
         // `crate::stepper` module doc) — same function the determinism/
         // replay test suite drives directly via `latch_and_advance_frame`.
-        if stepper.tick_running_with_input(input.load(), &mut sink) {
+        // `stepped` is checked alongside the running tick (ticket W2-14):
+        // a debugger step produces a frame the UI must see just as much as
+        // a free-running one does. Note `step_scanline` leaves `sink`
+        // holding a *partial* frame — the new scanline over the previous
+        // frame's content, since `rf_renderer::FrameBuffer` has no clear
+        // step. That is correct for a scanline stepper, and it is why one
+        // scanline step looks almost identical: Step Frame is the visible
+        // one.
+        let ran = stepper.tick_running_with_input(input.load(), &mut sink);
+        if ran || stepped {
             let msg = FrameMsg {
                 rgba: sink.to_vec(),
                 width: sink.width(),
@@ -458,6 +477,95 @@ mod tests {
             rx2.recv().is_err(),
             "process is still executing normally post-crash"
         );
+    }
+
+    /// Minimal synthetic NROM, same layout `crate::stepper`'s own tests
+    /// use: all-zero PRG means the reset vector resolves to `$0000`, which
+    /// is zeroed RAM (`BRK`) — a deterministic infinite loop that steps
+    /// forever without needing real game code.
+    fn synthetic_nrom() -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
+        data.push(1); // 1x16KiB PRG
+        data.push(1); // 1x8KiB CHR
+        data.extend_from_slice(&[0u8; 10]); // mapper 0, iNES 1.0
+        data.extend(vec![0u8; 16 * 1024]);
+        data.extend(vec![0u8; 8 * 1024]);
+        data
+    }
+
+    /// Ticket W2-14, and **the test whose absence let the bug ship**: a
+    /// `StepFrame` command must put a real `CoreEvent::Frame` on the
+    /// channel. Before the fix, the step advanced the machine and rendered
+    /// into the sink, then discarded it — the only send site sat inside
+    /// `tick_running_with_input`'s `true` branch, unreachable while
+    /// Paused — so this `recv_timeout` would time out.
+    ///
+    /// `EmuStepper`'s own state machine and the FM-01 panic path were both
+    /// well covered; the *seam* between a command and a delivered frame
+    /// was not, and that is exactly where the defect lived.
+    #[test]
+    fn step_frame_command_delivers_a_frame_to_the_ui() {
+        let core = spawn(synthetic_nrom()).expect("synthetic NROM must spawn a core thread");
+        core.cmd_tx
+            .send(CoreCommand::StepFrame)
+            .expect("core thread must accept a StepFrame command");
+
+        let evt = core
+            .evt_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a stepped frame must be SENT to the UI, not just rendered and dropped");
+        match evt {
+            CoreEvent::Frame(msg) => {
+                assert_eq!(
+                    msg.width * msg.height * 4,
+                    msg.rgba.len(),
+                    "RGBA buffer must match its declared dimensions"
+                );
+                assert!(msg.width > 0 && msg.height > 0);
+            }
+            CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
+        }
+
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+    }
+
+    /// Same seam for the scanline stepper — it renders a *partial* frame
+    /// (the new scanline over the previous frame's content, since
+    /// `FrameBuffer` has no clear step), but it must still be delivered.
+    #[test]
+    fn step_scanline_command_delivers_a_frame_to_the_ui() {
+        let core = spawn(synthetic_nrom()).expect("synthetic NROM must spawn a core thread");
+        core.cmd_tx
+            .send(CoreCommand::StepScanline)
+            .expect("core thread must accept a StepScanline command");
+
+        let evt = core
+            .evt_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a stepped scanline must also deliver a frame to the UI");
+        assert!(matches!(evt, CoreEvent::Frame(_)));
+
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+    }
+
+    /// The negative half: a core sitting Paused with no command must NOT
+    /// stream frames. Without this, "always send a frame every loop
+    /// iteration" would pass the two tests above while busy-spinning and
+    /// flooding the channel.
+    #[test]
+    fn a_paused_core_with_no_command_sends_no_frames() {
+        let core = spawn(synthetic_nrom()).expect("synthetic NROM must spawn a core thread");
+        // The core starts Paused (EmuStepper::from_ines_bytes).
+        thread::sleep(Duration::from_millis(60));
+        assert!(
+            core.evt_rx.try_recv().is_err(),
+            "a paused core must stay silent until commanded, not stream frames"
+        );
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
     }
 
     #[test]

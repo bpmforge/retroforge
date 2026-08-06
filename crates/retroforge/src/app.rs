@@ -58,6 +58,13 @@ pub struct RetroForgeApp {
     /// truth — this is only ever set right after sending a command, so it
     /// can't drift for more than one repaint.
     running: bool,
+    /// Ticket W2-14: a step command's frame arrives over the channel a few
+    /// milliseconds *after* the click's own repaint has already finished.
+    /// While paused nothing else schedules a repaint, so without this the
+    /// frame would sit unconsumed until some unrelated event (a mouse
+    /// move) happened to wake the UI — a "works if you jiggle the mouse"
+    /// bug. Set when a step is requested, cleared when a frame lands.
+    awaiting_stepped_frame: bool,
     /// Host-agnostic per-frame input latch (`rf_input`, FR-FE-003) — the
     /// UI thread's write side; `poll_input` samples it every repaint into
     /// the core thread's `SharedInputFrame` (module doc).
@@ -74,6 +81,7 @@ impl RetroForgeApp {
             status: "No ROM loaded \u{2014} File > Open ROM...".to_string(),
             crash: None,
             running: false,
+            awaiting_stepped_frame: false,
             input_latch: rf_input::InputLatch::new(),
             keymap: rf_input::KeyMap::default_nes(),
         }
@@ -167,6 +175,8 @@ impl RetroForgeApp {
             return;
         }
         if let Some(msg) = latest_frame {
+            // Ticket W2-14: a stepped frame has now been consumed.
+            self.awaiting_stepped_frame = false;
             let image =
                 egui::ColorImage::from_rgba_unmultiplied([msg.width, msg.height], &msg.rgba);
             match &mut self.texture {
@@ -177,9 +187,12 @@ impl RetroForgeApp {
                 }
             }
         }
-        if self.running {
+        if self.running || self.awaiting_stepped_frame {
             // Keep repainting while running so the core thread's frames
-            // keep getting picked up (CPU blit, "live frames" criterion).
+            // keep getting picked up (CPU blit, "live frames" criterion),
+            // and likewise until a requested step's frame has landed
+            // (ticket W2-14) — while paused nothing else would wake the
+            // UI to consume it.
             ctx.request_repaint();
         }
     }
@@ -218,6 +231,7 @@ impl RetroForgeApp {
                     .clicked()
                 {
                     self.running = false;
+                    self.awaiting_stepped_frame = true;
                     self.send_command(CoreCommand::StepFrame);
                 }
                 if ui
@@ -225,6 +239,7 @@ impl RetroForgeApp {
                     .clicked()
                 {
                     self.running = false;
+                    self.awaiting_stepped_frame = true;
                     self.send_command(CoreCommand::StepScanline);
                 }
                 ui.separator();
