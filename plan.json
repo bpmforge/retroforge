@@ -987,6 +987,33 @@
    ]
   },
   {
+   "id": "W2-15",
+   "title": "Transport position readout: frame + scanline in the status bar",
+   "phase": 2,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W2-14"
+   ],
+   "acceptance": [
+    "the status bar shows the machine's position (frame number + last rendered scanline) and it updates on every delivered frame, so Step Frame and Step Scanline are both observable instead of having to be taken on faith (FR-DBG-004)",
+    "pressing Step Scanline advances the displayed scanline; pressing Step Frame advances the displayed frame -- asserted headlessly against EmuStepper, not by eye",
+    "no change to crates/rf-nes: the position comes from CoreSink::video_scanline's own y argument, so docs/evidence/local-gate.json does NOT go stale"
+   ],
+   "points": 2,
+   "status": "in_progress",
+   "stories": [
+    "E1-S2"
+   ],
+   "notes": [
+    "RAISED BY BRAD 2026-08-06, immediately after W2-14 made Step Frame visibly work: 'what does step scanline do? because i dont see that with the rom'. That is a fair question with a real answer -- Step Scanline advances 1/240th of a frame, the framebuffer persists between frames (rf_renderer::FrameBuffer has no clear step, deliberately), and NOTHING in the UI reports position, so a correct scanline step is literally unobservable. The instrument works; its display was never built. This ticket builds the display.",
+    "PRE-FLIGHT 2026-08-06 (conductor) -- THE CHEAP PATH EXISTS, and taking it matters more than usual here. The obvious implementation is to expose the PPU's scanline/dot: rf-nes has NO public accessor for either (verified by grep), so that would mean touching crates/rf-nes/src/ppu and system -- both listed in scripts/validate-evidence.mjs's coveredPaths for the nestest, ppu_vbl_nmi and sprite_hit_tests suites. A 2-point status-bar ticket would then invalidate docs/evidence/local-gate.json and force a full scripts/local-gate.sh regeneration (2.56M vectors + 8991 trace lines + 21 ROMs + the new 10k determinism run) to go green. INSTEAD: rf_core_api::CoreSink::video_scanline(y, pixels) ALREADY carries the line number, and crates/retroforge/src/stepper.rs already wraps the sink (CountingSink) to count scanlines for step_scanline. Widening that wrapper to also remember the last y gives the readout with ZERO rf-nes change, zero evidence churn, and a smaller blast radius. Note the wrapper must be used on the run_until_next_frame path too, not just step_scanline, or the readout would freeze during Run.",
+    "KNOWN LIMITATION, document rather than silently paper over: video_scanline only fires for the 240 VISIBLE lines, so the readout reports the last visible line drawn and does not tick through vblank (lines 240-260). That is aligned with what step_scanline actually does -- it runs until a visible scanline completes, so during vblank a single press advances through the rest of vblank into line 0 rather than one line. That pre-existing quirk is stepper.rs's, not this ticket's, and is NOT to be 'fixed' here; just make sure the readout does not lie about it."
+   ]
+  },
+  {
    "id": "W3-01",
    "title": "wgpu original pipeline + headless golden frames",
    "phase": 3,
