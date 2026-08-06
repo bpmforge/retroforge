@@ -16,7 +16,7 @@
 #   rom            ROM label to waive, or "*" to waive every ROM in `suite`
 #   justification  why this is currently expected to fail (non-empty)
 #   expiry         ISO YYYY-MM-DD; valid through and including this date
-#   ticket         tracking ticket id (^W\d+-\d{2}[a-c]?$), MUST be open —
+#   ticket         tracking ticket id (^W\d+-\d{2}[a-z]?$), MUST be open —
 #                  a closed/nonexistent ticket fails the report step too
 #
 # Waiver history for `ppu_vbl_nmi` (raised by W1-05b at 6 of 10 failing,
@@ -48,4 +48,4 @@ suite = "ppu_vbl_nmi"
 rom = "10-even_odd_timing"
 justification = "Fails at 'Clock is skipped too late, relative to enabling BG' (sub-test #3 of 4; #2 and #4 pass) -- off by one busy-poll loop iteration on the $2001-write side of the odd-frame dot-339 skip. CORRECTED 2026-08-05 (W1-05c): this is NOT the same root cause as the five read-side ROMs W1-05b grouped it with -- that grouping is refuted, not merely unproven. W1-05c fixed all five and 10 failed IDENTICALLY under every variant tried (both CpuBus::read orderings, every read_status model). Direction of error is the discriminator: the read-side five needed effects to land one cycle LATER, while this needs a $2001 write to land EARLIER, so no uniform re-sequencing satisfies both. Remaining work: model when a $2001 mask write takes effect relative to the pre-render line's dot-339/340 odd-frame skip decision. Do not retry by re-sequencing register access globally -- that is measured to not work."
 expiry = "2026-11-01"
-ticket = "W1-05c"
+ticket = "W1-05d"

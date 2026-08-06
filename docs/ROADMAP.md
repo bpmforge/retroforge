@@ -21,13 +21,33 @@ cycle-by-cycle bus), W1-02 (bus + NROM + DMA), W1-03 (nestest golden
 trace), W1-04 (per-dot background PPU), W1-05 (sprite eval + sprite-0),
 W1-07 (input + replay log), W0-03 (rf-harness runner + $6000 protocol +
 golden-frame hash), W1-06 (window + frame blit + frame stepping).
-Exit criteria:
+Exit criteria (**amended 2026-08-05 — Brad, on the Phase 1 gate's finding;
+this list is AUTHORITATIVE for Phase 1 exit, and `docs/TESTING.md` §8
+summarizes it rather than restating it**):
 - SingleStepTests nes6502 vectors 100% (official ops; illegal ops ≥ the set
   nestest covers).
 - **nestest golden log byte-exact** (PC/A/X/Y/P/SP/CYC vs nestest.log).
-- Two NROM homebrew titles boot (Alter Ego + a neslib fixture, per
-  TESTING §8); frame stepping works.
-- Determinism: 2× 10k-frame runs, identical per-frame state hashes.
+- Frame stepping works.
+- Determinism: 2× 10k-frame runs, identical per-frame hashes over
+  **reachable** state (CPU registers, WRAM, OAM, PRG-RAM, `master_cycle`,
+  `frame_count` — `EmuStepper::state_hash`'s enumerated set).
+
+**What was removed, and why it is not a weakening.** The first Phase 1 exit
+gate (2026-08-05, `docs/STATUS.md`) found that two criteria could not be
+satisfied by *any* amount of Phase 1 work, because the tickets that
+implement them are Phase 2: "two NROM homebrew titles boot" is W2-10 +
+W2-11, and full-machine-state determinism needs `save_state`, which is
+W2-04 — itself behind W2-01b → W2-01a. Satisfying Phase 1 as previously
+written required **31 of Phase 2's 71 points first**, which inverts the
+phase order the gate exists to enforce (R-05).
+
+Both were therefore moved *down* to Phase 2, not dropped — and Phase 2's
+exit criteria already covered them in **stronger** form ("RF-Scroller plays
+start-to-finish and Alter Ego plays by hand"; "save-state roundtrip +
+replay determinism suites green"), so the removal loses no coverage. The
+determinism criterion keeps its 10k-frame scale, which is the part that
+catches drift a short run hides; only its *state scope* is staged, because
+a hash cannot cover PPU/APU internals before the core can serialize them.
 
 ## Phase 2 — NES compatibility (weeks)
 
@@ -39,8 +59,17 @@ control), W2-04 (rfstate container + roundtrip + save-state UI), W2-07
 screens), W2-09 (nightly CI tier + bench baseline).
 Exit criteria:
 - blargg instr_test-v5, cpu_timing_test6, cpu_interrupts_v2, ppu_vbl_nmi,
-  sprite_hit_tests, oam_read, apu_test, mmc3_test_2 all pass headless.
-- Save-state roundtrip + replay determinism suites green.
+  sprite_hit_tests, oam_read, apu_test, mmc3_test_2 all pass headless
+  (**several of these are fetched but executed by nothing today — W2-12
+  owns wiring them into `local-gate.sh` + the evidence file; see the Phase 1
+  gate entry in `docs/STATUS.md`**).
+- Save-state roundtrip + replay determinism suites green, and determinism
+  extended to **full machine state** (PPU + APU included, reachable once
+  W2-04 lands `save_state`) — inherited from Phase 1's 2026-08-05 amendment.
+- **Two NROM homebrew titles boot** (Alter Ego + a neslib fixture) —
+  inherited from Phase 1's 2026-08-05 amendment; subsumed by, and weaker
+  than, the RF-Scroller/Alter Ego criterion immediately below, which stays
+  the real bar.
 - RF-Scroller (in-repo fixture, W2-10) plays start-to-finish and Alter Ego
   plays by hand without visible faults.
 

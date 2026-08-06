@@ -106,7 +106,7 @@ pub struct Waiver {
     /// ISO `YYYY-MM-DD`. The waiver is valid through and including this
     /// date; `today > expiry` (lexicographic) means expired.
     pub expiry: String,
-    /// Ticket id, expected to match `^W\d+-\d{2}[a-c]?$` (same pattern
+    /// Ticket id, expected to match `^W\d+-\d{2}[a-z]?$` (same pattern
     /// `scripts/validate-plan.mjs` enforces on `plan.json`).
     pub ticket: String,
 }
@@ -136,10 +136,10 @@ impl Waiver {
     }
 }
 
-const TICKET_PATTERN_HINT: &str = "W<phase>-<NN>[a|b|c], e.g. W1-02 or W1-02a";
+const TICKET_PATTERN_HINT: &str = "W<phase>-<NN>[a-z], e.g. W1-02 or W1-02a";
 
 fn ticket_id_looks_valid(ticket: &str) -> bool {
-    // ^W\d+-\d{2}[a-c]?$
+    // ^W\d+-\d{2}[a-z]?$
     let Some(rest) = ticket.strip_prefix('W') else {
         return false;
     };
@@ -154,7 +154,7 @@ fn ticket_id_looks_valid(ticket: &str) -> bool {
     let tail = suffix.get(2..).unwrap_or("");
     digits.len() == 2
         && digits.bytes().all(|b| b.is_ascii_digit())
-        && matches!(tail, "" | "a" | "b" | "c")
+        && matches!(tail.as_bytes(), [] | [b'a'..=b'z'])
 }
 
 /// Why [`build_report`] refused to produce a report.
@@ -501,14 +501,26 @@ mod tests {
         );
     }
 
+    /// `W1-02d` moved from REJECTED to ACCEPTED on 2026-08-05, deliberately.
+    /// The suffix class was `[a-c]`, which capped a ticket family at three
+    /// splits for no stated reason; W1-05c's close needed a fourth
+    /// (`W1-05d`, owning `10-even_odd_timing` after that ROM was proven a
+    /// separate defect), so the class was widened to `[a-z]` here and in
+    /// `scripts/validate-plan.mjs`'s matching `ID_RE`. Everything the
+    /// pattern was actually protecting against still fails below: a
+    /// lowercase `W`, a one-digit number, a multi-character suffix, an
+    /// uppercase suffix, and a non-ticket string.
     #[test]
     fn ticket_id_pattern_accepts_documented_shapes() {
         assert!(ticket_id_looks_valid("W1-02"));
         assert!(ticket_id_looks_valid("W0-03a"));
         assert!(ticket_id_looks_valid("W12-99c"));
+        assert!(ticket_id_looks_valid("W1-02d"));
+        assert!(ticket_id_looks_valid("W1-05z"));
         assert!(!ticket_id_looks_valid("w1-02"));
         assert!(!ticket_id_looks_valid("W1-2"));
-        assert!(!ticket_id_looks_valid("W1-02d"));
+        assert!(!ticket_id_looks_valid("W1-02ab"));
+        assert!(!ticket_id_looks_valid("W1-02A"));
         assert!(!ticket_id_looks_valid("ticket-42"));
     }
 

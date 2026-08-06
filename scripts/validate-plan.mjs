@@ -19,7 +19,7 @@ const STATUSES = ['todo', 'in_progress', 'done', 'blocked'];
 const POINTS = [1, 2, 3, 5, 8];
 const TICKET_KEYS = ['id', 'title', 'phase', 'crate', 'write_scope', 'depends_on', 'acceptance', 'points', 'status', 'stories'];
 const OPTIONAL_KEYS = ['notes', 'scaffold', 'hold'];
-const ID_RE = /^W\d+-\d{2}[a-c]?$/;
+const ID_RE = /^W\d+-\d{2}[a-z]?$/;
 const STORY_RE = /^E\d+-S\d+$/;
 
 const errors = [];

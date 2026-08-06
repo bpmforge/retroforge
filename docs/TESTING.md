@@ -72,13 +72,22 @@ evidence file rather than re-running the suite. It is still a hard release
 gate, not an optional one: it is just verified on a different
 cadence/machine than Tier A/B.
 
+**"NOT WIRED" in the Tier column means the ROMs are fetched by the manifest
+but executed by NO code path** — the tier is the intended gate, not the
+current one. Flagged 2026-08-05 by the Phase 1 exit gate's challenger, which
+found `instr_test-v5` labelled Tier A ("every PR") while nothing ran it: a
+downloaded ROM is not a tested ROM, and a tier label that overstates
+coverage is worse than an honest gap. Only four suites are executed today
+(`nes6502`, `nestest`, `sprite_hit_tests`, `ppu_vbl_nmi` — all A-local, all
+in `docs/evidence/local-gate.json`). W2-12 owns wiring the rest.
+
 | Suite | Verifies | SRS | Tier | Pass criteria |
 |---|---|---|---|---|
 | SingleStepTests `nes6502` | per-opcode state + bus cycles | FR-CORE-020 | A-local | 100% of all 256 opcodes (151 official + 105 unofficial/illegal) — 2,560,000 cases |
 | nestest + `nestest.log` | whole-CPU conformance (register/CYC + disassembly) | FR-CORE-021 | A-local | byte-exact trace diff empty over all 8991 lines |
-| blargg `instr_test-v5` | official+unofficial instructions | FR-CORE-020 | A | $6000 = 0 all ROMs |
-| `cpu_timing_test6`, `instr_timing`, `branch_timing_tests` | cycle counts, page-cross, branches | FR-CORE-020 | A | $6000 = 0 |
-| `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A | $6000 = 0 |
+| blargg `instr_test-v5` | official+unofficial instructions | FR-CORE-020 | A — **NOT WIRED (W2-12)** | $6000 = 0 all ROMs |
+| `cpu_timing_test6`, `instr_timing`, `branch_timing_tests` | cycle counts, page-cross, branches | FR-CORE-020 | A — **NOT WIRED (W2-12)** | $6000 = 0 |
+| `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A — **NOT WIRED (W2-12)** | $6000 = 0 |
 | `cpu_dummy_reads/writes`, `cpu_exec_space` | dummy bus cycles, open bus | FR-CORE-020 | B | $6000 = 0 |
 | blargg `ppu_vbl_nmi` (10 sub-ROMs, `rom_singles/`) | VBL/NMI to the PPU cycle | FR-CORE-022 | A-local | $6000 = 0 — 9/10 clean (all but `10-even_odd_timing`, ticket W1-05c); `10` waived, a separate `$2001`-write-timing cause, see `crate::ppu`'s module doc + `crates/rf-harness/waivers.toml` |
 | `sprite_hit_tests` | sprite-0 hit | FR-CORE-023 | A-local | RAM-result byte (`$00F8`) = 1 — NOT `$6000` (ticket W1-05b correction; this ROM generation predates blargg's `$6000` runtime, see `tests/rom-manifest.toml`'s comment on this suite) |
@@ -255,10 +264,21 @@ judgment call).
 
 ## 8. Phase exit gates (roadmap enforcement)
 
+**`docs/ROADMAP.md`'s per-phase "Exit criteria" list is AUTHORITATIVE. This
+table is a summary of it and must never add or drop a criterion** (corrected
+2026-08-05 by the Phase 1 exit gate). Until then this table restated the
+criteria independently and had silently drifted: its Phase-1 row demanded
+`instr_test-v5` (which ROADMAP places in **Phase 2**) and a save-state
+`roundtrip` suite (owned by W2-04, Phase 2), so the two documents specified
+different gates and a phase could "pass" against whichever was convenient.
+`docs/work/DESIGN_REVIEW.md`'s G-34 recorded that drift as fixed in 2026-07,
+but that was a wording alignment only — hence the rule above, which removes
+the duplication rather than re-aligning it a second time.
+
 | Phase | Exit = all of |
 |---|---|
-| 1 (NES MVP) | nes6502 vectors 100% official · nestest diff empty · instr_test-v5 pass · NROM boots 2 homebrew titles · double-run + roundtrip + replay suites green |
-| 2 (NES compat) | Tier-A NES table fully green · mapper set complete · battery saves · RF-Scroller + Alter Ego replays green |
+| 1 (NES MVP) | nes6502 vectors 100% official · nestest diff empty · frame stepping works · 2× 10k-frame double-run identical over **reachable** state |
+| 2 (NES compat) | Tier-A NES table fully green (incl. `instr_test-v5`, wired by W2-12) · mapper set complete · battery saves · save-state roundtrip green · determinism extended to **full** machine state (PPU + APU, once W2-04 lands `save_state`) · 2 NROM homebrew titles boot · RF-Scroller + Alter Ego replays green |
 | 3 (renderer) | golden frames render identically through wgpu original pipeline (pre-shader hash unchanged) · fallback test green |
 | 4 (enhancement fw) | mode invariant green with runtime subscribed · overlay + profile-load demos · plugin containment tests |
 | 5 (game-aware) | RF-Scroller full-level decode goldens · E6-S1 acceptance demo recorded |
