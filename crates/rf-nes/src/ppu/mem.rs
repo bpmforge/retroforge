@@ -17,19 +17,67 @@
 //! addressing math never needed to change; they just always see whatever
 //! bank was pushed most recently.
 //!
-//! This indirection exists specifically because of this ticket's
+//! This indirection exists specifically because of ticket W2-02's
 //! write_scope: `docs/design/EMULATION_CORES.md` §2.4 sketches a
 //! `Mapper::ppu_read`/`ppu_write` pair that would let a mapper answer
 //! every individual PPU-bus access directly, but the only call sites
 //! that could invoke them (`Ppu::tick`'s background/sprite fetch
 //! pipeline) live in `ppu/mod.rs`/`background.rs`/`sprites.rs`/
-//! `scroll.rs` — all outside this ticket's write_scope (only this file
-//! is in scope). There is nowhere to thread a `&mut dyn Mapper`
-//! parameter through, so the mapper can't be asked per-access; it can
-//! only be *pushed* into this file's existing, unmodified storage.
-//! See `crate::mappers` module doc for the full reasoning and what a
-//! real MMC3 (W2-03, which needs genuine per-access interception for its
-//! A12 IRQ hook) will likely have to do differently.
+//! `scroll.rs` — all outside that ticket's write_scope (only this file
+//! was in scope then). There was nowhere to thread a `&mut dyn Mapper`
+//! parameter through, so the mapper couldn't be asked per-access; it could
+//! only be *pushed* into this file's existing storage. See `crate::mappers`
+//! module doc for the full reasoning.
+//!
+//! ## A12 rising-edge detection (ticket W2-03) — computed here, pulled by
+//! `NesBus`, never pushed a mapper reference
+//!
+//! MMC3's scanline IRQ counter needs genuine per-access interception (every
+//! time the PPU address bus changes, not just after a `$8000-$FFFF` CPU
+//! write) — exactly the gap this file's "CHR banking" section above
+//! predicted. Rather than threading `&mut dyn Mapper` through the render
+//! pipeline (which W2-02 correctly identified as unreachable without
+//! inverting this crate's layering), [`Ppu::mem_read`]/[`Ppu::mem_write`]
+//! (below) and the two `$2006`/`$2007`-driven `v`-changes
+//! ([`super::scroll`]'s `write_addr` second write and
+//! `increment_vram_addr`) all funnel through [`Ppu::observe_ppu_bus_address`],
+//! which is mapper-agnostic (A12 is a PPU-bus-electrical fact, not an MMC3
+//! fact) and only *records* filtered rising edges into a drainable counter
+//! ([`Ppu::take_a12_edges`], `pub(crate)`). `crate::system::NesBus` is what
+//! polls that counter and forwards each edge into
+//! [`crate::mappers::Mapper::clock_irq_counter`] — see that trait's and
+//! `crate::mappers`' module docs for the full push/pull design. `Ppu` never
+//! holds or calls into a `Mapper`.
+//!
+//! ### The filter itself
+//!
+//! nesdev.org/wiki/MMC3, verbatim: "The MMC3 scanline counter is based
+//! entirely on PPU A12, triggered on a rising edge after the line has
+//! remained low for three falling edges of M2" (M2 = the CPU clock). This
+//! crate has no CPU-cycle counter reachable from `Ppu` (by design — see
+//! `crate::system` module doc's master-clock seam), so the filter is
+//! expressed in PPU dots instead: [`Ppu::dot_clock`] increments exactly
+//! once per [`Ppu::tick`] call, and since `NesBus::tick_master` guarantees
+//! **exactly 3 dots per CPU cycle always** (the same lock-step invariant
+//! nestest's byte-exact canary depends on), "3 CPU cycles" translates
+//! losslessly to **9 PPU dots**. nesdev's own text gives no exact number;
+//! the quantitative `>= 3` (CPU cycles) threshold is sourced from
+//! [Mesen2's `MMC3::IsA12RisingEdge`](https://github.com/SourMesen/Mesen2/blob/master/Core/NES/Mappers/Nintendo/MMC3.h)
+//! (`_console->GetMasterClock()`, which that codebase's `NesConsole::GetMasterClock`
+//! confirms is a CPU-cycle count, not a PPU-dot count), a reference
+//! implementation independently verified against this exact oracle suite.
+//!
+//! Margin, not fine-tuning: tracing `mmc3_test_2/source/3-A12_clocking.s`
+//! by hand (the actual asm, cached from the pinned
+//! christopherpow/nes-test-roms commit) shows every "should count" rising
+//! edge separated by >= 12 dots (a full `STA $2006`/`STX $2006`/`STY $2006`
+//! instruction's worth of cycles between the low sample and the high one),
+//! and every "should NOT count" case inside the render pipeline (one BG
+//! tile's NT/AT-low-period before its own PT-high fetch) separated by only
+//! 2-4 dots. The 7-11 dot boundary this threshold sits inside is never
+//! exercised by any oracle this ticket runs — 9 is not finely tuned to a
+//! razor's-edge test case, just Mesen's sourced value translated to this
+//! crate's units.
 //!
 //! ## CHR RAM is not banked by this design (documented gap, not a bug)
 //!
@@ -48,12 +96,20 @@
 use super::Ppu;
 use rf_cart::Mirroring;
 
+/// The A12 low-period filter threshold, in PPU dots — 3 CPU cycles x 3
+/// dots/cycle. See this module's doc "A12 rising-edge detection" section
+/// for the full derivation and sourcing.
+const A12_FILTER_DOTS: u64 = 9;
+
 impl Ppu {
     /// One PPU-bus read at `addr & 0x3FFF`: `$0000-$1FFF` pattern tables
     /// (CHR), `$2000-$3EFF` nametables (mirrored per `mirroring`),
-    /// `$3F00-$3FFF` palette RAM.
-    pub(super) fn mem_read(&self, addr: u16) -> u8 {
+    /// `$3F00-$3FFF` palette RAM. `&mut self` (ticket W2-03, widened from
+    /// `&self`) because every real access now also feeds
+    /// [`Ppu::observe_ppu_bus_address`] — see this module's doc.
+    pub(super) fn mem_read(&mut self, addr: u16) -> u8 {
         let addr = addr & 0x3FFF;
+        self.observe_ppu_bus_address(addr);
         match addr {
             0x0000..=0x1FFF => self.chr_read(addr),
             0x2000..=0x3EFF => self.vram[self.nametable_offset(addr)],
@@ -65,6 +121,7 @@ impl Ppu {
     /// One PPU-bus write at `addr & 0x3FFF` — same ranges as [`Ppu::mem_read`].
     pub(super) fn mem_write(&mut self, addr: u16, value: u8) {
         let addr = addr & 0x3FFF;
+        self.observe_ppu_bus_address(addr);
         match addr {
             0x0000..=0x1FFF => self.chr_write(addr, value),
             0x2000..=0x3EFF => {
@@ -74,6 +131,51 @@ impl Ppu {
             0x3F00..=0x3FFF => self.palette_write(addr, value),
             _ => unreachable!("addr masked to 14 bits above"),
         }
+    }
+
+    /// Record one PPU-address-bus sample (ticket W2-03) — called for every
+    /// real bus access ([`Ppu::mem_read`]/[`Ppu::mem_write`], above) AND
+    /// the two places `v` changes without an accompanying access
+    /// (`$2006`'s second write, `$2007`'s post-access auto-increment — both
+    /// in `super::scroll`): on real hardware the address bus continuously
+    /// reflects `v` whenever the PPU isn't actively fetching, so those two
+    /// `v`-only changes are genuine bus-address changes too. Verified
+    /// against `mmc3_test_2/source/3-A12_clocking.s` tests 5/6 ("Should be
+    /// clocked when A12 changes to 1 via PPUDATA read/write"): both set up
+    /// `v = $0FFF` (A12 low, no transition) and rely ENTIRELY on the
+    /// post-access increment to `$1000` (A12 high) to produce the rising
+    /// edge — the access itself never does.
+    ///
+    /// Implements nesdev's filter (module doc): `addr`'s bit 12 rising from
+    /// low to high counts as a clock-worthy edge only if the low period
+    /// that preceded it lasted at least [`A12_FILTER_DOTS`]. Mirrors
+    /// [Mesen2's `MMC3::IsA12RisingEdge`](https://github.com/SourMesen/Mesen2/blob/master/Core/NES/Mappers/Nintendo/MMC3.h)
+    /// structurally: `a12_low_since` records the dot A12 was FIRST observed
+    /// low (not re-armed by further low samples while already tracking),
+    /// and is always consumed (cleared) the next time A12 is observed high,
+    /// whether or not that edge cleared the threshold — so a too-soon rise
+    /// doesn't leave a stale timestamp behind to wrongly credit a LATER,
+    /// genuinely-separated rise.
+    pub(super) fn observe_ppu_bus_address(&mut self, addr: u16) {
+        if addr & 0x1000 != 0 {
+            if let Some(low_since) = self.a12_low_since {
+                if self.dot_clock.saturating_sub(low_since) >= A12_FILTER_DOTS {
+                    self.pending_a12_edges += 1;
+                }
+            }
+            self.a12_low_since = None;
+        } else if self.a12_low_since.is_none() {
+            self.a12_low_since = Some(self.dot_clock);
+        }
+    }
+
+    /// Drain every filtered A12 rising edge recorded since the last call
+    /// (ticket W2-03) — [`crate::system::NesBus::tick_master`] polls this
+    /// once per PPU dot and forwards each pulse into
+    /// [`crate::mappers::Mapper::clock_irq_counter`]. `pub(crate)`, never
+    /// `pub`: this is `crate::system`'s integration seam, not a public API.
+    pub(crate) fn take_a12_edges(&mut self) -> u32 {
+        std::mem::take(&mut self.pending_a12_edges)
     }
 
     fn chr_read(&self, addr: u16) -> u8 {

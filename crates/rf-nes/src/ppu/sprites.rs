@@ -287,80 +287,203 @@ impl Ppu {
         self.active_sprite_count = 0;
     }
 
-    /// Dot 257 of ANY rendering-enabled scanline (visible or pre-render —
-    /// module doc): fetch each `secondary_oam` sprite's CHR pattern bytes
-    /// and latch them into `active_sprites`, the render-ready units
-    /// [`Ppu::sprite_pixel`] reads while drawing the scanline that follows.
-    pub(super) fn load_sprite_units(&mut self) {
-        // Copy out first (`EvaluatedSprite` is `Copy`): the loop below
-        // calls `self.mem_read`, which needs `&self`, while also writing
-        // `self.active_sprites` — working from an independent local copy
-        // sidesteps any question of overlapping borrows entirely.
-        let secondary = self.secondary_oam;
-        let count = self.secondary_oam_count;
-        let height = self.sprite_height();
+    /// A garbage sprite standing in for an unused output-unit slot (ticket
+    /// W2-03) — see [`Ppu::load_sprite_units`]'s doc for why every slot
+    /// fetches, not just the occupied ones. `tile: 0xFF` matches real
+    /// hardware's own `$FF`-initialized secondary OAM
+    /// (nesdev.org/wiki/PPU_sprite_evaluation); `y`/`attr`/`x` are never
+    /// read for a slot this stands in for (only `tile`, via the address
+    /// formula below, and even then only for its bank-select bit in 8x16
+    /// mode).
+    const DUMMY_SPRITE: EvaluatedSprite = EvaluatedSprite {
+        y: 0xFF,
+        tile: 0xFF,
+        attr: 0,
+        x: 0xFF,
+        oam_index: 0xFF,
+    };
 
+    /// Dots 257-320 of ANY rendering-enabled scanline (visible or
+    /// pre-render — module doc): reset the output units at the start of
+    /// the window ([`Ppu::reset_sprite_output_units`]), then, ticked
+    /// dot-by-dot from `background.rs`'s `process_render_dot`
+    /// ([`Ppu::run_sprite_fetch_dot`]), fetch each of the 8 sprite output
+    /// units' CHR pattern bytes and latch the real ones into
+    /// `active_sprites`, the render-ready units [`Ppu::sprite_pixel`]
+    /// reads while drawing the scanline that follows.
+    ///
+    /// ## Every slot fetches, not just the occupied ones, at real hardware's
+    /// own per-dot cadence (ticket W2-03)
+    ///
+    /// nesdev.org/wiki/PPU_rendering: "each memory access takes 2 PPU
+    /// cycles to complete, and 4 are performed for each of the 8 sprites:
+    /// garbage nametable byte, garbage nametable byte, pattern table tile
+    /// low, pattern table tile high" — i.e. an 8-dot cadence per slot
+    /// (garbage NT fetches at local dots 1-2/3-4, the two REAL pattern
+    /// fetches at local dots 5-6/7-8), the same "access happens on the
+    /// 2nd dot of each pair" convention `background.rs`'s BG fetch table
+    /// already documents, applied here to [`Ppu::run_sprite_fetch_dot`]'s
+    /// `phase` (1/3/5/7, matching that file's `fetch_phase`).
+    ///
+    /// This is load-bearing for MMC3's A12 IRQ counter, in two ways this
+    /// ticket's fetched oracle (`mmc3_test_2`) independently exercises:
+    /// - **Slots beyond `secondary_oam_count` still fetch** (garbage-tile
+    ///   `$FF`, matching real hardware's own `$FF`-initialized secondary
+    ///   OAM — nesdev.org/wiki/PPU_sprite_evaluation) — the mechanism that
+    ///   makes exactly one PPU-A12 rising edge happen per scanline
+    ///   regardless of how many sprites are actually in range
+    ///   (`2-details.s` test 8, "Counter should be clocked 241 times in
+    ///   PPU frame", runs with OAM deliberately cleared first).
+    /// - **The real pattern fetches land on dots 261/263 of sprite 0's
+    ///   slot (257 + local 4/6), not dot 257 itself** — collapsing all 8
+    ///   slots' fetches into one instant at dot 257 (this function's
+    ///   pre-W2-03 shape) passes every sub-ROM except
+    ///   `4-scanline_timing.s`, which asserts IRQ delivery to
+    ///   single-CPU-cycle resolution against real hardware's own timing
+    ///   and fails exactly the way an ~3-dot-early edge predicts
+    ///   (nesdev's own hedge, "the IRQ counter should decrement on PPU
+    ///   cycle 260, right after the visible part of the target scanline
+    ///   has ended", is consistent with this: the FIRST rising edge, if
+    ///   sprites use $1xxx, lands at the local-dot-5 PT-lo fetch of slot
+    ///   0, absolute dot 257+4=261, one access-pair after garbage NT #2).
+    ///
+    /// `active_sprite_count` still gates [`Ppu::sprite_pixel`]'s
+    /// iteration, so rendered pixels are unaffected by any of this — only
+    /// which dots the PPU bus is touched on changes (fetched bytes for
+    /// unused slots are computed and discarded, never stored).
+    pub(super) fn reset_sprite_output_units(&mut self) {
         self.active_sprites = [EMPTY_SPRITE_UNIT; 8];
-        self.active_sprite_count = count;
+        self.active_sprite_count = self.secondary_oam_count;
+    }
 
-        for (i, sprite) in secondary.iter().enumerate().take(count as usize) {
-            // `self.scanline` here is the SAME scanline `evaluate_sprites`
-            // used as its in-range comparison a moment ago (dot 65 of this
-            // scanline) — module doc: that already guarantees
-            // `sprite.y <= self.scanline < sprite.y + height`, so
-            // `self.scanline - sprite.y` is already the correct 0-indexed
-            // row for the scanline these units render NEXT.
-            //
-            // That guarantee holds ONLY if `evaluate_sprites` actually ran
-            // on THIS scanline. It doesn't if rendering was toggled off at
-            // dot 65 (skipping evaluation) and back on before dot 257 (a
-            // normal mid-scanline raster-effect pattern) — `secondary_oam`
-            // is then stale from whatever earlier scanline last evaluated,
-            // and `sprite.y` may not satisfy the invariant against the
-            // CURRENT `self.scanline` at all (row could be `>= height`, or
-            // `sprite.y > self.scanline` entirely, which would underflow
-            // the subtraction below). Re-checking with the same
-            // `sprite_in_range` evaluation uses, and simply not latching a
-            // sprite that fails it, turns that stale-data case into "this
-            // sprite doesn't render this frame" instead of a wrong pixel
-            // (leftover `EMPTY_SPRITE_UNIT` is fully transparent) or a
-            // panic.
-            if !self.sprite_in_range(sprite.y) {
-                continue;
+    /// One dot of the sprite-fetch window (`dot` in `257..=320`) — see
+    /// [`Ppu::reset_sprite_output_units`]'s doc for the full per-dot
+    /// cadence this implements. A no-op outside the four fetch phases
+    /// (1/3/5/7 of each slot's local 0-7 dot range).
+    pub(super) fn run_sprite_fetch_dot(&mut self, dot: u16) {
+        let local = dot - 257;
+        let slot = (local / 8) as usize;
+        let phase = local % 8;
+
+        let count = self.secondary_oam_count;
+        let candidate = if (slot as u8) < count {
+            self.secondary_oam[slot]
+        } else {
+            Self::DUMMY_SPRITE
+        };
+        // `self.scanline` here is the SAME scanline `evaluate_sprites` used
+        // as its in-range comparison a moment ago (dot 65 of this
+        // scanline) — module doc: that already guarantees
+        // `sprite.y <= self.scanline < sprite.y + height`, so
+        // `self.scanline - sprite.y` is already the correct 0-indexed row
+        // for the scanline these units render NEXT.
+        //
+        // That guarantee holds ONLY if `evaluate_sprites` actually ran on
+        // THIS scanline. It doesn't if rendering was toggled off at dot 65
+        // (skipping evaluation) and back on before dot 257 (a normal
+        // mid-scanline raster-effect pattern) — `secondary_oam` is then
+        // stale from whatever earlier scanline last evaluated, and
+        // `sprite.y` may not satisfy the invariant against the CURRENT
+        // `self.scanline` at all (row could be `>= height`, or `sprite.y >
+        // self.scanline` entirely, which would underflow the subtraction
+        // in `sprite_fetch_address_parts`). Re-checking with the same
+        // `sprite_in_range` evaluation uses, and simply not latching a
+        // sprite that fails it, turns that stale-data case into "this
+        // sprite doesn't render this frame" instead of a wrong pixel
+        // (leftover `EMPTY_SPRITE_UNIT` is fully transparent) or a panic —
+        // same treatment `DUMMY_SPRITE`'s `y: 0xFF` gets for free (out of
+        // range on any real scanline 0-239, though NOT the pre-render line
+        // 261 — harmless either way, since `real` below is independently
+        // gated on `slot < count`, which is always false for a dummy slot
+        // regardless of what `sprite_in_range` returns for it).
+        let real = (slot as u8) < count && self.sprite_in_range(candidate.y);
+
+        match phase {
+            1 | 3 => {
+                // Garbage nametable fetch (nesdev.org/wiki/PPU_rendering,
+                // quoted in this function's doc) — content discarded; the
+                // address is A12=0 regardless of its low 12 bits, matching
+                // real hardware's own NT-range (`$2000-$2FFF`) fetch here.
+                let _ = self.mem_read(0x2000);
             }
-            let mut row = self.scanline - sprite.y as u16;
-            let flip_v = sprite.attr & 0x80 != 0;
-            if flip_v {
+            5 => {
+                let (bank, tile_index, fine_row) = self.sprite_fetch_address_parts(candidate, real);
+                let addr_lo = bank | ((tile_index as u16) << 4) | fine_row;
+                self.sprite_pattern_lo_latch = self.mem_read(addr_lo);
+            }
+            7 => {
+                let (bank, tile_index, fine_row) = self.sprite_fetch_address_parts(candidate, real);
+                let addr_lo = bank | ((tile_index as u16) << 4) | fine_row;
+                let addr_hi = addr_lo | 0x08;
+                let pattern_hi = self.mem_read(addr_hi);
+                if real {
+                    self.active_sprites[slot] = SpriteUnit {
+                        pattern_lo: self.sprite_pattern_lo_latch,
+                        pattern_hi,
+                        attr: candidate.attr,
+                        x: candidate.x,
+                        oam_index: candidate.oam_index,
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `(bank, tile_index, fine_row)` for `candidate`'s pattern-table
+    /// address — 8x16 mode: bank + top/bottom tile selection from OAM byte
+    /// 1 itself (nesdev.org/wiki/PPU_OAM); 8x8 mode: PPUCTRL bit 3 selects
+    /// one shared bank for every sprite. `real` must be the SAME
+    /// `sprite_in_range`-gated value [`Ppu::run_sprite_fetch_dot`] computed
+    /// — when `false` (garbage/stale slot), `row` is forced to 0 rather
+    /// than computed from `candidate.y`, which would underflow the
+    /// subtraction for `DUMMY_SPRITE`'s `y: 0xFF` on any real scanline.
+    fn sprite_fetch_address_parts(&self, candidate: EvaluatedSprite, real: bool) -> (u16, u8, u16) {
+        let height = self.sprite_height();
+        let row = if real {
+            let mut row = self.scanline - candidate.y as u16;
+            if candidate.attr & 0x80 != 0 {
                 row = height as u16 - 1 - row;
             }
+            row
+        } else {
+            0
+        };
 
-            // 8x16 mode: bank + top/bottom tile selection from OAM byte 1
-            // itself (nesdev.org/wiki/PPU_OAM); 8x8 mode: PPUCTRL bit 3
-            // selects one shared bank for every sprite.
-            let (bank, tile_index, fine_row) = if height == 16 {
-                let bank = if sprite.tile & 0x01 != 0 {
-                    0x1000u16
-                } else {
-                    0x0000u16
-                };
-                if row < 8 {
-                    (bank, sprite.tile & 0xFE, row)
-                } else {
-                    (bank, (sprite.tile & 0xFE) + 1, row - 8)
-                }
+        if height == 16 {
+            let bank = if candidate.tile & 0x01 != 0 {
+                0x1000u16
             } else {
-                (self.sprite_pattern_table_base(), sprite.tile, row)
+                0x0000u16
             };
+            if row < 8 {
+                (bank, candidate.tile & 0xFE, row)
+            } else {
+                (bank, (candidate.tile & 0xFE) + 1, row - 8)
+            }
+        } else {
+            (self.sprite_pattern_table_base(), candidate.tile, row)
+        }
+    }
 
-            let addr_lo = bank | ((tile_index as u16) << 4) | fine_row;
-            let addr_hi = addr_lo | 0x08;
-            self.active_sprites[i] = SpriteUnit {
-                pattern_lo: self.mem_read(addr_lo),
-                pattern_hi: self.mem_read(addr_hi),
-                attr: sprite.attr,
-                x: sprite.x,
-                oam_index: sprite.oam_index,
-            };
+    /// Convenience wrapper for tests that don't drive the full per-dot
+    /// tick loop (`ppu/tests/sprite_evaluation.rs`): runs the entire dot
+    /// 257-320 sprite-fetch window in one call. Identical FINAL
+    /// `active_sprites` content to ticking through it dot-by-dot (the
+    /// fetch/gating logic is exactly [`Ppu::run_sprite_fetch_dot`],
+    /// called here for every dot in the window instead of spread across
+    /// real `Ppu::tick` calls) — only the PPU-bus-access TIMING differs,
+    /// which is why the real tick loop (`background.rs`'s
+    /// `process_render_dot`) does NOT use this and calls
+    /// [`Ppu::reset_sprite_output_units`]/[`Ppu::run_sprite_fetch_dot`]
+    /// directly instead (ticket W2-03: the collapsed-to-one-instant timing
+    /// this function has is exactly what made `mmc3_test_2/
+    /// 4-scanline_timing`'s cycle-exact assertions fail before this split).
+    #[cfg(test)]
+    pub(super) fn load_sprite_units(&mut self) {
+        self.reset_sprite_output_units();
+        for dot in 257..=320u16 {
+            self.run_sprite_fetch_dot(dot);
         }
     }
 

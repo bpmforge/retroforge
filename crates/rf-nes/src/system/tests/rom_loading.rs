@@ -54,23 +54,22 @@ fn sixteen_kib_halves_are_identical_not_independently_addressable() {
     assert_eq!(bus.read(0xE000), 0xBB);
 }
 
-#[test]
-fn unimplemented_mapper_is_rejected_even_though_rf_cart_parses_its_header() {
-    // RETARGETED 1 -> 4 by ticket W2-02, because this test's premise
-    // expired rather than its intent. It originally used mapper 1 (MMC1)
-    // with the comment "rf-nes implements only mapper 0 in this ticket" —
-    // true at W1-02, false now that W2-02 implements 1/2/3. The property
-    // being tested is unchanged and still worth pinning: rf-cart
-    // *parsing* a mapper's header does not mean rf-nes can *emulate* it,
-    // so the two lists must stay separate. Mapper 4 (MMC3) is the current
-    // example — in rf-cart's SUPPORTED_MAPPERS, not in rf-nes's
-    // EMULATED_MAPPERS, owned by ticket W2-03. Retarget it again when
-    // MMC3 lands.
-    let mut raw = build_nrom_ines(1, 1, |i| i as u8);
-    raw[6] = 0x40; // flags6 high nibble = mapper low nibble = 4
-    let err = NesRom::from_ines_bytes(&raw).unwrap_err();
-    assert_eq!(err, NesLoadError::UnimplementedMapper(4));
-}
+// `unimplemented_mapper_is_rejected_even_though_rf_cart_parses_its_header`
+// (the test that used to live here) was RETIRED, not retargeted, by ticket
+// W2-03. It pinned "mapper 4 (MMC3) is in rf-cart's `nes::SUPPORTED_MAPPERS`
+// but not rf-nes's `EMULATED_MAPPERS`" (itself retargeted there from mapper
+// 1/MMC1 by W2-02, for the identical expired-premise reason). W2-03 makes
+// MMC3 the fifth real implementor, so the two lists are now identical
+// (`[0, 1, 2, 3, 4]`) and there is no mapper number left that exercises
+// "rf-cart parses it, rf-nes refuses it" — `nes::SUPPORTED_MAPPERS` is a
+// private `const` (correctly: rf-cart has no reason to expose it), so this
+// crate cannot even assert the two lists' equality directly without
+// widening rf-cart's own API surface for a test, which is out of this
+// ticket's write_scope (`crates/rf-cart/**` is a different crate). The
+// sibling case — "rf-cart refuses it outright" — stays covered below by
+// `a_mapper_rf_cart_cannot_identify_is_refused_not_loaded` (mapper 66).
+// Retarget a new test back into a real rejection assertion the moment
+// EITHER list gains a mapper number the other one doesn't have yet.
 
 #[test]
 fn chr_rom_is_sliced_after_prg_rom() {
@@ -125,8 +124,10 @@ fn ines_with_mapper(mapper: u8, prg_banks: u8, chr_banks: u8) -> Vec<u8> {
 
 #[test]
 fn every_emulated_mapper_loads_through_the_production_path() {
-    // (mapper id, prg banks, chr banks) — CNROM/MMC1 need real CHR to bank.
-    for (mapper, prg, chr) in [(0u8, 1u8, 1u8), (1, 2, 2), (2, 2, 0), (3, 1, 2)] {
+    // (mapper id, prg banks, chr banks) — CNROM/MMC1/MMC3 need real CHR to
+    // bank; MMC3 needs at least 2 x 16 KiB (4 x 8 KiB) PRG banks for its
+    // fixed/switchable windows to be distinguishable at all.
+    for (mapper, prg, chr) in [(0u8, 1u8, 1u8), (1, 2, 2), (2, 2, 0), (3, 1, 2), (4, 2, 1)] {
         let raw = ines_with_mapper(mapper, prg, chr);
         let rom = NesRom::from_ines_bytes(&raw)
             .unwrap_or_else(|e| panic!("mapper {mapper} must load through the real path, got {e}"));
@@ -140,10 +141,17 @@ fn every_emulated_mapper_loads_through_the_production_path() {
 
 /// FR-CORE-013 must keep working for a mapper rf-cart cannot even name —
 /// widening the emulated set must not turn a clear diagnostic into a
-/// panic or a silent accept. (The "rf-cart parses it but rf-nes refuses
-/// it" case is covered by
-/// `unimplemented_mapper_is_rejected_even_though_rf_cart_parses_its_header`
-/// above; this is the earlier-exit path through the Cart error.)
+/// panic or a silent accept.
+///
+/// This is now the ONLY reachable refusal path: W2-03 made
+/// `EMULATED_MAPPERS` and rf-cart's `SUPPORTED_MAPPERS` identical
+/// (`[0,1,2,3,4]`), so rf-cart rejects everything rf-nes would have
+/// rejected, and `NesLoadError::UnimplementedMapper` is currently
+/// unreachable from parsing. That variant is deliberately kept — it
+/// becomes reachable the instant either list moves — and its *message* is
+/// covered directly by
+/// `unimplemented_mapper_message_names_the_mapper_and_what_is_emulated`
+/// below, which is the half a user actually reads.
 #[test]
 fn a_mapper_rf_cart_cannot_identify_is_refused_not_loaded() {
     // 66 = GxROM: absent from rf-cart's SUPPORTED_MAPPERS entirely.
@@ -152,4 +160,27 @@ fn a_mapper_rf_cart_cannot_identify_is_refused_not_loaded() {
         NesRom::from_ines_bytes(&raw).is_err(),
         "an unknown mapper must be refused, never loaded"
     );
+}
+
+/// The `UnimplementedMapper` message is what a user sees when their ROM is
+/// refused, and W2-16 fixed it after it went stale ("NROM/mapper 0 only",
+/// false the moment W2-02 landed three more mappers). The variant is
+/// currently unreachable from parsing (see above), so this constructs it
+/// directly rather than leaving the message — the part that faces the
+/// user — with no coverage at all.
+#[test]
+fn unimplemented_mapper_message_names_the_mapper_and_what_is_emulated() {
+    let shown = NesLoadError::UnimplementedMapper(7).to_string();
+    assert!(
+        shown.contains('7'),
+        "the message must name the offending mapper, got: {shown}"
+    );
+    // Derived from EMULATED_MAPPERS, not restated in prose — so this also
+    // fails if someone reintroduces a hard-coded list that can drift.
+    for emulated in [0, 1, 2, 3, 4] {
+        assert!(
+            shown.contains(&emulated.to_string()),
+            "the message must list emulated mapper {emulated}, got: {shown}"
+        );
+    }
 }

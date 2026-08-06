@@ -627,6 +627,61 @@ sha256 = "56698b6918453d161a8d4e51f66e363d6966b054939c8176c53c401a6b55269b"
 mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_test_2/rom_singles/6-MMC3_alt.nes"]
 dest = "roms/nes/mmc3_test_2/rom_singles/6-MMC3_alt.nes"
 
+# mmc3_irq_tests (ticket W2-03) -- a DIFFERENT, later suite from mmc3_test_2
+# above, covering the same MMC3 IRQ-counter ground with clearer sub-test
+# names (its 5th/6th ROMs are literally named `rev_A`/`rev_B`, confirming
+# in-filename what mmc3_test_2's `5-MMC3`/`6-MMC3_alt` only document in
+# their readme). Lives as a top-level directory (no `rom_singles/`
+# subfolder) in the SAME already-pinned christopherpow/nes-test-roms
+# aggregator at the SAME commit every other artifact above pins -- verified
+# present via the GitHub contents API against that exact commit this
+# session: `api.github.com/repos/christopherpow/nes-test-roms/contents/
+# mmc3_irq_tests?ref=95d8f621ae55cee0d09b91519a8989ae0e64753b` lists all six
+# `.nes` files plus `readme.txt`/`source/`. Hashes below were computed
+# directly against bytes fetched from that same pinned-commit URL this
+# session (not vendored, not re-derived from a different source).
+[[artifact]]
+id = "mmc3-irq-tests-1-clocking"
+license_status = "no-license-grant-fetch-only"
+sha256 = "699d0644bd2b6ff4c9ba598c9609f4a3da536594b6363585b2caf82cf337ac88"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_irq_tests/1.Clocking.nes"]
+dest = "roms/nes/mmc3_irq_tests/1.Clocking.nes"
+
+[[artifact]]
+id = "mmc3-irq-tests-2-details"
+license_status = "no-license-grant-fetch-only"
+sha256 = "0af95238b69806c072c28aed0fa8ad812157dfee928a6c9cea8d5420268baade"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_irq_tests/2.Details.nes"]
+dest = "roms/nes/mmc3_irq_tests/2.Details.nes"
+
+[[artifact]]
+id = "mmc3-irq-tests-3-a12-clocking"
+license_status = "no-license-grant-fetch-only"
+sha256 = "3b936e1079f12bdc5e55aa82def017ddc76fd79e3879ff0478d41ca718302e7c"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_irq_tests/3.A12_clocking.nes"]
+dest = "roms/nes/mmc3_irq_tests/3.A12_clocking.nes"
+
+[[artifact]]
+id = "mmc3-irq-tests-4-scanline-timing"
+license_status = "no-license-grant-fetch-only"
+sha256 = "3369e8f73a96ec97918c6c9440804a369a19256c57df91e62881555f21528894"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_irq_tests/4.Scanline_timing.nes"]
+dest = "roms/nes/mmc3_irq_tests/4.Scanline_timing.nes"
+
+[[artifact]]
+id = "mmc3-irq-tests-5-mmc3-rev-a"
+license_status = "no-license-grant-fetch-only"
+sha256 = "6b662c2d08ee4094d89b6d1ddde330e47f81929fb642dc217b6e4c33f8926944"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_irq_tests/5.MMC3_rev_A.nes"]
+dest = "roms/nes/mmc3_irq_tests/5.MMC3_rev_A.nes"
+
+[[artifact]]
+id = "mmc3-irq-tests-6-mmc3-rev-b"
+license_status = "no-license-grant-fetch-only"
+sha256 = "d8a2af42cdafe8046b36109e6f6ff71ca0d7f5d62c7d5953e0aa1d1828a86088"
+mirrors = ["https://raw.githubusercontent.com/christopherpow/nes-test-roms/95d8f621ae55cee0d09b91519a8989ae0e64753b/mmc3_irq_tests/6.MMC3_rev_B.nes"]
+dest = "roms/nes/mmc3_irq_tests/6.MMC3_rev_B.nes"
+
 # ---------------------------------------------------------------------------
 # Artifacts — CPU/APU vector suites (SingleStepTests). No license grant
 # (verified via GitHub API this session: SingleStepTests/65816 and
@@ -1205,6 +1260,43 @@ frame_budget = 600
 [[suite.roms]]
 artifact = "mmc3-test-2-6-mmc3-alt"
 rom = "6-MMC3_alt"
+frame_budget = 600
+
+# docs/TESTING.md §4's row bundles this with mmc3_test_2 above ("mmc3_test_2
+# + IRQ tests | MMC3 A12 IRQ counter | FR-CORE-025 | A | $6000 = 0") into
+# one FR/tier cell -- split into its own [[suite]] here per this file's own
+# schema note ("bundle several named blargg test programs into one FR/tier
+# cell... split here into one [[suite]] per named program, each carrying
+# the identical FR/tier the bundled row specifies").
+[[suite]]
+id = "mmc3_irq_tests"
+console = "nes"
+fr = "FR-CORE-025"
+tier = "A"
+protocol = "six_thousand"
+[[suite.roms]]
+artifact = "mmc3-irq-tests-1-clocking"
+rom = "1.Clocking"
+frame_budget = 600
+[[suite.roms]]
+artifact = "mmc3-irq-tests-2-details"
+rom = "2.Details"
+frame_budget = 600
+[[suite.roms]]
+artifact = "mmc3-irq-tests-3-a12-clocking"
+rom = "3.A12_clocking"
+frame_budget = 600
+[[suite.roms]]
+artifact = "mmc3-irq-tests-4-scanline-timing"
+rom = "4.Scanline_timing"
+frame_budget = 600
+[[suite.roms]]
+artifact = "mmc3-irq-tests-5-mmc3-rev-a"
+rom = "5.MMC3_rev_A"
+frame_budget = 600
+[[suite.roms]]
+artifact = "mmc3-irq-tests-6-mmc3-rev-b"
+rom = "6.MMC3_rev_B"
 frame_budget = 600
 
 [[suite]]

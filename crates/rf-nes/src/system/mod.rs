@@ -53,7 +53,7 @@
 //! | `$6000-$7FFF` | cartridge PRG RAM (always backed, 8 KiB) |
 //! | `$8000-$FFFF` | cartridge PRG ROM (NROM: mirrored/mapped, see `read_prg`) |
 //!
-//! ## Mapper scope (`docs/design/EMULATION_CORES.md` §2.4, ticket W2-02)
+//! ## Mapper scope (`docs/design/EMULATION_CORES.md` §2.4, tickets W2-02/W2-03)
 //!
 //! Ticket W1-02 inlined NROM's PRG read/mirroring logic directly in this
 //! module (`read_prg`, no longer present) rather than building the §2.4
@@ -62,32 +62,24 @@
 //! "speculative scaffolding". Ticket W2-02 is that second (third, fourth)
 //! implementor: [`crate::mappers`] now holds the trait plus NROM (0,
 //! extracted verbatim from this file's old `read_prg`), MMC1 (1), UxROM
-//! (2), and CNROM (3). `self.mapper: Box<dyn Mapper>` (built in
-//! [`NesBus::new`] from `rom.header().mapper`) is now what `read_untimed`/
-//! `peek`/`write_untimed` dispatch `$8000-$FFFF` PRG accesses through.
+//! (2), and CNROM (3); W2-03 adds MMC3 (4). `self.mapper: Box<dyn Mapper>`
+//! (built in [`NesBus::new`] from `rom.header().mapper`) is now what
+//! `read_untimed`/`peek`/`write_untimed` dispatch `$8000-$FFFF` PRG
+//! accesses through — verified end to end (not just per-mapper unit tests)
+//! by `system/tests/rom_loading.rs`'s
+//! `every_emulated_mapper_loads_through_the_production_path`, which
+//! constructs a real `NesBus` for every id in `EMULATED_MAPPERS`.
 //!
-//! `self.mapper` is also how CHR banking (CNROM, MMC1) and MMC1's
-//! mirroring control reach [`crate::ppu::Ppu`]: after every `$8000-$FFFF`
-//! write, this module pushes `self.mapper.chr_window()` (if `Some`) and
-//! `self.mapper.mirroring()` into the PPU via `Ppu::set_chr_window`/
-//! `Ppu::set_mirroring` (both new in `ppu/mem.rs`, ticket W2-02) — see
-//! `crate::mappers`' and `ppu/mem.rs`'s module docs for why this
-//! materialize/push design exists instead of a per-access
-//! `Mapper::ppu_read`/`ppu_write` (this ticket's write_scope has no
-//! reachable call site to thread a mapper reference through the render
-//! pipeline).
-//!
-//! **Known gap, documented rather than silently left:** `NesBus::new`'s
-//! `match rom.header().mapper { 0 => ..., 1 => ..., 2 => ..., 3 => ... }`
-//! has no test coverage — `system/cartridge.rs`'s
-//! `if header.mapper != 0` gate (a file outside this ticket's write_scope;
-//! see W2-02's own `plan.json` notes for the full evidence) means
-//! [`NesRom::from_ines_bytes`] can only ever produce a mapper-0 header
-//! today, so this match's `1`/`2`/`3` arms are live, forward-looking code
-//! that nothing can currently drive end to end. `crate::mappers`' own
-//! test suites verify each mapper's behavior directly instead (register-
-//! level unit tests plus real-`Cpu`-driven fixtures against a minimal
-//! test-only bus — see `crate::mappers::integration_tests`).
+//! `self.mapper` is also how CHR banking and mirroring control reach
+//! [`crate::ppu::Ppu`]: after every `$8000-$FFFF` write, this module pushes
+//! `self.mapper.chr_window()` (if `Some`) and `self.mapper.mirroring()`
+//! into the PPU via `Ppu::set_chr_window`/`Ppu::set_mirroring` (both new in
+//! `ppu/mem.rs`, ticket W2-02) — see `crate::mappers`' and `ppu/mem.rs`'s
+//! module docs for why this materialize/push design exists instead of a
+//! per-access `Mapper::ppu_read`/`ppu_write`. W2-03 adds a second,
+//! inverted pull/push seam for MMC3's IRQ counter (`tick_master`'s A12-edge
+//! drain, below) — see `crate::mappers` module doc's "MMC3 additions"
+//! section for the full design.
 //!
 //! ## Open bus
 //!
@@ -113,7 +105,7 @@ pub use cartridge::{NesLoadError, NesRom};
 pub use controller::Controller;
 
 use crate::cpu::CpuBus;
-use crate::mappers::{Cnrom, Mapper, Mmc1, Nrom, UxRom};
+use crate::mappers::{Cnrom, Mapper, Mmc1, Mmc3, Mmc3Revision, Nrom, UxRom};
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
 use rf_core_api::CoreSink;
@@ -151,11 +143,35 @@ pub struct NesBus {
 }
 
 impl NesBus {
-    /// Build a bus from an already-loaded [`NesRom`]. Ticket W2-02: the
-    /// mapper is selected by `rom.header().mapper` — see the module doc's
-    /// "Mapper scope" section for why only the `0` arm is reachable via
-    /// this constructor today (`system/cartridge.rs`'s own gate).
+    /// Build a bus from an already-loaded [`NesRom`]. Ticket W2-02/W2-03:
+    /// the mapper is selected by `rom.header().mapper` — see the module
+    /// doc's "Mapper scope" section for why only mappers `EMULATED_MAPPERS`
+    /// lists are reachable via this constructor (`system/cartridge.rs`'s
+    /// own gate). MMC3 (mapper 4) always builds [`Mmc3Revision::B`] — see
+    /// [`Self::new_forcing_mmc3_revision_a`]'s doc for why a second
+    /// constructor exists rather than a parameter here.
     pub fn new(rom: NesRom) -> Self {
+        Self::new_with_mmc3_revision(rom, Mmc3Revision::B)
+    }
+
+    /// Identical to [`Self::new`] except an MMC3 cartridge (mapper 4)
+    /// builds [`Mmc3Revision::A`] instead of the default
+    /// [`Mmc3Revision::B`] — ticket W2-03's `mmc3.rs` module doc "Which
+    /// revision does a real cartridge get?" section explains why this
+    /// exists at all: `mmc3_test_2`'s `6-MMC3_alt.nes` and
+    /// `mmc3_irq_tests`' `5.MMC3_rev_A.nes` need revision-A behavior to
+    /// pass, but their iNES headers are byte-identical to their
+    /// revision-B-requiring siblings, so there is no header field this
+    /// crate could dispatch on. This is `crate::ppu::tests::blargg_roms`'s
+    /// integration seam for exactly those two ROMs, never a
+    /// general-purpose loading path — no real, un-database-identified
+    /// cartridge should ever be forced through it.
+    #[cfg(test)]
+    pub(crate) fn new_forcing_mmc3_revision_a(rom: NesRom) -> Self {
+        Self::new_with_mmc3_revision(rom, Mmc3Revision::A)
+    }
+
+    fn new_with_mmc3_revision(rom: NesRom, mmc3_revision: Mmc3Revision) -> Self {
         let mapper: Box<dyn Mapper> = match rom.header().mapper {
             0 => Box::new(Nrom::new(rom.prg_rom().to_vec(), rom.header().mirroring)),
             1 => Box::new(Mmc1::new(
@@ -169,6 +185,13 @@ impl NesBus {
                 rom.chr_rom().to_vec(),
                 rom.chr_is_ram(),
                 rom.header().mirroring,
+            )),
+            4 => Box::new(Mmc3::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+                rom.header().mirroring,
+                mmc3_revision,
             )),
             other => unreachable!(
                 "system/cartridge.rs's UnimplementedMapper gate must reject mapper {other} \
@@ -204,6 +227,16 @@ impl NesBus {
     /// step (acceptance criterion 2: "NROM loads via rf-cart").
     pub fn from_ines_bytes(raw: &[u8]) -> Result<Self, NesLoadError> {
         Ok(Self::new(NesRom::from_ines_bytes(raw)?))
+    }
+
+    /// [`Self::from_ines_bytes`], but see [`Self::new_forcing_mmc3_revision_a`].
+    #[cfg(test)]
+    pub(crate) fn from_ines_bytes_forcing_mmc3_revision_a(
+        raw: &[u8],
+    ) -> Result<Self, NesLoadError> {
+        Ok(Self::new_forcing_mmc3_revision_a(NesRom::from_ines_bytes(
+            raw,
+        )?))
     }
 
     /// Total bus cycles elapsed since this bus was created — the master
@@ -525,6 +558,20 @@ impl NesBus {
         for _ in 0..cycles * 3 {
             self.nmi_level_latch = self.ppu.nmi_line();
             self.ppu.tick();
+            // Ticket W2-03: drain whatever filtered A12 rising edges this
+            // dot produced and forward each one into the mapper's own IRQ
+            // counter (a no-op for every mapper but MMC3) — see
+            // `crate::mappers` module doc's "MMC3 additions" section and
+            // `ppu/mem.rs`'s "A12 rising-edge detection" section for the
+            // full push/pull design this drain is the `NesBus` half of.
+            // Draining every dot (not once per `tick_master` call) keeps
+            // multi-edge ordering trivially correct: each `clock_irq_counter`
+            // call sees exactly the counter state the PREVIOUS call left,
+            // the same sequencing real hardware's back-to-back edges would
+            // produce.
+            for _ in 0..self.ppu.take_a12_edges() {
+                self.mapper.clock_irq_counter();
+            }
         }
     }
 }
@@ -597,9 +644,13 @@ impl CpuBus for NesBus {
         self.nmi_level_latch
     }
 
-    // `irq_line` stays at the `CpuBus` trait's default (`false`): the APU
-    // stub (out of this crate's scope so far) has no interrupt source, and
-    // NROM (this crate's only mapper, W1-02) has no mapper IRQ either —
-    // nothing else on this bus can assert IRQ yet. A later ticket overrides
-    // this once a real IRQ source exists.
+    /// Ticket W2-03: a straight passthrough to the cartridge mapper's own
+    /// IRQ line (`false` for every mapper but MMC3, whose `Mmc3Revision`
+    /// -specific fire rule and `$E000`-ack are described in
+    /// `crate::mappers::mmc3`'s module doc). The APU stub (out of this
+    /// crate's scope so far) has no interrupt source, so the mapper is the
+    /// only thing that can currently assert this.
+    fn irq_line(&self) -> bool {
+        self.mapper.irq_pending()
+    }
 }

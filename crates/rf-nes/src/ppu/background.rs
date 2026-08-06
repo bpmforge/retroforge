@@ -141,10 +141,17 @@ impl Ppu {
                 self.oam_addr = 0;
             }
             // Same "sprite tile loading interval" window's other half:
-            // latch this scanline's evaluated sprites into render-ready
-            // units for the NEXT scanline.
+            // fetch this scanline's evaluated sprites' CHR pattern bytes,
+            // spread across the real dots real hardware fetches them on
+            // (ticket W2-03; see `sprites.rs`'s
+            // `Ppu::reset_sprite_output_units`/`Ppu::run_sprite_fetch_dot`
+            // doc for why this is no longer a single dot-257 call) —
+            // latching render-ready units for the NEXT scanline.
             if dot == 257 {
-                self.load_sprite_units();
+                self.reset_sprite_output_units();
+            }
+            if (257..=320).contains(&dot) {
+                self.run_sprite_fetch_dot(dot);
             }
         }
         // Pre-render dot 1: unconditional, NOT gated on `rendering_enabled`

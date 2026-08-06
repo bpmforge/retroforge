@@ -9,9 +9,13 @@
 //! `nestest` is ticket W1-03's acceptance criterion 2 (FR-CORE-021): the
 //! real nestest ROM/log golden-trace diff, gitignored-artifact-absent-skip
 //! discipline documented in that module.
+//!
+//! `mmc3_irq` is ticket W2-03's acceptance criterion 3: the analytic
+//! (never-recorded, see that module's own doc) scanline-IRQ assertion.
 mod controller;
 mod integration;
 mod memory_map;
+mod mmc3_irq;
 mod nestest;
 mod oam_dma;
 mod rom_loading;

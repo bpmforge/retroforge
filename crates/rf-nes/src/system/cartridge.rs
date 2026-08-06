@@ -21,14 +21,18 @@ const TRAINER_LEN: usize = 512;
 const DEFAULT_CHR_RAM_SIZE: usize = 8 * 1024;
 
 /// The mapper numbers `NesBus::new`'s dispatch can actually construct
-/// (ticket W2-02, message derived from it by W2-16). This is rf-nes's
-/// statement about what it can EMULATE — deliberately separate from
-/// `rf_cart::nes`'s `SUPPORTED_MAPPERS`, which is rf-cart's statement
-/// about which headers it can PARSE and identify (that list includes 4 /
-/// MMC3 for identification purposes). Collapsing the two would silently
-/// admit a mapper the moment rf-cart learned to name it. MMC3 is ticket
-/// W2-03; add `4` here in the same commit as its `NesBus::new` arm.
-pub(crate) const EMULATED_MAPPERS: &[u16] = &[0, 1, 2, 3];
+/// (ticket W2-02, message derived from it by W2-16; `4`/MMC3 added by
+/// W2-03, in the same commit as its `NesBus::new` arm — see that ticket's
+/// own note: W2-02 shipped its mappers unreachable once before by letting
+/// this list and the dispatch `match` drift apart across commits). This is
+/// rf-nes's statement about what it can EMULATE — deliberately separate
+/// from `rf_cart::nes`'s `SUPPORTED_MAPPERS`, which is rf-cart's statement
+/// about which headers it can PARSE and identify. The two lists are
+/// identical as of W2-03 (both `[0, 1, 2, 3, 4]`) — a coincidence of this
+/// crate's current mapper roadmap, not a reason to collapse them: the next
+/// mapper rf-cart learns to identify should not silently become emulable
+/// the moment it's added there.
+pub(crate) const EMULATED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4];
 
 /// Everything that can go wrong turning a raw ROM image into an
 /// `rf-nes`-usable [`NesRom`]. Wraps [`CartError`] for the parsing/format
@@ -42,11 +46,14 @@ pub enum NesLoadError {
     /// The image parsed, but as an SNES cartridge, not NES.
     NotNesImage,
     /// A mapper `rf-cart`'s header parser already accepts (it is in
-    /// `nes::SUPPORTED_MAPPERS`) but that `rf-nes` does not implement yet.
-    /// Ticket W1-02 only implements mapper 0 (NROM); MMC1/UxROM/CNROM/MMC3
-    /// are `rf-cart`-parseable today but have no `rf-nes` behavior until a
-    /// later ticket lands, so this crate must not silently treat their PRG
-    /// data as if it were NROM-mapped.
+    /// `nes::SUPPORTED_MAPPERS`) but that `rf-nes` does not implement yet
+    /// (i.e. it's absent from `EMULATED_MAPPERS`, above) — this crate must
+    /// not silently treat an unemulated mapper's PRG data as if it were
+    /// NROM-mapped. As of W2-03, `EMULATED_MAPPERS` and
+    /// `nes::SUPPORTED_MAPPERS` happen to be identical (`[0, 1, 2, 3, 4]`),
+    /// so this variant currently has no reachable example — see
+    /// `system/tests/rom_loading.rs` for how that's tested (or rather, why
+    /// it currently can't be, directly).
     UnimplementedMapper(u16),
 }
 

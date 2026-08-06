@@ -76,10 +76,58 @@
 //!   [CPU] cycles" quirk (nesdev.org/wiki/MMC1) needs it *now*, and it is
 //!   the same input MMC3's A12 low-filter will need in W2-03, so it is a
 //!   better-informed honest gap than inventing `MapperBus` to carry it.
+//!
+//! ## MMC3 additions (ticket W2-03) — `ppu_a12`/`irq_pending` built, but not
+//! as sketched
+//!
+//! §2.4's sketch (quoted above) has `fn ppu_a12(&mut self, rising_cycle:
+//! u64)` — a per-access hook the PPU would call directly on `&mut dyn
+//! Mapper`. That still cannot work with this crate's ownership shape:
+//! [`crate::system::NesBus`] owns both `ppu: Ppu` and `mapper: Box<dyn
+//! Mapper>` as siblings, and [`crate::ppu::Ppu`]'s fetch call sites
+//! (`background.rs`/`sprites.rs`/`scroll.rs`) have no reachable path to a
+//! mapper reference without `Ppu` holding one — which would invert this
+//! crate's layering (PPU depending on the mapper abstraction) for a
+//! capability only one of five mappers uses.
+//!
+//! Instead, A12 rising-edge detection (with MMC3's documented low-period
+//! filter) is computed entirely inside [`crate::ppu::Ppu`] — mapper-agnostic,
+//! since A12 is a PPU-bus-electrical fact independent of what's listening —
+//! and exposed as a drainable pulse count (`Ppu::take_a12_edges`, `pub(crate)`
+//! to `crate::system` only). `NesBus::tick_master` drains it once per PPU dot
+//! and forwards each pulse into the two new trait members below, which
+//! **do** match §2.4's sketch member-for-member:
+//!
+//! - **`fn clock_irq_counter(&mut self) {}`** — called once per filtered A12
+//!   rising edge. Default no-op, so NROM/MMC1/UxROM/CNROM need no changes.
+//! - **`fn irq_pending(&self) -> bool { false }`** — `NesBus`'s
+//!   `CpuBus::irq_line` is now a straight passthrough to this (replacing the
+//!   "no IRQ source yet" comment/default that method carried since W1-02).
+//!
+//! This is the same push/pull convention `chr_window`/`mirroring` already
+//! use (`NesBus` polls the mapper and pushes into the PPU after every
+//! `$8000-$FFFF` write) — just inverted: here `NesBus` polls the *PPU* and
+//! pushes into the *mapper*. Neither `Ppu` nor `Mapper` needs to know the
+//! other exists; `NesBus` is the only thing that does, exactly as
+//! `docs/ARCHITECTURE.md`'s layer rules already require.
+//!
+//! **`$A001` (PRG-RAM protect) is deliberately NOT a trait member.** MMC3's
+//! [`Mmc3`] stores the two register bits (write-protect, chip
+//! enable) faithfully, but nothing in `system/mod.rs`'s `$6000-$7FFF`
+//! handling consults them — verified against every one of this ticket's
+//! oracle ROMs (`grep -rn 'A001' mmc3_test_2/source mmc3_irq_tests/source`
+//! upstream: zero hits) that no sub-ROM this ticket runs ever writes
+//! `$A001` at all, so there is no oracle to build the gate against, and
+//! MMC3 powers on with WRAM disabled per most emulator conventions — wiring
+//! the gate blind risks silently breaking every sub-ROM's own `$6000`
+//! result protocol (which depends on `$6000-$7FFF` staying writable) for a
+//! behavior nothing here exercises. An honest, narrow gap — the same shape
+//! as MMC1's un-modeled PRG-RAM-enable bit above — not a silent one.
 use rf_cart::Mirroring;
 
 mod cnrom;
 mod mmc1;
+mod mmc3;
 mod nrom;
 mod uxrom;
 
@@ -88,6 +136,7 @@ mod integration_tests;
 
 pub use cnrom::Cnrom;
 pub use mmc1::Mmc1;
+pub use mmc3::{Mmc3, Mmc3Revision};
 pub use nrom::Nrom;
 pub use uxrom::UxRom;
 
@@ -130,4 +179,19 @@ pub trait Mapper {
     /// every launch-set game in `docs/design/EMULATION_CORES.md`'s table
     /// actually ships, is unaffected).
     fn chr_window(&self) -> Option<&[u8]>;
+
+    /// One filtered PPU-A12 rising edge occurred (ticket W2-03) — see this
+    /// module's doc "MMC3 additions" section for why this is pulled by
+    /// [`crate::system::NesBus`] from [`crate::ppu::Ppu`] rather than
+    /// pushed in directly. Default no-op: only [`Mmc3`] overrides
+    /// this; NROM/MMC1/UxROM/CNROM have no scanline counter to clock.
+    fn clock_irq_counter(&mut self) {}
+
+    /// Whether this mapper is currently asserting `/IRQ` (ticket W2-03) —
+    /// [`crate::system::NesBus`]'s [`crate::cpu::CpuBus::irq_line`] is a
+    /// straight passthrough to this. Default `false`: only [`Mmc3`]
+    /// has an IRQ source.
+    fn irq_pending(&self) -> bool {
+        false
+    }
 }

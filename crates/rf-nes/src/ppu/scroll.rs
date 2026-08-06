@@ -185,6 +185,14 @@ impl Ppu {
         } else {
             self.t = (self.t & 0xFF00) | value as u16;
             self.v = self.t;
+            // Ticket W2-03: on real hardware the PPU address bus
+            // continuously reflects `v` whenever the PPU isn't actively
+            // fetching, so committing a new `v` here is itself a bus-address
+            // change MMC3's A12 watcher must see -- `mmc3_test_2/source/
+            // 3-A12_clocking.s` tests 2-4 exercise exactly this path (no
+            // `$2007` access at all, only `$2006` writes). See
+            // `ppu/mem.rs`'s module doc "A12 rising-edge detection" section.
+            self.observe_ppu_bus_address(self.v & 0x3FFF);
         }
         self.w = !self.w;
     }
@@ -232,6 +240,12 @@ impl Ppu {
     fn increment_vram_addr(&mut self) {
         let step = if self.ctrl & 0x04 != 0 { 32 } else { 1 };
         self.v = self.v.wrapping_add(step) & 0x7FFF;
+        // Ticket W2-03: the incremented `v` immediately becomes the new bus
+        // address (same reasoning as `write_addr`'s hook above) --
+        // `3-A12_clocking.s` tests 5/6 rely on THIS increment, not the
+        // access that precedes it, to produce their rising edge (both set
+        // up `v = $0FFF`, A12 already low, before the access).
+        self.observe_ppu_bus_address(self.v & 0x3FFF);
     }
 
     /// nesdev.org/wiki/PPU_scrolling, verbatim:

@@ -60,8 +60,27 @@ fn resolve(default_rel: &str) -> Option<PathBuf> {
 fn run_six_thousand(rom_path: &Path, max_frames: u32) -> Option<u8> {
     let rom_bytes = std::fs::read(rom_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", rom_path.display()));
-    let mut bus = NesBus::from_ines_bytes(&rom_bytes)
+    let bus = NesBus::from_ines_bytes(&rom_bytes)
         .unwrap_or_else(|e| panic!("invalid rom image {}: {e}", rom_path.display()));
+    run_six_thousand_on(bus, max_frames)
+}
+
+/// [`run_six_thousand`], but for the two MMC3 sub-ROMs
+/// (`mmc3_test_2/6-MMC3_alt.nes`, `mmc3_irq_tests/5.MMC3_rev_A.nes`) that
+/// require `Mmc3Revision::A` rather than `NesBus::from_ines_bytes`'s
+/// default `Mmc3Revision::B` to pass — see `crate::mappers::mmc3`'s module
+/// doc "Which revision does a real cartridge get?" section: both ROMs'
+/// headers are byte-identical to their revision-B-requiring siblings, so
+/// there is no way to detect this from the file itself.
+fn run_six_thousand_mmc3_revision_a(rom_path: &Path, max_frames: u32) -> Option<u8> {
+    let rom_bytes = std::fs::read(rom_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", rom_path.display()));
+    let bus = NesBus::from_ines_bytes_forcing_mmc3_revision_a(&rom_bytes)
+        .unwrap_or_else(|e| panic!("invalid rom image {}: {e}", rom_path.display()));
+    run_six_thousand_on(bus, max_frames)
+}
+
+fn run_six_thousand_on(mut bus: NesBus, max_frames: u32) -> Option<u8> {
     let mut cpu = Cpu::power_on(&mut bus);
 
     for _ in 0..max_frames {
@@ -207,3 +226,108 @@ fn ppu_vbl_nmi_known_good_roms_still_pass() {
         regressions.join("\n")
     );
 }
+
+/// SEQUENCING (ticket W2-03 pre-flight): run this sub-ROM first and alone.
+/// It isolates A12 edge detection (the PPU/bus seam this ticket's guardrail
+/// note calls out) from the counter-reload and IRQ-delivery questions the
+/// other five sub-ROMs also exercise.
+#[test]
+fn mmc3_test_2_3_a12_clocking_passes() {
+    let Some(rom_path) = resolve("../../roms/nes/mmc3_test_2/rom_singles/3-A12_clocking.nes")
+    else {
+        eprintln!(
+            "SKIP mmc3_test_2_3_a12_clocking_passes: mmc3_test_2/rom_singles/3-A12_clocking.nes \
+             not found. Fetch it first: scripts/fetch-test-roms.sh"
+        );
+        return;
+    };
+    let status = run_six_thousand(&rom_path, 600);
+    eprintln!(
+        "mmc3_test_2/3-A12_clocking: {}",
+        match status {
+            Some(0) => "PASS".to_string(),
+            Some(code) => format!("FAIL (code ${code:02X})"),
+            None => "TIMEOUT".to_string(),
+        }
+    );
+    assert_eq!(status, Some(0), "3-A12_clocking must pass");
+}
+
+/// Acceptance criterion 1 (ticket W2-03): all 6 fetched `mmc3_test_2`
+/// sub-ROMs pass, asserted the same way [`sprite_hit_tests_all_eleven_pass`]/
+/// [`ppu_vbl_nmi_known_good_roms_still_pass`] already are.
+/// `6-MMC3_alt` needs [`Mmc3Revision::A`](crate::mappers::Mmc3Revision)
+/// (`run_six_thousand_mmc3_revision_a`) — see that function's doc.
+#[test]
+fn mmc3_test_2_all_six_sub_roms_pass() {
+    let names_and_revision_a = [
+        ("1-clocking", false),
+        ("2-details", false),
+        ("3-A12_clocking", false),
+        ("4-scanline_timing", false),
+        ("5-MMC3", false),
+        ("6-MMC3_alt", true),
+    ];
+
+    let mut missing = 0;
+    let mut failures = Vec::new();
+    for (name, revision_a) in names_and_revision_a {
+        let rel = format!("../../roms/nes/mmc3_test_2/rom_singles/{name}.nes");
+        let Some(rom_path) = resolve(&rel) else {
+            missing += 1;
+            continue;
+        };
+        let status = if revision_a {
+            run_six_thousand_mmc3_revision_a(&rom_path, 600)
+        } else {
+            run_six_thousand(&rom_path, 600)
+        };
+        eprintln!(
+            "mmc3_test_2/{name}: {}",
+            match status {
+                Some(0) => "PASS".to_string(),
+                Some(code) => format!("FAIL (code ${code:02X})"),
+                None => "TIMEOUT".to_string(),
+            }
+        );
+        if status != Some(0) {
+            failures.push(format!("{name}: expected Some(0), got {status:?}"));
+        }
+    }
+
+    if missing == names_and_revision_a.len() {
+        eprintln!(
+            "SKIP mmc3_test_2_all_six_sub_roms_pass: mmc3_test_2/rom_singles/*.nes not found. \
+             Fetch them first: scripts/fetch-test-roms.sh"
+        );
+        return;
+    }
+    assert!(
+        missing == 0,
+        "found some but not all 6 mmc3_test_2 rom_singles (partial fetch?) -- {missing} missing"
+    );
+    assert!(
+        failures.is_empty(),
+        "mmc3_test_2 failures:\n{}",
+        failures.join("\n")
+    );
+}
+
+// `mmc3_irq_tests` (ticket W2-03) is wired into `tests/rom-manifest.toml`
+// and verified fetchable (`scripts/fetch-test-roms.sh
+// mmc3-irq-tests-*` — six `OK`s, hash-verified, this ticket's session) but
+// deliberately has NO in-crate assertion here, unlike `mmc3_test_2` above.
+// A `run_six_thousand`-based attempt was tried first and every one of its
+// six sub-ROMs timed out — not an MMC3 behavior gap (the identical ground
+// mmc3_test_2 covers passes 6/6 above), but a PROTOCOL mismatch: this
+// suite's source (`mmc3_irq_tests/source/*.asm`, its own readme: "runs on
+// a custom devcart and assembler") uses Shay Green's older devcart result
+// format — a zero-page `result` byte and an infinite text-printing loop at
+// `report_final_result_` — not the `$6000`/`$6001-$6003`
+// "DE B0 61"-signature protocol `run_six_thousand` reads (confirmed by
+// grepping that suite's `validation.asm`: zero references to `$6000` or
+// the signature bytes anywhere). Building a second reader (poll a
+// zero-page address plus detect the infinite loop, or read rendered
+// nametable text) is a real, separate harness feature, not a quick fix,
+// and out of what this ticket's acceptance actually requires (the manifest
+// entry, done above) — blocked-with-evidence, not silently skipped.

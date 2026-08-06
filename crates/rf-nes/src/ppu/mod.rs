@@ -401,15 +401,38 @@ pub struct Ppu {
     /// sprites that will be rendered on the *next* scanline.
     secondary_oam: [EvaluatedSprite; 8],
     secondary_oam_count: u8,
-    /// The render-ready snapshot [`Ppu::load_sprite_units`] latches at dot
-    /// 257, used by [`Ppu::output_pixel`]'s sprite compositing while
-    /// drawing the CURRENT scanline.
+    /// The render-ready snapshot [`Ppu::run_sprite_fetch_dot`] latches
+    /// across dots 257-320, used by [`Ppu::output_pixel`]'s sprite
+    /// compositing while drawing the CURRENT scanline.
     active_sprites: [SpriteUnit; 8],
     active_sprite_count: u8,
+    /// The most recent sprite pattern-table LOW byte fetched by
+    /// [`Ppu::run_sprite_fetch_dot`] (ticket W2-03), held from that slot's
+    /// phase-5 dot until its phase-7 dot latches the completed
+    /// [`SpriteUnit`] — the same "reload at the second half of a two-part
+    /// fetch" shape [`Ppu::pt_lo_latch`]/[`Ppu::pt_hi_latch`] already use
+    /// for background tiles, needed here because the fetch is now spread
+    /// across real dots instead of computed all at once.
+    sprite_pattern_lo_latch: u8,
 
     // ---- scanline output ----
     line_buffer: [PpuPixel; 256],
     completed: Vec<CompletedScanline>,
+
+    // ---- MMC3 A12 edge filter (ticket W2-03; see `ppu/mem.rs`'s module
+    // doc "A12 rising-edge detection" section) ----
+    /// Monotonic PPU-dot counter, incremented once per [`Ppu::tick`] —
+    /// the filter's own time base (nesdev's "3 CPU cycles" translated to
+    /// "9 PPU dots", exact because `NesBus::tick_master` guarantees
+    /// exactly 3 dots per CPU cycle always).
+    dot_clock: u64,
+    /// The `dot_clock` value at which A12 was first observed low since
+    /// the last consumed rising edge; `None` while A12 is high or while a
+    /// low period hasn't been sampled yet.
+    a12_low_since: Option<u64>,
+    /// Filtered A12 rising edges recorded since the last
+    /// [`Ppu::take_a12_edges`] drain.
+    pending_a12_edges: u32,
 }
 
 /// A fully-transparent placeholder pixel used to fill freshly-allocated
@@ -466,8 +489,12 @@ impl Ppu {
             secondary_oam_count: 0,
             active_sprites: [EMPTY_SPRITE_UNIT; 8],
             active_sprite_count: 0,
+            sprite_pattern_lo_latch: 0,
             line_buffer: [BLANK_PIXEL; 256],
             completed: Vec::with_capacity(240),
+            dot_clock: 0,
+            a12_low_since: None,
+            pending_a12_edges: 0,
         }
     }
 
@@ -525,6 +552,7 @@ impl Ppu {
     /// instead of 341, 89341 dots that whole frame instead of 89342). See
     /// [`Ppu::advance_counters`] for the implementation.
     pub fn tick(&mut self) {
+        self.dot_clock += 1;
         self.process_dot();
         self.advance_counters();
     }
