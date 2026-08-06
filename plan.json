@@ -1033,6 +1033,37 @@
    ]
   },
   {
+   "id": "W2-16",
+   "title": "Fix two misleading load diagnostics (stale mapper list; zip swallows the real reason)",
+   "phase": 2,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-nes/src/system/cartridge.rs",
+    "crates/rf-nes/src/system/tests/**",
+    "docs/evidence/local-gate.json"
+   ],
+   "depends_on": [
+    "W2-02"
+   ],
+   "acceptance": [
+    "the unimplemented-mapper message names what IS emulated rather than the stale 'NROM/mapper 0 only', which became false the moment W2-02 landed MMC1/UxROM/CNROM (FR-CORE-013)",
+    "opening a .zip whose only entry IS an iNES image but is rejected (e.g. an unsupported mapper) reports THAT reason naming the mapper, instead of the generic 'archive contains no recognizable ROM' which hides it",
+    "a zip genuinely containing no ROM at all still reports the generic no-ROM message -- the specific and generic paths must stay distinguishable"
+   ],
+   "points": 1,
+   "status": "done",
+   "stories": [
+    "E1-S2"
+   ],
+   "notes": [
+    "REPORTED BY BRAD 2026-08-06 from a real session, two separate defects in one message. (1) He hit 'mapper 4 is not implemented by rf-nes yet (NROM/mapper 0 only)' -- the parenthetical is STALE and actively wrong since W2-02 landed mappers 1/2/3 the same day; a diagnostic that misstates current capability is worse than a terse one. (2) He then tried Marble Madness (USA).zip and got what he described as 'no valid rom', despite it loading in other emulators.",
+    "ROOT CAUSE of (2), diagnosed from the actual artifact rather than guessed: `roms/nes/Marble Madness (USA).zip` holds one entry, `Marble Madness (USA).nes`, which is a perfectly valid NES 2.0 image (flags7 & 0x0C == 0x08) declaring MAPPER 7 (AxROM) -- flags6=0x70, flags7=0x08, PRG=8x16K, CHR=0 (CHR-RAM), size 131088 bytes exactly matching its header. rf-cart parses it fine and correctly returns CartError::UnsupportedMapper{id:7, name:\"AxROM\"}. But W2-13's zip resolver sniffs each entry through Cartridge::load and keeps only Ok(Nes), DISCARDING the error -- so a single-entry archive whose entry is a real ROM with an unsupported mapper falls through to NoRomInArchive, reporting 'no recognizable ROM'. The precise, correct, already-generated diagnostic was thrown away by the layer above it. That is a W2-13 defect, i.e. the conductor's own code.",
+    "NOT A BUG, and worth stating so it is not 'fixed': the ROM itself is fine and so is rf-cart. Mapper 7 (AxROM) is simply outside the planned set. FR-CORE-025 covers NROM(0), MMC1(1), UxROM(2), CNROM(3), MMC3(4) -- about 91.5% of the licensed NA library -- and AxROM is not among them. This ticket makes the refusal HONEST and specific; it does not add mapper support. Mapper 4 is W2-03; mapper 7 needs its own ticket if Brad wants it.",
+    "NFR-006 CHECK 2026-08-06 (conductor): the ROM Brad dropped in is at `roms/nes/Marble Madness (USA).zip`, and `git check-ignore` confirms it is covered by .gitignore's `/roms/` rule -- it can never be committed. Inspected locally for diagnosis only; no ROM bytes enter git, and no copyrighted title is hardcoded anywhere in engine code (the fixture used by the new test is a synthetic image declaring mapper 7, not this file)."
+   ]
+  },
+  {
    "id": "W3-01",
    "title": "wgpu original pipeline + headless golden frames",
    "phase": 3,

@@ -20,6 +20,16 @@ const TRAINER_LEN: usize = 512;
 /// exact size since no PPU exists yet to read it (W1-04a+ seam).
 const DEFAULT_CHR_RAM_SIZE: usize = 8 * 1024;
 
+/// The mapper numbers `NesBus::new`'s dispatch can actually construct
+/// (ticket W2-02, message derived from it by W2-16). This is rf-nes's
+/// statement about what it can EMULATE — deliberately separate from
+/// `rf_cart::nes`'s `SUPPORTED_MAPPERS`, which is rf-cart's statement
+/// about which headers it can PARSE and identify (that list includes 4 /
+/// MMC3 for identification purposes). Collapsing the two would silently
+/// admit a mapper the moment rf-cart learned to name it. MMC3 is ticket
+/// W2-03; add `4` here in the same commit as its `NesBus::new` arm.
+pub(crate) const EMULATED_MAPPERS: &[u16] = &[0, 1, 2, 3];
+
 /// Everything that can go wrong turning a raw ROM image into an
 /// `rf-nes`-usable [`NesRom`]. Wraps [`CartError`] for the parsing/format
 /// failures `rf-cart` already detects, plus the two failure modes that are
@@ -46,9 +56,22 @@ impl std::fmt::Display for NesLoadError {
             NesLoadError::Cart(e) => write!(f, "{e}"),
             NesLoadError::NotNesImage => write!(f, "image is an SNES cartridge, not NES"),
             NesLoadError::UnimplementedMapper(id) => {
+                // Ticket W2-16: this used to say "(NROM/mapper 0 only)",
+                // which went stale the moment W2-02 landed MMC1/UxROM/
+                // CNROM the same day and told users something false about
+                // the emulator's own capability. Derived from
+                // `EMULATED_MAPPERS` rather than restated in prose, so it
+                // cannot drift again: adding a mapper to that list updates
+                // this message for free.
+                let supported = EMULATED_MAPPERS
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 write!(
                     f,
-                    "mapper {id} is not implemented by rf-nes yet (NROM/mapper 0 only)"
+                    "mapper {id} is not implemented by rf-nes yet \
+                     (emulated so far: {supported})"
                 )
             }
         }
@@ -99,7 +122,6 @@ impl NesRom {
         // to overlap, and collapsing them would silently admit MMC3 the
         // moment rf-cart learned to name it. MMC3 is ticket W2-03; when it
         // lands, add `4` here in the same commit as its `NesBus::new` arm.
-        const EMULATED_MAPPERS: &[u16] = &[0, 1, 2, 3];
         if !EMULATED_MAPPERS.contains(&header.mapper) {
             return Err(NesLoadError::UnimplementedMapper(header.mapper));
         }

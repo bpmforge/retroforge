@@ -80,6 +80,15 @@ pub enum RomOpenError {
     /// how many entries were inspected so the message can distinguish
     /// "empty archive" from "archive full of screenshots and a README".
     NoRomInArchive { entries_inspected: usize },
+    /// The archive held exactly one entry that **is** a NES image, but
+    /// `rf-cart` rejected it — an unsupported mapper being the common
+    /// case. Ticket W2-16: without this variant the specific, already
+    /// generated diagnostic was discarded and the user saw the generic
+    /// [`RomOpenError::NoRomInArchive`] instead, which reads as "your file
+    /// is junk" when the real answer is "this emulator does not support
+    /// mapper N yet". Reported by Brad against a real NES 2.0 mapper-7
+    /// (AxROM) archive that loads in other emulators.
+    ArchiveEntryRejected { name: String, source: CartError },
     /// A readable archive holding more than one ROM. Deliberately an
     /// error, never a silent pick: zip entry order is an artifact of how
     /// the archive was written, not a meaningful ranking, so choosing for
@@ -104,6 +113,10 @@ impl fmt::Display for RomOpenError {
                 "the zip archive contains no recognizable ROM ({entries_inspected} \
                  entr{} inspected)",
                 if *entries_inspected == 1 { "y" } else { "ies" }
+            ),
+            RomOpenError::ArchiveEntryRejected { name, source } => write!(
+                f,
+                "the zip archive's only NES image, '{name}', could not be loaded: {source}"
             ),
             RomOpenError::MultipleRomsInArchive { names } => write!(
                 f,
@@ -163,6 +176,10 @@ fn validate_nes(bytes: Vec<u8>) -> Result<Vec<u8>, RomOpenError> {
 fn rom_from_zip(bytes: &[u8]) -> Result<Vec<u8>, RomOpenError> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(RomOpenError::Zip)?;
     let mut candidates: Vec<(String, Vec<u8>)> = Vec::new();
+    // Entries that ARE NES images but which rf-cart refused, kept so the
+    // real reason can be reported instead of the generic no-ROM message
+    // (ticket W2-16).
+    let mut rejected: Vec<(String, CartError)> = Vec::new();
     let mut inspected = 0usize;
     let mut total_read = 0u64;
 
@@ -192,13 +209,31 @@ fn rom_from_zip(bytes: &[u8]) -> Result<Vec<u8>, RomOpenError> {
             .map_err(RomOpenError::Io)?;
         total_read = total_read.saturating_add(buf.len() as u64);
 
-        if matches!(Cartridge::load(&buf), Ok(Cartridge::Nes { .. })) {
-            candidates.push((name, buf));
+        match Cartridge::load(&buf) {
+            Ok(Cartridge::Nes { .. }) => candidates.push((name, buf)),
+            // Not a ROM at all (a README, a PNG): silently skipped, as
+            // before — those are expected archive contents.
+            Ok(Cartridge::Snes { .. }) => {}
+            Err(e) => {
+                // Only worth reporting if it really is a NES image;
+                // otherwise every text file in the archive would produce
+                // a confusing "could not be loaded" complaint.
+                if buf.starts_with(&rf_cart::nes::INES_MAGIC) {
+                    rejected.push((name, e));
+                }
+            }
         }
     }
 
     match candidates.len() {
         1 => Ok(candidates.remove(0).1),
+        // Ticket W2-16: prefer the specific reason over the generic one.
+        // Exactly one rejected NES image means we know precisely why this
+        // archive did not load, and saying so beats "no recognizable ROM".
+        0 if rejected.len() == 1 => {
+            let (name, source) = rejected.remove(0);
+            Err(RomOpenError::ArchiveEntryRejected { name, source })
+        }
         0 => Err(RomOpenError::NoRomInArchive {
             entries_inspected: inspected,
         }),
@@ -413,6 +448,71 @@ mod tests {
         let rom = synthetic_nrom_bytes();
         let out = resolve_rom_bytes(rom.clone()).expect("a bare NROM image must still load");
         assert_eq!(out, rom);
+    }
+
+    /// Build a synthetic iNES image declaring `mapper`, used to reproduce
+    /// the real-world case without any copyrighted ROM bytes (NFR-006).
+    fn ines_declaring_mapper(mapper: u8) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
+        data.push(1); // 1x16KiB PRG
+        data.push(1); // 1x8KiB CHR
+        data.push((mapper & 0x0F) << 4); // flags6: mapper low nibble
+        data.push(mapper & 0xF0); // flags7: mapper high nibble
+        data.extend_from_slice(&[0u8; 8]);
+        data.extend(vec![0u8; 16 * 1024]);
+        data.extend(vec![0u8; 8 * 1024]);
+        data
+    }
+
+    /// Ticket W2-16, the reported bug: an archive whose single entry IS a
+    /// real NES image but carries an unsupported mapper must report THAT,
+    /// not the generic "no recognizable ROM". Brad hit this with a NES 2.0
+    /// mapper-7 (AxROM) archive that loads in other emulators, and the
+    /// generic message reads as "your file is junk" when the true answer
+    /// is "this emulator does not support mapper 7 yet".
+    #[test]
+    fn zip_whose_only_rom_has_an_unsupported_mapper_reports_the_real_reason() {
+        // 7 = AxROM: rf-cart names it but does not support it.
+        let archive = zip_with(
+            &[("Some Game (USA).nes", &ines_declaring_mapper(7))],
+            zip::CompressionMethod::Stored,
+        );
+        match resolve_rom_bytes(archive) {
+            Err(RomOpenError::ArchiveEntryRejected { name, source }) => {
+                assert_eq!(name, "Some Game (USA).nes");
+                let shown = source.to_string();
+                assert!(
+                    shown.contains('7'),
+                    "the diagnostic must name the mapper number, got: {shown}"
+                );
+            }
+            other => panic!("expected ArchiveEntryRejected, got {other:?}"),
+        }
+    }
+
+    /// The generic path must survive: an archive with no NES image at all
+    /// still reports NoRomInArchive. Without this, "always report the
+    /// specific reason" could collapse the two cases into one and lose the
+    /// distinction the fix exists to create.
+    #[test]
+    fn zip_with_no_nes_image_at_all_still_reports_the_generic_message() {
+        let archive = zip_with(
+            &[
+                ("readme.txt", b"no rom here".as_slice()),
+                ("art.png", b"still not a rom".as_slice()),
+            ],
+            zip::CompressionMethod::Stored,
+        );
+        assert!(
+            matches!(
+                resolve_rom_bytes(archive),
+                Err(RomOpenError::NoRomInArchive {
+                    entries_inspected: 2
+                })
+            ),
+            "an archive with no NES image must keep the generic diagnostic"
+        );
     }
 
     #[test]
