@@ -83,7 +83,24 @@ impl NesRom {
             Cartridge::Nes { header, .. } => header,
             Cartridge::Snes { .. } => return Err(NesLoadError::NotNesImage),
         };
-        if header.mapper != 0 {
+        // Ticket W2-02: this gate is the ONLY thing standing between a real
+        // `.nes` file and `NesBus::new`'s mapper dispatch, so it must list
+        // exactly what that `match` can construct — no more (or `new`
+        // hits its `unreachable!`), no less (or a supported mapper is
+        // rejected and the implementation is dead code from the
+        // production path, which is precisely what happened when this
+        // read `!= 0` while MMC1/UxROM/CNROM were already implemented).
+        //
+        // Deliberately NOT reusing `rf_cart::nes::SUPPORTED_MAPPERS`: that
+        // list is rf-cart's statement about which headers it can *parse
+        // and identify* (it includes 4/MMC3 for identification purposes),
+        // whereas this one is rf-nes's statement about which mappers it
+        // can actually *emulate*. They are different questions that happen
+        // to overlap, and collapsing them would silently admit MMC3 the
+        // moment rf-cart learned to name it. MMC3 is ticket W2-03; when it
+        // lands, add `4` here in the same commit as its `NesBus::new` arm.
+        const EMULATED_MAPPERS: &[u16] = &[0, 1, 2, 3];
+        if !EMULATED_MAPPERS.contains(&header.mapper) {
             return Err(NesLoadError::UnimplementedMapper(header.mapper));
         }
 

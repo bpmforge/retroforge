@@ -56,12 +56,20 @@ fn sixteen_kib_halves_are_identical_not_independently_addressable() {
 
 #[test]
 fn unimplemented_mapper_is_rejected_even_though_rf_cart_parses_its_header() {
-    // Mapper 1 (MMC1) is in rf-cart's SUPPORTED_MAPPERS (header parses
-    // fine) but rf-nes implements only mapper 0 in this ticket.
+    // RETARGETED 1 -> 4 by ticket W2-02, because this test's premise
+    // expired rather than its intent. It originally used mapper 1 (MMC1)
+    // with the comment "rf-nes implements only mapper 0 in this ticket" —
+    // true at W1-02, false now that W2-02 implements 1/2/3. The property
+    // being tested is unchanged and still worth pinning: rf-cart
+    // *parsing* a mapper's header does not mean rf-nes can *emulate* it,
+    // so the two lists must stay separate. Mapper 4 (MMC3) is the current
+    // example — in rf-cart's SUPPORTED_MAPPERS, not in rf-nes's
+    // EMULATED_MAPPERS, owned by ticket W2-03. Retarget it again when
+    // MMC3 lands.
     let mut raw = build_nrom_ines(1, 1, |i| i as u8);
-    raw[6] = 0x10; // flags6 high nibble = mapper low nibble = 1
+    raw[6] = 0x40; // flags6 high nibble = mapper low nibble = 4
     let err = NesRom::from_ines_bytes(&raw).unwrap_err();
-    assert_eq!(err, NesLoadError::UnimplementedMapper(1));
+    assert_eq!(err, NesLoadError::UnimplementedMapper(4));
 }
 
 #[test]
@@ -81,5 +89,67 @@ fn zero_chr_rom_size_means_chr_ram() {
     assert!(
         !rom.chr_rom().is_empty(),
         "CHR RAM must still have a backing store"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Ticket W2-02 conductor fix: the PRODUCTION load path must actually
+// reach the mappers.
+//
+// `NesBus::new`'s mapper-selection `match` was implemented for 0/1/2/3,
+// but `NesRom::from_ines_bytes`'s own gate still read `!= 0` — so every
+// real MMC1/UxROM/CNROM `.nes` file was rejected before dispatch, making
+// the whole implementation dead code from the only path a user can take.
+// The implementing agent found and reported this (that file was outside
+// its write scope) and noted the dispatch `match` had ZERO coverage.
+// These tests close both holes at once: they go through
+// `NesBus::from_ines_bytes`, the same entry point `EmuStepper` and the
+// app use, not through a test-only constructor.
+// ---------------------------------------------------------------------
+
+/// Build a synthetic iNES image declaring `mapper` in flags6/flags7.
+/// iNES puts the low nibble in flags6 bits 4-7 and the high nibble in
+/// flags7 bits 4-7 (nesdev.org/wiki/INES).
+fn ines_with_mapper(mapper: u8, prg_banks: u8, chr_banks: u8) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
+    data.push(prg_banks);
+    data.push(chr_banks);
+    data.push((mapper & 0x0F) << 4); // flags6: mapper low nibble
+    data.push(mapper & 0xF0); // flags7: mapper high nibble
+    data.extend_from_slice(&[0u8; 8]); // 8 reserved
+    data.extend(vec![0xEAu8; prg_banks as usize * 16 * 1024]); // NOP fill
+    data.extend(vec![0u8; chr_banks as usize * 8 * 1024]);
+    data
+}
+
+#[test]
+fn every_emulated_mapper_loads_through_the_production_path() {
+    // (mapper id, prg banks, chr banks) — CNROM/MMC1 need real CHR to bank.
+    for (mapper, prg, chr) in [(0u8, 1u8, 1u8), (1, 2, 2), (2, 2, 0), (3, 1, 2)] {
+        let raw = ines_with_mapper(mapper, prg, chr);
+        let rom = NesRom::from_ines_bytes(&raw)
+            .unwrap_or_else(|e| panic!("mapper {mapper} must load through the real path, got {e}"));
+        assert_eq!(rom.header().mapper, u16::from(mapper));
+        // Constructing the bus exercises `NesBus::new`'s dispatch arm,
+        // which previously could not be reached for 1/2/3 at all.
+        let bus = super::super::NesBus::new(rom);
+        assert_eq!(bus.rom().mapper, u16::from(mapper));
+    }
+}
+
+/// FR-CORE-013 must keep working for a mapper rf-cart cannot even name —
+/// widening the emulated set must not turn a clear diagnostic into a
+/// panic or a silent accept. (The "rf-cart parses it but rf-nes refuses
+/// it" case is covered by
+/// `unimplemented_mapper_is_rejected_even_though_rf_cart_parses_its_header`
+/// above; this is the earlier-exit path through the Cart error.)
+#[test]
+fn a_mapper_rf_cart_cannot_identify_is_refused_not_loaded() {
+    // 66 = GxROM: absent from rf-cart's SUPPORTED_MAPPERS entirely.
+    let raw = ines_with_mapper(66, 1, 1);
+    assert!(
+        NesRom::from_ines_bytes(&raw).is_err(),
+        "an unknown mapper must be refused, never loaded"
     );
 }

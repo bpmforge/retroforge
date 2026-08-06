@@ -64,11 +64,28 @@ pub enum NesFormat {
 
 /// Nametable mirroring as declared by the header (mapper may override at
 /// runtime; this is only the header's declared default).
+///
+/// `OneScreenLower`/`OneScreenUpper` (ticket W2-02) can never come from a
+/// header — no iNES/NES 2.0 field encodes them — so `parse_nes_header`
+/// below never produces either variant. They exist here only because
+/// `rf_nes`'s MMC1 implementation needs *some* `Mirroring` value to return
+/// from its own runtime mirroring-control register
+/// ([nesdev.org/wiki/MMC1](https://www.nesdev.org/wiki/MMC1)'s control
+/// register bits 0-1, values 0/1), and `rf-nes`'s `ppu/mem.rs` is the only
+/// place in the workspace that matches on `Mirroring` exhaustively —
+/// adding the variants here is safe (verified: `grep -rn "Mirroring::"
+/// crates/` before adding, ticket W2-02 pre-flight).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mirroring {
     Horizontal,
     Vertical,
     FourScreen,
+    /// All four logical nametables alias the single physical page normally
+    /// used by nametable 0 ("screen A").
+    OneScreenLower,
+    /// All four logical nametables alias the single physical page normally
+    /// used by nametable 1 ("screen B").
+    OneScreenUpper,
 }
 
 /// Parsed iNES/NES 2.0 header fields (FR-CORE-010).

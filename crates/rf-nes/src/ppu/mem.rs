@@ -3,9 +3,48 @@
 //! entirely separate from the CPU-side `$0000-$FFFF` bus
 //! ([`crate::system::NesBus`]).
 //!
-//! No `Mapper` trait exists yet (see `crate::ppu`'s module doc scope
-//! fence): CHR is a flat `Vec<u8>` handed in at construction, addressed
-//! directly (mapper 0 has no CHR banking).
+//! ## CHR banking: the materialize/push design (ticket W2-02)
+//!
+//! `Ppu::chr` is still a flat `Vec<u8>` addressed directly by `chr_read`/
+//! `chr_write` below, completely unchanged from ticket W1-02 (mapper 0
+//! has no CHR banking) — CNROM (mapper 3) and MMC1 (mapper 1) DO bank
+//! CHR, but that banking is not implemented in this file, or anywhere in
+//! `crate::ppu`, at all. Instead, [`crate::mappers::Mapper::chr_window`]
+//! exposes each banked mapper's *current* 8 KiB CHR view, and
+//! [`crate::system::NesBus`] copies it into `self.chr` — via
+//! [`Ppu::set_chr_window`] below — after every `$8000-$FFFF` write that
+//! could have changed the selected bank. `chr_read`/`chr_write`'s
+//! addressing math never needed to change; they just always see whatever
+//! bank was pushed most recently.
+//!
+//! This indirection exists specifically because of this ticket's
+//! write_scope: `docs/design/EMULATION_CORES.md` §2.4 sketches a
+//! `Mapper::ppu_read`/`ppu_write` pair that would let a mapper answer
+//! every individual PPU-bus access directly, but the only call sites
+//! that could invoke them (`Ppu::tick`'s background/sprite fetch
+//! pipeline) live in `ppu/mod.rs`/`background.rs`/`sprites.rs`/
+//! `scroll.rs` — all outside this ticket's write_scope (only this file
+//! is in scope). There is nowhere to thread a `&mut dyn Mapper`
+//! parameter through, so the mapper can't be asked per-access; it can
+//! only be *pushed* into this file's existing, unmodified storage.
+//! See `crate::mappers` module doc for the full reasoning and what a
+//! real MMC3 (W2-03, which needs genuine per-access interception for its
+//! A12 IRQ hook) will likely have to do differently.
+//!
+//! ## CHR RAM is not banked by this design (documented gap, not a bug)
+//!
+//! [`Mapper::chr_window`](crate::mappers::Mapper::chr_window) returns
+//! `None` for any CHR-RAM cartridge, so [`Ppu::set_chr_window`] is simply
+//! never called for one. If it *were* called for CHR RAM, a PPU-side
+//! `$2007` write to `self.chr` (below) would only ever land in the
+//! current push's copy — the next push (from an unrelated register
+//! write elsewhere in the same mapper) would overwrite it with a stale
+//! read of the mapper's own backing buffer, silently losing the write.
+//! Refusing to push CHR-RAM banks at all avoids that silent-loss failure
+//! mode entirely, at the cost of CHR-RAM bank switching simply not
+//! working — an honest, narrow gap (no licensed CNROM/MMC1 game in
+//! `docs/design/EMULATION_CORES.md`'s launch-set table uses banked CHR
+//! RAM) rather than a silently wrong one.
 use super::Ppu;
 use rf_cart::Mirroring;
 
@@ -55,6 +94,40 @@ impl Ppu {
         self.chr[addr as usize % len] = value;
     }
 
+    /// Replace `self.chr`'s bytes with `window` (ticket W2-02) — see this
+    /// module's doc for the full materialize/push design. Called by
+    /// [`crate::system::NesBus`] after any `$8000-$FFFF` write that could
+    /// have changed a banked mapper's selected CHR bank.
+    ///
+    /// `window.len()` must equal `self.chr.len()`: every mapper this
+    /// crate constructs a [`Ppu`] from seeds `self.chr` (at construction,
+    /// in [`crate::system::NesBus::new`]) from the exact same
+    /// [`crate::mappers::Mapper::chr_window`] call this method's callers
+    /// use afterward, so the lengths can never legitimately diverge — a
+    /// mismatch here is a caller bug (e.g. a mapper whose window size
+    /// isn't a fixed 8 KiB), not a recoverable runtime condition, so this
+    /// asserts rather than silently truncating or panicking on an
+    /// out-of-bounds copy later.
+    pub(crate) fn set_chr_window(&mut self, window: &[u8]) {
+        assert_eq!(
+            window.len(),
+            self.chr.len(),
+            "CHR window size must match the buffer NesBus::new seeded"
+        );
+        self.chr.copy_from_slice(window);
+    }
+
+    /// Update the nametable mirroring a mapper's own register controls
+    /// (MMC1; ticket W2-02) — called by [`crate::system::NesBus`] after
+    /// every `$8000-$FFFF` write, the same "always push, cheap no-op for
+    /// static-mirroring mappers" convention [`Ppu::set_chr_window`] uses.
+    /// `mirroring` is private to `crate::ppu` (unlike `chr`, which is
+    /// `pub(super)`), so this accessor is `crate::system`'s only way to
+    /// reach it.
+    pub(crate) fn set_mirroring(&mut self, mirroring: Mirroring) {
+        self.mirroring = mirroring;
+    }
+
     /// Physical offset into `vram` (4 KiB, one 1 KiB bank per logical
     /// nametable) for a PPU-bus address in `$2000-$3EFF`. `$3000-$3EFF`
     /// mirrors `$2000-$2EFF` exactly (both fold into the same 4 KiB modulo
@@ -64,7 +137,9 @@ impl Ppu {
     /// share bank 1 (`logical_bank / 2`). Vertical: 0/2 share bank 0, 1/3
     /// share bank 1 (`logical_bank % 2`). Four-screen: each of the 4
     /// logical nametables gets its own physical bank (`vram` is sized for
-    /// exactly this case).
+    /// exactly this case). One-screen (ticket W2-02, MMC1 control values
+    /// 0/1 — nesdev.org/wiki/MMC1): every logical nametable aliases the
+    /// single physical bank 0 (`Lower`) or bank 1 (`Upper`).
     fn nametable_offset(&self, addr: u16) -> usize {
         let logical_offset = (addr - 0x2000) % 0x1000;
         let logical_bank = (logical_offset / 0x400) as usize;
@@ -73,6 +148,8 @@ impl Ppu {
             Mirroring::Horizontal => logical_bank / 2,
             Mirroring::Vertical => logical_bank % 2,
             Mirroring::FourScreen => logical_bank,
+            Mirroring::OneScreenLower => 0,
+            Mirroring::OneScreenUpper => 1,
         };
         physical_bank * 0x400 + within_bank
     }
@@ -198,5 +275,80 @@ mod tests {
         let mut ppu = Ppu::new(vec![0u8; 0x2000], true, Mirroring::Horizontal);
         ppu.mem_write(0x0010, 0x99);
         assert_eq!(ppu.mem_read(0x0010), 0x99);
+    }
+
+    #[test]
+    fn set_chr_window_replaces_the_visible_bank() {
+        let mut ppu = ppu_with_mirroring(Mirroring::Horizontal);
+        assert_eq!(
+            ppu.mem_read(0x0000),
+            0,
+            "bank 0 (all zeroes) at construction"
+        );
+        let bank1 = [0x42u8; 0x2000];
+        ppu.set_chr_window(&bank1);
+        assert_eq!(
+            ppu.mem_read(0x0000),
+            0x42,
+            "NesBus's push must have replaced the entire visible CHR window -- a no-op \
+             push would still read the original bank's bytes here"
+        );
+        assert_eq!(
+            ppu.mem_read(0x1FFF),
+            0x42,
+            "and the whole window, not just the start"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "CHR window size must match")]
+    fn set_chr_window_rejects_a_mismatched_length() {
+        let mut ppu = ppu_with_mirroring(Mirroring::Horizontal);
+        ppu.set_chr_window(&[0u8; 4]);
+    }
+
+    #[test]
+    fn set_mirroring_changes_nametable_routing_live() {
+        let mut ppu = ppu_with_mirroring(Mirroring::Horizontal);
+        ppu.mem_write(0x2000, 0xAB); // NT0
+        assert_eq!(
+            ppu.mem_read(0x2800),
+            0x00,
+            "under Horizontal, NT2 does not alias NT0"
+        );
+        ppu.set_mirroring(Mirroring::Vertical);
+        assert_eq!(
+            ppu.mem_read(0x2800),
+            0xAB,
+            "after switching to Vertical, NT2 must alias NT0 -- a no-op set_mirroring \
+             would still read 0 here"
+        );
+    }
+
+    #[test]
+    fn one_screen_modes_alias_all_four_nametables_to_a_single_bank() {
+        let mut ppu = ppu_with_mirroring(Mirroring::OneScreenLower);
+        ppu.mem_write(0x2000, 0x11);
+        assert_eq!(ppu.mem_read(0x2400), 0x11);
+        assert_eq!(ppu.mem_read(0x2800), 0x11);
+        assert_eq!(ppu.mem_read(0x2C00), 0x11);
+    }
+
+    #[test]
+    fn one_screen_lower_and_upper_are_genuinely_different_physical_banks() {
+        // Not just "all four logical nametables alias each other" (the
+        // previous test) -- Lower and Upper must alias *different*
+        // physical pages, or a mapper's MMC1-driven mode switch between
+        // them (nesdev's control values 0/1) would be a no-op in practice.
+        let mut ppu = ppu_with_mirroring(Mirroring::OneScreenLower);
+        ppu.mem_write(0x2000, 0x11);
+        ppu.set_mirroring(Mirroring::OneScreenUpper);
+        assert_eq!(
+            ppu.mem_read(0x2000),
+            0x00,
+            "switching to OneScreenUpper must expose a bank that never saw the earlier \
+             write -- a mapper that treated both one-screen modes identically would \
+             still read 0x11 here"
+        );
     }
 }

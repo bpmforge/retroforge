@@ -53,20 +53,41 @@
 //! | `$6000-$7FFF` | cartridge PRG RAM (always backed, 8 KiB) |
 //! | `$8000-$FFFF` | cartridge PRG ROM (NROM: mirrored/mapped, see `read_prg`) |
 //!
-//! ## Mapper scope (`docs/design/EMULATION_CORES.md` §2.4)
+//! ## Mapper scope (`docs/design/EMULATION_CORES.md` §2.4, ticket W2-02)
 //!
-//! §2.4 sketches a general `Mapper` trait (`cpu_read`/`cpu_write`/
-//! `ppu_read`/`ppu_a12`/`state_chunk`/...) for the *eventual* multi-mapper
-//! system. This ticket implements exactly one mapper (NROM, mapper 0,
-//! which has no bank registers, no PPU-side behavior, and no IRQ), and no
-//! other mapper ticket exists on the board yet (`plan.json`'s W1-* set
-//! stops at W1-07). Building out `MapperBus`/`BusValue`/`MapperState` —
-//! none of which exist anywhere in this crate yet — for a single
-//! zero-register mapper would be speculative scaffolding with no second
-//! implementor to validate it against, so NROM's PRG read/mirroring logic
-//! is inlined directly in this module (`read_prg`) instead. The next
-//! mapper ticket is the right place to extract a trait, informed by an
-//! actual second mapper's needs.
+//! Ticket W1-02 inlined NROM's PRG read/mirroring logic directly in this
+//! module (`read_prg`, no longer present) rather than building the §2.4
+//! `Mapper` trait, on the grounds that a single zero-register mapper with
+//! no second implementor to validate against would make that trait
+//! "speculative scaffolding". Ticket W2-02 is that second (third, fourth)
+//! implementor: [`crate::mappers`] now holds the trait plus NROM (0,
+//! extracted verbatim from this file's old `read_prg`), MMC1 (1), UxROM
+//! (2), and CNROM (3). `self.mapper: Box<dyn Mapper>` (built in
+//! [`NesBus::new`] from `rom.header().mapper`) is now what `read_untimed`/
+//! `peek`/`write_untimed` dispatch `$8000-$FFFF` PRG accesses through.
+//!
+//! `self.mapper` is also how CHR banking (CNROM, MMC1) and MMC1's
+//! mirroring control reach [`crate::ppu::Ppu`]: after every `$8000-$FFFF`
+//! write, this module pushes `self.mapper.chr_window()` (if `Some`) and
+//! `self.mapper.mirroring()` into the PPU via `Ppu::set_chr_window`/
+//! `Ppu::set_mirroring` (both new in `ppu/mem.rs`, ticket W2-02) — see
+//! `crate::mappers`' and `ppu/mem.rs`'s module docs for why this
+//! materialize/push design exists instead of a per-access
+//! `Mapper::ppu_read`/`ppu_write` (this ticket's write_scope has no
+//! reachable call site to thread a mapper reference through the render
+//! pipeline).
+//!
+//! **Known gap, documented rather than silently left:** `NesBus::new`'s
+//! `match rom.header().mapper { 0 => ..., 1 => ..., 2 => ..., 3 => ... }`
+//! has no test coverage — `system/cartridge.rs`'s
+//! `if header.mapper != 0` gate (a file outside this ticket's write_scope;
+//! see W2-02's own `plan.json` notes for the full evidence) means
+//! [`NesRom::from_ines_bytes`] can only ever produce a mapper-0 header
+//! today, so this match's `1`/`2`/`3` arms are live, forward-looking code
+//! that nothing can currently drive end to end. `crate::mappers`' own
+//! test suites verify each mapper's behavior directly instead (register-
+//! level unit tests plus real-`Cpu`-driven fixtures against a minimal
+//! test-only bus — see `crate::mappers::integration_tests`).
 //!
 //! ## Open bus
 //!
@@ -92,6 +113,7 @@ pub use cartridge::{NesLoadError, NesRom};
 pub use controller::Controller;
 
 use crate::cpu::CpuBus;
+use crate::mappers::{Cnrom, Mapper, Mmc1, Nrom, UxRom};
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
 use rf_core_api::CoreSink;
@@ -111,6 +133,10 @@ pub struct NesBus {
     controllers: [Controller; 2],
     prg_ram: [u8; PRG_RAM_SIZE],
     rom: NesRom,
+    /// The cartridge's mapper (ticket W2-02) — every `$8000-$FFFF` CPU
+    /// access and every CHR-bank/mirroring push into `ppu` goes through
+    /// this. See the module doc's "Mapper scope" section.
+    mapper: Box<dyn Mapper>,
     /// Stall length (513 or 514) of the most recently completed OAM DMA,
     /// *not counting* the `$4014` write's own bus cycle (see
     /// `run_oam_dma`'s doc for the exact accounting). `None` until the
@@ -125,17 +151,41 @@ pub struct NesBus {
 }
 
 impl NesBus {
-    /// Build a bus from an already-loaded [`NesRom`] (mapper 0 / NROM
-    /// only — see [`NesRom::from_ines_bytes`]).
+    /// Build a bus from an already-loaded [`NesRom`]. Ticket W2-02: the
+    /// mapper is selected by `rom.header().mapper` — see the module doc's
+    /// "Mapper scope" section for why only the `0` arm is reachable via
+    /// this constructor today (`system/cartridge.rs`'s own gate).
     pub fn new(rom: NesRom) -> Self {
-        // Built from `rom`'s own CHR bytes/mirroring before `rom` moves
-        // into the struct below — no `Mapper` trait exists yet (mapper 0
-        // has no CHR banking), so the PPU just owns a flat copy.
-        let ppu = Ppu::new(
-            rom.chr_rom().to_vec(),
-            rom.chr_is_ram(),
-            rom.header().mirroring,
-        );
+        let mapper: Box<dyn Mapper> = match rom.header().mapper {
+            0 => Box::new(Nrom::new(rom.prg_rom().to_vec(), rom.header().mirroring)),
+            1 => Box::new(Mmc1::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+            )),
+            2 => Box::new(UxRom::new(rom.prg_rom().to_vec(), rom.header().mirroring)),
+            3 => Box::new(Cnrom::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+                rom.header().mirroring,
+            )),
+            other => unreachable!(
+                "system/cartridge.rs's UnimplementedMapper gate must reject mapper {other} \
+                 before NesBus::new is ever reached -- see ticket W2-02's blocked-with-evidence \
+                 note in plan.json"
+            ),
+        };
+        // Seed the PPU's flat CHR buffer from the mapper's initial view:
+        // `chr_window()` (bank-0-windowed) for a banked mapper, or the raw
+        // cartridge CHR bytes for one with no CHR banking at all (module
+        // doc's materialize/push design — see `crate::mappers` and
+        // `ppu/mem.rs`'s module docs).
+        let chr = mapper
+            .chr_window()
+            .map(<[u8]>::to_vec)
+            .unwrap_or_else(|| rom.chr_rom().to_vec());
+        let ppu = Ppu::new(chr, rom.chr_is_ram(), mapper.mirroring());
         NesBus {
             master_cycle: 0,
             ram: [0; RAM_SIZE],
@@ -144,6 +194,7 @@ impl NesBus {
             controllers: [Controller::new(), Controller::new()],
             prg_ram: [0; PRG_RAM_SIZE],
             rom,
+            mapper,
             last_oam_dma_stall: None,
             nmi_level_latch: false,
         }
@@ -244,7 +295,7 @@ impl NesBus {
             0x4000..=0x4015 | 0x4018..=0x401F => self.open_bus,
             0x4020..=0x5FFF => self.open_bus,
             0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000],
-            0x8000..=0xFFFF => self.read_prg(addr),
+            0x8000..=0xFFFF => self.mapper.cpu_read(addr),
         };
         self.open_bus = value;
         value
@@ -326,19 +377,8 @@ impl NesBus {
             0x4000..=0x4015 | 0x4018..=0x401F => 0xFF,
             0x4020..=0x5FFF => self.open_bus,
             0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000],
-            0x8000..=0xFFFF => self.read_prg(addr),
+            0x8000..=0xFFFF => self.mapper.cpu_read(addr),
         }
-    }
-
-    /// NROM PRG read: a 16 KiB image is mirrored into both `$8000-$BFFF`
-    /// and `$C000-$FFFF`; a 32 KiB image is mapped straight through.
-    /// `% prg_rom.len()` implements both in one line since 16 KiB and
-    /// 32 KiB both evenly divide the 32 KiB `$8000-$FFFF` window.
-    fn read_prg(&self, addr: u16) -> u8 {
-        let prg = self.rom.prg_rom();
-        debug_assert!(!prg.is_empty(), "NROM image with empty PRG ROM");
-        let offset = (addr as usize - 0x8000) % prg.len();
-        prg[offset]
     }
 
     /// One CPU-visible write with no `master_cycle` side effect (see
@@ -363,8 +403,28 @@ impl NesBus {
             0x4000..=0x4013 | 0x4015 | 0x4017..=0x401F => {}
             0x4020..=0x5FFF => {}
             0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000] = value,
-            // NROM has no mapper registers; PRG ROM writes have no effect.
-            0x8000..=0xFFFF => {}
+            // Ticket W2-02: dispatched to the cartridge's own mapper (a
+            // no-op for NROM, which has no registers) rather than ignored
+            // outright. `self.master_cycle` here is still the cycle THIS
+            // write occupies -- `CpuBus::write`'s own `tick_master(1)`
+            // call (which advances it) hasn't run yet at this point in the
+            // call chain, which is exactly what makes consecutive writes
+            // (e.g. an RMW instruction's two `$8000+` writes) land on
+            // `master_cycle` values exactly 1 apart, the input MMC1's
+            // ignore-consecutive-write quirk needs (`crate::mappers`
+            // module doc). After the mapper's own write, push whatever it
+            // now reports for CHR/mirroring into the PPU (module doc's
+            // "Mapper scope" section; `ppu/mem.rs`'s module doc for the
+            // full materialize/push design and its CHR-RAM caveat) --
+            // cheap and correct to do unconditionally even for mappers
+            // that never change either.
+            0x8000..=0xFFFF => {
+                self.mapper.cpu_write(addr, value, self.master_cycle);
+                if let Some(window) = self.mapper.chr_window() {
+                    self.ppu.set_chr_window(window);
+                }
+                self.ppu.set_mirroring(self.mapper.mirroring());
+            }
         }
     }
 

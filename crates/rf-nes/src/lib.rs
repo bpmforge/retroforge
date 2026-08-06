@@ -17,11 +17,13 @@
 //! to depend on, not an upper layer.
 
 pub mod cpu;
+pub mod mappers;
 pub mod ppu;
 pub mod system;
 pub mod trace;
 
 pub use cpu::{Cpu, CpuBus};
+pub use mappers::Mapper;
 pub use ppu::Ppu;
 pub use system::{NesBus, NesLoadError, NesRom};
 pub use trace::{format_trace_line, TracePeek};
