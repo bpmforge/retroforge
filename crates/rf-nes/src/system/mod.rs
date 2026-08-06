@@ -105,7 +105,7 @@ pub use cartridge::{NesLoadError, NesRom};
 pub use controller::Controller;
 
 use crate::cpu::CpuBus;
-use crate::mappers::{Cnrom, Mapper, Mmc1, Mmc3, Mmc3Revision, Nrom, UxRom};
+use crate::mappers::{AxRom, Cnrom, Mapper, Mmc1, Mmc3, Mmc3Revision, Nrom, UxRom};
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
 use rf_core_api::CoreSink;
@@ -193,6 +193,7 @@ impl NesBus {
                 rom.header().mirroring,
                 mmc3_revision,
             )),
+            7 => Box::new(AxRom::new(rom.prg_rom().to_vec())),
             other => unreachable!(
                 "system/cartridge.rs's UnimplementedMapper gate must reject mapper {other} \
                  before NesBus::new is ever reached -- see ticket W2-02's blocked-with-evidence \

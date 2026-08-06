@@ -32,7 +32,7 @@ const DEFAULT_CHR_RAM_SIZE: usize = 8 * 1024;
 /// crate's current mapper roadmap, not a reason to collapse them: the next
 /// mapper rf-cart learns to identify should not silently become emulable
 /// the moment it's added there.
-pub(crate) const EMULATED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4];
+pub(crate) const EMULATED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7];
 
 /// Everything that can go wrong turning a raw ROM image into an
 /// `rf-nes`-usable [`NesRom`]. Wraps [`CartError`] for the parsing/format

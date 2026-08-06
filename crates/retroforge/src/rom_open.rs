@@ -471,11 +471,20 @@ mod tests {
     /// mapper-7 (AxROM) archive that loads in other emulators, and the
     /// generic message reads as "your file is junk" when the true answer
     /// is "this emulator does not support mapper 7 yet".
+    ///
+    /// RETARGETED 7 -> 5 by ticket W2-17, which implemented AxROM. This is
+    /// the THIRD test to expire this way (W2-02 retargeted one off mapper
+    /// 1, W2-03 retired one off mapper 4), because "the currently
+    /// unsupported mapper" is a premise that dies every time a mapper
+    /// lands. Mapper 5 (MMC5) is the durable choice: EMULATION_CORES.md
+    /// section 2.4 lists MMC2/4 and MMC5 as "explicitly deferred", so it
+    /// is out of scope by design rather than merely not-yet-done. rf-cart
+    /// still NAMES it ("MMC5 / ExROM"), which is what this test needs —
+    /// the point is that a *named* diagnostic reaches the user.
     #[test]
     fn zip_whose_only_rom_has_an_unsupported_mapper_reports_the_real_reason() {
-        // 7 = AxROM: rf-cart names it but does not support it.
         let archive = zip_with(
-            &[("Some Game (USA).nes", &ines_declaring_mapper(7))],
+            &[("Some Game (USA).nes", &ines_declaring_mapper(5))],
             zip::CompressionMethod::Stored,
         );
         match resolve_rom_bytes(archive) {
@@ -483,7 +492,7 @@ mod tests {
                 assert_eq!(name, "Some Game (USA).nes");
                 let shown = source.to_string();
                 assert!(
-                    shown.contains('7'),
+                    shown.contains('5'),
                     "the diagnostic must name the mapper number, got: {shown}"
                 );
             }

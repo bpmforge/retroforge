@@ -125,6 +125,7 @@
 //! as MMC1's un-modeled PRG-RAM-enable bit above — not a silent one.
 use rf_cart::Mirroring;
 
+mod axrom;
 mod cnrom;
 mod mmc1;
 mod mmc3;
@@ -134,6 +135,7 @@ mod uxrom;
 #[cfg(test)]
 mod integration_tests;
 
+pub use axrom::AxRom;
 pub use cnrom::Cnrom;
 pub use mmc1::Mmc1;
 pub use mmc3::{Mmc3, Mmc3Revision};

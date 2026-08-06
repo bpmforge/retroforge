@@ -19,7 +19,7 @@ const CHR_BANK: usize = 8 * 1024;
 /// (`docs/design/EMULATION_CORES.md` §3.4). Extend this list in lockstep
 /// with whatever ticket lands the next mapper in rf-nes — this table is
 /// the enforcement point for FR-CORE-013's "unknown mapper" diagnostic.
-const SUPPORTED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4];
+const SUPPORTED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7];
 
 /// A handful of well-known mapper names, used only to make an
 /// unsupported-mapper diagnostic more useful. Not exhaustive — absence

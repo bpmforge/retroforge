@@ -1082,6 +1082,45 @@
    ]
   },
   {
+   "id": "W2-17",
+   "title": "AxROM (mapper 7): 32 KiB PRG banking + single-screen mirroring",
+   "phase": 2,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/mappers/**",
+    "crates/rf-nes/src/system/mod.rs",
+    "crates/rf-nes/src/system/cartridge.rs",
+    "crates/rf-nes/src/system/tests/**",
+    "crates/rf-cart/**",
+    "docs/SRS.md",
+    "docs/evidence/local-gate.json"
+   ],
+   "depends_on": [
+    "W2-02"
+   ],
+   "acceptance": [
+    "AxROM implemented on the W2-02 Mapper trait: a whole 32 KiB PRG window at $8000-$FFFF with NO fixed bank (the difference from UxROM most likely to be got wrong by analogy), bank bits 0-2, and single-screen mirroring from bit 4 (FR-CORE-025)",
+    "a mapper-7 image loads through the PRODUCTION path -- rf-cart's SUPPORTED_MAPPERS and rf-nes's EMULATED_MAPPERS both gain 7 in the same commit, since either one alone leaves the implementation unreachable",
+    "the six canaries are unregressed: nes6502 2,560,000/2,560,000, nestest 8991/8991 byte-exact, golden_frame_bg, golden_frame_sprites, sprite_hit_tests 11/11, ppu_vbl_nmi 9/10",
+    "FR-CORE-025 amended to include AxROM(7) in the same commit as the ticket citing it, per the traceability ordering law (F2 is a hard failure; an SRS row must land with or before its citing ticket)"
+   ],
+   "points": 2,
+   "status": "done",
+   "stories": [
+    "E2-S1"
+   ],
+   "notes": [
+    "REQUESTED BY BRAD 2026-08-06 after a real mapper-7 ROM was refused: Marble Madness (USA).zip, a valid NES 2.0 image declaring mapper 7 (AxROM), 128 KiB PRG = 4 x 32 KiB banks, CHR-RAM. W2-16 had already made that refusal HONEST ('unsupported mapper: 7 (AxROM)' instead of the misleading 'no valid rom'); this ticket makes it unnecessary.",
+    "PRE-FLIGHT 2026-08-06 (conductor) -- THIS IS GENUINELY SMALL, verified rather than assumed, and the reason is that W2-02 already paid the cost. AxROM needs Mirroring::OneScreenLower/OneScreenUpper, which do NOT come from any iNES header field and exist solely because MMC1 needed runtime mirroring control; they are implemented in ppu/mem.rs (lines 253-254) AND tested there, including a runtime set_mirroring switch asserting the new bank never saw the old writes. So AxROM needs NO ppu/ change at all -- unlike CNROM (which forced CHR routing) or MMC3 (which forced A12 detection and a sprite-fetch rework). UxROM is the shape template at 139 lines.",
+    "PRE-FLIGHT 2026-08-06 (conductor) -- THE TWO-LIST TRAP, caught before it bit this time. W2-02 shipped its mappers unreachable because system/cartridge.rs's gate was not updated; the lesson generalized is that a mapper is reachable only if BOTH rf_cart::nes::SUPPORTED_MAPPERS (which gates first, and would otherwise reject mapper 7 with UnsupportedMapper before rf-nes ever sees it) AND rf-nes's EMULATED_MAPPERS contain it. Both are in this ticket's write_scope and both must move in the same commit. The two lists are deliberately NOT collapsed -- they answer different questions (parse/identify vs emulate) -- which is precisely why both need touching.",
+    "SRS AMENDMENT 2026-08-06, flagged rather than slipped in: FR-CORE-025 as written covers NROM(0), MMC1(1), UxROM(2), CNROM(3), MMC3(4) and explicitly justifies that set as 'approximately 91.5% of the licensed NA library'. Mapper 7 is OUTSIDE it. Brad asked for it directly after hitting a real mapper-7 ROM, so the requirement is amended to include AxROM(7) (taking coverage to roughly 93%) and the amendment lands in the SAME COMMIT as this ticket, per validate-traceability's F2 ordering rule. Recording it because amending an SRS requirement is a bigger act than amending a ticket's acceptance, and it should never look like it happened quietly.",
+    "IMPLEMENTED BY THE CONDUCTOR DIRECTLY, not delegated -- a deliberate departure from Brad's standing 'conduct with Sonnet subagents' instruction, recorded rather than silently taken. Roughly 40 lines of mapper logic on a fully established pattern (uxrom.rs is the near-identical template), plus one-line edits to two lists, a dispatch arm and an SRS row; writing the brief would have cost more than writing the code. Same judgement as W2-13 and W2-16.",
+    "CLOSED 2026-08-06 (conductor). Gate all seven exit 0, 487 passed / 0 failed / 3 ignored (was 481), cargo deny 'licenses ok'. FIELD-EQUIVALENT VERIFICATION against the REAL artifact, not just synthetic fixtures: Brad's Marble Madness (USA).zip now resolves out of the archive (131,088 bytes), loads into EmuStepper, and runs 120 frames rendering 4 distinct colours -- i.e. it boots and draws rather than merely being accepted. No ROM bytes entered git; the file is covered by .gitignore's /roms/ rule.",
+    "MUTATION-TESTED 2026-08-06 (conductor), aimed squarely at the two-list trap: reverting ONLY rf-cart's SUPPORTED_MAPPERS (leaving rf-nes's EMULATED_MAPPERS and the dispatch arm intact) fails every_emulated_mapper_loads_through_the_production_path with 'mapper 7 must load through the real path, got unsupported mapper: 7 (AxROM)'. That is the exact W2-02 failure mode -- an implemented mapper left unreachable because only one of the two gates moved -- now mechanically caught instead of discovered by a user.",
+    "A THIRD TEST EXPIRED THE SAME WAY, and the pattern is now worth naming. This ticket broke W2-16's zip_whose_only_rom_has_an_unsupported_mapper_reports_the_real_reason, which used MAPPER 7 as its unsupported example. That is the third instance: W2-02 retargeted one off mapper 1, W2-03 retired one off mapper 4, and now this. ROOT CAUSE: 'the currently unsupported mapper' is a premise that dies every single time a mapper lands, so any test using it is scheduled to break. FIX APPLIED, and it is durable rather than another lap: retargeted to MAPPER 5 (MMC5), which docs/design/EMULATION_CORES.md section 2.4 lists as EXPLICITLY DEFERRED alongside MMC2/4 -- out of scope by design rather than merely not-yet-done -- while rf-cart still NAMES it ('MMC5 / ExROM'), which is what the test actually needs since its point is that a named diagnostic reaches the user. Reasoning recorded in the test's own doc comment, not only here."
+   ]
+  },
+  {
    "id": "W3-01",
    "title": "wgpu original pipeline + headless golden frames",
    "phase": 3,

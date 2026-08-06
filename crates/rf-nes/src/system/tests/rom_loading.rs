@@ -127,7 +127,16 @@ fn every_emulated_mapper_loads_through_the_production_path() {
     // (mapper id, prg banks, chr banks) — CNROM/MMC1/MMC3 need real CHR to
     // bank; MMC3 needs at least 2 x 16 KiB (4 x 8 KiB) PRG banks for its
     // fixed/switchable windows to be distinguishable at all.
-    for (mapper, prg, chr) in [(0u8, 1u8, 1u8), (1, 2, 2), (2, 2, 0), (3, 1, 2), (4, 2, 1)] {
+    // AxROM (7) needs 2 x 32 KiB = 4 x 16 KiB PRG banks for its window to
+    // be distinguishable at all, and declares CHR-RAM (0 CHR banks).
+    for (mapper, prg, chr) in [
+        (0u8, 1u8, 1u8),
+        (1, 2, 2),
+        (2, 2, 0),
+        (3, 1, 2),
+        (4, 2, 1),
+        (7, 4, 0),
+    ] {
         let raw = ines_with_mapper(mapper, prg, chr);
         let rom = NesRom::from_ines_bytes(&raw)
             .unwrap_or_else(|e| panic!("mapper {mapper} must load through the real path, got {e}"));
