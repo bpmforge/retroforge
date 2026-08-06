@@ -40,6 +40,27 @@ nestest_log="${RF_NESTEST_LOG:-$repo_root/roms/nes/other/nestest.log}"
 ppu_vbl_nmi_dir="$repo_root/roms/nes/ppu_vbl_nmi/rom_singles"
 sprite_hit_dir="$repo_root/roms/nes/sprite_hit_tests_2005.10.05"
 
+# 10k-frame determinism double-run (ticket W1-08): #[ignore]'d in
+# crates/retroforge/tests/determinism.rs (debug cost ~93s/pair, measured;
+# release cost ~9s, measured) — release-only, same as CI's dedicated step
+# (.github/workflows/ci.yml). No docs/evidence/local-gate.json row — see
+# docs/TESTING.md §6 for why — but still a hard local-gate failure.
+#
+# Deliberately runs BEFORE the four ROM-directory pre-checks below
+# (conductor ruling, ticket W1-08): this suite's fixture is a synthetic
+# in-code NROM and needs no fetched ROMs at all, and because both tests
+# are `#[ignore]`'d this script is the ONLY local path that runs them.
+# Ordering it after the ROM checks would mean someone without a fetched
+# `roms/` — the exact person who most needs a ROM-free determinism check —
+# could never run it. The cost is that a missing-ROM run now pays ~9s
+# before reporting the missing directory, which is the cheaper mistake.
+echo "local-gate: running 10k-frame determinism double-run (release)..." >&2
+if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
+  -p retroforge --test determinism -- --ignored; then
+  echo "local-gate: 10k-frame determinism double-run FAILED" >&2
+  exit 1
+fi
+
 if [ ! -d "$vectors_dir" ]; then
   echo "local-gate: nes6502 vectors not found at $vectors_dir" >&2
   echo "Fetch them first: scripts/fetch-test-roms.sh singlestep-nes6502-src" >&2

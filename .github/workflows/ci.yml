@@ -37,6 +37,17 @@ jobs:
           # headless GPU tests (from W3-01) use fallback adapter
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
+      - name: determinism 10k-frame double-run (release, W1-08)
+        # #[ignore]'d in crates/retroforge/tests/determinism.rs — debug
+        # cost is ~93s for the pair (measured), which would nearly triple
+        # the ~45s "tests" step above; release cost is ~9s (measured), so
+        # this runs release-mode only, as its own step. See
+        # docs/TESTING.md §6 for the full reasoning, including why this
+        # suite does NOT also get a docs/evidence/local-gate.json row (its
+        # fixture is synthetic and in-code, not a gitignored fetched
+        # corpus — running it directly here, every PR, is a strictly
+        # stronger guarantee than a staleness-triggered row would be).
+        run: cargo test --release -p retroforge --test determinism -- --ignored
       - name: licence gate (NFR-011, W0-06)
         # Installed via `cargo install --locked --version`, not the
         # EmbarkStudios/cargo-deny-action Docker action: that action's image

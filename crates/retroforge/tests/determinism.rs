@@ -296,6 +296,131 @@ fn different_logs_produce_different_and_sticky_hash_sequences() {
     }
 }
 
+// ---------------------------------------------------------------------
+// Ticket W1-08: the SCALE half of docs/ROADMAP.md's Phase 1 exit
+// criterion ("Determinism: 2x 10k-frame runs, identical per-frame hashes
+// over reachable state"). The two tests above already prove the *shape*
+// of the property at 24/32 frames; these extend it to the actual 10,000
+// frames the criterion demands, using the same fixture and the same
+// anti-vacuity pattern (per-frame comparison + empirically located first
+// divergence), just at scale.
+//
+// #[ignore] + release-mode-only (ticket W1-08 conductor pre-flight,
+// measured, not guessed). This fixture runs a real NES frame per
+// iteration, so 2x10,000 frames is ~600M master cycles. Measured debug
+// cost: ~4.7ms/frame => 2x10,000 ~= 93s -- more than double the ~45s the
+// rest of `cargo test --workspace` costs today, so an inline #[test]
+// would nearly triple every contributor's default test run. Measured
+// release cost: ~10.5x faster, ~9s for the same 2x10,000. Hence these two
+// tests are #[ignore]'d and invoked explicitly, in --release, from both
+// .github/workflows/ci.yml and scripts/local-gate.sh. Run directly with:
+//   cargo test --release -p retroforge --test determinism -- --ignored
+//
+// No row in docs/evidence/local-gate.json for this suite (full reasoning
+// in docs/TESTING.md section 6): that mechanism exists for suites CI
+// cannot run AT ALL (gitignored fetched ROM corpora, so a skip is
+// indistinguishable from a pass). This fixture is a synthetic in-code
+// NROM with nothing to fetch and nothing to skip, and at ~9s release it
+// runs directly in CI on every PR -- a strictly stronger guarantee than a
+// staleness-triggered evidence row, which only re-fires when
+// `coveredPaths` changes.
+// ---------------------------------------------------------------------
+
+/// Criterion 1 at the mandated scale: the same 10,000-frame input log,
+/// run independently twice, must produce identical per-frame hash
+/// sequences -- checked frame-by-frame (not `assert_eq!` on the whole
+/// `Vec`, which would both print an unreadable 10,000-entry diff on
+/// failure and stop this test from naming which frame broke).
+///
+/// ## This test alone is not mutation-proof against a vacuous hash
+///
+/// Verified directly (mutation-test notes, ticket W1-08): if
+/// [`run_script`]'s `state_hash()` call were replaced with a constant,
+/// this test would still pass -- two runs of the same constant are
+/// trivially "identical". It derives its actual force from being paired
+/// with [`different_10k_frame_logs_produce_divergence_detected_at_first_occurrence`]
+/// below, which shares this exact `run_script`/`state_hash` path and
+/// *is* mutation-proven to depend on real per-frame state (same
+/// constant-hash mutation makes it fail, since a constant can never
+/// differ). Do not delete or weaken the divergence test without also
+/// re-examining what this one still proves on its own.
+#[test]
+#[ignore = "10k-frame double-run: ~93s/pair in debug (measured); release-only via CI + scripts/local-gate.sh, ticket W1-08"]
+fn same_log_two_10k_frame_runs_produce_identical_hash_sequences() {
+    let script = build_script(10_000, None);
+    let run1 = run_script(&script);
+    let run2 = run_script(&script);
+    for i in 0..script.len() {
+        assert_eq!(
+            run1.state_hashes[i], run2.state_hashes[i],
+            "frame {i} diverged between two independent runs of the identical \
+             10,000-frame input log"
+        );
+    }
+    assert_eq!(
+        run1.final_framebuffer_hash, run2.final_framebuffer_hash,
+        "identical 10,000-frame input logs must also reproduce the same rendered output"
+    );
+}
+
+/// Criterion 3 at the mandated scale, and the anti-vacuity half: a
+/// divergence injected mid-way through a 10,000-frame run must be
+/// detected and its first-occurrence frame reported -- not merely
+/// discovered to exist by comparing final hashes. (A final-hash-only
+/// check cannot satisfy the closeness assertion below: because this
+/// fixture's checksum is sticky, the final hashes of a diverged and a
+/// non-diverged run always differ regardless of *where* the divergence
+/// started, so "final hashes differ" proves nothing about *when*; see
+/// this ticket's mutation-test notes for the empirical demonstration.)
+/// Mirrors `different_logs_produce_different_and_sticky_hash_sequences`
+/// above, scaled up: `diverge_at` is mid-run rather than near the start,
+/// and stickiness is checked across the full ~5,000-frame remainder
+/// rather than a short tail.
+#[test]
+#[ignore = "10k-frame double-run: ~93s/pair in debug (measured); release-only via CI + scripts/local-gate.sh, ticket W1-08"]
+fn different_10k_frame_logs_produce_divergence_detected_at_first_occurrence() {
+    let diverge_at = 5_000;
+    let len = 10_000;
+    let script_a = build_script(len, None);
+    let script_b = build_script(len, Some(diverge_at));
+
+    let run_a = run_script(&script_a);
+    let run_b = run_script(&script_b);
+
+    assert_ne!(
+        run_a.state_hashes, run_b.state_hashes,
+        "different 10,000-frame input logs must produce different hash sequences"
+    );
+
+    for i in 0..diverge_at {
+        assert_eq!(
+            run_a.state_hashes[i], run_b.state_hashes[i],
+            "frame {i} precedes the injected divergence and must still match"
+        );
+    }
+
+    let first_divergent = (diverge_at..len)
+        .find(|&i| run_a.state_hashes[i] != run_b.state_hashes[i])
+        .expect(
+            "a button held continuously for thousands of frames must be captured at least once",
+        );
+    assert!(
+        first_divergent < diverge_at + 12,
+        "must be captured well within the fixture's measured ~12-frame miss \
+         period (module doc), not merely 'somewhere before len' -- a wider \
+         gap here would mean first-occurrence detection is not actually \
+         locating the divergence"
+    );
+
+    for i in first_divergent..len {
+        assert_ne!(
+            run_a.state_hashes[i], run_b.state_hashes[i],
+            "frame {i} must remain diverged once captured -- sticky checksum \
+             must not silently heal, even across ~5,000 frames"
+        );
+    }
+}
+
 /// Criterion 3's third leg: a known button byte must land at the known
 /// WRAM address the fixture writes it to, proving the actual `$4016`
 /// read path works — not merely "some hash differs somewhere".

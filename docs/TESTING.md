@@ -231,12 +231,68 @@ judgment call).
 | Test | Assertion | SRS |
 |---|---|---|
 | Double-run | run N frames twice from same state + input log ⇒ per-frame state hashes identical (suite: `crates/retroforge/tests/determinism.rs`, not `rf-harness` — `rf-nes` has no `EmulatorCore` impl yet for `rf-harness` to drive, ticket W1-07) | FR-CORE-002 |
+| Double-run at scale | ROADMAP's Phase 1 exit criterion, "2x 10k-frame runs, identical per-frame hashes over reachable state" — two `#[ignore]`'d tests in the same file, `same_log_two_10k_frame_runs_produce_identical_hash_sequences` and `different_10k_frame_logs_produce_divergence_detected_at_first_occurrence` (ticket W1-08); see below for why they're `#[ignore]`'d and how they're invoked | FR-CORE-002, FR-CORE-003 |
 | Replay determinism | every test-ROM run is recorded and replayed; final hash equal (suite: `crates/retroforge/tests/determinism.rs` + `rf-input`, not `rf-harness` — same reason, ticket W1-07) | FR-STATE-006 |
 | State roundtrip | at frames {60, 600, 3600}: save → load → run 600 more ⇒ hash equals uninterrupted run | FR-STATE-002 |
 | Cross-mode state | Enhanced-mode state loads in Accuracy config (enhancement chunks skipped) and continues hash-identical | FR-STATE-007 |
 | Golden fixtures | every released `.rfstate`/`.rfreplay` fixture loads on current main | FR-STATE-005 |
 | **Mode invariant** | same ROM + log run in Accuracy and Enhanced (all features on) ⇒ identical core hashes every frame | FR-MODE-002 |
 | Wrong-ROM refusal | state with mismatched normalized hash refused with diagnostic | FR-STATE-003 |
+
+**10k-frame double-run: why `#[ignore]` + release-mode, and why no
+`docs/evidence/local-gate.json` row (ticket W1-08).** `crates/retroforge/tests/determinism.rs`'s
+24/32-frame double-run tests (`same_log_two_independent_runs_produce_identical_hash_sequences`,
+`different_logs_produce_different_and_sticky_hash_sequences`) prove the
+*shape* of the determinism property, but ROADMAP's Phase 1 exit criterion
+is explicitly 2x **10,000** frames — over 400x more. Measured (not
+guessed): this fixture runs a real NES frame per script step, so
+2x10,000 frames is ~600M master cycles. Debug: ~4.7 ms/frame, linear,
+measured at 250 and 1000 frames ⇒ 2x10,000 ≈ 93 s — more than double the
+whole workspace's ~45 s `cargo test --workspace`, which would nearly
+triple every contributor's default test run if run inline. Release: ~10.5x
+faster, measured directly on the real 10k tests at 9.42 s (cold release
+build of the `retroforge` crate, first-time compile of its `eframe`/`wgpu`
+chain, adds ~57 s on top the first time only — amortized away by CI's
+existing `Swatinem/rust-cache`, same as the debug cache already is) —
+closely matching the pre-flight extrapolation of ~9 s. So: both tests are
+`#[ignore]`'d, and invoked explicitly in `--release` from both
+`.github/workflows/ci.yml` (a dedicated CI step, every PR) and
+`scripts/local-gate.sh` (for anyone running the local gate by hand) —
+run directly with:
+
+```
+cargo test --release -p retroforge --test determinism -- --ignored
+```
+
+They do **not** get a row in `docs/evidence/local-gate.json`, and this is
+a deliberate decision, not an oversight — record the reasoning here so it
+isn't re-litigated. §4 above explains what the evidence-row mechanism is
+actually *for*: suites CI **cannot run at all** — `nes6502`/`nestest`/
+`ppu_vbl_nmi`/`sprite_hit_tests` all depend on real, fetched, gitignored
+ROM/vector corpora (NFR-006) that never exist in a CI checkout, so
+`cargo test` skips them cleanly and a skip is visually indistinguishable
+from a pass; the evidence file plus its staleness check
+(`git merge-base --is-ancestor` over each suite's `coveredPaths`) is what
+turns "ran once, locally, trust me" into something CI can mechanically
+verify without ever fetching the corpus itself. This suite has neither
+problem: its fixture, `controller_reader_rom()`, is a synthetic in-code
+NROM assembled by the test itself — nothing to fetch, nothing gitignored,
+nothing to skip, nothing to fake. And at ~9 s release, it is cheap enough
+to run **directly, in full, in CI, on every single PR** — which is a
+*strictly stronger* guarantee than an evidence row would give: the row's
+staleness check only forces a re-run when `coveredPaths` changes, whereas
+direct CI execution runs it unconditionally every time. Adding a row here
+would apply a workaround built for suites CI can't run to a suite CI can
+and does run — solving a problem this test doesn't have — at a real cost:
+`local_gate_evidence.rs` would have to drive `EmuStepper`, so `rf-harness`
+(which today depends on `rf-nes` directly only via `scripts/validate-arch.sh`'s
+"test harness" exemption, and nothing else console-shaped) would gain a
+dependency on the `retroforge` lib crate, pulling `eframe`/`wgpu` into the
+harness build for no coverage gain. (Ruled out for the same reason:
+`scripts/local-gate.sh` passing a pass/fail *result* into the evidence
+binary as a CLI flag — shell-supplied *inputs* have precedent, e.g. the
+open-ticket list, but a shell-supplied *result* would make the evidence
+forgeable by the very script meant to check it.)
 
 ## 7. Enhancement feature tests
 
