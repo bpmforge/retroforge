@@ -2,6 +2,25 @@
 //!
 //! See /docs/MODULE_DESIGN.md and /docs/design/ for the contract this crate
 //! must implement. Do not add public API here without a ticket in plan.json.
+//!
+//! Ticket W4-08 adds the actual store: a content-addressed, LRU-bounded
+//! cache over opaque payload bytes (`ARCHITECTURE.md` §7's `(rom_sha256,
+//! asset_hash, producer, settings_hash)` key). See [`Cache`] and
+//! [`CacheKey`]. It is deliberately generic over `Vec<u8>` payloads and
+//! does not itself know how to serialize a [`CanvasChunk`] -- that
+//! conversion is ticket W4-03b's job, per that struct's own doc comment
+//! below.
+
+mod entry;
+mod error;
+mod fsutil;
+mod index;
+mod key;
+mod store;
+
+pub use error::CacheError;
+pub use key::CacheKey;
+pub use store::Cache;
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-cache";

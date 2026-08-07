@@ -11,3 +11,5 @@ workspace = true
 
 [dependencies]
 rf-core-api = { path = "../rf-core-api" }
+bincode = "2"
+sha2 = "0.11"

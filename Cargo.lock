@@ -2945,7 +2945,9 @@ version = "0.1.0"
 name = "rf-cache"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "rf-core-api",
+ "sha2",
 ]
 
 [[package]]
