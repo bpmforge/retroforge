@@ -2983,11 +2983,13 @@ version = "0.1.0"
 dependencies = [
  "rf-cart",
  "rf-core-api",
+ "rf-input",
  "rf-nes",
  "rf-renderer",
  "serde",
  "sha2",
  "toml",
+ "zip",
 ]
 
 [[package]]

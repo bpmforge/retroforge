@@ -21,10 +21,13 @@ toml = "1"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-# rf-cart: only for nestest_evidence.rs's own unit tests, which build a
-# minimal synthetic NROM image the same way crates/rf-nes/src/system/tests
-# already does (rf_cart::nes::INES_MAGIC) rather than vendoring any real
-# nestest.nes bytes (TESTING.md §3 G-43).
+# rf-cart: nestest_evidence.rs's own unit tests build a minimal synthetic
+# NROM image the same way crates/rf-nes/src/system/tests already does
+# (rf_cart::nes::INES_MAGIC) rather than vendoring any real nestest.nes
+# bytes (TESTING.md §3 G-43). Also used by tests/alter_ego_replay.rs
+# (ticket W2-11) to sniff the single NES ROM out of the fetched
+# `alter_ego.zip`, the same content-sniff `crates/retroforge/src/rom_open.rs`
+# uses rather than trusting a zip entry's file extension.
 rf-cart = { path = "../rf-cart" }
 # rf-renderer: ticket W3-01's headless wgpu golden-frame test
 # (tests/golden_frame_gpu.rs) -- rf-harness -> rf-renderer is a harness ->
@@ -33,6 +36,20 @@ rf-cart = { path = "../rf-cart" }
 # cores). Test-only: the palette pass is exercised from a test, not shipped
 # as part of any rf-harness binary.
 rf-renderer = { path = "../rf-renderer" }
+# rf-input: the `.rfreplay` format (ticket W1-07) -- tests/alter_ego_replay.rs
+# (ticket W2-11) records/round-trips/replays the scripted 5-minute input log
+# through it rather than inventing a second input-log serialization. Test-only
+# (no rf-harness binary or library API touches a replay log).
+rf-input = { path = "../rf-input" }
+# zip: unpack the fetched `alter_ego.zip` for tests/alter_ego_replay.rs
+# (ticket W2-11) -- see docs/TECH_STACK.md §2's Archive row (amended by this
+# ticket) for why a second, test-only home for this dependency doesn't
+# reopen the "keep it out of the NES core" reasoning that keeps it out of
+# rf-cart, and crates/retroforge/src/rom_open.rs's module doc for the
+# untrusted-zip posture this reuses. Same version/feature pin as
+# crates/retroforge's Cargo.toml -- deliberately not a second TECH_STACK
+# decision.
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "fetch-test-roms"

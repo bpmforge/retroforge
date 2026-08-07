@@ -99,7 +99,31 @@ in `docs/evidence/local-gate.json`). W2-12 owns wiring the rest.
 | `mmc3_test_2` + IRQ tests | MMC3 A12 IRQ counter | FR-CORE-025 | A | $6000 = 0 |
 | Holy Diver Batman (28 ROMs) | mapper acid breadth | FR-CORE-025 | B | golden frame per ROM |
 | RF-Scroller 5-min replay | real-game regression (in-repo fixture, D-001) | FR-CORE-026 | A | final-hash + 6 golden frames |
-| Alter Ego 5-min replay | independent-proof regression (PD fixture) | FR-CORE-026 | A | final-hash + golden frames |
+| Alter Ego 5-min replay | independent-proof regression (PD fixture) | FR-CORE-026 | A — **RUNS LOCALLY ONLY (W2-11)** | final-hash + 4 golden frames, real `.rfreplay` round trip + independent-run determinism check |
+
+**"RUNS LOCALLY ONLY" (Alter Ego row, ticket W2-11):** wired and
+self-verifying (`crates/rf-harness/tests/alter_ego_replay.rs`), but this is
+a narrower claim than plain Tier A ("every PR"), and a narrower one than
+Tier A-local too — stated precisely rather than rounded up to either. By
+this section's own Tier A-local definition above ("a suite whose … fixture
+is a gitignored fetched artifact CI never has (NFR-006)") Alter Ego
+qualifies for A-local treatment, but A-local also means "still a hard
+release gate" via `docs/evidence/local-gate.json` +
+`scripts/validate-evidence.mjs`'s staleness check, and wiring either that
+or a `.github/**` CI job was explicitly out of ticket W2-11's scope — a
+finding for whichever ticket does that wiring, not assumed here. Today: the
+suite SKIPs loudly (never silently) if `roms/nes/alter-ego/alter_ego.zip`
+is absent, matching every other fetched-ROM suite's convention; when
+present, the full 5-minute double-run (record + independent replay,
+~18s/pass release) is `#[ignore]`'d for cost — same discipline as
+`retroforge`'s `determinism.rs` 10k-frame suite (ticket W1-08) — and must be
+run explicitly (`cargo test --release -p rf-harness --test
+alter_ego_replay -- --ignored`); no CI job and no evidence file confirms it
+ran on any given commit. A second, cheap, NOT-`#[ignore]`'d test
+(`alter_ego_scripted_input_actually_drives_the_game`, ~3s) does run as part
+of the normal `cargo test --workspace` pass wherever the ROM is fetched,
+and is the anti-vacuity check (asserts the scripted input actually moved
+the on-screen player, not merely that the ROM booted).
 
 **Local evidence gate (tickets W0-07, W1-03, W1-05b):** `nes6502` is the
 first Tier A-local suite; `nestest` (ticket W1-03) is the second;

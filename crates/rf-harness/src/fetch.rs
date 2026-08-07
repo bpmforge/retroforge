@@ -5,9 +5,23 @@
 //! [`crate::manifest::Artifact`] (fetched by [`fetch_artifact`])
 //! deliberately has **no archive-unpack step**: every `Artifact` is one
 //! file, and the fetcher writes exactly the bytes it verified to `dest`
-//! and stops. Extraction would need either a new `zip` crate dependency
-//! (a whole new TECH_STACK decision, unverified API) or shelling out to
-//! `unzip`, which is not guaranteed present on minimal CI images.
+//! and stops. **Resolved 2026-08-07 (ticket W2-11):** this paragraph used
+//! to say extraction would need "a new `zip` crate dependency (a whole new
+//! TECH_STACK decision, unverified API)" — that blocker no longer exists.
+//! `zip 8.6.0` was adopted by ticket W2-13 (`docs/TECH_STACK.md` §2's
+//! Archive row) for `crates/retroforge`'s ROM-open path
+//! (`crates/retroforge/src/rom_open.rs::resolve_rom_bytes`), and this
+//! crate's own `tests/alter_ego_replay.rs` (ticket W2-11) now uses it too,
+//! as a `[dev-dependencies]` entry, to unpack the fetched `alter_ego.zip`
+//! for the 5-minute replay regression. Despite that, [`fetch_artifact`]
+//! staying unpack-free is still the right design, for a different reason
+//! than "no viable dependency exists": keeping "verify these bytes hash to
+//! `sha256`" and "interpret this archive's contents" as two separate steps
+//! means a hash-verification bug can never be silently papered over by
+//! extraction logic, and lets each unpack call site (the ROM-open dialog,
+//! this crate's replay test, any future one) choose its own
+//! untrusted-vs-already-pinned-content posture rather than baking one
+//! policy into the fetcher for every future archive artifact.
 //!
 //! [`crate::manifest::GitArtifact`] (fetched by [`fetch_git_artifact`],
 //! ticket W0-07) is the one deliberate exception to "every artifact is one

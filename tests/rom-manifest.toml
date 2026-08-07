@@ -790,6 +790,33 @@ dest = "roms/snes/peterlemon-snes-350b394.zip"
 # Artifacts — Alter Ego (Shiru, PD), the one third-party smoke fixture
 # (D-001). Fetched directly from the author's own site, the most
 # authoritative source available (better provenance than any bundler).
+#
+# SOURCE-ZIP PD NOTICE (ticket W2-11, RISKS.md R-16 mitigation "keep the
+# source-zip PD notice in the manifest"): "public-domain" below is this
+# project's own D-001 shorthand, not a legal PD claim independently
+# researched here — it should be read against the author's OWN words.
+# `alter_ego/notes.txt`, shipped INSIDE `alter_ego.zip` (the ROM archive,
+# not `alter_ego_src.zip`), verbatim:
+#
+#   "Please note that the game is released as freeware, not Public
+#   Domain. There are three authors involved. I personally grant you
+#   rights to do whatever you want with things I created (code, sound
+#   effects, graphics), but rights to other components (game concept,
+#   characters, title, music) are reserved to authors of these
+#   components. I.e., if you want to port it somewhere else, you need to
+#   ask Denis Grachev (and Kulor, if you need music) for permission."
+#
+# So: Shiru's own contribution (code/SFX/graphics — everything this
+# project's fetch-and-run smoke test actually exercises) is granted
+# do-whatever-you-want terms, functionally equivalent to PD for this use;
+# the game concept/characters/title (Denis Grachev) and music (Kulor)
+# remain rights-reserved. `license_status = "public-domain"` on both
+# artifacts below is this project's informal characterization of the
+# whole bundle for "fetch a hash-pinned zip and run it in CI/locally" —
+# it is NOT a claim that every byte of the archive is legally PD, and
+# reclassifying it (or dropping the fixture) is a human/legal call, not
+# an automated one — see RISKS.md R-16 for the full residual-risk
+# tracking and its trigger ("anyone challenges Alter Ego's PD status").
 # ---------------------------------------------------------------------------
 
 [[artifact]]
