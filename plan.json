@@ -1497,7 +1497,10 @@
    "crate": "rf-enhance",
    "write_scope": [
     "crates/rf-enhance/**",
-    "crates/rf-core-api/**"
+    "crates/rf-core-api/**",
+    "crates/rf-harness/**",
+    "crates/retroforge/**",
+    ".github/workflows/ci.yml"
    ],
    "depends_on": [
     "W0-04",
@@ -1510,8 +1513,15 @@
     "mode-invariant CI test: accuracy vs enhanced state hashes identical over test corpus (FR-MODE-002)",
     "on determinism/mode-invariant failure the harness dumps first-divergent-frame + both state hashes + replay slice as CI artifacts (R-F4)"
    ],
+   "notes": [
+    "PRE-FLIGHT 2026-08-07 (conductor) -- THIRTEENTH SELF-BLOCKING WRITE_SCOPE. Scope was rf-enhance + rf-core-api, but acceptance criterion 4 says 'the HARNESS dumps first-divergent-frame + both state hashes + replay slice as CI ARTIFACTS' -- that is crates/rf-harness plus .github/workflows/ci.yml, neither in scope. Criterion 3's mode-invariant comparison also needs EmuStepper, which lives in crates/retroforge. Four exact paths added. NOTE this ticket should NOT need crates/rf-nes at all -- the FrameBundle is assembled from CoreSink output by the app/enhancement side, not emitted by the core -- so docs/evidence/local-gate.json is deliberately NOT in scope and validate-evidence must stay green with no regeneration. If you find yourself needing rf-nes, stop and escalate: it means the design drifted.",
+    "CRITERION 1 IS ALREADY SATISFIED BY W4-00 -- do not rebuild it. 'EventMask filtering measured ~zero-cost when unsubscribed (bench)' was delivered yesterday as crates/rf-nes/benches/event_emission.rs, with a proper worktree A/B against the pre-emission commit: scroll_write_event_mask_none change [-0.97%, -0.15%, +0.67%] p=0.73 'No change in performance detected', frame_tick_event_mask_none within noise. That bench measures the EMISSION side, which is where the cost would be. Re-benching the subscription side is only worth doing if the bus itself adds per-event cost when nothing is subscribed; if so, bench that specifically rather than duplicating W4-00's work.",
+    "PLACEMENT RULING 2026-08-07 (conductor): FrameBundle belongs in rf-core-api, not rf-enhance. docs/design/RENDERER.md line 5 has rf-renderer consuming 'FrameBundle video (indexed pixels + metadata)' and line 17 says 'all passes run on the render thread against triple-buffered FrameBundles', while docs/design/FRONTEND_UI.md line 18 has UI panels reading from it too. So rf-renderer and retroforge both need the type, and neither may depend on rf-enhance (ARCHITECTURE section 3's layering). rf-core-api is the shared contract crate every side already depends on -- which is exactly why it is the right home, and also why the addition must be minimal and deliberate: docs/design/CONTRACTS.md makes that crate a versioned public commitment.",
+    "CRITERION 3'S CORPUS IS THIN TODAY, and pretending otherwise would make the test vacuous. 'Accuracy vs enhanced state hashes identical over test corpus' needs an ENHANCED mode to compare against, and exactly one enhancement exists: W3-05a's sprite-limit-bypass overlay, already covered by crates/retroforge/tests/sprite_overlay_mode_invariant.rs. So the honest deliverable is the MECHANISM -- a corpus-driven mode-invariant harness that runs N ROMs x M frames comparing accuracy against enhanced -- wired to the one enhancement that exists, and structured so W3-05/W4-03a plug in without redesign. Do not claim broad mode-invariance from a one-enhancement corpus.",
+    "USE THE STRONG CHECK, not EmuStepper::state_hash alone (this is the third ticket to need this warning). W3-05a proved empirically that state_hash covers CPU regs/WRAM/OAM/PRG-RAM/cycles and EXCLUDES PPU internals: a status-flag perturbation passes it while a field-by-field PPU comparison catches it. W4-00 followed that and compared PPU internals plus the A12 trio directly. A mode-invariant harness built on state_hash alone would be the weakest link in exactly the property FR-MODE-002 exists to protect."
+   ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E5-S1"
    ]
