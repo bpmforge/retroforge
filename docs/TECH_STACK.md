@@ -42,6 +42,35 @@ winit+gilrs+cpal), Tauri/webview (IPC hop wrong for 60fps memory viewers),
 iced/Slint (wrong shape for per-frame debug UIs), savefile (adopt only if
 manual chunk migrations become painful).
 
+### wgpu 29 API traps — VERIFIED by compile-probe 2026-08-06, not read off docs
+
+Two subagent attempts at W3-01 stalled without landing a line of code. A
+conductor compile-probe against the vendored `wgpu-29.0.4` source found the
+API differs from every pre-29 idiom (and therefore from training data) in
+three ways, each of which fails to compile rather than failing loudly:
+
+| What you'd write from memory | What wgpu 29 actually needs |
+|---|---|
+| `InstanceDescriptor::default()` | **No `Default` impl.** Use `InstanceDescriptor::new_without_display_handle()` — which is exactly the headless constructor `rf-renderer` wants (or the `_from_env` variant to honour `WGPU_BACKEND`) |
+| `Instance::new(&desc)` | Takes the descriptor **by value**: `Instance::new(desc)` |
+| `let adapters = instance.enumerate_adapters(..)` | Returns an **`impl Future<Output = Vec<Adapter>>`** — must be awaited/blocked on |
+
+`request_adapter` and `request_device` are likewise async and return
+`Result`. A verified-working headless skeleton (Metal, Apple M5 Max, no
+window):
+
+```rust
+let inst = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+let adapters = pollster::block_on(inst.enumerate_adapters(wgpu::Backends::all()));
+let adapter = pollster::block_on(inst.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
+let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+```
+
+**Awaiting any of these in a sync context with no executor never returns** —
+that, plus the `map_async` + `device.poll` readback pattern, is the most
+likely cause of a hang. The headless path itself is proven to work in this
+environment, so a hang means a blocking call, not a missing GPU.
+
 ## 3. Rules for the coding agent
 
 1. **Verify every API against docs.rs for the pinned version before use.**
