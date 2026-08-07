@@ -32,12 +32,19 @@
 //! - `nmi` — ticket W1-05b: [`Ppu::nmi_line`]'s `$2000`-bit-7-AND-`$2002`-
 //!   bit-7 level, `frame_count`, and the reachable half of the `$2002`-read
 //!   VBlank-set race (`crate::ppu`'s module doc "Scope fence" section).
+//! - `event_emission` — ticket W4-00: the four PPU-origin `CoreEvent`
+//!   sites (`FrameStart`/`FrameEnd`/`VblankStart`/`Scanline`/`ScrollWrite`),
+//!   `EventMask` gating (including per-bit selectivity), and the STRONG
+//!   (PPU-internal-field, not `state_hash`) non-perturbation proof —
+//!   `crate::system::tests::events` covers the three bus-origin sites
+//!   (`DmaStart`/`OamRewrite`/`MapperIrq`).
 //!
 //! nesdev source for every derived `v`/`t` bit pattern below:
 //! [nesdev.org/wiki/PPU_scrolling](https://www.nesdev.org/wiki/PPU_scrolling)
 //! (`crate::ppu::scroll`'s module doc quotes the same pseudocode this test
 //! module's expected values are hand-computed from).
 mod blargg_roms;
+mod event_emission;
 mod fetch_pipeline;
 mod frame_timing;
 mod nmi;

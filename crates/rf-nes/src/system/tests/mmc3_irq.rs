@@ -77,8 +77,11 @@ use crate::system::{NesBus, NesRom};
 /// `system::tests::integration::oam_dma_stolen_cycles_never_flow_through_any_cpu_api`
 /// already establishes, so no runnable program is needed), `chr_banks` x
 /// 8 KiB CHR (also zeroed — CHR *contents* are irrelevant to A12 timing,
-/// only which *addresses* get touched).
-fn build_mmc3_ines(prg_banks: u8, chr_banks: u8) -> Vec<u8> {
+/// only which *addresses* get touched). `pub(super)` (ticket W4-00): also
+/// reused by `system::tests::events` for the `MapperIrq` `CoreEvent` sites,
+/// which need the exact same A12-clocking fixture this module already
+/// built rather than a second, independently-constructed one.
+pub(super) fn build_mmc3_ines(prg_banks: u8, chr_banks: u8) -> Vec<u8> {
     let mut data = Vec::new();
     data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
     data.push(prg_banks);
@@ -91,7 +94,7 @@ fn build_mmc3_ines(prg_banks: u8, chr_banks: u8) -> Vec<u8> {
     data
 }
 
-fn mmc3_bus() -> NesBus {
+pub(super) fn mmc3_bus() -> NesBus {
     let raw = build_mmc3_ines(2, 1); // 32 KiB PRG (>= MMC3's 4 x 8 KiB minimum), 8 KiB CHR
     let rom = NesRom::from_ines_bytes(&raw).expect("valid synthetic MMC3 image");
     NesBus::new(rom) // Mmc3Revision::B, this crate's default (see `mmc3.rs` module doc)

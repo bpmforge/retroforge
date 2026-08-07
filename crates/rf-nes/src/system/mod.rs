@@ -108,7 +108,7 @@ use crate::cpu::CpuBus;
 use crate::mappers::{AxRom, Cnrom, Mapper, Mmc1, Mmc3, Mmc3Revision, Nrom, UxRom};
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
-use rf_core_api::CoreSink;
+use rf_core_api::{CoreEvent, CoreSink, EventMask};
 
 const RAM_SIZE: usize = 0x0800;
 const PRG_RAM_SIZE: usize = 0x2000;
@@ -273,13 +273,29 @@ impl NesBus {
         self.ppu.set_sprite_overlay_enabled(enabled);
     }
 
-    /// Flush every completed-but-undrained scanline the PPU has produced
-    /// through `sink` (acceptance criterion 3: "indexed pixels + metadata
-    /// emitted via CoreSink") — see [`crate::ppu`]'s module doc for why
-    /// this is a separate call rather than something `CpuBus::read`/`write`
-    /// do inline. No `EmulatorCore` exists in this crate yet to call this
-    /// once per frame automatically (out of this ticket's write scope);
-    /// callers (today: tests) drive it directly.
+    /// Configure which [`CoreEvent`]s this bus pushes through
+    /// [`Self::drain_video`] (ticket W4-00) — forwards to
+    /// [`Ppu::set_event_mask`], the same push-to-the-PPU convention
+    /// [`Self::set_sprite_overlay_enabled`] above already uses. `NONE`
+    /// (Accuracy mode's default, law 6) until called; this is the seam a
+    /// future `EmulatorCore` impl's `CoreConfig::event_mask` would wire
+    /// through (see [`rf_core_api::CoreConfig`]'s own doc for why
+    /// `event_mask` lives on that shared config struct) — no
+    /// `EmulatorCore` exists in this crate yet (module doc, "Mapper
+    /// scope"), so today only tests/benches call this directly.
+    pub fn set_event_mask(&mut self, mask: EventMask) {
+        self.ppu.set_event_mask(mask);
+    }
+
+    /// Flush every completed-but-undrained scanline (plus, as of ticket
+    /// W4-00, every queued [`CoreEvent`] — `Ppu::drain`'s own doc covers
+    /// both) the PPU has produced through `sink` (acceptance criterion 3:
+    /// "indexed pixels + metadata emitted via CoreSink") — see
+    /// [`crate::ppu`]'s module doc for why this is a separate call rather
+    /// than something `CpuBus::read`/`write` do inline. No `EmulatorCore`
+    /// exists in this crate yet to call this once per frame automatically
+    /// (out of this ticket's write scope); callers (today: tests) drive it
+    /// directly.
     pub fn drain_video(&mut self, sink: &mut dyn CoreSink) {
         self.ppu.drain(sink);
     }
@@ -585,7 +601,22 @@ impl NesBus {
             // the same sequencing real hardware's back-to-back edges would
             // produce.
             for _ in 0..self.ppu.take_a12_edges() {
+                // Ticket W4-00: `MapperIrq` fires on the RISING EDGE of
+                // `irq_pending()` (false -> true), not on every clock while
+                // it stays asserted — `irq_pending` is a pure getter
+                // (`crate::mappers::Mapper::irq_pending`'s own doc: this is
+                // the exact same accessor `CpuBus::irq_line` already
+                // forwards), so reading it before/after
+                // `clock_irq_counter` costs nothing extra and touches no
+                // bus/PPU state (this ticket's hazard note).
+                let was_pending = self.mapper.irq_pending();
                 self.mapper.clock_irq_counter();
+                if !was_pending
+                    && self.mapper.irq_pending()
+                    && self.ppu.event_mask().is_subscribed(EventMask::MAPPER_IRQ)
+                {
+                    self.ppu.queue_event(CoreEvent::MapperIrq);
+                }
             }
         }
     }
@@ -603,8 +634,23 @@ impl CpuBus for NesBus {
             let start_cycle_odd = self.master_cycle % 2 == 1;
             self.open_bus = value;
             self.tick_master(1); // the $4014 write's own cycle
+
+            // Ticket W4-00: "started" fires BEFORE the copy runs (only one
+            // DMA channel exists in this crate, so chan is always 0);
+            // "OAM was rewritten" fires AFTER, once the whole 256-byte
+            // table has actually changed — the module doc's own worked
+            // example for `OamRewrite` ("outside the normal per-scanline
+            // path... e.g. mid-frame DMA"). Individual `OAMDATA` ($2004)
+            // writes deliberately do NOT also fire `OamRewrite` — kept to
+            // this one, explicitly-cited call site rather than guessed at.
+            if self.ppu.event_mask().is_subscribed(EventMask::DMA_START) {
+                self.ppu.queue_event(CoreEvent::DmaStart { chan: 0 });
+            }
             let stall = self.run_oam_dma(value, start_cycle_odd);
             self.last_oam_dma_stall = Some(stall);
+            if self.ppu.event_mask().is_subscribed(EventMask::OAM_REWRITE) {
+                self.ppu.queue_event(CoreEvent::OamRewrite);
+            }
             return;
         }
         self.write_untimed(addr, value);

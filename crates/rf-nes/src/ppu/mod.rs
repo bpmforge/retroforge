@@ -180,6 +180,55 @@
 //! mechanism with a test-only `CoreSink` that records the calls it
 //! receives.
 //!
+//! ## `CoreEvent` emission (ticket W4-00) — a second, sibling drain queue
+//!
+//! [`rf_core_api::CoreEvent`]/[`rf_core_api::EventMask`] shipped complete in
+//! W0-04 but nothing in this crate ever called [`CoreSink::event`] before
+//! this ticket. The design follows the "`CoreSink` emission seam" section
+//! above exactly: [`Ppu::tick`] and [`Ppu::write_register`] (`$2005`) run
+//! deep inside [`crate::system::NesBus`], with no `&mut dyn CoreSink` in
+//! reach, so events are queued (`Ppu::events`, a `Vec<CoreEvent>` sibling of
+//! `completed`) and flushed by [`Ppu::drain`] alongside the video scanlines,
+//! in the same call.
+//!
+//! **One queue, not two.** `crate::system::NesBus` owns three of the eight
+//! emitted variants (`DmaStart`, `OamRewrite`, `MapperIrq` — none of them
+//! PPU state), but pushes them into `Ppu::events` too, via the
+//! `pub(crate)` [`Ppu::queue_event`]/[`Ppu::event_mask`] pair, rather than
+//! keeping a second bus-level queue drained separately. A second queue
+//! drained after this one would silently destroy cross-source ordering —
+//! `MapperIrq` landing on the same scanline as a `ScrollWrite` (the MMC3
+//! raster-split case `docs/design/ENHANCEMENT_RUNTIME.md` §3's stitcher
+//! cares about) must drain in the order the two actually happened, and
+//! `NesBus::tick_master`'s per-dot loop (module doc, "PPU tick seam") is
+//! already the single place bus- and PPU-driven state advance in lockstep,
+//! so pushing both kinds of event into the one FIFO that loop naturally
+//! visits in order costs nothing extra and preserves that order for free.
+//!
+//! **Gating is the caller's job, every time** (FR-CORE-006, mirrored from
+//! `rf-core-api/tests/mock_core.rs`'s own convention): every call site —
+//! four in this module/`scroll.rs`, three in `crate::system::mod` — reads
+//! `if self.event_mask.is_subscribed(EventMask::X) { ... push ... }`
+//! itself; [`Ppu::queue_event`] does not re-check. `EventMask::NONE` (the
+//! `Ppu::new` default, matching `rf_core_api::CoreConfig::event_mask`'s own
+//! default and law 6) means every one of those checks is a single `u32` AND
+//! against a `const`, evaluated a small, fixed number of times per frame,
+//! and the queue itself never grows.
+//!
+//! **Not emitted:** [`rf_core_api::CoreEvent::MemWatch`] — this ticket's own
+//! acceptance list omits it deliberately (it is debugger-configured, not
+//! hardware-produced, and belongs to whichever ticket builds watchpoint
+//! configuration).
+//!
+//! **The hazard** (this ticket's `plan.json` note, W3-05a's own near-miss):
+//! every site below reads data already in a register (`t`/`x`/`scanline`/
+//! `mapper.irq_pending()`, itself a pure getter `crate::system::NesBus`
+//! already called for `irq_line()`) — none goes through [`Ppu::mem_read`]
+//! or any other side-effecting accessor, so none can perturb
+//! [`Ppu::observe_ppu_bus_address`]'s A12 filter or any other simulation
+//! state. See `crates/rf-nes/src/ppu/tests/event_emission.rs` and
+//! `crates/rf-nes/src/system/tests/events.rs` for the field-by-field proof.
+//!
 //! ## Sprite-limit-bypass overlay (ticket W3-05a) — a staging decision, not
 //! where the reconstruction belongs long-term
 //!
@@ -264,7 +313,7 @@ mod sprites;
 mod tests;
 
 use rf_cart::Mirroring;
-use rf_core_api::{CoreSink, OverlayPixel, PixelLayer, PpuPixel};
+use rf_core_api::{CoreEvent, CoreSink, EventMask, OverlayPixel, PixelLayer, PpuPixel};
 
 /// Scanline 261 is the pre-render line (some sources call it -1);
 /// represented as an unsigned value here purely to avoid a signed
@@ -499,6 +548,21 @@ pub struct Ppu {
     /// Filtered A12 rising edges recorded since the last
     /// [`Ppu::take_a12_edges`] drain.
     pending_a12_edges: u32,
+
+    // ---- CoreEvent emission (ticket W4-00; module doc's "`CoreEvent`
+    // emission" section) ----
+    /// Which [`CoreEvent`] variants to queue. `NONE` on a freshly
+    /// constructed `Ppu` (law 6 / matches [`rf_core_api::CoreConfig`]'s own
+    /// default) — every gating check below is then a single `u32` AND
+    /// against a `const`, and [`Ppu::events`] never grows.
+    event_mask: EventMask,
+    /// Events queued since the last [`Ppu::drain`], oldest first — the
+    /// `CoreEvent` sibling of `completed` (module doc). Holds BOTH this
+    /// PPU's own tick/register-write-driven events AND, pushed via
+    /// [`Ppu::queue_event`], `crate::system::NesBus`'s bus-level ones
+    /// (`DmaStart`/`OamRewrite`/`MapperIrq`) — one FIFO so cross-source
+    /// order is preserved (module doc).
+    events: Vec<CoreEvent>,
 }
 
 /// A fully-transparent placeholder pixel used to fill freshly-allocated
@@ -572,6 +636,8 @@ impl Ppu {
             dot_clock: 0,
             a12_low_since: None,
             pending_a12_edges: 0,
+            event_mask: EventMask::NONE,
+            events: Vec::new(),
         }
     }
 
@@ -602,6 +668,40 @@ impl Ppu {
     /// at the moment of the call or on any later scanline.
     pub fn set_sprite_overlay_enabled(&mut self, enabled: bool) {
         self.sprite_overlay_enabled = enabled;
+    }
+
+    /// Current `CoreEvent` subscription mask (ticket W4-00; module doc's
+    /// "`CoreEvent` emission" section). `pub(crate)`: only
+    /// `crate::system::NesBus` needs to read this, to gate its OWN
+    /// bus-level events (`DmaStart`/`OamRewrite`/`MapperIrq`) before
+    /// queuing them here — everything else configures the mask through
+    /// [`Ppu::set_event_mask`] (or, for a `NesBus`, its own
+    /// `set_event_mask`) rather than inspecting it.
+    pub(crate) fn event_mask(&self) -> EventMask {
+        self.event_mask
+    }
+
+    /// Set the `CoreEvent` subscription mask (ticket W4-00). `pub`, unlike
+    /// [`Ppu::event_mask`] above, for the same reason
+    /// [`Ppu::set_sprite_overlay_enabled`] is: `benches/event_emission.rs`
+    /// and this module's own tests configure a bare `Ppu` directly, with no
+    /// `NesBus`/`EmulatorCore` in the loop. `NONE` (Accuracy mode's
+    /// default, law 6) until called.
+    pub fn set_event_mask(&mut self, mask: EventMask) {
+        self.event_mask = mask;
+    }
+
+    /// Push one already-gated event onto the drain queue (ticket W4-00;
+    /// module doc's "One queue, not two" section) — `pub(crate)` so
+    /// `crate::system::NesBus` can queue its own bus-level events into the
+    /// SAME FIFO this `Ppu`'s tick/register-write-driven events use,
+    /// preserving cross-source temporal order. Does NOT itself check
+    /// [`Ppu::event_mask`] — every call site (in this module, `scroll.rs`,
+    /// and `crate::system::mod`) does that itself before constructing `ev`,
+    /// per FR-CORE-006 ("there is nothing cheaper to construct than don't
+    /// construct at all" — [`CoreEvent`]'s own doc).
+    pub(crate) fn queue_event(&mut self, ev: CoreEvent) {
+        self.events.push(ev);
     }
 
     /// The exact side effect of one `OAMDATA` write — factored out because
@@ -673,6 +773,17 @@ impl Ppu {
                 if !self.suppress_vblank_this_frame {
                     self.status |= STATUS_VBLANK;
                 }
+                // Ticket W4-00: unconditional, regardless of
+                // `suppress_vblank_this_frame` above — that latch is only
+                // about the `$2002` READ VALUE race (`scroll.rs`'s
+                // `read_status` doc), a property of software polling.
+                // Physically the PPU enters vertical blank at this dot on
+                // EVERY frame; `CoreEvent::VblankStart`'s own doc ("PPU
+                // entered vertical blank") describes that hardware fact,
+                // not whether a CPU read of `$2002` happened to observe it.
+                if self.event_mask.is_subscribed(EventMask::VBLANK_START) {
+                    self.queue_event(CoreEvent::VblankStart);
+                }
             }
             // Post-render (240) and the rest of vblank (241-260, beyond
             // dot 1): genuinely idle, nothing to do.
@@ -703,6 +814,20 @@ impl Ppu {
             self.scanline = if self.scanline == PRERENDER_SCANLINE {
                 self.frame_is_odd = !self.frame_is_odd;
                 self.frame_count += 1;
+                // Ticket W4-00: the pre-render line wrapping to scanline 0
+                // is the only frame-boundary signal this crate has (module
+                // doc, "`CoreSink` emission seam" section: no
+                // `EmulatorCore::run_frame` exists here yet) — the outgoing
+                // frame's `FrameEnd` and the incoming one's `FrameStart`
+                // both land at this exact instant, in that order (matches
+                // `CoreEvent::FrameEnd`/`FrameStart`'s own doc: "after the
+                // last scanline" / "before the first scanline").
+                if self.event_mask.is_subscribed(EventMask::FRAME_END) {
+                    self.queue_event(CoreEvent::FrameEnd);
+                }
+                if self.event_mask.is_subscribed(EventMask::FRAME_START) {
+                    self.queue_event(CoreEvent::FrameStart);
+                }
                 0
             } else {
                 self.scanline + 1
@@ -758,8 +883,14 @@ impl Ppu {
 
     /// Queue every completed-but-undrained scanline through `sink`, oldest
     /// first, then clear the queue (module doc's "`CoreSink` emission
-    /// seam"). Safe to call at any time, including mid-frame; a real
-    /// integration is expected to call it once per frame.
+    /// seam"), THEN every queued `CoreEvent` through `sink.event`, oldest
+    /// first (ticket W4-00; module doc's "`CoreEvent` emission" section) —
+    /// video before events is an arbitrary but harmless ordering choice
+    /// (nothing documents or requires interleaving `CoreSink::event` calls
+    /// with `video_scanline` calls; `CoreEvent::Scanline`'s own payload
+    /// already carries the `y` a consumer would use to correlate the two).
+    /// Safe to call at any time, including mid-frame; a real integration is
+    /// expected to call it once per frame.
     pub fn drain(&mut self, sink: &mut dyn CoreSink) {
         // Ticket W3-05a: the overlay channel is gated on the CURRENT flag
         // (not a per-scanline stored one) so the default accuracy path
@@ -774,9 +905,20 @@ impl Ppu {
                 sink.overlay_scanline(line.y, &line.overlay);
             }
         }
+        for ev in self.events.drain(..) {
+            sink.event(ev);
+        }
     }
 
     fn finish_scanline(&mut self) {
+        // Ticket W4-00: `self.scanline` is still the completing line's own
+        // index here (dot 256, before `advance_counters` ever runs) — the
+        // same value `line.y` below carries into `video_scanline`, matching
+        // `CoreEvent::Scanline`'s own doc ("same value as the `y` passed to
+        // `video_scanline`").
+        if self.event_mask.is_subscribed(EventMask::SCANLINE) {
+            self.queue_event(CoreEvent::Scanline(self.scanline));
+        }
         self.completed.push(CompletedScanline {
             y: self.scanline,
             pixels: self.line_buffer,

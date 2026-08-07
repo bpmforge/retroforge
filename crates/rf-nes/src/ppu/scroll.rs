@@ -11,6 +11,7 @@
 //! +++----------------- fine Y scroll
 //! ```
 use super::{Ppu, PRERENDER_SCANLINE, STATUS_VBLANK, VBLANK_START_SCANLINE};
+use rf_core_api::{CoreEvent, EventMask, PixelLayer};
 
 impl Ppu {
     /// Dispatch a real (side-effecting) CPU read of register `index`
@@ -172,6 +173,55 @@ impl Ppu {
                 | (((value & 0xF8) as u16) << 2);
         }
         self.w = !self.w;
+        // Ticket W4-00: fires on BOTH the first (X) and second (Y) write —
+        // `CoreEvent::ScrollWrite` always carries both axes, and a
+        // consumer wanting only "X changed" can compare against the
+        // previous event itself. Reads only `t`/`x`, already-in-hand
+        // register state (this ticket's hazard note) — no bus access.
+        if self.event_mask.is_subscribed(EventMask::SCROLL_WRITE) {
+            let (x, y) = self.effective_scroll();
+            self.queue_event(CoreEvent::ScrollWrite {
+                x,
+                y,
+                layer: PixelLayer::Background(0), // NES has exactly one BG layer
+            });
+        }
+    }
+
+    /// Decode the current loopy `t`/`x` registers into a pixel-space scroll
+    /// position (ticket W4-00's `CoreEvent::ScrollWrite`) — bit layout per
+    /// [nesdev.org/wiki/PPU_scrolling](https://www.nesdev.org/wiki/PPU_scrolling)
+    /// (this file's module doc, reproduced at the top): coarse X/Y are 0-31
+    /// tile units, fine X/Y are 0-7 pixel units within a tile, and the two
+    /// nametable-select bits (`t` bits 10/11) pick which of the two
+    /// logical 256x240 screens the coarse value is relative to — folded in
+    /// here (`* 256`/`* 240`) so the emitted value is a single
+    /// wraparound-free position across a nametable-select flip, the shape
+    /// `docs/design/ENHANCEMENT_RUNTIME.md` §3's wideNES-style scroll
+    /// stitcher (ticket W4-03a) consumes.
+    ///
+    /// Emitted from [`Ppu::write_scroll`] (`$2005`) only. `$2006`
+    /// (`write_addr`) can ALSO change `v`/`t` directly — some raster-split
+    /// routines use it that way — and this deliberately does NOT emit
+    /// `ScrollWrite` from there: `$2006`'s primary purpose is general VRAM
+    /// addressing (CHR/nametable/palette pokes vastly outnumber scroll
+    /// splits through this register), so treating every `$2006` write as a
+    /// scroll change would over-fire for the common case to catch the
+    /// uncommon one. Documented gap, not an oversight — ticket W4-03a's own
+    /// stitcher inherits it and can widen coverage to `$2006`-driven splits
+    /// if a real profile needs it.
+    fn effective_scroll(&self) -> (u16, u16) {
+        let coarse_x = self.t & 0x001F;
+        let fine_x = u16::from(self.x & 0x07);
+        let nt_x = (self.t >> 10) & 0x01;
+        let x = nt_x * 256 + coarse_x * 8 + fine_x;
+
+        let coarse_y = (self.t >> 5) & 0x001F;
+        let fine_y = (self.t >> 12) & 0x07;
+        let nt_y = (self.t >> 11) & 0x01;
+        let y = nt_y * 240 + coarse_y * 8 + fine_y;
+
+        (x, y)
     }
 
     /// `$2006` write, first/second per the `w` toggle (nesdev):

@@ -12,7 +12,12 @@
 //!
 //! `mmc3_irq` is ticket W2-03's acceptance criterion 3: the analytic
 //! (never-recorded, see that module's own doc) scanline-IRQ assertion.
+//!
+//! `events` is ticket W4-00: the three bus-origin `CoreEvent` sites
+//! (`DmaStart`/`OamRewrite`/`MapperIrq`) — `crate::ppu::tests::event_emission`
+//! covers the five PPU-origin ones.
 mod controller;
+mod events;
 mod integration;
 mod memory_map;
 mod mmc3_irq;
