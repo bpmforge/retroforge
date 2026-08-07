@@ -1565,7 +1565,9 @@
    "crate": "rf-enhance",
    "write_scope": [
     "crates/rf-enhance/**",
-    "crates/rf-cache/**"
+    "crates/rf-cache/**",
+    "crates/rf-nes/src/ppu/scroll.rs",
+    "docs/evidence/local-gate.json"
    ],
    "depends_on": [
     "W4-01",
@@ -1575,8 +1577,14 @@
     "per ENHANCEMENT_RUNTIME.md \u00a73: scroll accumulation w/ wraparound heuristics, per-scanline bands, HUD band exclusion (FR-ENH-003)",
     "stitcher determinism test"
    ],
+   "notes": [
+    "PRE-FLIGHT 2026-08-07 (conductor) -- THE $2006 GAP W4-00 HANDED FORWARD IS REAL, AND THIS IS THE TICKET THAT MEETS IT. docs/design/ENHANCEMENT_RUNTIME.md section 3 requires 'mid-frame splits handled by tracking per-scanline scroll bands; HUD bands auto-detected as zero-delta regions and excluded' -- that is acceptance criterion 1. But W4-00 emits CoreEvent::ScrollWrite ONLY for the two $2005 writes. Verified in source: crates/rf-nes/src/ppu/scroll.rs's write_addr ($2006) sets self.v = self.t on its second write -- which IS a scroll position change, loopy v being the scroll register -- and emits nothing, with a comment reasoning that $2006's primary purpose is general VRAM addressing. That reasoning is sound for a general-purpose event and INSUFFICIENT for this ticket: the classic NES status-bar raster split is driven through $2006, so a stitcher that never sees it cannot detect the split or exclude the HUD band.",
+    "SCOPE 2026-08-07: crates/rf-nes/src/ppu/scroll.rs and docs/evidence/local-gate.json added as exact paths so this ticket CAN emit $2006-driven scroll changes if it needs to -- but DETERMINE THAT EMPIRICALLY FIRST, which is exactly what W4-00's handoff note asked ('handed forward to W4-03a, which is the ticket that will discover whether they matter for split detection'). If per-scanline bands turn out to work from $2005 alone on real scrolling ROMs, leave rf-nes untouched and say so; that is a finding, not a shortcut. If rf-nes IS touched, evidence regeneration becomes mandatory and the six canaries apply -- scroll.rs is PPU-timing-sensitive code that sprite_hit_tests and both golden frames exercise.",
+    "SCOPE FENCE: do NOT build canvas persistence or the ultrawide camera. crates/rf-cache is a 15-line stub and W4-08 owns building it; W4-03b's own acceptance is 'scene identity + canvas persistence in rf-cache across sessions' plus the ultrawide view and the FM-13 allocation guard, and it depends on W4-08 for exactly that reason. This ticket is the TRACKER and the STITCHER CORE: scroll accumulation, wraparound heuristics, per-scanline bands, HUD exclusion, and a determinism test. rf-cache stays in scope only so the canvas type can be shaped with its eventual home in mind -- not populated.",
+    "THE DETERMINISM TEST IS THE ACCEPTANCE CRITERION MOST EASILY FAKED: 'stitcher determinism test' passes trivially if it feeds the same input twice through a pure function. What it must actually pin is that the same ROM plus the same input log produces a byte-identical canvas -- the property FR-ENH-004 and the enhancement honesty contract depend on. Drive it through the real event stream (W4-01's FrameBundle carries the events now), not synthetic scroll values, or it proves nothing about the tracker's handling of real mid-frame writes."
+   ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E5-S2"
    ]
