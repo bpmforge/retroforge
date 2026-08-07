@@ -1454,6 +1454,35 @@
    "stories": []
   },
   {
+   "id": "W4-00",
+   "title": "rf-nes emits CoreEvents, EventMask-gated and zero-cost when unsubscribed",
+   "phase": 4,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-core-api/**",
+    "docs/evidence/local-gate.json"
+   ],
+   "depends_on": [
+    "W2-03"
+   ],
+   "acceptance": [
+    "rf-nes actually EMITS the CoreEvents its hardware produces, through CoreSink::event: FrameStart, FrameEnd, VblankStart, Scanline, ScrollWrite (x/y/layer), OamRewrite, MapperIrq and DmaStart -- today it emits NONE of them (FR-CORE-006)",
+    "every emission is gated by CoreConfig::event_mask, and EventMask::NONE -- the Accuracy-mode default -- is measurably ~zero-cost, proven by a criterion bench comparing masked-off against a no-event baseline rather than asserted",
+    "EMISSION CANNOT PERTURB THE SIMULATION: core state is bit-identical with the mask fully ON versus NONE over the same input log, proven the strong way (PPU-internal field comparison, NOT only EmuStepper::state_hash -- W3-05a established that hash excludes PPU internals and would miss a status-flag change)",
+    "the six canaries are unregressed: nes6502 2,560,000/2,560,000, nestest 8991/8991 byte-exact, golden_frame_bg, golden_frame_sprites, sprite_hit_tests 11/11, ppu_vbl_nmi 9/10, plus mmc3_test_2 6/6 since MapperIrq touches MMC3's IRQ path"
+   ],
+   "points": 5,
+   "status": "in_progress",
+   "stories": [],
+   "notes": [
+    "RAISED 2026-08-07 (conductor) as a MISSING PREREQUISITE discovered while pre-flighting W4-01, not as a split of it. W4-01 builds the event BUS in rf-enhance; pre-flight found the core emits NOTHING to carry. Verified by grep: crates/rf-nes/src contains zero calls to CoreSink::event and zero CoreEvent:: constructions outside tests, while rf-renderer's FrameBuffer/LayeredFrame and retroforge's sinks all implement event() as no-ops or forwards. So the contract (W0-04's CoreEvent + EventMask, complete and unused) has consumers planned in three tickets -- W4-01's bus, W4-03a's stitcher, W4-06a's event viewer -- and NO producer owned by anything. Building the bus first would be an event bus with neither producer nor consumer: exactly the unvalidated scaffolding W1-02 declined for the Mapper trait and W3-03 was fenced against for the SceneGraph.",
+    "WHY THIS IS THE RIGHT ORDER, and why the Mapper-trait precedent does NOT argue for deferring further: W1-02 declined to build a trait because no second consumer existed to inform its SHAPE. Here the shape is already fixed and public -- W0-04 shipped CoreEvent and EventMask as a versioned contract in rf-core-api, and docs/design/ENHANCEMENT_RUNTIME.md section 3 documents precisely what the stitcher will consume (ScrollWrite per BG layer, frame-end scroll state). The producer is the missing half of an already-designed interface, not a speculative abstraction.",
+    "THE HAZARD, and it is the same one W3-05a navigated: emission is OBSERVATION and must not perturb. W3-05a's near-miss is the cautionary tale worth reading before starting -- fetching sprite pattern bytes via mem_read instead of chr_peek would have clocked MMC3's A12 IRQ counter merely by enabling an enhancement, invisible to any pixel-comparison test. An event emitted from inside a PPU/bus path can do the same if it reads through a side-effecting accessor. Prefer emitting from data already in hand; if an emission needs to read state, use a peek-style accessor and prove it with mmc3_test_2.",
+    "TEST-STRENGTH NOTE: acceptance criterion 3 deliberately does NOT say 'state_hash identical'. W3-05a proved EmuStepper::state_hash covers CPU regs/WRAM/OAM/PRG-RAM/cycles and EXCLUDES PPU internals -- a status-flag perturbation passes it while a field-by-field PPU comparison catches it. Use the strong check; the hash may be kept as a secondary formality."
+   ]
+  },
+  {
    "id": "W4-01",
    "title": "Event bus + FrameBundle + subscriptions",
    "phase": 4,
@@ -1464,7 +1493,8 @@
    ],
    "depends_on": [
     "W0-04",
-    "W1-05b"
+    "W1-05b",
+    "W4-00"
    ],
    "acceptance": [
     "EventMask filtering measured ~zero-cost when unsubscribed (bench)",
