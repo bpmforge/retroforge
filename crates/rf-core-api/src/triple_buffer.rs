@@ -98,13 +98,37 @@ impl<T> TripleBufferWriter<T> {
     /// longer than an `Arc` clone takes (module doc).
     pub fn publish(&mut self, value: T) {
         self.write_idx = (self.write_idx + 1) % 3;
-        {
-            let mut slot = self.shared.slots[self.write_idx].lock().expect(
-                "triple buffer slot mutex poisoned (a reader must have panicked while holding it)",
-            );
-            *slot = Arc::new(value);
-        }
+        let mut slot = self.shared.slots[self.write_idx].lock().expect(
+            "triple buffer slot mutex poisoned (a reader must have panicked while holding it)",
+        );
+        *slot = Arc::new(value);
+        // MUST stay INSIDE the slot's critical section (ticket W4-01a).
+        //
+        // W4-01 shipped this store *after* the lock was released, which
+        // let a reader observe a frame and then, on its very next call,
+        // observe an OLDER one -- rollback, not the lag ARCHITECTURE §6
+        // permits. `latest()` loads the index and only then locks that
+        // slot, so a reader already blocked on THIS slot's mutex takes it
+        // the instant the writer releases and reads the new frame while
+        // `latest` still names the previous slot. Its next call resolves
+        // that stale index to an older frame. Concretely, with
+        // `latest = 0` and slots holding (99, 97, 98): a reader loads
+        // index 0 and is preempted; the writer publishes 100 -> slot 1,
+        // 101 -> slot 2, then 102 -> slot 0; the waiting reader takes
+        // slot 0 on release and sees 102 while `latest` is still 2; its
+        // next call loads 2 and reads 101. 101 < 102.
+        //
+        // Storing under the lock closes it: the only way to observe slot
+        // k's new value is after this critical section ends, by which
+        // point `latest` already names k (or newer), so no later load can
+        // resolve to an older frame. The cost is one atomic store inside
+        // an O(1) section, which does not disturb the module doc's
+        // "writer is never meaningfully delayed by a slow reader"
+        // argument. Reproduced at ~3 failures in 60 runs of
+        // `cargo test -p rf-core-api -- --test-threads=16` before the fix;
+        // a single green run proves nothing, which is how it shipped.
         self.shared.latest.store(self.write_idx, Ordering::Release);
+        drop(slot);
     }
 }
 

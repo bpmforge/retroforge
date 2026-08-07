@@ -196,11 +196,22 @@ fn reader_handles_clone_independently_and_share_the_same_stream() {
 /// published), and the writer is not handed any reader's lock to wait on.
 #[test]
 fn one_writer_and_two_reader_threads_never_observe_a_torn_or_bogus_bundle() {
-    let (mut writer, reader) = triple_buffer(FrameBundle::empty());
-    let reader_render = reader.clone();
-    let reader_debug = reader;
+    // Sized to DISCRIMINATE, not merely to exercise (ticket W4-01a). The
+    // race this guards has a window of a few instructions -- the gap
+    // between `publish` releasing a slot and advancing `latest` -- so the
+    // original 2 readers x 500 publishes caught the pre-fix defect only
+    // ~1-5 runs in 60. A guard that misses its own bug 95% of the time
+    // lets the next regression through CI unnoticed. More readers than
+    // the writer has slots, each polling far more often than the writer
+    // publishes, keeps at least one reader parked on the mutex the writer
+    // is about to release, which is exactly the interleaving required.
+    const N: u64 = 4_000;
+    const READERS: usize = 6;
 
-    const N: u64 = 500;
+    let (mut writer, reader) = triple_buffer(FrameBundle::empty());
+    let readers: Vec<_> = (0..READERS).map(|_| reader.clone()).collect();
+    drop(reader);
+
     let writer_thread = thread::spawn(move || {
         for i in 1..=N {
             writer.publish(bundle_with_frame_count(i));
@@ -216,21 +227,28 @@ fn one_writer_and_two_reader_threads_never_observe_a_torn_or_bogus_bundle() {
                     seen <= N,
                     "observed frame_count {seen} was never published (torn read)"
                 );
-                assert!(seen >= last_seen, "frame_count must never go backwards");
+                assert!(
+                    seen >= last_seen,
+                    "frame_count must never go backwards: saw {seen} after {last_seen} \
+                     (W4-01a -- `latest` must be advanced INSIDE the slot's critical section, \
+                     or a reader blocked on that mutex reads the new frame before `latest` \
+                     names its slot, then resolves the stale index to an older one)"
+                );
                 last_seen = seen;
             }
         }
     };
-    let render_thread = thread::spawn(spin(reader_render));
-    let debug_thread = thread::spawn(spin(reader_debug));
+
+    let reader_threads: Vec<_> = readers
+        .into_iter()
+        .map(|r| thread::spawn(spin(r)))
+        .collect();
 
     writer_thread.join().expect("writer thread must not panic");
-    render_thread
-        .join()
-        .expect("render reader thread must not panic");
-    debug_thread
-        .join()
-        .expect("debug reader thread must not panic");
+    for (i, t) in reader_threads.into_iter().enumerate() {
+        t.join()
+            .unwrap_or_else(|_| panic!("reader thread {i} must not panic"));
+    }
 }
 
 // ---------------------------------------------------------------------
