@@ -11,3 +11,4 @@ workspace = true
 
 [dependencies]
 rf-core-api = { path = "../rf-core-api" }
+wgpu = "29.0.4"
