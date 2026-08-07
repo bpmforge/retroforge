@@ -201,3 +201,122 @@ fn event_emission_does_not_perturb_ppu_internal_state() {
          would desync exactly this counter, invisible to status/line_buffer alone"
     );
 }
+
+// ---------------------------------------------------------------------
+// Ticket W4-03a's `$2006` ScrollWrite emission (conductor-added).
+//
+// W4-03a added a second `ScrollWrite` emission site in `write_addr`'s
+// second-write branch, because a mid-frame *vertical* raster split is
+// structurally unreachable through `$2005` alone: `copy_horizontal` runs
+// at dot 257 of every scanline, but `copy_vertical` only fires on the
+// pre-render line at dots 280-304, so the vertical half of `v` is never
+// refreshed from `t` during the visible picture by any hardware path
+// (nesdev.org/wiki/PPU_scrolling, "Split X/Y scroll": "Without the second
+// write to $2006, only the horizontal portion of v will be reloaded from
+// t"). The only mid-picture route is a direct `v` write, which is exactly
+// what `$2006`'s second write does.
+//
+// That site shipped with NO test — the conductor's scope for W4-03a
+// listed `ppu/scroll.rs` but not this directory, so the implementer could
+// not add one. Its gate is `rendering_enabled() && scanline < 240`, which
+// is precisely the kind of two-part condition that can be subtly wrong
+// (an off-by-one on the scanline bound, or the wrong rendering check)
+// with nothing to catch it. These four tests pin each half of the gate
+// independently, in both directions.
+// ---------------------------------------------------------------------
+
+/// Put the PPU in the state a real mid-frame split happens in: rendering
+/// enabled (PPUMASK bit 3, show background) and the beam inside the
+/// active picture.
+fn ppu_rendering_at_scanline(scanline: u16) -> super::Ppu {
+    let mut ppu = test_ppu();
+    ppu.set_event_mask(EventMask::SCROLL_WRITE);
+    ppu.write_register(1, 0b0000_1000); // $2001 PPUMASK: show background
+                                        // Set the beam position directly rather than ticking to it: other
+                                        // tests in this directory do the same (`fetch_pipeline.rs`), and it
+                                        // keeps the assertion about the $2006 gate rather than about however
+                                        // many unrelated events a few thousand ticks would also queue.
+    ppu.scanline = scanline;
+    ppu
+}
+
+fn drain_scroll_writes(ppu: &mut super::Ppu) -> usize {
+    let mut sink = RecordingSink::default();
+    ppu.drain(&mut sink);
+    sink.events
+        .iter()
+        .filter(|e| matches!(e, CoreEvent::ScrollWrite { .. }))
+        .count()
+}
+
+/// The case the whole ticket exists for: a `$2006` write mid-picture with
+/// rendering on must surface as a `ScrollWrite`, or the stitcher can never
+/// see a vertical split.
+#[test]
+fn dollar_2006_second_write_emits_scrollwrite_mid_picture_while_rendering() {
+    let mut ppu = ppu_rendering_at_scanline(120);
+    let before = drain_scroll_writes(&mut ppu);
+    ppu.write_register(6, 0x20); // first write: latches high byte, must NOT emit
+    let after_first = drain_scroll_writes(&mut ppu);
+    assert_eq!(
+        after_first, 0,
+        "only the SECOND $2006 write commits v; the first must stay silent"
+    );
+    ppu.write_register(6, 0x40); // second write: commits v -> a real scroll change
+    assert_eq!(
+        drain_scroll_writes(&mut ppu),
+        1,
+        "a mid-picture $2006 commit with rendering on must emit exactly one ScrollWrite \
+         (before={before})"
+    );
+}
+
+/// Gate half 1: rendering disabled. This is the overwhelmingly common
+/// case W4-03a measured on real ROMs — 394 of 394 observed active-picture
+/// `$2006` writes had rendering off, i.e. ordinary blanked-screen VRAM
+/// setup, not splits. Emitting there would be pure false positives.
+#[test]
+fn dollar_2006_is_silent_mid_picture_when_rendering_is_disabled() {
+    let mut ppu = ppu_rendering_at_scanline(120);
+    ppu.write_register(1, 0x00); // PPUMASK: rendering off
+    let _ = drain_scroll_writes(&mut ppu);
+    ppu.write_register(6, 0x20);
+    ppu.write_register(6, 0x40);
+    assert_eq!(
+        drain_scroll_writes(&mut ppu),
+        0,
+        "a blanked-screen $2006 write is VRAM setup, not a scroll split"
+    );
+}
+
+/// Gate half 2: outside the active picture. W4-03a measured over 12,000
+/// vblank/pre-render `$2006` writes per ROM — every one of them ordinary
+/// setup. `scanline < 240` is what keeps those out.
+#[test]
+fn dollar_2006_is_silent_during_vblank_even_with_rendering_enabled() {
+    let mut ppu = ppu_rendering_at_scanline(245); // vblank
+    let _ = drain_scroll_writes(&mut ppu);
+    ppu.write_register(6, 0x20);
+    ppu.write_register(6, 0x40);
+    assert_eq!(
+        drain_scroll_writes(&mut ppu),
+        0,
+        "scanline >= 240 is not the active picture; a $2006 write there is setup"
+    );
+}
+
+/// The mask still governs this site, exactly as it governs the `$2005`
+/// one — Accuracy mode's default must pay nothing.
+#[test]
+fn dollar_2006_scrollwrite_respects_event_mask_none() {
+    let mut ppu = ppu_rendering_at_scanline(120);
+    ppu.set_event_mask(EventMask::NONE);
+    let _ = drain_scroll_writes(&mut ppu);
+    ppu.write_register(6, 0x20);
+    ppu.write_register(6, 0x40);
+    assert_eq!(
+        drain_scroll_writes(&mut ppu),
+        0,
+        "EventMask::NONE must silence the $2006 site too"
+    );
+}

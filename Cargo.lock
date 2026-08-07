@@ -2944,6 +2944,9 @@ version = "0.1.0"
 [[package]]
 name = "rf-cache"
 version = "0.1.0"
+dependencies = [
+ "rf-core-api",
+]
 
 [[package]]
 name = "rf-cart"

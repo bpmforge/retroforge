@@ -200,16 +200,21 @@ impl Ppu {
     /// `docs/design/ENHANCEMENT_RUNTIME.md` §3's wideNES-style scroll
     /// stitcher (ticket W4-03a) consumes.
     ///
-    /// Emitted from [`Ppu::write_scroll`] (`$2005`) only. `$2006`
-    /// (`write_addr`) can ALSO change `v`/`t` directly — some raster-split
-    /// routines use it that way — and this deliberately does NOT emit
-    /// `ScrollWrite` from there: `$2006`'s primary purpose is general VRAM
-    /// addressing (CHR/nametable/palette pokes vastly outnumber scroll
-    /// splits through this register), so treating every `$2006` write as a
-    /// scroll change would over-fire for the common case to catch the
-    /// uncommon one. Documented gap, not an oversight — ticket W4-03a's own
-    /// stitcher inherits it and can widen coverage to `$2006`-driven splits
-    /// if a real profile needs it.
+    /// Emitted unconditionally from [`Ppu::write_scroll`] (`$2005`, both
+    /// writes) and, as of ticket W4-03a, conditionally from
+    /// [`Ppu::write_addr`] (`$2006`, second write only, gated on
+    /// rendering being enabled and the write landing in the active
+    /// picture — see that method's own doc for the full derivation and
+    /// the measurement backing the gate). `$2006`'s primary purpose really
+    /// is general VRAM addressing (CHR/nametable/palette pokes vastly
+    /// outnumber scroll splits through this register — measured, not
+    /// assumed: over 12,000 vblank/pre-render `$2006` writes per fixture
+    /// ROM in W4-03a's pre-flight, against low hundreds of active-picture
+    /// ones), so this is deliberately NOT "every `$2006` write" — that
+    /// would over-fire for the common case exactly as this doc used to
+    /// warn. The narrower gate covers the case that actually matters
+    /// (a write that can change what's on screen right now) without the
+    /// false-positive cost.
     fn effective_scroll(&self) -> (u16, u16) {
         let coarse_x = self.t & 0x001F;
         let fine_x = u16::from(self.x & 0x07);
@@ -229,6 +234,72 @@ impl Ppu {
     /// first write  (w=0): t: .FEDCBA ........ <- d: ..FEDCBA; t[14] <- 0; w <- 1
     /// second write (w=1): t: ....... HGFEDCBA <- d: HGFEDCBA; v <- t;     w <- 0
     /// ```
+    ///
+    /// ## Ticket W4-03a: `ScrollWrite` also fires from here now, conditionally
+    ///
+    /// [`Ppu::effective_scroll`]'s doc used to say `$2006` never emits
+    /// `ScrollWrite`, reasoning that VRAM-addressing pokes vastly
+    /// outnumber real scroll splits through this register. W4-03a's
+    /// pre-flight measured that over-fire directly (`investigate_2006_gap`,
+    /// a since-removed throwaway harness driving `Alter_Ego.nes` and
+    /// `Marble Madness (USA).nes` for 4000 frames each): every single
+    /// active-picture (`scanline < 240`) second `$2006` write observed —
+    /// 356 and 38 respectively — happened with rendering *disabled*
+    /// ([`Ppu::rendering_enabled`]), i.e. ordinary blanked-screen VRAM
+    /// setup, not a visible split. Neither ROM was ever coaxed into a real
+    /// scrolling gameplay state, so the *positive* case (a real mid-render
+    /// split) was never directly observed — recorded here rather than
+    /// silently dropped.
+    ///
+    /// What settles the question isn't ROM archaeology, though: it's this
+    /// crate's own render pipeline, already proven correct by the golden
+    /// frames. `crate::ppu::background::Ppu::process_render_dot` calls
+    /// [`Ppu::copy_horizontal`] at dot 257 of **every** scanline (visible
+    /// or pre-render alike), but [`Ppu::copy_vertical`] only
+    /// `if !is_visible && (280..=304).contains(&dot)` — the pre-render
+    /// line, once per frame. So the *vertical* component of `v` is never
+    /// refreshed from `t` during the visible picture by any automatic
+    /// hardware path — the only way to change it mid-frame is to write
+    /// `v` directly, which only `$2006`'s second write does (`$2005`
+    /// only ever touches `t`). nesdev.org/wiki/PPU_scrolling's "Split X/Y
+    /// scroll" section confirms this is the documented technique: "Without
+    /// the second write to $2006, only the horizontal portion of v will
+    /// [be re]loaded from t" mid-screen. A mid-frame *horizontal-only*
+    /// split (the common status-bar case with no vertical wrap) genuinely
+    /// can be built from `$2005` alone, riding the automatic dot-257
+    /// `copy_horizontal` every scanline — but any split touching the
+    /// vertical scroll (nametable-crossing status bars, the "classic" NES
+    /// case) structurally cannot be, regardless of what any fixture ROM
+    /// happens to do.
+    ///
+    /// So this fires `ScrollWrite` exactly when the write could be a
+    /// *visible* raster change: rendering enabled
+    /// ([`Ppu::rendering_enabled`]) and `self.scanline` inside the active
+    /// picture (`< 240`, matching [`CoreEvent::Scanline`]'s own range).
+    /// That gate is what the measurement above validates — it produces
+    /// **zero** of the 394 observed false positives (both fixture ROMs'
+    /// active-picture writes were 100% rendering-disabled) while still
+    /// covering the mid-render case by construction, not by having
+    /// witnessed one. Vblank/pre-render `$2006` writes (the overwhelming
+    /// majority — over 12,000/22,000 per ROM in the same measurement) are
+    /// untouched by this gate and still emit nothing, exactly as before.
+    ///
+    /// **Named remaining limitation, not fixed by this gate:** a ROM that
+    /// sets its *base* (non-split) scroll for the upcoming frame
+    /// exclusively through a `$2006` pair during vblank/pre-render
+    /// (instead of `$2005`, which some games do — e.g. because `$2006`
+    /// can also set the nametable-select bits `$2005`'s second write
+    /// cannot) produces no `ScrollWrite` at all: this gate deliberately
+    /// skips it (not active picture), and `copy_vertical`/`copy_horizontal`
+    /// re-derive `v` from `t` at the pre-render line before the next frame
+    /// starts, so the applied value is real but silent to this event.
+    /// `rf_enhance::scroll_tracker::ScrollTracker`'s carried-over scroll
+    /// value simply stays at whatever it last observed in that case —
+    /// narrower than the mid-frame split gap this ticket exists to close
+    /// (that gap can only ever misjudge the frame's *starting* position by
+    /// however much a $2006-only game's baseline actually moved between
+    /// $2005-visible updates, never lose a mid-frame split), and
+    /// documented here rather than silently inherited.
     fn write_addr(&mut self, value: u8) {
         if !self.w {
             self.t = (self.t & 0x00FF) | (((value & 0x3F) as u16) << 8);
@@ -243,6 +314,28 @@ impl Ppu {
             // `$2007` access at all, only `$2006` writes). See
             // `ppu/mem.rs`'s module doc "A12 rising-edge detection" section.
             self.observe_ppu_bus_address(self.v & 0x3FFF);
+            // Ticket W4-03a: see this method's own doc above for the full
+            // derivation of this exact gate (rendering-enabled + active
+            // picture). Reads `v` (already just committed above, matching
+            // `write_scroll`'s "already-in-hand register state" hazard
+            // note) rather than `t`, since a mid-render split cares about
+            // what is ACTUALLY being scanned out, i.e. `v`, not the
+            // latched-for-next-copy `t` `effective_scroll()` decodes for
+            // the `$2005` path -- `v` and `t` are identical at this exact
+            // instant anyway (the line just above sets `self.v = self.t`),
+            // so this is `effective_scroll()`-equivalent here, not a
+            // second decoding rule to maintain.
+            if self.event_mask.is_subscribed(EventMask::SCROLL_WRITE)
+                && self.rendering_enabled()
+                && self.scanline < 240
+            {
+                let (x, y) = self.effective_scroll();
+                self.queue_event(CoreEvent::ScrollWrite {
+                    x,
+                    y,
+                    layer: PixelLayer::Background(0), // NES has exactly one BG layer
+                });
+            }
         }
         self.w = !self.w;
     }

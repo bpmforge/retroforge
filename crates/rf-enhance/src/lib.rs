@@ -10,6 +10,8 @@
 //! actual `EnhancementRuntime`) and why.
 
 pub mod bus;
+pub mod scroll_tracker;
+pub mod stitcher;
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-enhance";
