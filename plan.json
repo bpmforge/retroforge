@@ -918,13 +918,14 @@
     "W2-11"
    ],
    "acceptance": [
-    "cc65/neslib source under fixtures/nes/rf-scroller with CC0/MIT-licensed assets (ours), deterministic CI build with checked-in ROM hash (fixture doctrine D-001)",
-    "gameplay deliberately exercises: multi-screen horizontal scroll with wraparound, a static HUD band split from the scrolling playfield by a SPRITE-0 HIT (not an IRQ -- see notes: the fixture is NROM per ROADMAP Phase-1 exit bullet 3, and mapper 0 has no IRQ source), a >8-sprites-per-scanline scene, an intentional-blink enemy, a vertical sub-area -- the red-fixture host for TESTING section 7 heuristic cases",
+    "cc65 source under fixtures/nes/rf-scroller with CC0/MIT-licensed assets (ours), deterministic CI build with checked-in ROM hash (fixture doctrine D-001)",
+    "gameplay exercises multi-screen HORIZONTAL scroll with wraparound plus a static HUD band split from the scrolling playfield by a SPRITE-0 HIT (not an IRQ -- NROM has no IRQ source; see notes)",
     "level format documented in fixtures/nes/rf-scroller/FORMAT.md and DESIGNED to be decodable by the metatile_screens family (the decoder itself is W5-02a and does not exist yet -- this ticket ships the format + doc, not a decoder)",
-    "scripted 5-min input log + golden frames registered as an RF-Scroller row in the Tier-A replay regression BUILT BY W2-11 (FR-CORE-026) -- this ticket adds the entry, it does not build the harness"
+    "scripted input log + golden frames registered as an RF-Scroller row in the Tier-A replay harness W2-11 BUILT (FR-CORE-026) -- this ticket adds the entry, it does not build the harness",
+    "the >8-sprites-per-scanline scene, intentional-blink enemy and vertical sub-area are SPLIT OUT to W2-10a and are explicitly NOT in this ticket"
    ],
-   "points": 8,
-   "status": "todo",
+   "points": 5,
+   "status": "in_progress",
    "stories": [],
    "notes": [
     "HANDOFF 2026-08-05 (Phase 1 wave gate, conductor + independent challenger): THIS PHASE-2 TICKET BLOCKS A PHASE-1 EXIT CRITERION. docs/ROADMAP.md's Phase 1 exit bullet 3 reads 'Two NROM homebrew titles boot (Alter Ego + a neslib fixture, per TESTING section 8); frame stepping works' — the neslib fixture is this ticket, and W2-11 owns Alter Ego. Both are todo, so Phase 1 cannot exit on that criterion by any amount of Phase-1 work. Verified by the challenger: nothing in crates/ loads or boots either title (grep for alter_ego/neslib returns zero hits outside comments), and roms/nes/alter-ego/alter_ego.zip is fetched but never unzipped or executed — downloaded is not tested. NOTE docs/work/DESIGN_REVIEW.md's G-34 records this drift as already 'fixed', but that was a wording alignment between ROADMAP and TESTING only; the implementation gap was never closed, so the conflict looked resolved on paper while staying open in fact. Escalated to Brad at the gate: either these two tickets land before Phase 1 exits, or the Phase 1 criterion is amended to stop depending on Phase 2.",
@@ -935,7 +936,43 @@
     "(3) FORWARD REFERENCE MADE EXPLICIT: criterion 3's 'decodable by the metatile_screens family' cannot be demonstrated here -- that decoder is W5-02a (depends_on W5-01, which depends_on this ticket), so it does not exist and cannot exist before this lands. Criterion 3 now says the format is DESIGNED to be decodable and documented in FORMAT.md; building the decoder is explicitly out of scope (rf-enhance is not in write_scope either way).",
     "TOOLCHAIN IS A REAL STALL RISK -- this is the W3-01 shape (a toolchain absent from the machine, two stalled agent attempts, zero code landed). cc65 was NOT installed (`which cc65/ca65/ld65` -> not found) and appears nowhere in .github/workflows/ci.yml. It is `brew install cc65` (2.19 bottled) per docs/research/accuracy-and-testing.md:138. What broke the W3-01 loop was a conductor compile-probe against real source before briefing; do the same here -- install, build a minimal neslib ROM, and boot it through rf-nes headless to confirm the whole chain (cc65/ca65/ld65 + a working .cfg + iNES header + rf-cart acceptance + one rendered frame) BEFORE handing an agent an 8-point game. The brief should carry a known-working build invocation, not ask the agent to discover one.",
     "ROM DELIVERY TO TESTS: the built ROM is gitignored (tests/rom-manifest.toml's own header law: never a ROM binary in git; D-001 checks in the HASH, not the bytes). Follow the existing convention exactly -- absent artifact means SKIP with a loud reason, never a hard failure; the workspace already carries 4 ignored tests and a gitignored roms/ directory on that pattern. CI is where it always builds.",
-    "LICENCE: THE GATE CANNOT CATCH THIS ONE. Vendoring neslib puts third-party C under fixtures/, and `cargo deny check licenses` only sees Cargo dependencies -- it will never look at it. Review-enforced, same class as the rf-cache SystemTime exemption noted in W4-08. The agent must read the ACTUAL LICENSE file from the source it vendors (docs/research/accuracy-and-testing.md:128 points at https://github.com/clbr/neslib, a FORK of Shiru's original -- verify the fork's own terms, not the research doc's 'PD/permissive' summary) and land it as a per-directory LICENSE. Also: fixtures/README.md currently claims 'Everything here is ours', which vendored neslib makes false; that file is inside write_scope, so amend it rather than letting it ship stale."
+    "LICENCE: THE GATE CANNOT CATCH THIS ONE. Vendoring neslib puts third-party C under fixtures/, and `cargo deny check licenses` only sees Cargo dependencies -- it will never look at it. Review-enforced, same class as the rf-cache SystemTime exemption noted in W4-08. The agent must read the ACTUAL LICENSE file from the source it vendors (docs/research/accuracy-and-testing.md:128 points at https://github.com/clbr/neslib, a FORK of Shiru's original -- verify the fork's own terms, not the research doc's 'PD/permissive' summary) and land it as a per-directory LICENSE. Also: fixtures/README.md currently claims 'Everything here is ours', which vendored neslib makes false; that file is inside write_scope, so amend it rather than letting it ship stale.",
+    "CONDUCTOR TOOLCHAIN PROBE 2026-08-07 -- THE CHAIN IS PROVEN END TO END, do not re-derive it. This is the W3-01 shape (a toolchain absent from the machine stalled two agents and produced zero code), and what broke that loop was a conductor probe against real source before briefing. Done here: `brew install cc65` (V2.18 at /opt/homebrew/bin/{cc65,ca65,ld65}), then a minimal C program built with ONE command -- `cl65 -t nes -o probe.nes main.c` -- producing a 40976-byte image = 16-byte header + 2 x 16K PRG + 8K CHR, header bytes `4e45 531a 02 01 03 00` (iNES magic, PRG=2, CHR=1, flags6=0x03, mapper 0). Booted headless through the real core: NesBus::from_ines_bytes accepted it, Cpu::power_on + 90 frames ran, and the DOMINANT palette index across the framebuffer was 0x21 -- the exact backdrop the C program writes to $3F00. That last assertion is the point: it proves the compiled C actually EXECUTED, not merely that the ROM parsed and the PPU spun.",
+    "NESLIB VS cc65's -t nes TARGET -- A DELIBERATE DEVIATION FROM D-001's WORDING, flagged for Brad. D-001 says 'cc65/neslib'. But `cl65 -t nes` uses cc65's own bundled nes.cfg + nes.lib, while neslib ships its OWN crt0.s and linker config and expects you NOT to use cc65's nes target -- they are different toolchains, and the probe above verified only the first. Taking the verified path: (a) it is proven end to end today, (b) it avoids vendoring third-party C into fixtures/ entirely, which in turn avoids a licence review `cargo deny check licenses` cannot perform (it only sees Cargo dependencies), a per-directory LICENSE file, and having to amend fixtures/README.md's claim that 'Everything here is ours'. Read D-001's 'neslib' as naming the IDIOM (C-on-NES via cc65) rather than that specific library. If Brad wants literal neslib, that is a one-line veto and this ticket re-opens with a vendoring + licence step.",
+    "CHR AND HEADER ARE BOTH YOURS TO CONTROL, checked in nes.cfg: the CHARS segment maps to ROM2 (8K CHR-ROM at $0000) so tile data goes in via `.segment \"CHARS\"` + .incbin, and HEADER is likewise a real segment, so the fixture supplies its own 16-byte iNES header rather than accepting cc65's default. Two things to get right there: cc65's default flags6=0x03 sets the battery bit (0x02), which is meaningless here and should be cleared; and it sets VERTICAL mirroring (bit 0), which is CORRECT for a horizontal scroller -- vertical mirroring puts the two nametables side by side horizontally. Do not 'fix' that to horizontal mirroring; that is the vertical-scrolling arrangement.",
+    "SCOPE NARROWED 8 -> 5 PTS. The >8-sprites-per-scanline scene, intentional-blink enemy and vertical sub-area moved to W2-10a, split along CONSUMER lines: this ticket unblocks W4-03d (a real scrolling fixture for scroll-stable scene identity) and ROADMAP Phase-1 exit bullet 3 (an NROM homebrew title that boots); W2-10a serves W3-05's de-flicker track and TESTING section 7's red fixtures. Do not build them here -- W2-10a's acceptance depends on this ticket's FORMAT.md and level-data layout being clean and documented first.",
+    "REPLAY HARNESS NOW EXISTS -- W2-11 closed at d7ddd5b and built it. Read crates/rf-harness/tests/alter_ego_replay.rs and follow its shape: NesBus::from_ines_bytes + Cpu::power_on, a run_frame helper that steps until bus.frame_count() advances while draining video, rf_input's ReplayRecorder/ReplayLog/ReplayPlayer for a genuine .rfreplay round trip, and a SECOND independent Cpu/NesBus for the determinism half. Its lesson applies directly: an input log that never drives the game produces a perfectly stable, perfectly reproducible hash OF A TITLE SCREEN. Unlike Alter Ego this fixture is ours, so you can assert on a known RAM address by construction rather than reverse-engineering one -- but you must still PROVE the log reaches gameplay and that the goldens are distinct, moving frames.",
+    "ROM DELIVERY: the built ROM is gitignored (tests/rom-manifest.toml's header law -- never a ROM binary in git; D-001 checks in the HASH). Absent artifact means SKIP with a loud reason, never hard-fail and never silent-pass. Follow the existing convention; the workspace carries 5 ignored tests on that pattern."
+   ]
+  },
+  {
+   "id": "W2-10a",
+   "title": "RF-Scroller red-fixture scenes: sprite overflow, intentional blink, vertical sub-area",
+   "phase": 2,
+   "crate": "fixtures",
+   "write_scope": [
+    "fixtures/**",
+    ".github/**",
+    "tests/rom-manifest.toml",
+    "crates/rf-harness/**"
+   ],
+   "depends_on": [
+    "W2-10"
+   ],
+   "acceptance": [
+    "a scene that deliberately puts MORE THAN 8 sprites on one scanline, reachable from the scripted input log, hosting TESTING section 7's anti-flicker cases (a) limit-bypass shows all sprites and (b) temporal mode reconstructs software-culled rotation",
+    "an INTENTIONAL-BLINK enemy (a sprite the game itself blinks on purpose, e.g. invincibility frames) -- the red fixture for FR-ENH-013/D-004's rule that de-flicker must NOT erase deliberate blinking, and the case W3-05 needs to distinguish from hardware flicker",
+    "a vertical sub-area exercising vertical scroll within NROM's fixed mirroring",
+    "FORMAT.md extended for any new level-data shape, and the checked-in ROM hash RE-PINNED -- naming every consumer of the old hash (W5-01's identity block, the W2-11 replay goldens) so none is silently stranded"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": [],
+   "notes": [
+    "SPLIT OUT OF W2-10 2026-08-07 in pre-flight, along CONSUMER lines rather than arbitrarily. W2-10 (5 pts) delivers what unblocks W4-03d (a real scrolling fixture for scroll-stable scene identity) and ROADMAP's Phase-1 exit bullet 3 (an NROM homebrew title that boots). THIS ticket delivers what W3-05's de-flicker track needs -- the red-fixture scenes of TESTING section 7 and D-004's red-fixture rule. Splitting an 8-pt whole-game ticket also keeps each brief inside what one executor can hold; the two halves sum to the original 8.",
+    "DO NOT BRIEF THIS COLD. 'Add three scenes to a game you did not write' fails without W2-10's FORMAT.md and its actual level-data layout in hand -- an agent handed only this text will invent a parallel format. Either continue W2-10's executor via its existing context, or carry FORMAT.md and the level-data layout verbatim into this brief.",
+    "HASH RE-PIN IS THE TRAP, and it is why criterion 4 names consumers explicitly. Adding scenes changes the ROM, so the checked-in hash moves. W5-01 (RF-Scroller profile: identity + RAM map) pins normalized hashes of 'the CI-built fixture ROM', and W2-11's harness will hold RF-Scroller golden frames by then. Its depends_on was updated to include this ticket for exactly that reason. Any consumer not re-pinned here fails later with a confusing identity mismatch rather than a clear error.",
+    "NROM MIRRORING CONSTRAINT for the vertical sub-area: a horizontal scroller wants VERTICAL mirroring (two horizontally-adjacent nametables), which is what cc65's nes target already sets in flags6. That leaves only a mirrored pair for vertical movement, so a vertical sub-area must fit that -- there is no four-screen option on NROM and changing mapper is out of scope."
    ]
   },
   {
@@ -1471,7 +1508,8 @@
    ],
    "depends_on": [
     "W3-03",
-    "W2-10"
+    "W2-10",
+    "W2-10a"
    ],
    "acceptance": [
     "per docs/design/ENHANCEMENT_RUNTIME.md \u00a72: bypass renders dropped_by_limit sprites; sprite-0/overflow flags unchanged (CI mode-invariant test) (FR-ENH-001)",
@@ -2029,7 +2067,8 @@
    "depends_on": [
     "W4-02",
     "W4-06b",
-    "W2-10"
+    "W2-10",
+    "W2-10a"
    ],
    "acceptance": [
     "identity block w/ normalized hashes of the CI-built fixture ROM",
