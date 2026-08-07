@@ -227,6 +227,25 @@ impl EmuStepper {
         self.bus.peek(addr)
     }
 
+    /// Out-of-band bus write — the write-side counterpart to
+    /// [`Self::peek`], routed through the same `rf_nes::CpuBus::write` a
+    /// real CPU instruction uses (already public `rf-nes` API; this does
+    /// not touch that crate's source at all), so writing e.g. `$2001`
+    /// (PPUMASK) genuinely toggles rendering the way a real program's `STA
+    /// $2001` would.
+    ///
+    /// Ticket W4-01's own use: `retroforge::mode_invariant`'s harness
+    /// self-test simulates "an enhancement that reaches into PPU registers
+    /// instead of going through the documented overlay channel", proving
+    /// the strong (indexed-pixel) mode-invariant check catches what
+    /// [`Self::state_hash`] structurally cannot (that hash never includes
+    /// PPU registers — see its own doc). Also the generically useful
+    /// write-side of a debugger memory view.
+    pub fn poke_bus(&mut self, addr: u16, value: u8) {
+        use rf_nes::CpuBus;
+        self.bus.write(addr, value);
+    }
+
     /// The full 256-byte OAM as last written — forwards `NesBus::oam`
     /// (ticket W3-05a: the mode-invariant test suite's fixture-sanity
     /// check reads this to prove its sprite table actually landed).

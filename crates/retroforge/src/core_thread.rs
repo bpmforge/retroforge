@@ -275,12 +275,22 @@ pub fn spawn(rom: Vec<u8>) -> Result<CoreHandle, NesLoadError> {
     let (evt_tx, evt_rx) = mpsc::channel();
     let input = Arc::new(SharedInputFrame::new());
     let thread_input = Arc::clone(&input);
-    let handle = thread::spawn(move || core_thread_main(rom, cmd_rx, evt_tx, thread_input));
+    // Ticket W4-01: the writer half is moved into the core thread; the
+    // reader half is handed back to the caller (render/debug threads clone
+    // it from `CoreHandle::frame_bundle`). Seeded with `FrameBundle::empty()`
+    // so a reader that polls before the first real frame gets a
+    // well-defined value (`triple_buffer`'s own doc).
+    let (bundle_writer, bundle_reader) =
+        rf_core_api::triple_buffer(rf_core_api::FrameBundle::empty());
+    let handle = thread::spawn(move || {
+        core_thread_main(rom, cmd_rx, evt_tx, thread_input, bundle_writer);
+    });
     Ok(CoreHandle {
         cmd_tx,
         evt_rx,
         join_handle: handle,
         input,
+        frame_bundle: bundle_reader,
     })
 }
 
@@ -292,26 +302,40 @@ pub struct CoreHandle {
     /// The UI thread's write side of the live input latch (ticket W1-07):
     /// call `input.store(latch.sample(&keymap))` once per repaint.
     pub input: Arc<SharedInputFrame>,
+    /// Ticket W4-01: the read side of the triple-buffered `FrameBundle`
+    /// stream (`rf_core_api::triple_buffer`) — clone this for each
+    /// independent consumer (render thread, debug panels; see
+    /// `rf_core_api::TripleBufferReader::clone`'s doc for why cloning is
+    /// cheap and each clone sees the same stream without contending with
+    /// the others).
+    pub frame_bundle: rf_core_api::TripleBufferReader<rf_core_api::FrameBundle>,
 }
 
-/// Ticket W3-03: fans out each `CoreSink` call to both the accuracy-frame
+/// Ticket W3-03 (renamed from `DualSink` by ticket W4-01, which added the
+/// third leg below): fans out each `CoreSink` call to the accuracy-frame
 /// sink (`rf_renderer::FrameBuffer`, unchanged — still the only thing
-/// W3-05a's overlay reaches) and the layer-extraction sink
-/// (`rf_renderer::LayeredFrame`), so `EmuStepper`'s single `&mut dyn
-/// CoreSink` parameter can feed both without widening `stepper.rs`'s API.
-/// `overlay_scanline` is deliberately forwarded to `frame` only — the
+/// W3-05a's overlay reaches), the layer-extraction sink
+/// (`rf_renderer::LayeredFrame`), and the `FrameBundle` accumulator
+/// (`rf_core_api::FrameBundleBuilder`), so `EmuStepper`'s single `&mut dyn
+/// CoreSink` parameter can feed all three without widening `stepper.rs`'s
+/// API. `overlay_scanline` is deliberately forwarded to `frame` only — the
 /// dropped-sprite overlay stays exactly where W3-05a put it (plan.json
 /// W3-03's forward note: migrating it into the extracted layers is W3-05's
-/// job, not this ticket's).
-struct DualSink<'a> {
+/// job, not this ticket's) — and `FrameBundleBuilder` itself also
+/// deliberately no-ops `overlay_scanline` (see its own `CoreSink` impl doc):
+/// `FrameBundle::video` must stay accuracy-exact regardless of any
+/// enhancement overlay.
+struct FanoutSink<'a> {
     frame: &'a mut rf_renderer::FrameBuffer,
     layers: &'a mut rf_renderer::LayeredFrame,
+    bundle: &'a mut rf_core_api::FrameBundleBuilder,
 }
 
-impl rf_core_api::CoreSink for DualSink<'_> {
+impl rf_core_api::CoreSink for FanoutSink<'_> {
     fn video_scanline(&mut self, y: u16, pixels: &[rf_core_api::PpuPixel]) {
         self.frame.video_scanline(y, pixels);
         self.layers.video_scanline(y, pixels);
+        self.bundle.video_scanline(y, pixels);
     }
 
     fn overlay_scanline(&mut self, y: u16, pixels: &[rf_core_api::OverlayPixel]) {
@@ -320,10 +344,12 @@ impl rf_core_api::CoreSink for DualSink<'_> {
 
     fn audio(&mut self, samples: &[i16]) {
         self.frame.audio(samples);
+        self.bundle.audio(samples);
     }
 
     fn event(&mut self, ev: rf_core_api::CoreEvent) {
         self.frame.event(ev);
+        self.bundle.event(ev);
     }
 }
 
@@ -332,6 +358,7 @@ fn core_thread_main(
     cmd_rx: Receiver<CoreCommand>,
     evt_tx: Sender<CoreEvent>,
     input: Arc<SharedInputFrame>,
+    mut bundle_writer: rf_core_api::TripleBufferWriter<rf_core_api::FrameBundle>,
 ) {
     install_panic_capture_hook();
 
@@ -344,8 +371,15 @@ fn core_thread_main(
     let mut stepper = EmuStepper::from_ines_bytes(&rom).expect("rom already validated by spawn()");
     let mut sink = rf_renderer::FrameBuffer::new();
     // Ticket W3-03: same-frame BG/sprite layer extraction, fed alongside
-    // `sink` via `DualSink` at every call site below.
+    // `sink` via `FanoutSink` at every call site below.
     let mut layers = rf_renderer::LayeredFrame::new();
+    // Ticket W4-01: the indexed-pixel + event accumulator that becomes each
+    // published `FrameBundle`, fed alongside `sink`/`layers` via the same
+    // `FanoutSink`.
+    let mut bundle_builder = rf_core_api::FrameBundleBuilder::new(
+        rf_renderer::frame::NES_WIDTH as u16,
+        rf_renderer::frame::NES_HEIGHT as u16,
+    );
 
     // `run_guarded_loop` needs its own `&Sender` (to report a crash) at
     // the same time the loop body needs to *own* a sender to `send` frames
@@ -383,9 +417,10 @@ fn core_thread_main(
                 CoreCommand::StepFrame => {
                     stepper.latch_and_advance_frame(
                         input.load(),
-                        &mut DualSink {
+                        &mut FanoutSink {
                             frame: &mut sink,
                             layers: &mut layers,
+                            bundle: &mut bundle_builder,
                         },
                     );
                     stepper.pause();
@@ -398,9 +433,10 @@ fn core_thread_main(
                 // ARCHITECTURE §6's determinism rule that input only ever
                 // takes effect at frame boundaries.
                 CoreCommand::StepScanline => {
-                    stepper.step_scanline(&mut DualSink {
+                    stepper.step_scanline(&mut FanoutSink {
                         frame: &mut sink,
                         layers: &mut layers,
+                        bundle: &mut bundle_builder,
                     });
                     stepped = true;
                 }
@@ -439,12 +475,18 @@ fn core_thread_main(
         }
         let ran = stepper.tick_running_with_input(
             input.load(),
-            &mut DualSink {
+            &mut FanoutSink {
                 frame: &mut sink,
                 layers: &mut layers,
+                bundle: &mut bundle_builder,
             },
         );
         if ran || stepped {
+            // Ticket W4-01: publish before sending `FrameMsg` so a reader
+            // that wakes on the `FrameMsg` channel never sees a
+            // `frame_bundle` older than the frame it was just notified
+            // about.
+            bundle_writer.publish(bundle_builder.take(stepper.frame_count()));
             let msg = FrameMsg {
                 rgba: sink.to_vec(),
                 width: sink.width(),
@@ -626,15 +668,15 @@ mod tests {
         let _ = core.join_handle.join();
     }
 
-    /// Ticket W3-03: `DualSink` must actually reach `FrameMsg`'s
-    /// `bg_rgba` field with real content, not just a correctly-sized
-    /// buffer — `LayeredFrame::new()` pre-allocates both buffers at the
-    /// full frame size, so a length-only assertion would pass even if
-    /// `DualSink::video_scanline` never forwarded to `layers` at all (the
-    /// exact silent-drop-at-a-wrapper failure mode
-    /// `stepper::CountingSink`'s own doc warns about for
+    /// Ticket W3-03: `FanoutSink` (named `DualSink` until ticket W4-01 added
+    /// its third leg) must actually reach `FrameMsg`'s `bg_rgba` field with
+    /// real content, not just a correctly-sized buffer — `LayeredFrame::new()`
+    /// pre-allocates both buffers at the full frame size, so a length-only
+    /// assertion would pass even if `FanoutSink::video_scanline` never
+    /// forwarded to `layers` at all (the exact silent-drop-at-a-wrapper
+    /// failure mode `stepper::CountingSink`'s own doc warns about for
     /// `overlay_scanline`). Mutation-verified: commenting out
-    /// `DualSink::video_scanline`'s `self.layers.video_scanline(y,
+    /// `FanoutSink::video_scanline`'s `self.layers.video_scanline(y,
     /// pixels)` forward makes this FAIL.
     ///
     /// Two `StepFrame`s, not one: a fresh core's first frame is the
@@ -675,11 +717,89 @@ mod tests {
                     msg.bg_rgba.chunks_exact(4).any(|px| px[3] == 0xFF),
                     "bg layer must carry at least one opaque pixel from a real \
                      steady-state frame — an all-transparent buffer here means \
-                     DualSink is not actually forwarding to `layers`"
+                     FanoutSink is not actually forwarding to `layers`"
                 );
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
         }
+
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+    }
+
+    /// Ticket W4-01, acceptance criterion 2: a stepped frame must reach
+    /// `CoreHandle::frame_bundle`, not just the `FrameMsg` channel — the
+    /// same "silently drop at a wrapper" failure mode `FanoutSink`'s own
+    /// doc and `step_frame_command_also_delivers_bg_layer_content_not_just_size`
+    /// above both guard against, now for the third leg
+    /// (`bundle_writer.publish`). Mutation-verified: commenting out the
+    /// `bundle_writer.publish(...)` call in `core_thread_main` leaves
+    /// `frame_bundle.latest().frame_count` stuck at 0 while `FrameMsg`
+    /// keeps arriving normally — this test is what would catch that.
+    #[test]
+    fn step_frame_command_also_publishes_a_matching_frame_bundle() {
+        let core = spawn(synthetic_nrom()).expect("synthetic NROM must spawn a core thread");
+        assert_eq!(
+            core.frame_bundle.latest().frame_count,
+            0,
+            "before any frame is stepped, the reader must see the FrameBundle::empty() seed"
+        );
+
+        core.cmd_tx
+            .send(CoreCommand::StepFrame)
+            .expect("core thread must accept a StepFrame command");
+        let evt = core
+            .evt_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a stepped frame must be delivered");
+        let msg_frame_count = match evt {
+            CoreEvent::Frame(msg) => msg.frame_count,
+            CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
+        };
+
+        let bundle = core.frame_bundle.latest();
+        assert_eq!(
+            bundle.frame_count, msg_frame_count,
+            "the published FrameBundle must carry the same frame_count as the \
+             FrameMsg delivered for the same step"
+        );
+        assert_eq!(bundle.width, rf_renderer::frame::NES_WIDTH as u16);
+        assert_eq!(bundle.height, rf_renderer::frame::NES_HEIGHT as u16);
+        assert_eq!(
+            bundle.video.len(),
+            bundle.width as usize * bundle.height as usize
+        );
+
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+    }
+
+    /// Ticket W4-01: "triple-buffered FrameBundle to render/debug
+    /// threads" (plural) — two independent clones of the reader handle
+    /// (standing in for a render thread and a debug panel) must each
+    /// independently see the same published bundle, neither one
+    /// interfering with the other or with the writer.
+    #[test]
+    fn frame_bundle_reader_can_be_cloned_for_multiple_independent_consumers() {
+        let core = spawn(synthetic_nrom()).expect("synthetic NROM must spawn a core thread");
+        let render_reader = core.frame_bundle.clone();
+        let debug_reader = core.frame_bundle.clone();
+
+        core.cmd_tx
+            .send(CoreCommand::StepFrame)
+            .expect("core thread must accept a StepFrame command");
+        core.evt_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a stepped frame must be delivered");
+
+        assert_eq!(
+            render_reader.latest().frame_count,
+            core.frame_bundle.latest().frame_count
+        );
+        assert_eq!(
+            debug_reader.latest().frame_count,
+            core.frame_bundle.latest().frame_count
+        );
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
         let _ = core.join_handle.join();

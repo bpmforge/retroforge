@@ -49,6 +49,30 @@ pub enum CoreEvent {
     },
 }
 
+impl CoreEvent {
+    /// The single [`EventMask`] bit this variant corresponds to
+    /// ([`EventMask`]'s own doc: "Bits correspond 1:1 to `CoreEvent`
+    /// variants"). Used by subscription filtering (`rf_enhance::bus`,
+    /// ticket W4-01) to answer "does subscriber X want this event" without
+    /// duplicating this match arm at every call site — and, being an
+    /// exhaustive match, fails to compile (rather than silently missing a
+    /// case) if a future variant is ever added without updating it here.
+    #[must_use]
+    pub const fn mask_bit(&self) -> EventMask {
+        match self {
+            CoreEvent::FrameStart => EventMask::FRAME_START,
+            CoreEvent::FrameEnd => EventMask::FRAME_END,
+            CoreEvent::VblankStart => EventMask::VBLANK_START,
+            CoreEvent::Scanline(_) => EventMask::SCANLINE,
+            CoreEvent::OamRewrite => EventMask::OAM_REWRITE,
+            CoreEvent::ScrollWrite { .. } => EventMask::SCROLL_WRITE,
+            CoreEvent::MapperIrq => EventMask::MAPPER_IRQ,
+            CoreEvent::DmaStart { .. } => EventMask::DMA_START,
+            CoreEvent::MemWatch { .. } => EventMask::MEM_WATCH,
+        }
+    }
+}
+
 /// Cheap, allocation-free bitmask of which [`CoreEvent`] variants a sink is
 /// subscribed to (FR-CORE-006). Bits correspond 1:1 to `CoreEvent`
 /// variants.

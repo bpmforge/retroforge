@@ -17,16 +17,20 @@ mod cart;
 mod core;
 mod error;
 mod event;
+mod frame_bundle;
 mod input;
 mod state_view;
+mod triple_buffer;
 mod video;
 
 pub use cart::CartImage;
 pub use core::{CoreConfig, CoreSink, EmulatorCore, ResetKind, Step, StepResult};
 pub use error::{CoreError, StateError};
 pub use event::{CoreEvent, EventMask};
+pub use frame_bundle::{FrameBundle, FrameBundleBuilder};
 pub use input::{InputFrame, MAX_INPUT_PORTS};
 pub use state_view::{StateReader, StateView, StateWriter};
+pub use triple_buffer::{triple_buffer, TripleBufferReader, TripleBufferWriter};
 pub use video::{OverlayPixel, PixelLayer, PpuPixel};
 
 /// Crate marker used by the test harness to confirm workspace wiring.

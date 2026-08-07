@@ -37,6 +37,22 @@ jobs:
           # headless GPU tests (from W3-01) use fallback adapter
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
+      - name: mode-invariant failure evidence (W4-01, R-F4)
+        # Only ever has anything to upload if the "tests" step's
+        # every_corpus_entry_is_mode_invariant_over_its_full_frame_window
+        # (crates/retroforge/tests/mode_invariant_corpus.rs) diverged for
+        # real and dumped evidence before failing -- if: failure() also
+        # fires for an earlier step failing first (fmt/clippy/etc, which
+        # skip "tests" entirely), hence if-no-files-found: ignore rather
+        # than error. $CARGO_TARGET_TMPDIR resolves to target/tmp
+        # workspace-wide (verified: retroforge's own test binaries report
+        # it as <repo>/target/tmp, not a per-binary subdirectory).
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mode-invariant-evidence
+          path: target/tmp/mode-invariant-evidence/
+          if-no-files-found: ignore
       - name: determinism 10k-frame double-run (release, W1-08)
         # #[ignore]'d in crates/retroforge/tests/determinism.rs — debug
         # cost is ~93s for the pair (measured), which would nearly triple

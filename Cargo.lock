@@ -2966,6 +2966,9 @@ version = "0.1.0"
 [[package]]
 name = "rf-enhance"
 version = "0.1.0"
+dependencies = [
+ "rf-core-api",
+]
 
 [[package]]
 name = "rf-harness"
