@@ -16,14 +16,19 @@
 //! crate does not and must not depend on `eframe`. `cargo test -p
 //! rf-renderer` still never *requires* a display or device -- GPU-backed
 //! tests skip cleanly when no adapter exists (see [`gpu::GpuContext`]).
+//! [`layers`] is ticket W3-03's BG/sprite layer extraction, built directly
+//! from `CoreSink` metadata (see that module's doc for the deliberate
+//! scope fence against building `RENDERER.md` §3's `SceneGraph`).
 
 pub mod frame;
 pub mod gpu;
+pub mod layers;
 pub mod original_pipeline;
 pub mod palette;
 
 pub use frame::FrameBuffer;
 pub use gpu::{GpuContext, GpuUnavailable};
+pub use layers::LayeredFrame;
 pub use original_pipeline::{IndexedFrame, PalettePass};
 pub use palette::{palette_index_to_rgb, NES_PALETTE};
 

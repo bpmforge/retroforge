@@ -190,6 +190,13 @@ pub struct FrameMsg {
     /// there is no position change the UI could miss.
     pub frame_count: u64,
     pub last_scanline: Option<u16>,
+    /// Ticket W3-03: the same frame's BG-only and sprite-only layers
+    /// (`rf_renderer::LayeredFrame`, extracted from the identical
+    /// `CoreSink::video_scanline` stream `rgba` above was built from), each
+    /// `width * height * 4` bytes, transparent where the other layer drew.
+    /// The app layer's debug view turns these into separate egui textures.
+    pub bg_rgba: Vec<u8>,
+    pub sprite_rgba: Vec<u8>,
 }
 
 /// What the core thread reports back to the UI thread.
@@ -287,6 +294,39 @@ pub struct CoreHandle {
     pub input: Arc<SharedInputFrame>,
 }
 
+/// Ticket W3-03: fans out each `CoreSink` call to both the accuracy-frame
+/// sink (`rf_renderer::FrameBuffer`, unchanged — still the only thing
+/// W3-05a's overlay reaches) and the layer-extraction sink
+/// (`rf_renderer::LayeredFrame`), so `EmuStepper`'s single `&mut dyn
+/// CoreSink` parameter can feed both without widening `stepper.rs`'s API.
+/// `overlay_scanline` is deliberately forwarded to `frame` only — the
+/// dropped-sprite overlay stays exactly where W3-05a put it (plan.json
+/// W3-03's forward note: migrating it into the extracted layers is W3-05's
+/// job, not this ticket's).
+struct DualSink<'a> {
+    frame: &'a mut rf_renderer::FrameBuffer,
+    layers: &'a mut rf_renderer::LayeredFrame,
+}
+
+impl rf_core_api::CoreSink for DualSink<'_> {
+    fn video_scanline(&mut self, y: u16, pixels: &[rf_core_api::PpuPixel]) {
+        self.frame.video_scanline(y, pixels);
+        self.layers.video_scanline(y, pixels);
+    }
+
+    fn overlay_scanline(&mut self, y: u16, pixels: &[rf_core_api::OverlayPixel]) {
+        self.frame.overlay_scanline(y, pixels);
+    }
+
+    fn audio(&mut self, samples: &[i16]) {
+        self.frame.audio(samples);
+    }
+
+    fn event(&mut self, ev: rf_core_api::CoreEvent) {
+        self.frame.event(ev);
+    }
+}
+
 fn core_thread_main(
     rom: Vec<u8>,
     cmd_rx: Receiver<CoreCommand>,
@@ -303,6 +343,9 @@ fn core_thread_main(
     // would fail.
     let mut stepper = EmuStepper::from_ines_bytes(&rom).expect("rom already validated by spawn()");
     let mut sink = rf_renderer::FrameBuffer::new();
+    // Ticket W3-03: same-frame BG/sprite layer extraction, fed alongside
+    // `sink` via `DualSink` at every call site below.
+    let mut layers = rf_renderer::LayeredFrame::new();
 
     // `run_guarded_loop` needs its own `&Sender` (to report a crash) at
     // the same time the loop body needs to *own* a sender to `send` frames
@@ -338,7 +381,13 @@ fn core_thread_main(
                 // ignored — which is precisely the case a debugger user
                 // steps a frame to inspect.
                 CoreCommand::StepFrame => {
-                    stepper.latch_and_advance_frame(input.load(), &mut sink);
+                    stepper.latch_and_advance_frame(
+                        input.load(),
+                        &mut DualSink {
+                            frame: &mut sink,
+                            layers: &mut layers,
+                        },
+                    );
                     stepper.pause();
                     stepped = true;
                 }
@@ -349,7 +398,10 @@ fn core_thread_main(
                 // ARCHITECTURE §6's determinism rule that input only ever
                 // takes effect at frame boundaries.
                 CoreCommand::StepScanline => {
-                    stepper.step_scanline(&mut sink);
+                    stepper.step_scanline(&mut DualSink {
+                        frame: &mut sink,
+                        layers: &mut layers,
+                    });
                     stepped = true;
                 }
                 CoreCommand::SetSpriteOverlay(enabled) => {
@@ -385,7 +437,13 @@ fn core_thread_main(
                 thread::sleep(delay);
             }
         }
-        let ran = stepper.tick_running_with_input(input.load(), &mut sink);
+        let ran = stepper.tick_running_with_input(
+            input.load(),
+            &mut DualSink {
+                frame: &mut sink,
+                layers: &mut layers,
+            },
+        );
         if ran || stepped {
             let msg = FrameMsg {
                 rgba: sink.to_vec(),
@@ -393,6 +451,8 @@ fn core_thread_main(
                 height: sink.height(),
                 frame_count: stepper.frame_count(),
                 last_scanline: stepper.last_scanline(),
+                bg_rgba: layers.bg_rgba().to_vec(),
+                sprite_rgba: layers.sprite_rgba().to_vec(),
             };
             if frame_tx.send(CoreEvent::Frame(msg)).is_err() {
                 // UI thread hung up; nothing left to serve.
@@ -558,6 +618,65 @@ mod tests {
                     "RGBA buffer must match its declared dimensions"
                 );
                 assert!(msg.width > 0 && msg.height > 0);
+            }
+            CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
+        }
+
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+    }
+
+    /// Ticket W3-03: `DualSink` must actually reach `FrameMsg`'s
+    /// `bg_rgba` field with real content, not just a correctly-sized
+    /// buffer — `LayeredFrame::new()` pre-allocates both buffers at the
+    /// full frame size, so a length-only assertion would pass even if
+    /// `DualSink::video_scanline` never forwarded to `layers` at all (the
+    /// exact silent-drop-at-a-wrapper failure mode
+    /// `stepper::CountingSink`'s own doc warns about for
+    /// `overlay_scanline`). Mutation-verified: commenting out
+    /// `DualSink::video_scanline`'s `self.layers.video_scanline(y,
+    /// pixels)` forward makes this FAIL.
+    ///
+    /// Two `StepFrame`s, not one: a fresh core's first frame is the
+    /// pre-render-scanline boot artifact with **zero visible scanlines
+    /// drained** (`stepper.rs`'s `running_keeps_the_reported_scanline_
+    /// updating` test documents this same trap) — asserting against that
+    /// frame would fail for the wrong reason regardless of wiring.
+    ///
+    /// Only `bg_rgba` is checked for content: this synthetic NROM never
+    /// enables rendering (`$2001`/PPUMASK stays 0), so every pixel is
+    /// `PixelLayer::Backdrop` (routes into `bg_rgba`, per `layers.rs`'s
+    /// module doc) and `sprite_rgba` legitimately stays all-transparent —
+    /// asserting sprite content here would need a sprite-enabling fixture
+    /// like `sprite_overlay_mode_invariant.rs`'s.
+    #[test]
+    fn step_frame_command_also_delivers_bg_layer_content_not_just_size() {
+        let core = spawn(synthetic_nrom()).expect("synthetic NROM must spawn a core thread");
+        core.cmd_tx
+            .send(CoreCommand::StepFrame)
+            .expect("core thread must accept a StepFrame command");
+        let _boot_artifact_frame = core
+            .evt_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first stepped frame must be delivered");
+
+        core.cmd_tx
+            .send(CoreCommand::StepFrame)
+            .expect("core thread must accept a second StepFrame command");
+        let evt = core
+            .evt_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("second stepped frame must be delivered");
+        match evt {
+            CoreEvent::Frame(msg) => {
+                assert_eq!(msg.bg_rgba.len(), msg.rgba.len());
+                assert_eq!(msg.sprite_rgba.len(), msg.rgba.len());
+                assert!(
+                    msg.bg_rgba.chunks_exact(4).any(|px| px[3] == 0xFF),
+                    "bg layer must carry at least one opaque pixel from a real \
+                     steady-state frame — an all-transparent buffer here means \
+                     DualSink is not actually forwarding to `layers`"
+                );
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
         }

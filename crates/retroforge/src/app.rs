@@ -51,6 +51,14 @@ const POLLED_KEYS: [egui::Key; 8] = [
 pub struct RetroForgeApp {
     core: Option<CoreHandle>,
     texture: Option<egui::TextureHandle>,
+    /// Ticket W3-03: the same frame's BG-only layer as a separate egui
+    /// texture (`rf_renderer::LayeredFrame::bg_rgba`, via
+    /// `core_thread::FrameMsg::bg_rgba`) — `None` until the first frame
+    /// lands, same lifecycle as [`Self::texture`].
+    bg_layer_texture: Option<egui::TextureHandle>,
+    /// Ticket W3-03: the sprite-only layer, mirroring
+    /// [`Self::bg_layer_texture`].
+    sprite_layer_texture: Option<egui::TextureHandle>,
     status: String,
     crash: Option<CoreCrashReport>,
     /// Mirrors the core thread's run state for button labels/enablement;
@@ -85,6 +93,10 @@ pub struct RetroForgeApp {
     /// source of truth). `false` by default: a freshly opened ROM boots in
     /// Accuracy Mode (law 6).
     sprite_overlay: bool,
+    /// Ticket W3-03 acceptance criterion 2: whether the "Layers (debug)"
+    /// window is shown. Off by default — a debug view, not part of the
+    /// ordinary play experience.
+    show_layers: bool,
 }
 
 impl RetroForgeApp {
@@ -93,6 +105,8 @@ impl RetroForgeApp {
         RetroForgeApp {
             core: None,
             texture: None,
+            bg_layer_texture: None,
+            sprite_layer_texture: None,
             status: "No ROM loaded \u{2014} File > Open ROM...".to_string(),
             crash: None,
             running: false,
@@ -101,6 +115,7 @@ impl RetroForgeApp {
             input_latch: rf_input::InputLatch::new(),
             keymap: rf_input::KeyMap::default_nes(),
             sprite_overlay: false,
+            show_layers: false,
         }
     }
 
@@ -142,6 +157,8 @@ impl RetroForgeApp {
                 self.core = Some(handle);
                 self.crash = None;
                 self.texture = None;
+                self.bg_layer_texture = None;
+                self.sprite_layer_texture = None;
                 self.running = false;
                 // A freshly loaded ROM's core boots in Accuracy Mode (law
                 // 6) — mirror that in the checkbox too, rather than leaving
@@ -208,6 +225,35 @@ impl RetroForgeApp {
                 None => {
                     self.texture =
                         Some(ctx.load_texture("nes-frame", image, egui::TextureOptions::NEAREST));
+                }
+            }
+            // Ticket W3-03 acceptance criterion 2: keep the debug layer
+            // textures current every frame regardless of whether the
+            // "Layers (debug)" window is currently shown — cheap relative
+            // to the main texture upload above, and avoids a stale image
+            // flashing the instant the window is toggled on mid-session.
+            let bg_image =
+                egui::ColorImage::from_rgba_unmultiplied([msg.width, msg.height], &msg.bg_rgba);
+            match &mut self.bg_layer_texture {
+                Some(tex) => tex.set(bg_image, egui::TextureOptions::NEAREST),
+                None => {
+                    self.bg_layer_texture = Some(ctx.load_texture(
+                        "nes-frame-bg-layer",
+                        bg_image,
+                        egui::TextureOptions::NEAREST,
+                    ));
+                }
+            }
+            let sprite_image =
+                egui::ColorImage::from_rgba_unmultiplied([msg.width, msg.height], &msg.sprite_rgba);
+            match &mut self.sprite_layer_texture {
+                Some(tex) => tex.set(sprite_image, egui::TextureOptions::NEAREST),
+                None => {
+                    self.sprite_layer_texture = Some(ctx.load_texture(
+                        "nes-frame-sprite-layer",
+                        sprite_image,
+                        egui::TextureOptions::NEAREST,
+                    ));
                 }
             }
         }
@@ -282,6 +328,13 @@ impl RetroForgeApp {
                     self.send_command(CoreCommand::SetSpriteOverlay(self.sprite_overlay));
                 }
                 ui.separator();
+                // Ticket W3-03 acceptance criterion 2: pure UI-thread
+                // state, no core command — the layer textures are already
+                // kept current every frame in `pump_core_events`
+                // regardless of this checkbox, so toggling it just shows/
+                // hides the window with no round trip to the core thread.
+                ui.checkbox(&mut self.show_layers, "Layers (debug)");
+                ui.separator();
                 ui.label(&self.status);
                 if let Some((frame, scanline)) = self.position {
                     ui.separator();
@@ -319,6 +372,60 @@ impl RetroForgeApp {
             });
     }
 
+    /// Ticket W3-03 acceptance criterion 2: shows the BG-only and
+    /// sprite-only layers ([`Self::bg_layer_texture`]/
+    /// [`Self::sprite_layer_texture`], kept current every frame in
+    /// [`Self::pump_core_events`]) side by side in their own window, so a
+    /// viewer can see the extraction is real without cross-referencing the
+    /// main composited frame at all. The sprite layer's transparent
+    /// (`rf_renderer::LayeredFrame` module doc) areas show through to
+    /// egui's panel background, which is exactly what makes "isolated"
+    /// visible: a game with few on-screen sprites renders as a
+    /// mostly-empty pane, not a black one.
+    fn layers_debug_window(&mut self, ctx: &egui::Context) {
+        if !self.show_layers {
+            return;
+        }
+        egui::Window::new("Layers (debug)")
+            .collapsible(true)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label("Background layer");
+                        match &self.bg_layer_texture {
+                            Some(tex) => {
+                                ui.add(
+                                    egui::Image::from_texture(tex)
+                                        .max_width(256.0)
+                                        .maintain_aspect_ratio(true),
+                                );
+                            }
+                            None => {
+                                ui.label("(no frame yet)");
+                            }
+                        }
+                    });
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        ui.label("Sprite layer");
+                        match &self.sprite_layer_texture {
+                            Some(tex) => {
+                                ui.add(
+                                    egui::Image::from_texture(tex)
+                                        .max_width(256.0)
+                                        .maintain_aspect_ratio(true),
+                                );
+                            }
+                            None => {
+                                ui.label("(no frame yet)");
+                            }
+                        }
+                    });
+                });
+            });
+    }
+
     fn video_panel(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(texture) = &self.texture {
@@ -342,5 +449,6 @@ impl eframe::App for RetroForgeApp {
         self.controls_bar(ui);
         self.video_panel(ui);
         self.crash_dialog(&ctx);
+        self.layers_debug_window(&ctx);
     }
 }
