@@ -1331,7 +1331,8 @@
    "crate": "rf-renderer",
    "write_scope": [
     "crates/rf-renderer/**",
-    "crates/rf-core-api/**"
+    "crates/rf-core-api/**",
+    "crates/retroforge/**"
    ],
    "depends_on": [
     "W3-01"
@@ -1340,8 +1341,14 @@
     "BG and sprite layers renderable independently from CoreSink metadata",
     "debug view shows layers isolated"
    ],
+   "notes": [
+    "PRE-FLIGHT 2026-08-07 (conductor) -- TWELFTH SELF-BLOCKING WRITE_SCOPE, and a mild one this time. Scope was rf-renderer + rf-core-api, but acceptance criterion 2 is 'debug view shows layers isolated' and there is nowhere in those two crates to put a view: crates/retroforge is the only thing that owns UI (app.rs is the sole egui-touching module, plus input_map.rs since W1-07). Added as an exact path. rf-debugger is NOT the answer -- it is a Phase 4 crate and still a stub.",
+    "SCOPE FENCE 2026-08-07 (conductor), the important one: DO NOT BUILD THE SceneGraph. docs/design/RENDERER.md line 6 says rf-renderer consumes 'the SceneGraph defined in ENHANCEMENT_RUNTIME.md section 7', and section 7 defines it as the output of rf-enhance's SceneComposer -- i.e. it is the ENHANCEMENT side's type, arriving via W4-01's event bus and FrameBundle, and rf-enhance is still a 15-line stub. Verified by grep: SceneGraph/SceneLayer/ExtractedBg/SpriteSet exist nowhere in crates/ today. This ticket's own acceptance is narrower and self-contained -- 'BG and sprite layers renderable independently FROM CoreSink METADATA' -- so extract layers from the PpuPixel data that already exists and stop there. Building a speculative SceneGraph now would be exactly the 'unvalidated scaffolding' W1-02 declined to build for the Mapper trait, with the same reasoning: no second consumer exists yet to inform its shape.",
+    "PRE-FLIGHT 2026-08-07 (conductor): the metadata this needs ALREADY EXISTS and needs no rf-core-api change -- rf_core_api::PixelLayer is Backdrop / Background(u8) / Sprite, and PpuPixel additionally carries palette_index and sprite_id (W1-04a shipped it; the NES core always emits Background(0)). rf-core-api is in scope only in case a small addition proves necessary; prefer not needing it, since that crate is a public contract per docs/design/CONTRACTS.md.",
+    "FORWARD NOTE, not this ticket's work: docs/design/RENDERER.md section 3 says the ExtractedBg/SpriteSet sub-renderers are where 'dropped_by_limit sprites render only here (never in section 2)'. W3-05a's de-flicker overlay currently composites in the CPU blit because that was the only place it could reach pattern and palette data (see that ticket's architecture ruling). This ticket builds the layer extraction that eventually gives the overlay its proper home -- but MIGRATING it is W3-05's, not this one's. Do not move it; do not break it. Its FrameBuffer tests are the guard."
+   ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
