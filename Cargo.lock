@@ -2983,6 +2983,7 @@ version = "0.1.0"
 dependencies = [
  "rf-cart",
  "rf-core-api",
+ "rf-enhance",
  "rf-input",
  "rf-nes",
  "rf-renderer",

@@ -29,6 +29,14 @@ serde = { version = "1", features = ["derive"] }
 # `alter_ego.zip`, the same content-sniff `crates/retroforge/src/rom_open.rs`
 # uses rather than trusting a zip entry's file extension.
 rf-cart = { path = "../rf-cart" }
+# rf-enhance: ticket W4-03d's fixture-driven scene-identity validation
+# (tests/rf_scroller_scene_tracker.rs) -- the SceneTracker itself lives in
+# rf-enhance (scripts/validate-arch.sh rule 3 forbids rf-enhance depending
+# on a console core directly, so the fixture-driven half of this ticket
+# lives here instead, dev-depending on rf-enhance the same shape
+# rf-renderer already does below). Test-only: no rf-harness binary or
+# library API touches rf-enhance.
+rf-enhance = { path = "../rf-enhance" }
 # rf-renderer: ticket W3-01's headless wgpu golden-frame test
 # (tests/golden_frame_gpu.rs) -- rf-harness -> rf-renderer is a harness ->
 # host-service dependency, unconstrained by scripts/validate-arch.sh (rule 1

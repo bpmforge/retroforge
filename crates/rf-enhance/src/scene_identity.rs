@@ -90,6 +90,27 @@
 //! `mapper_bank_state` for cartridges where each level occupies its own
 //! bank) is left to a future ticket informed by a real scrolling fixture
 //! (W5-01).
+//!
+//! ## Real-fixture update (W4-03d, `crates/rf-enhance/src/scene_tracker.rs`)
+//!
+//! [`crate::scene_tracker::SceneTracker`] solves the session-level
+//! fragmentation above by not calling [`compute_scene_id`] on every
+//! scrolling frame at all (continuity-based identity). Doing so on the
+//! REAL RF-Scroller fixture surfaced a second, DIFFERENT, previously
+//! unmeasured gap in this module's own edge-threshold approach: real NES
+//! `palette_index` values cluster far closer together than the wide
+//! 0/96/176-separated thirds this module's own synthetic test fixtures use
+//! (`crates/rf-harness/tests/rf_scroller_scene_tracker.rs`'s module doc has
+//! the full measurement) — on that fixture, `block_averages`' largest
+//! adjacent-block delta anywhere in the level never exceeds roughly 10,
+//! nowhere near `EDGE_THRESHOLD`'s 48, so [`compute_scene_id`]'s edge
+//! signature is constant (all "flat") for the entire level, and collides
+//! with an unrelated ROM's (Alter Ego) equally low-contrast signature. No
+//! single `EDGE_THRESHOLD` can fix this without also breaking this
+//! module's own sprite/HUD-noise watermark test (that test's own
+//! perturbation math, `~17-34` per block, is smaller than the real-content
+//! deltas that would need catching) — a genuine open gap in this
+//! algorithm's design, not a tuning miss, left for a future ticket.
 
 use rf_core_api::PpuPixel;
 

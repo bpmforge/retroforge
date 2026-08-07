@@ -286,10 +286,30 @@ impl ScrollTracker {
         // `WorldAxis::advance`'s own) is a real game whose static overlay
         // happens to outsize its viewport, out of scope here the same way
         // scene semantics generally are (module doc).
+        // `saturating_sub`, not `-`: ticket W4-03d found this panics on a
+        // REAL running core's output (RF-Scroller, frame 711 of a 900-frame
+        // session) -- `crates/retroforge/src/stepper.rs::run_until_next_frame`'s
+        // own doc names the mechanism plainly: a single `Cpu::step` can
+        // legitimately drain up to ~4.5 scanlines belonging to the NEXT
+        // frame when an OAM-DMA-triggering instruction straddles a frame
+        // boundary ("occasionally more" scanlines than 1). Every prior test
+        // of this function fed it a hand-authored, always-monotonic event
+        // log (module doc's own honesty section), so this never fired
+        // before a real ROM drove it. `compute_bands` has no cross-call
+        // memory to know a `Scanline` value has regressed, so it closes the
+        // dangling in-progress band with whatever `last_seen` it has --
+        // here, a value LESS than that band's own `start` -- producing an
+        // `end < start` band. `saturating_sub` makes that band's width `0`
+        // (it can never win "largest", which is correct: it is malformed
+        // leaked data, not real content) instead of panicking; the
+        // `start..end` ranges `ScanlineBand::y_at`/the stitcher iterate
+        // stay empty either way (Rust's own `Range` semantics for
+        // `start >= end`), so nothing downstream ever paints or positions
+        // from it.
         let primary_index = bands
             .iter()
             .enumerate()
-            .max_by_key(|(_, b)| b.end - b.start)
+            .max_by_key(|(_, b)| b.end.saturating_sub(b.start))
             .map(|(i, _)| i);
 
         let previous_bands_is_empty = self.previous_bands.is_empty();
@@ -522,6 +542,52 @@ mod tests {
         assert!(
             !world_band.0.is_hud,
             "the band whose scroll value moved between frames must not be classified HUD"
+        );
+    }
+
+    /// Ticket W4-03d, found by driving a REAL core (RF-Scroller) rather
+    /// than a hand-authored log: a frame's event slice can end with one or
+    /// more `Scanline` values LESS than the band already in progress —
+    /// scanlines belonging to the NEXT frame, leaked in by an
+    /// OAM-DMA-triggering instruction straddling the frame boundary
+    /// (`crates/retroforge/src/stepper.rs::run_until_next_frame`'s own doc:
+    /// "occasionally more" than one scanline drains per `Cpu::step`). Same
+    /// two-band shape as `a_mid_frame_scroll_write_splits_the_frame_into_two_bands`
+    /// (the real trace's own shape — HUD band then a mid-frame split), plus
+    /// a leaked trailing `Scanline(0)` with no `ScrollWrite` in between:
+    /// `last_seen` gets overwritten to `0` without the split band ever
+    /// closing, so it closes at end-of-slice with `start=16, end=0+1=1` —
+    /// `end < start`. Before this ticket's fix that panicked
+    /// (`b.end - b.start` overflow) inside `observe_frame`'s own
+    /// `primary_index` computation; this is the exact shape frame 711 of a
+    /// real 900-frame RF-Scroller session produced.
+    ///
+    /// This only proves the crash is gone, not that the malformed band's
+    /// content is recovered — it can't be: the leak genuinely destroyed the
+    /// split band's true `end` (240), so `saturating_sub` correctly treats
+    /// it as width 0 and the HUD band (the only band with real width left)
+    /// wins "primary" instead for this one malformed frame. That is a
+    /// documented, honest degradation (one frame's world position briefly
+    /// aliases to the HUD band's, self-correcting the next well-formed
+    /// frame), not a claim this reconstructs the lost data.
+    #[test]
+    fn a_leaked_next_frame_scanline_at_the_end_does_not_panic() {
+        let mut tracker = ScrollTracker::new();
+        let mut events = scanlines(0..16);
+        events.push(scroll(40, 100));
+        events.extend(scanlines(16..240));
+        events.push(CoreEvent::Scanline(0)); // leaked: belongs to the next frame
+
+        let observed = tracker.observe_frame(&events); // must not panic
+
+        assert!(
+            observed.iter().any(|(b, _)| b.start == 0 && b.end == 16),
+            "the well-formed HUD band must still be present"
+        );
+        assert!(
+            !observed.iter().any(|(b, _)| b.start == 16 && b.end == 240),
+            "the split band's true end (240) was destroyed by the leaked scanline in this \
+             reproduction -- documented above, not hidden"
         );
     }
 }
