@@ -81,6 +81,51 @@ impl Canvas {
         self.height
     }
 
+    /// Read-only access to the raw row-major cell buffer, `width() *
+    /// height()` long — for conversion to a persisted representation
+    /// (`crate::persistence`) and for fog derivation
+    /// (`crate::camera::fog_mask_from_canvas`), both of which need the
+    /// `None`/`Some` distinction cell-for-cell, not just resolved colour.
+    #[must_use]
+    pub fn cells(&self) -> &[Option<PpuPixel>] {
+        &self.cells
+    }
+
+    /// Reconstruct a canvas from previously-exported raw parts (e.g. a
+    /// restored `rf_cache::CanvasChunk` — `crate::persistence`'s restore
+    /// path), preserving origin and bounds exactly rather than only the
+    /// cell contents (W4-08's persistence lesson, restated in this
+    /// ticket's brief: a restored canvas that drops origin/bounds makes
+    /// world coordinates shift silently on the next session).
+    ///
+    /// # Panics
+    /// Panics if `cells.len() != width * height` — an assembly bug, the
+    /// same "caller bug, not a runtime condition to degrade through"
+    /// stance `FrameBundle::new` takes for the same shape of invariant.
+    #[must_use]
+    pub fn from_raw_parts(
+        origin_x: i64,
+        origin_y: i64,
+        width: usize,
+        height: usize,
+        cells: Vec<Option<PpuPixel>>,
+    ) -> Self {
+        assert_eq!(
+            cells.len(),
+            width * height,
+            "Canvas::from_raw_parts: {} cells for a {width}x{height} canvas (need {})",
+            cells.len(),
+            width * height
+        );
+        Canvas {
+            origin_x,
+            origin_y,
+            width,
+            height,
+            cells,
+        }
+    }
+
     /// The observed pixel at world coordinates, `None` for both "outside
     /// the canvas's current bounds" and "inside bounds but never visited"
     /// — indistinguishable to a caller by design (module doc: unvisited
@@ -186,7 +231,7 @@ impl Default for Canvas {
 /// in `rf-renderer` for one `matches!` would invert the intended
 /// dependency direction (`ENHANCEMENT_RUNTIME.md` §1: `rf-enhance`
 /// produces the scene graph `rf-renderer` consumes, not the reverse).
-fn stitchable_pixel(pixel: &PpuPixel) -> Option<PpuPixel> {
+pub(crate) fn stitchable_pixel(pixel: &PpuPixel) -> Option<PpuPixel> {
     match pixel.layer {
         PixelLayer::Backdrop | PixelLayer::Background(_) => Some(*pixel),
         PixelLayer::Sprite => None,

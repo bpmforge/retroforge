@@ -13,3 +13,4 @@ workspace = true
 rf-core-api = { path = "../rf-core-api" }
 bincode = "2"
 sha2 = "0.11"
+zstd = "0.13.3"

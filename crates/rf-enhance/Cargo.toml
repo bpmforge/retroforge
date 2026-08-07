@@ -11,3 +11,4 @@ workspace = true
 
 [dependencies]
 rf-core-api = { path = "../rf-core-api" }
+rf-cache = { path = "../rf-cache" }

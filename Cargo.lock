@@ -2948,6 +2948,7 @@ dependencies = [
  "bincode",
  "rf-core-api",
  "sha2",
+ "zstd",
 ]
 
 [[package]]
@@ -2972,6 +2973,7 @@ version = "0.1.0"
 name = "rf-enhance"
 version = "0.1.0"
 dependencies = [
+ "rf-cache",
  "rf-core-api",
 ]
 

@@ -10,6 +10,10 @@
 //! actual `EnhancementRuntime`) and why.
 
 pub mod bus;
+pub mod camera;
+pub mod persistence;
+pub mod scene_graph;
+pub mod scene_identity;
 pub mod scroll_tracker;
 pub mod stitcher;
 

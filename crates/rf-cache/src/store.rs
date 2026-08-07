@@ -12,6 +12,7 @@ use crate::error::CacheError;
 use crate::fsutil::{atomic_write, ensure_contained};
 use crate::index::{Index, IndexEntry};
 use crate::key::CacheKey;
+use crate::CanvasChunk;
 
 const INDEX_FILE_NAME: &str = "index.bin";
 const ENTRIES_DIR_NAME: &str = "entries";
@@ -169,6 +170,38 @@ impl Cache {
     #[must_use]
     pub fn cap_bytes(&self) -> u64 {
         self.cap_bytes
+    }
+
+    /// Typed put for a stitched-canvas chunk (ticket W4-03b): serializes
+    /// via `crate::canvas_chunk::encode` and stores it exactly like any
+    /// other opaque payload -- `Cache` itself stays payload-agnostic
+    /// (module doc); this is a convenience wrapper so a caller does not
+    /// hand-roll encode-then-put itself.
+    ///
+    /// # Errors
+    /// Propagates [`Cache::put`]'s errors, plus [`CacheError::Encode`] if
+    /// `chunk` fails to serialize (should not happen for any value this
+    /// crate's own types can construct).
+    pub fn put_canvas_chunk(
+        &mut self,
+        key: &CacheKey,
+        chunk: &CanvasChunk,
+    ) -> Result<(), CacheError> {
+        let bytes = crate::canvas_chunk::encode(chunk)?;
+        self.put(key, &bytes)
+    }
+
+    /// Typed get for a stitched-canvas chunk. `Ok(None)` for a cache miss,
+    /// same contract as [`Cache::get`].
+    ///
+    /// # Errors
+    /// Propagates [`Cache::get`]'s errors, plus [`CacheError::Decode`] if
+    /// the stored bytes are not a valid encoded [`CanvasChunk`].
+    pub fn get_canvas_chunk(&mut self, key: &CacheKey) -> Result<Option<CanvasChunk>, CacheError> {
+        match self.get(key)? {
+            Some(bytes) => Ok(Some(crate::canvas_chunk::decode(&bytes)?)),
+            None => Ok(None),
+        }
     }
 
     fn evict_to_cap(&mut self) {

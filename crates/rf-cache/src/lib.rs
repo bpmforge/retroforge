@@ -6,11 +6,12 @@
 //! Ticket W4-08 adds the actual store: a content-addressed, LRU-bounded
 //! cache over opaque payload bytes (`ARCHITECTURE.md` §7's `(rom_sha256,
 //! asset_hash, producer, settings_hash)` key). See [`Cache`] and
-//! [`CacheKey`]. It is deliberately generic over `Vec<u8>` payloads and
-//! does not itself know how to serialize a [`CanvasChunk`] -- that
-//! conversion is ticket W4-03b's job, per that struct's own doc comment
-//! below.
+//! [`CacheKey`]. `Cache::get`/`Cache::put` stay payload-agnostic by design;
+//! [`Cache::put_canvas_chunk`]/[`Cache::get_canvas_chunk`] (ticket W4-03b,
+//! `canvas_chunk` module) are a typed convenience layered on top, not a
+//! change to that contract.
 
+mod canvas_chunk;
 mod entry;
 mod error;
 mod fsutil;
@@ -25,24 +26,17 @@ pub use store::Cache;
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-cache";
 
-/// The payload shape a persisted stitched-canvas chunk will eventually
-/// take (ticket W4-03a shapes this type; ticket W4-08 builds the real
-/// cache — keying, eviction, on-disk format, the FM-13 allocation guard —
-/// and ticket W4-03b is the one that actually constructs and persists
-/// values of this shape, per `docs/design/ENHANCEMENT_RUNTIME.md` §3:
-/// "Canvas chunks are cached in `rf-cache` keyed by ROM hash + scene id,
-/// so a revisited level restores instantly across sessions").
-///
-/// Deliberately **not populated or constructed anywhere in this crate or
-/// `rf-enhance` yet** — `rf_enhance::stitcher::Canvas` is this ticket's
-/// real, in-memory, per-session working canvas, and nothing currently
-/// converts one into a [`CanvasChunk`]. No key type accompanies this
-/// struct either: "keyed by ROM hash + scene id" is scene-identity work
-/// (`docs/design/ENHANCEMENT_RUNTIME.md` §3's "perceptual hash of
-/// framebuffer edges + mapper bank state") this ticket's own scope fence
-/// explicitly defers to W4-03b, so guessing at a key type here would be
-/// exactly the "unvalidated scaffolding" this crate's module doc above
-/// already warns against adding without a ticket backing it.
+/// The payload shape a persisted stitched-canvas chunk takes (ticket
+/// W4-03a shaped this type; ticket W4-08 built the real cache — keying,
+/// eviction, on-disk format; ticket W4-03b is what actually constructs and
+/// persists values of this shape, via `rf_enhance::persistence` and
+/// [`Cache::put_canvas_chunk`]/[`Cache::get_canvas_chunk`], per
+/// `docs/design/ENHANCEMENT_RUNTIME.md` §3: "Canvas chunks are cached in
+/// `rf-cache` keyed by ROM hash + scene id, so a revisited level restores
+/// instantly across sessions"). The key is an ordinary [`CacheKey`] —
+/// `rom_sha256` plus `asset_hash` set to the scene id's hex form
+/// (`rf_enhance::persistence::canvas_cache_key`); no dedicated key type was
+/// needed after all.
 ///
 /// Field shape mirrors `rf_enhance::stitcher::Canvas`'s in-memory layout
 /// (flat, row-major, explicit bounds) rather than a sparse/map-based
