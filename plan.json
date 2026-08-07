@@ -1202,7 +1202,12 @@
    "phase": 3,
    "crate": "rf-renderer",
    "write_scope": [
-    "crates/rf-renderer/**"
+    "crates/rf-renderer/**",
+    "crates/rf-harness/**",
+    ".github/workflows/ci.yml",
+    "docs/design/RENDERER.md",
+    "docs/TECH_STACK.md",
+    "scripts/validate-arch.sh"
    ],
    "depends_on": [
     "W1-06"
@@ -1217,7 +1222,15 @@
     "align CI software-GPU env naming (.github workflow vs RENDERER.md section 7) and document the chosen fallback adapter"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
+   "notes": [
+    "PRE-FLIGHT 2026-08-06 (conductor) -- ELEVENTH SELF-BLOCKING WRITE_SCOPE. The scope was crates/rf-renderer/** alone while the ticket's OWN acceptance names three other trees: criterion 3 wants headless render-to-buffer hashing 'used by rf-harness golden tests' (crates/rf-harness/**), and criterion 7 wants the CI software-GPU env naming aligned between '.github workflow vs RENDERER.md section 7' (.github/workflows/ci.yml AND docs/design/RENDERER.md). Two further paths added for the wgpu ruling below. Criterion 6's .pal assets and generator tool need NO extra path -- put them under crates/rf-renderer/assets and a bin/example in the same crate.",
+    "PRE-FLIGHT 2026-08-06 (conductor) -- THE REAL CI/DOC MISMATCH, since criterion 7 only says 'align' without saying which way. .github/workflows/ci.yml sets WGPU_BACKEND=gl plus LIBGL_ALWAYS_SOFTWARE=1, i.e. OpenGL via llvmpipe. docs/design/RENDERER.md section 7 says 'Lavapipe/llvmpipe fallback in Linux CI' -- Lavapipe is the VULKAN software rasteriser, a different backend entirely. Pick one deliberately, make the workflow and the doc agree, and record WHY in the doc rather than just making the strings match.",
+    "WGPU RULING 2026-08-06 (conductor) -- THIS TICKET AMENDS A TECH_STACK RULE, flagged rather than slipped in. docs/TECH_STACK.md's GPU row currently reads '29.0.4 -- via eframe::wgpu, NOT a direct dep' and says 'Take wgpu through eframe::wgpu so exactly one version can ever be present'. That rule was written for W1-06, when the ONLY wgpu consumer was the app shell, which does depend on eframe. rf-renderer does NOT depend on eframe and must not -- it is a host-service crate, and pulling the whole GUI framework into it to reach a type would be far worse than the problem being avoided. RESOLUTION: rf-renderer takes a direct wgpu dependency pinned to the SAME version eframe resolves (29.0.4 today), so cargo unifies them and exactly one wgpu remains in the lockfile. The rule's PURPOSE survives intact; only its mechanism changes. Update the TECH_STACK row to say so, including the standing obligation that rf-renderer's pin moves in LOCKSTEP with egui's whenever egui bumps -- a stale pin against a newer egui is exactly how the two-version trap returns.",
+    "MAKE THE ONE-WGPU GUARD MECHANICAL, not honour-system (conductor, 2026-08-06): the check `grep -c '^name = \"wgpu\"$' Cargo.lock` == 1 is currently a sentence in docs/work/HANDOFF.md that a human is supposed to remember after any GUI dependency change. This ticket is precisely when it stops being reliable, because it introduces a SECOND crate that can pull wgpu. Add it to scripts/validate-arch.sh so the seven-command gate enforces it. Same theme as R-05's unenforced phase gate: a control that lives only in prose is not a control.",
+    "PRE-FLIGHT 2026-08-06 (conductor) -- GOLDEN-HASH SCOPE IS NARROWER THAN IT LOOKS, and RENDERER.md section 7 already says so: 'the palette pass is bit-exact by construction (integer LUT lookups, no filtering, no sRGB math on the 1x buffer), so golden hashes are stable across backends; anything after the 1x buffer is NOT hashed in CI (shader output may differ per driver)'. So hash the 1x pre-shader buffer ONLY. Hashing post-scale or post-shader output would produce goldens that pass on the dev Mac and fail on Linux CI for reasons that are not bugs.",
+    "PRE-FLIGHT 2026-08-06 (conductor) -- DO NOT LOSE W3-05a's OVERLAY. crates/rf-renderer/src/frame.rs gained overlay_scanline compositing hours before this ticket (the sprite-limit bypass Brad asked for). A wgpu pipeline replacing the CPU blit must keep the enhanced overlay working, and the existing FrameBuffer tests are the guard. Also note palette.rs currently hardcodes NES_PALETTE as a [[u8;3];64] literal -- criterion 6 turns that into a checked-in .pal asset plus a generator, so the literal moves to data rather than being duplicated."
+   ],
    "stories": [
     "E4-S1",
     "E4-S3"
