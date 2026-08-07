@@ -31,6 +31,20 @@ jobs:
         # docs/TESTING.md §4), so this step's cost is unchanged regardless
         # of how heavy the suite it's covering evidence for is.
         run: node scripts/validate-evidence.mjs
+      - name: install cc65 (RF-Scroller fixture toolchain, W2-10)
+        run: sudo apt-get update && sudo apt-get install -y cc65
+      - name: build RF-Scroller fixture ROM (D-001, deterministic from source)
+        # fixtures/nes/rf-scroller/build.sh is the SAME command a local
+        # rebuild uses — never a hand-typed variant here — and itself
+        # fails loudly (never silently passes) if the built bytes don't
+        # match the checked-in fixtures/nes/rf-scroller/rom.sha256. The
+        # ROM binary itself is never committed (gitignored build/, D-001);
+        # the "tests" step below builds on this artifact being present —
+        # if this step is ever skipped/removed, rf_scroller_replay.rs's
+        # own tests degrade to a loud SKIP (see that file), never a
+        # silent pass, so a missing ROM here fails visibly one step
+        # later rather than invisibly.
+        run: fixtures/nes/rf-scroller/build.sh
       - name: tests
         run: cargo test --workspace
         env:

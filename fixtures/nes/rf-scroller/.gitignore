@@ -1,0 +1,10 @@
+# Build output (fixture doctrine D-001: the ROM binary never enters git;
+# only rom.sha256, the checked-in hash, does).
+/build/
+# cl65 compiles each src/*.c and src/*.s to a same-directory .o before
+# linking into build/rf-scroller.nes, regardless of -o's target — build.sh
+# cleans these up itself, but this is defense in depth against a
+# hand-run cl65/ca65 invocation (or a build.sh that changes later)
+# leaving compiled object files sitting next to source, uncommitted-by-
+# convention but not actually blocked without this.
+src/*.o
