@@ -19,7 +19,7 @@ combination, validated for this exact workload.
 
 | Concern | Crate | Version (2026-07-06) | Rationale | Risk / note |
 |---|---|---|---|---|
-| GPU | **wgpu** | **29.0.4 — via `eframe::wgpu`, NOT a direct dep** | One abstraction → Vulkan/Metal/DX12/GL/WebGPU; egui first-party backend shares device/queue | **Corrected 2026-08-03 (W1-06 pre-flight): this row said 30.0, which is impossible today.** `egui-wgpu 0.35.0` depends on `wgpu 29.0.4`, and 0.35.0 is the newest egui/eframe published; wgpu 30.0.0 exists but no egui release pairs with it. Verified by resolving eframe 0.35.0 in a scratch crate. Pinning both would put **two** wgpu versions in the tree and break the shared-device/queue design, since `wgpu30::Device` and `wgpu29::Device` are distinct types. Take wgpu through `eframe::wgpu` so exactly one version can ever be present; bump to 30 only when an egui release requires it (rule 2 below) |
+| GPU | **wgpu** | **29.0.4 — direct dep in BOTH `retroforge` (via `eframe::wgpu`) and `rf-renderer` (pinned directly), same version, lockstep** | One abstraction → Vulkan/Metal/DX12/GL/WebGPU; egui first-party backend shares device/queue | **Corrected 2026-08-03 (W1-06 pre-flight): this row said 30.0, which is impossible today.** `egui-wgpu 0.35.0` depends on `wgpu 29.0.4`, and 0.35.0 is the newest egui/eframe published; wgpu 30.0.0 exists but no egui release pairs with it. Verified by resolving eframe 0.35.0 in a scratch crate. Pinning both would put **two** wgpu versions in the tree and break the shared-device/queue design, since `wgpu30::Device` and `wgpu29::Device` are distinct types. **RULING amended W3-01 (2026-08-07):** the original rule said "take wgpu through `eframe::wgpu`, never a direct dep" — written when the app shell (which depends on `eframe`) was the only wgpu consumer. `rf-renderer` (ticket W3-01's headless original pipeline) does **not** depend on `eframe` and must not — it is a host-service crate, and pulling the whole GUI framework in just to reach a type would be worse than the problem being avoided. `rf-renderer` therefore takes wgpu as a **direct** dependency, pinned to the **same** version eframe resolves (29.0.4 today), so cargo unifies them into exactly one `wgpu` in `Cargo.lock` — verified empirically (`grep -c '^name = "wgpu"$' Cargo.lock` == 1, now mechanically enforced by `scripts/validate-arch.sh` rule 5, not just this doc). The rule's *purpose* (exactly one wgpu version, ever) survives unchanged; only its mechanism does. **Standing obligation: `rf-renderer`'s pin moves in LOCKSTEP with egui's whenever egui bumps** — a stale pin against a newer egui reintroduces the two-version trap this whole rule exists to prevent (rule 2 below already says never bump wgpu/egui independently; this is that rule applied to a second crate) |
 | Window/events | **winit** | 0.30.13 | De-facto standard; eframe wraps it | — |
 | UI | **egui + eframe** | 0.35.0 | Immediate mode fits per-frame debug views; what real Rust emulators use; 0.35 inspection protocol enables agent-driven UI tests | Complex docking edge cases → R-08. **API drift confirmed 2026-08-03 (W1-06):** `eframe::App::ui` now takes `&mut egui::Ui` (not `&egui::Context`); `TopBottomPanel`/`SidePanel` were removed in favor of a unified `egui::Panel::top/bottom/left/right(id).show(ui, ...)`; `ui.close_menu()` renamed `ui.close()`. **Licence risk found (W1-06), NOT yet resolved:** `egui-winit`'s default features (`clipboard`→`arboard`→`clipboard-win`/`error-code`, Windows-only; `links`→`webbrowser`→`url`→`idna`→the `icu_*`/`zerovec`/`yoke`/`litemap`/`writeable`/`tinystr`/`potential_utf` family) plus `egui`'s bundled `epaint_default_fonts` pull three licence families `cargo deny check licenses` rejects against the current NFR-011 allowlist: `Unicode-3.0` (same family as the existing `unicode-ident` exception, just more crates), `BSL-1.0` (Boost Software License), and `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` (the embedded default font files). All three are OSI-approved permissive/font licences, not copyleft — no NFR-011 violation in spirit — but none is on `deny.toml`'s allowlist yet and W1-06 was instructed to report rather than silently add exceptions. Needs a licence-policy decision: widen the allowlist, or trim `default-features` on `eframe`/`egui-winit` (loses clipboard/hyperlink/bundled fonts) |
 | Docking | **egui_dock** | 0.20.1 | Mesen-style dockable viewer layout | Fallback: egui_docking (tear-off windows) |
@@ -70,6 +70,36 @@ let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDes
 that, plus the `map_async` + `device.poll` readback pattern, is the most
 likely cause of a hang. The headless path itself is proven to work in this
 environment, so a hang means a blocking call, not a missing GPU.
+
+**Readback-path traps — VERIFIED by attempt 3 (2026-08-07), landed and
+working (`crates/rf-renderer/src/gpu.rs`, `original_pipeline.rs`).** The
+skeleton above stops short of readback, which is exactly where attempt 1
+froze ("verify the device-loss callback mechanism"). Checked against the
+vendored `wgpu-29.0.4`/`wgpu-types-29.0.4` source, not memory:
+
+| What you'd write from memory | What wgpu 29 actually needs |
+|---|---|
+| `device.poll(wgpu::Maintain::Wait)` | `Maintain` is gone; it's `PollType`, and **critically it takes a bound**: `device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(10)) })` → `Result<PollStatus, PollError>`. **Always pass `timeout: Some(_)`, never `None`** — an unbounded wait is the leading suspect for both 600s stalls; a bounded one turns a real hang into `Err(PollError::Timeout)` you can report instead of silence |
+| `wgpu::ImageCopyTexture` / `ImageCopyBuffer` / `ImageDataLayout` | Renamed to `TexelCopyTextureInfo` / `TexelCopyBufferInfo` / `TexelCopyBufferLayout` (used by `Queue::write_texture`, `CommandEncoder::copy_texture_to_buffer`) |
+| `PipelineLayoutDescriptor { bind_group_layouts: &[&bgl], push_constant_ranges: &[] }` | `bind_group_layouts` is `&[Option<&BindGroupLayout>]` (wrap each in `Some`); `push_constant_ranges` is gone, replaced by `immediate_size: u32` (`0` if unused) |
+| `RenderPassColorAttachment { view, resolve_target, ops }` | Gained a required `depth_slice: Option<u32>` field (`None` for a plain 2D target) |
+
+`map_async`'s own shape (`BufferSlice::map_async(MapMode, callback)`) is
+unchanged from pre-29 — the callback fires during `device.poll`, same as
+always. The working pattern (bounded, reports rather than hangs):
+
+```rust
+let slice = buffer.slice(..);
+let (tx, rx) = std::sync::mpsc::channel();
+slice.map_async(wgpu::MapMode::Read, move |result| { let _ = tx.send(result); });
+device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(10)) })
+    .map_err(|e| format!("readback timed out: {e}"))?;
+match rx.try_recv() {
+    Ok(Ok(())) => { /* slice.get_mapped_range() ... buffer.unmap() */ }
+    Ok(Err(e)) => { /* map_async failed */ }
+    Err(_) => { /* callback never fired even though poll returned -- report, don't retry */ }
+}
+```
 
 ## 3. Rules for the coding agent
 

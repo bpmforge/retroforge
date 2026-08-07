@@ -2974,6 +2974,7 @@ dependencies = [
  "rf-cart",
  "rf-core-api",
  "rf-nes",
+ "rf-renderer",
  "serde",
  "sha2",
  "toml",
@@ -3007,6 +3008,7 @@ version = "0.1.0"
 name = "rf-renderer"
 version = "0.1.0"
 dependencies = [
+ "pollster",
  "rf-core-api",
  "wgpu",
 ]

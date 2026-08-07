@@ -9,15 +9,22 @@
 //! `rf-nes`/`rf-core-api` (project law — cores emit indexed pixels, never
 //! RGB). [`palette`] is the NES 2C02 palette LUT; [`frame`] is the
 //! `CoreSink` that resolves a whole frame's worth of indexed scanlines
-//! into RGBA using it. No `wgpu`/`egui` dependency lives here yet — the
-//! real GPU pipeline this crate's doc-comment describes is W3-01's ticket;
-//! today this crate is deliberately GPU-API-free so `cargo test -p
-//! rf-renderer` never needs a display or device.
+//! into RGBA using it. [`gpu`] and [`original_pipeline`] are ticket
+//! W3-01's headless wgpu original pipeline (indexed frame -> palette LUT ->
+//! RGBA8, `docs/design/RENDERER.md` §2/§7): a direct `wgpu` dependency
+//! (`docs/TECH_STACK.md`'s GPU row), never through `eframe`, since this
+//! crate does not and must not depend on `eframe`. `cargo test -p
+//! rf-renderer` still never *requires* a display or device -- GPU-backed
+//! tests skip cleanly when no adapter exists (see [`gpu::GpuContext`]).
 
 pub mod frame;
+pub mod gpu;
+pub mod original_pipeline;
 pub mod palette;
 
 pub use frame::FrameBuffer;
+pub use gpu::{GpuContext, GpuUnavailable};
+pub use original_pipeline::{IndexedFrame, PalettePass};
 pub use palette::{palette_index_to_rgb, NES_PALETTE};
 
 /// Crate marker used by the test harness to confirm workspace wiring.

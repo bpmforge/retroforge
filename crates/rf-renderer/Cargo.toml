@@ -12,3 +12,13 @@ workspace = true
 [dependencies]
 rf-core-api = { path = "../rf-core-api" }
 wgpu = "29.0.4"
+# Blocks on the async wgpu 29 request_adapter/request_device/enumerate_adapters
+# futures with no executor of our own (see docs/TECH_STACK.md's "wgpu 29 API
+# traps" section) -- already resolved transitively via eframe (Cargo.lock:
+# pollster 0.4.0), pinned directly here since headless rf-renderer does not
+# depend on eframe to reach it.
+pollster = "0.4.0"
+
+[[bin]]
+name = "gen-pal"
+path = "src/bin/gen_pal.rs"

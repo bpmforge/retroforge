@@ -103,13 +103,32 @@ blink. Original output also feeds the de-flicker debug diff view
 ## 7. Headless mode
 
 `rf-renderer` compiles without a window: device from any adapter (Metal on
-the M2 CI host, Lavapipe/llvmpipe fallback in Linux CI), render into an
+a local macOS dev host, **OpenGL via llvmpipe** in Linux CI), render into an
 offscreen texture, read back, SHA-256 hash → `rf-harness` compares against
 golden hashes. The palette pass is bit-exact by construction (integer LUT
 lookups, no filtering, no sRGB math on the 1× buffer), so golden hashes are
-stable across backends; anything after the 1× buffer is *not* hashed in CI
-(shader output may differ per driver — validated by eyeball + reference
-images with tolerance instead).
+*derived* to be stable across backends by that construction — not yet
+independently observed on more than one backend (this doc/ticket's own
+implementation was verified on Metal only; CI's first green run on llvmpipe
+is what turns "should be identical" into "is identical," and a red run
+there is a cross-backend question to investigate, not necessarily a code
+regression). Anything after the 1× buffer is *not* hashed in CI (shader
+output may differ per driver — validated by eyeball + reference images with
+tolerance instead).
+
+**Backend choice, decided (ticket W3-01, 2026-08-07):** `.github/workflows/ci.yml`
+sets `WGPU_BACKEND=gl` + `LIBGL_ALWAYS_SOFTWARE=1` — OpenGL via **llvmpipe**,
+not Vulkan via Lavapipe (an earlier draft of this section named "Lavapipe/
+llvmpipe" as if interchangeable; they are different backends, Vulkan vs
+OpenGL, on the same underlying software rasterizer project). llvmpipe is
+chosen because it is what `ubuntu-latest`'s stock Mesa provides without
+extra `apt` packages, and because the original pipeline's palette pass (the
+only thing CI golden-hashes) needs nothing Vulkan-only: it is a plain
+render pipeline (fullscreen-triangle vertex stage, `textureLoad` fragment
+stage against an `R8Uint` sampled texture) with no compute-shader
+requirement, so GL 3.3-class software rendering is sufficient. Lavapipe
+remains a documented fallback option if a future pass needs a Vulkan-only
+feature, but is not the CI default.
 
 ## 8. Pacing interaction
 

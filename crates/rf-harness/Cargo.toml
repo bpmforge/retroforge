@@ -26,6 +26,13 @@ serde = { version = "1", features = ["derive"] }
 # already does (rf_cart::nes::INES_MAGIC) rather than vendoring any real
 # nestest.nes bytes (TESTING.md §3 G-43).
 rf-cart = { path = "../rf-cart" }
+# rf-renderer: ticket W3-01's headless wgpu golden-frame test
+# (tests/golden_frame_gpu.rs) -- rf-harness -> rf-renderer is a harness ->
+# host-service dependency, unconstrained by scripts/validate-arch.sh (rule 1
+# only guards the core crates; rule 3 only guards direct access to console
+# cores). Test-only: the palette pass is exercised from a test, not shipped
+# as part of any rf-harness binary.
+rf-renderer = { path = "../rf-renderer" }
 
 [[bin]]
 name = "fetch-test-roms"

@@ -44,5 +44,19 @@ for c in rf-core-api rf-nes rf-snes rf-cart; do
   fi
 done
 
+# 5. One-wgpu invariant (W3-01): rf-renderer now takes a direct wgpu dep,
+#    pinned in lockstep with whatever version egui-wgpu resolves (see
+#    docs/TECH_STACK.md's GPU row) -- exactly ONE `wgpu` entry may ever
+#    appear in Cargo.lock, or two incompatible wgpu::Device/Queue types
+#    would coexist and the shared-device design (RENDERER.md §1) breaks.
+#    Previously an honour-system sentence in docs/work/HANDOFF.md; this
+#    ticket is precisely when a second wgpu-pulling crate landed, so it
+#    stops being reliable unless it's mechanical.
+wgpu_count=$(grep -c '^name = "wgpu"$' Cargo.lock || true)
+if [ "$wgpu_count" -ne 1 ]; then
+  echo "ARCH VIOLATION: expected exactly 1 \"wgpu\" entry in Cargo.lock, found $wgpu_count" >&2
+  fail=1
+fi
+
 [ $fail -eq 0 ] && echo "arch OK"
 exit $fail

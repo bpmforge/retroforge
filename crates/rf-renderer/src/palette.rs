@@ -30,76 +30,50 @@
 //! (`raw.githubusercontent.com/lukexor/tetanes/main/tetanes-core/ntscpalette.pal`)
 //! and decoding its first 192 bytes as 64 `(R, G, B)` triples — not
 //! reproduced from memory/training data.
+//!
+//! ## Data, not code (ticket W3-01, acceptance criterion 6)
+//!
+//! Those 192 bytes are checked in as `assets/nes.pal` — the exact bytes a
+//! `.pal` consumer/generator can hand around unchanged — rather than
+//! transcribed into this file as a literal. [`NES_PALETTE`] below is
+//! `const`-decoded from that asset at compile time (`include_bytes!` +
+//! [`decode_pal`], a `const fn`, so this is still a zero-cost compile-time
+//! constant, not a runtime load). `src/bin/gen_pal.rs` is the generator:
+//! re-run it against a freshly fetched upstream `.pal` to update the asset
+//! when palette research changes — this file and `shaders/palette.wgsl`
+//! never need touching for that.
 #![allow(clippy::unreadable_literal)]
 
+/// The checked-in asset: 64 RGB triples, 192 bytes, no color emphasis. See
+/// module doc for provenance and `src/bin/gen_pal.rs` for how to regenerate
+/// it from a different upstream `.pal` source.
+const NES_PAL_BYTES: &[u8] = include_bytes!("../assets/nes.pal");
+
+/// Decode a `.pal`-convention byte slice (3 bytes per entry: R, G, B) into
+/// [`NES_PALETTE`]'s array form. `const fn` so [`NES_PALETTE`] stays a
+/// compile-time constant despite no longer being a literal.
+///
+/// # Panics (at compile time, via the `const` context evaluating this)
+/// Panics if `bytes.len() != 64 * 3` — a malformed/truncated asset file
+/// must fail the build, not silently produce a short or garbled palette.
+const fn decode_pal(bytes: &[u8]) -> [[u8; 3]; 64] {
+    assert!(
+        bytes.len() == 64 * 3,
+        "assets/nes.pal must be exactly 192 bytes (64 RGB triples)"
+    );
+    let mut table = [[0u8; 3]; 64];
+    let mut i = 0;
+    while i < 64 {
+        table[i] = [bytes[i * 3], bytes[i * 3 + 1], bytes[i * 3 + 2]];
+        i += 1;
+    }
+    table
+}
+
 /// `$00`-`$3F` → `[R, G, B]`, no color emphasis. See module doc for
-/// provenance.
-pub const NES_PALETTE: [[u8; 3]; 64] = [
-    [91, 91, 91],    // $00
-    [0, 35, 123],    // $01
-    [18, 17, 157],   // $02
-    [49, 4, 153],    // $03
-    [79, 0, 113],    // $04
-    [96, 1, 53],     // $05
-    [94, 9, 1],      // $06
-    [73, 24, 0],     // $07
-    [42, 44, 0],     // $08
-    [12, 60, 0],     // $09
-    [0, 69, 0],      // $0A
-    [0, 67, 9],      // $0B
-    [0, 54, 66],     // $0C
-    [0, 0, 0],       // $0D
-    [3, 3, 3],       // $0E
-    [3, 3, 3],       // $0F
-    [170, 170, 170], // $10
-    [20, 85, 217],   // $11
-    [58, 56, 255],   // $12
-    [107, 34, 255],  // $13
-    [152, 24, 202],  // $14
-    [178, 27, 113],  // $15
-    [174, 43, 28],   // $16
-    [144, 68, 0],    // $17
-    [96, 98, 0],     // $18
-    [48, 124, 0],    // $19
-    [14, 137, 0],    // $1A
-    [0, 133, 43],    // $1B
-    [1, 114, 132],   // $1C
-    [3, 3, 3],       // $1D
-    [3, 3, 3],       // $1E
-    [3, 3, 3],       // $1F
-    [255, 255, 255], // $20
-    [92, 171, 255],  // $21
-    [140, 137, 255], // $22
-    [197, 111, 255], // $23
-    [247, 98, 255],  // $24
-    [255, 102, 203], // $25
-    [255, 121, 103], // $26
-    [237, 152, 31],  // $27
-    [184, 186, 2],   // $28
-    [128, 215, 4],   // $29
-    [84, 230, 42],   // $2A
-    [62, 226, 121],  // $2B
-    [65, 204, 224],  // $2C
-    [68, 68, 68],    // $2D
-    [3, 3, 3],       // $2E
-    [3, 3, 3],       // $2F
-    [255, 255, 255], // $30
-    [191, 226, 255], // $31
-    [212, 211, 255], // $32
-    [237, 199, 255], // $33
-    [255, 193, 255], // $34
-    [255, 195, 240], // $35
-    [255, 204, 196], // $36
-    [254, 218, 160], // $37
-    [232, 233, 141], // $38
-    [207, 245, 143], // $39
-    [187, 251, 166], // $3A
-    [176, 249, 204], // $3B
-    [178, 240, 249], // $3C
-    [179, 179, 179], // $3D
-    [3, 3, 3],       // $3E
-    [3, 3, 3],       // $3F
-];
+/// provenance; decoded from `assets/nes.pal` at compile time via
+/// [`decode_pal`], not a hand-transcribed literal.
+pub const NES_PALETTE: [[u8; 3]; 64] = decode_pal(NES_PAL_BYTES);
 
 /// Resolve a `PpuPixel::palette_index` to opaque RGB. Masks to 6 bits
 /// first (`& 0x3F`) since the NES palette only ever has 64 entries and a
