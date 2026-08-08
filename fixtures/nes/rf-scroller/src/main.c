@@ -1,4 +1,5 @@
-/* RetroForge -- RF-Scroller (ticket W2-10): in-repo NES fixture platformer.
+/* RetroForge -- RF-Scroller (ticket W2-10, extended by W2-10a): in-repo
+ * NES fixture platformer.
  *
  * cc65's OWN "nes" target (`cl65 -t nes`), not neslib -- see ../FORMAT.md
  * and the ticket report for why. No NMI vector is used anywhere in this
@@ -7,16 +8,16 @@
  * through the real core before this game was written.
  *
  * Gameplay: the player walks right (D-pad Right only -- see FORMAT.md's
- * "What this ticket's runtime does NOT do" for why there is no Left/
- * jump), the camera follows once the player passes the screen's
- * left-hand dead zone, and the playfield streams new metatile columns
- * into whichever physical nametable is currently off-screen as the
- * camera advances past the initial two-nametable (512px) window --
- * that reuse of physical VRAM for logically further-along level content
- * is the "wraparound" acceptance criterion. A one-pixel... one-TILE
- * (8px) movement granularity is a deliberate simplification (see
- * FORMAT.md) that lets the mid-frame HUD/playfield split below use the
- * textbook $2000+$2005 technique with a constant fine-X of zero.
+ * "What this ticket's runtime does NOT do" for why there is no jump),
+ * the camera follows once the player passes the screen's left-hand dead
+ * zone, and the playfield streams new metatile columns into whichever
+ * physical nametable is currently off-screen as the camera advances past
+ * the initial two-nametable (512px) window -- that reuse of physical
+ * VRAM for logically further-along level content is the "wraparound"
+ * acceptance criterion. A one-pixel... one-TILE (8px) movement
+ * granularity is a deliberate simplification (see FORMAT.md) that lets
+ * the mid-frame HUD/playfield split below use the textbook $2000+$2005
+ * technique with a constant fine-X of zero.
  *
  * HUD/playfield split: sprite 0 (OAM slot 0, a fully-opaque sentinel
  * tile placed at the last HUD scanline) genuinely collides with HUD row
@@ -35,6 +36,11 @@
  * project deliberately does NOT use the $2006-only "commit v directly"
  * technique here (it would require reconstructing coarse/fine Y
  * mid-scanline, which $2000+$2005 never has to touch).
+ *
+ * W2-10a adds three red-fixture scenes, all confined to the level's tail
+ * (`columns_streamed >= TAIL_GATE_COL`) so they cost nothing before that
+ * -- see FORMAT.md's "W2-10a red-fixture scenes" section for the full
+ * writeup and the acceptance evidence for each.
  */
 
 #include "leveldata.h"
@@ -48,6 +54,7 @@
 #define PPU_CTRL (*(volatile unsigned char *)0x2000)
 #define PPU_MASK (*(volatile unsigned char *)0x2001)
 #define PPU_STATUS (*(volatile unsigned char *)0x2002)
+#define OAM_ADDR (*(volatile unsigned char *)0x2003)
 #define PPU_SCROLL (*(volatile unsigned char *)0x2005)
 #define PPU_ADDR (*(volatile unsigned char *)0x2006)
 #define PPU_DATA (*(volatile unsigned char *)0x2007)
@@ -82,13 +89,57 @@
 #define OAM_SHADOW ((volatile unsigned char *)0x0200)
 
 /* OAM slot 0 MUST be the sprite-0 sentinel -- sprite-0 hit is defined in
- * terms of OAM index 0 specifically, not "any opaque sprite". */
+ * terms of OAM index 0 specifically, not "any opaque sprite". Slot 1 is
+ * the player. Slots 2-13 (W2-10a) are the sprite-overflow gem scene;
+ * slot 14 (W2-10a) is the intentional-blink enemy. */
 #define OAM_SPRITE0_SLOT 0
 #define OAM_PLAYER_SLOT 1
+#define OAM_GEM_BASE_SLOT 2u
+#define OAM_BLINK_SLOT 14u
 
 #define SPRITE0_Y 14u  /* renders scanline 15 -- last HUD scanline */
 #define SPRITE0_X 8u   /* clear of the 0-7 left-clip region */
 #define PLAYER_Y 215u  /* renders scanlines 216-223, feet at 224 (ground) */
+
+/* ---- W2-10a red-fixture scenes: constants (FORMAT.md "W2-10a
+ * red-fixture scenes" has the full mechanism writeup for each). All
+ * three are confined to the tail (`columns_streamed >= TAIL_GATE_COL`)
+ * so they cost nothing on any earlier frame. */
+#define TAIL_GATE_COL 95u
+
+/* Criterion 1: 12 gems > the PPU's real 8-sprite-per-scanline limit,
+ * all sharing GEM_Y, tile 0x0E (reuses the sprite-0 sentinel's tile --
+ * no CHR budget spent). `gem_order[]` (defined below) rotates which
+ * LOGICAL gem occupies which PHYSICAL OAM slot every GEM_ROTATE_MASK+1
+ * frames -- every logical gem is in OAM at GEM_Y on every frame
+ * regardless of rotation phase (so the >8-in-range criterion holds
+ * unconditionally, not just some frames), but which 8-of-12 the
+ * hardware's first-8-by-slot-order pick actually draws changes over
+ * time, producing genuine hardware-forced flicker rather than a
+ * software visibility toggle. */
+#define GEM_COUNT 12u
+#define GEM_Y 99u
+#define GEM_X_BASE 704u
+#define GEM_ROTATE_MASK 0x07u
+
+/* Criterion 2: a single enemy that blinks on a fixed, game-driven
+ * period (invincibility-frame style) -- the red fixture for the rule
+ * that de-flicker must NOT erase deliberate blinking. */
+#define BLINK_WORLD_X 680u
+#define BLINK_Y 149u
+#define BLINK_PERIOD_BIT 0x08u
+
+/* Criterion 3: a vertical sub-area, reachable once the player has
+ * cleared the tail AND reached BLINK/GEM territory (world X). */
+#define VERTICAL_AREA_START_X 704u
+#define VERTICAL_MAX 48u
+
+/* `read_buttons()`'s own internal bitmask -- unrelated to
+ * `rf_input::NesButton`'s `$4016` shift-register bit layout, which this
+ * file never needs to know about directly (see that function's doc). */
+#define BTN_UP 0x01u
+#define BTN_DOWN 0x02u
+#define BTN_RIGHT 0x04u
 
 /* Calibrated bridge to sprite 0's fixed scanline (main_loop()'s doc):
  * measured against crates/rf-harness/tests/rf_scroller_explore.rs's
@@ -109,7 +160,11 @@
 /* ---- Documented state addresses (FORMAT.md / the ticket report record
  * the addresses the linker actually assigned these at -- see the build
  * log / .map file referenced there; declared in this fixed order so a
- * rebuild from unchanged source assigns the same addresses again). ----
+ * rebuild from unchanged source assigns the same addresses again).
+ * `camera_y`/`blink_visible` (W2-10a) are non-static, deliberately
+ * declared here rather than lower down with the rest of the W2-10a
+ * state, so they land in the linker's non-static bucket right after
+ * `columns_streamed` -- see FORMAT.md's "Address re-pin (W2-10a)". ----
  */
 unsigned int player_x;         /* world X, pixels, 0..MAX_PLAYER_X */
 unsigned int camera_x;         /* screen-left world X, pixels, 0..512 */
@@ -119,6 +174,13 @@ unsigned char columns_streamed; /* highest RAW tile-column index (0..95)
                                     exceed 63 (2 nametables' worth) once
                                     a physical nametable has genuinely
                                     been reused for new content. */
+unsigned char camera_y;        /* W2-10a: vertical sub-area scroll offset,
+                                   pixels, 0..VERTICAL_MAX. 0 everywhere
+                                   outside the vertical sub-area. */
+unsigned char blink_visible;   /* W2-10a: 1 when the intentional-blink
+                                   enemy is currently drawn, 0 hidden --
+                                   documented RAM witness, formula in
+                                   update_blink_enemy()'s doc. */
 static unsigned char frame_counter;
 static unsigned char metatile_scratch[SCREEN_ROWS]; /* decode_column()'s
                                                         output: one
@@ -147,6 +209,11 @@ static unsigned char stream_row;          /* next metatile row to emit, 0..14 */
 static unsigned char stream_rle_offset;   /* cursor into level_rle_data */
 static unsigned char stream_run_remaining; /* rows left in the current RLE run */
 static unsigned char stream_run_id;        /* metatile id of the current run */
+
+/* W2-10a: which LOGICAL gem (0..GEM_COUNT-1, a fixed world-X identity --
+ * see update_gems()'s doc) currently occupies PHYSICAL OAM slot
+ * `OAM_GEM_BASE_SLOT + i`. Rotated in place by update_gems(). */
+static unsigned char gem_order[GEM_COUNT];
 
 /* Decode one metatile-column's column-RLE data (FORMAT.md "Column-RLE
  * encoding") into `out[SCREEN_ROWS]`, one metatile ID per row. Runs
@@ -255,10 +322,9 @@ static void blit_pending_column(void) {
  * fully solve the timing problem it exists to fix, though: a 2-row
  * chunk is cheap on its own, but on frames where it actually runs it
  * still measurably pushes the mid-frame split several scanlines past
- * the split-good window (14-18) -- see the ticket report's
- * mutation/verification section for the measured scanlines and for why
- * this is shipped as a documented, characterized residual defect rather
- * than chased further. */
+ * the split-good window (14-18) -- see FORMAT.md's "Known defects" for
+ * the measured scanlines and for why this is shipped as a documented,
+ * characterized residual defect rather than chased further. */
 static void stream_chunk(unsigned char needed_raw_col) {
     unsigned char side;
     unsigned char physical_col;
@@ -310,19 +376,132 @@ static void stream_chunk(unsigned char needed_raw_col) {
     }
 }
 
-/* Full controller-1 8-bit read (A,B,Select,Start,Up,Down,Left,Right);
- * only Right is used by this fixture (FORMAT.md), but the strobe+8-read
- * protocol is implemented in full since a partial read is not a
- * documented hardware shortcut. */
-static unsigned char read_right(void) {
+/* W2-10a: `gem_order[i] = i` -- OAM slot `OAM_GEM_BASE_SLOT + i` starts
+ * out holding logical gem `i`. Called once from init_video(). */
+static void init_gem_order(void) {
     unsigned char i;
-    unsigned char last = 0;
+    for (i = 0; i < GEM_COUNT; i++) {
+        gem_order[i] = i;
+    }
+}
+
+/* W2-10a criterion 1: writes all GEM_COUNT (12) gems into the OAM shadow
+ * buffer every tail frame, all sharing GEM_Y -- the real, hardware
+ * sprite-per-scanline limit is 8, so this always leaves 4 of the 12
+ * beyond what the PPU's own evaluator keeps (FORMAT.md "Sprite-overflow
+ * scene"). Every logical gem (fixed world X = GEM_X_BASE + logical*8) is
+ * written into OAM on every call, regardless of rotation phase --
+ * rotating `gem_order[]` only changes which logical gem occupies which
+ * PHYSICAL slot, not whether all 12 are present, so the >8-in-range
+ * criterion holds on every tail frame, not just some. What DOES change
+ * with rotation is which 8-of-12 the hardware's first-8-by-slot-order
+ * pick actually draws (lowest OAM index wins) -- since a different
+ * logical gem cycles through the last 4 slots (10-13, the ones the
+ * hardware drops) every GEM_ROTATE_MASK+1 (8) frames, the DROPPED
+ * gem's world position changes over time too, producing genuine
+ * hardware-forced flicker rather than a software visibility toggle
+ * (TESTING.md §7's anti-flicker case). */
+static void update_gems(void) {
+    unsigned char i;
+
+    if (columns_streamed < TAIL_GATE_COL) {
+        return;
+    }
+
+    if ((frame_counter & GEM_ROTATE_MASK) == 0) {
+        unsigned char first = gem_order[0];
+        for (i = 0; i < GEM_COUNT - 1u; i++) {
+            gem_order[i] = gem_order[i + 1u];
+        }
+        gem_order[GEM_COUNT - 1u] = first;
+    }
+
+    for (i = 0; i < GEM_COUNT; i++) {
+        unsigned char logical = gem_order[i];
+        unsigned char slot = OAM_GEM_BASE_SLOT + i;
+        unsigned int world_x = GEM_X_BASE + (unsigned int)logical * 8u;
+        OAM_SHADOW[slot * 4 + 0] = GEM_Y;
+        OAM_SHADOW[slot * 4 + 1] = 0x0E; /* reuses sprite-0's tile */
+        OAM_SHADOW[slot * 4 + 2] = 0x00;
+        OAM_SHADOW[slot * 4 + 3] = (unsigned char)(world_x - camera_x);
+    }
+}
+
+/* W2-10a criterion 2: a single enemy (OAM slot OAM_BLINK_SLOT) that
+ * blinks on a fixed, game-driven period -- invincibility-frame style,
+ * the red fixture for the rule that de-flicker must NOT erase
+ * deliberate blinking (FORMAT.md "Intentional-blink scene"). Exact
+ * formula: `blink_visible = (frame_counter & BLINK_PERIOD_BIT) != 0` --
+ * period 16 frames, 8 visible / 8 hidden. When hidden, the shadow Y byte
+ * is set to 0xFF (the same off-screen convention init_video()'s hide-all
+ * loop uses), so the sprite genuinely leaves OAM's in-range set rather
+ * than merely not being drawn by some other means. */
+static void update_blink_enemy(void) {
+    if (columns_streamed < TAIL_GATE_COL) {
+        return;
+    }
+
+    blink_visible = (frame_counter & BLINK_PERIOD_BIT) ? 1u : 0u;
+    if (blink_visible) {
+        OAM_SHADOW[OAM_BLINK_SLOT * 4 + 0] = BLINK_Y;
+        OAM_SHADOW[OAM_BLINK_SLOT * 4 + 1] = 0x0D; /* reuses player's tile */
+        OAM_SHADOW[OAM_BLINK_SLOT * 4 + 2] = 0x00;
+        OAM_SHADOW[OAM_BLINK_SLOT * 4 + 3] = (unsigned char)(BLINK_WORLD_X - camera_x);
+    } else {
+        OAM_SHADOW[OAM_BLINK_SLOT * 4 + 0] = 0xFF;
+    }
+}
+
+/* W2-10a criterion 3: a vertical sub-area, reachable once the tail is
+ * open AND the player has reached VERTICAL_AREA_START_X (FORMAT.md
+ * "Vertical sub-area"). `camera_y` is a real, bounded, Up/Down-driven
+ * RAM value -- see main_loop()'s own comment on the split write for the
+ * documented, verified gap between this value reaching the PPU and it
+ * having any observable rendered effect. Internally re-checks
+ * `player_x >= VERTICAL_AREA_START_X` (defense-in-depth: the caller's
+ * own gate is `columns_streamed >= TAIL_GATE_COL` alone, which reaches
+ * true before `player_x` necessarily has). */
+static void update_vertical_area(unsigned char buttons) {
+    if (columns_streamed < TAIL_GATE_COL || player_x < VERTICAL_AREA_START_X) {
+        camera_y = 0;
+        return;
+    }
+    if ((buttons & BTN_DOWN) && camera_y < VERTICAL_MAX) {
+        camera_y++;
+    } else if ((buttons & BTN_UP) && camera_y > 0) {
+        camera_y--;
+    }
+}
+
+/* Full controller-1 8-bit read (A,B,Select,Start,Up,Down,Left,Right --
+ * nesdev.org/wiki/Standard_controller's read order, `rf_input::
+ * NesButton::bit`'s doc mirrors it on the host side). Unrolled into 8
+ * individual reads with only 3 conditional stores (Up, Down, Right) --
+ * NOT a shift-accumulate loop -- because the loop form measurably cost
+ * this ticket's own split-timing budget (FORMAT.md "W2-10a's own
+ * re-measurement, and the fix it required" has the before/after
+ * histogram). Select/Start/A/B/Left are read (the strobe+8-read protocol
+ * is not a documented hardware shortcut to skip) but discarded -- this
+ * fixture never uses them. */
+static unsigned char read_buttons(void) {
+    unsigned char result = 0;
     JOYPAD1 = 1;
     JOYPAD1 = 0;
-    for (i = 0; i < 8; i++) {
-        last = JOYPAD1 & 0x01u;
+    (void)(JOYPAD1 & 0x01u); /* 1: A */
+    (void)(JOYPAD1 & 0x01u); /* 2: B */
+    (void)(JOYPAD1 & 0x01u); /* 3: Select */
+    (void)(JOYPAD1 & 0x01u); /* 4: Start */
+    if (JOYPAD1 & 0x01u) {
+        result |= BTN_UP; /* 5: Up */
     }
-    return last; /* 8th read = Right */
+    if (JOYPAD1 & 0x01u) {
+        result |= BTN_DOWN; /* 6: Down */
+    }
+    (void)(JOYPAD1 & 0x01u); /* 7: Left */
+    if (JOYPAD1 & 0x01u) {
+        result |= BTN_RIGHT; /* 8: Right */
+    }
+    return result;
 }
 
 /* One-time forced-blank setup: palettes, both nametables' HUD rows +
@@ -402,12 +581,14 @@ static void init_video(void) {
     }
     columns_streamed = 63;
 
-    /* Hide all 64 OAM sprites, then place the two this game uses.
-     * `i` counts SPRITES (0..63), not byte offsets, specifically so it
-     * never has to compare an 8-bit counter against 256 -- an unsigned
-     * char loop bound of 256 can never be reached (max 255) and
-     * `i += 4` from 252 wraps to 0, which would silently never
-     * terminate. */
+    /* Hide all 64 OAM sprites, then place the two this game uses at
+     * init. Gem/blink slots (2-13, 14) stay hidden (0xFF) until
+     * update_gems()/update_blink_enemy() populate them once the tail
+     * gate opens. `i` counts SPRITES (0..63), not byte offsets,
+     * specifically so it never has to compare an 8-bit counter against
+     * 256 -- an unsigned char loop bound of 256 can never be reached
+     * (max 255) and `i += 4` from 252 wraps to 0, which would silently
+     * never terminate. */
     for (i = 0; i < 64; i++) {
         OAM_SHADOW[i * 4] = 0xFF;
     }
@@ -423,12 +604,18 @@ static void init_video(void) {
     OAM_SHADOW[OAM_PLAYER_SLOT * 4 + 1] = 0x0D; /* sprite CHR tile $0D */
     OAM_SHADOW[OAM_PLAYER_SLOT * 4 + 2] = 0x00;
     OAM_SHADOW[OAM_PLAYER_SLOT * 4 + 3] = (unsigned char)(player_x - camera_x);
+
+    /* W2-10a state init here. */
+    init_gem_order();
+    camera_y = 0;
+    blink_visible = 0;
 }
 
 /* The main superloop. Runs forever; every iteration is exactly one NES
  * frame, paced entirely by polling PPUSTATUS (module doc). */
 static void main_loop(void) {
     for (;;) {
+        unsigned char buttons;
         unsigned char right_held;
         unsigned int needed_raw_col;
         unsigned int delay;
@@ -439,7 +626,8 @@ static void main_loop(void) {
         }
 
         /* ---- pure game logic (safe anywhere -- no PPU access) ---- */
-        right_held = read_right();
+        buttons = read_buttons();
+        right_held = buttons & BTN_RIGHT;
         frame_counter++;
         /* 8px every 8 frames (1px/frame average), not every 4: this rate
          * is a budget-derived constant, not a pacing choice -- see
@@ -487,14 +675,57 @@ static void main_loop(void) {
         }
         stream_chunk((unsigned char)needed_raw_col);
 
+        OAM_SHADOW[OAM_PLAYER_SLOT * 4 + 0] =
+            (unsigned char)(PLAYER_Y - camera_y); /* camera_y==0 outside the
+                                                       vertical sub-area, so
+                                                       this is PLAYER_Y
+                                                       unchanged there */
         OAM_SHADOW[OAM_PLAYER_SLOT * 4 + 3] = (unsigned char)(player_x - camera_x);
+        /* `$2003` (OAMADDR) must be 0 before an OAM DMA -- real hardware
+         * starts the 256-byte copy at OAMADDR's CURRENT value and wraps,
+         * so a nonzero OAMADDR here would rotate every OAM slot's data
+         * relative to OAM_SHADOW's layout. This program never writes
+         * $2004 directly anywhere else (every OAM update goes through
+         * OAM_SHADOW + this DMA), so OAMADDR should always already be 0
+         * by the time control reaches here -- explicit anyway, once per
+         * frame, since that invariant is cheap to state and expensive to
+         * silently violate later. */
+        OAM_ADDR = 0x00;
         OAM_DMA = 0x02; /* copies $0200-$02FF into PPU OAM */
 
         /* Top-of-frame scroll: X=0, NT-select=0 (NT0) -- the HUD always
-         * shows NT0's rows 0-1, whatever camera_x currently is. */
+         * shows NT0's rows 0-1, whatever camera_x currently is. Y is
+         * camera_y (ticket W2-10a) rather than the literal 0 W2-10 shipped.
+         *
+         * CORRECTION (W2-10a, post-rendering-verification): an earlier
+         * version of this comment claimed this write's Y value reaches
+         * `copy_vertical()` (nesdev.org/wiki/PPU_scrolling's
+         * "vert(v)=vert(t)", pre-render dots 280-304) and therefore
+         * produces a real vertical scroll. That claim was checked against
+         * the emulator's own dot/scanline gate (mechanism-level) but never
+         * against actual rendered pixels. It does not hold: the split
+         * write below (same iteration, later) sets `PPU_SCROLL = 0` for Y,
+         * which overwrites `t`'s Y bits BEFORE the pre-render copy runs --
+         * that copy is once per frame, at the end of the CURRENT frame,
+         * not "the following iteration's own top write". So `t`'s Y is
+         * always 0 at the moment `vert(v)=vert(t)` fires, regardless of
+         * camera_y here. Verified empirically: phase-matched rendered
+         * frames (same frame_counter%16, controlling for gem-rotation and
+         * blink phase) at camera_y==0 vs camera_y==48 are byte-identical
+         * (FORMAT.md "Vertical sub-area" section has the method and
+         * numbers). camera_y is a real, game-driven, bounded RAM value
+         * (0x602E) that this write does send to the PPU, but it has no
+         * observable effect on the rendered picture with the CURRENT
+         * split technique -- fixing that requires reconstructing `v`
+         * directly via `$2006` at the split point (rejected below, with
+         * measurements, for the ORIGINAL reason: mid-scanline coarse/fine
+         * Y reconstruction complexity), which is out of this ticket's
+         * scope. camera_y is 0 everywhere outside the vertical sub-area
+         * (update_vertical_area()'s doc), so this line is at least a
+         * byte-for-byte no-op there, identical to W2-10's literal 0. */
         PPU_CTRL = PPUCTRL_BASE; /* nt_x bit = 0 */
         PPU_SCROLL = 0;
-        PPU_SCROLL = 0;
+        PPU_SCROLL = camera_y;
 
         PPU_MASK = PPUMASK_ON; /* idempotent after frame 0 */
 
@@ -560,6 +791,47 @@ static void main_loop(void) {
         PPU_CTRL = PPUCTRL_BASE | nt_x;
         PPU_SCROLL = (unsigned char)(camera_x & 0xFFu);
         PPU_SCROLL = 0;
+
+        /* ---- ticket W2-10a: the three red-fixture scenes -- deliberately
+         * AFTER the split write, not before it.
+         *
+         * An earlier version of this block ran BEFORE `OAM_ADDR=0;
+         * OAM_DMA=0x02;` above, gated the same way (`columns_streamed >=
+         * TAIL_GATE_COL`). That placement corrupted the gem transfer: on
+         * tail frames, this block's own cost (12-sprite shadow write plus
+         * the periodic gem_order[] rotation) pushed the DMA's START point
+         * later into (or past) the vblank window, and OAM_DMA's ~514
+         * stolen cycles (~1536 PPU dots, ~4.5 scanlines of REAL PPU
+         * ticking -- `crate::system::NesBus::run_oam_dma` ticks the PPU in
+         * lockstep with every get/put cycle, module doc) then straddled a
+         * visible or pre-render scanline's dots 257-320 window, where
+         * `crates/rf-nes/src/ppu/sprites.rs` implements the real
+         * hardware's `OAMADDR`-reset-to-0-mid-transfer behavior
+         * (nesdev.org/wiki/PPU_registers: "OAMADDR is set to 0 during each
+         * of ticks 257-320 ... of the pre-render and visible scanlines").
+         * A reset mid-copy restarts the remaining `OAMDATA` writes at OAM
+         * offset 0, scrambling everything after that point -- measured:
+         * OAM_SHADOW's 12 correctly-written gems arrived in `Ppu::oam()`
+         * as garbage for 10 of 12 slots, matching exactly this mechanism
+         * (not merely "did not run" -- the DMA ran, mid-transfer, into a
+         * reset).
+         *
+         * The fix is this reordering: everything before `OAM_ADDR`/
+         * `OAM_DMA` above is now BYTE-FOR-BYTE what W2-10 shipped (read
+         * input, movement, `stream_chunk()`, player position, DMA, top-
+         * of-frame scroll) -- this block's cost cannot affect the DMA's
+         * timing at all, because it no longer runs before it. Writing
+         * `OAM_SHADOW` here (CPU RAM only, no PPU register touched) is
+         * safe at ANY point in the frame, including well into active
+         * rendering -- the data merely waits in the shadow buffer for
+         * NEXT frame's DMA, a one-frame latency that is imperceptible for
+         * gem rotation (every 8 frames), blink phase (period 16), and
+         * camera_y (a plain RAM value with no DMA involvement at all). */
+        if (columns_streamed >= TAIL_GATE_COL) {
+            update_vertical_area(buttons);
+            update_gems();
+            update_blink_enemy();
+        }
     }
 }
 

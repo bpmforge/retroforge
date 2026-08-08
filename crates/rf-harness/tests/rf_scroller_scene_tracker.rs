@@ -96,6 +96,9 @@ use std::path::PathBuf;
 const PLAYER_X_ADDR: u16 = 0x6029;
 const CAMERA_X_ADDR: u16 = 0x602B;
 const COLUMNS_STREAMED_ADDR: u16 = 0x602D;
+/// `0x6030`, not `0x602E` -- ticket W2-10a moved `frame_counter` (see
+/// `rf_scroller_replay.rs`'s own doc on `FRAME_COUNTER_ADDR` for why).
+const FRAME_COUNTER_ADDR: u16 = 0x6030;
 const PLAYER_X_AT_END: u16 = 752;
 const CAMERA_X_AT_END: u16 = 512;
 const COLUMNS_STREAMED_AT_END: u8 = 95;
@@ -310,6 +313,26 @@ fn nine_hundred_frames_of_real_scrolling_play_stay_one_scene_id_with_bounded_con
             first_world = after;
         }
         last_world = after;
+    }
+
+    // Settle to a real program-level synchronization point before
+    // peeking camera_x (`rf_scroller_replay.rs::settle_to_iteration_boundary`'s
+    // doc, duplicated here -- module doc's convention): `run_frame`
+    // returns at an arbitrary PPU-clock frame_count tick, which can land
+    // between camera_x's provisional (ternary) write and its clamp write
+    // within the same main_loop() iteration. Advancing until
+    // frame_counter changes guarantees the previous iteration -- clamp
+    // included -- fully completed.
+    let fc_before = bus.peek(FRAME_COUNTER_ADDR);
+    let mut extra = 0u64;
+    while bus.peek(FRAME_COUNTER_ADDR) == fc_before {
+        let mut builder = FrameBundleBuilder::new(256, 240);
+        run_frame(&mut bus, &mut cpu, scripted_buttons_right(), &mut builder);
+        extra += 1;
+        assert!(
+            extra <= 20,
+            "frame_counter did not advance within 20 extra frames -- main_loop() appears stuck"
+        );
     }
 
     // Anti-vacuity (same RAM witnesses `rf_scroller_replay.rs`'s own

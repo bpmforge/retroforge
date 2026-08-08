@@ -45,7 +45,7 @@
 //! (spawn), `camera_x == 0`, and `columns_streamed == 63` at frame 900,
 //! failing all three assertions below.
 use rf_core_api::{CoreEvent, CoreSink, InputFrame, PpuPixel};
-use rf_harness::{hash_frame_palette_indices, hex_sha256, FrameCapture};
+use rf_harness::{hash_frame_palette_indices, hex_sha256};
 use rf_input::{NesButton, ReplayHeader, ReplayLog, ReplayPlayer, ReplayRecorder, StartType};
 use rf_nes::{Cpu, NesBus};
 use std::path::PathBuf;
@@ -74,9 +74,20 @@ const HASH_INTERVAL: u64 = 600;
 const GOLDEN_FRAMES: [u64; 6] = [655, 1200, 2400, 5000, 10000, 15000];
 
 /// Documented RAM addresses (`FORMAT.md` "Documented RAM addresses").
+/// `FRAME_COUNTER_ADDR` moved from `0x602E` (its W2-10 address) to
+/// `0x6030` at ticket W2-10a -- see that section's "Address re-pin" note:
+/// inserting `camera_y`/`blink_visible` (both non-`static` globals, like
+/// `player_x`/`camera_x`/`columns_streamed`) ahead of `frame_counter` in
+/// source order pushed `frame_counter` (a `static`) two bytes later,
+/// because cc65 buckets non-`static` globals together ahead of file-scope
+/// statics regardless of source interleaving -- confirmed by rebuilding
+/// with `-g -Wl --dbgfile,...` and reading the resulting symbol table
+/// (the checked-in `build/rf-scroller.dbg` is stale and must not be
+/// trusted -- `build.sh` never regenerates it).
 const PLAYER_X_ADDR: u16 = 0x6029;
 const CAMERA_X_ADDR: u16 = 0x602B;
 const COLUMNS_STREAMED_ADDR: u16 = 0x602D;
+const FRAME_COUNTER_ADDR: u16 = 0x6030;
 
 /// Level-end / wraparound-complete values (`FORMAT.md`): `player_x`
 /// saturates at `MAX_PLAYER_X` (752), `camera_x` at `MAX_CAMERA_X` (512),
@@ -92,6 +103,127 @@ impl CoreSink for NullSink {
     fn video_scanline(&mut self, _y: u16, _pixels: &[PpuPixel]) {}
     fn audio(&mut self, _samples: &[i16]) {}
     fn event(&mut self, _ev: CoreEvent) {}
+}
+
+/// Golden-capture robustness fix (ticket W2-10a, discovered while
+/// regenerating `GOLDEN_HASHES` for this ticket's ROM): `run_frame`'s stop
+/// condition ("`bus.frame_count()` changed") does not guarantee a fresh
+/// sink receives exactly scanlines 0..239 of one frame. `OAM_DMA` is a
+/// ~513-CPU-cycle (~1539-dot, ~5.9-scanline) halting write; the single
+/// `cpu.step()` call that executes it can span a `Scanline` dot-256 event
+/// for several scanlines at once, INCLUDING, if timing lines up, a few of
+/// the NEXT frame's early scanlines -- which land in `drain_video`'s
+/// caller-supplied sink for whichever `run_frame` call happens to be
+/// active at that instant. A prior version of this test used
+/// `rf_harness::FrameCapture` per golden index (fresh `FrameCapture::new()`
+/// per capture) and panicked ("expected 0, got 3") the first time this
+/// ticket's cycle-count changes (the `read_buttons()`/call-site-gating fix
+/// -- see FORMAT.md) shifted which frame straddles a boundary -- this ROM
+/// always had this latent fragility; the OLD ROM's goldens (655, 1200,
+/// ...) simply never happened to land on a straddling frame.
+///
+/// Earlier fix attempts here (documented for the next person who hits
+/// this, not left in the diff): (1) a `TolerantFrameCapture` shared across
+/// the golden call and the PRECEDING call, resetting on every `y==0` --
+/// recovered 655/1200 but discarded golden 2400's own complete data when
+/// THAT call itself straddled forward into 2401. (2) a single-call
+/// version banking "the most recent complete 240-row frame" and returning
+/// the instant `frame_count` advances -- panicked instead of silently
+/// mislabeling (good), but revealed that golden 655's own LEADING rows
+/// were already being lost to the call BEFORE it (the preceding, ordinary
+/// `run_frame`+`NullSink` call): a fresh capture starting mid-frame can
+/// see fewer than 240 rows before the next `y==0`, so it never banks
+/// anything for the target at all.
+///
+/// The fix that actually holds: track "most recently completed 240-row
+/// frame" the same way as attempt (2), but thread ONE persistent
+/// [`GoldenCaptureState`] across BOTH the frame immediately before a
+/// golden AND the golden itself (`GOLDEN_FRAMES` entries are >600 frames
+/// apart, so this never needs to look back more than one frame). Any
+/// straggler rows from the target that leak into the PRECEDING call are
+/// no longer lost to a `NullSink` -- they accumulate into the SAME
+/// `current` buffer that will go on to complete the target frame during
+/// the following call. `last_complete` gets overwritten every time a
+/// frame genuinely completes (first the priming frame's own, then the
+/// target's), so by the time the target's own call ticks `frame_count`
+/// past its start, whatever's banked is guaranteed to be the target's own
+/// data -- and if it isn't (some larger drift ate the target's OWN
+/// trailing rows too), this panics loudly rather than mislabeling.
+struct GoldenCaptureState {
+    current: Vec<Vec<u8>>,
+    last_complete: Option<Vec<Vec<u8>>>,
+}
+impl GoldenCaptureState {
+    fn new() -> Self {
+        GoldenCaptureState {
+            current: Vec::new(),
+            last_complete: None,
+        }
+    }
+}
+struct GoldenCaptureSink<'a> {
+    state: &'a mut GoldenCaptureState,
+}
+impl CoreSink for GoldenCaptureSink<'_> {
+    fn video_scanline(&mut self, y: u16, pixels: &[PpuPixel]) {
+        if y == 0 {
+            if self.state.current.len() == 240 {
+                self.state.last_complete = Some(std::mem::take(&mut self.state.current));
+            } else {
+                self.state.current.clear();
+            }
+        }
+        self.state
+            .current
+            .push(pixels.iter().map(|p| p.palette_index).collect());
+    }
+    fn audio(&mut self, _samples: &[i16]) {}
+    fn event(&mut self, _ev: CoreEvent) {}
+}
+
+/// Same contract as `run_frame` (advances `bus.frame_count()` by exactly
+/// one), but feeds scanlines into a persistent [`GoldenCaptureState`]
+/// instead of an arbitrary sink -- see that struct's doc for why.
+fn run_frame_tracking_goldens(
+    bus: &mut NesBus,
+    cpu: &mut Cpu,
+    buttons: u8,
+    state: &mut GoldenCaptureState,
+) {
+    bus.set_controller_buttons(0, buttons);
+    let start = bus.frame_count();
+    let mut sink = GoldenCaptureSink { state };
+    let mut guard = 0u64;
+    while bus.frame_count() == start {
+        cpu.step(bus);
+        bus.drain_video(&mut sink);
+        guard += 1;
+        assert!(
+            guard <= 400_000,
+            "frame did not complete within guard cycles at frame {start}"
+        );
+    }
+}
+
+/// Called only when `frame` is a `GOLDEN_FRAMES` entry, immediately after
+/// `run_frame_tracking_goldens` was used for both `frame` and `frame - 1`
+/// (`GoldenCaptureState`'s own doc). Takes and validates the banked
+/// capture.
+fn take_golden_capture(state: &mut GoldenCaptureState, frame: u64) -> Vec<Vec<u8>> {
+    let rows = state.last_complete.take().unwrap_or_else(|| {
+        panic!(
+            "golden frame {frame}: no complete 240-row frame was ever banked -- \
+             straggler-scanline recovery failed entirely (see GoldenCaptureState's doc)"
+        )
+    });
+    assert_eq!(
+        rows.len(),
+        240,
+        "golden frame {frame}: banked capture had {} rows, not 240 -- GoldenCaptureSink's own \
+         invariant (only banks at exactly 240) should make this impossible",
+        rows.len()
+    );
+    rows
 }
 
 /// Resolves the built (never committed, gitignored `build/`) ROM:
@@ -170,6 +302,64 @@ fn peek_u16(bus: &NesBus, addr: u16) -> u16 {
     u16::from(bus.peek(addr)) | (u16::from(bus.peek(addr + 1)) << 8)
 }
 
+/// Root-caused at ticket W2-10a (recorded in FORMAT.md's "Address re-pin"
+/// section): `run_frame` returns the instant `bus.frame_count()` (a PPU-
+/// clock-driven counter, independent of `main.c`'s own control flow)
+/// ticks -- that tick can land at ANY point inside one `main_loop()`
+/// iteration's C-level body, including between `camera_x`'s two writes in
+/// the same iteration (the ternary's provisional value, then the clamp's
+/// corrected one a few instructions later). A `bus.peek(CAMERA_X_ADDR)`
+/// taken at an arbitrary `run_frame` boundary can therefore observe the
+/// PRE-clamp value even though the clamp always fires correctly by the
+/// time the iteration actually finishes -- confirmed by single-stepping
+/// `Cpu::pc` through the clamp's machine code at several frame indices
+/// and finding it fires every time, while the SAME peek taken immediately
+/// after alternated between the clamped and unclamped value frame to
+/// frame. `camera_x` is the only one of the three RAM witnesses written
+/// TWICE per iteration (`player_x` and `columns_streamed` are each
+/// written at most once), which is exactly why only `camera_x` exhibited
+/// this.
+///
+/// This is a genuine, pre-existing latent fragility in sampling `camera_x`
+/// at an arbitrary `run_frame` boundary -- not something this ticket's
+/// added per-frame cost created, though added cost does change which
+/// frames land on which side of the ternary/clamp gap, which is how this
+/// was found (see the ticket report's mutation/verification section).
+/// The fix is a real synchronization point in the PROGRAM's own terms
+/// rather than a PPU-side coincidence: `frame_counter` (module doc /
+/// FORMAT.md) increments exactly once, near the very top of each
+/// `main_loop()` iteration, right after that iteration's own
+/// `read_buttons()` call. Once `frame_counter` is OBSERVED to have
+/// changed value, the PREVIOUS iteration -- including its own
+/// `camera_x` clamp, OAM DMA, and split write -- is GUARANTEED to have
+/// run to completion (main_loop is a single sequential loop; iteration
+/// N+1 cannot begin incrementing frame_counter until iteration N's full
+/// body, all the way through its split-write, has finished). Advancing
+/// until `frame_counter` changes therefore samples a point that is
+/// structurally after the clamp, not merely usually after it.
+fn settle_to_iteration_boundary(
+    bus: &mut NesBus,
+    cpu: &mut Cpu,
+    scripted_from_frame: u64,
+    sink: &mut dyn CoreSink,
+) {
+    let before = bus.peek(FRAME_COUNTER_ADDR);
+    let mut extra = 0u64;
+    while bus.peek(FRAME_COUNTER_ADDR) == before {
+        run_frame(
+            bus,
+            cpu,
+            scripted_buttons(scripted_from_frame + extra),
+            sink,
+        );
+        extra += 1;
+        assert!(
+            extra <= 20,
+            "frame_counter did not advance within 20 extra frames -- main_loop() appears stuck"
+        );
+    }
+}
+
 /// The "reachable-v1" state hash -- byte-for-byte the same formula as
 /// `alter_ego_replay.rs::reachable_state_hash` and
 /// `crates/retroforge/src/stepper.rs::EmuStepper::state_hash`, duplicated
@@ -194,30 +384,44 @@ fn reachable_state_hash(bus: &NesBus, cpu: &Cpu) -> String {
     hex_sha256(&buf)
 }
 
-/// Frozen 2026-08-07: golden-frame hashes for [`GOLDEN_FRAMES`], SHA-256
-/// over `palette_index` only (`hash_frame_palette_indices`), in frame
-/// order, against ROM `sha256=aa3b08c2ee7b0d9213203e15ae555ced009215121f
-/// 28b52d4d6ee460a30b96f0` (`rom.sha256`). **Verified before freezing**:
-/// (1) this test's own recording run and independent replay run agree on
-/// all six byte-exact (the assertion using this constant, which fails
-/// loudly on any divergence -- see the golden-frame comparison below);
-/// (2) each of the six frame indices was independently confirmed, via a
-/// throwaway instrumented harness run over the exact same ROM hash, to
-/// be free of the residual split-timing defect FORMAT.md documents (the
-/// `ScrollWrite` events for that frame all land inside vblank or the
-/// scanline-14-18 split window) -- these are not merely "the hash
-/// matched itself" goldens, and they were deliberately NOT chosen from
-/// the streaming-active window (frames ~100-650) where FORMAT.md records
-/// the split can land late; (3) `columns_streamed` is `95` at every one
-/// of these frame indices (all six are at or after wraparound
-/// completion), independently confirmed via the same instrumented run.
+/// Re-frozen a SECOND time for ticket W2-10a, after a conductor-side `git
+/// checkout` destroyed the in-flight `main.c` mid-ticket (recorded in
+/// `plan.json`'s W2-10a notes) and the reconstruction fixed a real bug the
+/// first pass had shipped without catching (gems corrupted in transit to
+/// `Ppu::oam()` via an `OAMADDR`-reset-during-DMA interaction -- see
+/// FORMAT.md's "Sprite-overflow scene" and "The `git checkout` incident"
+/// sections). Golden-frame hashes for [`GOLDEN_FRAMES`], SHA-256 over
+/// `palette_index` only (`hash_frame_palette_indices`), in frame order,
+/// against ROM
+/// `sha256=c79f6f61ae82a87beaf57edb6757d75c1cfb2a1316196b1c8295f22a1699e087`
+/// (`rom.sha256`). The reorder that fixed the gem transfer (tail-scene
+/// updates now run AFTER the split write, one-frame latency) legitimately
+/// changes every golden frame's rendered content again -- the prior
+/// hashes (first W2-10a freeze) no longer apply and are not a regression.
+///
+/// **Verified before freezing** (same discipline as both prior freezes,
+/// re-run against this ROM): (1) this test's own recording run and
+/// independent replay run agree on all six byte-exact (the assertion
+/// using this constant, which fails loudly on any divergence -- see the
+/// golden-frame comparison below) -- this is the actual determinism
+/// proof; the frozen-constant comparison below it is a regression trip
+/// wire, not the proof itself. (2) `columns_streamed` is `95` and
+/// `player_x`/`camera_x` are at their level-end values at every one of
+/// these frame indices (all six are well after wraparound completion, in
+/// the same idle tail `FORMAT.md`'s split-timing section characterizes).
+///
+/// Unlike the first W2-10a freeze, golden frames 2400 and 10000 do NOT
+/// hash identically this time (that was a coincidence of the prior
+/// `gem_order[]` rotation scheme's own phase alignment, not a fixture
+/// property -- the redesigned `update_gems()` that fixed the OAM transfer
+/// also changed that incidental alignment).
 const GOLDEN_HASHES: [&str; 6] = [
-    "1257b381c4dcbb4f0fc6cda8f1e35520099628efeb4e12654b828f340257f1e0",
-    "cba5b17fd0b5eb6711b3c6d65232e2e97e3c5ac1d8f461e917ac7291e27d9bdc",
-    "cb09aae208921fd90a59f9b1d7711f874a70d5b2d595dcbf6256a86677e0c27f",
-    "658165a4e7df562482ead82095f4b514959458ae9c41a05fdd872b15d4fd9c5e",
-    "80ab136a64b9ca62e9929ccd96be5af550830bcd2d082ad3c7d7658e76b912ac",
-    "4f7a24f715eee2c7e9091236da9f946f34d21273fce36d92b60dc173004d3a46",
+    "638cb9d8acab9b2022ac807dde10c664b34e6badfb79f77d01d9be247d903caa",
+    "55d490ad3f4e156aae3189531ddf348b07f7a679abe37b57eef5bf380d2793d0",
+    "392608a0b7064966b69d94d0ea0a0d27e436bab0ae945d0989be2be35f886e10",
+    "92096dc72f76c4fdc285aa68fb2ba304c7da94e8d333e29c995a125c65c11f16",
+    "6ec87b2dd3cba22e09b57ed791dd336dd94d948e1714f8fd9810c7d78ba2c01c",
+    "58b28e63340643fd854acc605a8c58531a25b197b4a4ffd3b69db43465334580",
 ];
 
 /// Fast anti-vacuity check (NOT `#[ignore]`'d -- runs on every
@@ -245,6 +449,9 @@ fn rf_scroller_scripted_input_actually_drives_the_game() {
     for frame in 0..900u64 {
         run_frame(&mut bus, &mut cpu, scripted_buttons(frame), &mut sink);
     }
+    // Sample at a real program-level synchronization point, not an
+    // arbitrary run_frame boundary -- settle_to_iteration_boundary's doc.
+    settle_to_iteration_boundary(&mut bus, &mut cpu, 900, &mut sink);
 
     assert_eq!(
         peek_u16(&bus, PLAYER_X_ADDR),
@@ -319,16 +526,27 @@ fn rf_scroller_five_minute_replay_final_hash_and_golden_frames() {
         NesBus::from_ines_bytes(&rom_bytes).expect("rf-scroller.nes must be valid iNES");
     let mut rec_cpu = Cpu::power_on(&mut rec_bus);
     let mut rec_goldens: Vec<(u64, String)> = Vec::new();
-    let mut null = NullSink;
+    let mut golden_state = GoldenCaptureState::new();
 
+    // GoldenCaptureState's own doc: an N-frame look-back window (tried 0
+    // and 1) isn't reliably enough runway -- golden 1200's own straddle
+    // needed more than one frame of priming to resolve. Tracking every
+    // single frame through the same persistent, cheap (palette-index
+    // bytes only) capture state removes the guess entirely: whatever's
+    // banked in `last_complete` at the instant `bus.frame_count()` first
+    // reaches `frame + 1` for a golden `frame` MUST be that frame's own
+    // data, because that is the exact condition under which it was most
+    // recently banked.
     for frame in 0..TOTAL_FRAMES {
         let buttons = scripted_buttons(frame);
+        run_frame_tracking_goldens(&mut rec_bus, &mut rec_cpu, buttons, &mut golden_state);
         if GOLDEN_FRAMES.contains(&frame) {
-            let mut cap = FrameCapture::new();
-            run_frame(&mut rec_bus, &mut rec_cpu, buttons, &mut cap);
-            rec_goldens.push((frame, hash_frame_palette_indices(cap.scanlines(), 240)));
-        } else {
-            run_frame(&mut rec_bus, &mut rec_cpu, buttons, &mut null);
+            let rows = take_golden_capture(&mut golden_state, frame);
+            eprintln!(
+                "golden frame {frame} (recording): frame_counter witness={}",
+                rec_bus.peek(FRAME_COUNTER_ADDR)
+            );
+            rec_goldens.push((frame, hash_frame_palette_indices(&rows, 240)));
         }
         recorder.record_frame(InputFrame {
             ports: [buttons as u16, 0, 0, 0],
@@ -376,15 +594,18 @@ fn rf_scroller_five_minute_replay_final_hash_and_golden_frames() {
     let mut play_goldens: Vec<(u64, String)> = Vec::new();
     let mut frame_no = 0u64;
     let mut hashes_checked = 0usize;
+    let mut golden_state = GoldenCaptureState::new();
 
     while let Some(input) = player.next_frame() {
         let buttons = input.ports[0] as u8;
+        run_frame_tracking_goldens(&mut play_bus, &mut play_cpu, buttons, &mut golden_state);
         if GOLDEN_FRAMES.contains(&frame_no) {
-            let mut cap = FrameCapture::new();
-            run_frame(&mut play_bus, &mut play_cpu, buttons, &mut cap);
-            play_goldens.push((frame_no, hash_frame_palette_indices(cap.scanlines(), 240)));
-        } else {
-            run_frame(&mut play_bus, &mut play_cpu, buttons, &mut null);
+            let rows = take_golden_capture(&mut golden_state, frame_no);
+            eprintln!(
+                "golden frame {frame_no} (replay): frame_counter witness={}",
+                play_bus.peek(FRAME_COUNTER_ADDR)
+            );
+            play_goldens.push((frame_no, hash_frame_palette_indices(&rows, 240)));
         }
         if let Some(expected) = player.expected_hash(frame_no) {
             assert_eq!(
