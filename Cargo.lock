@@ -2923,8 +2923,10 @@ name = "retroforge"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "rf-cache",
  "rf-cart",
  "rf-core-api",
+ "rf-enhance",
  "rf-input",
  "rf-nes",
  "rf-renderer",

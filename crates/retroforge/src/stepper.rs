@@ -167,6 +167,22 @@ impl EmuStepper {
     /// rejects (bad magic, unimplemented mapper, ...).
     pub fn from_ines_bytes(raw: &[u8]) -> Result<Self, NesLoadError> {
         let mut bus = NesBus::from_ines_bytes(raw)?;
+        // Ticket W4-03e: the enhanced camera's scroll/scene tracking
+        // (`crate::canvas_accum::CanvasAccumulator`, driven by
+        // `crate::core_thread`) needs `CoreEvent::Scanline`/`ScrollWrite`
+        // on every `FrameBundle` — before this, `EventMask` stayed at its
+        // `CoreConfig` default (`EventMask::NONE`, `rf_core_api::core`'s own
+        // doc), so nothing anywhere in this crate ever received those
+        // events and the whole enhanced-camera pipeline would have silently
+        // stitched nothing, forever. `EventMask` only gates which
+        // `CoreEvent` variants get CONSTRUCTED (`rf_core_api::event`'s own
+        // doc: "callers ... MUST check ... before building the matching
+        // CoreEvent variant") — it cannot perturb simulation state, so
+        // turning it on here does not touch Law 6 (Accuracy Mode stays an
+        // unmodified simulation; this is metadata plumbing, not gameplay).
+        bus.set_event_mask(
+            rf_core_api::EventMask::SCANLINE.union(rf_core_api::EventMask::SCROLL_WRITE),
+        );
         let cpu = Cpu::power_on(&mut bus);
         Ok(EmuStepper {
             bus,

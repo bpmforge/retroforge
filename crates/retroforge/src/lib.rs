@@ -16,9 +16,18 @@
 //! all (`scripts/validate-arch.sh` + that crate's own doc). `src/main.rs`'s
 //! `fn main` is the only place `eframe::run_native` is ever called — never
 //! from a test.
+//!
+//! Ticket W4-03e adds [`canvas_accum`] (per-scene `Canvas` accumulation,
+//! driven on the core thread — see [`core_thread`] for why every frame
+//! must reach it) and [`enhanced_view`] (the `SceneGraph` ->
+//! `CompositeLayer` mediator, `ARCHITECTURE.md` §3). Neither touches
+//! `egui`/`eframe` — the "two modules touch egui" count above stays
+//! exactly two.
 
 pub mod app;
+pub mod canvas_accum;
 pub mod core_thread;
+pub mod enhanced_view;
 pub mod hash;
 pub mod input_map;
 pub mod mode_invariant;

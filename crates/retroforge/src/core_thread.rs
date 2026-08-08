@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 use rf_core_api::InputFrame;
 use rf_nes::NesLoadError;
 
+use crate::canvas_accum::CanvasAccumulator;
 use crate::pacer::FramePacer;
 use crate::stepper::EmuStepper;
 
@@ -207,6 +208,15 @@ pub enum CoreEvent {
     /// halted. No further `CoreEvent`s will ever arrive on this channel
     /// after this one.
     Crashed(CoreCrashReport),
+    /// Ticket W4-03e: the reply to `CoreCommand::RequestCanvasSnapshot` —
+    /// a clone of the CURRENT scene's stitched canvas
+    /// (`crate::canvas_accum::CanvasAccumulator::current_canvas`), for the
+    /// UI thread to resolve into an ultrawide render
+    /// (`crate::enhanced_view::compose_ultrawide`). Pull, not push
+    /// (`crate::canvas_accum`'s own module doc): cloning a whole `Canvas`
+    /// every frame would be tens of MB/s at 60Hz for a level of any real
+    /// size, so this only happens when the UI thread actually asks.
+    CanvasSnapshot(rf_enhance::stitcher::Canvas),
 }
 
 /// What the UI thread can ask the core thread to do (FR-DBG-004).
@@ -220,6 +230,13 @@ pub enum CoreCommand {
     /// produce a `CoreEvent::Frame`; the next running/stepped frame simply
     /// reflects the new setting.
     SetSpriteOverlay(bool),
+    /// Ticket W4-03e: ask for a `CoreEvent::CanvasSnapshot` of the current
+    /// scene's stitched canvas (see that variant's doc). Also flushes the
+    /// canvas accumulator's cache (`CanvasAccumulator::flush`) — piggy-
+    /// backing persistence on the same user-driven cadence (whenever the
+    /// UI is actually showing/refreshing the Ultrawide view) rather than
+    /// every frame.
+    RequestCanvasSnapshot,
     Shutdown,
 }
 
@@ -282,8 +299,13 @@ pub fn spawn(rom: Vec<u8>) -> Result<CoreHandle, NesLoadError> {
     // well-defined value (`triple_buffer`'s own doc).
     let (bundle_writer, bundle_reader) =
         rf_core_api::triple_buffer(rf_core_api::FrameBundle::empty());
+    // Ticket W4-03e: identifies this ROM for the canvas cache key
+    // (`rf_enhance::persistence::canvas_cache_key`'s own `rom_sha256`
+    // field) — computed once here (off the hot per-frame path) rather
+    // than inside `core_thread_main`.
+    let rom_sha256 = crate::hash::sha256_hex(&rom);
     let handle = thread::spawn(move || {
-        core_thread_main(rom, cmd_rx, evt_tx, thread_input, bundle_writer);
+        core_thread_main(rom, rom_sha256, cmd_rx, evt_tx, thread_input, bundle_writer);
     });
     Ok(CoreHandle {
         cmd_tx,
@@ -353,8 +375,26 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
     }
 }
 
+/// Placeholder cache root for the stitched-canvas cache (ticket W4-03e).
+/// Not a considered app-data-directory policy — that is a separate,
+/// unscoped decision (no XDG/platform-data-dir convention exists anywhere
+/// else in this workspace to align with yet) — just enough of a real,
+/// writable location that [`rf_cache::Cache::open`] genuinely persists to
+/// disk across a `Cache` re-open within the same machine, which is all
+/// this ticket's four acceptance criteria need. A future ticket choosing a
+/// permanent location only has to change this one path.
+fn canvas_cache_root() -> std::path::PathBuf {
+    std::env::temp_dir().join("retroforge-canvas-cache")
+}
+
+/// Cap for the placeholder canvas cache above — generous for a handful of
+/// stitched levels, not tuned against any measured workload (same "not a
+/// considered policy" caveat as [`canvas_cache_root`]).
+const CANVAS_CACHE_CAP_BYTES: u64 = 256 * 1024 * 1024;
+
 fn core_thread_main(
     rom: Vec<u8>,
+    rom_sha256: String,
     cmd_rx: Receiver<CoreCommand>,
     evt_tx: Sender<CoreEvent>,
     input: Arc<SharedInputFrame>,
@@ -380,6 +420,15 @@ fn core_thread_main(
         rf_renderer::frame::NES_WIDTH as u16,
         rf_renderer::frame::NES_HEIGHT as u16,
     );
+    // Ticket W4-03e: fed one real `FrameBundle` per frame below, right
+    // where `bundle_builder` is drained — `crate::canvas_accum`'s own
+    // module doc explains why this must happen on THIS thread (every real
+    // frame, no gaps) rather than the UI thread polling the triple buffer.
+    // A cache-open failure (unwritable placeholder dir, etc.) degrades to
+    // `None` — persistence is strictly additive (`CanvasAccumulator`'s own
+    // doc), never a reason to fail loading the ROM.
+    let cache = rf_cache::Cache::open(canvas_cache_root(), CANVAS_CACHE_CAP_BYTES).ok();
+    let mut canvas_accum = CanvasAccumulator::new(rom_sha256, cache);
 
     // `run_guarded_loop` needs its own `&Sender` (to report a crash) at
     // the same time the loop body needs to *own* a sender to `send` frames
@@ -443,6 +492,13 @@ fn core_thread_main(
                 CoreCommand::SetSpriteOverlay(enabled) => {
                     stepper.set_sprite_overlay_enabled(enabled);
                 }
+                CoreCommand::RequestCanvasSnapshot => {
+                    canvas_accum.flush();
+                    let snapshot = canvas_accum.current_canvas().unwrap_or_default();
+                    if frame_tx.send(CoreEvent::CanvasSnapshot(snapshot)).is_err() {
+                        return LoopControl::Stop; // UI thread hung up.
+                    }
+                }
                 CoreCommand::Shutdown => return LoopControl::Stop,
             }
         }
@@ -482,11 +538,22 @@ fn core_thread_main(
             },
         );
         if ran || stepped {
+            // Ticket W4-03e: feed the enhanced-camera pipeline THIS exact
+            // frame's bundle before it moves into `bundle_writer.publish`
+            // below — `canvas_accum`'s own module doc is explicit that
+            // every real frame must reach it, with no gaps, which is only
+            // true on this thread (the UI thread's own `frame_bundle`
+            // reader is latest-wins/lossy). Read-only: nothing here
+            // mutates `stepper`/`sink`/`layers`, only the already-
+            // materialized bundle, so this cannot perturb core state
+            // (Law 6).
+            let bundle = bundle_builder.take(stepper.frame_count());
+            canvas_accum.observe_frame(&bundle, &[]);
             // Ticket W4-01: publish before sending `FrameMsg` so a reader
             // that wakes on the `FrameMsg` channel never sees a
             // `frame_bundle` older than the frame it was just notified
             // about.
-            bundle_writer.publish(bundle_builder.take(stepper.frame_count()));
+            bundle_writer.publish(bundle);
             let msg = FrameMsg {
                 rgba: sink.to_vec(),
                 width: sink.width(),
@@ -594,6 +661,9 @@ mod tests {
                 );
             }
             CoreEvent::Frame(_) => panic!("expected a crash report, got an ordinary frame"),
+            CoreEvent::CanvasSnapshot(_) => {
+                panic!("expected a crash report, got a canvas snapshot")
+            }
         }
 
         // The spawned thread's own top-level closure must return
@@ -662,6 +732,7 @@ mod tests {
                 assert!(msg.width > 0 && msg.height > 0);
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
+            CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -721,6 +792,7 @@ mod tests {
                 );
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
+            CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -755,6 +827,7 @@ mod tests {
         let msg_frame_count = match evt {
             CoreEvent::Frame(msg) => msg.frame_count,
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
+            CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
         };
 
         let bundle = core.frame_bundle.latest();

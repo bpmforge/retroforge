@@ -117,6 +117,11 @@ fn measure_fps_with_frame_bundle_assembly_enabled() {
             Ok(CoreEvent::Crashed(r)) => {
                 panic!("core thread crashed mid-measurement: {}", r.message)
             }
+            Ok(CoreEvent::CanvasSnapshot(_)) => {
+                // This test never sends `RequestCanvasSnapshot`; an
+                // unrelated event landing here would not invalidate the
+                // FPS measurement.
+            }
             Err(_) => panic!("core thread stalled -- no frame within 2s"),
         }
     }

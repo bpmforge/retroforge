@@ -143,6 +143,42 @@ impl GpuContext {
             adapter_limits,
         })
     }
+
+    /// Build a [`GpuContext`] around an **existing** device/queue rather
+    /// than requesting a new one (ticket W4-03e). [`Self::request_headless`]
+    /// is the *only* other constructor and always creates its own private
+    /// device — fine for headless tests, but a host that already has a
+    /// live device (the `retroforge` app shell, via
+    /// `eframe::CreationContext::wgpu_render_state` — verified this ticket
+    /// that eframe 0.35's *default* feature set is `wgpu`, not `glow`:
+    /// `eframe-0.35.0/Cargo.toml`'s `default` array includes `"wgpu"`, so
+    /// the shell genuinely has a live `wgpu::Device`/`Queue` to hand in
+    /// here) must not spin up a second one just to reach this type —
+    /// textures cannot cross device boundaries, so a second device would
+    /// force every enhanced-composite frame through an extra GPU→CPU→GPU
+    /// round trip versus the one CPU readback ([`crate::composite`]'s own
+    /// design) already pays with a shared device. `RENDERER.md` §1 already
+    /// calls for exactly this: "One `Device`/`Queue` shared with egui via
+    /// `egui-wgpu`".
+    ///
+    /// All four fields are `pub` (this struct has always allowed direct
+    /// construction from another crate); this constructor exists for
+    /// documentation and call-site clarity, not because the fields were
+    /// ever private.
+    #[must_use]
+    pub fn from_shared(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        adapter_info: wgpu::AdapterInfo,
+        adapter_limits: wgpu::Limits,
+    ) -> Self {
+        GpuContext {
+            device,
+            queue,
+            adapter_info,
+            adapter_limits,
+        }
+    }
 }
 
 /// Blocking buffer readback: maps `buffer` for reading, polls the device
@@ -199,5 +235,34 @@ mod tests {
             Ok(ctx) => println!("headless GPU available: {:?}", ctx.adapter_info),
             Err(e) => println!("headless GPU unavailable ({e}) -- treated as a clean skip"),
         }
+    }
+
+    /// [`GpuContext::from_shared`] must reproduce an equivalent context
+    /// from parts pulled back out of an existing one -- proves it actually
+    /// threads `device`/`queue`/`adapter_info`/`adapter_limits` through
+    /// rather than, say, silently substituting `Limits::default()`
+    /// (exactly the bug `request_headless`'s own doc says was already hit
+    /// once for the conservative-default reason). Skips cleanly with no
+    /// GPU, same contract as every other test in this module.
+    #[test]
+    fn from_shared_reproduces_an_equivalent_context() {
+        let Some(original) = GpuContext::request_headless().ok() else {
+            println!("SKIP from_shared_reproduces_an_equivalent_context: no wgpu adapter");
+            return;
+        };
+        let expected_max_dim = original.adapter_limits.max_texture_dimension_2d;
+        let expected_backend = original.adapter_info.backend;
+        let rebuilt = GpuContext::from_shared(
+            original.device,
+            original.queue,
+            original.adapter_info,
+            original.adapter_limits,
+        );
+        assert_eq!(
+            rebuilt.adapter_limits.max_texture_dimension_2d, expected_max_dim,
+            "from_shared must carry the caller's adapter_limits through unchanged, not \
+             substitute a default"
+        );
+        assert_eq!(rebuilt.adapter_info.backend, expected_backend);
     }
 }

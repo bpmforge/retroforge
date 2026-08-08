@@ -24,6 +24,16 @@ rf-cart = { path = "../rf-cart" }
 rf-renderer = { path = "../rf-renderer" }
 # rf-input: host-agnostic Key/KeyMap/InputLatch + .rfreplay (ticket W1-07).
 rf-input = { path = "../rf-input" }
+# rf-enhance: SceneGraph/Camera/Stitcher/SceneTracker (ticket W4-03e) — the
+# shell is the mediator that resolves rf-enhance's handles into
+# rf-renderer's CompositeLayer (ARCHITECTURE.md §3: UI depends on both REN
+# and ENH; no edge between REN and ENH themselves).
+rf-enhance = { path = "../rf-enhance" }
+# rf-cache: already an rf-enhance dependency (arrives transitively for
+# version-resolution purposes), listed directly here too because
+# `crate::canvas_accum` calls `rf_cache::Cache::open` itself (Rust's
+# extern prelude only exposes crates a Cargo.toml names directly).
+rf-cache = { path = "../rf-cache" }
 eframe = "0.35.0"
 rfd = "0.17.2"
 # sha2: reachable-state hash for the determinism/replay suite (ticket

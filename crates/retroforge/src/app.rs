@@ -31,8 +31,19 @@
 use eframe::egui;
 
 use crate::core_thread::{self, CoreCommand, CoreCrashReport, CoreEvent, CoreHandle};
+use crate::enhanced_view::{self, CameraToggle};
 use crate::input_map;
 use crate::rom_open;
+
+/// How many repaints [`RetroForgeApp::maybe_request_canvas_snapshot`] lets
+/// pass between `CoreCommand::RequestCanvasSnapshot` sends while the
+/// Ultrawide camera is active — a fresh snapshot on every repaint would
+/// clone the whole stitched `Canvas` at ~60Hz (`CanvasAccumulator::
+/// current_canvas`'s own doc: "tens of MB/s for a level of any real
+/// size"). 30 repaints is roughly twice a second at the app's normal
+/// repaint cadence — frequent enough that Ultrawide visibly keeps up with
+/// play, far below the cost of a per-frame clone.
+const CANVAS_SNAPSHOT_REFRESH_INTERVAL: u32 = 30;
 
 /// Every host key the default NES keymap binds — the fixed poll list
 /// `poll_input` checks each repaint (module doc).
@@ -97,11 +108,81 @@ pub struct RetroForgeApp {
     /// window is shown. Off by default — a debug view, not part of the
     /// ordinary play experience.
     show_layers: bool,
+    /// Ticket W4-03e: the enhanced compositor's shared-device `GpuContext`
+    /// (`rf_renderer::GpuContext::from_shared`, built once from `eframe`'s
+    /// own `wgpu_render_state` — never a second `request_headless()`
+    /// device, see that constructor's doc). `None` only if this build ever
+    /// ran on the glow backend (not expected — eframe 0.35's default
+    /// feature set is `wgpu`), in which case the Ultrawide camera degrades
+    /// to visibly unavailable rather than panicking.
+    gpu: Option<rf_renderer::GpuContext>,
+    /// Built once alongside [`Self::gpu`] (`EnhancedCompositor::new`'s own
+    /// "build once, reuse per frame" shape).
+    compositor: Option<rf_renderer::EnhancedCompositor>,
+    /// Ticket W4-03e acceptance criterion 2: the runtime Original/
+    /// Ultrawide toggle. `Original` by default — a fresh ROM boots showing
+    /// exactly what it always has (law 6).
+    camera: CameraToggle,
+    /// Latest stitched-canvas snapshot from the core thread
+    /// (`CoreEvent::CanvasSnapshot`), if the Ultrawide camera has ever been
+    /// requested this session.
+    ultrawide_canvas: Option<rf_enhance::stitcher::Canvas>,
+    /// The most recent [`enhanced_view::compose_ultrawide`] result over
+    /// [`Self::ultrawide_canvas`] — `Err` (e.g. "canvas is empty") is kept
+    /// distinct from `None` ("never even tried yet") so
+    /// [`enhanced_view::select_active_view`] can show a specific reason.
+    ultrawide_render: Option<Result<enhanced_view::UltrawideRender, String>>,
+    /// The egui texture built from [`Self::ultrawide_render`]'s `rgba`,
+    /// same "persistent `TextureHandle`, `.set()` on later frames" shape
+    /// [`Self::texture`] already uses.
+    ultrawide_texture: Option<egui::TextureHandle>,
+    /// FM-13 criterion 3: the "view too large for GPU, reduced" toast text
+    /// (`enhanced_view::UltrawideRender::fm13_message`), surfaced in
+    /// [`Self::controls_bar`] whenever the latest Ultrawide render was
+    /// reduced — `None` swallows nothing; it means the latest render
+    /// genuinely needed no reduction.
+    fm13_message: Option<String>,
+    /// Repaints remaining before [`Self::maybe_request_canvas_snapshot`]
+    /// sends another `CoreCommand::RequestCanvasSnapshot` — `0` forces an
+    /// immediate request on the very next repaint (set whenever the camera
+    /// is switched to Ultrawide).
+    ultrawide_refresh_countdown: u32,
+    /// Ticket W2-14's "a reply arrives a few ms after the click's own
+    /// repaint already finished" lesson, mirrored for canvas snapshots:
+    /// set when a `RequestCanvasSnapshot` is sent, cleared when
+    /// `CoreEvent::CanvasSnapshot` arrives — keeps the UI repainting until
+    /// the reply lands even while otherwise Paused, so it doesn't take a
+    /// stray mouse-move to show the first Ultrawide frame.
+    awaiting_canvas_snapshot: bool,
 }
 
 impl RetroForgeApp {
     #[must_use]
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Ticket W4-03e: build the ultrawide compositor's `GpuContext` from
+        // the SAME device/queue egui itself renders with
+        // (`rf_renderer::GpuContext::from_shared`'s own doc) — never a
+        // second `request_headless()` device, which would force every
+        // composited frame through an extra GPU->CPU->GPU round trip.
+        // `wgpu_render_state` is `None` only if this build ever ran on the
+        // glow backend (not expected: eframe 0.35's *default* feature set
+        // is `wgpu`, verified against `eframe-0.35.0/Cargo.toml`'s own
+        // `default` array — `docs/TECH_STACK.md` §2 records this), in
+        // which case Ultrawide degrades to visibly unavailable rather than
+        // panicking.
+        let (gpu, compositor) = match &cc.wgpu_render_state {
+            Some(rs) => {
+                let gpu = rf_renderer::GpuContext::from_shared(
+                    rs.device.clone(),
+                    rs.queue.clone(),
+                    rs.adapter.get_info(),
+                    rs.adapter.limits(),
+                );
+                let compositor = rf_renderer::EnhancedCompositor::new(&gpu);
+                (Some(gpu), Some(compositor))
+            }
+            None => (None, None),
+        };
         RetroForgeApp {
             core: None,
             texture: None,
@@ -116,6 +197,15 @@ impl RetroForgeApp {
             keymap: rf_input::KeyMap::default_nes(),
             sprite_overlay: false,
             show_layers: false,
+            gpu,
+            compositor,
+            camera: CameraToggle::Original,
+            ultrawide_canvas: None,
+            ultrawide_render: None,
+            ultrawide_texture: None,
+            fm13_message: None,
+            ultrawide_refresh_countdown: 0,
+            awaiting_canvas_snapshot: false,
         }
     }
 
@@ -165,6 +255,18 @@ impl RetroForgeApp {
                 // a previous ROM's overlay choice looking still-checked
                 // against a core that just reset it.
                 self.sprite_overlay = false;
+                // Ticket W4-03e: a new ROM is a new session for the
+                // enhanced camera too — the previous ROM's stitched canvas
+                // must not linger onscreen (or get composited into) against
+                // a completely different game. Camera resets to Original,
+                // matching "a fresh install boots in Accuracy Mode" (law 6).
+                self.camera = CameraToggle::Original;
+                self.ultrawide_canvas = None;
+                self.ultrawide_render = None;
+                self.ultrawide_texture = None;
+                self.fm13_message = None;
+                self.ultrawide_refresh_countdown = 0;
+                self.awaiting_canvas_snapshot = false;
                 self.status = format!("Loaded {}", path.display());
             }
             Err(e) => {
@@ -188,10 +290,15 @@ impl RetroForgeApp {
     fn pump_core_events(&mut self, ctx: &egui::Context) {
         let Some(core) = &self.core else { return };
         let mut latest_frame = None;
+        let mut latest_canvas = None;
         let mut crashed = false;
         while let Ok(evt) = core.evt_rx.try_recv() {
             match evt {
                 CoreEvent::Frame(msg) => latest_frame = Some(msg),
+                // Ticket W4-03e: keep only the latest, same "older ones are
+                // stale by the time we'd paint them" reasoning this
+                // function's own doc already gives for `latest_frame`.
+                CoreEvent::CanvasSnapshot(canvas) => latest_canvas = Some(canvas),
                 CoreEvent::Crashed(report) => {
                     self.crash = Some(report);
                     self.running = false;
@@ -212,6 +319,12 @@ impl RetroForgeApp {
             self.core = None;
             self.status = "Core crashed (FM-01) — open a ROM to start a fresh session".to_string();
             return;
+        }
+        if let Some(canvas) = latest_canvas {
+            // Ticket W2-14's lesson, mirrored: the reply has now landed.
+            self.awaiting_canvas_snapshot = false;
+            self.ultrawide_canvas = Some(canvas);
+            self.refresh_ultrawide_render(ctx);
         }
         if let Some(msg) = latest_frame {
             // Ticket W2-14: a stepped frame has now been consumed.
@@ -257,13 +370,87 @@ impl RetroForgeApp {
                 }
             }
         }
-        if self.running || self.awaiting_stepped_frame {
+        if self.running || self.awaiting_stepped_frame || self.awaiting_canvas_snapshot {
             // Keep repainting while running so the core thread's frames
             // keep getting picked up (CPU blit, "live frames" criterion),
-            // and likewise until a requested step's frame has landed
-            // (ticket W2-14) — while paused nothing else would wake the
-            // UI to consume it.
+            // and likewise until a requested step's frame (ticket W2-14) or
+            // a requested canvas snapshot (ticket W4-03e, same lesson) has
+            // landed — while paused nothing else would wake the UI to
+            // consume it.
             ctx.request_repaint();
+        }
+    }
+
+    /// Ticket W4-03e acceptance criterion 1: translate the current
+    /// [`Self::ultrawide_canvas`] into a `CompositeLayer`-composited RGBA
+    /// buffer (`crate::enhanced_view::compose_ultrawide` — this crate is
+    /// the mediator, `ARCHITECTURE.md` §3), upload it as
+    /// [`Self::ultrawide_texture`], and surface any FM-13 reduction
+    /// (criterion 3) as [`Self::fm13_message`]. A no-op if this build has
+    /// no GPU device ([`Self::gpu`]/[`Self::compositor`] both `None`) or no
+    /// canvas has ever arrived yet.
+    fn refresh_ultrawide_render(&mut self, ctx: &egui::Context) {
+        let (Some(gpu), Some(compositor)) = (&self.gpu, &self.compositor) else {
+            self.ultrawide_render = Some(Err(
+                "no GPU device available for the ultrawide view".to_string()
+            ));
+            self.ultrawide_texture = None;
+            self.fm13_message = None;
+            return;
+        };
+        let Some(canvas) = &self.ultrawide_canvas else {
+            return;
+        };
+        // FM-13 POLICY half (`crate::enhanced_view` module doc): the real
+        // adapter limit, never a hardcoded constant.
+        let policy_max_dim = gpu.adapter_limits.max_texture_dimension_2d;
+        let result = enhanced_view::compose_ultrawide(gpu, compositor, canvas, policy_max_dim);
+
+        // Criterion 3: surface (never swallow) whatever the latest render
+        // says about FM-13 — `None` here means the latest render genuinely
+        // needed no reduction, not that one was dropped.
+        self.fm13_message = result
+            .as_ref()
+            .ok()
+            .and_then(enhanced_view::UltrawideRender::fm13_message);
+
+        match &result {
+            Ok(render) => {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [render.width as usize, render.height as usize],
+                    &render.rgba,
+                );
+                match &mut self.ultrawide_texture {
+                    Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
+                    None => {
+                        self.ultrawide_texture = Some(ctx.load_texture(
+                            "ultrawide-frame",
+                            image,
+                            egui::TextureOptions::NEAREST,
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
+                self.ultrawide_texture = None;
+            }
+        }
+        self.ultrawide_render = Some(result);
+    }
+
+    /// Ticket W4-03e: keep the Ultrawide view live while it's the active
+    /// camera, without cloning the whole stitched canvas every repaint
+    /// (module-level [`CANVAS_SNAPSHOT_REFRESH_INTERVAL`] doc).
+    fn maybe_request_canvas_snapshot(&mut self) {
+        if self.camera != CameraToggle::Ultrawide || self.core.is_none() {
+            return;
+        }
+        if self.ultrawide_refresh_countdown == 0 {
+            self.send_command(CoreCommand::RequestCanvasSnapshot);
+            self.awaiting_canvas_snapshot = true;
+            self.ultrawide_refresh_countdown = CANVAS_SNAPSHOT_REFRESH_INTERVAL;
+        } else {
+            self.ultrawide_refresh_countdown -= 1;
         }
     }
 
@@ -334,6 +521,41 @@ impl RetroForgeApp {
                 // regardless of this checkbox, so toggling it just shows/
                 // hides the window with no round trip to the core thread.
                 ui.checkbox(&mut self.show_layers, "Layers (debug)");
+                ui.separator();
+                // Ticket W4-03e acceptance criterion 2: the runtime camera
+                // toggle. Disabled with no compositor at all (no GPU
+                // device, `Self::compositor` doc) — there is nothing to
+                // switch to in that case, and enabling the button would
+                // just click through to `enhanced_view::ActiveView::
+                // UltrawideUnavailable` every time.
+                let camera_label = match self.camera {
+                    CameraToggle::Original => "Camera: Original",
+                    CameraToggle::Ultrawide => "Camera: Ultrawide",
+                };
+                if ui
+                    .add_enabled(
+                        has_core && self.compositor.is_some(),
+                        egui::Button::new(camera_label),
+                    )
+                    .clicked()
+                {
+                    self.camera = self.camera.flipped();
+                    if self.camera == CameraToggle::Ultrawide {
+                        // Don't wait out the throttle interval for the
+                        // FIRST view after switching — request now.
+                        self.ultrawide_refresh_countdown = 0;
+                    }
+                }
+                if self.compositor.is_none() {
+                    ui.label("(no GPU device for ultrawide)");
+                }
+                // FM-13 criterion 3: "view too large for GPU, reduced" —
+                // surfaced plainly, never swallowed
+                // (`Self::refresh_ultrawide_render`'s doc).
+                if let Some(msg) = &self.fm13_message {
+                    ui.separator();
+                    ui.colored_label(egui::Color32::from_rgb(230, 180, 40), msg);
+                }
                 ui.separator();
                 ui.label(&self.status);
                 if let Some((frame, scanline)) = self.position {
@@ -426,14 +648,40 @@ impl RetroForgeApp {
             });
     }
 
+    /// Ticket W4-03e acceptance criterion 2: paints whichever camera view
+    /// [`enhanced_view::select_active_view`] resolves to — the ONLY branch
+    /// point between Original and Ultrawide, so a mutation that hardcodes
+    /// `ActiveView::Original` here (or upstream) is exactly what that
+    /// function's own tests (`enhanced_view::tests::
+    /// ultrawide_toggle_with_a_ready_render_shows_ultrawide_content_not_original`)
+    /// are written to catch. The Original arm is untouched from before this
+    /// ticket (criterion 4: Accuracy Mode's own output, unmodified).
     fn video_panel(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(texture) = &self.texture {
-                ui.add(egui::Image::from_texture(texture).shrink_to_fit());
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label(&self.status);
-                });
+            match enhanced_view::select_active_view(self.camera, self.ultrawide_render.as_ref()) {
+                enhanced_view::ActiveView::Original => {
+                    if let Some(texture) = &self.texture {
+                        ui.add(egui::Image::from_texture(texture).shrink_to_fit());
+                    } else {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(&self.status);
+                        });
+                    }
+                }
+                enhanced_view::ActiveView::Ultrawide { .. } => {
+                    if let Some(texture) = &self.ultrawide_texture {
+                        ui.add(egui::Image::from_texture(texture).shrink_to_fit());
+                    } else {
+                        ui.centered_and_justified(|ui| {
+                            ui.label("Ultrawide view: preparing texture\u{2026}");
+                        });
+                    }
+                }
+                enhanced_view::ActiveView::UltrawideUnavailable(reason) => {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(format!("Ultrawide view unavailable: {reason}"));
+                    });
+                }
             }
         });
     }
@@ -444,6 +692,7 @@ impl eframe::App for RetroForgeApp {
         let ctx = ui.ctx().clone();
         self.poll_input(&ctx);
         self.pump_core_events(&ctx);
+        self.maybe_request_canvas_snapshot();
 
         self.menu_bar(ui);
         self.controls_bar(ui);
