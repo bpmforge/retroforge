@@ -16,6 +16,7 @@ pub mod scene_graph;
 pub mod scene_identity;
 pub mod scene_tracker;
 pub mod scroll_tracker;
+pub mod sprite_historian;
 pub mod stitcher;
 
 /// Crate marker used by the test harness to confirm workspace wiring.
