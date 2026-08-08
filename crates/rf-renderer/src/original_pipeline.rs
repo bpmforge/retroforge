@@ -21,7 +21,7 @@
 
 use std::borrow::Cow;
 
-use crate::gpu::{GpuContext, GPU_WAIT};
+use crate::gpu::{read_buffer_sync, GpuContext};
 use crate::palette::NES_PALETTE;
 
 const PALETTE_SHADER_SRC: &str = include_str!("shaders/palette.wgsl");
@@ -83,39 +83,6 @@ fn lut_bytes(palette: &[[u8; 3]; 64]) -> Vec<u8> {
         }
     }
     bytes
-}
-
-/// Blocking buffer readback: maps `buffer` for reading, polls the device
-/// with a **bounded** wait (never `timeout: None` -- see
-/// `crate::gpu`'s module doc for why), and returns the mapped bytes as an
-/// owned `Vec<u8>`. `buffer` must have been created with
-/// `BufferUsages::MAP_READ`.
-fn read_buffer_sync(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<Vec<u8>, String> {
-    let slice = buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = tx.send(result);
-    });
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: Some(GPU_WAIT),
-        })
-        .map_err(|e| format!("device.poll timed out waiting for buffer readback: {e}"))?;
-    match rx.try_recv() {
-        Ok(Ok(())) => {
-            let data = slice.get_mapped_range().to_vec();
-            buffer.unmap();
-            Ok(data)
-        }
-        Ok(Err(e)) => Err(format!("buffer map_async failed: {e}")),
-        Err(_) => Err(
-            "buffer map_async callback never fired even though device.poll returned \
-                 (this would be the readback hanging the way attempts 1-2 did -- reported, \
-                 not retried)"
-                .to_string(),
-        ),
-    }
 }
 
 /// The GPU original-pipeline palette pass: indexed R8Uint texture in, RGBA8

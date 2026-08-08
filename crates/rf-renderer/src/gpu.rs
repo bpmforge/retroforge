@@ -39,6 +39,25 @@ pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_info: wgpu::AdapterInfo,
+    /// The **adapter's** real limits (ticket W4-03c), captured via
+    /// `Adapter::limits()` before the adapter is dropped, and *also* what
+    /// `device` was actually granted -- [`Self::request_headless`]
+    /// deliberately requests the device with `required_limits:
+    /// adapter_limits.clone()` rather than `DeviceDescriptor::default()`'s
+    /// conservative baseline (`Limits::default()`, ~8192 on every axis
+    /// regardless of hardware), precisely so `device.limits()` and this
+    /// field agree and both reflect the real hardware ceiling. This was
+    /// not a style choice: requesting the conservative default was tried
+    /// first and produces a device that validation-panics on any texture
+    /// above 8192 even on hardware (this run: Metal, `max_texture_
+    /// dimension_2d` 16384) that could do far more -- FM-13 enforcement
+    /// (`crate::composite`) enforcing against a ceiling that is always the
+    /// same hardcoded default regardless of adapter would be exactly the
+    /// vacuous "hardcode 8192" this ticket's brief warns against, and
+    /// would *also* still device-lose on real hardware whenever the
+    /// device's granted limit (always 8192) was below what got requested
+    /// but the adapter itself could have granted more.
+    pub adapter_limits: wgpu::Limits,
 }
 
 /// Why [`GpuContext::request_headless`] could not produce a context. Kept
@@ -89,14 +108,79 @@ impl GpuContext {
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
                 .map_err(|_| GpuUnavailable::NoAdapter)?;
         let adapter_info = adapter.get_info();
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                .map_err(|e| GpuUnavailable::DeviceRequestFailed(e.to_string()))?;
+        // Captured while `adapter` is still alive, before `request_device`
+        // below -- `Adapter::request_device` takes `&self` so this does not
+        // need to precede it, but reading the adapter's own capability
+        // first (rather than anything derived from the device we're about
+        // to request) makes the intent unambiguous: this is the hardware
+        // ceiling, not a negotiated/requested value.
+        let adapter_limits = adapter.limits();
+        // Request the device with the adapter's *own* limits, not
+        // `DeviceDescriptor::default()`'s conservative baseline
+        // (`Limits::default()`, ~8192 on every axis regardless of
+        // hardware) -- verified empirically (ticket W4-03c), not assumed:
+        // `Device::limits()`'s doc says the granted limits "will be equal
+        // to the required_limits specified when creating the device," and
+        // requesting the conservative default reproduced exactly that --
+        // on this machine's real Metal adapter (`max_texture_dimension_2d`
+        // 16384), the *device* still only granted 8192, and creating a
+        // texture above that (even though the adapter could do it) hit a
+        // real `wgpu` validation panic. FM-13 enforcement
+        // (`crate::composite`) is worthless against a ceiling that is
+        // always the same hardcoded default irrespective of the actual
+        // adapter, so this crate must request (and therefore be granted,
+        // since we're asking for no more than what `adapter.limits()` just
+        // reported) the real capability up front.
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: adapter_limits.clone(),
+            ..Default::default()
+        }))
+        .map_err(|e| GpuUnavailable::DeviceRequestFailed(e.to_string()))?;
         Ok(GpuContext {
             device,
             queue,
             adapter_info,
+            adapter_limits,
         })
+    }
+}
+
+/// Blocking buffer readback: maps `buffer` for reading, polls the device
+/// with a **bounded** wait (never `timeout: None` -- see this module's own
+/// doc for why), and returns the mapped bytes as an owned `Vec<u8>`.
+/// `buffer` must have been created with `BufferUsages::MAP_READ`. Shared by
+/// every GPU pass in this crate (`crate::original_pipeline`,
+/// `crate::composite`) rather than re-derived per pass -- the
+/// map_async/poll/try_recv dance is exactly the kind of thing ticket W3-01
+/// already spent two stalled attempts getting right (module doc).
+pub(crate) fn read_buffer_sync(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+) -> Result<Vec<u8>, String> {
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(GPU_WAIT),
+        })
+        .map_err(|e| format!("device.poll timed out waiting for buffer readback: {e}"))?;
+    match rx.try_recv() {
+        Ok(Ok(())) => {
+            let data = slice.get_mapped_range().to_vec();
+            buffer.unmap();
+            Ok(data)
+        }
+        Ok(Err(e)) => Err(format!("buffer map_async failed: {e}")),
+        Err(_) => Err(
+            "buffer map_async callback never fired even though device.poll returned \
+                 (this would be the readback hanging the way attempts 1-2 did -- reported, \
+                 not retried)"
+                .to_string(),
+        ),
     }
 }
 

@@ -19,13 +19,21 @@
 //! [`layers`] is ticket W3-03's BG/sprite layer extraction, built directly
 //! from `CoreSink` metadata (see that module's doc for the deliberate
 //! scope fence against building `RENDERER.md` §3's `SceneGraph`).
+//! [`composite`] is ticket W4-03c's enhanced-pipeline layer compositor:
+//! shell-resolved RGBA layers, back-to-front, into an arbitrarily sized
+//! (including ultrawide) render target, with FM-13 allocation-size
+//! enforcement against the real adapter limit (see that module's doc for
+//! the shell-mediated scope fence -- this crate still has no dependency on
+//! `rf-enhance`).
 
+pub mod composite;
 pub mod frame;
 pub mod gpu;
 pub mod layers;
 pub mod original_pipeline;
 pub mod palette;
 
+pub use composite::{CompositeLayer, CompositeOutcome, EnhancedCompositor, TargetReduction};
 pub use frame::FrameBuffer;
 pub use gpu::{GpuContext, GpuUnavailable};
 pub use layers::LayeredFrame;
