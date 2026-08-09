@@ -24,7 +24,12 @@
 //! (including ultrawide) render target, with FM-13 allocation-size
 //! enforcement against the real adapter limit (see that module's doc for
 //! the shell-mediated scope fence -- this crate still has no dependency on
-//! `rf-enhance`).
+//! `rf-enhance`). [`scale`] is ticket W3-01b's original-pipeline scale
+//! pass (`docs/design/RENDERER.md` §2/§7): overscan crop + integer/PAR
+//! scale over the 1x post-palette buffer, nearest-neighbor, plus the CPU
+//! oracle ([`scale::render_scaled_reference`]) `rf-harness`'s
+//! reference-image-with-tolerance test checks the GPU output against,
+//! since (§7) nothing past the 1x buffer is golden-hashable in CI.
 
 pub mod composite;
 pub mod frame;
@@ -32,6 +37,7 @@ pub mod gpu;
 pub mod layers;
 pub mod original_pipeline;
 pub mod palette;
+pub mod scale;
 
 pub use composite::{CompositeLayer, CompositeOutcome, EnhancedCompositor, TargetReduction};
 pub use frame::FrameBuffer;
@@ -39,6 +45,7 @@ pub use gpu::{GpuContext, GpuUnavailable};
 pub use layers::LayeredFrame;
 pub use original_pipeline::{IndexedFrame, PalettePass};
 pub use palette::{palette_index_to_rgb, NES_PALETTE};
+pub use scale::{render_scaled_reference, FillMode, Overscan, ParRatio, ScaleGeometry, ScalePass};
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-renderer";

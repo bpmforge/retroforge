@@ -19,6 +19,12 @@
 //! from the "cores only via rf-core-api" restriction by name, alongside
 //! the app shell and the cores themselves.
 //!
+//! [`tolerance`] is ticket W3-01b's reference-image-with-tolerance
+//! mechanism (`docs/design/RENDERER.md` §7): `rf_renderer::scale`'s scale
+//! pass runs past the golden-hashable 1x buffer, so
+//! `tests/scale_pass_tolerance.rs` checks its GPU output against a CPU
+//! oracle with [`compare_with_tolerance`] instead of a frozen hash.
+//!
 //! Do not add public API here without a ticket in plan.json.
 
 mod accuracy;
@@ -30,6 +36,7 @@ mod json;
 mod manifest;
 pub mod nes6502_evidence;
 pub mod nestest_evidence;
+mod tolerance;
 mod vector_json;
 
 pub use accuracy::{
@@ -51,6 +58,9 @@ pub use json::Json;
 pub use manifest::{
     Artifact, Console, GitArtifact, LicenseStatus, Manifest, Protocol, Suite, SuiteRom, Tier,
     ValidationError,
+};
+pub use tolerance::{
+    compare_with_tolerance, dump_ppm, ToleranceConfig, ToleranceReport, DEFAULT_TOLERANCE,
 };
 
 /// Crate marker used by the test harness to confirm workspace wiring.

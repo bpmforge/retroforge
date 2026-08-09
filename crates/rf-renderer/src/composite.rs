@@ -37,7 +37,7 @@
 
 use std::borrow::Cow;
 
-use crate::gpu::{read_buffer_sync, GpuContext};
+use crate::gpu::{align_up, read_buffer_sync, GpuContext};
 
 const COMPOSITE_SHADER_SRC: &str = include_str!("shaders/composite.wgsl");
 
@@ -487,13 +487,6 @@ impl EnhancedCompositor {
             reduction,
         })
     }
-}
-
-/// Round `value` up to the next multiple of `align` (`align` clamped to at
-/// least 1 so this never divides by zero).
-fn align_up(value: u32, align: u32) -> u32 {
-    let align = align.max(1);
-    value.div_ceil(align) * align
 }
 
 /// Pixel-space (top-left origin, +Y down, matching every RGBA buffer this

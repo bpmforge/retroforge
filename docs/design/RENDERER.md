@@ -35,6 +35,31 @@ default-on with fractional fill as a user option; overscan crop (default
 palette LUT is data (checked-in `.pal` assets + generator tool), so palette
 research doesn't touch shaders.
 
+**Integer scaling vs. 8:7 PAR, resolved (ticket W3-01b):** these two rules
+pull against each other — 8:7 is not an integer ratio, so a single scale
+factor applied to both axes cannot be simultaneously integer *and* land on
+exactly 8:7. Two resolutions were on the table: (a) integer-scale both axes
+by the same whole number, then apply a second, separate horizontal-only
+stretch to correct the aspect; or (b) integer-lock only the vertical axis
+and let the horizontal axis carry the (non-integer) PAR correction
+directly, in the same pass. **Chosen: (b).** The vertical axis is the one
+[`Overscan`](../../crates/rf-renderer/src/scale.rs) crops (224 vs. 240
+lines), so keeping it integer keeps every cropped source scanline landing
+on an exact whole number of output rows with no seam; the horizontal axis
+was already going into non-integer territory the moment 8:7 entered the
+picture, so there is nothing extra lost by computing it directly as
+`y_scale * 8/7` rather than integer-scaling it first and immediately
+undoing that with a second stretch. (a) and (b) produce the *same final
+output size* either way (`out_width` is `source_width * y_scale * 8/7`
+under both) — (a)'s second pass is pure overhead for an identical result,
+so (b) is strictly simpler: one pass, one shader, one shared rounding rule
+between the GPU pass and its CPU reference oracle (§7). Implemented in
+`rf-renderer::scale` (`ScaleGeometry`, `FillMode::IntegerLocked`,
+`ParRatio`); the 8:7 "user override" is exposed as a `ParRatio` the caller
+supplies (`ParRatio::SQUARE` for square pixels, or any other ratio) — a
+settings-UI control for it is app-shell (`crates/retroforge`) scope, not
+built by this ticket.
+
 ## 3. Enhanced pipeline
 
 Renders the `SceneGraph` back-to-front into a **virtual canvas** whose size
@@ -115,6 +140,29 @@ there is a cross-backend question to investigate, not necessarily a code
 regression). Anything after the 1× buffer is *not* hashed in CI (shader
 output may differ per driver — validated by eyeball + reference images with
 tolerance instead).
+
+**The tolerance mechanism (ticket W3-01b):** `rf-harness::tolerance`
+(`compare_with_tolerance`, `ToleranceConfig`, `DEFAULT_TOLERANCE`) is that
+"reference images with tolerance" instrument. The "reference image" side is
+a CPU oracle (`rf_renderer::scale::render_scaled_reference`) computed by
+the same formula, at the same `f32` precision, as `shaders/scale.wgsl` —
+not a checked-in binary asset — the same "independent oracle, not a
+codified GPU output" shape §7's palette-pass golden hash already pairs
+with `palette_index_to_rgb`. The metric is two numbers applied together: a
+per-pixel `channel_delta` (how far any one channel may drift and still
+count as "matching" — kept at `0` for a nearest-neighbor pass, since a
+correct sample is either exactly right or a different texel entirely, not
+"slightly off") and a `max_mismatch_fraction` (how many pixels, as a
+fraction of the frame, are allowed to fail that check at all — this is the
+number that actually absorbs cross-backend float noise, and is also kept
+at `0.0`: on this ticket's own Metal run the GPU scale pass and its CPU
+oracle came back byte-identical, 0 of 65,632 pixels, so there was no
+observed noise to size a nonzero allowance against — see
+`crates/rf-harness/tests/scale_pass_tolerance.rs` for the measured numbers
+and its four calibration mutations, each of which must fail this exact
+threshold). On tolerance-check failure the test dumps both buffers as
+`.ppm` files (`rf-harness::tolerance::dump_ppm` — no image-codec dependency
+needed to write one) for the "eyeball" half of this section's own name.
 
 **Backend choice, decided (ticket W3-01, 2026-08-07):** `.github/workflows/ci.yml`
 sets `WGPU_BACKEND=gl` + `LIBGL_ALWAYS_SOFTWARE=1` — OpenGL via **llvmpipe**,

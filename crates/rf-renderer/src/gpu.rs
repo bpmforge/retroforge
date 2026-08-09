@@ -220,6 +220,19 @@ pub(crate) fn read_buffer_sync(
     }
 }
 
+/// Round `value` up to the next multiple of `align` (`align` clamped to at
+/// least 1 so this never divides by zero). Shared by every GPU pass in this
+/// crate whose readback target isn't guaranteed 256-byte-aligned by
+/// construction (`crate::composite`, `crate::scale`) -- `original_pipeline`
+/// can `debug_assert` the alignment away instead because 256x240 RGBA8
+/// (1024 bytes/row) already satisfies it, but neither an arbitrary
+/// enhanced-composite target nor a PAR-scaled output width has that
+/// guarantee.
+pub(crate) fn align_up(value: u32, align: u32) -> u32 {
+    let align = align.max(1);
+    value.div_ceil(align) * align
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
