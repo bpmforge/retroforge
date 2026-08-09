@@ -210,6 +210,17 @@ pub struct FrameMsg {
     /// auto-derefs to `&[u8; 256]` at every `rf_debugger::oam::decode_oam`
     /// call site, so this costs nothing at the call sites, only here.
     pub oam: Box<[u8; 256]>,
+    /// Ticket W4-06b: the same frame's 2 KiB WRAM snapshot
+    /// (`EmuStepper::wram_snapshot`, side-effect-free — same "read-only is
+    /// a hard requirement" posture as `oam` above), for
+    /// `rf_debugger::memory_view`'s memory-hex panel. `Box`ed for the same
+    /// `clippy::large_enum_variant` reason `oam` already is.
+    pub wram: Box<[u8; 0x0800]>,
+    /// Ticket W4-06b: the same frame's cartridge PRG-RAM window
+    /// (`EmuStepper::prg_ram`, side-effect-free), the memory viewer's
+    /// second live range — see `EmuStepper::prg_ram`'s own doc for why one
+    /// range alone (WRAM) isn't enough.
+    pub prg_ram: Box<[u8; 0x2000]>,
 }
 
 /// What the core thread reports back to the UI thread.
@@ -588,6 +599,8 @@ fn core_thread_main(
                 bg_rgba: layers.bg_rgba().to_vec(),
                 sprite_rgba: layers.sprite_rgba().to_vec(),
                 oam: Box::new(*stepper.oam()),
+                wram: Box::new(stepper.wram_snapshot()),
+                prg_ram: Box::new(*stepper.prg_ram()),
             };
             if frame_tx.send(CoreEvent::Frame(msg)).is_err() {
                 // UI thread hung up; nothing left to serve.

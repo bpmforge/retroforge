@@ -32,3 +32,16 @@ rf-renderer = { path = "../rf-renderer" }
 # surface, both already resolve in Cargo.lock.
 toml = "1"
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# rf-profiles: dev-only, for `crate::profile_export`'s own test suite to
+# round-trip its output through the REAL validator (`rf_profiles::
+# load_str`, the exact function `retroforge-tool profile validate` calls —
+# ticket W4-06b criterion 2's vacuity trap: "an export test that only
+# checks the TOML parses proves nothing"). Not a `[dependencies]` entry:
+# nothing in this crate's production code needs `rf-profiles` at runtime
+# (`crate::profile_export` builds its own `Serialize` structs — see that
+# module's doc for why), and validate-arch.sh rule 3 (which the ticket
+# brief flags as matching `[dev-dependencies]` too) only forbids
+# `rf-nes`/`rf-snes`, not `rf-profiles`.
+rf-profiles = { path = "../rf-profiles" }

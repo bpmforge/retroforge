@@ -3,6 +3,12 @@
 //! nametable/palette/OAM viewers, event viewer, `egui_dock` layout
 //! persistence — FR-DBG-001, DEBUGGER.md §3, FR-FE-004).
 //!
+//! Ticket W4-06b adds the annotation store + profile-skeleton export +
+//! DataCrystal TSV import + memory-viewer data layer (FR-DBG-005,
+//! FR-DBG-002, GAME_PROFILES.md §3 steps 1-2, CONSTRAINTS §2's
+//! facts-only transcription policy): [`annotation`], [`profile_export`],
+//! [`datacrystal`], [`memory_view`].
+//!
 //! See /docs/MODULE_DESIGN.md and /docs/design/ for the contract this crate
 //! must implement. Do not add public API here without a ticket in plan.json.
 //!
@@ -36,13 +42,21 @@
 //! | [`oam`] | OAM/Sprite | Yes — live, every frame |
 //! | [`event_timeline`] | Event viewer | Yes — live, `FrameBundle::events` |
 //! | [`layout`] | (docking, not a viewer) | N/A — pure persisted-format data |
+//! | [`memory_view`] | Memory hex | Yes — live, `EmuStepper::peek`/`prg_ram` (W4-06b) |
+//! | [`annotation`] | (annotation store, not a viewer) | N/A — pure data (W4-06b) |
+//! | [`profile_export`] | (skeleton export, not a viewer) | N/A — pure data (W4-06b) |
+//! | [`datacrystal`] | (TSV import, not a viewer) | N/A — pure data (W4-06b) |
 
+pub mod annotation;
+pub mod datacrystal;
 pub mod event_timeline;
 pub mod layout;
+pub mod memory_view;
 pub mod nametable;
 pub mod oam;
 pub mod palette;
 pub mod pattern;
+pub mod profile_export;
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-debugger";

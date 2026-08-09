@@ -282,6 +282,8 @@ impl RetroForgeApp {
                 self.debug_panels.data.chr_rom = chr_rom;
                 self.debug_panels.data.oam = [0u8; 256];
                 self.debug_panels.data.events = Vec::new();
+                self.debug_panels.data.wram = [0u8; 0x0800];
+                self.debug_panels.data.prg_ram = [0u8; 0x2000];
                 // A fresh `EmuStepper` (inside `core_thread::spawn` below)
                 // starts back at `stepper::CAMERA_BASELINE_EVENT_MASK` —
                 // if the event-viewer panel was already open before this
@@ -404,6 +406,11 @@ impl RetroForgeApp {
             // in this same block.
             self.debug_panels.data.oam = *msg.oam;
             self.debug_panels.data.events = latest_bundle_events;
+            // Ticket W4-06b: WRAM/PRG-RAM travel with the frame the same
+            // way OAM already does — see `core_thread::FrameMsg::wram`'s
+            // own doc.
+            self.debug_panels.data.wram = *msg.wram;
+            self.debug_panels.data.prg_ram = *msg.prg_ram;
             let image =
                 egui::ColorImage::from_rgba_unmultiplied([msg.width, msg.height], &msg.rgba);
             match &mut self.texture {

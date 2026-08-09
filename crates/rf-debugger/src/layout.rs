@@ -31,6 +31,13 @@ use serde::{Deserialize, Serialize};
 /// a viewer later is an additive enum variant — old persisted layouts that
 /// never mention it still deserialize fine (`#[serde(default)]`-free here
 /// because every variant is a plain unit case with no fields to default).
+///
+/// `Memory` (ticket W4-06b, FR-DBG-002): the read-only, non-perturbing
+/// memory-hex panel over `crate::memory_view`'s decoded rows. Adding it
+/// does **not** bump [`LAYOUT_FORMAT_VERSION`] — this doc's own "additive
+/// enum variant" clause covers exactly this case, an old persisted layout
+/// that never mentions `Memory` still deserializes fine, it simply never
+/// lists that tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DebugTab {
     Pattern,
@@ -38,6 +45,7 @@ pub enum DebugTab {
     Palette,
     Oam,
     EventTimeline,
+    Memory,
 }
 
 /// Which axis a [`PersistedNode::Split`] divides along — matches
@@ -107,7 +115,7 @@ pub fn default_layout() -> PersistedLayout {
                     active: 0,
                 }),
                 second: Box::new(PersistedNode::Leaf {
-                    tabs: vec![DebugTab::Palette, DebugTab::Oam],
+                    tabs: vec![DebugTab::Palette, DebugTab::Oam, DebugTab::Memory],
                     active: 0,
                 }),
             }),

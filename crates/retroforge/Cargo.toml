@@ -64,3 +64,13 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 # `egui_dock-0.20.1` source, not training data) to capture/restore it —
 # see that module's doc for the full reasoning.
 egui_dock = "0.20.1"
+
+[dev-dependencies]
+# rf-profiles: dev-only, for the ticket W4-06b criterion-2 integration test
+# (`tests/profile_skeleton_export.rs`) to re-parse the exported skeleton
+# with the real loader (`rf_profiles::load_file`) after round-tripping it
+# through the actual `retroforge-tool` CLI as a subprocess, and assert
+# `source` actually survived (not just that the CLI exited 0 — an unknown-
+# key typo would still exit 0 with a warning). Not a `[dependencies]`
+# entry: nothing in this crate's production code touches `rf-profiles`.
+rf-profiles = { path = "../rf-profiles" }

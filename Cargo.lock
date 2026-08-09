@@ -2978,6 +2978,7 @@ dependencies = [
  "rf-enhance",
  "rf-input",
  "rf-nes",
+ "rf-profiles",
  "rf-renderer",
  "rfd",
  "sha2",
@@ -3029,6 +3030,7 @@ name = "rf-debugger"
 version = "0.1.0"
 dependencies = [
  "rf-core-api",
+ "rf-profiles",
  "rf-renderer",
  "serde",
  "toml",

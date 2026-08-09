@@ -278,6 +278,38 @@ impl EmuStepper {
         self.bus.oam()
     }
 
+    /// Side-effect-free 2 KiB WRAM snapshot (`$0000-$07FF`, the real
+    /// backing 2 KiB — not its `$0800`-stepped mirrors, same span
+    /// `Self::state_hash`'s own doc already enumerates as "reachable
+    /// state") — ticket W4-06b's debug memory-viewer panel (FR-DBG-002).
+    /// Built by looping [`Self::peek`], so it carries that method's exact
+    /// side-effect-free guarantee: looping it 2048 times doesn't change
+    /// which registers/counters it touches (none). `PRG-RAM`'s equivalent
+    /// ([`Self::prg_ram`]) needs no loop because `NesBus` already exposes
+    /// that window as a direct slice.
+    #[must_use]
+    pub fn wram_snapshot(&self) -> [u8; 0x0800] {
+        let mut out = [0u8; 0x0800];
+        for (addr, byte) in out.iter_mut().enumerate() {
+            *byte = self.peek(addr as u16);
+        }
+        out
+    }
+
+    /// The cartridge PRG-RAM window (`$6000-$7FFF`, 8 KiB) — forwards
+    /// `NesBus::prg_ram`, already side-effect-free (that method's own
+    /// doc). Ticket W4-06b's debug memory-viewer panel's SECOND live
+    /// range, alongside [`Self::wram_snapshot`]: commercial-game
+    /// `memory_map` annotations very often live here, not in WRAM (e.g.
+    /// `profiles/nes/rf-scroller-demo/profile.toml`'s `player_x`/
+    /// `camera_x` at `$6029`/`$602B`) — a viewer covering WRAM alone would
+    /// never surface the addresses this project's own example profile
+    /// annotates.
+    #[must_use]
+    pub fn prg_ram(&self) -> &[u8; 0x2000] {
+        self.bus.prg_ram()
+    }
+
     /// Whether the sprite-limit-bypass overlay is currently recording
     /// (ticket W3-05a) — forwards `NesBus::sprite_overlay_enabled`. `false`
     /// on a freshly opened ROM (law 6: a fresh install boots in Accuracy

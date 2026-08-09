@@ -207,6 +207,15 @@ pub struct PanelData {
     /// `CoreHandle::frame_bundle`) — genuinely live, gated by whatever mask
     /// `DebugPanels::wants_event_subscription` last asked for.
     pub events: Vec<rf_core_api::CoreEvent>,
+    /// Ticket W4-06b: latest frame's 2 KiB WRAM snapshot
+    /// (`core_thread::FrameMsg::wram`) — genuinely live, read-only,
+    /// non-perturbing (`EmuStepper::wram_snapshot`'s own doc).
+    pub wram: [u8; 0x0800],
+    /// Ticket W4-06b: latest frame's 8 KiB PRG-RAM window
+    /// (`core_thread::FrameMsg::prg_ram`) — the memory viewer's second
+    /// live range (`EmuStepper::prg_ram`'s own doc for why WRAM alone
+    /// isn't enough).
+    pub prg_ram: [u8; 0x2000],
 }
 
 impl Default for PanelData {
@@ -215,6 +224,8 @@ impl Default for PanelData {
             chr_rom: None,
             oam: [0u8; 256],
             events: Vec::new(),
+            wram: [0u8; 0x0800],
+            prg_ram: [0u8; 0x2000],
         }
     }
 }
@@ -307,6 +318,7 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
             DebugTab::Palette => "Palette",
             DebugTab::Oam => "OAM",
             DebugTab::EventTimeline => "Events",
+            DebugTab::Memory => "Memory",
         }
         .into()
     }
@@ -318,6 +330,7 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
             DebugTab::Palette => palette_ui(ui),
             DebugTab::Oam => oam_ui(ui, &self.data.oam),
             DebugTab::EventTimeline => event_timeline_ui(ui, &self.data.events),
+            DebugTab::Memory => memory_ui(ui, &self.data.wram, &self.data.prg_ram),
         }
     }
 }
@@ -416,6 +429,41 @@ fn oam_ui(ui: &mut egui::Ui, oam: &[u8; 256]) {
                     ui.end_row();
                 }
             });
+    });
+}
+
+/// Ticket W4-06b (FR-DBG-002, DEBUGGER.md §3 "Memory hex" row): a
+/// read-only hex dump of the two live ranges `PanelData` carries — WRAM
+/// (`$0000-$07FF`) and cartridge PRG-RAM (`$6000-$7FFF`),
+/// `rf_debugger::memory_view::build_rows`'d separately (they're not
+/// contiguous). Purely a rendering of already-decoded rows: nothing here
+/// reads the core itself (that already happened on the core thread, into
+/// `PanelData`, non-perturbingly — `EmuStepper::wram_snapshot`/`prg_ram`'s
+/// own docs), which is what keeps this panel "read-only and
+/// non-perturbing" even though it repaints every frame.
+fn memory_ui(ui: &mut egui::Ui, wram: &[u8; 0x0800], prg_ram: &[u8; 0x2000]) {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.label("WRAM ($0000-$07FF)");
+        memory_rows_ui(ui, "debug-memory-wram", 0x0000, wram);
+        ui.separator();
+        ui.label("PRG-RAM ($6000-$7FFF)");
+        memory_rows_ui(ui, "debug-memory-prgram", 0x6000, prg_ram);
+    });
+}
+
+fn memory_rows_ui(ui: &mut egui::Ui, grid_id: &str, base_addr: u32, bytes: &[u8]) {
+    let rows = rf_debugger::memory_view::build_rows(base_addr, bytes);
+    egui::Grid::new(grid_id).striped(true).show(ui, |ui| {
+        for row in &rows {
+            ui.monospace(format!("{:04X}", row.addr));
+            let hex: String = row
+                .bytes
+                .iter()
+                .map(|b| format!("{b:02X} "))
+                .collect::<String>();
+            ui.monospace(hex);
+            ui.end_row();
+        }
     });
 }
 
