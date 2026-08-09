@@ -1842,7 +1842,7 @@
     "unknown-key warnings, newer-major rejection (FR-PROF-004, NFR-008)"
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "PRE-FLIGHT + CLAIM 2026-08-08 (conductor, HEAD ce38a0a, baseline 712 passed / 0 failed / 7 ignored). Scope [crates/rf-profiles/**, tools/**, profiles/**] is NOT self-blocking -- tests live under the crate, the CLI under tools/, example profiles under profiles/. No amendment needed to this ticket's own scope.",
     "COLLISION FOUND AND RESOLVED IN THE BOARD, not left to be discovered mid-implementation: W4-02 and W4-07 BOTH write to tools/**, BOTH create the `retroforge-tool` binary (which does not exist -- there is no tools/ directory and no such bin anywhere), and BOTH define a subcommand called `hash` -- W4-02's matches a PROFILE against a ROM, W4-07's emits RA-compatible ROM hashes. Neither depended on the other, so whichever ran second would have collided with a binary and a subcommand namespace it did not expect. RESOLUTION: W4-02 (this ticket) OWNS the retroforge-tool skeleton and the `profile` subcommand group; W4-07 now depends_on W4-02 and owns the `rom` group. DESIGN THE SUBCOMMAND NAMESPACE ONCE, HERE -- prefer `retroforge-tool profile validate` / `profile hash` and leave `rom ...` free -- so W4-07 slots in without renaming anything.",
@@ -1851,11 +1851,47 @@
     "HASH-MATCH TRAP (criterion 2, FR-PROF-002 / FR-MODE-005): 'incl. md5/crc32 aliases' means a profile may identify its ROM by ANY of the hash families rf-cart computes -- SHA-256 primary, plus SHA-1, MD5 and CRC32 for RetroAchievements/No-Intro compatibility. rf-cart ALREADY computes all four with RA-convention normalization (ticket W0-02, docs/research/game-identity-and-re-data.md); do NOT reimplement hashing, and do not assume SHA-256-only. Note the RustCrypto 0.11 trap while you are there: finalize() returns Array<u8,N> with no LowerHex, so the 0.10 `format!(\"{:x}\")` idiom does not compile -- rf-cart hex-encodes manually and is the pattern to copy.",
     "VACUITY TRAPS. (a) A schema test that only parses a VALID profile cannot detect a loader that accepts anything -- assert that a newer-major profile is REJECTED and that an unknown key WARNS (and that the warning is actually surfaced, not swallowed). (b) A hash-match test using one hash family proves nothing about the aliases -- exercise each family the criterion names, and include a NEGATIVE case where the profile does not match the ROM. (c) A `profile validate` CLI test that only checks exit code 0 on a good file is worthless -- assert a bad file exits non-zero AND names the offending key. This board has caught SIX tests that exercised a path without discriminating it (see docs/work/HANDOFF.md's session-lessons section); do not add a seventh.",
     "SCOPE FENCE: this ticket ships the LOADER, the SCHEMA and the VALIDATOR. It does NOT ship a decoder -- `metatile_screens` is W5-02a and depends on W5-01, which depends on this. RF-Scroller's FORMAT.md documents a column-RLE metatile level format built specifically to be that decoder's first target, so the schema must be able to EXPRESS it, but nothing here decodes anything. Resist the pull.",
-    "NO EXECUTABLE CODE IN PROFILES -- ARCHITECTURE section 7 is explicit that rf-profiles is 'data only; code = plugins', and D-005 makes community intake deny-by-default with SPDX licence + provenance required. Whatever the schema allows must stay declarative; a field that smuggles in behaviour would breach both."
+    "NO EXECUTABLE CODE IN PROFILES -- ARCHITECTURE section 7 is explicit that rf-profiles is 'data only; code = plugins', and D-005 makes community intake deny-by-default with SPDX licence + provenance required. Whatever the schema allows must stay declarative; a field that smuggles in behaviour would breach both.",
+    "CLOSED 2026-08-08 at 599ef5a. Gate verified INDEPENDENTLY by the conductor: all seven exit 0 plus `cargo deny check licenses` ok; workspace 745 passed / 0 failed / 7 ignored (baseline 712, +33). No new EXTERNAL crate entered the tree -- Cargo.lock grew only by the local retroforge-tool package.",
+    "UNBLOCKED BY THIS: W4-05, W4-06b, W5-01, W5-06. The CLI namespace collision with W4-07 was resolved in the board at claim time, and this ticket honoured it -- `profile validate` / `profile hash` under a `profile` group, with `rom` reserved and refusing with a message that names W4-07 by ticket id.",
+    "TWO MECHANISMS, NOT ONE, and the distinction is load-bearing: unknown keys WARN, newer majors REJECT. serde's deny_unknown_fields ERRORS rather than warns, so shape-checking hand-walks the parsed toml::Value against a whitelist tree; and the major check runs BEFORE the typed deserialize, so a profile that is both newer-major and structurally broken fails with the NEWER-MAJOR error rather than a confusing parse error. LoadOutcome{profile, warnings} carries warnings out by value so they cannot be dropped between loader and CLI -- and the mutation suite proves the two swallow points are genuinely distinct, since killing the library's collection and killing the CLI's printing fail DIFFERENT tests.",
+    "HASHING CONSUMED, NOT REBUILT, as the pre-flight required: matches_rom takes rf_cart::RomIdentity/RomHashes directly, compares against `.normalized` never `.raw`, case-insensitively; an [[identity]] entry must match on EVERY family it specifies while the profile matches if ANY entry does. matching_revision returns the matched entry rather than a bool, added mid-task because FR-PROF-002 names per-revision overrides and a bool would force a future consumer to re-search. Mutation: matching on sha256 alone killed 6 tests.",
+    "MY PRE-FLIGHT NOTE WAS WRONG AND THE EXECUTOR SAID SO: I wrote that `profiles/` already had example profiles to parse, having listed the nes/ and snes/ directories WITHOUT checking their contents -- both were empty. Two synthetic examples were authored instead, with tests/example_profiles.rs walking /profiles and failing if any profile there does not load, which makes them load-bearing rather than decorative. The NES example mirrors RF-Scroller's real FORMAT.md constants (SCREEN_COLS=48, SCREEN_ROWS=14, column_rle) to prove the schema can EXPRESS that fixture's format -- nothing decodes it, per the scope fence.",
+    "OUT-OF-SCOPE EDIT, DECLARED AND JUSTIFIED AT THE EDIT SITE: root Cargo.toml gains `tools/*` in members. Structurally required -- a tools/ crate with neither a members entry nor its own [workspace] table is a hard cargo error, and a standalone [workspace] would drop retroforge-tool out of `cargo test --workspace`, `clippy --workspace`, `fmt --all` and `cargo deny`, all of which this ticket's own gate runs.",
+    "AN ARCH BLIND SPOT WORTH KNOWING ABOUT, created deliberately and recorded here rather than left implicit: the crate lives under tools/ rather than crates/ BECAUSE scripts/validate-arch.sh rule 3 iterates `for c in crates/*/` and therefore never walks tools/. That lets W4-07's future `rom` group depend on rf-nes/rf-snes for trace capture without tripping the 'only retroforge and rf-harness may depend on a console core directly' rule. The reasoning is sound -- a dev CLI is harness-like, and the rule's own comment names the app shell and test harness as the legitimate consumers -- but the effect is that anything under tools/ is now OUTSIDE the layer linter entirely. If tools/ ever grows beyond dev tooling, either rule 3 should walk it with an explicit allowlist or the exemption should be stated in ARCHITECTURE section 3, rather than resting on a path the linter happens not to visit.",
+    "FR-PROF-003 IS NOT MET AND WAS CORRECTLY NOT FAKED -- filed as W4-02a. The SRS says 'validation SHALL FAIL' without a `source` citation on every memory_map/rom_map entry, but that is not among this ticket's four acceptance criteria, so `source` shipped as an OPTIONAL field (schema expressive) with no enforcement. Note GAME_PROFILES.md section 2's own rom_map EXAMPLE omits `source`, so the spec's example currently violates the spec's requirement."
    ],
    "stories": [
     "E6-S2",
     "E6-S3"
+   ]
+  },
+  {
+   "id": "W4-02a",
+   "title": "Enforce FR-PROF-003: profiles must cite a source for every memory_map/rom_map entry",
+   "phase": 4,
+   "crate": "rf-profiles",
+   "write_scope": [
+    "crates/rf-profiles/**",
+    "tools/**",
+    "profiles/**"
+   ],
+   "depends_on": [
+    "W4-02"
+   ],
+   "acceptance": [
+    "validation FAILS a profile with a memory_map or rom_map entry lacking `source` (FR-PROF-003), naming the offending entry",
+    "the shipped example profiles under /profiles cite sources and still load clean, so the rule is exercised by real data rather than only by a negative test",
+    "docs/design/GAME_PROFILES.md section 2's rom_map example updated to include `source`, since it currently omits the field the SRS makes mandatory"
+   ],
+   "points": 1,
+   "status": "todo",
+   "stories": [],
+   "notes": [
+    "FILED 2026-08-08 at W4-02's close, flagged by that ticket's executor rather than assumed away. FR-PROF-003 (docs/SRS.md line 106) reads: 'Every memory_map/rom_map entry shall carry a `source` citation (clean-room provenance); validation SHALL FAIL without one.' W4-02's four acceptance criteria do not mention it, so the executor added `source`/`notes` as OPTIONAL fields (schema now expressive) and deliberately did NOT implement fail-without-one. Correct call -- it is a scope decision, not an oversight.",
+    "THE ENFORCEMENT IS ORPHANED, WHICH IS WHY THIS IS A TICKET AND NOT A NOTE. The only ticket citing FR-PROF-003 is W5-01 (RF-Scroller profile: identity + RAM map), which is a profile-AUTHORING ticket -- it will cite sources in its own profile, but nothing will FAIL a profile that omits them. The requirement's verb is 'validation shall fail', and validation lives in the loader W4-02 just built. Same shape as the FR-REND-004 gap found at W4-03b: a requirement with an owning crate, a consumer, and nobody building the enforcing half.",
+    "WHY IT MATTERS BEYOND TIDINESS: `source` is the CLEAN-ROOM PROVENANCE field. D-005 makes community profile intake deny-by-default with SPDX licence + provenance required, and NFR-011's core rule is that first-party work is clean-room from documentation rather than transcribed. An unenforced `source` field means a community profile can assert a RAM map with no stated origin and pass validation -- which is precisely the intake hazard D-005 exists to close.",
+    "NOTE THE DOC IS ALSO WRONG and fixing it is in scope: GAME_PROFILES.md section 2's own `rom_map` example OMITS `source`, so the spec's example currently fails the spec's own requirement. Anyone implementing from the example would produce an invalid profile."
    ]
   },
   {
