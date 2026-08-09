@@ -1,4 +1,4 @@
-# HANDOFF — resume point for the next session (rewritten 2026-08-04)
+# HANDOFF — resume point for the next session (rewritten 2026-08-08)
 
 For a fresh coding session (any model). The design-review arc is DONE and
 merged. **Your job is implementation: execute tickets from plan.json, one at
@@ -14,32 +14,32 @@ a time.** Do not redesign anything.
 4. `PLAYBOOK.md` — per-ticket loop, gate command, block-note discipline
 5. The tail of `docs/STATUS.md` — per-ticket evidence for everything below
 
-## Current state (verified 2026-08-04, commit `ac5e165` on main, both remotes)
+## Current state (verified 2026-08-08, commit `45f5188` on main, both remotes)
 
-**16 tickets done. Workspace tests: 358 passing / 0 failed / 1 ignored.**
-Nothing `in_progress`, nothing `blocked`, tree clean.
+**45 tickets done, 45 todo, across 90 tickets / 437 pts. Workspace tests:
+712 passing / 0 failed / 7 ignored.** Nothing `in_progress`, tree clean,
+all seven validators green, `cargo deny check licenses` ok, exactly one
+`wgpu` in `Cargo.lock`.
 
-| Ticket | What landed |
+Per-ticket evidence for every close is in the tail of `docs/STATUS.md` —
+that is the authoritative record, and it is long because each entry
+carries the traps and corrections, not just the outcome.
+
+**The four things the project owner asked for are all built end to end:**
+
+| Goal | Where it landed |
 |---|---|
-| W0-01 | CI pipeline + arch validator |
-| W0-02 | rf-cart: iNES/NES2.0/SNES parse, RA-convention normalized hashing |
-| W0-03 | rf-harness: manifest fetcher, blargg $6000 protocol, accuracy table + waivers |
-| W0-04 | rf-core-api: EmulatorCore/CoreSink/StateView/CoreEvent/PpuPixel, zero deps |
-| W0-05 | rf-state: `.rfstate` TLV container + zstd + bincode 2 |
-| W0-06 | cargo-deny licence gate (NFR-011) |
-| W0-07 | manifest `[[git_artifact]]` kind + local evidence gate |
-| W1-01a | 6502: 151 official opcodes, cycle-stepped |
-| W1-01b | 6502: 105 unofficial opcodes + interrupt edges |
-| W1-02 | NES bus + NROM + OAM DMA + controller strobe |
-| W1-03 | nestest golden trace 8991/8991 byte-exact + reset/power-on sequence |
-| W1-04a | PPU background: loopy regs + fetch pipeline + CoreSink emission |
-| W1-04b | PPU frame-timing edges + analytic golden frame |
-| W1-05a | PPU sprites: secondary OAM, 8-sprite limit, buggy overflow flag |
-| W1-05b | sprite-0 hit (sprite_hit 11/11) + VBL/NMI wiring (ppu_vbl_nmi 4/10) |
-| W1-06 | frontend shell: eframe window, CPU blit, frame stepping, FM-01 containment |
+| Whole-level / ultrawide view | W4-00 → W4-01 → W4-03a → W4-08 → W4-03b → W4-03d → W4-03c → W4-03e — ROM to screen, behind a toggle that defaults to Accuracy |
+| De-flicker without erasing deliberate blinking | W3-05 (`SpriteHistorian`), red fixture from W2-10a |
+| 4× integer scaling | W3-01b (integer + 8:7 PAR + 224-line overscan + tolerance harness) |
+| Shaders | W3-02 (chain + nearest/sharp-bilinear/scanlines); W3-02a holds the rest |
 
-Board: 67 tickets / 379 pts · validators green · traceability 101/101.
-Toolchain pinned **1.94** (rust-toolchain.toml — never change to "stable").
+Toolchain pinned **1.94** (`rust-toolchain.toml` — never change to
+"stable"). **cc65 2.18 is required** for the RF-Scroller fixture
+(`brew install cc65`); `fixtures/nes/rf-scroller/build.sh` is the single
+build invocation and it verifies the checked-in hash rather than trusting
+it.
+
 
 ## The gate is SEVEN commands (validate-evidence joined in W0-07)
 
@@ -59,24 +59,51 @@ you touch dependencies.
 
 ## START HERE — recommended order
 
-1. **W1-07** — keyboard input + InputFrame + replay log. Builds directly on
-   W1-06's shell. **See "Needs a human" below first.**
-2. **W1-05c** — the sub-cycle VBL/NMI ceiling. Higher risk than its 5 points
-   suggest; read its notes before claiming.
-3. **W2-02** — mappers; scope already fixed, and it owns extracting NROM into
-   a real `Mapper` trait.
+Claimable now, highest leverage first:
 
-Claim = set `in_progress` in plan.json + commit that change first.
+1. **W4-02** (8 pts, profile loader + schema v0 + validator tool) — unblocks
+   W4-05, W4-06b, W5-01 and W5-06. The single biggest unblocker left.
+2. **W3-02a** (3 pts) — the remaining three shaders. **Read its notes before
+   touching it:** RENDERER §4's licensing law is a *clean-room* requirement,
+   not an attribution one, and `cargo deny` structurally cannot check a
+   `.wgsl` file.
+3. **W2-12** (5 pts) — five Tier-A blargg suites are fetched by the manifest
+   and executed by nothing. A downloaded ROM is not a tested ROM.
+4. **W3-01a** (3 pts) — renderer device-loss/shader-compile fallback, the
+   hazard that stalled W3-01 twice.
+5. **W2-11a** (1 pt) — needs a human decision first, see below.
 
-## Needs a human (blocks nothing mechanically, but W1-07 builds on it)
+`node scripts/validate-plan.mjs` prints the full claimable list every run.
 
-**W1-06's visual criteria are UNVERIFIED.** The window painting, the native
-ROM open dialog, and transport-button response could not be checked in a
-sandboxed macOS session (no screen-recording / assistive-access grant). The
-binary runs as a real GUI process with no panic and no winit/wgpu init error
-— which is not the same as "the window works". Run `./target/debug/retroforge`,
-open a ROM, confirm frames appear and pause/step respond, before layering
-input on top.
+
+## Needs a human — decisions and eyes, not code
+
+**Two decisions that are the project owner's, not an agent's:**
+
+1. **W2-11a — Alter Ego is not Public Domain.** `notes.txt` *inside*
+   `alter_ego.zip` says "released as freeware, not Public Domain… rights to
+   other components (game concept, characters, title, music) are reserved".
+   The manifest says `license_status = "public-domain"`. That field is
+   machine-readable and the no-vendor/no-rehost rule keys on it, so the
+   label is not cosmetic. The conservative relabel to
+   `no-license-grant-fetch-only` *tightens* handling and changes no
+   behaviour — but D-001 is the owner's decision and calls the fixture PD.
+2. **D-001 says "cc65/neslib"; W2-10 used cc65's own `-t nes` target.**
+   They are different toolchains. Only `-t nes` was probe-verified, and it
+   avoids vendoring third-party C into `fixtures/` entirely. If "neslib"
+   was meant literally, that is a one-line veto and W2-10 reopens with a
+   vendoring + licence step.
+
+**Two things only a human running the app can confirm** (recorded as such
+rather than claimed):
+
+- **W4-03e** — the camera toggle, the fog, and the FM-13 "view too large,
+  reduced" toast in a live window. Tests assert against real
+  GPU-composited RGBA buffers, which is stronger than compile-checking,
+  but nobody has looked at it.
+- **W3-03** — the older "Layers (debug)" checkbox, still verified by
+  compile only.
+
 
 ## Execution pattern that has been working (D-003 "one conductor")
 
@@ -274,3 +301,79 @@ on a matching HEAD rather than re-cloning.
 6. Push after merged work: `git push origin main && git push github main`
    (origin/Gitea may be unreachable off-LAN — GitHub always).
 7. Commit trailer names the implementing model.
+
+## The 2026-08-08 session's lessons — read these before writing a test
+
+Twenty-nine tickets closed in one run. The failures were not in the code
+so much as in what the tests *proved*, and the same shape recurred six
+times. It is worth naming because it is invisible from inside:
+
+**A test that EXERCISES a path is not a test that DISCRIMINATES it.** All
+six of these passed their original gate:
+
+1. `rf_cache::fsutil` — the leaf-symlink branch was documented as guarding
+   dangling links, but its test pointed at an *existing* file, which the
+   ancestor walk refuses on its own. Deleting the branch left all 20 tests
+   green.
+2. rf-enhance's FM-11 watermark test was **named** for coverage it did not
+   have (unchanged background only, never scrolling).
+3. `TripleBuffer`'s concurrency test detected its own race ~1 run in 60 —
+   indistinguishable from no guard on a single CI run. **It let a real
+   rollback bug ship** (W4-01a).
+4. W2-10a's `$2002` sprite-overflow test measured a flag that *cannot*
+   witness what it claimed, because rf-nes implements the authentic buggy
+   hardware scan.
+5. W3-01b's tolerance metric had two knobs and only one was doing any
+   work.
+6. W3-02's `nearest` stage was constructed, selectable and
+   manifest-documented — and **never rendered a pixel** in any test.
+
+The counter-practice that worked every time: **mutate the implementation
+and require the specific test to fail.** Size a concurrency test until it
+fails against the known defect *every* run, not sometimes. And check the
+mutation itself is not vacuous — one of the conductor's own fog mutations
+changed nothing, because both branches led to the same colour.
+
+**Scope pre-flight paid for itself repeatedly.** Twenty tickets had a
+`write_scope` that could not reach their own acceptance. The highest-cost
+near-miss: W4-03d waited on a real scrolling fixture and then could not
+have run it, because `validate-arch.sh` rule 3 forbids rf-enhance from
+depending on a console core — **including under `[dev-dependencies]`**,
+since the grep does not distinguish. That constraint binds rf-enhance,
+rf-profiles, rf-debugger and rf-ai alike. Only `retroforge` and
+`rf-harness` can drive a real core. Budget for it at pre-flight.
+
+**Three findings that look like emulator bugs and are not:**
+
+- `$2002` bit 6 (sprite-0 hit) reads set during vblank from the *previous*
+  frame — the PPU clears it at dot 1 of pre-render, *after* vblank ends. A
+  bare "wait until set" exits instantly on the stale flag; SMB1 uses a
+  two-phase wait for exactly this reason.
+- `$2002` bit 5 (overflow) fires on garbage, because the authentic buggy
+  diagonal scan misreads tile/attribute/X bytes as Y.
+- OAM DMA straddling dots 257–320 gets its OAMADDR reset mid-transfer,
+  scrambling the copy. This is real hardware behaviour and cost two full
+  passes to find. Note the conductor explicitly told an executor to *drop*
+  this line of investigation; it was the actual mechanism.
+
+**When a metric moves the wrong way after a change that should have
+helped, that is information about the mechanism — not just a failed
+attempt.** The gem count going 2→0 after a redesign was the clue that
+identified the DMA straddle.
+
+## Multi-session safety — a data-loss incident happened here
+
+Two Claude sessions worked the same tree during W2-10a with no shared view
+of each other's actions. The conductor ran `git checkout` over paths
+holding **uncommitted** work and destroyed the keystone file of a change
+set. A backup taken afterwards prevented a *second* loss, when the peer
+was about to reconstruct from memory seven files that existed verbatim on
+disk.
+
+- **Commit code before verifying it.** That is already the board's
+  discipline and it exists precisely to make a bad checkout recoverable.
+- `git checkout <path>` discards uncommitted work with no confirmation.
+- If a second session is active in the tree, **tell it when the tree
+  changes under it** — and if you are that second session, stop and report
+  a discrepancy rather than proceeding on your own model of the tree.
+  That is what contained the damage both times.
