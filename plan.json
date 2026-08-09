@@ -2266,17 +2266,56 @@
     "W4-02"
    ],
    "acceptance": [
-    "memory viewer + watchpoints via core step() (FR-DBG-002)",
-    "annotation store exports profile skeleton per GAME_PROFILES.md \u00a73 (FR-DBG-005)",
-    "DataCrystal TSV import dialog into the annotation store (DEBUGGER.md section 4)",
-    "breakpoint engine: PC exec, value-conditional, scanline/dot position, IRQ/mapper events via compiled table in step() \u2014 one-branch cost when empty (DEBUGGER.md section 1)",
-    "execution control: instruction step, step-over/step-out, run-to-cursor (DEBUGGER.md section 1)"
+    "annotation store: labelled addresses with a REQUIRED source field per annotation (FR-DBG-005)",
+    "annotation store EXPORTS a profile skeleton per GAME_PROFILES.md section 3 step 2 -- memory_map/rom_map pre-filled WITH sources -- that `retroforge-tool profile validate` (W4-02) accepts. This is the criterion W5-01 waits on",
+    "DataCrystal TSV import into the annotation store under the FACTS-ONLY transcription policy (CONSTRAINTS section 2): individual addresses/sizes/values only, fresh prose, NEVER verbatim whole tables -- DataCrystal is GFDL 1.2 (DEBUGGER.md section 4)",
+    "memory viewer panel over the live core, read-only and non-perturbing (FR-DBG-002)",
+    "the breakpoint engine and execution control (instruction step / step-over / step-out / run-to-cursor) are SPLIT OUT to W4-06e -- they need an instruction-level step seam this ticket does not build"
    ],
-   "points": 8,
-   "status": "todo",
+   "points": 5,
+   "status": "in_progress",
+   "notes": [
+    "PRE-FLIGHT + CLAIM 2026-08-09 (conductor, HEAD 0e1268b, baseline 786 passed / 0 failed / 7 ignored). SPLIT 8 -> 5 PTS on the seam that matters: the breakpoint engine and execution control need an instruction-level step seam that does not exist, while the other four criteria do not. W5-01 -- and with it the entire full-level-reconstruction chain -- waits ONLY on this ticket's profile-skeleton export, so holding that behind a breakpoint engine would block the headline goal for no reason. Filed as W4-06e.",
+    "CRITERION 2 IS THE ONE THAT UNBLOCKS EVERYTHING. GAME_PROFILES.md section 3 step 2: 'Debugger exports annotations -> profile skeleton (memory_map/rom_map pre-filled WITH SOURCES)'. The exported skeleton must be accepted by `retroforge-tool profile validate`, which W4-02 built -- so round-trip it through the REAL validator rather than asserting the TOML looks right. Note W4-02a is filed to make `source` MANDATORY (FR-PROF-003 says validation shall FAIL without it); export sources from the start so this ticket's output does not become invalid the moment W4-02a lands.",
+    "LICENSING CONSTRAINT ON CRITERION 3, and the gate cannot catch it. DataCrystal is GFDL 1.2, and CONSTRAINTS section 2's facts-only transcription policy (quoted verbatim in GAME_PROFILES section 3 step 1) permits 'individual addresses/sizes/values only, fresh prose, NEVER verbatim whole tables'. So a TSV import must ingest FACTS -- address, size, value, a short fresh label -- and must not slurp and store a whole wiki table's prose. Same class as the shader clean-room rule (W3-02a) and the vendored-C question (W2-10): `cargo deny check licenses` will never look at an imported TSV, so this is review-enforced. Design the import so the policy is structural (parse fields, drop free prose) rather than a warning nobody reads.",
+    "rf-debugger MAY NOT DEPEND ON rf-nes (validate-arch.sh rule 3, whose grep matches [dev-dependencies] too). The annotation store and the export are pure data and belong in rf-debugger where they are headlessly testable. The memory VIEWER needs live core bytes, which only crates/retroforge can supply -- and note from W4-06a that `EmulatorCore::state_view` HAS NO PRODUCTION IMPLEMENTER (only test mocks), so do not route through StateView. EmuStepper::peek(addr) already exists and is the working seam; NesBus::oam() is the precedent for a plain read-only borrow.",
+    "READ-ONLY IS A HARD REQUIREMENT: a memory viewer repaints constantly, so an observing accessor would perturb the core continuously. rf-nes deliberately separates `mem_read` (bus-observing, ticks the MMC3 A12 counter) from `chr_peek` (non-observing) for exactly this reason -- W3-05a's hazard class, invisible to pixel comparison and fatal to IRQ timing. crates/retroforge/tests/{mode_invariant_corpus.rs, sprite_overlay_mode_invariant.rs} guard it and are outside write_scope: do not edit them, keep them green.",
+    "BUILD ON W4-06a, DO NOT FORK IT: crates/rf-debugger already has pattern/nametable/palette/oam/event_timeline decode modules and a versioned `layout.rs` dock format, and crates/retroforge/src/debug_dock.rs holds the egui_dock wiring with a DebugTab enum. Add tabs to that, and follow layout.rs's precedent for any persisted format this ticket introduces (TOML, hand-rolled, versioned).",
+    "VACUITY TRAPS. (a) An export test that only checks the TOML PARSES proves nothing -- run it through `retroforge-tool profile validate` and assert it passes, then mutate an annotation's source away and assert it FAILS once W4-02a lands (or assert the exporter refuses to emit a sourceless entry today). (b) A DataCrystal import test with one well-formed row cannot detect a parser that accepts anything -- include malformed rows and assert they are rejected with the offending line named. (c) A memory-viewer test asserting 'reads some bytes' is worthless -- write known values via EmuStepper::poke_bus and assert the viewer surfaces exactly those at exactly those addresses. This board has caught SIX tests that exercised a path without discriminating it.",
+    "DO NOT ADD A FOURTH HUMAN-ONLY ITEM. W3-03's Layers checkbox, W4-03e's camera toggle and W4-06a's Debug Viewers window are all compile-checked-only, all from UI tickets. Keep the annotation store, the exporter and the TSV parser as pure data in rf-debugger where they are headlessly testable, so only the egui panel wiring is unverifiable."
+   ],
    "stories": [
     "E3-S2",
     "E3-S3"
+   ]
+  },
+  {
+   "id": "W4-06e",
+   "title": "Breakpoint engine + execution control (instruction step, step-over/out, run-to-cursor)",
+   "phase": 4,
+   "crate": "rf-debugger",
+   "write_scope": [
+    "crates/rf-debugger/**",
+    "crates/retroforge/**",
+    "crates/rf-nes/src/**"
+   ],
+   "depends_on": [
+    "W4-06b"
+   ],
+   "acceptance": [
+    "breakpoint engine: PC exec, value-conditional, scanline/dot position, IRQ/mapper events, via a compiled table checked in the step loop -- one-branch cost when no breakpoint is armed (DEBUGGER.md section 1)",
+    "execution control: instruction step, step-over, step-out, run-to-cursor",
+    "MEASURED non-regression with zero breakpoints armed, against the criterion benchmark rather than asserted -- and core state hashes IDENTICAL with the engine present and absent over one input log (CLAUDE.md law 6, W3-05a's hazard class)"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": [],
+   "notes": [
+    "SPLIT OUT OF W4-06b 2026-08-09 in pre-flight, on the seam that actually matters: these two criteria need an INSTRUCTION-LEVEL step seam that does not exist yet, while the other four do not. W5-01 -- and with it the whole full-level-reconstruction chain -- waits only on W4-06b's profile-skeleton export, so holding that behind a breakpoint engine would have blocked the headline goal for no reason.",
+    "THE SEAM QUESTION THIS TICKET MUST ANSWER FIRST, and it is why write_scope includes crates/rf-nes/src/**. crates/retroforge/src/stepper.rs exposes only step_frame and step_scanline; there is no instruction step and no hook inside the CPU loop. Two routes: (a) the SHELL drives cpu.step(bus) directly per instruction -- retroforge already owns EmuStepper and may depend on rf-nes, so no core change is needed and rf-debugger stays UI-free and core-free; or (b) a compiled breakpoint table is checked INSIDE rf-nes's step loop, which is what DEBUGGER.md section 1's 'one-branch cost' phrasing implies but which puts debugger concerns in the core. PICK ONE DELIBERATELY AND SAY WHY. Route (a) is cheaper and keeps the layer boundary clean; route (b) is the only way to catch mid-instruction bus events like a value-conditional WATCHPOINT, since the shell cannot see individual bus writes.",
+    "WATCHPOINTS ARE THE HARD HALF and are the reason route (a) may not suffice: catching 'a write of value V to address A' requires seeing bus writes, which only rf-nes can observe. Snapshot-diffing memory between instruction steps would technically work and is deterministic, but is O(memory) per instruction and would miss a write that is overwritten within the same instruction. Decide explicitly rather than discovering it after the engine is built.",
+    "NON-REGRESSION MUST BE MEASURED, NOT ASSERTED -- criterion 3 says so because 'one-branch cost when no breakpoint is armed' is a performance claim and this board has a bench harness (criterion 0.19 ms/frame release was measured at W4-03a). Run the A/B properly: a git worktree at the parent commit, a shared target dir, criterion baselines. W4-00's executor got this wrong first time by never draining an event queue, saw CI +/-75% noise and sign-flipped means, noticed, and re-ran -- follow that example.",
+    "MODE INVARIANT: core state hashes must be IDENTICAL with the engine present and absent over one input log. W3-05a's hazard class is the precedent -- an addition that silently clocks MMC3's A12 counter is invisible to pixel comparison but corrupts IRQ timing. crates/retroforge/tests/{mode_invariant_corpus.rs, sprite_overlay_mode_invariant.rs} guard it and must stay green."
    ]
   },
   {
