@@ -1382,15 +1382,50 @@
     "W3-01"
    ],
    "acceptance": [
-    "WGSL pass chain with param UBOs (FR-REND-003)",
-    "ALL first-party shaders per RENDERER.md section 4: nearest, sharp-bilinear, scanlines, crt-easymode-class, lcd-grid, xbr-class (MIT xBR basis; shader licensing law \u2014 no GPL ports)",
-    "runtime selectable",
-    "per-shader provenance recorded in its manifest"
+    "WGSL pass chain with param UBOs (FR-REND-003) -- the reusable chain infrastructure every later shader plugs into",
+    "the THREE ARITHMETICALLY SIMPLE first-party shaders per RENDERER.md section 4: nearest, sharp-bilinear, scanlines. The three harder ones (crt-easymode-class, lcd-grid, xbr-class) are SPLIT OUT to W3-02a, where the clean-room licensing risk is concentrated",
+    "runtime selectable, with an empty chain `[]` valid and equivalent to passthrough (RENDERER.md section 4's own example)",
+    "per-shader provenance recorded in a manifest, including the licence and a statement of how the WGSL was authored -- the format is set here and W3-02a follows it",
+    "a NONZERO tolerance threshold is calibrated for at least one filtering shader using W3-01b's harness, since filtering is what RENDERER.md section 7's non-hashability warning is actually about (W3-01b measured nearest-neighbour integer scaling as byte-exact, so the harness has not yet had to size a real allowance)"
    ],
-   "points": 8,
-   "status": "todo",
+   "points": 5,
+   "status": "in_progress",
    "stories": [
     "E4-S1"
+   ]
+  },
+  {
+   "id": "W3-02a",
+   "title": "CRT, LCD-grid and xBR-class shaders (clean-room, MIT basis)",
+   "phase": 3,
+   "crate": "rf-renderer",
+   "write_scope": [
+    "crates/rf-renderer/**",
+    "docs/design/RENDERER.md"
+   ],
+   "depends_on": [
+    "W3-02"
+   ],
+   "acceptance": [
+    "crt-easymode-class, lcd-grid and xbr-class shaders as WGSL passes in the chain W3-02 built, each with param UBOs and manifest provenance",
+    "SHADER LICENSING LAW (design review G-42) satisfied and demonstrably so: the upscaler is based on Hyllian's xBR (MIT), NEVER xBRZ (Zenju, GPL-3.0) and never a libretro GPL port. Each manifest records licence, basis and how the WGSL was authored",
+    "each shader's output compared against a reference image using W3-01b's tolerance harness with a CALIBRATED nonzero threshold, and a mutation proving that threshold still rejects a wrong image"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": [],
+   "notes": [
+    "SPLIT OUT OF W3-02 2026-08-08 in pre-flight, on the licensing line rather than arbitrarily. RENDERER.md section 4's shader licensing law (design review G-42) is a CLEAN-ROOM requirement, not merely an attribution one: 'the upscaler is based on Hyllian's xBR (MIT) -- never xBRZ (Zenju, GPL-3.0) or libretro GPL... whoever writes the WGSL must not have the GPL/unlicensed libretro shaders' in front of them. All three of this ticket's shaders are the ones with widely-circulated GPL implementations; W3-02's three (nearest, sharp-bilinear, scanlines) are arithmetically trivial and carry no such risk. Concentrating the risk in one ticket means it gets its own focused brief and its own provenance review instead of being a footnote on an 8-pointer.",
+    "THE GATE CANNOT CATCH A LICENCE VIOLATION HERE -- `cargo deny check licenses` only sees Cargo dependencies and will never look at a .wgsl file. This is review-enforced, exactly like the rf-cache SystemTime exemption (W4-08) and the vendored-C question (W2-10). Same class of hazard: a rule the linter structurally cannot see.",
+    "PARALLEL TO NFR-011's CORE RULE, which is the useful mental model: emulation cores are 'first-party clean-room implementations from hardware documentation -- no ported or transcribed third-party emulator source'. Shaders get the same treatment. Write from the published ALGORITHM (xBR's edge-detection rules are documented independently of any one implementation), not from a remembered GPL source file, and say in the manifest which it was.",
+    "TOLERANCE FINALLY EARNS A NONZERO THRESHOLD HERE. W3-01b measured nearest-neighbour integer scaling as BYTE-EXACT on Metal (0 of 65,632 pixels differing), so its harness ships with channel_delta 0 -- correct, because inventing an allowance with no measured noise would have made it vacuous. Filtering shaders are what RENDERER.md section 7's non-hashability warning is actually about, so this is where a real threshold must be sized. Calibrate it against measured cross-run/backend noise and mutation-verify that it STILL REJECTS a wrong image; a threshold that passes a visibly wrong render is worse than no test.",
+    "PRE-FLIGHT + CLAIM 2026-08-08 (conductor, HEAD 301c3f7, baseline 699 passed / 0 failed / 7 ignored). SPLIT 8 -> 5 PTS ON THE LICENSING LINE, not arbitrarily: crt-easymode-class, lcd-grid and xbr-class all have widely-circulated GPL implementations and are moved to W3-02a, where the clean-room risk gets its own focused brief and provenance review. The three that stay -- nearest, sharp-bilinear, scanlines -- are arithmetically trivial and carry no such risk, so this ticket is really about the CHAIN INFRASTRUCTURE every later shader plugs into. Scope crates/rf-renderer/** is not self-blocking; tests live under it.",
+    "THE CHAIN IS THE DELIVERABLE. RENDERER.md section 4's own examples make the shape explicit -- `[crt-easymode, vignette]`, `[xbrz4]`, or `[]` -- so an EMPTY chain must be valid and equivalent to passthrough. Get param UBOs, ordering, and the manifest format right here, because W3-02a and every later shader inherit all three. A manifest format that cannot express 'licence + basis + how the WGSL was authored' will have to be redesigned in the ticket where it matters most.",
+    "TOLERANCE FINALLY EARNS A NONZERO THRESHOLD -- this is the ticket where W3-01b's harness stops being theoretical. W3-01b measured nearest-neighbour integer scaling as BYTE-EXACT on Metal (0 of 65,632 pixels differing, max channel delta 0), so it correctly ships with channel_delta 0 rather than an invented allowance. Filtering is what RENDERER.md section 7's 'not hashable past 1x' warning is ACTUALLY about, so sharp-bilinear is the natural place to size a real threshold. Calibrate against measured noise and mutation-verify that the threshold STILL REJECTS a wrong image -- a threshold that passes a visibly wrong render is worse than no test at all.",
+    "LICENSING APPLIES EVEN TO THE SIMPLE THREE, in one specific way: `nearest` and `scanlines` are trivial arithmetic nobody can own, but the WGSL must still be authored rather than transcribed, and each manifest must say so. That habit is what makes W3-02a's harder claim credible. Note `cargo deny check licenses` only sees Cargo dependencies and will NEVER look at a .wgsl file -- this is review-enforced, the same class as the rf-cache SystemTime exemption and W2-10's vendored-C question.",
+    "WGPU 29 TRAPS, verified by compile-probe (docs/TECH_STACK.md section 2) -- two W3-01 attempts stalled to ZERO code on these: InstanceDescriptor has no Default (new_without_display_handle()); Instance::new takes the descriptor BY VALUE; enumerate_adapters returns a FUTURE; Device::poll needs a BOUNDED timeout (`None` blocks forever, the actual stall cause); ImageCopy* is TexelCopy*; bind_group_layouts is &[Option<&BindGroupLayout>] with immediate_size; RenderPassColorAttachment needs depth_slice. validate-arch.sh rule 5: exactly ONE wgpu in Cargo.lock, ever.",
+    "BUILD ON WHAT EXISTS, do not fork it: crates/rf-renderer/src/original_pipeline.rs (PalettePass), scale.rs (ScalePass, W3-01b), composite.rs (EnhancedCompositor, W4-03c) and gpu.rs (GpuContext::request_headless + from_shared, plus the shared align_up and read_buffer_sync helpers). W3-01b noted ScalePass is not yet chained to PalettePass anywhere -- if this ticket's chain work makes that wiring natural, doing it here is in scope and closes one of W3-01b's four recorded partials.",
+    "VACUITY TRAPS. (a) A pass-chain test with ONE pass cannot detect ordering bugs -- chain at least two and assert the result differs from the reverse order. (b) An empty-chain test that asserts 'no panic' proves nothing; assert it is byte-identical to the unfiltered input. (c) A param-UBO test that never CHANGES a parameter cannot tell whether the UBO is bound at all -- vary a parameter and assert the output changes. This board has caught five tests that exercised a path without discriminating it; do not add a sixth."
    ]
   },
   {
