@@ -30,6 +30,15 @@
 //! oracle ([`scale::render_scaled_reference`]) `rf-harness`'s
 //! reference-image-with-tolerance test checks the GPU output against,
 //! since (§7) nothing past the 1x buffer is golden-hashable in CI.
+//! [`shader_chain`] is ticket W3-02's WGSL pass chain (`docs/design/
+//! RENDERER.md` §4, FR-REND-003): one shared bind-group/pipeline layout
+//! every shader plugs into, plus the three arithmetically simple
+//! first-party shaders (`nearest`, `sharp-bilinear`, `scanlines`) — the
+//! three harder ones (`crt-easymode`-class, `lcd-grid`, `xbr`-class) are
+//! ticket W3-02a, split out on design review G-42's clean-room licensing
+//! line (see that module's doc). [`pipeline`] wires [`original_pipeline::
+//! PalettePass`] -> [`scale::ScalePass`] -> [`shader_chain::ShaderChain`]
+//! into the one end-to-end call W3-01b recorded as not yet done.
 
 pub mod composite;
 pub mod frame;
@@ -37,7 +46,9 @@ pub mod gpu;
 pub mod layers;
 pub mod original_pipeline;
 pub mod palette;
+pub mod pipeline;
 pub mod scale;
+pub mod shader_chain;
 
 pub use composite::{CompositeLayer, CompositeOutcome, EnhancedCompositor, TargetReduction};
 pub use frame::FrameBuffer;
@@ -46,6 +57,12 @@ pub use layers::LayeredFrame;
 pub use original_pipeline::{IndexedFrame, PalettePass};
 pub use palette::{palette_index_to_rgb, NES_PALETTE};
 pub use scale::{render_scaled_reference, FillMode, Overscan, ParRatio, ScaleGeometry, ScalePass};
+pub use shader_chain::{
+    render_sharp_bilinear_reference, ChainStage, ShaderChain, ShaderKind, ShaderManifest,
+    ShaderParamDescriptor,
+};
+
+pub use pipeline::run as run_original_pipeline;
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-renderer";
