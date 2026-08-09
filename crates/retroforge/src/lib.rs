@@ -21,12 +21,20 @@
 //! driven on the core thread — see [`core_thread`] for why every frame
 //! must reach it) and [`enhanced_view`] (the `SceneGraph` ->
 //! `CompositeLayer` mediator, `ARCHITECTURE.md` §3). Neither touches
-//! `egui`/`eframe` — the "two modules touch egui" count above stays
-//! exactly two.
+//! `egui`/`eframe`.
+//!
+//! Ticket W4-06a adds [`debug_dock`] (the third and last module that
+//! touches `egui`/`egui_dock`: `DockState<rf_debugger::layout::DebugTab>`
+//! capture/restore + persistence). Its own doc explains why it stays
+//! separate from [`app`] rather than folding in: `capture_layout`/
+//! `restore_layout` are unit-testable without a window (plain data
+//! structures, no rendering), and keeping them in their own module is what
+//! makes that testable in practice rather than in principle.
 
 pub mod app;
 pub mod canvas_accum;
 pub mod core_thread;
+pub mod debug_dock;
 pub mod enhanced_view;
 pub mod hash;
 pub mod input_map;

@@ -198,6 +198,18 @@ pub struct FrameMsg {
     /// The app layer's debug view turns these into separate egui textures.
     pub bg_rgba: Vec<u8>,
     pub sprite_rgba: Vec<u8>,
+    /// Ticket W4-06a: the same frame's full 256-byte OAM
+    /// (`EmuStepper::oam`, a side-effect-free `&self` read — never
+    /// perturbs the core, same "read-only is a hard requirement" posture
+    /// `crate::stepper::EmuStepper::peek` already documents), for
+    /// `rf_debugger::oam::decode_oam`. Same "same-frame extraction" shape
+    /// `bg_rgba`/`sprite_rgba` above already use (ticket W3-03) — one more
+    /// field alongside them rather than a second channel. `Box`ed (not a
+    /// bare `[u8; 256]`) so `CoreEvent::Frame`'s variant doesn't blow past
+    /// `clippy::large_enum_variant`'s threshold — `Box<[u8; 256]>`
+    /// auto-derefs to `&[u8; 256]` at every `rf_debugger::oam::decode_oam`
+    /// call site, so this costs nothing at the call sites, only here.
+    pub oam: Box<[u8; 256]>,
 }
 
 /// What the core thread reports back to the UI thread.
@@ -237,6 +249,16 @@ pub enum CoreCommand {
     /// UI is actually showing/refreshing the Ultrawide view) rather than
     /// every frame.
     RequestCanvasSnapshot,
+    /// Ticket W4-06a: widen/narrow which `CoreEvent`s this session emits
+    /// (`EmuStepper::set_event_mask`) — the debugger's event-viewer panel
+    /// sends this as it opens/closes (DEBUGGER.md §6: "closed panels
+    /// register no event subscriptions"). Like `SetSpriteOverlay`, a pure
+    /// state toggle: does not itself produce a `CoreEvent::Frame`.
+    /// `EmuStepper::set_event_mask` always re-asserts
+    /// `crate::stepper::CAMERA_BASELINE_EVENT_MASK` regardless of what is
+    /// requested here, so this can never starve the enhanced-camera
+    /// pipeline (see that function's own doc).
+    SetEventMask(rf_core_api::EventMask),
     Shutdown,
 }
 
@@ -492,6 +514,9 @@ fn core_thread_main(
                 CoreCommand::SetSpriteOverlay(enabled) => {
                     stepper.set_sprite_overlay_enabled(enabled);
                 }
+                CoreCommand::SetEventMask(mask) => {
+                    stepper.set_event_mask(mask);
+                }
                 CoreCommand::RequestCanvasSnapshot => {
                     canvas_accum.flush();
                     let snapshot = canvas_accum.current_canvas().unwrap_or_default();
@@ -562,6 +587,7 @@ fn core_thread_main(
                 last_scanline: stepper.last_scanline(),
                 bg_rgba: layers.bg_rgba().to_vec(),
                 sprite_rgba: layers.sprite_rgba().to_vec(),
+                oam: Box::new(*stepper.oam()),
             };
             if frame_tx.send(CoreEvent::Frame(msg)).is_err() {
                 // UI thread hung up; nothing left to serve.
@@ -699,6 +725,106 @@ mod tests {
         data.extend(vec![0u8; 16 * 1024]);
         data.extend(vec![0u8; 8 * 1024]);
         data
+    }
+
+    /// A hand-assembled NROM program that writes ONE known sprite (Y=50,
+    /// tile=7, attr=0, X=100) into OAM slot 0 via an `$2003`/`$2004`
+    /// write sequence, then loops forever — same opcode layout/verification
+    /// discipline as `crates/retroforge/tests/sprite_overlay_mode_
+    /// invariant.rs`'s own (larger) OAM-writing fixture, trimmed to one
+    /// sprite since this test only needs *some* non-zero OAM content to
+    /// discriminate "forwarded" from "always zero" (see the test's own
+    /// doc). Opcodes: `A9` LDA#, `8D` STA abs, `4C` JMP abs — the exact
+    /// same three already verified working in that sibling fixture.
+    ///
+    /// | Addr  | Bytes       | Instruction             |
+    /// |-------|-------------|-------------------------|
+    /// | $8000 | A9 00       | LDA #$00                |
+    /// | $8002 | 8D 03 20    | STA $2003 (OAMADDR = 0) |
+    /// | $8005 | A9 32       | LDA #$32 (Y = 50)       |
+    /// | $8007 | 8D 04 20    | STA $2004                |
+    /// | $800A | A9 07       | LDA #$07 (tile = 7)     |
+    /// | $800C | 8D 04 20    | STA $2004                |
+    /// | $800F | A9 00       | LDA #$00 (attr = 0)     |
+    /// | $8011 | 8D 04 20    | STA $2004                |
+    /// | $8014 | A9 64       | LDA #$64 (X = 100)      |
+    /// | $8016 | 8D 04 20    | STA $2004                |
+    /// | $8019 | 4C 19 80    | forever: JMP forever     |
+    #[rustfmt::skip]
+    const OAM_WRITE_PROGRAM: &[(u16, &[u8])] = &[
+        (0x8000, &[0xA9, 0x00]),
+        (0x8002, &[0x8D, 0x03, 0x20]),
+        (0x8005, &[0xA9, 0x32]),
+        (0x8007, &[0x8D, 0x04, 0x20]),
+        (0x800A, &[0xA9, 0x07]),
+        (0x800C, &[0x8D, 0x04, 0x20]),
+        (0x800F, &[0xA9, 0x00]),
+        (0x8011, &[0x8D, 0x04, 0x20]),
+        (0x8014, &[0xA9, 0x64]),
+        (0x8016, &[0x8D, 0x04, 0x20]),
+        (0x8019, &[0x4C, 0x19, 0x80]),
+    ];
+
+    fn oam_write_nrom() -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
+        data.push(1); // 1x16KiB PRG
+        data.push(1); // 1x8KiB CHR
+        data.extend_from_slice(&[0u8; 10]); // mapper 0, iNES 1.0
+
+        let mut prg = vec![0u8; 16 * 1024];
+        for (addr, bytes) in OAM_WRITE_PROGRAM {
+            let offset = (*addr - 0x8000) as usize;
+            prg[offset..offset + bytes.len()].copy_from_slice(bytes);
+        }
+        prg[0x3FFC] = 0x00; // reset vector low  -> $8000
+        prg[0x3FFD] = 0x80; // reset vector high
+        data.extend(prg);
+        data.extend(vec![0u8; 8 * 1024]);
+        data
+    }
+
+    /// Ticket W4-06a: `FrameMsg::oam` must carry the CORE's real OAM
+    /// content, not a zeroed placeholder that happens to look plausible.
+    /// `synthetic_nrom` above (all-zero, `BRK`-forever) can't discriminate
+    /// this — it never writes OAM at all, so "forwarded correctly" and
+    /// "field never wired up" would look identical (all zero either way,
+    /// the exact trap `step_frame_command_also_delivers_bg_layer_content_
+    /// not_just_size`'s own doc warns about for `bg_rgba`). `oam_write_nrom`
+    /// writes a real, known, non-zero sprite via genuine `$2003`/`$2004`
+    /// bus writes, so this test fails if `core_thread_main`'s `oam: Box::
+    /// new(*stepper.oam())` line is ever dropped or reads the wrong slot.
+    #[test]
+    fn step_frame_command_delivers_real_oam_content_not_a_zeroed_placeholder() {
+        let core = spawn(oam_write_nrom()).expect("OAM-writing NROM must spawn a core thread");
+        core.cmd_tx
+            .send(CoreCommand::StepFrame)
+            .expect("core thread must accept a StepFrame command");
+        let evt = core
+            .evt_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a stepped frame must be delivered");
+        match evt {
+            CoreEvent::Frame(msg) => {
+                assert_eq!(
+                    &msg.oam[0..4],
+                    &[50, 7, 0, 100],
+                    "OAM slot 0 must carry the exact bytes the fixture wrote \
+                     (Y=50, tile=7, attr=0, X=100), not zeros: {:?}",
+                    &msg.oam[0..8]
+                );
+                assert!(
+                    msg.oam[4..].iter().all(|&b| b == 0),
+                    "only slot 0 was written — every other slot must stay zero, \
+                     not leak slot 0's bytes across the whole array"
+                );
+            }
+            CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
+            CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
+        }
+
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
     }
 
     /// Ticket W2-14, and **the test whose absence let the bug ship**: a

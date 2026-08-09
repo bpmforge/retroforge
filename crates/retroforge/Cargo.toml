@@ -34,6 +34,14 @@ rf-enhance = { path = "../rf-enhance" }
 # `crate::canvas_accum` calls `rf_cache::Cache::open` itself (Rust's
 # extern prelude only exposes crates a Cargo.toml names directly).
 rf-cache = { path = "../rf-cache" }
+# rf-debugger: viewer data providers + persisted-layout data model (ticket
+# W4-06a) — this crate is the shell-mediation point `rf-debugger`'s own
+# pre-flight notes call for: `rf-debugger` may not depend on `rf-nes`
+# (scripts/validate-arch.sh rule 3), so it never sees CHR/OAM/event bytes
+# itself. `retroforge` reads them (it already depends on `rf-nes` above)
+# and hands plain `&[u8]`/`&[CoreEvent]` slices to `rf-debugger`'s decode
+# functions — same resolution as SceneGraph at W4-03c/W4-03e.
+rf-debugger = { path = "../rf-debugger" }
 eframe = "0.35.0"
 rfd = "0.17.2"
 # sha2: reachable-state hash for the determinism/replay suite (ticket
@@ -41,3 +49,18 @@ rfd = "0.17.2"
 # exists via rf-cart's use of it).
 sha2 = "0.11"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+# egui_dock: sanctioned at docs/TECH_STACK.md §2 ("Docking" row, "Mesen-
+# style dockable viewer layout") — ticket W4-06a criterion 3. The `serde`
+# feature is deliberately NOT enabled: `DockState<Tab>`'s own tree embeds
+# `egui::Rect` (whose `Serialize`/`Deserialize` impls are behind egui's own
+# `serde` feature, unverified/unenabled in this workspace's `eframe` build)
+# and a mixed unit/tuple-variant `Node<Tab>` enum inside a `Vec` — exactly
+# the shape TOML's serde support (this workspace's only sanctioned
+# serialization format, `docs/TECH_STACK.md` §2 "Config/profiles" row)
+# breaks on. `crate::debug_dock` instead owns a small versioned layout
+# format it controls (`rf_debugger::layout::PersistedLayout`) and walks
+# `DockState`'s public `Tree`/`Node`/`SplitNode`/`LeafNode`/`split()` API
+# (all plain data + safe constructors, verified against the vendored
+# `egui_dock-0.20.1` source, not training data) to capture/restore it —
+# see that module's doc for the full reasoning.
+egui_dock = "0.20.1"

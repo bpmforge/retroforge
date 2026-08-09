@@ -86,6 +86,16 @@ use rf_nes::{Cpu, NesBus, NesLoadError};
 /// here is cycle-bounded".
 const CYCLE_BUDGET: u64 = 4 * 29_781;
 
+/// `CoreEvent` subscriptions the enhanced-camera pipeline
+/// (`crate::canvas_accum`) needs on every frame, unconditionally — turned
+/// on once by [`EmuStepper::from_ines_bytes`] below and re-asserted by
+/// every [`EmuStepper::set_event_mask`] call (ticket W4-06a) so a
+/// debugger-driven mask change can never silently starve scene tracking.
+/// A single named constant rather than two call sites each spelling out
+/// the same union keeps them from drifting apart.
+pub const CAMERA_BASELINE_EVENT_MASK: rf_core_api::EventMask =
+    rf_core_api::EventMask::SCANLINE.union(rf_core_api::EventMask::SCROLL_WRITE);
+
 /// Whether the emulator is advancing on its own each repaint, or holding
 /// still until the debugger asks for another step (FR-DBG-004).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,9 +190,7 @@ impl EmuStepper {
         // CoreEvent variant") — it cannot perturb simulation state, so
         // turning it on here does not touch Law 6 (Accuracy Mode stays an
         // unmodified simulation; this is metadata plumbing, not gameplay).
-        bus.set_event_mask(
-            rf_core_api::EventMask::SCANLINE.union(rf_core_api::EventMask::SCROLL_WRITE),
-        );
+        bus.set_event_mask(CAMERA_BASELINE_EVENT_MASK);
         let cpu = Cpu::power_on(&mut bus);
         Ok(EmuStepper {
             bus,
@@ -283,6 +291,23 @@ impl EmuStepper {
     /// W3-05a) — forwards `NesBus::set_sprite_overlay_enabled`.
     pub fn set_sprite_overlay_enabled(&mut self, enabled: bool) {
         self.bus.set_sprite_overlay_enabled(enabled);
+    }
+
+    /// Widen (or narrow) which `CoreEvent`s this machine emits (ticket
+    /// W4-06a: the debugger's event viewer subscribes/unsubscribes as its
+    /// panel opens/closes, DEBUGGER.md §6's "closed panels register no
+    /// event subscriptions" discipline). `NesBus::set_event_mask` *replaces*
+    /// the mask outright (`rf_nes::Ppu::set_event_mask`'s own doc: `self.
+    /// event_mask = mask`) — a bare passthrough here would let a debugger
+    /// toggle silently drop [`CAMERA_BASELINE_EVENT_MASK`], the bits
+    /// `Self::from_ines_bytes` turns on unconditionally for the enhanced-
+    /// camera pipeline (`crate::canvas_accum`), breaking scene tracking the
+    /// moment the event panel is opened once. Always unioning the baseline
+    /// back in makes that invariant hold by construction rather than by
+    /// caller discipline.
+    pub fn set_event_mask(&mut self, mask: rf_core_api::EventMask) {
+        self.bus
+            .set_event_mask(mask.union(CAMERA_BASELINE_EVENT_MASK));
     }
 
     /// Stop advancing on repaint ticks. Idempotent.
@@ -860,5 +885,85 @@ mod tests {
         let s = stepper();
         assert_eq!(s.peek(0x0000), 0);
         assert_eq!(s.peek(0x07FF), 0);
+    }
+
+    /// Records every `CoreEvent` seen, for [`set_event_mask`]'s tests below
+    /// — `NullSink` above deliberately discards events, and nothing else in
+    /// this test module already collects them.
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Vec<rf_core_api::CoreEvent>,
+    }
+    impl CoreSink for RecordingSink {
+        fn video_scanline(&mut self, _y: u16, _pixels: &[PpuPixel]) {}
+        fn audio(&mut self, _samples: &[i16]) {}
+        fn event(&mut self, ev: rf_core_api::CoreEvent) {
+            self.events.push(ev);
+        }
+    }
+
+    /// Ticket W4-06a: `set_event_mask` must NOT be able to drop
+    /// [`CAMERA_BASELINE_EVENT_MASK`] even when the caller asks for
+    /// `EventMask::NONE` — otherwise a debugger session that ever narrows
+    /// the mask (e.g. closing the event-viewer panel) would silently starve
+    /// `crate::canvas_accum`'s scene tracking for the rest of the session.
+    /// `Scanline` is code-independent (driven by PPU tick logic, not game
+    /// code — unlike `ScrollWrite`, which the all-zero synthetic NROM never
+    /// triggers), so a full stepped frame is guaranteed to emit at least
+    /// one if the baseline actually survived.
+    #[test]
+    fn set_event_mask_cannot_drop_the_camera_baseline_even_when_asked_to() {
+        let mut s = stepper();
+        s.set_event_mask(rf_core_api::EventMask::NONE);
+        // Get past the boot-artifact partial frame (see
+        // `running_keeps_the_reported_scanline_updating`'s doc: a fresh
+        // stepper's very first frame_count tick completes with zero
+        // visible scanlines drawn, hence zero Scanline events too).
+        s.step_frame(&mut NullSink);
+        let mut sink = RecordingSink::default();
+        s.step_frame(&mut sink);
+        assert!(
+            sink.events
+                .iter()
+                .any(|e| matches!(e, rf_core_api::CoreEvent::Scanline(_))),
+            "Scanline events must survive an EventMask::NONE request: {:?}",
+            sink.events
+        );
+    }
+
+    /// The other half: `set_event_mask` must actually narrow subscriptions,
+    /// not silently behave as `EventMask::ALL` regardless of what's asked
+    /// for — otherwise the mask parameter would be decorative. `VblankStart`
+    /// is outside `CAMERA_BASELINE_EVENT_MASK` and, like `Scanline`, is
+    /// code-independent (fires every frame at a fixed scanline regardless
+    /// of ROM content), so it is a clean discriminator: present only when
+    /// explicitly subscribed.
+    #[test]
+    fn set_event_mask_actually_narrows_which_events_get_constructed() {
+        let mut s = stepper();
+        s.set_event_mask(rf_core_api::EventMask::NONE);
+        s.step_frame(&mut NullSink); // past the boot-artifact partial frame
+        let mut narrow_sink = RecordingSink::default();
+        s.step_frame(&mut narrow_sink);
+        assert!(
+            !narrow_sink
+                .events
+                .iter()
+                .any(|e| matches!(e, rf_core_api::CoreEvent::VblankStart)),
+            "VblankStart must NOT appear when not subscribed: {:?}",
+            narrow_sink.events
+        );
+
+        s.set_event_mask(rf_core_api::EventMask::VBLANK_START);
+        let mut wide_sink = RecordingSink::default();
+        s.step_frame(&mut wide_sink);
+        assert!(
+            wide_sink
+                .events
+                .iter()
+                .any(|e| matches!(e, rf_core_api::CoreEvent::VblankStart)),
+            "VblankStart must appear once explicitly subscribed: {:?}",
+            wide_sink.events
+        );
     }
 }

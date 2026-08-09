@@ -8,3 +8,27 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# rf-core-api: shared contract crate every crate depends on
+# (scripts/validate-arch.sh has no rule forbidding this) — `CoreEvent` is
+# `rf_debugger::event_timeline`'s input type, matching the real producer
+# W4-00/W4-01 already built (`rf_core_api::FrameBundle::events`) rather
+# than inventing a parallel one.
+rf-core-api = { path = "../rf-core-api" }
+# rf-renderer: not a console core (scripts/validate-arch.sh rule 3 only
+# names rf-nes/rf-snes), so this is an ordinary downward dependency, same
+# shape `rf-nes` itself has on `rf-cart`. Reused for `NES_PALETTE`/
+# `palette_index_to_rgb` (`rf_debugger::palette`) — the master 64-color NES
+# hardware LUT already lives there (`rf-renderer/src/palette.rs`); a
+# palette viewer re-deriving its own copy would be exactly the "use
+# existing utilities before creating new" duplication CLAUDE.md's code-
+# quality rules warn against.
+rf-renderer = { path = "../rf-renderer" }
+# toml + serde: sanctioned at docs/TECH_STACK.md §2 ("Config/profiles" row,
+# pinned major 1) — same pins `rf-profiles`/`rf-harness` already use.
+# `rf_debugger::layout::PersistedLayout` (ticket W4-06a criterion 3) is
+# this crate's own small, versioned dock-layout format; no new licence
+# surface, both already resolve in Cargo.lock.
+toml = "1"
+serde = { version = "1", features = ["derive"] }

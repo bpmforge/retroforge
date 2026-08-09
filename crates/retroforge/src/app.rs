@@ -154,6 +154,17 @@ pub struct RetroForgeApp {
     /// the reply lands even while otherwise Paused, so it doesn't take a
     /// stray mouse-move to show the first Ultrawide frame.
     awaiting_canvas_snapshot: bool,
+    /// Ticket W4-06a: the debug-viewer dock (pattern/nametable/palette/OAM/
+    /// event viewers, `egui_dock` layout). Owns its own persisted layout
+    /// and per-panel state — see `crate::debug_dock`'s module doc for why
+    /// it stays a separate module rather than folding into this one.
+    debug_panels: crate::debug_dock::DebugPanels,
+    /// Whether `crate::core_thread::CoreCommand::SetEventMask` was last
+    /// sent with the event viewer's bits included — mirrors `running`'s
+    /// "set right after sending a command" pattern above, so the app only
+    /// re-sends the command when `debug_panels.wants_event_subscription()`
+    /// actually *changes* rather than every single repaint.
+    event_subscription_active: bool,
 }
 
 impl RetroForgeApp {
@@ -206,6 +217,8 @@ impl RetroForgeApp {
             fm13_message: None,
             ultrawide_refresh_countdown: 0,
             awaiting_canvas_snapshot: false,
+            debug_panels: crate::debug_dock::DebugPanels::new(),
+            event_subscription_active: false,
         }
     }
 
@@ -242,9 +255,45 @@ impl RetroForgeApp {
                 return;
             }
         };
+        // Ticket W4-06a: extract CHR *before* `bytes` moves into
+        // `core_thread::spawn` below — the pattern viewer's only in-scope
+        // data path (`rf_debugger::pattern`'s module doc: rf-debugger may
+        // not depend on rf-nes at all, so this crate is the mediator).
+        // Best-effort and independent of the real load below: a parse
+        // failure here just means no CHR preview (`chr_rom` stays `None`),
+        // never a reason to fail opening the ROM — `core_thread::spawn`'s
+        // own `EmuStepper::from_ines_bytes` call is the authoritative
+        // load path and reports its own error separately. `chr_is_ram()`
+        // cartridges have no static pattern data to show at all (module
+        // doc point 1) — filtered out here rather than in the viewer, so
+        // the viewer's `None` always means "no data", never "zeroed RAM
+        // dressed up as ROM content".
+        let chr_rom = rf_nes::NesRom::from_ines_bytes(&bytes)
+            .ok()
+            .filter(|rom| !rom.chr_is_ram())
+            .map(|rom| rom.chr_rom().to_vec());
         match core_thread::spawn(bytes) {
             Ok(handle) => {
                 self.core = Some(handle);
+                // A new ROM is a new debug session too — the previous
+                // ROM's OAM/events would otherwise linger onscreen against
+                // a completely different game (same reasoning the
+                // Ultrawide-camera reset below already uses).
+                self.debug_panels.data.chr_rom = chr_rom;
+                self.debug_panels.data.oam = [0u8; 256];
+                self.debug_panels.data.events = Vec::new();
+                // A fresh `EmuStepper` (inside `core_thread::spawn` below)
+                // starts back at `stepper::CAMERA_BASELINE_EVENT_MASK` —
+                // if the event-viewer panel was already open before this
+                // reload, `event_subscription_active` would otherwise
+                // still read `true` from the OLD core and
+                // `sync_event_subscription`'s "only send when it changes"
+                // guard would skip re-sending `SetEventMask` to the NEW
+                // one, silently leaving it under-subscribed. Resetting
+                // here forces the very next `sync_event_subscription` call
+                // to re-send, regardless of whether the panel's open/closed
+                // state itself changed.
+                self.event_subscription_active = false;
                 self.crash = None;
                 self.texture = None;
                 self.bg_layer_texture = None;
@@ -307,6 +356,19 @@ impl RetroForgeApp {
                 }
             }
         }
+        // Ticket W4-06a: read out of `core.frame_bundle` (an owned clone of
+        // its `events`) here, AFTER draining `evt_rx` above but BEFORE the
+        // canvas-snapshot handling below (which calls `&mut self` methods
+        // the borrow checker cannot allow alongside a live borrow through
+        // `core`). Ordering matters for more than the borrow checker: the
+        // core thread always publishes a frame's `FrameBundle` before
+        // sending its matching `CoreEvent::Frame` (`core_thread::
+        // core_thread_main`'s own doc), so reading `frame_bundle` only
+        // after `latest_frame` is captured guarantees these `events`
+        // belong to a bundle at least as fresh as `latest_frame` below —
+        // reading it any earlier could race a bundle published between the
+        // two reads and pair a frame with a stale event log.
+        let latest_bundle_events = core.frame_bundle.latest().events.clone();
         if crashed {
             // FM-01's recovery row is "Reload ROM / load last state" — the
             // core thread has already halted for good (`run_guarded_loop`
@@ -331,6 +393,17 @@ impl RetroForgeApp {
             self.awaiting_stepped_frame = false;
             // Ticket W2-15: position travels with the frame.
             self.position = Some((msg.frame_count, msg.last_scanline));
+            // Ticket W4-06a: OAM travels with the frame the same way
+            // (`core_thread::FrameMsg::oam`'s own doc); the event FIFO is
+            // read from the triple-buffered `FrameBundle` instead — it is
+            // NOT carried on `FrameMsg` (that would duplicate a stream
+            // that already crosses the thread boundary on its own,
+            // `core_thread::CoreHandle::frame_bundle`'s doc). Cloning one
+            // frame's (usually short, EventMask-gated) event `Vec` here is
+            // cheap relative to the RGBA texture uploads already happening
+            // in this same block.
+            self.debug_panels.data.oam = *msg.oam;
+            self.debug_panels.data.events = latest_bundle_events;
             let image =
                 egui::ColorImage::from_rgba_unmultiplied([msg.width, msg.height], &msg.rgba);
             match &mut self.texture {
@@ -522,6 +595,19 @@ impl RetroForgeApp {
                 // hides the window with no round trip to the core thread.
                 ui.checkbox(&mut self.show_layers, "Layers (debug)");
                 ui.separator();
+                // Ticket W4-06a criterion 3: layout is saved the moment the
+                // window closes (not only on process exit via
+                // `eframe::App::save` below), so a session that opens,
+                // rearranges panels, and closes without a clean shutdown
+                // still keeps the change.
+                if ui
+                    .checkbox(&mut self.debug_panels.visible, "Debug Viewers")
+                    .changed()
+                    && !self.debug_panels.visible
+                {
+                    self.debug_panels.save();
+                }
+                ui.separator();
                 // Ticket W4-03e acceptance criterion 2: the runtime camera
                 // toggle. Disabled with no compositor at all (no GPU
                 // device, `Self::compositor` doc) — there is nothing to
@@ -648,6 +734,46 @@ impl RetroForgeApp {
             });
     }
 
+    /// Ticket W4-06a criteria 1-3: the debug-viewer dock window
+    /// (pattern/nametable/palette/OAM/event panels + persisted
+    /// `egui_dock` layout). Same "own window, toggled by a checkbox" shape
+    /// [`Self::layers_debug_window`] already uses.
+    fn debug_panels_window(&mut self, ctx: &egui::Context) {
+        if !self.debug_panels.visible {
+            return;
+        }
+        egui::Window::new("Debug Viewers")
+            .collapsible(true)
+            .resizable(true)
+            .default_size([640.0, 480.0])
+            .show(ctx, |ui| {
+                self.debug_panels.ui(ui);
+            });
+    }
+
+    /// Ticket W4-06a: DEBUGGER.md §6's "closed panels register no event
+    /// subscriptions" — sends `CoreCommand::SetEventMask` only when
+    /// [`crate::debug_dock::DebugPanels::wants_event_subscription`]'s
+    /// answer actually *changes*, not every repaint (mirrors
+    /// [`Self::event_subscription_active`]'s doc). `EmuStepper::
+    /// set_event_mask` always re-asserts the camera baseline regardless of
+    /// what's requested here (that function's own doc), so narrowing to
+    /// `NONE` when every debug window is closed can never starve
+    /// `crate::canvas_accum`.
+    fn sync_event_subscription(&mut self) {
+        let wants = self.debug_panels.visible && self.debug_panels.wants_event_subscription();
+        if wants == self.event_subscription_active {
+            return;
+        }
+        self.event_subscription_active = wants;
+        let mask = if wants {
+            rf_core_api::EventMask::ALL
+        } else {
+            rf_core_api::EventMask::NONE
+        };
+        self.send_command(CoreCommand::SetEventMask(mask));
+    }
+
     /// Ticket W4-03e acceptance criterion 2: paints whichever camera view
     /// [`enhanced_view::select_active_view`] resolves to — the ONLY branch
     /// point between Original and Ultrawide, so a mutation that hardcodes
@@ -693,11 +819,35 @@ impl eframe::App for RetroForgeApp {
         self.poll_input(&ctx);
         self.pump_core_events(&ctx);
         self.maybe_request_canvas_snapshot();
+        self.sync_event_subscription();
 
         self.menu_bar(ui);
         self.controls_bar(ui);
         self.video_panel(ui);
         self.crash_dialog(&ctx);
         self.layers_debug_window(&ctx);
+        self.debug_panels_window(&ctx);
     }
+
+    // Ticket W4-06a criterion 3: `eframe::App::save`/`auto_save_interval`
+    // (its own periodic-autosave hook) is deliberately NOT overridden here.
+    // Verified against `eframe-0.35.0`'s own `Cargo.toml`, not assumed: it
+    // is only ever called when this crate's `eframe` dependency enables the
+    // `persistence` feature ("Only called when the 'persistence' feature is
+    // enabled", `epi::App::save`'s own doc), which pulls in `ron`/`home` as
+    // new transitive dependencies — a new-crate licence surface the ticket
+    // brief is explicit about ("Any other new crate does [need a
+    // docs/TECH_STACK.md row] — stop and report instead"), and `docs/**` is
+    // outside this ticket's write scope regardless. An override here would
+    // therefore be dead code today — never invoked, never exercised by any
+    // test — exactly the kind of unverified-because-unreachable path this
+    // ticket's own "vacuity trap" guidance warns against. The "Debug
+    // Viewers" checkbox's explicit `debug_panels.save()` on close
+    // (`Self::controls_bar`) is therefore the ONLY persistence trigger this
+    // build has; a session ended by `kill -9` or an OS-level force-quit
+    // loses whatever layout change happened since the last checkbox
+    // toggle. Recorded here as the cleaner long-term answer: enabling
+    // `persistence` (a `docs/TECH_STACK.md`-and-`deny.toml` decision, both
+    // outside this write scope) would add eframe's own native periodic
+    // save as a second, real trigger.
 }
