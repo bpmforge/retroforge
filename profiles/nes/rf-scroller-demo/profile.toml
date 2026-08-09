@@ -1,0 +1,133 @@
+# Schema v0 (docs/design/GAME_PROFILES.md §2) demonstration profile,
+# authored for ticket W4-02, not derived from a real commercial game.
+#
+# Shapes its [decode] section on fixtures/nes/rf-scroller/FORMAT.md's real
+# on-ROM constants (SCREEN_COLS=48, SCREEN_ROWS=14, column-RLE order) to
+# prove the schema can EXPRESS that fixture's level format -- the future
+# `metatile_screens` decoder (W5-02a, depends on W5-01, which depends on
+# this ticket) is what will eventually read a document shaped like this
+# one. Nothing in this ticket decodes it.
+#
+# The `[[identity]]` hash below is a PLACEHOLDER, not RF-Scroller's real
+# ROM hash -- this ticket does not pin a real ROM identity (W5-01's job),
+# and claiming a match against the real fixture without verifying it would
+# be a false provenance claim.
+
+[meta]
+profile_version = "0.1"
+title = "RF-Scroller schema demo"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge W4-02"]
+sources = ["synthetic example for schema v0 demonstration; not a real game"]
+
+[meta.requires]
+mapper = "NROM"
+chips = []
+
+[[identity]]
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+md5 = "00000000000000000000000000000000"
+crc32 = "00000000"
+revision = "1.0"
+
+[capabilities]
+full_level = true
+hud_separation = true
+entity_overlay = false
+widescreen = "stitched"
+fast_load = false
+smooth_camera = false
+
+[[memory_map]]
+addr = 0x6029
+len = 2
+type = "u16"
+label = "player_x"
+notes = "World X, pixels, 0..752"
+source = "fixtures/nes/rf-scroller/FORMAT.md"
+
+[[memory_map]]
+addr = 0x602B
+len = 2
+type = "u16"
+label = "camera_x"
+notes = "Screen-left world X, pixels, 0..512"
+source = "fixtures/nes/rf-scroller/FORMAT.md"
+
+[camera]
+mode = "side_scroller"
+
+[camera.x]
+addr = 0x602B
+type = "u16"
+scale = 1
+
+[camera.hud]
+region = "top"
+scanlines = [0, 1]
+detect = "sprite0_split"
+
+[entities]
+offscreen_valid = false
+
+[entities.table]
+addr = 0x0400
+stride = 16
+count = 8
+
+[entities.fields]
+x = 0
+y = 4
+kind = 12
+active = { offset = 15, mask = 0x80 }
+
+[[rom_map]]
+offset = 0x0000
+len = 4
+label = "metatile_table"
+type = "ptr_table"
+count = 4
+source = "fixtures/nes/rf-scroller/FORMAT.md#metatile-table"
+
+[decode]
+kind = "metatile_screens"
+
+[decode.metatile]
+table = 0x0000
+size = 4
+
+[decode.screens]
+width = 48
+height = 14
+order = "column_rle"
+
+[decode.palettes]
+table = 0x3F00
+per_area = true
+
+[decode.collision]
+table = 0x0004
+bits = "solid,platform,hazard"
+
+[antiflicker]
+mode = "default"
+exclude_oam = []
+blink_periods = [16]
+
+[loading]
+[[loading.wait_loops]]
+pc = 0xC000
+until = { addr = 0x602D, equals = 95 }
+label = "streaming wait (columns_streamed reaches last raw column)"
+
+[plugins]
+required = []
+optional = []
+
+[mods]
+[[mods.patch]]
+id = "no-hud"
+description = "Disable the HUD split (example only, off by default)"
+addr = 0xC500
+replace = [0xEA, 0xEA]

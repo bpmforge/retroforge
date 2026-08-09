@@ -1,6 +1,18 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+# tools/*: added by ticket W4-02 for `retroforge-tool` (crates/rf-profiles/**
+# and tools/** are the granted write_scope; this one-line root-manifest edit
+# is out of that literal scope but structurally required -- a tools/ crate
+# with neither a workspace-members entry nor its own [workspace] table is a
+# hard `cargo` error, and a standalone [workspace] would drop the binary out
+# of `cargo test --workspace` / `cargo clippy --workspace --all-targets` /
+# `cargo fmt --all --check` / `cargo deny check licenses`, which the ticket's
+# own gate list runs. Putting the crate under tools/ rather than crates/ is
+# also deliberate: scripts/validate-arch.sh rule 3 only walks `crates/*/`,
+# so a future tools/ crate (W4-07's `rom` group) can depend on rf-nes/rf-snes
+# for trace capture without tripping the "only retroforge/rf-harness may
+# depend on a console core directly" layer rule.
+members = ["crates/*", "tools/*"]
 
 [workspace.package]
 version = "0.1.0"

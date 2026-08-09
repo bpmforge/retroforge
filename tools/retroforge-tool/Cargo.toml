@@ -1,0 +1,14 @@
+[package]
+name = "retroforge-tool"
+description = "RetroForge developer CLI: profile validate/hash (ticket W4-02); rom group reserved for W4-07"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rf-profiles = { path = "../../crates/rf-profiles" }
+rf-cart = { path = "../../crates/rf-cart" }

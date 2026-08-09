@@ -1,0 +1,48 @@
+# Schema v0 (docs/design/GAME_PROFILES.md §2) demonstration profile,
+# authored for ticket W4-02, not derived from a real commercial game.
+#
+# Deliberately smaller than profiles/nes/rf-scroller-demo/profile.toml: it
+# exercises console = "snes", a `[[identity]]` entry keyed on sha1 alone
+# (proving the loader doesn't require sha256 specifically -- FR-PROF-002's
+# "any of the hash families"), and a "top_down_rooms" camera mode, without
+# repeating every optional section the NES example already covers.
+
+[meta]
+profile_version = "0.1"
+title = "SNES schema demo"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge W4-02"]
+sources = ["synthetic example for schema v0 demonstration; not a real game"]
+
+[meta.requires]
+chips = ["DSP-1"]
+
+[[identity]]
+sha1 = "0000000000000000000000000000000000000000"
+revision = "1.0"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+widescreen = "none"
+fast_load = true
+smooth_camera = true
+
+[camera]
+mode = "top_down_rooms"
+
+[camera.x]
+addr = 0x0F10
+type = "u16"
+scale = 1
+
+[camera.y]
+addr = 0x0F12
+type = "u16"
+scale = 1
+
+[decode]
+kind = "room_grid"
+family_version = "0"

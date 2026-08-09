@@ -8,3 +8,16 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# toml/serde: sanctioned at docs/TECH_STACK.md §2 ("Config/profiles" row,
+# pinned major 1) for exactly this crate's job (human-authored, diffable
+# profiles per docs/design/GAME_PROFILES.md). Same version pins
+# crates/rf-harness already uses (tests/rom-manifest.toml, W0-03) -- no new
+# licence surface, both already resolve in Cargo.lock.
+toml = "1"
+serde = { version = "1", features = ["derive"] }
+# rf-cart: hash types only (RomHashes/RomIdentity) -- FR-PROF-002/FR-MODE-005
+# say a profile matches by ANY of rf-cart's already-computed hash families;
+# this crate consumes those types rather than recomputing hashes itself.
+rf-cart = { path = "../rf-cart" }

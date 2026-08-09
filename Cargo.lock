@@ -2936,6 +2936,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "retroforge-tool"
+version = "0.1.0"
+dependencies = [
+ "rf-cart",
+ "rf-profiles",
+]
+
+[[package]]
 name = "rf-ai"
 version = "0.1.0"
 
@@ -3018,6 +3026,11 @@ version = "0.1.0"
 [[package]]
 name = "rf-profiles"
 version = "0.1.0"
+dependencies = [
+ "rf-cart",
+ "serde",
+ "toml",
+]
 
 [[package]]
 name = "rf-renderer"
