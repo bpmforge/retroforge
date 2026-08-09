@@ -1645,7 +1645,8 @@
     "crates/retroforge/**"
    ],
    "depends_on": [
-    "W3-05"
+    "W3-05",
+    "W4-06a"
    ],
    "acceptance": [
     "OAM diff view showing which sprites changed between frames and which the 8-per-scanline limit dropped (FR-DBG-006)",
@@ -2200,7 +2201,17 @@
     "egui_dock panel layout persisted (FR-FE-004)"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
+   "notes": [
+    "PRE-FLIGHT + CLAIM 2026-08-09 (conductor, HEAD d1a9de0, baseline 745 passed / 0 failed / 7 ignored). Scope [crates/rf-debugger/**, crates/retroforge/**] is not self-blocking. THIS TICKET IS ON THE CRITICAL PATH TO THE PROJECT'S HEADLINE GOAL: W4-06a -> W4-06b (annotation store exports a profile skeleton, GAME_PROFILES section 3) -> W5-01 -> W5-02a/b -> W5-03, which is game-aware FULL-LEVEL reconstruction. The generic stitcher already shipped shows only VISITED area by design; this chain is what rebuilds geometry the player has never walked through.",
+    "SKELETON-OWNERSHIP COLLISION RESOLVED IN THE BOARD, the same pattern caught at W4-02/W4-07 one ticket ago. crates/rf-debugger is a 15-LINE STUB and is NOT a dependency of crates/retroforge. W4-06a and W3-05b were BOTH claimable, BOTH write to [rf-debugger, retroforge], and NEITHER depended on the other -- so whichever ran second would have collided with a crate skeleton, a shell dependency and an egui_dock layout it did not create. RESOLUTION: W4-06a owns the skeleton, the shell wiring and the docking layout (its own criterion 3); W3-05b now depends_on W4-06a and adds one panel to it. W4-06b already depended on W4-06a, so the whole debugger track is now serialized correctly.",
+    "ARCH WALL -- rf-debugger MAY NOT DEPEND ON rf-nes. scripts/validate-arch.sh rule 3 allows only retroforge and rf-harness to touch a console core directly, and its grep matches [dev-dependencies] too (the constraint W3-05 hit and recorded). So the viewers CANNOT read PPU state directly; they consume rf_core_api::StateView, which exposes cpu_regs, wram, vram, cgram, oam, ppu_regs and mapper_state as byte slices.",
+    "CONSEQUENCE, AND IT AFFECTS CRITERION 1: StateView has NO CHR/pattern-table field. vram covers the nametable viewer, cgram the palette viewer, oam the OAM viewer -- but the PATTERN viewer has no data path from rf-debugger. rf-nes has `chr_peek` (added by W3-05a) and it is unreachable from there. TAKE THE SHELL-MEDIATED ROUTE, which needs no contract change and no scope amendment: crates/retroforge depends on BOTH rf-nes and rf-debugger, so it reads CHR and passes it to the viewer as a plain &[u8]. That is the same resolution used for SceneGraph at W4-03c/W4-03e. RECORD, do not fix here: the cleaner long-term answer is a `chr` field on StateView, but that is a versioned rf-core-api contract change touching rf-nes as well, both outside this write_scope.",
+    "READ-ONLY IS A HARD REQUIREMENT, not a style preference. W3-05a's hazard class is the precedent: an enhancement that silently clocks MMC3's A12 counter is INVISIBLE to pixel comparison but corrupts IRQ timing. Note rf-nes deliberately has BOTH `mem_read` (bus-observing, ticks A12) and `chr_peek` (non-observing) for exactly this reason -- a viewer that reaches for the wrong one perturbs the core every time a panel repaints. crates/retroforge/tests/{mode_invariant_corpus.rs, sprite_overlay_mode_invariant.rs} guard this and must stay green.",
+    "egui_dock 0.20.1 IS ALREADY SANCTIONED in docs/TECH_STACK.md section 2 ('Docking | egui_dock | 0.20.1 | Mesen-style dockable viewer layout'), so adding it needs no doc row you cannot write. Any OTHER new crate does -- stop and report instead. egui 0.35 API drift, verified at W1-06 and NOT what training data suggests: `eframe::App::ui` takes &mut egui::Ui (not &egui::Context); TopBottomPanel/SidePanel were REMOVED for a unified egui::Panel::top/bottom/left/right(id).show(ui, ...); ui.close_menu() is renamed ui.close(). Match the shapes already in crates/retroforge/src.",
+    "VACUITY TRAPS FOR VIEWER PANELS. (a) A viewer test that only checks 'the panel constructs' proves nothing -- assert the DECODED OUTPUT against known input (a synthetic nametable with a known tile at a known cell must appear at the expected coordinates). (b) A layout-persistence test that writes and reads back in one process cannot detect a broken save path -- round-trip through the actual serialized form. (c) 'Compile-checked only' is NOT a met criterion: W3-03's 'Layers (debug)' checkbox and W4-03e's camera toggle are the board's TWO outstanding human-only items, both from UI tickets. Do not add a third -- decode logic belongs in rf-debugger where it is testable headlessly, leaving only the egui wiring unverifiable.",
+    "THE EVENT VIEWER HAS A REAL PRODUCER ALREADY -- do not invent a parallel one. W4-00 made rf-nes emit CoreEvents (FrameStart, FrameEnd, VblankStart, Scanline, ScrollWrite, OamRewrite, MapperIrq, DmaStart), all EventMask-gated and zero-cost when unsubscribed, and W4-01 built the bus plus the triple-buffered FrameBundle that carries them. Criterion 2's frame-timeline scatter consumes that stream. Note the design call recorded at W4-00: a SINGLE shared FIFO preserves cross-source ordering (MapperIrq vs ScrollWrite on the same scanline), which is exactly what a timeline scatter needs to be truthful."
+   ],
    "stories": [
     "E3-S1",
     "E3-S2"
