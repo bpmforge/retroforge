@@ -24,9 +24,19 @@ SRS verification column, `docs/design/SAVE_STATES.md`.
 - **Golden-frame**: run to frame N (manifest-declared), hash framebuffer
   (indexed buffer, pre-shader — host GPU never affects goldens), compare
   SHA-256; on mismatch, dump PNG pair + diff heatmap as CI artifacts.
-- **Audio check**: capture ring-buffer output, compare per-channel RMS
-  envelope against known-good recording (blargg `apu_mixer`); exact
-  sample-hash for S-DSP BRR cases.
+- **Audio check**: capture the core's sample stream through the app's own
+  output-stage filters and compare the RMS envelope (blargg `apu_mixer`);
+  exact sample-hash for S-DSP BRR cases. **Corrected 2026-08-16 (W2-05):**
+  the "known-good recording" this line originally named does not exist and
+  is not needed — `apu_mixer`'s ROMs cancel their own tone against the DMC
+  DAC, so near-silence between their beeps IS the reference, and it is a
+  stronger one (a recording would also encode this engine's filtering,
+  decimation and volume scaling).
+- **Audio underrun soak**: five minutes of device playback with zero
+  silence-filled callbacks (`crates/retroforge/tests/audio_soak.rs`).
+  Device-gated and `#[ignore]`d — CI has no sound card — so it is run
+  deliberately, and the headless pieces it is built from (ring, rate loop,
+  resampler, filters) run on every commit.
 - **Replay check**: play `.rfreplay`, assert periodic + final state hashes;
   on divergence report first divergent frame (hashes every N frames make
   bisection O(log) by re-run).
@@ -97,7 +107,7 @@ in `docs/evidence/local-gate.json`). W2-12 owns wiring the rest.
 | blargg `apu_test` (1 combined ROM, 8 sub-tests) | length counters, length table, frame IRQ + its timing, APU jitter, DMC basics + rates | FR-CORE-024 | A-local | $6000 = 0 — **8/8 as of W2-01a**; fifth Tier-A-local suite (gitignored ROM, so `scripts/local-gate.sh` + `docs/evidence/local-gate.json` carry the evidence, not CI) |
 | blargg `apu_reset` (6 ROMs) | APU state across reset | FR-CORE-024 | A — **NOT WIRED**: fetched and in the manifest, but no ticket owns it and no `Apu::reset` path exists yet (W2-01a `HANDOFF:` note) | $6000 = 0 |
 | blargg `dmc_dma_during_read4` (5 ROMs) | DMC DMA cycle stealing + the repeated-read glitch on `$2007`/`$4016` | FR-CORE-024 | A-local — **3/5, W2-01b BLOCKED with evidence** | **NOT `$6000`**: all five leave PRG-RAM zero (older screen-only shell), so the result is read out of the PPU nametable. `dma_2007_read` matches documented CRC `5E3DF9C4`, `dma_2007_write` and `read_write_2007` self-report `Passed`; `dma_4016_read` needs 1 extra `$4016` read and this engine makes 3, and `double_2007_read` needs an unimplemented `$2007` double-read PPU quirk. Both diagnoses are in W2-01b's block note |
-| blargg `apu_mixer` (4 ROMs) | non-linear mixer levels | FR-CORE-024 | B | RMS envelope match — **the LUTs are built and unit-tested against nesdev's exact formula (W2-01b); the ROM-level RMS check is not wired**, and needs an audio capture path (W2-05) |
+| blargg `apu_mixer` (4 ROMs) | non-linear mixer levels | FR-CORE-024 | B-local | RMS envelope of the cancellation section between the ROMs' two beeps — **the ROM's own design is the oracle** ("generate a tone, then generate the inverse waveform using the DMC DAC, canceling to (near) silence"), so no reference recording is needed. **`square` and `dmc` are gated** (residue < 0.10 of peak; a +20% `tnd`-LUT mutation measures 0.31/0.21, so the gate is not vacuous). `triangle` (0.092 residue vs a 0.057 noise floor) and `noise` (its section is *meant* to be noisy — "fade noise in, and out, without any tone") are structural-only, stated in `crates/retroforge/tests/apu_mixer.rs` rather than gated on a threshold picked to pass |
 | `mmc3_test_2` + IRQ tests | MMC3 A12 IRQ counter | FR-CORE-025 | A | $6000 = 0 |
 | Holy Diver Batman (28 ROMs) | mapper acid breadth | FR-CORE-025 | B | golden frame per ROM |
 | RF-Scroller 5-min replay | real-game regression (in-repo fixture, D-001) | FR-CORE-026 | A | final-hash + 6 golden frames |

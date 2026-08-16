@@ -304,6 +304,26 @@ impl NesBus {
     /// exists in this crate yet to call this once per frame automatically
     /// (out of this ticket's write scope); callers (today: tests) drive it
     /// directly.
+    /// Hand every audio sample produced since the last call to `sink`
+    /// (ticket W2-05, FR-CORE-024 / ARCHITECTURE §8's `audio.push`).
+    ///
+    /// Separate from [`NesBus::drain_video`] rather than folded into it
+    /// because the two have different cadences in the app: video is drained
+    /// once per frame to paint, audio can be drained more often to keep the
+    /// ring fed. Both are pure output — draining either never touches
+    /// machine state, which is what lets `crate::apu::state` exclude the
+    /// sample queue from save states.
+    ///
+    /// Emits nothing when no samples are pending, so a caller polling it
+    /// every instruction costs one branch.
+    pub fn drain_audio(&mut self, sink: &mut dyn CoreSink) {
+        if self.apu.queued_samples() == 0 {
+            return;
+        }
+        let samples = self.apu.take_samples();
+        sink.audio(&samples);
+    }
+
     pub fn drain_video(&mut self, sink: &mut dyn CoreSink) {
         self.ppu.drain(sink);
     }

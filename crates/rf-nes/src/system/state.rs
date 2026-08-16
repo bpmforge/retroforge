@@ -160,3 +160,24 @@ impl Controller {
         Ok(())
     }
 }
+
+impl NesBus {
+    /// The nametable decoded as ASCII (ticket W2-05): blargg's older shells
+    /// write character codes straight into VRAM, so for those ROMs this is
+    /// the only place their result exists. Whitespace-normalized.
+    #[must_use]
+    pub fn ppu_vram_ascii(&self) -> String {
+        let vram = &self.ppu.vram;
+        let text: String = (0..30 * 32)
+            .map(|i| {
+                let tile = vram[i];
+                if (0x20..0x7F).contains(&tile) {
+                    tile as char
+                } else {
+                    ' '
+                }
+            })
+            .collect();
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+}

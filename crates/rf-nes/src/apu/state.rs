@@ -29,6 +29,18 @@ impl Apu {
             noise,
             dmc,
             frame_counter,
+            // AUDIO OUTPUT, NOT MACHINE STATE (ticket W2-05) — the same
+            // ruling `crate::ppu`'s completed-scanline queue gets, and for
+            // the same reason: these three carry the decimator's phase and
+            // the samples produced since the last drain, none of which any
+            // future *machine* behaviour reads. Restoring them would make a
+            // save state's bytes depend on how recently the host drained
+            // audio, which is a property of the app, not of the console.
+            // `load_state` resets the decimator instead, so a restored
+            // machine starts a clean output period.
+            sample_accumulator: _,
+            sample_phase: _,
+            samples: _,
             on_apu_cycle,
         } = self;
         pulse1.save_state(out)?;
@@ -48,6 +60,7 @@ impl Apu {
         self.dmc.load_state(inp)?;
         self.frame_counter.load_state(inp)?;
         self.on_apu_cycle = inp.bool()?;
+        self.reset_audio_output();
         Ok(())
     }
 }

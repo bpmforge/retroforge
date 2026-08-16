@@ -443,6 +443,13 @@ impl EmuStepper {
         while self.bus.master_cycle() < deadline {
             self.cpu.step(&mut self.bus);
             self.bus.drain_video(&mut counting);
+            // Ticket W2-05: audio drains on the same cadence as video —
+            // per instruction, not per frame — so the ring is fed steadily
+            // instead of in one ~800-sample burst at each frame boundary.
+            // A burst is what makes a small ring underrun between frames
+            // (`docs/design/FAILURE_MODES.md` FM-02); the drain costs one
+            // branch when nothing is queued.
+            self.bus.drain_audio(&mut counting);
             if counting.scanlines > 0 {
                 break;
             }
@@ -581,6 +588,7 @@ impl EmuStepper {
         while self.bus.master_cycle() < deadline {
             self.cpu.step(&mut self.bus);
             self.bus.drain_video(&mut counting);
+            self.bus.drain_audio(&mut counting);
             let now = self.bus.frame_count();
             if now != start {
                 debug_assert_eq!(
@@ -1113,5 +1121,15 @@ fn hex_to_bytes(hex: &str, out: &mut [u8; 32]) {
                 return;
             }
         }
+    }
+}
+
+impl EmuStepper {
+    /// The text a blargg shell printed to the nametable, ASCII-decoded —
+    /// for the older ROMs whose only output is the screen (ticket W2-05;
+    /// same reader `rf-nes`'s `dmc_dma_during_read4` suite uses).
+    #[must_use]
+    pub fn screen_text_for_test(&self) -> String {
+        self.bus.ppu_vram_ascii()
     }
 }

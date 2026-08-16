@@ -64,6 +64,25 @@ use noise::Noise;
 use pulse::Pulse;
 use triangle::Triangle;
 
+/// The internal audio rate this core decimates to (ticket W2-05).
+/// `EMULATION_CORES.md` §2.3: the mixer runs "at ~1.789 MHz effective,
+/// downsampled by the core to a fixed internal rate"; `rf-audio`'s
+/// resampler takes it from here to whatever the device wants.
+pub const OUTPUT_SAMPLE_RATE: u32 = 48_000;
+
+/// NTSC CPU frequency: the 21.477272 MHz master clock divided by 12
+/// (nesdev.org/wiki/Cycle_reference_chart).
+const CPU_HZ: f64 = 1_789_772.727_272_727;
+
+/// CPU cycles per output sample in 16.16 fixed point (~37.287 cycles).
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+const CYCLES_PER_SAMPLE_FIXED: u32 = ((CPU_HZ / OUTPUT_SAMPLE_RATE as f64) * 65_536.0) as u32;
+
+/// One NTSC frame is ~29781 CPU cycles, so ~800 samples; the queue is
+/// preallocated for that — a hint, never a cap, the same convention
+/// `crate::ppu`'s completed-scanline queue uses.
+const SAMPLES_PER_FRAME_HINT: usize = 900;
+
 /// The raw per-channel outputs, for W2-01b's mixer and for tests. Pulse and
 /// noise are 4-bit envelope volumes, triangle a 4-bit sequence step, DMC a
 /// 7-bit level — the four inputs nesdev's APU_Mixer formulas take.
@@ -86,6 +105,16 @@ pub struct Apu {
     noise: Noise,
     dmc: Dmc,
     frame_counter: FrameCounter,
+    /// Running area under the mixer's piecewise-constant output since the
+    /// last emitted sample (ticket W2-05). See [`Apu::accumulate_sample`].
+    sample_accumulator: f32,
+    /// Fractional CPU cycles remaining before the next output sample, in
+    /// 16.16 fixed point — fixed point rather than `f32` so the sample
+    /// clock cannot drift over a long session.
+    sample_phase: u32,
+    /// Output samples produced since the last drain, emptied by
+    /// [`Apu::take_samples`].
+    samples: Vec<i16>,
     /// The APU's single CPU/2 parity signal: `true` on the CPU cycles that
     /// are also APU cycles. Toggled once at the top of [`Apu::tick`], and
     /// used by two consumers whose validation status is deliberately NOT
@@ -122,6 +151,9 @@ impl Apu {
             noise: Noise::default(),
             dmc: Dmc::default(),
             frame_counter: FrameCounter::new(),
+            sample_accumulator: 0.0,
+            sample_phase: CYCLES_PER_SAMPLE_FIXED,
+            samples: Vec::with_capacity(SAMPLES_PER_FRAME_HINT),
             on_apu_cycle: false,
         }
     }
@@ -233,6 +265,71 @@ impl Apu {
             self.pulse1.tick_apu_cycle();
             self.pulse2.tick_apu_cycle();
         }
+
+        self.accumulate_sample();
+    }
+
+    /// Decimate 1.789 MHz mixer output to [`OUTPUT_SAMPLE_RATE`] by
+    /// integrating the area under the signal over each output period
+    /// (ticket W2-05).
+    ///
+    /// **What this is, precisely**: the mixer's output is piecewise
+    /// constant between channel-timer edges, so summing it across an
+    /// output period and dividing by that period is the *exact* integral
+    /// of the signal over the period — a moving-average (sinc-shaped)
+    /// low-pass followed by decimation, not point sampling. That is real
+    /// anti-aliasing, which is what keeps the top of the pulse range from
+    /// folding down into audible whine.
+    ///
+    /// **What it is not**: `EMULATION_CORES.md` §2.3 names "blip-buffer
+    /// band-limited steps" — blargg's windowed-sinc step synthesis, whose
+    /// stopband rejection is far better than a box filter's -13 dB first
+    /// sidelobe. This is a narrower implementation of the same idea,
+    /// chosen so the core stays dependency-free and the decimation is
+    /// exactly checkable. Upgrading it changes audio quality only, never
+    /// machine state, so it can land any time without touching the
+    /// determinism invariant.
+    fn accumulate_sample(&mut self) {
+        self.sample_accumulator += self.mixed_output();
+        if self.sample_phase > 65_536 {
+            self.sample_phase -= 65_536;
+            return;
+        }
+        // This cycle straddles the period boundary: emit, then carry the
+        // phase remainder so the sample clock never drifts.
+        let cycles = f64::from(CYCLES_PER_SAMPLE_FIXED) / 65_536.0;
+        #[allow(clippy::cast_possible_truncation)]
+        let mean = (f64::from(self.sample_accumulator) / cycles) as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let sample = (mean * f32::from(i16::MAX)) as i16;
+        self.samples.push(sample);
+        self.sample_accumulator = 0.0;
+        self.sample_phase = self.sample_phase + CYCLES_PER_SAMPLE_FIXED - 65_536;
+    }
+
+    /// Samples produced since the last call, clearing the queue.
+    /// `crate::system::NesBus::drain_audio` is the only caller in normal
+    /// operation; it hands them to [`rf_core_api::CoreSink::audio`].
+    pub fn take_samples(&mut self) -> Vec<i16> {
+        std::mem::take(&mut self.samples)
+    }
+
+    /// Drop any partially-accumulated sample and everything queued, and
+    /// restart the decimator's phase (ticket W2-05). Called on state
+    /// restore: audio is output, not state (`crate::apu::state`), so a
+    /// restored machine starts a clean output period rather than inheriting
+    /// a phase from whenever the state happened to be written.
+    pub(crate) fn reset_audio_output(&mut self) {
+        self.sample_accumulator = 0.0;
+        self.sample_phase = CYCLES_PER_SAMPLE_FIXED;
+        self.samples.clear();
+    }
+
+    /// How many samples are queued — for tests, and for a host sizing a
+    /// buffer before it drains.
+    #[must_use]
+    pub fn queued_samples(&self) -> usize {
+        self.samples.len()
     }
 
     /// The DMC memory reader's outstanding fetch — `(address, is_load)`, or
