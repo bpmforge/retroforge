@@ -1,0 +1,187 @@
+//! blargg's `dmc_dma_during_read4` suite (ticket W2-01b, FR-CORE-024) — the
+//! five ROMs that measure what a DMC DMA does to a CPU read with side
+//! effects.
+//!
+//! ## These ROMs speak neither `$6000` nor a pass/fail protocol
+//!
+//! `tests/rom-manifest.toml` tags this suite `protocol = "six_thousand"`,
+//! but its PRG-RAM stays all-zero for every one of the five: they are from
+//! blargg's older, screen-only shell, so **their results exist only in the
+//! PPU nametable**. This is the same class of protocol mistag W1-05b found
+//! on `sprite_hit_tests`; the manifest row is left alone (out of this
+//! ticket's write scope) and this test reads the rendered text instead, via
+//! `NesBus::ppu_vram_for_test`. Two of the ROMs do print `Passed`/`Failed`
+//! themselves; the other three print only hex plus a CRC, which their source
+//! headers list accepted values for.
+//!
+//! **Why several outputs are accepted per ROM**: the headers say so —
+//! `dma_2007_read`'s is "Number of extra reads depends in [sic] CPU-PPU
+//! synchronization at reset", `double_2007_read`'s is "Output (depends on
+//! CPU-PPU synchronization)". A real console powers up with a random
+//! CPU/APU/PPU alignment; this crate is deterministic (ARCHITECTURE §3) and
+//! picks one, so the assertion is "our output is one of the variants the
+//! author documented as correct", never "the one variant we happen to
+//! produce".
+//!
+//! ## Status: 3 of 5, and the other two are separately diagnosed
+//!
+//! This suite is W2-01b's acceptance criterion and it is **not met**; the
+//! ticket carries the block note, `crates/rf-harness/waivers.toml` the
+//! waiver. What passes and what does not is asserted below rather than
+//! described, so a future fix cannot quietly regress the three that work:
+//!
+//! - `dma_2007_read` — matches documented variant 2 (`44 55`, CRC
+//!   `5E3DF9C4`) exactly.
+//! - `dma_2007_write` — the ROM prints `Passed`. (Its header's expected hex
+//!   is from an older build and no longer matches what the ROM itself
+//!   accepts; the ROM's own verdict is the authority.)
+//! - `read_write_2007` — prints `Passed`, and its hex matches the header.
+//! - `dma_4016_read` — prints `Failed`: it needs exactly ONE extra `$4016`
+//!   read (`08 08 07 08 08`) and this engine produces three (`05`).
+//! - `double_2007_read` — CRC `D84F6815`, none of the four accepted. It
+//!   needs a PPU-side behavior this crate does not implement at all
+//!   ("Double read of $2007 sometimes ignores extra read, and puts odd
+//!   things into buffer"), which is not a DMA-model question.
+
+use std::path::{Path, PathBuf};
+
+use crate::cpu::Cpu;
+use crate::system::NesBus;
+
+/// Runs `rom` for `frames` frames and returns the text it printed to the
+/// screen: the nametable's 30 rows of 32 tiles, decoded as ASCII (blargg's
+/// console writes character codes straight into the nametable) and
+/// whitespace-normalized.
+fn screen_text(rom_path: &Path, frames: u32) -> String {
+    let rom_bytes = std::fs::read(rom_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", rom_path.display()));
+    let mut bus = NesBus::from_ines_bytes(&rom_bytes)
+        .unwrap_or_else(|e| panic!("invalid rom image {}: {e}", rom_path.display()));
+    let mut cpu = Cpu::power_on(&mut bus);
+
+    for _ in 0..frames {
+        let start_frame = bus.frame_count();
+        while bus.frame_count() == start_frame {
+            cpu.step(&mut bus);
+        }
+    }
+
+    let vram = bus.ppu_vram_for_test();
+    let text: String = (0..30 * 32)
+        .map(|i| {
+            let tile = vram[i];
+            if (0x20..0x7F).contains(&tile) {
+                tile as char
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn resolve(name: &str) -> Option<PathBuf> {
+    let rel = format!("../../roms/nes/dmc_dma_during_read4/{name}.nes");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+    path.is_file().then_some(path)
+}
+
+/// What each ROM must print, transcribed from its own source header
+/// (`nes-test-roms/dmc_dma_during_read4/source/*.s`) or, where the ROM
+/// self-reports, from its own verdict. `expected_pass` records this
+/// engine's measured status: see the module doc for the two that fail and
+/// why they are separate problems.
+struct Rom {
+    name: &'static str,
+    /// Any one of these substrings appearing in the screen text is a pass.
+    accepted: &'static [&'static str],
+    expected_pass: bool,
+}
+
+const ROMS: &[Rom] = &[
+    // "DMC DMA during $2007 read causes 2-3 extra $2007 reads before real
+    // read." Two documented variants; this engine lands on the second.
+    Rom {
+        name: "dma_2007_read",
+        accepted: &["159A7A8F", "5E3DF9C4"],
+        expected_pass: true,
+    },
+    // "DMC DMA during $2007 write has no effect." The ROM self-reports, and
+    // its verdict is the authority over its header's older expected hex.
+    Rom {
+        name: "dma_2007_write",
+        accepted: &["Passed"],
+        expected_pass: true,
+    },
+    // "DMC DMA during $4016 read causes extra $4016 read." Needs exactly one
+    // extra read (`07`); this engine produces three (`05`). See the block
+    // note on W2-01b.
+    Rom {
+        name: "dma_4016_read",
+        accepted: &["Passed", "08 08 07 08 08"],
+        expected_pass: false,
+    },
+    // "Double read of $2007 sometimes ignores extra read, and puts odd
+    // things into buffer" -- an unimplemented PPU behavior, not a DMA one.
+    Rom {
+        name: "double_2007_read",
+        accepted: &["85CFD627", "F018C287", "440EF923", "E52F41A5"],
+        expected_pass: false,
+    },
+    // "Read of $2007 just before write behaves normally."
+    Rom {
+        name: "read_write_2007",
+        accepted: &["Passed", "33 11 22 33 09 55 66 77"],
+        expected_pass: true,
+    },
+];
+
+/// Runs each ROM and asserts the measured status EXACTLY: the three that
+/// pass must keep passing (a regression there is a real bug), and the two
+/// that fail must keep failing for the reason recorded -- if one starts
+/// passing, this test fails too, because that means the block note is stale
+/// and the ticket can move.
+#[test]
+fn dmc_dma_during_read4_three_of_five_pass_and_the_other_two_fail_as_recorded() {
+    let mut missing = 0;
+    let mut surprises = Vec::new();
+    for rom in ROMS {
+        let Some(path) = resolve(rom.name) else {
+            missing += 1;
+            continue;
+        };
+        let text = screen_text(&path, 600);
+        let passed = rom.accepted.iter().any(|a| text.contains(a));
+        eprintln!(
+            "dmc_dma_during_read4/{}: {} -- {text:?}",
+            rom.name,
+            if passed { "PASS" } else { "FAIL" }
+        );
+        if passed != rom.expected_pass {
+            surprises.push(format!(
+                "{}: expected {} but measured {} -- {text:?}",
+                rom.name,
+                if rom.expected_pass { "PASS" } else { "FAIL" },
+                if passed { "PASS" } else { "FAIL" }
+            ));
+        }
+    }
+
+    if missing == ROMS.len() {
+        eprintln!(
+            "SKIP dmc_dma_during_read4: roms/nes/dmc_dma_during_read4/*.nes not found. Fetch \
+             them first: scripts/fetch-test-roms.sh"
+        );
+        return;
+    }
+    assert_eq!(missing, 0, "partial fetch: {missing} of 5 ROMs missing");
+    assert!(
+        surprises.is_empty(),
+        "measured status differs from what W2-01b's block note records:
+{}",
+        surprises.join(
+            "
+"
+        )
+    );
+}

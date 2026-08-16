@@ -45,6 +45,12 @@ pub(super) struct Dmc {
     sample_buffer: Option<u8>,
     /// Set while a read has been requested but not yet supplied by the bus.
     fetch_pending: bool,
+    /// Which kind of DMA the outstanding request is (ticket W2-01b) —
+    /// nesdev.org/wiki/DMA: "Load DMAs occur after $4015 D4 is set, but only
+    /// if the sample buffer is empty... Reload DMAs occur in response to the
+    /// sample buffer being emptied." They schedule their halt on opposite
+    /// cycle types, which is why the kind is carried to the bus.
+    fetch_is_load: bool,
 
     shift_register: u8,
     bits_remaining: u8,
@@ -68,6 +74,7 @@ impl Default for Dmc {
             bytes_remaining: 0,
             sample_buffer: None,
             fetch_pending: false,
+            fetch_is_load: false,
             shift_register: 0,
             bits_remaining: 8,
             silence: true,
@@ -115,7 +122,7 @@ impl Dmc {
         } else {
             self.bytes_remaining = 0;
         }
-        self.maybe_request_fetch();
+        self.maybe_request_fetch(true);
     }
 
     /// "When a sample is (re)started, the current address is set to the
@@ -131,18 +138,21 @@ impl Dmc {
         self.bytes_remaining > 0
     }
 
-    /// The address the memory reader wants, if a fetch is outstanding. The
-    /// bus reads it and answers with [`Dmc::supply_byte`].
-    pub(super) fn fetch_address(&self) -> Option<u16> {
-        self.fetch_pending.then_some(self.current_address)
+    /// The outstanding fetch, if any: `(address, is_load)`. The bus halts
+    /// the CPU for it and answers with [`Dmc::supply_byte`] — see
+    /// `crate::system::NesBus`'s `CpuBus::read` for the stall itself.
+    pub(super) fn fetch_request(&self) -> Option<(u16, bool)> {
+        self.fetch_pending
+            .then_some((self.current_address, self.fetch_is_load))
     }
 
     /// "Any time the sample buffer is in an empty state and bytes remaining
     /// is not zero (including just after a write to $4015 that enables the
     /// channel...)" — the reader starts a fetch.
-    fn maybe_request_fetch(&mut self) {
-        if self.sample_buffer.is_none() && self.bytes_remaining > 0 {
+    fn maybe_request_fetch(&mut self, is_load: bool) {
+        if self.sample_buffer.is_none() && self.bytes_remaining > 0 && !self.fetch_pending {
             self.fetch_pending = true;
+            self.fetch_is_load = is_load;
         }
     }
 
@@ -162,7 +172,7 @@ impl Dmc {
         if self.bytes_remaining == 0 {
             if self.loop_flag {
                 self.restart();
-                self.maybe_request_fetch();
+                self.maybe_request_fetch(false);
             } else if self.irq_enabled {
                 self.irq_flag = true;
             }
@@ -179,7 +189,7 @@ impl Dmc {
         } else {
             self.timer -= 1;
         }
-        self.maybe_request_fetch();
+        self.maybe_request_fetch(false);
     }
 
     /// The output unit, in the order nesdev's "When the timer outputs a
