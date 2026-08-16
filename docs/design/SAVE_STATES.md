@@ -98,7 +98,7 @@ rom_sha256=<64 lowercase hex>
 emu_version=<semver>
 core_config=accuracy
 start_type=power-on
-hash_kind=reachable-v1
+hash_kind=full-v1
 hash_interval=<u64>
 [LogKey]
 P1:A,B,Select,Start,Up,Down,Left,Right
@@ -118,7 +118,7 @@ P2:A,B,Select,Start,Up,Down,Left,Right
 | `[Header]` | `key=value` lines, one per field, all seven required; an unrecognized key is refused (v1 has no forward-compat skip-unknown for `[Header]`, unlike `.rfstate`'s chunk-level "unknown ⇒ skip with a warning" — a BizHawk-header-import reader inherits a header field this crate doesn't know and must decide explicitly, not silently drop it) |
 | `rom_sha256` | 64 lowercase hex chars — same normalized-hash convention `.rfstate` uses (§2); mismatch against the loaded ROM is refused |
 | `start_type` | only `power-on` is accepted as of W1-07; any other value (e.g. a future savestate-anchored start) is refused with a "not supported until W2-04" message |
-| `hash_kind` | names *what* was hashed — `reachable-v1` today (see `crates/retroforge/src/stepper.rs`'s `EmuStepper::state_hash` doc for the exact field list); a full-machine hash is a later ticket's upgrade, not a silent redefinition of this field |
+| `hash_kind` | names *what* was hashed. **`full-v1` as of W2-04**: every `rf_nes::StateRegion` — CPU + bus counters, the whole PPU (VRAM, palette, OAM, loopy registers, sprite units), the whole APU, WRAM, mapper registers, battery PRG-RAM (`crates/retroforge/src/save_state.rs`'s `HASH_KIND`, `EmuStepper::state_hash`). `reachable-v1` is the **historical** value written before `rf-nes` had state serialization, when PPU/APU internals were structurally unreachable; it still names that narrower hash and must not be reused for the wider one — the upgrade this row anticipated was taken as a NEW value, exactly as required. `crates/rf-harness`'s two replay-corpus tests still compute `reachable-v1` from their own independent reimplementation and are unaffected |
 | `[LogKey]` | one `P<n>:<button>,<button>,...` line per controller port, declaring both the port count and the per-port button order used by `[Input]` |
 | `[Input]` | one `\|...\|...\|` line per frame, 0-indexed by line position; each port group has one char per `[LogKey]` button: `.` = unpressed, else that button's BizHawk-compatible mnemonic (`A`=A, `B`=B, `s`=Select, `S`=Start, `U`=Up, `D`=Down, `L`=Left, `R`=Right) |
 | `[Hashes]` | `frame=hex` lines, emitted every `hash_interval` frames **and always for the final frame** |

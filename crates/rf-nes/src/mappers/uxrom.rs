@@ -18,6 +18,9 @@
 //! conflicts, and the relevant games all work around this in software")
 //! are not modeled — see `crate::mappers` module doc's "MapperBus/
 //! BusValue" section.
+use rf_core_api::StateError;
+
+use crate::state::{StateIn, StateOut};
 use rf_cart::Mirroring;
 
 use super::Mapper;
@@ -72,6 +75,17 @@ impl Mapper for UxRom {
 
     fn chr_window(&self) -> Option<&[u8]> {
         None
+    }
+
+    /// `MAPR` (ticket W2-04): the one PRG bank register. `mirroring` is
+    /// header-fixed for this mapper and comes back with the ROM.
+    fn save_state(&self, out: &mut StateOut<'_>) -> Result<(), StateError> {
+        out.u8(self.bank)
+    }
+
+    fn load_state(&mut self, inp: &mut StateIn<'_>) -> Result<(), StateError> {
+        self.bank = inp.u8()?;
+        Ok(())
     }
 }
 

@@ -41,6 +41,7 @@ pub mod input_map;
 pub mod mode_invariant;
 pub mod pacer;
 pub mod rom_open;
+pub mod save_state;
 pub mod stepper;
 
 /// Crate marker used by the test harness to confirm workspace wiring.

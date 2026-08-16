@@ -24,9 +24,9 @@ pub(super) struct Envelope {
     /// `L` — the envelope loop flag, which is physically the same bit as
     /// the channel's length-counter halt flag (see [`LengthCounter::halt`]).
     pub(super) loop_flag: bool,
-    start: bool,
-    divider: u8,
-    decay_level: u8,
+    pub(super) start: bool,
+    pub(super) divider: u8,
+    pub(super) decay_level: u8,
 }
 
 impl Envelope {
@@ -91,7 +91,7 @@ pub(super) struct LengthCounter {
     /// The halt flag — the same physical bit as the envelope's loop flag on
     /// pulse/noise, and as the triangle's linear-counter control flag.
     pub(super) halt: bool,
-    counter: u8,
+    pub(super) counter: u8,
 }
 
 impl LengthCounter {
@@ -141,8 +141,8 @@ pub(super) struct Sweep {
     pub(super) negate: bool,
     pub(super) shift: u8,
     pub(super) ones_complement: bool,
-    reload: bool,
-    divider: u8,
+    pub(super) reload: bool,
+    pub(super) divider: u8,
 }
 
 impl Sweep {

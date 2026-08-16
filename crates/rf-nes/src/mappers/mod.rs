@@ -123,6 +123,9 @@
 //! result protocol (which depends on `$6000-$7FFF` staying writable) for a
 //! behavior nothing here exercises. An honest, narrow gap — the same shape
 //! as MMC1's un-modeled PRG-RAM-enable bit above — not a silent one.
+use rf_core_api::StateError;
+
+use crate::state::{StateIn, StateOut};
 use rf_cart::Mirroring;
 
 mod axrom;
@@ -195,5 +198,34 @@ pub trait Mapper {
     /// has an IRQ source.
     fn irq_pending(&self) -> bool {
         false
+    }
+
+    /// Serialize this mapper's *state* into the `MAPR` chunk (ticket
+    /// W2-04) — bank-select registers, IRQ counters, shift registers and
+    /// any materialized CHR window, but never the PRG/CHR ROM bytes
+    /// themselves, which are cartridge data the loaded ROM restores.
+    ///
+    /// This is the `state_chunk` hook §2.4 named and W2-02 deliberately
+    /// left out ("left out rather than guessed at" -- see this module's
+    /// doc), now that there is a save-state format for it to feed.
+    ///
+    /// Default: write nothing. That is correct, not a stub, for a mapper
+    /// with no writable registers at all (`Nrom`).
+    ///
+    /// # Errors
+    /// Returns [`StateError`] if the underlying writer rejects a write.
+    fn save_state(&self, out: &mut StateOut<'_>) -> Result<(), StateError> {
+        let _ = out;
+        Ok(())
+    }
+
+    /// Restore what [`Mapper::save_state`] wrote. Default: read nothing.
+    ///
+    /// # Errors
+    /// Returns [`StateError`] if the stream is exhausted or holds a value
+    /// this mapper cannot accept.
+    fn load_state(&mut self, inp: &mut StateIn<'_>) -> Result<(), StateError> {
+        let _ = inp;
+        Ok(())
     }
 }

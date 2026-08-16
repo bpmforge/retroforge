@@ -18,13 +18,13 @@ const DUTY_SEQUENCES: [[u8; 8]; 4] = [
 pub(super) struct Pulse {
     pub(super) envelope: Envelope,
     pub(super) length: LengthCounter,
-    sweep: Sweep,
-    duty: u8,
+    pub(super) sweep: Sweep,
+    pub(super) duty: u8,
     /// 11-bit raw timer period `t`; the waveform period is `8 * (t + 1)`
     /// APU cycles.
-    period: u16,
-    timer: u16,
-    sequence_step: u8,
+    pub(super) period: u16,
+    pub(super) timer: u16,
+    pub(super) sequence_step: u8,
 }
 
 impl Pulse {

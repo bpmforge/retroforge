@@ -279,7 +279,7 @@ fn build_replay_slice(
         emu_version: env!("CARGO_PKG_VERSION").to_string(),
         core_config: "enhanced".to_string(),
         start_type: rf_input::StartType::PowerOn,
-        hash_kind: "reachable-v1".to_string(),
+        hash_kind: crate::save_state::HASH_KIND.to_string(),
         hash_interval: 1,
     };
     let mut recorder = rf_input::ReplayRecorder::new(header);

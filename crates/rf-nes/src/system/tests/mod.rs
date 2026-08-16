@@ -24,6 +24,7 @@ mod mmc3_irq;
 mod nestest;
 mod oam_dma;
 mod rom_loading;
+mod save_state;
 
 use super::NesRom;
 

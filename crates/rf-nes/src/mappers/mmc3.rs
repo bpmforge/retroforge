@@ -146,6 +146,9 @@
 //! from their revision-B siblings) can be run against the correct
 //! revision; it is not, and must never become, a general-purpose public
 //! API.
+use rf_core_api::StateError;
+
+use crate::state::{StateIn, StateOut};
 use rf_cart::Mirroring;
 
 use super::Mapper;
@@ -413,6 +416,40 @@ impl Mapper for Mmc3 {
 
     fn irq_pending(&self) -> bool {
         self.irq_pending
+    }
+
+    /// `MAPR` (ticket W2-04): bank select + the eight bank registers, the
+    /// mirroring and PRG-RAM protect registers, the whole IRQ unit
+    /// (latch, counter, reload flag, enable, pending) and the materialized
+    /// CHR window. `revision` is not state -- it is how the cartridge was
+    /// constructed (`crate::mappers::mmc3`'s "Which revision does a real
+    /// cartridge get?" section), and a state that could silently flip it
+    /// would change IRQ behavior invisibly.
+    fn save_state(&self, out: &mut StateOut<'_>) -> Result<(), StateError> {
+        out.u8(self.bank_select)?;
+        out.bytes(&self.registers)?;
+        out.u8(self.mirroring_reg)?;
+        out.u8(self.prg_ram_protect)?;
+        out.u8(self.irq_latch)?;
+        out.u8(self.irq_counter)?;
+        out.bool(self.irq_reload_flag)?;
+        out.bool(self.irq_enabled)?;
+        out.bool(self.irq_pending)?;
+        out.bytes(&self.chr_view)
+    }
+
+    fn load_state(&mut self, inp: &mut StateIn<'_>) -> Result<(), StateError> {
+        self.bank_select = inp.u8()?;
+        inp.bytes(&mut self.registers)?;
+        self.mirroring_reg = inp.u8()?;
+        self.prg_ram_protect = inp.u8()?;
+        self.irq_latch = inp.u8()?;
+        self.irq_counter = inp.u8()?;
+        self.irq_reload_flag = inp.bool()?;
+        self.irq_enabled = inp.bool()?;
+        self.irq_pending = inp.bool()?;
+        inp.bytes(&mut self.chr_view)?;
+        Ok(())
     }
 }
 

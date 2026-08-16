@@ -537,7 +537,7 @@ fn replay_round_trip_matches_recorded_hashes_byte_exact() {
         emu_version: "0.1.0".to_string(),
         core_config: "accuracy".to_string(),
         start_type: rf_input::StartType::PowerOn,
-        hash_kind: "reachable-v1".to_string(),
+        hash_kind: retroforge::save_state::HASH_KIND.to_string(),
         hash_interval,
     };
 
@@ -615,7 +615,7 @@ fn recorded_replay_text() -> (String, String) {
         emu_version: "0.1.0".to_string(),
         core_config: "accuracy".to_string(),
         start_type: rf_input::StartType::PowerOn,
-        hash_kind: "reachable-v1".to_string(),
+        hash_kind: retroforge::save_state::HASH_KIND.to_string(),
         hash_interval: 60,
     };
     let mut recorder = rf_input::ReplayRecorder::new(header);

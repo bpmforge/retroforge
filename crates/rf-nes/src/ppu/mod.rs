@@ -313,6 +313,7 @@ mod background;
 mod mem;
 mod scroll;
 mod sprites;
+mod state;
 
 #[cfg(test)]
 mod tests;

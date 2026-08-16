@@ -15,13 +15,13 @@ pub(super) struct Triangle {
     pub(super) length: LengthCounter,
     /// `C` — the linear counter's control flag, physically the same bit as
     /// the length counter's halt flag.
-    control: bool,
-    linear_reload_value: u8,
-    linear_counter: u8,
-    linear_reload_flag: bool,
-    period: u16,
-    timer: u16,
-    sequence_step: u8,
+    pub(super) control: bool,
+    pub(super) linear_reload_value: u8,
+    pub(super) linear_counter: u8,
+    pub(super) linear_reload_flag: bool,
+    pub(super) period: u16,
+    pub(super) timer: u16,
+    pub(super) sequence_step: u8,
 }
 
 impl Triangle {

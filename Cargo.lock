@@ -2980,6 +2980,7 @@ dependencies = [
  "rf-nes",
  "rf-profiles",
  "rf-renderer",
+ "rf-state",
  "rfd",
  "sha2",
  "zip",
