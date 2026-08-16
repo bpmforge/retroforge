@@ -1484,6 +1484,38 @@
    ]
   },
   {
+   "id": "W2-20",
+   "title": "CPU: BRK/NMI interaction and the unstable $AB opcode",
+   "phase": 2,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-harness/waivers.toml",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [
+    "W2-12"
+   ],
+   "acceptance": [
+    "cpu_interrupts_v2 passes -- today it fails at '2-nmi_and_brk', test 2 of 5 (FR-CORE-022)",
+    "cpu_timing_test6 passes -- today its screen reads 'FAIL OP :$00', i.e. BRK (FR-CORE-020)",
+    "instr_test-v5 passes -- today it fails at 'AB ATX #n', test 3 of 16, the unstable immediate opcode $AB (FR-CORE-020)",
+    "the three waivers W2-12 added for these ROMs are DELETED rather than re-dated, and the local gate is green without them",
+    "nes6502 2,560,000/2,560,000 and nestest 8991/8991 byte-exact are unregressed -- whatever changes here is on a path both already cover"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ],
+   "notes": [
+    "FILED 2026-08-16 BY W2-12, from the first execution of suites that had been fetched-but-unrun since W0-03. TWO defects, and the evidence says they are probably ONE plus one: cpu_interrupts_v2 fails on 'nmi_and_brk' and cpu_timing_test6 fails on 'OP :$00' -- opcode $00 IS BRK. Two independent ROMs pointing at BRK is a strong signal; start by assuming they share a cause and try to refute that, rather than fixing them separately.",
+    "THE THIRD IS SEPARATE AND IS NOT A TIMING BUG: instr_test-v5 stops at 'AB ATX #n' (test 3 of 16, 03-immediate). $AB is LXA/ATX, one of the genuinely UNSTABLE illegal opcodes -- its result depends on an analog 'magic constant' that varies by chip and temperature. crate::cpu already models this family (`UnstableOp::Lxa`). The question is not 'what is the right answer' but 'which convention does this ROM expect', and blargg's is the one to match here. Do NOT change the magic constant without checking nes6502's 2.56M-case suite still passes: that suite covers $AB too, with SingleStepTests' own convention, and the two could disagree.",
+    "WHY THIS WAS INVISIBLE UNTIL NOW: the CPU passes 2,560,000 SingleStepTests vectors and nestest byte-exact over all 8991 lines, and still fails these. Per-opcode vectors do not exercise an NMI arriving during BRK, and nestest's trace never takes an interrupt. That gap is precisely what W2-12 wired these suites to close.",
+    "MECHANISM: W2-12 waived all three in crates/rf-harness/waivers.toml against this ticket, with expiry 2026-11-01, so the local gate is green and any NEW CPU failure is visible immediately. The accuracy report refuses a waiver whose ticket is closed, so closing this ticket without deleting the waivers fails the gate -- which is what makes the last acceptance criterion self-enforcing."
+   ]
+  },
+  {
    "id": "W2-19",
    "title": "Tier-B accuracy gaps: PPU open-bus decay, CPU dummy cycles, OAM stress",
    "phase": 2,

@@ -74,7 +74,8 @@
 #   protocol  "six_thousand" (blargg $6000/$6004) | "trace_log" (nestest) |
 #             "vector" (SingleStepTests JSON, no ROM run) | "golden_frame" |
 #             "ram_result" (RAM block vs shipped expected-value file) |
-#             "audio_rms"
+#             "audio_rms" | "screen_text" (verdict is only on the nametable,
+#             scored by blargg's own "if a test prints 'passed', it passed")
 #   [[suite.roms]]  one row per accuracy-table ROM
 #     artifact       artifact id above
 #     rom            accuracy-table row label (not necessarily the filename)
@@ -879,11 +880,17 @@ id = "cpu_timing_test6"
 console = "nes"
 fr = "FR-CORE-020"
 tier = "A"
-protocol = "six_thousand"
+protocol = "screen_text"
+# CORRECTED 2026-08-16 (ticket W2-12): this ROM writes its verdict only to
+# the screen -- $6000 never becomes valid and $00F8 stays 0 -- so under
+# `six_thousand` it reported "signature never became valid", which reads as
+# a hang. It is not hanging: it prints "6502 TIMING TEST (16 SECONDS) ...
+# FAIL OP :$00", a real failure on BRK timing. Scored by screen text so the
+# failure is recorded as a failure rather than as a protocol error.
 [[suite.roms]]
 artifact = "cpu-timing-test6"
 rom = "cpu_timing_test"
-frame_budget = 3600
+frame_budget = 1500
 
 [[suite]]
 id = "instr_timing"
@@ -901,7 +908,15 @@ id = "branch_timing_tests"
 console = "nes"
 fr = "FR-CORE-020"
 tier = "A"
-protocol = "six_thousand"
+protocol = "ram_result"
+# CORRECTED 2026-08-16 (ticket W2-12), measured not assumed: these three
+# ROMs are from blargg's 2005-era generation, like sprite_hit_tests, and
+# predate the $6000 runtime. Run under `six_thousand` they report "signature
+# never became valid" -- which reads as a hang and would have been recorded
+# as three FAILURES. They in fact PASS: $00F8 = 1 and the screen says
+# "BRANCH TIMING BASICS PASSED" / "BACKWARD BRANCH TIMING PASSED" /
+# "FORWARD BRANCH TIMING PASSED". A wrongly-wired ROM is worse than an
+# unwired one, because it manufactures a failure that then gets waived.
 [[suite.roms]]
 artifact = "branch-timing-1-basics"
 rom = "1.Branch_Basics"
