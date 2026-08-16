@@ -171,6 +171,17 @@ pub enum Protocol {
     RamResult,
     /// Per-channel RMS envelope compared against a known-good recording.
     AudioRms,
+    /// The ROM's verdict is only on screen: it writes ASCII character codes
+    /// into the nametable and never touches `$6000` or a RAM result byte
+    /// (ticket W2-12). blargg's own readme is the scoring rule — "If a test
+    /// prints 'passed', it passed" — so the runner reads the nametable and
+    /// looks for PASSED / FAIL.
+    ///
+    /// This exists because `cpu_timing_test6` is scoreable no other way,
+    /// and because `dmc_dma_during_read4` (W2-01b) is in the same family:
+    /// screen-only ROMs were previously either unwired or mis-scored as
+    /// hangs.
+    ScreenText,
 }
 
 /// One accuracy-table row within a [`Suite`].

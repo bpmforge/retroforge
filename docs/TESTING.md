@@ -105,17 +105,42 @@ but executed by NO code path** — the tier is the intended gate, not the
 current one. Flagged 2026-08-05 by the Phase 1 exit gate's challenger, which
 found `instr_test-v5` labelled Tier A ("every PR") while nothing ran it: a
 downloaded ROM is not a tested ROM, and a tier label that overstates
-coverage is worse than an honest gap. Only four suites are executed today
-(`nes6502`, `nestest`, `sprite_hit_tests`, `ppu_vbl_nmi` — all A-local, all
-in `docs/evidence/local-gate.json`). W2-12 owns wiring the rest.
+coverage is worse than an honest gap.
+
+**W2-12 closed that gap for the CPU suites (2026-08-16)**, and doing so
+produced two findings worth reading before trusting any tier label:
+
+1. **A wrongly-wired ROM is worse than an unwired one.** `branch_timing_tests`
+   was tagged `six_thousand`; under that protocol all three ROMs report
+   "signature never became valid", which is indistinguishable from a hang
+   and would have been recorded as three failures. They actually **pass** —
+   they are 2005-era RAM-result ROMs like `sprite_hit_tests`. `cpu_timing_test6`
+   was mistagged the same way and is screen-only, so it needed a new
+   `screen_text` protocol to be scored at all rather than looking hung.
+2. **Passing 2.56M opcode vectors and a byte-exact nestest trace does not
+   mean the CPU is right.** `cpu_interrupts_v2` fails on an NMI arriving
+   during BRK and `cpu_timing_test6` fails on opcode `$00` — the same
+   instruction from two directions. Per-opcode vectors never deliver an
+   interrupt mid-instruction and nestest's trace never takes one, so the
+   gap was structurally invisible to both. W2-20 owns it.
+
+Executed today: `nes6502`, `nestest`, `sprite_hit_tests`, `ppu_vbl_nmi`,
+`apu_test`, `instr_test-v5`, `instr_timing`, `branch_timing_tests`,
+`cpu_timing_test6`, `cpu_interrupts_v2` (A-local, all in
+`docs/evidence/local-gate.json`), plus the Tier-B set W2-09 wired into the
+nightly. Still unwired: `sprite_overflow_tests` (same suspected protocol
+mistag, flagged since W1-05b and deliberately NOT absorbed here) and
+`apu_reset` (needs an `Apu::reset` path — W2-01a's handoff).
 
 | Suite | Verifies | SRS | Tier | Pass criteria |
 |---|---|---|---|---|
 | SingleStepTests `nes6502` | per-opcode state + bus cycles | FR-CORE-020 | A-local | 100% of all 256 opcodes (151 official + 105 unofficial/illegal) — 2,560,000 cases |
 | nestest + `nestest.log` | whole-CPU conformance (register/CYC + disassembly) | FR-CORE-021 | A-local | byte-exact trace diff empty over all 8991 lines |
-| blargg `instr_test-v5` | official+unofficial instructions | FR-CORE-020 | A — **NOT WIRED (W2-12)** | $6000 = 0 all ROMs |
-| `cpu_timing_test6`, `instr_timing`, `branch_timing_tests` | cycle counts, page-cross, branches | FR-CORE-020 | A — **NOT WIRED (W2-12)** | $6000 = 0 |
-| `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A — **NOT WIRED (W2-12)** | $6000 = 0 |
+| blargg `instr_test-v5` | official+unofficial instructions | FR-CORE-020 | A-local — **wired 2026-08-16 (W2-12)**; fails at `AB ATX #n` (test 3 of 16), the unstable illegal opcode $AB, waived against **W2-20** | $6000 = 0 all ROMs |
+| `instr_timing` | instruction cycle counts | FR-CORE-020 | A-local — **wired (W2-12), PASSES** | $6000 = 0 |
+| `branch_timing_tests` (3 ROMs) | branch timing, page-cross | FR-CORE-020 | A-local — **wired (W2-12), 3/3 PASS** | **NOT `$6000`**: 2005-era ROMs like `sprite_hit_tests`, scored on the RAM-result byte at `$00F8`. Under the `six_thousand` tag the manifest used to carry, all three reported "signature never became valid" — a false hang, and three false failures. Corrected in `tests/rom-manifest.toml` |
+| `cpu_timing_test6` | official-instruction cycle counts | FR-CORE-020 | A-local — **wired (W2-12)**; fails `FAIL OP :$00` (BRK), waived against **W2-20** | **NOT `$6000`**: verdict is only on the nametable, scored by the new `screen_text` protocol using blargg's own rule ("if a test prints 'passed', it passed") |
+| `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A-local — **wired (W2-12)**; fails at `2-nmi_and_brk` (test 2 of 5), waived against **W2-20** | $6000 = 0 |
 | `cpu_dummy_reads/writes`, `cpu_exec_space` | dummy bus cycles, open bus | FR-CORE-020 | B — **wired 2026-08-16 (W2-09)**; 1 of 5 ROMs passing, the other four waived against **W2-19** (PPU/APU open bus, RMW double-write, and one ROM that never reaches its own init) | $6000 = 0 |
 | blargg `ppu_vbl_nmi` (10 sub-ROMs, `rom_singles/`) | VBL/NMI to the PPU cycle | FR-CORE-022 | A-local | $6000 = 0 — **10/10 clean, no waiver** (W1-05c took it 4→9, W1-05d closed `10-even_odd_timing`; see `crate::ppu::Ppu::render_enable_pipe`) |
 | `sprite_hit_tests` | sprite-0 hit | FR-CORE-023 | A-local | RAM-result byte (`$00F8`) = 1 — NOT `$6000` (ticket W1-05b correction; this ROM generation predates blargg's `$6000` runtime, see `tests/rom-manifest.toml`'s comment on this suite) |

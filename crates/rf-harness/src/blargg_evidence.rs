@@ -334,3 +334,46 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 }
+
+/// What a screen-only ROM printed, and whether it says it passed
+/// (ticket W2-12; [`crate::Protocol::ScreenText`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScreenOutcome {
+    /// The screen contains "PASSED" and no "FAIL".
+    Passed(String),
+    /// The screen contains "FAIL".
+    Failed(String),
+    /// Neither word appeared. NOT treated as a pass: a ROM that never
+    /// printed a verdict has not given one, and calling that green is how a
+    /// suite silently stops testing anything.
+    NoVerdict(String),
+}
+
+/// Run `rom_path` for `frames` and read the verdict off the screen.
+///
+/// The scoring rule is blargg's own, quoted from his readmes: "If a test
+/// prints 'passed', it passed". Case-insensitive, because his ROM
+/// generations disagree about capitalisation.
+///
+/// # Errors
+/// Returns a message if the image cannot be read or parsed.
+pub fn run_screen_text(rom_path: &Path, frames: u32) -> Result<ScreenOutcome, String> {
+    let bytes = std::fs::read(rom_path).map_err(|e| format!("cannot read rom: {e}"))?;
+    let mut bus = NesBus::from_ines_bytes(&bytes).map_err(|e| format!("invalid rom: {e}"))?;
+    let mut cpu = Cpu::power_on(&mut bus);
+    for _ in 0..frames {
+        let start = bus.frame_count();
+        while bus.frame_count() == start {
+            cpu.step(&mut bus);
+        }
+    }
+    let text = bus.ppu_vram_ascii();
+    let upper = text.to_ascii_uppercase();
+    Ok(if upper.contains("FAIL") {
+        ScreenOutcome::Failed(text)
+    } else if upper.contains("PASSED") {
+        ScreenOutcome::Passed(text)
+    } else {
+        ScreenOutcome::NoVerdict(text)
+    })
+}

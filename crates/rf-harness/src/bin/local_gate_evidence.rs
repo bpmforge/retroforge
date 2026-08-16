@@ -29,9 +29,15 @@
 //! for real evidence (mirrors `fetch_artifact`'s "verify before writing"
 //! discipline, applied to this binary's own output instead of a
 //! downloaded file).
-use rf_harness::blargg_evidence::{self, RamResultOutcome};
+/// The RAM-result byte address blargg's 2005-era ROMs report through
+/// (`source/runtime/validation.a`'s `result = $f8`) — shared by
+/// `sprite_hit_tests` and, since ticket W2-12, `branch_timing_tests`.
+const SPRITE_HIT_RESULT_ADDR: u16 = 0x00F8;
+
+use rf_harness::blargg_evidence::{self, RamResultOutcome, ScreenOutcome};
 use rf_harness::nes6502_evidence::run_all;
 use rf_harness::nestest_evidence;
+use rf_harness::Protocol;
 use rf_harness::{
     build_report, git_rev_parse_head, git_tree_is_clean, AccuracyRow, BlarggStatus, Json, Manifest,
     RowStatus, SystemGitRunner, WaiverFile,
@@ -255,6 +261,34 @@ fn run_six_thousand_suite(
     )
 }
 
+/// `protocol = "screen_text"` suites (ticket W2-12): ROMs whose only output
+/// is the screen. Scored by blargg's own rule, "if a test prints 'passed',
+/// it passed" — and a ROM that printed NO verdict is scored as a failure,
+/// never as a pass, because a suite that stops printing has stopped testing.
+fn run_screen_text_suite(
+    manifest: &Manifest,
+    suite_id: &str,
+    expected_roms: usize,
+    repo_root: &Path,
+) -> Result<SuiteResult, String> {
+    run_suite(
+        manifest,
+        suite_id,
+        expected_roms,
+        repo_root,
+        |rom_path, frame_budget| match blargg_evidence::run_screen_text(rom_path, frame_budget) {
+            Ok(ScreenOutcome::Passed(text)) => (RowStatus::Pass, frame_budget, text),
+            Ok(ScreenOutcome::Failed(text)) => (RowStatus::Fail, frame_budget, text),
+            Ok(ScreenOutcome::NoVerdict(text)) => (
+                RowStatus::Fail,
+                frame_budget,
+                format!("no PASSED/FAIL on screen after {frame_budget} frames: {text}"),
+            ),
+            Err(e) => (RowStatus::Fail, 0, e),
+        },
+    )
+}
+
 /// `protocol = "ram_result"` suites (`sprite_hit_tests`) via
 /// [`blargg_evidence::run_ram_result`]. `result_addr` is the suite-specific
 /// RAM location (e.g. `0x00F8` for `sprite_hit_tests`' `validation.a`
@@ -444,14 +478,19 @@ fn run(args: &Args) -> ExitCode {
 
     // --- sprite_hit_tests (11 ROMs) + ppu_vbl_nmi (10 ROMs), ticket W1-05b
     // ------------------------------------------------------------------
-    let sprite_hit =
-        match run_ram_result_suite(&manifest, "sprite_hit_tests", 11, &args.repo_root, 0x00F8) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("sprite_hit_tests run failed: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let sprite_hit = match run_ram_result_suite(
+        &manifest,
+        "sprite_hit_tests",
+        11,
+        &args.repo_root,
+        SPRITE_HIT_RESULT_ADDR,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("sprite_hit_tests run failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     eprintln!(
         "sprite_hit_tests: {}/{} ROMs passed",
         sprite_hit.roms_passed, sprite_hit.roms_tested
@@ -468,6 +507,65 @@ fn run(args: &Args) -> ExitCode {
         "ppu_vbl_nmi: {}/{} ROMs passed",
         ppu_vbl_nmi.roms_passed, ppu_vbl_nmi.roms_tested
     );
+
+    // --- Tier-A CPU suites, ticket W2-12 ---------------------------------
+    // These five were fetched by the manifest and executed by NOTHING (the
+    // Phase 1 exit gate's challenger found `instr_test-v5` labelled Tier A
+    // -- "every PR" -- while no code path ran it). A downloaded ROM is not
+    // a tested ROM, so they are executed here and carry evidence rows like
+    // every other suite.
+    //
+    // PROTOCOL IS PER SUITE, AND ONE OF THEM WAS MISTAGGED: the manifest
+    // called branch_timing_tests `six_thousand`, under which its three ROMs
+    // report "signature never became valid" -- indistinguishable from a
+    // hang, and it would have been recorded as three failures. They are
+    // 2005-era ROMs like sprite_hit_tests, they use the RAM-result byte at
+    // $00F8, and they PASS. The manifest is corrected there rather than
+    // here; this loop just reads it.
+    let mut cpu_suites: Vec<(&str, SuiteResult)> = Vec::new();
+    for (suite_id, rom_count) in [
+        ("instr_test-v5", 1usize),
+        ("cpu_timing_test6", 1),
+        ("instr_timing", 1),
+        ("branch_timing_tests", 3),
+        ("cpu_interrupts_v2", 1),
+    ] {
+        let protocol = manifest
+            .suites
+            .iter()
+            .find(|s| s.id == suite_id)
+            .map(|s| s.protocol);
+        let outcome = match protocol {
+            Some(Protocol::SixThousand) => {
+                run_six_thousand_suite(&manifest, suite_id, rom_count, &args.repo_root)
+            }
+            Some(Protocol::RamResult) => run_ram_result_suite(
+                &manifest,
+                suite_id,
+                rom_count,
+                &args.repo_root,
+                SPRITE_HIT_RESULT_ADDR,
+            ),
+            Some(Protocol::ScreenText) => {
+                run_screen_text_suite(&manifest, suite_id, rom_count, &args.repo_root)
+            }
+            other => Err(format!(
+                "{suite_id}: protocol {other:?} has no runner in this binary"
+            )),
+        };
+        let result = match outcome {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("{suite_id} run failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        eprintln!(
+            "{suite_id}: {}/{} ROMs passed",
+            result.roms_passed, result.roms_tested
+        );
+        cpu_suites.push((suite_id, result));
+    }
 
     // --- apu_test (1 combined ROM, 8 sub-tests), ticket W2-01a -----------
     // The combined `apu_test.nes` is one manifest ROM that runs all eight
@@ -492,6 +590,9 @@ fn run(args: &Args) -> ExitCode {
     all_rows.extend(sprite_hit.rows.iter().cloned());
     all_rows.extend(ppu_vbl_nmi.rows.iter().cloned());
     all_rows.extend(apu_test.rows.iter().cloned());
+    for (_, result) in &cpu_suites {
+        all_rows.extend(result.rows.iter().cloned());
+    }
     let report = match build_report(&all_rows, &waiver_file.waivers, &args.today, |t| {
         open_tickets.iter().any(|o| o == t)
     }) {
@@ -578,6 +679,16 @@ fn run(args: &Args) -> ExitCode {
             suite_summary_json("ppu_vbl_nmi", &ppu_vbl_nmi),
         ),
         ("apu_test", suite_summary_json("apu_test", &apu_test)),
+        ("cpu_suites", {
+            // Ticket W2-12: one object per newly-wired Tier-A CPU suite,
+            // grouped rather than flattened so a reader can tell at a
+            // glance which suites this ticket brought under the gate.
+            let mut entries: Vec<(&str, Json)> = Vec::new();
+            for (suite_id, result) in &cpu_suites {
+                entries.push((suite_id, suite_summary_json(suite_id, result)));
+            }
+            Json::object(entries)
+        }),
         ("accuracy_table", report.to_json()),
     ]);
 
