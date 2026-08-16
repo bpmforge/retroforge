@@ -920,7 +920,7 @@
     "apu_mixer RMS envelope check wired against W2-01b's mixer LUTs, using the ROMs' own cancellation-to-silence design as the oracle -- no external reference recording exists or is needed (added 2026-08-16 by Brad's ruling, from W2-01b's split)"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ]
