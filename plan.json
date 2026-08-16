@@ -683,7 +683,7 @@
     "non-linear mixer LUTs per nesdev APU_Mixer; apu_mixer RMS envelope match"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ]
