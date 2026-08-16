@@ -3290,7 +3290,9 @@ dependencies = [
  "rf-renderer",
  "rf-state",
  "rfd",
+ "serde",
  "sha2",
+ "toml",
  "zip",
 ]
 
