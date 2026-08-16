@@ -23,3 +23,10 @@ harness = false
 [[bench]]
 name = "event_emission"
 harness = false
+
+# Ticket W2-09: whole-machine ms/frame, the quantity NFR-002 states a budget
+# for. `event_emission`'s frame arm ticks the PPU alone, which is a lower
+# bound on the machine's cost -- see machine_frame.rs's module doc.
+[[bench]]
+name = "machine_frame"
+harness = false

@@ -1,0 +1,76 @@
+name: Nightly
+# Ticket W2-09. The Tier-B tier from docs/TESTING.md §4 ("Tier B = nightly
+# (slow or visual-manual-once suites)") plus the criterion regression gate
+# from §7/§9.
+#
+# Why a separate workflow rather than more steps on ci.yml: everything here
+# is either slow (the 5-minute replay suites), fetch-dependent (Tier-B ROMs
+# come from the gitignored roms/ tree, NFR-006), or measurement-based
+# (criterion needs a quiet machine to mean anything). Putting any of it on
+# every PR would make the PR gate slower and noisier without making it
+# stricter.
+on:
+  schedule:
+    # 03:17 UTC — an odd minute on purpose: GitHub queues scheduled runs at
+    # popular times, and an off-peak slot both starts sooner and shares the
+    # runner with less noise, which is exactly what a benchmark needs.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The threshold script is itself gated. A regression gate that has
+      # silently stopped enforcing anything passes either way, so its own
+      # tests run FIRST — a broken gate fails here rather than waving a
+      # regression through below.
+      - name: bench gate self-test
+        run: node scripts/bench-compare.test.mjs
+
+      - name: fetch test ROMs
+        # Tier-B suites run against the gitignored roms/ tree (NFR-006).
+        # Failure here is not fatal: the suite runner reports unfetched ROMs
+        # as SKIPPED and refuses to call a run with zero executions a pass,
+        # so a mirror outage degrades to a loud "nothing ran", never a
+        # silent green.
+        continue-on-error: true
+        run: scripts/fetch-test-roms.sh
+
+      - name: Tier-B ROM suites (TESTING.md §4)
+        # --today is injected rather than read from a clock inside the
+        # binary, so a run is reproducible and waiver expiry can be driven
+        # by a test — the same discipline rf_harness::build_report uses.
+        run: |
+          cargo run --release -p rf-harness --bin tier_b_suites -- \
+            --repo-root . --today "$(date -u +%Y-%m-%d)"
+
+      - name: release-gate replay suites (NFR-001)
+        # The two 5-minute double-run replay suites are #[ignore]d in the
+        # ordinary gate because they are release-only and slow; nightly is
+        # where they are meant to run (docs/TESTING.md §8).
+        run: |
+          cargo test --release -p rf-harness --test alter_ego_replay -- --ignored
+          cargo test --release -p rf-harness --test rf_scroller_replay -- --ignored
+
+      - name: criterion benches
+        run: cargo bench --workspace
+
+      - name: regression threshold (TESTING.md §9, NFR-002/003, R-C2)
+        run: node scripts/bench-compare.mjs
+
+      - name: upload criterion output
+        # Kept regardless of outcome: the run that FAILED is the one whose
+        # numbers someone will want to read.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-${{ github.run_id }}
+          path: target/criterion
+          retention-days: 14

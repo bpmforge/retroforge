@@ -32,6 +32,24 @@ SRS verification column, `docs/design/SAVE_STATES.md`.
   DAC, so near-silence between their beeps IS the reference, and it is a
   stronger one (a recording would also encode this engine's filtering,
   decimation and volume scaling).
+- **Tier-B nightly** (ticket W2-09): `.github/workflows/nightly.yml` runs
+  `cargo run -p rf-harness --bin tier_b_suites`, which selects Tier-B suites
+  from `tests/rom-manifest.toml`'s own `tier` field (never a second list
+  that could disagree with §4's table) and scores them through the `$6000`
+  protocol. Known-fails go through the SAME `crates/rf-harness/waivers.toml`
+  the Tier-A accuracy report uses — justification, expiry, open ticket — and
+  the runner **fails on an expired waiver and on a waiver covering a ROM
+  that has started passing** (a stale waiver hides the next regression).
+  Unfetched ROMs are counted as skipped, never as passes, and a run where
+  nothing executed is a failure rather than a green.
+- **Criterion regression gate** (W2-09): `benches/baseline.json` +
+  `scripts/bench-compare.mjs`, >10% fails (§9), with NFR-002's absolute
+  ms/frame budget checked separately from the relative threshold. R-C2 is
+  enforced mechanically: a baseline whose numbers move without its `meta`
+  moving is refused, checked against the committed file via `git show`. The
+  gate has its own test suite (`scripts/bench-compare.test.mjs`) which the
+  nightly runs FIRST — a threshold script that has silently stopped
+  enforcing anything passes either way.
 - **Audio underrun soak**: five minutes of device playback with zero
   silence-filled callbacks (`crates/retroforge/tests/audio_soak.rs`).
   Device-gated and `#[ignore]`d — CI has no sound card — so it is run
@@ -98,12 +116,12 @@ in `docs/evidence/local-gate.json`). W2-12 owns wiring the rest.
 | blargg `instr_test-v5` | official+unofficial instructions | FR-CORE-020 | A — **NOT WIRED (W2-12)** | $6000 = 0 all ROMs |
 | `cpu_timing_test6`, `instr_timing`, `branch_timing_tests` | cycle counts, page-cross, branches | FR-CORE-020 | A — **NOT WIRED (W2-12)** | $6000 = 0 |
 | `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A — **NOT WIRED (W2-12)** | $6000 = 0 |
-| `cpu_dummy_reads/writes`, `cpu_exec_space` | dummy bus cycles, open bus | FR-CORE-020 | B | $6000 = 0 |
+| `cpu_dummy_reads/writes`, `cpu_exec_space` | dummy bus cycles, open bus | FR-CORE-020 | B — **wired 2026-08-16 (W2-09)**; 1 of 5 ROMs passing, the other four waived against **W2-19** (PPU/APU open bus, RMW double-write, and one ROM that never reaches its own init) | $6000 = 0 |
 | blargg `ppu_vbl_nmi` (10 sub-ROMs, `rom_singles/`) | VBL/NMI to the PPU cycle | FR-CORE-022 | A-local | $6000 = 0 — **10/10 clean, no waiver** (W1-05c took it 4→9, W1-05d closed `10-even_odd_timing`; see `crate::ppu::Ppu::render_enable_pipe`) |
 | `sprite_hit_tests` | sprite-0 hit | FR-CORE-023 | A-local | RAM-result byte (`$00F8`) = 1 — NOT `$6000` (ticket W1-05b correction; this ROM generation predates blargg's `$6000` runtime, see `tests/rom-manifest.toml`'s comment on this suite) |
 | `sprite_overflow_tests` | overflow bug | FR-CORE-023 | A | $6000 = 0 — **unverified as of W1-05b**: shares `sprite_hit_tests`' pre-`$6000` ROM family and almost certainly has the same protocol mistag; out of this ticket's scope, flagged in `tests/rom-manifest.toml` for whichever ticket implements this suite |
-| `oam_read`, `oam_stress` | $2004 semantics | FR-CORE-023 | B | $6000 = 0 |
-| `full_palette`, `ppu_open_bus`, `ppu_read_buffer` | palette, open bus, $2007 buffer | FR-CORE-022 | B | golden frame / $6000 |
+| `oam_read`, `oam_stress` | $2004 semantics | FR-CORE-023 | B — **wired (W2-09)**: `oam_read` passes, `oam_stress` waived against W2-19 (CRC mismatch) | $6000 = 0 |
+| `full_palette`, `ppu_open_bus`, `ppu_read_buffer` | palette, open bus, $2007 buffer | FR-CORE-022 | B — **wired (W2-09)** for the two `$6000` ROMs, both waived against W2-19 (`ppu_open_bus`: "write to any PPU register should set decay value"; `ppu_read_buffer`: times out at 600 frames). `full_palette` is `golden_frame` protocol and still has no runner | golden frame / $6000 |
 | blargg `apu_test` (1 combined ROM, 8 sub-tests) | length counters, length table, frame IRQ + its timing, APU jitter, DMC basics + rates | FR-CORE-024 | A-local | $6000 = 0 — **8/8 as of W2-01a**; fifth Tier-A-local suite (gitignored ROM, so `scripts/local-gate.sh` + `docs/evidence/local-gate.json` carry the evidence, not CI) |
 | blargg `apu_reset` (6 ROMs) | APU state across reset | FR-CORE-024 | A — **NOT WIRED**: fetched and in the manifest, but no ticket owns it and no `Apu::reset` path exists yet (W2-01a `HANDOFF:` note) | $6000 = 0 |
 | blargg `dmc_dma_during_read4` (5 ROMs) | DMC DMA cycle stealing + the repeated-read glitch on `$2007`/`$4016` | FR-CORE-024 | A-local — **3/5, W2-01b BLOCKED with evidence** | **NOT `$6000`**: all five leave PRG-RAM zero (older screen-only shell), so the result is read out of the PPU nametable. `dma_2007_read` matches documented CRC `5E3DF9C4`, `dma_2007_write` and `read_write_2007` self-report `Passed`; `dma_4016_read` needs 1 extra `$4016` read and this engine makes 3, and `double_2007_read` needs an unimplemented `$2007` double-read PPU quirk. Both diagnoses are in W2-01b's block note |
