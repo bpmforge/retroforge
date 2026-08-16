@@ -117,6 +117,24 @@ pub struct RetroForgeApp {
     pad_backend: Option<rf_input::GilrsBackend>,
     /// Whether the Controls (remap) window is open.
     show_controls: bool,
+    /// Whether the Library window is open (ticket W2-07).
+    show_library: bool,
+    /// Configured library roots, as the user chose them (resolved at scan
+    /// time, never stored canonicalized — see `crate::library_roots`).
+    library_roots: Vec<std::path::PathBuf>,
+    /// Last scan's result. `None` until the first scan, which is why the
+    /// window scans on open rather than at startup: a cold start must not
+    /// wait on a folder walk over a network share.
+    library: Option<crate::library::Library>,
+    /// Normalized hash of the ROM currently loaded (ticket W2-07) — the key
+    /// its per-game settings are stored under. `None` for a ROM this build
+    /// could not identify, which is deliberate: settings keyed by a hash we
+    /// could not compute would be settings that silently apply to the wrong
+    /// game later.
+    current_game_hash: Option<String>,
+    /// The current game's settings, loaded on open and written back the
+    /// moment one changes.
+    current_game_settings: crate::game_settings::GameSettings,
     /// What the remap UI is waiting to capture, if anything: the
     /// `(port, button)` a next key press should bind.
     awaiting_key: Option<(usize, rf_input::NesButton)>,
@@ -259,6 +277,15 @@ impl RetroForgeApp {
             ),
         };
 
+        // Ticket W2-07: the configured folders load at startup (cheap: one
+        // small file), but the SCAN waits until the library window opens —
+        // a cold start must not block on a folder walk over a network
+        // share.
+        let library_roots = config_root
+            .as_ref()
+            .map(|root| crate::library_roots::load(root))
+            .unwrap_or_default();
+
         RetroForgeApp {
             core: None,
             texture: None,
@@ -276,6 +303,11 @@ impl RetroForgeApp {
             #[cfg(feature = "gamepad")]
             pad_backend: pad_backend_or_none(),
             show_controls: false,
+            show_library: false,
+            library_roots: library_roots.clone(),
+            library: None,
+            current_game_hash: None,
+            current_game_settings: crate::game_settings::GameSettings::default(),
             awaiting_key: None,
             bindings_status,
             pending_binding_save: false,
@@ -349,7 +381,15 @@ impl RetroForgeApp {
         let Some(path) = rom_open::pick_rom_file() else {
             return; // user cancelled the dialog
         };
-        let bytes = match rom_open::load_rom_bytes(&path) {
+        self.open_rom_path(&path);
+    }
+
+    /// Open a ROM by path (ticket W2-07: the library's Play button uses
+    /// this, the File menu's picker calls it with what the user chose).
+    /// One body, so a game launched from the library goes through exactly
+    /// the same load path as one opened by hand.
+    fn open_rom_path(&mut self, path: &std::path::Path) {
+        let bytes = match rom_open::load_rom_bytes(path) {
             Ok(bytes) => bytes,
             Err(e) => {
                 self.status = format!("Failed to open ROM: {e}");
@@ -373,6 +413,19 @@ impl RetroForgeApp {
             .ok()
             .filter(|rom| !rom.chr_is_ram())
             .map(|rom| rom.chr_rom().to_vec());
+        // Ticket W2-07 (FR-FE-002): identify the ROM and load its settings
+        // BEFORE the core starts, so a game configured for Enhanced mode
+        // opens in it rather than flipping a frame later.
+        self.current_game_hash = match rf_cart::Cartridge::load(&bytes) {
+            Ok(rf_cart::Cartridge::Nes { identity, .. }) => Some(identity.normalized.sha256),
+            Ok(rf_cart::Cartridge::Snes { identity, .. }) => Some(identity.normalized.sha256),
+            Err(_) => None,
+        };
+        self.current_game_settings = match (&self.config_root, &self.current_game_hash) {
+            (Some(root), Some(hash)) => crate::game_settings::load(root, hash),
+            _ => crate::game_settings::GameSettings::default(),
+        };
+
         match core_thread::spawn(bytes) {
             Ok(handle) => {
                 self.core = Some(handle);
@@ -406,7 +459,16 @@ impl RetroForgeApp {
                 // 6) — mirror that in the checkbox too, rather than leaving
                 // a previous ROM's overlay choice looking still-checked
                 // against a core that just reset it.
-                self.sprite_overlay = false;
+                //
+                // Ticket W2-07 (FR-FE-002): then apply THIS game's saved
+                // setting on top. The default stays Accuracy/off, so law 6
+                // still holds for a game nobody has configured; a game the
+                // user turned the overlay on for gets it back, which is the
+                // entire point of per-game settings.
+                self.sprite_overlay = self.current_game_settings.sprite_overlay;
+                if self.sprite_overlay {
+                    self.send_command(CoreCommand::SetSpriteOverlay(true));
+                }
                 // Ticket W4-03e: a new ROM is a new session for the
                 // enhanced camera too — the previous ROM's stitched canvas
                 // must not linger onscreen (or get composited into) against
@@ -694,6 +756,13 @@ impl RetroForgeApp {
                     .changed()
                 {
                     self.send_command(CoreCommand::SetSpriteOverlay(self.sprite_overlay));
+                    // Ticket W2-07: persist immediately, keyed by hash.
+                    // No Apply button anywhere in this app's settings —
+                    // an unsaved change a crash discards is the kind of
+                    // small betrayal that makes people stop trusting a
+                    // settings screen.
+                    self.current_game_settings.sprite_overlay = self.sprite_overlay;
+                    self.save_current_game_settings();
                 }
                 ui.separator();
                 // Ticket W3-03 acceptance criterion 2: pure UI-thread
@@ -708,6 +777,11 @@ impl RetroForgeApp {
                 // so a remap takes effect on the very next frame with no
                 // round trip to the core thread.
                 ui.checkbox(&mut self.show_controls, "Controls\u{2026}");
+                ui.separator();
+                // Ticket W2-07: the library. Opening it triggers the first
+                // scan (see `library_window`), so a cold start never waits
+                // on a folder walk.
+                ui.checkbox(&mut self.show_library, "Library\u{2026}");
                 ui.separator();
                 // Ticket W4-06a criterion 3: layout is saved the moment the
                 // window closes (not only on process exit via
@@ -804,6 +878,167 @@ impl RetroForgeApp {
     /// egui's panel background, which is exactly what makes "isolated"
     /// visible: a game with few on-screen sprites renders as a
     /// mostly-empty pane, not a black one.
+    /// The library window (ticket W2-07; FRONTEND_UI §3.1).
+    ///
+    /// The three first-run states are decided by
+    /// [`crate::library::first_run_state`] rather than here, so the rule
+    /// design review G-21 raised — "no folders configured" and "folders
+    /// with nothing in them" must say different things, not both render an
+    /// empty grid — is unit-tested rather than only rendered.
+    fn library_window(&mut self, ctx: &egui::Context) {
+        if !self.show_library {
+            return;
+        }
+        if self.library.is_none() {
+            self.rescan_library();
+        }
+
+        let mut open = self.show_library;
+        let mut rescan = false;
+        let mut to_play: Option<std::path::PathBuf> = None;
+        egui::Window::new("Library")
+            .open(&mut open)
+            .collapsible(true)
+            .resizable(true)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                let library = self.library.clone().unwrap_or_default();
+                let state = crate::library::first_run_state(&self.library_roots, &library);
+
+                match &state {
+                    crate::library::FirstRunState::NoRootsConfigured => {
+                        ui.heading("No ROM folders yet");
+                        ui.label(
+                            "RetroForge finds games by scanning folders you choose. Nothing is \
+                             ever sent anywhere \u{2014} identification is done locally, by \
+                             hashing the file.",
+                        );
+                        if ui.button("Add a ROM folder\u{2026}").clicked() {
+                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                self.library_roots.push(folder);
+                                self.save_library_roots();
+                                rescan = true;
+                            }
+                        }
+                    }
+                    crate::library::FirstRunState::NoRomsFound { roots } => {
+                        ui.heading("No ROMs found");
+                        for root in roots {
+                            ui.label(format!("0 ROMs found in {}", root.display()));
+                        }
+                        if ui.button("Add another folder\u{2026}").clicked() {
+                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                self.library_roots.push(folder);
+                                self.save_library_roots();
+                                rescan = true;
+                            }
+                        }
+                    }
+                    crate::library::FirstRunState::Populated { count } => {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{count} game(s)"));
+                            if ui.button("Rescan").clicked() {
+                                rescan = true;
+                            }
+                            if ui.button("Add folder\u{2026}").clicked() {
+                                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                    self.library_roots.push(folder);
+                                    self.save_library_roots();
+                                    rescan = true;
+                                }
+                            }
+                        });
+                        ui.separator();
+                        egui::ScrollArea::vertical()
+                            .max_height(360.0)
+                            .show(ui, |ui| {
+                                egui::Grid::new("library-grid")
+                                    .num_columns(3)
+                                    .striped(true)
+                                    .show(ui, |ui| {
+                                        for entry in &library.entries {
+                                            ui.label(&entry.title);
+                                            match &entry.identity {
+                                                crate::library::EntryIdentity::Recognized {
+                                                    console,
+                                                    normalized_sha256,
+                                                } => {
+                                                    ui.label(console.name());
+                                                    ui.label(
+                                                        normalized_sha256
+                                                            .chars()
+                                                            .take(12)
+                                                            .collect::<String>(),
+                                                    );
+                                                }
+                                                crate::library::EntryIdentity::Unrecognized {
+                                                    reason,
+                                                } => {
+                                                    ui.label("unrecognized");
+                                                    ui.label(reason);
+                                                }
+                                            }
+                                            if ui.button("Play").clicked() {
+                                                to_play = Some(entry.path.clone());
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+                    }
+                }
+
+                if !library.issues.is_empty() {
+                    ui.separator();
+                    ui.heading("Skipped");
+                    // NFR-010/FM-15: a refused path is named, never
+                    // silently dropped -- a scan that quietly ignores half
+                    // a library looks identical to one that found nothing.
+                    for issue in &library.issues {
+                        ui.label(format!("{issue:?}"));
+                    }
+                }
+            });
+        self.show_library = open;
+        if rescan {
+            self.rescan_library();
+        }
+        if let Some(path) = to_play {
+            self.open_rom_path(&path);
+        }
+    }
+
+    /// Persist the current game's settings (ticket W2-07, FR-FE-002).
+    /// A no-op for a ROM this build could not identify — settings keyed by
+    /// a hash we could not compute would eventually apply to the wrong game.
+    fn save_current_game_settings(&mut self) {
+        let (Some(root), Some(hash)) = (self.config_root.clone(), self.current_game_hash.clone())
+        else {
+            return;
+        };
+        if let Err(e) = crate::game_settings::save(&root, &hash, &self.current_game_settings) {
+            self.status = format!("Could not save game settings: {e}");
+        }
+    }
+
+    /// Rescan the configured roots.
+    fn rescan_library(&mut self) {
+        self.library = Some(crate::library::scan(&self.library_roots));
+    }
+
+    /// Persist the configured roots, reporting failure into the status line
+    /// rather than swallowing it.
+    fn save_library_roots(&mut self) {
+        let Some(root) = self.config_root.clone() else {
+            self.status =
+                "No config directory; library folders apply to this session only.".to_string();
+            return;
+        };
+        if let Err(e) = crate::library_roots::save(&root, &self.library_roots) {
+            self.status = format!("Could not save library folders: {e}");
+        }
+    }
+
     /// The remap window (ticket W2-06): one row per NES button per port,
     /// showing what is bound and offering to rebind it.
     ///
@@ -1074,6 +1309,7 @@ impl eframe::App for RetroForgeApp {
         self.crash_dialog(&ctx);
         self.layers_debug_window(&ctx);
         self.controls_window(&ctx);
+        self.library_window(&ctx);
         self.debug_panels_window(&ctx);
     }
 
