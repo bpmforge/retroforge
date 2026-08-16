@@ -788,16 +788,14 @@ mirrors = [
 dest = "roms/snes/peterlemon-snes-350b394.zip"
 
 # ---------------------------------------------------------------------------
-# Artifacts — Alter Ego (Shiru, PD), the one third-party smoke fixture
-# (D-001). Fetched directly from the author's own site, the most
+# Artifacts — Alter Ego (Shiru, freeware), the one third-party smoke
+# fixture (D-001). Fetched directly from the author's own site, the most
 # authoritative source available (better provenance than any bundler).
 #
-# SOURCE-ZIP PD NOTICE (ticket W2-11, RISKS.md R-16 mitigation "keep the
-# source-zip PD notice in the manifest"): "public-domain" below is this
-# project's own D-001 shorthand, not a legal PD claim independently
-# researched here — it should be read against the author's OWN words.
-# `alter_ego/notes.txt`, shipped INSIDE `alter_ego.zip` (the ROM archive,
-# not `alter_ego_src.zip`), verbatim:
+# LICENCE CLASSIFICATION (ticket W2-11a; the notice itself landed at
+# W2-11 as RISKS.md R-16's stated mitigation). `alter_ego/notes.txt`,
+# shipped INSIDE `alter_ego.zip` (the ROM archive, not
+# `alter_ego_src.zip`), states verbatim:
 #
 #   "Please note that the game is released as freeware, not Public
 #   Domain. There are three authors involved. I personally grant you
@@ -807,22 +805,37 @@ dest = "roms/snes/peterlemon-snes-350b394.zip"
 #   components. I.e., if you want to port it somewhere else, you need to
 #   ask Denis Grachev (and Kulor, if you need music) for permission."
 #
-# So: Shiru's own contribution (code/SFX/graphics — everything this
-# project's fetch-and-run smoke test actually exercises) is granted
-# do-whatever-you-want terms, functionally equivalent to PD for this use;
-# the game concept/characters/title (Denis Grachev) and music (Kulor)
-# remain rights-reserved. `license_status = "public-domain"` on both
-# artifacts below is this project's informal characterization of the
-# whole bundle for "fetch a hash-pinned zip and run it in CI/locally" —
-# it is NOT a claim that every byte of the archive is legally PD, and
-# reclassifying it (or dropping the fixture) is a human/legal call, not
-# an automated one — see RISKS.md R-16 for the full residual-risk
-# tracking and its trigger ("anyone challenges Alter Ego's PD status").
+# Read that against the schema's three values and none is a perfect fit —
+# there is no "freeware, mixed reservations". W2-11 therefore left the
+# field at "public-domain" and escalated; the human decision (2026-08-16)
+# is the conservative one: **"no-license-grant-fetch-only"**. Rationale:
+#
+#   * The author's own words rule out "public-domain" as a description of
+#     the bundle. Shiru's contribution (code/SFX/graphics) does carry
+#     do-whatever-you-want terms, but game concept/characters/title
+#     (Denis Grachev) and music (Kulor) are rights-reserved, and the
+#     artifact this manifest pins is the whole zip, not Shiru's share of
+#     it.
+#   * The field is not decoration: the no-vendor/no-rehost rule
+#     (TESTING.md §3, design review G-43) keys on it. Under
+#     "public-domain" nothing stopped a future ticket from vendoring or
+#     re-hosting an archive containing rights-reserved music. Under
+#     "no-license-grant-fetch-only" that is already forbidden by the rule
+#     that governs every other fetched oracle here.
+#   * It is behaviourally a no-op today — fetch-hash-verify-run from the
+#     author's site is exactly how this fixture is already used — so the
+#     reclassification costs nothing and closes a latent hole.
+#
+# The concrete forward constraint: `mirrors` below must stay
+# ORIGIN-ONLY. Adding a bundler/archive-site URL for either artifact
+# would be re-hosting by proxy, and is precisely what this classification
+# refuses. If the fixture is ever challenged, R-16's fallback (drop it)
+# still applies — that remains a human call, not an automated one.
 # ---------------------------------------------------------------------------
 
 [[artifact]]
 id = "alter-ego-rom"
-license_status = "public-domain"
+license_status = "no-license-grant-fetch-only"
 sha256 = "c7dc651d06aa7aee830d7c1d4563c9347bd724ad9de44dde7f459090b466cdc8"
 mirrors = [
   "https://shiru.untergrund.net/files/nes/alter_ego.zip",
@@ -831,7 +844,7 @@ dest = "roms/nes/alter-ego/alter_ego.zip"
 
 [[artifact]]
 id = "alter-ego-src"
-license_status = "public-domain"
+license_status = "no-license-grant-fetch-only"
 sha256 = "bee5569e4a38b574479f8a5f2731ffc55bcccd277b577aad9fc568ba0f015c3b"
 mirrors = [
   "https://shiru.untergrund.net/files/src/alter_ego_src.zip",

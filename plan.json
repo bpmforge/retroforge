@@ -144,7 +144,8 @@
     "tests/rom-manifest.toml",
     "docs/RISKS.md",
     "docs/DECISIONS.md",
-    "docs/TESTING.md"
+    "docs/TESTING.md",
+    "docs/SRS.md"
    ],
    "depends_on": [
     "W2-11"
@@ -152,10 +153,11 @@
    "acceptance": [
     "decide and record Alter Ego's licence classification against the author's verbatim notes.txt text (conservative option: license_status = \"no-license-grant-fetch-only\", which tightens handling to fetch-from-origin-only and never vendor/mirror/re-host -- behaviourally a no-op today, since that is already how it is used)",
     "D-001's parenthetical \"Alter Ego (PD)\" and TESTING section 3's \"Alter Ego (PD) is the one third-party smoke fixture\" updated to match whatever is decided",
-    "RISKS.md R-16 either closed (its stated mitigation, the source-zip notice, landed in W2-11) or restated against the new classification"
+    "RISKS.md R-16 either closed (its stated mitigation, the source-zip notice, landed in W2-11) or restated against the new classification",
+    "SRS FR-CORE-026 amended too: its normative text also said \"Alter Ego (PD)\". AMENDMENT 2026-08-16 -- docs/SRS.md was added to write_scope at execution time, because the filer enumerated two prose sites and there were three; a requirement doc left asserting the retracted claim is the one instance that would matter most. Recorded rather than taken silently; vetoable."
    ],
    "points": 1,
-   "status": "in_progress",
+   "status": "done",
    "stories": [],
    "notes": [
     "FILED 2026-08-07 at W2-11 close. HUMAN DECISION REQUIRED -- do not let an agent pick this unilaterally. notes.txt, shipped INSIDE alter_ego.zip, states verbatim: 'Please note that the game is released as freeware, not Public Domain. There are three authors involved. I personally grant you rights to do whatever you want with things I created (code, sound effects, graphics), but rights to other components (game concept, characters, title, music) are reserved to authors of these components.' Conductor read this from the primary source directly (unzip -p on the fetched artifact), not from an agent's summary.",

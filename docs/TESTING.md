@@ -78,14 +78,19 @@ protocol this replaced for `nes6502`.
 **Fixture doctrine (D-001, 2026-07-15):** game-shaped fixtures the project
 demos or gates on are self-contained — in-repo source (RF-Scroller under
 `fixtures/`, cc65/libSFX-built in CI, CC0/MIT assets), never third-party
-content. Accuracy oracles above stay external fetch-only. Alter Ego (PD) is
-the one third-party smoke fixture (independent proof), fetched by manifest.
+content. Accuracy oracles above stay external fetch-only. Alter Ego
+(freeware — **D-008**, not PD as D-001 originally said) is the one
+third-party smoke fixture (independent proof), fetched by manifest.
 **No-vendor/no-rehost rule (design review G-43):** sources with no license
 grant (SingleStepTests/65816, PeterLemon/SNES, christopherpow/nes-test-roms,
-nestest/.log) are fetch-from-origin only — never vendored, mirrored, or
-re-hosted; the CI cache is the only tolerated copy. Manifest entries record
-each artifact's license status; upstream grant requests tracked in
-docs/PREREQUISITES.md.
+nestest/.log, **and Alter Ego since D-008**) are fetch-from-origin only —
+never vendored, mirrored, or re-hosted; the CI cache is the only tolerated
+copy. Manifest entries record each artifact's license status; upstream grant
+requests tracked in docs/PREREQUISITES.md. Note this rule is **documented,
+not mechanically enforced**: `license_status` is parsed and carried by
+`rf_harness::manifest` but nothing gates on it, so the guard against an
+accidental vendoring is `/roms/` being gitignored (NFR-006) plus review —
+worth knowing before trusting the field to stop anything by itself.
 
 ## 4. NES CI gates
 
@@ -154,7 +159,7 @@ mistag, flagged since W1-05b and deliberately NOT absorbed here) and
 | `mmc3_test_2` + IRQ tests | MMC3 A12 IRQ counter | FR-CORE-025 | A | $6000 = 0 |
 | Holy Diver Batman (28 ROMs) | mapper acid breadth | FR-CORE-025 | B | golden frame per ROM |
 | RF-Scroller 5-min replay | real-game regression (in-repo fixture, D-001) | FR-CORE-026 | A | final-hash + 6 golden frames |
-| Alter Ego 5-min replay | independent-proof regression (PD fixture) | FR-CORE-026 | A — **RUNS LOCALLY ONLY (W2-11)** | final-hash + 4 golden frames, real `.rfreplay` round trip + independent-run determinism check |
+| Alter Ego 5-min replay | independent-proof regression (freeware fixture, D-008) | FR-CORE-026 | A — **RUNS LOCALLY ONLY (W2-11)** | final-hash + 4 golden frames, real `.rfreplay` round trip + independent-run determinism check |
 
 **"RUNS LOCALLY ONLY" (Alter Ego row, ticket W2-11):** wired and
 self-verifying (`crates/rf-harness/tests/alter_ego_replay.rs`), but this is
