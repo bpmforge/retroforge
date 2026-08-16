@@ -67,6 +67,16 @@ const TIER_A_LOCAL_SUITES = {
   sprite_hit_tests: {
     coveredPaths: ['crates/rf-nes/src/ppu', 'crates/rf-nes/src/system'],
   },
+  // apu_test (ticket W2-01a, fifth Tier-A-local suite): the whole APU lives
+  // in apu/**, and system/mod.rs carries the register decode ($4000-$4017),
+  // the per-CPU-cycle Apu::tick call and the IRQ wired-OR the suite's
+  // frame-counter and DMC interrupt sub-tests exercise. Deliberately NOT
+  // crates/rf-nes/src/cpu: the CPU's IRQ handling is exercised, but this
+  // suite's pass/fail turns on the APU's flags, and cpu/** already carries
+  // its own two Tier-A-local suites.
+  apu_test: {
+    coveredPaths: ['crates/rf-nes/src/apu', 'crates/rf-nes/src/system'],
+  },
 };
 
 // Suite -> expected [[suite.roms]] row count DATA table (ticket W1-05b) —
@@ -77,6 +87,10 @@ const TIER_A_LOCAL_SUITES = {
 const EXPECTED_ROM_COUNTS = {
   ppu_vbl_nmi: 10,
   sprite_hit_tests: 11,
+  // One combined ROM that runs all eight sub-tests and reports the first
+  // failure's number (blargg's apu_test/readme.txt); the per-sub-test
+  // `rom_singles` are not in the manifest.
+  apu_test: 1,
 };
 
 const errors = [];

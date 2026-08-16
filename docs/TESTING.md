@@ -94,7 +94,9 @@ in `docs/evidence/local-gate.json`). W2-12 owns wiring the rest.
 | `sprite_overflow_tests` | overflow bug | FR-CORE-023 | A | $6000 = 0 — **unverified as of W1-05b**: shares `sprite_hit_tests`' pre-`$6000` ROM family and almost certainly has the same protocol mistag; out of this ticket's scope, flagged in `tests/rom-manifest.toml` for whichever ticket implements this suite |
 | `oam_read`, `oam_stress` | $2004 semantics | FR-CORE-023 | B | $6000 = 0 |
 | `full_palette`, `ppu_open_bus`, `ppu_read_buffer` | palette, open bus, $2007 buffer | FR-CORE-022 | B | golden frame / $6000 |
-| blargg `apu_test`, `apu_reset`, `dmc_dma_during_read4` | frame counter, IRQ, DMC DMA | FR-CORE-024 | A | $6000 = 0 |
+| blargg `apu_test` (1 combined ROM, 8 sub-tests) | length counters, length table, frame IRQ + its timing, APU jitter, DMC basics + rates | FR-CORE-024 | A-local | $6000 = 0 — **8/8 as of W2-01a**; fifth Tier-A-local suite (gitignored ROM, so `scripts/local-gate.sh` + `docs/evidence/local-gate.json` carry the evidence, not CI) |
+| blargg `apu_reset` (6 ROMs) | APU state across reset | FR-CORE-024 | A — **NOT WIRED**: fetched and in the manifest, but no ticket owns it and no `Apu::reset` path exists yet (W2-01a `HANDOFF:` note) | $6000 = 0 |
+| blargg `dmc_dma_during_read4` | DMC DMA cycle stealing + the `$2007`/`$4016`/`$4017` double-read glitch | FR-CORE-024 | A — **NOT WIRED (W2-01b)**: W2-01a builds the DMC's registers and reader but deliberately not the CPU stall | $6000 = 0 |
 | blargg `apu_mixer` | non-linear mixer levels | FR-CORE-024 | B | RMS envelope match |
 | `mmc3_test_2` + IRQ tests | MMC3 A12 IRQ counter | FR-CORE-025 | A | $6000 = 0 |
 | Holy Diver Batman (28 ROMs) | mapper acid breadth | FR-CORE-025 | B | golden frame per ROM |

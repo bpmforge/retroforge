@@ -5,6 +5,7 @@
 //! Runs the nes6502 SingleStepTests vector suite via
 //! [`rf_harness::nes6502_evidence::run_all`], the nestest golden-trace
 //! diff via [`rf_harness::nestest_evidence::run`], and (ticket W1-05b) the
+//! `apu_test` (1 combined ROM, ticket W2-01a),
 //! `ppu_vbl_nmi` (10 ROMs, blargg `$6000` protocol, via
 //! [`rf_harness::blargg_evidence::run`]) and `sprite_hit_tests` (11 ROMs,
 //! RAM-result-byte protocol, via
@@ -468,10 +469,29 @@ fn run(args: &Args) -> ExitCode {
         ppu_vbl_nmi.roms_passed, ppu_vbl_nmi.roms_tested
     );
 
+    // --- apu_test (1 combined ROM, 8 sub-tests), ticket W2-01a -----------
+    // The combined `apu_test.nes` is one manifest ROM that runs all eight
+    // sub-tests in sequence and reports the first failure's number, so it
+    // is a single row here rather than the per-sub-ROM grain
+    // `ppu_vbl_nmi`/`sprite_hit_tests` use (the manifest's `rom_singles`
+    // are not fetched -- see `tests/rom-manifest.toml`'s `apu_test` suite).
+    let apu_test = match run_six_thousand_suite(&manifest, "apu_test", 1, &args.repo_root) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("apu_test run failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!(
+        "apu_test: {}/{} ROMs passed",
+        apu_test.roms_passed, apu_test.roms_tested
+    );
+
     let open_tickets = args.open_tickets.clone();
     let mut all_rows = vec![row, nestest_row];
     all_rows.extend(sprite_hit.rows.iter().cloned());
     all_rows.extend(ppu_vbl_nmi.rows.iter().cloned());
+    all_rows.extend(apu_test.rows.iter().cloned());
     let report = match build_report(&all_rows, &waiver_file.waivers, &args.today, |t| {
         open_tickets.iter().any(|o| o == t)
     }) {
@@ -557,6 +577,7 @@ fn run(args: &Args) -> ExitCode {
             "ppu_vbl_nmi",
             suite_summary_json("ppu_vbl_nmi", &ppu_vbl_nmi),
         ),
+        ("apu_test", suite_summary_json("apu_test", &apu_test)),
         ("accuracy_table", report.to_json()),
     ]);
 
