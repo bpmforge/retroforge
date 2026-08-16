@@ -507,7 +507,7 @@
     "master_cycle is still mutated only inside crates/rf-nes/src/system and advances exactly once per bus op, and no DMA/stall reference appears in crates/rf-nes/src/cpu"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ],
