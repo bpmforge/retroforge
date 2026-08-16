@@ -32,6 +32,7 @@
 //! makes that testable in practice rather than in principle.
 
 pub mod app;
+pub mod audio_out;
 pub mod canvas_accum;
 pub mod core_thread;
 pub mod debug_dock;

@@ -384,6 +384,10 @@ struct FanoutSink<'a> {
     frame: &'a mut rf_renderer::FrameBuffer,
     layers: &'a mut rf_renderer::LayeredFrame,
     bundle: &'a mut rf_core_api::FrameBundleBuilder,
+    /// Ticket W2-05: the audio path. `None` when the chain could not be
+    /// built at all, which is not fatal — a silent emulator is far better
+    /// than one that refuses to start because a machine has no sound card.
+    audio: Option<&'a mut crate::audio_out::AudioOut>,
 }
 
 impl rf_core_api::CoreSink for FanoutSink<'_> {
@@ -400,6 +404,9 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
     fn audio(&mut self, samples: &[i16]) {
         self.frame.audio(samples);
         self.bundle.audio(samples);
+        if let Some(audio) = self.audio.as_deref_mut() {
+            audio.push(samples);
+        }
     }
 
     fn event(&mut self, ev: rf_core_api::CoreEvent) {
@@ -471,6 +478,12 @@ fn core_thread_main(
     // a release build. See `crate::pacer` for why it is deadline-based
     // rather than a fixed sleep, and why it cannot affect determinism.
     let mut pacer = FramePacer::new();
+    // Ticket W2-05: the audio path, and with it the audio clock. `open`
+    // exists only with the `audio` feature (cpal); without it, or when
+    // there is no device, the chain still runs headless so the same code
+    // is exercised, and `crate::pacer` stays in charge of frame timing —
+    // see `crate::audio_out`'s module doc.
+    let mut audio = crate::audio_out::open_audio_out();
     run_guarded_loop(&evt_tx, move || {
         // Ticket W2-14: a stepped frame must be SENT, not just rendered.
         // Before this flag existed the only `CoreEvent::Frame` send site
@@ -503,6 +516,7 @@ fn core_thread_main(
                             frame: &mut sink,
                             layers: &mut layers,
                             bundle: &mut bundle_builder,
+                            audio: audio.as_mut(),
                         },
                     );
                     stepper.pause();
@@ -519,6 +533,7 @@ fn core_thread_main(
                         frame: &mut sink,
                         layers: &mut layers,
                         bundle: &mut bundle_builder,
+                        audio: audio.as_mut(),
                     });
                     stepped = true;
                 }
@@ -559,6 +574,21 @@ fn core_thread_main(
         // like a backlog to repay (`crate::pacer`).
         if stepper.is_paused() {
             pacer.resync();
+        } else if audio
+            .as_ref()
+            .is_some_and(crate::audio_out::AudioOut::is_clock)
+        {
+            // Ticket W2-05, ARCHITECTURE §8's audio-driven pacing: run a
+            // frame only once the device has drained the ring back to its
+            // target. This is a clock that cannot drift against itself,
+            // which the wall-clock deadline below structurally can.
+            while audio
+                .as_ref()
+                .is_some_and(crate::audio_out::AudioOut::should_wait)
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+            pacer.resync();
         } else {
             let delay = pacer.next_delay(Instant::now());
             if !delay.is_zero() {
@@ -571,6 +601,7 @@ fn core_thread_main(
                 frame: &mut sink,
                 layers: &mut layers,
                 bundle: &mut bundle_builder,
+                audio: audio.as_mut(),
             },
         );
         if ran || stepped {

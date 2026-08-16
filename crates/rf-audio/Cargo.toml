@@ -8,3 +8,21 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+cpal = { version = "0.18.1", optional = true }
+rtrb = "0.3.4"
+rubato = "3.0.0"
+# audioadapter-buffers: rubato 3's buffer adapters cross its API boundary,
+# so a caller needs the same version rubato pins (ticket W2-05; verified
+# against the vendored rubato-3.0.0/Cargo.toml, not guessed).
+audioadapter-buffers = "3.0"
+
+[features]
+# Device output is optional and OFF by default (ticket W2-05): cpal pulls in
+# ALSA on Linux, which the CI runner does not install, and every part of this
+# crate that can be tested headlessly -- ring, rate control, resampler -- is
+# outside it. The app turns it on; `cargo test --workspace` does not need to.
+default = []
+device = ["dep:cpal"]
+

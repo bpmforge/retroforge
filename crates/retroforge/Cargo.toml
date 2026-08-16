@@ -25,6 +25,10 @@ rf-cart = { path = "../rf-cart" }
 # only layer that may know both a core's state regions and rf-state's chunk
 # tags, since core crates may not depend on rf-state (validate-arch.sh).
 rf-state = { path = "../rf-state" }
+# rf-audio: ring, dynamic rate control and the output-stage filters
+# (ticket W2-05). The `device` feature (cpal) is enabled by the binary, not
+# here, so `cargo test --workspace` needs no ALSA headers.
+rf-audio = { path = "../rf-audio" }
 rf-renderer = { path = "../rf-renderer" }
 # rf-input: host-agnostic Key/KeyMap/InputLatch + .rfreplay (ticket W1-07).
 rf-input = { path = "../rf-input" }
@@ -78,3 +82,11 @@ egui_dock = "0.20.1"
 # key typo would still exit 0 with a warning). Not a `[dependencies]`
 # entry: nothing in this crate's production code touches `rf-profiles`.
 rf-profiles = { path = "../rf-profiles" }
+
+[features]
+# `audio` turns on real device output (ticket W2-05). OFF by default so
+# `cargo test --workspace` needs no ALSA headers on Linux; the binary and
+# the soak test enable it. See crates/rf-audio/Cargo.toml for the same
+# reasoning one layer down.
+default = []
+audio = ["rf-audio/device"]
