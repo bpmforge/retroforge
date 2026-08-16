@@ -679,15 +679,16 @@
     "W2-01a"
    ],
    "acceptance": [
-    "dmc_dma_during_read4 passes (FR-CORE-024)",
-    "non-linear mixer LUTs per nesdev APU_Mixer; apu_mixer RMS envelope match"
+    "AMENDED 2026-08-16 by Brad's split ruling (see notes): dmc_dma_during_read4's three DMA-model ROMs pass -- dma_2007_read (documented CRC), dma_2007_write and read_write_2007 (self-reported Passed) -- with the DMC DMA CPU stall in NesBus::read; the remaining two are W2-01c and W2-01d (FR-CORE-024)",
+    "non-linear mixer LUTs per nesdev APU_Mixer, checked against the page's exact formula with the approximation's error measured; the apu_mixer ROM-level RMS check needs an audio capture path and moves to W2-05"
    ],
    "points": 5,
-   "status": "blocked",
+   "status": "done",
    "stories": [
     "E1-S1"
    ],
    "notes": [
+    "RESOLVED 2026-08-16: Brad chose the split (the option this ticket's own notes proposed, following the W1-05c/W1-05d precedent). Acceptance criterion 1 is AMENDED to the three ROMs the DMA model actually explains, which is exactly what the evidence supports, and criterion 2's ROM-level RMS check moves to W2-05, which builds the audio capture path it needs. The two residual defects become W2-01c (the $4016 no-op-cycle bus-address model) and W2-01d (the $2007 double-read PPU quirk, which lives in ppu/** and could never have been in this ticket's write scope). Rationale for amending rather than leaving blocked, same as W1-05c's: the ticket bundled defects the work itself proved independent, and leaving it blocked would have held W2-04 (save states) and W2-05 (audio) -- and through them W4-10 and the W5-04 MVP -- behind a $4016 read-count question they have nothing to do with.",
     "attempt: 2026-08-16 claude-opus-5 partial \u2014 criterion 2 (mixer) DONE, criterion 1 (dmc_dma_during_read4) 3 of 5 ROMs. BLOCKED with evidence rather than closed, per PLAYBOOK's one-honest-attempt rule.",
     "WHAT LANDED AND IS VERIFIED. (1) The non-linear mixer, criterion 2, complete: `apu/mixer.rs` builds nesdev.org/wiki/APU_Mixer's two lookup tables (31-entry pulse, 203-entry tnd) with the page's own constants, exposed as `Apu::mixed_output`/`mixed_sample`. Its test checks the tables against the page's EXACT formula rather than against themselves, and MEASURES the approximation: worst deviation 4.66% at tnd index 1, falling below the page's claimed 4% only from index 27 up \u2014 both bounds asserted, so neither is a threshold tuned until green. Deliberately no filtering and no resampling (the page's three analog filters, and EMULATION_CORES \u00a72.3's blip-buffer downsample, belong to the audio path W2-05 builds; a filter here would silently change what apu_mixer's cancellation test measures). (2) The DMC DMA CPU stall, in `NesBus::read` \u2014 the only place it can live, since nesdev.org/wiki/DMA says \"DMA can only halt on CPU read cycles\", which is also why `dma_2007_write` (\"DMC DMA during $2007 write has no effect\") passes with no special case.",
     "ROOT CAUSE OF THE BLOCK, per failing ROM \u2014 they are TWO SEPARATE DEFECTS, not one. (a) `dma_4016_read` needs exactly ONE extra $4016 read (`08 08 07 08 08`); this engine produces THREE (`05`). nesdev.org/wiki/DMA itself says this case is \"1 or 3 extra reads\", so the count is alignment-dependent, but every configuration tried lands on 2 or 3, never 1 \u2014 the halt-position model cannot currently express the 1-extra case. (b) `double_2007_read` is NOT a DMA question at all: it needs a PPU behavior this crate does not implement in any form \u2014 its own header, \"Double read of $2007 sometimes ignores extra read, and puts odd things into buffer\". Fixing (a) cannot fix (b).",
@@ -696,6 +697,60 @@
     "PROPOSED SPLIT for Brad, following the W1-05c/W1-05d precedent (a ticket that bundled two independent defects). Criterion 2 is done and shipped; criterion 1 is two unrelated gaps. Suggested: amend W2-01b to the mixer plus the DMA stall it already has (3 of 5 ROMs, asserted exactly), and file the remainder as two tickets \u2014 one for the $4016 no-op-cycle address model, one for the $2007 double-read PPU quirk (which belongs in ppu/**, not apu/**, and so cannot be this ticket's scope in any case).",
     "SUITE PROTOCOL MISTAG, filed for whoever picks this up: `tests/rom-manifest.toml` tags dmc_dma_during_read4 `protocol = \"six_thousand\"`, but all five ROMs leave PRG-RAM all-zero \u2014 they are blargg's older screen-only shell, and their results exist ONLY in the PPU nametable. Same class of mistag W1-05b found on sprite_hit_tests. The manifest row was left alone (outside this ticket's write scope); the in-crate test reads the nametable via a new `#[cfg(test)] NesBus::ppu_vram_for_test`. No evidence-runner row was added for this suite for the same reason \u2014 the generic $6000 runner cannot drive it \u2014 so no waiver entry was added either: a waiver with no accuracy-table row to cover is decorative, and docs/TESTING.md carries the status instead.",
     "SCOPE-ADD beyond crates/rf-nes/src/apu/**: `crates/rf-nes/src/system/mod.rs` (the stall itself in `CpuBus::read`, the get/put parity helper, and the test-only VRAM accessor) and `docs/TESTING.md` (the suite's status row). No other file outside scope was touched."
+   ]
+  },
+  {
+   "id": "W2-01c",
+   "title": "DMC DMA no-op-cycle bus address: unblock dma_4016_read",
+   "phase": 2,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/apu/**",
+    "crates/rf-nes/src/system/mod.rs"
+   ],
+   "depends_on": [
+    "W2-01b"
+   ],
+   "acceptance": [
+    "dmc_dma_during_read4/dma_4016_read prints 08 08 07 08 08 and self-reports Passed (FR-CORE-024)",
+    "the three ROMs W2-01b already explains are unregressed: dma_2007_read still matches a documented CRC, dma_2007_write and read_write_2007 still self-report Passed",
+    "apu_test stays 8/8 and nestest stays 8991/8991 byte-exact -- a DMA-timing change moves every CPU cycle count downstream of it"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ],
+   "notes": [
+    "SPLIT OUT OF W2-01b 2026-08-16 (Brad's ruling; W2-01b's notes carry the full measurement history). ROOT CAUSE: dma_4016_read needs exactly ONE extra $4016 read (08 08 07 08 08) and W2-01b's model produces THREE (05). nesdev.org/wiki/DMA says this case is \"1 or 3 extra reads\", so the count is alignment-dependent -- but every configuration W2-01b measured lands on 2 or 3, never 1.",
+    "DO NOT RETRY WITHOUT: a model of WHICH ADDRESS the halted 6502 holds on each no-operation DMA cycle. Every W2-01b configuration assumed it re-issues the read of the address it was reading (nesdev: \"the 6502 core repeats the last read cycle\"); the 1-extra-read case implies that on at least one no-op cycle the bus is NOT showing $4016. The two references nesdev cites for exactly this are BreakingNESWiki's DMA circuit analysis and Fiskbit's aligned-controller-read tests. Do NOT retry by tuning get/put parity -- measured in W2-01b, strictly worse (the first three ROMs stop printing at all).",
+    "ALREADY PAID by W2-01b, do not rediscover: these five ROMs leave PRG-RAM all-zero (blargg's older screen-only shell -- a manifest protocol mistag of the same class W1-05b found on sprite_hit_tests), so results are read out of the PPU nametable via `NesBus::ppu_vram_for_test`; the in-crate test in crates/rf-nes/src/apu/tests/dmc_dma_rom.rs already asserts the measured 3-of-5 status EXACTLY, so this ticket's fix will fail that test until its expected_pass flag is flipped -- that is the intended signal, not a regression."
+   ]
+  },
+  {
+   "id": "W2-01d",
+   "title": "PPU $2007 double-read quirk: unblock double_2007_read",
+   "phase": 2,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/src/ppu/**",
+    "crates/rf-nes/src/apu/tests/dmc_dma_rom.rs"
+   ],
+   "depends_on": [
+    "W2-01b"
+   ],
+   "acceptance": [
+    "dmc_dma_during_read4/double_2007_read prints one of the four CRCs its source header documents (FR-CORE-022, FR-CORE-024)",
+    "the in-crate PPU suite is unregressed: read_buffer, both golden frames, ppu_vbl_nmi 10/10, sprite_hit_tests 11/11"
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ],
+   "notes": [
+    "SPLIT OUT OF W2-01b 2026-08-16 (Brad's ruling). This is NOT a DMA defect and never was -- it is a PPU behavior this crate does not implement in any form, stated by the ROM's own header: \"Double read of $2007 sometimes ignores extra read, and puts odd things into buffer\". It lives in ppu/** (the $2007 delayed read buffer, `crate::ppu::scroll`'s read_data path), which is why it could not have been inside W2-01b's apu/** write scope.",
+    "MEASURED in W2-01b: this engine prints CRC D84F6815, none of the four accepted (85CFD627, F018C287, 440EF923, E52F41A5), and the value is IDENTICAL across every DMA-model configuration tried -- which is the evidence that it does not share W2-01c's root cause. Its screen text (22 33 44 55 66 / 33 44 55 66 77) is close to two of the documented variants, so the gap is narrow and specific, not a wholesale mismatch."
    ]
   },
   {
