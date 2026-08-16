@@ -104,6 +104,7 @@ mod tests;
 pub use cartridge::{NesLoadError, NesRom};
 pub use controller::Controller;
 
+use crate::apu::Apu;
 use crate::cpu::CpuBus;
 use crate::mappers::{AxRom, Cnrom, Mapper, Mmc1, Mmc3, Mmc3Revision, Nrom, UxRom};
 use crate::ppu::Ppu;
@@ -140,6 +141,11 @@ pub struct NesBus {
     /// `self.ppu.nmi_line()` directly) is what reproduces nesdev's "same
     /// PPU clock or one clock later" VBlank-race row.
     nmi_level_latch: bool,
+    /// The APU (ticket W2-01a). Clocked exactly once per CPU cycle from
+    /// `tick_master`, alongside the PPU's three dots — see
+    /// `crate::apu`'s module doc for the full clocking contract, and this
+    /// method for the DMC memory-reader handshake that rides with it.
+    apu: Apu,
 }
 
 impl NesBus {
@@ -221,6 +227,7 @@ impl NesBus {
             mapper,
             last_oam_dma_stall: None,
             nmi_level_latch: false,
+            apu: Apu::new(),
         }
     }
 
@@ -356,7 +363,16 @@ impl NesBus {
             0x2000..=0x3FFF => self.ppu.read_register((addr & 0x0007) as u8, self.open_bus),
             0x4016 => self.controllers[0].read_bit() | (self.open_bus & !0x01),
             0x4017 => self.controllers[1].read_bit() | (self.open_bus & !0x01),
-            0x4000..=0x4015 | 0x4018..=0x401F => self.open_bus,
+            // Ticket W2-01a: `$4015` is the APU's one readable register.
+            // nesdev.org/wiki/APU ("Status ($4015)"): "This register is
+            // internal to the CPU and so the external CPU data bus is
+            // disconnected when reading it... the value does not affect
+            // open bus. Bit 5 is open bus." Both halves of that are
+            // honored below -- bit 5 comes from the latch, and the early
+            // return skips the `self.open_bus = value` this method ends
+            // with.
+            0x4015 => return self.apu.read_status() | (self.open_bus & 0x20),
+            0x4000..=0x4014 | 0x4018..=0x401F => self.open_bus,
             0x4020..=0x5FFF => self.open_bus,
             0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000],
             0x8000..=0xFFFF => self.mapper.cpu_read(addr),
@@ -460,11 +476,12 @@ impl NesBus {
                 self.controllers[1].write_strobe(value);
             }
             0x4014 => unreachable!("intercepted in CpuBus::write before reaching here"),
-            // $4017 write is the APU frame counter register, not a
-            // controller register — stub, dropped. $4000-4013/4015 are
-            // the other APU registers, and $4018-401F the disabled test
-            // registers; all stub/dropped.
-            0x4000..=0x4013 | 0x4015 | 0x4017..=0x401F => {}
+            // Ticket W2-01a: the APU's registers. `$4017` is the frame
+            // counter here, NOT a controller register (only `$4016`
+            // strobes the controllers). `$4018-$401F` are the disabled
+            // test registers and stay dropped.
+            0x4000..=0x4013 | 0x4015 | 0x4017 => self.apu.write_register(addr, value),
+            0x4018..=0x401F => {}
             0x4020..=0x5FFF => {}
             0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000] = value,
             // Ticket W2-02: dispatched to the cartridge's own mapper (a
@@ -586,7 +603,32 @@ impl NesBus {
     /// later" row needs.
     fn tick_master(&mut self, cycles: u32) {
         self.master_cycle += cycles as u64;
-        for _ in 0..cycles * 3 {
+        for _ in 0..cycles {
+            // Ticket W2-01a: one APU cycle per CPU cycle, before this
+            // cycle's three PPU dots. The DMC's memory reader cannot touch
+            // the bus itself (it is a field of the thing that owns the
+            // bus), so its fetch is serviced here, through the
+            // side-effect-free `peek` rather than `read_untimed`:
+            // `read_untimed` would update `open_bus`, and a DMA read is
+            // not a CPU read. THE CPU STALL IS NOT MODELLED HERE -- that
+            // is W2-01b's `dmc_dma_during_read4` (see `crate::apu::dmc`'s
+            // module doc), so this fetch currently costs zero cycles.
+            self.apu.tick();
+            if let Some(addr) = self.apu.dmc_fetch_address() {
+                let byte = self.peek(addr);
+                self.apu.dmc_supply_byte(byte);
+            }
+            for _ in 0..3 {
+                self.tick_ppu_dot();
+            }
+        }
+    }
+
+    /// One PPU dot, factored out of [`NesBus::tick_master`] when ticket
+    /// W2-01a made that method's outer loop count CPU cycles rather than
+    /// dots. The body is unchanged.
+    fn tick_ppu_dot(&mut self) {
+        {
             self.nmi_level_latch = self.ppu.nmi_line();
             self.ppu.tick();
             // Ticket W2-03: drain whatever filtered A12 rising edges this
@@ -705,13 +747,14 @@ impl CpuBus for NesBus {
         self.nmi_level_latch
     }
 
-    /// Ticket W2-03: a straight passthrough to the cartridge mapper's own
-    /// IRQ line (`false` for every mapper but MMC3, whose `Mmc3Revision`
-    /// -specific fire rule and `$E000`-ack are described in
-    /// `crate::mappers::mmc3`'s module doc). The APU stub (out of this
-    /// crate's scope so far) has no interrupt source, so the mapper is the
-    /// only thing that can currently assert this.
+    /// The wired-OR of every IRQ source on the bus, which
+    /// [`CpuBus::irq_line`]'s own doc describes: the cartridge mapper
+    /// (ticket W2-03 — `false` for every mapper but MMC3, whose
+    /// `Mmc3Revision`-specific fire rule and `$E000`-ack are described in
+    /// `crate::mappers::mmc3`'s module doc) and, since ticket W2-01a, the
+    /// APU's frame-counter and DMC interrupt flags
+    /// ([`crate::apu::Apu::irq_line`]).
     fn irq_line(&self) -> bool {
-        self.mapper.irq_pending()
+        self.mapper.irq_pending() || self.apu.irq_line()
     }
 }

@@ -141,11 +141,20 @@ fn peek_returns_fixed_ff_for_the_apu_stub_range_and_never_ticks_the_clock() {
         before,
         "peek must never advance the master clock"
     );
-    // The real emulation path is unaffected: an actual read still returns
-    // the tracked open-bus latch, not the peek-only placeholder.
+    // The real emulation path is unaffected by `peek`'s placeholder, but it
+    // is no longer pure open bus either: ticket W2-01a made `$4015` the
+    // APU's one readable register. nesdev.org/wiki/APU ("Status ($4015)"):
+    // the returned byte is `IF-D NT21` with "Bit 5 is open bus", and the
+    // read "does not affect open bus". With every channel silent at
+    // power-on, that leaves exactly bit 5 of the 0x37 latch.
     assert_eq!(
         bus.read(0x4015),
+        0x37 & 0x20,
+        "real $4015 read: silent APU status, with only bit 5 from the open-bus latch"
+    );
+    assert_eq!(
+        bus.read(0x401F),
         0x37,
-        "read_untimed (real emulation) must still return the tracked open_bus latch"
+        "and the $4015 read left the open-bus latch itself untouched"
     );
 }

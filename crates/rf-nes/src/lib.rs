@@ -16,12 +16,14 @@
 //! since `rf-core-api` is the shared contract crate every core is expected
 //! to depend on, not an upper layer.
 
+pub mod apu;
 pub mod cpu;
 pub mod mappers;
 pub mod ppu;
 pub mod system;
 pub mod trace;
 
+pub use apu::Apu;
 pub use cpu::{Cpu, CpuBus};
 pub use mappers::Mapper;
 pub use ppu::Ppu;
