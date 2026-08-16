@@ -49,6 +49,7 @@
 
 mod dmc;
 mod frame_counter;
+mod mixer;
 mod noise;
 mod pulse;
 #[cfg(test)]
@@ -233,16 +234,18 @@ impl Apu {
         }
     }
 
-    /// The DMC memory reader's outstanding fetch address, if any — polled
-    /// by `crate::system::NesBus` after each [`Apu::tick`], answered with
-    /// [`Apu::dmc_supply_byte`]. This handshake exists because the APU may
-    /// not touch the bus itself (it would need a `&mut NesBus` it is a
-    /// field of); see [`dmc`]'s module doc.
-    pub fn dmc_fetch_address(&self) -> Option<u16> {
-        self.dmc.fetch_address()
+    /// The DMC memory reader's outstanding fetch — `(address, is_load)`, or
+    /// `None`. Polled by `crate::system::NesBus::read`, which halts the CPU
+    /// for it (ticket W2-01b) and answers with [`Apu::dmc_supply_byte`].
+    /// This handshake exists because the APU may not touch the bus itself
+    /// (it would need a `&mut NesBus` it is a field of); the `is_load` flag
+    /// distinguishes nesdev's two DMA kinds, which schedule their halt on
+    /// opposite cycle types.
+    pub fn dmc_fetch_request(&self) -> Option<(u16, bool)> {
+        self.dmc.fetch_request()
     }
 
-    /// Completes the fetch [`Apu::dmc_fetch_address`] requested.
+    /// Completes the fetch [`Apu::dmc_fetch_request`] reported.
     pub fn dmc_supply_byte(&mut self, value: u8) {
         self.dmc.supply_byte(value);
     }
@@ -255,7 +258,22 @@ impl Apu {
         self.frame_counter.irq_flag || self.dmc.irq_flag
     }
 
-    /// Raw per-channel outputs for W2-01b's mixer (see [`ChannelOutputs`]).
+    /// The mixed, non-linear output level for the current cycle, in
+    /// nesdev.org/wiki/APU_Mixer's "range of 0.0 to 1.0" (ticket W2-01b).
+    /// No filtering and no resampling — see [`mixer`]'s module doc for why
+    /// both belong to the audio path rather than here.
+    pub fn mixed_output(&self) -> f32 {
+        let c = self.channel_outputs();
+        mixer::mix(c.pulse1, c.pulse2, c.triangle, c.noise, c.dmc)
+    }
+
+    /// [`Apu::mixed_output`] scaled to the `i16` domain
+    /// [`rf_core_api::CoreSink::audio`] takes.
+    pub fn mixed_sample(&self) -> i16 {
+        (self.mixed_output() * f32::from(i16::MAX)) as i16
+    }
+
+    /// Raw per-channel outputs for the mixer above (see [`ChannelOutputs`]).
     pub fn channel_outputs(&self) -> ChannelOutputs {
         ChannelOutputs {
             pulse1: self.pulse1.output(),

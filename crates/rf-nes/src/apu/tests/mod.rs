@@ -5,5 +5,7 @@
 
 mod blargg_rom;
 mod channels;
+mod dmc_dma_rom;
 mod frame_counter;
+mod mixer;
 mod status;

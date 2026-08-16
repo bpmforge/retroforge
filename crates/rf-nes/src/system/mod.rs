@@ -605,23 +605,33 @@ impl NesBus {
         self.master_cycle += cycles as u64;
         for _ in 0..cycles {
             // Ticket W2-01a: one APU cycle per CPU cycle, before this
-            // cycle's three PPU dots. The DMC's memory reader cannot touch
-            // the bus itself (it is a field of the thing that owns the
-            // bus), so its fetch is serviced here, through the
-            // side-effect-free `peek` rather than `read_untimed`:
-            // `read_untimed` would update `open_bus`, and a DMA read is
-            // not a CPU read. THE CPU STALL IS NOT MODELLED HERE -- that
-            // is W2-01b's `dmc_dma_during_read4` (see `crate::apu::dmc`'s
-            // module doc), so this fetch currently costs zero cycles.
+            // cycle's three PPU dots. The DMC's memory-reader fetch is NOT
+            // serviced here -- ticket W2-01b moved it into `CpuBus::read`,
+            // because nesdev.org/wiki/DMA's "DMA can only halt on CPU read
+            // cycles" makes the fetch a property of a CPU read cycle, not
+            // of the clock.
             self.apu.tick();
-            if let Some(addr) = self.apu.dmc_fetch_address() {
-                let byte = self.peek(addr);
-                self.apu.dmc_supply_byte(byte);
-            }
             for _ in 0..3 {
                 self.tick_ppu_dot();
             }
         }
+    }
+
+    /// Whether `cycle` is a DMA "get" cycle — nesdev.org/wiki/DMA: "The CPU
+    /// alternates between cycles on which DMA can get (read) and cycles on
+    /// which DMA can put (write). These are the first and second halves of
+    /// APU cycles, respectively. **At power-on, whether the first CPU cycle
+    /// is get or put is random.**"
+    ///
+    /// A deterministic emulator cannot be random (ARCHITECTURE §3), so this
+    /// crate picks one alignment and keeps it: even `master_cycle` is a get.
+    /// That choice is observable — `dmc_dma_during_read4`'s own source
+    /// headers list two-to-four accepted outputs per ROM precisely because
+    /// "number of extra reads depends on CPU-PPU synchronization at reset" —
+    /// so the suite's harness accepts any of the documented variants rather
+    /// than pinning the one this alignment happens to produce.
+    fn is_get_cycle(cycle: u64) -> bool {
+        cycle.is_multiple_of(2)
     }
 
     /// One PPU dot, factored out of [`NesBus::tick_master`] when ticket
@@ -665,7 +675,56 @@ impl NesBus {
 }
 
 impl CpuBus for NesBus {
+    /// One CPU read cycle — and, since ticket W2-01b, the only place a DMC
+    /// DMA can steal cycles.
+    ///
+    /// nesdev.org/wiki/DMA: "DMA can only halt on CPU read cycles. On write
+    /// cycles, the halt fails and the DMA unit tries again next CPU cycle,
+    /// repeating until successful." Modelling the halt here rather than in
+    /// `tick_master` is what makes that true for free — and it is also why
+    /// `dmc_dma_during_read4`'s `dma_2007_write` ROM ("DMC DMA during $2007
+    /// write has no effect") passes without a special case.
+    ///
+    /// The stall itself, verbatim from that page's "DMC DMA collides with
+    /// $2007 read" example: a halt cycle, a dummy cycle, an optional
+    /// alignment cycle, then the DMA's own get. **On the 2A03 the CPU's
+    /// read is re-issued on every one of those no-operation cycles** —
+    /// "When RDY is deasserted, the 6502 core repeats the last read cycle
+    /// indefinitely... these repeated reads are externally visible on any
+    /// no-operation DMA cycle, causing data loss if reading a register with
+    /// side effects" — which is the entire content of the
+    /// `dmc_dma_during_read4` suite. So this loop calls `read_untimed` on
+    /// the CPU's own address once per no-op cycle, side effects and all,
+    /// and only the last read's value reaches the CPU ("When the DMA
+    /// process completes, the CPU performs the read it attempted when
+    /// halted").
+    ///
+    /// Deliberately NOT modelled, and listed rather than silently omitted:
+    /// the bus conflicts that occur when the DMA address's low five bits
+    /// alias `$4015-$4017` (that page's last three examples), the DMC-DMA-
+    /// during-OAM-DMA interleave, and the two sample-stop bugs (aborted and
+    /// unexpected DMAs). None is exercised by this suite's five ROMs.
     fn read(&mut self, addr: u16) -> u8 {
+        if let Some((dma_addr, _is_load)) = self.apu.dmc_fetch_request() {
+            // Halt + dummy are unconditional; the get must land on a get
+            // cycle, so an alignment cycle is inserted when the cycle two
+            // after this one is a put. ("After the halt, DMC DMA always
+            // performs a dummy cycle where no work is done. If the next
+            // cycle is not a get cycle, then a cycle will be spent on
+            // alignment.")
+            let noop_cycles = if Self::is_get_cycle(self.master_cycle + 2) {
+                2
+            } else {
+                3
+            };
+            for _ in 0..noop_cycles {
+                self.read_untimed(addr);
+                self.tick_master(1);
+            }
+            let byte = self.read_untimed(dma_addr);
+            self.apu.dmc_supply_byte(byte);
+            self.tick_master(1);
+        }
         let value = self.read_untimed(addr);
         self.tick_master(1);
         value
@@ -756,5 +815,16 @@ impl CpuBus for NesBus {
     /// ([`crate::apu::Apu::irq_line`]).
     fn irq_line(&self) -> bool {
         self.mapper.irq_pending() || self.apu.irq_line()
+    }
+}
+
+#[cfg(test)]
+impl NesBus {
+    /// Read access to PPU VRAM for in-crate tests (ticket W2-01b): blargg's
+    /// older shells, including `dmc_dma_during_read4`'s, print only to the
+    /// screen, so the nametable is the only place their result exists.
+    /// Public VRAM exposure for the debugger is a separate ticket (W4-06d).
+    pub(crate) fn ppu_vram_for_test(&self) -> &[u8; 0x1000] {
+        &self.ppu.vram
     }
 }

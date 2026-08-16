@@ -206,13 +206,16 @@ fn dmc_decodes_sample_address_and_length_per_nesdev() {
     apu.write_register(0x4012, 0x00);
     apu.write_register(0x4013, 0x00);
     apu.write_register(0x4015, 0x10);
-    assert_eq!(apu.dmc_fetch_address(), Some(0xC000));
+    assert_eq!(apu.dmc_fetch_request().map(|(addr, _)| addr), Some(0xC000));
 
     let mut apu = Apu::new();
     apu.write_register(0x4012, 0xFF);
     apu.write_register(0x4013, 0x01);
     apu.write_register(0x4015, 0x10);
-    assert_eq!(apu.dmc_fetch_address(), Some(0xC000 + 0xFF * 64));
+    assert_eq!(
+        apu.dmc_fetch_request().map(|(addr, _)| addr),
+        Some(0xC000 + 0xFF * 64)
+    );
 
     // $4013 = 0 gives a 1-byte sample: after one supplied byte the channel
     // is no longer active.
