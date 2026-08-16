@@ -33,6 +33,7 @@
 
 pub mod app;
 pub mod audio_out;
+pub mod bindings_store;
 pub mod canvas_accum;
 pub mod core_thread;
 pub mod debug_dock;

@@ -90,3 +90,6 @@ rf-profiles = { path = "../rf-profiles" }
 # reasoning one layer down.
 default = []
 audio = ["rf-audio/device"]
+# `gamepad` turns on the real gilrs backend (ticket W2-06), for the same
+# CI reason `audio` is opt-in: gilrs reaches for evdev/udev on Linux.
+gamepad = ["rf-input/gilrs"]

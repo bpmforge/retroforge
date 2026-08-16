@@ -26,6 +26,36 @@ impl KeyMap {
         self.entries.push((key, port, button));
     }
 
+    /// Bind `key` to `(port, button)` **as a remap**: any other key
+    /// previously driving that same `(port, button)` is unbound first.
+    ///
+    /// This is what a remap UI wants, and [`KeyMap::bind`] is not. `bind`
+    /// dedupes by KEY (one key drives one button), which deliberately
+    /// allows several keys to drive the same button — useful for binding
+    /// both shifts. A capture-style remap needs the opposite guarantee: if
+    /// the user says "Start is now Q", `Enter` must stop being Start, or
+    /// the old key keeps working while the UI shows only one of the two.
+    /// That exact bug is why this method exists rather than the UI doing
+    /// it by hand — the next programmatic binder would have reintroduced it.
+    pub fn rebind(&mut self, key: Key, port: usize, button: NesButton) {
+        self.entries
+            .retain(|(k, p, b)| *k != key && !(*p == port && *b == button));
+        self.entries.push((key, port, button));
+    }
+
+    /// Remove any binding for `key`.
+    pub fn unbind(&mut self, key: Key) {
+        self.entries.retain(|(k, _, _)| *k != key);
+    }
+
+    /// Every binding, in insertion order — for the remap UI and for saving
+    /// (ticket W2-06; `crate::bindings` writes these out verbatim, which is
+    /// what makes a saved config diff cleanly between runs).
+    #[must_use]
+    pub fn entries(&self) -> &[(Key, usize, NesButton)] {
+        &self.entries
+    }
+
     /// What `key` is bound to, if anything.
     #[must_use]
     pub fn lookup(&self, key: Key) -> Option<(usize, NesButton)> {
@@ -59,6 +89,65 @@ impl KeyMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The remap guarantee: rebinding a button moves it, rather than
+    /// leaving the old key working alongside the new one (ticket W2-06).
+    #[test]
+    fn rebinding_a_button_releases_the_key_that_used_to_drive_it() {
+        let mut map = KeyMap::default_nes();
+        assert_eq!(map.lookup(Key::Enter), Some((0, NesButton::Start)));
+
+        map.rebind(Key::Q, 0, NesButton::Start);
+
+        assert_eq!(map.lookup(Key::Q), Some((0, NesButton::Start)));
+        assert_eq!(
+            map.lookup(Key::Enter),
+            None,
+            "the old key must stop driving Start, or it silently keeps working"
+        );
+        assert_eq!(
+            map.entries()
+                .iter()
+                .filter(|(_, p, b)| *p == 0 && *b == NesButton::Start)
+                .count(),
+            1,
+            "exactly one key drives Start after a remap"
+        );
+    }
+
+    /// A remap must also drop whatever the NEW key used to do, or pressing
+    /// it would drive two buttons at once.
+    #[test]
+    fn rebinding_also_clears_the_new_keys_previous_job() {
+        let mut map = KeyMap::default_nes();
+        map.rebind(Key::Z, 0, NesButton::Start);
+        assert_eq!(map.lookup(Key::Z), Some((0, NesButton::Start)));
+        assert_eq!(
+            map.entries()
+                .iter()
+                .filter(|(k, _, _)| *k == Key::Z)
+                .count(),
+            1
+        );
+        assert!(
+            map.entries()
+                .iter()
+                .all(|(_, _, b)| *b != NesButton::B || map.lookup(Key::Z) != Some((0, *b))),
+            "Z must not still be B"
+        );
+    }
+
+    /// `bind` keeps its own, different guarantee — several keys may drive
+    /// one button on purpose (both shifts, say). Remap uses `rebind`; this
+    /// pins that the two are not the same operation.
+    #[test]
+    fn bind_still_allows_two_keys_to_drive_the_same_button() {
+        let mut map = KeyMap::new();
+        map.bind(Key::LeftShift, 0, NesButton::Select);
+        map.bind(Key::RightShift, 0, NesButton::Select);
+        assert_eq!(map.lookup(Key::LeftShift), Some((0, NesButton::Select)));
+        assert_eq!(map.lookup(Key::RightShift), Some((0, NesButton::Select)));
+    }
 
     #[test]
     fn default_nes_binds_all_eight_keys_to_port_zero() {

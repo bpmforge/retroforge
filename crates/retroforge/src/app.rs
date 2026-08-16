@@ -47,16 +47,19 @@ const CANVAS_SNAPSHOT_REFRESH_INTERVAL: u32 = 30;
 
 /// Every host key the default NES keymap binds — the fixed poll list
 /// `poll_input` checks each repaint (module doc).
-const POLLED_KEYS: [egui::Key; 8] = [
-    egui::Key::ArrowUp,
-    egui::Key::ArrowDown,
-    egui::Key::ArrowLeft,
-    egui::Key::ArrowRight,
-    egui::Key::Z,
-    egui::Key::X,
-    egui::Key::Enter,
-    egui::Key::ShiftRight,
-];
+/// Open the gamepad backend, or carry on without one (ticket W2-06).
+/// A missing or unopenable gamepad subsystem is not an error: the keyboard
+/// still works, and refusing to start over it would be absurd.
+#[cfg(feature = "gamepad")]
+fn pad_backend_or_none() -> Option<rf_input::GilrsBackend> {
+    match rf_input::GilrsBackend::new() {
+        Ok(backend) => Some(backend),
+        Err(e) => {
+            eprintln!("retroforge: gamepads unavailable ({e}); keyboard only");
+            None
+        }
+    }
+}
 
 /// The whole application's UI-thread-owned state.
 pub struct RetroForgeApp {
@@ -96,7 +99,33 @@ pub struct RetroForgeApp {
     /// UI thread's write side; `poll_input` samples it every repaint into
     /// the core thread's `SharedInputFrame` (module doc).
     input_latch: rf_input::InputLatch,
-    keymap: rf_input::KeyMap,
+    /// Keyboard + gamepad bindings (ticket W2-06), loaded from the user's
+    /// config at startup and written back the moment a remap changes —
+    /// see `crate::bindings_store`.
+    bindings: rf_input::Bindings,
+    /// Where those bindings live, `None` when the platform gave us no
+    /// config directory (a sandboxed or headless run): remapping still
+    /// works for the session, it just cannot be saved, and the UI says so.
+    config_root: Option<std::path::PathBuf>,
+    /// Pad-to-port assignment and held state (ticket W2-06). Present even
+    /// without the `gamepad` feature, because the routing rules are what
+    /// the frontend reads; with no backend it simply stays empty.
+    pad_router: rf_input::PadRouter,
+    /// The live gamepad backend, when this build has one and the platform
+    /// let us open it.
+    #[cfg(feature = "gamepad")]
+    pad_backend: Option<rf_input::GilrsBackend>,
+    /// Whether the Controls (remap) window is open.
+    show_controls: bool,
+    /// What the remap UI is waiting to capture, if anything: the
+    /// `(port, button)` a next key press should bind.
+    awaiting_key: Option<(usize, rf_input::NesButton)>,
+    /// Last thing the binding store said, shown in the Controls window so a
+    /// failed save is visible rather than silent.
+    bindings_status: String,
+    /// Set when a key-capture completed inside the input closure, which
+    /// cannot call `save_bindings` itself (it holds a borrow of `self`).
+    pending_binding_save: bool,
     /// UI-thread mirror of the core thread's overlay setting (ticket
     /// W3-05a) — same "set right after sending a command" pattern
     /// `running` above uses, for the same reason (the checkbox needs
@@ -194,6 +223,42 @@ impl RetroForgeApp {
             }
             None => (None, None),
         };
+
+        // Ticket W2-06: load the user's bindings before the first frame, so
+        // a remapped controller works from the first key press rather than
+        // after some later "apply".
+        let config_root = crate::bindings_store::config_root();
+        let (bindings, bindings_status) = match &config_root {
+            Some(root) => {
+                let (bindings, outcome) = crate::bindings_store::load(root);
+                let status = match outcome {
+                    crate::bindings_store::LoadOutcome::Defaulted => {
+                        "Using default bindings (no config file yet).".to_string()
+                    }
+                    crate::bindings_store::LoadOutcome::Loaded(warnings) if warnings.is_empty() => {
+                        format!(
+                            "Bindings loaded from {}.",
+                            crate::bindings_store::bindings_path(root).display()
+                        )
+                    }
+                    crate::bindings_store::LoadOutcome::Loaded(warnings) => format!(
+                        "Bindings loaded with {} skipped line(s): {warnings:?}",
+                        warnings.len()
+                    ),
+                    crate::bindings_store::LoadOutcome::Rejected(reason) => format!(
+                        "Binding file could not be read ({reason}); using defaults. Your file \
+                         was left untouched."
+                    ),
+                };
+                (bindings, status)
+            }
+            None => (
+                rf_input::Bindings::default(),
+                "No config directory on this platform; remapping works for this session only."
+                    .to_string(),
+            ),
+        };
+
         RetroForgeApp {
             core: None,
             texture: None,
@@ -205,7 +270,15 @@ impl RetroForgeApp {
             awaiting_stepped_frame: false,
             position: None,
             input_latch: rf_input::InputLatch::new(),
-            keymap: rf_input::KeyMap::default_nes(),
+            bindings,
+            config_root,
+            pad_router: rf_input::PadRouter::new(),
+            #[cfg(feature = "gamepad")]
+            pad_backend: pad_backend_or_none(),
+            show_controls: false,
+            awaiting_key: None,
+            bindings_status,
+            pending_binding_save: false,
             sprite_overlay: false,
             show_layers: false,
             gpu,
@@ -222,25 +295,53 @@ impl RetroForgeApp {
         }
     }
 
-    /// Sample the fixed [`POLLED_KEYS`] list once per repaint into
+    /// Sample every bindable key once per repaint into
     /// [`Self::input_latch`], then publish the resulting `InputFrame` to
     /// the core thread (module doc). A no-op if no core is loaded — there
     /// is nothing to publish to.
     fn poll_input(&mut self, ctx: &egui::Context) {
+        // Ticket W2-06: poll every key a binding could name, not W1-07's
+        // fixed eight — a user who binds Start to `Q` must have `Q` reach
+        // the keymap, and before this the translation dropped it first.
         ctx.input(|input_state| {
-            for key in POLLED_KEYS {
-                let Some(mapped) = input_map::map_key(key) else {
+            for &key in rf_input::Key::ALL {
+                let Some(egui_key) = input_map::egui_key_for(key) else {
                     continue;
                 };
-                if input_state.key_down(key) {
-                    self.input_latch.key_down(mapped);
-                } else {
-                    self.input_latch.key_up(mapped);
+                if !input_state.key_down(egui_key) {
+                    self.input_latch.key_up(key);
+                    continue;
                 }
+                // A remap in progress swallows the press rather than also
+                // feeding it to the game -- otherwise binding Start would
+                // press Start at the same moment.
+                if let Some((port, button)) = self.awaiting_key.take() {
+                    self.bindings.keys.rebind(key, port, button);
+                    self.pending_binding_save = true;
+                    continue;
+                }
+                self.input_latch.key_down(key);
             }
         });
+
+        // The pads, then the OR: neither input wins, because a player using
+        // a pad while a hand rests on the keyboard should not have one
+        // silently cancel the other.
+        #[cfg(feature = "gamepad")]
+        if let Some(backend) = self.pad_backend.as_mut() {
+            self.pad_router.poll(backend);
+        }
         if let Some(core) = &self.core {
-            core.input.store(self.input_latch.sample(&self.keymap));
+            let mut frame = self.input_latch.sample(&self.bindings.keys);
+            let pads = self.pad_router.sample(&self.bindings.pads);
+            for (port, bits) in frame.ports.iter_mut().enumerate() {
+                *bits |= pads.ports[port];
+            }
+            core.input.store(frame);
+        }
+
+        if std::mem::take(&mut self.pending_binding_save) {
+            self.save_bindings();
         }
     }
 
@@ -602,6 +703,12 @@ impl RetroForgeApp {
                 // hides the window with no round trip to the core thread.
                 ui.checkbox(&mut self.show_layers, "Layers (debug)");
                 ui.separator();
+                // Ticket W2-06: the remap window. Pure UI-thread state —
+                // bindings are sampled on this thread too (`poll_input`),
+                // so a remap takes effect on the very next frame with no
+                // round trip to the core thread.
+                ui.checkbox(&mut self.show_controls, "Controls\u{2026}");
+                ui.separator();
                 // Ticket W4-06a criterion 3: layout is saved the moment the
                 // window closes (not only on process exit via
                 // `eframe::App::save` below), so a session that opens,
@@ -697,6 +804,139 @@ impl RetroForgeApp {
     /// egui's panel background, which is exactly what makes "isolated"
     /// visible: a game with few on-screen sprites renders as a
     /// mostly-empty pane, not a black one.
+    /// The remap window (ticket W2-06): one row per NES button per port,
+    /// showing what is bound and offering to rebind it.
+    ///
+    /// **Capture, not a dropdown.** Rebinding waits for the user to press
+    /// the key they want — a list of 60-odd key names is unusable, and the
+    /// press is unambiguous in a way "pick `Semicolon` from a list" is not.
+    /// `awaiting_key` is that state; the capture happens in `poll_input`,
+    /// which is the only place that sees raw key events.
+    ///
+    /// Every change saves immediately. There is no Apply button, because an
+    /// unsaved remap that a crash discards is exactly the kind of small
+    /// betrayal that makes people stop trusting a settings screen.
+    fn controls_window(&mut self, ctx: &egui::Context) {
+        if !self.show_controls {
+            return;
+        }
+        let mut changed = false;
+        let mut open = self.show_controls;
+        egui::Window::new("Controls")
+            .open(&mut open)
+            .collapsible(true)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.label(&self.bindings_status);
+                ui.separator();
+
+                for port in 0..2usize {
+                    ui.heading(format!("Player {}", port + 1));
+                    egui::Grid::new(format!("controls-port-{port}"))
+                        .num_columns(3)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for button in rf_input::NesButton::ALL {
+                                ui.label(button.name());
+
+                                let bound = self
+                                    .bindings
+                                    .keys
+                                    .entries()
+                                    .iter()
+                                    .find(|(_, p, b)| *p == port && *b == button)
+                                    .map(|(key, _, _)| key.name());
+                                let label = match (self.awaiting_key, bound) {
+                                    (Some((p, b)), _) if p == port && b == button => {
+                                        "press a key\u{2026}".to_string()
+                                    }
+                                    (_, Some(name)) => name.to_string(),
+                                    (_, None) => "\u{2014}".to_string(),
+                                };
+                                if ui.button(label).clicked() {
+                                    self.awaiting_key = Some((port, button));
+                                }
+
+                                if ui.small_button("Clear").clicked() {
+                                    let bound_key = self
+                                        .bindings
+                                        .keys
+                                        .entries()
+                                        .iter()
+                                        .find(|(_, p, b)| *p == port && *b == button)
+                                        .map(|(key, _, _)| *key);
+                                    if let Some(key) = bound_key {
+                                        self.bindings.keys.unbind(key);
+                                        changed = true;
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    ui.separator();
+                }
+
+                ui.heading("Gamepad");
+                ui.label(format!(
+                    "{} pad(s) connected",
+                    self.pad_router.connected_count()
+                ));
+                egui::Grid::new("controls-pad")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for pad_button in rf_input::PadButton::ALL {
+                            ui.label(pad_button.name());
+                            let current = self.bindings.pads.lookup(pad_button);
+                            let label = current.map_or("\u{2014}", rf_input::NesButton::name);
+                            egui::ComboBox::from_id_salt(pad_button.name())
+                                .selected_text(label)
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(current.is_none(), "\u{2014}").clicked()
+                                    {
+                                        self.bindings.pads.unbind(pad_button);
+                                        changed = true;
+                                    }
+                                    for nes in rf_input::NesButton::ALL {
+                                        if ui
+                                            .selectable_label(current == Some(nes), nes.name())
+                                            .clicked()
+                                        {
+                                            self.bindings.pads.bind(pad_button, nes);
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                            ui.end_row();
+                        }
+                    });
+
+                ui.separator();
+                if ui.button("Restore defaults").clicked() {
+                    self.bindings = rf_input::Bindings::default();
+                    changed = true;
+                }
+            });
+        self.show_controls = open;
+        if changed {
+            self.save_bindings();
+        }
+    }
+
+    /// Persist the current bindings, reporting the result into
+    /// `bindings_status` rather than silently.
+    fn save_bindings(&mut self) {
+        let Some(root) = self.config_root.clone() else {
+            self.bindings_status =
+                "No config directory; this remap applies to the current session only.".to_string();
+            return;
+        };
+        self.bindings_status = match crate::bindings_store::save(&root, &self.bindings) {
+            Ok(path) => format!("Bindings saved to {}.", path.display()),
+            Err(e) => format!("Could not save bindings: {e}"),
+        };
+    }
+
     fn layers_debug_window(&mut self, ctx: &egui::Context) {
         if !self.show_layers {
             return;
@@ -833,6 +1073,7 @@ impl eframe::App for RetroForgeApp {
         self.video_panel(ui);
         self.crash_dialog(&ctx);
         self.layers_debug_window(&ctx);
+        self.controls_window(&ctx);
         self.debug_panels_window(&ctx);
     }
 

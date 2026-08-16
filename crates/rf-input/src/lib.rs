@@ -15,16 +15,24 @@
 //!
 //! See `docs/design/SAVE_STATES.md` §3 and [`replay`] for the `.rfreplay`
 //! input-log format (FR-STATE-006).
+pub mod bindings;
 mod button;
+#[cfg(feature = "gilrs")]
+mod gilrs_backend;
 mod key;
 mod keymap;
 mod latch;
+pub mod pad;
 pub mod replay;
 
+pub use bindings::{BindingError, BindingWarning, Bindings};
 pub use button::NesButton;
+#[cfg(feature = "gilrs")]
+pub use gilrs_backend::GilrsBackend;
 pub use key::Key;
 pub use keymap::KeyMap;
 pub use latch::InputLatch;
+pub use pad::{PadBackend, PadButton, PadEvent, PadId, PadMap, PadRouter};
 pub use replay::{
     PortLogKey, ReplayError, ReplayHeader, ReplayLog, ReplayPlayer, ReplayRecorder, StartType,
 };

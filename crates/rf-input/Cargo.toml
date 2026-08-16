@@ -10,4 +10,15 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+gilrs = { version = "0.11.2", optional = true }
 rf-core-api = { path = "../rf-core-api" }
+
+[features]
+# `gilrs` turns on the real gamepad backend (ticket W2-06). OFF by default:
+# gilrs reaches for evdev/udev on Linux and the CI runner installs only
+# cc65, so a default-on dependency would redden CI for a change no dev
+# machine can verify. The pad model, port routing, hotplug rules and
+# binding persistence all sit behind `PadBackend` and compile
+# unconditionally.
+default = []
+gilrs = ["dep:gilrs"]
