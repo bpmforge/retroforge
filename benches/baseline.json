@@ -1,0 +1,29 @@
+{
+  "meta": {
+    "rebaselined_by": "W2-09 (initial baseline)",
+    "justification": "First baseline: measured on the dev machine (Apple M2 Max, macOS) with `cargo bench --workspace` on a quiet system. Numbers are release-profile point estimates from criterion's own mean. Nothing to compare against yet -- this file exists so the NEXT change has something to regress against.",
+    "pr": "W2-09",
+    "machine": "Apple M2 Max, macOS (dev machine; a CI runner will differ and that difference is a legitimate re-baseline)",
+    "toolchain": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "criterion_metric": "mean point estimate, nanoseconds"
+  },
+  "benchmarks": {
+    "cpu_step_lda_immediate": {
+      "ns": 5.6
+    },
+    "cpu_step_loop_body": {
+      "ns": 8.0
+    },
+    "frame_tick_event_mask_none": {
+      "ns": 356373.2
+    },
+    "machine_frame_accuracy": {
+      "ns": 1105320.8,
+      "budget_ns": 2000000,
+      "note": "NFR-002: NES <= 2 ms/frame, whole machine, Accuracy config"
+    },
+    "scroll_write_event_mask_none": {
+      "ns": 2.1
+    }
+  }
+}

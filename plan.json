@@ -1051,11 +1051,21 @@
     "criterion benches compared against benches/baseline.json (NFR-002, NFR-003)",
     "threshold script fails the run on >10% regression per docs/TESTING.md sections 7 and 9",
     "baseline.json carries meta (rebaselined_by, justification, pr); threshold script refuses a baseline change without it (R-C2)",
-    "accuracy-vs-compatibility config diff run over the test-ROM suite per docs/design/EMULATION_CORES.md section 5 (FR-MODE-004)"
+    "AMENDED 2026-08-16 by Brad's ruling: the accuracy-vs-compatibility config diff (FR-MODE-004) moves to W3-07, because it is not implementable here -- CoreConfig::accuracy_mode is never plumbed into rf-nes and there is exactly one code path, so the diff would compare a path against itself and pass forever. What this ticket delivers instead is the nightly tier the diff will run in"
    ],
    "points": 3,
-   "status": "todo",
-   "stories": []
+   "status": "done",
+   "stories": [],
+   "notes": [
+    "CLOSED 2026-08-16. Delivered: `.github/workflows/nightly.yml` (Tier-B suites, the two release-only 5-minute replay suites NFR-001 gates on, criterion, and the threshold gate), `crates/rf-harness/src/bin/tier_b_suites.rs`, `benches/baseline.json` with real measured numbers, `scripts/bench-compare.mjs` and its own test suite.",
+    "THE TIER-B TIER FOUND SEVEN REAL ACCURACY FAILURES ON ITS FIRST RUN, which is exactly what it exists for and the single most valuable output of this ticket: ppu_open_bus ('write to any PPU register should set decay value'), cpu_exec_space both arms (PPU open bus, and the APU write-only ports + unallocated $4018-$40FF), cpu_dummy_writes_ppumem (675 errors, 42 opcodes, open-bus reads returning $FF), cpu_dummy_reads (never reaches its own init), oam_stress (CRC mismatch), ppu_read_buffer (times out at 600 frames). Two ROMs pass (cpu_dummy_writes_oam, oam_read). Brad's ruling: file a ticket and waive. W2-19 owns them, every failure is quoted verbatim in crates/rf-harness/waivers.toml, and W2-19's last acceptance criterion is that those waivers be DELETED rather than re-dated.",
+    "THE WAIVER MECHANISM IS THE EXISTING ONE, and its teeth were verified by running it, not by reading it: an EXPIRED waiver fails the run (checked with --today 2026-12-01: exit 1, seven 'WAIVER EXPIRED' lines), and a waiver covering a ROM that has STARTED PASSING also fails (checked by temporarily waiving oam_read: 'STALE WAIVER ... delete the waiver rather than leaving it to mask the next failure'). A stale waiver hides the next regression in that suite, so refusing it is the difference between a waiver file and an excuse file. Unfetched ROMs count as skipped, never as passes, and a run where nothing executed is a failure -- the three ways a nightly usually goes quietly green.",
+    "CRITERION 5 WAS NOT IMPLEMENTABLE AND IS SPLIT OUT (Brad's ruling). `CoreConfig::accuracy_mode` is never plumbed into rf-nes, and EMULATION_CORES section 5's compatibility switches (PPU catch-up stepping, OAM decay off, simplified open bus) do not exist -- the crate has exactly one path, so a diff would compare it against itself and pass forever. That is the vacuous-check shape this project has spent the session removing, so building it would have been worse than not. W3-07 owns the switch AND the diff together, because a diff without a second path is decoration and a second path without a diff is what section 5 forbids.",
+    "NFR-002 IS NOW MEASURED RATHER THAN ASSUMED, and it passes with headroom: 1.11 ms/frame against a 2 ms budget. That needed a bench that did not exist -- `event_emission`'s frame arm ticks the PPU ALONE (0.356 ms), a lower bound on the machine's cost, and putting NFR-002's budget on it would have been an overstatement dressed as a measurement. `crates/rf-nes/benches/machine_frame.rs` runs CPU + bus + PPU + APU for one frame with rendering enabled and an APU channel running, draining video and audio the way a host does, on a synthetic in-tree ROM (a fetched ROM could not run in the CI gate this feeds, NFR-006).",
+    "THE THRESHOLD SCRIPT HAS ITS OWN TESTS, and the nightly runs them BEFORE the gate. A regression gate that has silently stopped enforcing anything passes either way; scripts/bench-compare.test.mjs covers both sides of every rule -- the +10% boundary passing and +11% failing, an absolute NFR-002 budget failing even when the relative change is fine, a baseline benchmark that DID NOT RUN being reported rather than ignored, a new benchmark absent from the baseline NOT failing, placeholder meta refused, and R-C2's core rule: numbers that move without meta moving are refused, checked against the committed file via `git show HEAD:`, while numbers moving WITH new meta are accepted.",
+    "SCOPE-ADD beyond .github/**, scripts/** and benches/**: `crates/rf-harness/src/bin/tier_b_suites.rs` and `crates/rf-harness/waivers.toml` (a nightly tier with no runner is a workflow that runs nothing -- the generic $6000 runner existed but nothing drove Tier-B suites), `crates/rf-nes/benches/machine_frame.rs` + its Cargo.toml bench entry (see the NFR-002 note above), and `docs/TESTING.md`.",
+    "GATE 2026-08-16, all seven commands exit 0. workspace: 944 passing / 0 failed / 8 ignored (unchanged -- this ticket's work is a workflow, a binary, a bench and a script, none of which are cargo tests). Separately verified by running them: bench-compare.test.mjs 13/13, `node scripts/bench-compare.mjs` OK across 5 benchmarks, tier_b_suites exit 0 today and exit 1 with expiry driven past. THE WORKFLOW FILE ITSELF IS UNVERIFIABLE FROM THIS MACHINE -- GitHub Actions cannot be run locally -- so every step it contains was executed by hand first, and that is the honest limit of what this close claims."
+   ]
   },
   {
    "id": "W2-10",
@@ -1471,6 +1481,71 @@
     "AN ORDERING BUG WAS FOUND AND FIXED, not shipped as a known gap: reading overlay_sprites (written at evaluation time, dot 65) instead of a dot-257 latched copy tears mid-scanline, because evaluate_sprites runs partway through the very scanline whose pixels are being emitted -- x<64 would see the previous line's overlay and x>=64 the current one. The accuracy path never has this problem because its own latch already happens at dots 257-320, entirely before the scanline it renders. Fixed with overlay_active_sprites mirroring active_sprites' latch, and covered by a dot-driven regression test verified to fail pre-fix.",
     "CONTRACT CHANGE, minimal and backward-compatible: CoreSink gains overlay_scanline as a DEFAULT no-op method, so PpuPixel and video_scanline stay untouched and the sink remains accuracy-exact per Brad's 2026-08-03 ruling. Its doc warns that any WRAPPING sink must forward it explicitly or the overlay silently vanishes -- the conductor verified crates/retroforge/src/stepper.rs's CountingSink does forward it, which is exactly the trap that doc names.",
     "NOT VERIFIED, and not claimed: intentional-blink preservation. Without RF-Scroller's engineered scenes there is no automated check that a game's deliberate flicker (invincibility frames, low-health warnings) survives the bypass. That remains Brad's eyes on a real ROM until W3-05 + W2-10 land it."
+   ]
+  },
+  {
+   "id": "W2-19",
+   "title": "Tier-B accuracy gaps: PPU open-bus decay, CPU dummy cycles, OAM stress",
+   "phase": 2,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-harness/waivers.toml",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [
+    "W2-09"
+   ],
+   "acceptance": [
+    "ppu_open_bus passes: a write to any PPU register sets the decay value, and the decay itself is modelled (FR-CORE-022)",
+    "cpu_exec_space 2/2: the write-only APU ports and the unallocated $4018-$40FF space return open bus, and code executes correctly from I/O space (FR-CORE-020)",
+    "cpu_dummy_reads and cpu_dummy_writes both 2/2 (FR-CORE-020)",
+    "oam_stress passes (FR-CORE-023)",
+    "ppu_read_buffer passes, or its frame budget is proven insufficient rather than assumed (it currently times out at 600 frames without ever leaving $80)",
+    "every waiver W2-09 added for these suites is DELETED rather than re-dated, and the Tier-B nightly is green with no waivers naming this ticket"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ],
+   "notes": [
+    "FILED 2026-08-16 BY W2-09, from the first run of the Tier-B nightly tier -- which is exactly what that tier is for. These are not speculative gaps: each is a real ROM failing today, with its own message quoted in W2-09's notes and in crates/rf-harness/waivers.toml.",
+    "PPU OPEN-BUS DECAY IS THE COMMON ROOT of at least three of these. ppu_open_bus says outright 'Write to any PPU register should set decay value'; cpu_exec_space's PPU arm fails with 'PPU open bus implementation is missing or incomplete: A write to $2003, followed by a read from $2001 should return the same value as was written'. This crate models an open-bus LATCH (`NesBus::open_bus`) but not the PPU's own decaying bus, and not writes to write-only PPU registers refreshing it. Start there: it is likely to move cpu_exec_space's PPU arm and ppu_open_bus together.",
+    "cpu_exec_space's APU arm is a separate gap in the same family: it enumerates $4000-$4016 and the unallocated $4018-$40FF and expects open bus from every one. W2-01a's APU made $4015 a real register; the write-only ports and the unallocated space still need to read as open bus rather than as whatever `read_untimed` currently returns.",
+    "ppu_read_buffer TIMES OUT rather than failing -- 600 frames elapsed with $6000 never leaving $80 (running). Do NOT simply raise the budget until it passes: establish first whether the ROM is genuinely slow or whether this engine has stalled it, because a budget raised to hide a hang is the exact shape of a gate that stops gating.",
+    "MECHANISM ALREADY IN PLACE: W2-09's `tier_b_suites` binary consults crates/rf-harness/waivers.toml, so today's failures are waived-with-justification against THIS ticket and the nightly is green. That means a NEW Tier-B failure is visible immediately -- and it also means this ticket's last acceptance criterion (delete the waivers, do not re-date them) is what proves the work actually landed."
+   ]
+  },
+  {
+   "id": "W3-07",
+   "title": "Compatibility config path + accuracy-vs-compatibility diff (FR-MODE-004)",
+   "phase": 3,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-harness/**",
+    "crates/rf-core-api/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [
+    "W2-09"
+   ],
+   "acceptance": [
+    "CoreConfig::accuracy_mode is plumbed into rf-nes and selects a real second path -- the PPU catch-up scheduler EMULATION_CORES section 5 names, which crate::ppu's 'Scheduling: lock-step, not catch-up' section already owes to a later ticket",
+    "the accuracy-vs-compatibility diff runs the whole executed test-ROM suite under both configs and reports any divergence (FR-MODE-004, EMULATION_CORES section 5's 'CI diffs both')",
+    "the diff is proven non-vacuous: a deliberately wrong compatibility path must make it fail, demonstrated the way W2-05's apu_mixer mutation was",
+    "nightly runs the diff (docs/TESTING.md section 4/9)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ],
+   "notes": [
+    "SPLIT OUT OF W2-09 2026-08-16 (Brad's ruling). W2-09's criterion 5 asked for an accuracy-vs-compatibility diff over the test-ROM suite. It is NOT IMPLEMENTABLE as of that ticket, and the reason is structural rather than a matter of effort: `CoreConfig::accuracy_mode` is never plumbed into rf-nes at all, and rf-nes has exactly ONE code path -- EMULATION_CORES section 5's compatibility switches (PPU catch-up stepping, OAM decay off, simplified open bus) do not exist. A diff today would compare a path against itself and pass forever, which is precisely the class of vacuous check this project keeps removing.",
+    "SO THE SWITCH AND THE DIFF ARE ONE TICKET. A diff has no meaning without a second path, and a second path without a diff is exactly what EMULATION_CORES section 5 forbids ('CI diffs both'). Building them together is also what makes the third acceptance criterion possible: a deliberately wrong compatibility path must break the diff, or the diff is decoration.",
+    "PRE-FLIGHT already paid: crate::ppu's module doc, 'Scheduling: lock-step, not catch-up' section, records that W1-04a built lock-step only and names the catch-up path as an explicit debt, including the CI-diff requirement. Read that before starting -- it states what the second path must be equivalent to and why."
    ]
   },
   {
