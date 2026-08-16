@@ -854,17 +854,44 @@
     "battery SRAM persisted to disk (FR-CORE-012)",
     "golden .rfstate fixture added",
     "Enhanced-mode state loads in Accuracy config and continues hash-identical (FR-STATE-007; enhancement chunks skipped with warning)",
-    "save-state manager modal: 10 slots + auto-slots, screenshot thumbnails, mods-warning flag per docs/design/FRONTEND_UI.md section 3.2",
     "wrong-ROM state refused with diagnostic (FR-STATE-003)"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S3",
     "E2-S1"
    ],
    "notes": [
+    "SPLIT 2026-08-16 by Brad's ruling: the save-state manager modal (10 slots + auto-slots, screenshot thumbnails, mods-warning flag, FRONTEND_UI.md section 3.2) moved OUT of this ticket to W4-11 (a wave-4 id, not W2-04a: it depends on W4-09, and plan validator rule P7 forbids a wave-2 ticket depending forward -- the same rephase W3-05b took to become W4-06c). Reason: it is egui work in crates/retroforge that needs a framebuffer-capture path for thumbnails and has no mechanical verification until W4-09 builds the egui inspection-protocol harness, so bundling it would have made one of six criteria close on assertion rather than on a test. What remains here is exactly the mechanically verifiable half -- roundtrip, SRAM, fixture, wrong-ROM refusal, mode-invariance -- plus the determinism-hash widening this ticket's HANDOFF note already owns.",
     "HANDOFF 2026-08-05 (Phase 1 wave gate, conductor + independent challenger): THIS TICKET OWNS HALF OF A PHASE-1 EXIT CRITERION. ROADMAP's Phase 1 bullet 4 is 'Determinism: 2x 10k-frame runs, identical per-frame state hashes'. W1-07 built the double-run mechanism, but its hash is explicitly NOT a full-machine hash — rf-nes implements no EmulatorCore::save_state/state_view, so PPU internals (VRAM, palette RAM, loopy v/t/x/w) and APU are structurally unreachable and excluded by design. The challenger's sharpest point: a hash that cannot see PPU/APU divergence cannot satisfy 'identical STATE hashes' at ANY frame count, so raising W1-07's frame count alone does NOT close the criterion — full-state coverage only arrives with this ticket's save_state work. Also: TESTING.md section 8's Phase-1 row additionally demands a 'roundtrip' suite green, which is FR-STATE-002 and owned here, so under that reading Phase 1 exit is unsatisfiable by construction until this Phase-2 ticket lands. WHEN THIS TICKET ADDS save_state: extend crates/retroforge/tests/determinism.rs's state_hash to cover the newly reachable regions, and delete the 'not a full-machine hash' caveat from EmuStepper::state_hash's doc and from crates/retroforge/src/stepper.rs's module doc."
+   ]
+  },
+  {
+   "id": "W4-11",
+   "title": "Save-state manager modal (10 slots + auto-slots, thumbnails)",
+   "phase": 4,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W2-04",
+    "W4-09"
+   ],
+   "acceptance": [
+    "save-state manager modal per docs/design/FRONTEND_UI.md section 3.2: 10 slots + auto-slots, each with screenshot, timestamp, mode-at-save and a 'contains mods' warning flag read from the PROF chunk",
+    "load warns on version-migrated states (FRONTEND_UI.md section 3.2's last clause)",
+    "asserted through W4-09's egui inspection protocol, not by manual checklist: open the modal, assert slot count and that a saved slot's thumbnail and mode badge appear"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E2-S1"
+   ],
+   "notes": [
+    "SPLIT OUT OF W2-04 2026-08-16 (Brad's ruling). W2-04 owns everything mechanically verifiable about save states; this ticket owns the UI on top of it. It depends on W4-09 DELIBERATELY -- W4-09 builds the egui inspection-protocol harness, and without it this ticket's only possible acceptance is a manual checklist in a commit body, which is exactly what the split exists to avoid.",
+    "PRE-FLIGHT: thumbnails need a framebuffer capture path. The core emits indexed pixels (ARCHITECTURE, cores never emit RGB), so a thumbnail is a palette-applied downscale -- check whether rf-renderer already exposes a readback before building one, and do NOT reach into core state for it."
    ]
   },
   {
@@ -882,7 +909,8 @@
    "acceptance": [
     "rtrb SPSC ring, rubato resampler with \u00b10.5% dynamic rate control against buffer fill (FR-FE-006)",
     "no underruns over 5-min soak on dev machine",
-    "audio-clock frame pacing per ARCHITECTURE \u00a78"
+    "audio-clock frame pacing per ARCHITECTURE \u00a78",
+    "apu_mixer RMS envelope check wired against W2-01b's mixer LUTs, using the ROMs' own cancellation-to-silence design as the oracle -- no external reference recording exists or is needed (added 2026-08-16 by Brad's ruling, from W2-01b's split)"
    ],
    "points": 8,
    "status": "todo",
