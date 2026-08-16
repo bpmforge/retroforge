@@ -47,6 +47,16 @@ const CANVAS_SNAPSHOT_REFRESH_INTERVAL: u32 = 30;
 
 /// Every host key the default NES keymap binds — the fixed poll list
 /// `poll_input` checks each repaint (module doc).
+/// Which app-wide settings tab is showing (ticket W2-08; FRONTEND_UI §2's
+/// Settings tree). Input has its own window (W2-06's Controls) and Plugins
+/// belongs to W4-04, so this build's tabs are the three W2-08 owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    Video,
+    Audio,
+    Paths,
+}
+
 /// Open the gamepad backend, or carry on without one (ticket W2-06).
 /// A missing or unopenable gamepad subsystem is not an error: the keyboard
 /// still works, and refusing to start over it would be absurd.
@@ -119,6 +129,14 @@ pub struct RetroForgeApp {
     show_controls: bool,
     /// Whether the Library window is open (ticket W2-07).
     show_library: bool,
+    /// Whether the app-wide Settings window is open (ticket W2-08).
+    show_settings: bool,
+    /// Which Settings tab is showing.
+    settings_tab: SettingsTab,
+    /// App-wide settings, loaded at startup and written back on change.
+    settings: crate::settings::AppSettings,
+    /// Whether the Esc overlay menu is showing (FRONTEND_UI §2).
+    show_overlay_menu: bool,
     /// Configured library roots, as the user chose them (resolved at scan
     /// time, never stored canonicalized — see `crate::library_roots`).
     library_roots: Vec<std::path::PathBuf>,
@@ -277,6 +295,18 @@ impl RetroForgeApp {
             ),
         };
 
+        // Ticket W2-08: app-wide settings load at startup. A parse
+        // problem is reported into the status line rather than swallowed;
+        // the defaults are in force and the user's file is untouched.
+        let (app_settings, settings_problem) = match &config_root {
+            Some(root) => crate::settings::load(root),
+            None => (crate::settings::AppSettings::default(), None),
+        };
+        let bindings_status = match settings_problem {
+            Some(problem) => format!("{bindings_status}  {problem}"),
+            None => bindings_status,
+        };
+
         // Ticket W2-07: the configured folders load at startup (cheap: one
         // small file), but the SCAN waits until the library window opens —
         // a cold start must not block on a folder walk over a network
@@ -304,6 +334,10 @@ impl RetroForgeApp {
             pad_backend: pad_backend_or_none(),
             show_controls: false,
             show_library: false,
+            show_settings: false,
+            settings_tab: SettingsTab::Video,
+            settings: app_settings,
+            show_overlay_menu: false,
             library_roots: library_roots.clone(),
             library: None,
             current_game_hash: None,
@@ -783,6 +817,9 @@ impl RetroForgeApp {
                 // on a folder walk.
                 ui.checkbox(&mut self.show_library, "Library\u{2026}");
                 ui.separator();
+                // Ticket W2-08: app-wide settings (FRONTEND_UI §2).
+                ui.checkbox(&mut self.show_settings, "Settings\u{2026}");
+                ui.separator();
                 // Ticket W4-06a criterion 3: layout is saved the moment the
                 // window closes (not only on process exit via
                 // `eframe::App::save` below), so a session that opens,
@@ -878,6 +915,252 @@ impl RetroForgeApp {
     /// egui's panel background, which is exactly what makes "isolated"
     /// visible: a game with few on-screen sprites renders as a
     /// mostly-empty pane, not a black one.
+    /// The app-wide Settings window (ticket W2-08; FRONTEND_UI §2).
+    ///
+    /// Every control writes through immediately — no Apply button anywhere
+    /// in this app, for the reason W2-06's Controls window already states:
+    /// an unsaved change a crash discards is the kind of small betrayal
+    /// that makes people stop trusting a settings screen.
+    ///
+    /// Which of these take effect live and which need a restart is stated
+    /// ON the control rather than left to be discovered: vsync and the
+    /// audio device are owned by objects created at startup
+    /// (`eframe`'s window, `rf_audio::AudioDevice`), and pretending
+    /// otherwise would be worse than saying so.
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = self.show_settings;
+        let mut changed = false;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .collapsible(true)
+            .resizable(true)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    for (tab, label) in [
+                        (SettingsTab::Video, "Video"),
+                        (SettingsTab::Audio, "Audio"),
+                        (SettingsTab::Paths, "Paths"),
+                    ] {
+                        ui.selectable_value(&mut self.settings_tab, tab, label);
+                    }
+                });
+                ui.separator();
+
+                match self.settings_tab {
+                    SettingsTab::Video => {
+                        ui.label("Scaling");
+                        for mode in crate::settings::ScaleMode::ALL {
+                            if ui
+                                .radio_value(
+                                    &mut self.settings.video.scale_mode,
+                                    mode,
+                                    mode.label(),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                        ui.separator();
+
+                        ui.label("Shader");
+                        // W3-02a owns the shader set; until it lands the
+                        // only honest options are "none" and whatever a
+                        // config already names, so this is a text field
+                        // rather than a dropdown pretending to a catalogue.
+                        let mut shader = self.settings.video.shader.clone().unwrap_or_default();
+                        if ui.text_edit_singleline(&mut shader).changed() {
+                            self.settings.video.shader =
+                                (!shader.trim().is_empty()).then(|| shader.trim().to_string());
+                            changed = true;
+                        }
+                        ui.small(
+                            "Shader names arrive with W3-02a; empty means the plain pipeline.",
+                        );
+                        ui.separator();
+
+                        if ui
+                            .checkbox(&mut self.settings.video.vsync, "V-sync")
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.small(
+                            "Takes effect on restart (the window surface is created at startup).",
+                        );
+                    }
+                    SettingsTab::Audio => {
+                        let mut device = self.settings.audio.device.clone().unwrap_or_default();
+                        ui.label("Output device (empty = system default)");
+                        if ui.text_edit_singleline(&mut device).changed() {
+                            self.settings.audio.device =
+                                (!device.trim().is_empty()).then(|| device.trim().to_string());
+                            changed = true;
+                        }
+                        ui.small("Takes effect on restart.");
+                        ui.separator();
+
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut self.settings.audio.latency_ms, 10..=200)
+                                    .text("Buffer latency (ms)"),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.small(
+                            "Lower is more responsive, higher survives a stalled frame. Takes \
+                             effect on restart.",
+                        );
+                        ui.separator();
+
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut self.settings.audio.volume, 0.0..=1.0)
+                                    .text("Volume"),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                    SettingsTab::Paths => {
+                        ui.label("Library folders");
+                        let mut remove: Option<usize> = None;
+                        for (index, folder) in self
+                            .settings
+                            .paths
+                            .library_folders
+                            .clone()
+                            .iter()
+                            .enumerate()
+                        {
+                            ui.horizontal(|ui| {
+                                ui.label(folder.display().to_string());
+                                if ui.small_button("Remove").clicked() {
+                                    remove = Some(index);
+                                }
+                            });
+                        }
+                        if let Some(index) = remove {
+                            self.settings.paths.library_folders.remove(index);
+                            changed = true;
+                        }
+                        if ui.button("Add folder\u{2026}").clicked() {
+                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                if !self.settings.paths.library_folders.contains(&folder) {
+                                    self.settings.paths.library_folders.push(folder);
+                                    changed = true;
+                                }
+                            }
+                        }
+                        ui.separator();
+
+                        ui.label("Cache");
+                        let mut cache = self
+                            .settings
+                            .paths
+                            .cache_dir
+                            .clone()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default();
+                        if ui.text_edit_singleline(&mut cache).changed() {
+                            self.settings.paths.cache_dir = (!cache.trim().is_empty())
+                                .then(|| std::path::PathBuf::from(cache.trim()));
+                            changed = true;
+                        }
+                        ui.small("Empty = the default location under the config directory.");
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut self.settings.paths.cache_cap_mb,
+                                    128..=32_768,
+                                )
+                                .text("Cache cap (MB)"),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                }
+
+                ui.separator();
+                ui.small(&self.bindings_status);
+            });
+        self.show_settings = open;
+        if changed {
+            self.save_settings();
+            // The library screen reads its roots from here, so a folder
+            // added in Paths must be visible in Library without a restart.
+            self.library_roots
+                .clone_from(&self.settings.paths.library_folders);
+            self.library = None;
+        }
+    }
+
+    /// Persist app-wide settings, reporting failure rather than swallowing it.
+    fn save_settings(&mut self) {
+        let Some(root) = self.config_root.clone() else {
+            self.status = "No config directory; settings apply to this session only.".to_string();
+            return;
+        };
+        if let Err(e) = crate::settings::save(&root, &self.settings) {
+            self.status = format!("Could not save settings: {e}");
+        }
+    }
+
+    /// The Esc overlay menu (ticket W2-08; FRONTEND_UI §2: "resume · states
+    /// · settings · switch mode · quit").
+    ///
+    /// Shown as a modal-ish window rather than a full-screen takeover
+    /// because the point is to pause *access*, not to hide the game: a
+    /// player pressing Esc mid-level wants to see where they were.
+    fn overlay_menu(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.show_overlay_menu = !self.show_overlay_menu;
+        }
+        if !self.show_overlay_menu {
+            return;
+        }
+        let mut open = self.show_overlay_menu;
+        egui::Window::new("Menu")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                if ui.button("Resume").clicked() {
+                    self.show_overlay_menu = false;
+                    if self.core.is_some() {
+                        self.send_command(CoreCommand::Resume);
+                        self.running = true;
+                    }
+                }
+                // Save states are W4-11's modal; the entry is present and
+                // says what it is waiting for rather than being silently
+                // absent from a menu FRONTEND_UI §2 enumerates.
+                ui.add_enabled(false, egui::Button::new("States\u{2026} (W4-11)"));
+                if ui.button("Settings\u{2026}").clicked() {
+                    self.show_settings = true;
+                }
+                if ui.button("Controls\u{2026}").clicked() {
+                    self.show_controls = true;
+                }
+                ui.add_enabled(false, egui::Button::new("Switch mode (W4-05)"));
+                ui.separator();
+                if ui.button("Quit").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+        self.show_overlay_menu = open;
+    }
+
     /// The library window (ticket W2-07; FRONTEND_UI §3.1).
     ///
     /// The three first-run states are decided by
@@ -1310,6 +1593,8 @@ impl eframe::App for RetroForgeApp {
         self.layers_debug_window(&ctx);
         self.controls_window(&ctx);
         self.library_window(&ctx);
+        self.settings_window(&ctx);
+        self.overlay_menu(&ctx);
         self.debug_panels_window(&ctx);
     }
 

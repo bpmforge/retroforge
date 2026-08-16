@@ -1,75 +1,84 @@
-//! The configured library folders, persisted (ticket W2-07).
+//! The configured library folders (tickets W2-07, absorbed by W2-08).
 //!
-//! ## Why this is its own tiny store
+//! ## This is now a view onto `settings.toml`
 //!
-//! W2-08 owns app-wide settings screens and will own where a list like this
-//! finally lives. The library needs *somewhere* to keep its roots now, so
-//! this is deliberately the smallest thing that works: one file, one path
-//! per line, in the same config directory as the bindings, with the same
-//! "never leave the user with nothing" load policy. It is a handful of
-//! lines for W2-08 to absorb, and absorbing it is easier than unpicking a
-//! settings framework invented early.
+//! W2-07 needed somewhere to keep its roots before an app-wide settings
+//! system existed and said in its own notes that W2-08 would absorb it.
+//! This is that absorption: the roots live in `[paths] library_folders`
+//! (`crate::settings`), and this module is the thin accessor the library
+//! screen already calls, kept so the call sites did not have to move at the
+//! same time as the storage.
 //!
-//! ## Roots are stored as written, resolved at scan time
+//! ## The legacy file is migrated, not abandoned
 //!
-//! A root is saved exactly as the user chose it — not canonicalized —
-//! because the canonical form of a path on a removable drive is not stable
-//! across mounts, and a config that silently rewrote `~/roms` into
-//! `/Volumes/…` would confuse anyone who read it. Containment
-//! (NFR-010/D-006) resolves the root at scan time instead, which is where
-//! it has to happen anyway: a symlink can be introduced after the folder
-//! was configured.
+//! W2-07's `library.rflib` is read once, folded into the settings file, and
+//! then **deleted** — so a user who configured folders under the previous
+//! build does not silently lose them and does not end up with two files
+//! disagreeing about what their library is. Migration is idempotent: once
+//! the legacy file is gone, [`load`] is a plain settings read.
 
 use std::path::{Path, PathBuf};
 
-/// File name inside the config directory.
-pub const FILE_NAME: &str = "library.rflib";
-const MAGIC: &str = "RFLIB 1";
+/// The pre-W2-08 file name, still read once so its contents can be
+/// migrated.
+pub const LEGACY_FILE_NAME: &str = "library.rflib";
+const LEGACY_MAGIC: &str = "RFLIB 1";
 
-/// Where the roots list lives under `root`.
+/// Where the pre-W2-08 roots file lived.
 #[must_use]
-pub fn roots_path(config_root: &Path) -> PathBuf {
+pub fn legacy_roots_path(config_root: &Path) -> PathBuf {
     config_root
         .join(crate::bindings_store::APP_DIR)
-        .join(FILE_NAME)
+        .join(LEGACY_FILE_NAME)
 }
 
-/// Load the configured roots. An absent or unreadable file means "none
-/// configured", which the library screen turns into its first-run call to
-/// action rather than an error.
+/// The configured library folders, migrating W2-07's file if it is still
+/// there.
 #[must_use]
 pub fn load(config_root: &Path) -> Vec<PathBuf> {
-    let Ok(text) = std::fs::read_to_string(roots_path(config_root)) else {
-        return Vec::new();
-    };
-    let mut lines = text.lines();
-    if lines.next().map(str::trim) != Some(MAGIC) {
-        return Vec::new();
+    let (mut settings, _) = crate::settings::load(config_root);
+
+    if let Some(legacy) = read_legacy(config_root) {
+        // Union rather than replace: a user who configured folders in both
+        // places keeps both, and the order stays theirs.
+        for root in legacy {
+            if !settings.paths.library_folders.contains(&root) {
+                settings.paths.library_folders.push(root);
+            }
+        }
+        if crate::settings::save(config_root, &settings).is_ok() {
+            // Only after the new home is definitely written.
+            let _ = std::fs::remove_file(legacy_roots_path(config_root));
+        }
     }
-    lines
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(PathBuf::from)
-        .collect()
+
+    settings.paths.library_folders
 }
 
-/// Save the configured roots.
+/// Replace the configured library folders.
 ///
 /// # Errors
-/// Returns the I/O error message.
+/// Returns the error message from writing `settings.toml`.
 pub fn save(config_root: &Path, roots: &[PathBuf]) -> Result<PathBuf, String> {
-    let path = roots_path(config_root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let (mut settings, _) = crate::settings::load(config_root);
+    settings.paths.library_folders = roots.to_vec();
+    crate::settings::save(config_root, &settings)
+}
+
+/// Read W2-07's file if it exists and is ours.
+fn read_legacy(config_root: &Path) -> Option<Vec<PathBuf>> {
+    let text = std::fs::read_to_string(legacy_roots_path(config_root)).ok()?;
+    let mut lines = text.lines();
+    if lines.next().map(str::trim) != Some(LEGACY_MAGIC) {
+        return None;
     }
-    let mut text = String::from(MAGIC);
-    text.push('\n');
-    for root in roots {
-        text.push_str(&root.to_string_lossy());
-        text.push('\n');
-    }
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
-    Ok(path)
+    Some(
+        lines
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(PathBuf::from)
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -80,57 +89,76 @@ mod tests {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let unique = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "rf-w2-07-roots-{label}-{}-{unique}",
+            "rf-w2-08-roots-{label}-{}-{unique}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
 
-    #[test]
-    fn roots_round_trip_in_the_order_they_were_configured() {
-        let config = temp_root("roundtrip");
-        assert!(load(&config).is_empty(), "nothing configured yet");
+    fn write_legacy(config_root: &Path, body: &str) {
+        let path = legacy_roots_path(config_root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
 
-        let roots = vec![
-            PathBuf::from("/home/someone/roms"),
-            PathBuf::from("/mnt/nas/nes"),
-        ];
+    #[test]
+    fn roots_round_trip_through_the_settings_file() {
+        let config = temp_root("roundtrip");
+        assert!(load(&config).is_empty());
+
+        let roots = vec![PathBuf::from("/roms/nes"), PathBuf::from("/mnt/nas")];
         save(&config, &roots).expect("save");
-        assert_eq!(load(&config), roots, "order is the user's, so it is kept");
+        assert_eq!(load(&config), roots);
+
+        // ...and they really are in settings.toml, not somewhere private.
+        let (settings, _) = crate::settings::load(&config);
+        assert_eq!(settings.paths.library_folders, roots);
+
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    /// The migration, and the property that matters about it: the user's
+    /// folders survive, and the old file goes away so two files cannot
+    /// disagree about what the library is.
+    #[test]
+    fn the_legacy_file_is_migrated_then_removed() {
+        let config = temp_root("migrate");
+        write_legacy(&config, "RFLIB 1\n/roms/old\n");
+
+        let roots = load(&config);
+        assert_eq!(roots, vec![PathBuf::from("/roms/old")]);
+        assert!(
+            !legacy_roots_path(&config).exists(),
+            "the legacy file must be removed once its contents are safely in settings.toml"
+        );
+        let (settings, _) = crate::settings::load(&config);
+        assert_eq!(settings.paths.library_folders, roots);
+
+        // Idempotent: a second load is a plain settings read.
+        assert_eq!(load(&config), roots);
 
         let _ = std::fs::remove_dir_all(&config);
     }
 
     #[test]
-    fn a_file_that_is_not_ours_reads_as_no_roots_rather_than_as_paths() {
-        let config = temp_root("foreign");
-        let path = roots_path(&config);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "/etc/passwd\n/tmp\n").unwrap();
-        assert!(
-            load(&config).is_empty(),
-            "without the magic line these are not our paths and must not be scanned"
+    fn migration_unions_with_folders_already_in_settings_rather_than_replacing_them() {
+        let config = temp_root("union");
+        save(&config, &[PathBuf::from("/roms/new")]).expect("save");
+        write_legacy(&config, "RFLIB 1\n/roms/old\n/roms/new\n");
+
+        assert_eq!(
+            load(&config),
+            vec![PathBuf::from("/roms/new"), PathBuf::from("/roms/old")],
+            "both survive, in a stable order, with no duplicate"
         );
         let _ = std::fs::remove_dir_all(&config);
     }
 
     #[test]
-    fn blank_lines_and_comments_are_ignored() {
-        let config = temp_root("comments");
-        let path = roots_path(&config);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "RFLIB 1\n\n# my roms\n/roms\n").unwrap();
-        assert_eq!(load(&config), vec![PathBuf::from("/roms")]);
-        let _ = std::fs::remove_dir_all(&config);
-    }
-
-    #[test]
-    fn saving_an_empty_list_clears_the_roots() {
-        let config = temp_root("clear");
-        save(&config, &[PathBuf::from("/roms")]).expect("save");
-        assert_eq!(load(&config).len(), 1);
-        save(&config, &[]).expect("save empty");
+    fn a_legacy_file_that_is_not_ours_is_ignored_rather_than_read_as_paths() {
+        let config = temp_root("foreign");
+        write_legacy(&config, "/etc/passwd\n/tmp\n");
         assert!(load(&config).is_empty());
         let _ = std::fs::remove_dir_all(&config);
     }

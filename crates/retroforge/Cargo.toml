@@ -72,6 +72,8 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 # `egui_dock-0.20.1` source, not training data) to capture/restore it —
 # see that module's doc for the full reasoning.
 egui_dock = "0.20.1"
+toml = "1"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 # rf-profiles: dev-only, for the ticket W4-06b criterion-2 integration test
