@@ -1231,7 +1231,7 @@
     "a suite whose ROMs are absent still SKIPS cleanly (cargo test --workspace passes with roms/ absent), and the skip is distinguishable from a pass in the evidence file even though it is not in default cargo test output"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ],
