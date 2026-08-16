@@ -13,9 +13,6 @@ use crate::state::{StateIn, StateOut};
 /// loader allocate wildly: 8 KiB is the standard CHR-RAM size and 256 KiB is
 /// far above anything a mapper this crate emulates exposes.
 const MAX_CHR_BYTES: usize = 256 * 1024;
-/// Overlay sprite lists are per-scanline and bounded by OAM (64 sprites);
-/// the cap is deliberately loose but finite.
-const MAX_OVERLAY_SPRITES: usize = 64;
 
 impl Ppu {
     /// The `PPU_` chunk: every field that is neither one of the four
@@ -57,9 +54,26 @@ impl Ppu {
             active_sprites,
             active_sprite_count,
             sprite_pattern_lo_latch,
-            sprite_overlay_enabled,
-            overlay_sprites,
-            overlay_active_sprites,
+            // ENHANCEMENT STATE, NOT CORE STATE -- excluded deliberately,
+            // and the exclusion is load-bearing. The overlay channel
+            // (ticket W3-05a: `sprite_overlay_enabled`, `overlay_sprites`,
+            // `overlay_active_sprites`, `overlay_line_buffer`) exists only
+            // when Enhanced mode asks for it, and `sprites.rs`'s own doc
+            // establishes it is structurally incapable of perturbing
+            // accuracy state. Serializing it here would put mode-dependent
+            // bytes into a CORE chunk and break ARCHITECTURE §3's
+            // determinism invariant outright -- "Accuracy vs Enhanced must
+            // produce identical core state hashes for identical inputs" --
+            // which is exactly what happened when this ticket first widened
+            // `EmuStepper::state_hash` to cover the whole PPU:
+            // `mode_invariant_corpus` went red on
+            // `w3-05a-sprite-limit-bypass-overlay` with identical VIDEO
+            // hashes and differing STATE hashes. Enhancement state belongs
+            // in the `ENHC` chunk (`rf-enhance`'s, per SAVE_STATES.md §2),
+            // which an Accuracy-mode session skips with a warning.
+            sprite_overlay_enabled: _,
+            overlay_sprites: _,
+            overlay_active_sprites: _,
             // Per-scanline scratch, not state: every element of both line
             // buffers is written before the row that reads them is pushed
             // (`sprites.rs`'s `output_pixel` writes `line_buffer[x]` for
@@ -124,9 +138,6 @@ impl Ppu {
         }
         out.u8(*active_sprite_count)?;
         out.u8(*sprite_pattern_lo_latch)?;
-        out.bool(*sprite_overlay_enabled)?;
-        save_sprite_list(out, overlay_sprites)?;
-        save_sprite_list(out, overlay_active_sprites)?;
         out.u64(*dot_clock)?;
         out.opt_u64(*a12_low_since)?;
         out.u32(*pending_a12_edges)
@@ -170,9 +181,6 @@ impl Ppu {
         }
         self.active_sprite_count = inp.u8()?;
         self.sprite_pattern_lo_latch = inp.u8()?;
-        self.sprite_overlay_enabled = inp.bool()?;
-        self.overlay_sprites = load_sprite_list(inp)?;
-        self.overlay_active_sprites = load_sprite_list(inp)?;
         self.dot_clock = inp.u64()?;
         self.a12_low_since = inp.opt_u64()?;
         self.pending_a12_edges = inp.u32()?;
@@ -312,32 +320,4 @@ fn load_sprite_unit(inp: &mut StateIn<'_>) -> Result<SpriteUnit, StateError> {
         x: inp.u8()?,
         oam_index: inp.u8()?,
     })
-}
-
-fn save_sprite_list(out: &mut StateOut<'_>, list: &[SpriteUnit]) -> Result<(), StateError> {
-    let len = u8::try_from(list.len()).map_err(|_| {
-        StateError::Corrupt(format!(
-            "overlay sprite list of {} exceeds the 64-sprite OAM bound",
-            list.len()
-        ))
-    })?;
-    out.u8(len)?;
-    for sprite in list {
-        save_sprite_unit(out, sprite)?;
-    }
-    Ok(())
-}
-
-fn load_sprite_list(inp: &mut StateIn<'_>) -> Result<Vec<SpriteUnit>, StateError> {
-    let len = inp.u8()? as usize;
-    if len > MAX_OVERLAY_SPRITES {
-        return Err(StateError::Corrupt(format!(
-            "overlay sprite list length {len} exceeds the {MAX_OVERLAY_SPRITES}-sprite bound"
-        )));
-    }
-    let mut list = Vec::with_capacity(len);
-    for _ in 0..len {
-        list.push(load_sprite_unit(inp)?);
-    }
-    Ok(list)
 }

@@ -61,20 +61,23 @@
 //!
 //! ## The reachable-state hash (ticket W1-07)
 //!
-//! [`EmuStepper::state_hash`] is **not** a full-machine hash and must never
-//! be described as one: `rf-nes` does not implement
-//! `rf_core_api::EmulatorCore` (no `save_state`/`state_view`) — NES state
-//! serialization is ticket W2-04's job. What's reachable from this crate
-//! today, and exactly what the hash covers (enumerated, not a 64 KiB
-//! `peek` sweep, which would drag in constant PRG ROM for nothing):
-//! WRAM `$0000-$07FF` (the real 2 KiB, not its `$0800`-stepped mirrors),
-//! OAM (`NesBus::oam`), PRG-RAM (`NesBus::prg_ram`), CPU `a, x, y, s, pc,
-//! p, jammed`, and `NesBus::master_cycle`/`frame_count`. PPU-internal state
-//! (VRAM, palette RAM, loopy `v`/`t`/`x`/`w`) and APU state are **not**
-//! reachable and are not covered — a PPU-internal divergence that happens
-//! to render identically would not be caught by this hash. The rendered
-//! framebuffer is a separate, separately-named digest the test suite
-//! computes on its own (never folded in here): it is *output*, not state.
+//! [`EmuStepper::state_hash`] IS a full-machine hash as of ticket W2-04:
+//! it digests every `rf_nes::StateRegion`, so CPU, bus, PPU (VRAM, palette,
+//! OAM, loopy registers, sprite units), APU (every channel's phase and the
+//! frame counter), WRAM, mapper registers and battery PRG-RAM are all
+//! covered. Before W2-04 it could not be — `rf-nes` had no state
+//! serialization, so PPU and APU internals were structurally unreachable
+//! and the hash was documented here as explicitly partial. That caveat is
+//! deleted rather than softened, because it is no longer true; what remains
+//! excluded is the rendered framebuffer, which is *output*, not state (the
+//! test suite digests it separately and never folds it in here), and the
+//! PPU's undrained output queues, which the core refuses to serialize at
+//! all outside a frame boundary.
+//!
+//! Anything recording this hash in a `.rfreplay` writes
+//! `hash_kind=full-v1` ([`crate::save_state::HASH_KIND`]); the old
+//! `reachable-v1` names the narrower hash and must not be reused for this
+//! one (SAVE_STATES.md §3).
 use rf_core_api::{CoreSink, InputFrame};
 use rf_nes::{Cpu, NesBus, NesLoadError};
 
@@ -161,6 +164,12 @@ pub struct EmuStepper {
     /// bound actually terminates a loop rather than merely existing in the
     /// source.
     cycle_budget: u64,
+    /// Normalized SHA-256 of the loaded ROM (ticket W2-04), computed once
+    /// at load time via `rf_cart::identity_nes` — the same normalized
+    /// convention `tests/rom-manifest.toml` and `.rfreplay` use. Save
+    /// states carry it in their header so a state can be refused against
+    /// the wrong game (FR-STATE-003).
+    rom_sha256: [u8; 32],
     /// Last visible scanline drawn, for the transport position readout
     /// (ticket W2-15). `None` until the first visible line completes.
     /// See [`Self::last_scanline`] for the deliberate limitation.
@@ -192,13 +201,60 @@ impl EmuStepper {
         // unmodified simulation; this is metadata plumbing, not gameplay).
         bus.set_event_mask(CAMERA_BASELINE_EVENT_MASK);
         let cpu = Cpu::power_on(&mut bus);
+        // Ticket W2-04: the NORMALIZED hash (header stripped), matching
+        // `tests/rom-manifest.toml` and `.rfreplay`'s `rom_sha256`, so the
+        // same cartridge dumped with a different header still matches its
+        // own save states.
+        let identity = rf_cart::hash::identity_nes(raw);
+        let mut rom_sha256 = [0u8; 32];
+        hex_to_bytes(&identity.normalized.sha256, &mut rom_sha256);
         Ok(EmuStepper {
             bus,
             cpu,
             state: RunState::Paused,
             cycle_budget: CYCLE_BUDGET,
+            rom_sha256,
             last_scanline: None,
         })
+    }
+
+    /// The loaded ROM's normalized SHA-256 (ticket W2-04), as save-state
+    /// headers and `.rfreplay` record it.
+    #[must_use]
+    pub fn rom_sha256(&self) -> [u8; 32] {
+        self.rom_sha256
+    }
+
+    /// Borrowed bus for battery-RAM persistence (ticket W2-04) — narrower
+    /// than exposing the whole machine, and the only reason it is `pub`:
+    /// `crate::save_state`'s `.sav` helpers take a bus, so a caller that
+    /// owns a stepper needs a way to hand one over.
+    #[must_use]
+    pub fn bus_for_battery(&self) -> &NesBus {
+        &self.bus
+    }
+
+    /// Mutable counterpart of [`Self::bus_for_battery`], for loading a
+    /// `.sav` at startup.
+    pub fn bus_for_battery_mut(&mut self) -> &mut NesBus {
+        &mut self.bus
+    }
+
+    /// Borrowed CPU, for `crate::save_state`'s serializer.
+    pub(crate) fn cpu_for_state(&self) -> &Cpu {
+        &self.cpu
+    }
+
+    /// Borrowed bus, for `crate::save_state`'s serializer.
+    pub(crate) fn bus_for_state(&self) -> &NesBus {
+        &self.bus
+    }
+
+    /// Both halves mutably, for `crate::save_state`'s loader — one call
+    /// rather than two accessors, so a caller cannot restore a CPU into a
+    /// bus from a different state.
+    pub(crate) fn machine_for_state(&mut self) -> (&mut Cpu, &mut NesBus) {
+        (&mut self.cpu, &mut self.bus)
     }
 
     /// Test-only hook to prove [`CYCLE_BUDGET`]'s termination guarantee
@@ -450,31 +506,59 @@ impl EmuStepper {
         self.latch_and_advance_frame(frame, sink) > 0
     }
 
-    /// The reachable-state hash (module doc's "The reachable-state hash"
-    /// section — read it before using this for anything: it is explicitly
-    /// **not** a full-machine hash). SHA-256 over, in order: WRAM
-    /// `$0000-$07FF` (2048 bytes via [`NesBus::peek`], side-effect-free),
-    /// OAM, PRG-RAM, `Cpu::{a,x,y,s,p}`, `Cpu::pc` (little-endian),
-    /// `Cpu::jammed`, `NesBus::master_cycle` (little-endian),
-    /// `NesBus::frame_count` (little-endian).
+    /// The **full-machine** state hash (ticket W2-04): SHA-256 over every
+    /// save-state region, in [`rf_nes::StateRegion::ALL`] order — CPU
+    /// registers and interrupt latches, bus counters, the entire PPU
+    /// (including VRAM, palette RAM, OAM and the loopy registers), the
+    /// entire APU, WRAM, mapper registers and battery PRG-RAM.
+    ///
+    /// **This replaced a deliberately partial hash, and the replacement is
+    /// the point.** Until this ticket `rf-nes` had no state serialization,
+    /// so the hash could only reach WRAM, OAM, PRG-RAM, five CPU registers
+    /// and two counters; PPU and APU internals were structurally invisible,
+    /// which meant a PPU-internal divergence that happened to render
+    /// identically went unseen. W2-04's own HANDOFF note (plan.json) called
+    /// that out as blocking half of ROADMAP's Phase-1 determinism exit
+    /// criterion, "identical per-frame state hashes", which a hash that
+    /// cannot see the PPU could not satisfy at any frame count.
+    ///
+    /// Callers that record this value in a `.rfreplay` must write
+    /// `hash_kind=full-v1` ([`crate::save_state::HASH_KIND`]), NOT the old
+    /// `reachable-v1` — SAVE_STATES.md §3 requires the field to change
+    /// rather than be silently redefined.
+    ///
+    /// Deliberately still excluded: the rendered framebuffer (output, not
+    /// state — the test suite digests it separately and never folds it in
+    /// here) and the PPU's undrained scanline/event queues, which are the
+    /// same output and which the core refuses to serialize mid-frame at all.
+    ///
+    /// # Panics
+    /// Panics only if the core refuses to serialize, which for an
+    /// in-memory writer means the frame-boundary rule was violated —
+    /// hashing mid-frame with undrained scanlines. Every caller in this
+    /// crate hashes at a frame boundary.
     #[must_use]
     pub fn state_hash(&self) -> String {
-        let mut buf = Vec::with_capacity(0x0800 + 256 + 0x2000 + 32);
-        for addr in 0x0000u16..=0x07FF {
-            buf.push(self.bus.peek(addr));
+        crate::hash::sha256_hex(&self.full_state_bytes())
+    }
+
+    /// The bytes [`Self::state_hash`] digests: every region's payload,
+    /// concatenated in [`rf_nes::StateRegion::ALL`] order. Exposed because
+    /// a divergence report wants the bytes, not just the digest.
+    ///
+    /// # Panics
+    /// See [`Self::state_hash`].
+    #[must_use]
+    pub fn full_state_bytes(&self) -> Vec<u8> {
+        let mut buf = StateBuf::default();
+        for region in rf_nes::StateRegion::ALL {
+            self.bus
+                .save_region(&self.cpu, region, &mut buf)
+                .unwrap_or_else(|e| {
+                    panic!("state_hash: core refused to serialize {region:?}: {e}")
+                });
         }
-        buf.extend_from_slice(self.bus.oam());
-        buf.extend_from_slice(self.bus.prg_ram());
-        buf.push(self.cpu.a);
-        buf.push(self.cpu.x);
-        buf.push(self.cpu.y);
-        buf.push(self.cpu.s);
-        buf.push(self.cpu.p);
-        buf.extend_from_slice(&self.cpu.pc.to_le_bytes());
-        buf.push(u8::from(self.cpu.jammed));
-        buf.extend_from_slice(&self.bus.master_cycle().to_le_bytes());
-        buf.extend_from_slice(&self.bus.frame_count().to_le_bytes());
-        crate::hash::sha256_hex(&buf)
+        buf.bytes
     }
 
     /// Shared by `step_frame`/`tick_running`: run instructions, draining
@@ -997,5 +1081,37 @@ mod tests {
             "VblankStart must appear once explicitly subscribed: {:?}",
             wide_sink.events
         );
+    }
+}
+
+/// In-memory `StateWriter` for [`EmuStepper::full_state_bytes`].
+#[derive(Default)]
+struct StateBuf {
+    bytes: Vec<u8>,
+}
+
+impl rf_core_api::StateWriter for StateBuf {
+    fn write_all(&mut self, buf: &[u8]) -> Result<(), rf_core_api::StateError> {
+        self.bytes.extend_from_slice(buf);
+        Ok(())
+    }
+}
+
+/// Parses 64 lowercase hex chars into 32 bytes, leaving `out` zeroed if the
+/// input is malformed — `rf_cart::identity_nes` always produces well-formed
+/// hex, so this cannot silently truncate a real hash; the fallback exists so
+/// a hash helper never panics inside a ROM-open path.
+fn hex_to_bytes(hex: &str, out: &mut [u8; 32]) {
+    if hex.len() != 64 {
+        return;
+    }
+    for (index, slot) in out.iter_mut().enumerate() {
+        match u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16) {
+            Ok(byte) => *slot = byte,
+            Err(_) => {
+                *out = [0u8; 32];
+                return;
+            }
+        }
     }
 }

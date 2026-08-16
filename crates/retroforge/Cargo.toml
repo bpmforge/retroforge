@@ -21,6 +21,10 @@ rf-nes = { path = "../rf-nes" }
 # below build against (same pattern as rf-harness's own dev-dependency use
 # of rf-cart).
 rf-cart = { path = "../rf-cart" }
+# rf-state: the .rfstate container (ticket W2-04) — the app shell is the
+# only layer that may know both a core's state regions and rf-state's chunk
+# tags, since core crates may not depend on rf-state (validate-arch.sh).
+rf-state = { path = "../rf-state" }
 rf-renderer = { path = "../rf-renderer" }
 # rf-input: host-agnostic Key/KeyMap/InputLatch + .rfreplay (ticket W1-07).
 rf-input = { path = "../rf-input" }
