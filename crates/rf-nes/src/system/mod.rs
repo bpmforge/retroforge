@@ -97,6 +97,7 @@
 //! and correct for the one bit every acceptance test actually checks (D0).
 mod cartridge;
 mod controller;
+mod state;
 
 #[cfg(test)]
 mod tests;

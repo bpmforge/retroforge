@@ -37,6 +37,9 @@
 //! Added on Brad's request (2026-08-06) after a real mapper-7 ROM was
 //! refused; mapper 7 sits outside FR-CORE-025's original 0/1/2/3/4 set,
 //! which was amended in the same commit.
+use rf_core_api::StateError;
+
+use crate::state::{StateIn, StateOut};
 use rf_cart::Mirroring;
 
 use super::Mapper;
@@ -109,6 +112,26 @@ impl Mapper for AxRom {
     /// the permanently-correct view.
     fn chr_window(&self) -> Option<&[u8]> {
         None
+    }
+
+    /// `MAPR` (ticket W2-04): the bank register AND the mirroring, which
+    /// AxROM drives from that same register rather than from the header.
+    fn save_state(&self, out: &mut StateOut<'_>) -> Result<(), StateError> {
+        out.u8(self.bank)?;
+        out.u8(match self.mirroring {
+            Mirroring::OneScreenLower => 0,
+            _ => 1,
+        })
+    }
+
+    fn load_state(&mut self, inp: &mut StateIn<'_>) -> Result<(), StateError> {
+        self.bank = inp.u8()?;
+        self.mirroring = if inp.u8()? == 0 {
+            Mirroring::OneScreenLower
+        } else {
+            Mirroring::OneScreenUpper
+        };
+        Ok(())
     }
 }
 

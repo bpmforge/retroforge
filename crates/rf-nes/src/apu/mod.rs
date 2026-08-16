@@ -52,6 +52,7 @@ mod frame_counter;
 mod mixer;
 mod noise;
 mod pulse;
+mod state;
 #[cfg(test)]
 mod tests;
 mod triangle;

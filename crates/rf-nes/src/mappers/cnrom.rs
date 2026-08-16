@@ -20,6 +20,9 @@
 //! uses, and the push/materialize design this ticket's write_scope
 //! forces (see `crate::mappers` module doc) cannot safely bank RAM
 //! without a round-trip write-back mechanism this ticket does not build.
+use rf_core_api::StateError;
+
+use crate::state::{StateIn, StateOut};
 use rf_cart::Mirroring;
 
 use super::Mapper;
@@ -77,6 +80,18 @@ impl Mapper for Cnrom {
         let bank = (self.chr_bank as usize) % self.chr_bank_count();
         let start = bank * CHR_BANK_SIZE;
         Some(&self.chr_rom[start..start + CHR_BANK_SIZE])
+    }
+
+    /// `MAPR` (ticket W2-04): the CHR bank register. `mirroring` is
+    /// header-fixed; CHR bytes are cartridge data (or, for the CHR-RAM
+    /// case, live in the PPU's own buffer and travel in the `VRAM` chunk).
+    fn save_state(&self, out: &mut StateOut<'_>) -> Result<(), StateError> {
+        out.u8(self.chr_bank)
+    }
+
+    fn load_state(&mut self, inp: &mut StateIn<'_>) -> Result<(), StateError> {
+        self.chr_bank = inp.u8()?;
+        Ok(())
     }
 }
 

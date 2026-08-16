@@ -37,6 +37,7 @@
 mod addressing;
 mod exec;
 mod ops;
+mod state;
 
 pub use bus::CpuBus;
 

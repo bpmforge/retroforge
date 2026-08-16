@@ -78,6 +78,9 @@
 //!   but has no SOROM/SUROM-specific extra bank bit logic.
 //! - **CHR-RAM bank switching** — see [`Mapper::chr_window`]'s doc and
 //!   this crate's `mappers` module doc.
+use rf_core_api::StateError;
+
+use crate::state::{StateIn, StateOut};
 use rf_cart::Mirroring;
 
 use super::Mapper;
@@ -268,6 +271,33 @@ impl Mapper for Mmc1 {
         } else {
             Some(&self.chr_view[..])
         }
+    }
+
+    /// `MAPR` (ticket W2-04): the serial shift register and every bank
+    /// register, plus `last_write_cycle` -- without which the
+    /// consecutive-write-ignore quirk would behave differently for one
+    /// write after a restore -- and the materialized CHR window, which is
+    /// stored rather than recomputed so a restore cannot depend on the
+    /// order in which the PPU is re-seeded.
+    fn save_state(&self, out: &mut StateOut<'_>) -> Result<(), StateError> {
+        out.u8(self.shift)?;
+        out.u8(self.control)?;
+        out.u8(self.chr_bank0)?;
+        out.u8(self.chr_bank1)?;
+        out.u8(self.prg_bank)?;
+        out.opt_u64(self.last_write_cycle)?;
+        out.bytes(&self.chr_view)
+    }
+
+    fn load_state(&mut self, inp: &mut StateIn<'_>) -> Result<(), StateError> {
+        self.shift = inp.u8()?;
+        self.control = inp.u8()?;
+        self.chr_bank0 = inp.u8()?;
+        self.chr_bank1 = inp.u8()?;
+        self.prg_bank = inp.u8()?;
+        self.last_write_cycle = inp.opt_u64()?;
+        inp.bytes(&mut self.chr_view)?;
+        Ok(())
     }
 }
 

@@ -53,9 +53,9 @@ const MODE1_LAST: u32 = 37282;
 #[derive(Debug)]
 pub(super) struct FrameCounter {
     /// CPU cycles since the sequence last restarted.
-    cycle: u32,
+    pub(super) cycle: u32,
     /// `M` — false = 4-step (mode 0), true = 5-step (mode 1).
-    mode_five_step: bool,
+    pub(super) mode_five_step: bool,
     /// `I` — the interrupt inhibit flag.
     pub(super) inhibit_irq: bool,
     /// The frame interrupt flag itself, wired to the CPU's IRQ line.
@@ -63,10 +63,10 @@ pub(super) struct FrameCounter {
     /// Countdown for a pending `$4017` write: "After 3 or 4 CPU clock
     /// cycles, the timer is reset" — 3 if the write occurred during an APU
     /// cycle, 4 if between them. `None` when no write is pending.
-    pending_reset: Option<u8>,
+    pub(super) pending_reset: Option<u8>,
     /// The mode bit the pending write carried, applied when the countdown
     /// expires (not at write time).
-    pending_mode_five_step: bool,
+    pub(super) pending_mode_five_step: bool,
 }
 
 impl Default for FrameCounter {

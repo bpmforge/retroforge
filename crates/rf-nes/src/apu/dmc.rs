@@ -23,41 +23,41 @@ const RATES: [u16; 16] = [
 #[derive(Debug)]
 pub(super) struct Dmc {
     /// `I` — IRQ enabled flag.
-    irq_enabled: bool,
+    pub(super) irq_enabled: bool,
     /// `L` — loop flag.
-    loop_flag: bool,
+    pub(super) loop_flag: bool,
     /// The interrupt flag itself, wired to the CPU's IRQ line alongside the
     /// frame counter's.
     pub(super) irq_flag: bool,
 
-    period: u16,
-    timer: u16,
+    pub(super) period: u16,
+    pub(super) timer: u16,
 
     /// `$4012`, decoded: "Sample address = %11AAAAAA.AA000000 = $C000 +
     /// (A * 64)".
-    sample_address: u16,
+    pub(super) sample_address: u16,
     /// `$4013`, decoded: "Sample length = %LLLL.LLLL0001 = (L * 16) + 1
     /// bytes".
-    sample_length: u16,
+    pub(super) sample_length: u16,
 
-    current_address: u16,
-    bytes_remaining: u16,
-    sample_buffer: Option<u8>,
+    pub(super) current_address: u16,
+    pub(super) bytes_remaining: u16,
+    pub(super) sample_buffer: Option<u8>,
     /// Set while a read has been requested but not yet supplied by the bus.
-    fetch_pending: bool,
+    pub(super) fetch_pending: bool,
     /// Which kind of DMA the outstanding request is (ticket W2-01b) —
     /// nesdev.org/wiki/DMA: "Load DMAs occur after $4015 D4 is set, but only
     /// if the sample buffer is empty... Reload DMAs occur in response to the
     /// sample buffer being emptied." They schedule their halt on opposite
     /// cycle types, which is why the kind is carried to the bus.
-    fetch_is_load: bool,
+    pub(super) fetch_is_load: bool,
 
-    shift_register: u8,
-    bits_remaining: u8,
-    silence: bool,
+    pub(super) shift_register: u8,
+    pub(super) bits_remaining: u8,
+    pub(super) silence: bool,
     /// The 7-bit output level, "sent to the mixer whether the channel is
     /// enabled or not".
-    output_level: u8,
+    pub(super) output_level: u8,
 }
 
 impl Default for Dmc {

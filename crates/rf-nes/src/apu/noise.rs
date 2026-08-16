@@ -16,12 +16,12 @@ pub(super) struct Noise {
     pub(super) length: LengthCounter,
     /// `M` — "Feedback is calculated as the exclusive-OR of bit 0 and one
     /// other bit: bit 6 if Mode flag is set, otherwise bit 1."
-    mode: bool,
-    period: u16,
-    timer: u16,
+    pub(super) mode: bool,
+    pub(super) period: u16,
+    pub(super) timer: u16,
     /// 15-bit LFSR. "On power-up, the shift register is loaded with the
     /// value 1."
-    shift_register: u16,
+    pub(super) shift_register: u16,
 }
 
 impl Default for Noise {

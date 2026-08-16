@@ -32,20 +32,20 @@ pub struct Controller {
     /// Live button state, bit 0..7 = A, B, Select, Start, Up, Down, Left,
     /// Right (the documented `$4016`/`$4017` read order). Set by the host
     /// via [`Controller::set_buttons`]; not itself affected by strobing.
-    buttons: u8,
+    pub(super) buttons: u8,
     /// Whether the strobe line is currently held high (continuous-reload
     /// mode).
-    strobe: bool,
+    pub(super) strobe: bool,
     /// The byte latched at the most recent 1→0 strobe transition. Only
     /// meaningful once `strobe` has gone low at least once; until then a
     /// standard controller's shift register content is undefined by
     /// nesdev, and we never read this field while `strobe` is true anyway
     /// (see `read`).
-    latched: u8,
+    pub(super) latched: u8,
     /// How many bits of `latched` have been shifted out so far (0..=8);
     /// clamped at 8 so every further read reports 1, matching a standard
     /// pad (no Four Score / expansion shift-through modeled here).
-    shift_index: u8,
+    pub(super) shift_index: u8,
 }
 
 impl Default for Controller {
