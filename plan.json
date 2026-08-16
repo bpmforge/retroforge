@@ -952,7 +952,7 @@
     "remap UI persists per-user config"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E2-S2"
    ]
