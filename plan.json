@@ -1054,7 +1054,7 @@
     "accuracy-vs-compatibility config diff run over the test-ROM suite per docs/design/EMULATION_CORES.md section 5 (FR-MODE-004)"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
