@@ -653,7 +653,7 @@
     "frame counter modes correct incl. $4017 delay"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ]
