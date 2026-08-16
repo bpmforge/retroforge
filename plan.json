@@ -986,7 +986,7 @@
     "scan is symlink-loop-safe and confined to configured roots (NFR-010)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E2-S3"
    ]
