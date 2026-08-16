@@ -155,7 +155,7 @@
     "RISKS.md R-16 either closed (its stated mitigation, the source-zip notice, landed in W2-11) or restated against the new classification"
    ],
    "points": 1,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [],
    "notes": [
     "FILED 2026-08-07 at W2-11 close. HUMAN DECISION REQUIRED -- do not let an agent pick this unilaterally. notes.txt, shipped INSIDE alter_ego.zip, states verbatim: 'Please note that the game is released as freeware, not Public Domain. There are three authors involved. I personally grant you rights to do whatever you want with things I created (code, sound effects, graphics), but rights to other components (game concept, characters, title, music) are reserved to authors of these components.' Conductor read this from the primary source directly (unzip -p on the fetched artifact), not from an agent's summary.",
