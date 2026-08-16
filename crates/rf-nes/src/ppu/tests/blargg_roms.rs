@@ -15,22 +15,18 @@
 //! absent, so these tests print why and return rather than failing or
 //! hanging.
 //!
-//! ## Why `ppu_vbl_nmi` doesn't assert 10/10 (ticket W1-05c)
+//! ## `ppu_vbl_nmi` asserts 10/10 (ticket W1-05d)
 //!
-//! W1-05b left only 4 of the 10 real `ppu_vbl_nmi` sub-ROMs passing.
-//! W1-05c's sub-CPU-cycle fix (`crate::ppu`'s module doc "Reachable and
-//! unreachable races" section; `crate::system::NesBus::tick_master`'s
-//! `nmi_level_latch` doc) brings that to 9/10 — every sub-ROM except
-//! `10-even_odd_timing`, which fails for a *separate, independently
-//! investigated* reason (a `$2001`-write-timing question, not the
-//! `$2002`-read/NMI-edge race the other nine share — see
-//! `crates/rf-harness/waivers.toml`'s one remaining entry for the specific
-//! symptom and why W1-05c's fix cannot reach it). Asserting 10/10 here
-//! would make `cargo test --workspace` permanently fail for every
-//! contributor who fetches these ROMs, for a gap this ticket tracks as
-//! evidence, not silently. This test instead asserts that the nine ROMs
-//! known to pass keep passing (a regression there IS a real bug), and
-//! reports `10-even_odd_timing`'s status without asserting on it.
+//! W1-05b left only 4 of the 10 real `ppu_vbl_nmi` sub-ROMs passing;
+//! W1-05c's sub-CPU-cycle `$2002`-read/NMI-edge fix (`crate::ppu`'s module
+//! doc "Reachable and unreachable races" section;
+//! `crate::system::NesBus::tick_master`'s `nmi_level_latch` doc) brought
+//! that to 9/10. W1-05d closes the last one, `10-even_odd_timing`, which
+//! failed for a separate reason — a `$2001`-write-timing question, fixed by
+//! the two-dot rendering-enable latch documented on
+//! `crate::ppu::Ppu::render_enable_pipe`. Every one of the ten is therefore
+//! `must_pass` now, and `crates/rf-harness/waivers.toml` no longer carries
+//! an entry for this suite.
 use std::path::{Path, PathBuf};
 
 use crate::cpu::Cpu;
@@ -181,7 +177,7 @@ fn ppu_vbl_nmi_known_good_roms_still_pass() {
         ("07-nmi_on_timing", 3600, true),
         ("08-nmi_off_timing", 3600, true),
         ("09-even_odd_frames", 3600, true),
-        ("10-even_odd_timing", 3600, false),
+        ("10-even_odd_timing", 3600, true),
     ];
 
     let mut missing = 0;
