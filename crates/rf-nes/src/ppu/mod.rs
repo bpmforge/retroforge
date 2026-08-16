@@ -97,23 +97,28 @@
 //!    sample, matching "one clock later" without `cpu/**` needing to know
 //!    anything happened.
 //!
-//! ### Result: 9/10, `10-even_odd_timing` excepted
+//! ### Result: 9/10 at W1-05c, 10/10 at W1-05d
 //!
-//! Measured against the real, fetched `ppu_vbl_nmi` ROMs: `01-vbl_basics`,
-//! `02-vbl_set_time`, `03-vbl_clear_time`, `04-nmi_control`,
-//! `05-nmi_timing`, `06-suppression`, `07-nmi_on_timing`,
-//! `08-nmi_off_timing`, `09-even_odd_frames` all pass. `10-even_odd_timing`
-//! still fails, at the same "Clock is skipped too late, relative to
-//! enabling BG" sub-test (#3 of 4; #2 and #4 pass) W1-05b originally
-//! measured — byte-identical across every experiment this ticket ran
-//! (both `CpuBus::read` orderings, every `read_status` model tried),
-//! confirming W1-05b's own prediction that it does not share this root
-//! cause: it needs a `$2001`-write EFFECT to land earlier, and
-//! `write_untimed` already runs before its own cycle's dots — the earliest
-//! position reachable without literally moving `master_cycle`'s own
-//! per-write increment, which none of this ticket's fixes touch.
-//! `crates/rf-harness/waivers.toml` and `docs/STATUS.md`'s W1-05c entry
-//! carry the full per-ROM evidence.
+//! Measured against the real, fetched `ppu_vbl_nmi` ROMs: W1-05c's three
+//! read-side mechanisms above passed `01-vbl_basics` through
+//! `09-even_odd_frames` and left `10-even_odd_timing` failing at "Clock is
+//! skipped too late, relative to enabling BG" (sub-test #3 of 4) —
+//! byte-identical across every experiment that ticket ran (both
+//! `CpuBus::read` orderings, every `read_status` model tried), confirming
+//! it did not share this root cause.
+//!
+//! **W1-05d closed it, and the diagnosis above was half right.** It is
+//! indeed a `$2001`-write-side question, not a `$2002`-read one — but the
+//! fix is not to make the write land earlier (`write_untimed` already runs
+//! before its own cycle's dots, the earliest position reachable). It is
+//! that the *skip decision* was reading `mask` with no propagation delay at
+//! all, where nesdev.org/wiki/PPU_registers's `PPUMASK` section says
+//! "toggling rendering takes effect approximately 3-4 dots after the
+//! write". [`Ppu::render_enable_pipe`] carries the two-dot latch, the
+//! measurement that pins its depth, and why it is deliberately scoped to
+//! this one decision. `docs/STATUS.md`'s W1-05c/W1-05d entries carry the
+//! per-ROM evidence; `crates/rf-harness/waivers.toml` no longer waives
+//! anything in this suite.
 //!
 //! It deliberately does NOT implement:
 //! - A `Mapper` trait / CHR bank switching (routed the same way W1-02
@@ -446,6 +451,39 @@ pub struct Ppu {
     /// fields); `false` (even) is this module's arbitrary but documented
     /// choice.
     pub(super) frame_is_odd: bool,
+    /// Two-dot shift register of [`Ppu::rendering_enabled`], pushed once at
+    /// the top of every [`Ppu::tick`] (ticket W1-05d). Bit 0 is the value
+    /// in effect during the dot being ticked right now, bit 1 the previous
+    /// dot's, bit 2 the one two dots back — which is the bit the odd-frame
+    /// idle-dot skip decision reads (see [`Ppu::advance_counters`]).
+    ///
+    /// **Why a delay exists at all**: nesdev.org/wiki/PPU_registers's
+    /// `PPUMASK` section, verbatim — "Toggling rendering takes effect
+    /// approximately 3-4 dots after the write. This delay is required by
+    /// Battletoads to avoid a crash." A `$2001` write is therefore *not*
+    /// visible to rendering logic on the very next dot, which is what the
+    /// unlatched `self.mask` read this replaced assumed.
+    ///
+    /// **Why exactly two dots, and only here**: the depth is measured
+    /// against the ROM, not read off that "3-4" (which counts from a
+    /// hardware write instant this engine does not model — `NesBus::write`
+    /// applies `write_untimed` *before* its own cycle's three dots, so a
+    /// write lands at the start of its cycle's dot window, up to three dots
+    /// ahead of the physical latch). `10-even_odd_timing` pins the value
+    /// exactly: its sub-tests 2 and 3 enable BG one PPU dot apart (blargg's
+    /// `sync_vbl_delay` with A=4 vs A=5) and both expect X=8, i.e. hardware
+    /// skips for the earlier write and not the later one. Instrumented,
+    /// those two writes land at pre-render dots 337 and 338 in this
+    /// engine's coordinates, and the skip decision runs after dot 339 — so
+    /// "enabled at dot 339 - 2" is the only depth that accepts 337 and
+    /// rejects 338. The latch is deliberately confined to the skip
+    /// decision rather than applied to `rendering_enabled` globally: no
+    /// test in this tree measures the delay anywhere else, and
+    /// `sprite_hit_tests` 09/11 plus both golden frames encode the current
+    /// undelayed behavior for the fetch pipeline. Widening it is a real
+    /// hardware refinement, but it must be re-verified against those,
+    /// not assumed.
+    render_enable_pipe: u8,
     /// Total frames completed since this PPU was constructed (ticket
     /// W1-05b) — incremented exactly once per frame, alongside
     /// `frame_is_odd`'s toggle in [`Ppu::advance_counters`], regardless of
@@ -620,6 +658,7 @@ impl Ppu {
             scanline: PRERENDER_SCANLINE,
             dot: 0,
             frame_is_odd: false,
+            render_enable_pipe: 0,
             frame_count: 0,
             suppress_vblank_this_frame: false,
             secondary_oam: [EMPTY_EVALUATED_SPRITE; 8],
@@ -747,6 +786,12 @@ impl Ppu {
     /// [`Ppu::advance_counters`] for the implementation.
     pub fn tick(&mut self) {
         self.dot_clock += 1;
+        // Ticket W1-05d: sampled before `process_dot` because nothing in a
+        // dot's own processing writes `mask` — this is the value in effect
+        // *during* this dot, which is what the odd-frame skip decision two
+        // dots later needs (see `render_enable_pipe`'s doc).
+        self.render_enable_pipe =
+            (self.render_enable_pipe << 1) | u8::from(self.rendering_enabled());
         self.process_dot();
         self.advance_counters();
     }
@@ -807,7 +852,7 @@ impl Ppu {
         let odd_frame_skip = self.scanline == PRERENDER_SCANLINE
             && self.dot == Self::ODD_FRAME_SKIP_DOT
             && self.frame_is_odd
-            && self.rendering_enabled();
+            && self.render_enable_pipe & 0b100 != 0;
 
         if odd_frame_skip || self.dot >= DOTS_PER_SCANLINE - 1 {
             self.dot = 0;

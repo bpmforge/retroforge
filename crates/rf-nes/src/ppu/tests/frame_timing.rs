@@ -132,9 +132,18 @@ fn odd_frame_with_rendering_enabled_skips_dot_340() {
     let mut ppu = test_ppu();
     ppu.write_register(1, 0x08); // rendering enabled
     ppu.scanline = PRERENDER_SCANLINE;
-    ppu.dot = ODD_FRAME_SKIP_DOT;
+    // Ticket W1-05d: the skip reads rendering-enable as it stood two dots
+    // earlier (`Ppu::render_enable_pipe`'s doc: nesdev's "toggling
+    // rendering takes effect approximately 3-4 dots after the write"), so
+    // this starts at dot 337 and ticks up to the decision rather than
+    // poking (261, 339) and enabling in the same breath -- an enable that
+    // late is exactly the case hardware does NOT skip for, and the case
+    // `enabling_bg_one_dot_too_late_does_not_skip` below now covers.
+    ppu.dot = ODD_FRAME_SKIP_DOT - 2;
     ppu.frame_is_odd = true;
 
+    ppu.tick(); // dot 337
+    ppu.tick(); // dot 338
     ppu.tick(); // processes dot 339; the skip fires -> jumps straight to (0,0)
     assert_eq!(
         (ppu.scanline, ppu.dot),
@@ -142,6 +151,32 @@ fn odd_frame_with_rendering_enabled_skips_dot_340() {
         "dot 340 is skipped entirely on an odd frame with rendering enabled"
     );
     assert!(!ppu.frame_is_odd, "frame parity toggles once, at the wrap");
+}
+
+/// Ticket W1-05d, the regression guard for the delay itself: BG enabled one
+/// PPU dot later than [`odd_frame_with_rendering_enabled_skips_dot_340`]'s
+/// write must NOT shorten the frame. This is the exact pair blargg's
+/// `ppu_vbl_nmi/10-even_odd_timing` measures (its sub-tests 2 and 3 differ
+/// by one `sync_vbl_delay` PPU clock and both expect the same answer, X=8),
+/// reproduced here as a unit test so a future change to
+/// `Ppu::render_enable_pipe`'s depth fails in seconds instead of only in
+/// the fetched-ROM suite.
+#[test]
+fn enabling_bg_one_dot_too_late_does_not_skip() {
+    let mut ppu = test_ppu();
+    ppu.write_register(1, 0x08);
+    ppu.scanline = PRERENDER_SCANLINE;
+    ppu.dot = ODD_FRAME_SKIP_DOT - 1;
+    ppu.frame_is_odd = true;
+
+    ppu.tick(); // dot 338
+    ppu.tick(); // dot 339: the enable has only propagated one dot -> no skip
+    assert_eq!(
+        (ppu.scanline, ppu.dot),
+        (PRERENDER_SCANLINE, 340),
+        "an enable that reaches the PPU less than two dots before the \
+         decision leaves the pre-render line its full 341 dots"
+    );
 }
 
 #[test]

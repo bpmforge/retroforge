@@ -89,7 +89,7 @@ in `docs/evidence/local-gate.json`). W2-12 owns wiring the rest.
 | `cpu_timing_test6`, `instr_timing`, `branch_timing_tests` | cycle counts, page-cross, branches | FR-CORE-020 | A — **NOT WIRED (W2-12)** | $6000 = 0 |
 | `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A — **NOT WIRED (W2-12)** | $6000 = 0 |
 | `cpu_dummy_reads/writes`, `cpu_exec_space` | dummy bus cycles, open bus | FR-CORE-020 | B | $6000 = 0 |
-| blargg `ppu_vbl_nmi` (10 sub-ROMs, `rom_singles/`) | VBL/NMI to the PPU cycle | FR-CORE-022 | A-local | $6000 = 0 — 9/10 clean (all but `10-even_odd_timing`, ticket W1-05c); `10` waived, a separate `$2001`-write-timing cause, see `crate::ppu`'s module doc + `crates/rf-harness/waivers.toml` |
+| blargg `ppu_vbl_nmi` (10 sub-ROMs, `rom_singles/`) | VBL/NMI to the PPU cycle | FR-CORE-022 | A-local | $6000 = 0 — **10/10 clean, no waiver** (W1-05c took it 4→9, W1-05d closed `10-even_odd_timing`; see `crate::ppu::Ppu::render_enable_pipe`) |
 | `sprite_hit_tests` | sprite-0 hit | FR-CORE-023 | A-local | RAM-result byte (`$00F8`) = 1 — NOT `$6000` (ticket W1-05b correction; this ROM generation predates blargg's `$6000` runtime, see `tests/rom-manifest.toml`'s comment on this suite) |
 | `sprite_overflow_tests` | overflow bug | FR-CORE-023 | A | $6000 = 0 — **unverified as of W1-05b**: shares `sprite_hit_tests`' pre-`$6000` ROM family and almost certainly has the same protocol mistag; out of this ticket's scope, flagged in `tests/rom-manifest.toml` for whichever ticket implements this suite |
 | `oam_read`, `oam_stress` | $2004 semantics | FR-CORE-023 | B | $6000 = 0 |
@@ -201,13 +201,28 @@ positions (the "same PPU clock as the set" and the pre-render "same clock
 as the auto-clear" fenceposts) plus a one-PPU-*dot* NMI-visibility latch in
 `crate::system::NesBus::tick_master` (a genuine dot-loop split, not a
 `master_cycle` one — see that method's doc). Result: 9/10 —
-`02`/`05`/`06`/`07`/`08` all pass now. `10-even_odd_timing` still fails, at
+`02`/`05`/`06`/`07`/`08` all pass now. `10-even_odd_timing` still failed, at
 the same "Clock is skipped too late, relative to enabling BG" sub-test
 W1-05b measured, byte-identical across every experiment W1-05c ran
 (multiple `read_status` models, both `CpuBus::read` orderings) — confirming
 W1-05b's own prediction that it's a separate, `$2001`-write-timing cause,
-not this read-side/NMI-edge race. `crates/rf-harness/waivers.toml` carries
-the one remaining tracked waiver.
+not this read-side/NMI-edge race.
+
+**`ppu_vbl_nmi` W1-05d: 10/10, and the waiver is deleted rather than
+re-dated.** `10-even_odd_timing` needed no re-sequencing of register access
+at all — the defect was that the odd-frame skip decision read `PPUMASK`
+with zero propagation delay, against nesdev.org/wiki/PPU_registers's
+"toggling rendering takes effect approximately 3-4 dots after the write".
+The ROM pins the depth exactly (its sub-tests 2 and 3 enable BG one PPU dot
+apart and both expect X=8; instrumented, those land at pre-render dots 337
+and 338 in this engine's write-application convention, and the decision
+runs after dot 339), so a two-dot latch — `crate::ppu::Ppu::render_enable_pipe`,
+scoped to that decision and not to rendering generally — is the only depth
+that accepts one and rejects the other. Corroboration that it is a model
+and not a tuned constant: sub-tests 4 and 5, the *disabling*-BG pair that
+had never run before, pass untouched, and the ROM's printed output is
+`08 08 09 07`, byte-identical to the expected output in its own source
+header. `crates/rf-harness/waivers.toml` now holds no waivers at all.
 
 **nestest disassembly-column finding (ticket W1-03):** both halves of the
 trace are byte-exact over all 8991 lines, but the disassembly-annotation
