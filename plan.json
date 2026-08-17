@@ -1512,7 +1512,7 @@
     "apu_test stays 8/8 and the $4017 write-delay polarity claim in `Apu::on_apu_cycle`'s doc is corrected or made true -- see notes"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ],
