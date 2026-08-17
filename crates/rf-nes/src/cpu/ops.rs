@@ -272,11 +272,23 @@ impl Cpu {
         self.unstable_op = Some(UnstableOp::Ane);
     }
 
-    /// `LXA` (`LAX` immediate, `$AB`) — unstable, same magic constant and
-    /// formula shape as `ANE`: `A = X = (A | $EE) & operand`. Sets
-    /// [`Cpu::unstable_op`] to [`UnstableOp::Lxa`].
+    /// `LXA` (`LAX` immediate, `$AB`) — unstable: `A = X = (A | magic) &
+    /// operand`, where `magic` is an analog artifact varying by chip and
+    /// temperature, not a fixed hardware constant.
+    ///
+    /// The magic is **$FF** here (so this reduces to `A = X = operand`),
+    /// which is what blargg's `instr_test-v5` `03-immediate` checksums
+    /// against. That is a deliberate choice between two disagreeing
+    /// oracles, not the shape `ANE` uses: SingleStepTests' nes6502
+    /// vectors are generated against `$EE`, and no single value satisfies
+    /// both. Ticket W2-20 measured both directions and recorded the
+    /// trade-off in full on
+    /// `cpu::tests::vectors::LXA_CONVENTION_CLASH_OPCODE` — read that
+    /// before changing this value, and change both or neither.
+    ///
+    /// Sets [`Cpu::unstable_op`] to [`UnstableOp::Lxa`].
     pub(super) fn op_lxa(&mut self, value: u8) {
-        let result = (self.a | 0xEE) & value;
+        let result = (self.a | 0xFF) & value;
         self.a = result;
         self.x = result;
         self.set_nz(result);

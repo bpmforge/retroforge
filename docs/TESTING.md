@@ -123,11 +123,32 @@ produced two findings worth reading before trusting any tier label:
    was mistagged the same way and is screen-only, so it needed a new
    `screen_text` protocol to be scored at all rather than looking hung.
 2. **Passing 2.56M opcode vectors and a byte-exact nestest trace does not
-   mean the CPU is right.** `cpu_interrupts_v2` fails on an NMI arriving
-   during BRK and `cpu_timing_test6` fails on opcode `$00` — the same
-   instruction from two directions. Per-opcode vectors never deliver an
-   interrupt mid-instruction and nestest's trace never takes one, so the
-   gap was structurally invisible to both. W2-20 owns it.
+   mean the CPU is right.** `cpu_interrupts_v2` failed on an NMI arriving
+   during BRK and `cpu_timing_test6` on opcode `$00`. Per-opcode vectors
+   never deliver an interrupt mid-instruction and nestest's trace never
+   takes one, so the gap was structurally invisible to both.
+   **W2-20 resolved it (2026-08-16)** and the shared-cause hypothesis held:
+   `FAIL OP :$00` was never a BRK *timing* bug. Two real defects, both in
+   interrupt handling — the `BRK`/`IRQ` hijack tested the NMI **level**
+   (which the NES holds asserted for all of vblank, so a serviced edge kept
+   hijacking), and interrupt-entry sequences **polled**, which nesdev says
+   they do not. Both ROMs now pass.
+3. **Fixing a masking failure exposes the next one, and that is the tier
+   working.** With `2-nmi_and_brk` passing, `cpu_interrupts_v2` moved on to
+   failing `3-nmi_and_irq` — an APU frame-counter IRQ timing gap that had
+   been sitting behind it. W2-21 owns that; it is not a CPU defect.
+4. **Two oracles can disagree, and the honest answer is to say which one
+   this project follows.** `instr_test-v5`'s `AB ATX #n` failure was
+   `LXA`'s magic constant, one of the genuinely *unstable* illegal opcodes
+   (an analog artifact varying by chip and temperature). blargg checksums
+   against `$FF`; SingleStepTests' vectors are generated against `$EE`; no
+   value satisfies both. Measured both ways rather than argued — `$FF`
+   gives `instr_test-v5` 16/16 with exactly one of 105 unofficial opcodes
+   failing nes6502, `$EE` the reverse. `$FF` is implemented, because
+   `docs/MVP.md` §3 makes `instr_test-v5` an acceptance item while scoping
+   its vector requirement to "100% **official** opcodes". The cost is one
+   named exception in the unofficial vector suite, carrying a guard that
+   fails if `$AB` ever starts passing.
 
 Executed today: `nes6502`, `nestest`, `sprite_hit_tests`, `ppu_vbl_nmi`,
 `apu_test`, `instr_test-v5`, `instr_timing`, `branch_timing_tests`,
@@ -141,11 +162,11 @@ mistag, flagged since W1-05b and deliberately NOT absorbed here) and
 |---|---|---|---|---|
 | SingleStepTests `nes6502` | per-opcode state + bus cycles | FR-CORE-020 | A-local | 100% of all 256 opcodes (151 official + 105 unofficial/illegal) — 2,560,000 cases |
 | nestest + `nestest.log` | whole-CPU conformance (register/CYC + disassembly) | FR-CORE-021 | A-local | byte-exact trace diff empty over all 8991 lines |
-| blargg `instr_test-v5` | official+unofficial instructions | FR-CORE-020 | A-local — **wired 2026-08-16 (W2-12)**; fails at `AB ATX #n` (test 3 of 16), the unstable illegal opcode $AB, waived against **W2-20** | $6000 = 0 all ROMs |
+| blargg `instr_test-v5` | official+unofficial instructions | FR-CORE-020 | A-local — **wired (W2-12), PASSES 16/16 as of W2-20** (its `AB ATX #n` failure was `LXA`'s magic constant; see below) | $6000 = 0 all ROMs |
 | `instr_timing` | instruction cycle counts | FR-CORE-020 | A-local — **wired (W2-12), PASSES** | $6000 = 0 |
 | `branch_timing_tests` (3 ROMs) | branch timing, page-cross | FR-CORE-020 | A-local — **wired (W2-12), 3/3 PASS** | **NOT `$6000`**: 2005-era ROMs like `sprite_hit_tests`, scored on the RAM-result byte at `$00F8`. Under the `six_thousand` tag the manifest used to carry, all three reported "signature never became valid" — a false hang, and three false failures. Corrected in `tests/rom-manifest.toml` |
-| `cpu_timing_test6` | official-instruction cycle counts | FR-CORE-020 | A-local — **wired (W2-12)**; fails `FAIL OP :$00` (BRK), waived against **W2-20** | **NOT `$6000`**: verdict is only on the nametable, scored by the new `screen_text` protocol using blargg's own rule ("if a test prints 'passed', it passed") |
-| `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A-local — **wired (W2-12)**; fails at `2-nmi_and_brk` (test 2 of 5), waived against **W2-20** | $6000 = 0 |
+| `cpu_timing_test6` | official-instruction cycle counts | FR-CORE-020 | A-local — **wired (W2-12), PASSES as of W2-20** — its `FAIL OP :$00` was never a BRK *timing* bug, it was the interrupt poll | **NOT `$6000`**: verdict is only on the nametable, scored by the new `screen_text` protocol using blargg's own rule ("if a test prints 'passed', it passed") |
+| `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A-local — **wired (W2-12)**; `2-nmi_and_brk` PASSES as of W2-20, now fails at `3-nmi_and_irq` (test 3 of 5) which W2-20 unmasked — an APU frame-IRQ timing gap, not a CPU one; waived against **W2-21** | $6000 = 0 |
 | `cpu_dummy_reads/writes`, `cpu_exec_space` | dummy bus cycles, open bus | FR-CORE-020 | B — **wired 2026-08-16 (W2-09)**; 1 of 5 ROMs passing, the other four waived against **W2-19** (PPU/APU open bus, RMW double-write, and one ROM that never reaches its own init) | $6000 = 0 |
 | blargg `ppu_vbl_nmi` (10 sub-ROMs, `rom_singles/`) | VBL/NMI to the PPU cycle | FR-CORE-022 | A-local | $6000 = 0 — **10/10 clean, no waiver** (W1-05c took it 4→9, W1-05d closed `10-even_odd_timing`; see `crate::ppu::Ppu::render_enable_pipe`) |
 | `sprite_hit_tests` | sprite-0 hit | FR-CORE-023 | A-local | RAM-result byte (`$00F8`) = 1 — NOT `$6000` (ticket W1-05b correction; this ROM generation predates blargg's `$6000` runtime, see `tests/rom-manifest.toml`'s comment on this suite) |

@@ -92,27 +92,19 @@ expiry = "2026-11-01"
 ticket = "W2-19"
 
 # ----------------------------------------------------------------------
-# Tier-A CPU known-fails, raised 2026-08-16 by W2-12 -- the first execution
-# of suites the manifest had been fetching since W0-03 while NO code path
-# ran them. Owned by W2-20. Two of the three point at the same place.
+# Tier-A CPU known-fail, narrowed 2026-08-16 by W2-20.
+#
+# W2-12 raised THREE waivers here. Two are now DELETED rather than
+# re-dated, because the ROMs pass: `cpu_timing_test6` (the interrupt-poll
+# fix -- its "FAIL OP :$00" was never a BRK timing bug) and
+# `instr_test-v5` (LXA's magic constant moved to $FF; see
+# `cpu::tests::vectors::LXA_CONVENTION_CLASH_OPCODE` for the oracle
+# clash that documents). The one below is re-pointed at the NEW ticket
+# that owns what is actually left, which is not a CPU defect at all.
 
 [[waiver]]
 suite = "cpu_interrupts_v2"
 rom = "cpu_interrupts"
-justification = "Fails at '2-nmi_and_brk', test 2 of 5: an NMI arriving during BRK is mishandled. Neither of this crate's two headline CPU gates can see it -- SingleStepTests' per-opcode vectors never deliver an interrupt mid-instruction, and nestest's golden trace never takes one at all -- which is exactly why W2-12 wired this suite. Owned by W2-20."
+justification = "Test 2 of 5 (`2-nmi_and_brk`) PASSES as of W2-20 -- exact, all ten delay rows. What fails now is test 3 of 5, `3-nmi_and_irq`, which W2-20 unmasked and which is an APU frame-counter IRQ timing defect, not a CPU one: the IRQ is recognised ~2 CPU cycles early and the error alternates with iteration parity, so the ROM's seven identical rows come out alternating 21/20. Verified NOT to be the $4017 3-vs-4-cycle write-delay polarity (flipping it does not fix test 3). Owned by W2-21."
 expiry = "2026-11-01"
-ticket = "W2-20"
-
-[[waiver]]
-suite = "cpu_timing_test6"
-rom = "cpu_timing_test"
-justification = "Screen reads '6502 TIMING TEST (16 SECONDS) OFFICIAL INSTRUCTIONS ONLY FAIL OP :$00'. Opcode $00 is BRK, so this is very likely the SAME defect cpu_interrupts_v2 reports from the interrupt side rather than a second one -- W2-20's notes say to try to refute that before fixing them separately. Owned by W2-20."
-expiry = "2026-11-01"
-ticket = "W2-20"
-
-[[waiver]]
-suite = "instr_test-v5"
-rom = "all_instrs"
-justification = "Fails at 'AB ATX #n', test 3 of 16 (03-immediate). $AB is LXA/ATX, one of the genuinely UNSTABLE illegal opcodes whose result depends on an analog magic constant; crate::cpu already models that family via UnstableOp::Lxa. This is a convention mismatch, not a timing bug, and it is NOT the same defect as the two above. Note the 2,560,000-case nes6502 suite covers $AB under SingleStepTests' own convention and passes -- the two conventions can disagree, so W2-20 must check both. Owned by W2-20."
-expiry = "2026-11-01"
-ticket = "W2-20"
+ticket = "W2-21"

@@ -65,7 +65,35 @@ pub struct Nes6502Summary {
     /// Only opcodes with `fail > 0` — kept for diagnostics, not counted
     /// twice.
     pub failing: Vec<OpcodeResult>,
+    /// Opcodes deliberately excluded from `total_pass`/`total_fail`/
+    /// `failing`, with the reason (ticket W2-20).
+    ///
+    /// This is a field rather than a silent `continue` because an
+    /// exclusion that only exists in source is invisible in the evidence
+    /// file — and `docs/evidence/local-gate.json` is what a reader trusts
+    /// when they are told the vector suite is green. An excluded opcode
+    /// must show up there, named, with its justification.
+    pub excluded: Vec<(u8, String)>,
 }
+
+/// `$AB` (`LXA`/`ATX`) is excluded from the vector totals: it is a
+/// genuinely UNSTABLE illegal opcode whose magic constant is an analog
+/// artifact, and blargg's `instr_test-v5` and SingleStepTests' nes6502
+/// vectors are generated against two different values ($FF and $EE) that
+/// no single implementation can satisfy at once. This project implements
+/// `$FF` — see `rf_nes`'s `cpu::tests::vectors::LXA_CONVENTION_CLASH_OPCODE`
+/// for the full measurement and `docs/MVP.md` §3 for why (its vector
+/// requirement is scoped to official opcodes; `instr_test-v5` passing is
+/// its own acceptance item).
+///
+/// The unit test below fails if `$AB` ever stops failing, so this cannot
+/// quietly outlive the clash it documents.
+pub const EXCLUDED_OPCODES: [(u8, &str); 1] = [(
+    0xAB,
+    "LXA/ATX: unstable illegal opcode; SingleStepTests generates against magic $EE while \
+     blargg instr_test-v5 checksums against $FF. This engine implements $FF (ticket W2-20, \
+     docs/MVP.md §3). Excluded, not waived — the other 105 unofficial opcodes still gate.",
+)];
 
 /// A full 64 KiB address space, initialized from a vector's `initial.ram`,
 /// recording every access `Cpu::step` makes — identical in shape to
@@ -234,6 +262,7 @@ pub fn run_all(dir: &Path) -> Result<Nes6502Summary, String> {
     let mut total_pass = 0usize;
     let mut total_fail = 0usize;
     let mut failing = Vec::new();
+    let mut excluded = Vec::new();
 
     for opcode in 0u16..=0xFF {
         let opcode = opcode as u8;
@@ -242,7 +271,25 @@ pub fn run_all(dir: &Path) -> Result<Nes6502Summary, String> {
             continue;
         }
         let result = run_opcode_file(dir, opcode)?;
+        // `opcodes_tested` counts an excluded opcode too — it really is
+        // run, and the caller's "expected 256 opcode files" guard is
+        // about a partial *fetch*, not about scoring. Only the pass/fail
+        // totals skip it.
         opcodes_tested += 1;
+        if let Some((_, reason)) = EXCLUDED_OPCODES.iter().find(|(op, _)| *op == opcode) {
+            // Run it anyway: an exclusion that skips the work cannot
+            // notice when the reason for it goes away.
+            if result.fail == 0 {
+                return Err(format!(
+                    "${opcode:02X} is on EXCLUDED_OPCODES but now passes all {} cases — the \
+                     convention clash is gone, so delete the exclusion rather than leaving it \
+                     to mask the next regression in this opcode",
+                    result.pass
+                ));
+            }
+            excluded.push((opcode, (*reason).to_string()));
+            continue;
+        }
         total_pass += result.pass;
         total_fail += result.fail;
         if result.fail > 0 {
@@ -255,6 +302,7 @@ pub fn run_all(dir: &Path) -> Result<Nes6502Summary, String> {
         total_pass,
         total_fail,
         failing,
+        excluded,
     })
 }
 

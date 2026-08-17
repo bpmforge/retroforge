@@ -654,6 +654,26 @@ fn run(args: &Args) -> ExitCode {
                 ("opcodes_tested", Json::Int(summary.opcodes_tested as i64)),
                 ("total_pass", Json::Int(summary.total_pass as i64)),
                 ("total_fail", Json::Int(summary.total_fail as i64)),
+                // Written even when empty: "which opcodes were left out
+                // of total_fail" is exactly the question a reader who
+                // trusts a green vectors row needs answered, and an
+                // absent key reads as "none were" whether or not that is
+                // true (ticket W2-20).
+                (
+                    "excluded",
+                    Json::Array(
+                        summary
+                            .excluded
+                            .iter()
+                            .map(|(opcode, reason)| {
+                                Json::object(vec![
+                                    ("opcode", Json::str(format!("${opcode:02X}"))),
+                                    ("reason", Json::str(reason.clone())),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
             ]),
         ),
         (
