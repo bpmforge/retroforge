@@ -28,6 +28,17 @@ impl Cpu {
             pending_irq_after,
             i_flag_poll_snapshot,
             nmi_hijack_consumed,
+            // Deliberately NOT in the chunk (ticket W2-20): this flag is
+            // set and consumed entirely inside one `exec::run_cycled`
+            // call — written by `finish_interrupt_entry`, read at that
+            // same call's commit, and reset to false at the top of the
+            // next one. Save/load only ever happen between `Cpu::step`s,
+            // so it is always dead across the boundary, and serializing
+            // it would mean bumping the `CPU_` chunk version
+            // (`docs/design/CONTRACTS.md` §3) to carry a byte that can
+            // never differ. Named rather than `..` so the exhaustive
+            // destructure keeps failing the build on the next new field.
+            in_interrupt_entry: _,
         } = self;
 
         out.u8(*a)?;

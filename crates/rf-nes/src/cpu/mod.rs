@@ -189,6 +189,23 @@ pub struct Cpu {
     pending_irq_after: bool,
     i_flag_poll_snapshot: bool,
     nmi_hijack_consumed: bool,
+    /// Set by `exec::finish_interrupt_entry` for every interrupt-entry
+    /// sequence — `BRK`, hardware `IRQ`, hardware `NMI` alike — and read
+    /// by `exec::run_cycled`, which then suppresses that sequence's own
+    /// penultimate-cycle poll (ticket W2-20).
+    ///
+    /// nesdev.org/wiki/CPU_interrupts: "The interrupt sequences themselves
+    /// do not perform interrupt polling, meaning at least one instruction
+    /// from the interrupt handler will execute before another interrupt is
+    /// serviced." The **latch** still updates — an edge arriving during
+    /// the sequence is remembered and serviced after that first handler
+    /// instruction — it is only the poll that is skipped.
+    ///
+    /// blargg's `cpu_interrupts_v2` `2-nmi_and_brk` measures this in its
+    /// last two delay steps: the NMI lands in `BRK`'s cycles 6-7, and its
+    /// handler's opening `SEC` must run first, so the status the NMI
+    /// pushes reads `27` (carry set) and not `26`.
+    in_interrupt_entry: bool,
 }
 
 /// A plausible cold-boot register file (`S=$FD`, `I` set, matching the
@@ -215,6 +232,7 @@ impl Default for Cpu {
             pending_irq_after: false,
             i_flag_poll_snapshot: false,
             nmi_hijack_consumed: false,
+            in_interrupt_entry: false,
         }
     }
 }

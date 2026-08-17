@@ -137,6 +137,15 @@ impl CpuBus for CountingBus<'_> {
         self.inner.nmi_line()
     }
 
+    /// The sticky edge latch, not the level — see [`CpuBus::nmi_edge_pending`]
+    /// for why the hijack decision must not ask `nmi_line()`. Seeded from
+    /// `Cpu::nmi_edge_latched` at construction, so an edge latched by an
+    /// earlier still-unserviced instruction stays visible, and cleared
+    /// when `Cpu::step` services it.
+    fn nmi_edge_pending(&self) -> bool {
+        self.edge_latched_curr
+    }
+
     fn irq_line(&self) -> bool {
         self.inner.irq_line()
     }
@@ -177,18 +186,24 @@ fn run_cycled(
     cpu.jammed = false;
     cpu.i_flag_poll_snapshot = cpu.flag(super::FLAG_I);
     cpu.nmi_hijack_consumed = false;
+    cpu.in_interrupt_entry = false;
 
     let mut cb = CountingBus::new(bus, cpu.nmi_prev_asserted, cpu.nmi_edge_latched);
     body(cpu, &mut cb);
 
     cpu.nmi_prev_asserted = cb.nmi_prev_asserted;
     cpu.nmi_edge_latched = cb.edge_latched_curr;
-    cpu.pending_nmi_after = cb.edge_latched_prev;
+    // An interrupt-entry sequence does not poll (see
+    // `Cpu::in_interrupt_entry`): the latch above still carries an edge
+    // that arrived mid-sequence into the next instruction, but nothing
+    // becomes pending *now*, so the handler always gets its first
+    // instruction.
+    cpu.pending_nmi_after = !cpu.in_interrupt_entry && cb.edge_latched_prev;
     if cpu.nmi_hijack_consumed {
         cpu.nmi_edge_latched = false;
         cpu.pending_nmi_after = false;
     }
-    cpu.pending_irq_after = cb.irq_raw_prev && !cpu.i_flag_poll_snapshot;
+    cpu.pending_irq_after = !cpu.in_interrupt_entry && cb.irq_raw_prev && !cpu.i_flag_poll_snapshot;
     cb.count
 }
 
@@ -1326,20 +1341,36 @@ fn brk(cpu: &mut Cpu, bus: &mut dyn CpuBus) {
 /// ## Hijack model
 ///
 /// At the documented decision point (after `PCL` is pushed, before `P` is
-/// pushed), NMI hijacks a hijackable (`BRK`/`IRQ`) sequence if it's
-/// *currently* asserted (`bus.nmi_line()`) or was already
-/// latched-and-unserviced coming into this sequence
-/// (`cpu.nmi_edge_latched`) — i.e. "the line has been held low through
-/// this point, or an edge already happened and hasn't been serviced yet".
-/// This is deliberately a "hold or already-latched" model, not a
-/// sub-cycle-precise re-run of the edge detector through cycles 1-4: this
-/// engine only samples the line at the points it chooses to, so it can't
-/// distinguish a pulse that both asserts *and* releases entirely within
-/// this sequence's first four cycles from no pulse at all — the same
-/// resolution limit any single-sample-per-bus-op model has. Every
-/// hijacking scenario an external test can actually construct (assert
-/// NMI and hold it, or have an edge latch shortly before) is handled
-/// correctly.
+/// pushed), NMI hijacks a hijackable (`BRK`/`IRQ`) sequence if an NMI
+/// **edge has been latched and not yet serviced** as of that point —
+/// `bus.nmi_edge_pending()`, which for the real `CountingBus` is its
+/// sticky edge latch sampled through cycle 4, seeded from
+/// `cpu.nmi_edge_latched` so an edge from an earlier unserviced
+/// instruction still counts.
+///
+/// ## Why not `bus.nmi_line()` (ticket W2-20 — this was the bug)
+///
+/// Until W2-20 this asked whether the line was *currently asserted*,
+/// justified as a "hold or already-latched" model. That is wrong on the
+/// NES specifically, because the PPU holds NMI asserted for the whole of
+/// vblank — until `$2002` is read or `PPUCTRL` bit 7 is cleared — so the
+/// level stays true long after the edge it represents has been serviced.
+/// Any `BRK` executed in the remainder of vblank was therefore hijacked
+/// by an interrupt that had already run.
+///
+/// blargg's `cpu_interrupts_v2` `2-nmi_and_brk` is built to catch this:
+/// its NMI handler ends `bit SNDCHN`/`rti`, never touching `$2002`, and
+/// its first three delay steps put the NMI *before* the `BRK`. Under the
+/// level test those three ran the NMI, returned, then had the following
+/// `BRK` hijacked — the handler ran a second time and overwrote
+/// `nmi_flag` with `BRK`'s own B-set push, so the ROM's expected
+/// `27/26/26  36` printed as `36  00` and its 5-clock hijack window
+/// measured 8 clocks wide.
+///
+/// The sub-cycle caveat the old note raised still stands and is
+/// unrelated: this engine samples once per bus op, so a pulse that both
+/// asserts and releases inside a single cycle is invisible. What changed
+/// is that a *serviced* edge no longer keeps hijacking.
 fn finish_interrupt_entry(
     cpu: &mut Cpu,
     bus: &mut dyn CpuBus,
@@ -1347,10 +1378,16 @@ fn finish_interrupt_entry(
     default_vector: u16,
     hijackable: bool,
 ) {
+    // nesdev: an interrupt sequence performs no interrupt polling of its
+    // own — `run_cycled` reads this to suppress the poll it would
+    // otherwise commit (see `Cpu::in_interrupt_entry`). Set here rather
+    // than in the three callers so `BRK`, `IRQ` and `NMI` cannot drift
+    // apart, since all three share these cycles.
+    cpu.in_interrupt_entry = true;
     cpu.push(bus, (cpu.pc >> 8) as u8); // push PCH
     cpu.push(bus, cpu.pc as u8); // push PCL
                                  // *** decision point: NMI asserted up to here hijacks the vector ***
-    let vector = if hijackable && (bus.nmi_line() || cpu.nmi_edge_latched) {
+    let vector = if hijackable && (bus.nmi_edge_pending() || cpu.nmi_edge_latched) {
         // This hijack *is* that edge's servicing — `nmi_hijack_consumed`
         // tells `run_cycled`'s post-instruction commit to force
         // `nmi_edge_latched`/`pending_nmi_after` false (a direct write
