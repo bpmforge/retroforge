@@ -1500,7 +1500,9 @@
    "write_scope": [
     "crates/rf-nes/**",
     "crates/rf-harness/waivers.toml",
-    "docs/TESTING.md"
+    "docs/TESTING.md",
+    "crates/rf-harness/**",
+    "crates/rf-state/**"
    ],
    "depends_on": [
     "W2-20"
@@ -1512,7 +1514,7 @@
     "apu_test stays 8/8 and the $4017 write-delay polarity claim in `Apu::on_apu_cycle`'s doc is corrected or made true -- see notes"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E1-S1"
    ],
@@ -1522,7 +1524,16 @@
     "WHY IT IS THE IRQ AND NOT THE NMI: in the affected rows the IRQ column reads 00 (the IRQ handler never ran) while the NMI column carries the wrong C -- that combination means the NMI hijacked an IRQ sequence which had ALREADY STARTED. Had the NMI simply arrived early instead, the IRQ would have run afterwards and its column would be non-zero.",
     "ALREADY REFUTED, DO NOT RE-TRY: the $4017 write-delay polarity. nesdev gives the frame-counter reset a 3-or-4 CPU-cycle delay depending on whether the write lands on an APU cycle, which is a genuine parity dependence and looked like the obvious candidate for a parity-alternating error. Flipping `on_apu_cycle` at the `$4017` write site does NOT fix test 3 -- it only shifts which iterations are wrong.",
     "FINDING WORTH ACTING ON, from that same experiment: `Apu::on_apu_cycle`'s doc comment claims the polarity is \"ROM-pinned: blargg's apu_test/4-jitter measures the 3-vs-4-cycle choice directly, so the polarity in FrameCounter::write is measured\". IT IS NOT. apu_test passes 8/8 with the polarity flipped EITHER way, so that gate is vacuous for this fact and the comment overstates what is verified. Either find the ROM that does pin it, or correct the comment to say the polarity is unmeasured -- a doc comment asserting a measurement that does not exist is worse than one admitting the gap.",
-    "The frame counter ticks once per CPU cycle with nesdev's CPU-cycle step numbers (7457/14913/22371/29828/29829/29830), which is the standard model and is probably right; suspect the reset-delay arithmetic, the point at which `irq_flag` becomes visible to `CpuBus::irq_line`, or the interaction with W2-20's new no-poll-during-interrupt-entry rule before suspecting those constants."
+    "The frame counter ticks once per CPU cycle with nesdev's CPU-cycle step numbers (7457/14913/22371/29828/29829/29830), which is the standard model and is probably right; suspect the reset-delay arithmetic, the point at which `irq_flag` becomes visible to `CpuBus::irq_line`, or the interaction with W2-20's new no-poll-during-interrupt-entry rule before suspecting those constants.",
+    "DONE 2026-08-17. cpu_interrupts_v2 passes ALL FIVE sub-tests; its waiver is deleted, and `crates/rf-harness/waivers.toml` now contains NO waivers at all -- all ten ever raised (7 Tier-B by W2-09, 3 Tier-A CPU by W2-12) are gone, every one because the ROM passes.",
+    "THREE independent one-cycle facts, not one. The ticket predicted an APU frame-IRQ defect and that was right, but fixing it exposed two more, each invisible until the one before it was fixed -- a multi-sub-test ROM reports only its FIRST failure, so \"one ROM red\" was never one bug.",
+    "(1) THE CPU SEES THE APU IRQ ONE CYCLE LATE. The APU asserts at the end of a cycle; the CPU samples during the following one. `Apu::irq_line` now returns a view latched before each tick's work -- the same shape the PPU's NMI path already had via `NesBus::nmi_level_latch`, which is what made the omission findable. Without it `3-nmi_and_irq` recognised the frame IRQ a cycle early, and because the $4017 write delay has its own 3-vs-4-cycle parity rule, the ROM's SEVEN IDENTICAL rows came out ALTERNATING 21/20. DELIBERATELY NOT FIXED BY MOVING THE FRAME COUNTER: setting the reset delay to 4/5 instead of 3/4 makes the same ROM pass and is the wrong fix -- blargg's apu_test/6-irq_flag_timing pins the flag itself to \"29831 clocks after writing $00 to $4017\", which that change breaks by a cycle. Measured both ways before choosing.",
+    "(2) THE OAM-DMA GET/PUT PHASE WAS BACKWARDS. nesdev: \"at power-on, whether the first CPU cycle is get or put is random\", so the crate picked one and documented the choice; `4-irq_and_dma` pins it against hardware. Under the old phase the DMA ran one cycle short and the ROM's 8/9 boundary landed at +526 where hardware puts it at +527 -- with all 528 OTHER rows already matching, which is what localised it to the DMA length rather than to the poll. An arbitrary choice resolved by measurement; the invariant the unit tests protect (the two alignments differ by exactly one cycle, {513, 514}) is untouched, and the parameter was renamed from `start_cycle_odd` to `needs_alignment_cycle` because the parity was never the point.",
+    "(3) A TAKEN, NON-PAGE-CROSSING BRANCH POLLS ONE CYCLE EARLIER THAN EVERY OTHER INSTRUCTION. `5-branch_delays_irq` states the rule in prose and marks the single differing row `*** This is the special case`. Implemented by keeping one more sample of history in `CountingBus` (`edge_latched_prev2`/`irq_raw_prev2`) and a `Cpu::branch_polls_one_cycle_early` flag set only on that exact branch shape -- intra-instruction, so not serialized.",
+    "SAVE STATE: `irq_line_delayed` IS serialized (APU_ chunk -> version 2 via rf-state's per-tag registry, the mechanism W2-19 built). It is one cycle behind the flags BY DESIGN, so reconstructing it at load from the current flags would make a restored machine see the line a cycle earlier than the saved one did -- precisely the timing the field exists to model.",
+    "RE-BASELINES, each with its reason and none taken to go green. rf_scroller_split_timing's two frozen histograms moved by three writes between adjacent scanlines (total 1182 and later_than_18 734/448 both UNCHANGED, so what they guard is unaffected). The rf_scroller 5-minute replay goldens moved -- and this is the one worth reading: the DMA change shifts rendering by a cycle every frame, so the pixels HAD to move, but all three checks that make those goldens mean anything passed FIRST and are asserted before the frozen comparison: recording vs independent replay byte-identical, every recorded periodic state hash matched, and the anti-vacuity witnesses (`player_x` reaches PLAYER_X_AT_END, `columns_streamed` reaches COLUMNS_STREAMED_AT_END) unchanged. The game plays out identically; only the pixels moved. Alter Ego's replay goldens did NOT move.",
+    "Five unit tests encoded the superseded conventions (2 asserting the APU IRQ line reflects flags instantly, 3 asserting the old DMA parity) and now assert the corrected ones -- including the lag itself, so the new behaviour is pinned rather than merely tolerated.",
+    "SCOPE AMENDMENTS (vetoable, recorded): crates/rf-harness/** (the frozen histograms and replay goldens live in its tests) and crates/rf-state/** (the APU_ version bump)."
    ]
   },
   {

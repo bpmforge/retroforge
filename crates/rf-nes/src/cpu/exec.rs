@@ -77,8 +77,12 @@ struct CountingBus<'a> {
     nmi_prev_asserted: bool,
     edge_latched_curr: bool,
     edge_latched_prev: bool,
+    /// Two samples back, for the taken-branch poll (ticket W2-21) — see
+    /// `Cpu::branch_polls_one_cycle_early`.
+    edge_latched_prev2: bool,
     irq_raw_curr: bool,
     irq_raw_prev: bool,
+    irq_raw_prev2: bool,
 }
 
 impl<'a> CountingBus<'a> {
@@ -98,8 +102,10 @@ impl<'a> CountingBus<'a> {
             nmi_prev_asserted: nmi_now,
             edge_latched_curr: edge_now,
             edge_latched_prev: edge_now,
+            edge_latched_prev2: edge_now,
             irq_raw_curr: irq_now,
             irq_raw_prev: irq_now,
+            irq_raw_prev2: irq_now,
         }
     }
 
@@ -107,6 +113,8 @@ impl<'a> CountingBus<'a> {
     /// bus op (nesdev: the edge/level detectors sample "during φ2 of each
     /// CPU cycle").
     fn sample(&mut self) {
+        self.edge_latched_prev2 = self.edge_latched_prev;
+        self.irq_raw_prev2 = self.irq_raw_prev;
         self.edge_latched_prev = self.edge_latched_curr;
         self.irq_raw_prev = self.irq_raw_curr;
         let nmi_now = self.inner.nmi_line();
@@ -187,6 +195,7 @@ fn run_cycled(
     cpu.i_flag_poll_snapshot = cpu.flag(super::FLAG_I);
     cpu.nmi_hijack_consumed = false;
     cpu.in_interrupt_entry = false;
+    cpu.branch_polls_one_cycle_early = false;
 
     let mut cb = CountingBus::new(bus, cpu.nmi_prev_asserted, cpu.nmi_edge_latched);
     body(cpu, &mut cb);
@@ -198,12 +207,19 @@ fn run_cycled(
     // that arrived mid-sequence into the next instruction, but nothing
     // becomes pending *now*, so the handler always gets its first
     // instruction.
-    cpu.pending_nmi_after = !cpu.in_interrupt_entry && cb.edge_latched_prev;
+    // A taken, non-page-crossing branch polls one cycle earlier than
+    // every other instruction (see `Cpu::branch_polls_one_cycle_early`).
+    let (nmi_poll, irq_poll) = if cpu.branch_polls_one_cycle_early {
+        (cb.edge_latched_prev2, cb.irq_raw_prev2)
+    } else {
+        (cb.edge_latched_prev, cb.irq_raw_prev)
+    };
+    cpu.pending_nmi_after = !cpu.in_interrupt_entry && nmi_poll;
     if cpu.nmi_hijack_consumed {
         cpu.nmi_edge_latched = false;
         cpu.pending_nmi_after = false;
     }
-    cpu.pending_irq_after = !cpu.in_interrupt_entry && cb.irq_raw_prev && !cpu.i_flag_poll_snapshot;
+    cpu.pending_irq_after = !cpu.in_interrupt_entry && irq_poll && !cpu.i_flag_poll_snapshot;
     cb.count
 }
 
@@ -1258,6 +1274,11 @@ fn branch(cpu: &mut Cpu, bus: &mut dyn CpuBus, taken: bool) {
         if new_pc & 0xFF00 != old_pc & 0xFF00 {
             let wrong = (old_pc & 0xFF00) | (new_pc & 0x00FF);
             bus.read(wrong);
+        } else {
+            // Taken, no page cross: the one instruction whose interrupt
+            // poll is a cycle earlier than the general rule (ticket
+            // W2-21) — see `Cpu::branch_polls_one_cycle_early`.
+            cpu.branch_polls_one_cycle_early = true;
         }
         cpu.pc = new_pc;
     }

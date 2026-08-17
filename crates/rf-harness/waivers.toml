@@ -48,19 +48,20 @@
 # `Controller::default`, and the manifest comments on the three suites.
 
 # ----------------------------------------------------------------------
-# Tier-A CPU known-fail, narrowed 2026-08-16 by W2-20.
+# NO WAIVERS. This file is deliberately empty of them as of 2026-08-17.
 #
-# W2-12 raised THREE waivers here. Two are now DELETED rather than
-# re-dated, because the ROMs pass: `cpu_timing_test6` (the interrupt-poll
-# fix -- its "FAIL OP :$00" was never a BRK timing bug) and
-# `instr_test-v5` (LXA's magic constant moved to $FF; see
-# `cpu::tests::vectors::LXA_CONVENTION_CLASH_OPCODE` for the oracle
-# clash that documents). The one below is re-pointed at the NEW ticket
-# that owns what is actually left, which is not a CPU defect at all.
-
-[[waiver]]
-suite = "cpu_interrupts_v2"
-rom = "cpu_interrupts"
-justification = "Test 2 of 5 (`2-nmi_and_brk`) PASSES as of W2-20 -- exact, all ten delay rows. What fails now is test 3 of 5, `3-nmi_and_irq`, which W2-20 unmasked and which is an APU frame-counter IRQ timing defect, not a CPU one: the IRQ is recognised ~2 CPU cycles early and the error alternates with iteration parity, so the ROM's seven identical rows come out alternating 21/20. Verified NOT to be the $4017 3-vs-4-cycle write-delay polarity (flipping it does not fix test 3). Owned by W2-21."
-expiry = "2026-11-01"
-ticket = "W2-21"
+# History, so the emptiness reads as earned rather than as a file nobody
+# maintains: W2-09's first Tier-B nightly raised 7, W2-12's first run of
+# the Tier-A CPU suites raised 3. All ten are gone, every one deleted
+# because the ROM passes rather than re-dated:
+#   * W1-05d  ppu_vbl_nmi/10-even_odd_timing
+#   * W2-19   the Tier-B seven (PPU decay register, controller power-on
+#             shift state, two measured frame budgets, one protocol mistag)
+#   * W2-20   instr_test-v5 ($AB convention) and cpu_timing_test6
+#   * W2-21   cpu_interrupts_v2, the last one -- all 5 sub-tests pass
+#
+# An empty waiver list is the strongest statement this file can make, and
+# also the most fragile: the moment something legitimately needs waiving,
+# add it here with a justification, an expiry and an OPEN ticket, exactly
+# as the schema above requires. Do not treat emptiness as a target to
+# protect by looking away from a red ROM.

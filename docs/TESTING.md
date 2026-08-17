@@ -150,6 +150,41 @@ produced two findings worth reading before trusting any tier label:
    named exception in the unofficial vector suite, carrying a guard that
    fails if `$AB` ever starts passing.
 
+**`crates/rf-harness/waivers.toml` is now EMPTY of waivers (2026-08-17).**
+All ten ever raised — seven Tier-B by W2-09, three Tier-A CPU by W2-12 —
+were deleted because the ROM passes, never re-dated. That is the state the
+waiver mechanism exists to make reachable, and it is also the most fragile
+state: the moment something legitimately needs waiving, it gets an entry
+with a justification, an expiry and an open ticket. Emptiness is not a
+target to protect by looking away from a red ROM.
+
+**W2-21 finished `cpu_interrupts_v2` (2026-08-17)**, and what it took is
+the point: after W2-20 fixed two interrupt bugs, three more *independent
+one-cycle facts* stood between this engine and that one ROM.
+
+1. **The CPU sees the APU's IRQ one cycle after the APU raises it.** The
+   PPU's NMI path already modelled exactly this (`NesBus::nmi_level_latch`);
+   the APU had no equivalent. Deliberately NOT fixed by moving the frame
+   counter — setting its reset delay to 4/5 instead of 3/4 makes the same
+   ROM pass and would break `apu_test/6-irq_flag_timing`, which pins the
+   flag to "29831 clocks after writing $00 to $4017". The flag is set when
+   the wiki says; the CPU's *view of the line* is what lags.
+2. **The OAM-DMA get/put phase was backwards.** nesdev says the power-on
+   phase is random, so this crate picked one and documented the choice —
+   `4-irq_and_dma` pins it against hardware. Under the old phase the DMA
+   ran one cycle short and the ROM's `8`/`9` boundary landed at `+526`
+   where hardware puts it at `+527`, with all 528 other rows matching. An
+   arbitrary choice resolved by measurement, not a rule changed.
+3. **A taken, non-page-crossing branch polls interrupts a cycle earlier
+   than everything else.** `5-branch_delays_irq` states the rule and marks
+   the single row that proves it with `*** This is the special case`.
+
+Lesson worth keeping: **each of these was invisible until the one before
+it was fixed.** A multi-sub-test ROM reports only its first failure, so
+"one ROM red" was never one bug — and the frozen replay goldens moved on
+the DMA change, caught only because they were run explicitly (`cargo test
+--workspace` reports them as ignored).
+
 **W2-19 cleared the whole Tier-B waiver set (2026-08-16)** — all seven
 entries deleted rather than re-dated, and the nightly runs green with none.
 Four findings from it are worth carrying forward:
@@ -197,7 +232,7 @@ mistag, flagged since W1-05b and deliberately NOT absorbed here) and
 | `instr_timing` | instruction cycle counts | FR-CORE-020 | A-local — **wired (W2-12), PASSES** | $6000 = 0 |
 | `branch_timing_tests` (3 ROMs) | branch timing, page-cross | FR-CORE-020 | A-local — **wired (W2-12), 3/3 PASS** | **NOT `$6000`**: 2005-era ROMs like `sprite_hit_tests`, scored on the RAM-result byte at `$00F8`. Under the `six_thousand` tag the manifest used to carry, all three reported "signature never became valid" — a false hang, and three false failures. Corrected in `tests/rom-manifest.toml` |
 | `cpu_timing_test6` | official-instruction cycle counts | FR-CORE-020 | A-local — **wired (W2-12), PASSES as of W2-20** — its `FAIL OP :$00` was never a BRK *timing* bug, it was the interrupt poll | **NOT `$6000`**: verdict is only on the nametable, scored by the new `screen_text` protocol using blargg's own rule ("if a test prints 'passed', it passed") |
-| `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A-local — **wired (W2-12)**; `2-nmi_and_brk` PASSES as of W2-20, now fails at `3-nmi_and_irq` (test 3 of 5) which W2-20 unmasked — an APU frame-IRQ timing gap, not a CPU one; waived against **W2-21** | $6000 = 0 |
+| `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A-local — **5/5 as of W2-21**; took three tickets and five distinct one-cycle facts to get there (W2-12 wired it, W2-20 fixed the hijack and the interrupt-entry poll, W2-21 the APU IRQ lag, the OAM-DMA phase and the taken-branch poll) | $6000 = 0 |
 | `cpu_dummy_reads/writes`, `cpu_exec_space` | dummy bus cycles, open bus | FR-CORE-020 | B — **5/5 as of W2-19** (was 1/5). `cpu_dummy_reads` is **`screen_text`**, not `$6000` — it was mistagged, which is why it looked like a hang | $6000 = 0, except `cpu_dummy_reads` (screen) |
 | blargg `ppu_vbl_nmi` (10 sub-ROMs, `rom_singles/`) | VBL/NMI to the PPU cycle | FR-CORE-022 | A-local | $6000 = 0 — **10/10 clean, no waiver** (W1-05c took it 4→9, W1-05d closed `10-even_odd_timing`; see `crate::ppu::Ppu::render_enable_pipe`) |
 | `sprite_hit_tests` | sprite-0 hit | FR-CORE-023 | A-local | RAM-result byte (`$00F8`) = 1 — NOT `$6000` (ticket W1-05b correction; this ROM generation predates blargg's `$6000` runtime, see `tests/rom-manifest.toml`'s comment on this suite) |

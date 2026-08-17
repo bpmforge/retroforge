@@ -206,6 +206,23 @@ pub struct Cpu {
     /// handler's opening `SEC` must run first, so the status the NMI
     /// pushes reads `27` (carry set) and not `26`.
     in_interrupt_entry: bool,
+    /// Set by `exec::branch` when the branch is TAKEN and does NOT cross a
+    /// page, and read by `exec::run_cycled`, which then polls one cycle
+    /// earlier than its usual second-to-last-cycle rule (ticket W2-21).
+    ///
+    /// blargg's `cpu_interrupts_v2` `5-branch_delays_irq` states the rule
+    /// and marks the row that proves it: "A taken non-page-crossing branch
+    /// ignores IRQ during its last clock, so that next instruction
+    /// executes before the IRQ. Other instructions would execute the NMI
+    /// before the next instruction." Its `test_branch_taken` table flags
+    /// the single differing row with `*** This is the special case`, and
+    /// that one row was the whole of what this engine still got wrong once
+    /// the frame-IRQ lag and the DMA phase were fixed.
+    ///
+    /// Intra-instruction, like `in_interrupt_entry`: written and consumed
+    /// inside one `run_cycled`, so it never crosses a `Cpu::step` boundary
+    /// and is deliberately not serialized.
+    branch_polls_one_cycle_early: bool,
 }
 
 /// A plausible cold-boot register file (`S=$FD`, `I` set, matching the
@@ -233,6 +250,7 @@ impl Default for Cpu {
             i_flag_poll_snapshot: false,
             nmi_hijack_consumed: false,
             in_interrupt_entry: false,
+            branch_polls_one_cycle_early: false,
         }
     }
 }

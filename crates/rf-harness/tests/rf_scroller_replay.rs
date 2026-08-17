@@ -415,13 +415,38 @@ fn reachable_state_hash(bus: &NesBus, cpu: &Cpu) -> String {
 /// `gem_order[]` rotation scheme's own phase alignment, not a fixture
 /// property -- the redesigned `update_gems()` that fixed the OAM transfer
 /// also changed that incidental alignment).
+/// RE-FROZEN 2026-08-17 by ticket **W2-21**, and the re-verification the
+/// doc above demands was done by the test itself rather than by eye.
+///
+/// Cause: W2-21 flipped the OAM-DMA get/put phase (resolved against
+/// blargg's `cpu_interrupts_v2` `4-irq_and_dma`, which pins it) and
+/// corrected the CPU's view of the APU IRQ line and the taken-branch
+/// interrupt poll. This fixture runs an OAM DMA every frame, so a
+/// one-cycle change in DMA length shifts rendering by a cycle and every
+/// golden hash necessarily moves.
+///
+/// Why this is a re-baseline and not a masked regression — all three
+/// checks that make these goldens *mean* something still passed, and they
+/// are asserted BEFORE the frozen comparison, so the run reached this
+/// point having already proved them:
+///   * the recording run and the INDEPENDENT replay produced byte-identical
+///     goldens (determinism intact);
+///   * every recorded periodic state hash matched on replay;
+///   * the anti-vacuity witnesses are unchanged — `player_x` still reaches
+///     `PLAYER_X_AT_END` and `columns_streamed` still reaches
+///     `COLUMNS_STREAMED_AT_END`, reproduced from the log alone.
+///
+/// The game therefore plays out identically; only the pixels moved, which
+/// is exactly what a one-cycle DMA shift does. (W2-11's lesson — a replay
+/// can look healthy by hashes while the player has actually died and
+/// returned to the title screen — is what those witnesses exist for.)
 const GOLDEN_HASHES: [&str; 6] = [
-    "638cb9d8acab9b2022ac807dde10c664b34e6badfb79f77d01d9be247d903caa",
-    "55d490ad3f4e156aae3189531ddf348b07f7a679abe37b57eef5bf380d2793d0",
-    "392608a0b7064966b69d94d0ea0a0d27e436bab0ae945d0989be2be35f886e10",
-    "92096dc72f76c4fdc285aa68fb2ba304c7da94e8d333e29c995a125c65c11f16",
-    "6ec87b2dd3cba22e09b57ed791dd336dd94d948e1714f8fd9810c7d78ba2c01c",
-    "58b28e63340643fd854acc605a8c58531a25b197b4a4ffd3b69db43465334580",
+    "5b215ab63ae0c3f05eb338fc1b3c21be0801c1764bcc5882e5418dc60fa54d29",
+    "f0023c286a5b5501f2653e32ce6bbbd9535a4348912cc650dc409c8e14319a2d",
+    "10a4e6fdc85f4813282fa8e3382fc6850477d970cfbbf016d84c89150fe6dfc8",
+    "e30948c92dbc596e86824947237904e7eb9add527b97a82a7e54359f8ec65a9e",
+    "6482a3febd05bec94a2b0a0c1d07d03596f3b11916c56d388845c1aec2198ce1",
+    "a60a937fa1f0fe2a8e6b868b85e394a8b3848ada647eb3e7b0432d8e705638e7",
 ];
 
 /// Fast anti-vacuity check (NOT `#[ignore]`'d -- runs on every

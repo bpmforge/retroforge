@@ -39,6 +39,8 @@ impl Cpu {
             // never differ. Named rather than `..` so the exhaustive
             // destructure keeps failing the build on the next new field.
             in_interrupt_entry: _,
+            // Same reasoning as above (ticket W2-21).
+            branch_polls_one_cycle_early: _,
         } = self;
 
         out.u8(*a)?;
