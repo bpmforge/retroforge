@@ -86,6 +86,8 @@ impl Ppu {
             // Output, not state — refused below rather than dropped.
             completed,
             dot_clock,
+            last_2007_read_dot,
+            last_2007_read_value,
             a12_low_since,
             pending_a12_edges,
             // Caller configuration, not machine state: the event mask is
@@ -150,6 +152,12 @@ impl Ppu {
         out.u8(*active_sprite_count)?;
         out.u8(*sprite_pattern_lo_latch)?;
         out.u64(*dot_clock)?;
+        // Ticket W2-01d: decides whether the next `$2007` read is the
+        // second half of a double read and therefore reports a held
+        // value. Dropping it would let a restored machine return a fresh
+        // byte where the saved one returned a stale one.
+        out.opt_u64(*last_2007_read_dot)?;
+        out.u8(*last_2007_read_value)?;
         out.opt_u64(*a12_low_since)?;
         out.u32(*pending_a12_edges)
     }
@@ -197,6 +205,8 @@ impl Ppu {
         self.active_sprite_count = inp.u8()?;
         self.sprite_pattern_lo_latch = inp.u8()?;
         self.dot_clock = inp.u64()?;
+        self.last_2007_read_dot = inp.opt_u64()?;
+        self.last_2007_read_value = inp.u8()?;
         self.a12_low_since = inp.opt_u64()?;
         self.pending_a12_edges = inp.u32()?;
         self.completed.clear();

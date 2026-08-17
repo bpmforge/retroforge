@@ -23,7 +23,7 @@
 //! author documented as correct", never "the one variant we happen to
 //! produce".
 //!
-//! ## Status: 4 of 5 (W2-01c), and the last one is separately diagnosed
+//! ## Status: 5 of 5 (W2-01c, W2-01d)
 //!
 //! This suite is W2-01b's acceptance criterion and it is **not met**; the
 //! ticket carries the block note, `crates/rf-harness/waivers.toml` the
@@ -44,10 +44,13 @@
 //!   back-to-back `$4016` reads a DMC halt puts on the bus hold one strobe
 //!   asserted — one edge, one extra bit, which is exactly the `07` this
 //!   ROM wants. See `NesBus::last_joy_read_cycle`.
-//! - `double_2007_read` — CRC `D84F6815`, none of the four accepted. It
-//!   needs a PPU-side behavior this crate does not implement at all
-//!   ("Double read of $2007 sometimes ignores extra read, and puts odd
-//!   things into buffer"), which is not a DMA-model question.
+//! - `double_2007_read` — CRC `85CFD627`, the first of the four accepted,
+//!   **as of ticket W2-01d**. The ROM provokes it with `lda $20F7,x` where
+//!   `x = $10`: `$20F7 + $10 = $2107` crosses a page, so the 6502 issues
+//!   its dummy read at `$2007` and the real read at `$2107` (also `$2007`
+//!   after mirroring) on back-to-back cycles. The second read reports the
+//!   value the first already presented, while the buffer and `v` still
+//!   advance twice — see `Ppu::last_2007_read_dot`.
 
 use std::path::{Path, PathBuf};
 
@@ -128,11 +131,13 @@ const ROMS: &[Rom] = &[
         expected_pass: true,
     },
     // "Double read of $2007 sometimes ignores extra read, and puts odd
-    // things into buffer" -- an unimplemented PPU behavior, not a DMA one.
+    // things into buffer" -- a PPU behaviour, not a DMA one. Implemented
+    // in ticket W2-01d; this engine now lands on the FIRST of the four
+    // documented variants (`22 44 55 66 77`, CRC 85CFD627).
     Rom {
         name: "double_2007_read",
         accepted: &["85CFD627", "F018C287", "440EF923", "E52F41A5"],
-        expected_pass: false,
+        expected_pass: true,
     },
     // "Read of $2007 just before write behaves normally."
     Rom {
@@ -148,7 +153,7 @@ const ROMS: &[Rom] = &[
 /// passing, this test fails too, because that means the block note is stale
 /// and the ticket can move.
 #[test]
-fn dmc_dma_during_read4_four_of_five_pass_and_the_other_fails_as_recorded() {
+fn dmc_dma_during_read4_all_five_pass() {
     let mut missing = 0;
     let mut surprises = Vec::new();
     for rom in ROMS {

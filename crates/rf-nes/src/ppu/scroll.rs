@@ -39,7 +39,23 @@ impl Ppu {
                 self.refresh_decay(value, 0xFF);
                 value
             }
-            7 => self.read_data(),
+            7 => {
+                // The double-read quirk: a `$2007` read on the CPU cycle
+                // immediately after another one reports the earlier
+                // value, while the buffer/`v` side effects below still
+                // happen twice (ticket W2-01d; see
+                // `Ppu::last_2007_read_dot`).
+                let contiguous = self.last_2007_read_dot == Some(self.dot_clock.wrapping_sub(3));
+                let fresh = self.read_data();
+                let reported = if contiguous {
+                    self.last_2007_read_value
+                } else {
+                    fresh
+                };
+                self.last_2007_read_dot = Some(self.dot_clock);
+                self.last_2007_read_value = reported;
+                reported
+            }
             // "$2000/$2001/$2003/$2005/$2006 DDDDDDDD": write-only
             // registers read back as the decay register and — test 5 —
             // do NOT refresh it.

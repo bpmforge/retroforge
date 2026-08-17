@@ -747,7 +747,8 @@
    "crate": "rf-nes",
    "write_scope": [
     "crates/rf-nes/src/ppu/**",
-    "crates/rf-nes/src/apu/tests/dmc_dma_rom.rs"
+    "crates/rf-nes/src/apu/tests/dmc_dma_rom.rs",
+    "crates/rf-state/**"
    ],
    "depends_on": [
     "W2-01b"
@@ -757,13 +758,21 @@
     "the in-crate PPU suite is unregressed: read_buffer, both golden frames, ppu_vbl_nmi 10/10, sprite_hit_tests 11/11"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E1-S1"
    ],
    "notes": [
     "SPLIT OUT OF W2-01b 2026-08-16 (Brad's ruling). This is NOT a DMA defect and never was -- it is a PPU behavior this crate does not implement in any form, stated by the ROM's own header: \"Double read of $2007 sometimes ignores extra read, and puts odd things into buffer\". It lives in ppu/** (the $2007 delayed read buffer, `crate::ppu::scroll`'s read_data path), which is why it could not have been inside W2-01b's apu/** write scope.",
-    "MEASURED in W2-01b: this engine prints CRC D84F6815, none of the four accepted (85CFD627, F018C287, 440EF923, E52F41A5), and the value is IDENTICAL across every DMA-model configuration tried -- which is the evidence that it does not share W2-01c's root cause. Its screen text (22 33 44 55 66 / 33 44 55 66 77) is close to two of the documented variants, so the gap is narrow and specific, not a wholesale mismatch."
+    "MEASURED in W2-01b: this engine prints CRC D84F6815, none of the four accepted (85CFD627, F018C287, 440EF923, E52F41A5), and the value is IDENTICAL across every DMA-model configuration tried -- which is the evidence that it does not share W2-01c's root cause. Its screen text (22 33 44 55 66 / 33 44 55 66 77) is close to two of the documented variants, so the gap is narrow and specific, not a wholesale mismatch.",
+    "DONE 2026-08-17. double_2007_read prints `22 33 44 55 66` / `22 44 55 66 77` and CRC **85CFD627** -- the FIRST of the four variants its source header documents. dmc_dma_during_read4 is now 5 of 5, and wave 2 is complete.",
+    "WHAT THE ROM ACTUALLY DOES, from its source: it provokes the double read with `lda $20F7,x` where x = $10. $20F7 + $10 = $2107, which CROSSES A PAGE, so the 6502 issues its dummy read at the wrong address ($2007) and then the real read at $2107 -- which also mirrors to $2007. Two $2007 reads on back-to-back CPU cycles. The first `lda $20F7,x` with x = $00 does not cross, reads $2007 once, and is the control line.",
+    "MECHANISM: the second of two back-to-back $2007 reads reports the value the FIRST one already presented -- the PPU cannot drive a fresh byte one cycle later -- while the read buffer and `v` still advance twice. That is exactly the difference between this crate's old `33 44 55 66 77` (both reads counted, buffer advanced twice) and the ROM's first accepted variant `22 44 55 66 77` (same internal progress, one stale value out). The ROM's own header names the behaviour: \"Double read of $2007 sometimes ignores extra read, and puts odd things into buffer\".",
+    "SAME SHAPE AS W2-01c, ONE DAY APART, AND WORTH GENERALISING: both were a second access on a back-to-back cycle reporting a held value rather than a fresh one. The controller case suppresses the shift; this one does not suppress the side effects, only the reported value -- so they are the same *class* of bug (a device that cannot respond twice in consecutive cycles) with different internal consequences. Do not assume a third instance behaves like either without checking which half is held.",
+    "IMPLEMENTED IN ppu/** ONLY, as the ticket's write scope required, by keying off `Ppu::dot_clock` rather than the bus's `master_cycle`: `NesBus::read` performs the register read BEFORE ticking that cycle's three dots, so two reads on consecutive CPU cycles are exactly three dots apart. No bus-layer plumbing was needed.",
+    "SAVE STATE: `last_2007_read_dot`/`last_2007_read_value` are serialized and PPU_ moved to version 3 (it had gone to 2 in W2-19). They decide whether the next $2007 read reports a held value, so dropping them would let a restored machine return a fresh byte where the saved one returned a stale one.",
+    "VERIFIED, criterion 2 in full: ppu_vbl_nmi 10/10, sprite_hit_tests 11/11, nestest 8991/8991 byte-exact, the in-crate read_buffer suite and both golden frames green, accuracy table 31 rows. Both #[ignore]d 5-minute replay goldens re-run under --release and UNMOVED.",
+    "SCOPE AMENDMENT (vetoable, recorded): crates/rf-state/** for the PPU_ version bump."
    ]
   },
   {

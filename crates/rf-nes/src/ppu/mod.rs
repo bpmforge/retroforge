@@ -627,6 +627,31 @@ pub struct Ppu {
     /// "9 PPU dots", exact because `NesBus::tick_master` guarantees
     /// exactly 3 dots per CPU cycle always).
     dot_clock: u64,
+    /// `dot_clock` at the most recent CPU read of `$2007`, and the value
+    /// that read returned — the state behind the double-read quirk
+    /// (ticket W2-01d).
+    ///
+    /// blargg's `dmc_dma_during_read4/double_2007_read` names it in its
+    /// own header: "Double read of $2007 sometimes ignores extra read,
+    /// and puts odd things into buffer". It provokes the case with
+    /// `lda $20F7,x` where `x = $10`: `$20F7 + $10 = $2107` **crosses a
+    /// page**, so the 6502 issues its dummy read at `$2007` and the real
+    /// read at `$2107` (also `$2007` after mirroring) on back-to-back
+    /// cycles.
+    ///
+    /// On hardware the second of those two reads reports the value the
+    /// first one already presented — the PPU cannot drive a fresh byte
+    /// one cycle later — while the read buffer and `v` still advance
+    /// twice. That is the difference between this crate's old
+    /// `33 44 55 66 77` and the ROM's first accepted variant
+    /// `22 44 55 66 77`: same internal progress, one stale value out.
+    ///
+    /// Held in dots rather than CPU cycles because that is the clock this
+    /// module owns: [`NesBus::read`] performs the register read *before*
+    /// ticking the cycle's three dots, so two reads on consecutive CPU
+    /// cycles are exactly three dots apart.
+    last_2007_read_dot: Option<u64>,
+    last_2007_read_value: u8,
     /// The `dot_clock` value at which A12 was first observed low since
     /// the last consumed rising edge; `None` while A12 is high or while a
     /// low period hasn't been sampled yet.
@@ -723,6 +748,8 @@ impl Ppu {
             line_buffer: [BLANK_PIXEL; 256],
             completed: Vec::with_capacity(240),
             dot_clock: 0,
+            last_2007_read_dot: None,
+            last_2007_read_value: 0,
             a12_low_since: None,
             pending_a12_edges: 0,
             event_mask: EventMask::NONE,

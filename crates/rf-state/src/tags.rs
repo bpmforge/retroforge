@@ -46,15 +46,19 @@ pub const TAG_REGISTRY: &[TagInfo] = &[
         // reads return it -- so it had to be serialized, and a payload
         // that grew is a payload that changed.
         //
+        // Version 3 as of ticket W2-01d, which added the `$2007`
+        // double-read latch (`Ppu::last_2007_read_dot`/`_value`).
+        //
         // No migration fn: `Container::decode_default` turns an
         // unexpected version into `CannotMigrate`, which SAVE_STATES.md
-        // §2 allows as the alternative to migrating. A pre-W2-19 state
-        // is refused by name rather than misparsed -- the failure worth
-        // preventing is a v1 payload read as v2, which would restore a
-        // wrong PPU silently. Nothing has shipped (the tagged release is
-        // W5-05), so no such file exists outside a working tree.
+        // §2 allows as the alternative to migrating. An older state is
+        // refused by name rather than misparsed -- the failure worth
+        // preventing is an old payload read as the current one, which
+        // would restore a wrong PPU silently. Nothing has shipped (the
+        // tagged release is W5-05), so no such file exists outside a
+        // working tree.
         required: true,
-        current_version: 2,
+        current_version: 3,
     },
     TagInfo {
         tag: *b"APU_",
