@@ -1513,7 +1513,7 @@
     "nes6502 2,560,000/2,560,000 and nestest 8991/8991 byte-exact are unregressed -- whatever changes here is on a path both already cover"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ],
