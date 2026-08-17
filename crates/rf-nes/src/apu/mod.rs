@@ -130,6 +130,30 @@ pub struct Apu {
     ///   used rather than two so that when W2-01b does measure it, there is
     ///   a single fact to correct, not a hidden relative offset.
     on_apu_cycle: bool,
+    /// The IRQ line **as the CPU may observe it this cycle** — one CPU
+    /// cycle behind the flags themselves (ticket W2-21).
+    ///
+    /// The APU asserts its interrupt at the end of a cycle; the CPU
+    /// samples the line during the following one. Modelling that lag is
+    /// what the PPU's NMI path already does via
+    /// [`crate::system::NesBus::nmi_level_latch`], for the same reason
+    /// and with the same one-tick shape.
+    ///
+    /// Without it, `cpu_interrupts_v2`'s `3-nmi_and_irq` recognises the
+    /// frame IRQ one cycle early. That ROM prints seven identical rows
+    /// ("Same result for 7 clocks before IRQ is vectored"); an
+    /// engine one cycle fast produces rows that ALTERNATE, because the
+    /// `$4017` write-delay's own 3-vs-4-cycle parity rule then decides,
+    /// per iteration, whether the sequence starts before or after the
+    /// `clc` whose carry the ROM reads back.
+    ///
+    /// **Not modelled by moving the frame counter.** Setting the reset
+    /// delay to 4/5 instead of 3/4 makes the same ROM pass, and it is
+    /// the wrong fix: blargg's `apu_test/6-irq_flag_timing` pins the
+    /// flag itself to "29831 clocks after writing $00 to $4017", which
+    /// that change would break by a cycle. The flag is set when the wiki
+    /// says; it is the CPU's *view* of the line that lags.
+    irq_line_delayed: bool,
 }
 
 impl Default for Apu {
@@ -155,6 +179,7 @@ impl Apu {
             sample_phase: CYCLES_PER_SAMPLE_FIXED,
             samples: Vec::with_capacity(SAMPLES_PER_FRAME_HINT),
             on_apu_cycle: false,
+            irq_line_delayed: false,
         }
     }
 
@@ -237,6 +262,11 @@ impl Apu {
 
     /// Advance one CPU cycle. See the module doc's clocking contract.
     pub fn tick(&mut self) {
+        // Sampled BEFORE this cycle's work, so a flag raised below is not
+        // visible to the CPU until the next cycle (see
+        // `irq_line_delayed`). Same ordering as `tick_ppu_dot`'s
+        // `nmi_level_latch = ppu.nmi_line()` before `ppu.tick()`.
+        self.irq_line_delayed = self.irq_line_now();
         self.on_apu_cycle = !self.on_apu_cycle;
 
         let clocks = self.frame_counter.tick();
@@ -353,6 +383,12 @@ impl Apu {
     /// line is continuously asserted until the interrupt flag is cleared."
     /// `crate::system::NesBus::irq_line` ORs this with the mapper's.
     pub fn irq_line(&self) -> bool {
+        self.irq_line_delayed
+    }
+
+    /// The undelayed line, for [`Apu::tick`]'s own latch and for the
+    /// acknowledge path. Not what the CPU sees — see `irq_line_delayed`.
+    fn irq_line_now(&self) -> bool {
         self.frame_counter.irq_flag || self.dmc.irq_flag
     }
 

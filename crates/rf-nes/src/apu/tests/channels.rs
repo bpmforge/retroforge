@@ -240,6 +240,14 @@ fn dmc_irq_fires_at_sample_end_only_when_enabled_and_not_looping() {
     apu.write_register(0x4013, 0x00); // 1 byte
     apu.write_register(0x4015, 0x10);
     apu.dmc_supply_byte(0x00);
+    // `irq_line` is the CPU's view and lags the flag by one cycle
+    // (W2-21) -- assert BOTH halves, so the lag is pinned rather than
+    // merely tolerated.
+    assert!(
+        !apu.irq_line(),
+        "the CPU cannot see the line in the same cycle the flag is raised"
+    );
+    apu.tick();
     assert!(apu.irq_line(), "sample ended with IRQ enabled");
 
     let mut apu = Apu::new();
@@ -248,6 +256,7 @@ fn dmc_irq_fires_at_sample_end_only_when_enabled_and_not_looping() {
     apu.write_register(0x4015, 0x10);
     for _ in 0..8 {
         apu.dmc_supply_byte(0x00);
+        apu.tick();
     }
     assert!(
         !apu.irq_line(),

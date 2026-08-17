@@ -62,6 +62,10 @@ fn setting_the_inhibit_flag_clears_a_pending_frame_irq() {
     assert!(apu.irq_line(), "flag should be set by now in mode 0");
 
     apu.write_register(0x4017, 0x40);
+    // The FLAG clears immediately; the CPU's view of the line catches up
+    // one cycle later (W2-21's `irq_line_delayed`), which is why this
+    // ticks once rather than asserting in the same breath as the write.
+    apu.tick();
     assert!(
         !apu.irq_line(),
         "the inhibit bit clears the flag immediately, without waiting for the reset delay"

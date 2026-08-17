@@ -42,6 +42,7 @@ impl Apu {
             sample_phase: _,
             samples: _,
             on_apu_cycle,
+            irq_line_delayed,
         } = self;
         pulse1.save_state(out)?;
         pulse2.save_state(out)?;
@@ -49,7 +50,15 @@ impl Apu {
         noise.save_state(out)?;
         dmc.save_state(out)?;
         frame_counter.save_state(out)?;
-        out.bool(*on_apu_cycle)
+        out.bool(*on_apu_cycle)?;
+        // Ticket W2-21. Derived from the two IRQ flags, but NOT
+        // reconstructible at load time: it is deliberately one cycle
+        // behind them, and `Cpu`'s interrupt sampler reads
+        // `CpuBus::irq_line` before the first `tick` after a restore.
+        // Recomputing it from the current flags would make a restored
+        // machine see the line a cycle earlier than the saved one did,
+        // which is precisely the timing this field exists to model.
+        out.bool(*irq_line_delayed)
     }
 
     pub(crate) fn load_state(&mut self, inp: &mut StateIn<'_>) -> Result<(), StateError> {
@@ -60,6 +69,7 @@ impl Apu {
         self.dmc.load_state(inp)?;
         self.frame_counter.load_state(inp)?;
         self.on_apu_cycle = inp.bool()?;
+        self.irq_line_delayed = inp.bool()?;
         self.reset_audio_output();
         Ok(())
     }

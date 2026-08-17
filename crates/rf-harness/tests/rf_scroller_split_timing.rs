@@ -327,19 +327,28 @@ fn measure(rom_bytes: &[u8]) -> SplitTracker {
 /// numbers are a fresh, independent measurement, not a restoration of the
 /// pre-incident values (which described a ROM with the update block in the
 /// OLD position and no longer exist for that reason).
+/// RE-BASELINED 2026-08-17 by ticket **W2-21**, and this time the cause
+/// was NOT the fixture. W2-21 flipped the OAM-DMA get/put phase, which
+/// `crate::system`'s `is_get_cycle` had picked arbitrarily ("at power-on,
+/// whether the first CPU cycle is get or put is random" — so the crate
+/// picked one and documented it), because blargg's `cpu_interrupts_v2`
+/// `4-irq_and_dma` pins it: under the old phase its DMA ran one cycle
+/// short and the ROM's `8`/`9` boundary landed at `+526` instead of
+/// `+527`. A one-cycle change in DMA length moves where a few of this
+/// fixture's writes land, and exactly three moved: 13 gained one, 14 lost
+/// its only one, 15 gained one and 16 lost one.
+///
+/// This is a legitimate re-baseline, not a masked regression, and the
+/// numbers that carry the SAFETY meaning are untouched: `total` is still
+/// 1182, `later_than_18` still 734, and `FROZEN_STREAMING_ITERATIONS` is
+/// unchanged. What this histogram guards — the fixture reintroducing
+/// per-frame cost before the tail gate — is unaffected by an emulator
+/// timing correction.
 fn frozen_streaming_top() -> Histogram {
     Histogram {
-        counts: [
-            (11, 272),
-            (12, 84),
-            (13, 27),
-            (14, 1),
-            (15, 58),
-            (16, 6),
-            (239, 734),
-        ]
-        .into_iter()
-        .collect(),
+        counts: [(11, 272), (12, 84), (13, 28), (15, 59), (16, 5), (239, 734)]
+            .into_iter()
+            .collect(),
         total: 1182,
         later_than_18: 734,
     }
@@ -348,12 +357,15 @@ fn frozen_streaming_top() -> Histogram {
 fn frozen_streaming_split() -> Histogram {
     Histogram {
         counts: [
-            (13, 150),
-            (14, 584),
+            // Re-baselined with the rest by W2-21's OAM-DMA phase flip —
+            // see `frozen_streaming_top` for the full reason. `total`
+            // (1182) and `later_than_18` (448) are both unchanged.
+            (13, 157),
+            (14, 577),
             (29, 272),
             (30, 82),
-            (31, 27),
-            (32, 3),
+            (31, 29),
+            (32, 1),
             (33, 52),
             (34, 12),
         ]

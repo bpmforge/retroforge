@@ -20,8 +20,23 @@ fn fill_source_page(bus: &mut NesBus, page: u8) {
     }
 }
 
+/// PHASE FLIPPED BY W2-21: an **even** `master_cycle` start now costs
+/// **514**, an odd one 513 — the reverse of what this file asserted
+/// before.
+///
+/// The get/put phase is not derivable from documentation: nesdev says
+/// "at power-on, whether the first CPU cycle is get or put is random",
+/// so `crate::system` picked one and said so. blargg's
+/// `cpu_interrupts_v2` `4-irq_and_dma` pins it against real hardware —
+/// under the old phase its DMA ran one cycle short and the ROM's `8`/`9`
+/// boundary landed at `+526` where hardware puts it at `+527`, with all
+/// 528 other rows already matching. So this is the arbitrary choice being
+/// resolved by measurement, not a rule changing.
+///
+/// The invariant these tests actually protect — the two alignments differ
+/// by exactly one cycle, and the pair is {513, 514} — is unchanged.
 #[test]
-fn even_start_cycle_costs_513() {
+fn even_start_cycle_costs_514() {
     let mut bus = bus_with_pattern_rom(1, 1);
     fill_source_page(&mut bus, 0x02); // 256 writes: master_cycle 0 -> 256 (even)
     assert_eq!(
@@ -33,13 +48,13 @@ fn even_start_cycle_costs_513() {
     let before = bus.master_cycle();
     bus.write(0x4014, 0x02);
     let stall = bus.last_oam_dma_stall().expect("DMA ran");
-    assert_eq!(stall, 513);
+    assert_eq!(stall, 514);
     // Total bus-cycle delta is the write's own cycle plus the stall.
-    assert_eq!(bus.master_cycle() - before, 1 + 513);
+    assert_eq!(bus.master_cycle() - before, 1 + 514);
 }
 
 #[test]
-fn odd_start_cycle_costs_514() {
+fn odd_start_cycle_costs_513() {
     let mut bus = bus_with_pattern_rom(1, 1);
     fill_source_page(&mut bus, 0x02); // master_cycle -> 256 (even)
     bus.write(0x0000, 0); // one more tick -> 257 (odd)
@@ -52,8 +67,8 @@ fn odd_start_cycle_costs_514() {
     let before = bus.master_cycle();
     bus.write(0x4014, 0x02);
     let stall = bus.last_oam_dma_stall().expect("DMA ran");
-    assert_eq!(stall, 514);
-    assert_eq!(bus.master_cycle() - before, 1 + 514);
+    assert_eq!(stall, 513);
+    assert_eq!(bus.master_cycle() - before, 1 + 513);
 }
 
 #[test]
@@ -69,7 +84,10 @@ fn the_two_alignments_differ_by_exactly_one_cycle() {
 
     let even_stall = even_bus.last_oam_dma_stall().unwrap();
     let odd_stall = odd_bus.last_oam_dma_stall().unwrap();
-    assert_eq!(odd_stall - even_stall, 1);
+    // Direction flipped with the phase in W2-21; the invariant this test
+    // exists for -- the two alignments differ by exactly one cycle -- is
+    // what is actually being protected and is unchanged.
+    assert_eq!(even_stall - odd_stall, 1);
 }
 
 #[test]

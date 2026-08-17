@@ -54,8 +54,13 @@ pub const TAG_REGISTRY: &[TagInfo] = &[
     TagInfo {
         tag: *b"APU_",
         owner: "core",
+        // Version 2 as of ticket W2-21, which added the APU's delayed
+        // view of the IRQ line to the payload. Same reasoning as `PPU_`
+        // v2: real machine state, deliberately not reconstructible from
+        // the other fields (it is one cycle behind them by design), and
+        // read by the CPU before the first tick after a restore.
         required: true,
-        current_version: 1,
+        current_version: 2,
     },
     TagInfo {
         tag: *b"WRAM",

@@ -542,12 +542,18 @@ impl NesBus {
     /// include the `$4014` write's own bus cycle — that already elapsed
     /// as an ordinary cycle of the `STA $4014` instruction before the CPU
     /// is halted (see `CpuBus::write`'s call site: it ticks once for the
-    /// write, *then* calls this). `start_cycle_odd` is whether the
-    /// `$4014` write itself landed on an odd `master_cycle` (get/put
-    /// phase alignment) — an internal bookkeeping convention when no reset
+    /// write, *then* calls this). `needs_alignment_cycle` is whether the
+    /// `$4014` write landed on the get/put phase that costs the extra
+    /// cycle — an internal bookkeeping convention when no reset
     /// has run, not a claim about a specific absolute cycle number; what
     /// matters, and what the acceptance tests check, is that the two cases
-    /// differ by exactly one cycle. Concretely, `master_cycle` starts at 0
+    /// differ by exactly one cycle. **Which parity takes the extra cycle
+    /// was flipped in ticket W2-21**, resolved against real hardware by
+    /// blargg's `cpu_interrupts_v2` `4-irq_and_dma` (under the old phase
+    /// its DMA ran one cycle short and the ROM's `8`/`9` boundary landed
+    /// at `+526` where hardware puts it at `+527`); the parameter is now
+    /// named for what it does rather than for a parity, since the parity
+    /// was never the point. Concretely, `master_cycle` starts at 0
     /// in `NesBus::new`, so a caller that skips `Cpu::power_on` (ticket
     /// W1-03) and sets `cpu.pc` directly — as this crate's own bus-level
     /// unit tests still do — sees a parity that depends on however many
@@ -561,17 +567,17 @@ impl NesBus {
     /// `read_untimed`) to that source byte, same as a real CPU read would
     /// — so after a DMA, `open_bus` holds the *last PRG/RAM byte DMA
     /// fetched*, not the `$XX` page value that triggered it.
-    fn run_oam_dma(&mut self, page: u8, start_cycle_odd: bool) -> u32 {
+    fn run_oam_dma(&mut self, page: u8, needs_alignment_cycle: bool) -> u32 {
         let mut stall = 0u32;
 
         // 1 dummy read cycle while the DMA controller takes over the bus.
         self.tick_master(1);
         stall += 1;
 
-        // +1 extra alignment cycle if the write that triggered this landed
-        // on an odd cycle, so the first "get" cycle below lines up on an
-        // even one (the "get/put alignment" EMULATION_CORES.md §2.5 cites).
-        if start_cycle_odd {
+        // +1 extra alignment cycle when the triggering write landed on
+        // the wrong half of an APU cycle, so the first "get" below lines
+        // up (the "get/put alignment" EMULATION_CORES.md §2.5 cites).
+        if needs_alignment_cycle {
             self.tick_master(1);
             stall += 1;
         }
@@ -753,7 +759,7 @@ impl CpuBus for NesBus {
 
     fn write(&mut self, addr: u16, value: u8) {
         if addr == 0x4014 {
-            let start_cycle_odd = self.master_cycle % 2 == 1;
+            let needs_alignment_cycle = self.master_cycle.is_multiple_of(2);
             self.open_bus = value;
             self.tick_master(1); // the $4014 write's own cycle
 
@@ -768,7 +774,7 @@ impl CpuBus for NesBus {
             if self.ppu.event_mask().is_subscribed(EventMask::DMA_START) {
                 self.ppu.queue_event(CoreEvent::DmaStart { chan: 0 });
             }
-            let stall = self.run_oam_dma(value, start_cycle_odd);
+            let stall = self.run_oam_dma(value, needs_alignment_cycle);
             self.last_oam_dma_stall = Some(stall);
             if self.ppu.event_mask().is_subscribed(EventMask::OAM_REWRITE) {
                 self.ppu.queue_event(CoreEvent::OamRewrite);
