@@ -757,7 +757,7 @@
     "the in-crate PPU suite is unregressed: read_buffer, both golden frames, ppu_vbl_nmi 10/10, sprite_hit_tests 11/11"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ],
