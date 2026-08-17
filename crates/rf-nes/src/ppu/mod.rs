@@ -488,6 +488,32 @@ pub struct Ppu {
     /// ```
     ///
     /// A write to **any** `$2000-$2007` register sets all eight bits.
+    /// `false` selects EMULATION_CORES §5's **simplified** open-bus
+    /// model instead of the full one (ticket W3-07;
+    /// [`rf_core_api::CoreConfig::accuracy_mode`]).
+    ///
+    /// The two paths differ in exactly one thing: whether the decay
+    /// register ages. Accuracy runs [`Ppu::age_decay_register`] once per
+    /// frame, so an unrefreshed bit falls to 0 after ~600 ms the way
+    /// hardware's does; compatibility skips it, so the latch simply holds
+    /// what was last written to it. That "latch with no decay" is the
+    /// model most emulators ship and is what THIS crate did before W2-19
+    /// added the real one, which is why both sides genuinely exist here —
+    /// it is not a fast path invented to have something to diff.
+    ///
+    /// **Being honest about what it buys:** simplicity, not measurable
+    /// speed. Ageing eight bits once per frame is not a hot path. §5's
+    /// column for this row is "full | simplified", not fast/slow, and the
+    /// reason to build it now is that it is the one §5 switch this crate
+    /// can offer both sides of — which is what makes W3-07's diff a real
+    /// comparison rather than a path against itself.
+    ///
+    /// §5 also requires the divergence be **test-suite-visible**, and it
+    /// is: `ppu_open_bus`'s tests 3, 5, 7 and 9 all assert that an
+    /// unrefreshed bit reaches 0 within a second, so that ROM passes under
+    /// Accuracy and fails under Compatibility. A switch that diverged
+    /// nowhere would, by §5's own sentence, not be a switch.
+    pub(super) accuracy_mode: bool,
     pub(super) decay: u8,
     /// Per-bit time-to-live for [`Ppu::decay`], in frames; 0 means that
     /// bit has already decayed to 0.
@@ -731,6 +757,7 @@ impl Ppu {
             scanline: PRERENDER_SCANLINE,
             dot: 0,
             frame_is_odd: false,
+            accuracy_mode: true,
             decay: 0,
             decay_ttl: [0; 8],
             render_enable_pipe: 0,
@@ -805,6 +832,12 @@ impl Ppu {
     /// default, law 6) until called.
     pub fn set_event_mask(&mut self, mask: EventMask) {
         self.event_mask = mask;
+    }
+
+    /// Select the accuracy (`true`) or compatibility (`false`) open-bus
+    /// model — see [`Ppu::accuracy_mode`] (ticket W3-07).
+    pub fn set_accuracy_mode(&mut self, accuracy: bool) {
+        self.accuracy_mode = accuracy;
     }
 
     /// Push one already-gated event onto the drain queue (ticket W4-00;
@@ -936,7 +969,9 @@ impl Ppu {
             self.scanline = if self.scanline == PRERENDER_SCANLINE {
                 self.frame_is_odd = !self.frame_is_odd;
                 self.frame_count += 1;
-                self.age_decay_register();
+                if self.accuracy_mode {
+                    self.age_decay_register();
+                }
                 // Ticket W4-00: the pre-render line wrapping to scanline 0
                 // is the only frame-boundary signal this crate has (module
                 // doc, "`CoreSink` emission seam" section: no

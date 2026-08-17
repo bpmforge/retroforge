@@ -1641,6 +1641,38 @@
    ]
   },
   {
+   "id": "W3-07b",
+   "title": "PPU catch-up scheduler (the second half of FR-MODE-004)",
+   "phase": 3,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-harness/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [
+    "W3-07"
+   ],
+   "acceptance": [
+    "the compatibility config selects a PPU catch-up scheduler in place of lock-step per-CPU-cycle ticking (EMULATION_CORES section 5 row 1; crate::ppu's \"Scheduling: lock-step, not catch-up\" section owes exactly this)",
+    "W3-07's diff runs clean over the whole executed suite with the scheduler enabled -- catch-up is the one section 5 row whose \"risk of compat setting\" is stated as \"none if catch-up correct\", so unlike the open-bus switch it must produce NO divergence",
+    "ppu_vbl_nmi stays 10/10, mmc3_irq_tests stays green, and the accuracy path is bit-identical to today -- the scheduler may not be paid for out of the accuracy mode"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ],
+   "notes": [
+    "FILED 2026-08-17 BY W3-07, split on Brad's ruling. This is a SCHEDULER REDESIGN, not an optimisation, and the reason is specific: catch-up requires that nothing observe PPU state between flush points, and in this engine three things observe it at DOT granularity on every single CPU cycle.",
+    "(1) `cpu::exec::CountingBus::sample` calls `CpuBus::nmi_line` after EVERY bus op. Worse, W1-05c's fix depends on `NesBus::nmi_level_latch` being snapshotted per DOT rather than per cycle -- `tick_master`'s own doc records that a whole-cycle-wide version was tried first and measured exactly 2 PPU dots too wide against ppu_vbl_nmi 05-08. That suite is 10/10 today and this is what it rests on.",
+    "(2) `NesBus::tick_ppu_dot` drains filtered A12 rising edges into the mapper every dot; mmc3_irq_tests and mmc3_test_2 depend on that granularity (see crate::mappers' \"MMC3 additions\" section).",
+    "(3) Two things added in 2026-08 now key off dot counts as well: W2-19's `Ppu::age_decay_register` (per frame, driven from the dot loop) and W2-01d's `Ppu::last_2007_read_dot`, which detects a back-to-back `$2007` read as \"exactly 3 dots ago\".",
+    "THEREFORE the real work is PREDICTION: computing when the next NMI edge and the next A12 edge can occur, so the PPU can be safely skipped ahead to that point instead of ticked. Budget for that, not for a deferral counter. A naive \"flush on register access\" catch-up gains nothing here, because `nmi_line` is polled every cycle -- it would flush every cycle.",
+    "The diff W3-07 built is the tool for this ticket: run it with the scheduler on and it reports exactly where catch-up and lock-step disagree, which is the debugging loop rather than an afterthought."
+   ]
+  },
+  {
    "id": "W3-07",
    "title": "Compatibility config path + accuracy-vs-compatibility diff (FR-MODE-004)",
    "phase": 3,
@@ -1649,26 +1681,38 @@
     "crates/rf-nes/**",
     "crates/rf-harness/**",
     "crates/rf-core-api/**",
-    "docs/TESTING.md"
+    "docs/TESTING.md",
+    ".github/workflows/nightly.yml"
    ],
    "depends_on": [
     "W2-09"
    ],
    "acceptance": [
-    "CoreConfig::accuracy_mode is plumbed into rf-nes and selects a real second path -- the PPU catch-up scheduler EMULATION_CORES section 5 names, which crate::ppu's 'Scheduling: lock-step, not catch-up' section already owes to a later ticket",
-    "the accuracy-vs-compatibility diff runs the whole executed test-ROM suite under both configs and reports any divergence (FR-MODE-004, EMULATION_CORES section 5's 'CI diffs both')",
+    "CoreConfig::accuracy_mode is plumbed into rf-nes and selects a real second path. AMENDED 2026-08-17 (Brad): the second path is EMULATION_CORES section 5's \"Open-bus modeling: full | simplified\" switch, NOT the PPU catch-up scheduler -- that is split to W3-07b, see notes",
+    "the accuracy-vs-compatibility diff runs the whole executed test-ROM suite under both configs and reports any divergence (FR-MODE-004, EMULATION_CORES section 5's \"CI diffs both\")",
+    "the diff FAILS on an undeclared divergence, and equally FAILS when a DECLARED divergence stops happening -- section 5 says \"divergences must be test-suite-visible, or the switch doesn't exist\", so a compatibility switch that diverges nowhere is a switch that is not there, and the diff must say so",
     "the diff is proven non-vacuous: a deliberately wrong compatibility path must make it fail, demonstrated the way W2-05's apu_mixer mutation was",
     "nightly runs the diff (docs/TESTING.md section 4/9)"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "done",
    "stories": [
     "E1-S1"
    ],
    "notes": [
     "SPLIT OUT OF W2-09 2026-08-16 (Brad's ruling). W2-09's criterion 5 asked for an accuracy-vs-compatibility diff over the test-ROM suite. It is NOT IMPLEMENTABLE as of that ticket, and the reason is structural rather than a matter of effort: `CoreConfig::accuracy_mode` is never plumbed into rf-nes at all, and rf-nes has exactly ONE code path -- EMULATION_CORES section 5's compatibility switches (PPU catch-up stepping, OAM decay off, simplified open bus) do not exist. A diff today would compare a path against itself and pass forever, which is precisely the class of vacuous check this project keeps removing.",
     "SO THE SWITCH AND THE DIFF ARE ONE TICKET. A diff has no meaning without a second path, and a second path without a diff is exactly what EMULATION_CORES section 5 forbids ('CI diffs both'). Building them together is also what makes the third acceptance criterion possible: a deliberately wrong compatibility path must break the diff, or the diff is decoration.",
-    "PRE-FLIGHT already paid: crate::ppu's module doc, 'Scheduling: lock-step, not catch-up' section, records that W1-04a built lock-step only and names the catch-up path as an explicit debt, including the CI-diff requirement. Read that before starting -- it states what the second path must be equivalent to and why."
+    "PRE-FLIGHT already paid: crate::ppu's module doc, 'Scheduling: lock-step, not catch-up' section, records that W1-04a built lock-step only and names the catch-up path as an explicit debt, including the CI-diff requirement. Read that before starting -- it states what the second path must be equivalent to and why.",
+    "SPLIT 2026-08-17 (Brad's ruling). The original bundled the DIFF with the PPU CATCH-UP SCHEDULER. The scheduler is not an increment on this architecture, it is a scheduler redesign, and it lands on top of every accuracy gate: correct catch-up needs NMI and A12 edge PREDICTION, because three separate things observe PPU state at DOT granularity every cycle. (1) `cpu::exec::CountingBus::sample` calls `CpuBus::nmi_line` after EVERY bus op, and W1-05c's ppu_vbl_nmi 10/10 depends on `NesBus::nmi_level_latch` being snapshotted per DOT, not per cycle -- its own doc records that a whole-cycle version measured exactly 2 rows too wide. (2) `tick_ppu_dot` drains A12 rising edges into the mapper every dot, which mmc3_irq_tests depends on. (3) W2-19's decay ageing and W2-01d's `$2007` double-read latch both key off dot counts. Any deferral coarser than a dot breaks these. Filed as W3-07b with that analysis, so whoever takes it does not rediscover it.",
+    "WHY THE OPEN-BUS SWITCH IS THE RIGHT SECOND PATH, and not a consolation prize: section 5 lists six switches, and open-bus modelling is the one this crate can now actually offer BOTH sides of. W2-19 built the full model (the PPU's own decay register with per-bit ageing); \"simplified\" is what this crate did before it. The other candidate, \"NES OAM decay: emulated | off\", is not available -- this crate does not emulate OAM decay at all, so \"off\" is the only side that exists and a diff would compare a path against itself, the exact vacuity the original note warned about.",
+    "THE ACCEPTANCE INVERTS THE USUAL INSTINCT, deliberately. Section 5: \"Compatibility never changes observable game-facing behavior for the supported library -- divergences must be test-suite-visible, or the switch doesn't exist.\" So the diff going green everywhere is a FAILURE condition, not a success: it means the switch does nothing. Declared divergences are enforced in both directions, the same discipline `waivers.toml` applies to known-fails and `tier_b_suites` applies to a waiver over a ROM that has started passing.",
+    "DONE 2026-08-17. `mode_diff` compares 52 ROMs under both CoreConfig modes; exactly one diverges, it is the declared one, and the divergence message is the one section 5 predicts (\"Decay value should become zero by one second\"). Wired into nightly.",
+    "NON-VACUITY PROVEN IN BOTH DIRECTIONS against the real suite, the way W2-05's apu_mixer mutation was. (1) Break the compatibility path somewhere undeclared (XOR bit 0 of $2002 when !accuracy_mode): a second ROM diverges, UNDECLARED DIVERGENCE is reported, exit 1. (2) Make the switch a NO-OP (age the decay register in both modes): 0 of 52 diverge, STALE DECLARATION is reported, exit 1. Baseline: 1 divergence, exit 0. Mutation 2 is the one that matters -- everything agreeing is a FAILURE here, and that is not the usual instinct.",
+    "WHY BOTH DIRECTIONS: EMULATION_CORES section 5 says \"divergences must be test-suite-visible, or the switch doesn't exist\". A diff that only caught undeclared divergences would go green the moment someone deleted the compatibility path -- both configs would run the same code and agree everywhere, which is exactly the vacuous state this ticket's own note warned about (\"a diff today would compare a path against itself and pass forever\"). The stale-declaration rule is the direct analog of tier_b_suites' rule that a waiver over a now-passing ROM is itself an error.",
+    "DESIGN NOTE on what the comparison key is: the verdict AND its message, not a bare pass/fail. Two runs that both fail but fail at DIFFERENT sub-tests have diverged, and folding them together would hide precisely the class of difference this diff exists to surface.",
+    "HONEST ABOUT WHAT THE SWITCH BUYS: simplicity, not measurable speed. Ageing eight decay bits once per frame is not a hot path. Section 5's column for this row is \"full | simplified\", not fast/slow. The reason to build it now is that it is the one section 5 switch this crate can offer BOTH sides of -- W2-19 built the full model, and \"simplified\" is what this crate did before it. The obvious alternative, \"NES OAM decay: emulated | off\", is unavailable: this crate does not emulate OAM decay at all, so only one side exists and the diff would compare a path against itself.",
+    "accuracy_mode is deliberately NOT serialized into the PPU_ chunk, for the same reason event_mask is not: it is caller configuration, not machine state. Restoring it from a file would let a saved state silently switch a running session's mode -- and since the mode changes observable reads, a state saved in Compatibility would drag a session out of Accuracy, which law 6 (\"a fresh install boots in Accuracy Mode\") exists to prevent.",
+    "SCOPE AMENDMENT (vetoable, recorded): .github/workflows/nightly.yml, required by criterion 5 (\"nightly runs the diff\") and not in the original write_scope."
    ]
   },
   {

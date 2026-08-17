@@ -34,6 +34,7 @@ mod fetch;
 mod golden_frame;
 mod json;
 mod manifest;
+pub mod mode_diff;
 pub mod nes6502_evidence;
 pub mod nestest_evidence;
 mod tolerance;

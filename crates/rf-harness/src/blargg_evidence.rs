@@ -68,10 +68,23 @@ pub enum RamResultOutcome {
 /// [`std::fmt::Display`] text for a protocol violation/timeout — see
 /// `blargg.rs`'s `RunnerError` for exactly what each case means.
 pub fn run(rom_path: &Path, max_frames: u32) -> Result<BlarggOutcome, String> {
+    run_with_mode(rom_path, max_frames, true)
+}
+
+/// [`run`], but with [`rf_nes::NesBus::set_accuracy_mode`] chosen by the
+/// caller (ticket W3-07). `accuracy = true` is what every existing caller
+/// gets from [`run`]; `false` is the compatibility path, used only by
+/// [`crate::mode_diff`].
+pub fn run_with_mode(
+    rom_path: &Path,
+    max_frames: u32,
+    accuracy: bool,
+) -> Result<BlarggOutcome, String> {
     let rom_bytes = std::fs::read(rom_path)
         .map_err(|e| format!("failed to read {}: {e}", rom_path.display()))?;
     let mut bus = NesBus::from_ines_bytes(&rom_bytes)
         .map_err(|e| format!("invalid rom image {}: {e}", rom_path.display()))?;
+    bus.set_accuracy_mode(accuracy);
     let mut cpu = Cpu::power_on(&mut bus);
 
     let mut signature_ever_valid = false;
@@ -358,8 +371,19 @@ pub enum ScreenOutcome {
 /// # Errors
 /// Returns a message if the image cannot be read or parsed.
 pub fn run_screen_text(rom_path: &Path, frames: u32) -> Result<ScreenOutcome, String> {
+    run_screen_text_with_mode(rom_path, frames, true)
+}
+
+/// [`run_screen_text`], with the accuracy/compatibility switch exposed
+/// (ticket W3-07) — see [`run_with_mode`].
+pub fn run_screen_text_with_mode(
+    rom_path: &Path,
+    frames: u32,
+    accuracy: bool,
+) -> Result<ScreenOutcome, String> {
     let bytes = std::fs::read(rom_path).map_err(|e| format!("cannot read rom: {e}"))?;
     let mut bus = NesBus::from_ines_bytes(&bytes).map_err(|e| format!("invalid rom: {e}"))?;
+    bus.set_accuracy_mode(accuracy);
     let mut cpu = Cpu::power_on(&mut bus);
     for _ in 0..frames {
         let start = bus.frame_count();

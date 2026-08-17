@@ -322,6 +322,21 @@ impl NesBus {
         self.ppu.set_event_mask(mask);
     }
 
+    /// Wire [`rf_core_api::CoreConfig::accuracy_mode`] into this machine
+    /// (ticket W3-07), same push-to-the-PPU convention as the two setters
+    /// above.
+    ///
+    /// `true` (the default, and `CoreConfig`'s own default) is the
+    /// bit-for-bit reference path. `false` selects EMULATION_CORES §5's
+    /// compatibility settings; today that is exactly one switch, the
+    /// **simplified open-bus model** — see [`crate::ppu::Ppu::accuracy_mode`]
+    /// for what it changes and why this is the §5 row this crate can
+    /// currently offer both sides of. §5's other big one, PPU catch-up
+    /// stepping, is owed by ticket W3-07b.
+    pub fn set_accuracy_mode(&mut self, accuracy: bool) {
+        self.ppu.set_accuracy_mode(accuracy);
+    }
+
     /// Flush every completed-but-undrained scanline (plus, as of ticket
     /// W4-00, every queued [`CoreEvent`] — `Ppu::drain`'s own doc covers
     /// both) the PPU has produced through `sink` (acceptance criterion 3:

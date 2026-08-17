@@ -42,6 +42,24 @@ SRS verification column, `docs/design/SAVE_STATES.md`.
   that has started passing** (a stale waiver hides the next regression).
   Unfetched ROMs are counted as skipped, never as passes, and a run where
   nothing executed is a failure rather than a green.
+- **Accuracy-vs-Compatibility diff** (ticket W3-07; FR-MODE-004,
+  `docs/design/EMULATION_CORES.md` §5's "CI diffs both"):
+  `cargo run -p rf-harness --bin mode_diff` runs every executed ROM under
+  both `CoreConfig` modes and compares verdict *and* message. It fails in
+  **two** directions, and the second is the one that matters: an
+  **undeclared** divergence fails (compatibility may only differ where
+  someone wrote down that it may), and a **declared divergence that stops
+  happening** also fails. §5 says "divergences must be test-suite-visible,
+  or the switch doesn't exist" — so a run in which the two configs agree
+  everywhere means the switch has become a no-op, and reporting that as
+  green would be indistinguishable from reporting it as correct. Same
+  shape as `tier_b_suites`' stale-waiver rule. One switch exists today
+  (§5's "Open-bus modeling: full | simplified"), so one divergence is
+  declared: `ppu_open_bus` passes under Accuracy and fails its decay
+  sub-tests under Compatibility. Both failure directions are unit-tested
+  without ROMs, and both were demonstrated against the real suite by
+  mutation — breaking the compat path elsewhere and making the switch a
+  no-op each exit 1, while the baseline exits 0.
 - **Criterion regression gate** (W2-09): `benches/baseline.json` +
   `scripts/bench-compare.mjs`, >10% fails (§9), with NFR-002's absolute
   ms/frame budget checked separately from the relative threshold. R-C2 is

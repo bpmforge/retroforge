@@ -96,6 +96,15 @@ impl Ppu {
             // session emits. `crate::ppu`'s own doc calls it a
             // subscription, and FR-CORE-006 makes it the caller's choice.
             event_mask: _,
+            // Caller configuration too, and excluded for the same reason
+            // (ticket W3-07): `accuracy_mode` is what the *app* asked for
+            // via `CoreConfig`, not something the machine evolved into.
+            // Restoring it from a file would let a saved state silently
+            // switch a running session's mode -- and since the mode
+            // changes observable reads, a state saved in Compatibility
+            // would drag a session out of Accuracy, which law 6 ("a fresh
+            // install boots in Accuracy Mode") exists to prevent.
+            accuracy_mode: _,
             events,
         } = self;
 

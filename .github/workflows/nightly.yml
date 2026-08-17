@@ -59,6 +59,16 @@ jobs:
           cargo test --release -p rf-harness --test alter_ego_replay -- --ignored
           cargo test --release -p rf-harness --test rf_scroller_replay -- --ignored
 
+      - name: accuracy-vs-compatibility diff (FR-MODE-004, EMULATION_CORES §5)
+        # Runs the whole executed suite under BOTH CoreConfig modes.
+        # Note this step fails in two directions: on a divergence nobody
+        # declared, AND on a declared divergence that has stopped
+        # happening — §5 says "divergences must be test-suite-visible, or
+        # the switch doesn't exist", so a run where the two configs agree
+        # everywhere means the compatibility switch has become a no-op.
+        run: |
+          cargo run --release -p rf-harness --bin mode_diff -- --repo-root .
+
       - name: criterion benches
         run: cargo bench --workspace
 
