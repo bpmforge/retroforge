@@ -326,7 +326,7 @@ fn cleared_at_prerender_dot_1_not_by_reading_2002() {
     assert_eq!(ppu.status & STATUS_SPRITE0_HIT, STATUS_SPRITE0_HIT);
 
     // Reading $2002 clears vblank/w, never sprite-0-hit.
-    let _ = ppu.read_register(2, 0);
+    let _ = ppu.read_register(2);
     assert_eq!(
         ppu.status & STATUS_SPRITE0_HIT,
         STATUS_SPRITE0_HIT,

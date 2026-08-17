@@ -330,6 +330,16 @@ const POSTRENDER_SCANLINE: u16 = 240;
 const VBLANK_START_SCANLINE: u16 = 241;
 const DOTS_PER_SCANLINE: u16 = 341;
 
+/// How long a refreshed decay-register bit survives, in frames (ticket
+/// W2-19). nesdev and blargg's `ppu_open_bus` readme both state "about
+/// 600 milliseconds"; at NTSC's ~60.1 Hz that is ~36 frames.
+///
+/// The ROM brackets this from one side only — it refreshes, waits a full
+/// second, and requires 0 — so any value comfortably under ~60 frames
+/// passes. 36 is used because it is what the hardware documentation says,
+/// not because it is what makes the test go green.
+const DECAY_FRAMES: u8 = 36;
+
 const STATUS_VBLANK: u8 = 0x80;
 const STATUS_SPRITE0_HIT: u8 = 0x40;
 const STATUS_SPRITE_OVERFLOW: u8 = 0x20;
@@ -452,6 +462,43 @@ pub struct Ppu {
     /// fields); `false` (even) is this module's arbitrary but documented
     /// choice.
     pub(super) frame_is_odd: bool,
+
+    /// The PPU's own I/O bus latch — its "decay register" (ticket W2-19;
+    /// nesdev.org/wiki/PPU_registers "The PPU I/O bus", and blargg's
+    /// `ppu_open_bus` readme, whose table this implements verbatim).
+    ///
+    /// This is **separate from the CPU bus's open-bus latch**
+    /// ([`crate::system::NesBus::open_bus`]) — the `ppu_open_bus` readme
+    /// opens by saying exactly that: "Unlike other open-bus addresses,
+    /// the PPU ones are separate." Before W2-19 this crate had only the
+    /// CPU-side latch and passed it into the PPU, which is why
+    /// `ppu_open_bus` failed at its very first check and
+    /// `cpu_exec_space`'s PPU arm failed independently with the same
+    /// complaint.
+    ///
+    /// Refresh rules, from the readme's table (`D` = reads back from the
+    /// decay register and does NOT refresh it; `-` = driven by the PPU
+    /// and DOES refresh it):
+    ///
+    /// ```text
+    /// $2000 DDDDDDDD   $2004 --------
+    /// $2001 DDDDDDDD   $2005 DDDDDDDD
+    /// $2002 ---DDDDD   $2006 DDDDDDDD
+    /// $2003 DDDDDDDD   $2007 -------- non-palette / DD------ palette
+    /// ```
+    ///
+    /// A write to **any** `$2000-$2007` register sets all eight bits.
+    pub(super) decay: u8,
+    /// Per-bit time-to-live for [`Ppu::decay`], in frames; 0 means that
+    /// bit has already decayed to 0.
+    ///
+    /// Per-bit rather than one timer for the whole byte because the ROM
+    /// requires it: its tests 7 and 9 refresh only *part* of the register
+    /// (reading `$2002` refreshes bits 7-5; reading palette `$2007`
+    /// refreshes bits 5-0) in a loop for a full second, and then assert
+    /// that the *unrefreshed* bits have decayed anyway. A single shared
+    /// timer would be kept alive by those reads and fail both.
+    pub(super) decay_ttl: [u8; 8],
     /// Two-dot shift register of [`Ppu::rendering_enabled`], pushed once at
     /// the top of every [`Ppu::tick`] (ticket W1-05d). Bit 0 is the value
     /// in effect during the dot being ticked right now, bit 1 the previous
@@ -659,6 +706,8 @@ impl Ppu {
             scanline: PRERENDER_SCANLINE,
             dot: 0,
             frame_is_odd: false,
+            decay: 0,
+            decay_ttl: [0; 8],
             render_enable_pipe: 0,
             frame_count: 0,
             suppress_vblank_this_frame: false,
@@ -860,6 +909,7 @@ impl Ppu {
             self.scanline = if self.scanline == PRERENDER_SCANLINE {
                 self.frame_is_odd = !self.frame_is_odd;
                 self.frame_count += 1;
+                self.age_decay_register();
                 // Ticket W4-00: the pre-render line wrapping to scanline 0
                 // is the only frame-boundary signal this crate has (module
                 // doc, "`CoreSink` emission seam" section: no
@@ -880,6 +930,56 @@ impl Ppu {
             };
         } else {
             self.dot += 1;
+        }
+    }
+
+    /// Age every live bit of the decay register by one frame, clearing
+    /// the bits whose time is up (ticket W2-19).
+    ///
+    /// **Why frames and not dots.** nesdev and blargg's readme both give
+    /// the decay time as "about 600 milliseconds", explicitly approximate
+    /// — "some decay sooner, depending on the NES and temperature". A
+    /// dot-accurate countdown would spend 8 decrements every one of the
+    /// 89,342 dots in a frame to model a quantity the hardware itself
+    /// does not hold precisely; ticking once per frame costs nothing on
+    /// the hot path and is ~17 ms of resolution against a ~600 ms
+    /// constant. What the ROM actually measures is coarse: it refreshes,
+    /// waits a full second, and requires zero.
+    fn age_decay_register(&mut self) {
+        for bit in 0..8 {
+            if self.decay_ttl[bit] > 0 {
+                self.decay_ttl[bit] -= 1;
+                if self.decay_ttl[bit] == 0 {
+                    self.decay &= !(1 << bit);
+                }
+            }
+        }
+    }
+
+    /// Age the decay register by one frame from a unit test, without
+    /// ticking ~89,000 dots to get there (ticket W2-19).
+    ///
+    /// The decay tests need to advance tens of frames of *decay time*
+    /// while performing a register access per frame; running the real
+    /// dot loop for that would turn three sub-millisecond tests into
+    /// multi-second ones and would drag in rendering state they are not
+    /// about. The ROM itself remains the end-to-end check that the
+    /// per-frame ageing is wired into `tick`.
+    #[cfg(test)]
+    pub(crate) fn age_decay_register_for_test(&mut self) {
+        self.age_decay_register();
+    }
+
+    /// Set the decay-register bits selected by `mask` from `value`, and
+    /// restart their decay clocks. Bits outside `mask` keep both their
+    /// value and their remaining time — that distinction is exactly what
+    /// `ppu_open_bus`'s tests 7 and 9 check.
+    pub(super) fn refresh_decay(&mut self, value: u8, mask: u8) {
+        self.decay = (self.decay & !mask) | (value & mask);
+        for bit in 0..8 {
+            if mask & (1 << bit) != 0 {
+                self.decay_ttl[bit] = DECAY_FRAMES;
+            }
         }
     }
 

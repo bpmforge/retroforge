@@ -381,7 +381,7 @@ impl NesBus {
     fn read_untimed(&mut self, addr: u16) -> u8 {
         let value = match addr {
             0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)],
-            0x2000..=0x3FFF => self.ppu.read_register((addr & 0x0007) as u8, self.open_bus),
+            0x2000..=0x3FFF => self.ppu.read_register((addr & 0x0007) as u8),
             0x4016 => self.controllers[0].read_bit() | (self.open_bus & !0x01),
             0x4017 => self.controllers[1].read_bit() | (self.open_bus & !0x01),
             // Ticket W2-01a: `$4015` is the APU's one readable register.
@@ -472,7 +472,7 @@ impl NesBus {
     pub fn peek(&self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)],
-            0x2000..=0x3FFF => self.ppu.peek_register((addr & 0x0007) as u8, self.open_bus),
+            0x2000..=0x3FFF => self.ppu.peek_register((addr & 0x0007) as u8),
             0x4016 => self.controllers[0].peek_bit() | (self.open_bus & !0x01),
             0x4017 => self.controllers[1].peek_bit() | (self.open_bus & !0x01),
             0x4000..=0x4015 | 0x4018..=0x401F => 0xFF,

@@ -103,7 +103,7 @@ fn reading_2002_resets_the_w_latch() {
     let mut ppu = test_ppu();
     ppu.write_register(5, 0x08); // first write: w -> true, x <- 0
     assert!(ppu.w);
-    let _ = ppu.read_register(2, 0x00);
+    let _ = ppu.read_register(2);
     assert!(!ppu.w, "$2002 read must clear w");
 
     ppu.write_register(5, 0x5D); // must be treated as a FIRST write again
@@ -115,7 +115,7 @@ fn reading_2002_resets_the_w_latch() {
 fn reading_2002_clears_vblank_but_not_sprite0_or_overflow() {
     let mut ppu = test_ppu();
     ppu.status = 0xE0; // vblank | sprite0hit | overflow, all set
-    let result = ppu.read_register(2, 0x00);
+    let result = ppu.read_register(2);
     assert_eq!(result & 0xE0, 0xE0, "read returns all three flags as set");
     assert_eq!(ppu.status & 0x80, 0, "vblank cleared by the read");
     assert_eq!(
@@ -125,12 +125,32 @@ fn reading_2002_clears_vblank_but_not_sprite0_or_overflow() {
     );
 }
 
+/// "$2002 ---DDDDD": bits 7-5 are driven by the PPU, bits 4-0 read back
+/// from the PPU's own decay register (ticket W2-19).
 #[test]
-fn reading_2002_low_5_bits_pass_through_open_bus() {
+fn reading_2002_low_5_bits_come_from_the_decay_register() {
     let mut ppu = test_ppu();
+    ppu.write_register(0, 0b0001_0111); // sets every decay bit
     ppu.status = 0x80;
-    let result = ppu.read_register(2, 0b0001_0111);
+    let result = ppu.read_register(2);
     assert_eq!(result, 0x80 | 0b0001_0111);
+}
+
+/// Test 7 of `ppu_open_bus`: reading `$2002` refreshes bits 7-5 only, so
+/// the low five decay away even while the register is read continuously.
+#[test]
+fn reading_2002_does_not_refresh_the_low_5_decay_bits() {
+    let mut ppu = test_ppu();
+    ppu.write_register(0, 0xFF);
+    for _ in 0..80 {
+        let _ = ppu.read_register(2);
+        ppu.age_decay_register_for_test();
+    }
+    assert_eq!(
+        ppu.decay & 0x1F,
+        0,
+        "low five bits must decay despite repeated $2002 reads"
+    );
 }
 
 #[test]
@@ -138,7 +158,7 @@ fn peek_2002_does_not_clear_vblank_or_w() {
     let mut ppu = test_ppu();
     ppu.status = 0x80;
     ppu.w = true;
-    let result = ppu.peek_register(2, 0x00);
+    let result = ppu.peek_register(2);
     assert_eq!(result & 0x80, 0x80);
     assert_eq!(ppu.status & 0x80, 0x80, "peek must not clear vblank");
     assert!(ppu.w, "peek must not clear w");

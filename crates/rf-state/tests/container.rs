@@ -300,9 +300,12 @@ fn required_chunk_with_empty_payload_is_accepted() {
     for tag in [
         *b"CPU_", *b"PPU_", *b"APU_", *b"WRAM", *b"VRAM", *b"OAM_", *b"CGRM", *b"CART",
     ] {
-        c.add_chunk(tag, 1, vec![0]).unwrap();
+        // Registry version, not a literal — see support::current_version.
+        let v = rf_state::tag_info(tag).unwrap().current_version;
+        c.add_chunk(tag, v, vec![0]).unwrap();
     }
-    c.add_chunk(*b"MAPR", 1, vec![]).unwrap(); // no persistent mapper state
+    let mapr_v = rf_state::tag_info(*b"MAPR").unwrap().current_version;
+    c.add_chunk(*b"MAPR", mapr_v, vec![]).unwrap(); // no persistent mapper state
     let bytes = c.encode().unwrap();
 
     let (decoded, warnings) = Container::decode_default(&bytes).unwrap();

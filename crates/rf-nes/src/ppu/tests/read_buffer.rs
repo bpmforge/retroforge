@@ -19,20 +19,20 @@ fn nametable_read_is_delayed_by_one_read() {
     ppu.mem_write(0x2005, 0xAB); // seed the byte the first read should NOT see yet
     ppu.mem_write(0x2006, 0xCD); // the byte the SECOND read should return
 
-    let first = ppu.read_register(7, 0x00);
+    let first = ppu.read_register(7);
     assert_eq!(
         first, 0x00,
         "first read returns the buffer's pre-seeded (empty) value, not 0xAB"
     );
     assert_eq!(ppu.v, 0x2006, "v advanced by 1 (ctrl bit2 clear)");
 
-    let second = ppu.read_register(7, 0x00);
+    let second = ppu.read_register(7);
     assert_eq!(
         second, 0xAB,
         "second read returns what the FIRST read buffered"
     );
 
-    let third = ppu.read_register(7, 0x00);
+    let third = ppu.read_register(7);
     assert_eq!(
         third, 0xCD,
         "third read returns what the second read buffered"
@@ -45,7 +45,7 @@ fn palette_read_bypasses_the_buffer_and_returns_immediately() {
     ppu.palette[0x05] = 0x2A;
     set_v_via_2006(&mut ppu, 0x3F05);
 
-    let value = ppu.read_register(7, 0x00);
+    let value = ppu.read_register(7);
     assert_eq!(
         value & 0x3F,
         0x2A,
@@ -53,13 +53,60 @@ fn palette_read_bypasses_the_buffer_and_returns_immediately() {
     );
 }
 
+/// "$2007 DD------ palette" (blargg's `ppu_open_bus` readme): a palette
+/// read drives bits 5-0 and takes bits 7-6 from the PPU's OWN decay
+/// register — not from the CPU bus's open-bus latch, which is a separate
+/// thing (ticket W2-19; the readme's first paragraph says so outright).
 #[test]
-fn palette_read_top_2_bits_pass_through_open_bus() {
+fn palette_read_top_2_bits_come_from_the_ppu_decay_register() {
     let mut ppu = test_ppu();
     ppu.palette[0x00] = 0x3F;
+    // Any PPU-register write sets all eight decay bits; $2006 is the one
+    // this helper uses anyway, and $C0 puts 1s exactly in the two bits
+    // the palette read must not drive.
+    ppu.write_register(0, 0xC0);
     set_v_via_2006(&mut ppu, 0x3F00);
-    let value = ppu.read_register(7, 0b1100_0000);
-    assert_eq!(value, 0x3F | 0xC0);
+    ppu.write_register(0, 0xC0);
+    let value = ppu.read_register(7);
+    assert_eq!(
+        value,
+        0x3F | 0xC0,
+        "bits 7-6 read back from the decay register"
+    );
+
+    // ...and with those decay bits clear, they read back clear — the
+    // anti-vacuity half, since asserting only the $C0 case would pass on
+    // an implementation that simply ORed in $C0 unconditionally.
+    ppu.write_register(0, 0x00);
+    set_v_via_2006(&mut ppu, 0x3F00);
+    ppu.write_register(0, 0x00);
+    assert_eq!(ppu.read_register(7), 0x3F);
+}
+
+/// Test 9 of `ppu_open_bus`: a palette read refreshes bits 5-0 only, so
+/// the top two bits keep decaying even under a stream of such reads.
+#[test]
+fn palette_read_does_not_refresh_the_top_2_decay_bits() {
+    let mut ppu = test_ppu();
+    ppu.palette[0x00] = 0x3F;
+    ppu.write_register(0, 0xFF); // all eight decay bits set, clocks armed
+
+    for _ in 0..80 {
+        set_v_via_2006(&mut ppu, 0x3F00);
+        let _ = ppu.read_register(7);
+        ppu.age_decay_register_for_test();
+    }
+
+    assert_eq!(
+        ppu.decay & 0xC0,
+        0,
+        "bits 7-6 must have decayed despite the palette reads"
+    );
+    assert_eq!(
+        ppu.decay & 0x3F,
+        0x3F,
+        "bits 5-0 were refreshed by every read and must still stand"
+    );
 }
 
 #[test]
@@ -76,14 +123,14 @@ fn palette_read_still_refills_the_buffer_from_the_mirrored_nametable_underneath(
     ppu.palette[0x05] = 0x2A;
     set_v_via_2006(&mut ppu, 0x3F05);
 
-    let palette_value = ppu.read_register(7, 0x00);
+    let palette_value = ppu.read_register(7);
     assert_eq!(palette_value & 0x3F, 0x2A);
 
     // v is now 0x3F06 (still a palette address) after the increment; move
     // it to a plain nametable address to observe the buffered value without
     // yet another palette bypass.
     ppu.v = 0x2000;
-    let buffered = ppu.read_register(7, 0x00);
+    let buffered = ppu.read_register(7);
     assert_eq!(
         buffered, 0x77,
         "the palette read's buffer refill used the mirrored nametable byte"

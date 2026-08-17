@@ -61,12 +61,23 @@ fn ppu_register_mirroring_every_8_bytes_through_3fff() {
 /// proves those registers *are* mirrored (both addresses observe the same
 /// — unchanged — open-bus latch), without claiming any real PPUCTRL/
 /// PPUSTATUS/... behavior.
+/// Write-only PPU registers read back the **PPU's** decay register, and
+/// mirrors observe the same one (ticket W2-19).
+///
+/// This test previously asserted they returned the CPU bus's open-bus
+/// latch, driven here by a write to `$0000`. That was wrong, and blargg's
+/// `ppu_open_bus` readme says why in its opening line: "Unlike other
+/// open-bus addresses, the PPU ones are separate." The CPU-side latch is
+/// deliberately left driven to a DIFFERENT value below, so an
+/// implementation that went back to consulting it would fail rather than
+/// coincide.
 #[test]
-fn unimplemented_ppu_registers_are_open_bus_stubs() {
+fn unimplemented_ppu_registers_read_the_ppu_decay_register() {
     let mut bus = bus_with_pattern_rom(1, 1);
-    bus.write(0x0000, 0x77); // drives the open-bus latch to 0x77
-    assert_eq!(bus.read(0x2000), 0x77); // PPUCTRL: stub, open bus
-    assert_eq!(bus.read(0x2801), 0x77); // mirror of $2001 (PPUMASK): same
+    bus.write(0x0000, 0x77); // CPU open-bus latch := $77 — a decoy
+    bus.write(0x2001, 0x5A); // any PPU write sets the decay register
+    assert_eq!(bus.read(0x2000), 0x5A); // PPUCTRL: write-only, decay value
+    assert_eq!(bus.read(0x2801), 0x5A); // mirror of $2001: the same latch
 }
 
 #[test]

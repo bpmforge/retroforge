@@ -35,8 +35,21 @@ pub const TAG_REGISTRY: &[TagInfo] = &[
     TagInfo {
         tag: *b"PPU_",
         owner: "core",
+        // Version 2 as of ticket W2-19, which added the PPU's decay
+        // register (its own open-bus latch) and the eight per-bit decay
+        // clocks to the payload. Real machine state -- `$2000`-`$2006`
+        // reads return it -- so it had to be serialized, and a payload
+        // that grew is a payload that changed.
+        //
+        // No migration fn: `Container::decode_default` turns an
+        // unexpected version into `CannotMigrate`, which SAVE_STATES.md
+        // §2 allows as the alternative to migrating. A pre-W2-19 state
+        // is refused by name rather than misparsed -- the failure worth
+        // preventing is a v1 payload read as v2, which would restore a
+        // wrong PPU silently. Nothing has shipped (the tagged release is
+        // W5-05), so no such file exists outside a working tree.
         required: true,
-        current_version: 1,
+        current_version: 2,
     },
     TagInfo {
         tag: *b"APU_",

@@ -20,12 +20,30 @@ impl Ppu {
     /// unchanged, matching real hardware (and the pre-existing `ppu_stub`
     /// behavior this ticket replaces, for the registers this ticket still
     /// doesn't implement reads for).
-    pub fn read_register(&mut self, index: u8, open_bus: u8) -> u8 {
+    pub fn read_register(&mut self, index: u8) -> u8 {
         match index {
-            2 => self.read_status(open_bus),
-            4 => self.oam[self.oam_addr as usize],
-            7 => self.read_data(open_bus),
-            _ => open_bus,
+            2 => self.read_status(),
+            4 => {
+                // Bits 2-4 of a sprite's attribute byte are not stored by
+                // the OAM at all and always read back clear
+                // (nesdev.org/wiki/PPU_OAM "Byte 2"; `ppu_open_bus` test
+                // 10 asserts it). Byte 2 of each 4-byte sprite entry, so
+                // the low two bits of the address select it.
+                let mut value = self.oam[self.oam_addr as usize];
+                if self.oam_addr & 0x03 == 0x02 {
+                    value &= 0xE3;
+                }
+                // "$2004 --------": every bit is driven, so every bit
+                // refreshes (test 11 checks precisely this by reading
+                // $2004 and then $2000).
+                self.refresh_decay(value, 0xFF);
+                value
+            }
+            7 => self.read_data(),
+            // "$2000/$2001/$2003/$2005/$2006 DDDDDDDD": write-only
+            // registers read back as the decay register and — test 5 —
+            // do NOT refresh it.
+            _ => self.decay,
         }
     }
 
@@ -34,17 +52,31 @@ impl Ppu {
     /// path — see that method's doc for why it must never mutate PPU
     /// state). Mirrors [`Controller::peek_bit`](crate::system::Controller)'s
     /// existing peek/read split convention.
-    pub fn peek_register(&self, index: u8, open_bus: u8) -> u8 {
+    pub fn peek_register(&self, index: u8) -> u8 {
         match index {
-            2 => (self.status & 0xE0) | (open_bus & 0x1F),
-            4 => self.oam[self.oam_addr as usize],
+            2 => (self.status & 0xE0) | (self.decay & 0x1F),
+            4 => {
+                let value = self.oam[self.oam_addr as usize];
+                if self.oam_addr & 0x03 == 0x02 {
+                    value & 0xE3
+                } else {
+                    value
+                }
+            }
             7 => self.read_buffer,
-            _ => open_bus,
+            _ => self.decay,
         }
     }
 
     /// Dispatch a CPU write to register `index`.
     pub fn write_register(&mut self, index: u8, value: u8) {
+        // "Writing to any PPU register sets the decay register to the
+        // value written" (blargg's `ppu_open_bus` readme) — ALL eight
+        // bits, for all eight registers, including the read-only $2002.
+        // Its test 2 writes $55 to $2002 and then reads $2000 expecting
+        // $55 back, which is why this is here rather than in the
+        // individual write arms.
+        self.refresh_decay(value, 0xFF);
         match index {
             0 => self.write_ctrl(value),
             1 => self.mask = value,
@@ -124,8 +156,11 @@ impl Ppu {
     ///   dot out of alignment with each other — fixing only the set side
     ///   passed `02` but broke a previously-passing `03`, measured, not
     ///   theorized.
-    fn read_status(&mut self, open_bus: u8) -> u8 {
-        let mut result = (self.status & 0xE0) | (open_bus & 0x1F);
+    fn read_status(&mut self) -> u8 {
+        // "$2002 ---DDDDD": bits 7-5 are driven by the PPU and refresh
+        // the decay register; bits 4-0 read back FROM it and must not
+        // refresh it (`ppu_open_bus` tests 6 and 7).
+        let mut result = (self.status & 0xE0) | (self.decay & 0x1F);
         self.status &= !STATUS_VBLANK;
         self.w = false;
         match (self.scanline, self.dot) {
@@ -137,6 +172,10 @@ impl Ppu {
             (PRERENDER_SCANLINE, 1) => result &= !STATUS_VBLANK,
             _ => {}
         }
+        // Refresh from the value actually returned, after the vblank
+        // fencepost adjustments above — the decay register latches what
+        // the bus carried, not what `self.status` happened to hold.
+        self.refresh_decay(result, 0xE0);
         result
     }
 
@@ -355,15 +394,21 @@ impl Ppu {
     /// derives it from (real hardware's VRAM address pins can't distinguish
     /// `$3Fxx` from `$2Fxx` at that stage). Every read advances `v` by
     /// [`Ppu::increment_vram_addr`] regardless of which path was taken.
-    fn read_data(&mut self, open_bus: u8) -> u8 {
+    fn read_data(&mut self) -> u8 {
         let addr = self.v & 0x3FFF;
         let result = if addr >= 0x3F00 {
+            // "$2007 DD------ palette": the palette drives bits 5-0 and
+            // refreshes them; bits 7-6 come from the decay register and
+            // are NOT refreshed (`ppu_open_bus` tests 8 and 9).
             let value = self.palette_read(addr) & 0x3F;
             self.read_buffer = self.mem_read(addr & 0x2FFF);
-            value | (open_bus & 0xC0)
+            self.refresh_decay(value, 0x3F);
+            value | (self.decay & 0xC0)
         } else {
+            // "$2007 --------" non-palette: all eight bits driven.
             let value = self.read_buffer;
             self.read_buffer = self.mem_read(addr);
+            self.refresh_decay(value, 0xFF);
             value
         };
         self.increment_vram_addr();

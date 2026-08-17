@@ -37,10 +37,38 @@ use crate::stepper::EmuStepper;
 /// `console u8`).
 pub const CONSOLE_NES: u8 = 0;
 
-/// Chunk-payload version this build writes for every core chunk. Bumping it
-/// requires a migration fn or an explicit "cannot migrate" error
-/// (SAVE_STATES.md §2).
-pub const CHUNK_VERSION: u16 = 1;
+/// The payload version to write for `tag`, read from `rf-state`'s own
+/// per-tag registry (`TagInfo::current_version`).
+///
+/// **This replaced a single `CHUNK_VERSION` constant in ticket W2-19.**
+/// One global version for every chunk was only ever right while all the
+/// chunks happened to agree: W2-19 changed the `PPU_` payload alone (the
+/// PPU's decay register plus its eight per-bit clocks — real machine
+/// state, since `$2000`-`$2006` reads return it), and bumping a shared
+/// constant would have declared `CPU_`, `APU_`, `WRAM` and the rest to
+/// have changed too, making the reader reject four chunks that are
+/// byte-identical to what it already understands.
+///
+/// The registry is the right home for this: `rf-state` owns the wire
+/// format and already stores a version per tag. Reading it here means a
+/// future payload change is a one-line edit in the crate that defines the
+/// format, and this writer cannot drift from the reader's expectation —
+/// they are now the same number.
+///
+/// Panics if `tag` is not in the registry, which would mean
+/// [`REGION_TAGS`] names a chunk `rf-state` has never heard of — a
+/// build-time authoring error, not a runtime condition.
+fn chunk_version(tag: [u8; 4]) -> u16 {
+    rf_state::tag_info(tag)
+        .unwrap_or_else(|| {
+            panic!(
+                "chunk tag {} is not in rf-state's registry — REGION_TAGS and TAG_REGISTRY \
+                 have drifted",
+                String::from_utf8_lossy(&tag)
+            )
+        })
+        .current_version
+}
 
 /// The `hash_kind` value `.rfreplay` records for hashes produced by
 /// [`EmuStepper::state_hash`] (SAVE_STATES.md §3).
@@ -172,7 +200,7 @@ pub fn build_container(
     for (region, tag) in REGION_TAGS {
         let mut payload = PayloadBuf::default();
         bus.save_region(cpu, region, &mut payload)?;
-        container.add_chunk(tag, CHUNK_VERSION, payload.bytes)?;
+        container.add_chunk(tag, chunk_version(tag), payload.bytes)?;
     }
     Ok(container)
 }

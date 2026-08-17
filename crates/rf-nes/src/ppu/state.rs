@@ -46,6 +46,8 @@ impl Ppu {
             scanline,
             dot,
             frame_is_odd,
+            decay,
+            decay_ttl,
             render_enable_pipe,
             frame_count,
             suppress_vblank_this_frame,
@@ -126,6 +128,15 @@ impl Ppu {
         out.u16(*scanline)?;
         out.u16(*dot)?;
         out.bool(*frame_is_odd)?;
+        // The PPU's decay register and its per-bit clocks (ticket W2-19).
+        // Genuinely machine state, not scratch: `$2000`-`$2006` reads
+        // return `decay` directly, so a save/load that dropped it would
+        // change what the very next read yields. Both go in the `PPU_`
+        // chunk, which is why `PPU_`'s registry version moved to 2.
+        out.u8(*decay)?;
+        for ttl in decay_ttl {
+            out.u8(*ttl)?;
+        }
         out.u8(*render_enable_pipe)?;
         out.u64(*frame_count)?;
         out.bool(*suppress_vblank_this_frame)?;
@@ -169,6 +180,10 @@ impl Ppu {
         self.scanline = inp.u16()?;
         self.dot = inp.u16()?;
         self.frame_is_odd = inp.bool()?;
+        self.decay = inp.u8()?;
+        for bit in 0..8 {
+            self.decay_ttl[bit] = inp.u8()?;
+        }
         self.render_enable_pipe = inp.u8()?;
         self.frame_count = inp.u64()?;
         self.suppress_vblank_this_frame = inp.bool()?;

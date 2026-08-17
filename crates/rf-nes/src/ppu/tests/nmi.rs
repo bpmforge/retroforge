@@ -88,7 +88,7 @@ fn reading_2002_one_dot_before_the_set_suppresses_vblank_for_the_whole_frame() {
     ppu.scanline = VBLANK_START_SCANLINE;
     ppu.dot = 0;
 
-    let result = ppu.read_register(2, 0);
+    let result = ppu.read_register(2);
     assert_eq!(
         result & STATUS_VBLANK,
         0,
@@ -126,7 +126,7 @@ fn reading_2002_well_before_the_set_dot_does_not_suppress_it() {
     // effect on this frame's own VBlank set.
     ppu.scanline = 100;
     ppu.dot = 50;
-    let _ = ppu.read_register(2, 0);
+    let _ = ppu.read_register(2);
 
     // Loop while `dot != 1` reads a false positive one tick early: the
     // condition already reads (VBLANK_START_SCANLINE, 1) as soon as the
@@ -158,7 +158,7 @@ fn reading_2002_after_the_set_dot_does_not_suppress_it() {
     // A read now (dot 2) sees it set and clears it (ordinary $2002 read
     // behavior) -- unrelated to the one-dot-early suppression window,
     // which only ever applies to a read BEFORE the set.
-    let result = ppu.read_register(2, 0);
+    let result = ppu.read_register(2);
     assert_eq!(result & STATUS_VBLANK, STATUS_VBLANK);
     assert_eq!(
         ppu.status & STATUS_VBLANK,
@@ -184,7 +184,7 @@ fn reading_2002_on_the_same_dot_as_the_set_reads_it_as_set_and_still_suppresses_
     ppu.scanline = VBLANK_START_SCANLINE;
     ppu.dot = 1;
 
-    let result = ppu.read_register(2, 0);
+    let result = ppu.read_register(2);
     assert_eq!(
         result & STATUS_VBLANK,
         STATUS_VBLANK,
@@ -234,7 +234,7 @@ fn reading_2002_on_the_same_dot_as_the_clear_reads_it_as_already_clear() {
     ppu.scanline = PRERENDER_SCANLINE;
     ppu.dot = 1;
 
-    let result = ppu.read_register(2, 0);
+    let result = ppu.read_register(2);
     assert_eq!(
         result & STATUS_VBLANK,
         0,
@@ -253,7 +253,7 @@ fn reading_2002_one_dot_before_the_clear_still_reads_it_as_set() {
     ppu.scanline = PRERENDER_SCANLINE;
     ppu.dot = 0;
 
-    let result = ppu.read_register(2, 0);
+    let result = ppu.read_register(2);
     assert_eq!(
         result & STATUS_VBLANK,
         STATUS_VBLANK,
@@ -269,7 +269,7 @@ fn suppression_does_not_carry_over_to_the_next_frame() {
     let mut ppu = test_ppu();
     ppu.scanline = VBLANK_START_SCANLINE;
     ppu.dot = 0;
-    let _ = ppu.read_register(2, 0); // suppress THIS frame
+    let _ = ppu.read_register(2); // suppress THIS frame
     ppu.tick(); // dot 1: confirms suppressed
     assert_eq!(ppu.status & STATUS_VBLANK, 0);
 
