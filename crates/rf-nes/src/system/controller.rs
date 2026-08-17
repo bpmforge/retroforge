@@ -49,12 +49,35 @@ pub struct Controller {
 }
 
 impl Default for Controller {
+    /// Power-on state.
+    ///
+    /// **`shift_index` is 0, not 8 (ticket W2-19).** It was 8, which made
+    /// a pad that has never been strobed read back as *exhausted* — the
+    /// "1 for every read past the 8th" case — and so returned 1 on the
+    /// very first `$4016` read of a session. That conflates two different
+    /// situations: "the shift register has been emptied" and "nothing has
+    /// ever loaded it".
+    ///
+    /// `cpu_exec_space`'s APU test is what caught it. That ROM executes
+    /// code from all 256 addresses in `$4000-$40FF`, relying on each one
+    /// reading back `$40` (the address high byte, still on the bus) which
+    /// happens to be `RTI` — the opcode that returns it to the loop. At
+    /// `$4016` the pad's bit 0 was ORed in, the byte read `$41` (`EOR`,
+    /// a *two*-byte opcode), execution derailed into the ROM's own `BRK`
+    /// trap, and it reported "Mysteriously Landed at". Measured, not
+    /// inferred: an instrumented run showed read **#0** of the entire
+    /// session already returning 1.
+    ///
+    /// Zero is the right value on its own terms: with no buttons pressed
+    /// the register's parallel inputs are all 0, so an idle pad reads 0.
+    /// The "returns 1 when exhausted" behaviour is unchanged and still
+    /// applies once eight bits really have been shifted out.
     fn default() -> Self {
         Controller {
             buttons: 0,
             strobe: false,
             latched: 0,
-            shift_index: 8,
+            shift_index: 0,
         }
     }
 }
