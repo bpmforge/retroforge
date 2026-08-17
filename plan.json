@@ -719,7 +719,7 @@
     "apu_test stays 8/8 and nestest stays 8991/8991 byte-exact -- a DMA-timing change moves every CPU cycle count downstream of it"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ],
