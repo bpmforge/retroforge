@@ -77,8 +77,15 @@ fn chunk_version_bump_without_migration_is_an_explicit_error() {
         .filter(|ch| ch.tag != *b"CPU_")
         .cloned()
         .collect();
+    // One PAST whatever this build currently writes, derived rather than
+    // hardcoded: a literal became a no-op test the moment `CPU_` itself
+    // moved to version 2 (ticket W2-01c).
+    let cpu_v = rf_state::tag_info(*b"CPU_").unwrap().current_version;
+    let unexpected = cpu_v + 1;
     let mut rebuilt = Container::new(0, GOLDEN_ROM_SHA256, "0.1.0", 1_700_000_000);
-    rebuilt.add_chunk(*b"CPU_", 2, vec![1, 2, 3]).unwrap();
+    rebuilt
+        .add_chunk(*b"CPU_", unexpected, vec![1, 2, 3])
+        .unwrap();
     for ch in chunks_without_cpu {
         rebuilt.add_chunk(ch.tag, ch.version, ch.payload).unwrap();
     }
@@ -90,8 +97,8 @@ fn chunk_version_bump_without_migration_is_an_explicit_error() {
         err,
         ContainerError::CannotMigrate {
             tag: *b"CPU_",
-            found: 2,
-            expected: 1,
+            found: unexpected,
+            expected: cpu_v,
         }
     );
     assert!(err.to_string().contains("CPU_"));
@@ -106,8 +113,15 @@ fn chunk_version_bump_with_registered_migration_succeeds() {
         .filter(|ch| ch.tag != *b"CPU_")
         .cloned()
         .collect();
+    // One PAST whatever this build currently writes, derived rather than
+    // hardcoded: a literal became a no-op test the moment `CPU_` itself
+    // moved to version 2 (ticket W2-01c).
+    let cpu_v = rf_state::tag_info(*b"CPU_").unwrap().current_version;
+    let unexpected = cpu_v + 1;
     let mut rebuilt = Container::new(0, GOLDEN_ROM_SHA256, "0.1.0", 1_700_000_000);
-    rebuilt.add_chunk(*b"CPU_", 2, vec![1, 2, 3]).unwrap();
+    rebuilt
+        .add_chunk(*b"CPU_", unexpected, vec![1, 2, 3])
+        .unwrap();
     for ch in chunks_without_cpu {
         rebuilt.add_chunk(ch.tag, ch.version, ch.payload).unwrap();
     }
@@ -115,7 +129,7 @@ fn chunk_version_bump_with_registered_migration_succeeds() {
     let bytes = c.encode().unwrap();
 
     fn migrate_cpu_v2_to_v1(found: u16, payload: &[u8]) -> Result<Vec<u8>, String> {
-        assert_eq!(found, 2);
+        assert!(found > 1);
         // Trivial migration: v1 just drops the last byte of v2.
         Ok(payload[..payload.len() - 1].to_vec())
     }
@@ -127,12 +141,12 @@ fn chunk_version_bump_with_registered_migration_succeeds() {
         warnings,
         vec![LoadWarning::Migrated {
             tag: *b"CPU_",
-            from: 2,
-            to: 1,
+            from: unexpected,
+            to: cpu_v,
         }]
     );
     let migrated = decoded.chunk(*b"CPU_").unwrap();
-    assert_eq!(migrated.version, 1);
+    assert_eq!(migrated.version, cpu_v);
     assert_eq!(migrated.payload, vec![1, 2]);
 }
 

@@ -23,7 +23,7 @@
 //! author documented as correct", never "the one variant we happen to
 //! produce".
 //!
-//! ## Status: 3 of 5, and the other two are separately diagnosed
+//! ## Status: 4 of 5 (W2-01c), and the last one is separately diagnosed
 //!
 //! This suite is W2-01b's acceptance criterion and it is **not met**; the
 //! ticket carries the block note, `crates/rf-harness/waivers.toml` the
@@ -36,8 +36,14 @@
 //!   is from an older build and no longer matches what the ROM itself
 //!   accepts; the ROM's own verdict is the authority.)
 //! - `read_write_2007` — prints `Passed`, and its hex matches the header.
-//! - `dma_4016_read` — prints `Failed`: it needs exactly ONE extra `$4016`
-//!   read (`08 08 07 08 08`) and this engine produces three (`05`).
+//! - `dma_4016_read` — prints `Passed` (`08 08 07 08 08`) **as of ticket
+//!   W2-01c**. The fix was not in the DMA model at all: the ROM's `end:`
+//!   routine counts how many reads it takes the pad to return 1, so it is
+//!   measuring shifted BITS, not bus reads. A standard controller's shift
+//!   register is clocked by the EDGE of the read strobe, and the three
+//!   back-to-back `$4016` reads a DMC halt puts on the bus hold one strobe
+//!   asserted — one edge, one extra bit, which is exactly the `07` this
+//!   ROM wants. See `NesBus::last_joy_read_cycle`.
 //! - `double_2007_read` — CRC `D84F6815`, none of the four accepted. It
 //!   needs a PPU-side behavior this crate does not implement at all
 //!   ("Double read of $2007 sometimes ignores extra read, and puts odd
@@ -113,13 +119,13 @@ const ROMS: &[Rom] = &[
         accepted: &["Passed"],
         expected_pass: true,
     },
-    // "DMC DMA during $4016 read causes extra $4016 read." Needs exactly one
-    // extra read (`07`); this engine produces three (`05`). See the block
-    // note on W2-01b.
+    // "DMC DMA during $4016 read causes extra $4016 read." Needs exactly
+    // one extra BIT (`07`) -- fixed in W2-01c by the edge-triggered
+    // shift-clock model; see this module's doc.
     Rom {
         name: "dma_4016_read",
         accepted: &["Passed", "08 08 07 08 08"],
-        expected_pass: false,
+        expected_pass: true,
     },
     // "Double read of $2007 sometimes ignores extra read, and puts odd
     // things into buffer" -- an unimplemented PPU behavior, not a DMA one.
@@ -142,7 +148,7 @@ const ROMS: &[Rom] = &[
 /// passing, this test fails too, because that means the block note is stale
 /// and the ticket can move.
 #[test]
-fn dmc_dma_during_read4_three_of_five_pass_and_the_other_two_fail_as_recorded() {
+fn dmc_dma_during_read4_four_of_five_pass_and_the_other_fails_as_recorded() {
     let mut missing = 0;
     let mut surprises = Vec::new();
     for rom in ROMS {

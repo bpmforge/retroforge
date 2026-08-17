@@ -136,6 +136,31 @@ pub struct NesBus {
     /// `run_oam_dma`'s doc for the exact accounting). `None` until the
     /// first DMA runs.
     last_oam_dma_stall: Option<u32>,
+    /// `master_cycle` of the most recent CPU read of each controller port
+    /// (`$4016`/`$4017`), or `u64::MAX` if there has not been one — the
+    /// state behind the edge-triggered shift-clock model (ticket W2-01c).
+    ///
+    /// A standard controller's shift register is clocked by the **edge**
+    /// of the read strobe, not by the fact that a read happened. Reads on
+    /// consecutive CPU cycles hold that strobe continuously asserted, so
+    /// they produce ONE rising edge between them, not one per read.
+    ///
+    /// This is what blargg's `dmc_dma_during_read4/dma_4016_read`
+    /// measures. Its `end:` routine counts how many reads it takes for the
+    /// controller to return 1, so its expected output `08 08 07 08 08`
+    /// says: on four of five iterations the DMA cost no extra bit, and on
+    /// the one where it collided with the `lda $4016` it cost **exactly
+    /// one**. A DMC DMA halt puts three back-to-back `$4016` reads on the
+    /// bus (halt, dummy, alignment), and nesdev counts those as "1 or 3
+    /// extra *reads*" — but the ROM counts *bits*, and contiguous reads
+    /// clock the pad only once. The run is broken by the DMA's own get
+    /// (`$C000`), and the CPU's resumed read is the second edge; hence one
+    /// extra bit regardless of whether the alignment cycle is present.
+    last_joy_read_cycle: [u64; 2],
+    /// The bit each controller port last drove onto D0. A contiguous read
+    /// re-reports this rather than peeking the *next* bit: with no new
+    /// clock edge the shift register's output simply holds (W2-01c).
+    last_joy_bit: [u8; 2],
     /// The `/NMI` level [`CpuBus::nmi_line`] reports, latched once per bus
     /// cycle inside `tick_master` rather than read live from the PPU — see
     /// that method's doc for why this one-cycle-delayed snapshot (not
@@ -227,6 +252,8 @@ impl NesBus {
             rom,
             mapper,
             last_oam_dma_stall: None,
+            last_joy_read_cycle: [u64::MAX; 2],
+            last_joy_bit: [0; 2],
             nmi_level_latch: false,
             apu: Apu::new(),
         }
@@ -382,8 +409,8 @@ impl NesBus {
         let value = match addr {
             0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)],
             0x2000..=0x3FFF => self.ppu.read_register((addr & 0x0007) as u8),
-            0x4016 => self.controllers[0].read_bit() | (self.open_bus & !0x01),
-            0x4017 => self.controllers[1].read_bit() | (self.open_bus & !0x01),
+            0x4016 => self.read_controller_port(0) | (self.open_bus & !0x01),
+            0x4017 => self.read_controller_port(1) | (self.open_bus & !0x01),
             // Ticket W2-01a: `$4015` is the APU's one readable register.
             // nesdev.org/wiki/APU ("Status ($4015)"): "This register is
             // internal to the CPU and so the external CPU data bus is
@@ -657,6 +684,38 @@ impl NesBus {
     /// "number of extra reads depends on CPU-PPU synchronization at reset" —
     /// so the suite's harness accepts any of the documented variants rather
     /// than pinning the one this alignment happens to produce.
+    /// One CPU read of controller port `port` (0 = `$4016`, 1 = `$4017`),
+    /// clocking the pad's shift register only on a **new strobe edge**
+    /// (ticket W2-01c — see [`NesBus::last_joy_read_cycle`] for the
+    /// hardware reasoning and the ROM that measures it).
+    ///
+    /// A read on the cycle immediately after another read of the same port
+    /// is a continuation of one continuously-asserted strobe, so it
+    /// returns the same bit without advancing — [`Controller::peek_bit`]
+    /// is exactly that operation, and already existed for the trace
+    /// logger's non-perturbing peek.
+    fn read_controller_port(&mut self, port: usize) -> u8 {
+        // Only meaningful while the strobe is LOW. With it high the pad is
+        // continuously reloading from the live buttons rather than
+        // shifting, so there is no edge to miss and the output tracks the
+        // buttons on every read.
+        let contiguous = !self.controllers[port].strobe
+            && self.last_joy_read_cycle[port]
+                .checked_add(1)
+                .is_some_and(|next| next == self.master_cycle);
+        self.last_joy_read_cycle[port] = self.master_cycle;
+        if contiguous {
+            // No new edge: the shift register holds whatever it last
+            // drove. Note this is NOT `peek_bit`, which reports the bit
+            // that the NEXT clock would present.
+            self.last_joy_bit[port]
+        } else {
+            let bit = self.controllers[port].read_bit();
+            self.last_joy_bit[port] = bit;
+            bit
+        }
+    }
+
     fn is_get_cycle(cycle: u64) -> bool {
         cycle.is_multiple_of(2)
     }

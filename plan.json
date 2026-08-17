@@ -708,7 +708,9 @@
    "crate": "rf-nes",
    "write_scope": [
     "crates/rf-nes/src/apu/**",
-    "crates/rf-nes/src/system/mod.rs"
+    "crates/rf-nes/src/system/mod.rs",
+    "crates/rf-nes/src/system/**",
+    "crates/rf-state/**"
    ],
    "depends_on": [
     "W2-01b"
@@ -719,14 +721,23 @@
     "apu_test stays 8/8 and nestest stays 8991/8991 byte-exact -- a DMA-timing change moves every CPU cycle count downstream of it"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E1-S1"
    ],
    "notes": [
     "SPLIT OUT OF W2-01b 2026-08-16 (Brad's ruling; W2-01b's notes carry the full measurement history). ROOT CAUSE: dma_4016_read needs exactly ONE extra $4016 read (08 08 07 08 08) and W2-01b's model produces THREE (05). nesdev.org/wiki/DMA says this case is \"1 or 3 extra reads\", so the count is alignment-dependent -- but every configuration W2-01b measured lands on 2 or 3, never 1.",
     "DO NOT RETRY WITHOUT: a model of WHICH ADDRESS the halted 6502 holds on each no-operation DMA cycle. Every W2-01b configuration assumed it re-issues the read of the address it was reading (nesdev: \"the 6502 core repeats the last read cycle\"); the 1-extra-read case implies that on at least one no-op cycle the bus is NOT showing $4016. The two references nesdev cites for exactly this are BreakingNESWiki's DMA circuit analysis and Fiskbit's aligned-controller-read tests. Do NOT retry by tuning get/put parity -- measured in W2-01b, strictly worse (the first three ROMs stop printing at all).",
-    "ALREADY PAID by W2-01b, do not rediscover: these five ROMs leave PRG-RAM all-zero (blargg's older screen-only shell -- a manifest protocol mistag of the same class W1-05b found on sprite_hit_tests), so results are read out of the PPU nametable via `NesBus::ppu_vram_for_test`; the in-crate test in crates/rf-nes/src/apu/tests/dmc_dma_rom.rs already asserts the measured 3-of-5 status EXACTLY, so this ticket's fix will fail that test until its expected_pass flag is flipped -- that is the intended signal, not a regression."
+    "ALREADY PAID by W2-01b, do not rediscover: these five ROMs leave PRG-RAM all-zero (blargg's older screen-only shell -- a manifest protocol mistag of the same class W1-05b found on sprite_hit_tests), so results are read out of the PPU nametable via `NesBus::ppu_vram_for_test`; the in-crate test in crates/rf-nes/src/apu/tests/dmc_dma_rom.rs already asserts the measured 3-of-5 status EXACTLY, so this ticket's fix will fail that test until its expected_pass flag is flipped -- that is the intended signal, not a regression.",
+    "DONE 2026-08-17. dma_4016_read prints `08 08 07 08 08` and self-reports Passed. dmc_dma_during_read4 is 4 of 5; only double_2007_read remains, which is W2-01d's PPU behaviour and never shared this root cause.",
+    "THE TICKET'S OWN HYPOTHESIS WAS CLOSE BUT AIMED AT THE WRONG LAYER. It said the fix needed a model of WHICH ADDRESS the halted 6502 holds on each no-op DMA cycle. It does not. The ROM's source settles it: its `end:` routine counts how many reads it takes the pad to return 1, so `08` means no extra read and `07` means exactly one -- it is measuring shifted BITS, not bus reads. nesdev's \"1 or 3 extra reads\" counts reads; both statements are true at once.",
+    "MECHANISM: a standard controller's shift register is clocked by the EDGE of the read strobe. The three back-to-back $4016 reads a DMC halt puts on the bus (halt, dummy, alignment) hold one strobe continuously asserted -- one rising edge, so ONE extra bit. The run is broken by the DMA's own get ($C000) and the CPU's resumed read supplies the second edge. This yields exactly one extra bit for BOTH alignments, which is why the answer never depended on get/put parity -- the thing the ticket rightly forbade tuning.",
+    "TWO MODELS WERE MEASURED AGAINST EACH OTHER, not argued. Variant B (the halt cycle is the CPU's own read, so only later no-op cycles repeat it) gives `08 08 06 08 08` -- two extra bits, still wrong -- AND regresses dma_2007_read from its documented CRC 5E3DF9C4 to 159A7A8F. Variant A (edge-triggered clock) gives the ROM's exact expected output and leaves the other three ROMs untouched. A discriminating experiment, so the choice is evidence rather than preference.",
+    "IMPLEMENTED ENTIRELY IN system/mod.rs (`NesBus::read_controller_port` + `last_joy_read_cycle`/`last_joy_bit`), which is why it fit the declared write scope: a contiguous read returns the bit the port LAST drove -- deliberately not `Controller::peek_bit`, which reports the bit the NEXT clock would present. The suppression is disabled while the strobe is HIGH, because the pad is then continuously reloading from live buttons rather than shifting, and applying it there broke `strobe_held_high_continuously_reloads_from_live_buttons` (caught by that test, not by review).",
+    "FIVE CONTROLLER UNIT TESTS WERE READING $4016 ON CONSECUTIVE CYCLES -- a pattern no instruction sequence can produce (`LDA $4016` is four cycles) and which only a DMC DMA halt creates. They now read the way software does, via a `read_bits_like_software` helper that puts a non-port cycle between reads, and the contiguous case gets its OWN test asserting both halves (contiguous holds, spaced advances) so an engine that simply stopped shifting cannot pass.",
+    "SAVE STATE: both new fields go in the CPU_ chunk's bus half (-> version 2 via rf-state's per-tag registry). They decide whether the very next port read counts as a new strobe edge, so dropping them across a save would let a restored machine clock a bit the saved one would not have. Two rf-state tests hardcoded `2` as \"a version this build does not expect\" and silently became no-ops the moment CPU_ reached 2; they now derive it as current+1.",
+    "VERIFIED, criterion 3 in full: apu_test 8/8, nestest 8991/8991 byte-exact, nes6502 2,550,000/2,550,000 -- a DMA-timing change moves every downstream cycle count, so these were the real risk. Both #[ignore]d 5-minute replay goldens re-run under --release and UNMOVED (games read the pad spaced, so the edge model does not reach them).",
+    "SCOPE AMENDMENT (vetoable, recorded): crates/rf-nes/src/system/** (the controller test file is under system/tests/) and crates/rf-state/** (the CPU_ version bump)."
    ]
   },
   {

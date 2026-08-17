@@ -150,6 +150,30 @@ produced two findings worth reading before trusting any tier label:
    named exception in the unofficial vector suite, carrying a guard that
    fails if `$AB` ever starts passing.
 
+**W2-01c: the ROM was counting something other than what everyone assumed
+(2026-08-17).** `dma_4016_read` had resisted a whole ticket's worth of
+DMA-model work, and its own notes said the fix needed a model of *which
+address* the halted 6502 holds on each no-operation cycle. It did not.
+The ROM's `end:` routine counts how many reads it takes the pad to return
+1 — so its expected `08 08 07 08 08` is measuring shifted **bits**, and
+nesdev's "1 or 3 extra **reads**" is measuring bus cycles. Both are true
+at once.
+
+A standard controller's shift register is clocked by the **edge** of the
+read strobe. The three back-to-back `$4016` reads a DMC halt puts on the
+bus hold one strobe asserted — one rising edge, one extra bit — and the
+DMA's own get (`$C000`) breaks the run so the CPU's resumed read supplies
+the second. That gives exactly one extra bit for *either* alignment, which
+is why the answer never depended on get/put parity, the one thing the
+ticket explicitly forbade tuning.
+
+Two models were measured against each other rather than argued: the
+alternative (halt cycle is the CPU's own read, only later cycles repeat)
+produces `08 08 06 08 08` **and** regresses `dma_2007_read` off its
+documented CRC. Worth generalising: **when a ROM's expected output has
+resisted several plausible models, read what its scoring routine actually
+counts before building a sixth.**
+
 **`crates/rf-harness/waivers.toml` is now EMPTY of waivers (2026-08-17).**
 All ten ever raised — seven Tier-B by W2-09, three Tier-A CPU by W2-12 —
 were deleted because the ROM passes, never re-dated. That is the state the
@@ -241,7 +265,7 @@ mistag, flagged since W1-05b and deliberately NOT absorbed here) and
 | `full_palette`, `ppu_open_bus`, `ppu_read_buffer` | palette, open bus, $2007 buffer | FR-CORE-022 | B — **2/2 as of W2-19**: `ppu_open_bus` passes on the new PPU decay register, `ppu_read_buffer` on a budget of 2000 (measured completion ~1300; 600 was less than half what it needs). `full_palette` is `golden_frame` protocol and **still has no runner** | golden frame / $6000 |
 | blargg `apu_test` (1 combined ROM, 8 sub-tests) | length counters, length table, frame IRQ + its timing, APU jitter, DMC basics + rates | FR-CORE-024 | A-local | $6000 = 0 — **8/8 as of W2-01a**; fifth Tier-A-local suite (gitignored ROM, so `scripts/local-gate.sh` + `docs/evidence/local-gate.json` carry the evidence, not CI) |
 | blargg `apu_reset` (6 ROMs) | APU state across reset | FR-CORE-024 | A — **NOT WIRED**: fetched and in the manifest, but no ticket owns it and no `Apu::reset` path exists yet (W2-01a `HANDOFF:` note) | $6000 = 0 |
-| blargg `dmc_dma_during_read4` (5 ROMs) | DMC DMA cycle stealing + the repeated-read glitch on `$2007`/`$4016` | FR-CORE-024 | A-local — **3/5, W2-01b BLOCKED with evidence** | **NOT `$6000`**: all five leave PRG-RAM zero (older screen-only shell), so the result is read out of the PPU nametable. `dma_2007_read` matches documented CRC `5E3DF9C4`, `dma_2007_write` and `read_write_2007` self-report `Passed`; `dma_4016_read` needs 1 extra `$4016` read and this engine makes 3, and `double_2007_read` needs an unimplemented `$2007` double-read PPU quirk. Both diagnoses are in W2-01b's block note |
+| blargg `dmc_dma_during_read4` (5 ROMs) | DMC DMA cycle stealing + the repeated-read glitch on `$2007`/`$4016` | FR-CORE-024 | A-local — **4/5 as of W2-01c**; only `double_2007_read` is left, owned by **W2-01d** and never a DMA question | **NOT `$6000`**: all five leave PRG-RAM zero (older screen-only shell), so the result is read out of the PPU nametable. `dma_2007_read` matches documented CRC `5E3DF9C4`; `dma_2007_write`, `read_write_2007` and `dma_4016_read` self-report `Passed` |
 | blargg `apu_mixer` (4 ROMs) | non-linear mixer levels | FR-CORE-024 | B-local | RMS envelope of the cancellation section between the ROMs' two beeps — **the ROM's own design is the oracle** ("generate a tone, then generate the inverse waveform using the DMC DAC, canceling to (near) silence"), so no reference recording is needed. **`square` and `dmc` are gated** (residue < 0.10 of peak; a +20% `tnd`-LUT mutation measures 0.31/0.21, so the gate is not vacuous). `triangle` (0.092 residue vs a 0.057 noise floor) and `noise` (its section is *meant* to be noisy — "fade noise in, and out, without any tone") are structural-only, stated in `crates/retroforge/tests/apu_mixer.rs` rather than gated on a threshold picked to pass |
 | `mmc3_test_2` + IRQ tests | MMC3 A12 IRQ counter | FR-CORE-025 | A | $6000 = 0 |
 | Holy Diver Batman (28 ROMs) | mapper acid breadth | FR-CORE-025 | B | golden frame per ROM |

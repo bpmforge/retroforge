@@ -113,6 +113,8 @@ impl NesBus {
             rom: _,
             mapper: _, // MAPR chunk
             last_oam_dma_stall,
+            last_joy_read_cycle,
+            last_joy_bit,
             nmi_level_latch,
             apu: _, // APU_ chunk
         } = self;
@@ -123,6 +125,17 @@ impl NesBus {
             controller.save_state(out)?;
         }
         out.opt_u32(*last_oam_dma_stall)?;
+        // Ticket W2-01c. Genuinely state, not scratch: it decides whether
+        // the very next `$4016`/`$4017` read counts as a new strobe edge
+        // and therefore whether it shifts the pad. Dropping it across a
+        // save would let a restored machine clock a bit the saved one
+        // would not have.
+        for cycle in last_joy_read_cycle {
+            out.u64(*cycle)?;
+        }
+        for bit in last_joy_bit {
+            out.u8(*bit)?;
+        }
         out.bool(*nmi_level_latch)
     }
 
@@ -133,6 +146,12 @@ impl NesBus {
             self.controllers[index].load_state(inp)?;
         }
         self.last_oam_dma_stall = inp.opt_u32()?;
+        for index in 0..self.last_joy_read_cycle.len() {
+            self.last_joy_read_cycle[index] = inp.u64()?;
+        }
+        for index in 0..self.last_joy_bit.len() {
+            self.last_joy_bit[index] = inp.u8()?;
+        }
         self.nmi_level_latch = inp.bool()?;
         Ok(())
     }

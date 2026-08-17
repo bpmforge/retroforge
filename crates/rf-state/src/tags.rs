@@ -29,8 +29,13 @@ pub const TAG_REGISTRY: &[TagInfo] = &[
     TagInfo {
         tag: *b"CPU_",
         owner: "core",
+        // Version 2 as of ticket W2-01c, which added the per-port
+        // last-controller-read cycle to the bus half of this chunk. It
+        // decides whether the next `$4016`/`$4017` read is a new strobe
+        // edge and therefore whether it shifts the pad, so a restore that
+        // dropped it could clock a bit the saved machine would not have.
         required: true,
-        current_version: 1,
+        current_version: 2,
     },
     TagInfo {
         tag: *b"PPU_",
