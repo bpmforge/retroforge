@@ -1585,7 +1585,7 @@
     "every waiver W2-09 added for these suites is DELETED rather than re-dated, and the Tier-B nightly is green with no waivers naming this ticket"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ],
