@@ -1895,7 +1895,7 @@
     "every GPU wait in the test is bounded and cannot hang the suite: no unbounded device.poll, no awaiting a device-lost callback that may never fire"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [],
    "notes": [
     "SPLIT OUT OF W3-01 2026-08-07 (conductor, on Brad's authorization of a third attempt). W3-01 stalled TWICE at the 600s watchdog, and the evidence points at this criterion specifically rather than at the pipeline: attempt 1 reported the palette pass working 'end-to-end on real Metal hardware' and then froze immediately on 'verify the device-loss callback mechanism'. Isolating it means a hang here can no longer swallow the pipeline work, which is what happened twice.",
