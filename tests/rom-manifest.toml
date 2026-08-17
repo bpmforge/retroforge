@@ -959,7 +959,16 @@ id = "cpu_dummy_reads"
 console = "nes"
 fr = "FR-CORE-020"
 tier = "B"
-protocol = "six_thousand"
+# PROTOCOL CORRECTED 2026-08-16 (W2-19), was `six_thousand`. This ROM
+# never writes the $6001-$6003 signature at all -- it reports only on the
+# nametable -- so under the $6000 protocol it read as "never reached its
+# test-status init", i.e. indistinguishable from a hang, and W2-09 waived
+# it as one. It PASSES, and does so within 200 frames; it was never slow.
+# Same class of mistake as `branch_timing_tests` (W2-12) and
+# `cpu_timing_test6` (which needed the `screen_text` protocol added):
+# a wrongly-wired ROM is worse than an unwired one, because it
+# manufactures a failure that looks real enough to waive.
+protocol = "screen_text"
 [[suite.roms]]
 artifact = "cpu-dummy-reads"
 rom = "cpu_dummy_reads"
@@ -1159,7 +1168,12 @@ protocol = "six_thousand"
 [[suite.roms]]
 artifact = "oam-stress"
 rom = "oam_stress"
-frame_budget = 3600
+# BUDGET RAISED 2026-08-16 (W2-19) from 3600. Measured completion is
+# between frames 3600 and 3620, so the old budget missed by roughly
+# TWENTY frames -- a third of a second -- which is why this ROM reported
+# a partial result rather than an obvious timeout. 5400 is 1.5x the
+# measured need.
+frame_budget = 5400
 
 [[suite]]
 id = "full_palette"
@@ -1192,7 +1206,15 @@ protocol = "six_thousand"
 [[suite.roms]]
 artifact = "ppu-read-buffer"
 rom = "test_ppu_read_buffer"
-frame_budget = 600
+# BUDGET RAISED 2026-08-16 (W2-19) from 600, and the old value was
+# genuinely insufficient rather than merely inconvenient -- measured, per
+# this ticket's own instruction not to raise a budget until a ROM goes
+# green. Completion is between frames 1200 and 1300 (bisected); 600 was
+# less than half of what the ROM needs. Its own screen says so while
+# running: "This next test will take a while. In order to distract you
+# with entertainment, art is provided." 2000 leaves ~1.5x headroom -- a
+# real hang still surfaces in ~33 emulated seconds.
+frame_budget = 2000
 
 [[suite]]
 id = "apu_test"

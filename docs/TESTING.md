@@ -150,6 +150,37 @@ produced two findings worth reading before trusting any tier label:
    named exception in the unofficial vector suite, carrying a guard that
    fails if `$AB` ever starts passing.
 
+**W2-19 cleared the whole Tier-B waiver set (2026-08-16)** — all seven
+entries deleted rather than re-dated, and the nightly runs green with none.
+Four findings from it are worth carrying forward:
+
+1. **The PPU has its own open bus, and it is not the CPU's.** blargg's
+   `ppu_open_bus` readme says so in its first paragraph; this crate had
+   only the CPU-side latch. Adding the PPU's decay register fixed FOUR
+   ROMs at once (`ppu_open_bus`, both `cpu_exec_space` arms,
+   `cpu_dummy_writes_ppumem`) — the ticket predicted three of them.
+2. **A never-strobed controller is not an exhausted one.**
+   `Controller::default` started with the shift register empty, so the
+   first `$4016` read of a session returned 1. `cpu_exec_space`'s APU test
+   catches this because it executes code from all 256 addresses in
+   `$4000-$40FF`, and one wrong bit turns the `RTI` it relies on into a
+   two-byte opcode.
+3. **Two budgets were genuinely too small — proven, not assumed.** The
+   ticket forbade raising a budget until a ROM went green, so completion
+   frames were bisected first: `ppu_read_buffer` needs ~1300 against a
+   budget of 600 (and says "This next test will take a while" on screen
+   while it works), `oam_stress` ~3620 against 3600 — **short by twenty
+   frames**, which is why it reported a partial result instead of an
+   obvious timeout.
+4. **A third protocol mistag.** `cpu_dummy_reads` never writes the `$6000`
+   signature at all; it is screen-only, and under the `$6000` protocol it
+   read as "never reached its test-status init" and was waived as a hang.
+   It passes, in under 200 frames. That is the same class as
+   `branch_timing_tests` and `cpu_timing_test6` (W2-12) — three now — so
+   treat an unexplained "signature never valid" as a suspected mistag
+   before treating it as a bug. The Tier-B runner gained a `screen_text`
+   path so fixing the tag did not simply move the ROM to the skip list.
+
 Executed today: `nes6502`, `nestest`, `sprite_hit_tests`, `ppu_vbl_nmi`,
 `apu_test`, `instr_test-v5`, `instr_timing`, `branch_timing_tests`,
 `cpu_timing_test6`, `cpu_interrupts_v2` (A-local, all in
@@ -167,12 +198,12 @@ mistag, flagged since W1-05b and deliberately NOT absorbed here) and
 | `branch_timing_tests` (3 ROMs) | branch timing, page-cross | FR-CORE-020 | A-local — **wired (W2-12), 3/3 PASS** | **NOT `$6000`**: 2005-era ROMs like `sprite_hit_tests`, scored on the RAM-result byte at `$00F8`. Under the `six_thousand` tag the manifest used to carry, all three reported "signature never became valid" — a false hang, and three false failures. Corrected in `tests/rom-manifest.toml` |
 | `cpu_timing_test6` | official-instruction cycle counts | FR-CORE-020 | A-local — **wired (W2-12), PASSES as of W2-20** — its `FAIL OP :$00` was never a BRK *timing* bug, it was the interrupt poll | **NOT `$6000`**: verdict is only on the nametable, scored by the new `screen_text` protocol using blargg's own rule ("if a test prints 'passed', it passed") |
 | `cpu_interrupts_v2` | NMI/IRQ timing, hijacking | FR-CORE-022 | A-local — **wired (W2-12)**; `2-nmi_and_brk` PASSES as of W2-20, now fails at `3-nmi_and_irq` (test 3 of 5) which W2-20 unmasked — an APU frame-IRQ timing gap, not a CPU one; waived against **W2-21** | $6000 = 0 |
-| `cpu_dummy_reads/writes`, `cpu_exec_space` | dummy bus cycles, open bus | FR-CORE-020 | B — **wired 2026-08-16 (W2-09)**; 1 of 5 ROMs passing, the other four waived against **W2-19** (PPU/APU open bus, RMW double-write, and one ROM that never reaches its own init) | $6000 = 0 |
+| `cpu_dummy_reads/writes`, `cpu_exec_space` | dummy bus cycles, open bus | FR-CORE-020 | B — **5/5 as of W2-19** (was 1/5). `cpu_dummy_reads` is **`screen_text`**, not `$6000` — it was mistagged, which is why it looked like a hang | $6000 = 0, except `cpu_dummy_reads` (screen) |
 | blargg `ppu_vbl_nmi` (10 sub-ROMs, `rom_singles/`) | VBL/NMI to the PPU cycle | FR-CORE-022 | A-local | $6000 = 0 — **10/10 clean, no waiver** (W1-05c took it 4→9, W1-05d closed `10-even_odd_timing`; see `crate::ppu::Ppu::render_enable_pipe`) |
 | `sprite_hit_tests` | sprite-0 hit | FR-CORE-023 | A-local | RAM-result byte (`$00F8`) = 1 — NOT `$6000` (ticket W1-05b correction; this ROM generation predates blargg's `$6000` runtime, see `tests/rom-manifest.toml`'s comment on this suite) |
 | `sprite_overflow_tests` | overflow bug | FR-CORE-023 | A | $6000 = 0 — **unverified as of W1-05b**: shares `sprite_hit_tests`' pre-`$6000` ROM family and almost certainly has the same protocol mistag; out of this ticket's scope, flagged in `tests/rom-manifest.toml` for whichever ticket implements this suite |
-| `oam_read`, `oam_stress` | $2004 semantics | FR-CORE-023 | B — **wired (W2-09)**: `oam_read` passes, `oam_stress` waived against W2-19 (CRC mismatch) | $6000 = 0 |
-| `full_palette`, `ppu_open_bus`, `ppu_read_buffer` | palette, open bus, $2007 buffer | FR-CORE-022 | B — **wired (W2-09)** for the two `$6000` ROMs, both waived against W2-19 (`ppu_open_bus`: "write to any PPU register should set decay value"; `ppu_read_buffer`: times out at 600 frames). `full_palette` is `golden_frame` protocol and still has no runner | golden frame / $6000 |
+| `oam_read`, `oam_stress` | $2004 semantics | FR-CORE-023 | B — **2/2 as of W2-19**; `oam_stress` needed a frame budget of 5400, not 3600 (measured completion ~3620 — it was short by twenty frames) | $6000 = 0 |
+| `full_palette`, `ppu_open_bus`, `ppu_read_buffer` | palette, open bus, $2007 buffer | FR-CORE-022 | B — **2/2 as of W2-19**: `ppu_open_bus` passes on the new PPU decay register, `ppu_read_buffer` on a budget of 2000 (measured completion ~1300; 600 was less than half what it needs). `full_palette` is `golden_frame` protocol and **still has no runner** | golden frame / $6000 |
 | blargg `apu_test` (1 combined ROM, 8 sub-tests) | length counters, length table, frame IRQ + its timing, APU jitter, DMC basics + rates | FR-CORE-024 | A-local | $6000 = 0 — **8/8 as of W2-01a**; fifth Tier-A-local suite (gitignored ROM, so `scripts/local-gate.sh` + `docs/evidence/local-gate.json` carry the evidence, not CI) |
 | blargg `apu_reset` (6 ROMs) | APU state across reset | FR-CORE-024 | A — **NOT WIRED**: fetched and in the manifest, but no ticket owns it and no `Apu::reset` path exists yet (W2-01a `HANDOFF:` note) | $6000 = 0 |
 | blargg `dmc_dma_during_read4` (5 ROMs) | DMC DMA cycle stealing + the repeated-read glitch on `$2007`/`$4016` | FR-CORE-024 | A-local — **3/5, W2-01b BLOCKED with evidence** | **NOT `$6000`**: all five leave PRG-RAM zero (older screen-only shell), so the result is read out of the PPU nametable. `dma_2007_read` matches documented CRC `5E3DF9C4`, `dma_2007_write` and `read_write_2007` self-report `Passed`; `dma_4016_read` needs 1 extra `$4016` read and this engine makes 3, and `double_2007_read` needs an unimplemented `$2007` double-read PPU quirk. Both diagnoses are in W2-01b's block note |

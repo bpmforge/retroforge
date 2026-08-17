@@ -42,6 +42,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use rf_harness::blargg_evidence;
+use rf_harness::blargg_evidence::ScreenOutcome;
 use rf_harness::{BlarggStatus, Manifest, Protocol, Suite, Tier, Waiver, WaiverFile};
 
 /// Tier-B suites come from the manifest's own `tier` field rather than a
@@ -149,7 +150,11 @@ fn main() -> ExitCode {
 
     for suite in suites {
         let suite_id = &suite.id;
-        if suite.protocol != Protocol::SixThousand {
+        // `screen_text` joined `six_thousand` here in W2-19. Leaving it on
+        // the skip path would have traded one silent gap for another: it
+        // is the protocol `cpu_dummy_reads` actually uses, and that ROM
+        // had been waived as a hang precisely because nothing scored it.
+        if !matches!(suite.protocol, Protocol::SixThousand | Protocol::ScreenText) {
             eprintln!(
                 "tier-b-suites: {suite_id}: SKIP (protocol {:?} has no runner here)",
                 suite.protocol
@@ -177,17 +182,29 @@ fn main() -> ExitCode {
                 continue;
             }
             let waiver = waiver_for(&waivers, suite_id, &rom.rom);
-            let (failed, detail) = match blargg_evidence::run(&path, rom.frame_budget) {
-                Ok(outcome) if outcome.status == BlarggStatus::Passed => (false, String::new()),
-                Ok(outcome) => (
-                    true,
-                    format!(
-                        "{:?} — {}",
-                        outcome.status,
-                        outcome.message.trim().replace('\n', " | ")
+            let (failed, detail) = match suite.protocol {
+                Protocol::ScreenText => {
+                    match blargg_evidence::run_screen_text(&path, rom.frame_budget) {
+                        Ok(ScreenOutcome::Passed(_)) => (false, String::new()),
+                        // A ROM that printed no verdict has not given one —
+                        // scored as a failure, never folded into "passed",
+                        // which is the same rule the evidence binary applies.
+                        Ok(outcome) => (true, format!("{outcome:?}").replace('\n', " | ")),
+                        Err(e) => (true, format!("ERROR {e}")),
+                    }
+                }
+                _ => match blargg_evidence::run(&path, rom.frame_budget) {
+                    Ok(outcome) if outcome.status == BlarggStatus::Passed => (false, String::new()),
+                    Ok(outcome) => (
+                        true,
+                        format!(
+                            "{:?} — {}",
+                            outcome.status,
+                            outcome.message.trim().replace('\n', " | ")
+                        ),
                     ),
-                ),
-                Err(e) => (true, format!("ERROR {e}")),
+                    Err(e) => (true, format!("ERROR {e}")),
+                },
             };
 
             match (failed, waiver) {

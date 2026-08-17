@@ -29,67 +29,23 @@
 # and the nesdev citation, and `docs/STATUS.md`'s W1-05c/W1-05d entries
 # carry the per-ROM evidence.
 #
-# ----------------------------------------------------------------------
-# Tier-B known-fails, raised 2026-08-16 by W2-09's FIRST run of the nightly
-# Tier-B tier -- which is precisely what that tier exists to find. Every one
-# is a real ROM failing today against a real accuracy gap, quoted below in
-# the ROM's own words. All are owned by W2-19, whose last acceptance
-# criterion is that these entries be DELETED rather than re-dated.
+# Waiver history for the Tier-B set: raised 2026-08-16 by W2-09's first
+# run of the nightly tier (7 waivers: ppu_open_bus, cpu_exec_space x2,
+# cpu_dummy_writes_ppumem, cpu_dummy_reads, oam_stress, ppu_read_buffer)
+# and DELETED outright by W2-19 the same day, because all seven now pass.
+# Deleted rather than re-dated, per that ticket's own last criterion --
+# the ROMs pass, so there is nothing left to justify.
 #
-# Expiry is 2026-11-01, matching the horizon the ppu_vbl_nmi waivers used:
-# far enough out to be fixable deliberately, near enough that nobody
-# forgets. `crates/rf-harness/src/bin/tier_b_suites.rs` refuses a waiver
-# that covers a ROM which has started passing, so these cannot quietly
-# outlive the bug.
-
-[[waiver]]
-suite = "ppu_open_bus"
-rom = "ppu_open_bus"
-justification = "PPU OPEN-BUS DECAY IS NOT MODELLED. The ROM's own words: 'Write to any PPU register should set decay value' (Failed #2). This crate models a bus-level open-bus latch (NesBus::open_bus) but not the PPU's separately-decaying bus, and writes to write-only PPU registers do not refresh it. Owned by W2-19; likely the same root cause as cpu_exec_space's PPU arm."
-expiry = "2026-11-01"
-ticket = "W2-19"
-
-[[waiver]]
-suite = "cpu_exec_space"
-rom = "test_cpu_exec_space_ppuio"
-justification = "Same PPU open-bus gap, stated independently by a second ROM: 'PPU open bus implementation is missing or incomplete: A write to $2003, followed by a read from $2001 should return the same value as was written' (Failed #3). Owned by W2-19."
-expiry = "2026-11-01"
-ticket = "W2-19"
-
-[[waiver]]
-suite = "cpu_exec_space"
-rom = "test_cpu_exec_space_apu"
-justification = "APU-range open bus: the ROM enumerates $4000-$4016 plus the unallocated $4018-$40FF and expects open bus from every write-only port, then fails with 'Mysteriously Landed at $1A34' (Failed #2) when execution from I/O space diverges. W2-01a made $4015 a real register; the write-only ports and unallocated space still do not read as open bus. Owned by W2-19."
-expiry = "2026-11-01"
-ticket = "W2-19"
-
-[[waiver]]
-suite = "cpu_dummy_writes"
-rom = "cpu_dummy_writes_ppumem"
-justification = "Read-modify-write double-write behaviour against PPU memory: '675 ERRORS ... 42 OPCODES FAILED THE TEST' (Failed #9), with the failure table showing open-bus reads returning $FF where the written value is expected -- the same PPU open-bus gap seen from the RMW side. Its sibling cpu_dummy_writes_oam PASSES, which is what localizes this to the PPU-memory path rather than to RMW timing generally. Owned by W2-19."
-expiry = "2026-11-01"
-ticket = "W2-19"
-
-[[waiver]]
-suite = "cpu_dummy_reads"
-rom = "cpu_dummy_reads"
-justification = "The ROM never reaches its own test-status init: 600 frames elapse and the $6001-$6003 signature never becomes valid. That is a DIFFERENT failure shape from the others here (it is not reporting a wrong answer, it is not getting far enough to report one), so do not assume it shares their root cause. Owned by W2-19."
-expiry = "2026-11-01"
-ticket = "W2-19"
-
-[[waiver]]
-suite = "oam_stress"
-rom = "oam_stress"
-justification = "Fails with a CRC mismatch (59916E5B) and a visibly wrong sprite pattern in its own output. $2004/OAMADDR behaviour under stress is not modelled to this ROM's standard. Owned by W2-19."
-expiry = "2026-11-01"
-ticket = "W2-19"
-
-[[waiver]]
-suite = "ppu_read_buffer"
-rom = "test_ppu_read_buffer"
-justification = "TIMES OUT rather than failing: 600 frames elapse with a valid signature but $6000 never leaves $80 (running). Deliberately waived as a timeout, NOT as a wrong answer -- W2-19's own acceptance says to establish whether the ROM is genuinely slow or whether this engine stalled it, because a frame budget raised until it passes is the exact shape of a gate that stops gating."
-expiry = "2026-11-01"
-ticket = "W2-19"
+# Root causes, for whoever reads this next: four were ONE bug (the PPU's
+# decay register -- its own open-bus latch, which this crate did not have,
+# having only the CPU-side one) plus the controller's power-on shift
+# state. Two were budgets that were genuinely too small, measured by
+# bisection rather than raised until green (ppu_read_buffer needs ~1300
+# frames and had 600; oam_stress needs ~3620 and had 3600 -- short by
+# twenty frames). One, cpu_dummy_reads, was never failing at all: it is a
+# screen-only ROM that was tagged `six_thousand`, so it read as a hang.
+# The code carries the detail: `crate::ppu::Ppu::decay` (rf-nes),
+# `Controller::default`, and the manifest comments on the three suites.
 
 # ----------------------------------------------------------------------
 # Tier-A CPU known-fail, narrowed 2026-08-16 by W2-20.
