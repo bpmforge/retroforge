@@ -1969,7 +1969,7 @@
     "the isolation tests and the debug view both still work when the toggle is on"
    ],
    "points": 2,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [],
    "notes": [
     "RAISED 2026-08-07 by W3-03's implementing agent, unprompted, and confirmed by conductor measurement. W3-03 wires DualSink and two extra FrameMsg buffers UNCONDITIONALLY, so every frame pays the layer split plus two ~240 KB clones whether or not anyone is looking. NOT A REGRESSION TODAY, measured rather than assumed: through the real core thread on Alter Ego it still holds 60.0 fps in debug (0.998x NTSC) and 60.2 in release (1.003x), fully inside W2-18's 16.64 ms budget even in the tightest build. But it spends headroom a slower host, a heavier scene, or the coming enhancement passes will want.",
