@@ -2141,8 +2141,16 @@
     "golden-frame suite runs headless on the Linux software rasterizer"
    ],
    "points": 3,
-   "status": "in_progress",
-   "stories": []
+   "status": "done",
+    "stories": [],
+    "notes": [
+     "DONE 2026-08-18. A `build` matrix job over ubuntu-latest / macos-latest / windows-latest uploading a per-OS artifact, plus an explicit named step for the golden-frame GPU suite on Linux's software rasterizer.",
+     "WHAT IS VERIFIED LOCALLY AND WHAT IS NOT, stated plainly because this is a CI ticket and I cannot make GitHub run. VERIFIED: `actionlint` passes on both workflow files -- a real validator (action versions, expression syntax, matrix references, runner labels), not just a YAML parse; and `cargo build --release -p retroforge --features audio,gamepad` compiles and links on macOS, landing at exactly the artifact path the job uploads (13.8 MB, target/release/retroforge). NOT VERIFIED: that the jobs are green. The first CI run is what proves that -- the same class of claim RENDERER section 7 already records about llvmpipe (\"CI's first green run is what turns 'should be identical' into 'is identical'\").",
+     "SEPARATE JOB, NOT A MATRIX OVER `gate`, and the cost reasoning matters: fmt/clippy/arch/validators/licence/determinism are OS-INDEPENDENT -- their answers cannot differ by platform -- so matrixing them would triple CI time to re-derive the same result twice. What genuinely varies per OS is whether the thing COMPILES AND LINKS, which is what this job proves. fail-fast is off: 'Windows is broken' and 'Windows and macOS are broken' are different findings, and fail-fast reports them identically.",
+     "BUILDS WITH --features audio,gamepad, not the CI-default set, and that IS the point of the job. Those features are off by default so `cargo test --workspace` needs no ALSA headers -- which also means cpal and gilrs, the two most platform-specific dependency trees in the workspace, are otherwise compiled on NO platform in CI. A build artifact a human is meant to run had better have sound and controllers. Linux installs libasound2-dev/libudev-dev for exactly this.",
+     "CRITERION 3 IS ITS OWN NAMED STEP rather than buried inside `cargo test --workspace`. Costs almost nothing (already compiled, cached) and buys a green/red check a human can point at, plus --nocapture so the log records WHICH adapter answered. It cannot silently degrade to a skip: `gpu_or_skip` panics rather than skipping when CI is set, so 'no adapter' fails loudly instead of passing as zero tests run -- the failure mode that would have made the step decorative.",
+     "DELIBERATE SCOPE LIMIT, FLAGGED RATHER THAN PAPERED OVER: the build matrix does NOT run the workspace suite on macOS/Windows. `gpu_or_skip` panics whenever CI is set -- a guarantee that exists so a Linux run cannot silently lose GPU coverage -- so running those tests there would gate this job on the mac/win runners exposing a usable adapter, which this ticket did not verify and a BUILD job should not depend on. Letting them skip cleanly per-job needs a crate-side CI-strictness signal narrower than 'is CI', outside this ticket's .github/** write scope. RESIDUAL GAP, real and worth a follow-up: runtime behaviour on macOS/Windows (path handling, line endings) is still untested by CI. Criterion 1 says 'build jobs green', and build is what this delivers."
+    ]
   },
   {
    "id": "W4-00",

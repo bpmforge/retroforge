@@ -51,6 +51,24 @@ jobs:
           # headless GPU tests (from W3-01) use fallback adapter
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
+      - name: golden-frame GPU suite on the software rasterizer (W3-06)
+        # Acceptance criterion 3, as its OWN named step rather than buried
+        # inside `cargo test --workspace` above. It costs almost nothing
+        # (already compiled, and the binaries are cached), and it buys two
+        # things worth having: a green/red check a human can point at for
+        # "the golden-frame suite runs headless on Linux", and `--nocapture`
+        # so the log records WHICH adapter answered.
+        #
+        # This cannot silently degrade to a skip: `gpu_or_skip` in these
+        # tests panics rather than skipping when `CI` is set (GitHub sets
+        # CI=true), so "no adapter" fails loudly here instead of passing
+        # as zero tests run — which is the failure mode that would make
+        # this step decorative.
+        run: cargo test -p rf-harness --test golden_frame_gpu -- --nocapture
+        env:
+          WGPU_BACKEND: gl
+          LIBGL_ALWAYS_SOFTWARE: "1"
+
       - name: mode-invariant failure evidence (W4-01, R-F4)
         # Only ever has anything to upload if the "tests" step's
         # every_corpus_entry_is_mode_invariant_over_its_full_frame_window
@@ -94,3 +112,91 @@ jobs:
         run: |
           cargo install cargo-deny --locked --version 0.20.2
           cargo deny check licenses
+
+  # ---------------------------------------------------------------------
+  # Ticket W3-06 / NFR-009: "Platforms: macOS (primary dev), Windows,
+  # Linux — CI builds all three from Phase 3 onward."
+  #
+  # Deliberately a SEPARATE job from `gate` rather than a matrix over it.
+  # `gate` is fmt/clippy/arch/validators/licence/determinism — all
+  # OS-independent checks whose answers cannot differ by platform, so
+  # running them three times would triple CI cost to re-derive the same
+  # result twice. What genuinely varies per OS is whether the thing
+  # COMPILES and LINKS, which is what this job proves.
+  # ---------------------------------------------------------------------
+  build:
+    name: build (${{ matrix.target_label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the others: "Windows is
+      # broken" and "Windows and macOS are broken" are different
+      # findings, and fail-fast would report them identically.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target_label: linux-x86_64
+            binary: retroforge
+          - os: macos-latest
+            target_label: macos-arm64
+            binary: retroforge
+          - os: windows-latest
+            target_label: windows-x86_64
+            binary: retroforge.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Without this the three OSes would fight over one cache key and
+          # thrash, since each has a different target dir layout.
+          key: ${{ matrix.target_label }}
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        # ALSA and udev headers, needed by the `audio`/`gamepad` features
+        # below. Those features are OFF by default precisely so that
+        # `cargo test --workspace` needs no such headers (see
+        # crates/rf-audio/Cargo.toml) — but a build artifact a human is
+        # meant to run had better have sound and controllers, so this job
+        # turns them on and installs what they need.
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+
+      - name: build release binary (with audio + gamepad)
+        # The features a REAL user build ships with, not the CI-default
+        # feature set. Building only the default features here would leave
+        # the two feature-gated dependency trees — cpal and gilrs, the two
+        # most platform-specific things in the workspace — untested on any
+        # platform, which is exactly what a 3-OS build job exists to catch.
+        run: cargo build --release -p retroforge --features audio,gamepad
+
+      # NOTE, deliberately not a test step. This job BUILDS on three
+      # platforms; it does not run the workspace suite on them, and that
+      # is a scoped decision rather than an oversight.
+      #
+      # The GPU tests' `gpu_or_skip` helpers PANIC rather than skip
+      # whenever `CI` is set — a guarantee that exists so a Linux CI run
+      # cannot silently lose GPU coverage by finding no adapter. Running
+      # them on the macOS and Windows runners would make this job's
+      # success depend on those runners exposing a usable adapter, which
+      # is not something this ticket verified and not something a build
+      # job should be gated on. Letting them skip cleanly per-job needs a
+      # crate-side change (a CI-strictness signal narrower than "is CI"),
+      # which is outside this ticket's `.github/**` write scope.
+      #
+      # Coverage is not lost: `gate` runs the full workspace suite plus
+      # the golden-frame GPU suite on Linux every PR. What is genuinely
+      # untested per-platform is runtime behaviour on macOS/Windows —
+      # path handling, line endings — and that gap is real and recorded
+      # in plan.json rather than papered over here.
+
+      - name: upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: retroforge-${{ matrix.target_label }}
+          path: target/release/${{ matrix.binary }}
+          # A missing binary means the build step silently produced
+          # nothing at the expected path — fail rather than upload an
+          # empty artifact that looks like a successful build.
+          if-no-files-found: error
+          retention-days: 14
