@@ -449,6 +449,32 @@ impl RetroForgeApp {
         }
     }
 
+    /// Whether a frame from the core has actually reached the screen —
+    /// `texture` is uploaded only in `video_panel`, and only from a
+    /// `FrameBundle` the core thread delivered.
+    ///
+    /// `pub` since ticket W4-09 (FR-DBG-007's sibling, NFR-004): the UI
+    /// smoke test needs to assert "first frame arrived", and there is no
+    /// way to observe that through the accessibility tree — an
+    /// `egui::Image` contributes no labelled node, so a test that only
+    /// queried AccessKit could watch a permanently black window and call
+    /// it a pass. This reports the shipped field rather than a test-only
+    /// mirror of it.
+    #[must_use]
+    pub fn has_presented_frame(&self) -> bool {
+        self.texture.is_some()
+    }
+
+    /// The status line's current text (ticket W4-09). Same reasoning as
+    /// [`RetroForgeApp::has_presented_frame`]: the status line is drawn as
+    /// a label inside a panel and does not surface as a queryable node, so
+    /// a smoke test asserting "the ROM loaded rather than failed" has to
+    /// read it directly.
+    #[must_use]
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
     fn open_rom(&mut self) {
         let Some(path) = rom_open::pick_rom_file() else {
             return; // user cancelled the dialog
@@ -460,7 +486,15 @@ impl RetroForgeApp {
     /// this, the File menu's picker calls it with what the user chose).
     /// One body, so a game launched from the library goes through exactly
     /// the same load path as one opened by hand.
-    fn open_rom_path(&mut self, path: &std::path::Path) {
+    ///
+    /// `pub` since ticket W4-09, for one reason worth stating: the native
+    /// file dialog is the single step of the boot-to-first-frame flow that
+    /// no headless harness can drive (`rfd` opens a real OS window). The
+    /// UI smoke test therefore calls what the dialog's callback calls,
+    /// which is this — the same body the library's Play button uses — so
+    /// everything after the file picker is the shipped path rather than a
+    /// test-only one.
+    pub fn open_rom_path(&mut self, path: &std::path::Path) {
         let bytes = match rom_open::load_rom_bytes(path) {
             Ok(bytes) => bytes,
             Err(e) => {

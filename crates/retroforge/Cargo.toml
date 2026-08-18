@@ -88,6 +88,13 @@ serde = { version = "1", features = ["derive"] }
 # entry: nothing in this crate's production code touches `rf-profiles`.
 rf-profiles = { path = "../rf-profiles" }
 
+# egui_kittest: the headless UI-test harness for ticket W4-09's CI smoke
+# flow. Same repo and release train as egui itself (emilk/egui), published
+# at 0.35.0, so it moves in lockstep with the egui/wgpu pin
+# `docs/TECH_STACK.md` rule 2 requires rather than dragging a second
+# version in. Dev-only: nothing in the shipped binary touches it.
+egui_kittest = { version = "0.35.0", features = ["eframe"] }
+
 [features]
 # `audio` turns on real device output (ticket W2-05). OFF by default so
 # `cargo test --workspace` needs no ALSA headers on Linux; the binary and

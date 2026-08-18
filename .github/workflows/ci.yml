@@ -69,6 +69,23 @@ jobs:
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
 
+      - name: UI smoke flow (W4-09, R-A1) + NFR-004 timing
+        # Its own named step for the same two reasons the golden-frame
+        # step above has one: a check a human can point at for "the app
+        # boots, loads a ROM, presents a frame and opens every panel
+        # headless on Linux", and `--nocapture` so the log records the
+        # NFR-004 numbers rather than hiding them behind a green tick.
+        #
+        # Uses `egui_kittest`, NOT `egui_inspection`/`egui_mcp` — the
+        # latter is an MCP server driving a live app over a socket, which
+        # is not something CI can run. See the test's module doc.
+        #
+        # It cannot silently degrade to a skip: there is exactly one test
+        # in the binary and it has no skip path, so a harness that stopped
+        # finding the UI fails on its first assertion instead of passing
+        # as zero tests run.
+        run: cargo test -p retroforge --test ui_smoke -- --nocapture
+
       - name: mode-invariant failure evidence (W4-01, R-F4)
         # Only ever has anything to upload if the "tests" step's
         # every_corpus_entry_is_mode_invariant_over_its_full_frame_window
