@@ -16,6 +16,7 @@
 //! `events` is ticket W4-00: the three bus-origin `CoreEvent` sites
 //! (`DmaStart`/`OamRewrite`/`MapperIrq`) — `crate::ppu::tests::event_emission`
 //! covers the five PPU-origin ones.
+mod catch_up;
 mod controller;
 mod events;
 mod integration;

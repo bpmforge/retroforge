@@ -143,19 +143,39 @@
 //!   not "fix" this to ride the flag on a displaced pixel — that is exactly
 //!   what the ruling forbids.
 //!
-//! ## Scheduling: lock-step, not catch-up (`docs/design/EMULATION_CORES.md`
-//! §1)
+//! ## Scheduling: lock-step in Accuracy, catch-up in Compatibility
+//! (`docs/design/EMULATION_CORES.md` §1 and §5 row 1)
 //!
 //! §1 permits either catch-up scheduling or ticking the PPU in lock-step
 //! per CPU cycle in Accuracy mode ("simpler to reason about, ~10-20%
 //! slower"), and requires that "both paths must produce identical state,
-//! and CI diffs them on the test-ROM suite." This ticket builds **lock-step
-//! only**: [`crate::system::NesBus`] ticks this PPU exactly 3 dots per bus
-//! cycle from inside its own `master_cycle` advance (see that module's
-//! `tick_master`). The catch-up path, and the CI diff between the two
-//! paths §1 requires, are NOT built here — that is an explicit debt owed to
-//! a later ticket, the same way W1-02 routed its mapper-trait extraction
-//! and reset-sequence gaps to the tickets that inherited them.
+//! and CI diffs them on the test-ROM suite."
+//!
+//! **Accuracy is lock-step** (ticket W1-04a and unchanged since):
+//! [`crate::system::NesBus`] ticks this PPU exactly 3 dots per bus cycle
+//! from inside its own `master_cycle` advance.
+//!
+//! **Compatibility is catch-up** (ticket W3-07b): the bus asks
+//! [`Ppu::inert_run_len`] how many of the dots ahead are provably inert
+//! and advances those in one arithmetic step, using
+//! [`Ppu::dots_until_possible_inert`] to avoid re-asking on every dot.
+//! Nothing is deferred — the PPU's position is always exact — so the
+//! three things that observe this PPU at dot granularity every cycle
+//! (`nmi_level_latch`, the A12 drain into the mapper, and the
+//! dot-count-keyed state W2-19/W2-01d added) are untouched. That is what
+//! lets it meet §1's "identical state" requirement rather than declaring
+//! a divergence: `mode_diff` compares the two configs over the whole
+//! executed suite and reports exactly one divergence, which belongs to
+//! the other §5 switch (open-bus modelling, ticket W3-07).
+//!
+//! **What it buys, measured rather than assumed.** The dots it can prove
+//! inert are ~31% of a frame with rendering off but only ~8% with
+//! rendering on, and the inert ones are also the cheapest. Measured on
+//! `machine_frame`: rendering off, 693 vs 732 us/frame (**5.4% faster**);
+//! rendering on, 1.116 vs 1.124 ms (**parity**, inside run-to-run noise).
+//! §1's "~10-20% slower" for lock-step is not what this engine shows, and
+//! the reason is that this PPU's idle dots were already nearly free. See
+//! `docs/TESTING.md`.
 //!
 //! ## `CoreSink` emission seam
 //!
@@ -927,6 +947,201 @@ impl Ppu {
     /// dot 0 of scanline 0 (dot 340 never happens that frame: 340 dots
     /// instead of 341, 89341 dots that whole frame instead of 89342). See
     /// [`Ppu::advance_counters`] for the implementation.
+    /// The catch-up scheduler's predicate (ticket W3-07b;
+    /// `docs/design/EMULATION_CORES.md` §5 row 1): how many dots from the
+    /// current position are **provably inert** — no state change other
+    /// than the dot counters themselves.
+    ///
+    /// Returns 0 if the dot about to be processed is not inert. This is
+    /// the "compute when the next observable event is" half of §5's
+    /// catch-up row; [`Ppu::skip_inert_dots`] is the "jump to it" half.
+    ///
+    /// ## Why each region is inert, one clause per observer
+    ///
+    /// An inert dot must change **nothing** three separate subsystems can
+    /// see at dot granularity (the analysis W3-07 filed with this ticket):
+    /// `nmi_line` (sampled into `NesBus::nmi_level_latch` before every
+    /// dot, and `ppu_vbl_nmi` 05-08 is 10/10 on that being per-dot), the
+    /// A12 rising edges `NesBus::tick_ppu_dot` drains into the mapper
+    /// every dot, and the dot-count-keyed state W2-19/W2-01d added.
+    ///
+    /// | scanlines | inert when | why |
+    /// |---|---|---|
+    /// | 0-239 | rendering off, and dot 0 or dot > 256 | with rendering off `process_render_dot` runs nothing but `output_pixel` (dots 1-256) and `finish_scanline` (dot 256); every other branch in it is gated on `rendering_enabled()` |
+    /// | 240 | always | post-render: `process_dot`'s own comment, "genuinely idle, nothing to do" |
+    /// | 241 | dot != 1 | dot 1 sets `STATUS_VBLANK` and queues `CoreEvent::VblankStart` — the one dot in vblank that moves `nmi_line` |
+    /// | 242-260 | always | the rest of vblank, same idle arm |
+    /// | 261 | rendering off, and dot != 1 | dot 1 clears vblank/sprite-0/overflow (moves `nmi_line`) and clears the sprite units; with rendering off the rest of `process_render_dot(false)` is entirely gated off |
+    ///
+    /// **Rendering-enabled dots are never inert**, which is not just
+    /// conservatism — it is what makes A12 safe without a second
+    /// predicate. Every PPU-side A12 edge comes from a background or
+    /// sprite pattern fetch, and those only happen with rendering on. A
+    /// CPU-side edge (a `$2006`/`$2007` access) cannot be missed either,
+    /// and that falls out of there being **no cached run**: the predicate
+    /// is re-derived from live state every time the bus asks, so a
+    /// register access that changed `mask`, `v` or the vblank flag is
+    /// already reflected in the next answer. A cached-run-plus-invalidation
+    /// design was considered and rejected — the predicate is a `match` and
+    /// three comparisons against three `process_dot` calls, so the cache
+    /// would have bought a few operations per CPU cycle in exchange for an
+    /// invalidation obligation on every one of `NesBus`'s paths into the
+    /// PPU, which is precisely the class of bug this ticket's design note
+    /// warns about.
+    ///
+    /// It is also what keeps `render_enable_pipe` correct, and that one is
+    /// worth stating because a future edit to the table above could break
+    /// it silently: `advance_counters` reads `render_enable_pipe & 0b100`
+    /// at scanline 261 dot 339 for the odd-frame skip. Scanline 261 is
+    /// only ever inert with rendering **off**, so the pipe is being fed a
+    /// constant 0 across any run that reaches dot 339 — and 0 is what the
+    /// skip check needs to see. The run is additionally capped below so
+    /// dot 339 is always processed by a real `tick`.
+    ///
+    /// ## Capping
+    ///
+    /// A run never crosses a scanline boundary, and stops short of dot
+    /// 339: the last dot a run may cover is 338, so dots 339 and 340
+    /// always go through [`Ppu::tick`]. That single cap retires every
+    /// wrap-related hazard at once — the odd-frame skip, `frame_count`,
+    /// `age_decay_register`, and the end-of-scanline video emission all
+    /// live in `advance_counters`, which a skipped dot never calls. The
+    /// cost is ~20 predicate re-evaluations per frame, which the
+    /// measurement in `docs/TESTING.md` says is not where the time goes.
+    pub(crate) fn inert_run_len(&self) -> u16 {
+        const LAST_SKIPPABLE_DOT: u16 = 338;
+        if self.dot > LAST_SKIPPABLE_DOT {
+            return 0;
+        }
+        let rendering = self.rendering_enabled();
+        let inert_through = match self.scanline {
+            0..=239 => {
+                if rendering {
+                    return 0;
+                }
+                // Dot 0 alone, then everything past the last output dot.
+                if self.dot == 0 {
+                    0
+                } else if self.dot > 256 {
+                    LAST_SKIPPABLE_DOT
+                } else {
+                    return 0;
+                }
+            }
+            POSTRENDER_SCANLINE => LAST_SKIPPABLE_DOT,
+            VBLANK_START_SCANLINE => {
+                if self.dot == 1 {
+                    return 0;
+                }
+                if self.dot == 0 {
+                    0
+                } else {
+                    LAST_SKIPPABLE_DOT
+                }
+            }
+            242..=260 => LAST_SKIPPABLE_DOT,
+            PRERENDER_SCANLINE => {
+                if rendering || self.dot == 1 {
+                    return 0;
+                }
+                if self.dot == 0 {
+                    0
+                } else {
+                    LAST_SKIPPABLE_DOT
+                }
+            }
+            _ => return 0,
+        };
+        inert_through - self.dot + 1
+    }
+
+    /// A lower bound on how many dots from here [`Ppu::inert_run_len`] is
+    /// guaranteed to keep returning 0, assuming `mask` does not change
+    /// (ticket W3-07b).
+    ///
+    /// **This is the half of the scheduler that makes it worth having,
+    /// and the measurement says so.** Without it the bus evaluated the
+    /// predicate once per dot — 89342 times a frame — to save work on the
+    /// 8% of dots that are inert with rendering on, and those are the
+    /// *cheapest* dots (their `process_dot` already falls straight
+    /// through). Measured, that traded 1.092 ms/frame for 1.155 ms: the
+    /// "catch-up" scheduler was 6% SLOWER than lock-step. With this, the
+    /// predicate is evaluated a handful of times per frame instead.
+    ///
+    /// A lower bound is enough, and deliberately so: answering early
+    /// costs one extra predicate evaluation, while answering late would
+    /// skip a real inert run — or worse, mask one. So the pre-render line
+    /// just returns "to the end of this scanline" rather than reasoning
+    /// about the odd-frame skip's variable frame length.
+    ///
+    /// The caller must discard the answer whenever `mask` may have
+    /// changed; `NesBus::catch_up_ppu_dots` does that on every write into
+    /// `$2000-$3FFF`, which is the only way rendering can be toggled.
+    pub(crate) fn dots_until_possible_inert(&self) -> u16 {
+        debug_assert_eq!(self.inert_run_len(), 0, "only meaningful when not inert");
+        const LAST_SKIPPABLE_DOT: u16 = 338;
+        if self.dot > LAST_SKIPPABLE_DOT {
+            // Dots 339 and 340 are never skippable (see `inert_run_len`'s
+            // capping section); the next candidate is dot 0 of the next
+            // scanline.
+            return DOTS_PER_SCANLINE - self.dot;
+        }
+        match self.scanline {
+            // Rendering visible and pre-render lines have no inert dot at
+            // all, so the true answer runs to post-render dot 0 — up to
+            // 240 scanlines away. It is deliberately NOT computed that
+            // way: 240 x 341 is 81840, which does not fit in the `u16`
+            // these counters use, and in release that silently wraps.
+            // (It did: the first version of this function returned a
+            // wrapped value and `mode_diff` hung.) One scanline is a
+            // lower bound, it cannot overflow, and it already cuts the
+            // predicate from 89342 evaluations a frame to 262.
+            0..=239 if self.rendering_enabled() => DOTS_PER_SCANLINE - self.dot,
+            PRERENDER_SCANLINE if self.rendering_enabled() => DOTS_PER_SCANLINE - self.dot,
+            // Rendering off: only dots 1-256 of a visible line are
+            // non-inert.
+            0..=239 => 257u16.saturating_sub(self.dot).max(1),
+            // (241,1) and (261,1) with rendering off: exactly one dot.
+            _ => 1,
+        }
+    }
+
+    /// Advance `n` provably-inert dots without processing them (ticket
+    /// W3-07b) — the "jump" half of the catch-up scheduler.
+    ///
+    /// The PPU's position is never left stale: this does in O(1) exactly
+    /// what `n` calls to [`Ppu::tick`] would have done to the counters,
+    /// and by [`Ppu::inert_run_len`]'s contract those calls would have
+    /// done nothing else. That is the whole safety argument — there is no
+    /// deferral, so no observer needs a flush protocol and none of the
+    /// three dot-granularity observers changes at all.
+    ///
+    /// # Panics
+    /// Debug-asserts that the caller respected `inert_run_len`'s cap.
+    pub(crate) fn skip_inert_dots(&mut self, n: u16) {
+        debug_assert!(n > 0 && self.dot + n <= 339, "run must not reach dot 339");
+        self.dot_clock += u64::from(n);
+        self.dot += n;
+        // `tick` shifts one bit in per dot; across an inert run
+        // `rendering_enabled()` cannot change (nothing inert writes
+        // `mask`), so the pipe fills with n copies of one bit. Only the
+        // low three bits are ever read, so a run of 3 or more saturates.
+        let bit = u8::from(self.rendering_enabled());
+        self.render_enable_pipe = if n >= 8 {
+            if bit == 1 {
+                u8::MAX
+            } else {
+                0
+            }
+        } else {
+            let mut pipe = self.render_enable_pipe;
+            for _ in 0..n {
+                pipe = (pipe << 1) | bit;
+            }
+            pipe
+        };
+    }
+
     pub fn tick(&mut self) {
         self.dot_clock += 1;
         // Ticket W1-05d: sampled before `process_dot` because nothing in a

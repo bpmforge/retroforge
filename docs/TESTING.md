@@ -59,7 +59,38 @@ SRS verification column, `docs/design/SAVE_STATES.md`.
   sub-tests under Compatibility. Both failure directions are unit-tested
   without ROMs, and both were demonstrated against the real suite by
   mutation — breaking the compat path elsewhere and making the switch a
-  no-op each exit 1, while the baseline exits 0.
+  no-op each exit 1, while the baseline exits 0. **Ticket W3-07b added a
+  second switch, the PPU catch-up scheduler**, and it is held to a
+  stricter contract: §5 rates its "risk of compat setting" as "none if
+  catch-up correct", so it must produce NO divergence. It does — the
+  diff still reports exactly the one open-bus divergence over 52 ROMs.
+- **PPU catch-up scheduler** (ticket W3-07b; EMULATION_CORES §5 row 1).
+  Compatibility advances provably-inert dot runs in one arithmetic step
+  instead of processing them; Accuracy is untouched lock-step. Because
+  CI has no ROMs (NFR-006), the equivalence property is *also* checked
+  hermetically in `crate::system::tests::catch_up`, comparing every
+  save-state region after 12 frames of a rendering-on and a
+  rendering-off workload, and the predicate's structural rules are
+  enumerated exhaustively over all 262x341 positions in
+  `crate::ppu::tests::catch_up`.
+
+  **What it buys, measured on `machine_frame` (Apple M-series, release):**
+
+  | workload | Accuracy | Compatibility | |
+  |---|---|---|---|
+  | rendering **off** | 732 us/frame | 693 us/frame | **5.4% faster** |
+  | rendering **on** | 1.124 ms/frame | 1.116 ms/frame | parity (inside noise) |
+
+  The gap is structural, not incidental: with rendering off ~31% of a
+  frame's dots are inert, with rendering on only ~8% are, and the inert
+  ones are the cheapest dots in the frame. Measured over `mmc3_test_2`
+  (26-31%), `cpu_timing_test6` (13%) and synthetic workloads (31% / 8%).
+  **Most of the blargg suite runs with rendering off**, so quoting the
+  suite's number alone would overstate what this buys a real game by
+  about four times. The accuracy path was measured before and after and
+  is unchanged within run-to-run noise (~3% on this machine); the mode
+  check is hoisted out of `tick_master`'s per-cycle loop so the accuracy
+  arm is byte-for-byte the loop that preceded the ticket.
 - **Criterion regression gate** (W2-09): `benches/baseline.json` +
   `scripts/bench-compare.mjs`, >10% fails (§9), with NFR-002's absolute
   ms/frame budget checked separately from the relative threshold. R-C2 is

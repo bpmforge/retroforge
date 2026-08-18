@@ -113,6 +113,17 @@ impl NesBus {
             rom: _,
             mapper: _, // MAPR chunk
             last_oam_dma_stall,
+            // Ticket W3-07b. Diagnostic, not state: it counts how the
+            // scheduler ran this session, and nothing reads it back into
+            // the simulation. Serializing it would put a Compatibility
+            // session's bookkeeping into a file that an Accuracy session
+            // then restores — the same reason `accuracy_mode` is excluded
+            // (see `NesBus::skipped_dots`).
+            skipped_dots: _,
+            // Ticket W3-07b: a pure cache of a prediction re-derivable
+            // from `PPU_`'s own scanline/dot/mask, and only ever non-zero
+            // mid-`tick_master`. Nothing to restore.
+            inert_recheck_in: _,
             last_joy_read_cycle,
             last_joy_bit,
             nmi_level_latch,

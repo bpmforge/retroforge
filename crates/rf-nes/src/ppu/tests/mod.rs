@@ -44,6 +44,7 @@
 //! (`crate::ppu::scroll`'s module doc quotes the same pseudocode this test
 //! module's expected values are hand-computed from).
 mod blargg_roms;
+mod catch_up;
 mod event_emission;
 mod fetch_pipeline;
 mod frame_timing;

@@ -22,8 +22,9 @@
 //!
 //! `docs/design/EMULATION_CORES.md` §1 calls for the PPU to run either
 //! catch-up-scheduled or "in lock-step per CPU cycle" in Accuracy mode;
-//! this crate builds lock-step only (see [`crate::ppu`]'s module doc for
-//! why, and the debt that choice owes a later ticket). Lock-step means the
+//! Accuracy is lock-step and Compatibility is catch-up as of ticket
+//! W3-07b (see [`crate::ppu`]'s module doc, and `catch_up_ppu_dots`
+//! below). Lock-step means the
 //! real [`crate::ppu::Ppu`] must advance exactly 3 dots for every one
 //! master cycle the bus itself advances — so `tick_master` (below), the one
 //! private helper every `master_cycle` increment in this file now goes
@@ -136,6 +137,14 @@ pub struct NesBus {
     /// `run_oam_dma`'s doc for the exact accounting). `None` until the
     /// first DMA runs.
     last_oam_dma_stall: Option<u32>,
+    /// Dots the compatibility catch-up scheduler skipped rather than
+    /// processed (ticket W3-07b) — diagnostic, see
+    /// [`NesBus::skipped_dots`].
+    skipped_dots: u64,
+    /// Dots for which the catch-up scheduler may tick without re-asking
+    /// [`crate::ppu::Ppu::inert_run_len`] (ticket W3-07b). Always 0 in
+    /// Accuracy — that path never reaches `catch_up_ppu_dots`.
+    inert_recheck_in: u16,
     /// `master_cycle` of the most recent CPU read of each controller port
     /// (`$4016`/`$4017`), or `u64::MAX` if there has not been one — the
     /// state behind the edge-triggered shift-clock model (ticket W2-01c).
@@ -252,6 +261,8 @@ impl NesBus {
             rom,
             mapper,
             last_oam_dma_stall: None,
+            skipped_dots: 0,
+            inert_recheck_in: 0,
             last_joy_read_cycle: [u64::MAX; 2],
             last_joy_bit: [0; 2],
             nmi_level_latch: false,
@@ -343,9 +354,12 @@ impl NesBus {
     /// bit-for-bit reference path. `false` selects EMULATION_CORES §5's
     /// compatibility settings; today that is exactly one switch, the
     /// **simplified open-bus model** — see [`crate::ppu::Ppu::accuracy_mode`]
-    /// for what it changes and why this is the §5 row this crate can
-    /// currently offer both sides of. §5's other big one, PPU catch-up
-    /// stepping, is owed by ticket W3-07b.
+    /// for what it changes and why this is the §5 row W3-07 could offer
+    /// both sides of. §5's other big one, **PPU catch-up stepping**, is
+    /// now built too (ticket W3-07b) and rides this same flag — see
+    /// [`NesBus::catch_up_ppu_dots`]. The two differ in their contract:
+    /// open-bus modelling has a declared, test-suite-visible divergence,
+    /// while catch-up is required to have none at all.
     pub fn set_accuracy_mode(&mut self, accuracy: bool) {
         self.ppu.set_accuracy_mode(accuracy);
     }
@@ -544,7 +558,17 @@ impl NesBus {
         self.open_bus = value;
         match addr {
             0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)] = value,
-            0x2000..=0x3FFF => self.ppu.write_register((addr & 0x0007) as u8, value),
+            0x2000..=0x3FFF => {
+                // Ticket W3-07b: a `$2001` write is the only way rendering
+                // can be toggled, and the catch-up scheduler's prediction
+                // is valid only while `mask` holds. Invalidated on every
+                // `$2000-$3FFF` write rather than on `$2001` alone —
+                // coarse, but a mispredicted run is a silent timing bug
+                // and one comparison per PPU register write is not where
+                // this crate's time goes.
+                self.inert_recheck_in = 0;
+                self.ppu.write_register((addr & 0x0007) as u8, value);
+            }
             0x4016 => {
                 // Both controllers share the one strobe line (nesdev.org/
                 // wiki/Standard_controller): a $4016 write reaches both.
@@ -685,6 +709,24 @@ impl NesBus {
     /// later" row needs.
     fn tick_master(&mut self, cycles: u32) {
         self.master_cycle += cycles as u64;
+        // Ticket W3-07b: the mode check is hoisted OUT of the per-cycle
+        // loop rather than made per call, and that is a measurement, not
+        // a preference. Putting it inside cost the accuracy path 3.9%
+        // (1.0818 ms -> 1.1243 ms/frame on `machine_frame_accuracy`) —
+        // small, but this ticket's acceptance says in as many words that
+        // "the scheduler may not be paid for out of the accuracy mode",
+        // and a 4% tax on the reference path to make a compatibility
+        // switch tidier is exactly that. Hoisted, the accuracy arm below
+        // is byte-for-byte the loop that was here before this ticket.
+        if self.ppu.accuracy_mode {
+            for _ in 0..cycles {
+                self.apu.tick();
+                for _ in 0..3 {
+                    self.tick_ppu_dot();
+                }
+            }
+            return;
+        }
         for _ in 0..cycles {
             // Ticket W2-01a: one APU cycle per CPU cycle, before this
             // cycle's three PPU dots. The DMC's memory-reader fetch is NOT
@@ -693,9 +735,7 @@ impl NesBus {
             // cycles" makes the fetch a property of a CPU read cycle, not
             // of the clock.
             self.apu.tick();
-            for _ in 0..3 {
-                self.tick_ppu_dot();
-            }
+            self.catch_up_ppu_dots(3);
         }
     }
 
@@ -751,43 +791,153 @@ impl NesBus {
     /// One PPU dot, factored out of [`NesBus::tick_master`] when ticket
     /// W2-01a made that method's outer loop count CPU cycles rather than
     /// dots. The body is unchanged.
-    fn tick_ppu_dot(&mut self) {
-        {
-            self.nmi_level_latch = self.ppu.nmi_line();
-            self.ppu.tick();
-            // Ticket W2-03: drain whatever filtered A12 rising edges this
-            // dot produced and forward each one into the mapper's own IRQ
-            // counter (a no-op for every mapper but MMC3) — see
-            // `crate::mappers` module doc's "MMC3 additions" section and
-            // `ppu/mem.rs`'s "A12 rising-edge detection" section for the
-            // full push/pull design this drain is the `NesBus` half of.
-            // Draining every dot (not once per `tick_master` call) keeps
-            // multi-edge ordering trivially correct: each `clock_irq_counter`
-            // call sees exactly the counter state the PREVIOUS call left,
-            // the same sequencing real hardware's back-to-back edges would
-            // produce.
-            for _ in 0..self.ppu.take_a12_edges() {
-                // Ticket W4-00: `MapperIrq` fires on the RISING EDGE of
-                // `irq_pending()` (false -> true), not on every clock while
-                // it stays asserted — `irq_pending` is a pure getter
-                // (`crate::mappers::Mapper::irq_pending`'s own doc: this is
-                // the exact same accessor `CpuBus::irq_line` already
-                // forwards), so reading it before/after
-                // `clock_irq_counter` costs nothing extra and touches no
-                // bus/PPU state (this ticket's hazard note).
-                let was_pending = self.mapper.irq_pending();
-                self.mapper.clock_irq_counter();
-                if !was_pending
-                    && self.mapper.irq_pending()
-                    && self.ppu.event_mask().is_subscribed(EventMask::MAPPER_IRQ)
-                {
-                    self.ppu.queue_event(CoreEvent::MapperIrq);
+    /// Advance the PPU by `dots` under the **compatibility** catch-up
+    /// scheduler (ticket W3-07b; `docs/design/EMULATION_CORES.md` §5 row
+    /// 1, "PPU stepping: dot-accurate | catch-up"). Accuracy never calls
+    /// this — see [`NesBus::tick_master`]'s hoisted branch.
+    ///
+    /// It asks the PPU how many of the dots ahead are provably inert
+    /// ([`Ppu::inert_run_len`]) and advances them in one arithmetic step
+    /// instead of processing them. **Nothing is deferred** — the PPU's
+    /// position is always exact — so `nmi_level_latch`, the A12 drain and
+    /// the dot-count-keyed state W2-19/W2-01d added all keep working
+    /// untouched. That is why this switch is required to produce **zero**
+    /// divergence rather than a declared one, and why it does.
+    ///
+    /// A lagging-PPU design (defer dots, flush on observation, predict
+    /// NMI/A12 edges to answer without flushing) was considered and
+    /// rejected on the measurement in `docs/TESTING.md`: it would skip
+    /// the same dots this does, differing only in how many arithmetic
+    /// steps the skipping takes, in exchange for a flush obligation on
+    /// every path `NesBus` has into the PPU.
+    ///
+    /// `nmi_level_latch` is the one thing this path must argue rather
+    /// than inherit. Lock-step assigns it before every dot; a skipped run
+    /// assigns it once. Those are equivalent precisely because nothing in
+    /// an inert run can move `nmi_line` — `inert_run_len`'s table
+    /// excludes (241,1) and (261,1), the only two dots that touch the
+    /// vblank flag, and a `$2000`/`$2002` access that could move it from
+    /// the CPU side is a bus access, not a dot. This is a **narrower**
+    /// claim than the one W1-05c measured at exactly 2 dots too wide
+    /// (that one widened the latch across a whole CPU cycle regardless of
+    /// what the dots did), and `ppu_vbl_nmi` 05-08 is the suite that
+    /// decides it: 10/10 under both configs, with byte-identical result
+    /// text and identical frame counts.
+    fn catch_up_ppu_dots(&mut self, dots: u16) {
+        // Fast path, and the reason the compatibility scheduler does not
+        // cost more than it saves: while the prediction covers this whole
+        // cycle — which is every cycle of a rendering scanline — this is
+        // one compare and one subtract in front of the identical three
+        // ticks the accuracy path runs.
+        if self.inert_recheck_in >= dots {
+            self.inert_recheck_in -= dots;
+            for _ in 0..dots {
+                self.tick_ppu_dot();
+            }
+            return;
+        }
+        let mut remaining = dots;
+        while remaining > 0 {
+            // Prediction (ticket W3-07b): while the PPU has told us the
+            // predicate cannot fire, tick without asking it again. This is
+            // what stops the scheduler costing more than it saves — see
+            // `Ppu::dots_until_possible_inert` for the two measurements.
+            if self.inert_recheck_in > 0 {
+                let n = self.inert_recheck_in.min(remaining);
+                for _ in 0..n {
+                    self.tick_ppu_dot();
                 }
+                self.inert_recheck_in -= n;
+                remaining -= n;
+                continue;
+            }
+            let run = self.ppu.inert_run_len().min(remaining);
+            if run > 0 {
+                self.nmi_level_latch = self.ppu.nmi_line();
+                self.ppu.skip_inert_dots(run);
+                self.drain_a12_edges();
+                self.skipped_dots += u64::from(run);
+                remaining -= run;
+            } else {
+                self.inert_recheck_in = self.ppu.dots_until_possible_inert();
+            }
+        }
+    }
+
+    /// How many dots the compatibility scheduler has skipped rather than
+    /// processed, since power-on (ticket W3-07b).
+    ///
+    /// Diagnostic only — nothing reads it back into the simulation, and
+    /// it is deliberately **not** serialized into the save state for the
+    /// same reason `accuracy_mode` is not: it describes how a session was
+    /// configured and run, not what the machine is. It exists so the
+    /// "8% with rendering on, ~31% with rendering off" claim in
+    /// `docs/TESTING.md` stays re-measurable instead of being a number
+    /// somebody once wrote in a commit message.
+    pub fn skipped_dots(&self) -> u64 {
+        self.skipped_dots
+    }
+
+    #[inline]
+    fn tick_ppu_dot(&mut self) {
+        self.nmi_level_latch = self.ppu.nmi_line();
+        self.ppu.tick();
+        self.drain_a12_edges();
+    }
+
+    /// Forward this dot's filtered A12 rising edges into the mapper's IRQ
+    /// counter (ticket W2-03), split out of `tick_ppu_dot` by ticket
+    /// W3-07b so the catch-up scheduler can call it too.
+    ///
+    /// **The scheduler cannot skip this, and that is not a precaution —
+    /// it is a bug this ticket's own `mode_diff` run caught.** Skipping
+    /// dots skips no PPU-side edges (inert dots do no pattern fetches),
+    /// but a CPU-side edge — a `$2006`/`$2007` access, which is exactly
+    /// how `mmc3_test_2/3-A12_clocking` tests 5/6 clock the counter with
+    /// rendering off — is recorded by `Ppu::note_a12` between dots and
+    /// sits in `pending_a12_edges` until a dot drains it. Skip the dots
+    /// and the clock arrives up to a whole CPU cycle late; the first run
+    /// of the diff reported it as an UNDECLARED DIVERGENCE on three
+    /// separate `mmc3_test_2` ROMs.
+    ///
+    /// One call per skipped run is equivalent to lock-step's one call per
+    /// dot: a run never spans more than a single CPU cycle (it is capped
+    /// by the three dots `tick_master` asks for), and no inert dot can
+    /// produce an edge, so only the first of lock-step's three drains
+    /// could ever have found anything.
+    #[inline]
+    fn drain_a12_edges(&mut self) {
+        // Ticket W2-03: drain whatever filtered A12 rising edges this
+        // dot produced and forward each one into the mapper's own IRQ
+        // counter (a no-op for every mapper but MMC3) — see
+        // `crate::mappers` module doc's "MMC3 additions" section and
+        // `ppu/mem.rs`'s "A12 rising-edge detection" section for the
+        // full push/pull design this drain is the `NesBus` half of.
+        // Draining every dot (not once per `tick_master` call) keeps
+        // multi-edge ordering trivially correct: each `clock_irq_counter`
+        // call sees exactly the counter state the PREVIOUS call left,
+        // the same sequencing real hardware's back-to-back edges would
+        // produce.
+        for _ in 0..self.ppu.take_a12_edges() {
+            // Ticket W4-00: `MapperIrq` fires on the RISING EDGE of
+            // `irq_pending()` (false -> true), not on every clock while
+            // it stays asserted — `irq_pending` is a pure getter
+            // (`crate::mappers::Mapper::irq_pending`'s own doc: this is
+            // the exact same accessor `CpuBus::irq_line` already
+            // forwards), so reading it before/after
+            // `clock_irq_counter` costs nothing extra and touches no
+            // bus/PPU state (this ticket's hazard note).
+            let was_pending = self.mapper.irq_pending();
+            self.mapper.clock_irq_counter();
+            if !was_pending
+                && self.mapper.irq_pending()
+                && self.ppu.event_mask().is_subscribed(EventMask::MAPPER_IRQ)
+            {
+                self.ppu.queue_event(CoreEvent::MapperIrq);
             }
         }
     }
 }
-
 impl CpuBus for NesBus {
     /// One CPU read cycle — and, since ticket W2-01b, the only place a DMC
     /// DMA can steal cycles.
