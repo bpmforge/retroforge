@@ -2808,7 +2808,7 @@
     "MEASURED non-regression with zero breakpoints armed, against the criterion benchmark rather than asserted -- and core state hashes IDENTICAL with the engine present and absent over one input log (CLAUDE.md law 6, W3-05a's hazard class)"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [],
    "notes": [
     "SPLIT OUT OF W4-06b 2026-08-09 in pre-flight, on the seam that actually matters: these two criteria need an INSTRUCTION-LEVEL step seam that does not exist yet, while the other four do not. W5-01 -- and with it the whole full-level-reconstruction chain -- waits only on W4-06b's profile-skeleton export, so holding that behind a breakpoint engine would have blocked the headline goal for no reason.",
