@@ -294,6 +294,19 @@ impl NesBus {
         self.ppu.oam()
     }
 
+    /// The PPU's 4 KiB nametable VRAM (ticket W4-06d) — forwards
+    /// [`Ppu::vram`], which is a plain non-observing borrow. See that
+    /// method for why "non-observing" is the load-bearing property.
+    pub fn vram(&self) -> &[u8; 0x1000] {
+        self.ppu.vram()
+    }
+
+    /// The PPU's 32-byte palette RAM (ticket W4-06d) — forwards
+    /// [`Ppu::palette`], raw and unmirrored.
+    pub fn palette(&self) -> &[u8; 32] {
+        self.ppu.palette()
+    }
+
     /// Whether the sprite-limit-bypass overlay is currently recording
     /// (ticket W3-05a) — forwards [`Ppu::sprite_overlay_enabled`].
     #[must_use]

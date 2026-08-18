@@ -169,3 +169,83 @@ fn peek_returns_fixed_ff_for_the_apu_stub_range_and_never_ticks_the_clock() {
         "and the $4015 read left the open-bus latch itself untouched"
     );
 }
+
+/// Ticket W4-06d, acceptance criterion 2: the accessors return what a ROM
+/// actually wrote, not a plausible-looking zero buffer.
+///
+/// Writes through the real `$2006`/`$2007` register path — the same path a
+/// game uses — rather than poking the arrays, so this would catch an
+/// accessor wired to the wrong buffer, and it exercises `$2007`'s address
+/// auto-increment on the way.
+#[test]
+fn vram_and_palette_accessors_return_what_the_rom_actually_wrote() {
+    let mut bus = bus_with_pattern_rom(1, 1);
+
+    // Nametable 0 at $2000: three known bytes, relying on $2007's
+    // post-write increment to advance.
+    bus.write(0x2006, 0x20);
+    bus.write(0x2006, 0x00);
+    for byte in [0xAB, 0xCD, 0xEF] {
+        bus.write(0x2007, byte);
+    }
+    assert_eq!(
+        &bus.vram()[0..3],
+        &[0xAB, 0xCD, 0xEF],
+        "VRAM accessor must show bytes written through $2007"
+    );
+
+    // Palette RAM at $3F00.
+    bus.write(0x2006, 0x3F);
+    bus.write(0x2006, 0x00);
+    for byte in [0x21, 0x0F, 0x30] {
+        bus.write(0x2007, byte);
+    }
+    let palette = bus.palette();
+    assert_eq!(
+        &palette[0..3],
+        &[0x21, 0x0F, 0x30],
+        "palette accessor must show bytes written through $2007"
+    );
+
+    // Anti-vacuity: an address NOT written stays clear, so the assertions
+    // above cannot be passing because everything reads back as the value
+    // that happened to be written last.
+    assert_eq!(bus.vram()[0x0100], 0x00);
+}
+
+/// The accessors are NON-OBSERVING (criterion 3): reading them must not
+/// advance the master clock, touch open bus, or clock anything.
+///
+/// This is W3-05a's hazard class — a debug viewer repaints continuously,
+/// so an observing accessor would perturb MMC3 A12 IRQ timing on every
+/// frame a panel is open, invisibly to any pixel comparison.
+#[test]
+fn the_vram_and_palette_accessors_observe_nothing() {
+    let mut bus = bus_with_pattern_rom(1, 1);
+    bus.write(0x2006, 0x20);
+    bus.write(0x2006, 0x00);
+    bus.write(0x2007, 0x5A);
+
+    let cycle_before = bus.master_cycle();
+    // `peek` is the side-effect-free read the trace logger uses; $4000 is
+    // a write-only APU port, so it reports the open-bus latch.
+    let open_bus_before = bus.peek(0x4000);
+
+    // Read them the way a repainting panel would: repeatedly.
+    for _ in 0..100 {
+        let _ = bus.vram();
+        let _ = bus.palette();
+        let _ = bus.oam();
+    }
+
+    assert_eq!(
+        bus.master_cycle(),
+        cycle_before,
+        "an accessor that advanced the clock would perturb every timing the core has"
+    );
+    assert_eq!(
+        bus.peek(0x4000),
+        open_bus_before,
+        "an accessor that touched the data bus would change open-bus reads"
+    );
+}

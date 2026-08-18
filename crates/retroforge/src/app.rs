@@ -694,6 +694,12 @@ impl RetroForgeApp {
             // two 240 KB clones were worth gating).
             self.debug_panels.data.previous_oam = self.debug_panels.data.oam;
             self.debug_panels.data.oam = *msg.oam;
+            // Ticket W4-06d: live VRAM/palette for the nametable and
+            // palette viewers. Carried on the frame message like OAM, so
+            // the UI thread never reaches into the core — the same
+            // read-only discipline W4-06c's diff panel relies on.
+            self.debug_panels.data.vram = *msg.vram;
+            self.debug_panels.data.palette_ram = *msg.palette_ram;
             self.debug_panels.data.events = latest_bundle_events;
             // Ticket W4-06b: WRAM/PRG-RAM travel with the frame the same
             // way OAM already does — see `core_thread::FrameMsg::wram`'s

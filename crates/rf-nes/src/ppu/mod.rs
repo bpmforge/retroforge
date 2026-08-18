@@ -790,6 +790,39 @@ impl Ppu {
         &self.oam
     }
 
+    /// The 4 KiB nametable VRAM, as it currently stands (ticket W4-06d).
+    ///
+    /// **Non-observing, and that is the whole requirement.** A plain
+    /// borrow — deliberately NOT a read through [`Ppu::mem_read`], which
+    /// unconditionally feeds `observe_ppu_bus_address`, the A12
+    /// rising-edge filter MMC3's scanline IRQ counter depends on
+    /// (`mem.rs`'s "A12 rising-edge detection" section). The same
+    /// distinction `chr_peek` exists for, and it matters more here: a
+    /// debug viewer repaints continuously, so an observing accessor would
+    /// perturb IRQ timing on every frame the panel is open — W3-05a's
+    /// hazard class, invisible to pixel comparison and fatal to mapper
+    /// behaviour.
+    ///
+    /// Mirrors [`Ppu::oam`] exactly in shape for the same reason: a
+    /// borrow cannot have a side effect, so the guarantee is structural
+    /// rather than something a future edit has to remember.
+    pub fn vram(&self) -> &[u8; 0x1000] {
+        &self.vram
+    }
+
+    /// The 32-byte palette RAM (`$3F00-$3F1F`), as it currently stands
+    /// (ticket W4-06d). Non-observing, same reasoning as [`Ppu::vram`].
+    ///
+    /// Returned RAW, without the `$3F10/$14/$18/$1C` → `$3F00/$04/$08/$0C`
+    /// backdrop-mirroring the PPU applies on read: a debugger should show
+    /// what is actually stored, and a viewer that wants the mirrored view
+    /// can apply the rule itself. Hiding a difference between the raw
+    /// bytes and the rendered result is precisely what a palette viewer
+    /// exists to reveal.
+    pub fn palette(&self) -> &[u8; 32] {
+        &self.palette
+    }
+
     /// Current `OAMADDR` (test/debug visibility, same as the old
     /// `ppu_stub` this ticket replaces).
     pub fn oam_addr(&self) -> u8 {

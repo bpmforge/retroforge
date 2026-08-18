@@ -210,6 +210,12 @@ pub struct FrameMsg {
     /// auto-derefs to `&[u8; 256]` at every `rf_debugger::oam::decode_oam`
     /// call site, so this costs nothing at the call sites, only here.
     pub oam: Box<[u8; 256]>,
+    /// Ticket W4-06d: the PPU's nametable VRAM and palette RAM, read via
+    /// `NesBus::vram()`/`palette()` — plain non-observing borrows, so
+    /// snapshotting them here cannot perturb A12 edge timing (see
+    /// `rf_nes::Ppu::vram`'s doc for why that matters).
+    pub vram: Box<[u8; 0x1000]>,
+    pub palette_ram: Box<[u8; 32]>,
     /// Ticket W4-06b: the same frame's 2 KiB WRAM snapshot
     /// (`EmuStepper::wram_snapshot`, side-effect-free — same "read-only is
     /// a hard requirement" posture as `oam` above), for
@@ -673,6 +679,8 @@ fn core_thread_main(
                     Vec::new()
                 },
                 oam: Box::new(*stepper.oam()),
+                vram: Box::new(*stepper.vram()),
+                palette_ram: Box::new(*stepper.palette()),
                 wram: Box::new(stepper.wram_snapshot()),
                 prg_ram: Box::new(*stepper.prg_ram()),
             };

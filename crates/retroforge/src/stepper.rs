@@ -334,6 +334,18 @@ impl EmuStepper {
         self.bus.oam()
     }
 
+    /// The PPU's nametable VRAM (ticket W4-06d) — forwards
+    /// `NesBus::vram()`, a non-observing borrow.
+    pub fn vram(&self) -> &[u8; 0x1000] {
+        self.bus.vram()
+    }
+
+    /// The PPU's palette RAM (ticket W4-06d) — forwards
+    /// `NesBus::palette()`, raw and unmirrored.
+    pub fn palette(&self) -> &[u8; 32] {
+        self.bus.palette()
+    }
+
     /// Side-effect-free 2 KiB WRAM snapshot (`$0000-$07FF`, the real
     /// backing 2 KiB — not its `$0800`-stepped mirrors, same span
     /// `Self::state_hash`'s own doc already enumerates as "reachable

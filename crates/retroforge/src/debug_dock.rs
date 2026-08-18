@@ -214,6 +214,12 @@ pub struct PanelData {
     /// second sample (that is W3-05a's hazard class: a debug surface
     /// silently perturbing state, invisible to pixel comparison).
     pub previous_oam: [u8; 256],
+    /// Ticket W4-06d: the PPU's nametable VRAM and palette RAM, live at
+    /// last frame. Read through `NesBus::vram()`/`palette()`, which are
+    /// plain non-observing borrows — see `Ppu::vram`'s doc for why that
+    /// property is load-bearing rather than incidental.
+    pub vram: [u8; 0x1000],
+    pub palette_ram: [u8; 32],
     /// Which scanline the OAM diff panel's drop analysis is about.
     pub oam_diff_scanline: u16,
     /// Latest frame's event FIFO (`rf_core_api::FrameBundle::events`, via
@@ -238,6 +244,8 @@ impl Default for PanelData {
             script: None,
             oam: [0u8; 256],
             previous_oam: [0u8; 256],
+            vram: [0u8; 0x1000],
+            palette_ram: [0u8; 32],
             oam_diff_scanline: 0,
             events: Vec::new(),
             wram: [0u8; 0x0800],
@@ -462,8 +470,8 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut DebugTab) {
         match tab {
             DebugTab::Pattern => pattern_ui(ui, self.data.chr_rom.as_deref(), self.pattern_table),
-            DebugTab::Nametable => nametable_ui(ui),
-            DebugTab::Palette => palette_ui(ui),
+            DebugTab::Nametable => nametable_ui(ui, &self.data.vram),
+            DebugTab::Palette => palette_ui(ui, &self.data.palette_ram),
             DebugTab::Oam => oam_ui(ui, &self.data.oam),
             DebugTab::EventTimeline => event_timeline_ui(ui, &self.data.events),
             DebugTab::Memory => memory_ui(ui, &self.data.wram, &self.data.prg_ram),
@@ -528,21 +536,56 @@ fn pattern_ui(ui: &mut egui::Ui, chr: Option<&[u8]>, table: &mut PatternTable) {
     ui.add(egui::Image::from_texture(&texture).fit_to_original_size(2.0));
 }
 
-fn nametable_ui(ui: &mut egui::Ui) {
-    ui.label(
-        "No live nametable data: PPU VRAM has no accessor reachable from this crate yet \
-         (rf_debugger::nametable's module doc — a future ticket adding NesBus::vram(), \
-         mirroring the existing NesBus::oam(), closes this gap). Decode logic is already \
-         implemented and unit-tested against synthetic bytes in rf-debugger.",
-    );
+/// Live nametable viewer (ticket W4-06d closed W4-06a's "no live data"
+/// gap by adding `NesBus::vram()`).
+///
+/// Shows the first 1 KiB nametable; `$2400`/`$2800`/`$2C00` are mirrors of
+/// it or of the second physical table depending on cartridge mirroring,
+/// which the viewer does not yet resolve — stated rather than implied by
+/// showing one grid and calling it "the nametable".
+fn nametable_ui(ui: &mut egui::Ui, vram: &[u8; 0x1000]) {
+    let Some(grid) = rf_debugger::nametable::decode_nametable(vram) else {
+        ui.label("No nametable data yet — load a ROM and run a frame.");
+        return;
+    };
+    ui.label("Nametable 0 ($2000) — tile index per cell, palette in brackets");
+    egui::ScrollArea::both().show(ui, |ui| {
+        for row in grid.iter() {
+            let line: String = row
+                .iter()
+                .map(|c| format!("{:02X}[{}]", c.tile_index, c.palette))
+                .collect::<Vec<_>>()
+                .join(" ");
+            ui.monospace(line);
+        }
+    });
 }
 
-fn palette_ui(ui: &mut egui::Ui) {
-    ui.label(
-        "No live palette data: PPU palette RAM (CGRAM) has no accessor reachable from this \
-         crate yet (rf_debugger::palette's module doc — same gap as the nametable viewer). \
-         Decode logic is already implemented and unit-tested against synthetic bytes.",
-    );
+/// Live palette viewer (ticket W4-06d).
+///
+/// Shows the RAW stored bytes — `NesBus::palette()` deliberately does not
+/// apply the `$3F10/$14/$18/$1C` backdrop mirroring the PPU uses on read,
+/// because a difference between what is stored and what renders is
+/// exactly what a palette viewer exists to reveal.
+fn palette_ui(ui: &mut egui::Ui, cgram: &[u8; 32]) {
+    let Some(groups) = rf_debugger::palette::decode_palette(cgram) else {
+        ui.label("No palette data yet — load a ROM and run a frame.");
+        return;
+    };
+    ui.label("Raw palette RAM (unmirrored) — BG 0-3 then sprite 0-3");
+    for (i, group) in groups.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.monospace(format!("{} {}:", if i < 4 { "BG" } else { "SP" }, i % 4));
+            for swatch in group.iter() {
+                let [r, g, b] = swatch.rgb;
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(rect, 2.0, egui::Color32::from_rgb(r, g, b));
+                ui.monospace(format!("{:02X}", swatch.raw_index));
+            }
+        });
+    }
 }
 
 fn oam_ui(ui: &mut egui::Ui, oam: &[u8; 256]) {
