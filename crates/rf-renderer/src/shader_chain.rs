@@ -77,6 +77,9 @@ use crate::gpu::{align_up, read_buffer_sync, GpuContext};
 const NEAREST_SHADER_SRC: &str = include_str!("shaders/chain_nearest.wgsl");
 const SHARP_BILINEAR_SHADER_SRC: &str = include_str!("shaders/chain_sharp_bilinear.wgsl");
 const SCANLINES_SHADER_SRC: &str = include_str!("shaders/chain_scanlines.wgsl");
+const CRT_SHADER_SRC: &str = include_str!("shaders/chain_crt.wgsl");
+const LCD_GRID_SHADER_SRC: &str = include_str!("shaders/chain_lcd_grid.wgsl");
+const XBR_SHADER_SRC: &str = include_str!("shaders/chain_xbr.wgsl");
 
 /// Which first-party shader a [`ChainStage`] selects. `Copy`/`PartialEq` so
 /// chain descriptions (`Vec<ChainStage>`) are cheap, comparable, ordinary
@@ -91,6 +94,15 @@ pub enum ShaderKind {
     SharpBilinear,
     /// Per-row darkening overlay. `shaders/chain_scanlines.wgsl`.
     Scanlines,
+    /// CRT-class look: gaussian beam profile + aperture mask + gamma
+    /// round-trip. `shaders/chain_crt.wgsl` (ticket W3-02a).
+    Crt,
+    /// LCD-grid-style look: cell gaps + subpixel stripes.
+    /// `shaders/chain_lcd_grid.wgsl` (ticket W3-02a).
+    LcdGrid,
+    /// xBR-class edge-directed upscaler. `shaders/chain_xbr.wgsl`
+    /// (ticket W3-02a).
+    Xbr,
 }
 
 /// One tunable field a shader's manifest exposes, "name/range annotations"
@@ -146,6 +158,9 @@ impl ShaderKind {
             ShaderKind::Nearest => NEAREST_SHADER_SRC,
             ShaderKind::SharpBilinear => SHARP_BILINEAR_SHADER_SRC,
             ShaderKind::Scanlines => SCANLINES_SHADER_SRC,
+            ShaderKind::Crt => CRT_SHADER_SRC,
+            ShaderKind::LcdGrid => LCD_GRID_SHADER_SRC,
+            ShaderKind::Xbr => XBR_SHADER_SRC,
         }
     }
 
@@ -216,6 +231,130 @@ impl ShaderKind {
                     },
                 ],
             },
+            ShaderKind::Crt => &ShaderManifest {
+                id: "crt",
+                display_name: "CRT-class",
+                license: "MIT OR Apache-2.0",
+                basis: None,
+                authorship: "Authored fresh for RetroForge ticket W3-02a (`shaders/chain_crt\
+                    .wgsl`). NOT based on, ported from, or transcribed from crt-easymode, any \
+                    libretro GPL shader, or any RetroArch preset -- RENDERER.md §4 classes the \
+                    CRT look as behaviour-spec clean-room, and the display name is \"CRT-class\", \
+                    never a claim to BE crt-easymode. Three independently derived terms, each \
+                    motivated in the WGSL header: a gaussian beam profile exp(-(d/sigma)^2) for \
+                    the vertical scanline falloff (gaussian being the standard model for a \
+                    focused beam cross-section), a per-column three-phase aperture-grille tint, \
+                    and a gamma decode/encode round-trip so the two multipliers act in linear \
+                    light rather than on gamma-encoded values. AUTHORSHIP CAVEAT (Brad's ruling, 2026-08-17): written by an LLM which may have been trained on GPL shader sources, so G-42's literal test -- 'did not have the sources open' -- does not mean the same thing here as it does for a human author. Rather than assert a test that cannot be verified for such an author, the WGSL derives every term from stated reasoning a reviewer can check line by line, and the file header records the derivation. Flagged in the open rather than buried so a human licence review knows exactly what to audit.",
+                params: &[
+                    ShaderParamDescriptor {
+                        name: "beam_sigma",
+                        label: "Beam focus",
+                        min: 0.05,
+                        max: 1.0,
+                        default: 0.3,
+                    },
+                    ShaderParamDescriptor {
+                        name: "mask_strength",
+                        label: "Aperture mask",
+                        min: 0.0,
+                        max: 1.0,
+                        default: 0.3,
+                    },
+                    ShaderParamDescriptor {
+                        name: "gamma",
+                        label: "Gamma",
+                        min: 1.0,
+                        max: 3.0,
+                        default: 2.2,
+                    },
+                ],
+            },
+            ShaderKind::LcdGrid => &ShaderManifest {
+                id: "lcd-grid",
+                display_name: "LCD-grid-style",
+                license: "MIT OR Apache-2.0",
+                basis: None,
+                authorship: "Authored fresh for RetroForge ticket W3-02a (`shaders/chain_lcd_\
+                    grid.wgsl`). NOT based on, ported from, or transcribed from libretro's \
+                    lcd-grid/lcd3x or any other GPL or unlicensed shader. RENDERER.md §4 notes \
+                    lcd3x is public domain and MAY be ported directly; this is not a port of it \
+                    either. Two independently derived terms, both pure geometry: a cell grid \
+                    (distance from the fragment to the nearest edge of its source-pixel cell, \
+                    smoothstepped so non-integer scale factors do not alias) and three vertical \
+                    subpixel stripes keyed to position WITHIN the cell -- which is precisely \
+                    what distinguishes this look from the CRT aperture mask, whose tint is \
+                    keyed to the output column instead. No gamma round-trip, deliberately: the \
+                    grid is geometric occlusion rather than a modulation of emitted light, so \
+                    display-space is the more defensible of the two choices, and the WGSL says \
+                    so where a later measurement could revisit it. AUTHORSHIP CAVEAT (Brad's ruling, 2026-08-17): written by an LLM which may have been trained on GPL shader sources, so G-42's literal test -- 'did not have the sources open' -- does not mean the same thing here as it does for a human author. Rather than assert a test that cannot be verified for such an author, the WGSL derives every term from stated reasoning a reviewer can check line by line, and the file header records the derivation. Flagged in the open rather than buried so a human licence review knows exactly what to audit.",
+                params: &[
+                    ShaderParamDescriptor {
+                        name: "grid_strength",
+                        label: "Grid strength",
+                        min: 0.0,
+                        max: 1.0,
+                        default: 0.5,
+                    },
+                    ShaderParamDescriptor {
+                        name: "gap",
+                        label: "Cell gap",
+                        min: 0.0,
+                        max: 0.5,
+                        default: 0.12,
+                    },
+                    ShaderParamDescriptor {
+                        name: "subpixel_strength",
+                        label: "Subpixel tint",
+                        min: 0.0,
+                        max: 1.0,
+                        default: 0.25,
+                    },
+                ],
+            },
+            ShaderKind::Xbr => &ShaderManifest {
+                id: "xbr",
+                display_name: "xBR-class",
+                license: "MIT OR Apache-2.0",
+                basis: Some(
+                    "The published CLASS of technique -- diagonal edge-directed interpolation, \
+                     as used by the xBR family (Hyllian, MIT) and the older EPX/Eagle/Scale2x \
+                     lineage. Explicitly NOT xBRZ (Zenju, GPL-3.0) and NOT any libretro GPL \
+                     xBR port, both of which design review G-42 forbids outright. Also not a \
+                     transcription of Hyllian's MIT xBR: MIT would have PERMITTED a credited \
+                     port, but a port is not what this is, and claiming one would misstate the \
+                     provenance in the other direction.",
+                ),
+                authorship: "Authored fresh for RetroForge ticket W3-02a (`shaders/chain_xbr\
+                    .wgsl`), implementing the idea the family shares -- decide which diagonal \
+                    across a 2x2 neighbourhood is the real edge and interpolate ALONG it rather \
+                    than across it -- with a rule set derived in the WGSL header and \
+                    deliberately SIMPLER than xBR's. Real xBR evaluates a larger neighbourhood \
+                    against a multi-level weighted rule table; this evaluates one 2x2 with a \
+                    single comparison, `d_small * (1 + threshold) < d_large`, and falls back to \
+                    nearest-neighbour when neither diagonal dominates (an unnecessary blend is \
+                    a visible artefact on pixel art; a missed blend is merely the un-upscaled \
+                    original). Distance is luma-weighted with the standard Rec. 601 \
+                    coefficients, because edge detection should follow perceived brightness. \
+                    The simplification is real rather than cosmetic, and the display name is \
+                    \"xBR-class\", never \"xBR\", exactly as RENDERER.md §4 requires. AUTHORSHIP CAVEAT (Brad's ruling, 2026-08-17): written by an LLM which may have been trained on GPL shader sources, so G-42's literal test -- 'did not have the sources open' -- does not mean the same thing here as it does for a human author. Rather than assert a test that cannot be verified for such an author, the WGSL derives every term from stated reasoning a reviewer can check line by line, and the file header records the derivation. Flagged in the open rather than buried so a human licence review knows exactly what to audit.",
+                params: &[
+                    ShaderParamDescriptor {
+                        name: "threshold",
+                        label: "Edge threshold",
+                        min: 0.0,
+                        max: 2.0,
+                        default: 0.4,
+                    },
+                    ShaderParamDescriptor {
+                        name: "strength",
+                        label: "Blend strength",
+                        min: 0.0,
+                        max: 1.0,
+                        default: 1.0,
+                    },
+                ],
+            },
         }
     }
 }
@@ -268,6 +407,49 @@ impl ChainStage {
         }
     }
 
+    /// CRT-class look. `beam_sigma` is the vertical beam focus (small =
+    /// tight, obviously-scanlined; large = washed out), `mask_strength`
+    /// the aperture-grille tint in `[0, 1]`, `gamma` the encode exponent
+    /// the beam/mask multipliers are applied underneath (2.2 is the usual
+    /// display gamma). See `shaders/chain_crt.wgsl`'s header for where
+    /// each term comes from.
+    #[must_use]
+    pub fn crt(beam_sigma: f32, mask_strength: f32, gamma: f32) -> Self {
+        ChainStage {
+            kind: ShaderKind::Crt,
+            v0: [beam_sigma, mask_strength, gamma, 0.0],
+            out_size: None,
+        }
+    }
+
+    /// LCD-grid-style look. `grid_strength` and `subpixel_strength` are
+    /// `[0, 1]`; `gap` is the dark inter-cell gap as a fraction of a cell
+    /// (`[0, 0.5]`).
+    #[must_use]
+    pub fn lcd_grid(grid_strength: f32, gap: f32, subpixel_strength: f32) -> Self {
+        ChainStage {
+            kind: ShaderKind::LcdGrid,
+            v0: [grid_strength, gap, subpixel_strength, 0.0],
+            out_size: None,
+        }
+    }
+
+    /// xBR-class edge-directed upscaler. `threshold` is how much more
+    /// different the opposing diagonal must be before an edge is believed
+    /// (0 = any difference counts); `strength` in `[0, 1]` scales how far
+    /// toward the blend the result moves, so 0 is plain nearest.
+    ///
+    /// Pair with [`ChainStage::with_out_size`] to actually upscale — like
+    /// every stage in this module the default output size is the input's.
+    #[must_use]
+    pub fn xbr(threshold: f32, strength: f32) -> Self {
+        ChainStage {
+            kind: ShaderKind::Xbr,
+            v0: [threshold, strength, 0.0, 0.0],
+            out_size: None,
+        }
+    }
+
     /// Override this stage's output size (default: unchanged from
     /// whatever size fed into it). Builder-style so call sites read as
     /// `ChainStage::sharp_bilinear(0.6).with_out_size(512, 448)`.
@@ -282,14 +464,29 @@ impl ChainStage {
 /// v1: vec4<f32> }` uniform (32 bytes) — `v0` is the stage's own tunable
 /// fields, `v1.xy` is always `(1/out_width, 1/out_height)` (every shader in
 /// this module needs it to turn a fragment's window-space position into a
-/// UV; computed here once rather than duplicated per shader).
-fn params_bytes(v0: [f32; 4], out_width: u32, out_height: u32) -> [u8; 32] {
+/// UV; computed here once rather than duplicated per shader), and
+/// `v1.zw` is `(source_width, source_height)`.
+///
+/// `v1.zw` was zero-filled until ticket W3-02a, whose three shaders all
+/// reason in SOURCE-texel units rather than output ones — the CRT beam
+/// falls off across a source scanline, the LCD cell grid is a source
+/// pixel, and the xBR-class edge test loads source texels directly. That
+/// is the same argument by which `v1.xy` already exists: a size every
+/// shader of the class needs belongs in the shared uniform, computed once,
+/// not re-derived per shader.
+fn params_bytes(
+    v0: [f32; 4],
+    out_width: u32,
+    out_height: u32,
+    source_width: u32,
+    source_height: u32,
+) -> [u8; 32] {
     #[allow(clippy::cast_precision_loss)]
     let v1 = [
         1.0f32 / out_width as f32,
         1.0f32 / out_height as f32,
-        0.0f32,
-        0.0f32,
+        source_width as f32,
+        source_height as f32,
     ];
     let mut bytes = [0u8; 32];
     for (i, v) in v0.iter().chain(v1.iter()).enumerate() {
@@ -309,6 +506,9 @@ pub struct ShaderChain {
     nearest_pipeline: wgpu::RenderPipeline,
     sharp_bilinear_pipeline: wgpu::RenderPipeline,
     scanlines_pipeline: wgpu::RenderPipeline,
+    crt_pipeline: wgpu::RenderPipeline,
+    lcd_grid_pipeline: wgpu::RenderPipeline,
+    xbr_pipeline: wgpu::RenderPipeline,
     nearest_sampler: wgpu::Sampler,
     linear_sampler: wgpu::Sampler,
 }
@@ -415,11 +615,27 @@ impl ShaderChain {
             ..wgpu::SamplerDescriptor::default()
         });
 
+        let crt_pipeline = make_pipeline(
+            "rf-renderer::shader_chain::crt_pipeline",
+            ShaderKind::Crt.source(),
+        );
+        let lcd_grid_pipeline = make_pipeline(
+            "rf-renderer::shader_chain::lcd_grid_pipeline",
+            ShaderKind::LcdGrid.source(),
+        );
+        let xbr_pipeline = make_pipeline(
+            "rf-renderer::shader_chain::xbr_pipeline",
+            ShaderKind::Xbr.source(),
+        );
+
         ShaderChain {
             bind_group_layout,
             nearest_pipeline,
             sharp_bilinear_pipeline,
             scanlines_pipeline,
+            crt_pipeline,
+            lcd_grid_pipeline,
+            xbr_pipeline,
             nearest_sampler,
             linear_sampler,
         }
@@ -430,6 +646,14 @@ impl ShaderChain {
             ShaderKind::Nearest => (&self.nearest_pipeline, &self.nearest_sampler),
             ShaderKind::SharpBilinear => (&self.sharp_bilinear_pipeline, &self.linear_sampler),
             ShaderKind::Scanlines => (&self.scanlines_pipeline, &self.nearest_sampler),
+            // All three W3-02a shaders sample with the NEAREST sampler:
+            // each derives its own filtering (beam profile, cell grid,
+            // edge-directed blend) from explicit arithmetic, so hardware
+            // bilinear underneath would blur the very texel boundaries
+            // they are reasoning about.
+            ShaderKind::Crt => (&self.crt_pipeline, &self.nearest_sampler),
+            ShaderKind::LcdGrid => (&self.lcd_grid_pipeline, &self.nearest_sampler),
+            ShaderKind::Xbr => (&self.xbr_pipeline, &self.nearest_sampler),
         }
     }
 
@@ -550,7 +774,7 @@ impl ShaderChain {
         gpu.queue.write_buffer(
             &params_buffer,
             0,
-            &params_bytes(stage.v0, out_width, out_height),
+            &params_bytes(stage.v0, out_width, out_height, source_width, source_height),
         );
 
         let (pipeline, sampler) = self.pipeline_and_sampler(stage.kind);
@@ -639,6 +863,295 @@ impl ShaderChain {
         }
         Ok(rgba)
     }
+}
+
+// ---------------------------------------------------------------------
+// CPU oracles for ticket W3-02a's three shaders.
+//
+// Same shape and the same reason as `render_sharp_bilinear_reference`
+// below: an INDEPENDENT re-derivation of the shader's formula at the same
+// `f32` precision, not a checked-in GPU output. `docs/design/RENDERER.md`
+// §7 is explicit that anything past the 1x buffer is not golden-hashable
+// (driver-dependent), so the instrument for a filtering pass is
+// oracle-plus-tolerance, and the oracle has to be computed from the
+// formula or it is just codifying whatever the GPU did.
+// ---------------------------------------------------------------------
+
+/// Nearest-sample a source texel the way `textureSample` with this
+/// crate's nearest sampler does, given a UV in `[0,1]`.
+fn nearest_texel(
+    source_rgba: &[u8],
+    source_width: u32,
+    source_height: u32,
+    u: f32,
+    v: f32,
+) -> [f32; 4] {
+    #[allow(clippy::cast_precision_loss)]
+    let sx = ((u * source_width as f32).floor() as i64).clamp(0, i64::from(source_width) - 1);
+    #[allow(clippy::cast_precision_loss)]
+    let sy = ((v * source_height as f32).floor() as i64).clamp(0, i64::from(source_height) - 1);
+    #[allow(clippy::cast_sign_loss)]
+    let idx = ((sy as usize) * (source_width as usize) + (sx as usize)) * 4;
+    [
+        f32::from(source_rgba[idx]) / 255.0,
+        f32::from(source_rgba[idx + 1]) / 255.0,
+        f32::from(source_rgba[idx + 2]) / 255.0,
+        f32::from(source_rgba[idx + 3]) / 255.0,
+    ]
+}
+
+/// Load a source texel by integer coordinate, edge-clamped — the CPU twin
+/// of `chain_xbr.wgsl`'s `texel()`.
+fn load_texel(
+    source_rgba: &[u8],
+    source_width: u32,
+    source_height: u32,
+    x: i64,
+    y: i64,
+) -> [f32; 4] {
+    let cx = x.clamp(0, i64::from(source_width) - 1);
+    let cy = y.clamp(0, i64::from(source_height) - 1);
+    #[allow(clippy::cast_sign_loss)]
+    let idx = ((cy as usize) * (source_width as usize) + (cx as usize)) * 4;
+    [
+        f32::from(source_rgba[idx]) / 255.0,
+        f32::from(source_rgba[idx + 1]) / 255.0,
+        f32::from(source_rgba[idx + 2]) / 255.0,
+        f32::from(source_rgba[idx + 3]) / 255.0,
+    ]
+}
+
+fn to_u8(v: f32) -> u8 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+    }
+}
+
+/// CPU oracle for `shaders/chain_crt.wgsl` — same three terms, same order,
+/// same `f32` precision.
+///
+/// # Panics
+/// Panics if `source_rgba` does not match `source_width`x`source_height`.
+#[must_use]
+// Matches the shader's own parameter list one-for-one; grouping them
+// into a struct would put a second, drifting copy of the UBO layout in
+// this file for no reader's benefit.
+#[allow(clippy::too_many_arguments)]
+pub fn render_crt_reference(
+    source_rgba: &[u8],
+    source_width: u32,
+    source_height: u32,
+    out_width: u32,
+    out_height: u32,
+    beam_sigma: f32,
+    mask_strength: f32,
+    gamma: f32,
+) -> Vec<u8> {
+    assert_eq!(
+        source_rgba.len(),
+        (source_width as usize) * (source_height as usize) * 4,
+        "render_crt_reference: source buffer size does not match {source_width}x{source_height}"
+    );
+    let sigma = beam_sigma.max(0.0001);
+    let mask_strength = mask_strength.clamp(0.0, 1.0);
+    let gamma = gamma.max(0.0001);
+    #[allow(clippy::cast_precision_loss)]
+    let src_h = source_height as f32;
+
+    let mut out = Vec::with_capacity((out_width as usize) * (out_height as usize) * 4);
+    for y in 0..out_height {
+        for x in 0..out_width {
+            #[allow(clippy::cast_precision_loss)]
+            let u = (x as f32 + 0.5) / out_width as f32;
+            #[allow(clippy::cast_precision_loss)]
+            let v = (y as f32 + 0.5) / out_height as f32;
+            let c = nearest_texel(source_rgba, source_width, source_height, u, v);
+
+            // (1) beam profile
+            let src_y = v * src_h;
+            let d = (src_y - src_y.floor()) - 0.5;
+            let t = d / sigma;
+            let beam = (-(t * t)).exp();
+
+            // (2) aperture mask, by output column
+            let tint = match x % 3 {
+                0 => [1.0, 0.0, 0.0],
+                1 => [0.0, 1.0, 0.0],
+                _ => [0.0, 0.0, 1.0],
+            };
+            let tint = [
+                1.0 + (tint[0] - 1.0) * mask_strength,
+                1.0 + (tint[1] - 1.0) * mask_strength,
+                1.0 + (tint[2] - 1.0) * mask_strength,
+            ];
+
+            // (3) gamma round-trip
+            for ch in 0..3 {
+                let linear = c[ch].max(0.0).powf(gamma);
+                let lit = linear * beam * tint[ch];
+                out.push(to_u8(lit.max(0.0).powf(1.0 / gamma)));
+            }
+            out.push(to_u8(c[3]));
+        }
+    }
+    out
+}
+
+/// CPU oracle for `shaders/chain_lcd_grid.wgsl`.
+///
+/// # Panics
+/// Panics if `source_rgba` does not match `source_width`x`source_height`.
+#[must_use]
+// Matches the shader's own parameter list one-for-one; grouping them
+// into a struct would put a second, drifting copy of the UBO layout in
+// this file for no reader's benefit.
+#[allow(clippy::too_many_arguments)]
+pub fn render_lcd_grid_reference(
+    source_rgba: &[u8],
+    source_width: u32,
+    source_height: u32,
+    out_width: u32,
+    out_height: u32,
+    grid_strength: f32,
+    gap: f32,
+    subpixel_strength: f32,
+) -> Vec<u8> {
+    assert_eq!(
+        source_rgba.len(),
+        (source_width as usize) * (source_height as usize) * 4,
+        "render_lcd_grid_reference: source buffer size does not match \
+         {source_width}x{source_height}"
+    );
+    let grid_strength = grid_strength.clamp(0.0, 1.0);
+    let gap = gap.clamp(0.0, 0.5);
+    let subpixel_strength = subpixel_strength.clamp(0.0, 1.0);
+    #[allow(clippy::cast_precision_loss)]
+    let (src_w, src_h) = (source_width as f32, source_height as f32);
+
+    // WGSL `smoothstep(e0, e1, x)`.
+    let smoothstep = |e0: f32, e1: f32, x: f32| -> f32 {
+        let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+
+    let mut out = Vec::with_capacity((out_width as usize) * (out_height as usize) * 4);
+    for y in 0..out_height {
+        for x in 0..out_width {
+            #[allow(clippy::cast_precision_loss)]
+            let u = (x as f32 + 0.5) / out_width as f32;
+            #[allow(clippy::cast_precision_loss)]
+            let v = (y as f32 + 0.5) / out_height as f32;
+            let c = nearest_texel(source_rgba, source_width, source_height, u, v);
+
+            let cell_x = (u * src_w) - (u * src_w).floor();
+            let cell_y = (v * src_h) - (v * src_h).floor();
+
+            let nearest_edge = cell_x.min(1.0 - cell_x).min(cell_y.min(1.0 - cell_y));
+            let lit = smoothstep(0.0, gap.max(0.0001), nearest_edge);
+            let grid = 1.0 + (lit - 1.0) * grid_strength;
+
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let third = (cell_x * 3.0) as u32;
+            let stripe = match third {
+                0 => [1.0, 0.0, 0.0],
+                1 => [0.0, 1.0, 0.0],
+                _ => [0.0, 0.0, 1.0],
+            };
+            for ch in 0..3 {
+                let tint = 1.0 + (stripe[ch] - 1.0) * subpixel_strength;
+                out.push(to_u8(c[ch] * grid * tint));
+            }
+            out.push(to_u8(c[3]));
+        }
+    }
+    out
+}
+
+/// CPU oracle for `shaders/chain_xbr.wgsl`.
+///
+/// # Panics
+/// Panics if `source_rgba` does not match `source_width`x`source_height`.
+#[must_use]
+pub fn render_xbr_reference(
+    source_rgba: &[u8],
+    source_width: u32,
+    source_height: u32,
+    out_width: u32,
+    out_height: u32,
+    threshold: f32,
+    strength: f32,
+) -> Vec<u8> {
+    assert_eq!(
+        source_rgba.len(),
+        (source_width as usize) * (source_height as usize) * 4,
+        "render_xbr_reference: source buffer size does not match {source_width}x{source_height}"
+    );
+    let threshold = threshold.max(0.0);
+    let strength = strength.clamp(0.0, 1.0);
+    #[allow(clippy::cast_precision_loss)]
+    let (src_w, src_h) = (source_width as f32, source_height as f32);
+
+    let dist = |a: [f32; 4], b: [f32; 4]| -> f32 {
+        (a[0] - b[0]).abs() * 0.299 + (a[1] - b[1]).abs() * 0.587 + (a[2] - b[2]).abs() * 0.114
+    };
+    let mix4 = |a: [f32; 4], b: [f32; 4], t: f32| -> [f32; 4] {
+        [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+            a[3] + (b[3] - a[3]) * t,
+        ]
+    };
+
+    let mut out = Vec::with_capacity((out_width as usize) * (out_height as usize) * 4);
+    for y in 0..out_height {
+        for x in 0..out_width {
+            #[allow(clippy::cast_precision_loss)]
+            let u = (x as f32 + 0.5) / out_width as f32;
+            #[allow(clippy::cast_precision_loss)]
+            let v = (y as f32 + 0.5) / out_height as f32;
+
+            let sx = u * src_w;
+            let sy = v * src_h;
+            #[allow(clippy::cast_possible_truncation)]
+            let bx = sx.floor() as i64;
+            #[allow(clippy::cast_possible_truncation)]
+            let by = sy.floor() as i64;
+            let fx = sx - sx.floor();
+            let fy = sy - sy.floor();
+            let step_x = if fx >= 0.5 { 1 } else { -1 };
+            let step_y = if fy >= 0.5 { 1 } else { -1 };
+
+            let pp = load_texel(source_rgba, source_width, source_height, bx, by);
+            let bb = load_texel(source_rgba, source_width, source_height, bx + step_x, by);
+            let cc = load_texel(source_rgba, source_width, source_height, bx, by + step_y);
+            let dd = load_texel(
+                source_rgba,
+                source_width,
+                source_height,
+                bx + step_x,
+                by + step_y,
+            );
+
+            let d_pd = dist(pp, dd);
+            let d_bc = dist(bb, cc);
+
+            let blended = if d_pd * (1.0 + threshold) < d_bc {
+                mix4(pp, dd, 0.5)
+            } else if d_bc * (1.0 + threshold) < d_pd {
+                mix4(bb, cc, 0.5)
+            } else {
+                pp
+            };
+
+            let result = mix4(pp, blended, strength);
+            for channel in result {
+                out.push(to_u8(channel));
+            }
+        }
+    }
+    out
 }
 
 /// CPU oracle for `shaders/chain_sharp_bilinear.wgsl` — same UV/sharpness
@@ -753,20 +1266,20 @@ mod tests {
     // compare_with_tolerance`'s exact two-number metric. -------------------
 
     #[derive(Debug, Clone, Copy, PartialEq)]
-    struct ToleranceConfig {
-        channel_delta: u8,
-        max_mismatch_fraction: f64,
+    pub(super) struct ToleranceConfig {
+        pub(super) channel_delta: u8,
+        pub(super) max_mismatch_fraction: f64,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq)]
-    struct ToleranceReport {
-        total_pixels: usize,
-        mismatched_pixels: usize,
-        max_channel_delta_observed: u8,
-        passed: bool,
+    pub(super) struct ToleranceReport {
+        pub(super) total_pixels: usize,
+        pub(super) mismatched_pixels: usize,
+        pub(super) max_channel_delta_observed: u8,
+        pub(super) passed: bool,
     }
 
-    fn compare_with_tolerance(
+    pub(super) fn compare_with_tolerance(
         actual: &[u8],
         reference: &[u8],
         cfg: &ToleranceConfig,
@@ -1296,6 +1809,303 @@ mod tests {
                  the tolerance check, but it passed ({}/{} pixels mismatched, max delta {}) -- \
                  the tolerance is too wide",
                 report.mismatched_pixels, report.total_pixels, report.max_channel_delta_observed
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod w3_02a_tests {
+    // The in-crate, test-only tolerance comparator (module doc: rf-renderer
+    // must not depend on rf-harness, so W3-02's tests mirror its metric).
+    use super::tests::{compare_with_tolerance, ToleranceConfig};
+    use super::*;
+    use crate::gpu::GpuContext;
+
+    fn gpu_or_skip(test_name: &str) -> Option<GpuContext> {
+        match GpuContext::request_headless() {
+            Ok(gpu) => Some(gpu),
+            Err(e) => {
+                if std::env::var_os("CI").is_some() {
+                    panic!("{test_name} cannot skip in CI: {e}");
+                }
+                eprintln!("SKIP {test_name}: no wgpu adapter ({e})");
+                None
+            }
+        }
+    }
+
+    fn synthetic_source(w: u32, h: u32) -> Vec<u8> {
+        let mut v = Vec::with_capacity((w as usize) * (h as usize) * 4);
+        for y in 0..h {
+            for x in 0..w {
+                v.push(((x * 7 + y * 3) % 256) as u8);
+                v.push(((x * 13 + y * 29) % 256) as u8);
+                v.push(((x * 31 + y * 17) % 256) as u8);
+                v.push(255);
+            }
+        }
+        v
+    }
+
+    /// CALIBRATION RUN, not an assertion: prints the measured GPU-vs-oracle
+    /// divergence for each W3-02a shader so the thresholds below are sized
+    /// against numbers rather than guessed.
+    #[test]
+    #[ignore = "calibration: run explicitly with --ignored --nocapture to size the thresholds"]
+    fn calibrate_w3_02a_tolerances() {
+        let Some(gpu) = gpu_or_skip("calibrate_w3_02a_tolerances") else {
+            return;
+        };
+        let chain = ShaderChain::new(&gpu);
+        let (sw, sh) = (64u32, 48u32);
+        let source = synthetic_source(sw, sh);
+        let loose = ToleranceConfig {
+            channel_delta: 255,
+            max_mismatch_fraction: 1.0,
+        };
+
+        for (name, stage, reference) in [
+            (
+                "crt",
+                ChainStage::crt(0.3, 0.3, 2.2).with_out_size(sw * 3, sh * 3),
+                render_crt_reference(&source, sw, sh, sw * 3, sh * 3, 0.3, 0.3, 2.2),
+            ),
+            (
+                "lcd-grid",
+                ChainStage::lcd_grid(0.5, 0.12, 0.25).with_out_size(sw * 3, sh * 3),
+                render_lcd_grid_reference(&source, sw, sh, sw * 3, sh * 3, 0.5, 0.12, 0.25),
+            ),
+            (
+                "xbr",
+                ChainStage::xbr(0.4, 1.0).with_out_size(sw * 2, sh * 2),
+                render_xbr_reference(&source, sw, sh, sw * 2, sh * 2, 0.4, 1.0),
+            ),
+        ] {
+            let actual = chain
+                .render(&gpu, &source, sw, sh, &[stage])
+                .expect("GPU pass must succeed");
+            assert_eq!(actual.len(), reference.len(), "{name}: geometry mismatch");
+            let r = compare_with_tolerance(&actual, &reference, &loose);
+            let zero = compare_with_tolerance(
+                &actual,
+                &reference,
+                &ToleranceConfig {
+                    channel_delta: 0,
+                    max_mismatch_fraction: 0.0,
+                },
+            );
+            eprintln!(
+                "CALIBRATE {name}: max_channel_delta={} mismatched_at_delta0={}/{} ({:.4}%)",
+                r.max_channel_delta_observed,
+                zero.mismatched_pixels,
+                zero.total_pixels,
+                100.0 * zero.mismatched_pixels as f64 / zero.total_pixels as f64,
+            );
+        }
+    }
+
+    /// Calibrated tolerances for ticket W3-02a's three shaders.
+    ///
+    /// **Measured, not guessed** (Metal, Apple M-series, 64x48 synthetic
+    /// source; regenerate with `calibrate_w3_02a_tolerances`):
+    ///
+    /// | shader | max channel delta | mismatched at delta 0 |
+    /// |---|---|---|
+    /// | crt | 1 | 4/27648 (0.0145%) |
+    /// | lcd-grid | 1 | 4059/27648 (14.68%) |
+    /// | xbr | 0 | 0/12288 (0.00%) |
+    ///
+    /// So CRT and LCD-grid earn `channel_delta: 1` — the first nonzero
+    /// threshold in this crate, which is exactly what this ticket's brief
+    /// predicted ("tolerance finally earns a nonzero threshold here").
+    /// Their noise comes from transcendentals evaluated at different
+    /// precision on GPU and CPU: `pow` for the CRT's gamma round-trip,
+    /// `smoothstep` and the divide for the LCD grid. One least-significant
+    /// bit is the smallest value that covers the measurement, and with it
+    /// **zero** pixels mismatch — so `max_mismatch_fraction` stays 0.0 and
+    /// the threshold is doing all its work at the channel level, where the
+    /// noise actually is.
+    ///
+    /// **xBR keeps `channel_delta: 0` and that is deliberate.** It came
+    /// back byte-exact, because its arithmetic is comparisons and a
+    /// `mix(_, _, 0.5)` — no transcendental anywhere. Giving it an
+    /// allowance it has not earned is precisely the vacuity W3-01b refused
+    /// when it shipped nearest-neighbour at 0: an unmeasured threshold
+    /// tests nothing. If a future backend shows real noise here, size it
+    /// against that measurement and say so.
+    const CRT_TOLERANCE: ToleranceConfig = ToleranceConfig {
+        channel_delta: 1,
+        max_mismatch_fraction: 0.0,
+    };
+    const LCD_GRID_TOLERANCE: ToleranceConfig = ToleranceConfig {
+        channel_delta: 1,
+        max_mismatch_fraction: 0.0,
+    };
+    const XBR_TOLERANCE: ToleranceConfig = ToleranceConfig {
+        channel_delta: 0,
+        max_mismatch_fraction: 0.0,
+    };
+
+    /// Acceptance criterion 3, the "matches its reference" half: each
+    /// shader's real GPU output against its CPU oracle at the calibrated
+    /// threshold above.
+    #[test]
+    fn w3_02a_shaders_match_their_cpu_oracles_within_calibrated_tolerance() {
+        let Some(gpu) = gpu_or_skip("w3_02a_shaders_match_their_cpu_oracles") else {
+            return;
+        };
+        let chain = ShaderChain::new(&gpu);
+        let (sw, sh) = (64u32, 48u32);
+        let source = synthetic_source(sw, sh);
+
+        for (name, stage, reference, tol) in [
+            (
+                "crt",
+                ChainStage::crt(0.3, 0.3, 2.2).with_out_size(sw * 3, sh * 3),
+                render_crt_reference(&source, sw, sh, sw * 3, sh * 3, 0.3, 0.3, 2.2),
+                CRT_TOLERANCE,
+            ),
+            (
+                "lcd-grid",
+                ChainStage::lcd_grid(0.5, 0.12, 0.25).with_out_size(sw * 3, sh * 3),
+                render_lcd_grid_reference(&source, sw, sh, sw * 3, sh * 3, 0.5, 0.12, 0.25),
+                LCD_GRID_TOLERANCE,
+            ),
+            (
+                "xbr",
+                ChainStage::xbr(0.4, 1.0).with_out_size(sw * 2, sh * 2),
+                render_xbr_reference(&source, sw, sh, sw * 2, sh * 2, 0.4, 1.0),
+                XBR_TOLERANCE,
+            ),
+        ] {
+            let actual = chain
+                .render(&gpu, &source, sw, sh, &[stage])
+                .expect("GPU pass must succeed");
+            assert_eq!(actual.len(), reference.len(), "{name}: geometry mismatch");
+            let report = compare_with_tolerance(&actual, &reference, &tol);
+            eprintln!(
+                "{name}: {}/{} mismatched, max channel delta {} (tolerance {})",
+                report.mismatched_pixels,
+                report.total_pixels,
+                report.max_channel_delta_observed,
+                tol.channel_delta,
+            );
+            assert!(
+                report.passed,
+                "{name} GPU output diverged from its CPU oracle beyond the calibrated \
+                 tolerance: {}/{} pixels mismatched, max channel delta {}",
+                report.mismatched_pixels, report.total_pixels, report.max_channel_delta_observed
+            );
+        }
+    }
+
+    /// Acceptance criterion 3, the half that matters: **the calibrated
+    /// threshold still rejects a wrong image.**
+    ///
+    /// Mutation through the REAL GPU pass, not two CPU numbers compared to
+    /// each other: render the source through a genuinely different shader
+    /// and check it against the intended shader's oracle. "Wrong shader"
+    /// is exactly what these tolerances exist to catch, and a threshold
+    /// that waved it through would be worse than no test at all.
+    #[test]
+    fn a_wrong_shader_fails_each_calibrated_tolerance() {
+        let Some(gpu) = gpu_or_skip("a_wrong_shader_fails_each_calibrated_tolerance") else {
+            return;
+        };
+        let chain = ShaderChain::new(&gpu);
+        let (sw, sh) = (64u32, 48u32);
+        let source = synthetic_source(sw, sh);
+        let (ow, oh) = (sw * 3, sh * 3);
+
+        // Each intended shader, paired with a DIFFERENT stage rendered in
+        // its place. The pairings are deliberate: nearest for the two
+        // look-shaders (no modulation at all), and the CRT for xBR (a
+        // wholly different transform at the same geometry).
+        for (name, wrong_stage, reference, tol) in [
+            (
+                "crt",
+                ChainStage::nearest().with_out_size(ow, oh),
+                render_crt_reference(&source, sw, sh, ow, oh, 0.3, 0.3, 2.2),
+                CRT_TOLERANCE,
+            ),
+            (
+                "lcd-grid",
+                ChainStage::nearest().with_out_size(ow, oh),
+                render_lcd_grid_reference(&source, sw, sh, ow, oh, 0.5, 0.12, 0.25),
+                LCD_GRID_TOLERANCE,
+            ),
+            (
+                "xbr",
+                ChainStage::crt(0.3, 0.3, 2.2).with_out_size(ow, oh),
+                render_xbr_reference(&source, sw, sh, ow, oh, 0.4, 1.0),
+                XBR_TOLERANCE,
+            ),
+        ] {
+            let wrong = chain
+                .render(&gpu, &source, sw, sh, &[wrong_stage])
+                .expect("GPU pass must succeed");
+            let report = compare_with_tolerance(&wrong, &reference, &tol);
+            eprintln!(
+                "{name} MUTATION: {}/{} mismatched, max channel delta {}",
+                report.mismatched_pixels, report.total_pixels, report.max_channel_delta_observed,
+            );
+            assert!(
+                !report.passed,
+                "{name}: the calibrated tolerance ACCEPTED a wrong image -- a threshold that \
+                 passes a visibly wrong render is worse than no test"
+            );
+        }
+    }
+
+    /// The licensing law (acceptance criterion 2) is review-enforced —
+    /// `cargo deny` will never look inside a `.wgsl` file — so the parts
+    /// of it that CAN be checked mechanically are checked here: every
+    /// shipped shader records a licence and an authorship statement, and
+    /// the upscaler's `basis` names the permitted MIT basis while
+    /// explicitly ruling out the forbidden GPL ones.
+    #[test]
+    fn every_shader_manifest_records_its_provenance() {
+        for kind in [
+            ShaderKind::Nearest,
+            ShaderKind::SharpBilinear,
+            ShaderKind::Scanlines,
+            ShaderKind::Crt,
+            ShaderKind::LcdGrid,
+            ShaderKind::Xbr,
+        ] {
+            let m = kind.manifest();
+            assert!(!m.license.trim().is_empty(), "{} has no licence", m.id);
+            assert!(
+                m.authorship.len() > 80,
+                "{} has no substantive authorship statement",
+                m.id
+            );
+        }
+
+        // The G-42-critical one, asserted specifically rather than left to
+        // the generic loop above.
+        let xbr = ShaderKind::Xbr.manifest();
+        let basis = xbr.basis.expect("the upscaler must record its basis");
+        assert!(basis.contains("Hyllian"), "basis must name the MIT basis");
+        assert!(basis.contains("MIT"), "basis must name the MIT licence");
+        assert!(
+            basis.contains("xBRZ") && basis.contains("GPL-3.0"),
+            "basis must explicitly rule out xBRZ (GPL-3.0)"
+        );
+        assert!(
+            basis.contains("libretro"),
+            "basis must explicitly rule out libretro GPL ports"
+        );
+        assert_eq!(
+            xbr.display_name, "xBR-class",
+            "RENDERER.md §4: the label says -class, never claiming to BE xBR"
+        );
+        for kind in [ShaderKind::Crt, ShaderKind::LcdGrid, ShaderKind::Xbr] {
+            assert!(
+                kind.manifest().authorship.contains("LLM"),
+                "{}: the authorship caveat must be recorded, not buried",
+                kind.manifest().id
             );
         }
     }

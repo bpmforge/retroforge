@@ -105,6 +105,41 @@ full-map), then applies the camera transform and shader chain.
   sources open; UI labels say "-class"/"-style", never claiming to *be*
   the libretro shaders. Every shipped shader records its provenance in
   its manifest.
+- **Shipped as of ticket W3-02a**, completing §4's first-party list:
+  `crt` (CRT-class), `lcd-grid` (LCD-grid-style), `xbr` (xBR-class). Each
+  carries a `ShaderManifest` with `license`, `basis` and `authorship`, and
+  each WGSL file opens with a PROVENANCE block deriving every term it
+  computes — gaussian beam profile + aperture mask + gamma round-trip for
+  the CRT; cell-gap geometry + subpixel stripes for the LCD; a single
+  diagonal-edge comparison with a luma-weighted distance for the upscaler.
+  The upscaler's `basis` names Hyllian's xBR (MIT) as the permitted family
+  and explicitly rules out **xBRZ (Zenju, GPL-3.0)** and **libretro GPL
+  ports**; it is not a transcription of Hyllian's either, and is
+  deliberately simpler (one 2×2 comparison, where real xBR uses a larger
+  neighbourhood and a multi-level rule table) so the "-class" label is
+  accurate rather than modest.
+- **Authorship caveat, recorded rather than buried (W3-02a, 2026-08-17).**
+  These three were written by an LLM which may have been trained on
+  GPL-licensed shader sources, so G-42's literal test — "must not have the
+  sources open" — does not mean the same thing for such an author as for a
+  human. Rather than assert a test that cannot be verified, each file
+  *derives* its arithmetic from stated reasoning a reviewer can check line
+  by line, and each manifest says so. A human licence review knows exactly
+  what to audit. `cargo deny` cannot see inside a `.wgsl`, so the parts of
+  the law that CAN be mechanised are asserted in
+  `every_shader_manifest_records_its_provenance`.
+- **Tolerance, calibrated at last (W3-02a).** Measured on Metal against
+  the CPU oracles: CRT and LCD-grid both show a **1-LSB** max channel
+  delta (from `pow` and `smoothstep` evaluating differently on GPU and
+  CPU), so they earn `channel_delta: 1` — this crate's first nonzero
+  threshold, and with it **zero** pixels mismatch, so
+  `max_mismatch_fraction` stays 0.0. **xBR came back byte-exact** (its
+  arithmetic is comparisons and one `mix(_, _, 0.5)`, no transcendental)
+  and therefore keeps `channel_delta: 0`: giving it an unearned allowance
+  is the vacuity W3-01b refused when it shipped nearest at 0. Each
+  threshold is mutation-verified through the real GPU pass — rendering a
+  *different* shader in its place is rejected with max channel deltas of
+  131, 64 and 252 respectively.
 - Not a goal: full RetroArch slang-shader compatibility. A converter for
   simple single-pass GLSL presets is a Phase 8 stretch item; document this
   honestly in the UI.
