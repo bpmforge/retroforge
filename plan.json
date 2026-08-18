@@ -2141,7 +2141,7 @@
     "golden-frame suite runs headless on the Linux software rasterizer"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
