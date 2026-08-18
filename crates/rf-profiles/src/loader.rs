@@ -65,6 +65,34 @@ pub fn load_str(text: &str) -> Result<LoadOutcome, ProfileError> {
         }
     }
 
+    // FR-PROF-003, enforced (ticket W4-02a). W4-02 added `source` as an
+    // OPTIONAL field and deliberately did not implement the
+    // fail-without-one half, since its own acceptance criteria did not
+    // cite this requirement — a scope decision, recorded rather than
+    // assumed away, which is why this exists as its own ticket.
+    //
+    // Both tables, checked in declaration order so the FIRST offending
+    // row is the one reported: someone fixing a profile wants the top of
+    // the list, not an arbitrary member of it.
+    for (idx, entry) in profile.memory_map.iter().enumerate() {
+        if entry.source.as_ref().is_none_or(|s| s.trim().is_empty()) {
+            return Err(ProfileError::MapEntryMissingSource {
+                table: "memory_map",
+                index: idx,
+                label: entry.label.clone(),
+            });
+        }
+    }
+    for (idx, entry) in profile.rom_map.iter().enumerate() {
+        if entry.source.as_ref().is_none_or(|s| s.trim().is_empty()) {
+            return Err(ProfileError::MapEntryMissingSource {
+                table: "rom_map",
+                index: idx,
+                label: entry.label.clone(),
+            });
+        }
+    }
+
     Ok(LoadOutcome { profile, warnings })
 }
 
@@ -153,6 +181,100 @@ mod tests {
             .replace("title = \"Example Platformer\"", ""); // also drop a required field
         let err = load_str(&text).expect_err("must still fail");
         assert!(matches!(err, ProfileError::NewerMajor { found: 7, .. }));
+    }
+
+    // ---------------------------------------------------------------
+    // FR-PROF-003 (ticket W4-02a): "Every memory_map/rom_map entry shall
+    // carry a `source` citation (clean-room provenance); validation shall
+    // fail without one."
+    // ---------------------------------------------------------------
+
+    const MEMORY_ROW: &str = r#"
+        [[memory_map]]
+        addr = 0x0300
+        len = 2
+        type = "u16le"
+        label = "player_x"
+    "#;
+
+    const ROM_ROW: &str = r#"
+        [[rom_map]]
+        offset = 0x8000
+        len = 16
+        type = "metatile_table"
+        label = "metatiles"
+    "#;
+
+    #[test]
+    fn a_memory_map_entry_without_a_source_fails_and_names_the_entry() {
+        let err = load_str(&format!("{VALID}{MEMORY_ROW}"))
+            .expect_err("FR-PROF-003: validation shall fail without a source");
+        match &err {
+            ProfileError::MapEntryMissingSource {
+                table,
+                index,
+                label,
+            } => {
+                assert_eq!(*table, "memory_map");
+                assert_eq!(*index, 0);
+                assert_eq!(
+                    label, "player_x",
+                    "the LABEL is what someone can search for"
+                );
+            }
+            other => panic!("wrong error: {other:?}"),
+        }
+        // The message must actually name it — an error type carrying the
+        // label is no use if `Display` drops it.
+        let rendered = err.to_string();
+        assert!(rendered.contains("memory_map"), "{rendered}");
+        assert!(rendered.contains("player_x"), "{rendered}");
+    }
+
+    #[test]
+    fn a_rom_map_entry_without_a_source_fails_too() {
+        let err = load_str(&format!("{VALID}{ROM_ROW}"))
+            .expect_err("FR-PROF-003 names rom_map as well as memory_map");
+        assert!(matches!(
+            err,
+            ProfileError::MapEntryMissingSource {
+                table: "rom_map",
+                index: 0,
+                ..
+            }
+        ));
+    }
+
+    /// A present-but-blank `source` is not a citation. Without this, the
+    /// rule is trivially satisfiable by `source = ""`, which would make
+    /// the whole provenance requirement decorative.
+    #[test]
+    fn a_blank_source_does_not_count_as_a_citation() {
+        for blank in ["\"\"", "\"   \""] {
+            let text = format!("{VALID}{MEMORY_ROW}\n        source = {blank}\n");
+            assert!(
+                matches!(
+                    load_str(&text),
+                    Err(ProfileError::MapEntryMissingSource { .. })
+                ),
+                "source = {blank} must not satisfy FR-PROF-003"
+            );
+        }
+    }
+
+    /// The positive half: with a real citation the same profile loads
+    /// clean. Without this, every test above would pass on a loader that
+    /// rejected all map entries outright.
+    #[test]
+    fn a_cited_entry_loads_clean() {
+        let text =
+            format!("{VALID}{MEMORY_ROW}\n        source = \"docs/research/nes-ram-map.md\"\n");
+        let outcome = load_str(&text).expect("a cited entry must load");
+        assert_eq!(outcome.profile.memory_map.len(), 1);
+        assert_eq!(
+            outcome.profile.memory_map[0].source.as_deref(),
+            Some("docs/research/nes-ram-map.md")
+        );
     }
 
     /// Vacuity trap (a), unknown-key half: an unknown key must produce a

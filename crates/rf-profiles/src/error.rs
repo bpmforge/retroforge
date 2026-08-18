@@ -34,6 +34,27 @@ pub enum ProfileError {
     /// — such an entry could never discriminate a ROM, so it is a load
     /// error rather than a silently-useless row.
     IdentityMissingHash(usize),
+    /// A `[[memory_map]]` or `[[rom_map]]` entry carries no `source`
+    /// citation (ticket W4-02a; FR-PROF-003: "Every `memory_map`/`rom_map`
+    /// entry shall carry a `source` citation (clean-room provenance);
+    /// validation shall fail without one").
+    ///
+    /// Names the table, the 0-based row index AND the row's `label`,
+    /// because the index alone is a poor thing to hand someone editing a
+    /// forty-row memory map by hand — the label is what they can search
+    /// for.
+    ///
+    /// This is a **provenance** rule, not a tidiness one. D-005 makes
+    /// community profile intake deny-by-default with provenance required,
+    /// and NFR-011's core rule is clean-room-from-documentation rather
+    /// than transcribed. An unenforced `source` lets a profile assert a
+    /// RAM map with no stated origin and pass validation — exactly the
+    /// intake hazard D-005 exists to close.
+    MapEntryMissingSource {
+        table: &'static str,
+        index: usize,
+        label: String,
+    },
 }
 
 impl fmt::Display for ProfileError {
@@ -52,6 +73,16 @@ impl fmt::Display for ProfileError {
                  major {supported} — refusing to load"
             ),
             ProfileError::Deserialize(msg) => write!(f, "schema error: {msg}"),
+            ProfileError::MapEntryMissingSource {
+                table,
+                index,
+                label,
+            } => write!(
+                f,
+                "[[{table}]] entry {index} (`{label}`) has no `source` citation — FR-PROF-003 \
+                 requires clean-room provenance for every {table} entry, so validation fails \
+                 without one"
+            ),
             ProfileError::IdentityMissingHash(idx) => write!(
                 f,
                 "`[[identity]]` entry {idx} specifies no hash (need at least one of \

@@ -185,6 +185,9 @@ pub struct MemoryMapEntry {
     pub ty: String,
     pub label: String,
     pub notes: Option<String>,
+    /// FR-PROF-003's clean-room provenance citation. **Required** — see
+    /// [`RomMapEntry::source`] for why it is typed `Option` and rejected
+    /// by the loader rather than by serde (ticket W4-02a).
     pub source: Option<String>,
 }
 
@@ -260,15 +263,22 @@ pub struct RomMapEntry {
     #[serde(rename = "type")]
     pub ty: String,
     pub count: Option<u32>,
-    /// FR-PROF-003 ("every memory_map/rom_map entry shall carry a `source`
-    /// citation") names this field for `rom_map` too, even though §2's own
-    /// example TOML omits it here (only `memory_map`'s example shows one).
-    /// Carried as optional: this ticket's acceptance criteria don't cite
-    /// FR-PROF-003, so the *fail-without-one* enforcement is deliberately
-    /// not implemented here — but the field must exist, or every
-    /// `[[rom_map]]` row a future ticket (W4-06b's annotation-export
-    /// pipeline, §3 step 2) writes with a `source` would trip this
-    /// crate's own unknown-key warning.
+    /// FR-PROF-003's clean-room provenance citation. **Required** —
+    /// `Option` here is a wire-format detail, not permission to omit it:
+    /// the loader rejects a profile whose `source` is absent, empty or
+    /// whitespace (`ProfileError::MapEntryMissingSource`, ticket W4-02a).
+    ///
+    /// It is typed `Option<String>` rather than `String` so the failure
+    /// is the loader's own named error, naming the table, index and
+    /// label, rather than serde's generic "missing field" — which would
+    /// point at a line number and leave someone editing a forty-row map
+    /// to work out which entry it meant.
+    ///
+    /// W4-02 shipped this as genuinely optional (its acceptance criteria
+    /// did not cite FR-PROF-003) and flagged the gap rather than assuming
+    /// it away; W4-02a is that flag being acted on. GAME_PROFILES.md §2's
+    /// example omitted the field entirely until then, so the spec's own
+    /// example failed the spec's own requirement.
     pub source: Option<String>,
     pub notes: Option<String>,
 }

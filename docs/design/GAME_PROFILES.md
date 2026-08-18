@@ -63,12 +63,21 @@ fields = { x = 0, y = 4, kind = 12, active = { offset = 15, mask = 0x80 } }
 offscreen_valid = false              # if false, only spawn points are drawn off-screen
 
 # ---- static knowledge (ROM) ----
+# NOTE: `source` is MANDATORY on every [[memory_map]] and [[rom_map]] row
+# (FR-PROF-003) and validation FAILS without one — enforced by the loader
+# since ticket W4-02a. It is the clean-room provenance field: D-005 makes
+# community profile intake deny-by-default with provenance required, and
+# an unenforced `source` would let a profile assert a RAM map with no
+# stated origin. This example omitted it until W4-02a, so the spec's own
+# example failed the spec's own requirement — anyone implementing from it
+# would have produced an invalid profile.
 [[rom_map]]
 offset = 0x1D00
 len = 0x40
 label = "level_pointer_table"
 type = "ptr_table"
 count = 32
+source = "https://datacrystal.tcrf.net/..."   # REQUIRED — FR-PROF-003
 
 [decode]
 kind = "metatile_screens"            # selects a built-in decoder family
