@@ -1659,7 +1659,7 @@
     "ppu_vbl_nmi stays 10/10, mmc3_irq_tests stays green, and the accuracy path is bit-identical to today -- the scheduler may not be paid for out of the accuracy mode"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ],
