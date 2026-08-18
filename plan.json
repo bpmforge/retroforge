@@ -2918,8 +2918,8 @@
    "stories": []
   },
   {
-   "id": "W4-10",
-   "title": "Trace viewer + audio channel scopes + debugger idle bench",
+   "id": "W4-10a",
+   "title": "Per-chip trace rings, trace viewer, lz4 trace-to-file, debugger idle bench",
    "phase": 4,
    "crate": "rf-debugger",
    "write_scope": [
@@ -2931,9 +2931,8 @@
     "W2-05"
    ],
    "acceptance": [
-    "per-chip trace ring buffers (rtrb, overflow drops oldest + truncation flag) + trace viewer panel with filters (DEBUGGER.md sections 2-3)",
+    "per-chip trace ring buffers (rtrb transport, truncation flag) + trace viewer panel with filters (DEBUGGER.md sections 2-3)",
     "trace-to-file background writer with lz4 framing + size warning (DEBUGGER.md section 2)",
-    "audio channel scopes with per-channel mute/solo (FR-DBG-001, DEBUGGER.md section 3)",
     "CI bench: Accuracy frame time with debugger idle == compiled-out within noise (DEBUGGER.md section 6)"
    ],
    "points": 5,
@@ -2941,6 +2940,43 @@
    "stories": [
     "E3-S1",
     "E3-S2"
+   ],
+   "notes": [
+    "FILED 2026-08-18 BY W4-10, split on Brad's ruling. W4-10 bundled three self-contained criteria with a fourth that cannot be built inside its write_scope at all; see W4-10b for that one.",
+    "DEBUGGER.md section 2 says overflow \"drops oldest\", and rtrb cannot do that: `Producer` has only `push`/`is_full`/`slots` — `pop` is Consumer-only, so the core thread can never discard the oldest entry. Verified against the vendored rtrb 0.3 source. The resolution is a two-level ring: the TRANSPORT drops newest and sets the truncation flag, and the UI-side scrollback (a plain VecDeque in rf-debugger) drops oldest as it drains, which is the ring a user actually scrolls. Document that distinction at the seam or the next reader will assume drop-oldest holds end to end.",
+    "lz4 crate choice is `lz4_flex` 0.14.0, not `lz4`: `lz4` is C bindings (build-time toolchain plus unsafe across an FFI boundary, in a workspace whose lints flag unsafe_code), `lz4_flex` is pure Rust, MIT, no-unsafe-by-default. Frame API verified against the vendored source rather than recall: `FrameEncoder::new(w)`, `io::Write`, `finish()`.",
+    "VACUITY TRAP for the bench: \"debugger idle == compiled-out\" needs two configurations that genuinely differ, or it compares a path against itself (the trap W3-07 refused when it picked the open-bus switch over OAM decay). If the ring is always allocated and the push always called, idle and compiled-out are the same code. State the noise threshold as a number BEFORE measuring — this machine measured ~3% run-to-run on W3-07b — or whatever comes out is within noise by construction.",
+    "VACUITY TRAP for the truncation flag: a flag no test ever sets is indistinguishable from one that cannot be set. Drive the producer past capacity deliberately, and assert both the flag AND that the scrollback's newest entry is still the newest — a transport that silently dropped everything would pass a flag-only check."
+   ]
+  },
+  {
+   "id": "W4-10b",
+   "title": "Audio channel scopes with per-channel mute/solo",
+   "phase": 4,
+   "crate": "rf-debugger",
+   "write_scope": [
+    "crates/rf-debugger/**",
+    "crates/retroforge/**",
+    "crates/rf-nes/**"
+   ],
+   "depends_on": [
+    "W4-10a"
+   ],
+   "acceptance": [
+    "per-channel sample streams reach the shell alongside the mixed buffer (rf-nes), at the same rate as the mixed output rather than decimated",
+    "audio channel scopes with per-channel mute/solo (FR-DBG-001, DEBUGGER.md section 3)",
+    "mute/solo is a HOST-side mix and provably does not perturb the simulation: EmuStepper::state_hash is byte-identical under every mute combination"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E3-S2"
+   ],
+   "notes": [
+    "FILED 2026-08-18 BY W4-10, split on Brad's ruling, and the split boundary is a write_scope fact rather than a size preference: `NesBus` exposes no APU accessor at all, so `Apu::channel_outputs` is unreachable from `retroforge`, and `crates/rf-nes/**` was not in W4-10's scope. This ticket carries that scope.",
+    "An accessor alone is NOT enough, which is why this is 5 points rather than 1. `channel_outputs()` is an instantaneous getter; a scope needs a WAVEFORM. Sampling it once per scanline from the shell yields ~262 points per frame against ~800 audio samples per frame at 48 kHz — a 3x decimated trace that aliases and misrepresents the high channels. Per-channel sample buffers must be filled inside the APU's own tick, alongside the existing mixed buffer.",
+    "THE CONSTRAINT THAT DECIDES THE DESIGN: mute must not alter `Apu::mixed_sample`/`take_samples`. That is emulation output, and `crates/retroforge/tests/determinism.rs` and the .rfreplay format hash it. Mute therefore has to be a host-side mix over the per-channel streams, never a gate inside the APU mixer. If that cannot be arranged, the ticket splits again rather than quietly accepting a determinism change.",
+    "SRS FR-DBG-001 marks audio channel scopes P1, not MVP, so this may be scheduled after the W5 MVP chain without breaking any exit criterion."
    ]
   },
   {
