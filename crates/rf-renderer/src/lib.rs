@@ -40,6 +40,7 @@
 //! PalettePass`] -> [`scale::ScalePass`] -> [`shader_chain::ShaderChain`]
 //! into the one end-to-end call W3-01b recorded as not yet done.
 
+pub mod compare;
 pub mod composite;
 pub mod fallback;
 pub mod frame;
@@ -48,9 +49,11 @@ pub mod layers;
 pub mod original_pipeline;
 pub mod palette;
 pub mod pipeline;
+pub mod png;
 pub mod scale;
 pub mod shader_chain;
 
+pub use compare::{blink_shows_original, compose_split, original_rgba_from_indexed, CompareMode};
 pub use composite::{CompositeLayer, CompositeOutcome, EnhancedCompositor, TargetReduction};
 pub use fallback::{render_with_fallback, RenderOutcome, RenderPath, FALLBACK_BUDGET};
 pub use frame::FrameBuffer;

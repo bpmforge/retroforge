@@ -196,6 +196,27 @@ pub struct RetroForgeApp {
     /// [`Self::ultrawide_canvas`] — `Err` (e.g. "canvas is empty") is kept
     /// distinct from `None` ("never even tried yet") so
     /// [`enhanced_view::select_active_view`] can show a specific reason.
+    /// Ticket W3-04 (FR-REND-005): how the original/enhanced compare view
+    /// is presented, or `Off`. Pure UI state — the comparison itself is
+    /// `rf_renderer::compare`'s pure functions, which is where its tests
+    /// live.
+    compare_mode: rf_renderer::CompareMode,
+    /// Divider position for `CompareMode::Split`, kept across toggles so
+    /// turning compare off and on again does not reset the drag.
+    compare_divider: f32,
+    /// Ticket W3-04 (FR-FE-005): the two buffers the last frame produced,
+    /// kept ONLY while something needs them.
+    ///
+    /// Deliberately not populated unconditionally: W3-03a removed exactly
+    /// this shape of per-frame cost (two ~240 KB clones for a window
+    /// nobody had open), and re-adding it here for a compare view that is
+    /// off by default would have undone that ticket a day later. Populated
+    /// when compare mode is on, or for the single frame a screenshot is
+    /// pending.
+    compare_buffers: Option<CompareBuffers>,
+    /// Set by the Screenshot action; consumed by the next frame, which is
+    /// the first one whose buffers are guaranteed to exist.
+    screenshot_pending: bool,
     ultrawide_render: Option<Result<enhanced_view::UltrawideRender, String>>,
     /// The egui texture built from [`Self::ultrawide_render`]'s `rgba`,
     /// same "persistent `TextureHandle`, `.set()` on later frames" shape
@@ -351,6 +372,10 @@ impl RetroForgeApp {
             compositor,
             camera: CameraToggle::Original,
             ultrawide_canvas: None,
+            compare_mode: rf_renderer::CompareMode::Off,
+            compare_divider: 0.5,
+            compare_buffers: None,
+            screenshot_pending: false,
             ultrawide_render: None,
             ultrawide_texture: None,
             fm13_message: None,
@@ -577,6 +602,19 @@ impl RetroForgeApp {
         // reading it any earlier could race a bundle published between the
         // two reads and pair a frame with a stale event log.
         let latest_bundle_events = core.frame_bundle.latest().events.clone();
+        // Ticket W3-04: the accuracy-exact half of the compare pair, taken
+        // from the SAME read ordering the comment above establishes, so
+        // the two halves cannot land a frame apart. Cloned only when
+        // something actually needs them (W3-03a's rule: a closed feature
+        // costs nothing on the frame path).
+        let want_compare_buffers =
+            self.compare_mode != rf_renderer::CompareMode::Off || self.screenshot_pending;
+        let latest_bundle_video = if want_compare_buffers {
+            let b = core.frame_bundle.latest();
+            Some((b.video.clone(), u32::from(b.width), u32::from(b.height)))
+        } else {
+            None
+        };
         if crashed {
             // FM-01's recovery row is "Reload ROM / load last state" — the
             // core thread has already halted for good (`run_guarded_loop`
@@ -599,6 +637,29 @@ impl RetroForgeApp {
         if let Some(msg) = latest_frame {
             // Ticket W2-14: a stepped frame has now been consumed.
             self.awaiting_stepped_frame = false;
+            // Ticket W3-04: pair the two renderings of THIS frame.
+            self.compare_buffers = latest_bundle_video.and_then(|(video, bw, bh)| {
+                // Geometry must agree, or there is a scaling decision to
+                // make that this ticket deliberately does not guess at —
+                // drop the pair rather than compose a misaligned image.
+                let (w, h) = (
+                    u32::try_from(msg.width).ok()?,
+                    u32::try_from(msg.height).ok()?,
+                );
+                if bw != w || bh != h || video.len() != (w as usize) * (h as usize) {
+                    return None;
+                }
+                Some(CompareBuffers {
+                    original: rf_renderer::original_rgba_from_indexed(&video, w, h),
+                    enhanced: msg.rgba.clone(),
+                    width: w,
+                    height: h,
+                })
+            });
+            if self.screenshot_pending {
+                self.screenshot_pending = false;
+                self.write_screenshots();
+            }
             // Ticket W2-15: position travels with the frame.
             self.position = Some((msg.frame_count, msg.last_scanline));
             // Ticket W4-06a: OAM travels with the frame the same way
@@ -617,8 +678,33 @@ impl RetroForgeApp {
             // own doc.
             self.debug_panels.data.wram = *msg.wram;
             self.debug_panels.data.prg_ram = *msg.prg_ram;
+            // Ticket W3-04 (FR-REND-005): when comparing, the displayed
+            // image IS the composed comparison — one buffer, so what is
+            // on screen and what a screenshot of the compare view would
+            // show cannot disagree. `rf_renderer::compare` owns the
+            // branching; this only picks the bytes.
+            let compare_rgba = match (self.compare_mode, self.compare_buffers.as_ref()) {
+                (rf_renderer::CompareMode::Off, _) | (_, None) => None,
+                (rf_renderer::CompareMode::Split { divider }, Some(b)) => {
+                    Some(rf_renderer::compose_split(
+                        &b.original,
+                        &b.enhanced,
+                        b.width,
+                        b.height,
+                        divider,
+                    ))
+                }
+                (rf_renderer::CompareMode::Blink { period_frames }, Some(b)) => {
+                    if rf_renderer::blink_shows_original(msg.frame_count, period_frames) {
+                        Some(b.original.clone())
+                    } else {
+                        Some(b.enhanced.clone())
+                    }
+                }
+            };
+            let displayed: &[u8] = compare_rgba.as_deref().unwrap_or(&msg.rgba);
             let image =
-                egui::ColorImage::from_rgba_unmultiplied([msg.width, msg.height], &msg.rgba);
+                egui::ColorImage::from_rgba_unmultiplied([msg.width, msg.height], displayed);
             match &mut self.texture {
                 Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
                 None => {
@@ -828,6 +914,51 @@ impl RetroForgeApp {
                 // window costs one frame (≤16.6 ms at 60 Hz) before layer
                 // data arrives, which is under a human's flicker threshold
                 // and far cheaper than paying for it forever.
+                // Ticket W3-04 (FR-REND-005/FR-FE-005). Compare is off by
+                // default: it is a comparison tool, and law 6's "a fresh
+                // install boots in Accuracy Mode" reads the same way here
+                // — what you see by default is the emulator's own output,
+                // not an instrument reading of it.
+                ui.menu_button("Compare", |ui| {
+                    let mut mode = self.compare_mode;
+                    ui.radio_value(&mut mode, rf_renderer::CompareMode::Off, "Off");
+                    ui.radio_value(
+                        &mut mode,
+                        rf_renderer::CompareMode::Split {
+                            divider: self.compare_divider,
+                        },
+                        "Split screen",
+                    );
+                    ui.radio_value(
+                        &mut mode,
+                        rf_renderer::CompareMode::Blink { period_frames: 30 },
+                        "A/B blink",
+                    );
+                    if let rf_renderer::CompareMode::Split { .. } = mode {
+                        ui.separator();
+                        // The "draggable divider" RENDERER.md §5 asks for.
+                        // A slider rather than a hit-tested drag handle:
+                        // same control, and it works with a keyboard.
+                        ui.add(
+                            egui::Slider::new(&mut self.compare_divider, 0.0..=1.0).text("Divider"),
+                        );
+                        mode = rf_renderer::CompareMode::Split {
+                            divider: self.compare_divider,
+                        };
+                    }
+                    self.compare_mode = mode;
+                    ui.separator();
+                    if ui.button("Screenshot (both buffers)").clicked() {
+                        // Deferred to the next frame rather than taken
+                        // here: with compare off, no buffers are being
+                        // kept (W3-03a's rule), so the first frame that
+                        // HAS them is the next one.
+                        self.screenshot_pending = true;
+                        self.status = "Screenshot: capturing next frame\u{2026}".to_string();
+                        ui.close();
+                    }
+                });
+                ui.separator();
                 if ui
                     .checkbox(&mut self.show_layers, "Layers (debug)")
                     .changed()
@@ -1578,6 +1709,38 @@ impl RetroForgeApp {
     /// ultrawide_toggle_with_a_ready_render_shows_ultrawide_content_not_original`)
     /// are written to catch. The Original arm is untouched from before this
     /// ticket (criterion 4: Accuracy Mode's own output, unmodified).
+    /// Write the current frame's two renderings as PNGs (ticket W3-04,
+    /// FR-FE-005: "Screenshot capture (original and enhanced buffers
+    /// **separately**)").
+    ///
+    /// Two files, not one composed image, because that is what the
+    /// requirement says and it is also the more useful artefact: a
+    /// composed split is reproducible from the two halves, but neither
+    /// half is recoverable from a composed split.
+    fn write_screenshots(&mut self) {
+        let Some(buffers) = self.compare_buffers.as_ref() else {
+            self.status = "Screenshot: no frame captured yet".to_string();
+            return;
+        };
+        let stamp = self.position.map_or(0, |(frame, _)| frame);
+        let dir = std::env::current_dir().unwrap_or_default();
+        let mut written = Vec::new();
+        for (name, png) in screenshot_files(buffers, stamp) {
+            let path = dir.join(name);
+            match std::fs::write(&path, png) {
+                Ok(()) => written.push(path.display().to_string()),
+                Err(e) => {
+                    // A screenshot failing is never fatal — say so and
+                    // keep emulating, same stance as every other optional
+                    // side-effect in this shell.
+                    self.status = format!("Screenshot failed: {e}");
+                    return;
+                }
+            }
+        }
+        self.status = format!("Screenshot: wrote {}", written.join(", "));
+    }
+
     fn video_panel(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             match enhanced_view::select_active_view(self.camera, self.ultrawide_render.as_ref()) {
@@ -1650,4 +1813,90 @@ impl eframe::App for RetroForgeApp {
     // `persistence` (a `docs/TECH_STACK.md`-and-`deny.toml` decision, both
     // outside this write scope) would add eframe's own native periodic
     // save as a second, real trigger.
+}
+
+/// The two same-geometry renderings of one frame the compare view and the
+/// screenshot both work from (ticket W3-04).
+///
+/// "Same frame" is structural rather than maintained: both are derived
+/// from a single `FrameMsg`/`FrameBundle` pair inside one
+/// `pump_core_events` call, so there is no code path that can pair an
+/// original from frame N with an enhanced from frame N-1.
+/// Both screenshots as (filename, PNG bytes), with no I/O — the pure half
+/// of [`RetroForgeApp::write_screenshots`], so FR-FE-005's "captures
+/// both" is testable without an egui app or a filesystem (ticket W3-04).
+pub(crate) fn screenshot_files(buffers: &CompareBuffers, stamp: u64) -> [(String, Vec<u8>); 2] {
+    [
+        (
+            format!("retroforge-{stamp}-original.png"),
+            rf_renderer::png::encode_rgba(&buffers.original, buffers.width, buffers.height),
+        ),
+        (
+            format!("retroforge-{stamp}-enhanced.png"),
+            rf_renderer::png::encode_rgba(&buffers.enhanced, buffers.width, buffers.height),
+        ),
+    ]
+}
+
+pub(crate) struct CompareBuffers {
+    /// Accuracy-exact, resolved from `FrameBundle::video` — documented as
+    /// assembled from `video_scanline` only, never `overlay_scanline`.
+    pub original: Vec<u8>,
+    /// What the shell actually displays: the same frame with any
+    /// enhancement overlay painted over it (`FrameBuffer::overlay_scanline`).
+    pub enhanced: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[cfg(test)]
+mod compare_tests {
+    use super::*;
+
+    fn buffers() -> CompareBuffers {
+        // Two DIFFERENT images — the whole point of a compare view is
+        // that the halves differ, and a test using one buffer twice would
+        // pass on an implementation that wrote the same file twice.
+        CompareBuffers {
+            original: vec![255, 0, 0, 255].repeat(4),
+            enhanced: vec![0, 0, 255, 255].repeat(4),
+            width: 2,
+            height: 2,
+        }
+    }
+
+    /// FR-FE-005: "original and enhanced buffers **separately**" — two
+    /// files, distinctly named, with distinct contents.
+    #[test]
+    fn screenshot_captures_both_buffers_as_two_distinct_pngs() {
+        let files = screenshot_files(&buffers(), 1234);
+        assert_eq!(files[0].0, "retroforge-1234-original.png");
+        assert_eq!(files[1].0, "retroforge-1234-enhanced.png");
+        for (name, png) in &files {
+            assert_eq!(
+                &png[..8],
+                &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+                "{name} must be a PNG"
+            );
+        }
+        assert_ne!(
+            files[0].1, files[1].1,
+            "the two captures must differ — identical bytes would mean one buffer was \
+             written twice, which is the failure this requirement exists to prevent"
+        );
+    }
+
+    /// The compare composition the shell paints is the same function the
+    /// renderer tests cover, wired to the same buffers the screenshot
+    /// uses — so "what you see" and "what you capture" come from one
+    /// source of truth.
+    #[test]
+    fn split_compare_uses_both_halves_of_the_same_frame() {
+        let b = buffers();
+        let split = rf_renderer::compose_split(&b.original, &b.enhanced, b.width, b.height, 0.5);
+        assert_eq!(&split[0..4], &[255, 0, 0, 255], "left half is the original");
+        assert_eq!(&split[4..8], &[0, 0, 255, 255], "right half is enhanced");
+        assert_ne!(split, b.original);
+        assert_ne!(split, b.enhanced);
+    }
 }

@@ -151,10 +151,52 @@ Both pipelines run in the same frame (original always runs anyway — it's the
 blink. Original output also feeds the de-flicker debug diff view
 (ENHANCEMENT_RUNTIME §2). Cost is one extra scale pass — negligible.
 
+**Implemented in ticket W3-04.** `rf_renderer::compare` holds both
+presentations as pure functions over two RGBA buffers — `compose_split`
+and `blink_shows_original` — with no `egui` and no GPU, the same shape
+`retroforge::enhanced_view` uses: the branching is what has bugs, so the
+branching is what is tested headlessly and the UI only paints the result.
+
+**"Synced frame" (FR-REND-005) is structural here, not maintained.** The
+two halves are the *same* `FrameMsg`/`FrameBundle` pair: the enhanced half
+is what the shell displays (`FrameBuffer::overlay_scanline` paints the
+enhancement over the accuracy frame), and the original half is
+`FrameBundle::video`, documented as "always the accuracy-exact stream:
+assembled from `video_scanline` only, never `overlay_scanline`". One
+frame, two renderings, identical geometry — so there is no scaling policy
+to invent and no second fetch that could land a frame apart. If the two
+geometries ever disagree the pair is dropped rather than composed
+misaligned.
+
+**The split composes a buffer rather than clipping two draws**, which a UI
+toolkit would find more natural. Composing is what lets the compare view
+answer FR-FE-005: what is on screen and what a capture of it would contain
+come from one function and cannot disagree. It also makes the divider
+testable by reading pixels instead of by driving a UI.
+
+**Cost is gated**, following W3-03a: the two buffers are cloned only while
+compare mode is on, or for the single frame a screenshot is pending.
+Re-adding an unconditional per-frame clone for a view that is off by
+default would have undone that ticket a day later.
+
 ## 6. Capture points
 
 - Screenshot: post-palette (raw 1×), post-scale, or post-chain (as-seen) —
   user picks; PNG via async readback (`map_async`, never stalls render).
+- **PNG encoding is dependency-free (ticket W3-04, `rf_renderer::png`).**
+  This workspace has no image codec and TECH_STACK has no row for one, so
+  rather than quietly widen the dependency graph to write a screenshot,
+  PNG is encoded directly: zlib permits **stored** (uncompressed) deflate
+  blocks (RFC 1951 §3.2.4), so a conformant file needs only CRC-32 and
+  Adler-32, both implemented from their specifications. **The honest
+  trade:** files are roughly raw-RGBA sized (~245 KB for a 256×240 frame
+  rather than the ~10-40 KB a real encoder manages) — fine for a
+  screenshot a user takes deliberately, wrong for anything per-frame,
+  which is why §6's Phase-8 video capture must NOT be built on it. If
+  screenshots ever need to be small, that is the moment to add a real
+  codec *and* its TECH_STACK row. Verified against three independent
+  decoders (`file`, macOS `sips`, Python `zlib`), not only its own
+  round-trip test.
 - Video (Phase 8): wgpu readback ring → encoder worker (start with PNG/APNG
   sequence + ffmpeg external; in-process encoder later).
 - Golden-frame CI taps the **post-palette 1× buffer** — deterministic,
