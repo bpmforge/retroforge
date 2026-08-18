@@ -2080,7 +2080,7 @@
     "the panel is a READ-ONLY data consumer -- it must not perturb core state, and the mode-invariant tests must stay green (W3-05a's hazard class: an enhancement silently clocking MMC3's A12 counter, invisible to pixel comparison)"
    ],
    "points": 2,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E5-S4"
    ],
