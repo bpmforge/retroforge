@@ -2599,7 +2599,7 @@
     "capability list shown at enable time; write ledger visible in UI (FR-PLUG-003)"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E7-S1",
     "E7-S2"
