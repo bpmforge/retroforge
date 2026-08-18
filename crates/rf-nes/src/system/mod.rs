@@ -560,12 +560,18 @@ impl NesBus {
             0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)] = value,
             0x2000..=0x3FFF => {
                 // Ticket W3-07b: a `$2001` write is the only way rendering
-                // can be toggled, and the catch-up scheduler's prediction
-                // is valid only while `mask` holds. Invalidated on every
-                // `$2000-$3FFF` write rather than on `$2001` alone —
-                // coarse, but a mispredicted run is a silent timing bug
-                // and one comparison per PPU register write is not where
-                // this crate's time goes.
+                // can be toggled, so it is the only thing that can make
+                // the scheduler's prediction stale. Dropping it here is
+                // an OPTIMISATION, not a safety hook — a stale prediction
+                // only costs missed skips (see `catch_up_ppu_dots`) — and
+                // what it recovers is the run a rendering-off transition
+                // just freed. Done for every `$2000-$3FFF` write rather
+                // than for `$2001` alone because one comparison per PPU
+                // register write is not where this crate's time goes.
+                //
+                // Reads need no hook: the predicate depends only on
+                // scanline, dot and `mask`, and no read path touches
+                // `mask` (`$2002` moves `status`, `$2007` moves `v`).
                 self.inert_recheck_in = 0;
                 self.ppu.write_register((addr & 0x0007) as u8, value);
             }
@@ -842,6 +848,16 @@ impl NesBus {
             // predicate cannot fire, tick without asking it again. This is
             // what stops the scheduler costing more than it saves — see
             // `Ppu::dots_until_possible_inert` for the two measurements.
+            //
+            // **The cache can never make the machine wrong, and that is
+            // the invariant to preserve when editing this.** It only ever
+            // routes to `tick_ppu_dot` — the exact thing Accuracy does —
+            // and the skip branch below is reachable only when the cache
+            // is 0, where the predicate is re-derived from live state. So
+            // a stale prediction costs a missed skip, never a wrong dot.
+            // Do NOT restructure this so the cache drives *skipping*: the
+            // write-invalidation hook is an optimisation, not a
+            // correctness protocol, and it would not cover you.
             if self.inert_recheck_in > 0 {
                 let n = self.inert_recheck_in.min(remaining);
                 for _ in 0..n {

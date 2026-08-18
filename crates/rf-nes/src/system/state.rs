@@ -121,8 +121,14 @@ impl NesBus {
             // (see `NesBus::skipped_dots`).
             skipped_dots: _,
             // Ticket W3-07b: a pure cache of a prediction re-derivable
-            // from `PPU_`'s own scanline/dot/mask, and only ever non-zero
-            // mid-`tick_master`. Nothing to restore.
+            // from `PPU_`'s own scanline/dot/mask. It DOES persist across
+            // CPU cycles — a 341-dot prediction survives many of them,
+            // and that persistence is the whole mechanism — so it is
+            // excluded for a different reason than "it is always zero
+            // here": restoring it as 0 makes the scheduler re-derive at
+            // the restore point, and re-deriving is always safe, because
+            // a missing prediction costs a missed skip and never a wrong
+            // dot (see `NesBus::catch_up_ppu_dots`).
             inert_recheck_in: _,
             last_joy_read_cycle,
             last_joy_bit,

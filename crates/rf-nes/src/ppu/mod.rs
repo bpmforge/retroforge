@@ -1069,14 +1069,16 @@ impl Ppu {
     /// predicate is evaluated a handful of times per frame instead.
     ///
     /// A lower bound is enough, and deliberately so: answering early
-    /// costs one extra predicate evaluation, while answering late would
-    /// skip a real inert run — or worse, mask one. So the pre-render line
-    /// just returns "to the end of this scanline" rather than reasoning
-    /// about the odd-frame skip's variable frame length.
+    /// costs one extra predicate evaluation, while answering late costs a
+    /// missed inert run. Neither is a correctness failure — the caller
+    /// only ever *ticks* while this answer is in force, which is exactly
+    /// what Accuracy does (see `NesBus::catch_up_ppu_dots`) — so the
+    /// pre-render line just returns "to the end of this scanline" rather
+    /// than reasoning about the odd-frame skip's variable frame length.
     ///
-    /// The caller must discard the answer whenever `mask` may have
-    /// changed; `NesBus::catch_up_ppu_dots` does that on every write into
-    /// `$2000-$3FFF`, which is the only way rendering can be toggled.
+    /// The caller discards the answer when `mask` may have changed, which
+    /// is the only input to it that a CPU access can move. That is an
+    /// optimisation, not a safety requirement.
     pub(crate) fn dots_until_possible_inert(&self) -> u16 {
         debug_assert_eq!(self.inert_run_len(), 0, "only meaningful when not inert");
         const LAST_SKIPPABLE_DOT: u16 = 338;
