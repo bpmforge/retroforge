@@ -208,6 +208,14 @@ pub struct PanelData {
     /// Latest frame's OAM (`core_thread::FrameMsg::oam`) — genuinely live,
     /// unlike `chr_rom`/vram/cgram.
     pub oam: [u8; 256],
+    /// Ticket W4-06c: the PREVIOUS frame's OAM, so the diff panel can say
+    /// what moved. Kept here rather than fetched, because the panel is a
+    /// read-only consumer — it must never reach into the core for a
+    /// second sample (that is W3-05a's hazard class: a debug surface
+    /// silently perturbing state, invisible to pixel comparison).
+    pub previous_oam: [u8; 256],
+    /// Which scanline the OAM diff panel's drop analysis is about.
+    pub oam_diff_scanline: u16,
     /// Latest frame's event FIFO (`rf_core_api::FrameBundle::events`, via
     /// `CoreHandle::frame_bundle`) — genuinely live, gated by whatever mask
     /// `DebugPanels::wants_event_subscription` last asked for.
@@ -229,6 +237,8 @@ impl Default for PanelData {
             chr_rom: None,
             script: None,
             oam: [0u8; 256],
+            previous_oam: [0u8; 256],
+            oam_diff_scanline: 0,
             events: Vec::new(),
             wram: [0u8; 0x0800],
             prg_ram: [0u8; 0x2000],
@@ -309,6 +319,75 @@ impl Default for DebugPanels {
     }
 }
 
+/// OAM diff panel (ticket W4-06c; FR-DBG-006).
+///
+/// **Read-only by construction.** Both OAM snapshots arrive as copies the
+/// frame already carried (`core_thread::FrameMsg::oam`), so this function
+/// has no path to the core at all — it cannot perturb state even by
+/// accident, which is the hazard W3-05a named: an enhancement silently
+/// clocking MMC3's A12 counter, invisible to pixel comparison.
+///
+/// Both snapshots are the **PPU's own** OAM, never the CPU-side shadow at
+/// `$0200`. W2-10a's gem defect was exactly those two disagreeing.
+fn oam_diff_ui(ui: &mut egui::Ui, previous: &[u8; 256], current: &[u8; 256], scanline: u16) {
+    let deltas = rf_debugger::oam::diff_oam(previous, current);
+    ui.label(format!(
+        "{} sprite(s) changed since the last frame",
+        deltas.len()
+    ));
+    if deltas.is_empty() {
+        // Said explicitly: a blank panel reads as "not implemented", and
+        // "nothing moved" is a real and common answer.
+        ui.label("No OAM changes this frame.");
+    }
+    egui::ScrollArea::vertical()
+        .max_height(240.0)
+        .show(ui, |ui| {
+            egui::Grid::new("debug-oam-diff-grid")
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("#");
+                    ui.strong("changed");
+                    ui.strong("was (x,y,tile)");
+                    ui.strong("now (x,y,tile)");
+                    ui.end_row();
+                    for d in &deltas {
+                        ui.monospace(d.index.to_string());
+                        ui.monospace(d.fields.summary());
+                        ui.monospace(format!(
+                            "{},{},{:#04X}",
+                            d.before.x, d.before.y, d.before.tile
+                        ));
+                        ui.monospace(format!("{},{},{:#04X}", d.after.x, d.after.y, d.after.tile));
+                        ui.end_row();
+                    }
+                });
+        });
+
+    ui.separator();
+    // 8x8 is assumed: this panel has no PPUCTRL access of its own (it is
+    // a read-only consumer), and `rf_debugger::oam` takes sprite height
+    // from its caller for exactly that reason. Stated rather than hidden,
+    // since an 8x16 game's drop list would be wrong.
+    let sprites = rf_debugger::oam::decode_oam(current);
+    let dropped = rf_debugger::oam::dropped_by_limit(&sprites, scanline, 8);
+    ui.label(format!(
+        "Scanline {scanline}: {} sprite(s) dropped by the 8-per-scanline limit (assumes 8x8)",
+        dropped.len()
+    ));
+    if dropped.is_empty() {
+        ui.label("None dropped on this scanline.");
+    } else {
+        ui.monospace(
+            dropped
+                .iter()
+                .map(|i| format!("#{i}"))
+                .collect::<Vec<_>>()
+                .join("  "),
+        );
+    }
+}
+
 /// Paint the Lua console (ticket W4-04; DEBUGGER.md §5).
 ///
 /// Every string shown here is computed by `crate::script_panel`, which is
@@ -374,6 +453,7 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
             DebugTab::Oam => "OAM",
             DebugTab::EventTimeline => "Events",
             DebugTab::Memory => "Memory",
+            DebugTab::OamDiff => "OAM diff",
             DebugTab::LuaConsole => "Lua",
         }
         .into()
@@ -387,6 +467,12 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
             DebugTab::Oam => oam_ui(ui, &self.data.oam),
             DebugTab::EventTimeline => event_timeline_ui(ui, &self.data.events),
             DebugTab::Memory => memory_ui(ui, &self.data.wram, &self.data.prg_ram),
+            DebugTab::OamDiff => oam_diff_ui(
+                ui,
+                &self.data.previous_oam,
+                &self.data.oam,
+                self.data.oam_diff_scanline,
+            ),
             DebugTab::LuaConsole => lua_console_ui(ui, self.data.script.as_deref()),
         }
     }

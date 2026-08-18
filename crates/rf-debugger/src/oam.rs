@@ -131,6 +131,230 @@ pub fn scanline_occupancy(
         .collect()
 }
 
+/// The hardware sprites-per-scanline cap (nesdev: the PPU evaluates OAM in
+/// ascending slot order and keeps the first 8 that cover the line).
+pub const SPRITES_PER_SCANLINE_LIMIT: usize = 8;
+
+/// The slots the 8-per-scanline limit DROPPED on `scanline` — everything
+/// [`scanline_occupancy`] found past the first eight (ticket W4-06c,
+/// FR-DBG-006).
+///
+/// Derived from `scanline_occupancy` rather than re-scanning, so the
+/// panel and the occupancy bar can never disagree about which sprites
+/// were on a line: the dropped set is by construction the tail of the
+/// same list, in the same evaluation order hardware uses.
+///
+/// Empty for a line under the limit — which is the common case, and is
+/// why a caller should render "no drops" rather than an empty row.
+#[must_use]
+pub fn dropped_by_limit(
+    sprites: &[SpriteEntry; OAM_ENTRY_COUNT],
+    scanline: u16,
+    sprite_h: u8,
+) -> Vec<u8> {
+    let mut covering = scanline_occupancy(sprites, scanline, sprite_h);
+    if covering.len() <= SPRITES_PER_SCANLINE_LIMIT {
+        return Vec::new();
+    }
+    covering.split_off(SPRITES_PER_SCANLINE_LIMIT)
+}
+
+/// Which of a sprite's fields moved between two frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChangedFields {
+    pub y: bool,
+    pub tile: bool,
+    pub x: bool,
+    /// Palette, priority or either flip — the attribute byte as a whole.
+    pub attrs: bool,
+}
+
+impl ChangedFields {
+    #[must_use]
+    pub fn any(self) -> bool {
+        self.y || self.tile || self.x || self.attrs
+    }
+
+    /// A short human label like `"x, tile"`, for the panel.
+    #[must_use]
+    pub fn summary(self) -> String {
+        let mut parts = Vec::new();
+        if self.y {
+            parts.push("y");
+        }
+        if self.x {
+            parts.push("x");
+        }
+        if self.tile {
+            parts.push("tile");
+        }
+        if self.attrs {
+            parts.push("attrs");
+        }
+        parts.join(", ")
+    }
+}
+
+/// One sprite that changed between two frames (FR-DBG-006).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpriteDelta {
+    pub index: u8,
+    pub before: SpriteEntry,
+    pub after: SpriteEntry,
+    pub fields: ChangedFields,
+}
+
+/// Which sprites changed between `previous` and `current` OAM.
+///
+/// **Both inputs must be the PPU's own OAM** (`rf_nes::Ppu::oam`, which
+/// reaches this crate as `core_thread::FrameMsg::oam`) — never the
+/// CPU-side shadow at `$0200`. W2-10a's gem defect was exactly the two
+/// disagreeing: an OAM DMA straddling the dots-257-320 `OAMADDR` reset
+/// window scrambled the copy, so a panel reading the shadow would have
+/// shown a picture the PPU never had. A debugger that lies about what the
+/// hardware did is worse than no debugger.
+///
+/// Returns only changed slots, in ascending slot order. A frame where
+/// nothing moved returns empty, which the panel reports as "no changes"
+/// rather than as a blank list.
+#[must_use]
+pub fn diff_oam(previous: &[u8; 256], current: &[u8; 256]) -> Vec<SpriteDelta> {
+    let before = decode_oam(previous);
+    let after = decode_oam(current);
+    let mut out = Vec::new();
+    for i in 0..OAM_ENTRY_COUNT {
+        let (b, a) = (before[i], after[i]);
+        let fields = ChangedFields {
+            y: b.y != a.y,
+            tile: b.tile != a.tile,
+            x: b.x != a.x,
+            attrs: b.palette != a.palette
+                || b.priority_behind_bg != a.priority_behind_bg
+                || b.flip_h != a.flip_h
+                || b.flip_v != a.flip_v,
+        };
+        if fields.any() {
+            out.push(SpriteDelta {
+                index: a.index,
+                before: b,
+                after: a,
+                fields,
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+
+    fn oam_with(entries: &[(usize, [u8; 4])]) -> [u8; 256] {
+        // 0xFF Y = hardware's "off screen, never evaluated" convention,
+        // so unset slots do not accidentally sit at y=0 (a perfectly
+        // valid ON-screen position) and pollute occupancy counts.
+        let mut oam = [0u8; 256];
+        for slot in 0..OAM_ENTRY_COUNT {
+            oam[slot * 4] = 0xFF;
+        }
+        for (slot, bytes) in entries {
+            oam[slot * 4..slot * 4 + 4].copy_from_slice(bytes);
+        }
+        oam
+    }
+
+    #[test]
+    fn an_unchanged_frame_produces_no_deltas() {
+        let oam = oam_with(&[(0, [10, 1, 0, 20])]);
+        assert!(diff_oam(&oam, &oam).is_empty());
+    }
+
+    /// Each field is detected independently — a diff that only noticed
+    /// "something changed" would be far less useful, and one that missed
+    /// the attribute byte would hide palette and flip changes entirely.
+    #[test]
+    fn each_field_is_detected_separately() {
+        let base = oam_with(&[(3, [10, 1, 0x00, 20])]);
+
+        let moved = oam_with(&[(3, [10, 1, 0x00, 44])]);
+        let d = diff_oam(&base, &moved);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].index, 3);
+        assert_eq!(
+            d[0].fields,
+            ChangedFields {
+                x: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(d[0].fields.summary(), "x");
+        assert_eq!(d[0].before.x, 20);
+        assert_eq!(d[0].after.x, 44, "the delta must carry BOTH sides");
+
+        let retiled = oam_with(&[(3, [10, 9, 0x00, 20])]);
+        assert_eq!(diff_oam(&base, &retiled)[0].fields.summary(), "tile");
+
+        let dropped_down = oam_with(&[(3, [77, 1, 0x00, 20])]);
+        assert_eq!(diff_oam(&base, &dropped_down)[0].fields.summary(), "y");
+
+        // Attribute byte: palette, priority and both flips all route to
+        // `attrs`, so a flip change is not silently invisible.
+        for attr in [0x01u8, 0x20, 0x40, 0x80] {
+            let changed = oam_with(&[(3, [10, 1, attr, 20])]);
+            let d = diff_oam(&base, &changed);
+            assert_eq!(
+                d.len(),
+                1,
+                "attribute byte {attr:#04x} must register as a change"
+            );
+            assert!(d[0].fields.attrs, "{attr:#04x}");
+        }
+    }
+
+    #[test]
+    fn several_changed_sprites_come_back_in_slot_order() {
+        let a = oam_with(&[(1, [10, 0, 0, 10]), (5, [20, 0, 0, 20])]);
+        let b = oam_with(&[(1, [11, 0, 0, 10]), (5, [20, 0, 0, 21])]);
+        let d = diff_oam(&a, &b);
+        assert_eq!(d.iter().map(|x| x.index).collect::<Vec<_>>(), vec![1, 5]);
+    }
+
+    /// FR-DBG-006's other half: which sprites the 8-per-scanline limit
+    /// dropped. Nine sprites on one line means exactly one is dropped —
+    /// and it must be the NINTH in evaluation order, not an arbitrary one.
+    #[test]
+    fn the_ninth_sprite_on_a_line_is_the_one_reported_as_dropped() {
+        let entries: Vec<(usize, [u8; 4])> =
+            (0..9).map(|i| (i, [50u8, 0, 0, (i as u8) * 8])).collect();
+        let sprites = decode_oam(&oam_with(&entries));
+
+        // Scanline 51 = y(50) + 1, the first line these sprites cover.
+        let covering = scanline_occupancy(&sprites, 51, 8);
+        assert_eq!(covering.len(), 9, "all nine cover the line");
+
+        let dropped = dropped_by_limit(&sprites, 51, 8);
+        assert_eq!(
+            dropped,
+            vec![8],
+            "hardware keeps the first 8 in slot order, so slot 8 is dropped"
+        );
+
+        // Eight is not over the limit — the boundary itself, asserted so
+        // an off-by-one cannot pass.
+        let eight: Vec<(usize, [u8; 4])> =
+            (0..8).map(|i| (i, [50u8, 0, 0, (i as u8) * 8])).collect();
+        assert!(dropped_by_limit(&decode_oam(&oam_with(&eight)), 51, 8).is_empty());
+    }
+
+    /// A line nobody is on drops nothing — the common case, and the one
+    /// that would make a buggy implementation look fine on a busy frame.
+    #[test]
+    fn an_empty_scanline_drops_nothing() {
+        let sprites = decode_oam(&oam_with(&[(0, [50, 0, 0, 0])]));
+        assert!(dropped_by_limit(&sprites, 200, 8).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

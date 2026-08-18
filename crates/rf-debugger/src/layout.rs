@@ -46,6 +46,10 @@ pub enum DebugTab {
     Oam,
     EventTimeline,
     Memory,
+    /// `OamDiff` (ticket W4-06c, FR-DBG-006): which sprites changed since
+    /// the last frame and which the 8-per-scanline limit dropped.
+    /// Additive in the same sense as the variants above.
+    OamDiff,
     /// `LuaConsole` (ticket W4-04, DEBUGGER.md §5): the plugin script
     /// REPL. Additive in exactly the sense this doc's own clause above
     /// describes — an old persisted layout that never mentions it still

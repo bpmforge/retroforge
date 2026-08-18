@@ -2080,13 +2080,22 @@
     "the panel is a READ-ONLY data consumer -- it must not perturb core state, and the mode-invariant tests must stay green (W3-05a's hazard class: an enhancement silently clocking MMC3's A12 counter, invisible to pixel comparison)"
    ],
    "points": 2,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E5-S4"
    ],
    "notes": [
     "SPLIT OUT OF W3-05 2026-08-08 in pre-flight (20th self-blocking-scope catch on this board). W3-05's write_scope is [crates/rf-enhance/**, crates/rf-nes/src/ppu/**] and could not reach a debugger panel at all; docs/SRS.md assigns FR-DBG-006 to crate rf-debugger. Splitting rather than widening keeps each half testable in the crate that owns it.",
-    "READ Ppu::oam() (public accessor) rather than the CPU-side OAM shadow at $0200 -- W2-10a's whole gem defect was the two disagreeing, because OAM DMA straddling the dots-257-320 OAMADDR reset window scrambled the copy. A debug panel that reads the shadow would have shown a picture the PPU never had."
+    "READ Ppu::oam() (public accessor) rather than the CPU-side OAM shadow at $0200 -- W2-10a's whole gem defect was the two disagreeing, because OAM DMA straddling the dots-257-320 OAMADDR reset window scrambled the copy. A debug panel that reads the shadow would have shown a picture the PPU never had.",
+     "DONE 2026-08-18. rf_debugger::oam gains diff_oam + dropped_by_limit (+ ChangedFields/SpriteDelta); retroforge gains an 'OAM diff' dock tab. 1025 workspace tests.",
+     "THE DROPPED SET IS DERIVED FROM scanline_occupancy, NOT RE-SCANNED, so the diff panel and W4-06a's occupancy bar can never disagree about which sprites were on a line: the dropped set is by construction the TAIL of the same list, in the same ascending-slot evaluation order hardware uses. Re-implementing the scan would have been the obvious way to introduce a second, subtly different answer.",
+     "EACH FIELD IS DETECTED SEPARATELY (y/x/tile/attrs) rather than a single 'something changed' bool -- and the attribute byte routes palette, priority AND both flips into one `attrs` flag, tested across all four bits, because a diff that missed the attribute byte would hide flip and palette changes entirely while looking like it worked.",
+     "THE 8-LIMIT BOUNDARY IS ASSERTED FROM BOTH SIDES: nine sprites on a line reports exactly slot 8 as dropped (the NINTH in evaluation order, not an arbitrary one), and eight sprites reports none -- so an off-by-one cannot pass. An empty scanline drops nothing, which is the common case and the one a buggy implementation would still look fine on during a busy frame.",
+     "READ-ONLY BY CONSTRUCTION (criterion 2), not by discipline: both OAM snapshots arrive as copies the frame ALREADY carried (core_thread::FrameMsg::oam), so the panel has no path to the core at all and cannot perturb state even by accident. That is W3-05a's named hazard class -- an enhancement silently clocking MMC3's A12 counter, invisible to pixel comparison. Verified rather than asserted: mode_invariant_corpus 6/6 and sprite_overlay_mode_invariant 3/3 run explicitly and stay green.",
+     "BOTH SNAPSHOTS ARE THE PPU'S OWN OAM, never the CPU-side shadow at $0200 -- the ticket's own note, and W2-10a's gem defect was exactly those two disagreeing when an OAM DMA straddled the dots-257-320 OAMADDR reset window. A panel reading the shadow would have shown a picture the PPU never had, which is worse than no panel. Recorded in the function doc so a future edit cannot quietly switch sources.",
+     "THE PER-FRAME COST IS 256 BYTES and is deliberately NOT gated behind the panel being open, unlike W3-03a's layer buffers. The contrast is the point and is written down: 256 bytes is genuinely nothing next to the ~245 KB frame it arrives with, whereas two 240 KB clones were worth a CoreCommand round-trip. Gating everything on principle would have added a command path for a rounding error.",
+     "HONEST LIMITATION, stated in the panel text itself rather than only here: the drop analysis assumes 8x8 sprites. This panel has no PPUCTRL access of its own (it is a read-only consumer, which is the whole point), and rf_debugger::oam takes sprite height from its caller for exactly that reason -- so an 8x16 game's drop list would be wrong, and the UI says '(assumes 8x8)' rather than letting a reader assume otherwise.",
+     "SCOPE NOTE: DebugTab::OamDiff is an additive variant alongside W4-04's LuaConsole; LAYOUT_FORMAT_VERSION still does not move, per that enum's own additive-variant clause."
    ]
   },
   {

@@ -507,6 +507,7 @@ impl RetroForgeApp {
                 // Ultrawide-camera reset below already uses).
                 self.debug_panels.data.chr_rom = chr_rom;
                 self.debug_panels.data.oam = [0u8; 256];
+                self.debug_panels.data.previous_oam = [0u8; 256];
                 self.debug_panels.data.events = Vec::new();
                 self.debug_panels.data.wram = [0u8; 0x0800];
                 self.debug_panels.data.prg_ram = [0u8; 0x2000];
@@ -684,6 +685,14 @@ impl RetroForgeApp {
             // frame's (usually short, EventMask-gated) event `Vec` here is
             // cheap relative to the RGBA texture uploads already happening
             // in this same block.
+            // Ticket W4-06c: roll the previous frame's OAM forward before
+            // overwriting, so the diff panel has both sides. This is a
+            // 256-byte copy of a buffer the frame already carried — not a
+            // new clone of core state, and not gated behind the panel
+            // being open, because 256 bytes is genuinely nothing next to
+            // the ~245 KB frame it arrives with (contrast W3-03a, where
+            // two 240 KB clones were worth gating).
+            self.debug_panels.data.previous_oam = self.debug_panels.data.oam;
             self.debug_panels.data.oam = *msg.oam;
             self.debug_panels.data.events = latest_bundle_events;
             // Ticket W4-06b: WRAM/PRG-RAM travel with the frame the same
