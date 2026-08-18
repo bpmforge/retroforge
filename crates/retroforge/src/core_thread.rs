@@ -253,6 +253,27 @@ pub enum CoreCommand {
     /// produce a `CoreEvent::Frame`; the next running/stepped frame simply
     /// reflects the new setting.
     SetSpriteOverlay(bool),
+    /// Ticket W3-03a: opt into (or out of) per-frame layer extraction —
+    /// the BG-only/sprite-only split `FanoutSink` feeds
+    /// [`rf_renderer::LayeredFrame`], plus the two ~240 KB buffer clones
+    /// that carry it to the UI in [`FrameMsg`].
+    ///
+    /// **Off by default**, and that is the whole point: W3-03 wired the
+    /// split unconditionally, so every frame paid for it whether or not
+    /// the "Layers (debug)" window was open. Measured at the time and
+    /// found to fit inside W2-18's 16.64 ms budget (60.0 fps debug, 60.2
+    /// release) — not a regression, but headroom spent on a window nobody
+    /// was looking at.
+    ///
+    /// Exactly the same shape and the same principle as
+    /// [`CoreCommand::SetEventMask`], which the debugger's event viewer
+    /// sends as it opens and closes: DEBUGGER.md §6's "closed panels
+    /// register no event subscriptions", one layer over.
+    ///
+    /// A pure state toggle: it does not itself produce a
+    /// [`CoreEvent::Frame`], so the first frame carrying layers is the
+    /// next one the core produces anyway (≤16.6 ms later at 60 Hz).
+    SetLayerExtraction(bool),
     /// Ticket W4-03e: ask for a `CoreEvent::CanvasSnapshot` of the current
     /// scene's stitched canvas (see that variant's doc). Also flushes the
     /// canvas accumulator's cache (`CanvasAccumulator::flush`) — piggy-
@@ -382,7 +403,10 @@ pub struct CoreHandle {
 /// enhancement overlay.
 struct FanoutSink<'a> {
     frame: &'a mut rf_renderer::FrameBuffer,
-    layers: &'a mut rf_renderer::LayeredFrame,
+    /// `None` when layer extraction is off (ticket W3-03a) — the split is
+    /// simply not performed, rather than performed into a buffer nobody
+    /// reads.
+    layers: Option<&'a mut rf_renderer::LayeredFrame>,
     bundle: &'a mut rf_core_api::FrameBundleBuilder,
     /// Ticket W2-05: the audio path. `None` when the chain could not be
     /// built at all, which is not fatal — a silent emulator is far better
@@ -393,7 +417,9 @@ struct FanoutSink<'a> {
 impl rf_core_api::CoreSink for FanoutSink<'_> {
     fn video_scanline(&mut self, y: u16, pixels: &[rf_core_api::PpuPixel]) {
         self.frame.video_scanline(y, pixels);
-        self.layers.video_scanline(y, pixels);
+        if let Some(layers) = self.layers.as_mut() {
+            layers.video_scanline(y, pixels);
+        }
         self.bundle.video_scanline(y, pixels);
     }
 
@@ -453,6 +479,9 @@ fn core_thread_main(
     // Ticket W3-03: same-frame BG/sprite layer extraction, fed alongside
     // `sink` via `FanoutSink` at every call site below.
     let mut layers = rf_renderer::LayeredFrame::new();
+    // Ticket W3-03a: off until the UI asks, so a closed debug window costs
+    // nothing on the frame path (see `CoreCommand::SetLayerExtraction`).
+    let mut layers_enabled = false;
     // Ticket W4-01: the indexed-pixel + event accumulator that becomes each
     // published `FrameBundle`, fed alongside `sink`/`layers` via the same
     // `FanoutSink`.
@@ -514,7 +543,7 @@ fn core_thread_main(
                         input.load(),
                         &mut FanoutSink {
                             frame: &mut sink,
-                            layers: &mut layers,
+                            layers: layers_enabled.then_some(&mut layers),
                             bundle: &mut bundle_builder,
                             audio: audio.as_mut(),
                         },
@@ -531,7 +560,7 @@ fn core_thread_main(
                 CoreCommand::StepScanline => {
                     stepper.step_scanline(&mut FanoutSink {
                         frame: &mut sink,
-                        layers: &mut layers,
+                        layers: layers_enabled.then_some(&mut layers),
                         bundle: &mut bundle_builder,
                         audio: audio.as_mut(),
                     });
@@ -539,6 +568,9 @@ fn core_thread_main(
                 }
                 CoreCommand::SetSpriteOverlay(enabled) => {
                     stepper.set_sprite_overlay_enabled(enabled);
+                }
+                CoreCommand::SetLayerExtraction(enabled) => {
+                    layers_enabled = enabled;
                 }
                 CoreCommand::SetEventMask(mask) => {
                     stepper.set_event_mask(mask);
@@ -599,7 +631,7 @@ fn core_thread_main(
             input.load(),
             &mut FanoutSink {
                 frame: &mut sink,
-                layers: &mut layers,
+                layers: layers_enabled.then_some(&mut layers),
                 bundle: &mut bundle_builder,
                 audio: audio.as_mut(),
             },
@@ -627,8 +659,19 @@ fn core_thread_main(
                 height: sink.height(),
                 frame_count: stepper.frame_count(),
                 last_scanline: stepper.last_scanline(),
-                bg_rgba: layers.bg_rgba().to_vec(),
-                sprite_rgba: layers.sprite_rgba().to_vec(),
+                // Ticket W3-03a: the two ~240 KB clones only happen when
+                // someone is looking. Empty slices tell the UI "no layer
+                // data this frame" without a second flag to keep in sync.
+                bg_rgba: if layers_enabled {
+                    layers.bg_rgba().to_vec()
+                } else {
+                    Vec::new()
+                },
+                sprite_rgba: if layers_enabled {
+                    layers.sprite_rgba().to_vec()
+                } else {
+                    Vec::new()
+                },
                 oam: Box::new(*stepper.oam()),
                 wram: Box::new(stepper.wram_snapshot()),
                 prg_ram: Box::new(*stepper.prg_ram()),
@@ -935,6 +978,13 @@ mod tests {
     #[test]
     fn step_frame_command_also_delivers_bg_layer_content_not_just_size() {
         let core = spawn(synthetic_nrom()).expect("synthetic NROM must spawn a core thread");
+        // Ticket W3-03a: extraction is opt-in now, so this test asks for it
+        // first. `layer_extraction_is_off_until_asked_for` below is the
+        // other half — without it, "the toggle works" and "the toggle is
+        // ignored" would look identical from here.
+        core.cmd_tx
+            .send(CoreCommand::SetLayerExtraction(true))
+            .expect("core thread must accept SetLayerExtraction");
         core.cmd_tx
             .send(CoreCommand::StepFrame)
             .expect("core thread must accept a StepFrame command");
@@ -959,6 +1009,47 @@ mod tests {
                     "bg layer must carry at least one opaque pixel from a real \
                      steady-state frame — an all-transparent buffer here means \
                      FanoutSink is not actually forwarding to `layers`"
+                );
+            }
+            CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
+            CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
+        }
+
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+    }
+
+    /// Ticket W3-03a, acceptance criterion 1: a closed debug window costs
+    /// nothing on the frame path.
+    ///
+    /// The *cost* is measured in `tests/frame_bundle_perf.rs`; what is
+    /// asserted here is the mechanism that produces it — that no layer
+    /// buffers are cloned into `FrameMsg` at all until someone asks. Both
+    /// halves are needed: this test and the one above fail in opposite
+    /// directions, so an implementation that ignored the toggle either way
+    /// is caught.
+    #[test]
+    fn layer_extraction_is_off_until_asked_for() {
+        let core = spawn(synthetic_nrom()).expect("synthetic NROM must spawn a core thread");
+        core.cmd_tx
+            .send(CoreCommand::StepFrame)
+            .expect("core thread must accept a StepFrame command");
+        let evt = core
+            .evt_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("stepped frame must be delivered");
+        match evt {
+            CoreEvent::Frame(msg) => {
+                assert!(
+                    !msg.rgba.is_empty(),
+                    "the main frame must still be produced — this gates the LAYER split only"
+                );
+                assert!(
+                    msg.bg_rgba.is_empty() && msg.sprite_rgba.is_empty(),
+                    "no layer data may be cloned before SetLayerExtraction(true): got \
+                     {} bg bytes and {} sprite bytes",
+                    msg.bg_rgba.len(),
+                    msg.sprite_rgba.len()
                 );
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),

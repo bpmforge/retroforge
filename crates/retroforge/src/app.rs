@@ -503,6 +503,15 @@ impl RetroForgeApp {
                 if self.sprite_overlay {
                     self.send_command(CoreCommand::SetSpriteOverlay(true));
                 }
+                // Ticket W3-03a: a fresh core thread starts with layer
+                // extraction OFF. If the Layers window was already open
+                // before this reload, re-assert it — the identical
+                // stale-state-across-a-reload hazard that
+                // `event_subscription_active` is reset for above, and the
+                // reason that reset has a paragraph of its own.
+                if self.show_layers {
+                    self.send_command(CoreCommand::SetLayerExtraction(true));
+                }
                 // Ticket W4-03e: a new ROM is a new session for the
                 // enhanced camera too — the previous ROM's stitched canvas
                 // must not linger onscreen (or get composited into) against
@@ -617,11 +626,15 @@ impl RetroForgeApp {
                         Some(ctx.load_texture("nes-frame", image, egui::TextureOptions::NEAREST));
                 }
             }
-            // Ticket W3-03 acceptance criterion 2: keep the debug layer
-            // textures current every frame regardless of whether the
-            // "Layers (debug)" window is currently shown — cheap relative
-            // to the main texture upload above, and avoids a stale image
-            // flashing the instant the window is toggled on mid-session.
+            // Ticket W3-03a: empty means the core thread is not extracting
+            // layers (the window is closed), so there is nothing to
+            // upload. Keyed off the data itself rather than a second copy
+            // of `show_layers` on this side, which could disagree with
+            // what the core thread is actually doing for the one frame a
+            // command is in flight.
+            if msg.bg_rgba.is_empty() || msg.sprite_rgba.is_empty() {
+                return;
+            }
             let bg_image =
                 egui::ColorImage::from_rgba_unmultiplied([msg.width, msg.height], &msg.bg_rgba);
             match &mut self.bg_layer_texture {
@@ -799,12 +812,30 @@ impl RetroForgeApp {
                     self.save_current_game_settings();
                 }
                 ui.separator();
-                // Ticket W3-03 acceptance criterion 2: pure UI-thread
-                // state, no core command — the layer textures are already
-                // kept current every frame in `pump_core_events`
-                // regardless of this checkbox, so toggling it just shows/
-                // hides the window with no round trip to the core thread.
-                ui.checkbox(&mut self.show_layers, "Layers (debug)");
+                // Ticket W3-03a: this DOES round-trip to the core thread
+                // now. W3-03 kept the layer textures current every frame
+                // regardless of the checkbox, on the reasoning that the
+                // upload was cheap next to the main one and that a stale
+                // image would flash when the window opened. True, but it
+                // left the core thread paying for the split and two ~240
+                // KB clones on every frame of every session, open window
+                // or not — so the toggle now switches the work off at the
+                // source, exactly as the debugger's event viewer does with
+                // `SetEventMask` (DEBUGGER.md §6, "closed panels register
+                // no event subscriptions").
+                //
+                // The stale-image concern is real but bounded: opening the
+                // window costs one frame (≤16.6 ms at 60 Hz) before layer
+                // data arrives, which is under a human's flicker threshold
+                // and far cheaper than paying for it forever.
+                if ui
+                    .checkbox(&mut self.show_layers, "Layers (debug)")
+                    .changed()
+                {
+                    self.send_command(core_thread::CoreCommand::SetLayerExtraction(
+                        self.show_layers,
+                    ));
+                }
                 ui.separator();
                 // Ticket W2-06: the remap window. Pure UI-thread state —
                 // bindings are sampled on this thread too (`poll_input`),

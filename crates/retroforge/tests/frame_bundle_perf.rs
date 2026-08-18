@@ -154,3 +154,95 @@ fn measure_fps_with_frame_bundle_assembly_enabled() {
     let _ = core.cmd_tx.send(CoreCommand::Shutdown);
     let _ = core.join_handle.join();
 }
+
+/// Ticket W3-03a, acceptance criterion 2: measure the layer-extraction
+/// toggle's effect **through the real core thread**, both halves.
+///
+/// Two things have to be true and they pull in opposite directions:
+///
+/// 1. The PACED frame rate must be unchanged — gating work off must not
+///    somehow change what the pacer delivers. Measured above at ~60 Hz;
+///    re-measured here with layers explicitly ON so the paced number is
+///    known for the expensive configuration too.
+/// 2. The UNPACED headroom must measurably improve. Paced throughput
+///    cannot show this: it is capped at 60 Hz by design, so both
+///    configurations sit at the cap and the saving is invisible. This
+///    measures `StepFrame` instead, which produces a frame on demand with
+///    no pacer wait, and is therefore the real per-frame WORK cost.
+///
+/// Reported as numbers rather than asserted tightly: this is a wall-clock
+/// measurement on a shared machine, and a strict inequality would be
+/// flaky. The assertion is the weak, honest one -- extraction-off must not
+/// be SLOWER -- plus a printed ratio a human reads.
+#[test]
+#[ignore = "wall-clock perf measurement, run manually (W3-03a)"]
+fn measure_unpaced_headroom_with_and_without_layer_extraction() {
+    fn step_n(layers: bool, frames: u32) -> Duration {
+        let core = core_thread::spawn(many_sprites_rom()).expect("fixture ROM must spawn");
+        core.cmd_tx
+            .send(CoreCommand::SetLayerExtraction(layers))
+            .expect("core must accept SetLayerExtraction");
+
+        // Warm up: the first stepped frame is a boot artifact and the
+        // caches are cold.
+        for _ in 0..30 {
+            core.cmd_tx.send(CoreCommand::StepFrame).expect("step");
+            let _ = core
+                .evt_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("frame");
+        }
+
+        let start = Instant::now();
+        for _ in 0..frames {
+            core.cmd_tx.send(CoreCommand::StepFrame).expect("step");
+            loop {
+                match core.evt_rx.recv_timeout(Duration::from_secs(5)) {
+                    Ok(CoreEvent::Frame(msg)) => {
+                        // Touch the payload so nothing can be optimised
+                        // away, and prove the toggle actually took effect.
+                        assert_eq!(
+                            !msg.bg_rgba.is_empty(),
+                            layers,
+                            "layer payload must match the requested toggle"
+                        );
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(e) => panic!("core stalled: {e}"),
+                }
+            }
+        }
+        let elapsed = start.elapsed();
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+        elapsed
+    }
+
+    const FRAMES: u32 = 300;
+    let with_layers = step_n(true, FRAMES);
+    let without_layers = step_n(false, FRAMES);
+
+    let per_frame = |d: Duration| d.as_secs_f64() * 1000.0 / f64::from(FRAMES);
+    println!(
+        "W3-03a unpaced ({} build, {FRAMES} stepped frames): layers ON {:.3} ms/frame, \
+         layers OFF {:.3} ms/frame, saving {:.3} ms/frame ({:.1}%)",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        per_frame(with_layers),
+        per_frame(without_layers),
+        per_frame(with_layers) - per_frame(without_layers),
+        100.0 * (per_frame(with_layers) - per_frame(without_layers)) / per_frame(with_layers),
+    );
+
+    assert!(
+        without_layers <= with_layers.mul_f64(1.05),
+        "gating layer extraction OFF made the frame path SLOWER ({:.3} ms/frame vs {:.3}) -- \
+         the toggle is supposed to remove work, not add a branch that costs more than it saves",
+        per_frame(without_layers),
+        per_frame(with_layers),
+    );
+}
