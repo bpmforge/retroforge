@@ -2729,7 +2729,7 @@
     "the accessors are NON-OBSERVING (no A12 clocking, no open-bus side effects) and both mode-invariant suites stay green -- W3-05a's hazard class, invisible to pixel comparison"
    ],
    "points": 2,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [],
    "notes": [
     "FILED 2026-08-09 at W4-06a's close. That ticket built complete, tested decode logic for the nametable and palette viewers and then could not feed them: crates/rf-nes/src/ppu/mod.rs declares `pub(super) vram: [u8; 0x1000]` and `pub(super) palette: [u8; 32]`, invisible even inside rf-nes's own `system` module, and NesBus exposes only `oam()`. The panels honestly display 'no live data' rather than a plausible-looking fake reading. This is the smallest fix that makes them real.",
