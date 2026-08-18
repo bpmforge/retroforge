@@ -201,6 +201,15 @@ pub struct RetroForgeApp {
     /// is presented, or `Off`. Pure UI state — the comparison itself is
     /// `rf_renderer::compare`'s pure functions, which is where its tests
     /// live.
+    /// Ticket W4-05: held while the user is peeking at the original
+    /// (FRONTEND_UI.md §1's hold-to-peek). Not persisted — it is a
+    /// momentary gesture, not a setting.
+    peeking_original: bool,
+    /// Whether a profile matched this ROM (FR-PROF-005). `false` until a
+    /// profile loader is wired; the inspector says so rather than
+    /// implying a match.
+    profile_matched: bool,
+    show_enhance: bool,
     compare_mode: rf_renderer::CompareMode,
     /// Divider position for `CompareMode::Split`, kept across toggles so
     /// turning compare off and on again does not reset the drag.
@@ -373,6 +382,9 @@ impl RetroForgeApp {
             compositor,
             camera: CameraToggle::Original,
             ultrawide_canvas: None,
+            peeking_original: false,
+            profile_matched: false,
+            show_enhance: false,
             compare_mode: rf_renderer::CompareMode::Off,
             compare_divider: 0.5,
             compare_buffers: None,
@@ -875,6 +887,50 @@ impl RetroForgeApp {
                     self.running = false;
                     self.awaiting_stepped_frame = true;
                     self.send_command(CoreCommand::StepScanline);
+                }
+                ui.separator();
+                // Ticket W4-05 (FR-MODE-001): ARCHITECTURE §4's five modes
+                // as presets. Persisted per game immediately, same
+                // no-Apply-button stance as every other setting here.
+                let mut mode = self.current_game_settings.mode;
+                egui::ComboBox::from_label("Mode")
+                    .selected_text(mode.display_name())
+                    .show_ui(ui, |ui| {
+                        for option in crate::game_settings::Mode::all() {
+                            ui.selectable_value(&mut mode, option, option.display_name());
+                        }
+                    });
+                if mode != self.current_game_settings.mode {
+                    self.current_game_settings.mode = mode;
+                    self.save_current_game_settings();
+                }
+
+                // FRONTEND_UI.md §1: the honesty badge, with its hover
+                // breakdown and hold-to-peek. Not decoration — §1 is
+                // explicit that enhancement is never on silently, and this
+                // is where a user finds out what they are looking at.
+                let badge = crate::enhance_ui::badge_text(
+                    "NES",
+                    &self.current_game_settings,
+                    self.profile_matched,
+                );
+                let response = ui.button(badge);
+                let breakdown = crate::enhance_ui::badge_breakdown(
+                    &self.current_game_settings,
+                    self.profile_matched,
+                );
+                response.clone().on_hover_ui(|ui| {
+                    for line in &breakdown {
+                        ui.label(line);
+                    }
+                });
+                // Held, not toggled: peeking is a gesture with an obvious
+                // end, and a toggle would leave someone stuck looking at
+                // the original wondering why their enhancements stopped.
+                self.peeking_original = response.is_pointer_button_down_on();
+
+                if ui.button("Enhance\u{2026}").clicked() {
+                    self.show_enhance = !self.show_enhance;
                 }
                 ui.separator();
                 // Ticket W3-05a, FR-ENH-001: opt-in only, off by default
@@ -1791,9 +1847,119 @@ impl RetroForgeApp {
         self.status = format!("Screenshot: wrote {}", written.join(", "));
     }
 
+    /// The Enhance workspace (ticket W4-05; FRONTEND_UI.md §3.3's
+    /// Features tab plus the profile inspector of GAME_PROFILES.md §4).
+    ///
+    /// Every string here comes from `crate::enhance_ui`, which is tested
+    /// headlessly — this only lays them out, so there is no judgement in
+    /// this function that could disagree with what those tests assert.
+    fn enhance_window(&mut self, ctx: &egui::Context) {
+        if !self.show_enhance {
+            return;
+        }
+        let mut open = self.show_enhance;
+        egui::Window::new("Enhance")
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let rows = crate::enhance_ui::feature_rows(
+                    &self.current_game_settings,
+                    self.profile_matched,
+                );
+                ui.heading("Features");
+                let mut changed = false;
+                for row in &rows {
+                    ui.horizontal(|ui| {
+                        let available =
+                            row.availability == crate::enhance_ui::Availability::Available;
+                        let mut enabled = row.enabled;
+                        // Unavailable rows are shown DISABLED and
+                        // explained, never hidden — FRONTEND_UI.md §3.3's
+                        // honesty contract. Hiding them would tell a user
+                        // the feature does not exist.
+                        if ui
+                            .add_enabled(available, egui::Checkbox::new(&mut enabled, row.label))
+                            .changed()
+                        {
+                            match row.id {
+                                "sprite_overlay" => {
+                                    self.current_game_settings.sprite_overlay = enabled;
+                                    self.sprite_overlay = enabled;
+                                    self.send_command(CoreCommand::SetSpriteOverlay(enabled));
+                                }
+                                "deflicker" => self.current_game_settings.deflicker = enabled,
+                                "widescreen_decoded" => {
+                                    self.current_game_settings.widescreen_decoded = enabled;
+                                }
+                                "full_level_view" => {
+                                    self.current_game_settings.full_level_view = enabled;
+                                }
+                                _ => {}
+                            }
+                            changed = true;
+                        }
+                        ui.label(format!("({})", row.scope));
+                        if let Some(h) = row.heuristic {
+                            ui.label(format!(
+                                "[{}]",
+                                crate::enhance_ui::ladder_chip(
+                                    &self.current_game_settings.trust,
+                                    h
+                                )
+                            ));
+                        }
+                        if let Some(why) = row.availability.explanation() {
+                            ui.label(format!("— {why}"));
+                        }
+                    });
+                }
+                if changed {
+                    self.save_current_game_settings();
+                }
+
+                ui.separator();
+                egui::CollapsingHeader::new("Report card (D-004)").show(ui, |ui| {
+                    let card = self.current_game_settings.trust.report_card();
+                    if card.is_empty() {
+                        ui.label("No contradictions recorded this session.");
+                    }
+                    for c in card {
+                        ui.label(format!("[{}] {} — {}", c.scene, c.heuristic, c.detail));
+                    }
+                });
+
+                ui.separator();
+                egui::CollapsingHeader::new("Profile inspector")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for line in crate::enhance_ui::profile_inspector_lines(
+                            None,
+                            &[],
+                            &[
+                                "base profile".to_string(),
+                                "user overrides (profiles.d)".to_string(),
+                                "per-session toggles".to_string(),
+                            ],
+                        ) {
+                            ui.label(line);
+                        }
+                    });
+            });
+        self.show_enhance = open;
+    }
+
     fn video_panel(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
-            match enhanced_view::select_active_view(self.camera, self.ultrawide_render.as_ref()) {
+            // Ticket W4-05 (FRONTEND_UI.md §1): hold-to-peek forces the
+            // ORIGINAL view for as long as the badge is held. Applied
+            // here rather than by mutating `self.camera`, so releasing
+            // restores whatever the user had chosen without this having
+            // to remember it.
+            let camera = if self.peeking_original {
+                CameraToggle::Original
+            } else {
+                self.camera
+            };
+            match enhanced_view::select_active_view(camera, self.ultrawide_render.as_ref()) {
                 enhanced_view::ActiveView::Original => {
                     if let Some(texture) = &self.texture {
                         ui.add(egui::Image::from_texture(texture).shrink_to_fit());
@@ -1835,6 +2001,7 @@ impl eframe::App for RetroForgeApp {
         self.video_panel(ui);
         self.crash_dialog(&ctx);
         self.layers_debug_window(&ctx);
+        self.enhance_window(&ctx);
         self.controls_window(&ctx);
         self.library_window(&ctx);
         self.settings_window(&ctx);

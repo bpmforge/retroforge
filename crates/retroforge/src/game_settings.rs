@@ -42,9 +42,29 @@ const MAGIC: &str = "RFGAME 1";
 /// Accuracy Mode, so that is also the default here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
+    /// "core in cycle-accurate config, enhancement runtime not
+    /// subscribed, renderer in original pipeline. Reference for all
+    /// tests." The default, and law 6's "a fresh install boots in
+    /// Accuracy Mode".
     #[default]
     Accuracy,
+    /// "core may enable documented fast paths … that pass the
+    /// compatibility test suite; still deterministic." The switch itself
+    /// is W3-07's `CoreConfig::accuracy_mode`.
+    Compatibility,
+    /// "enhancement runtime subscribed; user-selected features on."
     Enhanced,
+    /// "everything exposed: traces, viewers, breakpoints, frame stepping;
+    /// enhancement optional."
+    ResearchDebug,
+    /// "Enhanced + a matched profile; unlocks profile-gated features
+    /// (full-level view, HUD split, entity overlays)."
+    ///
+    /// Selectable without a profile — the mode is what the user *asked
+    /// for*, and the UI explains what is unavailable rather than silently
+    /// refusing the choice. [`Mode::profile_gated_features_unlocked`] is
+    /// the question the feature list actually asks.
+    GameAware,
 }
 
 impl Mode {
@@ -52,7 +72,10 @@ impl Mode {
     pub const fn name(self) -> &'static str {
         match self {
             Mode::Accuracy => "accuracy",
+            Mode::Compatibility => "compatibility",
             Mode::Enhanced => "enhanced",
+            Mode::ResearchDebug => "research-debug",
+            Mode::GameAware => "game-aware",
         }
     }
 
@@ -60,9 +83,63 @@ impl Mode {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "accuracy" => Some(Mode::Accuracy),
+            "compatibility" => Some(Mode::Compatibility),
             "enhanced" => Some(Mode::Enhanced),
+            "research-debug" => Some(Mode::ResearchDebug),
+            "game-aware" => Some(Mode::GameAware),
+            // Deliberately no catch-all mapping to a *permissive* mode: an
+            // unrecognised name (an older file, a typo, a newer build's
+            // mode) resolves to `Accuracy` at the call site's
+            // `unwrap_or_default()`, which is FR-MODE-003's direction —
+            // enhancement is never on because a name failed to parse.
             _ => None,
         }
+    }
+}
+
+impl Mode {
+    /// Human-facing name for the badge and the mode picker.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Mode::Accuracy => "Accuracy",
+            Mode::Compatibility => "Compatibility",
+            Mode::Enhanced => "Enhanced",
+            Mode::ResearchDebug => "Research/Debug",
+            Mode::GameAware => "Game-Aware",
+        }
+    }
+
+    /// Does this mode subscribe the enhancement runtime at all?
+    ///
+    /// This is the FR-MODE-003 question — "enhancement never on
+    /// silently" — asked once, here, rather than re-derived by every
+    /// caller that needs it. `Research/Debug` says "enhancement
+    /// optional" (§4), which means *not on by itself*: a debugging mode
+    /// that quietly changed the picture would defeat its own purpose.
+    #[must_use]
+    pub const fn enhancement_active(self) -> bool {
+        matches!(self, Mode::Enhanced | Mode::GameAware)
+    }
+
+    /// Only `Game-Aware` unlocks profile-gated features, and only §4's
+    /// "Enhanced **+ a matched profile**" — so the mode alone is not
+    /// enough and the caller must pass whether one matched.
+    #[must_use]
+    pub const fn profile_gated_features_unlocked(self, profile_matched: bool) -> bool {
+        matches!(self, Mode::GameAware) && profile_matched
+    }
+
+    /// All five, in ARCHITECTURE §4's order, for the mode picker.
+    #[must_use]
+    pub const fn all() -> [Mode; 5] {
+        [
+            Mode::Accuracy,
+            Mode::Compatibility,
+            Mode::Enhanced,
+            Mode::ResearchDebug,
+            Mode::GameAware,
+        ]
     }
 }
 
@@ -72,6 +149,12 @@ pub struct GameSettings {
     pub mode: Mode,
     /// The W3-05a sprite-limit-bypass overlay, per game.
     pub sprite_overlay: bool,
+    /// Ticket W4-05 (FR-ENH-010): the remaining per-game enhancement
+    /// toggles. All default to OFF — FR-MODE-003's "enhancement never on
+    /// silently" is a property of the DEFAULT, not of a check somewhere.
+    pub deflicker: bool,
+    pub widescreen_decoded: bool,
+    pub full_level_view: bool,
     /// Shader name, `None` for the default pipeline. A string rather than
     /// an enum because W3-02a owns the shader set and this must not have to
     /// change when that lands.
@@ -101,6 +184,18 @@ impl GameSettings {
             "sprite_overlay".to_string(),
             self.sprite_overlay.to_string(),
         );
+        // Only written when ON, so a game nobody has configured does not
+        // grow three keys that restate the default (same reasoning as the
+        // trust ladder's key, W3-05c).
+        for (key, on) in [
+            ("deflicker", self.deflicker),
+            ("widescreen_decoded", self.widescreen_decoded),
+            ("full_level_view", self.full_level_view),
+        ] {
+            if on {
+                fields.insert(key.to_string(), "true".to_string());
+            }
+        }
         if let Some(shader) = &self.shader {
             fields.insert("shader".to_string(), shader.clone());
         }
@@ -147,6 +242,9 @@ impl GameSettings {
                 "mode" => settings.mode = Mode::from_name(value).unwrap_or_default(),
                 "sprite_overlay" => settings.sprite_overlay = value == "true",
                 "shader" => settings.shader = Some(value.to_string()),
+                "deflicker" => settings.deflicker = value == "true",
+                "widescreen_decoded" => settings.widescreen_decoded = value == "true",
+                "full_level_view" => settings.full_level_view = value == "true",
                 "trust" => {
                     settings.trust = rf_enhance::trust::TrustLadder::from_settings_value(value);
                 }
@@ -379,5 +477,62 @@ mod trust_persistence_tests {
             "an unknown key must survive: {round_tripped}"
         );
         assert!(round_tripped.contains("trust=anti-flicker=active"));
+    }
+}
+
+#[cfg(test)]
+mod mode_and_feature_persistence_tests {
+    use super::*;
+
+    /// FR-MODE-001: all five ARCHITECTURE §4 modes round-trip by name.
+    #[test]
+    fn every_mode_round_trips_through_the_per_game_file() {
+        for mode in Mode::all() {
+            let s = GameSettings {
+                mode,
+                ..GameSettings::default()
+            };
+            let restored = GameSettings::from_text(&s.to_text()).expect("self-written file parses");
+            assert_eq!(restored.mode, mode, "{} did not survive", mode.name());
+        }
+        assert_eq!(Mode::all().len(), 5, "ARCHITECTURE §4 defines five modes");
+    }
+
+    /// FR-MODE-003, at the persistence layer: an unrecognised mode name —
+    /// an older file, a typo, a newer build's mode — resolves to
+    /// Accuracy. Enhancement is never on because a name failed to parse.
+    #[test]
+    fn an_unknown_mode_name_falls_back_to_accuracy_not_to_enhanced() {
+        let text = format!("{MAGIC}\nmode=super-turbo\n");
+        let restored = GameSettings::from_text(&text).expect("file parses");
+        assert_eq!(restored.mode, Mode::Accuracy);
+        assert!(!restored.mode.enhancement_active());
+    }
+
+    /// FR-ENH-010: the per-game enhancement toggles persist, and an
+    /// untouched game writes none of them — the default stays a property
+    /// of the code rather than something a file has to assert.
+    #[test]
+    fn enhancement_toggles_persist_and_an_untouched_game_writes_none() {
+        let untouched = GameSettings::default().to_text();
+        for key in ["deflicker", "widescreen_decoded", "full_level_view"] {
+            assert!(
+                !untouched.contains(key),
+                "an untouched game must not write `{key}`:\n{untouched}"
+            );
+        }
+
+        let s = GameSettings {
+            deflicker: true,
+            full_level_view: true,
+            ..GameSettings::default()
+        };
+        let restored = GameSettings::from_text(&s.to_text()).expect("parses");
+        assert!(restored.deflicker);
+        assert!(restored.full_level_view);
+        assert!(
+            !restored.widescreen_decoded,
+            "a toggle that was never set must stay off"
+        );
     }
 }

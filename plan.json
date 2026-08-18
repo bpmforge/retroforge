@@ -2641,11 +2641,24 @@
     "profile inspector panel: identity match status, capability checklist, override precedence (GAME_PROFILES.md section 4, FR-PROF-005)"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E5-S3",
     "E5-S4"
-   ]
+    ],
+    "notes": [
+     "DONE 2026-08-18. Mode extended from 2 to ARCHITECTURE section 4's FIVE presets; per-game enhancement toggles persisted; honesty badge with hover breakdown and hold-to-peek; Enhance workspace with feature rows, ladder chips, report card and profile inspector.",
+     "FR-MODE-003 IS A PROPERTY OF THE DEFAULT, NOT A CHECK: `Mode::enhancement_active()` is asked ONCE, in one place, rather than re-derived by every caller. The test that carries the requirement asserts that a settings file with EVERY feature flag set still runs nothing in Accuracy -- 'enhancement never on silently' has to survive a file that says otherwise, or it is a UI convention rather than a guarantee. An unrecognised mode name (older file, typo, newer build) resolves to Accuracy, so enhancement is never on because a name failed to parse.",
+     "RESEARCH/DEBUG DELIBERATELY DOES NOT ENABLE ENHANCEMENT. Section 4 says 'enhancement optional', which means not on by itself -- a debugging mode that quietly changed the picture would defeat its own purpose. Asserted rather than left implicit, because 'everything exposed' reads like it should include enhancements.",
+     "THE BADGE COUNTS EFFECTIVE FEATURES, NOT ENABLED ONES. A badge reading 'Enhanced (4)' while two of those cannot run without a profile is exactly the dishonesty FRONTEND_UI.md section 1's badge exists to prevent. So FeatureRow::effective() = enabled AND available, asked once, and the badge counts that. Enhanced without a profile reads (2); Game-Aware with one reads (4); Game-Aware WITHOUT one falls back to (2).",
+     "THE TWO UNAVAILABLE REASONS ARE DISTINGUISHABLE, and that is the point of returning Availability rather than a bool: 'turn on Enhanced' and 'load a profile' are different user actions, and someone told only 'unavailable' cannot tell which they need. In Enhanced, a profile feature says NeedsMode(Game-Aware); in Game-Aware without a match it says NeedsProfile.",
+     "UNAVAILABLE ROWS ARE SHOWN DISABLED AND EXPLAINED, NEVER HIDDEN -- FRONTEND_UI.md section 3.3's honesty contract ('rows disabled+explained when no profile capability'). Hiding them would be the same lie by omission the badge prevents: a user who cannot see that full-level view NEEDS a profile concludes the emulator lacks the feature.",
+     "HOLD-TO-PEEK IS HELD, NOT TOGGLED, and is applied at the view-selection site rather than by mutating `self.camera` -- so releasing restores whatever the user had chosen without this having to remember it. A toggle would leave someone looking at the original wondering why their enhancements stopped.",
+     "THE LADDER CHIP SHOWS SUPPRESSION, NOT JUST THE RUNG. A heuristic that is nominally 'active' but suppressed in the current scene is NOT acting, so a chip reading only 'active' would be wrong. Reuses W3-05c's TrustLadder rather than a second model.",
+     "EMPTY STATES SAY SO EVERYWHERE: 'No enhancements active - this is the unmodified emulation', 'No contradictions recorded this session', 'no profile matched this ROM's normalized hash', '(none declared)'. An empty panel reads as a broken control, which is the specific doubt an honesty surface must not create.",
+     "PROFILE INSPECTOR: identity status, capability checklist with unmet caps shown UNCHECKED rather than omitted, and the precedence chain in GAME_PROFILES.md section 4's order (base -> user overrides -> per-session). The ORDER is asserted, because 'all layers visible' means precedence is the content. `profile_matched` is currently always false -- no profile loader is wired into the shell yet -- and the inspector SAYS no profile matched rather than implying one did. That gap is real and belongs to whichever ticket wires W4-02's loader into the shell.",
+     "UNVERIFIED, stated plainly: the visual layout is not checked by anything. Every string and every enable/disable decision is computed by crate::enhance_ui and tested headlessly (8 tests), and the egui layer only paints them -- so what is asserted is what the panel SAYS, not how it looks."
+    ]
   },
   {
    "id": "W4-06a",
