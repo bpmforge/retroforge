@@ -47,6 +47,7 @@ pub mod mode_invariant;
 pub mod pacer;
 pub mod rom_open;
 pub mod save_state;
+pub mod script_panel;
 pub mod settings;
 pub mod stepper;
 

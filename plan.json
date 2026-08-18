@@ -2599,11 +2599,26 @@
     "capability list shown at enable time; write ledger visible in UI (FR-PLUG-003)"
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E7-S1",
     "E7-S2"
-   ]
+    ],
+    "notes": [
+     "DONE 2026-08-18. rf-plugin-sdk gains manifest/sandbox/host; retroforge gains script_panel + a docked Lua tab; plugins/examples/player-overlay and docs/PLUGIN_AUTHORING.md ship with it. 1009 workspace tests, cargo deny licenses ok (mlua and vendored Lua 5.4 are both MIT).",
+     "THE SANDBOX WAS BUILT AND TESTED FIRST, because every other criterion is decorative if a script can reach io.open. PROBED RATHER THAN ASSUMED, and the probe found two real holes: with a minimal StdLib (TABLE|STRING|MATH|UTF8), io/os/package/require/debug/loadstring/coroutine are correctly ABSENT -- but dofile, loadfile and load are STILL PRESENT, because Lua's base library is always loaded and has no StdLib bit of its own. dofile and loadfile read files. All three are now removed explicitly (sandbox::REMOVED_BASE_GLOBALS, public so an auditor can read the list rather than infer it).",
+     "THE TEST ASSERTS ABSENCE, NOT REFUSAL: a binding that does not exist cannot be reached by a cleverer call, so no_escape_hatch_survives_the_sandbox checks each dangerous name is nil rather than that some wrapper said no. Paired with a_script_can_still_do_useful_work so 'everything is absent' cannot pass trivially -- string/math/table/utf8/pcall/print remain and a real computation runs.",
+     "A DENIED CAPABILITY MEANS THE FUNCTION IS ABSENT, not present-and-refusing: rf.mem is simply nil, so a denied call is Lua's own nil-call error pointing at the author's line rather than a runtime refusal they could catch and ignore. Both directions asserted, so 'the gate works' and 'nothing is ever bound' cannot look the same.",
+     "ERROR CONTAINMENT IS IN THE SIGNATURE (FR-PLUG-004): ScriptHost::on_frame returns unit, never Result -- 'script fault pauses script not emulator' means a fault is a STATE CHANGE, not an error a caller might propagate into the frame loop. The test drives a faulting script and then keeps calling the host, asserting it survives and that the fault reached the log the REPL renders.",
+     "THROTTLING TESTED IN BOTH DIRECTIONS (FR-PLUG-005): engages over budget AND releases when the script comes back. Testing only the engage half would pass on a one-way punishment. Uses a zero budget so any callback is over-budget, keeping it a fast unit test rather than one that must burn real milliseconds. My first assertion was off by one and the CODE was right -- 'every 4th frame' is three skips then a call -- so I corrected the test, not the behaviour.",
+     "PATH CONTAINMENT (NFR-010/D-006) canonicalizes BOTH sides then compares, the same shape retroforge::library uses (rf-plugin-sdk cannot depend on that crate, so the shape is copied, not the code). A file that does not exist yet resolves via its PARENT, so a plugin can create files without the capability being useless, while every symlink and .. on the way there is still caught. Tested with a real symlink escaping to a real outside dir, plain .. traversal, the no-capability case, and a baseline in-dir path that MUST succeed -- without which the test would pass on an implementation that refused everything.",
+     "THE LEDGER IS THE GATE, NOT A LOG BESIDE ONE: WriteLedger::record returns whether the write may proceed, so a caller cannot perform one without it having been recorded -- check and record are the same call rather than two a caller could reorder or forget to pair.",
+     "WRITE_MEMORY IS DECLARABLE AND LEDGERED BUT THE WRITE ITSELF IS REFUSED, recorded as owed rather than half-wired: PLUGINS.md section 2 requires the ledger also be recorded in save states (PROF/ENHC chunks), and the ENHC chunk does not exist. Criterion 8 asks for the capability list and a visible ledger, which ship; the save-state half is owed.",
+     "THE SHIPPED EXAMPLE IS EXECUTED, not just written: tests/example_plugin.rs loads the real plugin.toml and main.lua, runs 601 frames, and asserts the script neither faults nor throttles AND that its own frame-modulo-600 print branch was reached -- otherwise the test would only prove the file parses. A second test greps the example for forbidden globals, since a doc demonstrating an unavailable API is worse than no doc.",
+     "SCOPE AMENDMENT (vetoable, recorded): crates/rf-debugger/** for one additive DebugTab::LuaConsole variant. Criterion 5 says 'docked in the Debug workspace' and the tab enum lives there. LAYOUT_FORMAT_VERSION deliberately does NOT move -- that enum's own doc already covers additive variants, and an old persisted layout that never mentions LuaConsole still deserializes and simply never lists the tab.",
+     "BUILD-TIME RISK WORTH NAMING: mlua's vendored feature compiles Lua 5.4 from bundled C, so a C toolchain is now a build-time dependency on every platform. GitHub runners all have one, but W3-06's 3-OS matrix (added yesterday, itself never yet run) is where that first gets exercised -- the most likely first-CI-run failure alongside the mac/Windows adapter question W3-06 already flagged.",
+     "HONEST GAPS, in PLUGIN_AUTHORING.md's own 'Known gaps' section rather than only here: rf.mem.read_u8 is capability-gated but returns 0 (wiring a live StateView needs the shell's core handle); rf.gui.* validates calls but does not yet reach the renderer's overlay path; replace_layers, input_bindings and the WASM tier are not implemented. The GATES are real and tested; the data behind two of them is not yet."
+    ]
   },
   {
    "id": "W4-05",

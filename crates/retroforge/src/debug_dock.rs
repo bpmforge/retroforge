@@ -200,6 +200,11 @@ pub struct PanelData {
     /// (`rf_nes::NesRom::chr_is_ram`) — there is no static pattern data to
     /// show in that case (`rf_debugger::pattern`'s own module doc).
     pub chr_rom: Option<Vec<u8>>,
+    /// Ticket W4-04: everything the Lua console tab renders, pre-computed
+    /// by `crate::script_panel` (which is where its tests live). `None`
+    /// when no plugin is loaded, so the tab can say so rather than
+    /// showing an empty panel that reads as "not implemented".
+    pub script: Option<Box<ScriptPanelData>>,
     /// Latest frame's OAM (`core_thread::FrameMsg::oam`) — genuinely live,
     /// unlike `chr_rom`/vram/cgram.
     pub oam: [u8; 256],
@@ -222,6 +227,7 @@ impl Default for PanelData {
     fn default() -> Self {
         PanelData {
             chr_rom: None,
+            script: None,
             oam: [0u8; 256],
             events: Vec::new(),
             wram: [0u8; 0x0800],
@@ -303,6 +309,55 @@ impl Default for DebugPanels {
     }
 }
 
+/// Paint the Lua console (ticket W4-04; DEBUGGER.md §5).
+///
+/// Every string shown here is computed by `crate::script_panel`, which is
+/// tested headlessly — this function only lays them out, so there is no
+/// logic here that could disagree with what the tests assert.
+fn lua_console_ui(ui: &mut egui::Ui, script: Option<&ScriptPanelData>) {
+    let Some(script) = script else {
+        ui.label("No plugin loaded.");
+        ui.label(
+            "Load one from plugins/examples — see docs/PLUGIN_AUTHORING.md for the manifest \
+             shape and the capability list.",
+        );
+        return;
+    };
+    ui.label(&script.status);
+    ui.separator();
+    egui::CollapsingHeader::new("Capabilities")
+        .default_open(true)
+        .show(ui, |ui| {
+            for line in &script.capabilities {
+                ui.label(line);
+            }
+        });
+    egui::CollapsingHeader::new("Write ledger").show(ui, |ui| {
+        for line in &script.ledger {
+            ui.label(line);
+        }
+    });
+    ui.separator();
+    ui.label("Console:");
+    egui::ScrollArea::vertical()
+        .max_height(200.0)
+        .show(ui, |ui| {
+            for line in &script.console {
+                ui.monospace(line);
+            }
+        });
+}
+
+/// Everything the Lua console tab renders, pre-computed by
+/// `crate::script_panel` on the UI thread.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptPanelData {
+    pub status: String,
+    pub capabilities: Vec<String>,
+    pub ledger: Vec<String>,
+    pub console: Vec<String>,
+}
+
 struct PanelTabViewer<'a> {
     data: &'a PanelData,
     pattern_table: &'a mut PatternTable,
@@ -319,6 +374,7 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
             DebugTab::Oam => "OAM",
             DebugTab::EventTimeline => "Events",
             DebugTab::Memory => "Memory",
+            DebugTab::LuaConsole => "Lua",
         }
         .into()
     }
@@ -331,6 +387,7 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
             DebugTab::Oam => oam_ui(ui, &self.data.oam),
             DebugTab::EventTimeline => event_timeline_ui(ui, &self.data.events),
             DebugTab::Memory => memory_ui(ui, &self.data.wram, &self.data.prg_ram),
+            DebugTab::LuaConsole => lua_console_ui(ui, self.data.script.as_deref()),
         }
     }
 }

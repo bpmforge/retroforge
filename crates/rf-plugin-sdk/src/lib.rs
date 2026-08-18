@@ -13,3 +13,11 @@ mod tests {
         assert_eq!(super::CRATE_NAME, "rf-plugin-sdk");
     }
 }
+
+pub mod host;
+pub mod manifest;
+pub mod sandbox;
+
+pub use host::{Budget, LedgerEntry, PathRefusal, ScriptHost, ScriptState, WriteLedger};
+pub use manifest::{Capabilities, FilesystemCap, Manifest, ManifestError};
+pub use sandbox::ScriptLog;

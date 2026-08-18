@@ -50,6 +50,9 @@ rf-cache = { path = "../rf-cache" }
 # and hands plain `&[u8]`/`&[CoreEvent]` slices to `rf-debugger`'s decode
 # functions — same resolution as SceneGraph at W4-03c/W4-03e.
 rf-debugger = { path = "../rf-debugger" }
+# rf-plugin-sdk: the Lua script host (ticket W4-04). The shell owns the
+# REPL panel and the capability/ledger surfaces; the SDK owns the sandbox.
+rf-plugin-sdk = { path = "../rf-plugin-sdk" }
 eframe = "0.35.0"
 rfd = "0.17.2"
 # sha2: reachable-state hash for the determinism/replay suite (ticket

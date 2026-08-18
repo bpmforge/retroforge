@@ -1,0 +1,20 @@
+# Example overlay plugin (ticket W4-04; FR-REND-006).
+#
+# `license` and `provenance` are REQUIRED and validation refuses a
+# manifest without them — D-005 makes community intake deny-by-default,
+# and PLUGINS.md §2 puts that check BEFORE any capability prompt.
+[plugin]
+id = "player-overlay"
+version = "0.1.0"
+api = "0.1"
+license = "MIT OR Apache-2.0"
+provenance = "first-party example, authored for RetroForge ticket W4-04"
+
+# Every capability defaults to DENIED. This script asks for the two it
+# actually needs and nothing else — which is also the point of the
+# example: an author copying this should be adding capabilities
+# deliberately, not deleting ones they did not want.
+[capabilities]
+read_memory = true
+draw_overlay = true
+frame_events = true

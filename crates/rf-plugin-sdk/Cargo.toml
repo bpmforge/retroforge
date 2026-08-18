@@ -8,3 +8,14 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# Scripting host. Sanctioned in docs/TECH_STACK.md §2 ("Scripting" row:
+# mlua 0.12.0 — "Lua = emulator-community lingua franca (BizHawk/Mesen);
+# in-process, ~zero per-frame overhead; sandbox knobs").
+#
+# `vendored` compiles Lua 5.4 from bundled C source, which makes a C
+# toolchain a BUILD-TIME dependency on every platform — see this ticket's
+# notes: GitHub's runners all have one, but W3-06's 3-OS matrix is where
+# that first gets exercised.
+mlua = { version = "0.12.0", features = ["lua54", "vendored"] }

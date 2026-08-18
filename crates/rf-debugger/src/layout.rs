@@ -46,6 +46,12 @@ pub enum DebugTab {
     Oam,
     EventTimeline,
     Memory,
+    /// `LuaConsole` (ticket W4-04, DEBUGGER.md §5): the plugin script
+    /// REPL. Additive in exactly the sense this doc's own clause above
+    /// describes — an old persisted layout that never mentions it still
+    /// deserializes fine and simply never lists the tab, so
+    /// [`LAYOUT_FORMAT_VERSION`] does not move.
+    LuaConsole,
 }
 
 /// Which axis a [`PersistedNode::Split`] divides along — matches
