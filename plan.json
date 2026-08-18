@@ -2329,7 +2329,7 @@
     "docs/design/GAME_PROFILES.md section 2's rom_map example updated to include `source`, since it currently omits the field the SRS makes mandatory"
    ],
    "points": 1,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [],
    "notes": [
     "FILED 2026-08-08 at W4-02's close, flagged by that ticket's executor rather than assumed away. FR-PROF-003 (docs/SRS.md line 106) reads: 'Every memory_map/rom_map entry shall carry a `source` citation (clean-room provenance); validation SHALL FAIL without one.' W4-02's four acceptance criteria do not mention it, so the executor added `source`/`notes` as OPTIONAL fields (schema now expressive) and deliberately did NOT implement fail-without-one. Correct call -- it is a scope decision, not an oversight.",
