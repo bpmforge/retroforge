@@ -2107,7 +2107,7 @@
     "contradiction events land in a local per-game report card with NO telemetry (NFR-005), and safety-heuristic suppression requires a stored justification that auto-reopens on new-context triggers (FR-ENH-012)"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E5-S4"
    ],
