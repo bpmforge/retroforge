@@ -300,8 +300,10 @@ impl EmuStepper {
     }
 
     /// Side-effect-free memory peek (`NesBus::peek`) — a debugger memory
-    /// view, and what the determinism suite's positive WRAM assertion
-    /// reads (ticket W1-07).
+    /// view, what the determinism suite's positive WRAM assertion reads
+    /// (ticket W1-07), and what a value-conditional breakpoint evaluates
+    /// through plus what step-over reads to see whether the next opcode
+    /// is a `JSR` (ticket W4-06e).
     #[must_use]
     pub fn peek(&self, addr: u16) -> u8 {
         self.bus.peek(addr)
@@ -432,6 +434,50 @@ impl EmuStepper {
     /// frame), or 0 only if [`CYCLE_BUDGET`]'s defensive bound fired
     /// first (module doc's "Why every loop in here is cycle-bounded") —
     /// which should never happen for any ROM this emulator runs correctly.
+    /// Execute exactly ONE CPU instruction (ticket W4-06e).
+    ///
+    /// This is the instruction-level seam W4-06e needed and `step_frame`/
+    /// `step_scanline` did not provide. It lives HERE, in the shell,
+    /// rather than as a breakpoint check inside `rf-nes`'s step loop —
+    /// route (a) of the two the ticket named. See
+    /// `rf_debugger::breakpoint`'s module doc for the full reasoning; the
+    /// short version is that every condition acceptance criterion 1 lists
+    /// is answerable at an instruction boundary, so putting debugger
+    /// concerns on the core's hot path would buy nothing.
+    ///
+    /// Drains video/audio afterwards exactly as the other steppers do, so
+    /// single-stepping cannot silently grow the PPU's completed-scanline
+    /// queue (`Ppu::drain`'s own warning, and the trap `event_emission.rs`
+    /// records having fallen into).
+    pub fn step_instruction(&mut self, sink: &mut dyn CoreSink) -> u32 {
+        let mut counting = CountingSink {
+            inner: sink,
+            scanlines: 0,
+            last_scanline: self.last_scanline,
+        };
+        let cycles = self.cpu.step(&mut self.bus);
+        self.bus.drain_video(&mut counting);
+        self.bus.drain_audio(&mut counting);
+        self.last_scanline = counting.last_scanline;
+        self.state = RunState::Paused;
+        cycles
+    }
+
+    /// The CPU's current program counter — the address the NEXT
+    /// instruction will execute from, which is what a PC breakpoint and
+    /// run-to-cursor both compare against.
+    #[must_use]
+    pub fn pc(&self) -> u16 {
+        self.cpu.pc
+    }
+
+    /// The CPU's stack pointer, for step-over/step-out's frame tracking
+    /// (`rf_debugger::breakpoint::frame_has_returned`).
+    #[must_use]
+    pub fn sp(&self) -> u8 {
+        self.cpu.s
+    }
+
     pub fn step_frame(&mut self, sink: &mut dyn CoreSink) -> u64 {
         let advanced = self.run_until_next_frame(sink);
         self.state = RunState::Paused;
@@ -1143,5 +1189,143 @@ impl EmuStepper {
     #[must_use]
     pub fn screen_text_for_test(&self) -> String {
         self.bus.ppu_vram_ascii()
+    }
+}
+
+/// Execution control built on [`EmuStepper::step_instruction`] (ticket
+/// W4-06e, route (a) — see `rf_debugger::breakpoint`'s module doc).
+///
+/// Free functions rather than `EmuStepper` methods so the stepper keeps
+/// knowing nothing about the debugger, and so each is testable on its own
+/// against a real machine.
+pub mod exec_control {
+    use rf_core_api::CoreSink;
+    use rf_debugger::breakpoint::{
+        frame_has_returned, step_over_is_a_call, BreakCtx, BreakpointTable, Hit,
+    };
+
+    use super::EmuStepper;
+
+    /// Why a run stopped.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum StopReason {
+        /// The requested step completed.
+        Completed,
+        /// A breakpoint fired first — breakpoints outrank the step
+        /// request, or "run to cursor" past a breakpoint would silently
+        /// skip it.
+        Breakpoint(Hit),
+        /// The instruction budget ran out. Every loop here is bounded for
+        /// the same reason `EmuStepper`'s are: a step-out inside a routine
+        /// that never returns must stop, not hang the UI.
+        BudgetExhausted,
+    }
+
+    /// Defensive bound for the multi-instruction controls. Generous
+    /// (a frame is ~10k instructions) but finite.
+    pub const INSTRUCTION_BUDGET: u32 = 2_000_000;
+
+    /// Check armed breakpoints at the current boundary.
+    fn check(
+        stepper: &EmuStepper,
+        table: &BreakpointTable,
+        events: &[rf_debugger::breakpoint::EventKind],
+    ) -> Option<Hit> {
+        if !table.armed() {
+            // The one-branch fast path — see BreakpointTable::armed.
+            return None;
+        }
+        let peek = |addr: u16| stepper.peek(addr);
+        table.check(&BreakCtx {
+            pc: stepper.pc(),
+            scanline: stepper.last_scanline().unwrap_or(0),
+            dot: 0,
+            peek: &peek,
+            events,
+        })
+    }
+
+    /// One instruction, then stop.
+    pub fn step_into(
+        stepper: &mut EmuStepper,
+        sink: &mut dyn CoreSink,
+        table: &BreakpointTable,
+    ) -> StopReason {
+        stepper.step_instruction(sink);
+        match check(stepper, table, &[]) {
+            Some(hit) => StopReason::Breakpoint(hit),
+            None => StopReason::Completed,
+        }
+    }
+
+    /// One instruction, but run a `JSR`'s whole subroutine to completion.
+    ///
+    /// Only `JSR` is treated as a call — see
+    /// `rf_debugger::breakpoint::step_over_is_a_call` for why `JMP` must
+    /// not be.
+    pub fn step_over(
+        stepper: &mut EmuStepper,
+        sink: &mut dyn CoreSink,
+        table: &BreakpointTable,
+    ) -> StopReason {
+        let opcode = stepper.peek(stepper.pc());
+        if !step_over_is_a_call(opcode) {
+            return step_into(stepper, sink, table);
+        }
+        // Enter the call, THEN step out of it. The entry SP must be
+        // sampled from INSIDE the subroutine: `RTS` restores the stack
+        // pointer to exactly its pre-`JSR` value, so a predicate anchored
+        // before the call waits for `S` to rise strictly above a value it
+        // only ever returns to — and never fires. (Found by
+        // `step_over_runs_the_subroutine_and_lands_after_the_call`
+        // exhausting its budget; only a real machine shows this.)
+        stepper.step_instruction(sink); // the JSR itself
+        let inside_sp = stepper.sp();
+        run_until(stepper, sink, table, |s| {
+            frame_has_returned(inside_sp, s.sp())
+        })
+    }
+
+    /// Run until the current subroutine returns.
+    pub fn step_out(
+        stepper: &mut EmuStepper,
+        sink: &mut dyn CoreSink,
+        table: &BreakpointTable,
+    ) -> StopReason {
+        let entry_sp = stepper.sp();
+        run_until(stepper, sink, table, |s| {
+            frame_has_returned(entry_sp, s.sp())
+        })
+    }
+
+    /// Run until the PC reaches `target`.
+    pub fn run_to_cursor(
+        stepper: &mut EmuStepper,
+        sink: &mut dyn CoreSink,
+        table: &BreakpointTable,
+        target: u16,
+    ) -> StopReason {
+        run_until(stepper, sink, table, |s| s.pc() == target)
+    }
+
+    /// Shared loop: step until `done`, a breakpoint fires, or the budget
+    /// runs out. Breakpoints are checked BEFORE `done` so a breakpoint
+    /// inside a subroutine being stepped over is not silently skipped.
+    fn run_until(
+        stepper: &mut EmuStepper,
+        sink: &mut dyn CoreSink,
+        table: &BreakpointTable,
+        done: impl Fn(&EmuStepper) -> bool,
+    ) -> StopReason {
+        for _ in 0..INSTRUCTION_BUDGET {
+            stepper.step_instruction(sink);
+            if let Some(hit) = check(stepper, table, &[]) {
+                return StopReason::Breakpoint(hit);
+            }
+            if done(stepper) {
+                return StopReason::Completed;
+            }
+        }
+        StopReason::BudgetExhausted
     }
 }
