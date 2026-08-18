@@ -76,6 +76,16 @@ pub struct GameSettings {
     /// an enum because W3-02a owns the shader set and this must not have to
     /// change when that lands.
     pub shader: Option<String>,
+    /// Ticket W3-05c (FR-ENH-011, D-004): this game's heuristic trust
+    /// ladder, persisted here rather than in a second store of its own.
+    ///
+    /// The ticket's own note is why: "building a second, parallel
+    /// persistence path inside rf-enhance would be exactly the kind of
+    /// duplicate abstraction this board keeps deferring until a second
+    /// consumer genuinely exists". This file is already the per-game
+    /// store, already keyed by normalized ROM hash, and already preserves
+    /// keys it does not understand.
+    pub trust: rf_enhance::trust::TrustLadder,
     /// Keys this build does not know, kept verbatim (module doc).
     unknown: BTreeMap<String, String>,
 }
@@ -93,6 +103,14 @@ impl GameSettings {
         );
         if let Some(shader) = &self.shader {
             fields.insert("shader".to_string(), shader.clone());
+        }
+        // Ticket W3-05c: omitted entirely when everything is at its
+        // default, so an untouched game's file does not grow a key that
+        // only says "all-shadow" — which is what `TrustLadder::default`
+        // already means.
+        let trust = self.trust.to_settings_value();
+        if !trust.is_empty() {
+            fields.insert("trust".to_string(), trust);
         }
 
         let mut out = String::from(MAGIC);
@@ -129,6 +147,9 @@ impl GameSettings {
                 "mode" => settings.mode = Mode::from_name(value).unwrap_or_default(),
                 "sprite_overlay" => settings.sprite_overlay = value == "true",
                 "shader" => settings.shader = Some(value.to_string()),
+                "trust" => {
+                    settings.trust = rf_enhance::trust::TrustLadder::from_settings_value(value);
+                }
                 other => {
                     settings
                         .unknown
@@ -295,5 +316,68 @@ mod tests {
         };
         assert_eq!(settings.to_text(), settings.to_text());
         assert!(!settings.to_text().contains('\r'));
+    }
+}
+
+#[cfg(test)]
+mod trust_persistence_tests {
+    use super::*;
+    use rf_enhance::trust::TrustState;
+
+    /// Ticket W3-05c, acceptance criterion 1: per-game trust state is
+    /// PERSISTED — through this store, keyed by normalized ROM hash like
+    /// every other per-game setting, rather than through a second path of
+    /// rf-enhance's own.
+    #[test]
+    fn the_trust_ladder_round_trips_through_the_per_game_file() {
+        let mut settings = GameSettings::default();
+        settings.trust.set_state("anti-flicker", TrustState::Active);
+        settings
+            .trust
+            .suppress("anti-flicker", "deliberate strobe here", "scene-a")
+            .expect("a real justification is accepted");
+
+        let restored =
+            GameSettings::from_text(&settings.to_text()).expect("self-written file parses");
+        assert_eq!(restored.trust.state("anti-flicker"), TrustState::Active);
+        assert!(restored.trust.is_suppressed("anti-flicker", "scene-a"));
+        assert!(
+            !restored.trust.is_suppressed("anti-flicker", "scene-b"),
+            "the suppression's scene scope must survive persistence, or auto-reopen \
+             silently stops working across a restart"
+        );
+    }
+
+    /// D-004's "fresh install all-shadow" must survive a save/load with
+    /// no key written at all — otherwise the default would be a thing the
+    /// file asserts rather than a thing the code guarantees.
+    #[test]
+    fn an_untouched_game_writes_no_trust_key_and_still_loads_all_shadow() {
+        let settings = GameSettings::default();
+        let text = settings.to_text();
+        assert!(
+            !text.contains("trust"),
+            "an untouched game must not grow a key that only restates the default:\n{text}"
+        );
+        let restored = GameSettings::from_text(&text).expect("self-written file parses");
+        assert_eq!(restored.trust.state("anti-flicker"), TrustState::Shadow);
+        assert!(!restored.trust.should_act("anti-flicker", "scene-a"));
+    }
+
+    /// The unknown-key preservation this file already guarantees must
+    /// keep working alongside the new key — a build that did not know
+    /// `trust` must not eat it, and this build must not eat theirs.
+    #[test]
+    fn trust_coexists_with_unknown_keys_from_another_build() {
+        let text =
+            format!("{MAGIC}\nmode=accuracy\ntrust=anti-flicker=active\nfuture_key=whatever\n");
+        let settings = GameSettings::from_text(&text).expect("file parses");
+        assert_eq!(settings.trust.state("anti-flicker"), TrustState::Active);
+        let round_tripped = settings.to_text();
+        assert!(
+            round_tripped.contains("future_key=whatever"),
+            "an unknown key must survive: {round_tripped}"
+        );
+        assert!(round_tripped.contains("trust=anti-flicker=active"));
     }
 }

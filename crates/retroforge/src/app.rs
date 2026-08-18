@@ -34,6 +34,7 @@ use crate::core_thread::{self, CoreCommand, CoreCrashReport, CoreEvent, CoreHand
 use crate::enhanced_view::{self, CameraToggle};
 use crate::input_map;
 use crate::rom_open;
+use rf_enhance::trust::TrustState;
 
 /// How many repaints [`RetroForgeApp::maybe_request_canvas_snapshot`] lets
 /// pass between `CoreCommand::RequestCanvasSnapshot` sends while the
@@ -919,6 +920,55 @@ impl RetroForgeApp {
                 // install boots in Accuracy Mode" reads the same way here
                 // — what you see by default is the emulator's own output,
                 // not an instrument reading of it.
+                // Ticket W3-05c (FR-ENH-012): the per-game report card,
+                // surfaced locally and only locally — NFR-005 forbids
+                // telemetry, and `rf_enhance::trust` has no I/O of any
+                // kind, so there is nowhere for this to leak to even by
+                // accident.
+                ui.menu_button("Heuristics", |ui| {
+                    ui.label("Trust ladder (D-004) — fresh install is all-shadow");
+                    ui.separator();
+                    let mut changed = false;
+                    for heuristic in HEURISTICS {
+                        let before = self.current_game_settings.trust.state(heuristic);
+                        let mut state = before;
+                        ui.horizontal(|ui| {
+                            ui.label(*heuristic);
+                            ui.radio_value(&mut state, TrustState::Shadow, "Shadow");
+                            ui.radio_value(&mut state, TrustState::Advisory, "Advisory");
+                            ui.radio_value(&mut state, TrustState::Active, "Active");
+                        });
+                        if state != before {
+                            self.current_game_settings.trust.set_state(heuristic, state);
+                            changed = true;
+                        }
+                        if let Some(s) = self.current_game_settings.trust.suppression(heuristic) {
+                            ui.label(format!(
+                                "    suppressed in {}: {}",
+                                s.granted_in_scene, s.justification
+                            ));
+                        }
+                    }
+                    if changed {
+                        // Persist immediately, same stance as every other
+                        // per-game setting in this menu: a toggle that
+                        // survives only until the next crash is the small
+                        // betrayal that makes people stop trusting a
+                        // settings screen.
+                        self.save_current_game_settings();
+                    }
+                    ui.separator();
+                    let card = self.current_game_settings.trust.report_card();
+                    if card.is_empty() {
+                        ui.label("Report card: no contradictions recorded this session");
+                    } else {
+                        ui.label(format!("Report card ({} contradiction(s)):", card.len()));
+                        for c in card {
+                            ui.label(format!("  [{}] {} — {}", c.scene, c.heuristic, c.detail));
+                        }
+                    }
+                });
+                ui.separator();
                 ui.menu_button("Compare", |ui| {
                     let mut mode = self.compare_mode;
                     ui.radio_value(&mut mode, rf_renderer::CompareMode::Off, "Off");
@@ -1815,6 +1865,15 @@ impl eframe::App for RetroForgeApp {
     // save as a second, real trigger.
 }
 
+/// Every heuristic subject to D-004's trust ladder, in one place.
+///
+/// A plain list rather than something derived: `rf_enhance::trust` is
+/// deliberately generic over heuristic *names* (W3-05c's brief: "design
+/// it as a general mechanism"), so the set of names that actually exist
+/// is the shell's knowledge, not the mechanism's. New heuristics —
+/// stitcher scene-cut, profile decoders — join by appearing here.
+pub(crate) const HEURISTICS: &[&str] = &["anti-flicker"];
+
 /// The two same-geometry renderings of one frame the compare view and the
 /// screenshot both work from (ticket W3-04).
 ///
@@ -1858,8 +1917,8 @@ mod compare_tests {
         // that the halves differ, and a test using one buffer twice would
         // pass on an implementation that wrote the same file twice.
         CompareBuffers {
-            original: vec![255, 0, 0, 255].repeat(4),
-            enhanced: vec![0, 0, 255, 255].repeat(4),
+            original: [255, 0, 0, 255].repeat(4),
+            enhanced: [0, 0, 255, 255].repeat(4),
             width: 2,
             height: 2,
         }
