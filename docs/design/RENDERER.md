@@ -125,6 +125,51 @@ blink. Original output also feeds the de-flicker debug diff view
 - Golden-frame CI taps the **post-palette 1× buffer** — deterministic,
   scale/shader-independent, byte-hashable.
 
+## 6a. Failure fallback (FR-REND-007, ticket W3-01a)
+
+`rf_renderer::fallback` implements "renderer failures shall fall back to
+the original pipeline, never abort emulation", and the design turns on one
+fact about wgpu: **validation errors are reported out-of-band.** A shader
+that fails to compile does not return `Err` from `create_shader_module` —
+it reaches the device's uncaptured-error handler, whose default behaviour
+is to panic the process. So `guarded()` wraps GPU work in a
+`wgpu::ErrorScope` and converts a captured validation error into an `Err`.
+Without that seam FR-REND-007 is unimplementable, because the failure it
+names never becomes a value you can branch on.
+
+Three outcomes, and each says what actually happened rather than
+collapsing to a boolean:
+
+| `RenderPath` | When | Frame drawn? |
+|---|---|---|
+| `Enhanced` | palette → scale → chain all ran | yes |
+| `OriginalFallback` | the shader chain failed | yes, unshaded |
+| `RecoveredOnOriginal` | the device was lost and **recreated** | yes, unshaded |
+| `Failed` | device lost and could not be recreated | no — caller keeps emulating |
+
+`FallbackRenderer` adds the two things a real caller needs: device
+**recreation** (loss is recoverable — driver reset, GPU switch, suspend —
+so "no picture, forever" would meet the letter of "never abort emulation"
+and none of its intent), and a **sticky shader-disable** (a chain that
+failed to compile will not start compiling; retrying it 60 times a second
+pays the failure cost forever).
+
+**On not hanging.** W3-01 stalled at a 600-second watchdog twice, both
+times here. This module awaits exactly one future, and it is already
+resolved when created — verified against the vendored wgpu 29.0.4 source,
+not assumed: `backend/wgpu_core.rs`'s `pop_error_scope` ends
+`Box::pin(ready(scope.error))`. `Device::set_device_lost_callback` is
+deliberately **not used anywhere in this crate**; it is the one API whose
+contract permits never firing.
+
+**On the tests being real.** Device loss is injected with
+`Device::destroy()`, and shader failure with WGSL that genuinely does not
+compile, fed through `try_enable_shader` — the same production path a
+user-selected shader (W3-02a) will arrive by. Nothing is compiled out and
+no GPU is stubbed: each test first asserts the *enhanced* path works on
+the same objects, so a fallback that was always taken would fail. Measured
+on Metal: fallback in ~50-120 µs against a 1-second budget.
+
 ## 7. Headless mode
 
 `rf-renderer` compiles without a window: device from any adapter (Metal on

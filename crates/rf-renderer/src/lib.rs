@@ -41,6 +41,7 @@
 //! into the one end-to-end call W3-01b recorded as not yet done.
 
 pub mod composite;
+pub mod fallback;
 pub mod frame;
 pub mod gpu;
 pub mod layers;
@@ -51,6 +52,7 @@ pub mod scale;
 pub mod shader_chain;
 
 pub use composite::{CompositeLayer, CompositeOutcome, EnhancedCompositor, TargetReduction};
+pub use fallback::{render_with_fallback, RenderOutcome, RenderPath, FALLBACK_BUDGET};
 pub use frame::FrameBuffer;
 pub use gpu::{GpuContext, GpuUnavailable};
 pub use layers::LayeredFrame;
