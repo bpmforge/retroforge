@@ -2641,7 +2641,7 @@
     "profile inspector panel: identity match status, capability checklist, override precedence (GAME_PROFILES.md section 4, FR-PROF-005)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E5-S3",
     "E5-S4"
