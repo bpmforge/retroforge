@@ -3360,6 +3360,9 @@ name = "retroforge-tool"
 version = "0.1.0"
 dependencies = [
  "rf-cart",
+ "rf-core-api",
+ "rf-debugger",
+ "rf-nes",
  "rf-profiles",
 ]
 

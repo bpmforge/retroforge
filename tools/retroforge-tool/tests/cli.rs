@@ -246,10 +246,28 @@ fn profile_hash_reports_no_match_and_exits_nonzero_for_the_wrong_rom() {
     assert!(stdout.contains("NO MATCH"), "{stdout}");
 }
 
+/// W4-02 reserved the `rom` group and this test asserted the placeholder
+/// message; ticket W4-07 implemented it, so what is worth asserting here
+/// is what the placeholder was standing in for — that `rom` still
+/// dispatches to its own group rather than being swallowed by `profile`,
+/// and that its subcommands are the four W4-07 shipped. The content of
+/// those subcommands is tested in `rom_cli.rs`.
 #[test]
-fn rom_group_is_reserved_and_does_not_collide_with_profile() {
+fn rom_group_dispatches_separately_from_profile() {
     let output = Command::new(bin()).args(["rom", "hash"]).output().unwrap();
-    assert!(!output.status.success());
+    assert!(!output.status.success(), "a missing path is an error");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("W4-07"), "{stderr}");
+    assert!(
+        stderr.contains("rom hash") && stderr.contains("<rom-path>"),
+        "the error must come from the rom group, not the profile group: {stderr}"
+    );
+
+    let usage = Command::new(bin()).output().unwrap();
+    let usage_text = String::from_utf8_lossy(&usage.stderr);
+    for sub in ["rom hash", "rom inspect", "rom dump", "rom trace"] {
+        assert!(
+            usage_text.contains(sub),
+            "usage must list `{sub}`: {usage_text}"
+        );
+    }
 }

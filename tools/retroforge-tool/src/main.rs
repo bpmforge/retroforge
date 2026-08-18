@@ -27,6 +27,8 @@
 
 use std::path::{Path, PathBuf};
 
+mod rom;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     std::process::exit(run(&args));
@@ -35,10 +37,7 @@ fn main() {
 fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("profile") => run_profile(&args[1..]),
-        Some("rom") => {
-            eprintln!("retroforge-tool rom: reserved for ticket W4-07, not implemented here");
-            2
-        }
+        Some("rom") => rom::run(&args[1..]),
         Some(other) => {
             eprintln!("retroforge-tool: unknown command group `{other}`");
             print_usage();
@@ -54,6 +53,12 @@ fn run(args: &[String]) -> i32 {
 fn print_usage() {
     eprintln!("usage: retroforge-tool <group> <subcommand> [args...]");
     eprintln!();
+    eprintln!("  rom hash <rom>                every hash, normalized + raw");
+    eprintln!("  rom inspect <rom>             parsed iNES header");
+    eprintln!("  rom dump <rom> [--frame N] [--out DIR]");
+    eprintln!("                                VRAM/OAM/palette + tilemap at frame N");
+    eprintln!("  rom trace <rom> [--instructions N] [--out FILE]");
+    eprintln!("                                nestest-format CPU trace");
     eprintln!("  profile validate <path>...   validate profile TOML file(s)/dir(s)");
     eprintln!("                                against schema v0");
     eprintln!("  profile hash <rom> <profile>  check a ROM's hash against a profile's");

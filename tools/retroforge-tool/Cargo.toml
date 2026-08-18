@@ -1,6 +1,6 @@
 [package]
 name = "retroforge-tool"
-description = "RetroForge developer CLI: profile validate/hash (ticket W4-02); rom group reserved for W4-07"
+description = "RetroForge developer CLI: profile validate/hash, rom hash/inspect/dump/trace"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,3 +12,11 @@ workspace = true
 [dependencies]
 rf-profiles = { path = "../../crates/rf-profiles" }
 rf-cart = { path = "../../crates/rf-cart" }
+# rf-nes: the `rom dump` and `rom trace` subcommands (ticket W4-07) run a
+# real headless machine — the same core the app runs, never a second
+# simplified one, or the tool would report on an emulator nobody ships.
+rf-nes = { path = "../../crates/rf-nes" }
+rf-core-api = { path = "../../crates/rf-core-api" }
+# rf-debugger: reuses the tilemap/nametable decode the debug viewers use
+# (W4-06a), so the CLI export and the on-screen viewer cannot disagree.
+rf-debugger = { path = "../../crates/rf-debugger" }
