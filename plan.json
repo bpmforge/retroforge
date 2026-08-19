@@ -3204,6 +3204,41 @@
    ]
   },
   {
+   "id": "W5-08",
+   "title": "MVP demo evidence: 5k-frame mode-invariant run + un-profiled scroller replay",
+   "phase": 5,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-harness/**",
+    "crates/rf-enhance/**",
+    "fixtures/**",
+    "docs/MVP.md"
+   ],
+   "depends_on": [
+    "W5-03",
+    "W5-02c"
+   ],
+   "acceptance": [
+    "Accuracy vs Enhanced: identical per-frame core state hashes over a scripted 5000-frame RF-Scroller run, gated in CI (MVP.md, boundary section)",
+    "an un-profiled scroller session is recorded as a checked-in .rfreplay and a test replays it, asserting the stitched canvas grows and scene identity stays stable (MVP.md's enhancement-demo section: 'recorded + reproducible via replay files in-repo')"
+   ],
+   "points": 5,
+   "status": "done",
+   "stories": [
+    "E1-S1",
+    "E5-S2"
+   ],
+   "notes": [
+    "CLOSED 2026-08-19, both criteria. docs/MVP.md is now 11 of 11 checked, zero unchecked.",
+    "5000-FRAME RUN: `crates/retroforge/tests/mode_invariant_5k.rs`, Right held throughout, both modes, every frame's core state hash compared and identical. Carries its own loop rather than joining `CORPUS` for two reasons stated in the file: `CORPUS` is a const of hermetic synthetic ROMs and RF-Scroller is gitignored build output, and `CORPUS`'s runner feeds `InputFrame::empty()` while an idle RF-Scroller never scrolls, never streams and never reaches the tail scenes.",
+    "ANTI-VACUITY for the 5k run, and it is the assertion that makes the number mean anything: two runs of a game that never did anything would also agree at every frame. The test asserts >100 DISTINCT video frames (observed: 312) and that the machine did not end in the state it started in. Without those, 5000 comparisons of one static screen would pass.",
+    "REPLAY: `fixtures/replays/unprofiled-scroller.rfreplay` (900 frames) is checked in, with the recording step as a SEPARATE `#[ignore]`d test — a test that rewrote a checked-in artefact on every `cargo test` would dirty the working tree on every run. The replaying test verifies the ROM hash first, so a fixture rebuild fails loudly instead of replaying stale inputs into a different game.",
+    "\"UN-PROFILED\" IS A PROPERTY OF THE SESSION, NOT THE ROM, and the test says so rather than letting a reader assume otherwise: the stitcher, fog and scene identity never consult a profile — that is what makes them the generic fallback — so RF-Scroller driven without loading its profile is a faithful un-profiled session. Alter Ego, which the MVP line names first, is fetch-only with no redistribution grant (W0-03), so no replay of it could be checked in and the \"in-repo\" half of the requirement could not be met with it at all.",
+    "Both gates are wired into CI as their own named steps and both FAIL rather than skip when the fixture is absent on CI."
+   ]
+  },
+  {
    "id": "W5-05",
    "title": "Release engineering v0: tagged 3-OS release + fixture archive",
    "phase": 5,

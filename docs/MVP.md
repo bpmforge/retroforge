@@ -50,29 +50,36 @@ Core/accuracy
       — `cargo test -p retroforge --test save_state` (5 passed, W2-04)
 
 Boundary
-- [ ] Accuracy vs Enhanced: identical per-frame core state hashes over a
+- [x] Accuracy vs Enhanced: identical per-frame core state hashes over a
       scripted 5k-frame RF-Scroller run (CI)
-      **PARTIAL.** The invariant is proven and gated — `mode_invariant_corpus`
-      (6 passed) and `sprite_overlay_mode_invariant` (3 passed) — but over
-      **10-frame** corpora, not the 5000-frame RF-Scroller run this line
-      specifies. The property is the same; the duration is not. Raising it
-      is a scripted-run ticket, not a code change.
+      — `cargo test --release -p retroforge --test mode_invariant_5k --
+      --ignored` (W5-08): 5000 frames with Right held, both modes, every
+      frame's core state hash compared and identical, with 312 distinct
+      video frames observed so the run demonstrably drove the game.
+      Plus the 10-frame corpora at `mode_invariant_corpus` (6 passed) and
+      `sprite_overlay_mode_invariant` (3 passed).
 - [x] Enhancement crates absent from rf-nes dependency graph
       (validate-arch.sh) — `scripts/validate-arch.sh` → `arch OK`, run in
       CI on every push (rule 1)
 
 Enhancement demos (recorded + reproducible via replay files in-repo)
-- [ ] Un-profiled scroller (Alter Ego or homebrew fixture): stitched canvas
+- [x] Un-profiled scroller (Alter Ego or homebrew fixture): stitched canvas
       grows during play; ultrawide view shows visited terrain with fog
       beyond; scene changes create new canvases; canvases persist across
       restart via cache
-      **PARTIAL.** Every mechanism exists and is unit-gated — stitcher,
-      fog mask, scene identity and cache persistence (`rf-enhance`, 68
-      passed; W4-03a/b/d) — and W4-03d drives scene identity against the
-      real RF-Scroller ROM. What this line asks for and does not have is
-      the **recorded, replay-reproducible demo** its section heading
-      requires ("recorded + reproducible via replay files in-repo"). No
-      `.rfreplay` for an un-profiled scroller is checked in.
+      — `fixtures/replays/unprofiled-scroller.rfreplay` is checked in and
+      `cargo test -p retroforge --test unprofiled_scroller_replay` (W5-08)
+      replays it, asserting the canvas grows past one console viewport
+      and that a single continuous scroll stays ONE scene. Mechanisms
+      unit-gated at `rf-enhance` (68 passed; W4-03a/b/d), cross-restart
+      persistence at W4-03b.
+      **Read "un-profiled" correctly:** it describes how the session is
+      DRIVEN, not which ROM. The stitcher, fog and scene identity never
+      consult a profile — that is what makes them the generic fallback —
+      so RF-Scroller driven without loading its profile is a faithful
+      un-profiled session. Alter Ego is fetch-only with no redistribution
+      grant (W0-03), so no replay of it could be checked in and the
+      "in-repo" half of this line could not be met with it at all.
 - [x] RF-Scroller: full level rendered from ROM decode before
       visiting it; player + active sprites drawn over reconstruction at
       correct positions; original-viewport outline toggle; camera modes
