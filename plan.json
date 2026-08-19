@@ -3022,7 +3022,12 @@
     "pure function of ROM bytes (offline test, no emulation needed)"
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
+   "notes": [
+    "NOVA THE SQUIRREL NOT DELIVERED, and the reason is a blocker rather than a choice (2026-08-18). `profiles/nes/nova-the-squirrel/**` is in this ticket's write_scope but appears in NEITHER acceptance criterion; both criteria are about the decoder family. The profile could not be written honestly: Nova has no entry in `tests/rom-manifest.toml` and no build recipe in this repo, so there is no ROM to hash, and `[[identity]]` would have had to carry invented numbers — the exact false-provenance W4-02 refused when it shipped its demo profile with an all-zero placeholder and said so.",
+    "TO UNBLOCK NOVA someone must first add it as a fetchable or buildable artifact. It is GPLv3 source (github.com/NovaSquirrel/NovaTheSquirrel, docs/research/accuracy-and-testing.md:121), so the realistic path is a `[[git_artifact]]` pinned-commit checkout plus a build step, the same shape `fixtures/nes/rf-scroller` already uses. That touches `tests/rom-manifest.toml` and `scripts/**`, both outside this ticket's write_scope.",
+    "WHY NOVA MATTERS BEYOND ONE MORE PROFILE: GAME_PROFILES.md section 2 says families are added when >= 2 games need the same shape, and `metatile_screens` currently has exactly one subject. Its generality is asserted by the spec, not demonstrated by two games — the decoder's own module doc says so. Nova was to be the second subject, and until there is one, the `rom_map` label contract (`level_column_offset`/`level_rle_data`) is a convention that has never been tested against a codebase that did not invent it."
+   ],
    "stories": [
     "E6-S1"
    ]

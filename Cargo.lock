@@ -3458,6 +3458,7 @@ version = "0.1.0"
 dependencies = [
  "rf-cache",
  "rf-core-api",
+ "rf-profiles",
 ]
 
 [[package]]

@@ -12,3 +12,8 @@ workspace = true
 [dependencies]
 rf-core-api = { path = "../rf-core-api" }
 rf-cache = { path = "../rf-cache" }
+# rf-profiles: ticket W5-02a's decoder family is "driven by profile data"
+# (FR-ENH-005), so it reads `[decode]` and `[[rom_map]]` straight off a
+# loaded `Profile`. ARCHITECTURE.md §3's graph has this edge explicitly
+# (`ENH --> PRO`); it is not a new boundary.
+rf-profiles = { path = "../rf-profiles" }
