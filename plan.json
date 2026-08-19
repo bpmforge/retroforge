@@ -2999,7 +2999,7 @@
     "validates with retroforge-tool"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E6-S1",
     "E6-S3"
