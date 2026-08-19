@@ -3051,8 +3051,11 @@
     "decode matches in-game appearance EXACTLY: the expanded tile grid equals the nametable bytes the ROM itself streams into VRAM, byte for byte, over the whole level"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-08-18 WITH THE STREAMED TAIL FORMALLY WAIVED, on Brad's ruling. 64 of 64 preload columns verify byte-exact against the running game; 15 of the 32 streamed columns do not. The whole-level assertion ships as an `#[ignore]`d test rather than being weakened to \"at least 81 columns\" — a threshold set to whatever currently passes is fitting the target to the arrow. That test coming off `#[ignore]` is W5-02c's acceptance and the reopening trigger for this one.",
+    "THE WAIVER IS SAFE FOR W5-03 because the decoder is validated on the path where VRAM is observable at all: `init_video()` fills raw columns 0-63 and then nothing streams until the camera moves, so that snapshot is of a quiescent machine — no tearing, no recycled slots. The unverified columns are a property of WHEN VRAM can be read, plus a suspected fixture defect (W5-02c), not of the decoder, which W5-02a verified against an independent hand walk of the raw RLE bytes for all 48 metatile columns.",
+    
     "AMENDED 2026-08-18 ON BRAD'S RULING, two changes, both forced by the fixture rather than chosen. (1) \"at least 3 RF-Scroller levels\" is not satisfiable: RF-Scroller has exactly ONE level and ONE area — FORMAT.md's palette section says so in as many words (\"exactly one area, so this is the degenerate (area-count = 1) case\"). Three slices of one 48-column grid decoded by the same code path would prove nothing three times. The real second and third subjects were to be Nova the Squirrel, which W5-02a established is blocked upstream.",
     "(2) \"golden screenshots\" is replaced by an EXACT decode-vs-VRAM comparison, and that is a strengthening, not a relaxation: two renderings can agree while both misread the ROM, whereas the nametable bytes the game itself streams are the ground truth for \"in-game appearance\".",
     "SCOPE AMENDED (vetoable, recorded): `crates/rf-harness/**` added. Not optional — `scripts/validate-arch.sh` rule 3 exempts only retroforge/rf-harness/rf-nes/rf-snes from the no-direct-core-dependency law, so rf-enhance can never run a core and the comparison cannot live in the crate the decoder lives in.",
@@ -3062,6 +3065,40 @@
    ],
    "stories": [
     "E6-S1"
+   ]
+  },
+  {
+   "id": "W5-02c",
+   "title": "RF-Scroller tail-frame streaming corruption (fixture)",
+   "phase": 5,
+   "crate": "fixtures",
+   "write_scope": [
+    "fixtures/nes/rf-scroller/**",
+    "profiles/nes/rf-scroller/**",
+    "crates/rf-harness/**"
+   ],
+   "depends_on": [
+    "W5-02b"
+   ],
+   "acceptance": [
+    "root cause identified and recorded in FORMAT.md (not guessed: cite the measurement)",
+    "fixed in the fixture; the ROM still builds deterministically and rom.sha256 is re-pinned",
+    "profiles/nes/rf-scroller/profile.toml's [[identity]] re-pinned to the new normalized hashes",
+    "rf-harness's `the_offline_decode_equals_what_the_rom_streams_across_the_whole_level` comes off #[ignore] and passes 96/96"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E6-S1"
+   ],
+   "notes": [
+    "FILED 2026-08-18 BY W5-02b. The offline decoder and the running fixture disagree on 15 of 96 raw tile columns. Six (raw 64, 78-82) are byte-identical to the occupant they replace, so the frame their write lands is unobservable by any VRAM-sampling method — those are almost certainly correct and may simply need a different witness. NINE are the real finding: raw 86 and 88-95, i.e. metatile columns 43-47, which include W2-10a's ladder columns.",
+    "EVIDENCE ALREADY GATHERED, so nobody re-derives it. The wrong tiles are ISOLATED, not a truncated tail: raw 86 has 1 wrong tile row of 28; raw 88/89 have rows 18, 19, 24; raw 90 has 16, 18, 19, 24; raw 92-95 have 18, 19. Correct tiles sit on both sides of the wrong ones.",
+    "THAT RULES OUT THE TWO OBVIOUS CAUSES. A DROPPED PPU write cannot do this: `stream_chunk` sets PPU_ADDR once and relies on PPUCTRL's +32 auto-increment, so one lost write shifts every subsequent row and would corrupt ~20 rows, not 2. A PARTIAL write would corrupt a contiguous tail. Isolated single tiles with correct neighbours mean writes landing at the WRONG ADDRESS. Also ruled out: settling (BLIT_SETTLE at 3, 8 and 20 frames gives exactly 15 every time) and the decoder itself (W5-02a verified it against a hand walk of the raw RLE bytes for all 48 columns).",
+    "LEADING HYPOTHESIS, and it has direct precedent in this fixture's own history: streaming writes escaping vblank on TAIL frames. FORMAT.md's 'W2-10a red-fixture scenes' section records the same class of bug already found and fixed once — the gem/blink/vertical-area update block's cost pushed OAM DMA late enough to straddle the PPU's dots 257-320 window, a genuine hardware-accurate corruption mode rather than an rf-nes bug. That block still runs on tail frames, and the affected columns are exactly the ones streamed once the tail gate (columns_streamed >= TAIL_GATE_COL) opened it. Second hypothesis: the mid-frame split's $2005/$2006 writes colliding with an in-flight chunk. Third and least likely: `stream_chunk`'s incremental RLE cursor desyncing — ruled unlikely because raw 88's tile row 24 is wrong while row 25 is RIGHT, and both come from the same `mt[]` entry, which a cursor bug cannot produce.",
+    "HOW TO CONFIRM CHEAPLY: W4-10a's trace rings already capture PPU register writes with frame position. Trace the streaming path's $2007 writes on tail frames and check whether the bad tiles correlate with writes issued at scanline >= 0 (i.e. outside vblank), or with a split write interleaved between a chunk's first and last $2007.",
+    "THIS MAY BE A CORRECTNESS SUCCESS, NOT A BUG TO PAPER OVER. If the emulator is faithfully reproducing a real hardware corruption mode the fixture is vulnerable to — exactly as it did for the DMA case W2-10a fixed — then the fix belongs in the ROM and 'the emulator found a bug in our test ROM' is the finding worth recording. Do NOT 'fix' rf-nes to make this go away without evidence that rf-nes is wrong.",
+    "CHAIN THIS TRIGGERS: fixing the ROM changes rom.sha256, which invalidates profiles/nes/rf-scroller/profile.toml's [[identity]]. W5-02b's identity-drift gate will catch that immediately — that is what it is for — so budget the profile re-pin as part of this ticket rather than as a surprise. Both paths are in this ticket's write_scope."
    ]
   },
   {
@@ -3099,10 +3136,7 @@
    ],
    "depends_on": [
     "W5-03",
-    "W2-04",
-    "W4-04",
-    "W4-05",
-    "W3-06"
+    "W5-02c"
    ],
    "acceptance": [
     "every checkbox in docs/MVP.md checked with evidence links (CI runs, screenshots)",
