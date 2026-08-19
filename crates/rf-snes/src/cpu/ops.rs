@@ -17,10 +17,10 @@
 //! jumps and subroutine calls, flag ops, `XCE`, `REP`/`SEP`, `XBA`,
 //! `NOP`, block moves.
 //!
-//! Deliberately absent, returning `Err(opcode)` rather than a silent
-//! no-op: `BRK`, `COP`, `RTI`, `WAI`, `STP` — every one of them is about
-//! interrupts or vectors, which are **W6-01b**. A core that pretended to
-//! execute them would hand the next ticket something that looks finished.
+//! `BRK`, `COP`, `RTI`, `WAI` and `STP` were held back from W6-01a
+//! deliberately — returning `Err(opcode)` rather than no-opping, so the
+//! gap could not be mistaken for completeness — and land here in W6-01b
+//! along with the memory-speed model in [`super::speed`].
 
 use super::addressing as am;
 use super::{flags, Cpu, CpuBus};
@@ -866,6 +866,91 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) -> Result<(), u8
         0x42 => {
             let _ = cpu.fetch8(bus);
         }
+        // ---- interrupts and halts (W6-01b) -----------------------------
+        //
+        // `BRK` and `COP` differ only in which vector they take, so they
+        // share one path. Three things about them are easy to get wrong
+        // and are each verified against the vectors below:
+        //
+        // 1. **Both consume a signature byte.** `BRK` is a two-byte
+        //    instruction even though the second byte is discarded, and the
+        //    pushed PC points PAST it.
+        // 2. **Emulation mode pushes three bytes, native pushes four.**
+        //    Native pushes `PBR` first and clears it; emulation has no
+        //    `PBR` to push. (`00.e` shows exactly 3 writes, `00.n` shows 4.)
+        // 3. **The stack wraps in page 1.** These are 6502-era
+        //    instructions, so they use the wrapping helpers, not the flat
+        //    ones the new 65816 stack ops need. `02.e` proves it: a push
+        //    at `$0100` is followed by one at `$01FF`.
+        //
+        // The pushed `P` goes out unmodified. In emulation mode the `B`
+        // bit shares `X`'s position and `X` is already forced set, so
+        // there is nothing to set; in native mode `X` is the index-width
+        // flag and forcing it would corrupt the state `RTI` restores.
+        0x00 | 0x02 => {
+            let _signature = cpu.fetch8(bus);
+            if !cpu.e {
+                cpu.push8(bus, cpu.pbr);
+            }
+            cpu.push16(bus, cpu.pc);
+            cpu.push8(bus, cpu.p);
+            cpu.set_flag(flags::I, true);
+            cpu.set_flag(flags::D, false);
+            cpu.pbr = 0;
+            let vector: u16 = match (opcode, cpu.e) {
+                (0x00, true) => 0xFFFE,
+                (0x00, false) => 0xFFE6,
+                (_, true) => 0xFFF4,
+                (_, false) => 0xFFE4,
+            };
+            cpu.pc = am::read_pointer16(bus, am::Addr::from(vector));
+        }
+        // RTI pulls P, then PC, then — in native mode only — PBR.
+        //
+        // Unlike RTS it does NOT add one to the pulled address: the
+        // interrupt sequence pushed the address to resume AT, not the one
+        // before it.
+        0x40 => {
+            cpu.p = cpu.pull8(bus);
+            if cpu.e {
+                // M and X are not restorable in emulation mode; the pulled
+                // byte's bits in those positions are the 6502's B and
+                // unused flags. Forcing them keeps the register file in a
+                // state the chip can actually be in.
+                cpu.p |= flags::M | flags::X;
+            } else if cpu.p & flags::X != 0 {
+                // A pulled X flag narrows the index registers, and that
+                // truncation is immediate — same rule as SEP.
+                cpu.x &= 0xFF;
+                cpu.y &= 0xFF;
+            }
+            cpu.pc = cpu.pull16(bus);
+            if !cpu.e {
+                cpu.pbr = cpu.pull8(bus);
+            }
+        }
+        // WAI waits for an interrupt, STP halts until reset. Both are one
+        // byte and both leave PC after themselves; what distinguishes them
+        // is what wakes them, which is the scheduler's business rather
+        // than the CPU's. `stopped` is the CPU's half of that contract.
+        0xCB | 0xDB => cpu.stopped = true,
+        // UNREACHABLE AS OF W6-01b, and deliberately kept.
+        //
+        // All 256 opcodes are implemented, so clippy is right that no
+        // value reaches this arm — hence the allow. It stays for two
+        // reasons that outlive its current deadness:
+        //
+        // 1. A `match` on `u8` must be exhaustive, so any future refactor
+        //    that drops an opcode arm has to reinstate a catch-all. This
+        //    one already exists, already returns the opcode, and already
+        //    reports rather than silently no-ops — which is the behaviour
+        //    W6-01a went out of its way to guarantee.
+        // 2. The vector suite DISCOVERS coverage from it: an opcode whose
+        //    every case fails with `unimplemented opcode` is counted as a
+        //    gap rather than a failure. Removing the Err path would not
+        //    just delete a dead branch, it would delete that mechanism
+        //    and make the coverage line unconditionally "256 of 256".
+        #[allow(unreachable_patterns)]
         _ => return Err(opcode),
     }
     Ok(())

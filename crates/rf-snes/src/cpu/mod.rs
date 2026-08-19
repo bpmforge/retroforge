@@ -35,8 +35,10 @@
 pub mod addressing;
 pub mod bus;
 pub mod ops;
+pub mod speed;
 
 pub use bus::{Access, CpuBus, FlatBus};
+pub use speed::{access_cycles, AccessCost};
 
 /// Status register bits.
 ///

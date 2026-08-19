@@ -17,6 +17,7 @@
 //!
 //! When a vector fails later, one of these will usually say why.
 
+mod speed;
 mod vectors;
 
 use super::bus::FlatBus;
@@ -411,23 +412,119 @@ fn sixteen_bit_stores_write_both_bytes_low_first() {
 }
 
 // ---------------------------------------------------------------------
-// Scope boundary
+// Interrupts and halts (W6-01b)
 // ---------------------------------------------------------------------
 
-/// Interrupt and vector opcodes belong to W6-01b and must REFUSE rather
-/// than silently doing nothing — a core that no-opped them would hand the
-/// next ticket something that looks finished.
+/// The inverse of the W6-01a test that used to stand here.
+///
+/// That test asserted these five opcodes REFUSED, pinning the scope
+/// boundary so the gap could not be mistaken for completeness. W6-01b
+/// implements them, so it failed — which is the pin working, not
+/// breaking. It is replaced rather than deleted: the same five opcodes
+/// are still worth naming, now from the other side.
 #[test]
-fn interrupt_opcodes_are_refused_not_silently_skipped() {
+fn the_interrupt_and_halt_opcodes_are_implemented() {
     for opcode in [0x00u8, 0x02, 0x40, 0xCB, 0xDB] {
         let mut cpu = native16();
         let mut bus = FlatBus::new();
         bus.load(0, &[opcode]);
         assert_eq!(
             cpu.step(&mut bus),
-            Err(opcode),
-            "{opcode:#04X} is W6-01b's and must report itself unimplemented"
+            Ok(()),
+            "{opcode:#04X} landed in W6-01b and must execute"
         );
+    }
+}
+
+/// `BRK` and `COP` take DIFFERENT vectors, and each takes a different one
+/// per mode — four distinct addresses that are easy to transpose.
+///
+/// The vectors cover this exhaustively; this test exists so that when
+/// they fail, something says which of the four is wrong.
+#[test]
+fn brk_and_cop_take_the_right_vector_for_the_mode() {
+    for (opcode, emulation, vector, name) in [
+        (0x00u8, true, 0xFFFEu32, "BRK emulation"),
+        (0x00, false, 0xFFE6, "BRK native"),
+        (0x02, true, 0xFFF4, "COP emulation"),
+        (0x02, false, 0xFFE4, "COP native"),
+    ] {
+        let mut cpu = Cpu::new();
+        cpu.set_emulation(emulation);
+        cpu.pc = 0x1000;
+        let mut bus = FlatBus::new();
+        bus.load(0x1000, &[opcode, 0x00]);
+        // A recognisable target, so a wrong vector cannot coincidentally
+        // read the zeros everywhere else.
+        bus.mem[vector as usize] = 0xCD;
+        bus.mem[vector as usize + 1] = 0xAB;
+
+        cpu.step(&mut bus).expect("implemented");
+        assert_eq!(cpu.pc, 0xABCD, "{name} should vector through {vector:#06X}");
+        assert_eq!(cpu.pbr, 0, "{name} must clear the program bank");
+        assert!(cpu.flag(flags::I), "{name} must set I");
+        assert!(!cpu.flag(flags::D), "{name} must clear D");
+    }
+}
+
+/// Emulation mode pushes three bytes, native pushes four.
+///
+/// The extra byte is `PBR`, and getting it wrong leaves the stack
+/// misaligned so that `RTI` returns somewhere plausible but wrong — the
+/// kind of bug that surfaces a long way from its cause.
+#[test]
+fn brk_pushes_the_program_bank_only_in_native_mode() {
+    for (emulation, want) in [(true, 3usize), (false, 4usize)] {
+        let mut cpu = Cpu::new();
+        cpu.set_emulation(emulation);
+        cpu.pc = 0x1000;
+        let mut bus = FlatBus::new();
+        bus.load(0x1000, &[0x00, 0x00]);
+        cpu.step(&mut bus).expect("implemented");
+        assert_eq!(
+            bus.writes().len(),
+            want,
+            "BRK in {} mode should push {want} bytes",
+            if emulation { "emulation" } else { "native" }
+        );
+    }
+}
+
+/// `RTI` resumes AT the pulled address — unlike `RTS`, which adds one.
+///
+/// The two are otherwise so similar that sharing the return path is the
+/// obvious refactor, and it would be wrong by exactly one byte.
+#[test]
+fn rti_does_not_add_one_to_the_pulled_address() {
+    let mut cpu = native16();
+    cpu.sp = 0x01F0;
+    let mut bus = FlatBus::new();
+    bus.load(0, &[0x40]);
+    // Pull order: P, PCL, PCH, PBR.
+    bus.mem[0x01F1] = 0x00;
+    bus.mem[0x01F2] = 0x34;
+    bus.mem[0x01F3] = 0x12;
+    bus.mem[0x01F4] = 0x7E;
+    cpu.step(&mut bus).expect("implemented");
+    assert_eq!(cpu.pc, 0x1234, "RTI returns to the pushed address exactly");
+    assert_eq!(cpu.pbr, 0x7E, "native RTI restores the program bank");
+}
+
+/// `WAI` and `STP` both stop the CPU; what restarts them is the
+/// scheduler's business, not this module's.
+#[test]
+fn wai_and_stp_stop_the_cpu_and_a_stopped_cpu_stays_put() {
+    for opcode in [0xCBu8, 0xDB] {
+        let mut cpu = native16();
+        let mut bus = FlatBus::new();
+        bus.load(0, &[opcode, 0xA9, 0x42]);
+        cpu.step(&mut bus).expect("implemented");
+        assert!(cpu.stopped, "{opcode:#04X} must stop the CPU");
+        let pc = cpu.pc;
+        cpu.step(&mut bus)
+            .expect("a stopped CPU steps without error");
+        assert_eq!(cpu.pc, pc, "a stopped CPU must not execute the next opcode");
+        assert_eq!(cpu.a & 0xFF, 0, "...and must not have run the LDA after it");
     }
 }
 

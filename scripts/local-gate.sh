@@ -65,9 +65,13 @@ if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
   exit 1
 fi
 
-# 65816 SingleStepTests vectors (ticket W6-01a): 278 per-opcode files —
-# all 139 opcodes crates/rf-snes/src/cpu/ops.rs implements, in BOTH emulation
-# (`.e`) and native (`.n`) mode — at ~10,000 cases each. Local-only and
+# 65816 SingleStepTests vectors (tickets W6-01a, W6-01b): 512 per-opcode files —
+# ALL 256 opcodes, in BOTH emulation
+# (`.e`) and native (`.n`) mode, at ~10,000 cases each. The list is
+# deliberately NOT derived from the implementation — coverage is a number
+# the suite discovers and prints (254 of 256 as of W6-01b), which is how
+# it caught a wholly broken addressing-mode table that an ops.rs-derived
+# list had hidden behind an all-green run. Local-only and
 # release-only for the same reason nes6502 is: too expensive per CI run,
 # and NFR-006 keeps vector data off CI entirely.
 #

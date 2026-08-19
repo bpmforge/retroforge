@@ -3380,8 +3380,9 @@
    "phase": 6,
    "crate": "rf-snes",
    "write_scope": [
-    "crates/rf-snes/src/cpu/**"
-   ],
+      "crates/rf-snes/src/cpu/**",
+      "scripts/local-gate.sh"
+    ],
    "depends_on": [
     "W6-01a"
    ],
@@ -3389,8 +3390,16 @@
     "65816 vectors 100% incl. emulation-mode quirks",
     "bus access costs in master cycles by region per EMULATION_CORES.md section 3.1"
    ],
+    "notes": [
+      "CLOSED 2026-08-19: both criteria met. (1) VECTORS 100% — 5,080,000 of 5,080,000 cases, 254 of 256 opcodes, both modes, ZERO unimplemented. BRK, COP, RTI, WAI and STP (held back by W6-01a so the gap could not read as completeness) all landed and passed on the first run. The 65816 instruction set is now complete: the catch-all Err(opcode) arm in ops.rs is unreachable, and is kept only because a u8 match must stay exhaustive and because the vector suite discovers coverage from it. (2) MASTER-CYCLE MODEL — crates/rf-snes/src/cpu/speed.rs gives the 6/8/12 cost by region per EMULATION_CORES.md 3.1, with FastROM as a pure argument (the $420D register is W6-02a's).",
+      "SCOPE WIDENED to scripts/local-gate.sh, recorded rather than taken silently: this ticket's own work made that script's comments false (it said '278 per-opcode files' and 'all 139 opcodes'; both are now 512 and 256). A comment that misdescribes the gate is worse than no comment, and the fix is one this ticket caused.",
+      "VERIFICATION WORTH REUSING. speed.rs's region table is checked against the compact bit-trick form bsnes/higan uses, on ALL 16,777,216 addresses in both FastROM states. Two implementations written from different descriptions of the same hardware agreeing everywhere is much harder to achieve by accident than agreeing on the dozen boundaries a hand-written test would think to check. Mutation-checked: widening the joypad window by 512 bytes fails 7 assertions. A separate test asserts 12 cycles occurs ONLY in $4000-$41FF, globally, because that is the row most likely to be widened by mistake.",
+      "THE MODEL IS WIRED, NOT JUST DEFINED. AccessCost wraps a CpuBus and tallies master cycles, so the cost function is exercised by real instructions rather than sitting as a pure function nothing calls (a cost function nobody calls is indistinguishable from a wrong one). peek is deliberately NOT charged — it is the debugger's side-effect-free read, and charging it would let opening a memory viewer change the machine's timing.",
+      "HONEST GAP, DEFERRED TO W6-02a AND RECORDED THERE. The vectors' per-cycle bus traces are still parsed past rather than asserted on, and the promise in vectors.rs that W6-01b would change that is WITHDRAWN in the file itself rather than left to rot. The reason is a real distinction: this ticket delivers the COST of an access; replaying a cycle sequence needs a cycle-accurate executor that also models internal no-access cycles, which every opcode has. Note too that those traces are CPU cycles and bus accesses, so they would verify the access SEQUENCE and say nothing about the 6/8/12 mapping — separate oracles, and speed.rs has its own.",
+      "$44/$54 REMAIN EXCLUDED, with the reason now measured rather than inferred: SingleStepTests hard-caps each case at 100 cycles (9,999 of 10,000 cases in 54.n are exactly 100; the remaining one is 98), and a block move runs past that, so every case is captured mid-iteration. Matching them needs an executor that can stop PART-WAY THROUGH an instruction and resume — a different capability from a cost table. A GATE BUG WAS FIXED HERE TOO: excluded opcodes used to be skipped BEFORE being run, so implementing BRK would have shipped it untested against 20,000 available cases while the suite printed green. Excluded opcodes are now run and reported, just not gating, and an assertion fails if every excluded case starts passing — an obsolete exclusion is a false claim about what the suite cannot evaluate."
+    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E8-S1"
    ]
@@ -3415,8 +3424,9 @@
     "OWED BY W6-06 (2026-08-19): the LoROM/HiROM mirror-map fixtures EXIST, build deterministically in CI and write a golden RAM result block at $7E:0000 — but nothing runs them, because `rf-snes` is a 15-line stub. Reading that block is this ticket's, and it is the cheapest possible first proof that the bus maps correctly: boot each image, run to the loop, read $7E:0000, assert magic 'RF' then checks-run == checks-passed == 4. The protocol is documented in fixtures/snes/mirror-map/FORMAT.md and pinned by a test so it cannot drift.",
     "The magic is written LAST by the ROM on purpose: finding it present certifies the counts beneath it came from a run that reached the end, rather than from uninitialised WRAM that happened to look plausible. Check it before trusting the counts.",
     
-    "REFINED AT PHASE ENTRY BY W6-00 (2026-08-19). Right-sized at 8 points. Note the ordering dependency this creates for fixtures: W6-05 (RF-Scroller-S) depends on this ticket, because a fixture ROM is only useful once the bus can map and boot it \u2014 but W6-06 (the libSFX toolchain) deliberately depends on NOTHING and can be done first, since building a ROM does not require being able to run it."
-   ],
+    "REFINED AT PHASE ENTRY BY W6-00 (2026-08-19). Right-sized at 8 points. Note the ordering dependency this creates for fixtures: W6-05 (RF-Scroller-S) depends on this ticket, because a fixture ROM is only useful once the bus can map and boot it \u2014 but W6-06 (the libSFX toolchain) deliberately depends on NOTHING and can be done first, since building a ROM does not require being able to run it.",
+    "INHERITED FROM W6-01b: the SingleStepTests 65816 vectors carry a per-cycle bus trace (each entry an address, a value, and flags; internal cycles appear with no value) that the W6-01a/b runner parses past without asserting on. Comparing it would verify the ACCESS SEQUENCE of every instruction — a far stronger oracle than final-state matching, and it is already fetched and sitting in roms/snes/singlestep-65816/. It needs a cycle-accurate executor that models internal no-access cycles, which is why it is here and not in W6-01b: cycle-level behaviour only becomes observable once there is a bus to observe it on. Two things it would unlock: the $44/$54 block-move vectors currently EXCLUDED (they are hard-capped at 100 cycles and always truncated mid-iteration, so they need an executor that can stop inside an instruction), and a real check on rf-snes cycle counts. Note the trace is CPU cycles and bus accesses — it does NOT validate the 6/8/12 master-cycle mapping, which has its own tests in crates/rf-snes/src/cpu/speed.rs."
+  ],
    "points": 8,
    "status": "todo",
    "stories": [

@@ -33,6 +33,22 @@
 //! Stated rather than left implicit, because "vectors pass" reads as
 //! stronger than it is if nobody says which half passed.
 //!
+//! **W6-01b did not change this, and the earlier promise here that it
+//! would is withdrawn.** That ticket added the memory-speed model
+//! ([`super::super::speed`]), which gives the master-cycle COST of an
+//! access — a different thing from the ability to replay a cycle
+//! sequence. Comparing the traces needs a cycle-accurate executor that
+//! models internal (no-access) cycles too; the vector files show those as
+//! entries with no value, and every opcode has some. That work belongs
+//! with the bus and interrupt-timing tickets (W6-02a/W6-02b), where
+//! cycle-level behaviour is actually observable, and it is recorded on
+//! W6-02a rather than left as an aspiration in a doc comment.
+//!
+//! Note also what the traces would and would not prove: they are CPU
+//! cycles and bus ACCESSES, so they verify the access *sequence* and say
+//! nothing about the 6/8/12 master-cycle mapping. Those are separate
+//! oracles, and `speed.rs` has its own.
+//!
 //! ## Running them
 //!
 //! Local only — CI has no ROMs and never fetches vectors (NFR-006), the
@@ -380,21 +396,20 @@ fn run_file(path: &std::path::Path) -> (usize, usize, Vec<String>, bool) {
 /// second kind and names the ticket that will remove it.
 const EXCLUDED: &[(u8, &str)] = &[
     (
-        0x00,
-        "BRK: interrupt dispatch is W6-01b, not this ticket. `step` returns Err(opcode) rather \
-         than guessing at a vector fetch it does not implement (see the cpu module doc).",
-    ),
-    (
         0x44,
         "MVP: cycle-truncated mid-instruction, exactly as $54 — see there.",
     ),
     (
         0x54,
-        "MVN: SingleStepTests caps each case at a fixed cycle count and a block move runs past \
-         it. Verified on `54 e 1`: 100 cycles is 14 complete 7-cycle iterations plus 2 cycles \
-         of a 15th, leaving final PC two bytes into the operand and A/X/Y mid-move. No runner \
-         that steps whole instructions can reproduce a state captured 2 cycles into one; that \
-         needs the master-cycle model, which is W6-01b.",
+        "MVN: SingleStepTests hard-caps each case at 100 cycles (measured: 9,999 of 10,000 \
+         cases in 54.n are exactly 100, the remaining one is 98) and a block move runs past \
+         that, so every case's final state is captured MID-ITERATION — verified on `54 e 1`, \
+         where 100 cycles is 14 complete 7-cycle iterations plus 2 cycles of a 15th, leaving \
+         PC two bytes into the operand and A/X/Y mid-move. Matching this needs an executor \
+         that can stop PART-WAY THROUGH an instruction and resume, which is a different \
+         capability from either of this ticket's criteria: the master-cycle model in \
+         `super::speed` gives the COST of a cycle, not the ability to be interrupted inside \
+         one. Recorded here rather than silently carried; see the W6-01b close note.",
     ),
 ];
 
@@ -433,6 +448,7 @@ fn singlestep_65816_vectors() {
     let mut unimplemented = std::collections::BTreeSet::new();
     let mut covered = std::collections::BTreeSet::new();
     let mut excluded_files = 0usize;
+    let (mut excluded_pass, mut excluded_fail) = (0usize, 0usize);
 
     for path in &files {
         let stem = path
@@ -449,7 +465,19 @@ fn singlestep_65816_vectors() {
             modes.insert(mode.to_string());
         }
         if EXCLUDED.iter().any(|(op, _)| *op == opcode) {
+            // Excluded opcodes are still RUN, and their result is still
+            // reported — they simply do not gate.
+            //
+            // The first version of this `continue`d before `run_file`,
+            // which was a trap: an opcode implemented later would go on
+            // being skipped by name, and the suite would print green
+            // while 20,000 available cases went untouched. Skipping by
+            // OUTCOME rather than by identity means an exclusion that has
+            // become obsolete announces itself.
+            let (pass, fail, _, _) = run_file(path);
             excluded_files += 1;
+            excluded_pass += pass;
+            excluded_fail += fail;
             continue;
         }
 
@@ -502,21 +530,32 @@ fn singlestep_65816_vectors() {
             unimpl_list.join(" ")
         }
     );
+    eprintln!(
+        "  excluded (run and reported, but not gating): {excluded_pass} passed, \
+         {excluded_fail} failed across {excluded_files} files"
+    );
     for (op, why) in EXCLUDED {
         eprintln!("  excluded ${op:02X}: {why}");
     }
+    assert!(
+        excluded_pass == 0 || excluded_fail > 0,
+        "every excluded case now PASSES ({excluded_pass} of {}) — the exclusion is obsolete \
+         and should be deleted rather than left standing as a false claim about what this \
+         suite cannot evaluate",
+        excluded_pass + excluded_fail
+    );
 
     // The unimplemented set is PINNED, not merely reported. Printing it
     // tells a reader what the gap is; asserting it means the gap cannot
     // quietly widen — deleting an opcode's implementation would otherwise
     // just make this suite print a slightly longer line and still pass.
     //
-    // All four are interrupt-coupled and belong to W6-01b with $00:
-    //   $02 COP — software interrupt, same vector machinery as BRK
-    //   $40 RTI — returns from one
-    //   $CB WAI — waits for one
-    //   $DB STP — halts until reset, the degenerate case of the same
-    const EXPECTED_UNIMPLEMENTED: &[u8] = &[0x02, 0x40, 0xCB, 0xDB];
+
+    // Empty as of W6-01b: $00 BRK, $02 COP, $40 RTI, $CB WAI and $DB STP
+    // all landed here. The assertion stays — an EMPTY expected set is the
+    // strongest form of this check, because any regression at all breaks
+    // it.
+    const EXPECTED_UNIMPLEMENTED: &[u8] = &[];
     let actual: Vec<u8> = unimplemented.iter().copied().collect();
     assert_eq!(
         actual, EXPECTED_UNIMPLEMENTED,
