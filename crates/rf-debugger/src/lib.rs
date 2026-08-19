@@ -58,6 +58,7 @@ pub mod oam;
 pub mod palette;
 pub mod pattern;
 pub mod profile_export;
+pub mod trace;
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-debugger";

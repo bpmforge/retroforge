@@ -2936,7 +2936,7 @@
     "CI bench: Accuracy frame time with debugger idle == compiled-out within noise (DEBUGGER.md section 6)"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E3-S1",
     "E3-S2"

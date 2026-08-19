@@ -261,6 +261,11 @@ pub struct RetroForgeApp {
     /// re-sends the command when `debug_panels.wants_event_subscription()`
     /// actually *changes* rather than every single repaint.
     event_subscription_active: bool,
+    /// Ticket W4-10a: the UI-thread half of the trace transport, present
+    /// only while a capture is armed.
+    trace_drain: Option<crate::trace_capture::TraceDrain>,
+    /// The background lz4 writer, present only while writing to file.
+    trace_writer: Option<crate::trace_capture::TraceFileWriter>,
 }
 
 impl RetroForgeApp {
@@ -396,6 +401,8 @@ impl RetroForgeApp {
             awaiting_canvas_snapshot: false,
             debug_panels: crate::debug_dock::DebugPanels::new(),
             event_subscription_active: false,
+            trace_drain: None,
+            trace_writer: None,
         }
     }
 
@@ -879,6 +886,119 @@ impl RetroForgeApp {
     /// Ticket W4-03e: keep the Ultrawide view live while it's the active
     /// camera, without cloning the whole stitched canvas every repaint
     /// (module-level [`CANVAS_SNAPSHOT_REFRESH_INTERVAL`] doc).
+    /// Drain the trace transport and act on whatever the Trace panel's
+    /// buttons asked for (ticket W4-10a).
+    ///
+    /// Called once per repaint from `eframe::App::ui`, alongside
+    /// `pump_core_events` and `sync_event_subscription` — the same
+    /// pattern, for the same reason: the panel is a draw function with no
+    /// channel of its own, so it records a request and this acts on it.
+    fn pump_trace(&mut self) {
+        if self.core.is_none() {
+            self.debug_panels.data.trace = None;
+            return;
+        }
+        let panel = self.debug_panels.data.trace.get_or_insert_with(|| {
+            Box::new(crate::debug_dock::TracePanelData {
+                scrollback: rf_debugger::trace::TraceScrollback::new(
+                    crate::trace_capture::SCROLLBACK_CAPACITY,
+                ),
+                filter: rf_debugger::trace::TraceFilter::default(),
+                request: None,
+                armed: false,
+                file: None,
+                pc_from: String::new(),
+                pc_to: String::new(),
+            })
+        });
+
+        if let Some(drain) = self.trace_drain.as_mut() {
+            drain.drain_into(&mut panel.scrollback);
+        }
+
+        let Some(request) = panel.request.take() else {
+            return;
+        };
+        match request {
+            crate::debug_dock::TraceRequest::Start => {
+                let (producer, drain) = crate::trace_capture::channel(panel.filter.clone());
+                self.trace_drain = Some(drain);
+                panel.armed = true;
+                self.send_command(CoreCommand::ArmTrace(Box::new(producer)));
+            }
+            crate::debug_dock::TraceRequest::Stop => {
+                panel.armed = false;
+                self.trace_drain = None;
+                self.send_command(CoreCommand::DisarmTrace);
+                self.finish_trace_file();
+            }
+            crate::debug_dock::TraceRequest::Clear => panel.scrollback.clear(),
+            crate::debug_dock::TraceRequest::StartFile => {
+                // Written under the config root rather than through a
+                // native file dialog: `rfd` opens a real OS window, which
+                // the W4-09 UI smoke test cannot drive, and a control that
+                // no automated flow can exercise is one that regresses
+                // unnoticed. The path is reported in the status line and
+                // shown in the panel, so it is not hidden either.
+                let filter = panel.filter.clone();
+                match self.trace_file_path() {
+                    Some(path) => match crate::trace_capture::TraceFileWriter::spawn(&path) {
+                        Ok((writer, file_tx)) => {
+                            let (producer, drain) =
+                                crate::trace_capture::channel_with_file(filter, file_tx);
+                            self.trace_drain = Some(drain);
+                            if let Some(panel) = self.debug_panels.data.trace.as_mut() {
+                                panel.armed = true;
+                                panel.file = Some(path.clone());
+                            }
+                            self.trace_writer = Some(writer);
+                            self.status = format!("Tracing to {}", path.display());
+                            self.send_command(CoreCommand::ArmTrace(Box::new(producer)));
+                        }
+                        Err(e) => self.status = format!("Trace file failed: {e}"),
+                    },
+                    None => {
+                        self.status =
+                            "No config directory — nowhere to write a trace file".to_string();
+                    }
+                }
+            }
+            crate::debug_dock::TraceRequest::StopFile => self.finish_trace_file(),
+        }
+    }
+
+    /// Where a trace file goes: `<config root>/traces/trace-<n>.lz4`,
+    /// with `n` the number of files already there, so repeated captures
+    /// in one session never overwrite each other.
+    fn trace_file_path(&self) -> Option<std::path::PathBuf> {
+        let dir = self.config_root.as_ref()?.join("traces");
+        std::fs::create_dir_all(&dir).ok()?;
+        let n = std::fs::read_dir(&dir).map(Iterator::count).unwrap_or(0);
+        Some(dir.join(format!("trace-{n}.lz4")))
+    }
+
+    /// Stop the lz4 writer and report what it wrote.
+    ///
+    /// **Order matters and is the reason this is its own function:** the
+    /// producer must be gone before `finish()` is called, or the writer
+    /// thread is still waiting on a channel that will never close and
+    /// `join` blocks the UI thread forever. `DisarmTrace` drops the
+    /// producer on the core thread, which is why every caller sends that
+    /// first.
+    fn finish_trace_file(&mut self) {
+        let Some(writer) = self.trace_writer.take() else {
+            return;
+        };
+        let path = writer.path().to_path_buf();
+        self.status = match writer.finish() {
+            Ok(n) => format!("Trace written: {n} entries to {}", path.display()),
+            Err(e) => format!("Trace file failed: {e}"),
+        };
+        if let Some(panel) = self.debug_panels.data.trace.as_mut() {
+            panel.file = None;
+        }
+    }
+
     fn maybe_request_canvas_snapshot(&mut self) {
         if self.camera != CameraToggle::Ultrawide || self.core.is_none() {
             return;
@@ -2044,6 +2164,7 @@ impl eframe::App for RetroForgeApp {
         self.pump_core_events(&ctx);
         self.maybe_request_canvas_snapshot();
         self.sync_event_subscription();
+        self.pump_trace();
 
         self.menu_bar(ui);
         self.controls_bar(ui);

@@ -287,6 +287,20 @@ pub enum CoreCommand {
     /// UI is actually showing/refreshing the Ultrawide view) rather than
     /// every frame.
     RequestCanvasSnapshot,
+    /// Ticket W4-10a: arm the trace, handing the core thread the
+    /// producing half of the transport (`crate::trace_capture::channel`).
+    ///
+    /// Sent by the trace viewer as it starts a capture, exactly like
+    /// [`CoreCommand::SetEventMask`] and
+    /// [`CoreCommand::SetLayerExtraction`] before it — DEBUGGER.md §6's
+    /// "closed panels register no event subscriptions", a third time. The
+    /// producer is `Box`ed for the same reason `FrameMsg`'s bundle is:
+    /// it makes this variant no bigger than the others, so an untraced
+    /// session does not pay for the enum being able to carry one.
+    ArmTrace(Box<crate::trace_capture::TraceProducer>),
+    /// Ticket W4-10a: stop tracing and drop the producer, which closes
+    /// the file writer's channel and lets it finish its lz4 frame.
+    DisarmTrace,
     /// Ticket W4-06a: widen/narrow which `CoreEvent`s this session emits
     /// (`EmuStepper::set_event_mask`) — the debugger's event-viewer panel
     /// sends this as it opens/closes (DEBUGGER.md §6: "closed panels
@@ -488,6 +502,11 @@ fn core_thread_main(
     // Ticket W3-03a: off until the UI asks, so a closed debug window costs
     // nothing on the frame path (see `CoreCommand::SetLayerExtraction`).
     let mut layers_enabled = false;
+    // Ticket W4-10a: `None` is the shipped, untraced state. The run loop
+    // below tests this once per frame and takes the ordinary path — the
+    // whole cost of the debugger's tracing existing, on a session that is
+    // not using it (DEBUGGER.md §6, and `benches/debugger_idle.rs`).
+    let mut trace: Option<Box<crate::trace_capture::TraceProducer>> = None;
     // Ticket W4-01: the indexed-pixel + event accumulator that becomes each
     // published `FrameBundle`, fed alongside `sink`/`layers` via the same
     // `FanoutSink`.
@@ -588,6 +607,15 @@ fn core_thread_main(
                         return LoopControl::Stop; // UI thread hung up.
                     }
                 }
+                CoreCommand::ArmTrace(producer) => {
+                    trace = Some(producer);
+                }
+                CoreCommand::DisarmTrace => {
+                    // Dropping the producer closes the file writer's
+                    // channel; the writer then finishes its lz4 frame,
+                    // which is what makes the file readable at all.
+                    trace = None;
+                }
                 CoreCommand::Shutdown => return LoopControl::Stop,
             }
         }
@@ -633,15 +661,49 @@ fn core_thread_main(
                 thread::sleep(delay);
             }
         }
-        let ran = stepper.tick_running_with_input(
-            input.load(),
-            &mut FanoutSink {
-                frame: &mut sink,
-                layers: layers_enabled.then_some(&mut layers),
-                bundle: &mut bundle_builder,
-                audio: audio.as_mut(),
-            },
-        );
+        // Ticket W4-10a. Two whole loops rather than a per-instruction
+        // branch inside one: an untraced session must not pay for tracing
+        // being possible, which is DEBUGGER.md §6's pay-for-use rule and
+        // what `benches/debugger_idle.rs` measures. The test below is the
+        // entire per-frame cost.
+        let ran = match trace.as_mut() {
+            None => stepper.tick_running_with_input(
+                input.load(),
+                &mut FanoutSink {
+                    frame: &mut sink,
+                    layers: layers_enabled.then_some(&mut layers),
+                    bundle: &mut bundle_builder,
+                    audio: audio.as_mut(),
+                },
+            ),
+            Some(producer) => {
+                if stepper.is_paused() {
+                    false
+                } else {
+                    let wants_cpu = producer.wants(rf_debugger::trace::TraceKind::Cpu);
+                    let advanced = stepper.latch_and_advance_frame_traced(
+                        input.load(),
+                        &mut FanoutSink {
+                            frame: &mut sink,
+                            layers: layers_enabled.then_some(&mut layers),
+                            bundle: &mut bundle_builder,
+                            audio: audio.as_mut(),
+                        },
+                        &mut |pc, cycle, text| {
+                            if wants_cpu {
+                                producer.push(rf_debugger::trace::TraceEntry {
+                                    kind: rf_debugger::trace::TraceKind::Cpu,
+                                    cycle,
+                                    addr: pc,
+                                    text,
+                                });
+                            }
+                        },
+                    );
+                    advanced > 0
+                }
+            }
+        };
         if ran || stepped {
             // Ticket W4-03e: feed the enhanced-camera pipeline THIS exact
             // frame's bundle before it moves into `bundle_writer.publish`
@@ -653,6 +715,19 @@ fn core_thread_main(
             // materialized bundle, so this cannot perturb core state
             // (Law 6).
             let bundle = bundle_builder.take(stepper.frame_count());
+            // Ticket W4-10a: the non-CPU chips' trace entries come from
+            // the `CoreEvent` FIFO W4-00 already emits, NOT from new hooks
+            // inside `rf-nes` — that crate is outside this ticket's write
+            // scope, and inventing a parallel producer is what
+            // `rf_debugger::event_timeline`'s module doc warns against.
+            // The trade is stated rather than hidden: this gives
+            // event-granularity records for PPU writes, DMA and mapper
+            // IRQs (which is what those rows of DEBUGGER.md §2's list are
+            // about) and it is bounded by the session's `EventMask`, so a
+            // chip nobody subscribed to contributes nothing.
+            if let Some(producer) = trace.as_mut() {
+                push_event_traces(producer, &bundle);
+            }
             canvas_accum.observe_frame(&bundle, &[]);
             // Ticket W4-01: publish before sending `FrameMsg` so a reader
             // that wakes on the `FrameMsg` channel never sees a
@@ -695,6 +770,48 @@ fn core_thread_main(
         }
         LoopControl::Continue
     });
+}
+
+/// Turn one frame's [`rf_core_api::CoreEvent`]s into trace entries for the
+/// non-CPU chips (ticket W4-10a).
+///
+/// Events with no address of their own record 0; the `cycle` field is the
+/// frame number rather than a master cycle, and **that difference is
+/// deliberate and is why it is written down here**: the FIFO does not
+/// carry per-event cycle stamps, so claiming one would be inventing
+/// precision the source does not have. The trace viewer sorts by arrival,
+/// which is emission order, which is what the FIFO guarantees.
+fn push_event_traces(
+    producer: &mut crate::trace_capture::TraceProducer,
+    bundle: &rf_core_api::FrameBundle,
+) {
+    use rf_core_api::CoreEvent;
+    use rf_debugger::trace::{TraceEntry, TraceKind};
+
+    for event in &bundle.events {
+        let (kind, addr, text) = match event {
+            CoreEvent::ScrollWrite { x, y, layer } => (
+                TraceKind::PpuWrite,
+                0x2005,
+                format!("scroll {layer:?} -> x={x} y={y}"),
+            ),
+            CoreEvent::OamRewrite => (TraceKind::PpuWrite, 0x2003, "OAM rewrite".to_string()),
+            CoreEvent::DmaStart { chan } => {
+                (TraceKind::Dma, 0x4014, format!("DMA start, channel {chan}"))
+            }
+            CoreEvent::MapperIrq => (TraceKind::Mapper, 0, "mapper IRQ asserted".to_string()),
+            _ => continue,
+        };
+        if !producer.wants(kind) {
+            continue;
+        }
+        producer.push(TraceEntry {
+            kind,
+            cycle: bundle.frame_count,
+            addr,
+            text,
+        });
+    }
 }
 
 #[cfg(test)]

@@ -631,6 +631,63 @@ impl EmuStepper {
     /// exactly one, or [`CYCLE_BUDGET`]'s defensive bound elapses first
     /// (module doc). Never touches `self.state`. Returns the number of
     /// frames completed (0 or 1 — see the two public callers' docs).
+    /// [`Self::latch_and_advance_frame`], but calling `on_instruction`
+    /// with a formatted nestest-style line before every instruction
+    /// (ticket W4-10a; DEBUGGER.md §2).
+    ///
+    /// **The formatter is `rf_nes::trace::format_trace_line`, and that is
+    /// the requirement rather than a convenience.** DEBUGGER.md §2: "the
+    /// golden-trace diff in CI and the on-screen trace viewer share one
+    /// formatter." A second formatter would be a second thing to keep
+    /// correct, and only one of the two would be under test — the CI diff
+    /// compares this exact function's output byte-for-byte against
+    /// `nestest.log`.
+    ///
+    /// The peek is non-perturbing: `format_trace_line` takes `&Cpu` and a
+    /// `&dyn TracePeek`, and `NesBus`'s peek path is the one that
+    /// deliberately avoids `$2002`/`$2007`'s read side effects — so
+    /// tracing cannot change what it traces.
+    ///
+    /// This is a **separate loop** from the untraced path on purpose: the
+    /// shipped run loop pays nothing for tracing existing, not even a
+    /// per-instruction branch, which is what DEBUGGER.md §6's pay-for-use
+    /// rule asks for and what `benches/debugger_idle.rs` measures.
+    pub fn latch_and_advance_frame_traced(
+        &mut self,
+        frame: InputFrame,
+        sink: &mut dyn CoreSink,
+        on_instruction: &mut dyn FnMut(u16, u64, String),
+    ) -> u64 {
+        self.latch_input(frame);
+        let start = self.bus.frame_count();
+        let deadline = self.bus.master_cycle() + self.cycle_budget;
+        let mut counting = CountingSink {
+            inner: sink,
+            scanlines: 0,
+            last_scanline: self.last_scanline,
+        };
+        let mut advanced = 0;
+        while self.bus.master_cycle() < deadline {
+            let pc = self.cpu.pc;
+            let cycle = self.bus.master_cycle();
+            on_instruction(
+                pc,
+                cycle,
+                rf_nes::trace::format_trace_line(&self.cpu, &self.bus, cycle),
+            );
+            self.cpu.step(&mut self.bus);
+            self.bus.drain_video(&mut counting);
+            self.bus.drain_audio(&mut counting);
+            let now = self.bus.frame_count();
+            if now != start {
+                advanced = now - start;
+                break;
+            }
+        }
+        self.last_scanline = counting.last_scanline;
+        advanced
+    }
+
     fn run_until_next_frame(&mut self, sink: &mut dyn CoreSink) -> u64 {
         let start = self.bus.frame_count();
         let deadline = self.bus.master_cycle() + self.cycle_budget;

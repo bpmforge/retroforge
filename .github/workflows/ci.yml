@@ -69,6 +69,20 @@ jobs:
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
 
+      - name: debugger pay-for-use (W4-10a, DEBUGGER.md section 6)
+        # DEBUGGER.md section 6 asks for a CI benchmark asserting that
+        # Accuracy frame time with the debugger idle equals the
+        # debugger-compiled-out time within noise. This is that gate: it
+        # fails the build rather than printing a number, and it carries
+        # its own anti-vacuity assertions (the armed arm must actually
+        # capture entries and must actually cost more), so "idle is free"
+        # cannot pass by the trace having quietly stopped working.
+        #
+        # Release, and `--ignored`, for the same reason the determinism
+        # double-run below is: it is a wall-clock measurement, not a
+        # hermetic test, and a debug build would measure the wrong thing.
+        run: cargo test --release -p retroforge --test debugger_idle_cost -- --ignored --nocapture
+
       - name: UI smoke flow (W4-09, R-A1) + NFR-004 timing
         # Its own named step for the same two reasons the golden-frame
         # step above has one: a check a human can point at for "the app

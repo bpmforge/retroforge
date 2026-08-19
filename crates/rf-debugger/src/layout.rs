@@ -56,6 +56,12 @@ pub enum DebugTab {
     /// deserializes fine and simply never lists the tab, so
     /// [`LAYOUT_FORMAT_VERSION`] does not move.
     LuaConsole,
+    /// `Trace` (ticket W4-10a, DEBUGGER.md §2-3): the per-chip trace
+    /// scrollback with its filters. Additive in the same sense as every
+    /// variant above — an old persisted layout that never mentions it
+    /// still deserializes and simply never lists the tab, so
+    /// [`LAYOUT_FORMAT_VERSION`] does not move.
+    Trace,
 }
 
 /// Which axis a [`PersistedNode::Split`] divides along — matches
@@ -130,7 +136,7 @@ pub fn default_layout() -> PersistedLayout {
                 }),
             }),
             second: Box::new(PersistedNode::Leaf {
-                tabs: vec![DebugTab::EventTimeline],
+                tabs: vec![DebugTab::EventTimeline, DebugTab::Trace],
                 active: 0,
             }),
         },

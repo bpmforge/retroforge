@@ -75,6 +75,13 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 # `egui_dock-0.20.1` source, not training data) to capture/restore it —
 # see that module's doc for the full reasoning.
 egui_dock = "0.20.1"
+# rtrb: already sanctioned at docs/TECH_STACK.md §2 ("Audio ring" row,
+# "lock-free SPSC, realtime-safe") and already in the tree via rf-audio.
+# Ticket W4-10a uses it for the same reason one layer up: the trace
+# transport must never block the core thread (DEBUGGER.md §2).
+rtrb = "0.3.4"
+# lz4_flex: trace-to-file framing (ticket W4-10a, DEBUGGER.md §2).
+lz4_flex = "0.14.0"
 toml = "1"
 serde = { version = "1", features = ["derive"] }
 
@@ -94,6 +101,7 @@ rf-profiles = { path = "../rf-profiles" }
 # `docs/TECH_STACK.md` rule 2 requires rather than dragging a second
 # version in. Dev-only: nothing in the shipped binary touches it.
 egui_kittest = { version = "0.35.0", features = ["eframe"] }
+criterion = "0.8.2"
 
 [features]
 # `audio` turns on real device output (ticket W2-05). OFF by default so
@@ -105,3 +113,7 @@ audio = ["rf-audio/device"]
 # `gamepad` turns on the real gilrs backend (ticket W2-06), for the same
 # CI reason `audio` is opt-in: gilrs reaches for evdev/udev on Linux.
 gamepad = ["rf-input/gilrs"]
+
+[[bench]]
+name = "debugger_idle"
+harness = false

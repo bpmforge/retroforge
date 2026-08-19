@@ -205,6 +205,11 @@ pub struct PanelData {
     /// when no plugin is loaded, so the tab can say so rather than
     /// showing an empty panel that reads as "not implemented".
     pub script: Option<Box<ScriptPanelData>>,
+    /// Ticket W4-10a: the trace scrollback, its filters and the capture
+    /// controls. `None` when the app has no session — the panel then says
+    /// so rather than showing an empty list a user would read as "the
+    /// trace is running and nothing happened".
+    pub trace: Option<Box<TracePanelData>>,
     /// Latest frame's OAM (`core_thread::FrameMsg::oam`) — genuinely live,
     /// unlike `chr_rom`/vram/cgram.
     pub oam: [u8; 256],
@@ -242,6 +247,7 @@ impl Default for PanelData {
         PanelData {
             chr_rom: None,
             script: None,
+            trace: None,
             oam: [0u8; 256],
             previous_oam: [0u8; 256],
             vram: [0u8; 0x1000],
@@ -312,7 +318,7 @@ impl DebugPanels {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let style = egui_dock::Style::from_egui(ui.style().as_ref());
         let mut viewer = PanelTabViewer {
-            data: &self.data,
+            data: &mut self.data,
             pattern_table: &mut self.pattern_table,
         };
         egui_dock::DockArea::new(&mut self.dock_state)
@@ -446,7 +452,7 @@ pub struct ScriptPanelData {
 }
 
 struct PanelTabViewer<'a> {
-    data: &'a PanelData,
+    data: &'a mut PanelData,
     pattern_table: &'a mut PatternTable,
 }
 
@@ -463,6 +469,7 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
             DebugTab::Memory => "Memory",
             DebugTab::OamDiff => "OAM diff",
             DebugTab::LuaConsole => "Lua",
+            DebugTab::Trace => "Trace",
         }
         .into()
     }
@@ -482,6 +489,7 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
                 self.data.oam_diff_scanline,
             ),
             DebugTab::LuaConsole => lua_console_ui(ui, self.data.script.as_deref()),
+            DebugTab::Trace => trace_ui(ui, self.data.trace.as_deref_mut()),
         }
     }
 }
@@ -893,4 +901,167 @@ mod tests {
             .unwrap_or_else(layout::default_layout);
         assert_eq!(fallback, layout::default_layout());
     }
+}
+
+/// What the Trace tab needs (ticket W4-10a). Owned by
+/// [`crate::app::RetroForgeApp`]; the panel only reads and edits it.
+pub struct TracePanelData {
+    pub scrollback: rf_debugger::trace::TraceScrollback,
+    pub filter: rf_debugger::trace::TraceFilter,
+    /// Set by the panel, acted on by the app on the next update — the
+    /// panel cannot send `CoreCommand`s itself (it has no channel), and
+    /// giving it one would put core-thread wiring inside a draw function.
+    pub request: Option<TraceRequest>,
+    /// Whether a capture is currently armed, so the button can say
+    /// "Start"/"Stop" truthfully rather than toggling a local bool that
+    /// could drift from the core thread's actual state.
+    pub armed: bool,
+    /// Path currently being written, if any.
+    pub file: Option<std::path::PathBuf>,
+    /// Filter text boxes' raw contents. Kept as strings rather than
+    /// parsed `u16`s so a half-typed "C0" is not silently read as $00C0
+    /// and applied while the user is still typing.
+    pub pc_from: String,
+    pub pc_to: String,
+}
+
+/// A control the user pressed, for the app to act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceRequest {
+    Start,
+    Stop,
+    Clear,
+    StartFile,
+    StopFile,
+}
+
+/// The Trace tab (DEBUGGER.md §2-3's "Trace viewer | scrollback of ring
+/// buffer w/ filters").
+fn trace_ui(ui: &mut egui::Ui, data: Option<&mut TracePanelData>) {
+    let Some(data) = data else {
+        ui.label("No session — open a ROM to trace.");
+        return;
+    };
+
+    ui.horizontal(|ui| {
+        if ui
+            .button(if data.armed {
+                "Stop trace"
+            } else {
+                "Start trace"
+            })
+            .clicked()
+        {
+            data.request = Some(if data.armed {
+                TraceRequest::Stop
+            } else {
+                TraceRequest::Start
+            });
+        }
+        if ui.button("Clear").clicked() {
+            data.request = Some(TraceRequest::Clear);
+        }
+        match &data.file {
+            Some(path) => {
+                if ui.button("Stop writing").clicked() {
+                    data.request = Some(TraceRequest::StopFile);
+                }
+                ui.label(format!("writing {}", path.display()));
+            }
+            None => {
+                if ui.button("Trace to file\u{2026}").clicked() {
+                    data.request = Some(TraceRequest::StartFile);
+                }
+            }
+        }
+    });
+
+    let stats = data.scrollback.stats();
+    ui.horizontal(|ui| {
+        ui.label(format!("{} entries", stats.held));
+        if stats.dropped_from_scrollback > 0 {
+            ui.label(format!(
+                "\u{2022} {} scrolled past",
+                stats.dropped_from_scrollback
+            ));
+        }
+        // DEBUGGER.md §2's "truncation flag visible in the UI". Coloured
+        // and worded as a hole rather than as a count, because the number
+        // matters less than the fact that the trace is no longer
+        // contiguous.
+        if stats.truncated() {
+            ui.colored_label(
+                egui::Color32::from_rgb(0xE0, 0x80, 0x30),
+                format!(
+                    "\u{26a0} TRUNCATED — {} entries lost; the trace has gaps",
+                    stats.dropped_in_transport
+                ),
+            );
+        }
+    });
+
+    // DEBUGGER.md §2's size warning, shown next to the control it is
+    // about rather than only after the file has grown.
+    if let Some(warning) = rf_debugger::trace::size_warning(60, 73, 500_000) {
+        ui.label(egui::RichText::new(warning).small().weak());
+    }
+
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        for kind in rf_debugger::trace::TraceKind::ALL {
+            let mut on = data.filter.kinds.contains(&kind);
+            if ui.checkbox(&mut on, kind.label()).changed() {
+                if on {
+                    data.filter.kinds.push(kind);
+                } else {
+                    data.filter.kinds.retain(|k| *k != kind);
+                }
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("PC range $");
+        ui.add(egui::TextEdit::singleline(&mut data.pc_from).desired_width(48.0));
+        ui.label("\u{2013} $");
+        ui.add(egui::TextEdit::singleline(&mut data.pc_to).desired_width(48.0));
+        // Both boxes must parse before a range is applied: applying a
+        // half-typed range would filter the view out from under someone
+        // mid-keystroke.
+        data.filter.pc_range = match (
+            u16::from_str_radix(data.pc_from.trim(), 16),
+            u16::from_str_radix(data.pc_to.trim(), 16),
+        ) {
+            (Ok(lo), Ok(hi)) => Some((lo, hi)),
+            _ => None,
+        };
+        ui.label("find");
+        ui.add(egui::TextEdit::singleline(&mut data.filter.contains).desired_width(120.0));
+    });
+
+    ui.separator();
+    let rows: Vec<String> = data
+        .scrollback
+        .filtered(&data.filter)
+        .map(|e| format!("{:<10} {}", e.kind.label(), e.text))
+        .collect();
+    if rows.is_empty() {
+        ui.label(if data.armed {
+            "No entries match the current filters."
+        } else {
+            "Not tracing. Press Start trace."
+        });
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .stick_to_bottom(true)
+        .show_rows(
+            ui,
+            ui.text_style_height(&egui::TextStyle::Monospace),
+            rows.len(),
+            |ui, range| {
+                for row in &rows[range] {
+                    ui.label(egui::RichText::new(row).monospace());
+                }
+            },
+        );
 }
