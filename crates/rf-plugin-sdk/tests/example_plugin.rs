@@ -38,8 +38,32 @@ fn the_shipped_example_plugin_loads_and_runs_frames() {
         "an example that asks for the mod-tier capability teaches the wrong habit"
     );
 
-    let mut host =
-        ScriptHost::load(manifest, &source, Budget::default()).expect("example script loads");
+    // Ticket W5-07: publish a memory map and a window BEFORE loading.
+    // The example resolves `rf.profile.addr` once at load — the natural
+    // way to use a published map — so labels that arrive afterwards
+    // resolve to nil and the script correctly draws nothing. Driving it
+    // the way the shell does is what makes this test exercise the script
+    // rather than its early-return.
+    let bridge = rf_plugin_sdk::sandbox::Bridge::default();
+    let mut bytes = vec![0u8; 0x2000];
+    bytes[0x29] = 0x40; // player_x low  ($6029)
+    bytes[0x2A] = 0x01; // player_x high -> 320
+    bytes[0x2B] = 0x20; // camera_x      ($602B)
+    bridge.publish(
+        rf_plugin_sdk::sandbox::MemoryWindow {
+            base: 0x6000,
+            bytes,
+        },
+        [
+            ("player_x".to_string(), 0x6029u32),
+            ("camera_x".to_string(), 0x602Bu32),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    let mut host = ScriptHost::load_with_bridge(manifest, &source, Budget::default(), bridge)
+        .expect("example script loads");
 
     // Run enough frames to cross the script's own `frame % 600` branch,
     // so the whole callback body is exercised rather than just its first
@@ -54,10 +78,25 @@ fn the_shipped_example_plugin_loads_and_runs_frames() {
         "the shipped example must not fault or get throttled: {:?}",
         host.state()
     );
+    // The example draws one marker per frame at the published player
+    // position — 320, so the rect's left edge is 316. Asserting the
+    // POSITION and not merely that something was drawn is what
+    // distinguishes a working data path from W4-04's stub, which
+    // returned 0 for every read.
+    let overlay = host.bridge().take_overlay();
+    assert_eq!(overlay.len(), 601, "one marker per frame");
     assert!(
-        host.log.lines().iter().any(|l| l.contains("still running")),
-        "the example's own print() branch must have been reached — otherwise this test \
-         only proves the file parses, not that it runs: {:?}",
+        matches!(
+            overlay[0],
+            rf_plugin_sdk::sandbox::OverlayCmd::Rect { x: 316, .. }
+        ),
+        "the marker must sit at the published player_x (320) less half its width: {:?}",
+        overlay[0]
+    );
+    assert!(
+        host.log.lines().iter().any(|l| l.contains("player_x 320")),
+        "the example's own print() branch must have been reached, with the PUBLISHED value — \
+         otherwise this test only proves the file parses, not that it reads: {:?}",
         host.log.lines()
     );
 }

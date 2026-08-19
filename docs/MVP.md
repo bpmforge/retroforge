@@ -87,15 +87,16 @@ Enhancement demos (recorded + reproducible via replay files in-repo)
       fixture ROM; Accuracy mode still flickers (both under golden frames)
       — `cargo test -p retroforge --test sprite_overlay_mode_invariant`
       (3 passed, W3-05a)
-- [ ] Lua script draws live player-position overlay using profile-published
+- [x] Lua script draws live player-position overlay using profile-published
       addresses
-      **NOT BUILT.** W4-04 shipped the sandboxed Lua host, the capability
-      model and the write ledger, and `draw_overlay` exists as a manifest
-      *capability flag* — but no API exposes a profile's `memory_map`
-      addresses to a script, and none draws. Every ingredient is present
-      (W5-01's published addresses, W5-03's `OverlayCmds` layer, W4-04's
-      host); nothing connects them. This is a real ticket's worth of work,
-      not a checkbox.
+      — ticket W5-07 connected them. `rf.mem.read_u8/read_u16` read live
+      published memory, `rf.profile.addr(label)` resolves a
+      `[[memory_map]]` label, and `rf.gui.*` emit real draw commands.
+      `cargo test -p retroforge --test lua_overlay_demo` (4 passed) runs
+      the **shipped** `plugins/examples/player-overlay/main.lua` against
+      the RF-Scroller fixture and asserts the marker MOVES with the
+      player and sits exactly at `player_x`. The example no longer
+      contains an address literal.
 
 Product floor
 - [x] macOS + Linux + Windows builds from CI; ROM library with normalized-

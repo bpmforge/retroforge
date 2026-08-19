@@ -38,6 +38,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
 use crate::manifest::{Capabilities, FilesystemCap};
 
 /// Names Lua's always-loaded base library provides that this host removes.
@@ -83,12 +87,144 @@ impl ScriptLog {
     }
 }
 
+/// A window of live machine memory the host publishes each frame.
+///
+/// A snapshot rather than a live bus handle, and that is the whole
+/// safety argument: a script cannot reach into a running core, cannot
+/// perturb it, and cannot observe it mid-frame. The shell fills this at a
+/// frame boundary from a non-perturbing peek, exactly as the debugger's
+/// viewers do — `PLUGINS.md` §2's "the host routes all access".
+#[derive(Debug, Default, Clone)]
+pub struct MemoryWindow {
+    pub base: u32,
+    pub bytes: Vec<u8>,
+}
+
+impl MemoryWindow {
+    /// Byte at `addr`, or 0 outside the published window.
+    ///
+    /// Out-of-window reads return 0 rather than erroring because a script
+    /// polling an address the host did not publish is a normal thing to
+    /// do while an author is finding their way, and a Lua error would
+    /// pause the script (W4-04's fault handling) for what is really a
+    /// miss. The window's bounds are visible to the host, which is where
+    /// a "your script is reading outside the published range" diagnostic
+    /// belongs.
+    #[must_use]
+    pub fn read_u8(&self, addr: u32) -> u8 {
+        addr.checked_sub(self.base)
+            .and_then(|off| self.bytes.get(off as usize))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// Palette index an overlay draw uses when the script does not name one.
+///
+/// `0x30` is the NES palette's white, which is the one entry legible
+/// against every background this project's fixtures produce — a default
+/// that vanished into the backdrop would look like the overlay was
+/// broken.
+pub const DEFAULT_OVERLAY_COLOR: u8 = 0x30;
+
+/// One overlay draw the script asked for.
+///
+/// Deliberately its own type rather than `rf_enhance::scene_graph::DrawCmd`:
+/// this crate must not depend on the enhancement layer (ARCHITECTURE §3
+/// has no `PLU -> ENH` edge), so the shell maps between them. The two
+/// shapes are the same on purpose, so that mapping is total and obvious.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayCmd {
+    Rect {
+        x: i32,
+        y: i32,
+        width: u16,
+        height: u16,
+        color_index: u8,
+    },
+    Line {
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        color_index: u8,
+    },
+}
+
+/// What the shell publishes to a script, and what it collects back.
+///
+/// `Rc<RefCell<..>>` rather than `Arc<Mutex<..>>`: `mlua::Lua` is not
+/// `Send`, a [`crate::host::ScriptHost`] lives entirely on the UI thread,
+/// and a mutex here would buy nothing but the impression that this is
+/// shareable across threads.
+///
+/// ## Which coordinate space `rf.gui` draws in
+///
+/// **World space**, the same space W5-03's `SceneGraph` layers use. A
+/// script that reads a world-space value from a profile (RF-Scroller's
+/// `player_x` is one) can pass it straight to `rf.gui.rect` and the
+/// marker lands on the player in the full-level view. The bridge does
+/// NOT add or subtract a camera, because doing so silently would make a
+/// script's arithmetic wrong in exactly the way W5-03's module doc warns
+/// about — sprites that stick to the viewport while the level scrolls.
+/// A script wanting screen space subtracts `camera_x` itself, which the
+/// profile also publishes.
+#[derive(Debug, Default, Clone)]
+pub struct Bridge {
+    pub memory: Rc<RefCell<MemoryWindow>>,
+    /// `[[memory_map]]` labels from the loaded profile, so a script names
+    /// `player_x` instead of hardcoding `$6029` — the whole point of a
+    /// profile publishing addresses.
+    pub labels: Rc<RefCell<BTreeMap<String, u32>>>,
+    /// Filled by `rf.gui.*`, drained by the shell each frame.
+    pub overlay: Rc<RefCell<Vec<OverlayCmd>>>,
+}
+
+impl Bridge {
+    /// Publish this frame's memory window and profile labels.
+    pub fn publish(&self, window: MemoryWindow, labels: BTreeMap<String, u32>) {
+        *self.memory.borrow_mut() = window;
+        *self.labels.borrow_mut() = labels;
+    }
+
+    /// Take whatever the script drew, leaving the buffer empty.
+    ///
+    /// Drained rather than cleared-then-read so a frame on which the
+    /// script was throttled or paused (W4-04's budget handling)
+    /// contributes nothing instead of re-drawing the previous frame's
+    /// overlay at a stale position.
+    #[must_use]
+    pub fn take_overlay(&self) -> Vec<OverlayCmd> {
+        std::mem::take(&mut self.overlay.borrow_mut())
+    }
+}
+
 /// Build a sandboxed Lua state for a plugin with `caps`.
 ///
 /// # Errors
 /// Returns any error mlua raises constructing the state or editing its
 /// globals.
 pub fn build(caps: &Capabilities, log: &ScriptLog) -> mlua::Result<mlua::Lua> {
+    build_with_bridge(caps, log, &Bridge::default())
+}
+
+/// [`build`], but with a live [`Bridge`] behind `rf.mem`, `rf.profile`
+/// and `rf.gui` (ticket W5-07).
+///
+/// W4-04 built the capability GATE and left the data path stubbed —
+/// `rf.mem.read_u8` returned a literal 0 and `rf.gui.*` were no-ops —
+/// because wiring a live machine through is the shell's to give, not this
+/// crate's to take. This is that wiring, and the gate is unchanged: a
+/// denied capability still means the function is ABSENT, not
+/// present-and-refusing.
+///
+/// # Errors
+/// Returns the Lua error if the sandbox cannot be built.
+pub fn build_with_bridge(
+    caps: &Capabilities,
+    log: &ScriptLog,
+    bridge: &Bridge,
+) -> mlua::Result<mlua::Lua> {
     let lua = mlua::Lua::new_with(permitted_stdlib(), mlua::LuaOptions::default())?;
     {
         let globals = lua.globals();
@@ -119,19 +255,97 @@ pub fn build(caps: &Capabilities, log: &ScriptLog) -> mlua::Result<mlua::Lua> {
         rf.set("api", "0.1")?;
 
         if caps.read_memory {
-            // Bound to a stub in this ticket: wiring a live StateView
-            // through requires the shell's core handle, which is
-            // `crates/retroforge`'s to give (see this crate's lib doc).
-            // The CAPABILITY GATE is what is being built and tested here.
             let mem = lua.create_table()?;
-            mem.set("read_u8", lua.create_function(|_, _addr: u32| Ok(0u8))?)?;
+            let m = bridge.memory.clone();
+            mem.set(
+                "read_u8",
+                lua.create_function(move |_, addr: u32| Ok(m.borrow().read_u8(addr)))?,
+            )?;
+            let m16 = bridge.memory.clone();
+            // Little-endian, because every 6502-family game stores 16-bit
+            // values that way and every `u16` in a profile's `memory_map`
+            // means that. A script that had to assemble two bytes itself
+            // would get the order wrong roughly half the time, and the
+            // symptom — a value that looks right for the first 256 units
+            // and then wraps — is the kind of bug that survives a demo.
+            mem.set(
+                "read_u16",
+                lua.create_function(move |_, addr: u32| {
+                    let m = m16.borrow();
+                    Ok(u32::from(m.read_u8(addr)) | (u32::from(m.read_u8(addr + 1)) << 8))
+                })?,
+            )?;
             rf.set("mem", mem)?;
+
+            // `rf.profile.addr(label)` rides the SAME capability as
+            // reading memory, deliberately: an address the host published
+            // is only useful for reading, and gating it separately would
+            // let a script learn the map while being denied the map's
+            // only purpose.
+            let labels = bridge.labels.clone();
+            let profile = lua.create_table()?;
+            profile.set(
+                "addr",
+                lua.create_function(move |_, label: String| {
+                    Ok(labels.borrow().get(&label).copied())
+                })?,
+            )?;
+            rf.set("profile", profile)?;
         }
         if caps.draw_overlay {
             let gui = lua.create_table()?;
-            for name in ["rect", "text", "line"] {
-                gui.set(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
-            }
+            let rects = bridge.overlay.clone();
+            gui.set(
+                "rect",
+                // The colour is OPTIONAL, and not merely for
+                // convenience: W4-04's stub accepted any argument list,
+                // so scripts written against it call `rect(x, y, w, h)`.
+                // Making the fifth argument mandatory would have turned a
+                // stub into a breaking change for every script already
+                // written, which is not a thing a data path should do
+                // when it starts carrying data.
+                lua.create_function(
+                    move |_, (x, y, w, h, color): (i32, i32, u16, u16, Option<u8>)| {
+                        rects.borrow_mut().push(OverlayCmd::Rect {
+                            x,
+                            y,
+                            width: w,
+                            height: h,
+                            color_index: color.unwrap_or(DEFAULT_OVERLAY_COLOR),
+                        });
+                        Ok(())
+                    },
+                )?,
+            )?;
+            let lines = bridge.overlay.clone();
+            gui.set(
+                "line",
+                lua.create_function(
+                    move |_, (x0, y0, x1, y1, color): (i32, i32, i32, i32, Option<u8>)| {
+                        lines.borrow_mut().push(OverlayCmd::Line {
+                            x0,
+                            y0,
+                            x1,
+                            y1,
+                            color_index: color.unwrap_or(DEFAULT_OVERLAY_COLOR),
+                        });
+                        Ok(())
+                    },
+                )?,
+            )?;
+            // `text` stays a no-op and says so rather than pretending:
+            // W5-03's `OverlayCmds` layer carries lines and rects only,
+            // and inventing a text command here would put a variant in
+            // the API that nothing downstream can draw.
+            let log_for_text = log.clone();
+            gui.set(
+                "text",
+                lua.create_function(move |_, _: mlua::MultiValue| {
+                    log_for_text
+                        .push("rf.gui.text is not implemented — the overlay layer draws lines and rectangles only");
+                    Ok(())
+                })?,
+            )?;
             rf.set("gui", gui)?;
         }
         if caps.filesystem == FilesystemCap::CacheDir {

@@ -3174,7 +3174,8 @@
    "crate": "rf-plugin-sdk",
    "write_scope": [
     "crates/rf-plugin-sdk/**",
-    "crates/retroforge/**"
+    "crates/retroforge/**",
+    "plugins/**"
    ],
    "depends_on": [
     "W4-04",
@@ -3188,16 +3189,18 @@
     "end-to-end against the RF-Scroller fixture: a Lua script draws a marker at the live player position, asserted to MOVE with the player (MVP.md's last enhancement-demo checkbox)"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
-    "E5-S2"
+    "E7-S1"
    ],
    "notes": [
-    "FILED 2026-08-19 BY W5-04's evidence pass. This is the LAST MVP feature gap: docs/MVP.md's `Lua script draws live player-position overlay using profile-published addresses` is the one checkbox that is not built, as opposed to partial.",
-    "EVERY INGREDIENT ALREADY EXISTS AND IS TESTED, which is why this is 5 points and not 13. W4-04 shipped the sandboxed host, the capability model, the budget/throttle and the write ledger; W5-01 published the addresses in a validated profile; W5-03 built the `OverlayCmds` scene layer and the world-space coordinate lift. Nothing connects them.",
-    "WHAT W4-04 ACTUALLY LEFT: `sandbox::build` binds `rf.mem.read_u8` to a closure returning literal 0 and `rf.gui.rect/text/line` to no-ops, with a comment saying wiring a live StateView through is the shell's to give. So the CAPABILITY GATE is real and tested (a denied capability makes the function ABSENT, not present-and-refusing) and the DATA PATH is a stub. Do not re-litigate the gate; fill in the path.",
-    "THE COORDINATE TRAP, already paid for once in W5-03: OAM and a profile's camera give SCREEN coordinates, and an overlay drawn over the full-level view needs WORLD coordinates. A script that reads `player_x` gets a world X already (RF-Scroller's `player_x` is world-space; `camera_x` is what converts) — so the bridge must not silently add or subtract a camera. Say which space `rf.gui` draws in, in the API doc, and test a marker's position against a MOVED camera rather than asserting it merely exists.",
-    "VACUITY TRAP: a test that asserts `rf.mem.read_u8` returns some number passes against the existing stub, which returns 0 — and 0 is a plausible memory value. Assert it returns a value the host PUBLISHED and that changes when the machine changes."
+    "CLOSED 2026-08-19, all four criteria. This was the last MVP FEATURE gap; docs/MVP.md's Lua checkbox is now checked with an evidence link.",
+    "SCOPE WIDENED at filing (same day) to include `plugins/**`: the shipped example hardcoded `PLAYER_X = 0x0300` — the wrong address (RF-Scroller's player_x is $6029), read as u8 when the profile declares u16, and not profile-published at all. Leaving it would have met the letter of the code change and missed the point of the requirement, which says \"using profile-published addresses\" in as many words. The example now contains no address literal.",
+    "THE LIFECYCLE FINDING, which the tests caught rather than review: a script resolves `rf.profile.addr` ONCE AT LOAD, because that is the natural way to use a published map and it is what the shipped example does. If the host publishes labels only after `load`, that resolves to nil and stays nil forever — the script runs, faults nothing, draws nothing, and looks like a broken overlay rather than a lifecycle mistake. Hence `ScriptHost::load_with_bridge`; the profile is known when the ROM opens, which is before any script runs, so there is no reason to publish late.",
+    "`rf.gui` draws in WORLD space, stated in the API doc and not inferred: a world-space value from a profile goes straight through with no camera arithmetic, and a script wanting screen space subtracts `camera_x` itself (which the profile also publishes). Silently adding a camera would reproduce exactly the bug W5-03's module doc warns about — overlays that stick to the viewport while the level scrolls.",
+    "`rf.gui.rect`'s colour is OPTIONAL because W4-04's stub accepted any argument list, so scripts written against it call `rect(x, y, w, h)`. Making the fifth argument mandatory would have turned a stub into a breaking change for every script already written.",
+    "`rf.gui.text` remains a no-op and SAYS SO in the log rather than pretending: W5-03's `OverlayCmds` layer carries lines and rects only, and adding a text variant here would put something in the API that nothing downstream can draw.",
+    "VACUITY: `rf.mem.read_u8` returned a literal 0 until this ticket, and 0 is a plausible memory value — so the tests assert reads return what the host PUBLISHED (0xAB, 0xCDAB little-endian), that an out-of-window read is 0 rather than a fault, that an unknown label is nil, and that the marker's position CHANGES as the player walks. None of those pass against the stub."
    ]
   },
   {

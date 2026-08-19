@@ -200,6 +200,10 @@ pub struct ScriptHost {
     budget: Budget,
     ledger: WriteLedger,
     frames_since_call: u64,
+    /// Ticket W5-07: what the shell publishes to the script and collects
+    /// back. Cloned (it is `Rc`-backed), so the host and the shell see
+    /// the same buffers.
+    bridge: crate::sandbox::Bridge,
 }
 
 impl ScriptHost {
@@ -210,8 +214,38 @@ impl ScriptHost {
     /// fails to compile. A script that will not even load is a load-time
     /// failure, not a paused script — there is nothing to pause.
     pub fn load(manifest: Manifest, source: &str, budget: Budget) -> mlua::Result<Self> {
+        Self::load_with_bridge(manifest, source, budget, crate::sandbox::Bridge::default())
+    }
+
+    /// [`ScriptHost::load`], but against a bridge the caller has already
+    /// populated (ticket W5-07).
+    ///
+    /// **This exists because of how scripts are actually written.** The
+    /// natural way to use a published memory map is to resolve it once,
+    /// at load:
+    ///
+    /// ```lua
+    /// local PLAYER_X = rf.profile.addr("player_x")
+    /// function on_frame(n) ... end
+    /// ```
+    ///
+    /// which is what the shipped example does. If the host publishes the
+    /// labels only after `load`, that resolves to `nil` and stays `nil`
+    /// forever — the script runs, faults nothing, draws nothing, and
+    /// looks like a broken overlay rather than a lifecycle mistake. The
+    /// profile is known when the ROM is opened, which is before any
+    /// script runs, so there is no reason to publish late.
+    ///
+    /// # Errors
+    /// As [`ScriptHost::load`].
+    pub fn load_with_bridge(
+        manifest: Manifest,
+        source: &str,
+        budget: Budget,
+        bridge: crate::sandbox::Bridge,
+    ) -> mlua::Result<Self> {
         let log = ScriptLog::new();
-        let lua = sandbox::build(&manifest.capabilities, &log)?;
+        let lua = sandbox::build_with_bridge(&manifest.capabilities, &log, &bridge)?;
         lua.load(source).exec()?;
         Ok(ScriptHost {
             manifest,
@@ -221,7 +255,16 @@ impl ScriptHost {
             budget,
             ledger: WriteLedger::default(),
             frames_since_call: 0,
+            bridge,
         })
+    }
+
+    /// The live-data bridge (ticket W5-07): publish this frame's memory
+    /// window and profile labels here, and drain the overlay after
+    /// [`ScriptHost::on_frame`].
+    #[must_use]
+    pub fn bridge(&self) -> &crate::sandbox::Bridge {
+        &self.bridge
     }
 
     #[must_use]
