@@ -63,6 +63,10 @@ Boundary
       CI on every push (rule 1)
 
 Enhancement demos (recorded + reproducible via replay files in-repo)
+Capture: `docs/demo/rf-scroller-full-level.png`, regenerated from
+`fixtures/replays/unprofiled-scroller.rfreplay` by
+`cargo test -p retroforge --test demo_capture -- --ignored`. See
+`docs/demo/README.md`.
 - [x] Un-profiled scroller (Alter Ego or homebrew fixture): stitched canvas
       grows during play; ultrawide view shows visited terrain with fog
       beyond; scene changes create new canvases; canvases persist across
