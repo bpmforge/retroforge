@@ -3342,7 +3342,7 @@
    "phase": 6,
    "crate": "rf-snes",
    "write_scope": [
-    "crates/rf-snes/src/cpu/**"
+    "crates/rf-snes/**"
    ],
    "depends_on": [
     "W6-00"
@@ -3351,6 +3351,8 @@
     "65816 JSON vectors pass for the core op set incl. m/x width handling (FR-CORE-030)"
    ],
    "notes": [
+    "SCOPE AMENDED 2026-08-19 (vetoable, recorded), and it is a defect fix rather than a widening: the original `crates/rf-snes/src/cpu/**` cannot declare itself. `pub mod cpu;` lives in `src/lib.rs`, which that glob excludes, so the scoped work could not compile at all. Widened to `crates/rf-snes/**` — the crate the ticket's own `crate` field names.",
+    
     "REFINED AT PHASE ENTRY BY W6-00 (2026-08-19). Right-sized at 8 points; no 13-point tickets remain in W6 (an earlier pass already split W6-01..04 into a/b halves), so W6-00's split criterion is satisfied by verification rather than by further cutting.",
     "TEST ARTIFACTS ARE ALREADY FETCHABLE \u2014 verified, not assumed. `tests/rom-manifest.toml` carries `singlestep-65816`, `singlestep-spc700`, `gilyon-snes-tests`, `undisbeliever-snes-test-roms` and `peterlemon-snes`; `roms/snes/` already holds the gilyon, spc700 and undisbeliever archives locally. This is NOT the Nova situation W5-02a hit: nothing here is blocked on an unobtainable artifact.",
     "THE NES CPU WORK IS THE MODEL, INCLUDING ITS TRAPS: W1-01/W1-03 ran SingleStepTests per-opcode with cycle-by-cycle bus assertions, and W2-20 recorded the one place a vector suite and a blargg ROM legitimately disagree (the unstable illegal opcode $AB, where SingleStepTests generates against magic $EE and instr_test-v5 checksums against $FF). Expect 65C816 equivalents around unstable/undocumented behaviour and record them as EXCLUSIONS with reasons, the way `docs/evidence/local-gate.json` does, never as silent waivers."
