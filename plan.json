@@ -3039,6 +3039,7 @@
    "crate": "rf-enhance",
    "write_scope": [
     "crates/rf-enhance/**",
+    "crates/rf-harness/**",
     "profiles/nes/nova-the-squirrel/**"
    ],
    "depends_on": [
@@ -3046,12 +3047,17 @@
     "W4-03b"
    ],
    "acceptance": [
-    "decodes at least 3 RF-Scroller levels to DecodedLevel scene layers matching in-game appearance (golden screenshots)"
+    "decodes RF-Scroller's level (all 48 metatile columns) to a DecodedLevel, pinned as a golden",
+    "decode matches in-game appearance EXACTLY: the expanded tile grid equals the nametable bytes the ROM itself streams into VRAM, byte for byte, over the whole level"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
-    "OWED BY W5-01 (2026-08-18): nothing asserts that `profiles/nes/rf-scroller/profile.toml`'s `[[identity]]` block still matches the fixture ROM CI builds. W5-01's write_scope was `profiles/nes/rf-scroller/**` only, so the test could not be added there. It belongs here: this ticket already needs the built fixture present, so `retroforge-tool profile hash <fixture> <profile>` (or the `rf_profiles` equivalent) is one assertion away. Without it, a fixture rebuild that changes the ROM leaves a profile claiming an identity nothing has — and profiles are keyed on that hash.",
+    "AMENDED 2026-08-18 ON BRAD'S RULING, two changes, both forced by the fixture rather than chosen. (1) \"at least 3 RF-Scroller levels\" is not satisfiable: RF-Scroller has exactly ONE level and ONE area — FORMAT.md's palette section says so in as many words (\"exactly one area, so this is the degenerate (area-count = 1) case\"). Three slices of one 48-column grid decoded by the same code path would prove nothing three times. The real second and third subjects were to be Nova the Squirrel, which W5-02a established is blocked upstream.",
+    "(2) \"golden screenshots\" is replaced by an EXACT decode-vs-VRAM comparison, and that is a strengthening, not a relaxation: two renderings can agree while both misread the ROM, whereas the nametable bytes the game itself streams are the ground truth for \"in-game appearance\".",
+    "SCOPE AMENDED (vetoable, recorded): `crates/rf-harness/**` added. Not optional — `scripts/validate-arch.sh` rule 3 exempts only retroforge/rf-harness/rf-nes/rf-snes from the no-direct-core-dependency law, so rf-enhance can never run a core and the comparison cannot live in the crate the decoder lives in.",
+    "HOW THE COMPARISON WORKS, verified against main.c before amending: `blit_pending_column()` writes 28 tiles per raw column at `0x2000 + 64 + (physical_col & 0x1F)`, nametable 1 when `physical_col >= 32`. FORMAT.md's \"Raw tile columns vs. metatile columns\": `raw_col = mc*2 + side`, side 0 emits {TL, BL} and side 1 emits {TR, BR}, top to bottom. VRAM holds only 64 of the level's 96 raw columns at once (`col & 0x3F` wraparound, vertical mirroring), so ONE snapshot cannot cover the level: take two — after `init_video()` preloads raw columns 0-63 (metatile columns 0-31), and after the streaming wait-loop reaches TAIL_GATE_COL 95 (metatile columns 16-47). Together they cover all 48.",
+    "OWED BY W5-01 (2026-08-18): nothing asserts that `profiles/nes/rf-scroller/profile.toml`'s `[[identity]]` block still matches the fixture ROM CI builds. W5-01's write_scope was `profiles/nes/rf-scroller/**` only, so the test could not be added there. It belongs here: this ticket already needs the built fixture present, so `retroforge-tool profile hash <fixture> <profile>` (or the `rf_profiles` equivalent) is one assertion away.",
     "W5-01's RAM map came from a `-g --dbgfile` link verified byte-identical to `rom.sha256`, cross-checked against FORMAT.md. A STALE local .dbg had `frame_counter` at 0x602E (its pre-W2-10a address, which is now `camera_y`); regenerate rather than reuse."
    ],
    "stories": [
