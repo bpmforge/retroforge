@@ -33,6 +33,13 @@ jobs:
         run: node scripts/validate-evidence.mjs
       - name: install cc65 (RF-Scroller fixture toolchain, W2-10)
         run: sudo apt-get update && sudo apt-get install -y cc65
+      - name: build SNES mirror-map fixtures (W6-06, deterministic from source)
+        # Same cc65 the NES fixture uses — ca65 assembles 65816, so the
+        # SNES side needs no additional toolchain. Both mappings build
+        # from one source with a -D switch and the script refuses a hash
+        # mismatch rather than re-pinning silently.
+        run: fixtures/snes/mirror-map/build.sh
+
       - name: build RF-Scroller fixture ROM (D-001, deterministic from source)
         # fixtures/nes/rf-scroller/build.sh is the SAME command a local
         # rebuild uses — never a hand-typed variant here — and itself

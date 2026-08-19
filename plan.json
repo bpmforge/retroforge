@@ -3399,6 +3399,9 @@
     "MDMA basics sufficient to boot libSFX fixture ROMs (full DMA/HDMA edge cases land in W7 per EMULATION_CORES.md section 3.2)"
    ],
    "notes": [
+    "OWED BY W6-06 (2026-08-19): the LoROM/HiROM mirror-map fixtures EXIST, build deterministically in CI and write a golden RAM result block at $7E:0000 — but nothing runs them, because `rf-snes` is a 15-line stub. Reading that block is this ticket's, and it is the cheapest possible first proof that the bus maps correctly: boot each image, run to the loop, read $7E:0000, assert magic 'RF' then checks-run == checks-passed == 4. The protocol is documented in fixtures/snes/mirror-map/FORMAT.md and pinned by a test so it cannot drift.",
+    "The magic is written LAST by the ROM on purpose: finding it present certifies the counts beneath it came from a run that reached the end, rather than from uninitialised WRAM that happened to look plausible. Check it before trusting the counts.",
+    
     "REFINED AT PHASE ENTRY BY W6-00 (2026-08-19). Right-sized at 8 points. Note the ordering dependency this creates for fixtures: W6-05 (RF-Scroller-S) depends on this ticket, because a fixture ROM is only useful once the bus can map and boot it \u2014 but W6-06 (the libSFX toolchain) deliberately depends on NOTHING and can be done first, since building a ROM does not require being able to run it."
    ],
    "points": 8,
@@ -3571,14 +3574,16 @@
     "LoROM and HiROM mirror-map fixtures build from source and assert cartridge address mapping including mirrors and banks via a golden RAM result block (TESTING.md section 5 row; FR-CORE-035)"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E1-S1"
    ],
    "notes": [
-    "FILED 2026-08-19 BY W6-00, and pulled OUT of the fixture ticket on purpose: the toolchain is a prerequisite for every SNES fixture, it is independently useful (it unblocks W6-05 and any future SNES test ROM), and it is the piece most likely to need a TECH_STACK row and a licence check. Bundling it into RF-Scroller-S would have made a fixture ticket fail for toolchain reasons.",
-    "STATUS AT FILING, verified rather than assumed: `asar` is NOT installed on the development machine and there is no `fixtures/snes/` directory. The NES side's precedent is `cc65`, installed in CI by `.github/workflows/ci.yml`'s own apt step and used by `fixtures/nes/rf-scroller/build.sh`, which pins `rom.sha256` and refuses a mismatch. Do the same shape.",
-    "NO DEPENDENCIES: this is the one W6 ticket that can be started before any 65C816 work, because building a ROM does not require being able to run it. Doing it early de-risks the whole phase."
+    "CLOSED 2026-08-19. THE HEADLINE FINDING, and it changed the ticket: **no new toolchain was needed at all.** D-001 and this ticket both said libSFX, and the phase-entry assumption was that asar/libSFX had to be installed and licence-checked before any SNES work could start. Checked rather than assumed: cc65's `ca65` already assembles 65816 (`--cpu 65816`, with `.p816` and explicit `.a8`/`.a16` width directives) and `ld65` links a flat LoROM or HiROM image from a linker config — and cc65 is ALREADY installed in CI for the NES fixture. So there is no new dependency, no TECH_STACK row, no licence review, and the SNES phase was never gated on a toolchain decision.",
+    "libSFX remains right for RF-Scroller-S (W6-05), which wants a framework's init code, macros and asset pipeline. A cartridge MAPPING test needs one bank, a header and vectors; a framework would be a large dependency contributing nothing the test uses. Recorded in fixtures/snes/mirror-map/FORMAT.md so W6-05 does not read this as a precedent for avoiding libSFX everywhere.",
+    "ONE SOURCE, TWO MAPPINGS, via a -D switch — deliberately, so the pair is a COMPARISON rather than two unrelated fixtures. A test asserts they share a long common code prefix; without that they could drift into different programs and a difference in a later result block would be uninterpretable (you could not tell whether the mapping or the program caused it).",
+    "HONEST GAP, recorded rather than glossed: nothing EXECUTES these yet — `rf-snes` is a 15-line stub — so the ticket's \"assert ... via a golden RAM result block\" is delivered as far as it can be. The ROMs write the block; reading it is owed to W6-02a and is now a note on that ticket. The harness test asserts everything short of execution (deterministic build, valid cartridge structure, mapping-only difference, and the result-block protocol pinned against the source so it cannot drift) and says in its own doc that a structural test is not a substitute for running them.",
+    "A BUG WORTH NOT REPEATING, in FORMAT.md: the first build put the header at $FFB0, which is the EXTENDED header — the one a console reads is at $FFC0. It assembled, linked, looked fine, and reported its title as \"XTURE\", the real title read five bytes into itself."
    ]
   },
   {
