@@ -1,0 +1,309 @@
+# RF-Scroller — the real profile for this project's own fixture ROM
+# (ticket W5-01, schema v0, docs/design/GAME_PROFILES.md §2).
+#
+# ## Provenance (FR-PROF-003)
+#
+# Every address below was derived from THIS repository's own fixture
+# source, which RetroForge wrote — there is no clean-room question here,
+# and no commercial game is involved. Two independent derivations agree:
+#
+# 1. `fixtures/nes/rf-scroller/src/main.c`'s declarations, linked at the
+#    addresses cc65 assigns, read out of a `--dbgfile` symbol dump of a
+#    link that produces a BYTE-IDENTICAL ROM to the pinned build
+#    (verified: adding `-g --dbgfile` leaves the sha256 at
+#    c79f6f61...99e087, which is what `rom.sha256` pins).
+# 2. `fixtures/nes/rf-scroller/FORMAT.md`'s "Documented RAM addresses"
+#    table.
+#
+# **Both were needed, and the reason is recorded because it nearly went
+# wrong.** A stale `.dbg` left over from an older local build put
+# `columns_streamed` at `0x602D` and `frame_counter` at `0x602E`; the real
+# W2-10a build has `camera_y` at `0x602E` and `frame_counter` at `0x6030`.
+# FORMAT.md's own "Address re-pin (W2-10a)" section warns about exactly
+# that trap ("any test or tool that hardcodes `0x602E` for
+# `frame_counter`..."). A profile built from the stale file alone would
+# have read the wrong byte for two of its entries and looked perfectly
+# plausible doing it.
+#
+# ## Identity is the NORMALIZED hash set
+#
+# `fixtures/nes/rf-scroller/rom.sha256` pins the RAW file hash, because
+# that is what a build script can check. `[[identity]]` below is the
+# NORMALIZED (header-stripped) set, per SRS FR-CORE-011 and
+# `rf_cart::hash`'s rule that the raw hash is "kept too, but only for
+# diagnostics — never for identity". They are different numbers over the
+# same ROM; produced by `retroforge-tool rom hash`.
+
+[meta]
+profile_version = "0.1"
+title = "RF-Scroller"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge W5-01"]
+sources = [
+  "fixtures/nes/rf-scroller/src/main.c",
+  "fixtures/nes/rf-scroller/src/leveldata.h",
+  "fixtures/nes/rf-scroller/src/level_data.c",
+  "fixtures/nes/rf-scroller/FORMAT.md",
+  "fixtures/nes/rf-scroller/build.sh (deterministic build; rom.sha256 pins the result)",
+]
+
+[meta.requires]
+mapper = "NROM"
+chips = []
+
+# Normalized (header-stripped) hashes of the CI-built fixture ROM —
+# acceptance criterion 1. `revision` is the fixture's own generation:
+# W2-10a re-pinned three RAM addresses, so a profile matching the W2-10
+# ROM would be reading the wrong bytes, and the revision string is what
+# says which one this is.
+[[identity]]
+sha256 = "f009d21449b8b48d5abdc96717df2d5ba9cfa7749888b5f5761c29a7460bc239"
+md5 = "c5af6894955c2a1dd8925c9b69dcd1cc"
+crc32 = "e2f6fcd3"
+revision = "W2-10a"
+
+[capabilities]
+# Honest about what this profile currently supports: the level format is
+# fully described below, but nothing decodes it until W5-02a, and the
+# entity overlay reads OAM rather than a real entity table (see
+# `[entities]`).
+full_level = true
+hud_separation = true
+entity_overlay = true
+widescreen = "stitched"
+fast_load = false
+smooth_camera = false
+
+# ---------------------------------------------------------------------
+# RAM map. All of these live in PRG-RAM ($6000-$7FFF) because cc65's NES
+# target puts C globals there, not in zero page — which is also why the
+# addresses move when the declaration order in main.c changes, and why
+# build.sh's comment forbids reordering its source list.
+# ---------------------------------------------------------------------
+
+[[memory_map]]
+addr = 0x6029
+len = 2
+type = "u16"
+label = "player_x"
+notes = "World X in pixels, 0..752 (MAX_PLAYER_X). Little-endian."
+source = "fixtures/nes/rf-scroller/src/main.c:169 (`unsigned int player_x`); FORMAT.md 'Documented RAM addresses'"
+
+[[memory_map]]
+addr = 0x602B
+len = 2
+type = "u16"
+label = "camera_x"
+notes = "Screen-left world X in pixels, 0..512. Little-endian. This is the scroll position the full-level view tracks."
+source = "fixtures/nes/rf-scroller/src/main.c:170 (`unsigned int camera_x`); FORMAT.md 'Documented RAM addresses'"
+
+[[memory_map]]
+addr = 0x602D
+len = 1
+type = "u8"
+label = "columns_streamed"
+notes = "Highest raw tile-column (0..95) currently known-correct in VRAM. FORMAT.md calls this the wraparound witness; the loading wait-loop below keys off it."
+source = "fixtures/nes/rf-scroller/src/main.c:171 (`unsigned char columns_streamed`); FORMAT.md 'Documented RAM addresses'"
+
+[[memory_map]]
+addr = 0x602E
+len = 1
+type = "u8"
+label = "camera_y"
+notes = "Vertical sub-area scroll offset in pixels, 0..48. Real, bounded and Up/Down-driven, but FORMAT.md's 'Known defects' records that it has no rendered effect under the current split technique — recorded here as it is, not as it ought to be."
+source = "fixtures/nes/rf-scroller/src/main.c:177 (`unsigned char camera_y`); FORMAT.md 'Documented RAM addresses'"
+
+[[memory_map]]
+addr = 0x602F
+len = 1
+type = "u8"
+label = "blink_visible"
+notes = "1 while the intentional-blink enemy is drawn, 0 while hidden; exactly `(frame_counter & 0x08) != 0`. The documented witness a de-flicker heuristic must NOT smooth away — this is software blink, not hardware sprite-limit flicker."
+source = "fixtures/nes/rf-scroller/src/main.c:180 (`unsigned char blink_visible`); FORMAT.md 'W2-10a red-fixture scenes'"
+
+[[memory_map]]
+addr = 0x6030
+len = 1
+type = "u8"
+label = "frame_counter"
+notes = "Increments once per main_loop() iteration, unconditionally. RE-PINNED from 0x602E at W2-10a — FORMAT.md 'Address re-pin' warns that anything still hardcoding 0x602E reads camera_y instead."
+source = "fixtures/nes/rf-scroller/src/main.c:184 (`static unsigned char frame_counter`); FORMAT.md 'Address re-pin (W2-10a)'"
+
+[[memory_map]]
+addr = 0x6063
+len = 12
+type = "bytes"
+label = "gem_order"
+notes = "Permutation of GEM_COUNT (12) logical gem ids: gem_order[i] is which LOGICAL gem occupies PHYSICAL OAM slot 2+i. Rotated one step every 8 frames once the tail gate opens. This is the entity state that actually lives in RAM — the gems' world positions do not (see [entities])."
+source = "fixtures/nes/rf-scroller/src/main.c:216 (`static unsigned char gem_order[GEM_COUNT]`)"
+
+# ---------------------------------------------------------------------
+# Camera
+# ---------------------------------------------------------------------
+
+[camera]
+mode = "side_scroller"
+
+[camera.x]
+addr = 0x602B
+type = "u16"
+scale = 1
+
+[camera.y]
+addr = 0x602E
+type = "u8"
+scale = 1
+
+[camera.hud]
+# The status bar is the two-scanline sprite-0 split at the top of the
+# frame; FORMAT.md's "HUD split" section is the source.
+region = "top"
+scanlines = [0, 1]
+detect = "sprite0_split"
+
+# ---------------------------------------------------------------------
+# Entities
+#
+# **The table is the OAM shadow buffer, and that is a deliberate, honest
+# choice rather than a shortcut.** This ROM has no entity struct array in
+# RAM: every gem's world X is a compile-time constant
+# (`GEM_X_BASE + logical * 8`, main.c:422) and they all share one Y
+# (`GEM_Y`, main.c:121). The only per-entity state in RAM is `gem_order`
+# above, which says which logical gem is in which slot. So the only place
+# an overlay can read live entity POSITIONS is where the ROM actually
+# writes them — OAM. Pointing this section at a RAM address that does not
+# hold entity data would be a profile that validates and reads garbage.
+#
+# Slots: 0 = sprite-0 split sentinel, 1 = player, 2..13 = the twelve gems,
+# 14 = the intentional-blink enemy (main.c:95-98). The table below covers
+# the gems only.
+#
+# `offscreen_valid = false`: OAM Y >= 0xEF is the standard NES
+# off-screen park, and gems beyond the hardware's 8-per-scanline limit are
+# genuinely not drawn — an overlay that trusted every slot would draw
+# sprites the PPU dropped, which is precisely the sprite-limit behaviour
+# the fixture exists to exercise.
+# ---------------------------------------------------------------------
+
+[entities]
+offscreen_valid = false
+
+[entities.table]
+addr = 0x0208
+stride = 4
+count = 12
+
+[entities.fields]
+# Standard NES OAM byte order: Y, tile, attributes, X.
+y = 0
+kind = 1
+x = 3
+# **No `active` field, deliberately.** The schema supports one
+# (`active = { offset, mask }`) and it would have been easy to write, but
+# this ROM has no activity flag: `update_gems()` writes all twelve gems
+# into OAM on every tail frame unconditionally (main.c's own comment
+# says so twice), and nothing parks a gem off-screen. The only sense in
+# which a gem is "inactive" is that the PPU's 8-per-scanline evaluator
+# dropped it — which is a hardware fact the emulator knows and no RAM
+# byte records. A masked predicate over the Y byte would have validated
+# and been read as authoritative while meaning nothing.
+
+# ---------------------------------------------------------------------
+# ROM map. Offsets are into the NORMALIZED (header-stripped) image, so
+# CPU $8000 is offset 0x0000 — NROM maps the 16 KiB PRG bank at $8000.
+# Every address here is `<link address> - 0x8000`, and the link addresses
+# come from the same symbol dump as the RAM map above.
+# ---------------------------------------------------------------------
+
+[[rom_map]]
+offset = 0x11CD
+len = 16
+label = "metatile_table"
+type = "bytes"
+count = 4
+source = "symbol `_metatile_table` at $91CD; leveldata.h:24 `metatile_table[METATILE_COUNT][4]`, METATILE_COUNT = 4 — 4 metatiles x 4 tile ids = 16 bytes. NOT a pointer table: the entries are tile ids, and calling it `ptr_table` would tell a decoder to dereference them."
+
+[[rom_map]]
+offset = 0x11DD
+len = 4
+label = "collision_table"
+type = "bytes"
+source = "symbol `_collision_table` at $91DD; one attribute byte per metatile id"
+
+[[rom_map]]
+offset = 0x11E1
+len = 4
+label = "area_palette"
+type = "bytes"
+source = "symbol `_area_palette` at $91E1"
+
+[[rom_map]]
+offset = 0x11E5
+len = 4
+label = "sprite_palette"
+type = "bytes"
+source = "symbol `_sprite_palette` at $91E5"
+
+[[rom_map]]
+offset = 0x11E9
+len = 48
+label = "level_column_offset"
+type = "bytes"
+count = 48
+source = "symbol `_level_column_offset` at $91E9; leveldata.h:28 `level_column_offset[SCREEN_COLS]`, SCREEN_COLS = 48. ONE-BYTE offsets into level_rle_data, not pointers — leveldata.h:10 records that LEVEL_RLE_BYTES was deliberately kept <= 255 so these fit in `unsigned char`."
+
+[[rom_map]]
+offset = 0x1219
+len = 246
+label = "level_rle_data"
+type = "bytes"
+source = "symbol `_level_rle_data` at $9219; leveldata.h:10 LEVEL_RLE_BYTES = 246 (grew from 216 at W2-10a). Taken from the named constant, not rounded to 256 — a length longer than the array would hand a decoder trailing bytes that are not level data."
+
+# ---------------------------------------------------------------------
+# Level format. Nothing decodes this yet — W5-02a builds the
+# `metatile_screens` decoder that reads a document shaped like this.
+# ---------------------------------------------------------------------
+
+[decode]
+kind = "metatile_screens"
+
+[decode.metatile]
+table = 0x11CD
+size = 4
+
+[decode.screens]
+width = 48
+height = 14
+order = "column_rle"
+
+[decode.palettes]
+table = 0x11E1
+per_area = true
+
+[decode.collision]
+table = 0x11DD
+bits = "solid,platform,hazard"
+
+# ---------------------------------------------------------------------
+
+[antiflicker]
+# `blink_visible` (RAM 0x602F) is software blink and must survive
+# de-flicker; the gem rotation is hardware sprite-limit flicker and is
+# what de-flicker is FOR. The two are distinguished by which OAM slots
+# they touch, so the blink enemy's slot is excluded by index.
+mode = "default"
+exclude_oam = [14]
+blink_periods = [16]
+
+[loading]
+[[loading.wait_loops]]
+pc = 0xC000
+until = { addr = 0x602D, equals = 95 }
+label = "streaming wait — columns_streamed reaches TAIL_GATE_COL (95), the last raw column"
+
+[plugins]
+required = []
+optional = []
+
+[mods]

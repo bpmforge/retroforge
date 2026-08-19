@@ -2999,7 +2999,7 @@
     "validates with retroforge-tool"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E6-S1",
     "E6-S3"
@@ -3045,6 +3045,10 @@
    ],
    "points": 5,
    "status": "todo",
+   "notes": [
+    "OWED BY W5-01 (2026-08-18): nothing asserts that `profiles/nes/rf-scroller/profile.toml`'s `[[identity]]` block still matches the fixture ROM CI builds. W5-01's write_scope was `profiles/nes/rf-scroller/**` only, so the test could not be added there. It belongs here: this ticket already needs the built fixture present, so `retroforge-tool profile hash <fixture> <profile>` (or the `rf_profiles` equivalent) is one assertion away. Without it, a fixture rebuild that changes the ROM leaves a profile claiming an identity nothing has — and profiles are keyed on that hash.",
+    "W5-01's RAM map came from a `-g --dbgfile` link verified byte-identical to `rom.sha256`, cross-checked against FORMAT.md. A STALE local .dbg had `frame_counter` at 0x602E (its pre-W2-10a address, which is now `camera_y`); regenerate rather than reuse."
+   ],
    "stories": [
     "E6-S1"
    ]
