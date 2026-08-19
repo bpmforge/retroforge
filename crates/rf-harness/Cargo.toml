@@ -16,6 +16,15 @@ rf-core-api = { path = "../rf-core-api" }
 # "console cores only via rf-core-api" layer rule as "the test harness"
 # itself (scripts/validate-arch.sh rule 3).
 rf-nes = { path = "../rf-nes" }
+# rf-enhance + rf-profiles: ticket W5-02b runs the offline
+# `metatile_screens` decoder against a live core and compares its output
+# with the nametable bytes the ROM itself streams into VRAM. rf-enhance
+# cannot host that test — validate-arch rule 3 exempts only
+# retroforge/rf-harness/rf-nes/rf-snes from the no-direct-core rule — so
+# the harness, which already depends on cores legitimately, is where the
+# two sides can meet.
+rf-enhance = { path = "../rf-enhance" }
+rf-profiles = { path = "../rf-profiles" }
 sha2 = "0.11"
 toml = "1"
 serde = { version = "1", features = ["derive"] }

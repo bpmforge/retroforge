@@ -3470,6 +3470,7 @@ dependencies = [
  "rf-enhance",
  "rf-input",
  "rf-nes",
+ "rf-profiles",
  "rf-renderer",
  "serde",
  "sha2",

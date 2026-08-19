@@ -29,6 +29,7 @@
 
 mod accuracy;
 mod blargg;
+pub mod level_decode_evidence;
 pub mod blargg_evidence;
 mod fetch;
 mod golden_frame;
