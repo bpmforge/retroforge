@@ -3093,7 +3093,7 @@
     "rf-harness's `the_offline_decode_equals_what_the_rom_streams_across_the_whole_level` comes off #[ignore] and passes 96/96"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E6-S1"
    ],
