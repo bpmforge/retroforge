@@ -51,6 +51,7 @@ pub mod rom_open;
 pub mod save_state;
 pub mod script_panel;
 pub mod settings;
+pub mod state_slots;
 pub mod stepper;
 pub mod trace_capture;
 

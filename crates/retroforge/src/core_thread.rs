@@ -301,6 +301,29 @@ pub enum CoreCommand {
     /// Ticket W4-10a: stop tracing and drop the producer, which closes
     /// the file writer's channel and lets it finish its lz4 frame.
     DisarmTrace,
+    /// Ticket W4-11: write the current machine into a save-state slot,
+    /// thumbnail included.
+    ///
+    /// **The core thread does the whole save, and that is why this
+    /// carries a directory rather than returning bytes.** It is the only
+    /// thread holding both halves: the machine (for the container) and
+    /// this frame's RGBA framebuffer (for the thumbnail). Handing the
+    /// container back to the UI would need a new `CoreEvent` variant, and
+    /// `rf-core-api` is outside this ticket's write scope — but it would
+    /// also split one atomic user action across two threads, where a
+    /// crash between halves leaves a listed slot with no picture or a
+    /// picture with no slot.
+    SaveStateToSlot {
+        dir: std::path::PathBuf,
+        stem: String,
+    },
+    /// Ticket W4-11: apply a container the UI already decoded.
+    ///
+    /// Decoding happens UI-side because that is where the migration
+    /// warnings must surface (FRONTEND_UI §3.2's last clause) — by the
+    /// time it reaches here the question "did this state have to be
+    /// migrated?" has been asked and answered.
+    ApplyState(Box<rf_state::Container>),
     /// Ticket W4-06a: widen/narrow which `CoreEvent`s this session emits
     /// (`EmuStepper::set_event_mask`) — the debugger's event-viewer panel
     /// sends this as it opens/closes (DEBUGGER.md §6: "closed panels
@@ -615,6 +638,35 @@ fn core_thread_main(
                     // channel; the writer then finishes its lz4 frame,
                     // which is what makes the file readable at all.
                     trace = None;
+                }
+                CoreCommand::SaveStateToSlot { dir, stem } => {
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    match stepper.save_state(timestamp) {
+                        Ok(container) => {
+                            let Ok(bytes) = container.encode() else {
+                                continue;
+                            };
+                            let rgba = sink.to_vec();
+                            let (w, h) = (
+                                u32::try_from(sink.width()).unwrap_or(0),
+                                u32::try_from(sink.height()).unwrap_or(0),
+                            );
+                            if let Some(slot) = crate::state_slots::SlotId::from_stem(&stem) {
+                                let _ = crate::state_slots::save(
+                                    &dir,
+                                    slot,
+                                    &bytes,
+                                    Some((&rgba, w, h)),
+                                );
+                            }
+                        }
+                        Err(_) => { /* reported by the UI's own status line */ }
+                    }
+                }
+                CoreCommand::ApplyState(container) => {
+                    let _ = stepper.load_state(&container);
                 }
                 CoreCommand::Shutdown => return LoopControl::Stop,
             }

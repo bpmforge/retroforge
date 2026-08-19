@@ -266,6 +266,16 @@ pub struct RetroForgeApp {
     trace_drain: Option<crate::trace_capture::TraceDrain>,
     /// The background lz4 writer, present only while writing to file.
     trace_writer: Option<crate::trace_capture::TraceFileWriter>,
+    /// Ticket W4-11: the save-state manager modal's open flag and the
+    /// slot listing it draws. The listing is refreshed when the modal
+    /// opens and after every save/load, not per frame — it is a directory
+    /// scan, and a modal that stat()ed thirteen files at 60 Hz would be
+    /// paying for a picture that changes when the user presses a button.
+    show_states: bool,
+    state_slots: Vec<crate::state_slots::SlotInfo>,
+    /// Warnings from the most recent load, shown in the modal and
+    /// summarised in the status line (FRONTEND_UI §3.2's last clause).
+    state_warnings: Vec<String>,
 }
 
 impl RetroForgeApp {
@@ -403,6 +413,9 @@ impl RetroForgeApp {
             event_subscription_active: false,
             trace_drain: None,
             trace_writer: None,
+            show_states: false,
+            state_slots: Vec::new(),
+            state_warnings: Vec::new(),
         }
     }
 
@@ -480,6 +493,223 @@ impl RetroForgeApp {
     #[must_use]
     pub fn status(&self) -> &str {
         &self.status
+    }
+
+    /// Render a save's timestamp. Unix seconds as a plain date-time
+    /// rather than "3 minutes ago": a relative label is unreadable in a
+    /// screenshot, in a bug report, or after the session that produced it
+    /// has ended, which is most of when someone reads this list.
+    #[must_use]
+    fn format_timestamp(secs: u64) -> String {
+        // Deliberately arithmetic rather than a date crate: adding a
+        // dependency for one label would need a docs/TECH_STACK.md row
+        // and a licence review, which is a lot of process for a string.
+        let days = secs / 86_400;
+        let time = secs % 86_400;
+        let (mut y, mut d) = (1970u64, days);
+        loop {
+            let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            let len = if leap { 366 } else { 365 };
+            if d < len {
+                break;
+            }
+            d -= len;
+            y += 1;
+        }
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let months = [
+            31,
+            if leap { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        let mut m = 0usize;
+        while m < 12 && d >= months[m] {
+            d -= months[m];
+            m += 1;
+        }
+        format!(
+            "{y:04}-{:02}-{:02} {:02}:{:02}",
+            m + 1,
+            d + 1,
+            time / 3600,
+            (time % 3600) / 60
+        )
+    }
+
+    /// Point the state manager at a game hash without opening a ROM
+    /// (ticket W4-11's harness test).
+    ///
+    /// Test-only in practice but not `#[cfg(test)]`: an integration test
+    /// lives in another crate and cannot see a cfg-gated method, and a
+    /// second door into the same field would be a door the shipped code
+    /// does not use. `open_rom_path` sets the same field on the real
+    /// path.
+    pub fn set_game_hash_for_test(&mut self, hash: Option<String>) {
+        self.current_game_hash = hash;
+    }
+
+    /// Refresh the slot listing and open the manager (ticket W4-11).
+    pub fn open_states_modal(&mut self) {
+        self.state_slots = match self.states_dir() {
+            Some(dir) => crate::state_slots::scan(&dir),
+            // No config directory (or no ROM open): show the empty grid
+            // rather than nothing, so the modal still explains itself.
+            None => crate::state_slots::SlotId::all()
+                .into_iter()
+                .map(|id| crate::state_slots::SlotInfo { id, saved: None })
+                .collect(),
+        };
+        self.show_states = true;
+    }
+
+    /// Where this game's states live, or `None` with no config dir or no
+    /// ROM open.
+    fn states_dir(&self) -> Option<std::path::PathBuf> {
+        Some(crate::state_slots::slots_dir(
+            self.config_root.as_ref()?,
+            self.current_game_hash.as_ref()?,
+        ))
+    }
+
+    /// The save-state manager (FRONTEND_UI §3.2).
+    fn states_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_states {
+            return;
+        }
+        let mut open = true;
+        let mut action: Option<(crate::state_slots::SlotId, bool)> = None;
+        egui::Window::new("Save states")
+            .open(&mut open)
+            .resizable(true)
+            .show(ctx, |ui| {
+                if self.states_dir().is_none() {
+                    ui.label("No ROM open — save states are per game.");
+                }
+                for info in &self.state_slots {
+                    ui.horizontal(|ui| {
+                        let _ = ui.selectable_label(false, info.id.label());
+                        match &info.saved {
+                            Some(saved) => {
+                                // The two flags FRONTEND_UI §3.2 names,
+                                // plus the timestamp.
+                                //
+                                // `Label::sense(hover)` rather than a
+                                // bare `ui.label`: a plain label
+                                // contributes NO node to the
+                                // accessibility tree, so a screen reader
+                                // — and W4-09's harness, which is the
+                                // same tree — cannot see the mode badge
+                                // or the mods warning at all. Ticket
+                                // W4-09 recorded this trap for the
+                                // emulator viewport; it applies to any
+                                // information-bearing label, and these
+                                // three are the ones a user opens this
+                                // modal to read.
+                                // `selectable_label`, not `Label` with a
+                                // hover sense: measured against the real
+                                // accessibility tree, neither a bare
+                                // `ui.label` NOR a hover-sensed `Label`
+                                // contributes a node, so both are
+                                // invisible to a screen reader and to
+                                // W4-09's harness. A selectable label
+                                // renders the same and is a real widget.
+                                let badge = |ui: &mut egui::Ui, text: String| {
+                                    let _ = ui.selectable_label(false, text);
+                                };
+                                badge(ui, saved.mode.label().to_string());
+                                if saved.contains_mods {
+                                    let _ = ui.selectable_label(
+                                        false,
+                                        egui::RichText::new("\u{26a0} contains mods")
+                                            .color(egui::Color32::from_rgb(0xE0, 0x80, 0x30)),
+                                    );
+                                }
+                                badge(ui, Self::format_timestamp(saved.timestamp));
+                                badge(
+                                    ui,
+                                    if saved.thumbnail.is_some() {
+                                        "thumbnail".to_string()
+                                    } else {
+                                        "no thumbnail".to_string()
+                                    },
+                                );
+                                if ui.button(format!("Load {}", info.id.label())).clicked() {
+                                    action = Some((info.id, false));
+                                }
+                            }
+                            None => {
+                                let _ = ui.selectable_label(false, "empty");
+                            }
+                        }
+                        if ui.button(format!("Save {}", info.id.label())).clicked() {
+                            action = Some((info.id, true));
+                        }
+                    });
+                }
+                if !self.state_warnings.is_empty() {
+                    ui.separator();
+                    for line in &self.state_warnings {
+                        ui.colored_label(egui::Color32::from_rgb(0xE0, 0x80, 0x30), line);
+                    }
+                }
+            });
+        if let Some((slot, is_save)) = action {
+            if is_save {
+                self.save_to_slot(slot);
+            } else {
+                self.load_from_slot(slot);
+            }
+        }
+        self.show_states = open;
+    }
+
+    fn save_to_slot(&mut self, slot: crate::state_slots::SlotId) {
+        let Some(dir) = self.states_dir() else {
+            self.status = "No ROM open".to_string();
+            return;
+        };
+        self.status = format!("Saving {}\u{2026}", slot.label());
+        self.send_command(CoreCommand::SaveStateToSlot {
+            dir,
+            stem: slot.stem(),
+        });
+        // The core thread writes the file; re-scan on the next open so
+        // the listing reflects it rather than guessing it succeeded.
+        self.state_warnings.clear();
+    }
+
+    fn load_from_slot(&mut self, slot: crate::state_slots::SlotId) {
+        let Some(dir) = self.states_dir() else {
+            return;
+        };
+        match crate::state_slots::load(&dir, slot, &rf_state::MigrationRegistry::default()) {
+            Ok((container, warnings)) => {
+                // §3.2's last clause. Surfaced in the modal AND the status
+                // line: a warning only visible in a modal the user is
+                // about to close is a warning they will not read.
+                self.state_warnings = crate::state_slots::warning_lines(&warnings);
+                self.status = if self.state_warnings.is_empty() {
+                    format!("Loaded {}", slot.label())
+                } else {
+                    format!(
+                        "Loaded {} with {} warning(s)",
+                        slot.label(),
+                        self.state_warnings.len()
+                    )
+                };
+                self.send_command(CoreCommand::ApplyState(Box::new(container)));
+            }
+            Err(e) => self.status = format!("Load failed: {e}"),
+        }
     }
 
     fn open_rom(&mut self) {
@@ -1582,7 +1812,10 @@ impl RetroForgeApp {
                 // Save states are W4-11's modal; the entry is present and
                 // says what it is waiting for rather than being silently
                 // absent from a menu FRONTEND_UI §2 enumerates.
-                ui.add_enabled(false, egui::Button::new("States\u{2026} (W4-11)"));
+                if ui.button("States\u{2026}").clicked() {
+                    self.show_overlay_menu = false;
+                    self.open_states_modal();
+                }
                 if ui.button("Settings\u{2026}").clicked() {
                     self.show_settings = true;
                 }
@@ -2176,6 +2409,7 @@ impl eframe::App for RetroForgeApp {
         self.library_window(&ctx);
         self.settings_window(&ctx);
         self.overlay_menu(&ctx);
+        self.states_modal(&ctx);
         self.debug_panels_window(&ctx);
     }
 

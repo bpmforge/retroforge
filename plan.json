@@ -914,11 +914,15 @@
     "asserted through W4-09's egui inspection protocol, not by manual checklist: open the modal, assert slot count and that a saved slot's thumbnail and mode badge appear"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E2-S1"
    ],
    "notes": [
+    "CLOSED 2026-08-19. Both flags FRONTEND_UI section 3.2 names are DERIVED from the container's own chunk list (ENHC -> Enhanced, PROF -> contains mods) rather than stored in a sidecar. A sidecar field would be a second source of truth that can disagree with the state itself, and it would disagree in the worst direction: a state labelled Accuracy that restores enhancement data carries a session out of the reference mode, which project law 6 exists to prevent.",
+    "THE PRE-FLIGHT NOTE'S QUESTION, ANSWERED: no new readback was built. The shell already holds the only RGB that exists (cores emit indexed pixels, the palette is applied host-side), and `rf_renderer::png` already encodes — both from W3-04's screenshot path. The thumbnail is a box-filter downscale of the shell's framebuffer written as a sidecar PNG, never a new chunk: a screenshot is not machine state and SAVE_STATES.md's chunk list has no slot for one.",
+    "ACCESSIBILITY FINDING, worth carrying forward: measured against the real accessibility tree, NEITHER a bare `ui.label` NOR a hover-sensed `egui::Label` contributes a node. Every information-bearing label in this modal is therefore a `selectable_label`. This is the same trap W4-09 recorded for the emulator viewport, and it means any future panel whose content matters to a screen reader — or to W4-09's harness — cannot use `ui.label` for it.",
+    
     "SPLIT OUT OF W2-04 2026-08-16 (Brad's ruling). W2-04 owns everything mechanically verifiable about save states; this ticket owns the UI on top of it. It depends on W4-09 DELIBERATELY -- W4-09 builds the egui inspection-protocol harness, and without it this ticket's only possible acceptance is a manual checklist in a commit body, which is exactly what the split exists to avoid.",
     "PRE-FLIGHT: thumbnails need a framebuffer capture path. The core emits indexed pixels (ARCHITECTURE, cores never emit RGB), so a thumbnail is a palette-applied downscale -- check whether rf-renderer already exposes a readback before building one, and do NOT reach into core state for it."
    ]
