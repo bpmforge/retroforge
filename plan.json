@@ -3342,7 +3342,10 @@
    "phase": 6,
    "crate": "rf-snes",
    "write_scope": [
-    "crates/rf-snes/**"
+    "crates/rf-snes/**",
+    "tests/rom-manifest.toml",
+    "scripts/**",
+    "docs/evidence/**"
    ],
    "depends_on": [
     "W6-00"
@@ -3351,6 +3354,8 @@
     "65816 JSON vectors pass for the core op set incl. m/x width handling (FR-CORE-030)"
    ],
    "notes": [
+    "SCOPE WIDENED 2026-08-19 ON BRAD'S RULING to `tests/rom-manifest.toml`, `scripts/**` and `docs/evidence/**`, so this ticket can settle the vector question the manifest defers to it and then actually run them. The resolution taken is the nes6502 precedent: vectors are a LOCAL gate, CI never fetches them, and the result is committed as evidence.",
+    
     "HANDOFF 2026-08-19: the CPU is BUILT, GATED AND PUSHED; the single acceptance criterion — the 65816 JSON vectors — is blocked on a decision the manifest itself defers to this ticket, and on a file outside even the amended write_scope. Left in_progress rather than closed: one criterion, not met, is not done.",
     "WHAT IS BUILT, in crates/rf-snes/src/cpu/: the register file with real emulation/native mode semantics, 24-bit addressing across all sixteen modes, and the core op set (loads/stores, transfers, ALU with decimal, shifts, compares, inc/dec, stack group, branches, jumps, JSR/JSL/RTS/RTL, flag ops, XCE, REP/SEP, XBA, block moves, NOP/WDM). 24 unit tests, all passing.",
     "INTERRUPT AND VECTOR OPCODES (BRK, COP, RTI, WAI, STP) RETURN Err(opcode) RATHER THAN NO-OPPING, deliberately: they are W6-01b's, and a core that silently executed them as nothing would hand the next ticket something that looks finished. Two tests pin this in both directions — the five refuse, and a sample of sixteen in-scope ops execute, so \"everything is unimplemented\" cannot pass the first test.",
