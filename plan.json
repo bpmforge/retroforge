@@ -3121,7 +3121,7 @@
     "gameplay unchanged (mode-invariant test still green)"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E6-S1"
    ]
