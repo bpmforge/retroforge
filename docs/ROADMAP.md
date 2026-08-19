@@ -114,10 +114,30 @@ a second fixture).
 ## Phase 6 — SNES core MVP (months — R-01)
 
 Goal: 65C816 machine boots test ROMs.
-Key tickets: W6-00 (phase-entry refinement — splits the 13-pt set),
-W6-01 (65C816 SingleStepTests vectors), W6-02 (bus, LoROM/HiROM,
-MDMA/HDMA basics, auto-joypad), W6-03 (PPU modes 0/1, OAM, first
-frames), W6-04 (SPC700 vectors + boot-ROM handshake).
+Key tickets: W6-00 (phase-entry refinement — done 2026-08-19),
+W6-01a/b (65C816 SingleStepTests vectors), W6-02a/b (bus, LoROM/HiROM,
+MDMA/HDMA basics, auto-joypad), W6-03a/b (PPU modes 0/1, OAM, first
+frames), W6-04a/b (SPC700 vectors + boot-ROM handshake),
+**W6-06** (libSFX/asar toolchain in CI + LoROM/HiROM mirror-map
+fixtures) and **W6-05** (RF-Scroller-S, the in-repo SNES fixture D-001
+names).
+
+Start with **W6-06**: it is the only W6 ticket with no dependencies,
+because building a SNES ROM does not require being able to run one, and
+every fixture in the phase is blocked until the toolchain exists.
+
+Two things W6-00 established at phase entry, so they are not
+rediscovered. **The test artifacts are already fetchable** —
+`singlestep-65816`, `singlestep-spc700`, `gilyon-snes-tests`,
+`undisbeliever-snes-test-roms` and `peterlemon-snes` are all in
+`tests/rom-manifest.toml`, and three of them are already fetched locally;
+this phase is not blocked on an unobtainable artifact the way the Nova
+profile work was. **The SPC700 IPL boot ROM needs a ruling before
+W6-04a is claimed** — it is 64 bytes of Nintendo code and project law 5
+forbids ROM bytes in git, so the choice between HLE-ing the handshake,
+fetching it as a hash-verified artifact, or requiring the user to supply
+it is a decision about what the emulator claims to be, not a coding
+detail. W6-04a's notes carry the three options.
 Exit criteria: 65816 + spc700 vector suites 100%; gilyon cputest/spctest
 pass; libSFX-built fixture ROMs render golden frames; input works.
 

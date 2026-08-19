@@ -3326,8 +3326,14 @@
     "define + ticket RF-Scroller-S: in-repo libSFX SNES fixture with FORMAT.md and replay gate (FR-CORE-037, fixture doctrine D-001)",
     "ticket the libSFX-built LoROM/HiROM mirror-map fixtures (TESTING.md section 5)"
    ],
+   "notes": [
+    "CLOSED 2026-08-19, all three criteria. (1) All W6 tickets refined at phase entry; no 13-point tickets remain — an earlier pass had already split W6-01..04 into a/b halves, so the split criterion is satisfied by verification rather than further cutting, and that is recorded rather than left looking un-done. (2) RF-Scroller-S filed as W6-05. (3) The libSFX LoROM/HiROM mirror-map fixtures filed as W6-06, together with the toolchain they need.",
+    "W6-06 WAS SPLIT OUT OF W6-05 DELIBERATELY: the toolchain is a prerequisite for every SNES fixture, is independently useful, and is the piece most likely to need a TECH_STACK row and a licence check. Bundling it would have made a fixture ticket fail for toolchain reasons. It also has NO dependencies — building a ROM does not require being able to run one — so it is the right place to start the phase and it de-risks everything after it.",
+    "TWO PHASE-ENTRY FINDINGS, verified rather than assumed, now recorded on the tickets that need them. (a) THE TEST ARTIFACTS ARE ALREADY FETCHABLE: singlestep-65816, singlestep-spc700, gilyon-snes-tests, undisbeliever-snes-test-roms and peterlemon-snes are all in tests/rom-manifest.toml and three are already fetched locally. This phase is NOT blocked on an unobtainable artifact the way W5-02a's Nova profile was — worth knowing up front, because that was the assumption most likely to be wrong. (b) THE SPC700 IPL BOOT ROM NEEDS A RULING before W6-04a is claimed: 64 bytes of Nintendo code against project law 5's \"no ROM bytes in git\". Three options with their trade-offs are on W6-04a; the choice is about what the emulator claims to be, not a coding detail, so it was not made here.",
+    "`asar` is not installed and there is no fixtures/snes/ directory — checked, not assumed. The NES precedent to copy is cc65, installed by CI's own apt step and driven by a build.sh that pins rom.sha256 and refuses a mismatch."
+   ],
    "points": 2,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
@@ -3343,6 +3349,11 @@
    ],
    "acceptance": [
     "65816 JSON vectors pass for the core op set incl. m/x width handling (FR-CORE-030)"
+   ],
+   "notes": [
+    "REFINED AT PHASE ENTRY BY W6-00 (2026-08-19). Right-sized at 8 points; no 13-point tickets remain in W6 (an earlier pass already split W6-01..04 into a/b halves), so W6-00's split criterion is satisfied by verification rather than by further cutting.",
+    "TEST ARTIFACTS ARE ALREADY FETCHABLE \u2014 verified, not assumed. `tests/rom-manifest.toml` carries `singlestep-65816`, `singlestep-spc700`, `gilyon-snes-tests`, `undisbeliever-snes-test-roms` and `peterlemon-snes`; `roms/snes/` already holds the gilyon, spc700 and undisbeliever archives locally. This is NOT the Nova situation W5-02a hit: nothing here is blocked on an unobtainable artifact.",
+    "THE NES CPU WORK IS THE MODEL, INCLUDING ITS TRAPS: W1-01/W1-03 ran SingleStepTests per-opcode with cycle-by-cycle bus assertions, and W2-20 recorded the one place a vector suite and a blargg ROM legitimately disagree (the unstable illegal opcode $AB, where SingleStepTests generates against magic $EE and instr_test-v5 checksums against $FF). Expect 65C816 equivalents around unstable/undocumented behaviour and record them as EXCLUSIONS with reasons, the way `docs/evidence/local-gate.json` does, never as silent waivers."
    ],
    "points": 8,
    "status": "todo",
@@ -3386,6 +3397,9 @@
     "memory map + LoROM/HiROM mapping; unsupported chips produce the FR-CORE-013 diagnostic (FR-CORE-035)",
     "mul/div register latency + NMITIMEN + H/V IRQ + WRAM port per EMULATION_CORES.md section 3.1",
     "MDMA basics sufficient to boot libSFX fixture ROMs (full DMA/HDMA edge cases land in W7 per EMULATION_CORES.md section 3.2)"
+   ],
+   "notes": [
+    "REFINED AT PHASE ENTRY BY W6-00 (2026-08-19). Right-sized at 8 points. Note the ordering dependency this creates for fixtures: W6-05 (RF-Scroller-S) depends on this ticket, because a fixture ROM is only useful once the bus can map and boot it \u2014 but W6-06 (the libSFX toolchain) deliberately depends on NOTHING and can be done first, since building a ROM does not require being able to run it."
    ],
    "points": 8,
    "status": "todo",
@@ -3449,6 +3463,9 @@
    "acceptance": [
     "golden frames green on the PeterLemon PPU tests subset (FR-CORE-033 subset)"
    ],
+   "notes": [
+    "REFINED AT PHASE ENTRY BY W6-00 (2026-08-19). `peterlemon-snes` is in `tests/rom-manifest.toml` (artifacts `peterlemon_ppu`, `peterlemon_mode7`), so the golden-frame subset has a source. Note it is NOT yet fetched into `roms/snes/` on this machine \u2014 fetch before claiming, and expect the same NFR-006 rule the NES golden suites follow: CI has no ROMs, so the suite must skip locally and FAIL on CI when an artifact is missing rather than pass having asserted nothing."
+   ],
    "points": 5,
    "status": "todo",
    "stories": [
@@ -3469,6 +3486,12 @@
    "acceptance": [
     "spc700 JSON vectors pass (FR-CORE-031)",
     "64KB ARAM + IPL ROM banking via $F1 + timers T0-T2"
+   ],
+   "notes": [
+    "REFINED AT PHASE ENTRY BY W6-00 (2026-08-19).",
+    "**BLOCKER TO RESOLVE BEFORE CLAIMING: the SPC700 IPL boot ROM.** This ticket's acceptance says \"64KB ARAM + IPL ROM banking via $F1\", and EMULATION_CORES section 3.4 wants the \"$FFC0-FFFF, readable/bankable via $F1\" handshake. That IPL is 64 bytes of Nintendo code. Project law 5 is \"no ROM bytes in git\", so it cannot simply be pasted into the source the way a synthetic fixture can.",
+    "THREE OPTIONS, none of them chosen here \u2014 this needs a ruling, and the ticket should not be claimed until it has one. (a) HLE the handshake: implement the boot protocol's OBSERVABLE behaviour without the ROM's bytes, which is what several emulators do and which keeps the repo clean, at the cost of any game that reads IPL bytes directly seeing wrong data. (b) Fetch it as a hash-verified artifact like every other external oracle, which fits the manifest machinery exactly but puts a Nintendo-copyright blob in a fetch list rather than in git \u2014 note D-001's boundary already permits fetch-only for external oracles, though an IPL is not an oracle. (c) Require the user to supply it, like the ROMs themselves. The honest default is probably (a) with the limitation documented, but that is a call about what the emulator CLAIMS to be, not a coding decision.",
+    "spc700 vectors themselves are unblocked either way: `singlestep-spc700` is in the manifest and already fetched locally. The IPL question only gates the boot-handshake half."
    ],
    "points": 8,
    "status": "todo",
@@ -3496,6 +3519,66 @@
    "status": "todo",
    "stories": [
     "E8-S1"
+   ]
+  },
+  {
+   "id": "W6-05",
+   "title": "RF-Scroller-S: in-repo libSFX SNES fixture + FORMAT.md + replay gate",
+   "phase": 6,
+   "crate": "fixtures",
+   "write_scope": [
+    "fixtures/snes/**",
+    "crates/rf-harness/**",
+    "tests/rom-manifest.toml",
+    ".github/**"
+   ],
+   "depends_on": [
+    "W6-06",
+    "W6-02a"
+   ],
+   "acceptance": [
+    "fixtures/snes/rf-scroller-s builds deterministically from source in CI, with rom.sha256 pinned and verified by the build script (fixture doctrine D-001, as RF-Scroller does for NES)",
+    "FORMAT.md documents the level format, the RAM map and the toolchain provenance, to the standard fixtures/nes/rf-scroller/FORMAT.md sets",
+    "a scripted 5-minute input log runs without faults and is gated as a .rfreplay (FR-CORE-037)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ],
+   "notes": [
+    "FILED 2026-08-19 BY W6-00. D-001 names this fixture by name (\"RF-Scroller-S (SNES, libSFX, via W6-00)\") and FR-CORE-037 gates on it, so it is a doctrine obligation rather than a nice-to-have: game-shaped content the project demos or regresses on is OURS, in-repo, built from source in CI.",
+    "DEPENDS ON W6-06 FOR THE TOOLCHAIN, not the other way round: nothing SNES-shaped can be built until libSFX/asar exist in CI, and that is a separate, smaller, independently-useful piece of work.",
+    "LEARN FROM RF-SCROLLER RATHER THAN REDISCOVERING. Its FORMAT.md and three tickets' worth of hard-won lessons apply directly: (a) declaration order decides BSS layout, so any new global goes AFTER the documented ones or every documented address and the shipped profile silently go stale (W5-02c); (b) a stale local symbol dump will happily give you the wrong addresses — re-link with a debug file and verify the ROM is BYTE-IDENTICAL to the pinned hash before trusting symbols (W5-01); (c) anything between the vblank wait and a VRAM write eats that write's budget, and an overrun corrupts isolated tiles that look like nothing until an offline decoder disagrees (W5-02c).",
+    "The 5-minute replay gate should follow `fixtures/replays/unprofiled-scroller.rfreplay`'s pattern from W5-08: record with an #[ignore]d test, verify the ROM hash on replay so a fixture rebuild fails loudly rather than replaying stale inputs into a different game."
+   ]
+  },
+  {
+   "id": "W6-06",
+   "title": "libSFX/asar toolchain in CI + LoROM/HiROM mirror-map fixtures",
+   "phase": 6,
+   "crate": "infra",
+   "write_scope": [
+    "fixtures/snes/**",
+    ".github/**",
+    "scripts/**",
+    "tests/rom-manifest.toml",
+    "docs/TECH_STACK.md"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "libSFX (or asar) is installed in CI and a trivial SNES ROM builds deterministically from source, the way cc65 already does for NES",
+    "LoROM and HiROM mirror-map fixtures build from source and assert cartridge address mapping including mirrors and banks via a golden RAM result block (TESTING.md section 5 row; FR-CORE-035)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": [
+    "E1-S1"
+   ],
+   "notes": [
+    "FILED 2026-08-19 BY W6-00, and pulled OUT of the fixture ticket on purpose: the toolchain is a prerequisite for every SNES fixture, it is independently useful (it unblocks W6-05 and any future SNES test ROM), and it is the piece most likely to need a TECH_STACK row and a licence check. Bundling it into RF-Scroller-S would have made a fixture ticket fail for toolchain reasons.",
+    "STATUS AT FILING, verified rather than assumed: `asar` is NOT installed on the development machine and there is no `fixtures/snes/` directory. The NES side's precedent is `cc65`, installed in CI by `.github/workflows/ci.yml`'s own apt step and used by `fixtures/nes/rf-scroller/build.sh`, which pins `rom.sha256` and refuses a mismatch. Do the same shape.",
+    "NO DEPENDENCIES: this is the one W6 ticket that can be started before any 65C816 work, because building a ROM does not require being able to run it. Doing it early de-risks the whole phase."
    ]
   },
   {
