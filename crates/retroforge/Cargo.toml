@@ -50,6 +50,16 @@ rf-cache = { path = "../rf-cache" }
 # and hands plain `&[u8]`/`&[CoreEvent]` slices to `rf-debugger`'s decode
 # functions — same resolution as SceneGraph at W4-03c/W4-03e.
 rf-debugger = { path = "../rf-debugger" }
+# rf-profiles: promoted from a dev-dependency by ticket W5-03. The shell
+# is the layer that knows a ROM's identity hash AND can reach the
+# filesystem, so it is where a profile gets matched to the game that just
+# opened (`crate::level_view`). ARCHITECTURE.md §3 draws `UI --> ENH` and
+# `ENH --> PRO`; the shell already depends directly on three of the four
+# enhancement-side crates (rf-enhance, rf-debugger, rf-plugin-sdk) for the
+# same mediation reason, and `scripts/validate-arch.sh` restricts only the
+# console cores. Profiles are DATA, never code (ARCHITECTURE.md §3's own
+# table: "executable code (data only; code = plugins)").
+rf-profiles = { path = "../rf-profiles" }
 # rf-plugin-sdk: the Lua script host (ticket W4-04). The shell owns the
 # REPL panel and the capability/ledger surfaces; the SDK owns the sandbox.
 rf-plugin-sdk = { path = "../rf-plugin-sdk" }
@@ -86,14 +96,6 @@ toml = "1"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-# rf-profiles: dev-only, for the ticket W4-06b criterion-2 integration test
-# (`tests/profile_skeleton_export.rs`) to re-parse the exported skeleton
-# with the real loader (`rf_profiles::load_file`) after round-tripping it
-# through the actual `retroforge-tool` CLI as a subprocess, and assert
-# `source` actually survived (not just that the CLI exited 0 — an unknown-
-# key typo would still exit 0 with a warning). Not a `[dependencies]`
-# entry: nothing in this crate's production code touches `rf-profiles`.
-rf-profiles = { path = "../rf-profiles" }
 
 # egui_kittest: the headless UI-test harness for ticket W4-09's CI smoke
 # flow. Same repo and release train as egui itself (emilk/egui), published

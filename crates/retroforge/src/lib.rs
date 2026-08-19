@@ -42,6 +42,7 @@ pub mod enhanced_view;
 pub mod game_settings;
 pub mod hash;
 pub mod input_map;
+pub mod level_view;
 pub mod library;
 pub mod library_roots;
 pub mod mode_invariant;

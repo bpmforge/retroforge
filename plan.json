@@ -3121,7 +3121,12 @@
     "gameplay unchanged (mode-invariant test still green)"
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
+   "notes": [
+    "SHIPPED AS DATA, NOT PIXELS (2026-08-18). All four criteria are met at the scene-graph level: `rf_enhance::level_view` builds a FullMap or Ultrawide `SceneGraph` over a `DecodedLevel`, with live sprites lifted into world space and the original-viewport outline as an `OverlayCmds` rect. GPU compositing of a `SceneGraph` is W4-03c's job and this ticket's write_scope deliberately cannot reach the renderer — the same seam W4-03b recorded (\"produced as data ...; GPU compositing of that data is W4-03c\").",
+    "THE BUG THIS DESIGN EXISTS TO NOT HAVE: OAM holds SCREEN coordinates, a full-map view draws the LEVEL, so every sprite must be lifted into world space by adding the profile's `[camera].x`. Getting it wrong neither crashes nor looks obviously broken — sprites stick to the viewport while the level scrolls under them, which reads as \"the overlay is a bit off\". `sprites_in_world` therefore takes the camera as a required argument and never defaults it, and both test suites assert positions against a MOVED camera rather than asserting layer or sprite counts.",
+    "`rf-profiles` was promoted from a dev-dependency of `retroforge` to a real one. The shell is the only layer that knows a ROM's identity hash AND can reach the filesystem, so profile matching lives there; it already depends directly on three of the four enhancement-side crates for the same mediation reason, and validate-arch restricts only the console cores."
+   ],
    "stories": [
     "E6-S1"
    ]

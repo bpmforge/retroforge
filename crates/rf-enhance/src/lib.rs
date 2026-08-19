@@ -12,6 +12,7 @@
 pub mod bus;
 pub mod camera;
 pub mod decode;
+pub mod level_view;
 pub mod persistence;
 pub mod scene_graph;
 pub mod scene_identity;
