@@ -613,6 +613,16 @@ static void init_video(void) {
 
 /* The main superloop. Runs forever; every iteration is exactly one NES
  * frame, paced entirely by polling PPUSTATUS (module doc). */
+/* Ticket W5-02c: the streamer's demand target, carried from the PREVIOUS
+ * frame so `stream_chunk()` can run as the FIRST thing in vblank.
+ *
+ * Declared here, after every other static in this file, deliberately:
+ * cc65 assigns BSS in declaration order, so a new static declared earlier
+ * would shift `gem_order[]` and everything above it, and FORMAT.md's
+ * "Documented RAM addresses" table (plus the shipped profile keyed to it)
+ * would silently go stale. Declared last, nothing documented moves. */
+static unsigned int streamer_demand;
+
 static void main_loop(void) {
     for (;;) {
         unsigned char buttons;
@@ -626,6 +636,33 @@ static void main_loop(void) {
         }
 
         /* ---- pure game logic (safe anywhere -- no PPU access) ---- */
+        /* ---- stream FIRST, while vblank is still fresh ----
+         *
+         * Ticket W5-02c, and this ordering is the whole fix. Everything
+         * between the vblank wait and this call costs vblank: with
+         * `read_buttons()` (eight $4016 reads under cc65's codegen) and
+         * the 16-bit camera arithmetic ahead of it, the chunk was
+         * starting around scanline 256 of a vblank that ends at 260, and
+         * its last `$2007` writes landed on scanlines 0-1 — during
+         * rendering, where the PPU owns `v` and a write goes to whatever
+         * address rendering left there (nesdev.org/wiki/PPU_registers).
+         *
+         * MEASURED, not inferred (this was attempt 2; attempt 1 guessed
+         * and was wrong). Stepping the machine instruction by
+         * instruction and watching every playfield byte, playfield VRAM
+         * writes were landing at scanlines {0, 1, 256, 257, 258}: the
+         * 256-258 group is correct late-vblank streaming, and the 0-1
+         * group is the overrun. They hit exactly tile rows 16 and 24 —
+         * the rows ticket W5-02b measured as wrong.
+         *
+         * Streaming first uses the PREVIOUS frame's demand target, which
+         * costs one frame of lookahead and nothing else: the streamer
+         * already runs `STREAM_MARGIN_TILES` ahead of the camera
+         * precisely so a frame of slack is free. Same shape as W2-10a's
+         * fix, which moved the gem/blink/vertical block AFTER the split
+         * write to stop its cost landing on the DMA. */
+        stream_chunk((unsigned char)streamer_demand);
+
         buttons = read_buttons();
         right_held = buttons & BTN_RIGHT;
         frame_counter++;
@@ -673,7 +710,8 @@ static void main_loop(void) {
         if (needed_raw_col > 95u) {
             needed_raw_col = 95u;
         }
-        stream_chunk((unsigned char)needed_raw_col);
+        /* Hand it to NEXT frame's stream_chunk (see the call above). */
+        streamer_demand = needed_raw_col;
 
         OAM_SHADOW[OAM_PLAYER_SLOT * 4 + 0] =
             (unsigned char)(PLAYER_Y - camera_y); /* camera_y==0 outside the

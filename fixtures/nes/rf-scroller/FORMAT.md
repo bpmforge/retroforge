@@ -813,3 +813,68 @@ histograms (re-measured against the new ROM a second time — see "the tail-
 scene reorder" above — not copied from either prior measurement). W5-01's
 identity block does not yet exist (ticket not started) so had nothing to
 re-pin.
+
+## Streaming order and vblank budget (ticket W5-02c)
+
+`stream_chunk()` is the **first** thing `main_loop()` does after the
+vblank wait, before `read_buttons()` and the camera arithmetic. That
+ordering is load-bearing, not stylistic.
+
+### The bug it fixes
+
+Until W5-02c the order was: wait for vblank → read buttons → update
+camera → `stream_chunk()`. `read_buttons()` is eight `$4016` reads under
+cc65's codegen and the camera update is 16-bit arithmetic, so roughly
+fifteen scanlines of vblank were gone before the chunk started. Vblank
+ends at scanline 260. The chunk's last `$2007` writes were landing on
+**scanlines 0-1** — during rendering, where the PPU owns `v` and a write
+goes to whatever address rendering left there
+(nesdev.org/wiki/PPU_registers: writes to `$2007` during rendering
+"will corrupt the address").
+
+The result was isolated wrong tiles in the tail columns, and it was
+invisible on screen: a handful of tiles in a level of 1344.
+
+### How it was found, and one wrong turn worth recording
+
+Ticket W5-02b measured it first, from the outside: the offline
+`metatile_screens` decode disagreed with the nametable bytes the ROM
+streamed, on 15 of 96 raw tile columns, in whole `STREAM_CHUNK_ROWS`
+(2)-sized units, only in the tail.
+
+**Attempt 1 guessed and was wrong.** The theory was that tail-frame work
+overran vblank so the top-of-loop `PPU_STATUS` poll found the flag
+already set and started mid-vblank; the fix was to detect that and skip
+the chunk. Implemented and measured, 15 disagreeing columns became
+**17**. Reverted.
+
+**Attempt 2 instrumented instead of inferring.** Stepping the machine
+instruction by instruction and recording the PPU scanline at every
+playfield VRAM write showed writes clustering at scanlines
+`{0, 1, 256, 257, 258}` — the 256-258 group being correct late-vblank
+streaming and the 0-1 group being the overrun, hitting exactly the tile
+rows W5-02b had measured as wrong. That is the difference between a
+plausible story and a cause.
+
+### What this constrains
+
+Anything added between the vblank wait and `stream_chunk()` eats the
+chunk's budget directly. The gem/blink/vertical-area block already lives
+at the very end of `main_loop()` for the sibling reason W2-10a records
+(its cost was landing on the OAM DMA's timing); this is the same rule
+applied to the streamer.
+
+`streamer_demand` carries the demand target from the previous frame so
+the chunk can run before the camera update that would otherwise produce
+it. That costs one frame of lookahead and nothing else — the streamer
+already runs `STREAM_MARGIN_TILES` ahead of the camera precisely so a
+frame of slack is free.
+
+It is declared **after every other static in `main.c`**, deliberately:
+cc65 assigns BSS in declaration order, so a static declared earlier would
+shift `gem_order[]` and everything above it, and this document's
+"Documented RAM addresses" table — plus the shipped profile keyed to it —
+would silently go stale. Declared last, nothing documented moves, and the
+symbol dump confirms it: `streamer_demand` sits at `$606F`, above
+`gem_order` at `$6063`.
+

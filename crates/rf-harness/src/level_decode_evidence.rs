@@ -147,36 +147,23 @@ fn check_column(
     ));
 }
 
-/// ## The streamed tail: 81 of 96, and what the other 15 are
+/// ## The streamed tail: all 96 as of ticket W5-02c
 ///
-/// **Fully proven:** all 64 columns `init_video()` preloads, byte-exact,
-/// read from a quiescent machine. Of the 32 the camera streams in
-/// afterwards, 17 verify; 15 do not, and they split cleanly into two
-/// causes, established by diagnostic rather than guessed:
+/// This module was written for W5-02b, which could verify only 81 of the
+/// level's 96 raw tile columns. The other 15 were not a harness bug:
+/// `stream_chunk()` in the fixture ran after `read_buttons()` and the
+/// camera arithmetic, so it started near the end of vblank and its last
+/// `$2007` writes landed on scanlines 0-1 — during rendering, where the
+/// PPU owns `v` and a write goes wherever rendering left it. W5-02c
+/// found that by stepping the machine instruction by instruction and
+/// recording the scanline of every playfield VRAM write (they clustered
+/// at {0, 1, 256, 257, 258}), and fixed it by streaming first.
 ///
-/// * **Six** (raw 64, 78-82) are **byte-identical to the occupant they
-///   replace**. Nothing about the slot changes when they land, so the
-///   frame their write completes is unobservable — they read as the old
-///   column until they read as the new one, and the two are the same
-///   bytes. These are almost certainly correct; they simply cannot be
-///   witnessed by this method.
-/// * **Nine** (metatile columns 43-47, which include W2-10a's ladder
-///   columns) are **torn in the fixture's own final VRAM**, matching
-///   neither their own decoded content nor their predecessor's, and
-///   staying that way 30 frames after the level finishes streaming.
-///
-/// **What was ruled out.** It is not settling: `BLIT_SETTLE` at 3, 8 and
-/// 20 frames gives exactly 15 every time. It is not the decoder: W5-02a
-/// verified it against an independent hand walk of the raw RLE bytes for
-/// all 48 metatile columns. It is not a single-snapshot artefact either —
-/// a final snapshot is strictly worse (47 of 96), which is what first
-/// showed the window is genuinely moving: VRAM holds 64 raw columns and
-/// the level has 96, so slots are recycled while the player walks.
-///
-/// The remaining nine are unresolved and are **not** papered over: the
-/// whole-level test is `#[ignore]`d rather than weakened to "at least 81",
-/// because a threshold set to whatever currently passes is fitting the
-/// target to the arrow.
+/// The per-column structure below stays, and is still the right shape:
+/// VRAM holds 64 raw columns and the level has 96, so slots are recycled
+/// while the player walks and a single "final" snapshot photographs a
+/// moving target. W5-02b measured that directly — a final snapshot
+/// mismatched 47 of 96 where per-column checking mismatched 15.
 ///
 /// Which raw tile columns were verified, and what went wrong.
 pub struct VerifyReport {

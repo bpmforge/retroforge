@@ -346,10 +346,31 @@ fn measure(rom_bytes: &[u8]) -> SplitTracker {
 /// timing correction.
 fn frozen_streaming_top() -> Histogram {
     Histogram {
-        counts: [(11, 272), (12, 84), (13, 28), (15, 59), (16, 5), (239, 734)]
-            .into_iter()
-            .collect(),
-        total: 1182,
+        // Re-baselined by ticket W5-02c's streaming-order fix
+        // (`stream_chunk()` moved ahead of `read_buttons()` and the
+        // camera arithmetic, so the chunk no longer overruns vblank —
+        // FORMAT.md's "Streaming order and vblank budget" section).
+        //
+        // **The invariant this histogram exists to protect is
+        // UNCHANGED**: `later_than_18` is still exactly 734 and the
+        // scanline-239 count is still exactly 734, so nothing moved into
+        // vblank-crossing territory — the hard failure mode this test
+        // names. What changed is a redistribution WITHIN the safe early
+        // window (11-16), which is what moving a few hundred cycles of
+        // work earlier in the frame does. Total 1182 -> 1180 and
+        // iterations 591 -> 590 because the fix costs one frame of
+        // streamer lookahead.
+        counts: [
+            (11, 267),
+            (12, 51),
+            (13, 44),
+            (14, 20),
+            (15, 64),
+            (239, 734),
+        ]
+        .into_iter()
+        .collect(),
+        total: 1180,
         later_than_18: 734,
     }
 }
@@ -357,26 +378,28 @@ fn frozen_streaming_top() -> Histogram {
 fn frozen_streaming_split() -> Histogram {
     Histogram {
         counts: [
-            // Re-baselined with the rest by W2-21's OAM-DMA phase flip —
-            // see `frozen_streaming_top` for the full reason. `total`
-            // (1182) and `later_than_18` (448) are both unchanged.
-            (13, 157),
-            (14, 577),
-            (29, 272),
-            (30, 82),
-            (31, 29),
-            (32, 1),
-            (33, 52),
-            (34, 12),
+            // Re-baselined by W5-02c with the rest — see
+            // `frozen_streaming_top` for the reason and for why the
+            // vblank-crossing invariant is intact. `later_than_18` moves
+            // 448 -> 446, i.e. two writes, which is the same one-frame
+            // lookahead shift that took `total` from 1182 to 1180; the
+            // distribution's shape is unchanged.
+            (14, 679),
+            (15, 55),
+            (29, 241),
+            (30, 57),
+            (31, 59),
+            (32, 25),
+            (33, 64),
         ]
         .into_iter()
         .collect(),
-        total: 1182,
-        later_than_18: 448,
+        total: 1180,
+        later_than_18: 446,
     }
 }
 
-const FROZEN_STREAMING_ITERATIONS: u32 = 591;
+const FROZEN_STREAMING_ITERATIONS: u32 = 590;
 
 /// Re-derives the historical pre-W2-10a streaming histograms documented
 /// above, for comparison only (not asserted against -- see that doc

@@ -27,6 +27,17 @@
 #
 # ## Identity is the NORMALIZED hash set
 #
+# RE-PINNED BY TICKET W5-02c (2026-08-19). That ticket fixed a real race
+# in the fixture's own streamer: `stream_chunk()` ran after
+# `read_buttons()` and the camera arithmetic, so it started near the end
+# of vblank and its last $2007 writes landed on scanlines 0-1, during
+# rendering, where the PPU owns `v`. Streaming first fixed it. The ROM
+# therefore changed, and with it every ROM offset (the tables moved by
+# 0x0A) and the identity hashes. The RAM map did NOT move: the new carry
+# variable was declared after every existing static on purpose, so
+# FORMAT.md's documented addresses and this file's memory_map still hold.
+# W5-02b's identity-drift gate is what makes a re-pin like this safe.
+#
 # `fixtures/nes/rf-scroller/rom.sha256` pins the RAW file hash, because
 # that is what a build script can check. `[[identity]]` below is the
 # NORMALIZED (header-stripped) set, per SRS FR-CORE-011 and
@@ -58,10 +69,10 @@ chips = []
 # ROM would be reading the wrong bytes, and the revision string is what
 # says which one this is.
 [[identity]]
-sha256 = "f009d21449b8b48d5abdc96717df2d5ba9cfa7749888b5f5761c29a7460bc239"
-md5 = "c5af6894955c2a1dd8925c9b69dcd1cc"
-crc32 = "e2f6fcd3"
-revision = "W2-10a"
+sha256 = "9e4ccffe64505c2d1f31217ee484be23fcc5dec72841d4a8bb7085cc1c4daf61"
+md5 = "0b748a3ada96ba8415f0bee40f58f5ba"
+crc32 = "366bf4e7"
+revision = "W5-02c"
 
 [capabilities]
 # Honest about what this profile currently supports: the level format is
@@ -217,48 +228,48 @@ x = 3
 # ---------------------------------------------------------------------
 
 [[rom_map]]
-offset = 0x11CD
+offset = 0x11D7
 len = 16
 label = "metatile_table"
 type = "bytes"
 count = 4
-source = "symbol `_metatile_table` at $91CD; leveldata.h:24 `metatile_table[METATILE_COUNT][4]`, METATILE_COUNT = 4 — 4 metatiles x 4 tile ids = 16 bytes. NOT a pointer table: the entries are tile ids, and calling it `ptr_table` would tell a decoder to dereference them."
+source = "symbol `_metatile_table` at $91D7; leveldata.h:24 `metatile_table[METATILE_COUNT][4]`, METATILE_COUNT = 4 — 4 metatiles x 4 tile ids = 16 bytes. NOT a pointer table: the entries are tile ids, and calling it `ptr_table` would tell a decoder to dereference them."
 
 [[rom_map]]
-offset = 0x11DD
+offset = 0x11E7
 len = 4
 label = "collision_table"
 type = "bytes"
-source = "symbol `_collision_table` at $91DD; one attribute byte per metatile id"
+source = "symbol `_collision_table` at $91E7; one attribute byte per metatile id"
 
 [[rom_map]]
-offset = 0x11E1
+offset = 0x11EB
 len = 4
 label = "area_palette"
 type = "bytes"
-source = "symbol `_area_palette` at $91E1"
+source = "symbol `_area_palette` at $91EB"
 
 [[rom_map]]
-offset = 0x11E5
+offset = 0x11EF
 len = 4
 label = "sprite_palette"
 type = "bytes"
-source = "symbol `_sprite_palette` at $91E5"
+source = "symbol `_sprite_palette` at $91EF"
 
 [[rom_map]]
-offset = 0x11E9
+offset = 0x11F3
 len = 48
 label = "level_column_offset"
 type = "bytes"
 count = 48
-source = "symbol `_level_column_offset` at $91E9; leveldata.h:28 `level_column_offset[SCREEN_COLS]`, SCREEN_COLS = 48. ONE-BYTE offsets into level_rle_data, not pointers — leveldata.h:10 records that LEVEL_RLE_BYTES was deliberately kept <= 255 so these fit in `unsigned char`."
+source = "symbol `_level_column_offset` at $91F3; leveldata.h:28 `level_column_offset[SCREEN_COLS]`, SCREEN_COLS = 48. ONE-BYTE offsets into level_rle_data, not pointers — leveldata.h:10 records that LEVEL_RLE_BYTES was deliberately kept <= 255 so these fit in `unsigned char`."
 
 [[rom_map]]
-offset = 0x1219
+offset = 0x1223
 len = 246
 label = "level_rle_data"
 type = "bytes"
-source = "symbol `_level_rle_data` at $9219; leveldata.h:10 LEVEL_RLE_BYTES = 246 (grew from 216 at W2-10a). Taken from the named constant, not rounded to 256 — a length longer than the array would hand a decoder trailing bytes that are not level data."
+source = "symbol `_level_rle_data` at $9223; leveldata.h:10 LEVEL_RLE_BYTES = 246 (grew from 216 at W2-10a). Taken from the named constant, not rounded to 256 — a length longer than the array would hand a decoder trailing bytes that are not level data."
 
 # ---------------------------------------------------------------------
 # Level format. Nothing decodes this yet — W5-02a builds the
@@ -269,7 +280,7 @@ source = "symbol `_level_rle_data` at $9219; leveldata.h:10 LEVEL_RLE_BYTES = 24
 kind = "metatile_screens"
 
 [decode.metatile]
-table = 0x11CD
+table = 0x11D7
 size = 4
 
 [decode.screens]
@@ -278,11 +289,11 @@ height = 14
 order = "column_rle"
 
 [decode.palettes]
-table = 0x11E1
+table = 0x11EB
 per_area = true
 
 [decode.collision]
-table = 0x11DD
+table = 0x11E7
 bits = "solid,platform,hazard"
 
 # ---------------------------------------------------------------------

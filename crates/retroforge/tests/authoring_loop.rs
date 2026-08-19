@@ -34,6 +34,35 @@ fn shipped_profile_text() -> String {
         .expect("the shipped profile is checked in")
 }
 
+fn parse_hex(lit: &str) -> u32 {
+    u32::from_str_radix(lit.trim_start_matches("0x"), 16).expect("a hex literal")
+}
+
+/// The `offset = 0x...` literal of the `[[rom_map]]` entry labelled
+/// `label`, read out of the shipped profile.
+fn offset_literal_for(label: &str) -> String {
+    let text = shipped_profile_text();
+    let anchor = format!("label = \"{label}\"");
+    let at = text
+        .find(&anchor)
+        .unwrap_or_else(|| panic!("no {label} entry"));
+    let before = &text[..at];
+    let line = before
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with("offset = "))
+        .unwrap_or_else(|| panic!("{label} has no offset"));
+    line.trim().trim_start_matches("offset = ").to_string()
+}
+
+fn rle_offset_literal() -> String {
+    offset_literal_for("level_rle_data")
+}
+
+fn column_offset_literal() -> String {
+    offset_literal_for("level_column_offset")
+}
+
 /// The fixture ROM, header-stripped. Skips locally, fails on CI.
 fn normalized_rom() -> Option<Vec<u8>> {
     let path = repo_root().join("fixtures/nes/rf-scroller/build/rf-scroller.nes");
@@ -96,7 +125,17 @@ fn a_mistyped_table_address_reports_the_rom_offset_it_pointed_at() {
 
     // Push level_rle_data past the end of the ROM, the way a fat finger
     // on a hex digit would.
-    let text = shipped_profile_text().replace("offset = 0x1219", "offset = 0xF1219");
+    //
+    // The offset is read OUT of the shipped profile rather than
+    // hardcoded: ticket W5-02c changed the fixture ROM, which moved every
+    // table, and a literal here would have to be chased every time the
+    // fixture is rebuilt. Deriving it means this test follows the profile
+    // by construction.
+    let original = rle_offset_literal();
+    let text = shipped_profile_text().replace(
+        &format!("offset = {original}"),
+        &format!("offset = 0xF{}", original.trim_start_matches("0x")),
+    );
     std::fs::write(&path, &text).unwrap();
 
     let out = authoring::reload(&path, Some(&rom));
@@ -106,9 +145,11 @@ fn a_mistyped_table_address_reports_the_rom_offset_it_pointed_at() {
     );
     assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
     let err = &out.errors[0];
+    let expected = u32::from_str_radix(&format!("F{}", original.trim_start_matches("0x")), 16)
+        .expect("a hex literal");
     assert_eq!(
         err.rom_offset,
-        Some(0xF_1219),
+        Some(expected),
         "the error must carry the offset the author typed, so they can find it"
     );
     assert!(
@@ -117,7 +158,8 @@ fn a_mistyped_table_address_reports_the_rom_offset_it_pointed_at() {
         err.message
     );
     assert!(
-        err.line().contains("0xF1219"),
+        err.line()
+            .contains(&format!("{expected:#X}").replace("0X", "0x")),
         "the inline line must render the offset in hex, like every other ROM address in this \
          project: {}",
         err.line()
@@ -166,14 +208,13 @@ fn editing_the_profile_changes_what_the_preview_shows() {
     // Point the column table one byte off — still inside the ROM, still
     // structurally decodable, but a DIFFERENT level. This is the edit an
     // author makes while hunting for the right address, and the preview
-    // has to answer it.
+    // has to answer it. Derived from the profile, not hardcoded, for the
+    // reason the offset test above explains.
+    let col = column_offset_literal();
+    let shifted = format!("{:#X}", parse_hex(&col) + 1).replace("0X", "0x");
     let text = shipped_profile_text().replace(
-        r#"offset = 0x11E9
-len = 48
-label = "level_column_offset""#,
-        r#"offset = 0x11EA
-len = 48
-label = "level_column_offset""#,
+        &format!("offset = {col}\nlen = 48\nlabel = \"level_column_offset\""),
+        &format!("offset = {shifted}\nlen = 48\nlabel = \"level_column_offset\""),
     );
     std::fs::write(&path, &text).unwrap();
     let after = authoring::reload(&path, Some(&rom));
