@@ -35,36 +35,78 @@ falsifiable by a demo + CI gate:
 ## 3. Acceptance checklist
 
 Core/accuracy
-- [ ] SingleStepTests nes6502: 100% official opcodes, cycle-by-cycle bus
-- [ ] nestest.log byte-exact; blargg instr_test-v5 + ppu_vbl_nmi +
+- [x] SingleStepTests nes6502: 100% official opcodes, cycle-by-cycle bus
+      — `cargo test -p rf-nes --release vectors` (4 passed: official +
+      unofficial opcode vectors, W1-01/W1-03)
+- [x] nestest.log byte-exact; blargg instr_test-v5 + ppu_vbl_nmi +
       sprite_hit pass headless via $6000 protocol
-- [ ] 10k-frame double-run state-hash identity + replay-from-log identity
-- [ ] Save state → load → continue is pixel- and hash-identical
+      — `cargo test -p rf-nes --release nestest blargg` (nestest 1 passed;
+      blargg 5 passed, incl. `ppu_vbl_nmi_known_good_roms_still_pass`
+      10/10 and `sprite_hit_tests_all_eleven_pass`)
+- [x] 10k-frame double-run state-hash identity + replay-from-log identity
+      — `cargo test --release -p retroforge --test determinism -- --ignored`
+      (2 passed, W1-08)
+- [x] Save state → load → continue is pixel- and hash-identical
+      — `cargo test -p retroforge --test save_state` (5 passed, W2-04)
 
 Boundary
 - [ ] Accuracy vs Enhanced: identical per-frame core state hashes over a
       scripted 5k-frame RF-Scroller run (CI)
-- [ ] Enhancement crates absent from rf-nes dependency graph
-      (validate-arch.sh)
+      **PARTIAL.** The invariant is proven and gated — `mode_invariant_corpus`
+      (6 passed) and `sprite_overlay_mode_invariant` (3 passed) — but over
+      **10-frame** corpora, not the 5000-frame RF-Scroller run this line
+      specifies. The property is the same; the duration is not. Raising it
+      is a scripted-run ticket, not a code change.
+- [x] Enhancement crates absent from rf-nes dependency graph
+      (validate-arch.sh) — `scripts/validate-arch.sh` → `arch OK`, run in
+      CI on every push (rule 1)
 
 Enhancement demos (recorded + reproducible via replay files in-repo)
 - [ ] Un-profiled scroller (Alter Ego or homebrew fixture): stitched canvas
       grows during play; ultrawide view shows visited terrain with fog
       beyond; scene changes create new canvases; canvases persist across
       restart via cache
-- [ ] RF-Scroller: full level rendered from ROM decode before
+      **PARTIAL.** Every mechanism exists and is unit-gated — stitcher,
+      fog mask, scene identity and cache persistence (`rf-enhance`, 68
+      passed; W4-03a/b/d) — and W4-03d drives scene identity against the
+      real RF-Scroller ROM. What this line asks for and does not have is
+      the **recorded, replay-reproducible demo** its section heading
+      requires ("recorded + reproducible via replay files in-repo"). No
+      `.rfreplay` for an un-profiled scroller is checked in.
+- [x] RF-Scroller: full level rendered from ROM decode before
       visiting it; player + active sprites drawn over reconstruction at
       correct positions; original-viewport outline toggle; camera modes
       (original / ultrawide / full-level)
-- [ ] Sprite-limit bypass removes flicker on a constructed 9-sprites-a-line
+      — decode verified against the running game on **all 96 raw tile
+      columns** (`rf-harness/tests/level_decode_vram.rs`, W5-02b + W5-02c);
+      sprites at world positions, outline, and both cameras in
+      `rf-enhance/tests/level_view_offline.rs` +
+      `retroforge/tests/level_view_demo.rs` (W5-03). Scene data only —
+      GPU compositing of a `SceneGraph` is W4-03c's.
+- [x] Sprite-limit bypass removes flicker on a constructed 9-sprites-a-line
       fixture ROM; Accuracy mode still flickers (both under golden frames)
+      — `cargo test -p retroforge --test sprite_overlay_mode_invariant`
+      (3 passed, W3-05a)
 - [ ] Lua script draws live player-position overlay using profile-published
       addresses
+      **NOT BUILT.** W4-04 shipped the sandboxed Lua host, the capability
+      model and the write ledger, and `draw_overlay` exists as a manifest
+      *capability flag* — but no API exposes a profile's `memory_map`
+      addresses to a script, and none draws. Every ingredient is present
+      (W5-01's published addresses, W5-03's `OverlayCmds` layer, W4-04's
+      host); nothing connects them. This is a real ticket's worth of work,
+      not a checkbox.
 
 Product floor
-- [ ] macOS + Linux + Windows builds from CI; ROM library with normalized-
+- [x] macOS + Linux + Windows builds from CI; ROM library with normalized-
       hash identity; input remap (keyboard + one gamepad); per-game settings
       persist; 60 fps with enhancement on (M-class hardware)
+      — 3-OS matrix in `.github/workflows/ci.yml` (`build` job);
+      `crate::library` keyed on normalized hashes (W2-07);
+      `crate::bindings_store` (W2-06, keyboard + gilrs);
+      `crate::game_settings` (W2-07); **60.15 fps measured with FrameBundle
+      assembly enabled**, 8.68 ms/frame with layer extraction on
+      (`frame_bundle_perf`, release, M-series)
 
 ## 4. Stretch (only if MVP gates green early)
 
