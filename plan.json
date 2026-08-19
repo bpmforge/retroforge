@@ -2972,7 +2972,7 @@
     "mute/solo is a HOST-side mix and provably does not perturb the simulation: EmuStepper::state_hash is byte-identical under every mute combination"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E3-S2"
    ],
