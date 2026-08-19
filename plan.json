@@ -3143,7 +3143,8 @@
    "phase": 5,
    "crate": "infra",
    "write_scope": [
-    "docs/**"
+    "docs/**",
+    "crates/retroforge/**"
    ],
    "depends_on": [
     "W5-03",
@@ -3155,8 +3156,10 @@
     "STATUS.md snapshot written"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
+    "SCOPE AMENDED 2026-08-19 ON BRAD'S RULING (\"automation counts for now\"): `crates/retroforge/**` added so the demo capture can be PRODUCED by a harness rather than recorded by hand. The acceptance criterion says \"demo capture recorded\" and does not say by whom; an automated capture is reproducible and re-runnable, which a screen recording is not.",
+    
     "HANDOFF 2026-08-19: the evidence pass is DONE and the MVP is NOT green. 8 of 11 checkboxes are now checked WITH evidence links (the command that proves each, and the ticket that built it); 3 are not, and none of the three can be closed by re-running something.",
     "NOT BUILT — `Lua script draws live player-position overlay using profile-published addresses`. W4-04 shipped the sandboxed host, the capability model and the write ledger, and `draw_overlay` exists as a manifest capability FLAG, but no API exposes a profile's `memory_map` addresses to a script and none draws. Every ingredient exists — W5-01's published addresses, W5-03's `OverlayCmds` layer, W4-04's host — and nothing connects them. This is a ticket's worth of work and should be filed as one; it is the last MVP feature gap.",
     "PARTIAL — `Accuracy vs Enhanced ... over a scripted 5k-frame RF-Scroller run (CI)`. The invariant is proven and gated (`mode_invariant_corpus` 6 passed, `sprite_overlay_mode_invariant` 3 passed) but over 10-FRAME corpora, not 5000 frames of RF-Scroller. Same property, different duration; raising it is a scripted-run ticket.",
