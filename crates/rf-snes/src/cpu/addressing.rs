@@ -101,6 +101,25 @@ pub fn read_pointer16(bus: &mut dyn CpuBus, at: Addr) -> u16 {
     u16::from(lo) | (u16::from(hi) << 8)
 }
 
+/// Read a 16-bit pointer **within whatever bank `at` names**.
+///
+/// Distinct from [`read_pointer16`], which forces bank 0 — correct for
+/// every direct-page indirect mode and wrong for exactly two opcodes.
+/// `JMP ($nnnn,X)` and `JSR ($nnnn,X)` take their pointer from the
+/// *program* bank, so forcing the high byte to bank 0 fetched a plausible
+/// low byte and a zero high byte: `pc: got 0x0011, want 0xA711`.
+///
+/// Deliberately a sibling rather than a change to `read_pointer16`: over
+/// a hundred opcodes route through that function and rely on its bank-0
+/// behaviour, so "fixing" it in place would have traded two failures for
+/// a hundred.
+pub fn read_pointer16_in_bank(bus: &mut dyn CpuBus, at: Addr) -> u16 {
+    let b = (at >> 16) as u8;
+    let lo = bus.read(at);
+    let hi = bus.read(bank(b, (at as u16).wrapping_add(1)));
+    u16::from(lo) | (u16::from(hi) << 8)
+}
+
 /// Read a 24-bit pointer from bank 0, wrapping within it.
 pub fn read_pointer24(bus: &mut dyn CpuBus, at: Addr) -> u32 {
     let lo = bus.read(at);
@@ -153,19 +172,38 @@ pub fn stack_relative_indirect_indexed(cpu: &Cpu, bus: &mut dyn CpuBus, offset: 
 /// `$7E:FFFF` takes its high byte from `$7F:0000`. That matches the
 /// indexed-absolute carry rule above, and differs from the direct-page
 /// pointer wrap, which is why the two have separate helpers.
-pub fn read_value(bus: &mut dyn CpuBus, at: Addr, eight: bool) -> u16 {
+pub fn read_value(bus: &mut dyn CpuBus, at: Addr, eight: bool, wrap_bank0: bool) -> u16 {
     let lo = bus.read(at);
     if eight {
         return u16::from(lo);
     }
-    let hi = bus.read((at + 1) & 0x00FF_FFFF);
-    u16::from(lo) | (u16::from(hi) << 8)
+    u16::from(lo) | (u16::from(bus.read(next_byte(at, wrap_bank0))) << 8)
+}
+
+/// The address of the second byte of a 16-bit access — rule 2 of the
+/// module doc, applied.
+///
+/// `wrap_bank0` is set for direct-page and stack-relative modes, whose
+/// accesses live in bank 0 and stay there: with `D = $FFF8`, a 16-bit
+/// read at offset `$07` takes its low byte from `$00:FFFF` and its high
+/// byte from `$00:0000`. Every other mode does a true 24-bit increment
+/// and carries into the next bank.
+///
+/// One case in 4,980,000 distinguished these (`c4 n 1616`, `CPY $07` with
+/// `D = $FFF8`), which is a fair measure of how easy it is to write the
+/// carrying version everywhere and never notice.
+fn next_byte(at: Addr, wrap_bank0: bool) -> Addr {
+    if wrap_bank0 {
+        Addr::from((at as u16).wrapping_add(1))
+    } else {
+        (at + 1) & 0x00FF_FFFF
+    }
 }
 
 /// Write an 8- or 16-bit value, low byte first.
-pub fn write_value(bus: &mut dyn CpuBus, at: Addr, value: u16, eight: bool) {
+pub fn write_value(bus: &mut dyn CpuBus, at: Addr, value: u16, eight: bool, wrap_bank0: bool) {
     bus.write(at, value as u8);
     if !eight {
-        bus.write((at + 1) & 0x00FF_FFFF, (value >> 8) as u8);
+        bus.write(next_byte(at, wrap_bank0), (value >> 8) as u8);
     }
 }

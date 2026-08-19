@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local evidence gate (tickets W0-07, W1-03, W1-05b): runs the heavy,
+# Local evidence gate (tickets W0-07, W1-03, W1-05b, W6-01a): runs the heavy,
 # local-only nes6502 SingleStepTests vector suite (2,560,000 cases; too
 # expensive for every CI run — that's the entire reason this exists), the
 # nestest golden-trace diff (8991 lines against a fetched golden log), and
@@ -15,6 +15,10 @@
 #       crates/rf-nes/src/cpu/tests/vectors.rs — see that file's doc
 #       comment for how to fetch the vectors if they aren't present yet,
 #       or run `scripts/fetch-test-roms.sh singlestep-nes6502-src`).
+#     RF_65816_VECTORS (same convention as
+#       crates/rf-snes/src/cpu/tests/vectors.rs; fetch with
+#       `scripts/fetch-65816-vectors.sh`). Unlike the nes6502 vectors this
+#       one SKIPS rather than fails when absent — see the block below.
 #     RF_NESTEST_ROM / RF_NESTEST_LOG (same convention as
 #       crates/rf-nes/src/system/tests/nestest.rs; fetch with
 #       `scripts/fetch-test-roms.sh nestest-rom nestest-log`).
@@ -58,6 +62,32 @@ echo "local-gate: running 10k-frame determinism double-run (release)..." >&2
 if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
   -p retroforge --test determinism -- --ignored; then
   echo "local-gate: 10k-frame determinism double-run FAILED" >&2
+  exit 1
+fi
+
+# 65816 SingleStepTests vectors (ticket W6-01a): 278 per-opcode files —
+# all 139 opcodes crates/rf-snes/src/cpu/ops.rs implements, in BOTH emulation
+# (`.e`) and native (`.n`) mode — at ~10,000 cases each. Local-only and
+# release-only for the same reason nes6502 is: too expensive per CI run,
+# and NFR-006 keeps vector data off CI entirely.
+#
+# Follows the determinism run directly above in shape: a hard local-gate
+# failure with NO docs/evidence/local-gate.json row. The row is omitted
+# because the evidence generator lives in rf-harness, which does not (and
+# under the layering rules should not) depend on rf-snes to run a core's
+# own unit tests — the nes6502 row is generated there only because
+# rf-harness already owns that path. Adding a 65816 row is a rf-harness
+# change and belongs to a rf-harness-scoped ticket, not this one.
+#
+# Skips cleanly rather than failing when the vectors are absent: the test
+# itself prints a SKIP and returns, so someone without
+# scripts/fetch-65816-vectors.sh run yet still gets a usable gate. What it
+# will NOT do is silently pass on an empty directory — see the
+# "ran zero cases is not a pass" assertion in the runner.
+echo "local-gate: running 65816 SingleStepTests vectors (release)..." >&2
+if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
+  -p rf-snes -- --ignored --nocapture; then
+  echo "local-gate: 65816 vector suite FAILED" >&2
   exit 1
 fi
 

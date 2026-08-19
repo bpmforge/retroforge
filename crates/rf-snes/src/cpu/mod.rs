@@ -235,6 +235,50 @@ impl Cpu {
         bus.read(u32::from(self.sp))
     }
 
+    /// Push one byte **without** the emulation-mode page-1 wrap.
+    ///
+    /// The 65816 splits its stack instructions into two families, and the
+    /// split is observable:
+    ///
+    /// * **6502-era** ops (`PHA`/`PHP`/`PHX`/`PHY`/`PLA`/…, `JSR`/`RTS`/
+    ///   `RTI`) keep every access inside page 1 in emulation mode. A push
+    ///   at `$0100` lands at `$0100` and leaves `SP = $01FF`.
+    /// * **New** ops (`PHD`/`PLD`/`PHB`/`PLB`/`PEA`/`PEI`/`PER`/`JSL`/
+    ///   `RTL`) do not. `SP` behaves as a flat 16-bit register for the
+    ///   duration, so a `PEA` at `$0100` writes `$0100` and then
+    ///   `$00FF` — straight out of page 1 — and only the *final* `SP` is
+    ///   pinned back to `$01xx`.
+    ///
+    /// Verified against the vectors rather than recalled: `PEA` at
+    /// `S = $FD00` writes `$000100` then `$0000FF`, while `PHA` at
+    /// `S = $3F00` writes `$000100` and wraps to `$01FF`. Same starting
+    /// page, opposite behaviour.
+    ///
+    /// Single-byte pushes cannot tell the two apart (one access, and the
+    /// end-of-instruction pin hides the difference), but single-byte
+    /// *pulls* can — which is why `PLA` and `PLB` need different helpers
+    /// despite looking identical.
+    pub fn push8_flat(&mut self, bus: &mut dyn CpuBus, value: u8) {
+        bus.write(u32::from(self.sp), value);
+        self.sp = self.sp.wrapping_sub(1);
+    }
+
+    pub fn pull8_flat(&mut self, bus: &mut dyn CpuBus) -> u8 {
+        self.sp = self.sp.wrapping_add(1);
+        bus.read(u32::from(self.sp))
+    }
+
+    pub fn push16_flat(&mut self, bus: &mut dyn CpuBus, value: u16) {
+        self.push8_flat(bus, (value >> 8) as u8);
+        self.push8_flat(bus, value as u8);
+    }
+
+    pub fn pull16_flat(&mut self, bus: &mut dyn CpuBus) -> u16 {
+        let lo = self.pull8_flat(bus);
+        let hi = self.pull8_flat(bus);
+        u16::from(lo) | (u16::from(hi) << 8)
+    }
+
     /// Push 16 bits, high byte first — the order every 65x push uses, and
     /// the order `pull16` therefore has to undo.
     pub fn push16(&mut self, bus: &mut dyn CpuBus, value: u16) {
@@ -261,8 +305,26 @@ impl Cpu {
         if self.stopped {
             return Ok(());
         }
+        // The emulation-mode stack invariant holds CONTINUOUSLY, not just
+        // across a mode switch: the high byte of SP is not writable while
+        // `E` is set, so even an instruction that never touches the stack
+        // observes `$01xx`. Enforcing it only in `set_emulation` left
+        // 99.5% of the emulation-mode vectors failing with
+        // `s: got 0xA8B9, want 0x01B9` — the CPU was otherwise correct
+        // and every one of those was this single missing invariant.
+        if self.e {
+            self.sp = 0x0100 | (self.sp & 0x00FF);
+        }
         let opcode = self.fetch8(bus);
-        ops::execute(self, bus, opcode)
+        let result = ops::execute(self, bus, opcode);
+        // ...and again on the way out, because the flat-stack ops above
+        // are allowed to leave SP outside page 1 mid-instruction but must
+        // not be observable doing so. `PEA` at `S = $FD00` ends at
+        // `$01FE`, not `$00FE`.
+        if self.e {
+            self.sp = 0x0100 | (self.sp & 0x00FF);
+        }
+        result
     }
 }
 

@@ -17,6 +17,8 @@
 //!
 //! When a vector fails later, one of these will usually say why.
 
+mod vectors;
+
 use super::bus::FlatBus;
 use super::{flags, Cpu};
 

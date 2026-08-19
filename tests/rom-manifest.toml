@@ -721,23 +721,31 @@ commit = "bb11756436da8fd16cce86aef63dc6725f48836f"
 subpath = "nes6502/v1"
 dest = "roms/nes/singlestep-nes6502-src"
 
-[[artifact]]
-id = "singlestep-65816"
-license_status = "no-license-grant-fetch-only"
-# This repo's snapshot at commit db6b10401729d5f20f2181dde5d3d7b037093a4a
-# was downloaded and hashed this session
+# RETIRED at W6-01a — the ticket that actually consumes these vectors.
+#
+# The entry that stood here declared the whole-repo zip
 # (0cd1613c2373836bff01cb60eb41cafd71c7b994536848915788e5ffb68db7e1,
-# 490157719 bytes) then discarded rather than kept as a huge scratch file.
-# Left as TODO here pending a decision on whether rf-harness should really
-# fetch a 490MB archive per CI run, or a leaner per-opcode subset should be
-# curated instead — follow-up for the ticket that actually consumes these
-# vectors (rf-nes CPU work). The commit-pinned URL below is verified live
-# and the real hash above can be pasted in once that decision is made.
-sha256 = "TODO-490mb-archive-real-hash-computed-but-not-committed-here"
-mirrors = [
-  "https://codeload.github.com/SingleStepTests/65816/zip/db6b10401729d5f20f2181dde5d3d7b037093a4a",
-]
-dest = "roms/snes/singlestep-65816-db6b104.zip"
+# 490157719 bytes) and left a TODO asking whether rf-harness should fetch
+# a 490 MB archive per run or whether "a leaner per-opcode subset should
+# be curated instead".
+#
+# Neither. The question had a false premise: upstream is ALREADY
+# per-opcode. Commit db6b104's `v1/` directory holds 512 files —
+# `<opcode>.e.json` and `<opcode>.n.json`, one pair per opcode for
+# emulation and native mode — so the granularity the TODO wanted to
+# hand-curate exists for free, and there is no archive to unpack (which
+# also sidesteps rf-harness having no archive extraction; see fetch.rs).
+#
+# So this is no longer an [[artifact]] at all. `scripts/fetch-65816-vectors.sh`
+# pulls exactly the opcodes `crates/rf-snes/src/cpu/ops.rs` implements,
+# deriving the list from the source so the suite cannot silently stop
+# covering an opcode added later. Same commit pin, same
+# no-license-grant-fetch-only posture, local-only per NFR-006.
+#
+# Left as prose rather than deleted: the retired hash and size are the
+# evidence for why the archive shape was rejected, and a future reader
+# asking "why isn't 65816 in the manifest like spc700 is?" deserves the
+# answer here rather than in a commit message.
 
 [[artifact]]
 id = "singlestep-spc700"
@@ -1391,16 +1399,11 @@ frame_budget = 18000
 # Suites — SNES (docs/TESTING.md §5)
 # ---------------------------------------------------------------------------
 
-[[suite]]
-id = "singlestep_65816"
-console = "snes"
-fr = "FR-CORE-030"
-tier = "A"
-protocol = "vector"
-[[suite.roms]]
-artifact = "singlestep-65816"
-rom = "65816-vectors"
-frame_budget = 0
+# singlestep_65816 is not a [[suite]] here either: its artifact was
+# retired above in favour of per-opcode fetching, and the runner lives in
+# the core that owns the CPU (crates/rf-snes/src/cpu/tests/vectors.rs)
+# rather than in rf-harness, exactly as singlestep_nes6502 does for the
+# NES. FR-CORE-030 traceability is carried by that test.
 
 [[suite]]
 id = "singlestep_spc700"

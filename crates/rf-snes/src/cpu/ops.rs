@@ -50,7 +50,19 @@ enum Mode {
 ///
 /// `Immediate` has no address — it is handled by [`load_operand`], which
 /// is why this returns `Option`.
-fn resolve(cpu: &mut Cpu, bus: &mut dyn CpuBus, mode: Mode) -> Option<am::Addr> {
+/// Does a multi-byte access in this mode wrap inside bank 0?
+///
+/// Direct-page and stack-relative accesses are always in bank 0 and stay
+/// there. Everything else does a 24-bit increment. See
+/// [`am::read_value`] — this is the flag it takes.
+fn wraps_in_bank0(mode: Mode) -> bool {
+    matches!(
+        mode,
+        Mode::Direct | Mode::DirectX | Mode::DirectY | Mode::StackRel
+    )
+}
+
+fn resolve(cpu: &mut Cpu, bus: &mut dyn CpuBus, mode: Mode) -> Option<(am::Addr, bool)> {
     let addr = match mode {
         Mode::Immediate => return None,
         Mode::Direct => {
@@ -116,7 +128,7 @@ fn resolve(cpu: &mut Cpu, bus: &mut dyn CpuBus, mode: Mode) -> Option<am::Addr> 
             am::direct_indirect_long_indexed(cpu, bus, o)
         }
     };
-    Some(addr)
+    Some((addr, wraps_in_bank0(mode)))
 }
 
 /// Fetch an operand's VALUE, handling the immediate case's width.
@@ -129,7 +141,7 @@ fn load_operand(cpu: &mut Cpu, bus: &mut dyn CpuBus, mode: Mode, eight: bool) ->
                 cpu.fetch16(bus)
             }
         }
-        Some(addr) => am::read_value(bus, addr, eight),
+        Some((addr, wrap)) => am::read_value(bus, addr, eight, wrap),
     }
 }
 
@@ -147,76 +159,101 @@ fn set_a(cpu: &mut Cpu, value: u16, eight: bool) {
     }
 }
 
-fn adc(cpu: &mut Cpu, value: u16) {
+/// The shared decimal-capable adder behind `ADC` and `SBC`.
+///
+/// ## Why this is one function and not two
+///
+/// `SBC` is `ADC` of the complement — on this chip that identity holds in
+/// **decimal mode too**, not just binary. The only differences are the
+/// direction of the per-digit correction (`-6` where `ADC` adds `+6`) and
+/// the comparison that detects a digit needing it. Writing them as two
+/// functions duplicated the subtle part and let the two copies drift,
+/// which is exactly what happened: the decimal paths disagreed about
+/// where `V` comes from.
+///
+/// ## Where V comes from, precisely
+///
+/// The adder is a chain of 4-bit stages. Each stage corrects its digit
+/// and carries into the next — except the last, whose correction happens
+/// **after** the overflow output is latched. So `V` is computed from a
+/// sum that is decimal-corrected in every digit *but the top one*.
+///
+/// This is narrower than either obvious guess. "V from the fully adjusted
+/// result" fails 13% of the `D = 1` vectors; "V from the pure binary sum"
+/// fixes most of those and still fails 78 of 10000, because the low
+/// digits' corrections really do reach it. Only the off-by-one-stage
+/// version passes all 400000.
+///
+/// Structure follows the per-digit formulation used by bsnes/higan, which
+/// is the form the hardware's carry chain actually takes.
+fn add_with_carry(cpu: &mut Cpu, operand: u16, subtract: bool) {
     let eight = cpu.a8();
-    let a = if eight { cpu.a & 0xFF } else { cpu.a };
-    let carry = u32::from(cpu.flag(flags::C));
+    let width_mask: i32 = if eight { 0xFF } else { 0xFFFF };
+    let digits = if eight { 2 } else { 4 };
+    let sign: i32 = if eight { 0x80 } else { 0x8000 };
+    let top_shift = 4 * (digits - 1);
 
-    let (result, carry_out) = if cpu.flag(flags::D) {
-        // Decimal mode, nibble by nibble. The 65816 fixed the 6502's
-        // broken decimal N/Z, so flags come from the ADJUSTED result.
-        let width = if eight { 2 } else { 4 };
-        let mut acc = 0u32;
-        let mut c = carry;
-        for nib in 0..width {
-            let shift = nib * 4;
-            let mut sum = ((u32::from(a) >> shift) & 0xF) + ((u32::from(value) >> shift) & 0xF) + c;
-            c = u32::from(sum > 9);
-            if sum > 9 {
-                sum += 6;
+    let a = i32::from(cpu.a) & width_mask;
+    let operand = i32::from(operand) & width_mask;
+    let decimal = cpu.flag(flags::D);
+
+    let mut result;
+    if decimal {
+        let mut carry = i32::from(cpu.flag(flags::C));
+        result = 0;
+        for digit in 0..digits {
+            let shift = 4 * digit;
+            let nibble = 0xF << shift;
+            let below = (1 << shift) - 1;
+            // Each stage re-adds the digits at its own position and
+            // carries the already-corrected lower digits along unchanged.
+            result = (a & nibble) + (operand & nibble) + (carry << shift) + (result & below);
+            if digit + 1 == digits {
+                break; // top digit: corrected after V, below.
             }
-            acc |= (sum & 0xF) << shift;
+            let saturated = nibble | below;
+            if subtract {
+                if result <= saturated {
+                    result -= 0x6 << shift;
+                }
+            } else if result > ((0x9 << shift) | below) {
+                result += 0x6 << shift;
+            }
+            carry = i32::from(result > saturated);
         }
-        (acc, c != 0)
     } else {
-        let sum = u32::from(a) + u32::from(value) + carry;
-        let limit = if eight { 0x100 } else { 0x1_0000 };
-        (sum & (limit - 1), sum >= limit)
-    };
+        result = a + operand + i32::from(cpu.flag(flags::C));
+    }
 
-    // Overflow is a signed-magnitude question and is computed from the
-    // BINARY sum's sign bits even in decimal mode, matching the hardware.
-    let sign = if eight { 0x80 } else { 0x8000 };
-    let overflow = ((a ^ result as u16) & (value ^ result as u16) & sign) != 0;
+    // Latched here — see the doc comment. Moving this one line below the
+    // top-digit correction is the 78-vector bug.
+    cpu.set_flag(flags::V, (!(a ^ operand) & (a ^ result) & sign) != 0);
 
-    cpu.set_flag(flags::C, carry_out);
-    cpu.set_flag(flags::V, overflow);
-    cpu.set_nz(result as u16, eight);
-    set_a(cpu, result as u16, eight);
+    if decimal {
+        if subtract {
+            if result <= width_mask {
+                result -= 0x6 << top_shift;
+            }
+        } else if result > ((0x9 << top_shift) | ((1 << top_shift) - 1)) {
+            result += 0x6 << top_shift;
+        }
+    }
+
+    cpu.set_flag(flags::C, result > width_mask);
+    let result = (result & width_mask) as u16;
+    cpu.set_nz(result, eight);
+    set_a(cpu, result, eight);
+}
+
+fn adc(cpu: &mut Cpu, value: u16) {
+    add_with_carry(cpu, value, false);
 }
 
 fn sbc(cpu: &mut Cpu, value: u16) {
-    let eight = cpu.a8();
-    if cpu.flag(flags::D) {
-        let a = if eight { cpu.a & 0xFF } else { cpu.a };
-        let borrow = u32::from(!cpu.flag(flags::C));
-        let width = if eight { 2 } else { 4 };
-        let mut acc = 0u32;
-        let mut b = borrow;
-        for nib in 0..width {
-            let shift = nib * 4;
-            let da = (u32::from(a) >> shift) & 0xF;
-            let dv = (u32::from(value) >> shift) & 0xF;
-            let mut diff = da.wrapping_sub(dv).wrapping_sub(b) & 0x1F;
-            b = u32::from(diff > 9);
-            if diff > 9 {
-                diff = diff.wrapping_sub(6);
-            }
-            acc |= (diff & 0xF) << shift;
-        }
-        let sign = if eight { 0x80 } else { 0x8000 };
-        let overflow = ((a ^ value) & (a ^ acc as u16) & sign) != 0;
-        cpu.set_flag(flags::C, b == 0);
-        cpu.set_flag(flags::V, overflow);
-        cpu.set_nz(acc as u16, eight);
-        set_a(cpu, acc as u16, eight);
-    } else {
-        // Binary SBC is ADC of the complement — the identity the 6502
-        // family is built on, so it is written as one rather than
-        // duplicated with the signs flipped.
-        let mask = if eight { 0xFF } else { 0xFFFF };
-        adc(cpu, (!value) & mask);
-    }
+    // The complement identity, applied at the operand rather than by
+    // duplicating the adder with the signs flipped.
+    let mask = if cpu.a8() { 0xFF } else { 0xFFFF };
+    add_with_carry(cpu, (!value) & mask, true);
 }
 
 fn compare(cpu: &mut Cpu, reg: u16, value: u16, eight: bool) {
@@ -242,7 +279,7 @@ fn branch(cpu: &mut Cpu, bus: &mut dyn CpuBus, take: bool) {
 fn rmw(
     cpu: &mut Cpu,
     bus: &mut dyn CpuBus,
-    addr: Option<am::Addr>,
+    addr: Option<(am::Addr, bool)>,
     eight: bool,
     f: impl FnOnce(&mut Cpu, u16) -> u16,
 ) {
@@ -252,10 +289,10 @@ fn rmw(
             let r = f(cpu, v);
             set_a(cpu, r, eight);
         }
-        Some(addr) => {
-            let v = am::read_value(bus, addr, eight);
+        Some((addr, wrap)) => {
+            let v = am::read_value(bus, addr, eight, wrap);
             let r = f(cpu, v);
-            am::write_value(bus, addr, r, eight);
+            am::write_value(bus, addr, r, eight, wrap);
         }
     }
 }
@@ -314,8 +351,8 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) -> Result<(), u8
                 0x83 => Mode::StackRel,
                 _ => Mode::StackRelIndY,
             };
-            let addr = resolve(cpu, bus, mode).expect("store modes are never immediate");
-            am::write_value(bus, addr, cpu.a, m8);
+            let (addr, wrap) = resolve(cpu, bus, mode).expect("store modes are never immediate");
+            am::write_value(bus, addr, cpu.a, m8, wrap);
         }
         // ---- LDX / LDY / STX / STY ------------------------------------
         0xA2 | 0xA6 | 0xB6 | 0xAE | 0xBE => {
@@ -348,8 +385,8 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) -> Result<(), u8
                 0x96 => Mode::DirectY,
                 _ => Mode::Absolute,
             };
-            let addr = resolve(cpu, bus, mode).expect("not immediate");
-            am::write_value(bus, addr, cpu.x, i8b);
+            let (addr, wrap) = resolve(cpu, bus, mode).expect("not immediate");
+            am::write_value(bus, addr, cpu.x, i8b, wrap);
         }
         0x84 | 0x94 | 0x8C => {
             let mode = match opcode {
@@ -357,8 +394,8 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) -> Result<(), u8
                 0x94 => Mode::DirectX,
                 _ => Mode::Absolute,
             };
-            let addr = resolve(cpu, bus, mode).expect("not immediate");
-            am::write_value(bus, addr, cpu.y, i8b);
+            let (addr, wrap) = resolve(cpu, bus, mode).expect("not immediate");
+            am::write_value(bus, addr, cpu.y, i8b, wrap);
         }
         // STZ — store zero.
         0x64 | 0x74 | 0x9C | 0x9E => {
@@ -368,8 +405,8 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) -> Result<(), u8
                 0x9C => Mode::Absolute,
                 _ => Mode::AbsoluteX,
             };
-            let addr = resolve(cpu, bus, mode).expect("not immediate");
-            am::write_value(bus, addr, 0, m8);
+            let (addr, wrap) = resolve(cpu, bus, mode).expect("not immediate");
+            am::write_value(bus, addr, 0, m8, wrap);
         }
         // ---- ALU ------------------------------------------------------
         0x69 | 0x65 | 0x75 | 0x6D | 0x7D | 0x79 | 0x6F | 0x7F | 0x61 | 0x71 | 0x72 | 0x67
@@ -462,12 +499,12 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) -> Result<(), u8
                 0x04 => (Mode::Direct, true),
                 _ => (Mode::Absolute, true),
             };
-            let addr = resolve(cpu, bus, mode).expect("not immediate");
-            let v = am::read_value(bus, addr, m8);
+            let (addr, wrap) = resolve(cpu, bus, mode).expect("not immediate");
+            let v = am::read_value(bus, addr, m8, wrap);
             let a = if m8 { cpu.a & 0xFF } else { cpu.a };
             cpu.set_flag(flags::Z, a & v == 0);
             let r = if set { v | a } else { v & !a };
-            am::write_value(bus, addr, r, m8);
+            am::write_value(bus, addr, r, m8, wrap);
         }
         // ---- shifts and rotates ---------------------------------------
         0x0A | 0x06 | 0x16 | 0x0E | 0x1E => {
@@ -676,30 +713,30 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) -> Result<(), u8
                 cpu.y &= 0xFF;
             }
         }
-        0x8B => cpu.push8(bus, cpu.dbr),
+        0x8B => cpu.push8_flat(bus, cpu.dbr),
         0xAB => {
-            cpu.dbr = cpu.pull8(bus);
+            cpu.dbr = cpu.pull8_flat(bus);
             cpu.set_nz(u16::from(cpu.dbr), true);
         }
-        0x0B => cpu.push16(bus, cpu.d),
+        0x0B => cpu.push16_flat(bus, cpu.d),
         0x2B => {
-            cpu.d = cpu.pull16(bus);
+            cpu.d = cpu.pull16_flat(bus);
             cpu.set_nz(cpu.d, false);
         }
-        0x4B => cpu.push8(bus, cpu.pbr),
+        0x4B => cpu.push8_flat(bus, cpu.pbr),
         0xF4 => {
             let v = cpu.fetch16(bus);
-            cpu.push16(bus, v);
+            cpu.push16_flat(bus, v);
         }
         0xD4 => {
             let o = cpu.fetch8(bus);
             let v = am::read_pointer16(bus, am::direct(cpu, o));
-            cpu.push16(bus, v);
+            cpu.push16_flat(bus, v);
         }
         0x62 => {
             let rel = cpu.fetch16(bus);
             let target = cpu.pc.wrapping_add(rel);
-            cpu.push16(bus, target);
+            cpu.push16_flat(bus, target);
         }
         // ---- flags -----------------------------------------------------
         0x18 => cpu.set_flag(flags::C, false),
@@ -757,7 +794,7 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) -> Result<(), u8
         0x7C => {
             let base = cpu.fetch16(bus);
             let at = am::bank(cpu.pbr, base.wrapping_add(cpu.x));
-            cpu.pc = am::read_pointer16(bus, at);
+            cpu.pc = am::read_pointer16_in_bank(bus, at);
         }
         0x5C => {
             let lo = cpu.fetch16(bus);
@@ -783,13 +820,13 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) -> Result<(), u8
             let base = cpu.fetch16(bus);
             cpu.push16(bus, cpu.pc.wrapping_sub(1));
             let at = am::bank(cpu.pbr, base.wrapping_add(cpu.x));
-            cpu.pc = am::read_pointer16(bus, at);
+            cpu.pc = am::read_pointer16_in_bank(bus, at);
         }
         0x22 => {
             let lo = cpu.fetch16(bus);
             let b = cpu.fetch8(bus);
-            cpu.push8(bus, cpu.pbr);
-            cpu.push16(bus, cpu.pc.wrapping_sub(1));
+            cpu.push8_flat(bus, cpu.pbr);
+            cpu.push16_flat(bus, cpu.pc.wrapping_sub(1));
             cpu.pc = lo;
             cpu.pbr = b;
         }
@@ -798,8 +835,8 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) -> Result<(), u8
             cpu.pc = addr.wrapping_add(1);
         }
         0x6B => {
-            let addr = cpu.pull16(bus);
-            cpu.pbr = cpu.pull8(bus);
+            let addr = cpu.pull16_flat(bus);
+            cpu.pbr = cpu.pull8_flat(bus);
             cpu.pc = addr.wrapping_add(1);
         }
         // ---- block moves --------------------------------------------------
@@ -848,22 +885,40 @@ fn index_step(reg: u16, step: i32, eight: bool) -> u16 {
 /// form, so the mode falls out of the low bits rather than a 15-arm match
 /// repeated six times.
 fn alu_mode(opcode: u8, immediate: u8) -> Mode {
+    // Offsets from the immediate form. Every ALU group (`ORA` $09, `AND`
+    // $29, `EOR` $49, `ADC` $69, `CMP` $C9, `SBC` $E9) uses the same
+    // layout, which is why one table serves all six.
+    //
+    // These were ALL wrong except `Immediate`, `Long` and `LongX` — every
+    // other entry was off by exactly $20, and since the fallback arm is a
+    // catch-all rather than a panic, eleven addressing modes silently
+    // resolved as `StackRelIndY`. The suite did not catch it because the
+    // opcode list it fetched was itself derived by grepping this file's
+    // match arms, and the grep only saw the first opcode per line. A
+    // self-referential gate cannot fail this way loudly, which is why the
+    // fetch script now takes all 256 opcodes instead.
     match opcode.wrapping_sub(immediate) {
         0x00 => Mode::Immediate,
-        0xDC => Mode::Direct,
-        0xEC => Mode::DirectX,
-        0xE4 => Mode::Absolute,
-        0xF4 => Mode::AbsoluteX,
-        0xF0 => Mode::AbsoluteY,
+        0xFC => Mode::Direct,
+        0x0C => Mode::DirectX,
+        0x04 => Mode::Absolute,
+        0x14 => Mode::AbsoluteX,
+        0x10 => Mode::AbsoluteY,
         0x06 => Mode::Long,
         0x16 => Mode::LongX,
-        0xD8 => Mode::IndirectDpX,
-        0xE8 => Mode::IndirectDpY,
-        0xE9 => Mode::IndirectDp,
-        0xDE => Mode::IndirectLong,
-        0xEE => Mode::IndirectLongY,
-        0xDA => Mode::StackRel,
-        _ => Mode::StackRelIndY,
+        0xF8 => Mode::IndirectDpX,
+        0x08 => Mode::IndirectDpY,
+        0x09 => Mode::IndirectDp,
+        0xFE => Mode::IndirectLong,
+        0x0E => Mode::IndirectLongY,
+        0xFA => Mode::StackRel,
+        0x0A => Mode::StackRelIndY,
+        // Unreachable for the six real ALU groups; a panic here would be
+        // a decoding bug, not bad input, so it is better than a silent
+        // wrong mode — which is precisely the bug this table just had.
+        other => {
+            unreachable!("alu_mode: opcode {opcode:#04X} is not an ALU form (offset {other:#04X})")
+        }
     }
 }
 
@@ -874,7 +929,7 @@ fn shift_target(
     bus: &mut dyn CpuBus,
     opcode: u8,
     accumulator_form: u8,
-) -> Option<am::Addr> {
+) -> Option<(am::Addr, bool)> {
     if opcode == accumulator_form {
         return None;
     }
