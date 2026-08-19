@@ -3356,7 +3356,7 @@
     "THE NES CPU WORK IS THE MODEL, INCLUDING ITS TRAPS: W1-01/W1-03 ran SingleStepTests per-opcode with cycle-by-cycle bus assertions, and W2-20 recorded the one place a vector suite and a blargg ROM legitimately disagree (the unstable illegal opcode $AB, where SingleStepTests generates against magic $EE and instr_test-v5 checksums against $FF). Expect 65C816 equivalents around unstable/undocumented behaviour and record them as EXCLUSIONS with reasons, the way `docs/evidence/local-gate.json` does, never as silent waivers."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E8-S1"
    ]
