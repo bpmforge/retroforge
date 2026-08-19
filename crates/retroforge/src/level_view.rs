@@ -129,11 +129,15 @@ impl LevelSession {
 
 /// Walk `profiles_root` for a `profile.toml` whose identity matches.
 ///
+/// `pub` since ticket W5-06: the author workspace needs the PATH of the
+/// profile that matched, so it knows which file to watch.
+///
 /// Matching is on the **normalized** sha256 and nothing else: that is
 /// what `rf_cart::hash` says profiles are keyed on, and matching on a raw
 /// file hash would fail for the same game in different packaging while
 /// appearing to work for whichever copy the author happened to have.
-fn find_matching_profile(root: &Path, normalized_sha256: &str) -> Option<(Profile, PathBuf)> {
+#[must_use]
+pub fn find_matching_profile(root: &Path, normalized_sha256: &str) -> Option<(Profile, PathBuf)> {
     let mut found = Vec::new();
     collect_profiles(root, &mut found);
     found.sort();

@@ -3205,6 +3205,13 @@
    ],
    "points": 5,
    "status": "in_progress",
+   "notes": [
+    "HANDOFF 2026-08-19: criteria 1-3 are BUILT, GATED AND PUSHED; criterion 4 is blocked on write_scope and needs a ruling. Left `in_progress` deliberately rather than closed — three of four is not done.",
+    "WHAT IS DONE. (1) Hot-reload: `retroforge::authoring::Watch` polls (mtime, len) and re-decodes on change. (2) Decode errors inline with ROM offsets: `AuthoringError` carries the offset the author typed, rendered in hex like every other ROM address in this project, and a mistyped table address is tested end to end against the shipped profile. (3) Live preview: an Author window (FRONTEND_UI section 3.5's minimal Phase-4 form) showing errors first, then warnings, then a metatile-id grid; the test asserts the preview's CONTENT changes when the column table moves, not merely that a reload happened.",
+    "WHAT IS BLOCKED. Criterion 4 is a walkthrough DOC ('annotate -> export -> decode -> validate -> golden, recording time-to-first-decoded-level, R-A2'). It belongs under `docs/`, and this ticket's write_scope is `crates/retroforge/**`, `crates/rf-profiles/**`, `crates/rf-enhance/**`. MASTER_PROMPT's always-writable set covers plan.json status/notes, a one-line STATUS.md append, Cargo.lock and a TECH_STACK row — not a new doc. Amending scope to add `docs/**` is a one-line ruling; it was not taken unattended.",
+    "DESIGN DECISION WORTH KEEPING: mtime polling rather than the `notify` crate, and not merely to dodge a dependency. The shell already repaints continuously so one `stat` per repaint is below the noise floor of a frame that uploads a 240 KB texture; a watcher's callback arrives on its own thread at the OS's convenience, so testing one means sleeping (flaky) or mocking the watcher (testing the mock), whereas `Watch` is a pure function of two `fs::metadata` calls and its tests assert BOTH that it fires on a save and that it stays quiet otherwise — the half a watcher's tests usually skip. `notify` would also add per-OS backends, a TECH_STACK row and a `cargo deny` pass. The honest limit is recorded in the module doc: polling cannot see a change made and reverted between two polls, and compares (mtime, len) rather than content.",
+    "The Author control only appears when a profile actually claims the open ROM — a workspace with nothing to author against would be a control that does nothing. Polling is gated on the panel being open, so a session that never opens it does not stat a file at 60 Hz (DEBUGGER.md section 6's pay-for-use rule, applied one layer over)."
+   ],
    "stories": [
     "E6-S2"
    ]

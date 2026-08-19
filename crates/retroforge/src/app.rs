@@ -276,6 +276,18 @@ pub struct RetroForgeApp {
     /// Warnings from the most recent load, shown in the modal and
     /// summarised in the status line (FRONTEND_UI §3.2's last clause).
     state_warnings: Vec<String>,
+    /// Ticket W5-06: the author workspace (FRONTEND_UI §3.5). `None`
+    /// until a profile is matched — there is nothing to author against
+    /// before then.
+    author_watch: Option<crate::authoring::Watch>,
+    author_outcome: crate::authoring::ReloadOutcome,
+    show_author: bool,
+    /// The open ROM, header-stripped — what `[[rom_map]]` offsets are
+    /// relative to, and therefore what the authoring loop must decode
+    /// against (`rf_enhance::decode`'s module doc).
+    normalized_rom: Option<Vec<u8>>,
+    /// Path of the profile matched to the open ROM, if any.
+    matched_profile: Option<std::path::PathBuf>,
 }
 
 impl RetroForgeApp {
@@ -416,6 +428,11 @@ impl RetroForgeApp {
             show_states: false,
             state_slots: Vec::new(),
             state_warnings: Vec::new(),
+            author_watch: None,
+            author_outcome: crate::authoring::ReloadOutcome::default(),
+            show_author: false,
+            normalized_rom: None,
+            matched_profile: None,
         }
     }
 
@@ -555,6 +572,98 @@ impl RetroForgeApp {
     /// path.
     pub fn set_game_hash_for_test(&mut self, hash: Option<String>) {
         self.current_game_hash = hash;
+    }
+
+    /// Poll the watched profile and re-decode if it changed (ticket
+    /// W5-06, FRONTEND_UI §3.5's "hot-reloads on save").
+    ///
+    /// Called once per repaint alongside `pump_trace`, and cheap by
+    /// construction: one `fs::metadata` unless something actually
+    /// changed. Gated on the panel being open, so a session that never
+    /// opens the author workspace does not stat a file at 60 Hz — the
+    /// same pay-for-use rule DEBUGGER.md §6 sets for the debugger.
+    fn pump_authoring(&mut self) {
+        if !self.show_author {
+            return;
+        }
+        let Some(watch) = self.author_watch.as_mut() else {
+            return;
+        };
+        if !watch.poll() {
+            return;
+        }
+        let path = watch.path().to_path_buf();
+        let rom = self.normalized_rom.clone();
+        self.author_outcome = crate::authoring::reload(&path, rom.as_deref());
+    }
+
+    /// Point the author workspace at a profile and open it.
+    pub fn open_author_workspace(&mut self, profile_path: std::path::PathBuf) {
+        self.author_outcome =
+            crate::authoring::reload(&profile_path, self.normalized_rom.as_deref());
+        self.author_watch = Some(crate::authoring::Watch::new(profile_path));
+        self.show_author = true;
+    }
+
+    /// The author workspace (FRONTEND_UI §3.5, minimal Phase-4 form:
+    /// live decode preview + inline error list).
+    fn author_window(&mut self, ctx: &egui::Context) {
+        if !self.show_author {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Author")
+            .open(&mut open)
+            .resizable(true)
+            .show(ctx, |ui| {
+                match self.author_watch.as_ref() {
+                    Some(w) => {
+                        let _ =
+                            ui.selectable_label(false, format!("watching {}", w.path().display()));
+                    }
+                    None => {
+                        let _ = ui.selectable_label(false, "No profile matched this ROM.");
+                        return;
+                    }
+                }
+                ui.separator();
+                // §3.5's "error list inline". Errors first: a preview
+                // shown above its own errors invites the author to read
+                // the stale picture and miss why it is stale.
+                for e in &self.author_outcome.errors {
+                    let _ = ui.selectable_label(
+                        false,
+                        egui::RichText::new(e.line())
+                            .color(egui::Color32::from_rgb(0xE0, 0x50, 0x40)),
+                    );
+                }
+                for w in &self.author_outcome.warnings {
+                    let _ = ui.selectable_label(
+                        false,
+                        egui::RichText::new(w).color(egui::Color32::from_rgb(0xE0, 0x80, 0x30)),
+                    );
+                }
+                ui.separator();
+                match &self.author_outcome.level {
+                    Some(level) => {
+                        let _ = ui.selectable_label(
+                            false,
+                            format!("preview {}x{} metatiles", level.width, level.height),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(crate::authoring::preview_text(level, 48, 14))
+                                    .monospace(),
+                            )
+                            .sense(egui::Sense::hover()),
+                        );
+                    }
+                    None => {
+                        let _ = ui.selectable_label(false, "no preview");
+                    }
+                }
+            });
+        self.show_author = open;
     }
 
     /// Refresh the slot listing and open the manager (ticket W4-11).
@@ -764,6 +873,21 @@ impl RetroForgeApp {
             Ok(rf_cart::Cartridge::Snes { identity, .. }) => Some(identity.normalized.sha256),
             Err(_) => None,
         };
+        // Ticket W5-06: keep the header-stripped image and find the
+        // profile that claims this ROM, so the author workspace has both
+        // the bytes to decode and the file to watch. Both are `None` for
+        // a ROM nobody has written a profile for, which is the normal
+        // case and never an error.
+        self.normalized_rom = Some(
+            bytes
+                .strip_prefix(b"NES\x1a")
+                .map_or_else(|| bytes.clone(), |_| bytes[16..].to_vec()),
+        );
+        self.matched_profile = self.current_game_hash.as_ref().and_then(|hash| {
+            crate::level_view::find_matching_profile(std::path::Path::new("profiles"), hash)
+                .map(|(_, path)| path)
+        });
+
         self.current_game_settings = match (&self.config_root, &self.current_game_hash) {
             (Some(root), Some(hash)) => crate::game_settings::load(root, hash),
             _ => crate::game_settings::GameSettings::default(),
@@ -1819,6 +1943,15 @@ impl RetroForgeApp {
                 if ui.button("Settings\u{2026}").clicked() {
                     self.show_settings = true;
                 }
+                // Ticket W5-06: only offered when a profile actually
+                // claims this ROM — an author workspace with nothing to
+                // author against would be a control that does nothing.
+                if let Some(path) = self.matched_profile.clone() {
+                    if ui.button("Author\u{2026}").clicked() {
+                        self.show_overlay_menu = false;
+                        self.open_author_workspace(path);
+                    }
+                }
                 if ui.button("Controls\u{2026}").clicked() {
                     self.show_controls = true;
                 }
@@ -2410,6 +2543,8 @@ impl eframe::App for RetroForgeApp {
         self.settings_window(&ctx);
         self.overlay_menu(&ctx);
         self.states_modal(&ctx);
+        self.pump_authoring();
+        self.author_window(&ctx);
         self.debug_panels_window(&ctx);
     }
 
