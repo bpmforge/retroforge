@@ -3022,7 +3022,7 @@
     "pure function of ROM bytes (offline test, no emulation needed)"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E6-S1"
    ]
