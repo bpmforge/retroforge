@@ -666,6 +666,44 @@ impl RetroForgeApp {
         self.show_author = open;
     }
 
+    /// Keep the Audio tab fed and act on its buttons (ticket W4-10b).
+    ///
+    /// Same shape as `pump_trace`: the panel is a draw function with no
+    /// channel, so it records a request and this acts on it. Capture is
+    /// turned on when the debug dock opens the tab and off when it
+    /// closes, so a session that never looks at the scopes never pays for
+    /// them (DEBUGGER.md §6).
+    fn pump_audio_scopes(&mut self) {
+        if self.core.is_none() {
+            self.debug_panels.data.audio = None;
+            return;
+        }
+        let panel = self.debug_panels.data.audio.get_or_insert_with(|| {
+            Box::new(crate::debug_dock::AudioPanelData {
+                traces: Vec::new(),
+                mute: rf_debugger::audio_scope::MuteState::new(),
+                request: None,
+                capturing: false,
+            })
+        });
+
+        let Some(request) = panel.request.take() else {
+            return;
+        };
+        match request {
+            crate::debug_dock::AudioRequest::Start => {
+                panel.capturing = true;
+                self.send_command(CoreCommand::SetAudioChannelCapture(true));
+            }
+            crate::debug_dock::AudioRequest::Stop => {
+                panel.capturing = false;
+                panel.traces.clear();
+                self.send_command(CoreCommand::SetAudioChannelCapture(false));
+            }
+            crate::debug_dock::AudioRequest::ClearMutes => panel.mute.clear(),
+        }
+    }
+
     /// Refresh the slot listing and open the manager (ticket W4-11).
     pub fn open_states_modal(&mut self) {
         self.state_slots = match self.states_dir() {
@@ -1089,6 +1127,11 @@ impl RetroForgeApp {
             // two 240 KB clones were worth gating).
             self.debug_panels.data.previous_oam = self.debug_panels.data.oam;
             self.debug_panels.data.oam = *msg.oam;
+            if let Some(audio) = self.debug_panels.data.audio.as_mut() {
+                if !msg.audio_traces.is_empty() {
+                    audio.traces = msg.audio_traces.clone();
+                }
+            }
             // Ticket W4-06d: live VRAM/palette for the nametable and
             // palette viewers. Carried on the frame message like OAM, so
             // the UI thread never reaches into the core — the same
@@ -2531,6 +2574,7 @@ impl eframe::App for RetroForgeApp {
         self.maybe_request_canvas_snapshot();
         self.sync_event_subscription();
         self.pump_trace();
+        self.pump_audio_scopes();
 
         self.menu_bar(ui);
         self.controls_bar(ui);

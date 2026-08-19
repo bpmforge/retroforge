@@ -62,6 +62,10 @@ pub enum DebugTab {
     /// still deserializes and simply never lists the tab, so
     /// [`LAYOUT_FORMAT_VERSION`] does not move.
     Trace,
+    /// `Audio` (ticket W4-10b, FR-DBG-001, DEBUGGER.md §3's "Audio |
+    /// channel scopes, mute/solo per channel"). Additive like every
+    /// variant above, so [`LAYOUT_FORMAT_VERSION`] does not move.
+    Audio,
 }
 
 /// Which axis a [`PersistedNode::Split`] divides along — matches
@@ -136,7 +140,7 @@ pub fn default_layout() -> PersistedLayout {
                 }),
             }),
             second: Box::new(PersistedNode::Leaf {
-                tabs: vec![DebugTab::EventTimeline, DebugTab::Trace],
+                tabs: vec![DebugTab::EventTimeline, DebugTab::Trace, DebugTab::Audio],
                 active: 0,
             }),
         },

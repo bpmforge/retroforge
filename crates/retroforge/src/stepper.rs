@@ -463,6 +463,21 @@ impl EmuStepper {
         cycles
     }
 
+    /// Turn per-channel audio capture on or off (ticket W4-10b).
+    ///
+    /// Off by default. Enabling it cannot change `take_samples`, the
+    /// mixed output, or any machine state — see
+    /// [`rf_nes::apu::Apu::set_channel_capture`] and the invariance test
+    /// in `tests/audio_scope_invariance.rs`.
+    pub fn set_audio_channel_capture(&mut self, on: bool) {
+        self.bus.apu_mut().set_channel_capture(on);
+    }
+
+    /// Drain the per-channel scope streams captured since the last call.
+    pub fn take_audio_channel_samples(&mut self) -> [Vec<i16>; rf_nes::apu::CHANNEL_COUNT] {
+        self.bus.apu_mut().take_channel_samples()
+    }
+
     /// The CPU's current program counter — the address the NEXT
     /// instruction will execute from, which is what a PC breakpoint and
     /// run-to-cursor both compare against.

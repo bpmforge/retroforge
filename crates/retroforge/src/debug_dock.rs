@@ -210,6 +210,9 @@ pub struct PanelData {
     /// so rather than showing an empty list a user would read as "the
     /// trace is running and nothing happened".
     pub trace: Option<Box<TracePanelData>>,
+    /// Ticket W4-10b: per-channel scope traces and the mute/solo state.
+    /// `None` with no session.
+    pub audio: Option<Box<AudioPanelData>>,
     /// Latest frame's OAM (`core_thread::FrameMsg::oam`) — genuinely live,
     /// unlike `chr_rom`/vram/cgram.
     pub oam: [u8; 256],
@@ -248,6 +251,7 @@ impl Default for PanelData {
             chr_rom: None,
             script: None,
             trace: None,
+            audio: None,
             oam: [0u8; 256],
             previous_oam: [0u8; 256],
             vram: [0u8; 0x1000],
@@ -470,6 +474,7 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
             DebugTab::OamDiff => "OAM diff",
             DebugTab::LuaConsole => "Lua",
             DebugTab::Trace => "Trace",
+            DebugTab::Audio => "Audio",
         }
         .into()
     }
@@ -490,6 +495,7 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
             ),
             DebugTab::LuaConsole => lua_console_ui(ui, self.data.script.as_deref()),
             DebugTab::Trace => trace_ui(ui, self.data.trace.as_deref_mut()),
+            DebugTab::Audio => audio_ui(ui, self.data.audio.as_deref_mut()),
         }
     }
 }
@@ -1064,4 +1070,121 @@ fn trace_ui(ui: &mut egui::Ui, data: Option<&mut TracePanelData>) {
                 }
             },
         );
+}
+
+/// What the Audio tab needs (ticket W4-10b).
+pub struct AudioPanelData {
+    /// One trace per channel, in `rf_nes::apu::CHANNEL_NAMES` order.
+    pub traces: Vec<rf_debugger::audio_scope::ScopeTrace>,
+    pub mute: rf_debugger::audio_scope::MuteState<{ rf_nes::apu::CHANNEL_COUNT }>,
+    /// Set by the panel, acted on by the app — the panel has no channel
+    /// of its own, exactly like `TracePanelData::request`.
+    pub request: Option<AudioRequest>,
+    pub capturing: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioRequest {
+    Start,
+    Stop,
+    ClearMutes,
+}
+
+/// The Audio tab: one scope per channel with mute/solo
+/// (DEBUGGER.md §3's "Audio | channel scopes, mute/solo per channel").
+fn audio_ui(ui: &mut egui::Ui, data: Option<&mut AudioPanelData>) {
+    let Some(data) = data else {
+        ui.label("No session — open a ROM to see the audio channels.");
+        return;
+    };
+
+    ui.horizontal(|ui| {
+        if ui
+            .button(if data.capturing {
+                "Stop scopes"
+            } else {
+                "Start scopes"
+            })
+            .clicked()
+        {
+            data.request = Some(if data.capturing {
+                AudioRequest::Stop
+            } else {
+                AudioRequest::Start
+            });
+        }
+        if ui.button("Clear mutes").clicked() {
+            data.request = Some(AudioRequest::ClearMutes);
+        }
+        // Silence has to be explained, or it reads as a broken emulator.
+        if !data.mute.anything_audible() {
+            let _ = ui.selectable_label(
+                false,
+                egui::RichText::new("\u{26a0} everything is muted")
+                    .color(egui::Color32::from_rgb(0xE0, 0x80, 0x30)),
+            );
+        }
+    });
+    ui.separator();
+
+    for (i, name) in rf_nes::apu::CHANNEL_NAMES.iter().enumerate() {
+        ui.horizontal(|ui| {
+            let _ = ui.selectable_label(false, *name);
+            let mut muted = data.mute.muted[i];
+            if ui.checkbox(&mut muted, "M").changed() {
+                data.mute.toggle_mute(i);
+            }
+            let mut soloed = data.mute.soloed[i];
+            if ui.checkbox(&mut soloed, "S").changed() {
+                data.mute.toggle_solo(i);
+            }
+            let trace = data.traces.get(i);
+            let _ = ui.selectable_label(
+                false,
+                match trace {
+                    Some(t) if t.active => "signal",
+                    Some(_) => "silent",
+                    None => "no data",
+                },
+            );
+            if !data.mute.audible(i) {
+                let _ = ui.selectable_label(false, "(inaudible)");
+            }
+        });
+        if let Some(t) = data.traces.get(i) {
+            scope_plot(ui, t);
+        }
+    }
+}
+
+/// Draw one channel's min/max envelope.
+///
+/// Min and max as a filled band rather than a line through the mean: an
+/// averaged square wave is a flat line at its DC offset, which is the
+/// single most misleading thing an audio scope can show
+/// (`rf_debugger::audio_scope::trace`'s own doc).
+fn scope_plot(ui: &mut egui::Ui, trace: &rf_debugger::audio_scope::ScopeTrace) {
+    let height = 32.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
+    if trace.min.is_empty() {
+        return;
+    }
+    let mid = rect.center().y;
+    let scale = height / 2.0 / f32::from(i16::MAX);
+    let step = rect.width() / trace.min.len() as f32;
+    for (i, (lo, hi)) in trace.min.iter().zip(&trace.max).enumerate() {
+        let x = rect.left() + i as f32 * step;
+        let y0 = mid - f32::from(*hi) * scale;
+        let y1 = mid - f32::from(*lo) * scale;
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(x, y0), egui::pos2(x + step.max(1.0), y1)),
+            0.0,
+            egui::Color32::from_rgb(0x60, 0xC0, 0x80),
+        );
+    }
 }

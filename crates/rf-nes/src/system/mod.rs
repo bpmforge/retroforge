@@ -346,6 +346,18 @@ impl NesBus {
         self.ppu.set_event_mask(mask);
     }
 
+    /// The APU, for the debugger's channel scopes (ticket W4-10b).
+    ///
+    /// `&mut` because both callers mutate: one flips capture on, the
+    /// other drains the captured streams. Neither touches machine state —
+    /// `Apu::set_channel_capture` and `Apu::take_channel_samples` are
+    /// both audio-output operations, under the same ruling
+    /// `crate::apu::state`'s exhaustive destructure already applies to
+    /// `samples`.
+    pub fn apu_mut(&mut self) -> &mut Apu {
+        &mut self.apu
+    }
+
     /// Wire [`rf_core_api::CoreConfig::accuracy_mode`] into this machine
     /// (ticket W3-07), same push-to-the-PPU convention as the two setters
     /// above.

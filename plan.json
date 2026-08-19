@@ -2972,15 +2972,17 @@
     "mute/solo is a HOST-side mix and provably does not perturb the simulation: EmuStepper::state_hash is byte-identical under every mute combination"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E3-S2"
    ],
    "notes": [
-    "FILED 2026-08-18 BY W4-10, split on Brad's ruling, and the split boundary is a write_scope fact rather than a size preference: `NesBus` exposes no APU accessor at all, so `Apu::channel_outputs` is unreachable from `retroforge`, and `crates/rf-nes/**` was not in W4-10's scope. This ticket carries that scope.",
-    "An accessor alone is NOT enough, which is why this is 5 points rather than 1. `channel_outputs()` is an instantaneous getter; a scope needs a WAVEFORM. Sampling it once per scanline from the shell yields ~262 points per frame against ~800 audio samples per frame at 48 kHz — a 3x decimated trace that aliases and misrepresents the high channels. Per-channel sample buffers must be filled inside the APU's own tick, alongside the existing mixed buffer.",
-    "THE CONSTRAINT THAT DECIDES THE DESIGN: mute must not alter `Apu::mixed_sample`/`take_samples`. That is emulation output, and `crates/retroforge/tests/determinism.rs` and the .rfreplay format hash it. Mute therefore has to be a host-side mix over the per-channel streams, never a gate inside the APU mixer. If that cannot be arranged, the ticket splits again rather than quietly accepting a determinism change.",
-    "SRS FR-DBG-001 marks audio channel scopes P1, not MVP, so this may be scheduled after the W5 MVP chain without breaking any exit criterion."
+    "CLOSED 2026-08-19, all three criteria. Per-channel streams are decimated by the SAME accumulator as the mixed output, so a host summing them gets the same timebase — measured at >10000 samples over 20 frames, i.e. audio rate, not the ~262 points per frame a per-scanline sample of `channel_outputs()` would have given.",
+    "MUTE IS A HOST-SIDE MIX AND THAT IS PROVEN, NOT ASSERTED: `EmuStepper::state_hash` is byte-identical across ALL 32 mute combinations and all 5 solo cases, with capture on and the host mix actually performed before the hash is taken. The consequence is stated in `rf_debugger::audio_scope`'s module doc so nobody fixes it away: muting changes what you HEAR but not what the emulator DOES, so a .rfreplay recorded with three channels muted still hashes identically.",
+    "ANTI-VACUITY: the invariance tests pass trivially against a capture that produces nothing, so a fourth test pins that capture is real, at the mixed rate, shares one timebase across channels, and that pulse 1 and triangle produce DIFFERENT streams.",
+    "TWO DESIGN DECISIONS WORTH KEEPING. (1) Solo is evaluated at mix time, never stored as mute-everything-else: storing it eagerly loses which channels the user had muted BEFORE they soloed, so un-soloing would silently un-mute them. Solo-wins-over-mute matches every DAW and tracker, which matters more than an argument from first principles. (2) Scope traces keep min AND max per bucket rather than an average — an averaged square wave is a flat line at its DC offset, the single most misleading thing an audio scope can show.",
+    "Channel samples are scaled by the channel's own 0-15 range rather than through the mixer's non-linear curve: a scope shows what a channel is DOING, and pre-applying cross-channel attenuation would make one channel's trace move when a different channel got louder.",
+    "Capture is off by default and the buffers are freed when turned off; traces are reduced to 64 points on the CORE thread, so a frame's 5x735 samples never cross the channel."
    ]
   },
   {

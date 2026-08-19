@@ -210,6 +210,15 @@ pub struct FrameMsg {
     /// auto-derefs to `&[u8; 256]` at every `rf_debugger::oam::decode_oam`
     /// call site, so this costs nothing at the call sites, only here.
     pub oam: Box<[u8; 256]>,
+    /// Ticket W4-10b: per-channel scope traces for this frame, already
+    /// reduced to a drawable envelope on THIS thread.
+    ///
+    /// Reduced here rather than shipped raw for the same reason
+    /// `bg_rgba`/`sprite_rgba` are only cloned when someone is looking:
+    /// a frame's raw per-channel audio is ~735 samples x 5 channels, and
+    /// the panel draws a few dozen points. Empty when the scopes are
+    /// closed.
+    pub audio_traces: Vec<rf_debugger::audio_scope::ScopeTrace>,
     /// Ticket W4-06d: the PPU's nametable VRAM and palette RAM, read via
     /// `NesBus::vram()`/`palette()` — plain non-observing borrows, so
     /// snapshotting them here cannot perturb A12 edge timing (see
@@ -324,6 +333,10 @@ pub enum CoreCommand {
     /// time it reaches here the question "did this state have to be
     /// migrated?" has been asked and answered.
     ApplyState(Box<rf_state::Container>),
+    /// Ticket W4-10b: turn per-channel audio capture on or off. Off by
+    /// default, so a session that never opens the scopes pays nothing
+    /// (DEBUGGER.md §6).
+    SetAudioChannelCapture(bool),
     /// Ticket W4-06a: widen/narrow which `CoreEvent`s this session emits
     /// (`EmuStepper::set_event_mask`) — the debugger's event-viewer panel
     /// sends this as it opens/closes (DEBUGGER.md §6: "closed panels
@@ -530,6 +543,8 @@ fn core_thread_main(
     // whole cost of the debugger's tracing existing, on a session that is
     // not using it (DEBUGGER.md §6, and `benches/debugger_idle.rs`).
     let mut trace: Option<Box<crate::trace_capture::TraceProducer>> = None;
+    // Ticket W4-10b: off by default (DEBUGGER.md §6's pay-for-use rule).
+    let mut audio_capture = false;
     // Ticket W4-01: the indexed-pixel + event accumulator that becomes each
     // published `FrameBundle`, fed alongside `sink`/`layers` via the same
     // `FanoutSink`.
@@ -667,6 +682,10 @@ fn core_thread_main(
                 }
                 CoreCommand::ApplyState(container) => {
                     let _ = stepper.load_state(&container);
+                }
+                CoreCommand::SetAudioChannelCapture(on) => {
+                    stepper.set_audio_channel_capture(on);
+                    audio_capture = on;
                 }
                 CoreCommand::Shutdown => return LoopControl::Stop,
             }
@@ -806,6 +825,18 @@ fn core_thread_main(
                     Vec::new()
                 },
                 oam: Box::new(*stepper.oam()),
+                audio_traces: if audio_capture {
+                    // ~64 points is more than a 32-pixel-tall scope can
+                    // resolve; reducing here keeps a frame's 5x735
+                    // samples off the channel entirely.
+                    stepper
+                        .take_audio_channel_samples()
+                        .iter()
+                        .map(|c| rf_debugger::audio_scope::trace(c, 64))
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 vram: Box::new(*stepper.vram()),
                 palette_ram: Box::new(*stepper.palette()),
                 wram: Box::new(stepper.wram_snapshot()),

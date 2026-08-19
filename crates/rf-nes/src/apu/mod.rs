@@ -86,6 +86,13 @@ const SAMPLES_PER_FRAME_HINT: usize = 900;
 /// The raw per-channel outputs, for W2-01b's mixer and for tests. Pulse and
 /// noise are 4-bit envelope volumes, triangle a 4-bit sequence step, DMC a
 /// 7-bit level — the four inputs nesdev's APU_Mixer formulas take.
+/// How many channels a 2A03 mixes: pulse 1, pulse 2, triangle, noise,
+/// DMC.
+pub const CHANNEL_COUNT: usize = 5;
+
+/// Channel names, in [`ChannelOutputs::as_array`] order.
+pub const CHANNEL_NAMES: [&str; CHANNEL_COUNT] = ["Pulse 1", "Pulse 2", "Triangle", "Noise", "DMC"];
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelOutputs {
     pub pulse1: u8,
@@ -93,6 +100,21 @@ pub struct ChannelOutputs {
     pub triangle: u8,
     pub noise: u8,
     pub dmc: u8,
+}
+
+impl ChannelOutputs {
+    /// The five channels in a fixed order, so callers indexing by channel
+    /// number and callers naming fields cannot disagree.
+    #[must_use]
+    pub fn as_array(self) -> [u8; CHANNEL_COUNT] {
+        [
+            self.pulse1,
+            self.pulse2,
+            self.triangle,
+            self.noise,
+            self.dmc,
+        ]
+    }
 }
 
 /// The 2A03 audio processing unit. See the module doc for scope and for the
@@ -115,6 +137,26 @@ pub struct Apu {
     /// Output samples produced since the last drain, emptied by
     /// [`Apu::take_samples`].
     samples: Vec<i16>,
+    /// Per-channel sample streams, at the SAME rate as `samples`
+    /// (ticket W4-10b). Empty and never written unless
+    /// [`Apu::set_channel_capture`] turned it on.
+    ///
+    /// **This is what makes host-side mute/solo possible at all.**
+    /// `channel_outputs()` is an instantaneous getter; a scope needs a
+    /// waveform, and sampling that getter once per scanline would give
+    /// ~262 points against ~800 audio samples per frame — a 3x decimated
+    /// trace that aliases the high channels. These are decimated by the
+    /// same accumulator as the mixed output, so a host that sums them
+    /// gets the same timebase.
+    ///
+    /// Audio OUTPUT, not machine state, exactly like `samples` above —
+    /// see `crate::apu::state`'s exhaustive destructure.
+    channel_samples: [Vec<i16>; CHANNEL_COUNT],
+    /// Running area per channel since the last emitted sample.
+    channel_accumulators: [f32; CHANNEL_COUNT],
+    /// Off by default: an untraced session must not pay for the
+    /// debugger's scopes existing (DEBUGGER.md §6).
+    channel_capture: bool,
     /// The APU's single CPU/2 parity signal: `true` on the CPU cycles that
     /// are also APU cycles. Toggled once at the top of [`Apu::tick`], and
     /// used by two consumers whose validation status is deliberately NOT
@@ -178,6 +220,9 @@ impl Apu {
             sample_accumulator: 0.0,
             sample_phase: CYCLES_PER_SAMPLE_FIXED,
             samples: Vec::with_capacity(SAMPLES_PER_FRAME_HINT),
+            channel_samples: std::array::from_fn(|_| Vec::new()),
+            channel_accumulators: [0.0; CHANNEL_COUNT],
+            channel_capture: false,
             on_apu_cycle: false,
             irq_line_delayed: false,
         }
@@ -321,6 +366,12 @@ impl Apu {
     /// determinism invariant.
     fn accumulate_sample(&mut self) {
         self.sample_accumulator += self.mixed_output();
+        if self.channel_capture {
+            let c = self.channel_outputs();
+            for (acc, v) in self.channel_accumulators.iter_mut().zip(c.as_array()) {
+                *acc += f32::from(v);
+            }
+        }
         if self.sample_phase > 65_536 {
             self.sample_phase -= 65_536;
             return;
@@ -333,6 +384,23 @@ impl Apu {
         #[allow(clippy::cast_possible_truncation)]
         let sample = (mean * f32::from(i16::MAX)) as i16;
         self.samples.push(sample);
+        if self.channel_capture {
+            // Same period, same divisor: a host summing these gets the
+            // same timebase the mixed stream has. Scaled to i16 by the
+            // channel's own 0-15 range rather than by the mixer's
+            // non-linear curve — a scope shows what a channel is DOING,
+            // and pre-applying the mixer's cross-channel attenuation
+            // would make a channel's trace change when a different
+            // channel got louder.
+            for (i, acc) in self.channel_accumulators.iter_mut().enumerate() {
+                #[allow(clippy::cast_possible_truncation)]
+                let mean = (f64::from(*acc) / cycles) as f32;
+                #[allow(clippy::cast_possible_truncation)]
+                let v = (mean / 15.0 * f32::from(i16::MAX)) as i16;
+                self.channel_samples[i].push(v);
+                *acc = 0.0;
+            }
+        }
         self.sample_accumulator = 0.0;
         self.sample_phase = self.sample_phase + CYCLES_PER_SAMPLE_FIXED - 65_536;
     }
@@ -405,6 +473,30 @@ impl Apu {
     /// [`rf_core_api::CoreSink::audio`] takes.
     pub fn mixed_sample(&self) -> i16 {
         (self.mixed_output() * f32::from(i16::MAX)) as i16
+    }
+
+    /// Turn per-channel sample capture on or off (ticket W4-10b).
+    ///
+    /// Off by default. **Turning it on cannot change `mixed_output`,
+    /// `mixed_sample` or `take_samples`** — it only fills a second set of
+    /// buffers alongside them. That is the property acceptance criterion
+    /// 3 rests on: mute/solo is a host-side mix over these streams, never
+    /// a gate inside this mixer, because `take_samples` is emulation
+    /// output that `determinism.rs` and the `.rfreplay` format hash.
+    pub fn set_channel_capture(&mut self, on: bool) {
+        self.channel_capture = on;
+        if !on {
+            for buf in &mut self.channel_samples {
+                buf.clear();
+                buf.shrink_to_fit();
+            }
+            self.channel_accumulators = [0.0; CHANNEL_COUNT];
+        }
+    }
+
+    /// Drain the per-channel streams captured since the last call.
+    pub fn take_channel_samples(&mut self) -> [Vec<i16>; CHANNEL_COUNT] {
+        std::array::from_fn(|i| std::mem::take(&mut self.channel_samples[i]))
     }
 
     /// Raw per-channel outputs for the mixer above (see [`ChannelOutputs`]).

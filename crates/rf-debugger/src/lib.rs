@@ -48,6 +48,7 @@
 //! | [`datacrystal`] | (TSV import, not a viewer) | N/A — pure data (W4-06b) |
 
 pub mod annotation;
+pub mod audio_scope;
 pub mod breakpoint;
 pub mod datacrystal;
 pub mod event_timeline;

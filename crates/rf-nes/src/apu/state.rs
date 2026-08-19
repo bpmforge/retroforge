@@ -41,6 +41,15 @@ impl Apu {
             sample_accumulator: _,
             sample_phase: _,
             samples: _,
+            // Ticket W4-10b: the per-channel scope streams and their
+            // accumulators fall under the identical ruling — output, not
+            // state. `channel_capture` is caller CONFIGURATION (the same
+            // class as `accuracy_mode` and `event_mask`), and restoring
+            // it from a file would let a state saved with the scopes open
+            // turn them on in a session that never asked for them.
+            channel_samples: _,
+            channel_accumulators: _,
+            channel_capture: _,
             on_apu_cycle,
             irq_line_delayed,
         } = self;
