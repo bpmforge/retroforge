@@ -54,6 +54,11 @@ use rf_core_api::{CoreEvent, CoreSink, PpuPixel};
 use rf_enhance::decode::metatile_screens::{self, DecodedLevel, Spec};
 use rf_nes::{Cpu, NesBus};
 
+/// The last raw tile column `init_video()`'s preload fills. Everything
+/// up to and including this is written before the camera can move, which
+/// is what makes it verifiable from a quiescent machine.
+pub const PRELOAD_LAST_RAW_COLUMN: usize = 63;
+
 /// Tile rows of HUD above the playfield (`blit_pending_column`'s `+ 64`,
 /// i.e. two rows of 32).
 const HUD_TILE_ROWS: usize = 2;
@@ -106,7 +111,6 @@ pub fn vram_raw_column(vram: &[u8; 0x1000], raw_col: usize, rows: usize) -> Vec<
     (0..rows).map(|r| vram[base + r * NT_WIDTH]).collect()
 }
 
-
 /// Compare one raw tile column against VRAM and record the outcome.
 fn check_column(
     report: &mut VerifyReport,
@@ -133,12 +137,47 @@ fn check_column(
         "raw column {col} (metatile column {}, {} half) first differs at tile row {first}: \
          decoder says {:#04X}, VRAM holds {:#04X}",
         col / 2,
-        if col % 2 == 0 { "left" } else { "right" },
+        if col.is_multiple_of(2) {
+            "left"
+        } else {
+            "right"
+        },
         expected[first],
         actual[first],
     ));
 }
 
+/// ## The streamed tail: 81 of 96, and what the other 15 are
+///
+/// **Fully proven:** all 64 columns `init_video()` preloads, byte-exact,
+/// read from a quiescent machine. Of the 32 the camera streams in
+/// afterwards, 17 verify; 15 do not, and they split cleanly into two
+/// causes, established by diagnostic rather than guessed:
+///
+/// * **Six** (raw 64, 78-82) are **byte-identical to the occupant they
+///   replace**. Nothing about the slot changes when they land, so the
+///   frame their write completes is unobservable — they read as the old
+///   column until they read as the new one, and the two are the same
+///   bytes. These are almost certainly correct; they simply cannot be
+///   witnessed by this method.
+/// * **Nine** (metatile columns 43-47, which include W2-10a's ladder
+///   columns) are **torn in the fixture's own final VRAM**, matching
+///   neither their own decoded content nor their predecessor's, and
+///   staying that way 30 frames after the level finishes streaming.
+///
+/// **What was ruled out.** It is not settling: `BLIT_SETTLE` at 3, 8 and
+/// 20 frames gives exactly 15 every time. It is not the decoder: W5-02a
+/// verified it against an independent hand walk of the raw RLE bytes for
+/// all 48 metatile columns. It is not a single-snapshot artefact either —
+/// a final snapshot is strictly worse (47 of 96), which is what first
+/// showed the window is genuinely moving: VRAM holds 64 raw columns and
+/// the level has 96, so slots are recycled while the player walks.
+///
+/// The remaining nine are unresolved and are **not** papered over: the
+/// whole-level test is `#[ignore]`d rather than weakened to "at least 81",
+/// because a threshold set to whatever currently passes is fitting the
+/// target to the arrow.
+///
 /// Which raw tile columns were verified, and what went wrong.
 pub struct VerifyReport {
     /// Raw columns compared against VRAM and found equal.
@@ -207,7 +246,8 @@ pub fn verify_every_column(
         problems: Vec::new(),
         frames: 0,
     };
-    let mut advance = |cpu: &mut Cpu, bus: &mut NesBus| {
+    let raw_columns = || spec.width as usize * 2;
+    let advance = |cpu: &mut Cpu, bus: &mut NesBus| {
         let start = bus.frame_count();
         while bus.frame_count() == start {
             cpu.step(bus);
@@ -230,7 +270,7 @@ pub fn verify_every_column(
     // columns in a burst, so they all fall due at once while their blits
     // land over the following frames, and columns near the start read as
     // half-written.
-    const PRELOAD_LAST_COLUMN: u8 = 63;
+    const PRELOAD_LAST_COLUMN: u8 = PRELOAD_LAST_RAW_COLUMN as u8;
     while bus.peek(COLUMNS_STREAMED) < PRELOAD_LAST_COLUMN {
         advance(&mut cpu, &mut bus);
         report.frames += 1;
@@ -302,6 +342,31 @@ pub fn verify_every_column(
         // Start walking once the preload is done; before that the pad is
         // not even polled.
         if streamed >= i64::from(LAST_RAW_COLUMN) && pending.is_empty() {
+            // Second chance, at rest. A column checked the moment its own
+            // blit was due can be caught mid-write, and six of RF-Scroller's
+            // columns were: they are byte-identical to the occupant they
+            // replaced, so nothing about the slot changes when they land
+            // and the exact frame the write completes is unobservable.
+            // Re-checking the stragglers once the machine has settled
+            // resolves those without weakening anything — a column is
+            // verified if it EVER matched, and a genuinely wrong column
+            // matches at neither moment.
+            for _ in 0..30 {
+                advance(&mut cpu, &mut bus);
+                report.frames += 1;
+            }
+            let vram = *bus.vram();
+            let stragglers: Vec<usize> = (0..raw_columns())
+                .filter(|c| !report.verified.contains(c))
+                .collect();
+            // Rebuilt from the retry rather than appended to: every
+            // unverified column is retried, so the retry's failures ARE
+            // the true failures, and keeping the first-pass messages would
+            // report a column twice or report one that has since passed.
+            report.problems.clear();
+            for col in stragglers {
+                check_column(&mut report, level, spec, &vram, col);
+            }
             return Ok(report);
         }
         bus.set_controller_buttons(0, RIGHT);
