@@ -3205,8 +3205,11 @@
     "authoring walkthrough doc written end-to-end against RF-Scroller (annotate -> export -> decode -> validate -> golden), recording time-to-first-decoded-level (R-A2)"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-08-19, all four criteria. Criterion 4's walkthrough is `docs/AUTHORING.md`, and it is EXECUTED rather than described: `crates/retroforge/tests/authoring_walkthrough.rs` runs annotate -> export -> decode -> validate -> golden against the real fixture and prints the timings the doc quotes, so the doc cannot drift from the tool without a test failing.",
+    "R-A2 TIME TO FIRST DECODED LEVEL: 0.40 ms of machine time (annotate 0.001, export 0.058, decode 0.222, validate 0.109, golden 0.016). The doc states plainly what that EXCLUDES — finding the addresses in the debugger, and writing the `[decode]` section, which the exporter cannot infer from a list of addresses — because quoting a machine number as though it covered the whole loop would overstate the tool by orders of magnitude. What the number does say is that the loop is not the bottleneck: at sub-millisecond re-decode an author sees the result before their hand leaves the keyboard, which is the property hot-reload was built for.",
+    
     "SCOPE AMENDED 2026-08-19 ON BRAD'S RULING: `docs/**` added. Criterion 4 is a walkthrough DOC and there was nowhere in the original scope to put one; MASTER_PROMPT's always-writable set covers a STATUS.md line and a TECH_STACK row, not a new document. Recorded as vetoable.",
     
     "HANDOFF 2026-08-19: criteria 1-3 are BUILT, GATED AND PUSHED; criterion 4 is blocked on write_scope and needs a ruling. Left `in_progress` deliberately rather than closed — three of four is not done.",
