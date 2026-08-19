@@ -3390,7 +3390,7 @@
     "bus access costs in master cycles by region per EMULATION_CORES.md section 3.1"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E8-S1"
    ]
