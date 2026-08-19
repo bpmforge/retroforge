@@ -3168,6 +3168,39 @@
    "hold": true
   },
   {
+   "id": "W5-07",
+   "title": "Lua live-memory + overlay bridge (profile-published addresses)",
+   "phase": 5,
+   "crate": "rf-plugin-sdk",
+   "write_scope": [
+    "crates/rf-plugin-sdk/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W4-04",
+    "W5-01",
+    "W5-03"
+   ],
+   "acceptance": [
+    "rf.mem.read_u8/read_u16 return LIVE machine memory, not W4-04's stub zero, and stay capability-gated (absent, not refusing, when read_memory is denied)",
+    "rf.profile.addr(label) resolves a label from the loaded profile's [[memory_map]], so a script names `player_x` rather than hardcoding $6029",
+    "rf.gui.* produce real draw commands the shell composites into W5-03's OverlayCmds layer",
+    "end-to-end against the RF-Scroller fixture: a Lua script draws a marker at the live player position, asserted to MOVE with the player (MVP.md's last enhancement-demo checkbox)"
+   ],
+   "points": 5,
+   "status": "in_progress",
+   "stories": [
+    "E5-S2"
+   ],
+   "notes": [
+    "FILED 2026-08-19 BY W5-04's evidence pass. This is the LAST MVP feature gap: docs/MVP.md's `Lua script draws live player-position overlay using profile-published addresses` is the one checkbox that is not built, as opposed to partial.",
+    "EVERY INGREDIENT ALREADY EXISTS AND IS TESTED, which is why this is 5 points and not 13. W4-04 shipped the sandboxed host, the capability model, the budget/throttle and the write ledger; W5-01 published the addresses in a validated profile; W5-03 built the `OverlayCmds` scene layer and the world-space coordinate lift. Nothing connects them.",
+    "WHAT W4-04 ACTUALLY LEFT: `sandbox::build` binds `rf.mem.read_u8` to a closure returning literal 0 and `rf.gui.rect/text/line` to no-ops, with a comment saying wiring a live StateView through is the shell's to give. So the CAPABILITY GATE is real and tested (a denied capability makes the function ABSENT, not present-and-refusing) and the DATA PATH is a stub. Do not re-litigate the gate; fill in the path.",
+    "THE COORDINATE TRAP, already paid for once in W5-03: OAM and a profile's camera give SCREEN coordinates, and an overlay drawn over the full-level view needs WORLD coordinates. A script that reads `player_x` gets a world X already (RF-Scroller's `player_x` is world-space; `camera_x` is what converts) — so the bridge must not silently add or subtract a camera. Say which space `rf.gui` draws in, in the API doc, and test a marker's position against a MOVED camera rather than asserting it merely exists.",
+    "VACUITY TRAP: a test that asserts `rf.mem.read_u8` returns some number passes against the existing stub, which returns 0 — and 0 is a plausible memory value. Assert it returns a value the host PUBLISHED and that changes when the machine changes."
+   ]
+  },
+  {
    "id": "W5-05",
    "title": "Release engineering v0: tagged 3-OS release + fixture archive",
    "phase": 5,
