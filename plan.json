@@ -3204,7 +3204,7 @@
     "authoring walkthrough doc written end-to-end against RF-Scroller (annotate -> export -> decode -> validate -> golden), recording time-to-first-decoded-level (R-A2)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E6-S2"
    ]
