@@ -914,7 +914,7 @@
     "asserted through W4-09's egui inspection protocol, not by manual checklist: open the modal, assert slot count and that a saved slot's thumbnail and mode badge appear"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E2-S1"
    ],
