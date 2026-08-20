@@ -108,7 +108,7 @@ pub use controller::Controller;
 
 use crate::apu::Apu;
 use crate::cpu::CpuBus;
-use crate::mappers::{AxRom, Cnrom, Mapper, Mmc1, Mmc3, Mmc3Revision, Nrom, UxRom};
+use crate::mappers::{Action53, AxRom, Cnrom, Mapper, Mmc1, Mmc3, Mmc3Revision, Nrom, UxRom};
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
 use rf_core_api::{CoreEvent, CoreSink, EventMask};
@@ -235,6 +235,7 @@ impl NesBus {
                 mmc3_revision,
             )),
             7 => Box::new(AxRom::new(rom.prg_rom().to_vec())),
+            28 => Box::new(Action53::new(rom.prg_rom().to_vec())),
             other => unreachable!(
                 "system/cartridge.rs's UnimplementedMapper gate must reject mapper {other} \
                  before NesBus::new is ever reached -- see ticket W2-02's blocked-with-evidence \
@@ -600,7 +601,11 @@ impl NesBus {
             // test registers and stay dropped.
             0x4000..=0x4013 | 0x4015 | 0x4017 => self.apu.write_register(addr, value),
             0x4018..=0x401F => {}
-            0x4020..=0x5FFF => {}
+            // Open bus on every mapper except Action 53, whose
+            // register-select latch lives at $5000-$5FFF. The trait
+            // method defaults to a no-op, so this stays a drop for
+            // everything else.
+            0x4020..=0x5FFF => self.mapper.cpu_write_expansion(addr, value),
             0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000] = value,
             // Ticket W2-02: dispatched to the cartridge's own mapper (a
             // no-op for NROM, which has no registers) rather than ignored

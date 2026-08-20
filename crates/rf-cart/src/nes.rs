@@ -19,7 +19,7 @@ const CHR_BANK: usize = 8 * 1024;
 /// (`docs/design/EMULATION_CORES.md` §3.4). Extend this list in lockstep
 /// with whatever ticket lands the next mapper in rf-nes — this table is
 /// the enforcement point for FR-CORE-013's "unknown mapper" diagnostic.
-const SUPPORTED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7];
+const SUPPORTED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7, 28];
 
 /// A handful of well-known mapper names, used only to make an
 /// unsupported-mapper diagnostic more useful. Not exhaustive — absence
@@ -389,5 +389,31 @@ mod tests {
         rom[9] = 0x0F; // prg_msb == 0xF => exponent notation, unsupported
         let err = parse_nes_header(&rom).unwrap_err();
         assert!(matches!(err, CartError::InvalidHeader(_)));
+    }
+}
+
+#[cfg(test)]
+mod mapper28_tests {
+    use super::*;
+
+    /// Mapper 28 is accepted (ticket W7-11) — and the FR-CORE-013
+    /// diagnostic still fires for what remains unsupported, naming the
+    /// number.
+    ///
+    /// The second half matters as much as the first: widening a supported
+    /// set is only safe if the refusal path still works, and a test that
+    /// only checked acceptance would pass on a build that accepted
+    /// everything.
+    #[test]
+    fn mapper_28_is_supported_and_unknown_mappers_still_name_themselves() {
+        assert!(SUPPORTED_MAPPERS.contains(&28), "Action 53");
+        assert!(SUPPORTED_MAPPERS.contains(&7), "AxROM");
+
+        for unsupported in [5u16, 9, 69, 210] {
+            assert!(
+                !SUPPORTED_MAPPERS.contains(&unsupported),
+                "mapper {unsupported} must still be refused"
+            );
+        }
     }
 }

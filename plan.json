@@ -4014,10 +4014,17 @@
     "test ROMs for both mappers pass as golden frames or via the $6000 protocol"
    ],
    "notes": [
-    "Not SNES work, but it is in W7-01's acceptance and it is the last of the NES coverage target. rf-cart already reports UnsupportedMapper with the number and an optional name — extend the supported set there and in rf-nes together, or a cart will parse and then fail to run."
-   ],
+    "Not SNES work, but it is in W7-01's acceptance and it is the last of the NES coverage target. rf-cart already reports UnsupportedMapper with the number and an optional name — extend the supported set there and in rf-nes together, or a cart will parse and then fail to run.",
+   "HANDOFF 2026-08-20: criteria 1 and 2 COMPLETE; criterion 3 has no material for mapper 28. AxROM (mapper 7) ALREADY EXISTED — added at Brad's request during W2 after a real mapper-7 ROM was refused — so the work here was Action 53 (mapper 28), now implemented, wired into the factory, and added to rf-cart's SUPPORTED_MAPPERS. 12 unit tests.",
+   "MAPPER 28 NEEDED A BUS CHANGE, because it is the first mapper in this crate with a register OUTSIDE $8000-$FFFF: its select latch lives at $5000-$5FFF, which NesBus previously dropped as open bus. Added as Mapper::cpu_write_expansion with a DEFAULT NO-OP, so NROM, UxROM, CNROM, MMC1, MMC3 and AxROM are byte-for-byte unchanged rather than each having to acknowledge a region only one of them uses.",
+   "THE SPEC WAS FETCHED, NOT RECALLED (law 2). nesdev's INES_Mapper_028 page was read for the register layout, the 12-entry mode/size logic table and the mirroring rules, because the banking arithmetic here is not guessable: outer size S gives an inner field of S+1 bits, so a 16 KiB bank is (outer << (S+1)) | (inner & mask).",
+   "TWO DETAILS THAT SEPARATE THIS FROM PLAIN UNROM, both tested. (a) WHEN A FIXED BANK IS ACCESSED THE OUTER SIZE IS TEMPORARILY FORCED TO 32 KiB, so every outer bit passes through and no inner bit does — that is what lets mode 3's fixed $C000 bank be bank 1, 3, 5 or 7 of a 128 KiB game rather than only the last. (b) WHILE MIRRORING IS 1-SCREEN, its bit 0 can be written from THREE places — bit 0 of $80, bit 4 of $00, bit 4 of $01 — which is what lets an AxROM port keep its old mirroring code. When mirroring is vertical or horizontal, D4 is IGNORED; applying it unconditionally is the obvious bug and shows only on games that use H/V mirroring AND set D4, so it is asserted directly.",
+   "CRITERION 2 IS TESTED IN BOTH DIRECTIONS. Widening a supported set is only safe if the refusal path still works, and a test that only checked acceptance would pass on a build that accepted everything — so the test asserts 28 and 7 are supported AND that 5, 9, 69 and 210 are still refused.",
+   "CRITERION 3 HAS NO MATERIAL FOR MAPPER 28. It asks for 'test ROMs for both mappers'. There is no mapper-28 test ROM in tests/rom-manifest.toml, in docs/TESTING.md, or in anything fetched into roms/. Action 53 is a homebrew multicart collection rather than a mapper with a published conformance ROM. RECOMMEND: either drop the criterion for 28, or file a small in-repo fixture ticket — this crate's own cc65 toolchain could build one, but fixtures/** is outside this ticket's write_scope.",
+   "A NOTE ON THE ~96% FIGURE: criterion 1 quotes FR-CORE-027's own claim that mappers 7 and 28 extend coverage to approximately 96%. That number is the requirement's, not a measurement made here, and it is worth flagging that Action 53 is a HOMEBREW multicart — it adds compatibility with that collection rather than with commercial titles, so the commercial coverage figure is unlikely to move much. Recorded rather than silently restated as if verified."
+  ],
    "points": 5,
-   "status": "in_progress",
+   "status": "blocked",
    "stories": []
   },
   {

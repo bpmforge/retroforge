@@ -128,6 +128,7 @@ use rf_core_api::StateError;
 use crate::state::{StateIn, StateOut};
 use rf_cart::Mirroring;
 
+mod action53;
 mod axrom;
 mod cnrom;
 mod mmc1;
@@ -138,6 +139,7 @@ mod uxrom;
 #[cfg(test)]
 mod integration_tests;
 
+pub use action53::Action53;
 pub use axrom::AxRom;
 pub use cnrom::Cnrom;
 pub use mmc1::Mmc1;
@@ -163,6 +165,18 @@ pub trait Mapper {
     /// site), needed by MMC1's consecutive-write-ignore quirk; NROM/
     /// UxROM/CNROM ignore it.
     fn cpu_write(&mut self, addr: u16, value: u8, cycle: u64);
+
+    /// CPU write to the **expansion area** `$4020-$5FFF`.
+    ///
+    /// Defaulted to a no-op, because that region is open bus on every
+    /// mapper this crate supported before Action 53 (mapper 28), which
+    /// puts its register-select latch at `$5000-$5FFF`. Defaulting keeps
+    /// NROM/UxROM/CNROM/MMC1/MMC3/AxROM byte-for-byte unchanged rather
+    /// than making every mapper acknowledge a region only one of them
+    /// uses.
+    fn cpu_write_expansion(&mut self, addr: u16, value: u8) {
+        let _ = (addr, value);
+    }
 
     /// This mapper's current nametable mirroring. Fixed (header-declared,
     /// passed in at construction) for NROM/UxROM/CNROM; live and
