@@ -3456,7 +3456,7 @@
     "gilyon snes-tests cputest RAM result block matches shipped tests.txt (FR-CORE-030)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E8-S1"
    ]
