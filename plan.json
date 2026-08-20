@@ -4321,10 +4321,16 @@
     "a determinism double-run with fast-forward enabled matches one without it"
    ],
    "notes": [
-    "The second and third criteria are the ones that matter: a fast-forward that changes emulated state is a determinism bug (law 4), not a feature."
-   ],
+    "The second and third criteria are the ones that matter: a fast-forward that changes emulated state is a determinism bug (law 4), not a feature.",
+   "CLOSED 2026-08-20: all three criteria. crates/rf-enhance/src/loading.rs decides pacing from a profile's [loading].wait_loops (PC + condition), OFF by default (law 6), with every window ledgered by the profile author's own label rather than by an address.",
+   "IT CANNOT ALTER SIMULATION BECAUSE IT IS GIVEN NO WAY TO. FR-ENH-008 says fast-forward must disable frame pacing 'without altering simulation', and a fast-forward that changed emulated state would be a determinism bug (law 4) rather than a feature. So FastForward owns no machine: it takes a READ-ONLY probe and returns a Pacing decision. That makes the constraint close to structural — but almost is not a test, so the acceptance is proved by driving a real deterministic machine through identical input twice, once enabled and once not, and requiring the two to end BYTE-IDENTICAL. A test that only compared pacing decisions would pass on an implementation that also poked memory.",
+   "THE DETERMINISM TEST CAUGHT A REAL SEMANTIC BUG ON ITS FIRST RUN, and it was the exact one this module's own doc had predicted. `until = { addr, equals }` reads 'wait UNTIL addr equals this', so the wait is in progress while the address does NOT hold that value. The first implementation compared with == and therefore flagged EXACTLY ONE frame: the one the wait finished on. The test reported 1 unpaced frame instead of 30, and that single frame was the LAST rather than the first. The module doc already said 'a game will also pass through [the PC] on the frame the wait ENDS' — it turned out to be describing the bug rather than guarding against it, which is why the fix carries that story in the code.",
+   "THE ANTI-VACUITY GUARD MATTERS HERE MORE THAN USUAL. 'Enabled and disabled runs match' is trivially true if the enabled run never fast-forwarded — so the test also asserts the enabled run had a non-zero unpaced count and the disabled run had zero. Without that, the whole criterion could pass on a feature that did nothing.",
+   "PC ALONE IS NOT ENOUGH, which is why the profile schema carries both. The same address is reached once per loop iteration whether the wait has one frame left or a thousand, and the game passes through it on the frame the wait ends. Tested in all three directions: at the PC with the condition unmet (waiting), at the PC with it met (over), and elsewhere with it unmet (not waiting).",
+   "A PLAYER TOGGLING MID-LOAD IS THE OBVIOUS REAL CASE, so it has its own test: enabling at frame 10 and disabling at frame 20 must still produce a machine identical to never enabling it, and the ledger must stay BALANCED — disabling mid-window closes the open entry, because a ledger that says a window opened and never closed is worse than no ledger."
+  ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
