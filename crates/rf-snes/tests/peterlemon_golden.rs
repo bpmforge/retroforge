@@ -162,6 +162,25 @@ const GOLDENS: &[(&str, &str)] = &[
         "MosaicMode3.sfc",
         "d2999917d20c27b9f96ddf9c62572ee79078126352265aa61ab74f6dbfd8b826",
     ),
+    // HDMA (W7-07's amended criterion 4). Two of the four are pinned;
+    // the RedSpace pair is in EXCLUDED with evidence -- see there, because
+    // the reason is structural and worth knowing.
+    //
+    // WaveHDMA drives $210D (BG1HOFS) per line: a water surface with the
+    // scroll displacement making it ripple. This is the ROM that shows
+    // per-line scroll working end to end.
+    (
+        "WaveHDMA.sfc",
+        "688926f53d6200a6d7ff4e90500d00c7da3ac082a0d23f54cadbbb8da91a9417",
+    ),
+    // Mode7HDMA switches BG mode mid-frame: sky and a sun and a row of
+    // trees above, a mode-7 ground plane receding below. It needs both
+    // HDMA and the per-line BG-mode latching to come out as anything but
+    // one mode applied to all 224 lines.
+    (
+        "Mode7HDMA.sfc",
+        "9ad7a3f624086de56cbe616215f04bccc4c7ad5680c95e105c2c2c1524927fc3",
+    ),
 ];
 
 /// Generous cap; the fade completes in well under this.
@@ -197,6 +216,14 @@ const EXCLUDED: &[(&str, &str)] = &[
     (
         "MosaicMode5.sfc",
         "mode 5 is HI-RES 512, and this PPU has no hi-res path at all: bg::bit_depths gives          mode 5 the right depths (4bpp/2bpp) but composition is 256 wide, and $2105 bit 3 is          consumed as bg3_priority with nothing reading a hi-res flag. The frame renders as a          half-width character squeezed against a backdrop-grey field. The MOSAIC half is          correct and visible (holding R blockifies it exactly as MosaicMode3 does), which is          what makes this an exclusion rather than a bug in this ticket: the mosaic path works,          the mode it is being drawn in does not exist yet. Pinning it would record a picture          nobody claims is right. Owned by W7-17.",
+    ),
+    (
+        "RedSpaceHDMA.sfc",
+        "the HDMA is CORRECT and the golden still cannot see it. Tracing the channel shows          exactly the right walk: $2121 <- $00 twice, then $2122 <- $1F, $1E, $1D ... one step          every 7 lines, 32 steps over 224 lines -- a red gradient down the screen. But the          demo draws NOTHING ELSE (VRAM is legitimately empty; it clears VRAM/WRAM/CGRAM and          parks in a one-instruction loop at $00:818B with NMI off), so every pixel of the frame          is palette index 0. This suite hashes palette INDICES, so a per-line CGRAM gradient is          invisible to it by construction, and the PPM dump resolves index 0 against ONE          end-of-frame palette snapshot -- which the gradient has by then walked down to $0000,          hence a black picture. Not a defect: the same index-vs-colour boundary that keeps          colour math out of the pixel stream (law 4). Covered instead by          tests::hdma::hdma_writes_a_different_backdrop_colour_on_each_line. W7-16 owns making          colour-domain output reachable.",
+    ),
+    (
+        "RedSpaceIndirectHDMA.sfc",
+        "same picture and same reason as RedSpaceHDMA, via INDIRECT mode -- the channel          dereferences its pointer and reads the identical $1F, $1E, $1D gradient, which is          direct evidence that criterion 1's indirect-mode bank register works. Excluded for the          index-domain reason above, not for anything wrong with the transfer.",
     ),
 ];
 

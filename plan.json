@@ -3931,9 +3931,11 @@
    "STATUS SET TO `blocked`, NOT `in_progress` (2026-08-20): validate-plan's P8 rule forbids two concurrently-active tickets with overlapping write_scope, and W7-04 and W7-07 both write crates/rf-snes/**. `blocked` is also the truthful status: each one's own work is committed and each is waiting on a DIFFERENT ticket, not on more effort here. Caught by the validator after the commit rather than before it — a reminder that leaving two partially-done tickets open at once is itself a board state worth checking."
   ,
   "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). Amend acceptance rather than leave this blocked, exactly as this ticket\u2019s own HANDOFF recommended. CRITERION 4 IS REPLACED with the PeterLemon HDMA set, VERIFIED TO EXIST at the pinned commit 350b394e: PPU/HDMA/{WaveHDMA,RedSpaceHDMA,RedSpaceIndirectHDMA,Mode7HDMA}/*.sfc. These are per-SCANLINE HDMA effects \u2014 gradients and wave distortion driven by per-line register writes \u2014 which is precisely what the line-latching this ticket already built can express. The undisbeliever per-dot timing ROMs are NOT abandoned: they remain W7-15\u2019s criterion 2, which already exists and depends on this ticket."
+ ,
+  "CLOSED 2026-08-20: criterion 4 delivered against the amended acceptance. WaveHDMA (per-line $210D scroll -> a rippling water surface) and Mode7HDMA (BG mode switched mid-frame -> sky and trees above a mode-7 ground plane) are PINNED, each rendered and looked at. The RedSpace pair is EXCLUDED, and the reason is worth keeping: their HDMA is verifiably CORRECT -- the trace shows $2121 <- $00 then $2122 <- $1F, $1E, $1D, one step every 7 lines, 32 steps over 224, and the indirect variant dereferences its pointer to the identical gradient, which is direct evidence criterion 1's indirect-mode bank register works -- but the demos draw nothing but the backdrop, so every pixel is palette index 0 and an index-domain hash cannot see the effect at all. Covered instead by tests::hdma::hdma_writes_a_different_backdrop_colour_on_each_line, which runs without a fetched ROM. Noted on W7-16, which owns making colour-domain output reachable. 17 goldens green, every previously-pinned hash byte-identical."
  ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
@@ -4182,7 +4184,9 @@
     "FILED BY W8-01. Found during W7-05: colour math ($2130-$2132) produces an RGB value that need not exist anywhere in CGRAM, but cores emit INDEXED pixels (law 4) — so a blended colour cannot travel through PpuPixel at all, and the golden-frame hash (palette indices only) could not see it if it did. W7-05 therefore delivered clip-to-black on the indexed path (black IS index 0) and left the add/sub/half arithmetic implemented but unreachable.",
     "THE SAME QUESTION HAS NOW COME UP TWICE. W6-03a found that PpuPixel::dropped_by_limit is dead on BOTH the NES and SNES paths: its doc retains it 'for cores that can express a suppressed sprite without displacing a real pixel', but the one-pixel-per-x sink makes that impossible everywhere. Both features want the same thing — a second, parallel channel — so they should be answered together rather than twice.",
     "THE CONSTRAINT IS NOT NEGOTIABLE: rf_core_api::video's W1-05a ruling says video_scanline is accuracy-exact and nothing may displace it. OverlayPixel/overlay_scanline is the existing precedent for a parallel channel; extend that shape rather than fattening PpuPixel."
-   ],
+   ,
+  "PER-LINE CGRAM IS THE SAME PROBLEM, FOUND BY W7-07 (2026-08-20). PeterLemon's RedSpaceHDMA drives $2121/$2122 from HDMA to paint a different BACKDROP COLOUR on every scanline -- verified correct by trace ($1F, $1E, $1D ... one step every 7 lines, 32 steps over 224). It is unpinnable as a golden for exactly this ticket's reason: the frame is 100% palette index 0, so an index-domain hash cannot see it, and a renderer handed one palette snapshot per frame cannot draw it either. Whatever mechanism this ticket adds for colour math should be checked against this case too -- per-line CGRAM is not a test-only concern, it is how real games do sunsets and water. Both RedSpace ROMs are already fetched and sit in EXCLUDED in tests/peterlemon_golden.rs, so they are available as the acceptance evidence."
+ ],
    "points": 8,
    "status": "todo",
    "stories": []

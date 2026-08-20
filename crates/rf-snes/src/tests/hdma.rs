@@ -254,3 +254,55 @@ fn channels_walk_their_own_tables() {
         "both channels transfer, in channel order"
     );
 }
+
+/// **A per-scanline CGRAM gradient**: what PeterLemon's RedSpaceHDMA
+/// actually does, in a form that runs without a fetched ROM (ticket
+/// W7-07's criterion 4).
+///
+/// That ROM is EXCLUDED from the golden suite, and the reason is
+/// structural rather than a defect: its whole picture is the backdrop,
+/// so every pixel is palette index 0 on every line and an index-domain
+/// hash cannot see the effect at all (see the exclusion entry in
+/// `tests/peterlemon_golden.rs`). Tracing it showed the HDMA machinery
+/// doing exactly the right thing -- `$2121` <- 0, then `$2122` <- `$1F`,
+/// `$1E`, `$1D` ... one step every 7 lines, 32 steps over 224 lines --
+/// so this test pins that behaviour where the golden cannot.
+///
+/// Transfer unit 3 is the one this needs: two registers, written twice
+/// each (`b, b, b+1, b+1`), which is how a colour is written as an
+/// address followed by a 15-bit value.
+#[test]
+fn hdma_writes_a_different_backdrop_colour_on_each_line() {
+    let mut b = bus();
+    // Three entries, each holding for one line: CGADD=0 twice, then the
+    // colour low/high bytes. Red descending, exactly as the ROM does.
+    let table = [
+        0x01, 0x00, 0x00, 0x1F, 0x00, // line 0: colour $001F
+        0x01, 0x00, 0x00, 0x1E, 0x00, // line 1: colour $001E
+        0x01, 0x00, 0x00, 0x1D, 0x00, // line 2: colour $001D
+        0x00, // terminator
+    ];
+    for (i, v) in table.iter().enumerate() {
+        b.wram[0x0400 + i] = *v;
+    }
+    b.write(0x00_4300, 0x03); // unit 3: b, b, b+1, b+1
+    b.write(0x00_4301, 0x21); // B-bus $2121 (CGADD), so b+1 is $2122
+    b.write(0x00_4302, 0x00);
+    b.write(0x00_4303, 0x04);
+    b.write(0x00_4304, 0x00);
+    b.write(0x00_420C, 0x01);
+
+    b.hdma_init();
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        b.hdma_run_line();
+        seen.push(b.ppu.cgram[0]);
+    }
+
+    assert_eq!(
+        seen,
+        vec![0x001F, 0x001E, 0x001D],
+        "each line must leave its own colour in CGRAM[0] - a gradient that \
+         wrote one colour for the whole frame is the bug this catches"
+    );
+}

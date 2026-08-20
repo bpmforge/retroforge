@@ -67,6 +67,17 @@ ROMS=(
   "PPU/Window/WindowMultiHDMA/WindowMultiHDMA.sfc"
   "PPU/Mosaic/Mode3/MosaicMode3.sfc"
   "PPU/Mosaic/Mode5/MosaicMode5.sfc"
+  # HDMA (W7-07's amended criterion 4). The original criterion named the
+  # undisbeliever DMA/HDMA set; all eighteen of those were run and none
+  # leaves forced blank on a scanline-composed PPU, because they are
+  # per-DOT timing tests (W7-15 owns them). These four are per-SCANLINE
+  # HDMA effects -- gradients and wave distortion driven by per-line
+  # register writes -- which is exactly what the line latching built here
+  # can express.
+  "PPU/HDMA/WaveHDMA/WaveHDMA.sfc"
+  "PPU/HDMA/RedSpaceHDMA/RedSpaceHDMA.sfc"
+  "PPU/HDMA/RedSpaceIndirectHDMA/RedSpaceIndirectHDMA.sfc"
+  "PPU/HDMA/Mode7HDMA/Mode7HDMA.sfc"
 )
 
 mkdir -p "$DEST"
