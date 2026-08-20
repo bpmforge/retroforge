@@ -3535,8 +3535,9 @@
    "phase": 6,
    "crate": "rf-snes",
    "write_scope": [
-    "crates/rf-snes/src/apu/**"
-   ],
+      "crates/rf-snes/**",
+      "scripts/local-gate.sh"
+    ],
    "depends_on": [
     "W6-02b"
    ],
@@ -3548,10 +3549,11 @@
     "REFINED AT PHASE ENTRY BY W6-00 (2026-08-19).",
     "**BLOCKER TO RESOLVE BEFORE CLAIMING: the SPC700 IPL boot ROM.** This ticket's acceptance says \"64KB ARAM + IPL ROM banking via $F1\", and EMULATION_CORES section 3.4 wants the \"$FFC0-FFFF, readable/bankable via $F1\" handshake. That IPL is 64 bytes of Nintendo code. Project law 5 is \"no ROM bytes in git\", so it cannot simply be pasted into the source the way a synthetic fixture can.",
     "THREE OPTIONS, none of them chosen here \u2014 this needs a ruling, and the ticket should not be claimed until it has one. (a) HLE the handshake: implement the boot protocol's OBSERVABLE behaviour without the ROM's bytes, which is what several emulators do and which keeps the repo clean, at the cost of any game that reads IPL bytes directly seeing wrong data. (b) Fetch it as a hash-verified artifact like every other external oracle, which fits the manifest machinery exactly but puts a Nintendo-copyright blob in a fetch list rather than in git \u2014 note D-001's boundary already permits fetch-only for external oracles, though an IPL is not an oracle. (c) Require the user to supply it, like the ROMs themselves. The honest default is probably (a) with the limitation documented, but that is a call about what the emulator CLAIMS to be, not a coding decision.",
-    "spc700 vectors themselves are unblocked either way: `singlestep-spc700` is in the manifest and already fetched locally. The IPL question only gates the boot-handshake half."
-   ],
+    "spc700 vectors themselves are unblocked either way: `singlestep-spc700` is in the manifest and already fetched locally. The IPL question only gates the boot-handshake half.",
+      "RULING TAKEN 2026-08-20 (Brad, by reaffirmation): option (a), HLE — no Nintendo IPL bytes anywhere, not in git and not in a fetch list. Recorded as REVERSIBLE: options (b) and (c) stay open and nothing here depends on the IPL's actual contents. What this ticket implements is the $F1 BANKING MECHANISM in full — the switch that hides ARAM $FFC0-$FFFF behind a 64-byte boot region and exposes it again — with that region backed by a clean-room stub written here rather than by Nintendo's bytes. The banking is the testable behaviour; the boot protocol it serves is W6-04b's. The cost, stated plainly: a game that reads IPL bytes directly sees our stub, not the real ROM. No commercial title is known to do that, and W6-04b's handshake is what actually has to work."
+    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E8-S1"
    ]
