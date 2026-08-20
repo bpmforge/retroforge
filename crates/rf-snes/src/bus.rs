@@ -17,6 +17,7 @@
 
 use rf_cart::SnesMapMode;
 
+use crate::apu::Apu;
 use crate::cpu::CpuBus;
 use crate::dma::{Dma, CYCLES_PER_BYTE, CYCLES_PER_CHANNEL};
 use crate::mapping::{map, Target, WRAM_LEN};
@@ -53,6 +54,16 @@ pub struct SnesBus {
     /// to look tidier.
     pub open_bus: u8,
     pub ppu: Ppu,
+    pub apu: Apu,
+    /// Master cycles the APU still owes.
+    ///
+    /// **The APU is never free-running** (§3.4). It is caught up
+    /// immediately before any `$2140`-`$2143` access, so the CPU can only
+    /// ever observe a port state the APU has actually reached. Letting it
+    /// run ahead on its own clock and sampling whatever it had got to is
+    /// how port handshakes become timing-dependent and games become
+    /// flaky on some runs and not others.
+    pub apu_debt: u64,
     pub timing: Timing,
     pub joypads: Joypads,
     /// `$4016` strobe latch, and the serial shift position per port.
@@ -80,6 +91,8 @@ impl SnesBus {
             fast_rom: false,
             open_bus: 0,
             ppu: Ppu::new(),
+            apu: Apu::new(),
+            apu_debt: 0,
             timing: Timing::new(),
             joypads: Joypads::default(),
             manual_latch: false,
@@ -110,6 +123,9 @@ impl SnesBus {
             0x2180 => self.wram[(self.wram_port.address as usize) % WRAM_LEN],
             0x4212 => self.timing.read_hvbjoy(),
             0x213E => self.ppu.read_stat77(),
+            // Safe to peek: reading a port has no side effect, and peek
+            // must never trigger the catch-up that `read` does.
+            0x2140..=0x2143 => self.apu.cpu_read_port(usize::from(offset - 0x2140)),
             0x4218..=0x421F => {
                 let port = ((offset - 0x4218) / 2) as usize;
                 let word = self.joypads.latched[port];
@@ -145,6 +161,12 @@ impl SnesBus {
                 self.wram_port.advance();
                 v
             }
+            // $2140-$2143: catch the APU up FIRST, so what the CPU reads
+            // is a state the APU actually reached.
+            0x2140..=0x2143 => {
+                self.catch_up_apu();
+                self.apu.cpu_read_port(usize::from(offset - 0x2140))
+            }
             _ => self.read_register_pure(offset).unwrap_or(self.open_bus),
         }
     }
@@ -154,6 +176,10 @@ impl SnesBus {
             // $2100-$213F belong to the PPU, EXCEPT the VRAM port below,
             // which W6-02b built and which stores into `self.vram`.
             0x2100..=0x2114 | 0x211A..=0x213F => self.ppu.write_register(offset, value),
+            0x2140..=0x2143 => {
+                self.catch_up_apu();
+                self.apu.cpu_write_port(usize::from(offset - 0x2140), value);
+            }
             0x2115 => self.vmain = value,
             0x2116 => self.vram_address = (self.vram_address & 0xFF00) | u16::from(value),
             0x2117 => self.vram_address = (self.vram_address & 0x00FF) | (u16::from(value) << 8),
@@ -278,6 +304,30 @@ impl SnesBus {
         self.dma.channels[ch].a_address = a;
         self.dma.channels[ch].count = 0;
         moved
+    }
+
+    /// Run the APU forward by everything it is owed.
+    ///
+    /// The SPC700 runs at ~1.024 MHz against a 21.477 MHz master clock,
+    /// so one SPC cycle is about 21 master cycles.
+    pub fn catch_up_apu(&mut self) {
+        const MASTER_PER_SPC_CYCLE: u64 = 21;
+        let mut spc_cycles = self.apu_debt / MASTER_PER_SPC_CYCLE;
+        self.apu_debt -= spc_cycles * MASTER_PER_SPC_CYCLE;
+        // Bound the work a single catch-up can do. A long DMA or a paused
+        // debugger can otherwise hand the APU millions of cycles at once,
+        // and grinding through them inside one bus access would stall the
+        // whole emulator at exactly the moment a game is polling a port.
+        spc_cycles = spc_cycles.min(64);
+        for _ in 0..spc_cycles {
+            if self.apu.cpu.stopped || !self.apu.boot.is_running() {
+                // Nothing to execute: either halted, or the HLE boot
+                // handshake still owns the machine.
+                self.apu.tick_timers(1);
+                continue;
+            }
+            let _ = self.apu.step();
+        }
     }
 
     /// VMAIN bits 0-1 select the address increment: 1, 32, 128, 128

@@ -16,6 +16,7 @@
 //! between the intent and the assertion.
 
 mod apu;
+mod apu_ports;
 mod dma;
 mod mapping;
 mod ppu;

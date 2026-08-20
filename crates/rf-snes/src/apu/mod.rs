@@ -32,6 +32,8 @@
 //! it is currently executing from, and a model that dropped those writes
 //! would lose it silently.
 
+pub mod boot;
+pub mod dsp;
 pub mod spc700;
 
 use spc700::{ApuBus, Spc700};
@@ -154,6 +156,9 @@ pub struct Apu {
     pub dsp_addr: u8,
     /// `$F8`/`$F9`, two bytes of scratch with no hardware function.
     pub aux: [u8; 2],
+    /// The HLE boot handshake (W6-04b).
+    pub boot: boot::IplBoot,
+    pub dsp: dsp::Dsp,
 }
 
 impl Default for Apu {
@@ -176,6 +181,8 @@ impl Apu {
             ports_out: [0; 4],
             dsp_addr: 0,
             aux: [0; 2],
+            boot: boot::IplBoot::new(),
+            dsp: dsp::Dsp::new(),
         };
         apu.reset();
         apu
@@ -185,6 +192,11 @@ impl Apu {
     pub fn reset(&mut self) {
         self.cpu = Spc700::new();
         self.ipl_enabled = true;
+        self.boot = boot::IplBoot::new();
+        // The $AA/$BB the CPU polls for. Published at reset, before
+        // anything else: a CPU that never sees this pair concludes there
+        // is no APU at all.
+        self.ports_out = boot::IplBoot::ready_ports();
         let lo = self.read(0xFFFE);
         let hi = self.read(0xFFFF);
         self.cpu.pc = u16::from(lo) | (u16::from(hi) << 8);
@@ -212,6 +224,43 @@ impl Apu {
         // accuracy this ticket does not have.
         self.tick_timers(2);
         r
+    }
+
+    /// The CPU wrote one of `$2140`-`$2143`.
+    ///
+    /// Routed through the boot handshake while it is still running; once
+    /// it hands over, this is a plain port write and the SPC700 program
+    /// is what reads it.
+    pub fn cpu_write_port(&mut self, index: usize, value: u8) {
+        self.ports_in[index] = value;
+        if self.boot.is_running() {
+            return;
+        }
+        match self.boot.cpu_wrote(index, value, self.ports_in) {
+            boot::BootAction::Echo(v) => self.ports_out[0] = v,
+            boot::BootAction::Store {
+                address,
+                value,
+                echo,
+            } => {
+                self.aram[usize::from(address)] = value;
+                self.ports_out[0] = echo;
+            }
+            boot::BootAction::Run { entry } => {
+                // Hand over to the real SPC700 core, and bank the IPL out
+                // so the uploaded program owns the whole address space.
+                self.cpu.pc = entry;
+                self.cpu.stopped = false;
+                self.ipl_enabled = false;
+            }
+            boot::BootAction::None => {}
+        }
+    }
+
+    /// The CPU read one of `$2140`-`$2143`.
+    #[must_use]
+    pub fn cpu_read_port(&self, index: usize) -> u8 {
+        self.ports_out[index]
     }
 
     pub fn tick_timers(&mut self, cycles: u32) {

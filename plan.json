@@ -3580,8 +3580,15 @@
     "commercial-style init handshake boots (test ROM)",
     "S-DSP skeleton: BRR decode + basic voice mixing, clean audio (sample-exactness deferred to W7 per EMULATION_CORES.md section 3.4)"
    ],
+    "notes": [
+      "CLOSED 2026-08-20: all three criteria. (1) $2140-$2143 <-> $F4-$F7 in CATCH-UP SYNC, never free-running: the APU accrues debt with every master cycle the CPU spends and is settled immediately BEFORE any port access, so the CPU can only ever observe a state the APU actually reached. peek deliberately does NOT catch up — a debugger reading a port would otherwise advance the APU and change the machine it is inspecting. (2) A commercial-style init handshake driven by real 65816 machine code completes, uploads a byte and starts the APU at the supplied entry. (3) S-DSP skeleton: BRR decode and eight-voice mixing.",
+      "THE HLE RULING FROM W6-04a IS NOW CASHED OUT, and its consequence is stated in the code rather than buried: while the boot handshake runs, the SPC700 core DOES NOT EXECUTE. The handshake is a state machine reproducing the protocol's observable behaviour, which is exactly what option (a) said. The moment it hands over, the uploaded program runs on the real core — verified by the 65816 test, which checks the APU's PC is the entry address the CPU supplied and that the IPL has banked out.",
+      "THE COUNTER SKIP IS THE EASIEST PART OF THIS PROTOCOL TO GET WRONG, and it caught my own test on its first run. The transfer counter is an ACKNOWLEDGEMENT, not an index: after a byte acknowledged with counter N the APU expects N+1 for the next byte, so ENDING a block means skipping to N+2. My 65816 driver wrote N+1 and the handshake simply stored another byte and never finished. There is now a test that walks next-byte and new-block cases side by side, and the machine-code comment says why it is two.",
+      "DSP SCOPE, NAMED SO ITS ABSENCE IS A DECISION. Implemented: BRR decode (all four filters, the range 13-15 special case that collapses to the sign rather than shifting further, sign-extended nibbles, loop/end flags) and eight-voice mixing with per-voice and master volume. NOT implemented, per the acceptance's 'sample-exactness deferred to W7': Gaussian interpolation, ADSR/GAIN envelopes, echo, pitch modulation, noise. 'Clean audio' is tested as three specific properties rather than as a vibe — silence when nothing is keyed on, key-on resetting the filter history so a re-keyed voice reproduces its opening exactly (a voice that kept the old history would start with a click), and a non-looping sample keying itself off at its end instead of running on into whatever follows it in ARAM.",
+      "THE CATCH-UP IS BOUNDED, on purpose. A long DMA or a paused debugger can hand the APU millions of owed cycles at once; grinding through them inside one bus access would stall the emulator at exactly the moment a game is polling a port. The catch-up therefore runs at most 64 SPC cycles per access and keeps the remaining debt."
+    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E8-S1"
    ]

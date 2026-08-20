@@ -117,6 +117,9 @@ impl SnesSystem {
         // show; internal cycles are not modelled yet (W6-02a's note on
         // the cycle-accurate executor).
         self.bus.tick_math(accesses as u32);
+        // The APU accrues debt with every master cycle the CPU spends and
+        // is settled on port access — never free-running (§3.4).
+        self.bus.apu_debt += spent;
         let dma_cycles = self.bus.service_dma();
         self.master_cycles += dma_cycles;
 
