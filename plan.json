@@ -3725,7 +3725,7 @@
     "expand W9 into tickets: full profile editor GUI (FRONTEND_UI.md \u00a73.5), plugin manager polish + WASM (wasmtime) sandbox tier (PLUGINS.md \u00a71, FR-PLUG-006), plugin SDK docs + examples, map/sprite-sheet/tilemap export tools, community mod format + versioning (FR-ENH-009, FR-PROF-005/006/007 intake CI), documentation site (ROADMAP P9), second + third game profiles"
    ],
    "points": 2,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E12-S1",
     "E12-S2",
@@ -3766,8 +3766,12 @@
     "CLOSED 2026-08-20: phase 8 expanded into W8-02..W8-12, with acceptance drawn from SAVE_STATES.md 4, FRONTEND_UI.md 4/5/6, ENHANCEMENT_RUNTIME.md 6, ROADMAP P8 and the FR-AI / FR-ENH / FR-FE / FR-STATE rows. Every area this ticket's acceptance names is covered: rewind (W8-02), video recording and screenshot polish (W8-03), gamepad UI navigation and accessibility (W8-04), SNES widescreen per-BG policies (W8-05), HUD separation (W8-06), loading fast-forward (W8-07), smooth-camera and room-stitching (W8-08), the frame-interpolation experiment (W8-09), the AI upscaling cache and pack format (W8-10), the HD-pack loader with Mesen identity and hires.txt import (W8-11), and translation/accessibility overlays (W8-12). No ticket exceeds 8 points.",
     "TWO PHASE-7 TICKETS FILED HERE TOO, BECAUSE THEY BLOCK OPEN WORK RATHER THAN FUTURE WORK. W7-15 (per-dot PPU timing) unblocks W7-07's criterion 4 AND W7-05's — both name undisbeliever ROMs which W7-07 proved, by running all eighteen, are per-DOT timing tests that never leave forced blank on a scanline-composed PPU. W7-16 (a CoreSink sub-screen channel) unblocks colour-math verification, which no test can do today because a blended RGB value cannot travel through an indexed PpuPixel. W7-16 also answers the dropped_by_limit question W6-03a raised: the SAME missing mechanism — a second, parallel channel — is behind both, so they are one ticket rather than two.",
     "ACCEPTANCE WAS WRITTEN AGAINST ARTIFACTS THAT EXIST, deliberately, because phase 7 taught that lesson expensively. FIVE of its tickets stalled on criteria naming things that were not there: undisbeliever 'window/HDMA-gradient ROMs' that are absent from the pinned archive (W7-05), a 'designated SPC set' with reference audio that is designated nowhere (W7-08), a mapper-28 test ROM that does not exist (W7-11), and two golden sets requiring capabilities the design explicitly defers (W7-04, W7-07). The implementation landed in every one; the acceptance is what blocked. So every criterion filed here is satisfiable either by the ticket's own work or by an artifact already in the repo — and where a ticket must CREATE its oracle (W8-11's builder/loader round trip, W8-03's output inspection), that is stated as the criterion rather than assumed.",
-    "HARD-WON LESSONS ARE CITED ON THE TICKETS THAT WILL HIT THEM, not left to be rediscovered: W8-03 carries W5-04's white-PNG capture bug ('LOOK AT THE OUTPUT'); W8-04 carries W4-09's finding that the kittest harness renders ZERO accessible nodes at its default size and that neither ui.label nor a hover-sensed Label contributes one; W8-07 states that a fast-forward which changes emulated state is a determinism bug rather than a feature."
-   ],
+    "HARD-WON LESSONS ARE CITED ON THE TICKETS THAT WILL HIT THEM, not left to be rediscovered: W8-03 carries W5-04's white-PNG capture bug ('LOOK AT THE OUTPUT'); W8-04 carries W4-09's finding that the kittest harness renders ZERO accessible nodes at its default size and that neither ui.label nor a hover-sensed Label contributes one; W8-07 states that a fast-forward which changes emulated state is a determinism bug rather than a feature.",
+   "CLOSED 2026-08-20: phase 9 expanded into W9-02..W9-08, with acceptance drawn from FRONTEND_UI.md 3.5, PLUGINS.md 1, GAME_PROFILES.md, ROADMAP P9 and the FR-PLUG / FR-PROF rows. Every area this ticket's acceptance names is covered: the profile editor GUI (W9-02), the wasmtime component tier and capability sandbox (W9-03), SDK docs and examples (W9-04), the community distribution format with versioning and intake CI (W9-05), Mesen HD-pack import (W9-06), the documentation site (W9-07), and the second and third game profiles (W9-08). Map/sprite-sheet/tilemap export tools are folded into W9-02's editor rather than filed separately: they are the same surface and the same data, and splitting them would create two tickets that cannot be worked independently.",
+   "ROADMAP P9'S EXIT CRITERION IS THE REAL ACCEPTANCE, and it is quoted onto the ticket that owns it: 'a third party ships a profile + pack + script without touching Rust or asking us questions'. W9-07's third criterion — every code sample in the site is COMPILED OR EXECUTED by CI — is what stops that being aspirational, and W9-04's is the same mechanism for the SDK: documentation that is not compiled is documentation that silently goes stale. This project has already seen exactly that with EMULATION_CORES.md 3.3's superseded dropped_by_limit line.",
+   "TWO TICKETS CARRY AN EXPLICIT 'CHECK BEFORE CLAIMING' WARNING, because phase 7 lost five tickets to acceptance criteria naming things that did not exist. W9-03 says the wasmtime TECH_STACK row and NFR-011 licence review must land BEFORE any code, or it stalls the way W8-10's ort half did. W9-06 says to confirm a real Mesen pack is obtainable and licence-clear BEFORE claiming, or it stalls the way W7-05, W7-08 and W7-11 did.",
+   "THE POISONED-ARCHIVE TEST IS W9-05'S LOAD-BEARING CRITERION. 'Community-safe: no ROM data, licence metadata required' is ROADMAP P9's phrasing and CLAUDE.md law 5's counterpart — a format that merely DOCUMENTS the rule will eventually carry a ROM, so the acceptance requires a deliberately poisoned archive to be refused in a test rather than the rule to be written down."
+  ],
    "points": 5,
    "status": "done",
    "stories": []
@@ -4455,6 +4459,175 @@
    ],
    "notes": [
     "Same honesty contract as every other enhancement: the player must be able to tell what is the game and what is ours."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W9-02",
+   "title": "Profile editor GUI",
+   "phase": 9,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-profiles/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "a profile can be created, edited and saved entirely in the GUI, per FRONTEND_UI.md section 3.5",
+    "the editor writes a profile that rf-profiles loads without warnings, round-tripped in a test",
+    "an invalid edit is refused inline with the same diagnostic the loader would give, rather than saved and rejected later"
+   ],
+   "notes": [
+    "The third criterion is the one that decides whether this is usable: an editor that lets you save something the loader then refuses has moved the error later, not removed it.",
+    "W8-04's accessibility work applies — the editor is a player-facing surface, so its widgets need labels and gamepad reachability, and the kittest harness needs 1600x1000 or it will assert against an empty tree."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W9-03",
+   "title": "Plugin SDK: wasmtime component tier + capability sandbox",
+   "phase": 9,
+   "crate": "rf-plugin-sdk",
+   "write_scope": [
+    "crates/rf-plugin-sdk/**",
+    "docs/design/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "a WASM component tier alongside the existing Lua tier, per PLUGINS.md section 1 and FR-PLUG-006",
+    "a WIT world defining what a plugin may call, and a capability sandbox that refuses everything not granted",
+    "a plugin that requests an ungranted capability is REFUSED with a diagnostic naming the capability, not silently no-opped"
+   ],
+   "notes": [
+    "W5-07 built the Lua tier with capability gating and a Rc<RefCell<..>> bridge for non-Send Lua; read it before designing the component tier, because the capability MODEL should be shared even though the runtimes differ.",
+    "wasmtime is a substantial dependency: it needs a docs/TECH_STACK.md row and an NFR-011 licence review before any code lands. Do that first, or the ticket stalls the way W8-10's ort half did."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W9-04",
+   "title": "Plugin SDK documentation + example plugins",
+   "phase": 9,
+   "crate": "rf-plugin-sdk",
+   "write_scope": [
+    "crates/rf-plugin-sdk/**",
+    "docs/**",
+    "examples/**"
+   ],
+   "depends_on": [
+    "W9-03"
+   ],
+   "acceptance": [
+    "SDK documentation covering both tiers, written against the shipped API rather than an intended one",
+    "at least two example plugins that BUILD in CI, so a doc that drifts from the API fails the build rather than misleading a reader",
+    "each example is small enough to read in one sitting and does one thing"
+   ],
+   "notes": [
+    "The second criterion is the anti-rot mechanism: documentation that is not compiled is documentation that silently goes stale, which this project has already seen with EMULATION_CORES.md section 3.3's superseded dropped_by_limit line."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W9-05",
+   "title": "Community distribution format for packs, profiles and mods",
+   "phase": 9,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "crates/rf-profiles/**",
+    "docs/design/**"
+   ],
+   "depends_on": [
+    "W8-11"
+   ],
+   "acceptance": [
+    "a distribution format carrying packs, profiles and mods with REQUIRED licence metadata (FR-PROF-005/006/007)",
+    "no ROM data can be embedded: an archive containing any is refused with a diagnostic, tested with a deliberately poisoned archive",
+    "an intake CI check that a third-party submission passes or fails on its own merits"
+   ],
+   "notes": [
+    "'Community-safe: no ROM data, license metadata required' is ROADMAP P9's phrasing and is a hard requirement rather than a guideline — CLAUDE.md law 5 is the project-side counterpart.",
+    "The poisoned-archive test is the acceptance that matters: a format that merely DOCUMENTS the rule will eventually carry a ROM."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W9-06",
+   "title": "Mesen HD-pack import",
+   "phase": 9,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**"
+   ],
+   "depends_on": [
+    "W8-11"
+   ],
+   "acceptance": [
+    "existing Mesen HD packs import and apply, using the tile identity W8-11 already implements",
+    "a pack that imports but cannot be fully satisfied is reported as PARTIAL with the specific assets named, never silently degraded",
+    "a real community pack is imported end to end in a test"
+   ],
+   "notes": [
+    "W8-11 already requires Mesen-compatible tile identity, so this is the consumer of that work rather than a second implementation of it.",
+    "The third criterion needs a real pack: check one is obtainable and licence-clear BEFORE claiming, or this stalls exactly like W7-05, W7-08 and W7-11 did on artifacts that did not exist."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W9-07",
+   "title": "Documentation site",
+   "phase": 9,
+   "crate": "infra",
+   "write_scope": [
+    "docs/**",
+    ".github/**"
+   ],
+   "depends_on": [
+    "W9-04"
+   ],
+   "acceptance": [
+    "a documentation site built from docs/ in CI, so it cannot drift from the repository",
+    "the site covers the profile format, the pack format and the plugin SDK — the three things a third party needs",
+    "every code sample in the site is compiled or executed by CI"
+   ],
+   "notes": [
+    "ROADMAP P9's exit criterion is 'a third party ships a profile + pack + script without touching Rust or asking us questions'. That is the real acceptance for this ticket, and the third criterion above is how it stops being aspirational."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W9-08",
+   "title": "Second and third game profiles",
+   "phase": 9,
+   "crate": "rf-profiles",
+   "write_scope": [
+    "profiles/**",
+    "crates/rf-profiles/**"
+   ],
+   "depends_on": [
+    "W9-02"
+   ],
+   "acceptance": [
+    "two further game profiles beyond the first, each exercising a decoder family the first does not",
+    "each ships with the evidence its claims rest on, to the standard docs/design/GAME_PROFILES.md sets",
+    "both load without warnings and are covered by the profile-corpus test"
+   ],
+   "notes": [
+    "The point is breadth of FORMAT coverage, not count: two profiles of the same shape prove less than one that forces a second decoder family into existence. Pick them for what they exercise."
    ],
    "points": 5,
    "status": "todo",
