@@ -3937,7 +3937,7 @@
     "W6-04b delivered a SKELETON on purpose — BRR decode plus eight-voice mixing — with sample-exactness deferred here. What it did NOT implement is named in its close note and in the dsp module doc, so this ticket's scope is already written down rather than needing rediscovery."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
