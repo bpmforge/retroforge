@@ -125,6 +125,23 @@ if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
   exit 1
 fi
 
+# PeterLemon PPU golden frames (ticket W6-03b): the four 2BPP BGMAP tests,
+# one per background layer, in BG mode 0. Local-only (NFR-006).
+#
+# Fetched per-file rather than as the 240 MB repo snapshot the manifest
+# once pointed at — see scripts/fetch-peterlemon-ppu.sh.
+if [ ! -d "$repo_root/roms/snes/peterlemon-ppu" ]; then
+  echo "local-gate: PeterLemon PPU ROMs absent; fetching..." >&2
+  "$script_dir/fetch-peterlemon-ppu.sh" || true
+fi
+
+echo "local-gate: running PeterLemon PPU golden frames (release)..." >&2
+if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
+  -p rf-snes --test peterlemon_golden -- --ignored --nocapture; then
+  echo "local-gate: PeterLemon golden frames FAILED" >&2
+  exit 1
+fi
+
 if [ ! -d "$vectors_dir" ]; then
   echo "local-gate: nes6502 vectors not found at $vectors_dir" >&2
   echo "Fetch them first: scripts/fetch-test-roms.sh singlestep-nes6502-src" >&2

@@ -783,13 +783,27 @@ dest = "roms/snes/undisbeliever-snes-test-roms-20210217.zip"
 [[artifact]]
 id = "peterlemon-snes"
 license_status = "no-license-grant-fetch-only"
-# TODO-network-not-attempted: PeterLemon/SNES is an active, asset-heavy
-# assembly project; its whole-repo snapshot size was not checked this
-# session (both SingleStepTests archives above turned out to be 16MB and
-# 490MB respectively, so size is not predictable from repo description
-# alone) and downloading it just to compute a hash was not attempted given
-# the time already spent proving the pattern on smaller archives.
-sha256 = "TODO-network-not-attempted"
+# RESOLVED AT W6-03b, the ticket that consumes these.
+#
+# This entry carried `sha256 = "TODO-network-not-attempted"` with a
+# comment saying the snapshot's size had never been checked. It is
+# **240 MB** (GitHub API, commit 350b394) — and, exactly as with the
+# 65816 vectors in W6-01a, the archive turns out to be unnecessary:
+# individual `.sfc` files are fetchable from raw.githubusercontent.com at
+# the pinned commit, so the golden-frame subset costs four 32 KiB files
+# rather than a quarter-gigabyte download.
+#
+# `scripts/fetch-peterlemon-ppu.sh` fetches that subset and
+# `scripts/local-gate.sh` runs it. The archive URL below stays as the
+# provenance record for the commit pin, and the entry is NOT retired the
+# way `singlestep-65816` was, because the `peterlemon_mode7` suite still
+# points at it and Mode 7 is a later ticket's work.
+#
+# The hash stays a TODO- placeholder deliberately: it is still true that
+# nothing has computed it, and writing anything else would be a claim
+# about bytes nobody here has seen. If Mode 7 later needs the whole
+# archive, that ticket computes it then.
+sha256 = "TODO-archive-240MB-and-unused-subset-fetched-per-file-see-scripts-fetch-peterlemon-ppu-sh"
 mirrors = [
   "https://codeload.github.com/PeterLemon/SNES/zip/350b394e86ec5d62f600b5cbf64cdce3721bb6ef",
 ]

@@ -178,6 +178,66 @@ impl SnesSystem {
         Ok(max_instructions)
     }
 
+    /// Run until the start of the next vblank, then compose the visible
+    /// frame.
+    ///
+    /// Rendering at vblank rather than mid-frame is what makes the result
+    /// stable: a ROM sets registers during vblank and expects them to
+    /// hold for the frame, so composing at any other moment can catch a
+    /// half-updated tilemap.
+    ///
+    /// # Errors
+    /// Propagates an unimplemented opcode.
+    pub fn render_frame(&mut self, max_instructions: u64) -> Result<Vec<Vec<u8>>, u8> {
+        // Get into vblank...
+        let start = self.bus.timing.frame;
+        let mut n = 0;
+        while !self.bus.timing.in_vblank() && n < max_instructions {
+            self.step()?;
+            n += 1;
+        }
+        // ...and out again, so composition happens on a settled frame.
+        while (self.bus.timing.in_vblank() || self.bus.timing.frame == start)
+            && n < max_instructions
+        {
+            self.step()?;
+            n += 1;
+        }
+
+        let mut frame = Vec::with_capacity(usize::from(crate::ppu::VISIBLE_LINES));
+        for y in 0..crate::ppu::VISIBLE_LINES {
+            frame.push(
+                self.bus
+                    .ppu
+                    .render_scanline(y)
+                    .pixels
+                    .iter()
+                    .map(|p| p.palette_index)
+                    .collect(),
+            );
+        }
+        Ok(frame)
+    }
+
+    /// CGRAM as RGB888, for tests and tools that need to look at a frame.
+    ///
+    /// CGRAM is BGR555; the 5-bit channels are scaled to 8 bits by
+    /// replicating the high bits (`v << 3 | v >> 2`) rather than shifting
+    /// alone, so full-scale input maps to full-scale output instead of
+    /// topping out at 248.
+    #[must_use]
+    pub fn palette_rgb(&self) -> Vec<[u8; 3]> {
+        self.bus
+            .ppu
+            .cgram
+            .iter()
+            .map(|&c| {
+                let ch = |v: u16| ((v & 0x1F) as u8) << 3 | ((v & 0x1F) as u8) >> 2;
+                [ch(c), ch(c >> 5), ch(c >> 10)]
+            })
+            .collect()
+    }
+
     /// Master cycles one access at `addr` would cost right now.
     #[must_use]
     pub fn access_cost(&self, addr: u32) -> u8 {

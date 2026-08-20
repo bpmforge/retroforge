@@ -3526,6 +3526,7 @@ version = "0.1.0"
 dependencies = [
  "rf-cart",
  "rf-core-api",
+ "sha2",
 ]
 
 [[package]]
