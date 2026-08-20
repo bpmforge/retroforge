@@ -4630,9 +4630,11 @@
    ],
    "notes": [
     "The point is breadth of FORMAT coverage, not count: two profiles of the same shape prove less than one that forces a second decoder family into existence. Pick them for what they exercise."
-   ],
+   ,
+  "HANDOFF (2026-08-20, unattended loop): NOT STARTED \u2014 criterion 1 is unbuildable inside write_scope. Criterion 1 asks for profiles 'each exercising a decoder family the first does not'. Decoder families are implemented in crates/rf-enhance/src/decode/ and EXACTLY ONE exists: metatile_screens (decode/mod.rs:38 is the only `pub mod`; metatile_screens.rs:165 returns UnknownFamily for anything else). GAME_PROFILES.md \u00a72 names room_grid, tilemap_direct and custom, but none is implemented \u2014 profiles/snes/example-mode7 already declares kind = 'room_grid' and decodes nothing, which is the vacuous artifact this criterion must not produce more of. write_scope is profiles/** + crates/rf-profiles/**, so neither a new family nor a new fixture ROM (fixtures/**) can be added here. Criterion 2 ('ships with the evidence its claims rest on') compounds it: the only ROMs this repo can cite first-party evidence for are its own fixtures, and both are metatile scrollers \u2014 the same family. Criterion 3 IS satisfiable: crates/rf-profiles/tests/example_profiles.rs is the corpus test and already walks profiles/{nes,snes}. To unblock, one of: (a) widen write_scope to crates/rf-enhance/** + fixtures/** and accept that this ticket now implements a decoder family and the fixture that exercises it (probably better as its own ticket, e.g. 'implement room_grid + its fixture', with W9-08 depending on it); or (b) rule on whether profiles for real commercial titles belong in /profiles at all \u2014 that is a law-5 and clean-room-provenance question for Brad, and it decides whether criterion 2 can ever be met by anything but our own fixtures."
+ ],
    "points": 5,
-   "status": "todo",
+   "status": "blocked",
    "stories": []
   }
  ]
