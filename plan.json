@@ -3850,7 +3850,10 @@
    "crate": "rf-snes",
    "write_scope": [
     "crates/rf-snes/**"
-   ],
+   ,
+  "scripts/**",
+  "tests/rom-manifest.toml"
+ ],
    "depends_on": [
     "W7-03"
    ],
@@ -3868,9 +3871,11 @@
    "CRITERION 4 NAMES ROMS THAT DO NOT EXIST IN THE PINNED ARCHIVE. It asks for 'undisbeliever window/HDMA-gradient ROMs'. The manifest's pinned undisbeliever-snes-test-roms archive (20210217) was extracted and enumerated: 29 .sfc files, ALL of them hdma-*, hdmaen-*, inidisp-* or scpu-a-dma-bug-*. There is no window ROM and no gradient ROM in it. Separately, W7-07 established with direct evidence that the ROMs it DOES contain are per-dot timing tests which never leave forced blank on a scanline-composed PPU. RECOMMEND: amend this criterion to name a source that exists, or move it to the per-dot PPU ticket alongside W7-07's criterion 4."
   ,
   "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). Amend acceptance rather than leave this blocked. CRITERION 4 IS REPLACED, and the replacement names ROMs VERIFIED TO EXIST: the GitHub contents API at the pinned PeterLemon commit 350b394e lists PPU/Window/{WindowHDMA,WindowMultiHDMA}/*.sfc and PPU/Mosaic/{Mode3,Mode5}/*.sfc. The old criterion asked for undisbeliever window/gradient ROMs, and that archive was enumerated at 29 files with no window and no gradient ROM among them \u2014 the artifacts were never in the archive the criterion pointed at, they were in the OTHER pinned source all along. Both replacements are expressible on a scanline PPU: window masking resolves to clip-to-black (palette index 0, on the indexed path) and mosaic is an indexed-domain operation, so neither needs the RGB sub-screen. Colour math\u2019s golden-frame verification stays OUT of this ticket and remains W7-16\u2019s, which already exists and depends on this one."
+ ,
+  "SCOPE AMENDMENT (2026-08-20, standing authority): write_scope gains scripts/** and tests/rom-manifest.toml \u2014 the amended criterion 4 names ROMs that must be FETCHED before they can be rendered, and the fetcher lives in scripts/. W7-07 already carries exactly these two entries for the same reason."
  ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
