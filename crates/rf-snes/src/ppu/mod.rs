@@ -55,6 +55,30 @@ pub const CGRAM_ENTRIES: usize = 256;
 /// OAM: 512 bytes of low table plus 32 bytes of high table.
 pub const OAM_LEN: usize = 544;
 
+/// The register state a single scanline is composed from.
+///
+/// ## Why this exists (ticket W7-07)
+///
+/// §3.3 specifies "each scanline is composed at once from register state
+/// **latched at line start** + mid-line writes recorded with H-position".
+/// Until HDMA landed, composing the whole frame from the registers'
+/// final values was indistinguishable from that — nothing changed them
+/// mid-frame.
+///
+/// HDMA's entire purpose is changing them mid-frame. Without per-line
+/// latching, a mode-7 perspective demo composes all 224 lines from the
+/// LAST line's matrix and renders as one flat texture — which is exactly
+/// what happened the first time HDMA was wired up here.
+#[derive(Debug, Clone, Copy)]
+pub struct LineState {
+    pub mode7: mode7::Mode7,
+    pub bg_mode: u8,
+    pub bg3_priority: bool,
+    /// Per-layer scroll, the other thing HDMA is routinely used for.
+    pub hofs: [u16; 4],
+    pub vofs: [u16; 4],
+}
+
 /// One composed scanline: the accuracy-exact pixels, plus the
 /// overlay-only pixels for sprites the hardware limits dropped.
 #[derive(Debug, Clone)]
@@ -128,6 +152,12 @@ pub struct Ppu {
     /// into the pixel.
     pub direct_color: bool,
 
+    /// Register state latched at the start of each visible line, filled
+    /// in as the frame is scanned out. `None` until a line has been
+    /// reached — a caller rendering ahead of the beam falls back to the
+    /// live registers.
+    pub line_state: Vec<Option<LineState>>,
+
     /// `$213E` bit 6: more than 32 sprites on a line.
     pub range_over: bool,
     /// `$213E` bit 7: more than 34 tile slivers on a line.
@@ -165,6 +195,7 @@ impl Ppu {
             forced_blank: true,
             brightness: 0,
             mode7: mode7::Mode7::default(),
+            line_state: vec![None; VISIBLE_LINES as usize],
             direct_color: false,
             range_over: false,
             time_over: false,
@@ -304,6 +335,57 @@ impl Ppu {
         }
     }
 
+    /// Latch the current registers as line `y`'s state.
+    ///
+    /// Called once per visible scanline, after that line's HDMA has run.
+    pub fn latch_line(&mut self, y: u16) {
+        if let Some(slot) = self.line_state.get_mut(usize::from(y)) {
+            *slot = Some(LineState {
+                mode7: self.mode7,
+                bg_mode: self.bg_mode,
+                bg3_priority: self.bg3_priority,
+                hofs: [
+                    self.bgs[0].hofs,
+                    self.bgs[1].hofs,
+                    self.bgs[2].hofs,
+                    self.bgs[3].hofs,
+                ],
+                vofs: [
+                    self.bgs[0].vofs,
+                    self.bgs[1].vofs,
+                    self.bgs[2].vofs,
+                    self.bgs[3].vofs,
+                ],
+            });
+        }
+    }
+
+    /// Forget every latched line. Called at the start of a frame so a
+    /// line nothing reached this frame cannot serve last frame's state.
+    pub fn clear_line_state(&mut self) {
+        for slot in &mut self.line_state {
+            *slot = None;
+        }
+    }
+
+    /// A copy of this PPU with line `y`'s latched registers applied.
+    ///
+    /// Returns `None` when that line was never latched, in which case the
+    /// live registers are already the right answer.
+    #[must_use]
+    fn with_line_state(&self, y: u16) -> Option<Self> {
+        let state = (*self.line_state.get(usize::from(y))?)?;
+        let mut p = self.clone();
+        p.mode7 = state.mode7;
+        p.bg_mode = state.bg_mode;
+        p.bg3_priority = state.bg3_priority;
+        for (i, bg) in p.bgs.iter_mut().enumerate() {
+            bg.hofs = state.hofs[i];
+            bg.vofs = state.vofs[i];
+        }
+        Some(p)
+    }
+
     /// `$213E` STAT77 — the hardware's own report of the two OBJ limits.
     #[must_use]
     pub fn read_stat77(&self) -> u8 {
@@ -324,6 +406,22 @@ impl Ppu {
     /// module doc for why dropped sprites are never in the first.
     #[must_use]
     pub fn render_scanline(&mut self, y: u16) -> Scanline {
+        // Compose from the registers latched when the beam reached this
+        // line, not from wherever they have since been left. Without
+        // this, HDMA's per-line changes all collapse onto the frame's
+        // final state.
+        if let Some(latched) = self.with_line_state(y) {
+            let mut shadow = latched;
+            let line = shadow.render_scanline_live(y);
+            // Limit flags accumulate on the real PPU, not the shadow.
+            self.range_over |= shadow.range_over;
+            self.time_over |= shadow.time_over;
+            return line;
+        }
+        self.render_scanline_live(y)
+    }
+
+    fn render_scanline_live(&mut self, y: u16) -> Scanline {
         let backdrop = PpuPixel {
             palette_index: 0,
             layer: PixelLayer::Backdrop,

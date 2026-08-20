@@ -18,6 +18,7 @@
 mod apu;
 mod apu_ports;
 mod dma;
+mod hdma;
 mod mapping;
 mod ppu;
 mod regs;

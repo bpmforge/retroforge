@@ -57,6 +57,11 @@ pub struct Events {
     /// The auto-joypad window just closed — the moment the controller
     /// state is latched into `$4218`-`$421F`.
     pub auto_joypad_done: bool,
+    /// A new frame began: HDMA must re-initialise from its tables.
+    pub frame_started: bool,
+    /// How many visible scanlines were crossed — HDMA runs one unit per
+    /// visible line, so this is a count and not a flag.
+    pub visible_lines_crossed: u32,
 }
 
 /// The frame clock.
@@ -168,6 +173,12 @@ impl Timing {
                 if self.line >= LINES_PER_FRAME {
                     self.line = 0;
                     self.frame += 1;
+                }
+                if self.line < VBLANK_START_LINE {
+                    events.visible_lines_crossed += 1;
+                }
+                if self.line == 0 {
+                    events.frame_started = true;
                 }
                 if self.line == VBLANK_START_LINE {
                     // The NMI edge. The flag latches here and stays set

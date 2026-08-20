@@ -140,6 +140,20 @@ impl SnesSystem {
         if events.irq {
             self.bus.irq.fired = true;
         }
+        // HDMA: re-initialise at the top of each frame, then run one unit
+        // per visible scanline. Its cost is charged like MDMA's, because
+        // it steals the same bus.
+        if events.frame_started {
+            self.bus.hdma_init();
+            self.bus.ppu.clear_line_state();
+        }
+        for _ in 0..events.visible_lines_crossed {
+            self.master_cycles += self.bus.hdma_run_line();
+            // Latch AFTER this line's HDMA: the transfer that happens in
+            // the preceding hblank is what this line is drawn with.
+            let line = self.bus.timing.line;
+            self.bus.ppu.latch_line(line);
+        }
         if events.auto_joypad_done {
             self.bus.joypads.latch();
         }

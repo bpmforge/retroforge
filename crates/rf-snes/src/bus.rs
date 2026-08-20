@@ -262,6 +262,10 @@ impl SnesBus {
             0x4 => c.a_address = (c.a_address & 0x0000_FFFF) | (u32::from(value) << 16),
             0x5 => c.count = (c.count & 0xFF00) | u16::from(value),
             0x6 => c.count = (c.count & 0x00FF) | (u16::from(value) << 8),
+            0x7 => c.indirect_bank = value,
+            0x8 => c.table_addr = (c.table_addr & 0xFF00) | u16::from(value),
+            0x9 => c.table_addr = (c.table_addr & 0x00FF) | (u16::from(value) << 8),
+            0xA => c.line_counter = value,
             _ => {}
         }
     }
@@ -369,6 +373,119 @@ impl SnesBus {
         (0..len)
             .map(|i| self.ppu.vram[((word_addr as usize + i) * 2) % self.ppu.vram.len()])
             .collect()
+    }
+
+    /// **HDMA init**, at the start of every frame.
+    ///
+    /// Each enabled channel reloads its table pointer from `$43x2`-`$43x4`
+    /// and reads its first line counter. This happens once per frame, not
+    /// once per enable — a game that sets `$420C` mid-frame does not get
+    /// a transfer until the next frame's init, which is what
+    /// `hdmaen_latch_test` checks.
+    pub fn hdma_init(&mut self) {
+        for ch in 0..8 {
+            let enabled = self.hdmaen & (1 << ch) != 0;
+            let c = &mut self.dma.channels[ch];
+            c.hdma_done = !enabled;
+            c.do_transfer = false;
+            if !enabled {
+                continue;
+            }
+            c.table_addr = c.a_address as u16;
+            self.hdma_reload(ch);
+        }
+    }
+
+    /// Read the next line counter (and, in indirect mode, the next
+    /// pointer) from a channel's table.
+    ///
+    /// A counter of `$00` **terminates the channel for the frame** — it
+    /// is the table's end marker, not a zero-length entry. Treating it as
+    /// "transfer nothing this line and carry on" walks off the end of the
+    /// table into whatever follows it.
+    fn hdma_reload(&mut self, ch: usize) {
+        let bank = (self.dma.channels[ch].a_address >> 16) & 0xFF;
+        let addr = |offset: u16, table: u16| (bank << 16) | u32::from(table.wrapping_add(offset));
+
+        let table = self.dma.channels[ch].table_addr;
+        let counter = self.read(addr(0, table));
+        self.dma.channels[ch].table_addr = table.wrapping_add(1);
+        self.dma.channels[ch].line_counter = counter;
+
+        if counter == 0 {
+            self.dma.channels[ch].hdma_done = true;
+            return;
+        }
+        if self.dma.channels[ch].indirect() {
+            let t = self.dma.channels[ch].table_addr;
+            let lo = self.read(addr(0, t));
+            let hi = self.read(addr(1, t));
+            self.dma.channels[ch].table_addr = t.wrapping_add(2);
+            self.dma.channels[ch].count = u16::from(lo) | (u16::from(hi) << 8);
+        }
+        self.dma.channels[ch].do_transfer = true;
+    }
+
+    /// Run one scanline of HDMA for every enabled channel.
+    ///
+    /// Returns the master-cycle cost. Called once per visible scanline —
+    /// HDMA is what makes gradients, wavy effects and most split-screen
+    /// HUDs work, and it is the reason a mode-7 perspective demo looks
+    /// like perspective rather than a flat rotated plane.
+    pub fn hdma_run_line(&mut self) -> u64 {
+        let mut cycles = 0u64;
+        for ch in 0..8 {
+            if self.hdmaen & (1 << ch) == 0 || self.dma.channels[ch].hdma_done {
+                continue;
+            }
+            if self.dma.channels[ch].do_transfer {
+                cycles += CYCLES_PER_CHANNEL + self.hdma_transfer_unit(ch);
+            }
+
+            // Decrement the low seven bits; the repeat flag is bit 7 and
+            // is NOT part of the count.
+            let c = &mut self.dma.channels[ch];
+            let repeat = c.line_counter & 0x80 != 0;
+            let remaining = (c.line_counter & 0x7F).wrapping_sub(1);
+            c.line_counter = (c.line_counter & 0x80) | remaining;
+
+            if remaining == 0 {
+                self.hdma_reload(ch);
+            } else {
+                // With the repeat flag set the unit transfers on EVERY
+                // line; without it, only on the line the counter reloads.
+                self.dma.channels[ch].do_transfer = repeat;
+            }
+        }
+        cycles
+    }
+
+    /// Transfer one HDMA unit (1-4 bytes, per the channel's pattern).
+    fn hdma_transfer_unit(&mut self, ch: usize) -> u64 {
+        let c = self.dma.channels[ch];
+        let pattern = c.pattern();
+        let mut moved = 0u64;
+        for (i, step) in pattern.iter().enumerate() {
+            let b = 0x2100u32 + u32::from(c.b_address.wrapping_add(*step));
+            let source = if c.indirect() {
+                (u32::from(c.indirect_bank) << 16) | u32::from(c.count.wrapping_add(i as u16))
+            } else {
+                let bank = c.a_address & 0x00FF_0000;
+                bank | u32::from(c.table_addr.wrapping_add(i as u16))
+            };
+            let v = self.read(source);
+            self.write(b, v);
+            moved += 1;
+        }
+        // Direct mode consumes the bytes it just read from the table;
+        // indirect mode advances the pointer it dereferenced.
+        let len = pattern.len() as u16;
+        if self.dma.channels[ch].indirect() {
+            self.dma.channels[ch].count = self.dma.channels[ch].count.wrapping_add(len);
+        } else {
+            self.dma.channels[ch].table_addr = self.dma.channels[ch].table_addr.wrapping_add(len);
+        }
+        moved * CYCLES_PER_BYTE
     }
 
     /// Advance the math unit by `cycles` CPU cycles.

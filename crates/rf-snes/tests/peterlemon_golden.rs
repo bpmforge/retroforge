@@ -103,6 +103,13 @@ const GOLDENS: &[(&str, &str)] = &[
         "RotZoom.sfc",
         "ebd7f08c40f43c7377e905a581d31b40c6df1c2a837ba2e4ed60cd1a48f8408d",
     ),
+    // Pinned at W7-07, once HDMA and per-line register latching existed.
+    // Before them this ROM drew a flat rotated track; it now draws a
+    // ground plane receding to a horizon, verified by eye.
+    (
+        "Perspective.sfc",
+        "82972be08fa0a68933ba1e6ee3d383c44268052cb3c8ea401352a27d22f88946",
+    ),
 ];
 
 /// Generous cap; the fade completes in well under this.
@@ -131,10 +138,6 @@ fn rom_dir() -> Option<std::path::PathBuf> {
 /// says "pinning this would record a picture we know is not what the ROM
 /// means to draw". Both entries name the ticket that will remove them.
 const EXCLUDED: &[(&str, &str)] = &[
-    (
-        "Perspective.sfc",
-        "needs HDMA: it enables four channels ($420C reads $0F) to rewrite the mode-7 matrix          per scanline, which is the whole perspective effect. Without it the ROM renders a          coherent but FLAT rotated track — a half-right picture, and pinning it would freeze          the half. W7-07.",
-    ),
     (
         "StarWars.sfc",
         "renders fully transparent for its first ~170 frames: screen-over is 'transparent          outside the playfield' ($211A bits 6-7 = 2), the matrix sits static at A=410 D=256          Y0=-90, NMI is disabled, and the CPU loops at $00:8269 throughout. Whatever advances          this demo is not yet implemented, so there is nothing correct to pin — a black frame          would hash perfectly consistently forever. Diagnose with W7-07.",

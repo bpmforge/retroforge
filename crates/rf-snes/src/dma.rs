@@ -20,7 +20,7 @@
 //! rather than applied, because the CPU owns the clock and the bus should
 //! not silently advance it.
 
-/// One DMA channel's registers (`$43x0`-`$43x6`).
+/// One DMA channel's registers (`$43x0`-`$43xB`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Channel {
     /// `$43x0` DMAPn — direction (bit 7), addressing mode, transfer
@@ -30,8 +30,23 @@ pub struct Channel {
     pub b_address: u8,
     /// `$43x2`-`$43x4` A1Tn/A1Bn — the 24-bit CPU-side address.
     pub a_address: u32,
-    /// `$43x5`/`$43x6` DASn — byte count; 0 means 65536.
+    /// `$43x5`/`$43x6` — byte count for MDMA, and the **indirect
+    /// address** for HDMA. The two uses share one register pair on
+    /// hardware, which is why a channel cannot do both at once.
     pub count: u16,
+    /// `$43x7` DASBn — bank of the HDMA indirect address.
+    pub indirect_bank: u8,
+    /// `$43x8`/`$43x9` A2An — the HDMA table pointer, reloaded from
+    /// `a_address` at the start of each frame.
+    pub table_addr: u16,
+    /// `$43xA` NLTRn — the line counter. Bit 7 is the repeat flag; the
+    /// low seven bits are the count.
+    pub line_counter: u8,
+    /// Set when this channel's table has terminated for the frame.
+    pub hdma_done: bool,
+    /// Whether the current line should transfer (the repeat flag,
+    /// resolved).
+    pub do_transfer: bool,
 }
 
 impl Channel {
@@ -40,6 +55,13 @@ impl Channel {
     pub fn reverse(&self) -> bool {
         self.control & 0x80 != 0
     }
+    /// Bit 6: HDMA indirect addressing — the table holds POINTERS rather
+    /// than data.
+    #[must_use]
+    pub fn indirect(&self) -> bool {
+        self.control & 0x40 != 0
+    }
+
     /// Bit 3: fixed address. Bit 4: decrement instead of increment.
     #[must_use]
     pub fn a_step(&self) -> i32 {
@@ -61,7 +83,9 @@ impl Channel {
             2 | 6 => &[0, 0],
             3 | 7 => &[0, 0, 1, 1],
             4 => &[0, 1, 2, 3],
-            _ => &[0, 1, 1, 1],
+            // Pattern 5 alternates between TWO registers — b, b+1, b, b+1
+            // — it does not write b once and b+1 three times.
+            _ => &[0, 1, 0, 1],
         }
     }
 }
