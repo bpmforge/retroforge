@@ -3933,7 +3933,7 @@
   "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). Amend acceptance rather than leave this blocked, exactly as this ticket\u2019s own HANDOFF recommended. CRITERION 4 IS REPLACED with the PeterLemon HDMA set, VERIFIED TO EXIST at the pinned commit 350b394e: PPU/HDMA/{WaveHDMA,RedSpaceHDMA,RedSpaceIndirectHDMA,Mode7HDMA}/*.sfc. These are per-SCANLINE HDMA effects \u2014 gradients and wave distortion driven by per-line register writes \u2014 which is precisely what the line-latching this ticket already built can express. The undisbeliever per-dot timing ROMs are NOT abandoned: they remain W7-15\u2019s criterion 2, which already exists and depends on this ticket."
  ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
