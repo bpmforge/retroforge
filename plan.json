@@ -4505,9 +4505,11 @@
    "notes": [
     "W5-07 built the Lua tier with capability gating and a Rc<RefCell<..>> bridge for non-Send Lua; read it before designing the component tier, because the capability MODEL should be shared even though the runtimes differ.",
     "wasmtime is a substantial dependency: it needs a docs/TECH_STACK.md row and an NFR-011 licence review before any code lands. Do that first, or the ticket stalls the way W8-10's ort half did."
-   ],
+   ,
+  "HANDOFF (2026-08-20, unattended loop): NOT STARTED \u2014 stopped before any code, on this ticket's own precondition. (1) The note above requires a docs/TECH_STACK.md row before code lands, and docs/TECH_STACK.md is NOT in this ticket's write_scope (crates/rf-plugin-sdk/**, docs/design/**), so the precondition cannot be satisfied without a scope amendment. (2) docs/TECH_STACK.md:34 already names the Tier-2 plan as 'wasmtime 46 components, ONLY WHEN THIRD-PARTY DEMAND IS REAL' \u2014 that condition is a product judgement for Brad, not something an unattended run can declare met. (3) NFR-011 licence review for wasmtime and its tree has not been done. Same class of dependency decision as W8-10's `ort`. To unblock: rule on whether third-party demand justifies Tier 2 now, add the TECH_STACK row, run the licence pass, then widen write_scope to include docs/TECH_STACK.md (or file the row as its own ticket) and set this back to todo."
+ ],
    "points": 8,
-   "status": "todo",
+   "status": "blocked",
    "stories": []
   },
   {
