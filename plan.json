@@ -3774,8 +3774,9 @@
    "phase": 7,
    "crate": "rf-snes",
    "write_scope": [
-    "crates/rf-snes/**"
-   ],
+   "crates/rf-snes/**",
+   "scripts/**"
+  ],
    "depends_on": [
     "W6-03b"
    ],
@@ -3790,7 +3791,7 @@
     "The 4BPP BGMAP ROM excluded at W6-03b is actually MODE 3 (8bpp BG1 + 4bpp BG2), verified by running it. It belongs to this ticket, not to a mode-1 ticket."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
