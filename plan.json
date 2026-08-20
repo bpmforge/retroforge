@@ -3468,8 +3468,8 @@
    "phase": 6,
    "crate": "rf-snes",
    "write_scope": [
-    "crates/rf-snes/src/ppu/**"
-   ],
+      "crates/rf-snes/**"
+    ],
    "depends_on": [
     "W6-02b"
    ],
@@ -3478,7 +3478,7 @@
     "OBJ sprites with 32-sprite/34-sliver line limits + dropped_by_limit metadata"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E8-S1"
    ]
