@@ -4191,7 +4191,7 @@
     "The determinism suite is the natural oracle: a rewind that is not hash-identical is a save-state bug wearing a different hat."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
