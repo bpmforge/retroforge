@@ -288,6 +288,17 @@ pub struct RetroForgeApp {
     normalized_rom: Option<Vec<u8>>,
     /// Path of the profile matched to the open ROM, if any.
     matched_profile: Option<std::path::PathBuf>,
+    /// Ticket W9-02: the in-GUI profile editor. `None` until the author
+    /// creates or opens one — the workspace is useful without it (the
+    /// external-editor loop W5-06 built), so the editor is a mode of the
+    /// panel rather than the panel itself.
+    editor_draft: Option<crate::profile_editor::Draft>,
+    editor_form: crate::profile_editor::NewProfileForm,
+    /// Where a never-yet-saved draft will be written. Held as text
+    /// because it is a text field the author types into.
+    editor_path: String,
+    /// The last save's outcome, shown next to the button that caused it.
+    editor_status: Option<String>,
 }
 
 impl RetroForgeApp {
@@ -433,6 +444,10 @@ impl RetroForgeApp {
             show_author: false,
             normalized_rom: None,
             matched_profile: None,
+            editor_draft: None,
+            editor_form: crate::profile_editor::NewProfileForm::default(),
+            editor_path: String::new(),
+            editor_status: None,
         }
     }
 
@@ -605,6 +620,224 @@ impl RetroForgeApp {
         self.show_author = true;
     }
 
+    /// Open the editor on a brand-new draft (ticket W9-02).
+    ///
+    /// Public because the menu, a future "new profile" command and the
+    /// headless harness all need the same entry point; a test that had to
+    /// synthesise clicks to reach the editor's *initial* state would be
+    /// testing egui's click routing rather than the editor.
+    pub fn open_author_editor(&mut self) {
+        self.editor_draft = Some(crate::profile_editor::Draft::from_form(&self.editor_form));
+        self.editor_status = None;
+        self.show_author = true;
+    }
+
+    /// The open draft, mutably \u{2014} the headless harness's way to put a
+    /// specific buffer in front of the real widget code without typing it
+    /// character by character through synthesised key events.
+    pub fn author_draft_mut(&mut self) -> Option<&mut crate::profile_editor::Draft> {
+        self.editor_draft.as_mut()
+    }
+
+    /// Where the editor's Save button will write.
+    pub fn set_author_save_path(&mut self, path: impl Into<String>) {
+        self.editor_path = path.into();
+    }
+
+    /// The last save attempt's message, as shown in the panel.
+    #[must_use]
+    pub fn author_editor_status(&self) -> Option<&str> {
+        self.editor_status.as_deref()
+    }
+
+    /// Open the editor on the profile currently being watched.
+    pub fn edit_watched_profile(&mut self) {
+        let Some(path) = self.author_watch.as_ref().map(|w| w.path().to_path_buf()) else {
+            return;
+        };
+        match crate::profile_editor::Draft::open(&path) {
+            Ok(draft) => {
+                self.editor_path = path.display().to_string();
+                self.editor_draft = Some(draft);
+                self.editor_status = None;
+            }
+            Err(e) => self.editor_status = Some(format!("{}: {e}", path.display())),
+        }
+        self.show_author = true;
+    }
+
+    /// §3.5's embedded text editor plus the inspector's "validation
+    /// output" pane (ticket W9-02).
+    ///
+    /// The validation shown here is `Draft::check`, which is
+    /// `rf_profiles::loader::load_str` — so this pane cannot drift from
+    /// what the loader will say, and the Save button below it cannot
+    /// write a file the loader would refuse. The loader is fail-fast, so
+    /// there is at most one error at a time; the pane says as much rather
+    /// than implying a complete list.
+    fn profile_editor_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::profile_editor::{Check, Console, NewProfileForm};
+
+        if self.editor_draft.is_none() {
+            let mut want_new = false;
+            let mut want_edit = false;
+            let has_watch = self.author_watch.is_some();
+            ui.horizontal(|ui| {
+                want_new = ui.button("New profile").clicked();
+                if has_watch {
+                    want_edit = ui.button("Edit this profile").clicked();
+                }
+            });
+            if want_new {
+                self.open_author_editor();
+            } else if want_edit {
+                self.edit_watched_profile();
+            }
+            if self.editor_draft.is_some() {
+                return;
+            }
+            let form: &mut NewProfileForm = &mut self.editor_form;
+            egui::Grid::new("rf_profile_new_form")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    for (label, field) in [
+                        ("Title", &mut form.title),
+                        ("Region", &mut form.region),
+                        ("Author", &mut form.author),
+                        ("Source citation", &mut form.source),
+                    ] {
+                        let _ = ui.selectable_label(false, label);
+                        ui.add(
+                            egui::TextEdit::singleline(field)
+                                .desired_width(320.0)
+                                .hint_text(label),
+                        );
+                        ui.end_row();
+                    }
+                    let _ = ui.selectable_label(false, "Console");
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut form.console, Console::Nes, "NES");
+                        ui.radio_value(&mut form.console, Console::Snes, "SNES");
+                    });
+                    ui.end_row();
+                });
+            if let Some(status) = &self.editor_status {
+                let _ = ui.selectable_label(false, status.clone());
+            }
+            return;
+        }
+        let draft = self.editor_draft.as_mut().expect("checked above");
+
+        // ---- validation, above the buffer -------------------------
+        //
+        // Above, not below, for the same reason the decode errors sit
+        // above the decode preview: a verdict placed under a screenful of
+        // text is a verdict nobody scrolls to.
+        let check = draft.check();
+        match &check {
+            Check::Accepted { warnings } => {
+                let _ = ui.selectable_label(
+                    false,
+                    egui::RichText::new("Valid \u{2014} rf-profiles loads this")
+                        .color(egui::Color32::from_rgb(0x40, 0xC0, 0x60)),
+                );
+                for w in warnings {
+                    let _ = ui.selectable_label(
+                        false,
+                        egui::RichText::new(format!("unknown key: {w}"))
+                            .color(egui::Color32::from_rgb(0xE0, 0x80, 0x30)),
+                    );
+                }
+            }
+            Check::Refused { diagnostic } => {
+                let _ = ui.selectable_label(
+                    false,
+                    egui::RichText::new(format!("Invalid: {diagnostic}"))
+                        .color(egui::Color32::from_rgb(0xE0, 0x50, 0x40)),
+                );
+                let _ = ui.selectable_label(
+                    false,
+                    "The loader stops at the first problem, so more may follow this one.",
+                );
+            }
+        }
+
+        ui.horizontal(|ui| {
+            let _ = ui.selectable_label(false, "Save to");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.editor_path)
+                    .desired_width(420.0)
+                    .hint_text("path/to/profile.toml"),
+            );
+        });
+
+        let mut close = false;
+        ui.horizontal(|ui| {
+            // Disabled rather than absent when the draft is invalid: a
+            // button that vanishes reads as a missing feature, a greyed
+            // one reads as a blocked action, and the diagnostic directly
+            // above it says what unblocks it.
+            let can_save = check.is_accepted() && !self.editor_path.trim().is_empty();
+            if ui
+                .add_enabled(can_save, egui::Button::new("Save profile"))
+                .clicked()
+            {
+                let path = std::path::PathBuf::from(self.editor_path.trim());
+                match draft.save_to(&path) {
+                    Ok(warnings) => {
+                        self.editor_status = Some(if warnings.is_empty() {
+                            format!("saved {}", path.display())
+                        } else {
+                            format!(
+                                "saved {} with {} warning(s)",
+                                path.display(),
+                                warnings.len()
+                            )
+                        });
+                        // Point the watch at what was just written, so
+                        // §3.5's hot-reload loop closes without a second
+                        // preview path: `pump_authoring` takes it from
+                        // here.
+                        self.author_outcome =
+                            crate::authoring::reload(&path, self.normalized_rom.as_deref());
+                        self.author_watch = Some(crate::authoring::Watch::new(path));
+                    }
+                    Err(refused) => {
+                        self.editor_status = Some(format!("not saved: {}", refused.diagnostic));
+                    }
+                }
+            }
+            close = ui.button("Close editor").clicked();
+            if draft.is_dirty() {
+                let _ = ui.selectable_label(false, "unsaved changes");
+            }
+        });
+        if close {
+            self.editor_draft = None;
+            self.editor_status = None;
+            return;
+        }
+        let draft = self.editor_draft.as_mut().expect("still present");
+
+        if let Some(status) = &self.editor_status {
+            let _ = ui.selectable_label(false, status.clone());
+        }
+
+        let _ = ui.selectable_label(false, "Profile TOML");
+        egui::ScrollArea::vertical()
+            .max_height(320.0)
+            .id_salt("rf_profile_editor_text")
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(draft.text_mut())
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(16)
+                        .hint_text("Profile TOML"),
+                );
+            });
+    }
+
     /// The author workspace (FRONTEND_UI §3.5, minimal Phase-4 form:
     /// live decode preview + inline error list).
     fn author_window(&mut self, ctx: &egui::Context) {
@@ -622,9 +855,21 @@ impl RetroForgeApp {
                             ui.selectable_label(false, format!("watching {}", w.path().display()));
                     }
                     None => {
-                        let _ = ui.selectable_label(false, "No profile matched this ROM.");
-                        return;
+                        let _ = ui.selectable_label(
+                            false,
+                            "No profile matched this ROM \u{2014} create one below.",
+                        );
                     }
+                }
+                ui.separator();
+                // Ticket W9-02. Above the decode preview, and before the
+                // `author_watch` check that used to end this closure: the
+                // editor's whole point is that a profile can be brought
+                // into existence when there is no profile yet, so it
+                // cannot sit behind a control that requires one.
+                self.profile_editor_ui(ui);
+                if self.author_watch.is_none() {
+                    return;
                 }
                 ui.separator();
                 // §3.5's "error list inline". Errors first: a preview

@@ -4484,7 +4484,7 @@
     "W8-04's accessibility work applies — the editor is a player-facing surface, so its widgets need labels and gamepad reachability, and the kittest harness needs 1600x1000 or it will assert against an empty tree."
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
