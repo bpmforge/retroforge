@@ -56,6 +56,7 @@ pub mod settings;
 pub mod state_slots;
 pub mod stepper;
 pub mod trace_capture;
+pub mod ui_nav;
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "retroforge";

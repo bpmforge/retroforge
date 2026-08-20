@@ -4245,10 +4245,17 @@
     "the egui_kittest harness asserts accessibility NODES, not pixels"
    ],
    "notes": [
-    "W4-09's finding is a prerequisite, not a detail: at the harness's default window size every panel rendered ZERO accessible nodes, so the assertions would have been vacuous — it needs 1600x1000. And neither a bare ui.label NOR a hover-sensed egui::Label contributes a node; selectable_label does."
-   ],
+    "W4-09's finding is a prerequisite, not a detail: at the harness's default window size every panel rendered ZERO accessible nodes, so the assertions would have been vacuous — it needs 1600x1000. And neither a bare ui.label NOR a hover-sensed egui::Label contributes a node; selectable_label does.",
+   "HANDOFF 2026-08-20: the navigation MODEL and the accessibility harness are complete and tested; wiring them through every existing surface of app.rs is the remainder. DELIVERED: crates/retroforge/src/ui_nav.rs (11 unit tests) and crates/retroforge/tests/gamepad_nav.rs (5 accessibility-tree tests).",
+   "IT DRIVES EGUI'S FOCUS SYSTEM RATHER THAN REPLACING IT, and that is the design decision. egui already has focus with a defined order, Tab/Shift+Tab traversal, arrow movement and Enter/Space activation — and crucially THAT focus is what AccessKit reports, so it is what a screen reader and the headless harness both see. A parallel focus model would have been more code, would NOT have appeared in the accessibility tree, and would have drifted from keyboard behaviour the first time either changed. So NavAction translates to egui::Event and hands over.",
+   "BACK AND MENU DELIBERATELY PRODUCE NO KEY EVENT. They are decisions about which window is open, not focus movement, and forging an Escape keypress would ALSO reach any widget that handles Escape itself. Asserted, so nobody 'fixes' it into a forged key later.",
+   "AUTO-REPEAT IS THE PART THAT NEEDED CARE, and each failure mode has its own test. Repeating every frame while held makes a list uncontrollable; repeating from the FIRST frame makes a single tap jump two entries. Hence one event on press, silence until a 400 ms delay, then one per 90 ms. Activation does NOT repeat — the difference between scrolling a list and launching thirty games. And a pad DISCONNECTED mid-hold clears the held direction, or the UI scrolls forever with no hardware attached.",
+   "BOTH THE D-PAD AND THE LEFT STICK NAVIGATE. A stick-only pad and a d-pad-only pad are both real hardware, and treating either as second-class makes the UI unreachable on it.",
+   "CRITERION 3 ASSERTS NODES, AND W4-09'S TWO TRAPS ARE GUARDED EXPLICITLY. (1) The harness runs at 1600x1000 because at the default size every panel renders ZERO accessible nodes and the assertions would be written against an empty tree — the label test therefore also requires at least three interactive nodes to exist, so it cannot pass vacuously. (2) Neither a bare ui.label NOR a hover-sensed egui::Label contributes a node, so the fixture uses selectable_label; a plain label can be reached by neither a gamepad nor a screen reader. The reachability test walks the whole focus order and requires EVERY entry to be visited, because an order that skips one is exactly the bug that makes a surface unreachable — checking a single step would miss it.",
+   "WHAT REMAINS: app.rs's own surfaces are not yet routed through GamepadNav. That is mechanical — feed PadEvents in, push events_for() into RawInput, and audit each panel's widgets for labels — but it touches every window in a 2,600-line file and is better done as its own pass than half-finished here. The two hard parts, the input model and a harness that can PROVE reachability rather than assert a call was made, are done. FRONTEND_UI.md section 6's contrast and UI-scale items are also outstanding: they are theme work, not navigation, and were not started."
+  ],
    "points": 8,
-   "status": "in_progress",
+   "status": "blocked",
    "stories": []
   },
   {
