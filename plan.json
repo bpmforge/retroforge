@@ -3428,7 +3428,7 @@
     "INHERITED FROM W6-01b: the SingleStepTests 65816 vectors carry a per-cycle bus trace (each entry an address, a value, and flags; internal cycles appear with no value) that the W6-01a/b runner parses past without asserting on. Comparing it would verify the ACCESS SEQUENCE of every instruction — a far stronger oracle than final-state matching, and it is already fetched and sitting in roms/snes/singlestep-65816/. It needs a cycle-accurate executor that models internal no-access cycles, which is why it is here and not in W6-01b: cycle-level behaviour only becomes observable once there is a bus to observe it on. Two things it would unlock: the $44/$54 block-move vectors currently EXCLUDED (they are hard-capped at 100 cycles and always truncated mid-iteration, so they need an executor that can stop inside an instruction), and a real check on rf-snes cycle counts. Note the trace is CPU cycles and bus accesses — it does NOT validate the 6/8/12 master-cycle mapping, which has its own tests in crates/rf-snes/src/cpu/speed.rs."
   ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E8-S1"
    ]
