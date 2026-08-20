@@ -4060,7 +4060,7 @@
     "THE THIRD CRITERION IS THE DURABLE FIX. Whatever the cause, an #[ignore]'d Tier-A gate that CI never runs will go stale again. Either wire it into scripts/local-gate.sh alongside the SNES suites added in W6-01b/W6-02b/W6-03b/W6-04a, or give CI a step that runs the ignored replays."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   }
  ]
