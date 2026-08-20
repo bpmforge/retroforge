@@ -4017,7 +4017,7 @@
     "Not SNES work, but it is in W7-01's acceptance and it is the last of the NES coverage target. rf-cart already reports UnsupportedMapper with the number and an optional name — extend the supported set there and in rf-nes together, or a cart will parse and then fail to run."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
