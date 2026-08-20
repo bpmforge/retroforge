@@ -3701,7 +3701,7 @@
     "expand W8 into tickets: rewind (SAVE_STATES.md \u00a74 + FRONTEND_UI.md \u00a75, FR-STATE-008), video recording (FR-FE-007), screenshot polish, gamepad UI navigation + accessibility pass (FRONTEND_UI.md \u00a74/\u00a76), SNES widescreen per-BG policies (bsnes-hd model), HUD separation (FR-ENH-007), profile-declared loading fast-forward (FR-ENH-008), smooth-camera experiments, room-stitching for top-down profiles (ROADMAP P8), frame-interpolation experiment (design first per TRACEABILITY G5), AI upscaling cache + replacement packs (FR-AI-001/002/003/004) incl. animation-set grouping + pack manifest format (ENHANCEMENT_RUNTIME.md \u00a76), HD-pack loader with Mesen-compatible tile identity + hires.txt import + pack builder record-while-playing (SCOPE asset-replacement row), translation/accessibility overlays"
    ],
    "points": 2,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E10-S1",
     "E10-S2",
