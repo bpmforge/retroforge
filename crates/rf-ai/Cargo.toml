@@ -6,5 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+# sha2: the (rom, asset, model, settings) cache key of FR-AI-002. Already
+# a workspace dependency in five crates and already in TECH_STACK.
+sha2 = "0.11"
+
 [lints]
 workspace = true
