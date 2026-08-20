@@ -62,15 +62,40 @@ The ROMs deliberately touch no PPU, APU, DMA or interrupts: a mapping test
 that needed a working PPU could not run until the PPU worked, which is
 backwards for the first SNES fixture in the project.
 
-## Known gap
+## Status: these now run
 
-**Nothing executes these yet.** `rf-snes` is a 15-line stub, so the result
-block is written by code no emulator here can run. Reading it is owed to
-**W6-02a** (the SNES bus) and is recorded on that ticket.
-`crates/rf-harness/tests/snes_mirror_map_fixtures.rs` asserts everything
-short of execution — deterministic build, valid cartridge structure, and
-that the pair differs only in the mapping — and says plainly that a
-structural test is not a substitute for running them.
+**Closed by W6-02a.** `rf-snes` has a bus, so both images boot on it and
+their result blocks are read and asserted by
+`crates/rf-snes/tests/mirror_map_fixtures.rs`: magic present, 4 checks
+run, 4 passed. The structural test in
+`crates/rf-harness/tests/snes_mirror_map_fixtures.rs` still stands and is
+still worth having — it catches build non-determinism and header damage,
+which executing the ROM does not.
+
+### And running them found a bug in check 1
+
+Worth recording, because it is the exact failure "assert it from inside
+the machine" exists to catch, and because it survived a structural test
+that looked thorough.
+
+The LoROM branch was written `lda $008000` / `cmp $808000`. `ca65` saw a
+bank of `$00` on the first operand, shortened it to a 2-byte **absolute**
+`ad 00 80`, and absolute addressing resolves through `DBR` — which this
+ROM sets to `$7E` for its result-block stores. So check 1 compared WRAM
+`$7E:8000` against ROM `$80:8000`. It could only ever fail, and had it
+"passed" it would have proved nothing about the alias it names.
+
+HiROM never showed the problem: its operands are banks `$40`/`$C0`, so
+`ca65` had no short form to pick and emitted long addressing for both.
+An asymmetry between the two images coming from the **assembler** rather
+than the mapping is precisely what "one source, two mappings" is meant to
+rule out.
+
+The fix is `f:` on both operands, forcing 24-bit addressing. If you add a
+check here that names a specific bank, write `f:` and mean it — and note
+that rebuilding changed only `lorom.sfc`; `hirom.sfc` rebuilt
+byte-identical to its existing pin, which is how the fix was confirmed to
+be LoROM-only.
 
 ## One thing that went wrong, worth not repeating
 

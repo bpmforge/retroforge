@@ -82,11 +82,26 @@ c0_store:
     ; $C0:8000. Same question -- "does the bus mirror the ROM into the
     ; low banks?" -- asked at the address each mapping actually uses.
 .ifdef HIROM
-    lda $408000
-    cmp $C08000
+    lda f:$408000
+    cmp f:$C08000
 .else
-    lda $008000
-    cmp $808000
+    ; `f:` is REQUIRED here, and its absence was a real bug (found by
+    ; W6-02a, the first ticket able to run this ROM). Without it ca65 sees
+    ; a bank of $00, shortens `lda $008000` to 2-byte ABSOLUTE `ad 00 80`,
+    ; and absolute addressing resolves through DBR -- which this ROM set
+    ; to $7E for its result-block stores. The check then read WRAM
+    ; $7E:8000 and compared it against ROM $80:8000, so it could only ever
+    ; fail, and when it "passed" it would have been proving nothing about
+    ; the alias it names.
+    ;
+    ; HiROM never showed this: its operands are banks $40/$C0, so ca65 had
+    ; no short form to choose and emitted long for both. An asymmetry
+    ; between the two images that comes from the ASSEMBLER rather than the
+    ; mapping is exactly the kind of thing "one source, two mappings" is
+    ; supposed to rule out, and it slipped through because nothing could
+    ; execute the pair yet.
+    lda f:$008000
+    cmp f:$808000
 .endif
     beq c1_pass
     lda #$00
