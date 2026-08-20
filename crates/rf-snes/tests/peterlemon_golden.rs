@@ -94,6 +94,15 @@ const GOLDENS: &[(&str, &str)] = &[
         "8x8BGMapTileFlip.sfc",
         "ed283c35beefa83f23520dc84e1da433514a609a0f6fce76e5b6ae7ad3c4c6d7",
     ),
+    // Mode 7 (W7-04), rendered at hardware density. HD-Mode-7 is an
+    // opt-in overlay and is deliberately NOT what this gates.
+    //
+    // Only RotZoom is pinned. Perspective and StarWars are in EXCLUDED
+    // below, with evidence — see there.
+    (
+        "RotZoom.sfc",
+        "ebd7f08c40f43c7377e905a581d31b40c6df1c2a837ba2e4ed60cd1a48f8408d",
+    ),
 ];
 
 /// Generous cap; the fade completes in well under this.
@@ -115,9 +124,26 @@ fn rom_dir() -> Option<std::path::PathBuf> {
 /// silently pin whatever the mode-0 fallback drew — a green test
 /// recording a wrong picture, which is the worst outcome a golden suite
 /// can produce.
+/// ROMs fetched but deliberately NOT pinned, with the reason for each.
+///
+/// **Excluded, not waived** — the same distinction the 65816 vector suite
+/// draws. A waiver says "this is broken and we accept it"; an exclusion
+/// says "pinning this would record a picture we know is not what the ROM
+/// means to draw". Both entries name the ticket that will remove them.
+const EXCLUDED: &[(&str, &str)] = &[
+    (
+        "Perspective.sfc",
+        "needs HDMA: it enables four channels ($420C reads $0F) to rewrite the mode-7 matrix          per scanline, which is the whole perspective effect. Without it the ROM renders a          coherent but FLAT rotated track — a half-right picture, and pinning it would freeze          the half. W7-07.",
+    ),
+    (
+        "StarWars.sfc",
+        "renders fully transparent for its first ~170 frames: screen-over is 'transparent          outside the playfield' ($211A bits 6-7 = 2), the matrix sits static at A=410 D=256          Y0=-90, NMI is disabled, and the CPU loops at $00:8269 throughout. Whatever advances          this demo is not yet implemented, so there is nothing correct to pin — a black frame          would hash perfectly consistently forever. Diagnose with W7-07.",
+    ),
+];
+
 fn assert_supported_mode(name: &str, mode: u8) {
     assert!(
-        mode <= 6,
+        mode <= 7,
         "{name} runs in BG mode {mode}, which W6-03a does not implement. \
          Pinning a golden for it would record the mode-0 fallback's garbage \
          as though it were correct. Implement the mode or drop the ROM."
@@ -204,6 +230,18 @@ fn peterlemon_bg_map_goldens_match() {
             ));
         }
     }
+    // Excluded ROMs are still RUN and reported — skipping them by name
+    // would let an exclusion outlive its reason silently.
+    for (name, why) in EXCLUDED {
+        let path = dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let (hash, mode) = render_and_hash(&path);
+        assert_supported_mode(name, mode);
+        eprintln!("  excluded {name}: mode {mode}, sha256 {hash}\n    {why}");
+    }
+
     assert!(
         failures.is_empty(),
         "golden frame mismatch:\n{}",

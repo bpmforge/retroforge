@@ -51,6 +51,10 @@ ROMS=(
   "PPU/BGMAP/8x8/8BPP/64x32/8x8BGMap8BPP64x32.sfc"
   "PPU/BGMAP/8x8/8BPP/64x64/8x8BGMap8BPP64x64.sfc"
   "PPU/BGMAP/8x8/8BPP/TileFlip/8x8BGMapTileFlip.sfc"
+  # Mode 7 (W7-04).
+  "PPU/Mode7/RotZoom/RotZoom.sfc"
+  "PPU/Mode7/Perspective/Perspective.sfc"
+  "PPU/Mode7/StarWars/StarWars.sfc"
 )
 
 mkdir -p "$DEST"

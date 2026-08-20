@@ -69,6 +69,9 @@ pub struct SnesBus {
     /// `$4016` strobe latch, and the serial shift position per port.
     manual_latch: bool,
     manual_shift: [u16; 2],
+    /// `$420C` HDMAEN. HDMA itself is W7-07; this records what a ROM
+    /// asked for so a mode-7 golden can say WHY it renders flat.
+    pub hdmaen: u8,
     /// `$420B` write that is pending execution.
     pending_dma: u8,
 }
@@ -97,6 +100,7 @@ impl SnesBus {
             joypads: Joypads::default(),
             manual_latch: false,
             manual_shift: [0; 2],
+            hdmaen: 0,
             pending_dma: 0,
         }
     }
@@ -123,6 +127,19 @@ impl SnesBus {
             0x2180 => self.wram[(self.wram_port.address as usize) % WRAM_LEN],
             0x4212 => self.timing.read_hvbjoy(),
             0x213E => self.ppu.read_stat77(),
+            // $2134-$2136 MPYL/MPYM/MPYH — the M7A x M7B product.
+            //
+            // Wiring these is not optional even for a ROM that never uses
+            // mode 7: it is the SNES's general-purpose signed multiplier,
+            // and PeterLemon's RotZoom computes its rotation matrix with
+            // it. Leaving them unmapped returned open bus — which is the
+            // last value driven, i.e. $21 from the register address
+            // itself — so every matrix element came out as $2121 and the
+            // playfield rendered as diagonal stripes.
+            0x2134..=0x2136 => {
+                let p = self.ppu.mode7.product();
+                ((p >> (8 * (offset - 0x2134))) & 0xFF) as u8
+            }
             // Safe to peek: reading a port has no side effect, and peek
             // must never trigger the catch-up that `read` does.
             0x2140..=0x2143 => self.apu.cpu_read_port(usize::from(offset - 0x2140)),
@@ -216,6 +233,7 @@ impl SnesBus {
             0x4209 => self.irq.vtime = (self.irq.vtime & 0x100) | u16::from(value),
             0x420A => self.irq.vtime = (self.irq.vtime & 0x0FF) | (u16::from(value & 1) << 8),
             0x420B => self.pending_dma = value,
+            0x420C => self.hdmaen = value,
             0x420D => self.fast_rom = value & 1 != 0,
             0x4016 => {
                 // Strobe: while high, the shift registers reload.

@@ -41,6 +41,7 @@
 //! superseded line about NES sprites did. See the W6-03a close note.
 
 pub mod bg;
+pub mod mode7;
 pub mod obj;
 
 use rf_core_api::{OverlayPixel, PixelLayer, PpuPixel};
@@ -114,6 +115,9 @@ pub struct Ppu {
     pub forced_blank: bool,
     pub brightness: u8,
 
+    /// Mode 7 register state (ticket W7-04).
+    pub mode7: mode7::Mode7,
+
     /// `$2130` CGWSEL bit 0 — direct colour mode.
     ///
     /// In the 8bpp modes (3, 4 and 7) this makes a pixel's value a BGR333
@@ -160,6 +164,7 @@ impl Ppu {
             oam_priority_rotation: false,
             forced_blank: true,
             brightness: 0,
+            mode7: mode7::Mode7::default(),
             direct_color: false,
             range_over: false,
             time_over: false,
@@ -217,6 +222,7 @@ impl Ppu {
                 self.cgram_latch = None;
             }
             0x2122 => self.write_cgram(value),
+            0x211A..=0x2120 => self.mode7.write_register(offset, value),
             0x2130 => self.direct_color = value & 0x01 != 0,
             0x212C => {
                 for (i, bg) in self.bgs.iter_mut().enumerate() {
@@ -342,12 +348,40 @@ impl Ppu {
         }
 
         let bg_pixels = bg::render_backgrounds(self, y);
+        // Mode 7 replaces BG1 entirely: its "tilemap" is an affine
+        // transform, so it is rendered by its own module and injected as
+        // BG1's contribution rather than fetched through the tile path.
+        //
+        // Density 1 — hardware. Law 6: Accuracy Mode is the reference and
+        // HD-Mode-7 is an opt-in overlay, so nothing on this path can
+        // reach for a higher density.
+        let mode7_line = (self.bg_mode == 7).then(|| mode7::render_scanline(self, y, 1));
         let objs = obj::render_objects(self, y);
         self.range_over |= objs.range_over;
         self.time_over |= objs.time_over;
 
         for x in 0..WIDTH {
-            if let Some(p) = self.compose(x, &bg_pixels, &objs) {
+            if let Some(line) = &mode7_line {
+                if let Some(index) = line[x] {
+                    pixels[x] = PpuPixel {
+                        palette_index: index,
+                        layer: PixelLayer::Background(0),
+                        sprite_id: None,
+                        priority: 0,
+                        dropped_by_limit: false,
+                    };
+                }
+                // Sprites still compose over mode 7.
+                if let Some((index, id)) = objs.pixels[x] {
+                    pixels[x] = PpuPixel {
+                        palette_index: index,
+                        layer: PixelLayer::Sprite,
+                        sprite_id: Some(id),
+                        priority: objs.priority[x],
+                        dropped_by_limit: false,
+                    };
+                }
+            } else if let Some(p) = self.compose(x, &bg_pixels, &objs) {
                 pixels[x] = p;
             }
             if let Some(dropped) = objs.dropped[x] {

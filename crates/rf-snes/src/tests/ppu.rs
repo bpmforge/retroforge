@@ -557,3 +557,176 @@ fn cgwsel_bit_zero_selects_direct_colour() {
     p.write_register(0x2130, 0x00);
     assert!(!p.direct_color);
 }
+
+// ---------------------------------------------------------------------
+// Mode 7 (ticket W7-04)
+// ---------------------------------------------------------------------
+
+use crate::ppu::mode7;
+
+/// A mode-7 PPU with an identity matrix and a recognisable playfield.
+///
+/// Mode 7 stores its tilemap in the EVEN bytes of VRAM and its character
+/// data in the ODD bytes of the same words — interleaved, not two
+/// separate regions.
+fn ppu_mode7() -> Ppu {
+    let mut p = Ppu::new();
+    p.forced_blank = false;
+    p.bg_mode = 7;
+    p.bgs[0].enabled = true;
+    // Identity: A = D = 1.0 in 8.8, B = C = 0.
+    p.mode7.a = 0x0100;
+    p.mode7.d = 0x0100;
+    // Tile 1 everywhere in the tilemap (even bytes).
+    for i in 0..(128 * 128) {
+        p.vram[i * 2] = 1;
+    }
+    // Character 1: every pixel colour 7 (odd bytes, 64 bytes per tile).
+    for i in 0..64 {
+        p.vram[(64 + i) * 2 + 1] = 7;
+    }
+    p
+}
+
+#[test]
+fn mode_7_renders_its_playfield_through_the_matrix() {
+    let mut p = ppu_mode7();
+    let line = p.render_scanline(0);
+    assert_eq!(line.pixels[0].palette_index, 7);
+    assert_eq!(line.pixels[0].layer, PixelLayer::Background(0));
+}
+
+/// The matrix registers are signed 8.8 and share ONE write-twice latch
+/// with the centre registers.
+#[test]
+fn the_mode_7_registers_are_8_8_fixed_point_through_a_shared_latch() {
+    let mut p = Ppu::new();
+    p.write_register(0x211B, 0x00);
+    p.write_register(0x211B, 0x01);
+    assert_eq!(p.mode7.a, 0x0100, "$0100 is 1.0");
+    // Negative values are genuinely signed.
+    p.write_register(0x211C, 0x00);
+    p.write_register(0x211C, 0xFF);
+    assert_eq!(p.mode7.b, -256);
+}
+
+/// `HOFS`, `VOFS`, `X0` and `Y0` are **13-bit** signed, not 16-bit.
+///
+/// Sign-extending them wrongly gives a picture that is recognisable but
+/// swims away from the centre it should pivot around.
+#[test]
+fn the_centre_registers_are_thirteen_bit_signed() {
+    assert_eq!(mode7::sign_extend_13(0x0000), 0);
+    assert_eq!(mode7::sign_extend_13(0x0FFF), 4095, "largest positive");
+    assert_eq!(mode7::sign_extend_13(0x1000), -4096, "bit 12 is the sign");
+    assert_eq!(mode7::sign_extend_13(0x1FFF), -1);
+    // Bits 13-15 are not part of the number at all.
+    assert_eq!(mode7::sign_extend_13(0xF000), -4096);
+}
+
+/// `$2134`-`$2136` is the signed product of M7A and M7B's high byte.
+///
+/// It is a general-purpose multiplier games use for arithmetic unrelated
+/// to mode 7 — PeterLemon's RotZoom computes its rotation matrix with it,
+/// and leaving it unmapped made every matrix element read back as the
+/// open-bus byte `$21`, rendering the playfield as diagonal stripes.
+#[test]
+fn the_multiplier_result_is_readable() {
+    use crate::cpu::CpuBus;
+    let mut b = crate::bus::SnesBus::new(vec![0; 32 * 1024], 0, rf_cart::SnesMapMode::LoRom);
+    b.ppu.mode7.a = 1000;
+    b.ppu.mode7.b = 0x0300; // high byte 3
+    assert_eq!(b.ppu.mode7.product(), 3000);
+    assert_eq!(b.read(0x00_2134), (3000u32 & 0xFF) as u8);
+    assert_eq!(b.read(0x00_2135), ((3000u32 >> 8) & 0xFF) as u8);
+    assert_eq!(b.read(0x00_2136), 0);
+
+    // Signed: a negative high byte gives a negative product.
+    b.ppu.mode7.b = 0xFF00u16 as i16; // high byte -1
+    assert_eq!(b.ppu.mode7.product(), -1000);
+}
+
+/// Screen-over: what happens OUTSIDE the 1024x1024 playfield, which is
+/// exactly where most test content never looks.
+#[test]
+fn screen_over_modes_differ_only_outside_the_playfield() {
+    let mut p = ppu_mode7();
+    // Push the sampling far outside the playfield.
+    p.mode7.x0 = 4000;
+    p.mode7.hofs = 4000;
+
+    p.mode7.screen_over = 0; // wrap
+    let wrapped = p.render_scanline(0).pixels[0].layer;
+    p.mode7.screen_over = 2; // transparent
+    let transparent = p.render_scanline(0).pixels[0].layer;
+
+    assert_eq!(wrapped, PixelLayer::Background(0), "wrap keeps drawing");
+    assert_eq!(
+        transparent,
+        PixelLayer::Backdrop,
+        "screen-over 2 draws nothing outside the playfield"
+    );
+}
+
+/// **HD-Mode-7 samples the SAME matrix more densely.** It does not
+/// interpolate, smooth, or invent detail — every extra sample is a real
+/// evaluation of the transform.
+#[test]
+fn hd_mode7_evaluates_the_same_transform_at_higher_density() {
+    let p = ppu_mode7();
+    let base = mode7::render_scanline(&p, 0, 1);
+    let hd = mode7::render_scanline(&p, 0, 4);
+
+    assert_eq!(base.len(), 256);
+    assert_eq!(hd.len(), 1024, "four samples per hardware pixel");
+
+    // Every hardware sample must still appear, at the same place, in the
+    // denser run — the HD image contains the 1x image rather than
+    // replacing it with something reinterpolated.
+    for (x, expected) in base.iter().enumerate() {
+        assert_eq!(
+            &hd[x * 4],
+            expected,
+            "HD sample {} must equal hardware pixel {x}",
+            x * 4
+        );
+    }
+}
+
+/// **Law 6.** Accuracy Mode is the reference, so the ordinary render path
+/// is always hardware density — a caller must opt in to anything else.
+#[test]
+fn the_accuracy_path_renders_mode_7_at_hardware_density() {
+    let mut p = ppu_mode7();
+    let line = p.render_scanline(0);
+    assert_eq!(
+        line.pixels.len(),
+        crate::ppu::WIDTH,
+        "render_scanline must never widen itself; HD-Mode-7 is opt-in"
+    );
+    // And it is bit-identical to an explicit density of 1.
+    let explicit = mode7::render_scanline(&p, 0, 1);
+    for (x, sample) in explicit.iter().enumerate().take(crate::ppu::WIDTH) {
+        assert_eq!(line.pixels[x].palette_index, sample.unwrap_or(0));
+    }
+}
+
+/// Sprites still compose over mode 7 — it replaces BG1, not the whole
+/// screen.
+#[test]
+fn sprites_draw_over_the_mode_7_playfield() {
+    let mut p = ppu_mode7();
+    p.obj_enabled = true;
+    p.obj_size = 0;
+    for row in 0..8 {
+        p.vram[(16 + row) * 2] = 0xFF; // OBJ character 1, 4bpp
+    }
+    for i in 0..128usize {
+        p.oam[i * 4 + 1] = 100; // park them
+    }
+    p.oam[0] = 0; // sprite 0 at x=0, y=0
+    p.oam[1] = 0;
+    p.oam[2] = 1;
+    let line = p.render_scanline(0);
+    assert_eq!(line.pixels[0].layer, PixelLayer::Sprite);
+}
