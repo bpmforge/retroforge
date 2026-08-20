@@ -3725,7 +3725,7 @@
     "expand W9 into tickets: full profile editor GUI (FRONTEND_UI.md \u00a73.5), plugin manager polish + WASM (wasmtime) sandbox tier (PLUGINS.md \u00a71, FR-PLUG-006), plugin SDK docs + examples, map/sprite-sheet/tilemap export tools, community mod format + versioning (FR-ENH-009, FR-PROF-005/006/007 intake CI), documentation site (ROADMAP P9), second + third game profiles"
    ],
    "points": 2,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E12-S1",
     "E12-S2",
