@@ -4248,7 +4248,7 @@
     "W4-09's finding is a prerequisite, not a detail: at the harness's default window size every panel rendered ZERO accessible nodes, so the assertions would have been vacuous — it needs 1600x1000. And neither a bare ui.label NOR a hover-sensed egui::Label contributes a node; selectable_label does."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
