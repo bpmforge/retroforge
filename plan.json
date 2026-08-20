@@ -3614,7 +3614,7 @@
     "a scripted 5-minute input log runs without faults and is gated as a .rfreplay (FR-CORE-037)"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E1-S1"
    ],
