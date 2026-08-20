@@ -3570,8 +3570,8 @@
    "phase": 6,
    "crate": "rf-snes",
    "write_scope": [
-    "crates/rf-snes/src/apu/**"
-   ],
+      "crates/rf-snes/**"
+    ],
    "depends_on": [
     "W6-04a"
    ],
@@ -3581,7 +3581,7 @@
     "S-DSP skeleton: BRR decode + basic voice mixing, clean audio (sample-exactness deferred to W7 per EMULATION_CORES.md section 3.4)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E8-S1"
    ]
