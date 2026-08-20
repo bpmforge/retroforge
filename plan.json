@@ -3934,10 +3934,17 @@
     "audio RMS comparison against a reference for a designated SPC set"
    ],
    "notes": [
-    "W6-04b delivered a SKELETON on purpose — BRR decode plus eight-voice mixing — with sample-exactness deferred here. What it did NOT implement is named in its close note and in the dsp module doc, so this ticket's scope is already written down rather than needing rediscovery."
-   ],
+    "W6-04b delivered a SKELETON on purpose — BRR decode plus eight-voice mixing — with sample-exactness deferred here. What it did NOT implement is named in its close note and in the dsp module doc, so this ticket's scope is already written down rather than needing rediscovery.",
+   "HANDOFF 2026-08-20: criterion 1 COMPLETE; criteria 2 and 3 are blocked, one on a real deadlock and one on material that does not exist. DELIVERED: Gaussian interpolation, ADSR and GAIN envelopes, echo with its ARAM ring buffer and 8-tap FIR, pitch modulation, and the noise LFSR — all wired into the mixer, not merely defined.",
+   "THE UNITY-GAIN TEST EARNED ITS KEEP IMMEDIATELY. A resampling kernel whose four taps do not sum to a constant changes VOLUME WITH PITCH, so a sustained note swells or fades as it bends — the subtlest possible audio bug. The first table used a triangular-squared window and summed to 4080; the test caught it on the first run. The kernel is now built from the CUBIC B-SPLINE basis, which is a partition of unity by construction, plus an exact integer correction: fractions f and 255-f read the SAME four indices, so there are 128 independent sums and index f belongs to only one pair — which is why the correction loop runs to 128 and not 256 (running it to 256 double-corrects every pair and leaves the table worse than it started). Every fraction now sums to exactly 2048.",
+   "NAMED HONESTLY: this is a bell-shaped, low-pass kernel of the same family as the hardware's, NOT the S-DSP's exact 512-entry ROM table. Reproducing that byte-for-byte belongs with the sample-exactness work (FR-CORE-036), and the module doc says so rather than letting the constant's name imply more than it delivers.",
+   "THE ECHO BUFFER IS ARAM, and the model expresses that rather than hiding it in a private buffer — a game that miscomputes ESA/EDL really can have its echo overwrite its own samples, and a test asserts the ring buffer starts at ESA*256 and does not touch memory below it. $6C bit 5 disables WRITES while still reading, which is how games freeze an echo tail without clearing it; tested in both directions.",
+   "PMON BIT 0 DOES NOTHING, because voice 0 has no predecessor to be modulated by. A model that wrapped to voice 7 would sound plausible and be wrong, so there is a test that runs an identical voice with and without PMON bit 0 and requires bit-identical output.",
+   "CRITERION 2 IS BLOCKED ON A REAL DEADLOCK, and the diagnosis carries good news with it. gilyon's spctest.sfc was run: the HLE BOOT HANDSHAKE COMPLETES WITH A REAL COMMERCIAL-STYLE ROM (boot state reaches Running and the APU executes uploaded code at $0306-$0309), which is the first end-to-end validation of W6-04b's HLE. But the two processors then deadlock — the 65816 spins at $00:818E and the SPC700 loops between $0306 and $0309, each waiting on a port value the other never writes — so test_num never leaves 0 across 40,000,000 instructions. That is a post-boot port-protocol bug, not a DSP one, and it belongs to the CPU<->APU ports rather than to this ticket. RECOMMEND filing it against W6-04b's area.",
+   "CRITERION 3 HAS NO MATERIAL. It asks for 'audio RMS comparison against a reference for a designated SPC set'. No SPC set is designated anywhere in the board, tests/rom-manifest.toml or docs/TESTING.md, and no reference audio exists to compare against. RECOMMEND: designate the set and its reference, or amend the criterion — as written it cannot be satisfied by any amount of implementation work."
+  ],
    "points": 8,
-   "status": "in_progress",
+   "status": "blocked",
    "stories": []
   },
   {

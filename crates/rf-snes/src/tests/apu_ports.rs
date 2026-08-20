@@ -253,9 +253,9 @@ fn brr_header_flags_are_decoded() {
 #[test]
 fn a_dsp_with_no_voices_keyed_on_is_silent() {
     let mut dsp = Dsp::new();
-    let aram = vec![0u8; 1024];
+    let mut aram = vec![0u8; 1024];
     for _ in 0..64 {
-        assert_eq!(dsp.mix(&aram), (0, 0));
+        assert_eq!(dsp.mix(&mut aram), (0, 0));
     }
 }
 
@@ -273,14 +273,19 @@ fn a_keyed_voice_produces_output_scaled_by_its_volume() {
     dsp.voices[0].loop_addr = 0;
     dsp.voices[0].vol_left = 0x7F;
     dsp.voices[0].vol_right = 0x7F;
+    // W7-08 added envelopes: a voice with no envelope configured stays
+    // silent, which is correct. GAIN mode at full is the simplest way to
+    // hold it open for a mixing test.
+    dsp.voices[0].envelope.gain = 0x7F;
+    dsp.voices[0].pitch = 0x1000;
     dsp.key_on(0x01);
 
-    let loud: i32 = (0..16).map(|_| i32::from(dsp.mix(&aram).0.abs())).sum();
+    let loud: i32 = (0..16).map(|_| i32::from(dsp.mix(&mut aram).0.abs())).sum();
     assert!(loud > 0, "a keyed voice must be audible");
 
     dsp.voices[0].vol_left = 0;
     dsp.key_on(0x01);
-    let quiet: i32 = (0..16).map(|_| i32::from(dsp.mix(&aram).0.abs())).sum();
+    let quiet: i32 = (0..16).map(|_| i32::from(dsp.mix(&mut aram).0.abs())).sum();
     assert_eq!(quiet, 0, "zero volume must be silent");
 }
 
@@ -297,14 +302,16 @@ fn key_on_resets_the_filter_history() {
     }
     let mut dsp = Dsp::new();
     dsp.voices[0].vol_left = 0x7F;
+    dsp.voices[0].envelope.gain = 0x7F;
+    dsp.voices[0].pitch = 0x1000;
     dsp.key_on(0x01);
-    let first = dsp.mix(&aram).0;
+    let first = dsp.mix(&mut aram).0;
     for _ in 0..40 {
-        dsp.mix(&aram);
+        dsp.mix(&mut aram);
     }
     dsp.key_on(0x01);
     assert_eq!(
-        dsp.mix(&aram).0,
+        dsp.mix(&mut aram).0,
         first,
         "re-keying must reproduce the sample's opening exactly"
     );
@@ -321,12 +328,14 @@ fn a_non_looping_sample_stops_at_its_end() {
     }
     let mut dsp = Dsp::new();
     dsp.voices[0].vol_left = 0x7F;
+    dsp.voices[0].envelope.gain = 0x7F;
+    dsp.voices[0].pitch = 0x1000;
     dsp.key_on(0x01);
     for _ in 0..16 {
-        dsp.mix(&aram);
+        dsp.mix(&mut aram);
     }
     // The 17th sample needs the next block, which is the end.
-    dsp.mix(&aram);
+    dsp.mix(&mut aram);
     assert!(!dsp.voices[0].keyed_on, "the voice keyed itself off");
-    assert_eq!(dsp.mix(&aram), (0, 0));
+    assert_eq!(dsp.mix(&mut aram), (0, 0));
 }
