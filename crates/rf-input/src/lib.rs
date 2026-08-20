@@ -24,9 +24,10 @@ mod keymap;
 mod latch;
 pub mod pad;
 pub mod replay;
+mod snes_button;
 
 pub use bindings::{BindingError, BindingWarning, Bindings};
-pub use button::NesButton;
+pub use button::{Button, NesButton};
 #[cfg(feature = "gilrs")]
 pub use gilrs_backend::GilrsBackend;
 pub use key::Key;
@@ -36,6 +37,7 @@ pub use pad::{PadBackend, PadButton, PadEvent, PadId, PadMap, PadRouter};
 pub use replay::{
     PortLogKey, ReplayError, ReplayHeader, ReplayLog, ReplayPlayer, ReplayRecorder, StartType,
 };
+pub use snes_button::SnesButton;
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-input";

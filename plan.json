@@ -3614,7 +3614,7 @@
     "a scripted 5-minute input log runs without faults and is gated as a .rfreplay (FR-CORE-037)"
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E1-S1"
    ],
@@ -3627,8 +3627,9 @@
       "THE BLOCKER, with evidence: .rfreplay CANNOT REPRESENT SNES INPUT. rf-input's PortLogKey::buttons is a Vec<NesButton>, canonical_log_key() always writes the $4016 read order, and the crate has NO SnesButton type at all. A SNES button outside the NES 8-bit set — Right is bit 8 — has no log-key entry and is SILENTLY DROPPED on serialisation. Found the hard way: recording this fixture's 'hold Right' log and replaying it diverged at the very first checkpoint (frame 600) because run 2 received buttons == 0. THE EMULATOR WAS DETERMINISTIC THROUGHOUT — the log was lossy, which is why the delivered test compares two independent machines directly instead. WHAT IS OWED: a SnesButton set and a generalised PortLogKey in crates/rf-input/**, which is outside this ticket's write_scope and is a change to a documented wire format with its own tests, so it is a ticket rather than an amendment. the_replay_format_still_cannot_represent_snes_buttons pins the gap and FAILS WITH INSTRUCTIONS the moment someone adds SNES support.",
       "DEVIATION FROM THE TICKET TITLE AND D-001, FLAGGED NOT BURIED: built with cc65, not libSFX. W6-06 established by checking that ca65 already assembles 65816 and that cc65 is already in CI; its FORMAT.md predicted libSFX would still be right HERE, on the grounds a scroller wants a framework's init code, macros and asset pipeline. In the event it wants none of them — the init is ~40 lines of register writes and the 'assets' are four solid-colour characters generated in-source, deliberately, because a fixture whose graphics live in a binary blob is not reproducible from text. libSFX would have meant a new dependency, a TECH_STACK row, a licence review and a CI install step for nothing this fixture uses. Recorded in FORMAT.md too; if a later SNES fixture genuinely needs a framework, nothing here argues against it.",
       "A BUG WORTH NOT REPEATING, in FORMAT.md as well: stream_one_column originally saved only the FLAGS (PHP/PLP) and then used X as its row counter — but preload_columns uses X as its loop counter. The first build streamed 30,103 columns and never left forced blank: black screen, frame counter stuck at zero, no error anywhere. PHP saves the processor status, not the registers. The fix is PHX/PHY, two instructions, and the symptom looks nothing like the cause.",
-      "ANTI-VACUITY IS columns_streamed, and it has a counter-test. The tilemap is 32 columns wide, so columns_streamed == 33 means the preload plus the first frame and NOTHING HAS SCROLLED; above 33 is only reachable once a physical column has been overwritten with new content. One test asserts it exceeds 33 under the scripted input; another asserts it stays at exactly 33 with no input, so the first cannot be satisfied by a fixture that scrolls regardless of the pad."
-    ]
+      "ANTI-VACUITY IS columns_streamed, and it has a counter-test. The tilemap is 32 columns wide, so columns_streamed == 33 means the preload plus the first frame and NOTHING HAS SCROLLED; above 33 is only reachable once a physical column has been overwritten with new content. One test asserts it exceeds 33 under the scripted input; another asserts it stays at exactly 33 with no input, so the first cannot be satisfied by a fixture that scrolls regardless of the pad.",
+    "CLOSED 2026-08-20, after W7-02 removed the blocker. Criterion 3 is now fully met: the scripted 5-minute input log runs without faults AND is gated as a real .rfreplay — recorded, serialised, parsed, and replayed on a fresh machine that run 1 never touched, with bit-identical reachable state at all 30 ten-second checkpoints. The replay test additionally asserts the log carries the SNES button table rather than the NES one, and that each replayed frame's buttons equal what was recorded — so a future format regression fails here loudly instead of looking like an emulator divergence, which is exactly how this one first presented."
+   ]
   },
   {
    "id": "W6-06",
@@ -3757,10 +3758,14 @@
     "BACKWARD COMPATIBILITY IS THE RISK. .rfreplay is a documented wire format with existing NES logs and round-trip tests; widening PortLogKey must not change what an NES log serialises to. Prove it, do not assume it.",
     "CLOSED 2026-08-20: phase 7 expanded into W7-02..W7-13, with acceptance drawn from docs/design/EMULATION_CORES.md sections 3.2/3.3/3.4 and docs/TESTING.md's gate rows. Every area this ticket's own acceptance names is covered: DMA/HDMA (W7-07), modes 2-6 (W7-03), Mode 7 plus HD-Mode-7-class internal resolution (W7-04), colour math/windows/mosaic (W7-05), interlace/overscan/hires (W7-06), SNES save states (W7-09), BRR echo/gaussian (W7-08), the [mods] patch engine (W7-12), PAL timing (W7-10), AxROM + Action 53 (W7-11), and the PeterLemon/undisbeliever golden breadth (W7-13). No ticket exceeds 8 points.",
     "ONE TICKET FILED THAT THIS ACCEPTANCE DID NOT ANTICIPATE: W7-02, SNES support in rf-input's .rfreplay format. It was found during W6-05, which cannot finish its replay-gate criterion without it — PortLogKey::buttons is a Vec<NesButton>, there is no SnesButton type, and SNES buttons above bit 7 are silently dropped on serialisation. Filed as a ticket rather than left in a handoff note because it BLOCKS AN ALREADY-OPEN TICKET, and because 'the replay format is NES-only' is exactly the kind of fact that stays invisible until someone tries to use it.",
-    "A NOTE ON EDITING THIS FILE, since this ticket added twelve entries at once: plan.json's unicode escaping is MIXED — some strings carry literal em-dashes, others carry \\u2014 — so no json.load/json.dumps round trip reproduces it, at ANY ensure_ascii setting. A round trip here churned 4027 lines before it was reverted; the same twelve tickets inserted by targeted text surgery are 296 insertions and zero deletions. Append by text, never by re-serialising the whole board."
+    "A NOTE ON EDITING THIS FILE, since this ticket added twelve entries at once: plan.json's unicode escaping is MIXED — some strings carry literal em-dashes, others carry \\u2014 — so no json.load/json.dumps round trip reproduces it, at ANY ensure_ascii setting. A round trip here churned 4027 lines before it was reverted; the same twelve tickets inserted by targeted text surgery are 296 insertions and zero deletions. Append by text, never by re-serialising the whole board.",
+    "CLOSED 2026-08-20: all four criteria. SnesButton exists with the $4218/$4219 layout the core already uses (A is bit 7, Right is bit 8 — the same bits RF-Scroller-S and the gilyon harness drive); PortLogKey::buttons is now Vec<Button>, an enum over both consoles; every SNES button survives a record -> serialize -> parse -> replay round trip; and RF-Scroller-S's 5-minute log is gated as a REAL .rfreplay, completing W6-05 criterion 3.",
+    "PARSING IS CONSOLE-DIRECTED, AND THAT IS THE LOAD-BEARING DESIGN DECISION. 'A', 'B', 'Select', 'Start' and the four directions exist on BOTH consoles at DIFFERENT bits — Right is bit 7 on NES and bit 8 on SNES. So there is deliberately no Button::from_name: the [Header]'s console field decides which table a name is looked up in, and an unrecognised console falls back to NES because that is what every existing file already decodes as. A name-only lookup across both tables would have silently mis-decoded every NES log ever recorded.",
+    "BACKWARD COMPATIBILITY IS PINNED LITERALLY, not merely round-tripped. A round trip would pass even if both sides changed together, so the test asserts the exact bytes an NES recorder emits: 'P1:A,B,Select,Start,Up,Down,Left,Right' and '|A......R|........|'. The shoulder buttons take lowercase l/r mnemonics because L and R are already Left and Right — a collision that would make an input line ambiguous, asserted distinct in SnesButton's own tests.",
+    "FOUND EN ROUTE, FILED AS W7-14, AND NOT MINE: rf_scroller_replay's five-minute NES test is RED and has been since W5-02c. rom.sha256 last changed in 226b137 (W5-02c); the GOLDEN_HASHES gating it last changed in 3d9607e (W2-21), which is earlier — so that ticket changed the fixture ROM without regenerating its goldens. Verified not to be W7-02's doing by stashing this change (still red) and by running the test in a worktree at the pre-session commit. It hid because the test is #[ignore]'d and CI runs plain `cargo test --workspace`. W7-14 says DIAGNOSE BEFORE RE-PINNING: frames 1200 through 15000 all hash identically today, which is a static screen rather than a scroller."
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
@@ -4025,6 +4030,34 @@
    "notes": [
     "W6-03b fetches per-file from the pinned commit rather than the 240 MB archive (scripts/fetch-peterlemon-ppu.sh); extend that list rather than reinstating the archive.",
     "ITS GUARD IS THE POINT: the runner refuses to hash a frame whose BG mode the PPU does not implement, because a golden pinned on the mode-0 fallback's garbage would go green forever while recording a wrong picture. Every ROM added here must keep that property."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-14",
+   "title": "RF-Scroller (NES) goldens are stale since W5-02c — diagnose before re-pinning",
+   "phase": 7,
+   "crate": "rf-harness",
+   "write_scope": [
+    "crates/rf-harness/**",
+    "fixtures/nes/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "the cause of the frozen frames is DIAGNOSED and written down before any hash is re-pinned — frames 1200, 2400, 5000, 10000 and 15000 currently all hash identically, which is a static screen, not a scroller",
+    "the regenerated golden frames are LOOKED AT as images and confirmed to show a scrolling playfield, not merely re-pinned because they differ",
+    "rf_scroller_replay's five-minute test passes",
+    "an ignored-test gate exists so this class of failure cannot hide behind a green `cargo test --workspace` again"
+   ],
+   "notes": [
+    "FILED 2026-08-20 DURING W7-02, which found it by accident while proving .rfreplay backward compatibility. NOT caused by W7-02: verified by stashing the change (still fails) and by running the test in a worktree at the pre-session commit.",
+    "DIAGNOSIS: fixtures/nes/rf-scroller/rom.sha256 last changed in 226b137 (W5-02c, 'stream before thinking — the fixture was overrunning vblank'). The GOLDEN_HASHES in crates/rf-harness/tests/rf_scroller_replay.rs last changed in 3d9607e (W2-21), which is EARLIER. So W5-02c changed the fixture ROM and never regenerated the goldens that gate it.",
+    "WHY NOBODY NOTICED: the five-minute test is #[ignore]'d and CI runs plain `cargo test --workspace`, which skips ignored tests. The suite has been red locally and green in CI since W5-02c. This is the exact failure class docs/TESTING.md and the project's own notes call out — an ignored replay golden that a green workspace run does not cover.",
+    "DO NOT JUST RE-PIN. Frames 1200, 2400, 5000, 10000 and 15000 all hash to the same value today, which means the screen stops changing after ~frame 1200. That is either a real freeze introduced by W5-02c's streaming fix or a capture straddle, and re-pinning would enshrine whichever it is. W6-03b's lesson applies directly: a self-generated golden proves only that behaviour stopped changing, so LOOK AT THE FRAMES before pinning them.",
+    "THE THIRD CRITERION IS THE DURABLE FIX. Whatever the cause, an #[ignore]'d Tier-A gate that CI never runs will go stale again. Either wire it into scripts/local-gate.sh alongside the SNES suites added in W6-01b/W6-02b/W6-03b/W6-04a, or give CI a step that runs the ignored replays."
    ],
    "points": 5,
    "status": "todo",

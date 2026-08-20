@@ -96,25 +96,25 @@ hash forever while proving nothing. The harness therefore asserts a
 `columns_streamed` above 33, and has a counter-test asserting that with
 no input it stays at exactly 33.
 
-## Known gap: the replay gate is half-delivered
+## The replay gate
 
-**The scripted five-minute run is delivered and green** — it runs without
-faults, and two independent machines fed the same input reach
-bit-identical reachable state at all 30 ten-second checkpoints.
+**Delivered.** The scripted five-minute log runs without faults and is
+gated as a real `.rfreplay`: recorded, serialised, parsed, and replayed on
+a fresh machine that the recording run never touched, with bit-identical
+reachable state at all 30 ten-second checkpoints.
 
-**It is not gated as a `.rfreplay`, because the format cannot represent
-SNES input yet.** `rf-input`'s `PortLogKey::buttons` is a
-`Vec<NesButton>`, `canonical_log_key()` writes the `$4016` read order, and
-the crate has no `SnesButton` type at all. A SNES button outside the NES
-8-bit set — Right is bit 8 — has no log-key entry and is **silently
-dropped** on serialisation.
+It did not work the first time, and the reason is worth keeping. `.rfreplay`
+was **NES-only**: `PortLogKey::buttons` was a `Vec<NesButton>`, so a SNES
+button outside the NES 8-bit set — Right is bit 8 — had no log-key entry
+and was *silently dropped* on serialisation. The recorded "hold Right" log
+played back as an idle pad, and the run diverged at the very first
+checkpoint. The emulator was deterministic throughout; the log was lossy.
 
-That was found the hard way: recording this fixture's "hold Right" log and
-replaying it diverged at the very first checkpoint, because run 2 received
-`buttons == 0`. The emulator was deterministic throughout; the log was
-lossy. `the_replay_format_still_cannot_represent_snes_buttons` pins the
-gap, and starts failing — with instructions — the moment someone adds
-SNES support.
+W7-02 added `SnesButton` and made the log key console-directed. The replay
+test now also asserts the log carries the SNES button table and that each
+replayed frame's buttons equal what was recorded — so a future format
+regression fails as a format error rather than masquerading as an
+emulator divergence, which is how this one first presented.
 
 ## One thing that went wrong, worth not repeating
 

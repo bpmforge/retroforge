@@ -70,7 +70,7 @@ use std::fmt;
 
 use rf_core_api::InputFrame;
 
-use crate::NesButton;
+use crate::{Button, NesButton, SnesButton};
 
 /// `.rfreplay`'s only supported `start_type` value in this ticket.
 /// Savestate-anchored replay start is ticket W2-04's job.
@@ -108,24 +108,56 @@ pub struct ReplayHeader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortLogKey {
     pub label: String,
-    pub buttons: Vec<NesButton>,
+    pub buttons: Vec<Button>,
 }
 
 impl PortLogKey {
-    /// The canonical single-port entry this crate always writes: the full
-    /// `$4016` read order ([`NesButton::ALL`]).
-    fn canonical(label: &str) -> Self {
+    /// The canonical single-port entry for a console.
+    ///
+    /// NES is the full `$4016` read order ([`NesButton::ALL`]); SNES is
+    /// the `$4218`/`$4219` order ([`SnesButton::ALL`]).
+    fn canonical(label: &str, console: Console) -> Self {
+        let buttons = match console {
+            Console::Nes => NesButton::ALL.iter().copied().map(Button::Nes).collect(),
+            Console::Snes => SnesButton::ALL.iter().copied().map(Button::Snes).collect(),
+        };
         PortLogKey {
             label: label.to_string(),
-            buttons: NesButton::ALL.to_vec(),
+            buttons,
+        }
+    }
+}
+
+/// Which console's button table a log key uses.
+///
+/// Chosen from the `[Header]`'s `console` field. **Anything unrecognised
+/// is treated as NES**, deliberately: that is what every existing
+/// `.rfreplay` in the world decodes as today, and a format change must
+/// not reinterpret files it did not write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Console {
+    Nes,
+    Snes,
+}
+
+impl Console {
+    #[must_use]
+    pub fn from_header(console: &str) -> Self {
+        if console.eq_ignore_ascii_case("snes") {
+            Console::Snes
+        } else {
+            Console::Nes
         }
     }
 }
 
 /// The canonical two-controller `[LogKey]` table this crate's recorder
-/// always writes (module doc's wire shape).
-fn canonical_log_key() -> Vec<PortLogKey> {
-    vec![PortLogKey::canonical("P1"), PortLogKey::canonical("P2")]
+/// writes (module doc's wire shape), for a given console.
+fn canonical_log_key(console: Console) -> Vec<PortLogKey> {
+    vec![
+        PortLogKey::canonical("P1", console),
+        PortLogKey::canonical("P2", console),
+    ]
 }
 
 /// Every refusal [`ReplayLog::parse`]/[`ReplayLog::verify_rom_sha256`] can
@@ -322,7 +354,7 @@ impl ReplayLog {
         }
 
         let header = parse_header(&header_lines)?;
-        let log_key = parse_log_key(&logkey_lines)?;
+        let log_key = parse_log_key(&logkey_lines, Console::from_header(&header.console))?;
         let frames = parse_input(&input_lines, &log_key)?;
         let hashes = parse_hashes(&hash_lines)?;
 
@@ -457,7 +489,7 @@ fn parse_header(lines: &[&str]) -> Result<ReplayHeader, ReplayError> {
     })
 }
 
-fn parse_log_key(lines: &[&str]) -> Result<Vec<PortLogKey>, ReplayError> {
+fn parse_log_key(lines: &[&str], console: Console) -> Result<Vec<PortLogKey>, ReplayError> {
     if lines.is_empty() {
         return Err(ReplayError::Malformed(
             "[LogKey] has no port entries".to_string(),
@@ -484,8 +516,16 @@ fn parse_log_key(lines: &[&str]) -> Result<Vec<PortLogKey>, ReplayError> {
         }
         let mut buttons = Vec::new();
         for name in rest.split(',') {
-            let button = NesButton::from_name(name).ok_or_else(|| {
-                ReplayError::Malformed(format!("[LogKey] unknown button name {name:?}"))
+            // Console-directed on purpose: `A`, `B`, `Select`, `Start` and
+            // the four directions exist on both consoles at DIFFERENT
+            // bits, so a name-only lookup across both tables would
+            // silently mis-decode one of them.
+            let button = match console {
+                Console::Nes => NesButton::from_name(name).map(Button::Nes),
+                Console::Snes => SnesButton::from_name(name).map(Button::Snes),
+            }
+            .ok_or_else(|| {
+                ReplayError::Malformed(format!("[LogKey] unknown {console:?} button name {name:?}"))
             })?;
             buttons.push(button);
         }
@@ -602,9 +642,10 @@ pub struct ReplayRecorder {
 impl ReplayRecorder {
     #[must_use]
     pub fn new(header: ReplayHeader) -> Self {
+        let console = Console::from_header(&header.console);
         ReplayRecorder {
             header,
-            log_key: canonical_log_key(),
+            log_key: canonical_log_key(console),
             frames: Vec::new(),
             hashes: Vec::new(),
         }
@@ -834,5 +875,138 @@ mod tests {
         let player = ReplayPlayer::new(&log);
         assert_eq!(player.expected_hash(1), Some("b".repeat(64).as_str()));
         assert_eq!(player.expected_hash(0), None);
+    }
+}
+
+#[cfg(test)]
+mod snes_tests {
+    use super::*;
+
+    fn header(console: &str) -> ReplayHeader {
+        ReplayHeader {
+            console: console.to_string(),
+            rom_sha256: "0".repeat(64),
+            emu_version: "test".to_string(),
+            core_config: "accuracy".to_string(),
+            start_type: StartType::PowerOn,
+            hash_kind: "reachable-v1".to_string(),
+            hash_interval: 600,
+        }
+    }
+
+    /// **The bug W7-02 exists to fix.** Every SNES button — including the
+    /// eight above bit 7, which had no log-key entry at all before —
+    /// survives a full record -> serialize -> parse -> replay round trip.
+    #[test]
+    fn every_snes_button_survives_a_round_trip() {
+        let mut recorder = ReplayRecorder::new(header("snes"));
+        for button in SnesButton::ALL {
+            let mut frame = InputFrame::empty();
+            frame.ports[0] = 1u16 << button.bit();
+            recorder.record_frame(frame);
+        }
+        let log = recorder.finish();
+        let parsed = ReplayLog::parse(&log.to_string()).expect("parses");
+        let mut player = ReplayPlayer::new(&parsed);
+
+        for button in SnesButton::ALL {
+            let got = player.next_frame().expect("a frame per button").ports[0];
+            assert_eq!(
+                got,
+                1u16 << button.bit(),
+                "{button:?} (bit {}) did not survive the round trip",
+                button.bit()
+            );
+        }
+    }
+
+    /// The specific case that broke RF-Scroller-S: Right is bit 8, which
+    /// is outside the NES eight-bit range entirely.
+    #[test]
+    fn snes_right_at_bit_eight_survives() {
+        let mut recorder = ReplayRecorder::new(header("snes"));
+        let mut frame = InputFrame::empty();
+        frame.ports[0] = 0x0100;
+        recorder.record_frame(frame);
+        let parsed = ReplayLog::parse(&recorder.finish().to_string()).expect("parses");
+        assert_eq!(
+            ReplayPlayer::new(&parsed)
+                .next_frame()
+                .expect("frame")
+                .ports[0],
+            0x0100,
+            "a replay recorded holding Right must play back holding Right"
+        );
+    }
+
+    /// **Backward compatibility.** An NES recorder must still produce the
+    /// exact `[LogKey]` and `[Input]` bytes it always did.
+    ///
+    /// This is the risk in widening a documented wire format, so it is
+    /// pinned literally rather than merely round-tripped: a round trip
+    /// would pass even if both sides changed together.
+    #[test]
+    fn nes_logs_serialise_to_the_same_bytes_as_before() {
+        let mut recorder = ReplayRecorder::new(header("nes"));
+        let mut frame = InputFrame::empty();
+        frame.ports[0] = (1 << NesButton::A.bit()) | (1 << NesButton::Right.bit());
+        recorder.record_frame(frame);
+        let text = recorder.finish().to_string();
+
+        assert!(
+            text.contains("P1:A,B,Select,Start,Up,Down,Left,Right\n"),
+            "the NES log key must be unchanged:\n{text}"
+        );
+        assert!(
+            text.contains("|A......R|........|\n"),
+            "the NES input line must be unchanged:\n{text}"
+        );
+    }
+
+    /// A console this crate does not know decodes as NES — which is what
+    /// every existing file already does.
+    #[test]
+    fn an_unknown_console_falls_back_to_nes() {
+        assert_eq!(Console::from_header("nes"), Console::Nes);
+        assert_eq!(Console::from_header("SNES"), Console::Snes);
+        assert_eq!(Console::from_header("gameboy"), Console::Nes);
+        assert_eq!(Console::from_header(""), Console::Nes);
+    }
+
+    /// Names collide across consoles and mean DIFFERENT bits, so parsing
+    /// must be console-directed.
+    ///
+    /// `Right` is bit 7 on NES and bit 8 on SNES. If parsing ever became
+    /// name-only, one of these two assertions would break — which is
+    /// exactly the silent mis-decode this test exists to prevent.
+    #[test]
+    fn the_same_button_name_means_a_different_bit_per_console() {
+        assert_eq!(NesButton::from_name("Right").unwrap().bit(), 7);
+        assert_eq!(SnesButton::from_name("Right").unwrap().bit(), 8);
+        assert_eq!(NesButton::from_name("A").unwrap().bit(), 0);
+        assert_eq!(SnesButton::from_name("A").unwrap().bit(), 7);
+        // And an SNES-only name is not an NES button at all.
+        assert!(NesButton::from_name("X").is_none());
+        assert!(SnesButton::from_name("X").is_some());
+    }
+
+    /// An SNES log declaring SNES names must not be parsed as NES.
+    #[test]
+    fn a_snes_log_is_not_decoded_with_the_nes_table() {
+        let mut recorder = ReplayRecorder::new(header("snes"));
+        let mut frame = InputFrame::empty();
+        frame.ports[0] = 1u16 << SnesButton::X.bit();
+        recorder.record_frame(frame);
+        let text = recorder.finish().to_string();
+        assert!(text.contains("P1:B,Y,Select,Start,Up,Down,Left,Right,A,X,L,R\n"));
+        // Re-parsing with the header intact keeps the SNES meaning.
+        let parsed = ReplayLog::parse(&text).expect("parses");
+        assert_eq!(
+            ReplayPlayer::new(&parsed)
+                .next_frame()
+                .expect("frame")
+                .ports[0],
+            1u16 << SnesButton::X.bit()
+        );
     }
 }

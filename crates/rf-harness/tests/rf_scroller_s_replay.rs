@@ -25,6 +25,14 @@
 //! rather than "the hash is stable": a do-nothing input log leaves
 //! `player_x` at its spawn value, `camera_x` at 0 and `columns_streamed`
 //! at 33 (the 32-column preload plus the first frame's), forever.
+//!
+//! ## The `.rfreplay` gate needed W7-02 first
+//!
+//! This fixture is why `rf-input` has a `SnesButton` type at all. The
+//! format was NES-only, so the scripted "hold Right" log serialised to
+//! nothing and replayed as an idle pad — a lossy log masquerading as a
+//! determinism failure. W7-02 fixed the format; the gate below is what
+//! proves it.
 
 use rf_input::{ReplayHeader, ReplayLog, ReplayPlayer, ReplayRecorder, StartType};
 use rf_snes::cpu::CpuBus;
@@ -163,78 +171,35 @@ fn rf_scroller_s_does_nothing_without_input() {
     );
 }
 
-/// The full 5-minute run, twice, on two independent machines.
+/// The full 5-minute replay, through a real `.rfreplay` round trip.
 ///
-/// ## Why this does NOT go through a `.rfreplay` round trip
+/// Run 2 uses a FRESH machine that Run 1 never touched, driven entirely
+/// from the parsed log — that is the determinism proof, not a re-read of
+/// Run 1's own result.
 ///
-/// It cannot yet, and the reason is a real gap rather than a shortcut.
-/// `rf-input`'s replay format is **NES-only**: `PortLogKey::buttons` is a
-/// `Vec<NesButton>`, `canonical_log_key()` always writes the `$4016` read
-/// order, and there is no `SnesButton` type in the crate at all. A SNES
-/// button outside the NES 8-bit set — such as Right, at bit 8 — has no
-/// entry in the log key and is **silently dropped** on serialisation.
+/// ## This test could not exist until W7-02
 ///
-/// That is not a theory. Recording this fixture's scripted "hold Right"
-/// log and replaying it produced a state divergence at the very first
-/// checkpoint (frame 600), because run 2 received `buttons == 0`. The
-/// emulator was deterministic throughout; the log was lossy.
-///
-/// So this test delivers the half that is achievable and honest — the
-/// scripted five minutes runs without faults, and two independent
-/// machines fed the same input reach bit-identical reachable state at
-/// every checkpoint. The `.rfreplay` gating half is recorded as a
-/// HANDOFF on W6-05.
+/// `.rfreplay` was NES-only: `PortLogKey::buttons` was a
+/// `Vec<NesButton>`, so a SNES button outside the NES 8-bit set — Right
+/// is bit 8 — had no log-key entry and was **silently dropped** on
+/// serialisation. The first attempt at this test diverged at frame 600
+/// because run 2 received `buttons == 0`. The emulator was deterministic
+/// throughout; the log was lossy. W7-02 added `SnesButton` and made the
+/// log key console-directed, and this is the gate that proves it end to
+/// end rather than in a unit test.
 #[test]
 #[ignore = "5 minutes of emulated time; run via scripts/local-gate.sh"]
-fn rf_scroller_s_five_minutes_is_deterministic_across_independent_runs() {
+fn rf_scroller_s_five_minute_replay_is_deterministic() {
     let Some(rom) = load_rom() else {
         eprintln!("SKIP: run fixtures/snes/rf-scroller-s/build.sh");
         return;
     };
+    let rom_sha256 = rf_cart::hash::identity_snes(&rom).normalized.sha256;
 
-    let mut a = SnesSystem::load(&rom).expect("loads");
-    let mut b = SnesSystem::load(&rom).expect("loads");
-    let mut checkpoints = 0usize;
-
-    for frame in 0..TOTAL_FRAMES {
-        let buttons = scripted_buttons(frame);
-        run_frame(&mut a, buttons);
-        run_frame(&mut b, buttons);
-        if (frame + 1) % HASH_INTERVAL == 0 || frame + 1 == TOTAL_FRAMES {
-            assert_eq!(
-                reachable_state_hash(&a),
-                reachable_state_hash(&b),
-                "divergence at frame {}: the same input produced different \
-                 reachable state on two independent machines",
-                frame + 1
-            );
-            checkpoints += 1;
-        }
-    }
-
-    assert_eq!(
-        checkpoints, 30,
-        "30 ten-second checkpoints over five minutes"
-    );
-    // And the run must have gone somewhere: five minutes of scrolling
-    // streams far more than the 32-column preload.
-    let columns = read_word(&a, COLUMNS_STREAMED);
-    assert!(
-        columns > 1000,
-        "five minutes of scrolling should stream far more than the preload; got {columns}"
-    );
-}
-
-/// Pins the `.rfreplay` gap itself, so it cannot be quietly forgotten.
-///
-/// If someone adds SNES support to `rf-input`, this test starts failing
-/// and points at the work that becomes possible — which is a better
-/// reminder than a comment.
-#[test]
-fn the_replay_format_still_cannot_represent_snes_buttons() {
+    // --- Run 1: record ---
     let header = ReplayHeader {
         console: "snes".to_string(),
-        rom_sha256: "0".repeat(64),
+        rom_sha256,
         emu_version: env!("CARGO_PKG_VERSION").to_string(),
         core_config: "accuracy".to_string(),
         start_type: StartType::PowerOn,
@@ -242,18 +207,77 @@ fn the_replay_format_still_cannot_represent_snes_buttons() {
         hash_interval: HASH_INTERVAL,
     };
     let mut recorder = ReplayRecorder::new(header);
-    recorder.record_frame(rf_core_api::InputFrame {
-        ports: [BUTTON_RIGHT, 0, 0, 0],
-    });
+    let mut rec = SnesSystem::load(&rom).expect("loads");
+    let mut rec_hashes: Vec<(u64, String)> = Vec::new();
+
+    for frame in 0..TOTAL_FRAMES {
+        let buttons = scripted_buttons(frame);
+        recorder.record_frame(rf_core_api::InputFrame {
+            ports: [buttons, 0, 0, 0],
+        });
+        run_frame(&mut rec, buttons);
+        if (frame + 1).is_multiple_of(HASH_INTERVAL) || frame + 1 == TOTAL_FRAMES {
+            rec_hashes.push((frame + 1, reachable_state_hash(&rec)));
+        }
+    }
     let log = recorder.finish();
-    let parsed = ReplayLog::parse(&log.to_string()).expect("parses");
+
+    // --- serialize / parse round trip: proves the format is exercised,
+    // not merely constructed and discarded ---
+    let text = log.to_string();
+    let parsed = ReplayLog::parse(&text).expect("the recorded replay must parse");
+    assert_eq!(
+        text,
+        parsed.to_string(),
+        "serialize -> parse must round trip"
+    );
+    assert!(
+        text.contains("P1:B,Y,Select,Start,Up,Down,Left,Right,A,X,L,R\n"),
+        "the log must carry the SNES button table, not the NES one"
+    );
+
+    // --- Run 2: independent replay on a fresh machine ---
     let mut player = ReplayPlayer::new(&parsed);
-    let got = player.next_frame().expect("one frame").ports[0];
+    let mut play = SnesSystem::load(&rom).expect("loads");
+    let mut frame = 0u64;
+    let mut checked = 0usize;
+    while let Some(input) = player.next_frame() {
+        assert_eq!(
+            input.ports[0],
+            scripted_buttons(frame),
+            "frame {frame}: the log must replay the buttons it recorded — a \
+             mismatch here means the format dropped bits again"
+        );
+        run_frame(&mut play, input.ports[0]);
+        frame += 1;
+        if frame.is_multiple_of(HASH_INTERVAL) || frame == TOTAL_FRAMES {
+            let want = &rec_hashes[checked];
+            assert_eq!(want.0, frame, "checkpoint frames must line up");
+            assert_eq!(
+                reachable_state_hash(&play),
+                want.1,
+                "divergence at frame {frame}: the same input produced different \
+                 reachable state on an independent run"
+            );
+            checked += 1;
+        }
+    }
 
     assert_eq!(
-        got, 0,
-        "SNES bit 8 survived a .rfreplay round trip — rf-input has gained \
-         SNES support, so RF-Scroller-S's replay gate (W6-05 criterion 3) \
-         can now be completed. Delete this test and wire it up."
+        frame, TOTAL_FRAMES,
+        "the replay must cover the full 5 minutes"
+    );
+    assert_eq!(
+        checked,
+        rec_hashes.len(),
+        "every checkpoint must be compared"
+    );
+    assert_eq!(checked, 30, "30 ten-second checkpoints over five minutes");
+
+    // And the run must have gone somewhere.
+    let columns = read_word(&play, COLUMNS_STREAMED);
+    assert!(
+        columns > 1000,
+        "five minutes of scrolling should stream far more than the preload; got {columns}"
     );
 }

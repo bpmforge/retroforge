@@ -141,3 +141,64 @@ mod tests {
         }
     }
 }
+
+/// One button of *either* supported console, for the parts of the
+/// `.rfreplay` format that must work for both (ticket W7-02).
+///
+/// A `.rfreplay` `[LogKey]` line declares a port's buttons by name, and
+/// `[Input]` lines encode them by mnemonic — neither of which cares which
+/// console it is, as long as `bit()` says where the button lives in the
+/// 16-bit [`rf_core_api::InputFrame`] port word.
+///
+/// **Names collide across consoles and mean different bits.** `A`, `B`,
+/// `Select`, `Start` and the four directions exist on both, at different
+/// positions. So there is deliberately no `Button::from_name` — parsing
+/// is console-directed, driven by the `[Header]`'s `console` field. A
+/// name-only lookup that tried both tables would silently mis-decode
+/// every NES log ever recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Button {
+    Nes(NesButton),
+    Snes(crate::SnesButton),
+}
+
+impl Button {
+    /// Bit index within the port's 16-bit word.
+    #[must_use]
+    pub const fn bit(self) -> u8 {
+        match self {
+            Button::Nes(b) => b.bit(),
+            Button::Snes(b) => b.bit(),
+        }
+    }
+
+    /// Single-char `[Input]` mnemonic.
+    #[must_use]
+    pub const fn mnemonic(self) -> char {
+        match self {
+            Button::Nes(b) => b.mnemonic(),
+            Button::Snes(b) => b.mnemonic(),
+        }
+    }
+
+    /// Full `[LogKey]` name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Button::Nes(b) => b.name(),
+            Button::Snes(b) => b.name(),
+        }
+    }
+}
+
+impl From<NesButton> for Button {
+    fn from(b: NesButton) -> Self {
+        Button::Nes(b)
+    }
+}
+
+impl From<crate::SnesButton> for Button {
+    fn from(b: crate::SnesButton) -> Self {
+        Button::Snes(b)
+    }
+}
