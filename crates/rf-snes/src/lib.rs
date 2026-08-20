@@ -7,12 +7,14 @@ pub mod bus;
 pub mod cpu;
 pub mod dma;
 pub mod mapping;
+pub mod ppu;
 pub mod regs;
 pub mod system;
 pub mod timing;
 
 pub use bus::SnesBus;
 pub use mapping::{map, Target};
+pub use ppu::Ppu;
 pub use system::SnesSystem;
 
 /// Crate marker used by the test harness to confirm workspace wiring.

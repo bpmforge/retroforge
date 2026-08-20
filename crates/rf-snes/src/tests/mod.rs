@@ -17,6 +17,7 @@
 
 mod dma;
 mod mapping;
+mod ppu;
 mod regs;
 mod system;
 mod timing;
