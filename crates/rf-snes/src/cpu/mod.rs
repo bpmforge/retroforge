@@ -294,6 +294,45 @@ impl Cpu {
         u16::from(lo) | (u16::from(hi) << 8)
     }
 
+    /// Dispatch a hardware interrupt (ticket W6-02b).
+    ///
+    /// The same push sequence as `BRK`/`COP` — `PBR` in native mode only,
+    /// then `PC`, then `P` — but with two differences that matter:
+    ///
+    /// 1. **`PC` is not advanced.** `BRK` skips its signature byte;
+    ///    a hardware interrupt resumes at the instruction it preempted.
+    /// 2. **The pushed `B` flag is clear.** In emulation mode `B` shares
+    ///    `X`'s bit position and `X` is forced set, so pushing `P`
+    ///    unmodified would tell the handler a `BRK` had occurred. That is
+    ///    the one bit distinguishing the two, and the handler's dispatch
+    ///    turns on it.
+    ///
+    /// Also clears `stopped`: an interrupt is precisely what `WAI` waits
+    /// for.
+    pub fn interrupt(&mut self, bus: &mut dyn CpuBus, nmi: bool) {
+        self.stopped = false;
+        if self.e {
+            self.sp = 0x0100 | (self.sp & 0x00FF);
+        } else {
+            self.push8(bus, self.pbr);
+        }
+        self.push16(bus, self.pc);
+        let pushed = if self.e { self.p & !flags::X } else { self.p };
+        self.push8(bus, pushed);
+        self.set_flag(flags::I, true);
+        self.set_flag(flags::D, false);
+        self.pbr = 0;
+        let vector: u16 = match (nmi, self.e) {
+            (true, true) => 0xFFFA,
+            (true, false) => 0xFFEA,
+            (false, true) => 0xFFFE,
+            (false, false) => 0xFFEE,
+        };
+        let lo = bus.read(u32::from(vector));
+        let hi = bus.read(u32::from(vector) + 1);
+        self.pc = u16::from(lo) | (u16::from(hi) << 8);
+    }
+
     /// Execute one instruction.
     ///
     /// Returns `Err(opcode)` for anything this ticket does not implement.

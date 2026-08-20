@@ -22,6 +22,8 @@ pub struct SnesSystem {
     pub bus: SnesBus,
     /// Master cycles elapsed since reset.
     pub master_cycles: u64,
+    /// An NMI edge seen but not yet dispatched.
+    pending_nmi: bool,
 }
 
 impl SnesSystem {
@@ -53,6 +55,7 @@ impl SnesSystem {
             cpu: Cpu::new(),
             bus: SnesBus::new(rom, header.ram_size, header.map_mode),
             master_cycles: 0,
+            pending_nmi: false,
         };
         system.bus.fast_rom = header.fast_rom;
         system.reset();
@@ -71,6 +74,7 @@ impl SnesSystem {
             cpu: Cpu::new(),
             bus: SnesBus::new(rom, sram_len, mode),
             master_cycles: 0,
+            pending_nmi: false,
         };
         system.reset();
         system
@@ -89,6 +93,8 @@ impl SnesSystem {
         self.cpu.pc = u16::from(lo) | (u16::from(hi) << 8);
         self.cpu.pbr = 0;
         self.master_cycles = 0;
+        self.pending_nmi = false;
+        self.bus.timing = crate::timing::Timing::new();
     }
 
     /// Execute one instruction, charging its bus accesses in master
@@ -111,7 +117,42 @@ impl SnesSystem {
         // show; internal cycles are not modelled yet (W6-02a's note on
         // the cycle-accurate executor).
         self.bus.tick_math(accesses as u32);
-        self.master_cycles += self.bus.service_dma();
+        let dma_cycles = self.bus.service_dma();
+        self.master_cycles += dma_cycles;
+
+        // Advance the frame clock by everything this instruction spent,
+        // DMA included — DMA halts the CPU but the raster keeps going,
+        // and a model that froze time during a transfer would let a game
+        // DMA through vblank without ever leaving it.
+        let irq_mode = self.bus.nmitimen.irq_mode();
+        let auto_joypad = self.bus.nmitimen.auto_joypad();
+        let timer = self.bus.irq;
+        let events = self
+            .bus
+            .timing
+            .advance(spent + dma_cycles, auto_joypad, |dot, line| {
+                timer.matches(irq_mode, dot, line)
+            });
+
+        if events.irq {
+            self.bus.irq.fired = true;
+        }
+        if events.auto_joypad_done {
+            self.bus.joypads.latch();
+        }
+
+        // Delivery. NMI is edge-triggered on the vblank transition and
+        // ignores the I flag; IRQ is level-ish and masked by it.
+        if events.vblank_started && self.bus.nmitimen.nmi_enabled() {
+            self.pending_nmi = true;
+        }
+        if self.pending_nmi {
+            self.pending_nmi = false;
+            self.cpu.interrupt(&mut self.bus, true);
+        } else if self.bus.irq.fired && !self.cpu.flag(crate::cpu::flags::I) {
+            self.cpu.interrupt(&mut self.bus, false);
+        }
+
         result
     }
 

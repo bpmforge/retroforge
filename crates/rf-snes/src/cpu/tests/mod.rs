@@ -562,3 +562,70 @@ fn the_core_op_set_is_actually_implemented() {
         );
     }
 }
+
+/// `(direct,X)` in emulation mode with a non-zero `DL`: the pointer's
+/// high byte is read at `addr + 1` **without** wrapping within the page.
+///
+/// ## This contradicts gilyon cputest's README, and the README is wrong
+///
+/// That README documents an undocumented behaviour:
+///
+/// > In emulation mode when the low byte of D is nonzero, the (direct,X)
+/// > addressing mode behaves strangely: the low byte of the indirect
+/// > address is read from `direct_addr+X+D` without page wrapping (as
+/// > expected). The high byte is read from `direct_addr+X+D+1`, but the
+/// > +1 is done *with* wrapping within the page.
+///
+/// with the worked example `E=1, D=$11A, X=$EE, lda ($F7,X)` → low byte
+/// from `$2FF`, high byte from **`$200`**.
+///
+/// Checked against primary evidence rather than taken on trust, because
+/// implementing it would have been a real behaviour change. The
+/// SingleStepTests `65816` vectors carry per-cycle bus traces, so they
+/// record the addresses hardware actually drove. Filtering `$A1`, `$01`
+/// and `$C1` emulation-mode cases for the discriminating shape —
+/// `E = 1`, `DL != 0`, and `(D + dp + X) & $FF == $FF`, so the `+1`
+/// crosses a page — yields **88 cases**, and every one reads the high
+/// byte from the next page:
+///
+/// ```text
+/// a1 e 847:  D=2D57 X=0094 dp=14 → reads $00:2DFF then $00:2E00
+/// 01 e 328:  D=4D14 X=00D2 dp=19 → reads $00:4DFF then $00:4E00
+/// c1 e 230:  D=7AB1 X=0008 dp=46 → reads $00:7AFF then $00:7B00
+/// ```
+///
+/// Not `$2D00`, `$4D00`, `$7A00`. A second, independent oracle agrees:
+/// gilyon's own `cputest-full` — the ROM that ships alongside that
+/// README, and which explicitly does test emulation-mode wrapping —
+/// reports **Success** against this implementation.
+///
+/// So the prose is the outlier, not the two behavioural oracles. This
+/// test exists to stop someone reading that README later and "fixing" a
+/// correct implementation into a broken one.
+#[test]
+fn direct_indexed_indirect_does_not_page_wrap_its_high_byte_in_emulation_mode() {
+    let mut cpu = Cpu::new();
+    cpu.set_emulation(true);
+    cpu.d = 0x011A;
+    cpu.x = 0x00EE;
+    cpu.pc = 0x8000;
+    cpu.dbr = 0x00;
+
+    let mut bus = FlatBus::new();
+    bus.load(0x8000, &[0xA1, 0xF7]); // LDA ($F7,X)
+                                     // $F7 + $11A + $EE = $2FF. The high byte comes from $300.
+    bus.mem[0x02FF] = 0x34;
+    bus.mem[0x0300] = 0x12;
+    // A decoy at $200 — where the README's version would look.
+    bus.mem[0x0200] = 0xEE;
+    bus.mem[0x0000_1234] = 0x5A;
+    bus.mem[0x0000_EE34] = 0xA5;
+
+    cpu.step(&mut bus).expect("implemented");
+    assert_eq!(
+        cpu.a & 0xFF,
+        0x5A,
+        "pointer must be $1234 (high byte from $300, no page wrap); \
+         page-wrapping to $200 would give $EE34"
+    );
+}

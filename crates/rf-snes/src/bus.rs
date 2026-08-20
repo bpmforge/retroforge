@@ -21,12 +21,26 @@ use crate::cpu::CpuBus;
 use crate::dma::{Dma, CYCLES_PER_BYTE, CYCLES_PER_CHANNEL};
 use crate::mapping::{map, Target, WRAM_LEN};
 use crate::regs::{IrqTimer, MathUnit, NmiTimen, WramPort};
+use crate::timing::{Joypads, Timing};
 
 /// The machine's memory, cartridge and registers.
 pub struct SnesBus {
     pub rom: Vec<u8>,
     pub sram: Vec<u8>,
     pub wram: Vec<u8>,
+    /// 64 KiB of video RAM, as 32768 words.
+    ///
+    /// The WRITE PORT lives here because it is a memory-mapped register,
+    /// which is this ticket's business; RENDERING from it is W6-03a's.
+    /// Storing the bytes now rather than dropping them means the PPU
+    /// ticket inherits a populated VRAM instead of having to build the
+    /// port as well, and it gives tests a real oracle for what a ROM drew
+    /// (gilyon `cputest` writes its verdict as ASCII through `$2118`).
+    pub vram: Vec<u8>,
+    /// `$2116`/`$2117` VMADD — a WORD address into `vram`.
+    pub vram_address: u16,
+    /// `$2115` VMAIN — increment step and which port write advances it.
+    pub vmain: u8,
     pub mode: SnesMapMode,
     pub math: MathUnit,
     pub nmitimen: NmiTimen,
@@ -40,6 +54,11 @@ pub struct SnesBus {
     /// this; returning 0 would be a different (wrong) answer that happens
     /// to look tidier.
     pub open_bus: u8,
+    pub timing: Timing,
+    pub joypads: Joypads,
+    /// `$4016` strobe latch, and the serial shift position per port.
+    manual_latch: bool,
+    manual_shift: [u16; 2],
     /// `$420B` write that is pending execution.
     pending_dma: u8,
 }
@@ -51,6 +70,9 @@ impl SnesBus {
             rom,
             sram: vec![0; sram_len],
             wram: vec![0; WRAM_LEN],
+            vram: vec![0; 64 * 1024],
+            vram_address: 0,
+            vmain: 0,
             mode,
             math: MathUnit::default(),
             nmitimen: NmiTimen::default(),
@@ -59,6 +81,10 @@ impl SnesBus {
             dma: Dma::default(),
             fast_rom: false,
             open_bus: 0,
+            timing: Timing::new(),
+            joypads: Joypads::default(),
+            manual_latch: false,
+            manual_shift: [0; 2],
             pending_dma: 0,
         }
     }
@@ -83,6 +109,16 @@ impl SnesBus {
             0x4200 => self.nmitimen.0,
             0x420D => u8::from(self.fast_rom),
             0x2180 => self.wram[(self.wram_port.address as usize) % WRAM_LEN],
+            0x4212 => self.timing.read_hvbjoy(),
+            0x4218..=0x421F => {
+                let port = ((offset - 0x4218) / 2) as usize;
+                let word = self.joypads.latched[port];
+                if offset & 1 == 0 {
+                    word as u8
+                } else {
+                    (word >> 8) as u8
+                }
+            }
             _ => return None,
         })
     }
@@ -92,6 +128,17 @@ impl SnesBus {
             // $4211 TIMEUP: reading ACKNOWLEDGES and clears. This is why
             // `peek` cannot share this path.
             0x4211 => self.irq.read_timeup(),
+            // $4210 RDNMI: reading CLEARS the vblank flag. gilyon
+            // cputest's wait_for_vblank depends on it — see timing.rs.
+            0x4210 => self.timing.read_rdnmi(),
+            // $4016/$4017 manual joypad read: each read shifts out one
+            // bit, so this cannot be a pure read either.
+            0x4016 | 0x4017 => {
+                let port = usize::from(offset - 0x4016);
+                let bit = (self.manual_shift[port] & 0x8000) >> 15;
+                self.manual_shift[port] <<= 1;
+                bit as u8
+            }
             // $2180 WMDATA: reading auto-increments the port.
             0x2180 => {
                 let v = self.wram[(self.wram_port.address as usize) % WRAM_LEN];
@@ -104,6 +151,23 @@ impl SnesBus {
 
     fn write_register(&mut self, offset: u16, value: u8) {
         match offset {
+            0x2115 => self.vmain = value,
+            0x2116 => self.vram_address = (self.vram_address & 0xFF00) | u16::from(value),
+            0x2117 => self.vram_address = (self.vram_address & 0x00FF) | (u16::from(value) << 8),
+            0x2118 => {
+                let at = (self.vram_address as usize * 2) % self.vram.len();
+                self.vram[at] = value;
+                if self.vmain & 0x80 == 0 {
+                    self.step_vram_address();
+                }
+            }
+            0x2119 => {
+                let at = (self.vram_address as usize * 2 + 1) % self.vram.len();
+                self.vram[at] = value;
+                if self.vmain & 0x80 != 0 {
+                    self.step_vram_address();
+                }
+            }
             0x2180 => {
                 let at = (self.wram_port.address as usize) % WRAM_LEN;
                 self.wram[at] = value;
@@ -124,6 +188,17 @@ impl SnesBus {
             0x420A => self.irq.vtime = (self.irq.vtime & 0x0FF) | (u16::from(value & 1) << 8),
             0x420B => self.pending_dma = value,
             0x420D => self.fast_rom = value & 1 != 0,
+            0x4016 => {
+                // Strobe: while high, the shift registers reload.
+                let strobe = value & 1 != 0;
+                if self.manual_latch && !strobe {
+                    self.manual_shift = [self.joypads.ports[0], self.joypads.ports[1]];
+                }
+                self.manual_latch = strobe;
+                if strobe {
+                    self.manual_shift = [self.joypads.ports[0], self.joypads.ports[1]];
+                }
+            }
             0x4300..=0x437F => self.write_dma_register(offset, value),
             _ => {}
         }
@@ -200,6 +275,29 @@ impl SnesBus {
         self.dma.channels[ch].a_address = a;
         self.dma.channels[ch].count = 0;
         moved
+    }
+
+    /// VMAIN bits 0-1 select the address increment: 1, 32, 128, 128
+    /// words. Bit 7 selects which of the two data ports triggers it,
+    /// which is why the callers above differ.
+    fn step_vram_address(&mut self) {
+        let step = match self.vmain & 0x03 {
+            0 => 1u16,
+            1 => 32,
+            _ => 128,
+        };
+        self.vram_address = self.vram_address.wrapping_add(step);
+    }
+
+    /// Read the low bytes of `len` VRAM words starting at `word_addr`.
+    ///
+    /// Tile-map entries keep the character in the low byte, so this is
+    /// what a ROM that "wrote text" actually wrote.
+    #[must_use]
+    pub fn vram_low_bytes(&self, word_addr: u16, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| self.vram[((word_addr as usize + i) * 2) % self.vram.len()])
+            .collect()
     }
 
     /// Advance the math unit by `cycles` CPU cycles.

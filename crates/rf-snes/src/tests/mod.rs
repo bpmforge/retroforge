@@ -19,6 +19,7 @@ mod dma;
 mod mapping;
 mod regs;
 mod system;
+mod timing;
 
 #[test]
 fn crate_is_wired() {

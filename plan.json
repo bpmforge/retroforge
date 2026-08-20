@@ -3446,8 +3446,9 @@
    "phase": 6,
    "crate": "rf-snes",
    "write_scope": [
-    "crates/rf-snes/**"
-   ],
+      "crates/rf-snes/**",
+      "scripts/local-gate.sh"
+    ],
    "depends_on": [
     "W6-02a"
    ],
@@ -3456,7 +3457,7 @@
     "gilyon snes-tests cputest RAM result block matches shipped tests.txt (FR-CORE-030)"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E8-S1"
    ]
@@ -3497,8 +3498,15 @@
     "golden frames green on the PeterLemon PPU tests subset (FR-CORE-033 subset)"
    ],
    "notes": [
-    "REFINED AT PHASE ENTRY BY W6-00 (2026-08-19). `peterlemon-snes` is in `tests/rom-manifest.toml` (artifacts `peterlemon_ppu`, `peterlemon_mode7`), so the golden-frame subset has a source. Note it is NOT yet fetched into `roms/snes/` on this machine \u2014 fetch before claiming, and expect the same NFR-006 rule the NES golden suites follow: CI has no ROMs, so the suite must skip locally and FAIL on CI when an artifact is missing rather than pass having asserted nothing."
-   ],
+    "REFINED AT PHASE ENTRY BY W6-00 (2026-08-19). `peterlemon-snes` is in `tests/rom-manifest.toml` (artifacts `peterlemon_ppu`, `peterlemon_mode7`), so the golden-frame subset has a source. Note it is NOT yet fetched into `roms/snes/` on this machine \u2014 fetch before claiming, and expect the same NFR-006 rule the NES golden suites follow: CI has no ROMs, so the suite must skip locally and FAIL on CI when an artifact is missing rather than pass having asserted nothing.",
+      "CLOSED 2026-08-19: both criteria. (2) GILYON CPUTEST IS GREEN — cputest-full.sfc runs to completion with test_num reaching 0x649 (all 1610 tests) and the ROM writing its own verdict, 'Success', as ASCII into VRAM. Two independent readings on purpose: test_num alone could in principle be reached by a wild jump and names the failing test on failure (look it up in the shipped tests-full.txt); the text alone would not say which test failed. (1) AUTO-JOYPAD + $4210/$4211 — crates/rf-snes/src/timing.rs models the frame clock in MASTER cycles (1364/line x 262 lines = 60.1 Hz, the same arithmetic speed.rs pins), vblank at line 225, $4210 RDNMI clear-on-read, $4212 HVBJOY, and the ~3-scanline auto-joypad window.",
+      "$4210 CLEAR-ON-READ IS LOAD-BEARING, NOT AN EDGE CASE. gilyon's wait_for_vblank is `bit $4210 / bmi` (drain a pending flag) then `bit $4210 / bpl` (wait for the next one). Without clear-on-read the FIRST loop never exits and the ROM hangs before running a single test. Also why $4210 must go through read and never peek — a debugger that peeked it would acknowledge a vblank the program never saw. Tested in both directions.",
+      "THE JOYPAD LATCHES ON THE WINDOW'S CLOSING EDGE, not 'whenever idle'. The first version latched continuously, which made $4218 track the pad in real time and would have hidden any error in the window's timing — the port looking right for the wrong reason. Timing::advance now reports auto_joypad_done and the test asserts exactly one latch per frame.",
+      "THE ROM REQUIRES INPUT, AND THAT IS NOT A WORKAROUND. cputest pauses between test banks with 'Press A for next tests...', polling $4212 bit 0 then $4218 bit 7 and waiting for a press AND THEN A RELEASE — holding A permanently hangs on the release wait. Diagnosed by disassembling the loop the run was stuck in at test 36 rather than guessing. Pulsing the button means this suite genuinely exercises the auto-joypad latch, i.e. criterion 1, rather than only asserting it in isolation.",
+      "A DOCUMENTATION CONTRADICTION, RESOLVED AGAINST PRIMARY EVIDENCE. gilyon's cputest README documents an undocumented (direct,X) emulation-mode behaviour: with DL nonzero, the pointer's high byte is read from addr+1 with the +1 WRAPPING WITHIN THE PAGE (worked example: E=1, D=$11A, X=$EE, lda ($F7,X) -> low from $2FF, high from $200). This implementation does not wrap, so the README implied a bug. Checked rather than believed: the SingleStepTests vectors carry per-cycle bus traces, and filtering $A1/$01/$C1 emulation-mode cases for the discriminating shape (E=1, DL!=0, (D+dp+X)&$FF==$FF) yields 88 cases, EVERY one reading the high byte from the next page ($2DFF then $2E00, not $2D00). gilyon's own cputest-full — which does test emulation-mode wrapping — separately reports Success against this implementation. Two behavioural oracles against one line of prose. A test now pins the verified behaviour and quotes the README, so nobody later reads it and 'fixes' correct code.",
+      "SCOPE WIDENED to scripts/local-gate.sh so the cputest actually GATES rather than resting on an env-gated test run once by hand. The gate extracts the archive (rf-harness does no archive extraction, per its fetch.rs doc) and runs the suite. NOTE FOR FUTURE TICKETS: this is the third consecutive ticket needing a scope widening to make its own result gate — the write_scopes are systematically narrower than 'build it AND wire it into the gate', which is what closing a ticket honestly requires.",
+      "VRAM WRITE PORT ADDED HERE, DELIBERATELY: $2115 VMAIN, $2116/7 VMADD, $2118/9 VMDATA into a 64 KiB buffer. It is a memory-mapped REGISTER, which is W6-02a/b's business; RENDERING from it is W6-03a's, which now inherits a populated VRAM instead of having to build the port too. It is also what makes the ROM's own verdict readable without a PPU."
+    ],
    "points": 5,
    "status": "todo",
    "stories": [

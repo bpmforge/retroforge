@@ -95,6 +95,36 @@ if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
   exit 1
 fi
 
+# gilyon snes-tests cputest (ticket W6-02b): 1610 tests covering every
+# 65C816 opcode except STP/WAI, in every addressing mode, in both
+# emulation and native mode. Local-only (NFR-006) and #[ignore]'d, so this
+# script is the only path that runs it.
+#
+# A DIFFERENT ORACLE from the 65816 vectors above, not a weaker copy of
+# them: this one is a PROGRAM. It boots on the real bus, sets up the PPU,
+# waits on $4210, reads controllers through auto-joypad, and runs across
+# four ROM banks with JSL/RTL. A vector suite cannot fail the way a wrong
+# memory map, a stuck vblank flag or a mis-latched joypad port fails.
+#
+# Needs the archive EXTRACTED, which rf-harness does not do (see its
+# fetch.rs module doc — manifest artifacts land as the downloaded file
+# itself). Unzipped here rather than by the test, so the test stays a
+# test; it skips cleanly when the directory is absent.
+gilyon_zip="$repo_root/roms/snes/gilyon-snes-tests-v1.4.zip"
+gilyon_dir="$repo_root/roms/snes/gilyon-snes-tests"
+if [ -f "$gilyon_zip" ] && [ ! -f "$gilyon_dir/cputest/cputest-full.sfc" ]; then
+  echo "local-gate: extracting gilyon snes-tests..." >&2
+  mkdir -p "$gilyon_dir"
+  unzip -o -q "$gilyon_zip" -d "$gilyon_dir"
+fi
+
+echo "local-gate: running gilyon cputest (release)..." >&2
+if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
+  -p rf-snes --test gilyon_cputest -- --ignored --nocapture; then
+  echo "local-gate: gilyon cputest FAILED" >&2
+  exit 1
+fi
+
 if [ ! -d "$vectors_dir" ]; then
   echo "local-gate: nes6502 vectors not found at $vectors_dir" >&2
   echo "Fetch them first: scripts/fetch-test-roms.sh singlestep-nes6502-src" >&2
