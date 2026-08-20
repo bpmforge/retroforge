@@ -4219,7 +4219,7 @@
     "W5-04's lesson applies directly: a capture path that looked correct wrote alpha 0 for palette index 0 and produced a white PNG. LOOK AT THE OUTPUT."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
