@@ -3701,7 +3701,7 @@
     "expand W8 into tickets: rewind (SAVE_STATES.md \u00a74 + FRONTEND_UI.md \u00a75, FR-STATE-008), video recording (FR-FE-007), screenshot polish, gamepad UI navigation + accessibility pass (FRONTEND_UI.md \u00a74/\u00a76), SNES widescreen per-BG policies (bsnes-hd model), HUD separation (FR-ENH-007), profile-declared loading fast-forward (FR-ENH-008), smooth-camera experiments, room-stitching for top-down profiles (ROADMAP P8), frame-interpolation experiment (design first per TRACEABILITY G5), AI upscaling cache + replacement packs (FR-AI-001/002/003/004) incl. animation-set grouping + pack manifest format (ENHANCEMENT_RUNTIME.md \u00a76), HD-pack loader with Mesen-compatible tile identity + hires.txt import + pack builder record-while-playing (SCOPE asset-replacement row), translation/accessibility overlays"
    ],
    "points": 2,
-   "status": "in_progress",
+   "status": "done",
    "stories": [
     "E10-S1",
     "E10-S2",
@@ -3762,7 +3762,11 @@
     "CLOSED 2026-08-20: all four criteria. SnesButton exists with the $4218/$4219 layout the core already uses (A is bit 7, Right is bit 8 — the same bits RF-Scroller-S and the gilyon harness drive); PortLogKey::buttons is now Vec<Button>, an enum over both consoles; every SNES button survives a record -> serialize -> parse -> replay round trip; and RF-Scroller-S's 5-minute log is gated as a REAL .rfreplay, completing W6-05 criterion 3.",
     "PARSING IS CONSOLE-DIRECTED, AND THAT IS THE LOAD-BEARING DESIGN DECISION. 'A', 'B', 'Select', 'Start' and the four directions exist on BOTH consoles at DIFFERENT bits — Right is bit 7 on NES and bit 8 on SNES. So there is deliberately no Button::from_name: the [Header]'s console field decides which table a name is looked up in, and an unrecognised console falls back to NES because that is what every existing file already decodes as. A name-only lookup across both tables would have silently mis-decoded every NES log ever recorded.",
     "BACKWARD COMPATIBILITY IS PINNED LITERALLY, not merely round-tripped. A round trip would pass even if both sides changed together, so the test asserts the exact bytes an NES recorder emits: 'P1:A,B,Select,Start,Up,Down,Left,Right' and '|A......R|........|'. The shoulder buttons take lowercase l/r mnemonics because L and R are already Left and Right — a collision that would make an input line ambiguous, asserted distinct in SnesButton's own tests.",
-    "FOUND EN ROUTE, FILED AS W7-14, AND NOT MINE: rf_scroller_replay's five-minute NES test is RED and has been since W5-02c. rom.sha256 last changed in 226b137 (W5-02c); the GOLDEN_HASHES gating it last changed in 3d9607e (W2-21), which is earlier — so that ticket changed the fixture ROM without regenerating its goldens. Verified not to be W7-02's doing by stashing this change (still red) and by running the test in a worktree at the pre-session commit. It hid because the test is #[ignore]'d and CI runs plain `cargo test --workspace`. W7-14 says DIAGNOSE BEFORE RE-PINNING: frames 1200 through 15000 all hash identically today, which is a static screen rather than a scroller."
+    "FOUND EN ROUTE, FILED AS W7-14, AND NOT MINE: rf_scroller_replay's five-minute NES test is RED and has been since W5-02c. rom.sha256 last changed in 226b137 (W5-02c); the GOLDEN_HASHES gating it last changed in 3d9607e (W2-21), which is earlier — so that ticket changed the fixture ROM without regenerating its goldens. Verified not to be W7-02's doing by stashing this change (still red) and by running the test in a worktree at the pre-session commit. It hid because the test is #[ignore]'d and CI runs plain `cargo test --workspace`. W7-14 says DIAGNOSE BEFORE RE-PINNING: frames 1200 through 15000 all hash identically today, which is a static screen rather than a scroller.",
+    "CLOSED 2026-08-20: phase 8 expanded into W8-02..W8-12, with acceptance drawn from SAVE_STATES.md 4, FRONTEND_UI.md 4/5/6, ENHANCEMENT_RUNTIME.md 6, ROADMAP P8 and the FR-AI / FR-ENH / FR-FE / FR-STATE rows. Every area this ticket's acceptance names is covered: rewind (W8-02), video recording and screenshot polish (W8-03), gamepad UI navigation and accessibility (W8-04), SNES widescreen per-BG policies (W8-05), HUD separation (W8-06), loading fast-forward (W8-07), smooth-camera and room-stitching (W8-08), the frame-interpolation experiment (W8-09), the AI upscaling cache and pack format (W8-10), the HD-pack loader with Mesen identity and hires.txt import (W8-11), and translation/accessibility overlays (W8-12). No ticket exceeds 8 points.",
+    "TWO PHASE-7 TICKETS FILED HERE TOO, BECAUSE THEY BLOCK OPEN WORK RATHER THAN FUTURE WORK. W7-15 (per-dot PPU timing) unblocks W7-07's criterion 4 AND W7-05's — both name undisbeliever ROMs which W7-07 proved, by running all eighteen, are per-DOT timing tests that never leave forced blank on a scanline-composed PPU. W7-16 (a CoreSink sub-screen channel) unblocks colour-math verification, which no test can do today because a blended RGB value cannot travel through an indexed PpuPixel. W7-16 also answers the dropped_by_limit question W6-03a raised: the SAME missing mechanism — a second, parallel channel — is behind both, so they are one ticket rather than two.",
+    "ACCEPTANCE WAS WRITTEN AGAINST ARTIFACTS THAT EXIST, deliberately, because phase 7 taught that lesson expensively. FIVE of its tickets stalled on criteria naming things that were not there: undisbeliever 'window/HDMA-gradient ROMs' that are absent from the pinned archive (W7-05), a 'designated SPC set' with reference audio that is designated nowhere (W7-08), a mapper-28 test ROM that does not exist (W7-11), and two golden sets requiring capabilities the design explicitly defers (W7-04, W7-07). The implementation landed in every one; the acceptance is what blocked. So every criterion filed here is satisfiable either by the ticket's own work or by an artifact already in the repo — and where a ticket must CREATE its oracle (W8-11's builder/loader round trip, W8-03's output inspection), that is stated as the criterion rather than assumed.",
+    "HARD-WON LESSONS ARE CITED ON THE TICKETS THAT WILL HIT THEM, not left to be rediscovered: W8-03 carries W5-04's white-PNG capture bug ('LOOK AT THE OUTPUT'); W8-04 carries W4-09's finding that the kittest harness renders ZERO accessible nodes at its default size and that neither ui.label nor a hover-sensed Label contributes one; W8-07 states that a fast-forward which changes emulated state is a determinism bug rather than a feature."
    ],
    "points": 5,
    "status": "done",
@@ -4110,6 +4114,316 @@
   ],
    "points": 5,
    "status": "done",
+   "stories": []
+  },
+  {
+   "id": "W7-15",
+   "title": "Per-dot SNES PPU timing (unblocks the undisbeliever set)",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "scripts/**"
+   ],
+   "depends_on": [
+    "W7-07"
+   ],
+   "acceptance": [
+    "the SNES PPU composes per DOT rather than per scanline, with mid-line register writes taking effect at their H-position (EMULATION_CORES.md section 3.3's deferred 'per-dot upgrade path')",
+    "the undisbeliever hdma-2100-glitch, hdma-21ff-glitch and hdmaen_latch_test ROMs leave forced blank and produce stable golden frames",
+    "RotZoom, Perspective and the ten BGMAP goldens are unchanged, proving the upgrade did not disturb what already worked"
+   ],
+   "notes": [
+    "FILED BY W8-01 BECAUSE IT BLOCKS TWO OPEN TICKETS: W7-07's criterion 4 and W7-05's, both of which name undisbeliever ROMs.",
+    "EVIDENCE ALREADY GATHERED (W7-07): all 18 undisbeliever DMA/HDMA ROMs were extracted and run. Every one EXECUTES — PC advances, frames progress — but none leaves forced blank within 12,000,000 instructions; hdmaen_latch_test is still on frame 0 at that point. They are per-DOT timing tests (mid-scanline $2100/$21FF writes during HDMA), and section 3.3 states the v1 PPU is 'scanline-based ... per-dot deferred'. So this is the deferred upgrade, not a bug hunt.",
+    "W7-07 ALREADY BUILT HALF THE FOUNDATION: Ppu::line_state latches the mode-7 matrix, BG mode and per-layer scroll once per visible line. Per-dot means latching at finer granularity, or recording writes with their H-position as 3.3 describes — read that code before designing.",
+    "THE THIRD CRITERION IS THE GUARD. A per-dot rewrite is exactly the kind of change that fixes one suite and silently breaks another, so the existing goldens are part of the acceptance rather than something to re-pin afterwards."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-16",
+   "title": "rf-core-api: a sub-screen channel so colour math can reach a renderer",
+   "phase": 7,
+   "crate": "rf-core-api",
+   "write_scope": [
+    "crates/rf-core-api/**",
+    "crates/rf-snes/**",
+    "crates/rf-renderer/**",
+    "crates/rf-harness/**"
+   ],
+   "depends_on": [
+    "W7-05"
+   ],
+   "acceptance": [
+    "CoreSink can carry a sub-screen scanline and a per-pixel colour-math mode alongside the accuracy-exact main screen, without displacing it (the W1-05a ruling)",
+    "rf-snes emits it, and a golden or A-B test can detect a colour-math change — which no existing test can today",
+    "the NES path and every existing CoreSink implementor keep compiling and behaving identically, proven rather than assumed",
+    "PpuPixel::dropped_by_limit is either given a real carrier by the same mechanism or removed, with the decision recorded"
+   ],
+   "notes": [
+    "FILED BY W8-01. Found during W7-05: colour math ($2130-$2132) produces an RGB value that need not exist anywhere in CGRAM, but cores emit INDEXED pixels (law 4) — so a blended colour cannot travel through PpuPixel at all, and the golden-frame hash (palette indices only) could not see it if it did. W7-05 therefore delivered clip-to-black on the indexed path (black IS index 0) and left the add/sub/half arithmetic implemented but unreachable.",
+    "THE SAME QUESTION HAS NOW COME UP TWICE. W6-03a found that PpuPixel::dropped_by_limit is dead on BOTH the NES and SNES paths: its doc retains it 'for cores that can express a suppressed sprite without displacing a real pixel', but the one-pixel-per-x sink makes that impossible everywhere. Both features want the same thing — a second, parallel channel — so they should be answered together rather than twice.",
+    "THE CONSTRAINT IS NOT NEGOTIABLE: rf_core_api::video's W1-05a ruling says video_scanline is accuracy-exact and nothing may displace it. OverlayPixel/overlay_scanline is the existing precedent for a parallel channel; extend that shape rather than fattening PpuPixel."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W8-02",
+   "title": "Rewind",
+   "phase": 8,
+   "crate": "rf-state",
+   "write_scope": [
+    "crates/rf-state/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "rewind per SAVE_STATES.md section 4 and FRONTEND_UI.md section 5 (FR-STATE-008), with a ring of periodic states and a configurable depth",
+    "rewinding N seconds and replaying forward reaches state hash-identical to never having rewound",
+    "the memory and CPU cost of the ring is measured and recorded, not estimated"
+   ],
+   "notes": [
+    "The determinism suite is the natural oracle: a rewind that is not hash-identical is a save-state bug wearing a different hat."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W8-03",
+   "title": "Video recording + screenshot polish",
+   "phase": 8,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-renderer/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "video recording (FR-FE-007) writes a playable file whose frame count matches the frames emitted",
+    "screenshots capture the indexed frame through the same palette path the renderer uses, so a screenshot matches what was on screen",
+    "both are exercised by a test that inspects the OUTPUT rather than asserting the call was made"
+   ],
+   "notes": [
+    "W5-04's lesson applies directly: a capture path that looked correct wrote alpha 0 for palette index 0 and produced a white PNG. LOOK AT THE OUTPUT."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W8-04",
+   "title": "Gamepad UI navigation + accessibility pass",
+   "phase": 8,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-input/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "every UI surface is reachable and operable with a gamepad alone (FRONTEND_UI.md section 4)",
+    "an accessibility pass against FRONTEND_UI.md section 6: focus order, contrast, and text alternatives",
+    "the egui_kittest harness asserts accessibility NODES, not pixels"
+   ],
+   "notes": [
+    "W4-09's finding is a prerequisite, not a detail: at the harness's default window size every panel rendered ZERO accessible nodes, so the assertions would have been vacuous — it needs 1600x1000. And neither a bare ui.label NOR a hover-sensed egui::Label contributes a node; selectable_label does."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W8-05",
+   "title": "SNES widescreen per-BG-layer policies",
+   "phase": 8,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W7-05"
+   ],
+   "acceptance": [
+    "per-BG-layer widescreen policies on the bsnes-hd model, declared per profile",
+    "Accuracy Mode is unaffected and a fresh install renders 4:3 (law 6)",
+    "a layer whose policy would reveal unrendered content is identified and handled explicitly rather than showing garbage at the edges"
+   ],
+   "notes": [
+    "The third criterion is the whole difficulty: widescreen shows what the hardware never drew, so each layer needs a declared policy (extend, repeat, letterbox) rather than a global switch."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W8-06",
+   "title": "HUD separation (profile-driven + heuristic)",
+   "phase": 8,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**"
+   ],
+   "depends_on": [
+    "W7-07"
+   ],
+   "acceptance": [
+    "HUD separation per FR-ENH-007, driven by a profile declaration and by a heuristic where none is declared",
+    "the heuristic's inputs are the ScrollWrite and HDMA events EMULATION_CORES.md section 3.2 names, not pixel guessing",
+    "a false positive is visible in the ledger rather than silently altering the picture"
+   ],
+   "notes": [
+    "Depends on W7-07 because HDMA is what makes most split-screen HUDs work, and section 3.2 says those events feed this directly."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W8-07",
+   "title": "Profile-declared loading fast-forward",
+   "phase": 8,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "fast-forward during profile-declared loading windows (FR-ENH-008), off by default and ledger-logged",
+    "the emulated machine's state is IDENTICAL to running at normal speed — fast-forward changes wall-clock time only, never simulation",
+    "a determinism double-run with fast-forward enabled matches one without it"
+   ],
+   "notes": [
+    "The second and third criteria are the ones that matter: a fast-forward that changes emulated state is a determinism bug (law 4), not a feature."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W8-08",
+   "title": "Smooth-camera and room-stitching experiments",
+   "phase": 8,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "profiles/**"
+   ],
+   "depends_on": [
+    "W8-06"
+   ],
+   "acceptance": [
+    "profile-gated entity interpolation (smooth camera) and room-stitching for top-down profiles (ROADMAP P8)",
+    "both are opt-in overlays with honesty-contract UI labels, and Accuracy Mode shows neither",
+    "each ships with the A-B test ROADMAP P8's exit criteria require"
+   ],
+   "notes": [
+    "ROADMAP P8's exit criteria are explicit that EACH feature ships with its own golden/A-B tests, per-game override knobs and honesty-contract labels — that is acceptance, not decoration."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W8-09",
+   "title": "Frame-interpolation experiment (design first)",
+   "phase": 8,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "docs/design/**",
+    "crates/rf-enhance/**"
+   ],
+   "depends_on": [
+    "W8-08"
+   ],
+   "acceptance": [
+    "a design document precedes any implementation, per TRACEABILITY G5",
+    "the design states what interpolation can and cannot preserve, and how it interacts with the determinism invariant",
+    "if implemented, it is opt-in, labelled, and absent from Accuracy Mode"
+   ],
+   "notes": [
+    "TRACEABILITY G5 requires design-first for this specifically. The first criterion is therefore a gate, not a formality."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W8-10",
+   "title": "AI upscaling cache + replacement pack format",
+   "phase": 8,
+   "crate": "rf-ai",
+   "write_scope": [
+    "crates/rf-ai/**",
+    "crates/rf-enhance/**",
+    "docs/design/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "the offline pack pipeline and cache per FR-AI-001/002/003/004, cache-keyed so a pack is reproducible from its inputs",
+    "animation-set grouping and the pack manifest format per ENHANCEMENT_RUNTIME.md section 6",
+    "a pack that does not match its declared inputs is REFUSED with a diagnostic rather than partially applied"
+   ],
+   "notes": [
+    "The third criterion is the honesty contract in mechanical form: a half-applied replacement pack is worse than none, because the player cannot tell which pixels are the game's."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W8-11",
+   "title": "HD-pack loader: Mesen-compatible identity + hires.txt import",
+   "phase": 8,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W8-10"
+   ],
+   "acceptance": [
+    "an HD-pack loader with Mesen-compatible tile identity, so existing community packs load",
+    "hires.txt import (SCOPE's asset-replacement row)",
+    "a pack builder that records while playing, producing a pack the loader accepts — round-tripped in a test"
+   ],
+   "notes": [
+    "The round trip is the acceptance: a builder whose output its own loader rejects is the failure mode to design against."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W8-12",
+   "title": "Translation and accessibility overlays",
+   "phase": 8,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "profiles/**"
+   ],
+   "depends_on": [
+    "W8-06"
+   ],
+   "acceptance": [
+    "translation and accessibility overlays driven by profile declarations",
+    "overlays are opt-in, ledger-logged, and absent in Accuracy Mode",
+    "text an overlay replaces is identifiable in the ledger, so a player can always tell what was changed"
+   ],
+   "notes": [
+    "Same honesty contract as every other enhancement: the player must be able to tell what is the game and what is ours."
+   ],
+   "points": 5,
+   "status": "todo",
    "stories": []
   }
  ]
