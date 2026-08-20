@@ -56,6 +56,41 @@ fn adler32(bytes: &[u8]) -> u32 {
     (b << 16) | a
 }
 
+/// The zlib stream for one frame's raw scanlines, using stored deflate
+/// blocks (see the module doc for why no compressor is needed).
+fn zlib_stored(raw: &[u8]) -> Vec<u8> {
+    let mut z = vec![0x78, 0x01]; // CM=8/CINFO=7, FCHECK making it %31==0
+    let mut offset = 0usize;
+    if raw.is_empty() {
+        z.extend_from_slice(&[0x01, 0x00, 0x00, 0xFF, 0xFF]);
+    }
+    while offset < raw.len() {
+        // A stored block's LEN field is 16 bits, so 65535 bytes max.
+        let take = (raw.len() - offset).min(0xFFFF);
+        let final_block = offset + take == raw.len();
+        z.push(u8::from(final_block));
+        #[allow(clippy::cast_possible_truncation)]
+        let len = take as u16;
+        z.extend_from_slice(&len.to_le_bytes());
+        z.extend_from_slice(&(!len).to_le_bytes());
+        z.extend_from_slice(&raw[offset..offset + take]);
+        offset += take;
+    }
+    z.extend_from_slice(&adler32(raw).to_be_bytes());
+    z
+}
+
+/// Raw scanlines for one frame, each prefixed with filter type 0 (None).
+fn raw_scanlines(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let stride = (width as usize) * 4;
+    let mut raw = Vec::with_capacity((height as usize) * (stride + 1));
+    for y in 0..height as usize {
+        raw.push(0);
+        raw.extend_from_slice(&rgba[y * stride..(y + 1) * stride]);
+    }
+    raw
+}
+
 fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
     #[allow(clippy::cast_possible_truncation)]
     out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
@@ -85,32 +120,8 @@ pub fn encode_rgba(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
     // Raw scanlines, each prefixed with filter type 0 (None). Filtering
     // exists to help compression; with stored blocks there is nothing to
     // help, so None is both correct and the honest choice.
-    let stride = (width as usize) * 4;
-    let mut raw = Vec::with_capacity((height as usize) * (stride + 1));
-    for y in 0..height as usize {
-        raw.push(0);
-        raw.extend_from_slice(&rgba[y * stride..(y + 1) * stride]);
-    }
-
-    // zlib stream: header, stored deflate blocks, Adler-32 of `raw`.
-    let mut z = vec![0x78, 0x01]; // CM=8/CINFO=7, FCHECK making it %31==0
-    let mut offset = 0usize;
-    if raw.is_empty() {
-        z.extend_from_slice(&[0x01, 0x00, 0x00, 0xFF, 0xFF]);
-    }
-    while offset < raw.len() {
-        // A stored block's LEN field is 16 bits, so 65535 bytes max.
-        let take = (raw.len() - offset).min(0xFFFF);
-        let final_block = offset + take == raw.len();
-        z.push(u8::from(final_block));
-        #[allow(clippy::cast_possible_truncation)]
-        let len = take as u16;
-        z.extend_from_slice(&len.to_le_bytes());
-        z.extend_from_slice(&(!len).to_le_bytes());
-        z.extend_from_slice(&raw[offset..offset + take]);
-        offset += take;
-    }
-    z.extend_from_slice(&adler32(&raw).to_be_bytes());
+    let raw = raw_scanlines(rgba, width, height);
+    let z = zlib_stored(&raw);
 
     let mut out = Vec::with_capacity(z.len() + 128);
     out.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
@@ -250,6 +261,271 @@ mod tests {
             let row = &raw[y * (stride + 1)..(y + 1) * (stride + 1)];
             assert_eq!(row[0], 0, "row {y} filter byte must be None");
             assert_eq!(&row[1..], &rgba[y * stride..(y + 1) * stride], "row {y}");
+        }
+    }
+}
+
+/// Encode a sequence of RGBA frames as an **APNG** (ticket W8-03;
+/// FR-FE-007).
+///
+/// ## Why APNG rather than an encoder dependency
+///
+/// `docs/design/FRONTEND_UI.md` §5 left the backend open — "ffmpeg
+/// sidecar or gstreamer TBD at W8 planning". Both are large decisions:
+/// an ffmpeg sidecar makes recording depend on an external binary being
+/// installed and on shelling out; gstreamer is a substantial native
+/// dependency with its own licence review (NFR-011).
+///
+/// APNG needs neither. It is PNG with three extra chunk types, so it
+/// reuses this module's existing stored-deflate encoder wholesale — the
+/// same reasoning that produced [`encode_rgba`] rather than a `png`
+/// crate dependency, applied one step further. The result plays in every
+/// browser, in macOS Preview, and in ffmpeg/mpv.
+///
+/// It is uncompressed, so it is **large** — this is a recording format
+/// for clips and bug reports, not for hour-long captures. Said plainly
+/// rather than discovered later.
+///
+/// ## The chunk order matters
+///
+/// `acTL` must precede the first `IDAT`, frame 0's pixels live in `IDAT`
+/// (not `fdAT`), and every subsequent frame is an `fcTL`/`fdAT` pair
+/// whose sequence numbers form one shared, gapless sequence across both
+/// chunk types. Getting that sequence wrong produces a file that decodes
+/// as a still image — the first frame only — which looks like "recording
+/// captured one frame" rather than like a malformed file.
+///
+/// # Panics
+/// Panics if `frames` is empty, if a frame is not `width * height * 4`
+/// bytes, or if either dimension is zero.
+#[must_use]
+pub fn encode_apng(frames: &[Vec<u8>], width: u32, height: u32, fps: u16) -> Vec<u8> {
+    assert!(width > 0 && height > 0, "png::encode_apng: zero dimension");
+    assert!(!frames.is_empty(), "png::encode_apng: no frames");
+    let expected = (width as usize) * (height as usize) * 4;
+    for (i, f) in frames.iter().enumerate() {
+        assert_eq!(
+            f.len(),
+            expected,
+            "png::encode_apng: frame {i} is not {width}x{height} RGBA"
+        );
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit, RGBA, no interlace
+    chunk(&mut out, b"IHDR", &ihdr);
+
+    // acTL: frame count and play count. This is the chunk a reader uses
+    // to learn how many frames there are, which makes it exactly what
+    // FR-FE-007's "frame count matches" is checkable against.
+    let mut actl = Vec::with_capacity(8);
+    #[allow(clippy::cast_possible_truncation)]
+    actl.extend_from_slice(&(frames.len() as u32).to_be_bytes());
+    actl.extend_from_slice(&0u32.to_be_bytes()); // 0 = loop forever
+    chunk(&mut out, b"acTL", &actl);
+
+    // One shared sequence across fcTL and fdAT.
+    let mut seq: u32 = 0;
+    let delay_den = if fps == 0 { 60 } else { fps };
+
+    let fctl = |seq: u32| -> Vec<u8> {
+        let mut v = Vec::with_capacity(26);
+        v.extend_from_slice(&seq.to_be_bytes());
+        v.extend_from_slice(&width.to_be_bytes());
+        v.extend_from_slice(&height.to_be_bytes());
+        v.extend_from_slice(&0u32.to_be_bytes()); // x offset
+        v.extend_from_slice(&0u32.to_be_bytes()); // y offset
+        v.extend_from_slice(&1u16.to_be_bytes()); // delay numerator
+        v.extend_from_slice(&delay_den.to_be_bytes()); // denominator = fps
+        v.push(0); // dispose: none
+        v.push(0); // blend: source
+        v
+    };
+
+    chunk(&mut out, b"fcTL", &fctl(seq));
+    seq += 1;
+    // Frame 0's pixels go in IDAT, never fdAT.
+    chunk(
+        &mut out,
+        b"IDAT",
+        &zlib_stored(&raw_scanlines(&frames[0], width, height)),
+    );
+
+    for frame in &frames[1..] {
+        chunk(&mut out, b"fcTL", &fctl(seq));
+        seq += 1;
+        let mut fdat = seq.to_be_bytes().to_vec();
+        seq += 1;
+        fdat.extend_from_slice(&zlib_stored(&raw_scanlines(frame, width, height)));
+        chunk(&mut out, b"fdAT", &fdat);
+    }
+
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+/// Read an APNG's declared frame count out of its `acTL` chunk.
+///
+/// Exists so a test can assert FR-FE-007's "frame count matches the
+/// frames emitted" **against the file** rather than against the encoder's
+/// own bookkeeping — which would pass even if the file were malformed.
+#[must_use]
+pub fn apng_frame_count(bytes: &[u8]) -> Option<u32> {
+    let mut i = 8; // past the signature
+    while i + 8 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes[i..i + 4].try_into().ok()?) as usize;
+        let kind = &bytes[i + 4..i + 8];
+        if kind == b"acTL" && len >= 4 {
+            return Some(u32::from_be_bytes(bytes[i + 8..i + 12].try_into().ok()?));
+        }
+        i += 12 + len; // length + type + payload + crc
+    }
+    None
+}
+
+#[cfg(test)]
+mod apng_tests {
+    use super::*;
+
+    fn frame(w: u32, h: u32, fill: u8) -> Vec<u8> {
+        vec![fill; (w * h * 4) as usize]
+    }
+
+    /// **FR-FE-007's frame count, checked against the FILE.**
+    ///
+    /// Reading it back out of the `acTL` chunk is the point: asserting
+    /// the encoder's own bookkeeping would pass even if the file were
+    /// malformed, which is exactly the failure this criterion exists to
+    /// rule out.
+    #[test]
+    fn the_declared_frame_count_matches_the_frames_encoded() {
+        for n in [1usize, 2, 5, 60] {
+            let frames: Vec<Vec<u8>> = (0..n).map(|i| frame(4, 4, i as u8)).collect();
+            let bytes = encode_apng(&frames, 4, 4, 60);
+            assert_eq!(
+                apng_frame_count(&bytes),
+                Some(n as u32),
+                "{n} frames in, {n} declared out"
+            );
+        }
+    }
+
+    /// The chunk ORDER is what makes an APNG animate rather than decode
+    /// as a still.
+    ///
+    /// `acTL` must precede the first `IDAT`, frame 0's pixels must be in
+    /// `IDAT` (not `fdAT`), and there must be one `fcTL` per frame. Get
+    /// the order wrong and a viewer shows the first frame only — which
+    /// looks like "recording captured one frame", not like a broken file.
+    #[test]
+    fn the_chunk_order_is_the_one_apng_requires() {
+        let frames: Vec<Vec<u8>> = (0..3).map(|i| frame(2, 2, i as u8 * 40)).collect();
+        let bytes = encode_apng(&frames, 2, 2, 30);
+
+        let mut kinds = Vec::new();
+        let mut i = 8;
+        while i + 8 <= bytes.len() {
+            let len = u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+            kinds.push(String::from_utf8_lossy(&bytes[i + 4..i + 8]).into_owned());
+            i += 12 + len;
+        }
+
+        assert_eq!(
+            kinds,
+            vec!["IHDR", "acTL", "fcTL", "IDAT", "fcTL", "fdAT", "fcTL", "fdAT", "IEND"],
+            "APNG chunk order"
+        );
+        let actl = kinds.iter().position(|k| k == "acTL").unwrap();
+        let idat = kinds.iter().position(|k| k == "IDAT").unwrap();
+        assert!(actl < idat, "acTL must precede the first IDAT");
+    }
+
+    /// The `fcTL`/`fdAT` sequence numbers form ONE gapless sequence
+    /// across both chunk types — a decoder rejects a gap.
+    #[test]
+    fn the_sequence_numbers_are_shared_and_gapless() {
+        let frames: Vec<Vec<u8>> = (0..4).map(|i| frame(2, 2, i as u8)).collect();
+        let bytes = encode_apng(&frames, 2, 2, 60);
+
+        let mut seqs = Vec::new();
+        let mut i = 8;
+        while i + 8 <= bytes.len() {
+            let len = u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+            let kind = &bytes[i + 4..i + 8];
+            if kind == b"fcTL" || kind == b"fdAT" {
+                seqs.push(u32::from_be_bytes(bytes[i + 8..i + 12].try_into().unwrap()));
+            }
+            i += 12 + len;
+        }
+        let expected: Vec<u32> = (0..seqs.len() as u32).collect();
+        assert_eq!(
+            seqs, expected,
+            "sequence numbers must be 0,1,2,... with no gaps"
+        );
+    }
+
+    /// A single-frame recording is still a valid APNG — the degenerate
+    /// case a "start then immediately stop" produces.
+    #[test]
+    fn a_one_frame_recording_is_valid() {
+        let bytes = encode_apng(&[frame(8, 8, 200)], 8, 8, 60);
+        assert_eq!(apng_frame_count(&bytes), Some(1));
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+        );
+        assert!(bytes.ends_with(&[b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82]));
+    }
+
+    /// Frame 0 of an APNG must be byte-identical to the still PNG of the
+    /// same image, since both go through the same encoder.
+    ///
+    /// That is what makes "a screenshot matches what was on screen" and
+    /// "a recording matches what was on screen" the same guarantee rather
+    /// than two hopes.
+    #[test]
+    fn frame_zero_encodes_the_same_pixels_as_a_still_screenshot() {
+        let img = frame(4, 4, 123);
+        let still = encode_rgba(&img, 4, 4);
+        let movie = encode_apng(std::slice::from_ref(&img), 4, 4, 60);
+
+        let idat_of = |bytes: &[u8]| -> Vec<u8> {
+            let mut i = 8;
+            while i + 8 <= bytes.len() {
+                let len = u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+                if &bytes[i + 4..i + 8] == b"IDAT" {
+                    return bytes[i + 8..i + 8 + len].to_vec();
+                }
+                i += 12 + len;
+            }
+            Vec::new()
+        };
+        assert_eq!(
+            idat_of(&still),
+            idat_of(&movie),
+            "the recording's first frame must be the screenshot's pixels"
+        );
+    }
+
+    /// An fps of zero would make the delay denominator zero, which is a
+    /// division by zero for a player. It falls back rather than emitting
+    /// an unplayable file.
+    #[test]
+    fn a_zero_fps_falls_back_rather_than_emitting_an_unplayable_delay() {
+        let bytes = encode_apng(&[frame(2, 2, 1), frame(2, 2, 2)], 2, 2, 0);
+        let mut i = 8;
+        while i + 8 <= bytes.len() {
+            let len = u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+            if &bytes[i + 4..i + 8] == b"fcTL" {
+                let den = u16::from_be_bytes(bytes[i + 8 + 22..i + 8 + 24].try_into().unwrap());
+                assert_ne!(den, 0, "a zero delay denominator is unplayable");
+            }
+            i += 12 + len;
         }
     }
 }

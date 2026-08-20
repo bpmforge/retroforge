@@ -48,6 +48,7 @@ pub mod library;
 pub mod library_roots;
 pub mod mode_invariant;
 pub mod pacer;
+pub mod recording;
 pub mod rom_open;
 pub mod save_state;
 pub mod script_panel;
