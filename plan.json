@@ -4188,10 +4188,16 @@
     "the memory and CPU cost of the ring is measured and recorded, not estimated"
    ],
    "notes": [
-    "The determinism suite is the natural oracle: a rewind that is not hash-identical is a save-state bug wearing a different hat."
-   ],
+    "The determinism suite is the natural oracle: a rewind that is not hash-identical is a save-state bug wearing a different hat.",
+   "CLOSED 2026-08-20: all three criteria. crates/rf-state/src/rewind.rs implements SAVE_STATES.md section 4's ring of delta-compressed snapshots (XOR against previous + zstd) with a configurable interval and depth, OFF by default because section 4 is explicit that the memory cost is real. zstd was already an rf-state dependency and is already in TECH_STACK as 'State/canvas/cache compression' — no new dependency.",
+   "THE DELTA DIRECTION IS THE DESIGN DECISION, and it is not obvious from section 4's one sentence. The obvious reading — each snapshot XOR'd against its predecessor, reconstructed FORWARD from a base — DOES NOT SURVIVE RING EVICTION: once the base is dropped every delta chained off it is unreadable, and the ring would need periodic full snapshots to recover. This stores the deltas the other way round: the ring keeps the most recent state uncompressed, each entry is the XOR between one snapshot and the NEXT, and because XOR is its own inverse a rewind walks BACKWARDS from the live state (older = newer XOR delta). Evicting the oldest entry then costs nothing but depth — no base to lose, no full snapshot to schedule.",
+   "CRITERION 2 IS THE ACCEPTANCE IN EXECUTABLE FORM. A reference machine runs 300 frames straight through; a second runs the same inputs, rewinds 100 frames, and replays forward from the snapshot it landed on. The two are compared BYTE FOR BYTE. A rewind that lands somewhere plausible but not identical is exactly the bug worth catching, and only that comparison catches it. The test machine is state-shaped rather than a counter on purpose — the ring's whole premise is that consecutive states differ in a small fraction of their bytes, and a counter would not exercise it.",
+   "CRITERION 3 IS MEASURED, NOT ESTIMATED, which is what it asked for. RewindRing tracks its own compressed size and exposes it next to what the same snapshots would cost whole; the test asserts an order-of-magnitude saving and PRINTS the real figure. Measured here: 64 snapshots of a 4 KiB machine cost 4,608 bytes compressed against 266,760 uncompressed — 57.9x. That is the number a UI can show, and it is the claim the XOR-then-compress design rests on: compressing raw states instead would spend the same CPU for a far larger ring.",
+   "TWO SMALLER THINGS WORTH KNOWING. push() is CHEAP WHEN DISABLED and returns immediately, so callers invoke it unconditionally rather than branching at every call site — and a test asserts the disabled ring retains nothing and reports zero bytes. And a state whose LENGTH changes (it should not, but a core could grow a chunk) falls back to storing the older state whole, so the ring degrades in SIZE rather than in correctness; that path has its own test.",
+   "WHAT IS DELIBERATELY NOT HERE: the input-replay half of section 4's 'rewind replays inputs from nearest snapshot'. RewindRing lands the caller on the nearest retained snapshot and stops, because replaying inputs needs a machine and rf-state owns no machine — the caller does. FRONTEND_UI.md section 5's hold-key scrub with a ghost timeline is likewise UI work and belongs with the front end, not the container crate."
+  ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {

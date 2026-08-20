@@ -24,6 +24,7 @@ mod error;
 mod header;
 mod migrate;
 mod payload;
+mod rewind;
 mod tags;
 
 pub use chunk::Chunk;
@@ -32,6 +33,7 @@ pub use error::{ContainerError, LoadWarning};
 pub use header::Header;
 pub use migrate::{MigrateFn, MigrationRegistry};
 pub use payload::{decode_payload, encode_payload, ReplayCursor};
+pub use rewind::{RewindConfig, RewindRing};
 pub use tags::{is_required, tag_info, TagInfo, TAG_REGISTRY};
 
 /// Crate marker used by the test harness to confirm workspace wiring.
