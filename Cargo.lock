@@ -3472,6 +3472,7 @@ dependencies = [
  "rf-nes",
  "rf-profiles",
  "rf-renderer",
+ "rf-snes",
  "serde",
  "sha2",
  "toml",

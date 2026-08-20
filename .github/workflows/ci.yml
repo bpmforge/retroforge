@@ -39,6 +39,14 @@ jobs:
         # from one source with a -D switch and the script refuses a hash
         # mismatch rather than re-pinning silently.
         run: fixtures/snes/mirror-map/build.sh
+      - name: build RF-Scroller-S fixture (W6-05, deterministic from source)
+        # D-001: game-shaped content the project demos or regresses on is
+        # OURS, in-repo, built from source in CI — never a fetched binary.
+        # Same cc65 as every other fixture here, and the same contract:
+        # this script is the single command that turns source into the
+        # bytes fixtures/snes/rf-scroller-s/rom.sha256 pins, and it refuses
+        # a mismatch rather than re-pinning silently.
+        run: fixtures/snes/rf-scroller-s/build.sh
 
       - name: build RF-Scroller fixture ROM (D-001, deterministic from source)
         # fixtures/nes/rf-scroller/build.sh is the SAME command a local

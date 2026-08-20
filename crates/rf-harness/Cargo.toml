@@ -16,6 +16,10 @@ rf-core-api = { path = "../rf-core-api" }
 # "console cores only via rf-core-api" layer rule as "the test harness"
 # itself (scripts/validate-arch.sh rule 3).
 rf-nes = { path = "../rf-nes" }
+# rf-snes: the RF-Scroller-S replay gate (ticket W6-05, FR-CORE-037), the
+# SNES counterpart of the rf-nes dependency above and permitted by the
+# same no-direct-core exemption.
+rf-snes = { path = "../rf-snes" }
 # rf-enhance + rf-profiles: ticket W5-02b runs the offline
 # `metatile_screens` decoder against a live core and compares its output
 # with the nametable bytes the ROM itself streams into VRAM. rf-enhance
