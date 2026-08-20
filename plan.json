@@ -3677,7 +3677,7 @@
     "expand W7 (DMA/HDMA, modes 2-7 incl. Mode 7, color math/windows/mosaic, save states, BRR/echo/gaussian, HD-Mode-7-class internal resolution (ROADMAP P7), interlace/overscan (EMULATION_CORES.md section 3.3), profile [mods] patch engine ledgered + off-by-default (FR-ENH-009), PAL timing config per EMULATION_CORES.md section 3, NES AxROM+Action 53 mappers to ~96% coverage per FR-CORE-027) into tickets with acceptance from docs/design/EMULATION_CORES.md + TESTING.md gates"
    ],
    "points": 2,
-   "status": "todo",
+   "status": "done",
    "stories": [
     "E8-S2",
     "E9-S1",
@@ -3730,6 +3730,305 @@
     "E12-S2",
     "E12-S3"
    ]
+  },
+  {
+   "id": "W7-02",
+   "title": "rf-input: SNES button set + generalised replay log key",
+   "phase": 7,
+   "crate": "rf-input",
+   "write_scope": [
+    "crates/rf-input/**",
+    "crates/rf-harness/**",
+    "fixtures/snes/**"
+   ],
+   "depends_on": [
+    "W6-04b"
+   ],
+   "acceptance": [
+    "a SnesButton set exists and PortLogKey carries a console-appropriate button list (today it is Vec<NesButton>, and canonical_log_key() always writes the $4016 read order)",
+    "a SNES InputFrame survives a .rfreplay record -> serialize -> parse -> replay round trip with every bit intact, including buttons above bit 7",
+    "existing NES .rfreplay files still parse byte-identically — the format change must be backward compatible, and its own tests must prove it",
+    "RF-Scroller-S's 5-minute log is gated as a real .rfreplay, completing W6-05 criterion 3"
+   ],
+   "notes": [
+    "FILED BY W7-01, AND IT UNBLOCKS W6-05's HANDOFF. Found during W6-05: .rfreplay cannot represent SNES input at all. PortLogKey::buttons is a Vec<NesButton>, canonical_log_key() writes the $4016 order, and rf-input has NO SnesButton type — so a SNES button outside the NES 8-bit set (Right is bit 8) has no log-key entry and is SILENTLY DROPPED on serialisation.",
+    "EVIDENCE, not theory: recording RF-Scroller-S's 'hold Right' log and replaying it diverged at the FIRST checkpoint (frame 600) because run 2 received buttons == 0. The emulator was deterministic throughout — verified by comparing two independent machines directly, which passes at all 30 checkpoints. The log was lossy.",
+    "crates/rf-harness/tests/rf_scroller_s_replay.rs::the_replay_format_still_cannot_represent_snes_buttons pins the gap TODAY and fails with instructions the moment this lands. Delete it as part of this ticket.",
+    "BACKWARD COMPATIBILITY IS THE RISK. .rfreplay is a documented wire format with existing NES logs and round-trip tests; widening PortLogKey must not change what an NES log serialises to. Prove it, do not assume it.",
+    "CLOSED 2026-08-20: phase 7 expanded into W7-02..W7-13, with acceptance drawn from docs/design/EMULATION_CORES.md sections 3.2/3.3/3.4 and docs/TESTING.md's gate rows. Every area this ticket's own acceptance names is covered: DMA/HDMA (W7-07), modes 2-6 (W7-03), Mode 7 plus HD-Mode-7-class internal resolution (W7-04), colour math/windows/mosaic (W7-05), interlace/overscan/hires (W7-06), SNES save states (W7-09), BRR echo/gaussian (W7-08), the [mods] patch engine (W7-12), PAL timing (W7-10), AxROM + Action 53 (W7-11), and the PeterLemon/undisbeliever golden breadth (W7-13). No ticket exceeds 8 points.",
+    "ONE TICKET FILED THAT THIS ACCEPTANCE DID NOT ANTICIPATE: W7-02, SNES support in rf-input's .rfreplay format. It was found during W6-05, which cannot finish its replay-gate criterion without it — PortLogKey::buttons is a Vec<NesButton>, there is no SnesButton type, and SNES buttons above bit 7 are silently dropped on serialisation. Filed as a ticket rather than left in a handoff note because it BLOCKS AN ALREADY-OPEN TICKET, and because 'the replay format is NES-only' is exactly the kind of fact that stays invisible until someone tries to use it.",
+    "A NOTE ON EDITING THIS FILE, since this ticket added twelve entries at once: plan.json's unicode escaping is MIXED — some strings carry literal em-dashes, others carry \\u2014 — so no json.load/json.dumps round trip reproduces it, at ANY ensure_ascii setting. A round trip here churned 4027 lines before it was reverted; the same twelve tickets inserted by targeted text surgery are 296 insertions and zero deletions. Append by text, never by re-serialising the whole board."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-03",
+   "title": "SNES PPU: BG modes 2-6 + offset-per-tile",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W6-03b"
+   ],
+   "acceptance": [
+    "BG modes 2-6 per BGMODE ($2105) with their documented bit depths and layer counts",
+    "offset-per-tile in modes 2/4/6 (EMULATION_CORES.md section 3.3)",
+    "direct-color mode 3/4 via CGWSEL",
+    "the PeterLemon 8BPP BGMAP goldens (32x32, 32x64, 64x32, 64x64, TileFlip) green"
+   ],
+   "notes": [
+    "W6-03a implemented modes 0/1 only, and W6-03b's golden runner ASSERTS the ROM's BG mode is one the PPU implements before hashing — so adding a mode is what unlocks its goldens rather than a separate wiring job.",
+    "The 4BPP BGMAP ROM excluded at W6-03b is actually MODE 3 (8bpp BG1 + 4bpp BG2), verified by running it. It belongs to this ticket, not to a mode-1 ticket."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-04",
+   "title": "SNES PPU: Mode 7 + HD-Mode-7-class internal resolution",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W7-03"
+   ],
+   "acceptance": [
+    "Mode 7 matrix ($211B-$211E) as 8.8 fixed point, with the M7A x M7B product readable at $2134-$2136",
+    "1024x1024 playfield with screen-over repeat/clamp per M7SEL",
+    "HD-Mode-7-class internal resolution: the SAME matrix math sampled at higher density (ROADMAP P7), opt-in and off in Accuracy Mode (law 6)",
+    "PeterLemon Mode 7 goldens (RotZoom, Perspective, StarWars) green at 1x"
+   ],
+   "notes": [
+    "EXTBG (mode 7 BG2 priority bit) is explicitly Phase 7 per section 3.3 — keep it here rather than deferring further.",
+    "The HD variant must be an OVERLAY over an unmodified simulation (law 6): a fresh install boots in Accuracy Mode and renders 1x, and the golden set above gates the 1x path."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-05",
+   "title": "SNES PPU: windows, color math, mosaic",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W7-03"
+   ],
+   "acceptance": [
+    "windows WH0-WH3 with per-layer window logic (OR/AND/XOR/XNOR) and clip-to-black vs color-math masking ($2130)",
+    "color math: CGADSUB add/sub, half, per-layer enable, fixed color $2132, sub-screen composition",
+    "mosaic ($2106) including the mode-7 mosaic quirks",
+    "undisbeliever window/HDMA-gradient ROMs green as golden frames"
+   ],
+   "notes": [],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-06",
+   "title": "SNES PPU: interlace, overscan, hires modes 5/6",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W7-05"
+   ],
+   "acceptance": [
+    "interlace + overscan via SETINI, with the frame emitting 224 or 239 visible lines and the renderer letterboxing",
+    "pseudo-hires and hires modes 5/6 emitting 512-wide scanlines, with the PpuPixel stream carrying a width tag per line (EMULATION_CORES.md section 3.3)",
+    "PeterLemon Interlace ROMs green"
+   ],
+   "notes": [
+    "The per-line width tag is an rf-core-api shape question, not only an rf-snes one — check whether CoreSink::video_scanline can carry it before assuming, and file the api change separately if it cannot."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-07",
+   "title": "SNES DMA/HDMA: edge cases and the HDMA table walker",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W6-04b"
+   ],
+   "acceptance": [
+    "HDMA ($420C) per-scanline table walker: line-counter reload semantics (repeat bit, $00 terminator), indirect-mode bank register, HDMA init at start-of-frame and per-line timing windows",
+    "HDMA/MDMA collision (HDMA steals mid-MDMA)",
+    "DMA-to-$2180 and $4300-region open-bus edge cases",
+    "undisbeliever snes-test-roms DMA/HDMA set green as golden frames"
+   ],
+   "notes": [
+    "W6-02a delivered MDMA basics only, explicitly scoped to 'sufficient to boot libSFX fixture ROMs' per section 3.2. HDMA is what makes gradients, wavy effects and most split-screen HUDs work, and it feeds rf-enhance's HUD-separation heuristics (ScrollWrite + HDMA events) — so this gates W8 work too."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-08",
+   "title": "S-DSP: echo, gaussian interpolation, ADSR/GAIN",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W6-04b"
+   ],
+   "acceptance": [
+    "gaussian interpolation filter, ADSR and GAIN envelopes, echo (with its ARAM buffer and FIR filter), pitch modulation and noise",
+    "SPC timing suites pass; BRR decoding is sample-exact (FR-CORE-036)",
+    "audio RMS comparison against a reference for a designated SPC set"
+   ],
+   "notes": [
+    "W6-04b delivered a SKELETON on purpose — BRR decode plus eight-voice mixing — with sample-exactness deferred here. What it did NOT implement is named in its close note and in the dsp module doc, so this ticket's scope is already written down rather than needing rediscovery."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-09",
+   "title": "SNES save states: .rfstate chunks for the SNES core",
+   "phase": 7,
+   "crate": "rf-state",
+   "write_scope": [
+    "crates/rf-state/**",
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W7-07"
+   ],
+   "acceptance": [
+    "SNES machine state serialises into the chunked TLV .rfstate container at frame boundaries only (FR-STATE-001)",
+    "roundtrip is hash-identical to uninterrupted execution over N frames (FR-STATE-002)",
+    "loading a state whose normalized ROM hash differs is refused with a diagnostic (FR-STATE-003)",
+    "the APU (SPC700 + ARAM + timers + DSP) and the PPU (VRAM/CGRAM/OAM) are covered, not just the CPU"
+   ],
+   "notes": [
+    "The reachable-state hash RF-Scroller-S's replay uses is a good starting inventory of what has to round-trip, but it deliberately EXCLUDES VRAM/CGRAM as outputs — a save state must include them."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-10",
+   "title": "PAL timing configuration",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W7-06"
+   ],
+   "acceptance": [
+    "PAL timing selectable per EMULATION_CORES.md section 3, which is NTSC-first and names PAL a Phase 7 config",
+    "master clock, lines per frame and vblank start switch together, with the 60.1 Hz NTSC arithmetic in crates/rf-snes/src/cpu/speed.rs and crates/rf-snes/src/timing.rs staying correct in both modes",
+    "a golden frame from a PAL-timed run differs from its NTSC counterpart in the expected way rather than by accident"
+   ],
+   "notes": [
+    "timing.rs currently hardcodes 1364 master cycles x 262 lines with vblank at line 225, and speed.rs pins MASTER_CLOCK_HZ. Those are the concrete NTSC constants this ticket has to make configurable."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-11",
+   "title": "NES mappers: AxROM (7) and Action 53 (28)",
+   "phase": 7,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-cart/**"
+   ],
+   "depends_on": [
+    "W6-05"
+   ],
+   "acceptance": [
+    "AxROM (mapper 7) and Action 53 (mapper 28) implemented, extending coverage to approximately 96% (FR-CORE-027)",
+    "the FR-CORE-013 diagnostic still fires for what remains unsupported, naming the mapper number",
+    "test ROMs for both mappers pass as golden frames or via the $6000 protocol"
+   ],
+   "notes": [
+    "Not SNES work, but it is in W7-01's acceptance and it is the last of the NES coverage target. rf-cart already reports UnsupportedMapper with the number and an optional name — extend the supported set there and in rf-nes together, or a cart will parse and then fail to run."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-12",
+   "title": "Profile [mods] patch engine: ledgered and off by default",
+   "phase": 7,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "crates/retroforge/**",
+    "profiles/**"
+   ],
+   "depends_on": [
+    "W7-09"
+   ],
+   "acceptance": [
+    "game-logic patches declared in a profile's [mods] section are OFF by default and individually user-enabled (FR-ENH-009)",
+    "every enabled mod is ledger-logged and recorded in save states, so a state records which patches were active when it was taken",
+    "a save state taken with mods enabled and loaded with them disabled is refused or reconciled explicitly, never silently mismatched"
+   ],
+   "notes": [
+    "Law 6 applies directly: Accuracy Mode is the reference and enhancements are opt-in overlays over an unmodified simulation. A patch engine is the sharpest test of that rule in the project, because it modifies game LOGIC rather than presentation."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-13",
+   "title": "PeterLemon + undisbeliever golden-frame breadth",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "scripts/**",
+    "tests/rom-manifest.toml"
+   ],
+   "depends_on": [
+    "W7-05",
+    "W7-07"
+   ],
+   "acceptance": [
+    "the PeterLemon PPU set beyond the W6-03b subset is green (BGMAP 8BPP, Blend/HiColor, HDMA, Rings, GreenSpace, Mosaic)",
+    "the undisbeliever snes-test-roms set is green",
+    "each ROM's BG mode is asserted implemented before its golden is hashed, extending the W6-03b guard rather than bypassing it"
+   ],
+   "notes": [
+    "W6-03b fetches per-file from the pinned commit rather than the 240 MB archive (scripts/fetch-peterlemon-ppu.sh); extend that list rather than reinstating the archive.",
+    "ITS GUARD IS THE POINT: the runner refuses to hash a frame whose BG mode the PPU does not implement, because a golden pinned on the mode-0 fallback's garbage would go green forever while recording a wrong picture. Every ROM added here must keep that property."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
   }
  ]
 }
