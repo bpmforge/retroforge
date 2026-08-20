@@ -625,3 +625,25 @@ Nightly CI compares against `benches/baseline.json`; >10% regression fails
 the run and blocks merge until re-baselined with justification in the PR.
 NFR-002 targets (NES ≤2 ms, SNES ≤8 ms per frame) are re-baselined after
 Phase 1/6 measurements — treat as budgets, not guesses, thereafter.
+
+## Hidden gates: `#[ignore]`d tests CI never runs (W7-14)
+
+`cargo test --workspace` — which is what CI runs — **skips every
+`#[ignore]`d test**. Several Tier-A gates are `#[ignore]`d because they
+cost minutes of emulated time or need fetched, gitignored artifacts, so
+they are invisible to CI by construction.
+
+That is not hypothetical. RF-Scroller's five-minute NES replay was **red
+for months and green in CI the whole time**: W5-02c changed the fixture
+ROM (`rom.sha256` moved) without regenerating the golden hashes gating it,
+and nothing ran the test that would have said so. It was found by accident
+while proving an unrelated change's backward compatibility.
+
+`scripts/local-gate.sh` is the answer, and every such suite must be wired
+into it. As of W7-14 it runs: the nes6502 and 65816 and spc700 vector
+suites, nestest, the ppu_vbl_nmi / sprite_hit_tests / apu_test ROM sets,
+gilyon `cputest`, the PeterLemon PPU goldens, the 10k-frame determinism
+double-run, and **both five-minute replays** (NES and SNES).
+
+**If you add an `#[ignore]`d test that gates behaviour, add it to
+`local-gate.sh` in the same commit.** A gate nothing runs is not a gate.

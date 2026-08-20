@@ -160,6 +160,29 @@ if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
   exit 1
 fi
 
+# The #[ignore]'d five-minute REPLAY suites (ticket W7-14).
+#
+# WHY THESE ARE HERE AT ALL, and why it is not optional. RF-Scroller's
+# NES replay had been RED since W5-02c and green in CI the entire time:
+# that ticket changed the fixture ROM without regenerating the goldens
+# gating it, and because the test is #[ignore]'d while CI runs plain
+# `cargo test --workspace`, nothing ever ran it. It was found by accident,
+# months later, while proving an unrelated change's backward compatibility.
+#
+# An #[ignore]'d Tier-A gate that no automation runs is not a gate. These
+# two lines are the difference.
+echo "local-gate: running 5-minute replay suites (release)..." >&2
+if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
+  -p rf-harness --test rf_scroller_replay -- --ignored --nocapture; then
+  echo "local-gate: RF-Scroller (NES) replay FAILED" >&2
+  exit 1
+fi
+if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
+  -p rf-harness --test rf_scroller_s_replay -- --ignored --nocapture; then
+  echo "local-gate: RF-Scroller-S (SNES) replay FAILED" >&2
+  exit 1
+fi
+
 if [ ! -d "$vectors_dir" ]; then
   echo "local-gate: nes6502 vectors not found at $vectors_dir" >&2
   echo "Fetch them first: scripts/fetch-test-roms.sh singlestep-nes6502-src" >&2

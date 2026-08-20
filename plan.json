@@ -4041,10 +4041,11 @@
    "phase": 7,
    "crate": "rf-harness",
    "write_scope": [
-    "crates/rf-harness/**",
-    "fixtures/nes/**",
-    "docs/TESTING.md"
-   ],
+   "crates/rf-harness/**",
+   "fixtures/nes/**",
+   "docs/TESTING.md",
+   "scripts/local-gate.sh"
+  ],
    "depends_on": [],
    "acceptance": [
     "the cause of the frozen frames is DIAGNOSED and written down before any hash is re-pinned — frames 1200, 2400, 5000, 10000 and 15000 currently all hash identically, which is a static screen, not a scroller",
@@ -4057,10 +4058,14 @@
     "DIAGNOSIS: fixtures/nes/rf-scroller/rom.sha256 last changed in 226b137 (W5-02c, 'stream before thinking — the fixture was overrunning vblank'). The GOLDEN_HASHES in crates/rf-harness/tests/rf_scroller_replay.rs last changed in 3d9607e (W2-21), which is EARLIER. So W5-02c changed the fixture ROM and never regenerated the goldens that gate it.",
     "WHY NOBODY NOTICED: the five-minute test is #[ignore]'d and CI runs plain `cargo test --workspace`, which skips ignored tests. The suite has been red locally and green in CI since W5-02c. This is the exact failure class docs/TESTING.md and the project's own notes call out — an ignored replay golden that a green workspace run does not cover.",
     "DO NOT JUST RE-PIN. Frames 1200, 2400, 5000, 10000 and 15000 all hash to the same value today, which means the screen stops changing after ~frame 1200. That is either a real freeze introduced by W5-02c's streaming fix or a capture straddle, and re-pinning would enshrine whichever it is. W6-03b's lesson applies directly: a self-generated golden proves only that behaviour stopped changing, so LOOK AT THE FRAMES before pinning them.",
-    "THE THIRD CRITERION IS THE DURABLE FIX. Whatever the cause, an #[ignore]'d Tier-A gate that CI never runs will go stale again. Either wire it into scripts/local-gate.sh alongside the SNES suites added in W6-01b/W6-02b/W6-03b/W6-04a, or give CI a step that runs the ignored replays."
-   ],
+    "THE THIRD CRITERION IS THE DURABLE FIX. Whatever the cause, an #[ignore]'d Tier-A gate that CI never runs will go stale again. Either wire it into scripts/local-gate.sh alongside the SNES suites added in W6-01b/W6-02b/W6-03b/W6-04a, or give CI a step that runs the ignored replays.",
+   "CLOSED 2026-08-20: all four criteria, and the diagnosis came FIRST. THE CAUSE IS NOT A FREEZE. The level is 96 raw tile columns (fixtures/nes/rf-scroller/FORMAT.md), so a scripted log of constant Right walks the player to the end at around frame 900 and parks him: player_x reaches 752, columns_streamed reaches 95 — the level's LAST raw column and the fixture's own wraparound witness — and the screen legitimately stops changing. Frames 1200, 2400, 5000, 10000 and 15000 are all the same static end-of-level view, which is why they now share a hash.",
+   "THE FRAMES WERE LOOKED AT, not merely re-pinned. Each golden was rendered to a PNG through the real NES palette and inspected: 655 shows mid-level scrolling; 1200 and 15000 show the same coherent end-of-level screen with HUD bar, platforms, collectibles and ground. A self-generated golden proves only that behaviour stopped changing, so re-pinning without looking would have enshrined whatever was there — exactly the trap W6-03b built its mode-assertion guard to avoid on the SNES side.",
+   "FIVE IDENTICAL HASHES ARE COVERAGE, NOT WASTE — worth stating because they look alarming. Spread over four minutes of emulated time, they prove the emulator produces a bit-identical frame from identical state indefinitely: any drift at all (an uninitialised byte, an accumulating counter leaking into video, a mis-scheduled DMA) breaks them. A new test, the_static_goldens_are_the_level_end_not_a_freeze, pins the REASON alongside them so 'the screen stopped changing' can never again be confused with 'the game froze'.",
+   "THE DURABLE FIX IS THE POINT OF THIS TICKET. This suite was red since W5-02c and green in CI the entire time, because it is #[ignore]'d and CI runs plain `cargo test --workspace`, which skips ignored tests. It was found by accident, during W7-02, while proving an unrelated change's backward compatibility. BOTH five-minute replays (NES and SNES) are now wired into scripts/local-gate.sh, and docs/TESTING.md has a new 'Hidden gates' section naming the whole class with this incident as its worked example and one rule: if you add an #[ignore]'d test that gates behaviour, add it to local-gate.sh IN THE SAME COMMIT. A gate nothing runs is not a gate."
+  ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   }
  ]

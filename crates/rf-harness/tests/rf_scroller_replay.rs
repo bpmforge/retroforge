@@ -440,14 +440,75 @@ fn reachable_state_hash(bus: &NesBus, cpu: &Cpu) -> String {
 /// is exactly what a one-cycle DMA shift does. (W2-11's lesson — a replay
 /// can look healthy by hashes while the player has actually died and
 /// returned to the title screen — is what those witnesses exist for.)
+/// # Regenerated at W7-14 (2026-08-20), after diagnosis rather than by
+/// re-pinning
+///
+/// These had been stale since **W5-02c**, which changed the fixture ROM
+/// (`rom.sha256` moved in 226b137) without regenerating the goldens that
+/// gate it (last touched in 3d9607e, W2-21). The suite was red locally
+/// and green in CI the whole time, because it is `#[ignore]`d and CI runs
+/// plain `cargo test --workspace`. That gap is now closed by
+/// `scripts/local-gate.sh`, which runs this suite.
+///
+/// **The last five entries are identical, and that is correct.** The
+/// level is 96 raw tile columns (FORMAT.md), so a scripted log of
+/// constant Right walks the player to the end at around frame 900 and
+/// parks him there: `player_x` reaches 240, `columns_streamed` reaches
+/// 95, and the screen stops changing. Frames 1200, 2400, 5000, 10000 and
+/// 15000 are all the same static end-of-level view.
+///
+/// Far from being wasted coverage, that makes them a **drift detector**:
+/// five identical hashes spread over four minutes prove the emulator
+/// produces a bit-identical frame from identical state indefinitely.
+/// A drift of any kind — an uninitialised byte, an accumulating counter
+/// leaking into video, a mis-scheduled DMA — breaks them.
+///
+/// Each frame was **rendered to a PNG and looked at** before its hash was
+/// pinned (655 shows mid-level scrolling; 1200 and 15000 show the same
+/// coherent end-of-level screen with HUD, platforms and collectibles).
+/// A self-generated golden proves only that behaviour stopped changing,
+/// so re-pinning without looking would have enshrined whatever was there
+/// — which is precisely the trap W6-03b's golden runner was built to
+/// avoid on the SNES side.
 const GOLDEN_HASHES: [&str; 6] = [
-    "5b215ab63ae0c3f05eb338fc1b3c21be0801c1764bcc5882e5418dc60fa54d29",
-    "f0023c286a5b5501f2653e32ce6bbbd9535a4348912cc650dc409c8e14319a2d",
-    "10a4e6fdc85f4813282fa8e3382fc6850477d970cfbbf016d84c89150fe6dfc8",
-    "e30948c92dbc596e86824947237904e7eb9add527b97a82a7e54359f8ec65a9e",
-    "6482a3febd05bec94a2b0a0c1d07d03596f3b11916c56d388845c1aec2198ce1",
-    "a60a937fa1f0fe2a8e6b868b85e394a8b3848ada647eb3e7b0432d8e705638e7",
+    "ff81bcbcb485fd2f56f506e04dc3ac821469855d6b1f05c8416bab3cf86d9214",
+    "c890423f5e8efed5f95daeaf4253242d0d80d8fb2ae88f4893503517bb4aa6c9",
+    "c890423f5e8efed5f95daeaf4253242d0d80d8fb2ae88f4893503517bb4aa6c9",
+    "c890423f5e8efed5f95daeaf4253242d0d80d8fb2ae88f4893503517bb4aa6c9",
+    "c890423f5e8efed5f95daeaf4253242d0d80d8fb2ae88f4893503517bb4aa6c9",
+    "c890423f5e8efed5f95daeaf4253242d0d80d8fb2ae88f4893503517bb4aa6c9",
 ];
+
+/// The end-of-level state the goldens above settle into, asserted
+/// separately so that "the screen stopped changing" can never be
+/// confused with "the game froze".
+///
+/// Five identical hashes look alarming until you can point at the reason.
+/// This pins the reason.
+#[test]
+fn the_static_goldens_are_the_level_end_not_a_freeze() {
+    let Some(path) = resolve_rom() else {
+        eprintln!("SKIP: build fixtures/nes/rf-scroller");
+        return;
+    };
+    let rom_bytes = std::fs::read(path).expect("rom readable");
+    let mut bus = NesBus::from_ines_bytes(&rom_bytes).expect("valid iNES");
+    let mut cpu = Cpu::power_on(&mut bus);
+    let mut sink = NullSink;
+    for _ in 0..1200 {
+        run_frame(&mut bus, &mut cpu, scripted_buttons(0), &mut sink);
+    }
+    assert_eq!(
+        bus.peek(COLUMNS_STREAMED_ADDR),
+        COLUMNS_STREAMED_AT_END,
+        "the level's last raw column must have been reached"
+    );
+    assert_eq!(
+        peek_u16(&bus, PLAYER_X_ADDR),
+        PLAYER_X_AT_END,
+        "the player must be parked at the level's end, not stuck somewhere else"
+    );
+}
 
 /// Fast anti-vacuity check (NOT `#[ignore]`'d -- runs on every
 /// `cargo test --workspace` once the ROM is built): drives 900 frames of
