@@ -3497,8 +3497,10 @@
    "phase": 6,
    "crate": "rf-snes",
    "write_scope": [
-    "crates/rf-snes/src/ppu/**"
-   ],
+      "crates/rf-snes/**",
+      "scripts/**",
+      "tests/rom-manifest.toml"
+    ],
    "depends_on": [
     "W6-03a"
    ],
@@ -3516,7 +3518,7 @@
       "VRAM WRITE PORT ADDED HERE, DELIBERATELY: $2115 VMAIN, $2116/7 VMADD, $2118/9 VMDATA into a 64 KiB buffer. It is a memory-mapped REGISTER, which is W6-02a/b's business; RENDERING from it is W6-03a's, which now inherits a populated VRAM instead of having to build the port too. It is also what makes the ROM's own verdict readable without a PPU."
     ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": [
     "E8-S1"
    ]
