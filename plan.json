@@ -3884,8 +3884,10 @@
    "phase": 7,
    "crate": "rf-snes",
    "write_scope": [
-    "crates/rf-snes/**"
-   ],
+   "crates/rf-snes/**",
+   "scripts/**",
+   "tests/rom-manifest.toml"
+  ],
    "depends_on": [
     "W6-04b"
    ],
@@ -3899,7 +3901,7 @@
     "W6-02a delivered MDMA basics only, explicitly scoped to 'sufficient to boot libSFX fixture ROMs' per section 3.2. HDMA is what makes gradients, wavy effects and most split-screen HUDs work, and it feeds rf-enhance's HUD-separation heuristics (ScrollWrite + HDMA events) — so this gates W8 work too."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
