@@ -4324,7 +4324,7 @@
     "The second and third criteria are the ones that matter: a fast-forward that changes emulated state is a determinism bug (law 4), not a feature."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
