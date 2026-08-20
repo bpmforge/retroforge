@@ -3858,7 +3858,7 @@
     "windows WH0-WH3 with per-layer window logic (OR/AND/XOR/XNOR) and clip-to-black vs color-math masking ($2130)",
     "color math: CGADSUB add/sub, half, per-layer enable, fixed color $2132, sub-screen composition",
     "mosaic ($2106) including the mode-7 mosaic quirks",
-    "undisbeliever window/HDMA-gradient ROMs green as golden frames"
+    "PeterLemon PPU/Window (WindowHDMA, WindowMultiHDMA) and PPU/Mosaic (MosaicMode3, MosaicMode5) ROMs green as golden frames, each rendered and inspected by eye before its hash is pinned"
    ],
    "notes": [
    "HANDOFF 2026-08-20: criteria 1-3 COMPLETE; criterion 4 is UNSATISFIABLE AS WRITTEN — it names ROMs the pinned archive does not contain. DELIVERED: windows WH0-WH3 with per-layer enable/invert and all four combiners (OR/AND/XOR/XNOR), $212E/$212F main/sub mask gating, colour math ($2130-$2132) including add/sub/half with clamping and the four clip and prevent modes, and mosaic ($2106) wired into the fetch so it actually blockifies.",
@@ -3866,9 +3866,11 @@
    "A WINDOW MASKS THE MAIN SCREEN ONLY IF $212E SAYS SO. Games routinely configure a window and leave it disabled there, so checking the span alone makes content vanish. Tested in both directions, plus that a masked layer is REMOVED from priority resolution — the layer below shows through rather than the screen going blank.",
    "COLOUR MATH COLLIDES WITH LAW 4, AND THE SPLIT IS RECORDED RATHER THAN FUDGED. Colour math produces an RGB value that need not exist anywhere in CGRAM, but cores emit INDEXED pixels — so a blended colour cannot travel through PpuPixel at all, and the golden-frame hash (palette indices only) could not see it if it did. Delivered accordingly: CLIP-TO-BLACK runs on the indexed path and is asserted there, because black IS palette index 0; the add/sub/half arithmetic is implemented and unit-tested in RGB but does NOT enter the pixel stream. Carrying a sub-screen and blend mode across CoreSink is an rf-core-api contract change and is outside this ticket. RECOMMEND filing it — without it, colour math can never be verified by a golden frame.",
    "CRITERION 4 NAMES ROMS THAT DO NOT EXIST IN THE PINNED ARCHIVE. It asks for 'undisbeliever window/HDMA-gradient ROMs'. The manifest's pinned undisbeliever-snes-test-roms archive (20210217) was extracted and enumerated: 29 .sfc files, ALL of them hdma-*, hdmaen-*, inidisp-* or scpu-a-dma-bug-*. There is no window ROM and no gradient ROM in it. Separately, W7-07 established with direct evidence that the ROMs it DOES contain are per-dot timing tests which never leave forced blank on a scanline-composed PPU. RECOMMEND: amend this criterion to name a source that exists, or move it to the per-dot PPU ticket alongside W7-07's criterion 4."
-  ],
+  ,
+  "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). Amend acceptance rather than leave this blocked. CRITERION 4 IS REPLACED, and the replacement names ROMs VERIFIED TO EXIST: the GitHub contents API at the pinned PeterLemon commit 350b394e lists PPU/Window/{WindowHDMA,WindowMultiHDMA}/*.sfc and PPU/Mosaic/{Mode3,Mode5}/*.sfc. The old criterion asked for undisbeliever window/gradient ROMs, and that archive was enumerated at 29 files with no window and no gradient ROM among them \u2014 the artifacts were never in the archive the criterion pointed at, they were in the OTHER pinned source all along. Both replacements are expressible on a scanline PPU: window masking resolves to clip-to-black (palette index 0, on the indexed path) and mosaic is an indexed-domain operation, so neither needs the RGB sub-screen. Colour math\u2019s golden-frame verification stays OUT of this ticket and remains W7-16\u2019s, which already exists and depends on this one."
+ ],
    "points": 8,
-   "status": "blocked",
+   "status": "todo",
    "stories": []
   },
   {
@@ -3911,7 +3913,7 @@
     "HDMA ($420C) per-scanline table walker: line-counter reload semantics (repeat bit, $00 terminator), indirect-mode bank register, HDMA init at start-of-frame and per-line timing windows",
     "HDMA/MDMA collision (HDMA steals mid-MDMA)",
     "DMA-to-$2180 and $4300-region open-bus edge cases",
-    "undisbeliever snes-test-roms DMA/HDMA set green as golden frames"
+    "PeterLemon PPU/HDMA set (WaveHDMA, RedSpaceHDMA, RedSpaceIndirectHDMA, Mode7HDMA) green as golden frames, each rendered and inspected by eye before its hash is pinned"
    ],
    "notes": [
     "W6-02a delivered MDMA basics only, explicitly scoped to 'sufficient to boot libSFX fixture ROMs' per section 3.2. HDMA is what makes gradients, wavy effects and most split-screen HUDs work, and it feeds rf-enhance's HUD-separation heuristics (ScrollWrite + HDMA events) — so this gates W8 work too.",
@@ -3920,9 +3922,11 @@
    "THAT UNBLOCKED W7-04's PERSPECTIVE GOLDEN, which is now pinned and verified by eye: a ground plane receding to a horizon with road, grass and kerbing converging with depth, where before it was flat. RotZoom's hash is unchanged, which is the control — HDMA and line latching did not disturb the ROM that needs neither.",
    "CRITERION 4 IS NOT ACHIEVABLE WITH A SCANLINE-COMPOSED PPU, and the evidence is direct. All eighteen undisbeliever DMA/HDMA ROMs were extracted and run: every one executes (PC advances, frames progress) but none leaves forced blank within 12,000,000 instructions — hdmaen_latch_test is still on frame 0 at that point. They are per-DOT timing tests (mid-scanline $2100/$21FF writes during HDMA, the 'scpu-a-dma-bug' family), and 3.3 states plainly that the v1 PPU is 'scanline-based ... per-dot deferred'. This criterion therefore depends on the per-dot upgrade that document already defers, not on anything missing from HDMA. RECOMMEND: move criterion 4 onto a per-dot PPU ticket, or amend it to the PeterLemon HDMA ROMs, which a scanline PPU can express.",
    "STATUS SET TO `blocked`, NOT `in_progress` (2026-08-20): validate-plan's P8 rule forbids two concurrently-active tickets with overlapping write_scope, and W7-04 and W7-07 both write crates/rf-snes/**. `blocked` is also the truthful status: each one's own work is committed and each is waiting on a DIFFERENT ticket, not on more effort here. Caught by the validator after the commit rather than before it — a reminder that leaving two partially-done tickets open at once is itself a board state worth checking."
-  ],
+  ,
+  "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). Amend acceptance rather than leave this blocked, exactly as this ticket\u2019s own HANDOFF recommended. CRITERION 4 IS REPLACED with the PeterLemon HDMA set, VERIFIED TO EXIST at the pinned commit 350b394e: PPU/HDMA/{WaveHDMA,RedSpaceHDMA,RedSpaceIndirectHDMA,Mode7HDMA}/*.sfc. These are per-SCANLINE HDMA effects \u2014 gradients and wave distortion driven by per-line register writes \u2014 which is precisely what the line-latching this ticket already built can express. The undisbeliever per-dot timing ROMs are NOT abandoned: they remain W7-15\u2019s criterion 2, which already exists and depends on this ticket."
+ ],
    "points": 8,
-   "status": "blocked",
+   "status": "todo",
    "stories": []
   },
   {
@@ -4394,7 +4398,9 @@
     "crates/rf-ai/**",
     "crates/rf-enhance/**",
     "docs/design/**"
-   ],
+   ,
+  "docs/TECH_STACK.md"
+ ],
    "depends_on": [],
    "acceptance": [
     "the offline pack pipeline and cache per FR-AI-001/002/003/004, cache-keyed so a pack is reproducible from its inputs",
@@ -4411,9 +4417,11 @@
    "SECTION 6'S GROUPING NEEDS BOTH SIGNALS, AND NEITHER ALONE WOULD DO. OAM tile id groups a sprite with itself across frames but also groups unrelated sprites that reuse a tile (shared blanks, repeated UI glyphs); adjacency-in-time catches 'this replaced that', which is what an animation IS, but alone would chain two entities that pass through the same pixel. The motivation is concrete: upscaling each frame of a walk cycle independently gives eight subtly different characters that flicker between one another in motion — invisible in a screenshot, glaring in play.",
    "A DETAIL THAT WOULD HAVE SILENTLY GROUPED NOTHING: the position test needs SLACK. A walking character moves a pixel or two per frame, so a zero tolerance would split every walk cycle into single-frame sets — grouping nothing while appearing to work, and producing exactly the per-frame packs the feature exists to avoid. POSITION_TOLERANCE is 8, with tests on both sides of the boundary. Set ids are derived from their MEMBERS rather than discovery order, because a set that renamed itself between runs would break the reproducibility criterion 1 asks for.",
    "WHAT CRITERION 1 STILL OWES, AND WHY IT IS NOT HERE. 'The offline pack pipeline' needs a local ONNX runtime (ROADMAP P8 names ort) to actually produce upscaled pixels. That is a docs/TECH_STACK.md row plus an NFR-011 licence review plus a model artifact — a dependency decision on the scale of the wgpu and egui rows, not something to take inside a ticket whose write_scope is crates/rf-ai/**. Everything AROUND the model is done and tested: the contract assets are keyed by, the format the output lands in, the grouping that makes the output coherent, and the refusal that keeps a bad pack from being half-applied. RECOMMEND filing the ort/model decision as its own ticket."
-  ],
+  ,
+  "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). ADD `ort` AND DO THE INFERENCE. Criterion 1\u2019s inference half is authorised: add the docs/TECH_STACK.md row for the ONNX runtime, run the NFR-011 licence pass on it and its tree, and make the offline pack pipeline actually produce upscaled pixels. write_scope is widened to docs/TECH_STACK.md for the row. Constraints that do NOT move: law 6 (Accuracy Mode is the reference \u2014 upscaling is an opt-in overlay, never the default), no model weights in git (fetch-and-pin like the ROM and vector fetchers, gitignored, CI has no artifacts), and the all-or-nothing pack refusal already delivered stays. If the runtime turns out to need a model artifact with a licence that fails NFR-011, STOP and record it rather than shipping the row anyway."
+ ],
    "points": 8,
-   "status": "blocked",
+   "status": "todo",
    "stories": []
   },
   {
@@ -4495,7 +4503,9 @@
    "write_scope": [
     "crates/rf-plugin-sdk/**",
     "docs/design/**"
-   ],
+   ,
+  "docs/TECH_STACK.md"
+ ],
    "depends_on": [],
    "acceptance": [
     "a WASM component tier alongside the existing Lua tier, per PLUGINS.md section 1 and FR-PLUG-006",
@@ -4507,9 +4517,11 @@
     "wasmtime is a substantial dependency: it needs a docs/TECH_STACK.md row and an NFR-011 licence review before any code lands. Do that first, or the ticket stalls the way W8-10's ort half did."
    ,
   "HANDOFF (2026-08-20, unattended loop): NOT STARTED \u2014 stopped before any code, on this ticket's own precondition. (1) The note above requires a docs/TECH_STACK.md row before code lands, and docs/TECH_STACK.md is NOT in this ticket's write_scope (crates/rf-plugin-sdk/**, docs/design/**), so the precondition cannot be satisfied without a scope amendment. (2) docs/TECH_STACK.md:34 already names the Tier-2 plan as 'wasmtime 46 components, ONLY WHEN THIRD-PARTY DEMAND IS REAL' \u2014 that condition is a product judgement for Brad, not something an unattended run can declare met. (3) NFR-011 licence review for wasmtime and its tree has not been done. Same class of dependency decision as W8-10's `ort`. To unblock: rule on whether third-party demand justifies Tier 2 now, add the TECH_STACK row, run the licence pass, then widen write_scope to include docs/TECH_STACK.md (or file the row as its own ticket) and set this back to todo."
+ ,
+  "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). ADD WASMTIME NOW \u2014 the TECH_STACK.md:34 condition \"only when third-party demand is real\" is declared MET, which was the product judgement blocking this. Add the row (wasmtime 46 components, the version that row already names), run the NFR-011 licence pass, then build the WIT world and the capability sandbox. write_scope is widened to docs/TECH_STACK.md so the precondition can be satisfied in-ticket. W5-07\u2019s Lua tier is the model for the capability MODEL even though the runtimes differ \u2014 criterion 3 (an ungranted capability is REFUSED with a diagnostic naming it, never silently no-opped) is the one that decides whether the sandbox is real."
  ],
    "points": 8,
-   "status": "blocked",
+   "status": "todo",
    "stories": []
   },
   {
@@ -4619,7 +4631,10 @@
    "write_scope": [
     "profiles/**",
     "crates/rf-profiles/**"
-   ],
+   ,
+  "crates/rf-enhance/**",
+  "fixtures/**"
+ ],
    "depends_on": [
     "W9-02"
    ],
@@ -4632,9 +4647,11 @@
     "The point is breadth of FORMAT coverage, not count: two profiles of the same shape prove less than one that forces a second decoder family into existence. Pick them for what they exercise."
    ,
   "HANDOFF (2026-08-20, unattended loop): NOT STARTED \u2014 criterion 1 is unbuildable inside write_scope. Criterion 1 asks for profiles 'each exercising a decoder family the first does not'. Decoder families are implemented in crates/rf-enhance/src/decode/ and EXACTLY ONE exists: metatile_screens (decode/mod.rs:38 is the only `pub mod`; metatile_screens.rs:165 returns UnknownFamily for anything else). GAME_PROFILES.md \u00a72 names room_grid, tilemap_direct and custom, but none is implemented \u2014 profiles/snes/example-mode7 already declares kind = 'room_grid' and decodes nothing, which is the vacuous artifact this criterion must not produce more of. write_scope is profiles/** + crates/rf-profiles/**, so neither a new family nor a new fixture ROM (fixtures/**) can be added here. Criterion 2 ('ships with the evidence its claims rest on') compounds it: the only ROMs this repo can cite first-party evidence for are its own fixtures, and both are metatile scrollers \u2014 the same family. Criterion 3 IS satisfiable: crates/rf-profiles/tests/example_profiles.rs is the corpus test and already walks profiles/{nes,snes}. To unblock, one of: (a) widen write_scope to crates/rf-enhance/** + fixtures/** and accept that this ticket now implements a decoder family and the fixture that exercises it (probably better as its own ticket, e.g. 'implement room_grid + its fixture', with W9-08 depending on it); or (b) rule on whether profiles for real commercial titles belong in /profiles at all \u2014 that is a law-5 and clean-room-provenance question for Brad, and it decides whether criterion 2 can ever be met by anything but our own fixtures."
+ ,
+  "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). BOTH options taken. (a) write_scope is widened to crates/rf-enhance/** and fixtures/**: implement the `room_grid` decoder family \u2014 which profiles/snes/example-mode7 has declared since W4-02 while decoding nothing \u2014 and author the fixture that exercises it, so criterion 1\u2019s \"a decoder family the first does not\" becomes satisfiable at all. (b) Profiles for real, documented commercial titles ARE permitted, citing published documentation (DataCrystal and similar). Law 5 still binds absolutely: NO ROM BYTES IN GIT, and no copyrighted title hardcoded in engine code \u2014 a profile is data under /profiles, never a name baked into a crate. Every claim still needs its FR-PROF-003 source citation, and clean-room-from-documentation (NFR-011) remains the standard: transcribed-from-disassembly is not acceptable provenance no matter how convenient."
  ],
    "points": 5,
-   "status": "blocked",
+   "status": "todo",
    "stories": []
   }
  ]
