@@ -3,6 +3,7 @@
 //! See /docs/MODULE_DESIGN.md and /docs/design/ for the contract this crate
 //! must implement. Do not add public API here without a ticket in plan.json.
 
+pub mod apu;
 pub mod bus;
 pub mod cpu;
 pub mod dma;

@@ -142,6 +142,24 @@ if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
   exit 1
 fi
 
+# SPC700 SingleStepTests vectors (ticket W6-04a): 256 opcode files, 1000
+# cases each. Local-only (NFR-006); needs the archive extracted, which
+# rf-harness does not do.
+spc_zip="$repo_root/roms/snes/singlestep-spc700-67d15f4.zip"
+spc_dir="$repo_root/roms/snes/singlestep-spc700"
+if [ -f "$spc_zip" ] && [ ! -d "$spc_dir" ]; then
+  echo "local-gate: extracting spc700 vectors..." >&2
+  mkdir -p "$spc_dir"
+  unzip -o -q "$spc_zip" -d "$spc_dir"
+fi
+
+echo "local-gate: running spc700 vectors (release)..." >&2
+if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
+  -p rf-snes --test spc700_vectors -- --ignored --nocapture; then
+  echo "local-gate: spc700 vector suite FAILED" >&2
+  exit 1
+fi
+
 if [ ! -d "$vectors_dir" ]; then
   echo "local-gate: nes6502 vectors not found at $vectors_dir" >&2
   echo "Fetch them first: scripts/fetch-test-roms.sh singlestep-nes6502-src" >&2

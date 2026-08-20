@@ -15,6 +15,7 @@
 //! So the aliases are asserted here too, directly, where no assembler sits
 //! between the intent and the assertion.
 
+mod apu;
 mod dma;
 mod mapping;
 mod ppu;
