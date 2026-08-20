@@ -212,7 +212,10 @@ fn rf_scroller_s_five_minutes_is_deterministic_across_independent_runs() {
         }
     }
 
-    assert_eq!(checkpoints, 30, "30 ten-second checkpoints over five minutes");
+    assert_eq!(
+        checkpoints, 30,
+        "30 ten-second checkpoints over five minutes"
+    );
     // And the run must have gone somewhere: five minutes of scrolling
     // streams far more than the 32-column preload.
     let columns = read_word(&a, COLUMNS_STREAMED);
