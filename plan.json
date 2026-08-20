@@ -3760,7 +3760,7 @@
     "A NOTE ON EDITING THIS FILE, since this ticket added twelve entries at once: plan.json's unicode escaping is MIXED — some strings carry literal em-dashes, others carry \\u2014 — so no json.load/json.dumps round trip reproduces it, at ANY ensure_ascii setting. A round trip here churned 4027 lines before it was reverted; the same twelve tickets inserted by targeted text surgery are 296 insertions and zero deletions. Append by text, never by re-serialising the whole board."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
