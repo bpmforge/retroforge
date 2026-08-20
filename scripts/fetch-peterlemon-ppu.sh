@@ -55,6 +55,18 @@ ROMS=(
   "PPU/Mode7/RotZoom/RotZoom.sfc"
   "PPU/Mode7/Perspective/Perspective.sfc"
   "PPU/Mode7/StarWars/StarWars.sfc"
+  # Windows and mosaic (W7-05's amended criterion 4). The original
+  # criterion named "undisbeliever window/HDMA-gradient ROMs"; that
+  # archive was enumerated at 29 files and contains neither. These four
+  # were located in the OTHER already-pinned source, at the same commit
+  # this script has always used, via the GitHub contents API. Both effects
+  # are expressible on a scanline PPU: window masking resolves to
+  # clip-to-black (palette index 0) and mosaic is an indexed-domain
+  # operation, so neither needs the RGB sub-screen W7-16 will add.
+  "PPU/Window/WindowHDMA/WindowHDMA.sfc"
+  "PPU/Window/WindowMultiHDMA/WindowMultiHDMA.sfc"
+  "PPU/Mosaic/Mode3/MosaicMode3.sfc"
+  "PPU/Mosaic/Mode5/MosaicMode5.sfc"
 )
 
 mkdir -p "$DEST"

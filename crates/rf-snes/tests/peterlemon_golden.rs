@@ -38,6 +38,33 @@
 //! fade to COMPLETE, semantically, rather than for a magic instruction
 //! count.
 
+//! ## What W7-05's four ROMs changed, and why looking mattered
+//!
+//! Criterion 4 originally named undisbeliever window/gradient ROMs. That
+//! archive has neither; the GitHub contents API at this repo's already-
+//! pinned PeterLemon commit has both. Adding them found three things that
+//! all four hashes would have hidden:
+//!
+//! 1. **Windows and mosaic were not latched per scanline.** W7-07 latched
+//!    the mode-7 matrix, BG mode and scroll and stopped there. WindowHDMA
+//!    masked an identical 28 pixels on every one of 224 lines — an HDMA
+//!    window rendered as a constant band. Fixed in `Ppu::latch_line`, and
+//!    unit-tested in `tests::ppu` so it is not only this ignored file that
+//!    covers it.
+//! 2. **MosaicMode3's golden would have been vacuous.** It settles with
+//!    `$2106` at size 1: mosaic *enabled* and doing nothing. The size is
+//!    not on a timer — probing all twelve buttons showed L and R alone
+//!    drive it. See [`capture_plan`].
+//! 3. **A latent i32 overflow in the mode-7 transform**, which panics a
+//!    debug build on legitimate registers. Perspective's line 0 gives
+//!    `a * cx_fixed = -2,684,354,560`, past `i32::MIN`. No picture
+//!    changes: those samples fall outside the playfield whether the
+//!    product wraps or not, which is why the golden was pinned over it.
+//!
+//! Every previously-pinned hash is byte-identical after all three, which
+//! is the control that says the fixes disturbed nothing that worked.
+//!
+
 use rf_snes::SnesSystem;
 use sha2::{Digest, Sha256};
 
@@ -110,6 +137,31 @@ const GOLDENS: &[(&str, &str)] = &[
         "Perspective.sfc",
         "82972be08fa0a68933ba1e6ee3d383c44268052cb3c8ea401352a27d22f88946",
     ),
+    // Windows and mosaic (W7-05's amended criterion 4). Each was
+    // rendered to a PNG and LOOKED AT before its hash was pinned, and
+    // doing so changed three of the four outcomes -- see the module doc.
+    //
+    // WindowHDMA draws a lens-shaped reveal: the masked width narrows
+    // toward the middle of the screen (30, 26, 22, 20, 22, 26, 28 masked
+    // pixels sampled every 28 lines) and the cathedral shows through it.
+    (
+        "WindowHDMA.sfc",
+        "00b4f6bca155b4fa0a03a91ba4e9e32ec1bf3349ca1a50e88a2300bc5367a8d1",
+    ),
+    // WindowMultiHDMA draws a 2x2 grid of visible quadrants: two windows
+    // splitting each line, and HDMA blanking a band of lines between the
+    // upper and lower halves.
+    (
+        "WindowMultiHDMA.sfc",
+        "847895ce8a96a93d57998df83323db74d2017460d3f7e98e5b1054176d669204",
+    ),
+    // MosaicMode3 at a block size of 8: the landscape photograph is
+    // visibly blockified. See `capture_plan` for why the harness has to
+    // hold a button to get here at all.
+    (
+        "MosaicMode3.sfc",
+        "d2999917d20c27b9f96ddf9c62572ee79078126352265aa61ab74f6dbfd8b826",
+    ),
 ];
 
 /// Generous cap; the fade completes in well under this.
@@ -142,6 +194,10 @@ const EXCLUDED: &[(&str, &str)] = &[
         "StarWars.sfc",
         "renders fully transparent for its first ~170 frames: screen-over is 'transparent          outside the playfield' ($211A bits 6-7 = 2), the matrix sits static at A=410 D=256          Y0=-90, NMI is disabled, and the CPU loops at $00:8269 throughout. Whatever advances          this demo is not yet implemented, so there is nothing correct to pin — a black frame          would hash perfectly consistently forever. Diagnose with W7-07.",
     ),
+    (
+        "MosaicMode5.sfc",
+        "mode 5 is HI-RES 512, and this PPU has no hi-res path at all: bg::bit_depths gives          mode 5 the right depths (4bpp/2bpp) but composition is 256 wide, and $2105 bit 3 is          consumed as bg3_priority with nothing reading a hi-res flag. The frame renders as a          half-width character squeezed against a backdrop-grey field. The MOSAIC half is          correct and visible (holding R blockifies it exactly as MosaicMode3 does), which is          what makes this an exclusion rather than a bug in this ticket: the mosaic path works,          the mode it is being drawn in does not exist yet. Pinning it would record a picture          nobody claims is right. Owned by W7-17.",
+    ),
 ];
 
 fn assert_supported_mode(name: &str, mode: u8) {
@@ -153,10 +209,49 @@ fn assert_supported_mode(name: &str, mode: u8) {
     );
 }
 
+/// How to drive a ROM whose settled frame does not exercise the feature
+/// it is named for (ticket W7-05).
+///
+/// **This exists because looking at the picture caught a vacuous golden.**
+/// MosaicMode3 reaches its terminal loop with `$2106` at size 1 -- mosaic
+/// ENABLED on BG1 and set to a block size of one pixel, which is by
+/// definition a no-op. The frame is a perfectly good photograph, it hashes
+/// consistently, and it would have gone green forever while testing none
+/// of the mosaic path.
+///
+/// The size is not on a timer: probing all twelve buttons for six million
+/// instructions each showed ten of them leave it at 1, and **L and R alone
+/// drive it, reaching 16**. This is a demo with a control, not an
+/// animation -- so the harness has to press the button. Holding `R` and
+/// stopping at a size of 8 gives a block big enough to be unmistakable in
+/// the frame and is reached deterministically from reset.
+struct CapturePlan {
+    /// Joypad-1 bit mask to hold. `$4218` bit 4 is R.
+    hold: u16,
+    /// Stop when this is true.
+    until: fn(&SnesSystem) -> bool,
+}
+
+fn capture_plan(name: &str) -> Option<CapturePlan> {
+    match name {
+        "MosaicMode3.sfc" | "MosaicMode5.sfc" => Some(CapturePlan {
+            hold: 1 << 4,
+            until: |s| s.bus.ppu.mosaic.size >= 8,
+        }),
+        _ => None,
+    }
+}
+
 /// Run to a settled, faded-in frame and hash its palette indices.
 fn render_and_hash(path: &std::path::Path) -> (String, u8) {
     let rom = std::fs::read(path).expect("rom readable");
     let mut s = SnesSystem::load(&rom).expect("PeterLemon ROMs are plain LoROM carts");
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let plan = capture_plan(&name);
 
     // Wait for the fade to finish: screen on at full brightness.
     let mut n = 0u64;
@@ -172,9 +267,30 @@ fn render_and_hash(path: &std::path::Path) -> (String, u8) {
         "{} never finished fading in after {n} instructions",
         path.display()
     );
-    // Let it settle into its terminal loop so the frame is stable.
-    for _ in 0..200_000 {
-        s.step().expect("implemented");
+    match plan {
+        // Settle into the terminal loop; the frame is stable there.
+        None => {
+            for _ in 0..200_000 {
+                s.step().expect("implemented");
+            }
+        }
+        // Drive the control until the feature is actually being
+        // exercised, and render THERE. Settling further would walk the
+        // size straight past it, since the button is still held.
+        Some(plan) => {
+            while n < MAX_INSTRUCTIONS && !(plan.until)(&s) {
+                s.bus.joypads.ports[0] = plan.hold;
+                s.step().expect("implemented");
+                n += 1;
+            }
+            assert!(
+                (plan.until)(&s),
+                "{} never reached its capture condition in {n} instructions - \
+                 the golden would pin a frame that exercises nothing",
+                path.display()
+            );
+            s.bus.joypads.ports[0] = 0;
+        }
     }
 
     let mut hasher = Sha256::new();

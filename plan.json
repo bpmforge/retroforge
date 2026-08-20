@@ -3873,9 +3873,11 @@
   "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). Amend acceptance rather than leave this blocked. CRITERION 4 IS REPLACED, and the replacement names ROMs VERIFIED TO EXIST: the GitHub contents API at the pinned PeterLemon commit 350b394e lists PPU/Window/{WindowHDMA,WindowMultiHDMA}/*.sfc and PPU/Mosaic/{Mode3,Mode5}/*.sfc. The old criterion asked for undisbeliever window/gradient ROMs, and that archive was enumerated at 29 files with no window and no gradient ROM among them \u2014 the artifacts were never in the archive the criterion pointed at, they were in the OTHER pinned source all along. Both replacements are expressible on a scanline PPU: window masking resolves to clip-to-black (palette index 0, on the indexed path) and mosaic is an indexed-domain operation, so neither needs the RGB sub-screen. Colour math\u2019s golden-frame verification stays OUT of this ticket and remains W7-16\u2019s, which already exists and depends on this one."
  ,
   "SCOPE AMENDMENT (2026-08-20, standing authority): write_scope gains scripts/** and tests/rom-manifest.toml \u2014 the amended criterion 4 names ROMs that must be FETCHED before they can be rendered, and the fetcher lives in scripts/. W7-07 already carries exactly these two entries for the same reason."
+ ,
+  "CLOSED 2026-08-20: criterion 4 delivered against the amended acceptance. The four ROMs were fetched, rendered to PNG and LOOKED AT, and doing so changed three of the four outcomes -- see the module doc of crates/rf-snes/tests/peterlemon_golden.rs. WindowHDMA, WindowMultiHDMA and MosaicMode3 are pinned; MosaicMode5 is EXCLUDED with evidence and W7-17 is filed to own it. 15 goldens green, every previously-pinned hash byte-identical."
  ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
@@ -4655,6 +4657,31 @@
  ,
   "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). BOTH options taken. (a) write_scope is widened to crates/rf-enhance/** and fixtures/**: implement the `room_grid` decoder family \u2014 which profiles/snes/example-mode7 has declared since W4-02 while decoding nothing \u2014 and author the fixture that exercises it, so criterion 1\u2019s \"a decoder family the first does not\" becomes satisfiable at all. (b) Profiles for real, documented commercial titles ARE permitted, citing published documentation (DataCrystal and similar). Law 5 still binds absolutely: NO ROM BYTES IN GIT, and no copyrighted title hardcoded in engine code \u2014 a profile is data under /profiles, never a name baked into a crate. Every claim still needs its FR-PROF-003 source citation, and clean-room-from-documentation (NFR-011) remains the standard: transcribed-from-disassembly is not acceptable provenance no matter how convenient."
  ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W7-17",
+   "title": "SNES PPU: hi-res modes 5 and 6 (512-wide composition)",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W7-05"
+   ],
+   "acceptance": [
+    "modes 5 and 6 compose at 512 horizontal pixels, with the two 256-wide halves interleaved as hardware does rather than one half drawn and the other dropped",
+    "pseudo-hires ($2133 bit 3) is handled or explicitly refused with the decision recorded",
+    "PeterLemon MosaicMode5 renders its character at full width and is promoted from EXCLUDED to a pinned golden in tests/peterlemon_golden.rs, rendered and inspected before pinning"
+   ],
+   "notes": [
+    "FILED BY W7-05 (2026-08-20) with direct evidence. bg::bit_depths gives mode 5 the correct depths (4bpp/2bpp) but composition is fixed at 256 wide (ppu::WIDTH) and nothing reads a hi-res flag at all -- $2105 bit 3 is consumed as bg3_priority, which is correct for modes 0/1 and is not the hi-res control. MosaicMode5 therefore renders as a half-width character squeezed against a backdrop-grey field.",
+    "THE MOSAIC HALF IS ALREADY CORRECT, which is what makes this a mode gap and not a W7-05 defect: holding R blockifies MosaicMode5 exactly as it does MosaicMode3. The exclusion entry in peterlemon_golden.rs records this and names this ticket.",
+    "Hi-res interacts with the OBJ path and with colour math's sub-screen (W7-16) -- check both before assuming a width change is local to bg.rs."
+   ],
    "points": 5,
    "status": "todo",
    "stories": []

@@ -167,8 +167,28 @@ pub fn render_scanline(ppu: &Ppu, y: u16, samples_per_pixel: u32) -> Mode7Scanli
         let sx_fixed = (sx_num * 256) / samples_per_pixel as i32;
         let cx_fixed = sx_fixed + ((i32::from(m.hofs) - i32::from(m.x0)) * 256);
 
-        let vx = (i32::from(m.a) * cx_fixed) / 256 + i32::from(m.b) * cy + (i32::from(m.x0) * 256);
-        let vy = (i32::from(m.c) * cx_fixed) / 256 + i32::from(m.d) * cy + (i32::from(m.y0) * 256);
+        // **The products are computed in i64, and that is a fix, not a
+        // widening for tidiness.** `a` and `c` are 8.8 signed (up to
+        // +-32767) and `cx_fixed` carries `(hofs - x0) * 256`, so a
+        // perfectly ordinary matrix overflows i32: Perspective's line 0
+        // presents a = 20480 (80.0) with x0 = 512 and hofs = 0, giving
+        // cx_fixed = -131072 and a product of -2,684,354,560 — past
+        // i32::MIN, and a debug-build PANIC on registers the ROM is
+        // entitled to set.
+        //
+        // Nothing visible changes. Every sample that overflowed lands
+        // outside the 0..1024 playfield whether the product wraps or is
+        // exact, so screen-over resolves it to transparent either way;
+        // RotZoom, Perspective and StarWars all hash byte-identically
+        // before and after. It was a latent crash, not a wrong picture,
+        // which is why a release build never noticed and the goldens
+        // could be pinned over it.
+        let vx = ((i64::from(m.a) * i64::from(cx_fixed)) / 256) as i32
+            + i32::from(m.b) * cy
+            + (i32::from(m.x0) * 256);
+        let vy = ((i64::from(m.c) * i64::from(cx_fixed)) / 256) as i32
+            + i32::from(m.d) * cy
+            + (i32::from(m.y0) * 256);
 
         out.push(sample(ppu, vx >> 8, vy >> 8));
     }

@@ -730,3 +730,114 @@ fn sprites_draw_over_the_mode_7_playfield() {
     let line = p.render_scanline(0);
     assert_eq!(line.pixels[0].layer, PixelLayer::Sprite);
 }
+
+/// **A per-line window must mask a DIFFERENT span on each line** (ticket
+/// W7-05's criterion 4).
+///
+/// W7-07 taught the PPU to compose each scanline from state latched at
+/// that line, but latched only the mode-7 matrix, the BG mode and the
+/// scroll registers. Windows, colour math and mosaic were left reading
+/// live registers, so an HDMA-driven window drew whatever the LAST line
+/// set on all 224 lines. That is invisible in a still with a static
+/// window and unmistakable with a moving one — PeterLemon's WindowHDMA
+/// masked exactly 28 pixels on every row before this, and now traces the
+/// lens shape the ROM draws.
+///
+/// The golden that caught it is `#[ignore]`d and needs fetched ROMs, so
+/// this is the version that runs in `cargo test --workspace`.
+#[test]
+fn window_and_mosaic_registers_are_latched_per_scanline() {
+    let mut ppu = Ppu::new();
+    ppu.forced_blank = false;
+    ppu.brightness = 0x0F;
+    ppu.bg_mode = 0;
+
+    // Enable window 1 on BG1 and in the main-screen mask, then latch two
+    // lines with DIFFERENT spans and a different mosaic size each.
+    ppu.write_register(0x212E, 0x01); // TM: BG1 on the main screen
+    ppu.write_register(0x2123, 0x02); // W12SEL: BG1 window 1 enabled
+
+    ppu.write_register(0x2126, 10); // W1 left
+    ppu.write_register(0x2127, 20); // W1 right
+    ppu.write_register(0x2106, 0x31); // mosaic size 4, BG1
+    ppu.latch_line(0);
+
+    ppu.write_register(0x2126, 100);
+    ppu.write_register(0x2127, 200);
+    ppu.write_register(0x2106, 0x71); // mosaic size 8, BG1
+    ppu.latch_line(1);
+
+    let l0 = ppu.line_state_for_test(0).expect("line 0 was latched");
+    let l1 = ppu.line_state_for_test(1).expect("line 1 was latched");
+
+    assert_eq!(
+        (l0.windows.w1_left, l0.windows.w1_right),
+        (10, 20),
+        "line 0 kept its own window span"
+    );
+    assert_eq!(
+        (l1.windows.w1_left, l1.windows.w1_right),
+        (100, 200),
+        "line 1 kept its own window span, not line 0's and not the live one"
+    );
+    assert_eq!(l0.mosaic.size, 4);
+    assert_eq!(l1.mosaic.size, 8, "mosaic size is per-line state too");
+
+    // And the live registers moving on afterwards must not rewrite
+    // history — the bug this replaces was precisely "every line reads the
+    // final value".
+    ppu.write_register(0x2126, 250);
+    ppu.write_register(0x2127, 255);
+    let l0_again = ppu.line_state_for_test(0).expect("still latched");
+    assert_eq!(
+        (l0_again.windows.w1_left, l0_again.windows.w1_right),
+        (10, 20),
+        "a later write reached back and changed an already-latched line"
+    );
+
+    // ---- and the COMPOSITION must use it -------------------------
+    //
+    // Asserting on the latch alone would pass even if `with_line_state`
+    // never applied the fields — which is exactly half the bug. Draw a
+    // real tile across the line and check that the two lines mask
+    // DIFFERENT spans of it.
+    let mut p = ppu_with_tile();
+    for i in 0..32 {
+        set_tilemap(&mut p, 0, i, 1);
+    }
+    p.write_register(0x212E, 0x01); // BG1 on the main screen
+    p.write_register(0x2123, 0x02); // BG1 masked by window 1
+    p.write_register(0x2126, 10);
+    p.write_register(0x2127, 20);
+    p.latch_line(0);
+    p.write_register(0x2126, 100);
+    p.write_register(0x2127, 200);
+    p.latch_line(1);
+    // Live registers end somewhere else again, so a composition that
+    // reads them instead of the latch masks the same span on both lines.
+    p.write_register(0x2126, 0);
+    p.write_register(0x2127, 0);
+
+    let masked = |p: &mut Ppu, y: u16| -> Vec<usize> {
+        p.render_scanline(y)
+            .pixels
+            .iter()
+            .enumerate()
+            .filter(|(_, px)| px.layer == PixelLayer::Backdrop)
+            .map(|(x, _)| x)
+            .collect()
+    };
+    let m0 = masked(&mut p, 0);
+    let m1 = masked(&mut p, 1);
+    assert_eq!(
+        m0,
+        (10..=20).collect::<Vec<_>>(),
+        "line 0 masked its own span"
+    );
+    assert_eq!(
+        m1,
+        (100..=200).collect::<Vec<_>>(),
+        "line 1 composed from line 0's window, or from the live registers - \
+         this is the bug that made an HDMA window a constant band"
+    );
+}

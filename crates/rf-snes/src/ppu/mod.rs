@@ -78,6 +78,23 @@ pub struct LineState {
     /// Per-layer scroll, the other thing HDMA is routinely used for.
     pub hofs: [u16; 4],
     pub vofs: [u16; 4],
+    /// Windows, colour math and mosaic (ticket W7-05's criterion 4).
+    ///
+    /// **Added because three test ROMs proved they were missing.** W7-07
+    /// latched the mode-7 matrix and the scroll registers and stopped
+    /// there, which was enough for the ROMs it had. PeterLemon's
+    /// WindowHDMA, WindowMultiHDMA and MosaicMode3 drive `$2126`-`$212F`
+    /// and `$2106` from HDMA instead, and without these fields every line
+    /// composed from the register values left at the END of the frame:
+    /// the window mask came out IDENTICAL on all 224 lines (28 and 62
+    /// masked pixels per row respectively, measured), and MosaicMode3
+    /// settled at a block size of 1 -- mosaic enabled and doing nothing.
+    /// A per-line effect rendered as a constant band is the same failure
+    /// the perspective demo showed as a flat texture, in a different
+    /// register file.
+    pub windows: window::Windows,
+    pub color_math: window::ColorMath,
+    pub mosaic: window::Mosaic,
 }
 
 /// One composed scanline: the accuracy-exact pixels, plus the
@@ -371,8 +388,22 @@ impl Ppu {
                     self.bgs[2].vofs,
                     self.bgs[3].vofs,
                 ],
+                windows: self.windows,
+                color_math: self.color_math,
+                mosaic: self.mosaic,
             });
         }
+    }
+
+    /// The state latched for line `y`, for tests.
+    ///
+    /// `line_state` is private because nothing outside composition has any
+    /// business reading it; this accessor exists so the per-line latching
+    /// tests can assert on what was latched rather than only on the
+    /// picture that came out, which is a far weaker signal.
+    #[must_use]
+    pub fn line_state_for_test(&self, y: u16) -> Option<LineState> {
+        *self.line_state.get(usize::from(y))?
     }
 
     /// Forget every latched line. Called at the start of a frame so a
@@ -398,6 +429,9 @@ impl Ppu {
             bg.hofs = state.hofs[i];
             bg.vofs = state.vofs[i];
         }
+        p.windows = state.windows;
+        p.color_math = state.color_math;
+        p.mosaic = state.mosaic;
         Some(p)
     }
 
