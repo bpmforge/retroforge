@@ -3852,9 +3852,15 @@
     "mosaic ($2106) including the mode-7 mosaic quirks",
     "undisbeliever window/HDMA-gradient ROMs green as golden frames"
    ],
-   "notes": [],
+   "notes": [
+   "HANDOFF 2026-08-20: criteria 1-3 COMPLETE; criterion 4 is UNSATISFIABLE AS WRITTEN — it names ROMs the pinned archive does not contain. DELIVERED: windows WH0-WH3 with per-layer enable/invert and all four combiners (OR/AND/XOR/XNOR), $212E/$212F main/sub mask gating, colour math ($2130-$2132) including add/sub/half with clamping and the four clip and prevent modes, and mosaic ($2106) wired into the fetch so it actually blockifies.",
+   "THE COMBINER ONLY MATTERS WITH BOTH WINDOWS ENABLED — with one, all four agree. That is exactly why an implementation that hard-codes OR passes most content and fails the rest, so the test drives four x-positions (in W1 only, in both, in W2 only, in neither) against all four combiners, with a counter-test proving they agree when only one window is on. Inverting is a membership flip, NOT 'the other side of the span': an inverted EMPTY span (left > right) covers the whole line, and that is asserted.",
+   "A WINDOW MASKS THE MAIN SCREEN ONLY IF $212E SAYS SO. Games routinely configure a window and leave it disabled there, so checking the span alone makes content vanish. Tested in both directions, plus that a masked layer is REMOVED from priority resolution — the layer below shows through rather than the screen going blank.",
+   "COLOUR MATH COLLIDES WITH LAW 4, AND THE SPLIT IS RECORDED RATHER THAN FUDGED. Colour math produces an RGB value that need not exist anywhere in CGRAM, but cores emit INDEXED pixels — so a blended colour cannot travel through PpuPixel at all, and the golden-frame hash (palette indices only) could not see it if it did. Delivered accordingly: CLIP-TO-BLACK runs on the indexed path and is asserted there, because black IS palette index 0; the add/sub/half arithmetic is implemented and unit-tested in RGB but does NOT enter the pixel stream. Carrying a sub-screen and blend mode across CoreSink is an rf-core-api contract change and is outside this ticket. RECOMMEND filing it — without it, colour math can never be verified by a golden frame.",
+   "CRITERION 4 NAMES ROMS THAT DO NOT EXIST IN THE PINNED ARCHIVE. It asks for 'undisbeliever window/HDMA-gradient ROMs'. The manifest's pinned undisbeliever-snes-test-roms archive (20210217) was extracted and enumerated: 29 .sfc files, ALL of them hdma-*, hdmaen-*, inidisp-* or scpu-a-dma-bug-*. There is no window ROM and no gradient ROM in it. Separately, W7-07 established with direct evidence that the ROMs it DOES contain are per-dot timing tests which never leave forced blank on a scanline-composed PPU. RECOMMEND: amend this criterion to name a source that exists, or move it to the per-dot PPU ticket alongside W7-07's criterion 4."
+  ],
    "points": 8,
-   "status": "in_progress",
+   "status": "blocked",
    "stories": []
   },
   {

@@ -130,8 +130,13 @@ fn render_layer(ppu: &Ppu, bg_index: usize, y: u16, depth: u8, palette_base: u8)
         let hofs = offsets.h.unwrap_or(bg.hofs);
         let vofs = offsets.v.unwrap_or(bg.vofs);
 
-        let world_x = (x as u16).wrapping_add(hofs);
-        let world_y = y.wrapping_add(vofs);
+        // Mosaic snaps the SOURCE coordinate, so a block of pixels all
+        // fetch the same texel. Snapping the output instead would blur
+        // rather than blockify.
+        let mx = ppu.mosaic.snap(bg_index, x as u16);
+        let my = ppu.mosaic.snap(bg_index, y);
+        let world_x = mx.wrapping_add(hofs);
+        let world_y = my.wrapping_add(vofs);
 
         let entry = tilemap_entry(ppu, bg, world_x, world_y, tile_px);
         let character = entry & 0x03FF;

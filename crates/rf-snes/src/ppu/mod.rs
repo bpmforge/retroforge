@@ -43,6 +43,7 @@
 pub mod bg;
 pub mod mode7;
 pub mod obj;
+pub mod window;
 
 use rf_core_api::{OverlayPixel, PixelLayer, PpuPixel};
 
@@ -142,6 +143,11 @@ pub struct Ppu {
     /// Mode 7 register state (ticket W7-04).
     pub mode7: mode7::Mode7,
 
+    /// Windows, colour math and mosaic (ticket W7-05).
+    pub windows: window::Windows,
+    pub color_math: window::ColorMath,
+    pub mosaic: window::Mosaic,
+
     /// `$2130` CGWSEL bit 0 — direct colour mode.
     ///
     /// In the 8bpp modes (3, 4 and 7) this makes a pixel's value a BGR333
@@ -195,6 +201,9 @@ impl Ppu {
             forced_blank: true,
             brightness: 0,
             mode7: mode7::Mode7::default(),
+            windows: window::Windows::default(),
+            color_math: window::ColorMath::default(),
+            mosaic: window::Mosaic::default(),
             line_state: vec![None; VISIBLE_LINES as usize],
             direct_color: false,
             range_over: false,
@@ -254,7 +263,13 @@ impl Ppu {
             }
             0x2122 => self.write_cgram(value),
             0x211A..=0x2120 => self.mode7.write_register(offset, value),
-            0x2130 => self.direct_color = value & 0x01 != 0,
+            0x2106 => self.mosaic.write_register(value),
+            0x2123..=0x212B | 0x212E | 0x212F => self.windows.write_register(offset, value),
+            0x2131 | 0x2132 => self.color_math.write_register(offset, value),
+            0x2130 => {
+                self.direct_color = value & 0x01 != 0;
+                self.color_math.write_register(offset, value);
+            }
             0x212C => {
                 for (i, bg) in self.bgs.iter_mut().enumerate() {
                     bg.enabled = value & (1 << i) != 0;
@@ -482,6 +497,16 @@ impl Ppu {
             } else if let Some(p) = self.compose(x, &bg_pixels, &objs) {
                 pixels[x] = p;
             }
+            // Colour math's "clip main screen to black" IS expressible on
+            // an indexed path, because black is palette index 0. The
+            // add/sub blend is not — see the window module doc.
+            if self
+                .color_math
+                .clip_to_black(self.windows.masks(5, x as u8))
+            {
+                pixels[x] = backdrop;
+            }
+
             if let Some(dropped) = objs.dropped[x] {
                 // Only paint a dropped sprite where the real frame did not
                 // already put an opaque sprite: the enhancement layer
@@ -509,6 +534,9 @@ impl Ppu {
         for slot in self.priority_order() {
             match slot {
                 Slot::Obj(pri) => {
+                    if self.layer_masked(4, x) {
+                        continue;
+                    }
                     if let Some((index, id)) = objs.pixels[x] {
                         if objs.priority[x] == pri {
                             return Some(PpuPixel {
@@ -522,6 +550,13 @@ impl Ppu {
                     }
                 }
                 Slot::Bg(n, pri) => {
+                    // A layer masked by its window is absent here, so the
+                    // next slot down wins — windows remove a layer from
+                    // the priority resolution rather than painting over
+                    // its result.
+                    if self.layer_masked(usize::from(n), x) {
+                        continue;
+                    }
                     let layer = &bg_pixels.layers[usize::from(n)];
                     if let Some(index) = layer.pixels[x] {
                         if layer.priority[x] == pri {
@@ -538,6 +573,18 @@ impl Ppu {
             }
         }
         None
+    }
+
+    /// Is `layer` (0-3 = BG1-4, 4 = OBJ) masked out at `x` on the main
+    /// screen?
+    ///
+    /// Two things must BOTH be true: the layer's window must cover `x`,
+    /// and `$212E` must say this layer's mask applies to the main screen.
+    /// Games routinely configure a window and leave it disabled on the
+    /// main screen — checking only the first makes content vanish.
+    #[must_use]
+    fn layer_masked(&self, layer: usize, x: usize) -> bool {
+        self.windows.main_mask & (1 << layer) != 0 && self.windows.masks(layer, x as u8)
     }
 
     /// The mode's layer priority, front to back.

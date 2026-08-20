@@ -24,6 +24,7 @@ mod ppu;
 mod regs;
 mod system;
 mod timing;
+mod window;
 
 #[test]
 fn crate_is_wired() {
