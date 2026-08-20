@@ -42,6 +42,15 @@ ROMS=(
   "PPU/BGMAP/8x8/2BPP/8x8BG2Map2BPP32x328PAL/8x8BG2Map2BPP32x328PAL.sfc"
   "PPU/BGMAP/8x8/2BPP/8x8BG3Map2BPP32x328PAL/8x8BG3Map2BPP32x328PAL.sfc"
   "PPU/BGMAP/8x8/2BPP/8x8BG4Map2BPP32x328PAL/8x8BG4Map2BPP32x328PAL.sfc"
+  # Added at W7-03, once BG modes 2-6 existed to render them. The "4BPP"
+  # ROM runs in mode 3 and the 8BPP set in modes 3/4 — all of which the
+  # modes-0/1 PPU of W6-03a could only have drawn as garbage.
+  "PPU/BGMAP/8x8/4BPP/8x8BGMap4BPP32x328PAL/8x8BGMap4BPP32x328PAL.sfc"
+  "PPU/BGMAP/8x8/8BPP/32x32/8x8BGMap8BPP32x32.sfc"
+  "PPU/BGMAP/8x8/8BPP/32x64/8x8BGMap8BPP32x64.sfc"
+  "PPU/BGMAP/8x8/8BPP/64x32/8x8BGMap8BPP64x32.sfc"
+  "PPU/BGMAP/8x8/8BPP/64x64/8x8BGMap8BPP64x64.sfc"
+  "PPU/BGMAP/8x8/8BPP/TileFlip/8x8BGMapTileFlip.sfc"
 )
 
 mkdir -p "$DEST"

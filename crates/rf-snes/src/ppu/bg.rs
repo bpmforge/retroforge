@@ -51,16 +51,44 @@ pub struct BgScanlines {
     pub layers: [BgScanline; 4],
 }
 
-/// Bits per pixel for each layer in the active mode.
+/// Bits per pixel for each layer in the active mode. `0` means the mode
+/// has no such layer.
+///
+/// | mode | BG1  | BG2  | BG3  | BG4  | notes                    |
+/// |------|------|------|------|------|--------------------------|
+/// | 0    | 2bpp | 2bpp | 2bpp | 2bpp | four layers, four palette blocks |
+/// | 1    | 4bpp | 4bpp | 2bpp | —    | BG3 priority bit         |
+/// | 2    | 4bpp | 4bpp | —    | —    | offset-per-tile          |
+/// | 3    | 8bpp | 4bpp | —    | —    | direct colour available  |
+/// | 4    | 8bpp | 2bpp | —    | —    | offset-per-tile + direct colour |
+/// | 5    | 4bpp | 2bpp | —    | —    | hires 512                |
+/// | 6    | 4bpp | —    | —    | —    | offset-per-tile + hires  |
+///
+/// In modes 2, 4 and 6, BG3 still HAS a tilemap — it just is not drawn.
+/// It carries the per-column scroll offsets instead, which is why those
+/// rows read "—" here and yet [`offset_per_tile`] reads BG3's map.
 #[must_use]
 pub fn bit_depths(mode: u8) -> [u8; 4] {
     match mode {
         1 => [4, 4, 2, 0],
-        // Mode 0 and, for now, anything this ticket does not implement:
-        // rendering as mode 0 is a visible, debuggable wrong picture,
-        // where rendering nothing would look like a dead PPU.
+        2 => [4, 4, 0, 0],
+        3 => [8, 4, 0, 0],
+        4 => [8, 2, 0, 0],
+        5 => [4, 2, 0, 0],
+        6 => [4, 0, 0, 0],
+        // Mode 0, and mode 7 until W7-04 implements it. Rendering an
+        // unimplemented mode as mode 0 gives a visibly wrong picture
+        // rather than a dead PPU — and the golden runner refuses to hash
+        // a mode the PPU does not claim, so this can never be mistaken
+        // for correct output.
         _ => [2, 2, 2, 2],
     }
+}
+
+/// Does this mode use BG3's tilemap as per-column scroll offsets?
+#[must_use]
+pub fn uses_offset_per_tile(mode: u8) -> bool {
+    matches!(mode, 2 | 4 | 6)
 }
 
 /// The palette block each layer's colours are offset into.
@@ -84,18 +112,26 @@ pub fn render_backgrounds(ppu: &Ppu, y: u16) -> BgScanlines {
         if depth == 0 || !ppu.bgs[bg].enabled {
             continue;
         }
-        out.layers[bg] = render_layer(ppu, &ppu.bgs[bg], y, depth, palette_base(ppu.bg_mode, bg));
+        out.layers[bg] = render_layer(ppu, bg, y, depth, palette_base(ppu.bg_mode, bg));
     }
     out
 }
 
-fn render_layer(ppu: &Ppu, bg: &BgLayer, y: u16, depth: u8, palette_base: u8) -> BgScanline {
+fn render_layer(ppu: &Ppu, bg_index: usize, y: u16, depth: u8, palette_base: u8) -> BgScanline {
+    let bg = &ppu.bgs[bg_index];
     let mut out = BgScanline::default();
     let tile_px = if bg.tile_size_16 { 16u16 } else { 8 };
 
     for x in 0..WIDTH {
-        let world_x = (x as u16).wrapping_add(bg.hofs);
-        let world_y = y.wrapping_add(bg.vofs);
+        // Offset-per-tile replaces this column's scroll wholesale rather
+        // than adding to it (modes 2/4/6 only; a no-op elsewhere).
+        let column = (x as u16) / 8;
+        let offsets = offset_per_tile(ppu, bg_index, column);
+        let hofs = offsets.h.unwrap_or(bg.hofs);
+        let vofs = offsets.v.unwrap_or(bg.vofs);
+
+        let world_x = (x as u16).wrapping_add(hofs);
+        let world_y = y.wrapping_add(vofs);
 
         let entry = tilemap_entry(ppu, bg, world_x, world_y, tile_px);
         let character = entry & 0x03FF;
@@ -122,8 +158,15 @@ fn render_layer(ppu: &Ppu, bg: &BgLayer, y: u16, depth: u8, palette_base: u8) ->
         let colour = fetch_pixel(ppu, bg.char_base, character, px % 8, py % 8, depth);
 
         if colour != 0 {
-            let colours_per_palette = if depth == 4 { 16 } else { 4 };
-            out.pixels[x] = Some(palette_base.wrapping_add(palette * colours_per_palette + colour));
+            // 8bpp addresses all 256 CGRAM entries directly, so the
+            // tilemap's palette field is IGNORED — applying it would fold
+            // a 256-colour image into a 32-colour block.
+            let index = match depth {
+                8 => colour,
+                4 => palette_base.wrapping_add(palette.wrapping_mul(16).wrapping_add(colour)),
+                _ => palette_base.wrapping_add(palette.wrapping_mul(4).wrapping_add(colour)),
+            };
+            out.pixels[x] = Some(index);
             out.priority[x] = priority;
         }
     }
@@ -156,22 +199,98 @@ fn tilemap_entry(ppu: &Ppu, bg: &BgLayer, world_x: u16, world_y: u16, tile_px: u
 
 /// Read one pixel's colour index out of character data.
 ///
-/// SNES tiles are **bitplane-interleaved**, and not uniformly: planes 0
-/// and 1 sit together at the top of the tile, and planes 2 and 3 follow
-/// 16 bytes later. A 4bpp tile is therefore not "two 2bpp tiles" in
-/// memory order, which is the mistake that makes 4bpp graphics come out
-/// with the right shapes in scrambled colours.
+/// SNES tiles are **bitplane-interleaved in pairs**, and the pairs are 8
+/// words apart: planes 0/1 at the tile's start, planes 2/3 at +8, planes
+/// 4/5 at +16, planes 6/7 at +24. A 4bpp tile is therefore not "two 2bpp
+/// tiles" in memory order, and an 8bpp tile is not "two 4bpp tiles" —
+/// which is the mistake that makes graphics come out with the right
+/// shapes in scrambled colours.
 #[must_use]
 pub fn fetch_pixel(ppu: &Ppu, char_base: u16, character: u16, px: u16, py: u16, depth: u8) -> u8 {
-    let words_per_tile = if depth == 4 { 16u16 } else { 8 };
+    let words_per_tile = match depth {
+        8 => 32u16,
+        4 => 16,
+        _ => 8,
+    };
     let tile_word = char_base.wrapping_add(character.wrapping_mul(words_per_tile));
     let bit = 7 - px;
 
-    let plane01 = ppu.vram_word(tile_word.wrapping_add(py));
-    let mut colour = ((plane01 >> bit) & 1) | (((plane01 >> (8 + bit)) & 1) << 1);
-    if depth == 4 {
-        let plane23 = ppu.vram_word(tile_word.wrapping_add(8).wrapping_add(py));
-        colour |= (((plane23 >> bit) & 1) << 2) | (((plane23 >> (8 + bit)) & 1) << 3);
+    let mut colour = 0u16;
+    // One pass per bitplane PAIR: 1 pair for 2bpp, 2 for 4bpp, 4 for 8bpp.
+    for pair in 0..(depth / 2) {
+        let word = ppu.vram_word(tile_word.wrapping_add(u16::from(pair) * 8).wrapping_add(py));
+        let lo = (word >> bit) & 1;
+        let hi = (word >> (8 + bit)) & 1;
+        colour |= lo << (pair * 2);
+        colour |= hi << (pair * 2 + 1);
     }
     colour as u8
+}
+
+/// Per-column scroll offsets read from BG3's tilemap (modes 2, 4 and 6).
+///
+/// ## What offset-per-tile actually does
+///
+/// In these modes BG3 is not drawn. Its tilemap instead supplies, for
+/// each 8-pixel COLUMN of the screen, a replacement horizontal and/or
+/// vertical scroll value for BG1 and BG2. That is how a game bends a
+/// background into columns that scroll at different rates without any
+/// per-scanline interrupt work.
+///
+/// The entry format is the same 16 bits a tilemap entry always has, read
+/// differently:
+///
+/// * bits 0-9 — the offset value
+/// * bit 13 — apply to BG1
+/// * bit 14 — apply to BG2
+/// * bit 15 — **mode 4 only**: 0 = this entry is horizontal, 1 = vertical
+///
+/// Modes 2 and 6 read TWO entries per column — horizontal first, then
+/// vertical 32 entries later — because their format has no bit-15
+/// selector. Mode 4 reads one and lets bit 15 choose. Getting that
+/// difference wrong is the classic offset-per-tile bug: the picture
+/// looks almost right, with the vertical offsets applied horizontally.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ColumnOffset {
+    pub h: Option<u16>,
+    pub v: Option<u16>,
+}
+
+/// Resolve the offset entry covering screen column `column` for layer
+/// `bg` (0 = BG1, 1 = BG2).
+#[must_use]
+pub fn offset_per_tile(ppu: &Ppu, bg: usize, column: u16) -> ColumnOffset {
+    let mut out = ColumnOffset::default();
+    if !uses_offset_per_tile(ppu.bg_mode) || column == 0 {
+        // The first column has no preceding entry to read, so hardware
+        // leaves it on the layer's ordinary scroll.
+        return out;
+    }
+    let offset_layer = &ppu.bgs[2];
+    // BG3's own scroll selects which part of the offset table this
+    // column reads — the offsets scroll with it.
+    let index = (column - 1).wrapping_add(offset_layer.hofs / 8) & 0x1F;
+    let base = offset_layer.tilemap_base;
+    let applies = |entry: u16| entry & (0x2000 << bg) != 0;
+
+    if ppu.bg_mode == 4 {
+        let entry = ppu.vram_word(base.wrapping_add(index));
+        if applies(entry) {
+            if entry & 0x8000 == 0 {
+                out.h = Some(entry & 0x03FF);
+            } else {
+                out.v = Some(entry & 0x03FF);
+            }
+        }
+    } else {
+        let h_entry = ppu.vram_word(base.wrapping_add(index));
+        let v_entry = ppu.vram_word(base.wrapping_add(index).wrapping_add(32));
+        if applies(h_entry) {
+            out.h = Some(h_entry & 0x03FF);
+        }
+        if applies(v_entry) {
+            out.v = Some(v_entry & 0x03FF);
+        }
+    }
+    out
 }

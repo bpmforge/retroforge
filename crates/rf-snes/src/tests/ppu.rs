@@ -349,3 +349,211 @@ fn a_tile_written_through_the_vram_port_is_rendered() {
     );
     assert_eq!(line.pixels[0].layer, PixelLayer::Background(0));
 }
+
+// ---------------------------------------------------------------------
+// BG modes 2-6 (ticket W7-03)
+// ---------------------------------------------------------------------
+
+#[test]
+fn every_mode_has_the_documented_bit_depths() {
+    assert_eq!(bg::bit_depths(0), [2, 2, 2, 2]);
+    assert_eq!(bg::bit_depths(1), [4, 4, 2, 0], "mode 1 has no BG4");
+    assert_eq!(bg::bit_depths(2), [4, 4, 0, 0]);
+    assert_eq!(bg::bit_depths(3), [8, 4, 0, 0], "mode 3's BG1 is 8bpp");
+    assert_eq!(bg::bit_depths(4), [8, 2, 0, 0]);
+    assert_eq!(bg::bit_depths(5), [4, 2, 0, 0]);
+    assert_eq!(bg::bit_depths(6), [4, 0, 0, 0], "mode 6 is BG1 only");
+}
+
+#[test]
+fn offset_per_tile_is_a_property_of_modes_2_4_and_6() {
+    for mode in 0..=7u8 {
+        assert_eq!(
+            bg::uses_offset_per_tile(mode),
+            matches!(mode, 2 | 4 | 6),
+            "mode {mode}"
+        );
+    }
+}
+
+/// 8bpp tiles are FOUR bitplane pairs, 8 words apart — not "two 4bpp
+/// tiles" laid end to end.
+#[test]
+fn eight_bpp_reads_all_four_bitplane_pairs() {
+    let mut p = Ppu::new();
+    // Character 0 at word 0. Set exactly one bit in each plane pair's
+    // low plane, at pixel 0: planes 0, 2, 4 and 6 -> colour bits 0,2,4,6.
+    for pair in 0..4u16 {
+        let at = usize::from(pair * 8) * 2;
+        p.vram[at] = 0x80; // bit 7 of the low plane = pixel 0
+    }
+    assert_eq!(
+        bg::fetch_pixel(&p, 0, 0, 0, 0, 8),
+        0b0101_0101,
+        "each pair contributes two bits, and the pairs are 8 words apart"
+    );
+    // The same data read as 4bpp only sees the first two pairs.
+    assert_eq!(bg::fetch_pixel(&p, 0, 0, 0, 0, 4), 0b0101);
+    assert_eq!(bg::fetch_pixel(&p, 0, 0, 0, 0, 2), 0b01);
+}
+
+/// 8bpp addresses all 256 CGRAM entries, so the tilemap's palette field
+/// must be IGNORED — applying it would fold a 256-colour image into a
+/// 32-colour block.
+#[test]
+fn eight_bpp_ignores_the_tilemap_palette_field() {
+    let mut p = Ppu::new();
+    p.forced_blank = false;
+    p.bg_mode = 3;
+    p.bgs[0].enabled = true;
+    p.bgs[0].char_base = 0x1000;
+    // Character 1, 8bpp: 32 words per tile.
+    let at = (0x1000 + 32) * 2;
+    p.vram[at] = 0xFF; // plane 0 solid -> colour 1
+                       // Tilemap entry with a NON-ZERO palette field (palette 5).
+    set_tilemap(&mut p, 0, 0, 1 | (5 << 10));
+    assert_eq!(
+        p.render_scanline(0).pixels[0].palette_index,
+        1,
+        "the palette field must not shift an 8bpp colour"
+    );
+}
+
+/// Modes 2-5 share one priority order, and mode 6 has BG1 only.
+#[test]
+fn modes_2_to_6_resolve_priority_the_documented_way() {
+    let mut p = ppu_with_tile();
+    p.bg_mode = 2;
+    p.bgs[0].enabled = true;
+    p.bgs[1].enabled = true;
+    p.bgs[1].tilemap_base = 0x0400;
+    p.bgs[1].char_base = 0x1000;
+    // Both layers 4bpp in mode 2, so write 4bpp character data.
+    for row in 0..8 {
+        p.vram[(0x1000 + 16 + row) * 2] = 0xFF;
+    }
+    // BG2 shows a HIGH-priority tile; BG1 a low-priority one.
+    set_tilemap(&mut p, 0, 0, 1);
+    set_tilemap(&mut p, 0x0400, 0, 1 | 0x2000);
+    assert_eq!(
+        p.render_scanline(0).pixels[0].layer,
+        PixelLayer::Background(1),
+        "BG2 priority 1 outranks BG1 priority 0 in mode 2"
+    );
+
+    // Give BG1 the high-priority bit too: now BG1 wins.
+    set_tilemap(&mut p, 0, 0, 1 | 0x2000);
+    assert_eq!(
+        p.render_scanline(0).pixels[0].layer,
+        PixelLayer::Background(0),
+        "at equal priority BG1 outranks BG2"
+    );
+}
+
+/// **Offset-per-tile.** BG3's tilemap supplies a replacement scroll for a
+/// column of BG1/BG2 — it does not add to the layer's own scroll.
+#[test]
+fn offset_per_tile_replaces_a_columns_scroll() {
+    // Built from a CLEAN Ppu rather than `ppu_with_tile`, deliberately.
+    // That helper writes 2bpp data at words $1008-$100F, which in 4bpp is
+    // plane-pair 1 of character ZERO — so character 0 would not be
+    // transparent and "nothing is drawn here" could not be asserted.
+    let mut p = Ppu::new();
+    p.forced_blank = false;
+    p.bg_mode = 2; // BG1 is 4bpp
+    p.bgs[0].enabled = true;
+    p.bgs[0].tilemap_base = 0;
+    p.bgs[0].char_base = 0x1000;
+    // Character 1, 4bpp (16 words per tile): plane 0 solid -> colour 1.
+    for row in 0..8 {
+        p.vram[(0x1000 + 16 + row) * 2] = 0xFF;
+    }
+    // Map entries 0 and 2 show tile 1; entry 1 is empty. So column 1
+    // (x = 8..15) normally reads entry 1 and shows nothing, and an H
+    // offset of 8 moves its fetch forward one tile onto entry 2.
+    set_tilemap(&mut p, 0, 0, 1);
+    set_tilemap(&mut p, 0, 2, 1);
+
+    // BG3's map must live somewhere OTHER than BG1's, or the offset
+    // lookup reads BG1's own tilemap as its offset table.
+    p.bgs[2].tilemap_base = 0x0800;
+
+    // With an all-zero offset table, column 1 shows nothing.
+    assert_eq!(p.render_scanline(0).pixels[8].layer, PixelLayer::Backdrop);
+
+    // Bit 13 means "applies to BG1"; the low 10 bits are the offset.
+    set_tilemap(&mut p, 0x0800, 0, 0x2000 | 8);
+    assert_eq!(
+        p.render_scanline(0).pixels[8].layer,
+        PixelLayer::Background(0),
+        "the offset entry for column 1 must move BG1's fetch"
+    );
+    // ...and column 0 is untouched, because it has no entry.
+    assert_eq!(
+        p.render_scanline(0).pixels[0].layer,
+        PixelLayer::Background(0)
+    );
+}
+
+/// Only the layers an entry names are affected — bit 13 is BG1, bit 14
+/// is BG2.
+#[test]
+fn an_offset_entry_applies_only_to_the_layers_it_names() {
+    let mut p = Ppu::new();
+    p.bg_mode = 2;
+    p.bgs[2].tilemap_base = 0x0800;
+    // An entry naming BG2 only.
+    set_tilemap(&mut p, 0x0800, 0, 0x4000 | 12);
+    assert_eq!(bg::offset_per_tile(&p, 0, 1).h, None, "BG1 not named");
+    assert_eq!(bg::offset_per_tile(&p, 1, 1).h, Some(12), "BG2 named");
+}
+
+/// Mode 4 packs the H/V selector into bit 15 of a SINGLE entry; modes 2
+/// and 6 use two entries. Confusing the two applies vertical offsets
+/// horizontally — a picture that looks almost right.
+#[test]
+fn mode_4_uses_bit_15_to_choose_h_or_v_while_mode_2_uses_two_entries() {
+    let mut p = Ppu::new();
+    p.bgs[2].tilemap_base = 0x0800;
+
+    p.bg_mode = 4;
+    set_tilemap(&mut p, 0x0800, 0, 0x2000 | 20); // bit 15 clear -> H
+    let o = bg::offset_per_tile(&p, 0, 1);
+    assert_eq!((o.h, o.v), (Some(20), None));
+    set_tilemap(&mut p, 0x0800, 0, 0x8000 | 0x2000 | 30); // bit 15 set -> V
+    let o = bg::offset_per_tile(&p, 0, 1);
+    assert_eq!((o.h, o.v), (None, Some(30)));
+
+    p.bg_mode = 2;
+    set_tilemap(&mut p, 0x0800, 0, 0x2000 | 20); // horizontal entry
+    set_tilemap(&mut p, 0x0800, 32, 0x2000 | 30); // vertical, 32 entries on
+    let o = bg::offset_per_tile(&p, 0, 1);
+    assert_eq!(
+        (o.h, o.v),
+        (Some(20), Some(30)),
+        "modes 2/6 read a separate vertical entry 32 words later"
+    );
+}
+
+/// Column 0 has no preceding entry to read, so it keeps the layer's own
+/// scroll.
+#[test]
+fn column_zero_has_no_offset_entry() {
+    let mut p = Ppu::new();
+    p.bg_mode = 2;
+    p.bgs[2].tilemap_base = 0x0800;
+    set_tilemap(&mut p, 0x0800, 0, 0x2000 | 99);
+    let o = bg::offset_per_tile(&p, 0, 0);
+    assert_eq!((o.h, o.v), (None, None));
+}
+
+/// `$2130` CGWSEL bit 0 selects direct colour.
+#[test]
+fn cgwsel_bit_zero_selects_direct_colour() {
+    let mut p = Ppu::new();
+    assert!(!p.direct_color);
+    p.write_register(0x2130, 0x01);
+    assert!(p.direct_color);
+    p.write_register(0x2130, 0x00);
+    assert!(!p.direct_color);
+}

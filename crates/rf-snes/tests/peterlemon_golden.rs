@@ -70,6 +70,30 @@ const GOLDENS: &[(&str, &str)] = &[
         "8x8BG4Map2BPP32x328PAL.sfc",
         "e936654961211bd301b70845d5184a45776efda6ecf730292ea40def4b5d4068",
     ),
+    (
+        "8x8BGMap4BPP32x328PAL.sfc",
+        "424d09a81f97ab7667bbbfa3f9c48d59f2036e1d55acfbdf96f9bbcd8b19a677",
+    ),
+    (
+        "8x8BGMap8BPP32x32.sfc",
+        "926777ce19655ef4bc87d93191889f80c9b7f10084496629fe3429884974d099",
+    ),
+    (
+        "8x8BGMap8BPP32x64.sfc",
+        "c60967d58cf9be08d2bb4072271092461857598e563c8ce7df8330dbea78a7af",
+    ),
+    (
+        "8x8BGMap8BPP64x32.sfc",
+        "c60967d58cf9be08d2bb4072271092461857598e563c8ce7df8330dbea78a7af",
+    ),
+    (
+        "8x8BGMap8BPP64x64.sfc",
+        "51c904cf58356beb6f303e33668dc69958bda09ab7722cbd739200aaf1f5a408",
+    ),
+    (
+        "8x8BGMapTileFlip.sfc",
+        "ed283c35beefa83f23520dc84e1da433514a609a0f6fce76e5b6ae7ad3c4c6d7",
+    ),
 ];
 
 /// Generous cap; the fade completes in well under this.
@@ -93,7 +117,7 @@ fn rom_dir() -> Option<std::path::PathBuf> {
 /// can produce.
 fn assert_supported_mode(name: &str, mode: u8) {
     assert!(
-        mode == 0 || mode == 1,
+        mode <= 6,
         "{name} runs in BG mode {mode}, which W6-03a does not implement. \
          Pinning a golden for it would record the mode-0 fallback's garbage \
          as though it were correct. Implement the mode or drop the ROM."
@@ -187,13 +211,19 @@ fn peterlemon_bg_map_goldens_match() {
     );
 }
 
-/// Anti-vacuity: the four ROMs must produce FOUR DIFFERENT frames.
+/// Anti-vacuity for the per-LAYER set: the four 2BPP ROMs must produce
+/// four DIFFERENT frames.
 ///
 /// They draw the same photograph on four different background layers, so
-/// identical hashes would mean the layer under test is not actually the
-/// one being rendered — the exact bug a per-layer suite exists to catch,
-/// and one that four separately-pinned goldens would otherwise hide
-/// perfectly.
+/// identical hashes would mean the layer under test is not the one being
+/// rendered — the exact bug a per-layer suite exists to catch, and one
+/// that four separately-pinned goldens would otherwise hide perfectly.
+///
+/// Scoped to those four on purpose. Two of the 8BPP geometry ROMs
+/// (`32x64` and `64x32`) legitimately hash the SAME, because unscrolled
+/// they both show the first 32x28 tiles, which live in screen 0 either
+/// way. `the_tilemap_geometry_is_honoured_once_you_scroll_into_it` below
+/// is what proves the geometry is actually read.
 #[test]
 #[ignore = "local: run scripts/fetch-peterlemon-ppu.sh first"]
 fn the_four_layer_roms_do_not_all_render_the_same_frame() {
@@ -201,9 +231,15 @@ fn the_four_layer_roms_do_not_all_render_the_same_frame() {
         eprintln!("SKIP");
         return;
     };
+    const PER_LAYER: [&str; 4] = [
+        "8x8BG1Map2BPP32x328PAL.sfc",
+        "8x8BG2Map2BPP32x328PAL.sfc",
+        "8x8BG3Map2BPP32x328PAL.sfc",
+        "8x8BG4Map2BPP32x328PAL.sfc",
+    ];
     let mut hashes = std::collections::BTreeSet::new();
     let mut seen = 0;
-    for (name, _) in GOLDENS {
+    for name in PER_LAYER {
         let path = dir.join(name);
         if !path.exists() {
             continue;
@@ -221,5 +257,68 @@ fn the_four_layer_roms_do_not_all_render_the_same_frame() {
         "the {seen} per-layer ROMs produced only {} distinct frames — \
          a layer under test is not the one being rendered",
         hashes.len()
+    );
+}
+
+/// `32x64` and `64x32` hash identically, and this proves that is a
+/// property of the VIEW rather than of the mapping being ignored.
+///
+/// Unscrolled, both show the first 32x28 tiles, which sit in screen 0 in
+/// either geometry — so identical output is correct. Scroll one screen
+/// right and they must diverge: a 64-wide map has a second screen there,
+/// while a 32-wide map wraps back to its first. Without this, "the two
+/// geometries look the same" would be equally consistent with
+/// `tilemap_size` never being read at all.
+#[test]
+#[ignore = "local: run scripts/fetch-peterlemon-ppu.sh first"]
+fn the_tilemap_geometry_is_honoured_once_you_scroll_into_it() {
+    let Some(dir) = rom_dir() else {
+        eprintln!("SKIP");
+        return;
+    };
+    let (wide, tall) = (
+        dir.join("8x8BGMap8BPP64x32.sfc"),
+        dir.join("8x8BGMap8BPP32x64.sfc"),
+    );
+    if !wide.exists() || !tall.exists() {
+        eprintln!("SKIP: geometry ROMs not fetched");
+        return;
+    }
+
+    let scrolled = |path: &std::path::Path| -> String {
+        let rom = std::fs::read(path).expect("readable");
+        let mut s = SnesSystem::load(&rom).expect("loads");
+        let mut n = 0u64;
+        while n < MAX_INSTRUCTIONS {
+            s.step().expect("implemented");
+            n += 1;
+            if !s.bus.ppu.forced_blank && s.bus.ppu.brightness == 0x0F {
+                break;
+            }
+        }
+        for _ in 0..200_000 {
+            s.step().expect("implemented");
+        }
+        // One screen right, into the territory the two maps disagree about.
+        s.bus.ppu.bgs[0].hofs = 256;
+        s.bus.ppu.bgs[1].hofs = 256;
+        let mut hasher = Sha256::new();
+        for y in 0..HEIGHT {
+            let line = s.bus.ppu.render_scanline(y);
+            let idx: Vec<u8> = line.pixels.iter().map(|p| p.palette_index).collect();
+            hasher.update(&idx);
+        }
+        use std::fmt::Write;
+        hasher.finalize().iter().fold(String::new(), |mut a, b| {
+            let _ = write!(a, "{b:02x}");
+            a
+        })
+    };
+
+    assert_ne!(
+        scrolled(&wide),
+        scrolled(&tall),
+        "a 64-wide and a 32-wide tilemap must differ once scrolled a screen \
+         right — if they match, tilemap_size is not being read"
     );
 }

@@ -114,6 +114,16 @@ pub struct Ppu {
     pub forced_blank: bool,
     pub brightness: u8,
 
+    /// `$2130` CGWSEL bit 0 — direct colour mode.
+    ///
+    /// In the 8bpp modes (3, 4 and 7) this makes a pixel's value a BGR333
+    /// colour in its own right rather than a CGRAM index. The core still
+    /// emits that value as `palette_index`, because that is genuinely what
+    /// the PPU produced; what changes is how a renderer must INTERPRET it,
+    /// which is why the flag is public state rather than something folded
+    /// into the pixel.
+    pub direct_color: bool,
+
     /// `$213E` bit 6: more than 32 sprites on a line.
     pub range_over: bool,
     /// `$213E` bit 7: more than 34 tile slivers on a line.
@@ -150,6 +160,7 @@ impl Ppu {
             oam_priority_rotation: false,
             forced_blank: true,
             brightness: 0,
+            direct_color: false,
             range_over: false,
             time_over: false,
             bgofs_latch: 0,
@@ -206,6 +217,7 @@ impl Ppu {
                 self.cgram_latch = None;
             }
             0x2122 => self.write_cgram(value),
+            0x2130 => self.direct_color = value & 0x01 != 0,
             0x212C => {
                 for (i, bg) in self.bgs.iter_mut().enumerate() {
                     bg.enabled = value & (1 << i) != 0;
@@ -430,6 +442,20 @@ impl Ppu {
                 Obj(0),
                 Bg(2, 0),
             ],
+            // Modes 2-5 share one order: two layers, each with two
+            // priority levels, interleaved with the four sprite levels.
+            2..=5 => vec![
+                Obj(3),
+                Bg(0, 1),
+                Obj(2),
+                Bg(1, 1),
+                Obj(1),
+                Bg(0, 0),
+                Obj(0),
+                Bg(1, 0),
+            ],
+            // Mode 6 has BG1 only.
+            6 => vec![Obj(3), Bg(0, 1), Obj(2), Obj(1), Bg(0, 0), Obj(0)],
             // Mode 0: four 2bpp layers, BG3/BG4 behind BG1/BG2.
             _ => vec![
                 Obj(3),

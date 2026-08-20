@@ -3788,10 +3788,18 @@
    ],
    "notes": [
     "W6-03a implemented modes 0/1 only, and W6-03b's golden runner ASSERTS the ROM's BG mode is one the PPU implements before hashing — so adding a mode is what unlocks its goldens rather than a separate wiring job.",
-    "The 4BPP BGMAP ROM excluded at W6-03b is actually MODE 3 (8bpp BG1 + 4bpp BG2), verified by running it. It belongs to this ticket, not to a mode-1 ticket."
-   ],
+    "The 4BPP BGMAP ROM excluded at W6-03b is actually MODE 3 (8bpp BG1 + 4bpp BG2), verified by running it. It belongs to this ticket, not to a mode-1 ticket.",
+   "CLOSED 2026-08-20: all four criteria. BG modes 2-6 with their documented depths and layer counts, offset-per-tile in modes 2/4/6, the $2130 CGWSEL direct-colour flag, and the PeterLemon 8BPP BGMAP goldens green — ten goldens now, up from four.",
+   "8BPP IS FOUR BITPLANE PAIRS, 8 WORDS APART, not two 4bpp tiles end to end. fetch_pixel is now a loop over depth/2 pairs at +0, +8, +16 and +24, which collapses the 2/4/8bpp cases into one expression instead of three. A unit test reads the SAME character at all three depths and asserts each sees one more pair than the last.",
+   "8BPP IGNORES THE TILEMAP'S PALETTE FIELD, because it addresses all 256 CGRAM entries directly. Applying the field would fold a 256-colour image into a 32-colour block — the picture would keep its shapes and lose its colours, which reads as a palette bug rather than a depth bug. Tested with a deliberately non-zero palette field.",
+   "OFFSET-PER-TILE REPLACES A COLUMN'S SCROLL, it does not add to it. Modes 2 and 6 read TWO BG3 entries per column — horizontal, then vertical 32 entries later — while mode 4 reads ONE and uses bit 15 to choose. Confusing the two applies vertical offsets horizontally, which is the classic bug here: the picture looks almost right. Both forms are tested side by side, along with bit 13/14 layer selection and column 0 having no entry at all.",
+   "A TEST-SETUP TRAP WORTH RECORDING: ppu_with_tile writes 2bpp character data at words $1008-$100F, which in 4bpp is plane-pair 1 of character ZERO. So in any mode where BG1 is 4bpp, character 0 is not transparent, and 'nothing is drawn here' cannot be asserted from that helper. The offset-per-tile test builds a clean Ppu instead and says why.",
+   "32x64 AND 64x32 HASH IDENTICALLY, AND THAT IS CORRECT — but it needed proving rather than explaining away. Unscrolled, both show the first 32x28 tiles, which live in screen 0 either way. the_tilemap_geometry_is_honoured_once_you_scroll_into_it scrolls both one screen right, where a 64-wide map has a second screen and a 32-wide map wraps back to its first, and asserts they diverge. Without it, 'the two look the same' would have been equally consistent with tilemap_size never being read. The per-layer distinctness test was also SCOPED to the four 2BPP ROMs it was written for, rather than loosened to accommodate the coincidence.",
+   "DIRECT COLOUR IS EXPOSED, NOT FOLDED IN. $2130 bit 0 makes an 8bpp pixel a BGR333 colour in its own right rather than a CGRAM index. The core still emits that value as palette_index, because it is genuinely what the PPU produced; what changes is how a renderer must INTERPRET it. So the flag is public PPU state (law 4: cores emit indexed pixels plus metadata) rather than something silently baked into the pixel stream.",
+   "EVERY NEW GOLDEN WAS LOOKED AT before being pinned, per the W6-03b discipline: the mode-3 8bpp ROMs render a detailed castle scene, the 4BPP ROM the same landscape as the 2BPP set but in far richer colour, and TileFlip a perfectly symmetric seamless pattern — which is exactly what a flip test should produce, since broken flips show as asymmetry at tile boundaries."
+  ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
