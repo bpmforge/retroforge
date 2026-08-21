@@ -4619,10 +4619,13 @@
     "each example is small enough to read in one sitting and does one thing"
    ],
    "notes": [
-    "The second criterion is the anti-rot mechanism: documentation that is not compiled is documentation that silently goes stale, which this project has already seen with EMULATION_CORES.md section 3.3's superseded dropped_by_limit line."
+    "The second criterion is the anti-rot mechanism: documentation that is not compiled is documentation that silently goes stale, which this project has already seen with EMULATION_CORES.md section 3.3's superseded dropped_by_limit line.",
+     "HANDOFF 2026-08-21: ALL THREE CRITERIA COMPLETE. docs/PLUGIN_SDK.md covers both tiers, written against the API read out of host.rs/sandbox.rs/component.rs rather than recalled. Two examples in crates/rf-plugin-sdk/examples/: lua_player_marker.rs (read memory by profile label -> draw an overlay) and component_capability_refusal.rs (ONE component, refused or accepted purely by the manifest beside it). Both are BUILT BY THE EXISTING GATE \u2014 cargo test --workspace and clippy --all-targets both compile examples \u2014 so a doc that drifts from the shipped API turns the gate red. Both were also RUN, not just compiled: the Lua one draws at (116,84) from a player at (120,88) with DEFAULT_OVERLAY_COLOR and an empty write ledger (write_memory never granted); the component one prints the refusal message, then instantiates the SAME BYTES once granted.",
+     "ANTI-ROT HAS TWO HALVES AND THE TICKET NAMED ONLY ONE. Criterion 2 gives doc->API drift detection. The reverse needs its own test: `docs_examples_exist` asserts every example the doc names is present, and `the_sdk_doc_names_every_example_that_exists` asserts the converse \u2014 without it, ADDING an example the doc never mentions passes forever and no reader finds it. Same vacuity shape as W9-03\u2019s WIT interface COUNT check.",
+     "STATED PLAINLY IN \u00a75 RATHER THAN LEFT TO DISCOVER: you cannot yet write a Rust plugin, build it, and have RetroForge run it. Nothing in this workspace targets wasm32-wasip2 and the app shell does not load components (crates/retroforge/** is outside this write_scope). The tier\u2019s contract, sandbox and refusals are shipped and tested; the toolchain and shell wiring are not. The example builds its component from WAT via the `wat` dev-dependency, which exercises the sandbox and keeps a binary blob out of git (NFR-006)."
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
