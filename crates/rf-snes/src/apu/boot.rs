@@ -92,8 +92,17 @@ pub enum BootAction {
     Echo(u8),
     /// Store `value` at `address`, then echo.
     Store { address: u16, value: u8, echo: u8 },
-    /// Hand control to the SPC700 at `entry`.
-    Run { entry: u16 },
+    /// Hand control to the SPC700 at `entry`, **after echoing `echo` on
+    /// port 0**.
+    ///
+    /// The echo is not optional and not cosmetic (ticket W7-08). The CPU's
+    /// upload loop writes the counter to `$2140` and then SPINS on
+    /// `CMP $2140 / BNE` until the IPL sends it back — the jump signal is
+    /// no exception. Handing over without the echo leaves the 65816
+    /// polling a value that will never arrive while the SPC700 runs the
+    /// program it was just given: two live processors, each waiting on the
+    /// other, from a handshake that had otherwise completed perfectly.
+    Run { entry: u16, echo: u8 },
     /// Nothing to do.
     None,
 }
@@ -116,7 +125,10 @@ impl IplBoot {
                         // A zero "kind" byte with the very first $CC means
                         // "do not transfer anything, just run".
                         self.state = BootState::Running;
-                        return BootAction::Run { entry: self.entry };
+                        return BootAction::Run {
+                            entry: self.entry,
+                            echo: 0xCC,
+                        };
                     }
                     self.state = BootState::Transferring(0);
                     return BootAction::Echo(0xCC);
@@ -147,7 +159,10 @@ impl IplBoot {
                     self.entry = self.address;
                     if ports_in[1] == 0 {
                         self.state = BootState::Running;
-                        return BootAction::Run { entry: self.entry };
+                        return BootAction::Run {
+                            entry: self.entry,
+                            echo: value,
+                        };
                     }
                     self.state = BootState::AwaitingBlock(value);
                     return BootAction::Echo(value);

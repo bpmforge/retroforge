@@ -246,7 +246,12 @@ impl Apu {
                 self.aram[usize::from(address)] = value;
                 self.ports_out[0] = echo;
             }
-            boot::BootAction::Run { entry } => {
+            boot::BootAction::Run { entry, echo } => {
+                // Echo FIRST, then hand over: the CPU is already spinning
+                // on `CMP $2140 / BNE` waiting for exactly this byte, and
+                // it never gets another chance to see it once the SPC700
+                // owns the ports.
+                self.ports_out[0] = echo;
                 // Hand over to the real SPC700 core, and bank the IPL out
                 // so the uploaded program owns the whole address space.
                 self.cpu.pc = entry;

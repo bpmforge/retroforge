@@ -339,3 +339,39 @@ fn a_non_looping_sample_stops_at_its_end() {
     assert!(!dsp.voices[0].keyed_on, "the voice keyed itself off");
     assert_eq!(dsp.mix(&mut aram), (0, 0));
 }
+
+/// **The IPL hand-over must echo before it jumps** (ticket W7-08).
+///
+/// The CPU's upload loop is `STA $2140` then `CMP $2140 / BNE` — it spins
+/// until the IPL sends the counter back, and the jump signal is no
+/// exception. Handing control to the uploaded program without that echo
+/// leaves the 65816 polling for a byte that will never come while the
+/// SPC700 happily runs the code it was just given: two live processors,
+/// each waiting on the other, from a handshake that otherwise completed.
+///
+/// Asserted on the ACTION rather than through a whole boot, so the reason
+/// this byte exists is visible at the point that produces it.
+#[test]
+fn handing_control_to_the_spc700_still_echoes_the_final_counter() {
+    use crate::apu::boot::{BootAction, BootState, IplBoot};
+
+    // Mid-upload: one block transferred, counter at 2.
+    let mut boot = IplBoot::new();
+    boot.state = BootState::Transferring(2);
+    boot.address = 0x0300;
+
+    // The CPU signals "jump": port 1 = 0, entry in ports 2/3, counter+1.
+    let ports = [0u8, 0x00, 0x00, 0x03];
+    match boot.cpu_wrote(0, 3, ports) {
+        BootAction::Run { entry, echo } => {
+            assert_eq!(entry, 0x0300, "entry comes from ports 2/3");
+            assert_eq!(
+                echo, 3,
+                "the counter the CPU just wrote must come back, or its \
+                 CMP $2140 loop never exits"
+            );
+        }
+        other => panic!("expected a Run action, got {other:?}"),
+    }
+    assert_eq!(boot.state, BootState::Running);
+}
