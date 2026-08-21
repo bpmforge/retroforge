@@ -4707,7 +4707,7 @@
     "ROADMAP P9's exit criterion is 'a third party ships a profile + pack + script without touching Rust or asking us questions'. That is the real acceptance for this ticket, and the third criterion above is how it stops being aspirational."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
