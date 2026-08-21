@@ -31,6 +31,7 @@
 //! structures, no rendering), and keeping them in their own module is what
 //! makes that testable in practice rather than in principle.
 
+pub mod accessibility;
 pub mod app;
 pub mod audio_out;
 pub mod authoring;

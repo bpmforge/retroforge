@@ -193,8 +193,27 @@ fn dump_divergence_evidence_writes_a_summary_and_a_replay_slice() {
     let divergence = check(&poking_entry)
         .expect("this entry must diverge (same shape as the mutation test above)");
 
+    // PER-PROCESS path (RF-L-10). This directory used to be fixed, and
+    // `remove_dir_all` below made it a race: two overlapping `cargo test`
+    // runs share CARGO_TARGET_TMPDIR, so one run's cleanup deleted the
+    // other's just-written replay-slice.rfreplay and the reader asserted
+    // on an empty string.
+    //
+    // That cost FOUR red runs in one session before it was diagnosed —
+    // including two stop-hook failures that could not be reproduced
+    // afterwards, because by the time anyone re-ran the suite the second
+    // process was gone. A test that fails only under concurrency teaches
+    // that red runs are noise and the fix is to run it again, which is
+    // how a real regression gets waved through.
+    //
+    // `std::process::id()` is what makes the runs disjoint;
+    // crates/rf-enhance/tests/intake_poisoned_bundle.rs uses the same
+    // device and was never affected.
     let out_dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("mode-invariant-evidence-test")
+        .join(format!(
+            "mode-invariant-evidence-test-{}",
+            std::process::id()
+        ))
         .join(poking_entry.name.replace(' ', "_"));
     let _ = std::fs::remove_dir_all(&out_dir); // start clean if a previous run left files
     dump_divergence_evidence(&divergence, &out_dir).expect("dump must succeed");

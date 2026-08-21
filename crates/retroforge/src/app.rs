@@ -122,6 +122,16 @@ pub struct RetroForgeApp {
     /// without the `gamepad` feature, because the routing rules are what
     /// the frontend reads; with no backend it simply stays empty.
     pad_router: rf_input::PadRouter,
+    /// UI navigation driven by the same pad events the emulated ports see
+    /// (ticket W8-04). Present without the `gamepad` feature for the same
+    /// reason `pad_router` is: the model is what the frontend reads, and
+    /// with no backend it simply never sees an event.
+    ui_nav: crate::ui_nav::GamepadNav,
+    /// When the last `poll_input` ran, so `GamepadNav::tick` gets a real
+    /// delta rather than an assumed frame time. Auto-repeat measured in
+    /// frames would speed up on a fast display and crawl on a slow one —
+    /// the repeat rate a user feels must be wall-clock.
+    last_nav_tick: Option<std::time::Instant>,
     /// The live gamepad backend, when this build has one and the platform
     /// let us open it.
     #[cfg(feature = "gamepad")]
@@ -399,6 +409,8 @@ impl RetroForgeApp {
             bindings,
             config_root,
             pad_router: rf_input::PadRouter::new(),
+            ui_nav: crate::ui_nav::GamepadNav::new(),
+            last_nav_tick: None,
             #[cfg(feature = "gamepad")]
             pad_backend: pad_backend_or_none(),
             show_controls: false,
@@ -483,10 +495,34 @@ impl RetroForgeApp {
         // The pads, then the OR: neither input wins, because a player using
         // a pad while a hand rests on the keyboard should not have one
         // silently cancel the other.
+        // ONE poll, two consumers. `PadBackend::poll` DRAINS, so calling
+        // it once for the emulated ports and again for UI navigation
+        // would hand each of them roughly half the events and produce a
+        // d-pad that moves the menu on some presses and the game on
+        // others. So the events are taken once here and fanned out:
+        // `PadRouter::apply` for the ports (what `poll` does internally),
+        // and `GamepadNav` for the UI.
         #[cfg(feature = "gamepad")]
         if let Some(backend) = self.pad_backend.as_mut() {
-            self.pad_router.poll(backend);
+            // Fully-qualified: `PadBackend` is not imported in this file,
+            // and a `use` inside a cfg block would be dead in a default
+            // build. Note this whole block is `#[cfg(feature =
+            // "gamepad")]`, so a DEFAULT `cargo build` never type-checks
+            // it — verify with `--features gamepad`.
+            let events = rf_input::PadBackend::poll(backend);
+            self.pad_router.apply(&events);
+            let actions = self.ui_nav.on_events(&events);
+            self.push_nav_events(ctx, &actions);
         }
+
+        // Auto-repeat is wall-clock, not per-frame — see `last_nav_tick`.
+        let now = std::time::Instant::now();
+        let dt = self
+            .last_nav_tick
+            .map_or(std::time::Duration::ZERO, |prev| now - prev);
+        self.last_nav_tick = Some(now);
+        let repeated = self.ui_nav.tick(dt);
+        self.push_nav_events(ctx, &repeated);
         if let Some(core) = &self.core {
             let mut frame = self.input_latch.sample(&self.bindings.keys);
             let pads = self.pad_router.sample(&self.bindings.pads);
@@ -499,6 +535,29 @@ impl RetroForgeApp {
         if std::mem::take(&mut self.pending_binding_save) {
             self.save_bindings();
         }
+    }
+
+    /// Push navigation actions into egui as real input events.
+    ///
+    /// **They go through `RawInput`, not through a bespoke focus model**,
+    /// which is the whole reason this tier works: egui's own focus is
+    /// what AccessKit reports, so a gamepad that drives it is visible to
+    /// a screen reader and to the headless harness alike. A parallel
+    /// model would have been more code, invisible to the accessibility
+    /// tree, and free to drift from what the keyboard does.
+    ///
+    /// A repaint is requested only when something actually happened —
+    /// asking every frame would keep the UI awake on an idle pad.
+    fn push_nav_events(&mut self, ctx: &egui::Context, actions: &[crate::ui_nav::NavAction]) {
+        if actions.is_empty() {
+            return;
+        }
+        let events = crate::ui_nav::GamepadNav::events_for(actions);
+        if events.is_empty() {
+            return;
+        }
+        ctx.input_mut(|i| i.events.extend(events));
+        ctx.request_repaint();
     }
 
     /// Whether a frame from the core has actually reached the screen —
