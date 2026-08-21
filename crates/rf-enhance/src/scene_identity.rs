@@ -133,7 +133,7 @@ const FNV_PRIME: u64 = 1_099_511_628_211;
 /// determinism and the zero-dependency budget this crate is held to
 /// (ticket brief: "No other new crate"), not collision resistance against
 /// an adversary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SceneId(pub u64);
 
 impl SceneId {

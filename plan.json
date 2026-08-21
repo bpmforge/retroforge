@@ -4416,9 +4416,11 @@
    ],
    "notes": [
     "ROADMAP P8's exit criteria are explicit that EACH feature ships with its own golden/A-B tests, per-game override knobs and honesty-contract labels — that is acceptance, not decoration."
-   ],
+   ,
+  "CLOSED 2026-08-21: all three criteria. rf-enhance/src/experiments.rs. THE TWO FEATURES SHARE ONE PROBLEM AND DIFFER ON THE ANSWER: both show the player something the hardware never produced, but smooth camera INVENTS positions between the game's own updates while room stitching REVEALS pixels the game really made, just earlier. They therefore carry different HonestyLabels with an explicit `invents` flag rather than one shared 'enhanced' badge, and a test asserts the two disagree on it -- blurring that distinction is the exact dishonesty law 6 exists to prevent. P8's THREE EXIT CRITERIA ARE MET BY MECHANISMS THAT ALREADY EXISTED, which is why this is 8 points of care rather than 8 points of new machinery: per-game override knobs are TrustLadder::pin (FR-ENH-011 already says 'profiles may pin states', and a second override mechanism would just be a second thing to disagree with the first); the labels are carried BY the feature so a surface that forgets to show one is a visible omission; and each A-B test asserts BOTH that the feature is inert when ungated (law 6) AND that it changes something when gated (anti-vacuity, since 'inert' otherwise passes for 'working'). DETAILS WORTH KEEPING: interpolation is fixed-point (alpha 0..=255, integer lerp) not f32, because a replay that reproduces only on the same FPU does not reproduce; the first frame returns None rather than an invented origin, since treating a missing previous frame as (0,0) slams the camera to the corner; and rooms are kept in a BTreeMap keyed by SceneId rather than merged into one plane, because two top-down rooms both start at (0,0) and one plane would overlay them -- the ordered map also gives a map view a stable order so its own golden can exist. SceneId gained Ord for that. Mutation-checked four ways."
+ ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
