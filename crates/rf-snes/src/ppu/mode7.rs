@@ -85,6 +85,22 @@ impl Mode7 {
     /// latch, so a write to `$211B` changes what the next `$211F` write
     /// produces. Modelling them as independent 16-bit registers looks
     /// right until a game writes them in an unusual order.
+    /// `$210D`/`$210E`'s mode-7 half: M7HOFS / M7VOFS.
+    ///
+    /// Signed 13-bit through the M7 latch, which is the same latch the
+    /// matrix registers use and a DIFFERENT one from the BG scroll's — see
+    /// the caller in `Ppu::write_scroll` for the fullsnes quote.
+    pub fn write_scroll(&mut self, offset: u16, value: u8) {
+        let word = (u16::from(value) << 8) | u16::from(self.latch);
+        self.latch = value;
+        let v = sign_extend_13(word);
+        if offset == 0x210D {
+            self.hofs = v;
+        } else {
+            self.vofs = v;
+        }
+    }
+
     pub fn write_register(&mut self, offset: u16, value: u8) {
         match offset {
             0x211A => {

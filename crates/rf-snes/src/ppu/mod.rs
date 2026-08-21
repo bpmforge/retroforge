@@ -425,6 +425,27 @@ impl Ppu {
             self.bghofs_latch = value;
         }
         self.bgofs_latch = value;
+
+        // **`$210D`/`$210E` write TWO registers, not one** (ticket W7-04).
+        //
+        // fullsnes: "Writing to 210Dh does BOTH update M7HOFS (via M7_old
+        // mechanism), and also updates BG1HOFS (via BG_old mechanism). In
+        // the same fashion, 210Eh updates both M7VOFS and BG1VOFS."
+        //
+        // Nothing wrote `mode7.hofs`/`vofs` before this: the fields
+        // existed, the transform read them, and they were permanently 0.
+        // Mode 7 has no scroll registers of its own, so a mode-7 game that
+        // scrolled did nothing at all — StarWars set `M7X = M7Y = 512` and
+        // scrolled via `$210D`, so every sample landed outside the
+        // playfield and the logo never appeared.
+        //
+        // The M7 latch is a SEPARATE latch from the BG one ("M7_old" vs
+        // "BG_old"), which is why this uses `mode7`'s rather than
+        // `bgofs_latch`, and the value is signed 13-bit: "1st Write: Lower
+        // 8bit, 2nd Write: Upper 5bit".
+        if offset == 0x210D || offset == 0x210E {
+            self.mode7.write_scroll(offset, value);
+        }
     }
 
     fn write_cgram(&mut self, value: u8) {

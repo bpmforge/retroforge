@@ -157,7 +157,7 @@ const GOLDENS: &[(&str, &str)] = &[
     // ground plane receding to a horizon, verified by eye.
     (
         "Perspective.sfc",
-        "7ab7001f3220feb5cda52af09f19ab1a18fcdf11b57cd7afdfdf36258b5de573",
+        "e6a6cc83829199684ed8ad9ed63537260293bcb4a3f1b679846ab4f1d51afbc5",
     ),
     // Windows and mosaic (W7-05's amended criterion 4). Each was
     // rendered to a PNG and LOOKED AT before its hash was pinned, and
@@ -202,6 +202,16 @@ const GOLDENS: &[(&str, &str)] = &[
     (
         "Mode7HDMA.sfc",
         "17911817330b88afb34cd29c47e6f517684ff78b6162015619726f99c4f7c75a",
+    ),
+    // StarWars (W7-04), unblocked twice over: W7-15's clock fix let the
+    // demo run at all, and this ticket found that M7HOFS/M7VOFS were
+    // never wired, so the logo sampled entirely outside the playfield.
+    // The frame now shows the logo over a starfield -- looked at, and
+    // 88% exact against PeterLemon's reference, the remainder being that
+    // the reference is a different frame of a zoom animation.
+    (
+        "StarWars.sfc",
+        "df9ee82194df24ea9bf61faa334d6fb0b3eab4f9624e95d89ea06b2aced5c60e",
     ),
     // Breadth (W7-13), both VERIFIED PIXEL-EXACT against PeterLemon's own
     // shipped reference screenshot -- see the module doc. The HiColor set
@@ -251,10 +261,6 @@ fn rom_dir() -> Option<std::path::PathBuf> {
 /// says "pinning this would record a picture we know is not what the ROM
 /// means to draw". Both entries name the ticket that will remove them.
 const EXCLUDED: &[(&str, &str)] = &[
-    (
-        "StarWars.sfc",
-        "renders fully transparent for its first ~170 frames: screen-over is 'transparent          outside the playfield' ($211A bits 6-7 = 2), the matrix sits static at A=410 D=256          Y0=-90, NMI is disabled, and the CPU loops at $00:8269 throughout. Whatever advances          this demo is not yet implemented, so there is nothing correct to pin — a black frame          would hash perfectly consistently forever. Diagnose with W7-07.",
-    ),
     (
         "MosaicMode5.sfc",
         "mode 5 is HI-RES 512, and this PPU has no hi-res path at all: bg::bit_depths gives          mode 5 the right depths (4bpp/2bpp) but composition is 256 wide, and $2105 bit 3 is          consumed as bg3_priority with nothing reading a hi-res flag. The frame renders as a          half-width character squeezed against a backdrop-grey field. The MOSAIC half is          correct and visible (holding R blockifies it exactly as MosaicMode3 does), which is          what makes this an exclusion rather than a bug in this ticket: the mosaic path works,          the mode it is being drawn in does not exist yet. Pinning it would record a picture          nobody claims is right. Owned by W7-06, whose criterion 2 is hi-res modes 5/6.",
@@ -342,6 +348,16 @@ fn capture_plan(name: &str) -> Option<CapturePlan> {
         "MosaicMode3.sfc" | "MosaicMode5.sfc" => Some(CapturePlan {
             hold: 1 << 4,
             until: |s| s.bus.ppu.mosaic.size >= 8,
+        }),
+        // StarWars zooms its logo in from nothing over ~200 frames, and
+        // its first phase draws NO playfield at all -- the settle-after-
+        // fade capture landed there, which is why W7-04 recorded a black
+        // frame. Wait for the zoom to be well under way instead. `a` is
+        // the mode-7 scale in 8.8, climbing 12 -> 92 -> ... -> 892; at 800
+        // the logo is on screen and the content is stable.
+        "StarWars.sfc" => Some(CapturePlan {
+            hold: 0,
+            until: |s| s.bus.ppu.mode7.a >= 800,
         }),
         _ => None,
     }

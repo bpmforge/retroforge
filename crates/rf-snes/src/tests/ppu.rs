@@ -1016,3 +1016,43 @@ fn the_sub_screen_has_its_own_layer_designation() {
          is configuring a screen nothing composes"
     );
 }
+
+/// **`$210D`/`$210E` write TWO registers** (ticket W7-04).
+///
+/// fullsnes: "Writing to 210Dh does BOTH update M7HOFS (via M7_old
+/// mechanism), and also updates BG1HOFS (via BG_old mechanism)." Mode 7
+/// has no scroll registers of its own, so before this `Mode7::hofs` was a
+/// field the transform read and nothing ever wrote — permanently zero,
+/// and every mode-7 game silently unable to scroll. StarWars set
+/// `M7X = M7Y = 512` and scrolled through `$210D`; with the scroll lost,
+/// every sample landed outside the playfield and the logo never appeared.
+///
+/// The two latches are separate ("M7_old" vs "BG_old"), and the mode-7
+/// value is signed 13-bit against BG1's 16 — so a single write leaves the
+/// two registers holding genuinely different numbers, which is what makes
+/// this worth asserting rather than assuming.
+#[test]
+fn writing_bg1_scroll_also_writes_the_mode_7_scroll() {
+    let mut p = Ppu::new();
+    // 1st write: lower 8 bits. 2nd write: upper 5 (mode 7) / upper 8 (BG1).
+    p.write_register(0x210D, 0x80);
+    p.write_register(0x210D, 0x01);
+    assert_eq!(
+        p.mode7.hofs, 0x0180,
+        "M7HOFS must receive the write that $210D also gave BG1HOFS"
+    );
+    assert_eq!(p.bgs[0].hofs, 0x0180, "and BG1HOFS still gets it too");
+
+    p.write_register(0x210E, 0x40);
+    p.write_register(0x210E, 0x02);
+    assert_eq!(p.mode7.vofs, 0x0240);
+    assert_eq!(p.bgs[0].vofs, 0x0240);
+
+    // Signed 13-bit: bit 12 set means negative, where BG1's 16-bit value
+    // is simply large. One write, two different numbers.
+    let mut q = Ppu::new();
+    q.write_register(0x210D, 0x00);
+    q.write_register(0x210D, 0x1F);
+    assert_eq!(q.mode7.hofs, -256, "mode 7 sign-extends from bit 12");
+    assert_eq!(q.bgs[0].hofs, 0x1F00, "BG1 does not");
+}
