@@ -4117,7 +4117,7 @@
     "ITS GUARD IS THE POINT: the runner refuses to hash a frame whose BG mode the PPU does not implement, because a golden pinned on the mode-0 fallback's garbage would go green forever while recording a wrong picture. Every ROM added here must keep that property."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
