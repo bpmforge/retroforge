@@ -1,0 +1,22 @@
+# mdBook configuration for the RetroForge documentation site (ticket
+# W9-07).
+#
+# The book lives under docs/ and is BUILT FROM docs/ in CI, which is
+# criterion 1: there is no separate content tree that could drift from
+# the repository, because every chapter is assembled from the canonical
+# documents next to it.
+[book]
+title = "RetroForge"
+description = "Profiles, replacement packs and the plugin SDK — what a third party needs to ship without touching Rust."
+src = "src"
+language = "en"
+
+[output.html]
+# No custom theme or JS: the site is documentation, and every asset added
+# here is one more thing that can rot without anyone noticing.
+default-theme = "rust"
+git-repository-url = "https://github.com/bpmforge/retroforge"
+
+[output.html.fold]
+enable = true
+level = 1

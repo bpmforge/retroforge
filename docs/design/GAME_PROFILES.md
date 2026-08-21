@@ -14,6 +14,7 @@ declarative rules is a plugin (see PLUGINS.md) referenced *by* a profile.
 - Versioning: `profile_version` (schema semver) + `revision` (content);
   loader rejects newer majors, warns on unknown keys.
 
+<!-- ANCHOR: schema -->
 ## 2. Schema (v0)
 
 ```toml
@@ -155,6 +156,8 @@ silently re-decode differently under an upgraded emulator.
 Community-submitted profiles pass license-gated intake (D-005,
 FR-PROF-007): `[meta]` requires `license` (SPDX) alongside `sources`;
 deny-by-default at the Phase-9 submission CI.
+
+<!-- ANCHOR_END: schema -->
 
 ## 3. Authoring pipeline
 

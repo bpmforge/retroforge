@@ -21,6 +21,7 @@ Both metadata files are hand-parsed, the same deliberate choice
 parser dependency into `rf-enhance`, and a checker that cannot itself fail
 in interesting ways is worth more than one supporting nesting nobody uses.
 
+<!-- ANCHOR: allowlist -->
 ## 2. The allowlist is the mechanism; the ROM sniffer is the diagnostic
 
 **This is the load-bearing decision, and the obvious design gets it
@@ -68,6 +69,9 @@ data. A test asserts that wording. An "ACCEPTED" that read as "verified
 ROM-free" would be the same species of overclaim the project refuses
 everywhere else.
 
+<!-- ANCHOR_END: allowlist -->
+
+<!-- ANCHOR: licence -->
 ## 3. Licence metadata
 
 FR-PROF-007: "SPDX license + provenance metadata required; missing/unknown
@@ -93,6 +97,8 @@ errors and prompt different fixes.
 `ALLOWED_LICENSES` mirrors `deny.toml`'s allowlist plus the asset licences
 (`CC-BY-4.0`, `CC-BY-SA-4.0`) that a code allowlist has no reason to
 carry.
+
+<!-- ANCHOR_END: licence -->
 
 ## 4. Intake reports every fault at once
 

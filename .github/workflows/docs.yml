@@ -1,0 +1,64 @@
+# Documentation site (ticket W9-07).
+#
+# Criterion 1 is "a documentation site built from docs/ in CI, so it
+# cannot drift from the repository". Two things make that true, and the
+# second is the one that matters:
+#
+#   * the site is built from `docs/site`, whose chapters are assembled
+#     from the canonical documents beside them — there is no second
+#     content tree to fall out of step;
+#   * every code sample is an `{{#include}}` of a file this workflow
+#     compiles or validates, enforced by `verify-doc-samples.mjs`. A
+#     chapter that pastes a snippet in fails the build.
+#
+# The verify step runs FIRST and is cheap, so a broken include fails in
+# seconds rather than after a toolchain install.
+name: docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+      - '.github/scripts/verify-doc-samples.mjs'
+      - 'crates/rf-plugin-sdk/examples/**'
+      - 'profiles/**'
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cheapest check first: every include resolves, every anchor
+      # exists, and no chapter carries an inline sample.
+      - name: Verify documentation samples
+        run: node .github/scripts/verify-doc-samples.mjs
+
+      # The samples the site includes are Rust examples and a profile.
+      # Building them here is what makes "compiled or executed by CI"
+      # true of the site rather than only of the workspace gate.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Compile every Rust sample the site includes
+        run: cargo build -p rf-plugin-sdk --examples
+
+      - name: Validate every profile the site includes
+        run: cargo run -q -p retroforge-tool -- profile validate profiles/nes/rf-scroller-demo/profile.toml
+
+      - name: Install mdBook
+        run: cargo install --locked mdbook --version ^0.4
+
+      - name: Build the site
+        run: mdbook build docs/site
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: retroforge-docs
+          path: docs/site/book
+          if-no-files-found: error

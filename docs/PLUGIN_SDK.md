@@ -42,6 +42,7 @@ so this table cannot outlive the examples either.
 scripting ecosystem is Lua, so Lua is the compatibility idiom; WASM is the
 stability and sandbox play.
 
+<!-- ANCHOR: capabilities -->
 ## 2. The manifest is the same for both tiers
 
 ```toml
@@ -72,6 +73,8 @@ Capabilities (`manifest::Capabilities`): `read_memory`, `read_ppu`,
 `Capabilities::granted_summary()` returns the enable-time list
 most-dangerous-first, because a user skimming a prompt stops after a few
 lines and `write_memory` must never be the ninth bullet.
+
+<!-- ANCHOR_END: capabilities -->
 
 ## 3. Tier 1 — Lua
 
@@ -148,6 +151,7 @@ let host = ComponentHost::new(manifest)?;
 let (store, instance) = host.instantiate(&wasm_bytes)?;
 ```
 
+<!-- ANCHOR: sandbox_is_linker -->
 **The sandbox is the linker.** A host interface is linked *if and only if*
 the manifest grants the matching capability, so an ungranted import is a
 **missing** import and the component cannot instantiate.
@@ -156,6 +160,8 @@ the manifest grants the matching capability, so an ungranted import is a
 plugin run, do nothing, and report success — the user would be told a mod
 was active while it was inert. That is the exact failure the sandbox
 exists to prevent, so it does not exist as a code path.
+
+<!-- ANCHOR_END: sandbox_is_linker -->
 
 ### Three refusals, and whose problem each is
 
@@ -191,13 +197,16 @@ than to remove.
 
 ## 5. Building a component
 
+
 There is no in-repo toolchain for compiling a Rust plugin to a component
 yet — nothing in this workspace targets `wasm32-wasip2`, and the app shell
 does not load components at runtime. The example builds its component from
 WAT via the `wat` dev-dependency, which is enough to exercise the sandbox
 and keeps a binary blob out of git (NFR-006).
 
+<!-- ANCHOR: not_yet -->
 Stated plainly so nobody goes looking: **you cannot yet write a Rust
 plugin, build it, and have RetroForge run it.** The tier's contract,
 sandbox and refusals are shipped and tested; the toolchain and the shell
 wiring are not.
+<!-- ANCHOR_END: not_yet -->

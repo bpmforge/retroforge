@@ -4704,10 +4704,14 @@
     "every code sample in the site is compiled or executed by CI"
    ],
    "notes": [
-    "ROADMAP P9's exit criterion is 'a third party ships a profile + pack + script without touching Rust or asking us questions'. That is the real acceptance for this ticket, and the third criterion above is how it stops being aspirational."
+    "ROADMAP P9's exit criterion is 'a third party ships a profile + pack + script without touching Rust or asking us questions'. That is the real acceptance for this ticket, and the third criterion above is how it stops being aspirational.",
+     "HANDOFF 2026-08-21: ALL THREE CRITERIA COMPLETE. docs/site/ (mdBook: book.toml, SUMMARY.md, 4 chapters), .github/workflows/docs.yml, .github/scripts/verify-doc-samples.mjs. CRITERION 3 DROVE THE DESIGN: the site contains NO COPIED SAMPLES. Every one is an {{#include}} of a file CI already builds \u2014 W9-04\u2019s plugin examples, the profile retroforge-tool validates, anchored sections of the design docs. ONE COPY means drift is STRUCTURALLY IMPOSSIBLE rather than merely detected, which is stronger than compiling a second copy and discovering later that the two disagree.",
+     "LINE RANGES WERE THE FIRST DESIGN AND THEY ARE WRONG: a range shifts silently when the source doc is edited. Writing the verifier caught exactly that in my own draft \u2014 plugins.md cited lines 243:255 of a 204-line file. Every include is now a NAMED ANCHOR (<!-- ANCHOR: name --> in the source docs), and a missing anchor is an ERROR because mdBook would otherwise emit the WHOLE FILE, which reads as a formatting slip rather than a broken reference. The verifier was NEGATIVE-TESTED, not just run green: it correctly rejects an inline `rust` block, a nonexistent anchor, and a chapter SUMMARY.md never links.",
+     "UNPROVEN, AND STATED PLAINLY: GitHub Actions cannot run here. verify-doc-samples.mjs, `cargo build -p rf-plugin-sdk --examples` and `retroforge-tool profile validate` all pass LOCALLY, and docs.yml uses the same actions ci.yml already uses (actions/checkout@v4, dtolnay/rust-toolchain@stable, actions/upload-artifact@v4) \u2014 but `mdbook build docs/site` and the workflow as a whole are UNVERIFIED until it actually runs. First push to main is the real test. Also note the verifier lives at .github/scripts/ rather than scripts/ (this project\u2019s conventional home for validators) purely because scripts/** is outside this write_scope; worth moving when a ticket owns both.",
+     "NOT DONE: no publishing step. docs.yml uploads the built book as an artifact; it does not deploy to Pages or anywhere else. That needs a repository settings decision (Pages source, custom domain) that is not a code change."
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
