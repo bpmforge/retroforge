@@ -4182,7 +4182,7 @@
     "THE THIRD CRITERION IS THE GUARD. A per-dot rewrite is exactly the kind of change that fixes one suite and silently breaks another, so the existing goldens are part of the acceptance rather than something to re-pin afterwards."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
