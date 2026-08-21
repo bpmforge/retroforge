@@ -4676,10 +4676,12 @@
    ],
    "notes": [
     "W8-11 already requires Mesen-compatible tile identity, so this is the consumer of that work rather than a second implementation of it.",
-    "The third criterion needs a real pack: check one is obtainable and licence-clear BEFORE claiming, or this stalls exactly like W7-05, W7-08 and W7-11 did on artifacts that did not exist."
+    "The third criterion needs a real pack: check one is obtainable and licence-clear BEFORE claiming, or this stalls exactly like W7-05, W7-08 and W7-11 did on artifacts that did not exist.",
+     "PRE-CLAIM CHECK RUN 2026-08-21, AS THIS TICKET'S OWN NOTE DEMANDS \u2014 AND IT FAILED. Criterion 3 wants \"a real community pack imported end to end in a test\", but docs/SCOPE.md's game-aware row lists \"third-party assets as gate fixtures\" in the OUT column, and community HD packs are derived works keyed to copyrighted games with no clear licence (FR-PROF-007/NFR-011 deny unlicensed content; law 5 forbids ROM bytes). W8-11 hit the identical wall and recorded it. This write_scope is crates/rf-enhance/** only, so the fetch-and-pin manifest path (rf-harness + tests/rom-manifest.toml, which has a LicenseStatus::NoLicenseGrantFetchOnly category for exactly this) is also unavailable in-ticket.",
+     "RULING (Brad, 2026-08-21): DO CRITERIA 1 AND 2, BLOCK CRITERION 3 pending a licence-clear artifact \u2014 same shape W8-10 sat in before the ort ruling. Import + apply and the PARTIAL reporting are both fully inside this write_scope; criterion 3 is not, and is recorded rather than faked against a pack we authored ourselves."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
