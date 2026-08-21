@@ -4520,7 +4520,9 @@
    "crate": "rf-enhance",
    "write_scope": [
     "crates/rf-enhance/**",
-    "profiles/**"
+    "profiles/**",
+    "crates/rf-profiles/**",
+    "docs/design/**"
    ],
    "depends_on": [
     "W8-06"
@@ -4532,10 +4534,11 @@
    ],
    "notes": [
     "Same honesty contract as every other enhancement: the player must be able to tell what is the game and what is ours.",
-     "SCOPE BLOCKER found 2026-08-21 while orienting (ticket was claimed, then released unworked so W8-11 could take lowest-id order). Criterion 1 says overlays are \"driven by profile declarations\", but this write_scope is crates/rf-enhance/** + profiles/** and the PROFILE SCHEMA lives in crates/rf-profiles/src/schema.rs. Profile has NO serde(deny_unknown_fields), so a [translation] table in a profile TOML is SILENTLY IGNORED rather than rejected \u2014 an in-scope example profile would look right and do nothing. Wiring it needs one Option<Translation> field on Profile plus the struct, i.e. crates/rf-profiles/**, which is OUT OF SCOPE; GAME_PROFILES.md \u00a72 (docs/design/**) documents the table and is also out of scope. Precedent says do not take this unattended: W8-11-era note records \"amending scope to add docs/** is a one-line ruling; it was not taken unattended\". RECOMMEND asking Brad to add crates/rf-profiles/** + docs/design/** to this write_scope, or splitting the schema field into its own ticket. Everything else \u2014 the overlay engine, the ledger, the Accuracy-Mode absence and criterion 3\u2019s replaced-text identifiability \u2014 is fully in scope."
+     "SCOPE BLOCKER found 2026-08-21 while orienting (ticket was claimed, then released unworked so W8-11 could take lowest-id order). Criterion 1 says overlays are \"driven by profile declarations\", but this write_scope is crates/rf-enhance/** + profiles/** and the PROFILE SCHEMA lives in crates/rf-profiles/src/schema.rs. Profile has NO serde(deny_unknown_fields), so a [translation] table in a profile TOML is SILENTLY IGNORED rather than rejected \u2014 an in-scope example profile would look right and do nothing. Wiring it needs one Option<Translation> field on Profile plus the struct, i.e. crates/rf-profiles/**, which is OUT OF SCOPE; GAME_PROFILES.md \u00a72 (docs/design/**) documents the table and is also out of scope. Precedent says do not take this unattended: W8-11-era note records \"amending scope to add docs/** is a one-line ruling; it was not taken unattended\". RECOMMEND asking Brad to add crates/rf-profiles/** + docs/design/** to this write_scope, or splitting the schema field into its own ticket. Everything else \u2014 the overlay engine, the ledger, the Accuracy-Mode absence and criterion 3\u2019s replaced-text identifiability \u2014 is fully in scope.",
+     "SCOPE AMENDED 2026-08-21 ON BRAD'S RULING: `crates/rf-profiles/**` and `docs/design/**` added, in response to the scope blocker recorded in the note above. Criterion 1 requires overlays \"driven by profile declarations\" and the profile schema lives in crates/rf-profiles/src/schema.rs; GAME_PROFILES.md \u00a72 (docs/design/**) is where the table is specified. Same one-line-ruling shape as the earlier `docs/**` amendment on another ticket. Recorded as vetoable."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
