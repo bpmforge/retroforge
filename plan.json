@@ -4215,7 +4215,7 @@
   "PER-LINE CGRAM IS THE SAME PROBLEM, FOUND BY W7-07 (2026-08-20). PeterLemon's RedSpaceHDMA drives $2121/$2122 from HDMA to paint a different BACKDROP COLOUR on every scanline -- verified correct by trace ($1F, $1E, $1D ... one step every 7 lines, 32 steps over 224). It is unpinnable as a golden for exactly this ticket's reason: the frame is 100% palette index 0, so an index-domain hash cannot see it, and a renderer handed one palette snapshot per frame cannot draw it either. Whatever mechanism this ticket adds for colour math should be checked against this case too -- per-line CGRAM is not a test-only concern, it is how real games do sunsets and water. Both RedSpace ROMs are already fetched and sit in EXCLUDED in tests/peterlemon_golden.rs, so they are available as the acceptance evidence."
  ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
