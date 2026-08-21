@@ -36,6 +36,9 @@
 //! [`metatile_screens`] — is a version bump, not a patch.
 
 pub mod metatile_screens;
+/// The second family (ticket W9-08). See the module doc for why it is a
+/// different SHAPE rather than a second stream decoder.
+pub mod room_grid;
 
 /// Why a decode could not be performed.
 ///

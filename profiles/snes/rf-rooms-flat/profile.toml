@@ -1,0 +1,81 @@
+# RF-Rooms-Flat — the UNINDEXED `room_grid` demonstration profile
+# (ticket W9-08).
+#
+# ## Why a second room_grid profile rather than a third family
+#
+# `room_grid` has two halves and they are different on-ROM layouts, not a
+# general case and a degenerate one:
+#
+#   * INDEXED   (profiles/nes/rf-rooms) — the grid holds room NUMBERS and
+#     rooms repeat, which is how room games fit on a cartridge;
+#   * UNINDEXED (this profile)          — cell N is room N in reading
+#     order, with no indirection table at all.
+#
+# A profile that gets `indexed` wrong decodes garbage rather than
+# erroring, so both halves need a profile standing on them. W9-08's note
+# asks for breadth of FORMAT coverage rather than count, and this is that
+# breadth: RF-Scroller covers `metatile_screens`, and these two cover both
+# shapes of the family this ticket added.
+#
+# ## Provenance (FR-PROF-003)
+#
+# RetroForge authored every byte. `fixtures/snes/rf-rooms-flat/FORMAT.md`
+# describes the layout and `generate.md` states the rule that produces it,
+# so the evidence is a CONSTRUCTION RULE — checkable rather than merely
+# cited. The 24-byte normalized image hashes, verifiably:
+#
+#     sha256  66160ffc3425e84c739b51bb45b4a82dd600a0523cd2663fb54414191a2f949e
+#     md5     8d887cdd630c244de27c9400ef708cd6
+#     crc32   5c1b197c
+#
+# Those are hashes of the LEVEL IMAGE, not of a ROM.
+#
+# ## Why [[identity]] is a placeholder
+#
+# There is no ROM to identify: the family is a pure function of ROM bytes,
+# so this fixture is level data. Putting the level image's hash into a
+# field meaning "the ROM this profile matches" would be a false claim
+# wearing the costume of a precise one.
+
+[meta]
+profile_version = "0.1"
+title = "RF-Rooms-Flat (unindexed room_grid demonstration)"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge"]
+sources = [
+  "fixtures/snes/rf-rooms-flat/FORMAT.md",
+  "fixtures/snes/rf-rooms-flat/generate.md",
+]
+license = "MIT"
+
+[[identity]]
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+md5 = "00000000000000000000000000000000"
+crc32 = "00000000"
+revision = "1.0"
+
+[capabilities]
+full_level = true
+
+# 3x2 grid of 2x2-tile rooms = a 6x4-tile level, six distinct rooms, no
+# reuse. `indexed` is absent, which defaults to false — and there is
+# deliberately no room_grid_index entry below, because an index table
+# nothing reads is worse than no table.
+[decode]
+kind = "room_grid"
+family_version = "1"
+
+[decode.room_grid]
+rooms_across = 3
+rooms_down = 2
+room_width = 2
+room_height = 2
+indexed = false
+
+[[rom_map]]
+label = "room_grid_data"
+offset = 0x0000
+len = 24
+type = "room_tiles"
+source = "fixtures/snes/rf-rooms-flat/FORMAT.md — 6 rooms x 4 tiles, reading order"

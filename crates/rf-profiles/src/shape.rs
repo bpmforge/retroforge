@@ -164,6 +164,20 @@ fn known_shape() -> Shape {
                     "collision",
                     Shape::Object(vec![("table", Shape::Leaf), ("bits", Shape::Leaf)]),
                 ),
+                // room_grid (ticket W9-08). shape.rs is a SECOND source of
+                // truth beside the serde structs and Profile has no
+                // deny_unknown_fields, so a table missing here still
+                // deserialises and merely warns — the drift W8-12 found.
+                (
+                    "room_grid",
+                    Shape::Object(vec![
+                        ("rooms_across", Shape::Leaf),
+                        ("rooms_down", Shape::Leaf),
+                        ("room_width", Shape::Leaf),
+                        ("room_height", Shape::Leaf),
+                        ("indexed", Shape::Leaf),
+                    ]),
+                ),
                 ("family_version", Shape::Leaf),
             ]),
         ),

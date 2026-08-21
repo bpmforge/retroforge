@@ -1,0 +1,86 @@
+# RF-Rooms — the `room_grid` demonstration profile (ticket W9-08).
+#
+# ## What this exercises, and why it is not another scroller
+#
+# W9-08's first criterion is "each exercising a decoder family the first
+# does not", and its note says the point is breadth of FORMAT coverage,
+# not count: two profiles of the same shape prove less than one that
+# forces a second family into existence. RF-Scroller is
+# `metatile_screens` — a left-to-right stream of RLE columns. This is
+# `room_grid`: a 2-D grid of fixed-size rooms with an indirection table,
+# so one room can appear in many cells.
+#
+# Room REUSE is the property `metatile_screens` cannot express at all,
+# and it is why room games fit on a cartridge.
+#
+# ## Provenance (FR-PROF-003)
+#
+# RetroForge authored every byte this profile describes. The layout and
+# the rule that generates it are in
+# `fixtures/nes/rf-rooms/FORMAT.md` and `generate.md`, so the evidence is
+# a CONSTRUCTION RULE rather than a citation — checkable, not merely
+# attributed. Regenerating the 60-byte normalized image from generate.md
+# gives, verifiably:
+#
+#     sha256  b615ba8270aeb479ba54cff77b5d2830af24bd448e59b73de46fd01f8eddd54a
+#     md5     e691221232e193d90ded901029f8ce71
+#     crc32   fa635500
+#
+# Those are real, computed hashes of the level image — NOT of a ROM.
+#
+# ## Why [[identity]] is a placeholder
+#
+# This fixture is LEVEL DATA, not a bootable ROM: the `room_grid` family
+# is a pure function of ROM bytes, so exercising it needs bytes and
+# nothing else. There is therefore no ROM whose normalized hash could go
+# here, and putting the level image's hash in a field that means "the ROM
+# this profile matches" would be a false provenance claim dressed as a
+# precise one. The placeholder is honest; the real hashes are in the
+# comment above, where they say what they actually are.
+
+[meta]
+profile_version = "0.1"
+title = "RF-Rooms (room_grid demonstration)"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge"]
+sources = ["fixtures/nes/rf-rooms/FORMAT.md", "fixtures/nes/rf-rooms/generate.md"]
+license = "MIT"
+
+[[identity]]
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+md5 = "00000000000000000000000000000000"
+crc32 = "00000000"
+revision = "1.0"
+
+[capabilities]
+full_level = true
+
+# A 4x3 grid of 4x4-tile rooms = a 16x12-tile level, built from THREE
+# distinct rooms used twelve times. `indexed = true` is what makes that
+# possible; without the index table the grid would need twelve rooms of
+# data to say the same thing.
+[decode]
+kind = "room_grid"
+family_version = "1"
+
+[decode.room_grid]
+rooms_across = 4
+rooms_down = 3
+room_width = 4
+room_height = 4
+indexed = true
+
+[[rom_map]]
+label = "room_grid_data"
+offset = 0x0000
+len = 48
+type = "room_tiles"
+source = "fixtures/nes/rf-rooms/FORMAT.md — 3 rooms x 16 tiles, room 0 first"
+
+[[rom_map]]
+label = "room_grid_index"
+offset = 0x0030
+len = 12
+type = "room_index"
+source = "fixtures/nes/rf-rooms/FORMAT.md — 4x3 grid in reading order"

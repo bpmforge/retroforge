@@ -300,10 +300,47 @@ pub struct Decode {
     pub screens: Option<ScreensSpec>,
     pub palettes: Option<PalettesSpec>,
     pub collision: Option<CollisionSpec>,
+    /// `[decode].room_grid` (ticket W9-08).
+    pub room_grid: Option<RoomGridSpec>,
     /// §2's own forward note: schema v0.2 adds `decode.family_version`,
     /// versioned the same way `profile_version` is. Carried here as an
     /// optional string so a v0 loader neither requires nor rejects it.
     pub family_version: Option<String>,
+}
+
+/// `[decode].room_grid` (ticket W9-08).
+///
+/// The second decoder family. Where `metatile_screens` streams
+/// column-RLE data left to right, a room-grid game stores a **2-D grid of
+/// fixed-size rooms** — the shape Zelda-likes and Metroid-likes use — so
+/// the two exercise genuinely different parts of the format rather than
+/// being two profiles of the same shape.
+///
+/// **`index` is the load-bearing optional field.** With it, the grid
+/// holds room *numbers* and rooms may repeat; without it, cell N is room
+/// N laid out in reading order. Real room games nearly always have the
+/// indirection, because reusing one room in eight places is how they fit
+/// on the cartridge.
+///
+/// GAME_PROFILES.md §2 names `room_grid` but never specified it — this
+/// struct and `rf_enhance::decode::room_grid` are the specification. §2
+/// itself is outside W9-08's write_scope, so documenting the table there
+/// is recorded as follow-up rather than done here.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RoomGridSpec {
+    /// Grid width, in rooms.
+    pub rooms_across: u32,
+    /// Grid height, in rooms.
+    pub rooms_down: u32,
+    /// Tiles across one room.
+    pub room_width: u32,
+    /// Tiles down one room.
+    pub room_height: u32,
+    /// `true` when the grid stores room numbers indirected through the
+    /// `room_grid_index` table rather than laying rooms out in reading
+    /// order.
+    #[serde(default)]
+    pub indexed: bool,
 }
 
 /// `[decode].metatile` (§2).

@@ -43,6 +43,21 @@ addr = 0x0F12
 type = "u16"
 scale = 1
 
-[decode]
-kind = "room_grid"
-family_version = "0"
+# [decode] REMOVED by ticket W9-08.
+#
+# This profile declared `kind = "room_grid"` from W4-02 until 2026-08-21
+# while configuring NOTHING — no [decode.room_grid] table and no
+# [[rom_map]] entries — because no such family existed to configure
+# against. It decoded nothing and looked configured, which is precisely
+# the vacuous artifact W9-08 was told not to produce more of.
+#
+# Now that `room_grid` IS implemented, the declaration stopped being
+# merely inert and became a live falsehood: spec_from_profile would
+# refuse it with MissingSpec. There is no Mode 7 fixture with room data
+# behind this profile, and inventing offsets to satisfy the schema would
+# be inventing facts — so the claim is withdrawn rather than dressed up.
+#
+# Working room_grid profiles, both backed by authored fixtures with
+# published construction rules:
+#   profiles/nes/rf-rooms          — indexed (room reuse)
+#   profiles/snes/rf-rooms-flat    — unindexed
