@@ -4441,7 +4441,8 @@
     "if implemented, it is opt-in, labelled, and absent from Accuracy Mode"
    ],
    "notes": [
-    "TRACEABILITY G5 requires design-first for this specifically. The first criterion is therefore a gate, not a formality."
+    "TRACEABILITY G5 requires design-first for this specifically. The first criterion is therefore a gate, not a formality.",
+    "DESIGN: docs/design/FRAME_INTERPOLATION.md (written 2026-08-21, \u00a71\u2013\u00a77). \u00a77 DECLINES to implement blending; what ships in crates/rf-enhance/src/interpolation.rs is the candidacy predicate only \u2014 it decides whether a frame pair MAY be interpolated and blends nothing."
    ],
    "points": 5,
    "status": "in_progress",
