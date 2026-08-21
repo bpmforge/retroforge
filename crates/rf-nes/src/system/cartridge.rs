@@ -32,7 +32,17 @@ const DEFAULT_CHR_RAM_SIZE: usize = 8 * 1024;
 /// crate's current mapper roadmap, not a reason to collapse them: the next
 /// mapper rf-cart learns to identify should not silently become emulable
 /// the moment it's added there.
-pub(crate) const EMULATED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7];
+///
+/// **28 was missing until W7-11's fixture caught it.** Action 53 was
+/// implemented, given 12 unit tests, added to `rf_cart`'s
+/// `SUPPORTED_MAPPERS`, and wired into `NesBus::new`'s factory — and this
+/// gate rejected it before that factory was ever reached, so the `28 =>`
+/// arm was dead code and no mapper-28 ROM could load. Every one of those
+/// unit tests passed throughout, because each constructed `Action53`
+/// directly. That is the whole argument for this ticket's third criterion
+/// existing: only a real ROM entering through `from_ines_bytes` crosses
+/// this line.
+pub(crate) const EMULATED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7, 28];
 
 /// Everything that can go wrong turning a raw ROM image into an
 /// `rf-nes`-usable [`NesRom`]. Wraps [`CartError`] for the parsing/format

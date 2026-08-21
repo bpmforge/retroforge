@@ -6,3 +6,6 @@
 *.sav
 *.state
 .code-search/
+
+# Built fixture ROM (law 5: no ROM bytes in git); rom.sha256 pins it.
+fixtures/nes/action53/build/
