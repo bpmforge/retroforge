@@ -4742,7 +4742,7 @@
   "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). BOTH options taken. (a) write_scope is widened to crates/rf-enhance/** and fixtures/**: implement the `room_grid` decoder family \u2014 which profiles/snes/example-mode7 has declared since W4-02 while decoding nothing \u2014 and author the fixture that exercises it, so criterion 1\u2019s \"a decoder family the first does not\" becomes satisfiable at all. (b) Profiles for real, documented commercial titles ARE permitted, citing published documentation (DataCrystal and similar). Law 5 still binds absolutely: NO ROM BYTES IN GIT, and no copyrighted title hardcoded in engine code \u2014 a profile is data under /profiles, never a name baked into a crate. Every claim still needs its FR-PROF-003 source citation, and clean-room-from-documentation (NFR-011) remains the standard: transcribed-from-disassembly is not acceptable provenance no matter how convenient."
  ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   }
  ]
