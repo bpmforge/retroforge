@@ -215,7 +215,7 @@ const EXCLUDED: &[(&str, &str)] = &[
     ),
     (
         "MosaicMode5.sfc",
-        "mode 5 is HI-RES 512, and this PPU has no hi-res path at all: bg::bit_depths gives          mode 5 the right depths (4bpp/2bpp) but composition is 256 wide, and $2105 bit 3 is          consumed as bg3_priority with nothing reading a hi-res flag. The frame renders as a          half-width character squeezed against a backdrop-grey field. The MOSAIC half is          correct and visible (holding R blockifies it exactly as MosaicMode3 does), which is          what makes this an exclusion rather than a bug in this ticket: the mosaic path works,          the mode it is being drawn in does not exist yet. Pinning it would record a picture          nobody claims is right. Owned by W7-17.",
+        "mode 5 is HI-RES 512, and this PPU has no hi-res path at all: bg::bit_depths gives          mode 5 the right depths (4bpp/2bpp) but composition is 256 wide, and $2105 bit 3 is          consumed as bg3_priority with nothing reading a hi-res flag. The frame renders as a          half-width character squeezed against a backdrop-grey field. The MOSAIC half is          correct and visible (holding R blockifies it exactly as MosaicMode3 does), which is          what makes this an exclusion rather than a bug in this ticket: the mosaic path works,          the mode it is being drawn in does not exist yet. Pinning it would record a picture          nobody claims is right. Owned by W7-06, whose criterion 2 is hi-res modes 5/6.",
     ),
     (
         "RedSpaceHDMA.sfc",
