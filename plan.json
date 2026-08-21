@@ -4622,7 +4622,7 @@
     "The second criterion is the anti-rot mechanism: documentation that is not compiled is documentation that silently goes stale, which this project has already seen with EMULATION_CORES.md section 3.3's superseded dropped_by_limit line."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
