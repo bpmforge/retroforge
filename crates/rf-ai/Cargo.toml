@@ -6,10 +6,52 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# OFF BY DEFAULT, and that is the whole point (ticket W8-10). `cargo test
+# --workspace` must need no external anything — CLAUDE.md's Build section
+# promises it and CI depends on it. This is the same posture cpal takes
+# behind `device`/`audio` and gilrs behind `gamepad`: the dependency that
+# reaches outside the workspace is a feature nobody has to turn on.
+#
+# It also contains the release-candidate risk. See the TECH_STACK row: the
+# newest published `ort` is 2.0.0-rc.13, there is no stable 2.x, and an RC
+# behind an off-by-default feature is a different risk class than an RC on
+# a hot path.
+default = []
+onnx = ["dep:ort"]
+
 [dependencies]
 # sha2: the (rom, asset, model, settings) cache key of FR-AI-002. Already
 # a workspace dependency in five crates and already in TECH_STACK.
 sha2 = "0.11"
+
+# ort: the ONNX Runtime binding, for the offline upscale pipeline only —
+# NEVER on the frame path (FR-AI-001 says "zero AI on the frame path", and
+# `Upscaler` is called from the pack builder, not the composer).
+#
+# `default-features = false` is load-bearing, not tidiness. The default set
+# turns on `download-binaries` + `tls-native`, which (a) makes the BUILD
+# reach the network to pull prebuilt ONNX Runtime binaries and (b) drags a
+# whole TLS stack in: 73 crates resolved, including `webpki-root-certs`
+# under CDLA-Permissive-2.0, which is NOT on deny.toml's allowlist and
+# would need a per-crate NFR-011 exception. With `load-dynamic` instead the
+# tree is 20 crates and `cargo deny check licenses` passes with NO
+# allowlist change at all — which matters doubly here, since deny.toml is
+# outside this ticket's write_scope.
+#
+# `ndarray` is deliberately NOT enabled: `Tensor::from_array` accepts a
+# plain `(shape, data)` tuple (verified against the vendored
+# ort-2.0.0-rc.13 source, src/value/impl_tensor/create.rs:117), so the
+# ndarray dependency would buy nothing. Same reasoning as the `zip` row.
+#
+# `load-dynamic` means the runtime library is dlopen'd at RUN time from a
+# path we choose, rather than linked at build time. No build-time download,
+# no vendored blob in git, and a missing runtime is a clean runtime error
+# instead of a build failure on a machine that will never run inference.
+ort = { version = "2.0.0-rc.13", default-features = false, features = [
+    "load-dynamic",
+    "std",
+], optional = true }
 
 [lints]
 workspace = true
