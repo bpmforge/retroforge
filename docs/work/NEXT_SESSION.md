@@ -1,104 +1,100 @@
-# NEXT SESSION — resume point (rewritten 2026-08-21, after W8-09 closed)
+# NEXT SESSION — resume point (rewritten 2026-08-21, board drained)
 
 Supersedes the "Current state" and "START HERE" sections of
-`docs/work/HANDOFF.md` (that file's *process* sections — read-order, gate
-command, block-note discipline — are still correct and still apply).
+`docs/work/HANDOFF.md`; that file's *process* sections — read-order, gate
+command, block-note discipline — still apply.
 
-Read `CLAUDE.md` first. **Law 8 is new**, and it exists because of what
-happened on 2026-08-21.
-
----
-
-## Why Law 8 exists
-
-`W8-09`'s first implementation contained an unbounded `while` walk: in
-`candidacy()`, a `y` sitting inside a HUD band advanced in neither inner
-loop, so the outer loop pushed `(0, 0)` forever.
-
-Two concurrent `cargo test` runs reached **245 GB and 111 GB RSS** on a
-128 GB machine, drove free memory to 194 MB, stalled `tccd`, blocked
-WindowServer's main thread inside a TCC preflight, and **kernel-panicked
-the workstation twice** (07:24 and 07:54). Full forensics:
-`docs/LESSONS.md` **RF-L-09**.
-
-**Nothing is outstanding on the bug.** It is fixed, tested, shipped, and
-recorded in three places (CLAUDE.md Law 8, LESSONS.md RF-L-09, and a
-comment at the loop in `crates/rf-enhance/src/interpolation.rs`). It is
-described here only so the next session understands why Law 8 is there and
-does not read it as boilerplate.
+Read `CLAUDE.md` first. **Law 8 exists because of a kernel panic** — see
+`docs/LESSONS.md` RF-L-09. Nothing about it is outstanding.
 
 ---
 
-## State of the tree (verified 2026-08-21)
+## State
 
-Branch `main`, working tree clean, **both remotes in sync** (`origin`/Gitea
-and `github`). HEAD is the `docs(work)` commit that rewrote this file, or
-later. Six commits are new on both remotes since `f997d12` (W8-08) —
-deliberately listed by subject rather than by hash, so this table does not
-go stale the moment anything else is committed:
+Branch `main`, tree clean, **both remotes in sync**. HEAD is the
+`chore(W9-08): close` commit or later.
 
-| Commit | What |
-|---|---|
-| `chore(W8-09): claim` | the claim, local-only until this session pushed it |
-| `docs(RF-L-09)` | Law 8, LESSONS.md RF-L-09, this file |
-| `feat(W8-09)` | design doc + candidacy predicate + 7 tests |
-| `chore(evidence)` | regenerated `local-gate.json` |
-| `chore(W8-09): close` | plan.json `done` + STATUS.md |
-| `docs(work)` | this file, rewritten to the post-close state |
+**`plan.json` reports `claimable now: (none)`.** 132 of 140 tickets are
+done. Every ticket whose dependencies are satisfied has been closed, so
+the next session's first job is **not** "claim the lowest-id claimable
+ticket" — there isn't one. It is to unblock something below.
 
-`plan.json`: **W8-09 is `done`.**
-
-### Gate status — all seven green at the close commit
+### Gate, all green at the close (add the last two; they are new)
 
 ```
 cargo fmt --all --check                                  OK
 cargo clippy --workspace --all-targets -- -D warnings    OK
-cargo test --workspace                                   OK — 1474 passing
+cargo test --workspace                                   OK — 1599 passing
 scripts/validate-arch.sh                                 OK
 node scripts/validate-plan.mjs                           OK
 node scripts/validate-traceability.mjs                   OK
 node scripts/validate-evidence.mjs                       OK
+cargo deny --all-features check licenses                 OK   (new: ort, wasmtime)
+node .github/scripts/verify-doc-samples.mjs              OK   (new: W9-07)
 ```
 
-**The four-suite evidence FAIL is resolved.** `nestest`, `ppu_vbl_nmi`,
-`sprite_hit_tests` and `apu_test` had been stale since W7-11 (`27049cd`)
-and were blocking closes under Law 3 for *every* ticket, not just W8-09.
-`scripts/local-gate.sh` was re-run in full from a clean tree; the
-regenerated file differs from the old one in exactly one line, the
-`retroforge_commit`, so it was a bookkeeping lag rather than a regression.
-All ROM/vector prerequisites are present under `roms/` if it needs running
-again.
-
-### Two things to know about W8-09's outcome
-
-1. **§7 of `docs/design/FRAME_INTERPOLATION.md` declines to implement
-   blending.** There is no blender. `rf-enhance/src/interpolation.rs` is
-   the candidacy predicate only — it decides whether a frame pair *may* be
-   interpolated and blends nothing.
-2. The decline is on §3.1: interpolating toward frame N+1 requires having
-   N+1, so it costs a full frame of input latency, inherently. §7 lists
-   three preconditions for revisiting it.
+**Run the suite with nothing else running.** RF-L-10: a fixed temp path
+in `mode_invariant_corpus.rs` makes two concurrent `cargo test` runs
+delete each other's evidence file. A red run with a second cargo in
+flight is *suspect before it is believed*.
 
 ---
 
-## Next
+## What remains, and what each needs
 
-`validate-plan` reports claimable now: **W8-10, W8-12, W9-03, W9-08**.
-Read the claimed ticket's `notes` array first — per-ticket traps the
-conductor already paid for live there.
+| Ticket | State | What actually unblocks it |
+|---|---|---|
+| **W8-04** | blocked, no deps | The only one blocked on *work*, not on another ticket. Model + harness are complete; app-wide wiring remains (mechanical, touches every window) plus §6's contrast/UI-scale items. |
+| **W9-06** crit. 3 | blocked | Needs a **licence-clear** community HD pack. SCOPE puts third-party assets as gate fixtures in the OUT column, so this needs either a designated fetch-only artifact (`NoLicenseGrantFetchOnly` in `tests/rom-manifest.toml`, which means widening scope to `rf-harness` + `tests/`) or an amendment to what criterion 3 accepts as proof. **Do not satisfy it with a pack we authored** — that proves the importer against its own author. |
+| **W7-15** | blocked on W7-07 | Per-dot SNES PPU timing. The keystone: it also unblocks W7-06 → W7-10, and is one of W7-13's four deps. |
+| W7-06, W7-10, W7-13 | blocked | Chain behind W7-15/W7-07/W7-16. |
+| W7-08 | blocked on W6-04b | S-DSP echo/gaussian/ADSR. |
+| W5-04, W5-05 | **held** | Excluded from unattended claims by the board itself; W5-05 also waits on W3-06. |
+
+**W7-15 is the highest-leverage unblock** — it is upstream of three
+tickets. W8-04 is the only one that needs no ruling and no other ticket.
 
 ---
 
-## Standing optional work (proposed by RF-L-09, neither built)
+## Standing follow-ups recorded during the last run
 
-Deliberately not done as part of the W8-09 close; each is its own ticket's
-worth of work.
+None of these block anything; each is written up on its ticket.
 
-1. **An RSS / wall-clock cap around `cargo test --workspace`** — the
-   higher-value of the two, because it bounds the blast radius of *any*
-   future hang rather than one loop shape. A hang in a test suite is a
-   denial of service against the developer, and right now nothing stops
-   it.
-2. **A lint for the loop shape** — flag `while <ix> < <bound>` loops whose
-   body can leave `<ix>` unchanged on some path. Law 8 is currently
-   enforced by nothing but attention.
+1. **RF-L-10's fix** — give `mode_invariant_corpus.rs`'s output directory
+   a per-process suffix, as `rf-enhance/tests/intake_poisoned_bundle.rs`
+   already does. It is outside W9-06's scope, which is why it is still
+   here.
+2. **`rf-intake` is not wired into CI** (`.github/**` was outside W9-05's
+   scope), so FR-PROF-007's "nothing activates without passing" is a
+   property of the code path, not of the repository's automation.
+3. **`docs.yml` has never run.** GitHub Actions cannot execute in the dev
+   environment; the verifier, example build and profile validation all
+   pass locally, but `mdbook build` is unproven until the first push
+   exercises it. Check it.
+4. **GAME_PROFILES.md §2 does not document `[decode.room_grid]`** —
+   `docs/design/**` was outside W9-08's scope, so `RoomGridSpec`'s doc
+   comment is the specification.
+5. **An RSS/wall-clock cap around `cargo test --workspace`** (RF-L-09's
+   proposal). Still unbuilt, and still the higher-value of the two guards
+   it suggested: it bounds the blast radius of *any* future hang.
+6. **Commercial-title profiles are permitted and unused** — Brad's W9-08
+   ruling allows them from published documentation, but every claim needs
+   an FR-PROF-003 citation the loader enforces.
+
+---
+
+## The pattern worth carrying forward
+
+Three times in one run, shipped code contradicted its own documentation,
+and each was a **second source of truth no compiler checks**:
+
+* `rf-profiles/src/shape.rs` beside the serde structs (found in W8-12) —
+  a table missing there deserialises fine and only *warns*;
+* `wit/plugin.wit` read by nothing while a doc claimed drift was
+  compiler-checked (W9-03);
+* `example-mode7` declaring a decoder family it never configured, loading
+  cleanly for months (W9-08).
+
+Each needed a **test**, because none produced a build failure. When you
+add a second place that must agree with a first, write the test in the
+same commit.
