@@ -197,6 +197,16 @@ fn known_shape() -> Shape {
             ]),
         ),
         (
+            "widescreen",
+            Shape::Object(vec![
+                ("bg1", Shape::Leaf),
+                ("bg2", Shape::Leaf),
+                ("bg3", Shape::Leaf),
+                ("bg4", Shape::Leaf),
+                ("obj", Shape::Leaf),
+            ]),
+        ),
+        (
             "mods",
             Shape::Object(vec![(
                 "patch",

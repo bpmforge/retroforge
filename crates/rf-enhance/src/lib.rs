@@ -23,6 +23,7 @@ pub mod scroll_tracker;
 pub mod sprite_historian;
 pub mod stitcher;
 pub mod trust;
+pub mod widescreen;
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-enhance";

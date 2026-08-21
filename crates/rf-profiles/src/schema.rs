@@ -60,6 +60,8 @@ pub struct Profile {
     pub loading: Option<Loading>,
     pub plugins: Option<Plugins>,
     pub mods: Option<Mods>,
+    /// `[widescreen]` — per-BG-layer widescreen policies (ticket W8-05).
+    pub widescreen: Option<Widescreen>,
 }
 
 impl Profile {
@@ -374,6 +376,27 @@ pub struct Plugins {
 }
 
 /// `[mods]` (§2). Declarative byte-replacement descriptors, off by
+/// `[widescreen]` (ticket W8-05): per-BG-layer widescreen policies on
+/// the bsnes-hd model.
+///
+/// Every field is optional, and an absent one means "use the built-in
+/// default" — bsnes-hd's own `autoHor&Ver` for backgrounds and `safe` for
+/// sprites, both of which decline to widen anything they cannot justify.
+///
+/// **There is deliberately no `enabled` field.** A profile describes what
+/// widescreen should look like for this game; the user decides whether to
+/// have it at all. That is the same split `[mods]` uses, and it is what
+/// keeps law 6's "a fresh install boots in Accuracy Mode" true of a
+/// machine running a profile that would rather it were not.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Widescreen {
+    pub bg1: Option<String>,
+    pub bg2: Option<String>,
+    pub bg3: Option<String>,
+    pub bg4: Option<String>,
+    pub obj: Option<String>,
+}
+
 /// default, never applied by this crate.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct Mods {
@@ -569,6 +592,7 @@ mod tests {
             loading: None,
             plugins: None,
             mods: None,
+            widescreen: None,
         }
     }
 }
