@@ -263,7 +263,7 @@ fn rom_dir() -> Option<std::path::PathBuf> {
 const EXCLUDED: &[(&str, &str)] = &[
     (
         "MosaicMode5.sfc",
-        "mode 5 is HI-RES 512, and this PPU has no hi-res path at all: bg::bit_depths gives          mode 5 the right depths (4bpp/2bpp) but composition is 256 wide, and $2105 bit 3 is          consumed as bg3_priority with nothing reading a hi-res flag. The frame renders as a          half-width character squeezed against a backdrop-grey field. The MOSAIC half is          correct and visible (holding R blockifies it exactly as MosaicMode3 does), which is          what makes this an exclusion rather than a bug in this ticket: the mosaic path works,          the mode it is being drawn in does not exist yet. Pinning it would record a picture          nobody claims is right. Owned by W7-06, whose criterion 2 is hi-res modes 5/6.",
+        "mode 5 is HI-RES 512. **THE OLD REASON HERE IS OUT OF DATE AND THIS IS THE CORRECTION**: it said 'this PPU has no hi-res path at all', which was true until W7-06's second pass built Ppu::render_scanline_hires on top of W7-16's sub-screen channel. This ROM now renders 512 dots -- sub screen on the even half-dot, main on the odd -- which is why the golden harness had to become width-aware: it used to assert every line was exactly 256 and turned a correctly-widened hires frame into a HARNESS failure rather than a golden mismatch. STILL EXCLUDED, and for the reason that outlived the fix: this suite pins a golden only after the frame was rendered to a PNG and LOOKED AT, a standard that changed three of four outcomes when W7-05 applied it. Nobody has looked at the 512-dot frame yet, and pinning our own unverified output would record a picture nobody claims is right -- the same thing the old reason refused to do. The MOSAIC half remains correct and visible. TO REMOVE: look at the frame (RF_GOLDEN_DUMP=1 now emits a correctly-headed 512-wide PPM) and pin it.",
     ),
     (
         "RedSpaceHDMA.sfc",
@@ -421,13 +421,32 @@ fn render_and_hash(path: &std::path::Path) -> (String, u8) {
     // next person can re-verify instead of re-deriving.
     let dump = std::env::var("RF_GOLDEN_DUMP").ok();
     let palette = s.palette_rgb();
-    let mut ppm = format!("P6\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
+    // The dump's header is written after the first line is composed, so a
+    // hires frame dumps as 512 wide rather than producing a file whose
+    // header and payload disagree.
+    let mut ppm: Vec<u8> = Vec::new();
+    let mut dump_width = 0usize;
     for y in 0..HEIGHT {
         let line = s.bus.ppu.render_scanline(y);
-        assert_eq!(line.pixels.len(), WIDTH);
+        // WIDTH-AWARE since ticket W7-06: modes 5/6 and pseudo-hires emit
+        // 512 dots, and the slice length IS the width tag. This used to
+        // assert `== WIDTH`, which turned a correctly-widened hires line
+        // into a harness failure rather than a golden mismatch — the
+        // assertion was pinning the harness's assumption, not the ROM's
+        // output.
+        assert!(
+            line.pixels.len() == WIDTH || line.pixels.len() == WIDTH * 2,
+            "a scanline is either {WIDTH} dots or {} in hires, got {}",
+            WIDTH * 2,
+            line.pixels.len()
+        );
         let indices: Vec<u8> = line.pixels.iter().map(|p| p.palette_index).collect();
         hasher.update(&indices);
         if dump.is_some() {
+            if dump_width == 0 {
+                dump_width = indices.len();
+                ppm = format!("P6\n{dump_width} {HEIGHT}\n255\n").into_bytes();
+            }
             for i in &indices {
                 ppm.extend_from_slice(&palette[*i as usize]);
             }
