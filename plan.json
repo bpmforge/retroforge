@@ -4000,7 +4000,7 @@
     "The reachable-state hash RF-Scroller-S's replay uses is a good starting inventory of what has to round-trip, but it deliberately EXCLUDES VRAM/CGRAM as outputs — a save state must include them."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
