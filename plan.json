@@ -3892,7 +3892,9 @@
  ],
    "depends_on": [
     "W7-05"
-   ],
+   ,
+  "W7-16"
+ ],
    "acceptance": [
     "interlace + overscan via SETINI, with the frame emitting 224 or 239 visible lines and the renderer letterboxing",
     "pseudo-hires and hires modes 5/6 emitting 512-wide scanlines, with the PpuPixel stream carrying a width tag per line (EMULATION_CORES.md section 3.3)",
@@ -3904,9 +3906,11 @@
   "SCOPE AMENDMENT (2026-08-20, standing authority): write_scope gains scripts/** so criterion 3's Interlace ROMs can be fetched, exactly as W7-05 and W7-07 needed. The PeterLemon PPU/Interlace directory was enumerated at the pinned commit 350b394e and holds six ROMs: InterlaceFont, InterlaceMoogle, InterlaceMystHDMA, InterlaceRPG, InterlaceScroll, InterlaceSimpsonsHDMA.",
   "W7-17 IS FOLDED INTO THIS TICKET AND WITHDRAWN (2026-08-20). W7-17 was filed during W7-05 for 'hi-res modes 5 and 6' without first checking whether an existing ticket covered it -- this ticket's criterion 2 already did. Its one genuinely new criterion is carried over: promote PeterLemon MosaicMode5 from EXCLUDED to a pinned golden, since it is excluded solely because mode 5 hi-res does not exist yet. Recorded rather than quietly deleted, because a duplicate ticket filed by an unattended run is exactly the kind of board noise worth being able to trace.",
   "THE PER-LINE WIDTH TAG NEEDS NO API CHANGE, checked rather than assumed (this ticket's own note asked): CoreSink::video_scanline takes &[PpuPixel], and a slice carries its own length, so the width tag IS pixels.len(). What DOES need attention is the consumer side -- FrameBundleBuilder::video_scanline truncates each row to a single frame-level width (crates/rf-core-api/src/frame_bundle.rs), so a frame mixing 256-wide and 512-wide lines cannot be represented there. That is outside this write_scope and is filed separately."
+ ,
+  "HANDOFF 2026-08-20: criterion 1 DELIVERED (core half); criteria 2 and 3 BLOCKED ON W7-16, with primary-source evidence. DELIVERED: $2133 SETINI fully decoded, every bit asserted independently -- bit 1 is OBJ V-direction and bit 2 is BG V-direction, and swapping them gives a PPU that resizes sprites when a game asks for 239 lines -- overscan driving 224-vs-239 visible lines through the frame loop, and the vblank boundary moving with it. THE COUNTER-INTUITIVE PART IS PINNED: overscan does not lengthen the frame (262 lines either way), it takes 15 lines FROM vblank, so turning it on makes vblank SHORTER and a vblank DMA routine that was comfortable at 224 starts writing VRAM during active display. The 'renderer letterboxing' clause of criterion 1 is rf-renderer and outside this write_scope. WHY 2 AND 3 CANNOT BE BUILT HERE: both routes to 512 dots are SUB-SCREEN effects, quoted from fullsnes rather than recalled. Pseudo-hires (bit 3) is 'SHIFT SUBSCREEN HALF DOT TO THE LEFT'; true hires in modes 5/6 works because 'the main/subscreen pixels are rendered as half-pixels of the high-resolution image'. This core composes ONE screen and emits indexed pixels (law 4), so it can produce the main screen's half-dots and nothing else. Criterion 3 falls to the same cause: ALL SIX PPU/Interlace ROMs run in mode 5 (checked, not assumed), and InterlaceFont makes it unmistakable -- its whole point is sharp hires text and every glyph renders shredded with alternate columns missing. InterlaceMoogle hashes byte-identically to MosaicMode5, the same half-picture from the same cause. All six are fetched and sit in EXCLUDED in tests/peterlemon_golden.rs, ready as W7-16's acceptance evidence."
  ],
    "points": 5,
-   "status": "in_progress",
+   "status": "blocked",
    "stories": []
   },
   {
