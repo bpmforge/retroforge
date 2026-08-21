@@ -544,21 +544,44 @@ impl Ppu {
     /// module doc for why dropped sprites are never in the first.
     #[must_use]
     pub fn render_scanline(&mut self, y: u16) -> Scanline {
+        // **`y` is a 0-based VISIBLE ROW; the hardware scanline is one
+        // more** (ticket W7-13). fullsnes: the V counter runs 0-261 with
+        // "1-224 (or 1-239 if overscan is enabled) visible on the
+        // screen" -- line 0 is vblank, and the first row of the picture
+        // is drawn on line 1. A BG row is fetched as `vofs + L` for
+        // hardware line L, so a renderer that passed the 0-based row
+        // straight through fetches `vofs + 0` for the first row and
+        // draws the whole picture one row low.
+        //
+        // **This was found by comparing against PeterLemon's own
+        // reference screenshots, not by reading the docs.** Rings and
+        // 8x8BG1Map2BPP32x328PAL each matched their shipped PNG at
+        // exactly 100% with a one-line offset and 79%/85% without --
+        // two different ROMs in two different BG modes agreeing on the
+        // same off-by-one. Every golden in this project was pinned over
+        // it, which is precisely why an eyeball check could not catch
+        // it: a picture one row low looks entirely correct.
+        let line = y + 1;
         // Compose from the registers latched when the beam reached this
         // line, not from wherever they have since been left. Without
         // this, HDMA's per-line changes all collapse onto the frame's
         // final state.
-        if let Some(latched) = self.with_line_state(y) {
+        if let Some(latched) = self.with_line_state(line) {
             let mut shadow = latched;
-            let line = shadow.render_scanline_live(y);
+            let composed = shadow.render_scanline_live(line);
             // Limit flags accumulate on the real PPU, not the shadow.
             self.range_over |= shadow.range_over;
             self.time_over |= shadow.time_over;
-            return line;
+            return composed;
         }
-        self.render_scanline_live(y)
+        self.render_scanline_live(line)
     }
 
+    /// Compose one scanline from the live registers.
+    ///
+    /// `y` here is the **hardware scanline** (1-224), not a 0-based row —
+    /// see [`Ppu::render_scanline`], which is the only caller and does the
+    /// conversion.
     fn render_scanline_live(&mut self, y: u16) -> Scanline {
         let backdrop = PpuPixel {
             palette_index: 0,

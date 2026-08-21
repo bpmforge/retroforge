@@ -38,6 +38,28 @@
 //! fade to COMPLETE, semantically, rather than for a magic instruction
 //! count.
 
+//! ## Verified against PeterLemon's own reference screenshots (W7-13)
+//!
+//! Every ROM in this repository ships a `.png` of what it is supposed to
+//! look like, at 256x224. Comparing against those turned this suite from
+//! self-generated pins into externally verified ones, and immediately
+//! found a bug that eleven pinned goldens and every eyeball check had
+//! missed: **the whole picture was one scanline low.**
+//!
+//! Rings matched its reference at 100% with a one-line offset and 79%
+//! without; `8x8BG1Map2BPP32x328PAL` -- pinned since W6-03b -- did the
+//! same at 100% vs 85%. Two ROMs, two BG modes, one answer. fullsnes
+//! confirms why: the V counter runs 0-261 with "1-224 ... visible on the
+//! screen", so line 0 is vblank and the picture starts at line 1. See
+//! [`Ppu::render_scanline`] for the fix.
+//!
+//! Seven ROMs now match their reference **pixel-exactly**: the four 2BPP
+//! maps, the 4BPP map, TileFlip, Rings and GreenSpace. The animating
+//! demos (RotZoom, WaveHDMA, WindowMultiHDMA, MosaicMode3) cannot be
+//! compared that way -- the shipped screenshot is a different frame of an
+//! animation -- so for those the hash remains a regression detector
+//! rather than a correctness proof, which is what a golden is for.
+//!
 //! ## What W7-05's four ROMs changed, and why looking mattered
 //!
 //! Criterion 4 originally named undisbeliever window/gradient ROMs. That
@@ -83,43 +105,43 @@ use sha2::{Digest, Sha256};
 const GOLDENS: &[(&str, &str)] = &[
     (
         "8x8BG1Map2BPP32x328PAL.sfc",
-        "5424cc9358ef99e49ebce0842d693fd89f0ec12bf642e9337b405f60e0303751",
+        "85eae78722281d9a402d25d36c18c0158f799b6f574fb07882cbe4c1f69152db",
     ),
     (
         "8x8BG2Map2BPP32x328PAL.sfc",
-        "2040eb78cb7610dfb3de4255ea4d21660777c3a1240a4f10f2b94bbc09c160fc",
+        "38f2b0a50ffd94990d13de29bc7d52ca5091a1f88b3fd7dedc3fc612e2a4bbbe",
     ),
     (
         "8x8BG3Map2BPP32x328PAL.sfc",
-        "ee52e98f504f055f9729e1a360cfaf49384308d251bf47cb68a2760ee16345cd",
+        "a8f490acf86d2a1de520709f519cc1573673060322b283952b8fc9c1e3bf219d",
     ),
     (
         "8x8BG4Map2BPP32x328PAL.sfc",
-        "e936654961211bd301b70845d5184a45776efda6ecf730292ea40def4b5d4068",
+        "a595e2c969644ef2704dba04e932fdbd13e7867518224db5b69ddacdce87ab32",
     ),
     (
         "8x8BGMap4BPP32x328PAL.sfc",
-        "424d09a81f97ab7667bbbfa3f9c48d59f2036e1d55acfbdf96f9bbcd8b19a677",
+        "b2c05e68aec5b6e9c0073dfbcf7e4648b3b4fed581010696c4817d2fc0afe2d0",
     ),
     (
         "8x8BGMap8BPP32x32.sfc",
-        "926777ce19655ef4bc87d93191889f80c9b7f10084496629fe3429884974d099",
+        "76e1ab67aa089a7c82f73e695f83362f400fc73fdbad5218b801d8e753ab2147",
     ),
     (
         "8x8BGMap8BPP32x64.sfc",
-        "c60967d58cf9be08d2bb4072271092461857598e563c8ce7df8330dbea78a7af",
+        "9f1f6ff7300aacecd20c35b1d122ba9b80f25aa7936d920a19e01b302f938c15",
     ),
     (
         "8x8BGMap8BPP64x32.sfc",
-        "c60967d58cf9be08d2bb4072271092461857598e563c8ce7df8330dbea78a7af",
+        "9f1f6ff7300aacecd20c35b1d122ba9b80f25aa7936d920a19e01b302f938c15",
     ),
     (
         "8x8BGMap8BPP64x64.sfc",
-        "51c904cf58356beb6f303e33668dc69958bda09ab7722cbd739200aaf1f5a408",
+        "5cdcbdd87991077695387d1a3e77a650dd627ae032883563533ce9cd52669ee2",
     ),
     (
         "8x8BGMapTileFlip.sfc",
-        "ed283c35beefa83f23520dc84e1da433514a609a0f6fce76e5b6ae7ad3c4c6d7",
+        "9df26505248a1f9f4d8127f76960c45809dfb1c1b05ffe3057ee4650c2d873dd",
     ),
     // Mode 7 (W7-04), rendered at hardware density. HD-Mode-7 is an
     // opt-in overlay and is deliberately NOT what this gates.
@@ -128,14 +150,14 @@ const GOLDENS: &[(&str, &str)] = &[
     // below, with evidence — see there.
     (
         "RotZoom.sfc",
-        "ebd7f08c40f43c7377e905a581d31b40c6df1c2a837ba2e4ed60cd1a48f8408d",
+        "6ebfb8ce1b9454734dba2f15ea96ddf533758a15d108623c6c3c3cc8eada50a2",
     ),
     // Pinned at W7-07, once HDMA and per-line register latching existed.
     // Before them this ROM drew a flat rotated track; it now draws a
     // ground plane receding to a horizon, verified by eye.
     (
         "Perspective.sfc",
-        "82972be08fa0a68933ba1e6ee3d383c44268052cb3c8ea401352a27d22f88946",
+        "7ab7001f3220feb5cda52af09f19ab1a18fcdf11b57cd7afdfdf36258b5de573",
     ),
     // Windows and mosaic (W7-05's amended criterion 4). Each was
     // rendered to a PNG and LOOKED AT before its hash was pinned, and
@@ -146,21 +168,21 @@ const GOLDENS: &[(&str, &str)] = &[
     // pixels sampled every 28 lines) and the cathedral shows through it.
     (
         "WindowHDMA.sfc",
-        "00b4f6bca155b4fa0a03a91ba4e9e32ec1bf3349ca1a50e88a2300bc5367a8d1",
+        "ba01ba95aa9ffbdcdb5a9970c761df033ce34bad75ae53323552127c52af5b5f",
     ),
     // WindowMultiHDMA draws a 2x2 grid of visible quadrants: two windows
     // splitting each line, and HDMA blanking a band of lines between the
     // upper and lower halves.
     (
         "WindowMultiHDMA.sfc",
-        "847895ce8a96a93d57998df83323db74d2017460d3f7e98e5b1054176d669204",
+        "9c05fdd822d73a74465a600a11f56646c795118c0abb7a8c4a33cb360c0f8043",
     ),
     // MosaicMode3 at a block size of 8: the landscape photograph is
     // visibly blockified. See `capture_plan` for why the harness has to
     // hold a button to get here at all.
     (
         "MosaicMode3.sfc",
-        "d2999917d20c27b9f96ddf9c62572ee79078126352265aa61ab74f6dbfd8b826",
+        "9606457f53ee2f7324cb96215e4ad5dd276bdc37d465021c7dfca31f8c601b69",
     ),
     // HDMA (W7-07's amended criterion 4). Two of the four are pinned;
     // the RedSpace pair is in EXCLUDED with evidence -- see there, because
@@ -171,7 +193,7 @@ const GOLDENS: &[(&str, &str)] = &[
     // per-line scroll working end to end.
     (
         "WaveHDMA.sfc",
-        "688926f53d6200a6d7ff4e90500d00c7da3ac082a0d23f54cadbbb8da91a9417",
+        "2e6b2da85aff29e40f88c00cba976be3e84232804f50da6eb7fcbc24d4b60bc5",
     ),
     // Mode7HDMA switches BG mode mid-frame: sky and a sun and a row of
     // trees above, a mode-7 ground plane receding below. It needs both
@@ -179,7 +201,27 @@ const GOLDENS: &[(&str, &str)] = &[
     // one mode applied to all 224 lines.
     (
         "Mode7HDMA.sfc",
-        "9ad7a3f624086de56cbe616215f04bccc4c7ad5680c95e105c2c2c1524927fc3",
+        "17911817330b88afb34cd29c47e6f517684ff78b6162015619726f99c4f7c75a",
+    ),
+    // Breadth (W7-13), both VERIFIED PIXEL-EXACT against PeterLemon's own
+    // shipped reference screenshot -- see the module doc. The HiColor set
+    // is in EXCLUDED with evidence.
+    //
+    // Rings draws the same ring pattern on BG1 and BG2 at different
+    // scrolls, so it is a pure priority-and-scroll test; it is the ROM
+    // whose reference comparison found the one-scanline offset.
+    (
+        "Rings.sfc",
+        "a785a8cdfb4a1db0cc04e4866ab90c6fb39bb0430635639a44282e1ec2fd8d3c",
+    ),
+    // GreenSpace is a flat backdrop and matches its reference exactly.
+    // Pinned with a caveat worth stating: its frame is entirely palette
+    // index 0, so this hash equals every other all-backdrop frame's and
+    // cannot tell a correct green screen from a PPU that drew nothing.
+    // It guards against regressions that draw SOMETHING, and no more.
+    (
+        "GreenSpace.sfc",
+        "4f81904a9b06c58572a0e5769b3b4ffb99e7bd4be88ee8c2b64a804f483d9dc6",
     ),
 ];
 
@@ -248,6 +290,18 @@ const EXCLUDED: &[(&str, &str)] = &[
     (
         "InterlaceSimpsonsHDMA.sfc",
         "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed -- this one          included. Mode 5 is true hires, and fullsnes says how it works: 'the main/subscreen          pixels are rendered as half-pixels of the high-resolution image'. This core composes          ONE screen, so it draws the main screen's half-dots and nothing else, and the missing          half is not recoverable from what it has. InterlaceFont is the ROM that makes this          unmistakable: its point is sharp hires text, and every glyph comes out shredded with          alternate columns gone. Pinning any of these would assert that interlace and hires          render correctly when neither does. Unblocked by W7-16 (the sub-screen channel), which          W7-06's HANDOFF names.",
+    ),
+    (
+        "HiColor1241DLair.sfc",
+        "colour-math HIGH COLOUR, which needs the sub-screen this core does not have. Probed          rather than guessed: all three run in mode 3 with $2130 colour math ENABLED          (enable=0x21) and use_subscreen=true. The scene comes out recognisable -- Myst's          structures are all there -- and WRONG, because every pixel that should be a blend of          main and sub is drawn as the main screen's raw colour: Myst's sky is flat yellow where          it should be a gradient. Recognisable-but-wrong is the most dangerous thing to pin,          because it survives an eyeball check. Unblocked by W7-16.",
+    ),
+    (
+        "HiColor3840.sfc",
+        "colour-math HIGH COLOUR, which needs the sub-screen this core does not have. Probed          rather than guessed: all three run in mode 3 with $2130 colour math ENABLED          (enable=0x21) and use_subscreen=true. The scene comes out recognisable -- Myst's          structures are all there -- and WRONG, because every pixel that should be a blend of          main and sub is drawn as the main screen's raw colour: Myst's sky is flat yellow where          it should be a gradient. Recognisable-but-wrong is the most dangerous thing to pin,          because it survives an eyeball check. Unblocked by W7-16.",
+    ),
+    (
+        "HiColor575Myst.sfc",
+        "colour-math HIGH COLOUR, which needs the sub-screen this core does not have. Probed          rather than guessed: all three run in mode 3 with $2130 colour math ENABLED          (enable=0x21) and use_subscreen=true. The scene comes out recognisable -- Myst's          structures are all there -- and WRONG, because every pixel that should be a blend of          main and sub is drawn as the main screen's raw colour: Myst's sky is flat yellow where          it should be a gradient. Recognisable-but-wrong is the most dangerous thing to pin,          because it survives an eyeball check. Unblocked by W7-16.",
     ),
 ];
 

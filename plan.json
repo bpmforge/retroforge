@@ -4106,7 +4106,10 @@
    "depends_on": [
     "W7-05",
     "W7-07"
-   ],
+   ,
+  "W7-15",
+  "W7-16"
+ ],
    "acceptance": [
     "the PeterLemon PPU set beyond the W6-03b subset is green (BGMAP 8BPP, Blend/HiColor, HDMA, Rings, GreenSpace, Mosaic)",
     "the undisbeliever snes-test-roms set is green",
@@ -4115,9 +4118,11 @@
    "notes": [
     "W6-03b fetches per-file from the pinned commit rather than the 240 MB archive (scripts/fetch-peterlemon-ppu.sh); extend that list rather than reinstating the archive.",
     "ITS GUARD IS THE POINT: the runner refuses to hash a frame whose BG mode the PPU does not implement, because a golden pinned on the mode-0 fallback's garbage would go green forever while recording a wrong picture. Every ROM added here must keep that property."
-   ],
+   ,
+  "HANDOFF 2026-08-20: criterion 1 LARGELY DELIVERED and criterion 3 held; criterion 2 blocked on W7-15, the HiColor part of criterion 1 on W7-16. THE REAL RESULT IS A BUG THIS FOUND: every rendered frame was ONE SCANLINE LOW, and eleven pinned goldens had been pinned over it. Found by comparing against PeterLemon's own shipped reference .png files rather than by eye -- Rings matched its reference at 100% with a one-line offset and 79% without; 8x8BG1Map2BPP32x328PAL, pinned since W6-03b, did the same at 100% vs 85%. Two ROMs, two BG modes, one answer. fullsnes confirms the cause: the V counter runs 0-261 with '1-224 ... visible on the screen', so line 0 is vblank and the picture starts at line 1, and a BG row is fetched as vofs+L for hardware line L. Ppu::render_scanline now converts its 0-based visible row to a hardware scanline once, at the single point where that conversion belongs. ALL 17 GOLDENS RE-PINNED. SEVEN ARE NOW VERIFIED PIXEL-EXACT against the author's reference screenshots (the four 2BPP maps, 4BPP, TileFlip, Rings, GreenSpace) -- the suite is no longer merely self-generated. The animating demos cannot be compared that way because the shipped screenshot is a different frame. ADDED: Rings and GreenSpace pinned; the three Blend/HiColor ROMs EXCLUDED with probe evidence (mode 3, colour math enable=0x21, use_subscreen=true -- Myst's sky renders flat yellow instead of a gradient, which is recognisable-but-wrong and therefore the most dangerous thing to pin). Criterion 2 (the undisbeliever set) is unchanged from W7-07's finding: they are per-dot timing tests and W7-15 owns them."
+ ],
    "points": 5,
-   "status": "in_progress",
+   "status": "blocked",
    "stories": []
   },
   {

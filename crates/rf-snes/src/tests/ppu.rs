@@ -407,8 +407,11 @@ fn eight_bpp_ignores_the_tilemap_palette_field() {
     p.bg_mode = 3;
     p.bgs[0].enabled = true;
     p.bgs[0].char_base = 0x1000;
-    // Character 1, 8bpp: 32 words per tile.
-    let at = (0x1000 + 32) * 2;
+    // Character 1, 8bpp: 32 words per tile. Row 1 of the tile, not row 0
+    // — visible row 0 is hardware scanline 1 and fetches `vofs + 1`
+    // (ticket W7-13; see `Ppu::render_scanline`). Writing row 0 here and
+    // reading visible row 0 was testing the off-by-one, not the palette.
+    let at = (0x1000 + 32 + 1) * 2;
     p.vram[at] = 0xFF; // plane 0 solid -> colour 1
                        // Tilemap entry with a NON-ZERO palette field (palette 5).
     set_tilemap(&mut p, 0, 0, 1 | (5 << 10));
@@ -760,15 +763,16 @@ fn window_and_mosaic_registers_are_latched_per_scanline() {
     ppu.write_register(0x2126, 10); // W1 left
     ppu.write_register(0x2127, 20); // W1 right
     ppu.write_register(0x2106, 0x31); // mosaic size 4, BG1
-    ppu.latch_line(0);
+                                      // Hardware scanlines 1 and 2 — visible rows 0 and 1 (ticket W7-13).
+    ppu.latch_line(1);
 
     ppu.write_register(0x2126, 100);
     ppu.write_register(0x2127, 200);
     ppu.write_register(0x2106, 0x71); // mosaic size 8, BG1
-    ppu.latch_line(1);
+    ppu.latch_line(2);
 
-    let l0 = ppu.line_state_for_test(0).expect("line 0 was latched");
-    let l1 = ppu.line_state_for_test(1).expect("line 1 was latched");
+    let l0 = ppu.line_state_for_test(1).expect("line 1 was latched");
+    let l1 = ppu.line_state_for_test(2).expect("line 2 was latched");
 
     assert_eq!(
         (l0.windows.w1_left, l0.windows.w1_right),
@@ -788,7 +792,7 @@ fn window_and_mosaic_registers_are_latched_per_scanline() {
     // final value".
     ppu.write_register(0x2126, 250);
     ppu.write_register(0x2127, 255);
-    let l0_again = ppu.line_state_for_test(0).expect("still latched");
+    let l0_again = ppu.line_state_for_test(1).expect("still latched");
     assert_eq!(
         (l0_again.windows.w1_left, l0_again.windows.w1_right),
         (10, 20),
@@ -809,10 +813,10 @@ fn window_and_mosaic_registers_are_latched_per_scanline() {
     p.write_register(0x2123, 0x02); // BG1 masked by window 1
     p.write_register(0x2126, 10);
     p.write_register(0x2127, 20);
-    p.latch_line(0);
+    p.latch_line(1);
     p.write_register(0x2126, 100);
     p.write_register(0x2127, 200);
-    p.latch_line(1);
+    p.latch_line(2);
     // Live registers end somewhere else again, so a composition that
     // reads them instead of the latch masks the same span on both lines.
     p.write_register(0x2126, 0);

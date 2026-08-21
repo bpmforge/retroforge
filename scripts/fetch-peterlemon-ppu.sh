@@ -86,6 +86,14 @@ ROMS=(
   "PPU/Interlace/InterlaceRPG/InterlaceRPG.sfc"
   "PPU/Interlace/InterlaceScroll/InterlaceScroll.sfc"
   "PPU/Interlace/InterlaceSimpsonsHDMA/InterlaceSimpsonsHDMA.sfc"
+  # Breadth (W7-13): the PPU set beyond W6-03b's subset that this PPU has
+  # a chance of expressing. Blend/HiColor is colour-math high-colour;
+  # Rings and GreenSpace are whole-scene demos.
+  "PPU/Blend/HiColor/HiColor1241DLair/HiColor1241DLair.sfc"
+  "PPU/Blend/HiColor/HiColor3840/HiColor3840.sfc"
+  "PPU/Blend/HiColor/HiColor575Myst/HiColor575Myst.sfc"
+  "PPU/Rings/Rings.sfc"
+  "PPU/GreenSpace/GreenSpace.sfc"
 )
 
 mkdir -p "$DEST"
