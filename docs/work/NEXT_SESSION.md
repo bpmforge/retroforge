@@ -15,26 +15,31 @@ Seven tickets remain and **not one is blocked on programming.** Four need
 a human decision or an external artifact; two wait on those; one is held
 by board policy. Nothing here needs more code written first.
 
-### A. Look at one frame → unblocks W7-15, then W7-13
+### A. ~~Look at one frame~~ → RESOLVED 2026-08-21, no human action needed
 
-Per-dot PPU composition **was built and works** (segmentation at write
-boundaries). It was reverted for one reason: it changes RotZoom's pinned
-golden, because RotZoom writes registers mid-line — which is exactly what
-per-dot renders *correctly* and scanline composition cannot express.
+**Investigated and answered: per-dot has a WRITE-ATTRIBUTION defect. Do
+not re-pin RotZoom; the pinned `6ebfb8ce` is right.**
 
-```sh
-RF_GOLDEN_DUMP=/tmp/rf cargo test --release -p rf-snes \
-  --test peterlemon_golden -- --ignored --nocapture
-# then open the RotZoom PPM it writes
-```
+Re-applying segmentation and diffing every golden: 31 of 32 ROMs
+byte-identical, RotZoom differs by 105 of 57,344 pixels — **all on row 0**,
+one span from x=26 rightward. A change confined to the first visible line
+is frame-setup writes landing on line 0, not a mid-line effect.
 
-* If the per-dot frame is **right** → re-pin RotZoom and **amend
-  criterion 3**. As written it says "RotZoom ... unchanged", which is
-  **unsatisfiable** for any ROM that writes mid-line. That wording has to
-  change before the ticket can ever close.
-* If it is **wrong** → the segmentation design and its isolation evidence
-  are in W7-15's notes; it was ~80 lines in `ppu/mod.rs` plus one line in
-  `bus.rs`.
+Tracing every write treated as mid-line found `$2104` OAMDATA (16,307),
+`$2122` CGDATA (19,455 at one dot), `$210D` BG1HOFS (9,839), and
+`$211C`/`$211D` — RotZoom's own Mode 7 matrix — at dots 1-3. Bulk
+OAM/CGRAM transfers happen in **vblank**. `timing.dot()` cannot tell
+"dot N of the visible line" from "somewhere in vblank".
+
+**Remaining work on W7-15 crit 1** is therefore attribution, not
+composition: tag each write with **(line, dot)** and exclude
+vblank/forced-blank, then re-measure. The segmentation design itself is
+sound — 31 unchanged ROMs prove it is inert when it should be.
+
+**Also: criterion 3 is probably fine as written.** An earlier note called
+it unsatisfiable; if RotZoom's only change came from the attribution bug,
+correct attribution should leave it unchanged. Do not amend it — fix
+attribution and re-measure.
 
 ### B. Look at six frames → unblocks W7-06 crit 3, then W7-10
 
