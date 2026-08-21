@@ -18,6 +18,7 @@ stable L-ids (RF-L-*; cross-project lessons cite shipwright's L-* ids).
 | RF-L-07 | 07-15 | licensing | Flagship-content dependencies are architecture decisions: designing the risk OUT (self-contained in-repo fixtures, D-001) beats managing it (permission emails, NC-posture constraints) — and the fixture doubles as the red-fixture host, so self-containment paid for itself | product: W2-10 + W6-00 (shipped); experts: design-review checklist — "can this third-party dependency be designed out?" before "how do we license it?" | shipped (D-001) / open (upstream) |
 | RF-L-08 | 07-15 | traceability | L-05 reproduced exactly and freshly: 100/100 FR reachable + 33/33 stories green hid ~10 orphan deliverables (Alter Ego Tier-A fixture, breakpoint engine, trace/audio viewers, FM-01/FM-13), 5/6 all-of-the-set failures, and 10 stories "covered" only by planning tickets — AND the reviewer's own fix (W0-03's D-001 wording) introduced one of the orphans. The challenger pass is not optional, and the validator now reports planning-only coverage separately | process: challenger mandatory after every green (already D-002); product: validate-traceability planning-only line (shipped); experts: L-05 evidence++ | shipped (this arc) |
 | RF-L-09 | 08-21 | machine-safety | An unbounded `while` walk in new code (`interpolation.rs` candidacy) spun forever pushing zero-sized tuples; two concurrent `cargo test` runs reached 245 GB and 111 GB RSS, drove free memory to 194 MB, stalled `tccd`, blocked WindowServer's main thread in a TCC preflight, and **kernel-panicked the machine twice**. A hang in a test is not a hang in a test — on a workstation it is a denial of service against the developer | process: every hand-rolled index walk must have a provable-progress step; product: this crate's walks audited; experts: check idea — flag `while i < n` loops whose body can leave `i` unchanged | shipped (fix + regression test) |
+| RF-L-10 | 08-21 | test-isolation | A test writing evidence to a FIXED path under `CARGO_TARGET_TMPDIR` and calling `remove_dir_all` on it at start (`crates/retroforge/tests/mode_invariant_corpus.rs:196`) is not isolated between concurrent `cargo test` runs: one run's cleanup deletes the other's just-written file and the reader asserts on an empty string. Cost three red runs in one session \u2014 a gate at TEST=101/225, and BOTH stop-hook failures that could not be reproduced afterwards, because by the time anyone re-ran it the second process was gone. A flaky test is worse than a failing one: it teaches people to re-run instead of read | process: a test that writes to disk gets a PER-PROCESS path (`std::process::id()`), never a fixed one; a red run with a second `cargo test` in flight is suspect before it is believed; experts: check idea \u2014 flag fixed paths under CARGO_TARGET_TMPDIR combined with remove_dir_all | diagnosed, NOT fixed (outside W9-06 write_scope) |
 
 ## Details worth keeping (evidence pointers)
 
@@ -73,3 +74,48 @@ stable L-ids (RF-L-*; cross-project lessons cite shipwright's L-* ids).
 3. Product features already carrying a lesson: plan.json always-writable set
    (RF-L-01), validate-arch.sh determinism grep (G-17 — the product's own
    invariant, now machine-checked pre-implementation).
+
+## RF-L-10 — a fixed temp path is not test isolation (2026-08-21)
+
+**What happened.** `crates/retroforge/tests/mode_invariant_corpus.rs:196`
+builds its output directory as
+
+```rust
+Path::new(env!("CARGO_TARGET_TMPDIR"))
+    .join("mode-invariant-evidence-test")
+    .join(poking_entry.name.replace(' ', "_"));
+let _ = std::fs::remove_dir_all(&out_dir); // start clean
+```
+
+That path is **fixed** — no PID, no randomness — and the test wipes it
+before writing. Two overlapping `cargo test` runs share
+`CARGO_TARGET_TMPDIR`, so run B's `remove_dir_all` deletes the
+`replay-slice.rfreplay` run A just wrote, and A fails asserting on an
+empty string.
+
+**Why it took a session to see.** Overlap happened whenever the stop hook
+fired its own `cargo test` while a gate run was in flight. By the time
+anyone re-ran the suite the second process was gone, so it always passed
+on inspection — twice reported as "could not reproduce". The third
+occurrence landed inside a gate whose log survived, which is what made it
+diagnosable: `TEST=101` after only 225 tests, the assertion message
+showing an empty replay, the same test green 6/6 in isolation, and the
+touched code (`rf-enhance`) nowhere near the failing test (`retroforge`,
+replay dumps).
+
+**Why this is worse than a plain failure.** A test that fails tells you
+something. A test that fails only under concurrency teaches the opposite
+lesson — that red runs are noise and the fix is to run it again. That
+habit is how a real regression gets waved through, and it is the same
+family as RF-L-06's "a validator whose failures evaporate is a rumor".
+
+**The fix**, when someone takes it: give the path a per-process suffix.
+`crates/rf-enhance/tests/intake_poisoned_bundle.rs` already does exactly
+this (`std::process::id()` in the directory name) and is unaffected.
+Not applied here because `crates/retroforge/tests/**` is outside W9-06's
+write_scope.
+
+**Standing rule.** A test that writes to disk takes a per-process path,
+never a fixed one. And a red run with a second `cargo test` in flight is
+**suspect before it is believed** — check for concurrency before
+diagnosing the code.
