@@ -3840,7 +3840,7 @@
    "STATUS SET TO `blocked`, NOT `in_progress` (2026-08-20): validate-plan's P8 rule forbids two concurrently-active tickets with overlapping write_scope, and W7-04 and W7-07 both write crates/rf-snes/**. `blocked` is also the truthful status: each one's own work is committed and each is waiting on a DIFFERENT ticket, not on more effort here. Caught by the validator after the commit rather than before it — a reminder that leaving two partially-done tickets open at once is itself a board state worth checking."
   ],
    "points": 8,
-   "status": "blocked",
+   "status": "in_progress",
    "stories": []
   },
   {
