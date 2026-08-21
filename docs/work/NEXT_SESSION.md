@@ -1,100 +1,94 @@
-# NEXT SESSION — resume point (rewritten 2026-08-21, board drained)
+# NEXT SESSION — resume point (rewritten 2026-08-21, second run)
 
-Supersedes the "Current state" and "START HERE" sections of
-`docs/work/HANDOFF.md`; that file's *process* sections — read-order, gate
-command, block-note discipline — still apply.
-
-Read `CLAUDE.md` first. **Law 8 exists because of a kernel panic** — see
-`docs/LESSONS.md` RF-L-09. Nothing about it is outstanding.
+Supersedes `docs/work/HANDOFF.md`'s "Current state"/"START HERE"; that
+file's *process* sections still apply. Read `CLAUDE.md` first.
 
 ---
 
 ## State
 
-Branch `main`, tree clean, **both remotes in sync**. HEAD is the
-`chore(W9-08): close` commit or later.
+Branch `main`, tree clean, both remotes in sync. **133 of 140 tickets
+done.** `plan.json` reports `claimable now: (none)`.
 
-**`plan.json` reports `claimable now: (none)`.** 132 of 140 tickets are
-done. Every ticket whose dependencies are satisfied has been closed, so
-the next session's first job is **not** "claim the lowest-id claimable
-ticket" — there isn't one. It is to unblock something below.
-
-### Gate, all green at the close (add the last two; they are new)
+### The gate is now NINE commands, not seven
 
 ```
 cargo fmt --all --check                                  OK
 cargo clippy --workspace --all-targets -- -D warnings    OK
-cargo test --workspace                                   OK — 1599 passing
+cargo test --workspace                                   OK — 1614 passing
 scripts/validate-arch.sh                                 OK
 node scripts/validate-plan.mjs                           OK
 node scripts/validate-traceability.mjs                   OK
 node scripts/validate-evidence.mjs                       OK
-cargo deny --all-features check licenses                 OK   (new: ort, wasmtime)
-node .github/scripts/verify-doc-samples.mjs              OK   (new: W9-07)
+cargo deny --all-features check licenses                 OK   (ort, wasmtime)
+node .github/scripts/verify-doc-samples.mjs              OK   (doc site)
 ```
 
-**Run the suite with nothing else running.** RF-L-10: a fixed temp path
-in `mode_invariant_corpus.rs` makes two concurrent `cargo test` runs
-delete each other's evidence file. A red run with a second cargo in
-flight is *suspect before it is believed*.
+**And that is still not enough.** Two things the nine miss:
+
+1. **`cargo test --workspace` does not run the `#[ignore]`d goldens.**
+   A hires change shipped in `4ca5f93` broke `peterlemon_golden.rs` and
+   the full gate stayed green through it. Run
+   `cargo test --release -p rf-snes --test peterlemon_golden -- --ignored`
+   on anything touching the PPU.
+2. **CI leaves `gamepad` off**, so `#[cfg(feature = "gamepad")]` code is
+   never type-checked by the gate. A green default build hid a real
+   compile error in W8-04. Use
+   `cargo clippy -p retroforge --features gamepad --all-targets`.
+
+**Run the suite with nothing else running** (RF-L-10, now fixed): a red
+run with a second `cargo test` in flight is suspect before it is believed.
 
 ---
 
-## What remains, and what each needs
+## Everything left needs a HUMAN or an ARTIFACT — not more code
 
-| Ticket | State | What actually unblocks it |
-|---|---|---|
-| **W8-04** | blocked, no deps | The only one blocked on *work*, not on another ticket. Model + harness are complete; app-wide wiring remains (mechanical, touches every window) plus §6's contrast/UI-scale items. |
-| **W9-06** crit. 3 | blocked | Needs a **licence-clear** community HD pack. SCOPE puts third-party assets as gate fixtures in the OUT column, so this needs either a designated fetch-only artifact (`NoLicenseGrantFetchOnly` in `tests/rom-manifest.toml`, which means widening scope to `rf-harness` + `tests/`) or an amendment to what criterion 3 accepts as proof. **Do not satisfy it with a pack we authored** — that proves the importer against its own author. |
-| **W7-15** | blocked on W7-07 | Per-dot SNES PPU timing. The keystone: it also unblocks W7-06 → W7-10, and is one of W7-13's four deps. |
-| W7-06, W7-10, W7-13 | blocked | Chain behind W7-15/W7-07/W7-16. |
-| W7-08 | blocked on W6-04b | S-DSP echo/gaussian/ADSR. |
-| W5-04, W5-05 | **held** | Excluded from unattended claims by the board itself; W5-05 also waits on W3-06. |
+This is the honest reason there is no "next ticket". Seven remain and not
+one is blocked on programming.
 
-**W7-15 is the highest-leverage unblock** — it is upstream of three
-tickets. W8-04 is the only one that needs no ruling and no other ticket.
+| Ticket | What it needs |
+|---|---|
+| **W7-15** crit 1 | **Look at one frame.** Per-dot composition was built (segmentation at write boundaries), works, and *changes RotZoom's pinned golden* — because RotZoom writes registers mid-line, which is exactly what per-dot renders correctly. Isolated, not guessed: disabling segmentation alone restored `6ebfb8ce`. Re-pinning needs the visual check this suite requires. **Criterion 3 as written ("RotZoom unchanged") is unsatisfiable for any ROM that writes mid-line and must be amended.** |
+| **W7-06** crit 3 | **Look at six frames.** Mode 5 now composes 512 dots; the Interlace ROMs render but nobody has verified them. `RF_GOLDEN_DUMP=1` emits a correctly-headed 512-wide PPM. |
+| **W9-06** crit 3 | A **licence-clear** community HD pack. SCOPE puts third-party assets as gate fixtures in the OUT column; needs a fetch-only artifact designation or an amended criterion. Do **not** satisfy it with a pack we authored. |
+| **W7-08** crit 2, 3 | BRR sample-exactness, and an audio RMS comparison against a **designated** SPC set that does not exist. Check it is obtainable and licence-clear **before** claiming. |
+| W7-10 | Waits on W7-06. |
+| W7-13 | Waits on W7-15. |
+| W5-05 | **Held** by the board — excluded from unattended claims. |
+
+**The recurring shape:** every one is "we cannot verify this here", never
+"we cannot build this". That is a healthy place to stop, and the reason
+the gate is worth trusting.
 
 ---
 
-## Standing follow-ups recorded during the last run
+## Read RF-L-11 before writing any doc comment
 
-None of these block anything; each is written up on its ticket.
+Four stale second-sources-of-truth were found and fixed in one session,
+and the fourth **propagated into the plan** — a stale `dsp.rs` scope
+comment told W7-08's notes the DSP was absent, and that was restated into
+`plan.json` and `STATUS.md` as fact. Three layers of restatement, no
+compiler anywhere in the chain.
 
-1. **RF-L-10's fix** — give `mode_invariant_corpus.rs`'s output directory
-   a per-process suffix, as `rf-enhance/tests/intake_poisoned_bundle.rs`
-   already does. It is outside W9-06's scope, which is why it is still
-   here.
-2. **`rf-intake` is not wired into CI** (`.github/**` was outside W9-05's
+The standing rules, in full at `docs/LESSONS.md` RF-L-11:
+
+1. Add a second place that must agree with a first → write the test in the
+   **same commit**.
+2. A scope claim in a doc comment needs an assertion or an expiry.
+3. **Read the code before repeating a doc's claim about it.**
+
+---
+
+## Standing follow-ups
+
+1. **`rf-intake` is not wired into CI** (`.github/**` was out of W9-05's
    scope), so FR-PROF-007's "nothing activates without passing" is a
-   property of the code path, not of the repository's automation.
-3. **`docs.yml` has never run.** GitHub Actions cannot execute in the dev
-   environment; the verifier, example build and profile validation all
-   pass locally, but `mdbook build` is unproven until the first push
-   exercises it. Check it.
-4. **GAME_PROFILES.md §2 does not document `[decode.room_grid]`** —
-   `docs/design/**` was outside W9-08's scope, so `RoomGridSpec`'s doc
-   comment is the specification.
-5. **An RSS/wall-clock cap around `cargo test --workspace`** (RF-L-09's
-   proposal). Still unbuilt, and still the higher-value of the two guards
-   it suggested: it bounds the blast radius of *any* future hang.
-6. **Commercial-title profiles are permitted and unused** — Brad's W9-08
-   ruling allows them from published documentation, but every claim needs
-   an FR-PROF-003 citation the loader enforces.
-
----
-
-## The pattern worth carrying forward
-
-Three times in one run, shipped code contradicted its own documentation,
-and each was a **second source of truth no compiler checks**:
-
-* `rf-profiles/src/shape.rs` beside the serde structs (found in W8-12) —
-  a table missing there deserialises fine and only *warns*;
-* `wit/plugin.wit` read by nothing while a doc claimed drift was
-  compiler-checked (W9-03);
-* `example-mode7` declaring a decoder family it never configured, loading
-  cleanly for months (W9-08).
-
-Each needed a **test**, because none produced a build failure. When you
-add a second place that must agree with a first, write the test in the
-same commit.
+   property of the code path, not of the repo's automation.
+2. **`docs.yml` has never run.** GitHub Actions cannot execute here;
+   `mdbook build` is unproven until the first push exercises it.
+3. **GAME_PROFILES.md §2 does not document `[decode.room_grid]`** —
+   `RoomGridSpec`'s doc comment is the specification for now.
+4. **An RSS/wall-clock cap around `cargo test --workspace`** (RF-L-09's
+   proposal), still unbuilt and still the higher-value of its two guards.
+5. **Commercial-title profiles are permitted and unused** (W9-08 ruling) —
+   every claim needs an FR-PROF-003 citation the loader enforces.
