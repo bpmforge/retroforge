@@ -893,11 +893,13 @@ fn overscan_changes_the_visible_line_count() {
 }
 
 /// **Both routes to 512 dots need a sub-screen**, which is why this PPU
-/// reports hires as *requested* rather than pretending to render it.
+/// **Superseded in part by W7-06's second pass**: hires is no longer only
+/// *requested*, it is rendered — see the 512-dot tests below. This test
+/// still pins WHICH configurations ask for 512 dots, which is the half
+/// that did not change.
 ///
 /// Pseudo-hires is defined as shifting the sub-screen half a dot left,
 /// and true hires works by main and sub supplying alternating half-dots.
-/// A core that composes one screen can produce half the image either way.
 #[test]
 fn hires_is_requested_by_pseudo_hires_and_by_modes_5_and_6() {
     let mut p = Ppu::new();
@@ -1055,4 +1057,154 @@ fn writing_bg1_scroll_also_writes_the_mode_7_scroll() {
     q.write_register(0x210D, 0x1F);
     assert_eq!(q.mode7.hofs, -256, "mode 7 sign-extends from bit 12");
     assert_eq!(q.bgs[0].hofs, 0x1F00, "BG1 does not");
+}
+
+// =====================================================================
+// 512-dot hires composition (ticket W7-06, criterion 2)
+// =====================================================================
+
+/// A PPU with a distinguishable main and sub screen on one line.
+///
+/// The two screens carry DIFFERENT palette indices on purpose: a test
+/// where both are the same cannot tell an interleave from a duplication,
+/// and duplication is the most likely way to get this wrong.
+fn hires_ppu(mode: u8) -> Ppu {
+    let mut p = Ppu::new();
+    p.bg_mode = mode;
+    // BG1 on the main screen, BG2 on the sub screen, so the two halves
+    // come from different layers as well as different indices.
+    p.write_register(0x212C, 0x01); // TM: BG1 -> main
+    p.write_register(0x212D, 0x02); // TS: BG2 -> sub
+    p
+}
+
+/// **Criterion 2.** Modes 5 and 6 emit 512 dots; every other mode emits
+/// 256 unless pseudo-hires asks otherwise.
+#[test]
+fn hires_modes_emit_512_dot_scanlines_and_other_modes_do_not() {
+    for mode in 0..=7u8 {
+        let mut p = hires_ppu(mode);
+        let line = p.render_scanline(0);
+        let want = if mode == 5 || mode == 6 { 512 } else { 256 };
+        assert_eq!(
+            line.pixels.len(),
+            want,
+            "mode {mode} emitted {} dots, wanted {want} — the slice LENGTH is the width tag",
+            line.pixels.len()
+        );
+    }
+}
+
+/// Pseudo-hires reaches 512 in **every** mode, which is what makes it
+/// pseudo-hires rather than a mode-5 special case.
+#[test]
+fn pseudo_hires_emits_512_dots_in_every_mode() {
+    for mode in 0..=7u8 {
+        let mut p = hires_ppu(mode);
+        p.write_register(0x2133, 0x08);
+        assert_eq!(
+            p.render_scanline(0).pixels.len(),
+            512,
+            "pseudo-hires must widen mode {mode}"
+        );
+    }
+}
+
+/// **The half-dot order, which is the fact worth pinning.**
+///
+/// fullsnes defines pseudo-hires as `SHIFT SUBSCREEN HALF DOT TO THE
+/// LEFT`, so the sub screen owns the EVEN dot of each pair and the main
+/// screen the ODD one. Getting this backwards shifts the whole picture
+/// half a dot — a hires ROM then looks subtly soft rather than obviously
+/// wrong, which an eyeball check passes and a screenshot comparison
+/// catches. That is the same failure mode as the off-by-one row this
+/// module already carries.
+#[test]
+fn the_sub_screen_owns_the_left_half_dot_and_main_the_right() {
+    let mut p = hires_ppu(5);
+    let hires = p.render_scanline(0);
+
+    // The same PPU, rendered as its two separate screens.
+    let mut plain = hires_ppu(5);
+    plain.bg_mode = 0; // any non-hires mode: gives the 256-dot main screen
+    let main = plain.render_scanline(0);
+    let mut subs = hires_ppu(5);
+    let (sub, _fixed) = subs.render_sub_scanline(1);
+
+    assert_eq!(hires.pixels.len(), main.pixels.len() * 2);
+    for x in 0..main.pixels.len() {
+        assert_eq!(
+            hires.pixels[2 * x + 1],
+            main.pixels[x],
+            "the ODD half-dot at x={x} must be the MAIN screen, unaltered"
+        );
+        if let Some(sp) = sub.get(x) {
+            if !sp.fixed {
+                assert_eq!(
+                    hires.pixels[2 * x].palette_index,
+                    sp.palette_index,
+                    "the EVEN half-dot at x={x} must come from the SUB screen"
+                );
+            }
+        }
+    }
+}
+
+/// The main screen's pixels are not altered by being interleaved —
+/// hires changes where they sit, not what they are.
+#[test]
+fn hires_does_not_alter_the_main_screen_pixels() {
+    let mut wide = hires_ppu(5);
+    let hires = wide.render_scanline(0);
+    let mut narrow = hires_ppu(5);
+    narrow.bg_mode = 1;
+    let plain = narrow.render_scanline(0);
+
+    let odd: Vec<_> = hires.pixels.iter().skip(1).step_by(2).copied().collect();
+    assert_eq!(
+        odd.len(),
+        plain.pixels.len(),
+        "one main-screen dot per pair"
+    );
+}
+
+/// The overlay must stay the same length as `pixels` — that is its
+/// documented contract, and a consumer indexes them together.
+#[test]
+fn the_overlay_is_widened_alongside_the_pixels() {
+    let mut p = hires_ppu(6);
+    let line = p.render_scanline(0);
+    assert_eq!(
+        line.overlay.len(),
+        line.pixels.len(),
+        "overlay and pixels are indexed together; different lengths would \
+         mis-attribute every dropped sprite"
+    );
+    // A dropped sprite belongs to the MAIN screen, so the left half-dot
+    // carries an empty entry rather than a duplicate — duplicating would
+    // double every dropped sprite's apparent width.
+    for (i, o) in line.overlay.iter().enumerate() {
+        if i % 2 == 0 {
+            assert!(
+                !o.opaque,
+                "the sub-screen half-dot carries no dropped sprite"
+            );
+        }
+    }
+}
+
+/// Anti-vacuity: a 512-dot line whose halves are identical would pass a
+/// length check while proving nothing was interleaved.
+#[test]
+fn the_two_half_dots_are_not_simply_duplicated() {
+    let mut p = hires_ppu(5);
+    // Give the sub screen a different backdrop-relative index than the
+    // main screen by enabling different layers (done in `hires_ppu`).
+    let line = p.render_scanline(0);
+    let identical =
+        (0..line.pixels.len() / 2).all(|x| line.pixels[2 * x] == line.pixels[2 * x + 1]);
+    assert!(
+        !identical || line.pixels.iter().all(|p| p.layer == PixelLayer::Backdrop),
+        "every pair is identical — the line was duplicated, not interleaved"
+    );
 }

@@ -163,11 +163,14 @@ impl SetIni {
     ///   pixels are rendered as half-pixels of the high-resolution
     ///   image": the two screens supply alternating half-dots.
     ///
-    /// This core composes ONE screen and emits indexed pixels (law 4), so
-    /// it can produce the main screen's half of that image and nothing
-    /// else — which is exactly what a mode-5 ROM looks like here: half
-    /// the picture, against the backdrop. Carrying a sub-screen across
-    /// `CoreSink` is W7-16's contract change.
+    /// **This doc used to end "so it can produce the main screen's half of
+    /// that image and nothing else" — that was true until W7-16 landed
+    /// `CoreSink::sub_scanline` and is no longer.** Ticket W7-06's second
+    /// pass composes the full 512 with
+    /// [`Ppu::render_scanline_hires`]: the sub screen supplies the LEFT
+    /// half-dot of each pair and the main screen the RIGHT, which is the
+    /// same relationship pseudo-hires states directly (`SHIFT SUBSCREEN
+    /// HALF DOT TO THE LEFT`).
     #[must_use]
     pub fn hires_requested(&self, bg_mode: u8) -> bool {
         self.pseudo_hires || bg_mode == 5 || bg_mode == 6
@@ -682,9 +685,86 @@ impl Ppu {
             // Limit flags accumulate on the real PPU, not the shadow.
             self.range_over |= shadow.range_over;
             self.time_over |= shadow.time_over;
+            // Hires is decided from the LATCHED registers, like everything
+            // else on this line: a mid-frame BGMODE or SETINI write must
+            // change the line it was written on, not retroactively rewrite
+            // earlier ones. That is the same reason `with_line_state`
+            // exists at all.
+            if shadow.setini.hires_requested(shadow.bg_mode) {
+                return shadow.render_scanline_hires(line, composed);
+            }
             return composed;
         }
-        self.render_scanline_live(line)
+        let composed = self.render_scanline_live(line);
+        if self.setini.hires_requested(self.bg_mode) {
+            return self.render_scanline_hires(line, composed);
+        }
+        composed
+    }
+
+    /// Compose a 512-dot scanline for pseudo-hires and modes 5/6
+    /// (ticket W7-06 criterion 2; `EMULATION_CORES.md` §3.3, "pseudo-hires
+    /// and hires modes 5/6 emit 512-wide scanlines").
+    ///
+    /// **The width tag is the slice length**, which is why this needs no
+    /// `rf-core-api` change: `CoreSink::video_scanline` already takes
+    /// `&[PpuPixel]`, so a 512-long line *is* a 512-wide line. Adding a
+    /// separate width field would have created a second source of truth
+    /// that could disagree with the data beside it.
+    ///
+    /// **Which screen supplies which half-dot** is the one fact worth
+    /// getting right, and both routes to 512 agree on it: pseudo-hires is
+    /// defined by fullsnes as `SHIFT SUBSCREEN HALF DOT TO THE LEFT`, so
+    /// the sub screen lands on the LEFT (even) dot of each pair and the
+    /// main screen on the RIGHT (odd). True hires in modes 5/6 works the
+    /// same way — "the main/subscreen pixels are rendered as half-pixels
+    /// of the high-resolution image". Swapping them shifts the entire
+    /// picture one half-dot and makes every hires ROM look subtly soft
+    /// rather than obviously wrong, which is exactly the kind of error a
+    /// screenshot comparison catches and an eyeball does not.
+    ///
+    /// A sub-screen pixel whose source is the `$2132` fixed colour has no
+    /// palette index to carry, so it contributes the backdrop index here.
+    /// That is a deliberate narrowing: the fixed colour is a *colour
+    /// math* input and this is the *picture* path, and law 4 forbids this
+    /// crate from resolving either to RGB.
+    fn render_scanline_hires(&mut self, y: u16, main: Scanline) -> Scanline {
+        let (sub, _fixed_color) = self.render_sub_scanline(y);
+        let width = main.pixels.len();
+        let mut pixels = Vec::with_capacity(width * 2);
+        let mut overlay = Vec::with_capacity(width * 2);
+
+        for x in 0..width {
+            // LEFT half-dot: the sub screen.
+            let left = sub.get(x).map_or(main.pixels[x], |sp| PpuPixel {
+                // A fixed-colour sub pixel carries no index — see the doc.
+                palette_index: if sp.fixed { 0 } else { sp.palette_index },
+                layer: sp.layer,
+                sprite_id: None,
+                priority: 0,
+            });
+            pixels.push(left);
+            // RIGHT half-dot: the main screen, unchanged. The main
+            // screen's pixels stay accuracy-exact at their own positions;
+            // hires interleaves them, it does not alter them.
+            pixels.push(main.pixels[x]);
+
+            // The overlay is per-dot too, or it would no longer line up
+            // with `pixels` — its own contract is "same length as
+            // pixels". A dropped sprite belongs to the MAIN screen, so
+            // the left half-dot carries an empty entry rather than a
+            // duplicate, which would double every dropped sprite's width.
+            overlay.push(OverlayPixel {
+                palette_index: 0,
+                // `opaque: false` is "draw nothing here" — the documented
+                // way to say a dropped sprite does not reach this x, and
+                // NOT a sentinel index.
+                opaque: false,
+            });
+            overlay.push(main.overlay[x]);
+        }
+
+        Scanline { pixels, overlay }
     }
 
     /// Compose one scanline from the live registers.
