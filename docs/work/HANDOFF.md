@@ -1,5 +1,10 @@
 # HANDOFF — resume point for the next session (rewritten 2026-08-08)
 
+> **Start at `docs/work/NEXT_SESSION.md` (2026-08-21).** It supersedes the
+> "Current state" and "START HERE" sections below, which are stale. The
+> process sections of this file — read-order, the seven-command gate,
+> block-note discipline — are still current.
+
 For a fresh coding session (any model). The design-review arc is DONE and
 merged. **Your job is implementation: execute tickets from plan.json, one at
 a time.** Do not redesign anything.

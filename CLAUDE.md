@@ -20,7 +20,17 @@ Entry point for coding agents: `MASTER_PROMPT.md` → `plan.json` → `PLAYBOOK.
 6. **Accuracy Mode is the reference**: enhancements are opt-in overlays over
    an unmodified simulation; a fresh install boots in Accuracy Mode.
 7. Report test counts in commit/PR bodies (e.g. "workspace: 214 passing").
-8. Push `main` to both remotes after merged work: `git push origin main &&
+8. **Every hand-rolled walk must prove progress.** In any `while i < n`
+   loop, the index has to advance on *every* path through the body — if a
+   branch can leave it unchanged, the loop is infinite and an accumulator
+   inside it is a memory bomb. `cargo test` runs unsandboxed on the
+   developer's workstation: on 2026-08-21 one such loop in
+   `interpolation.rs` panicked the machine twice (docs/LESSONS.md RF-L-09).
+   Prefer an iterator or a range; if you must index by hand, put the
+   unconditional advance first and say in a comment why it terminates. A
+   test that hangs is not a failing test — it is a denial of service, so
+   never re-run a suite that hung without finding the loop first.
+9. Push `main` to both remotes after merged work: `git push origin main &&
    git push github main` (origin/Gitea may be unreachable off-LAN — GitHub
    always; note unsynced state in docs/STATUS.md when it happens).
 
