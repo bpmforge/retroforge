@@ -5,6 +5,11 @@
 
 pub mod animation;
 pub mod pack;
+pub mod pipeline;
+pub mod upscale;
+
+#[cfg(feature = "onnx")]
+pub mod onnx;
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-ai";
