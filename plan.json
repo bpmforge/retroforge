@@ -4311,7 +4311,7 @@
    "WHAT REMAINS: app.rs's own surfaces are not yet routed through GamepadNav. That is mechanical — feed PadEvents in, push events_for() into RawInput, and audit each panel's widgets for labels — but it touches every window in a 2,600-line file and is better done as its own pass than half-finished here. The two hard parts, the input model and a harness that can PROVE reachability rather than assert a call was made, are done. FRONTEND_UI.md section 6's contrast and UI-scale items are also outstanding: they are theme work, not navigation, and were not started."
   ],
    "points": 8,
-   "status": "blocked",
+   "status": "in_progress",
    "stories": []
   },
   {
