@@ -4480,7 +4480,7 @@
   "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). ADD `ort` AND DO THE INFERENCE. Criterion 1\u2019s inference half is authorised: add the docs/TECH_STACK.md row for the ONNX runtime, run the NFR-011 licence pass on it and its tree, and make the offline pack pipeline actually produce upscaled pixels. write_scope is widened to docs/TECH_STACK.md for the row. Constraints that do NOT move: law 6 (Accuracy Mode is the reference \u2014 upscaling is an opt-in overlay, never the default), no model weights in git (fetch-and-pin like the ROM and vector fetchers, gitignored, CI has no artifacts), and the all-or-nothing pack refusal already delivered stays. If the runtime turns out to need a model artifact with a licence that fails NFR-011, STOP and record it rather than shipping the row anyway."
  ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
