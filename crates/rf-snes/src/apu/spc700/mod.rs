@@ -25,7 +25,8 @@
 //! **registers and memory, not the cycle trace**; the cycle-accurate
 //! executor is not this ticket's.
 
-pub mod ops;
+mod ops;
+pub mod timing;
 
 /// `PSW` bits.
 pub mod flags {
@@ -90,6 +91,12 @@ impl ApuBus for FlatApuBus {
 /// The SPC700 register file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Spc700 {
+    /// Set by `ops::branch` when a conditional branch was taken, so
+    /// `step_counted` can charge the +2 (ticket W7-08). Reset at the top
+    /// of every instruction; it is a per-step output, not CPU state, and
+    /// is deliberately NOT serialized — a save state restores between
+    /// instructions, where it is always false.
+    pub(crate) branch_taken: bool,
     pub a: u8,
     pub x: u8,
     pub y: u8,
@@ -110,6 +117,7 @@ impl Spc700 {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            branch_taken: false,
             a: 0,
             x: 0,
             y: 0,
@@ -223,11 +231,25 @@ impl Spc700 {
     /// # Errors
     /// Returns the opcode if it is not implemented.
     pub fn step(&mut self, bus: &mut dyn ApuBus) -> Result<(), u8> {
+        self.step_counted(bus).map(|_| ())
+    }
+
+    /// Step one instruction and report what it COST (ticket W7-08).
+    ///
+    /// A halted core still costs one cycle — charging zero is what froze
+    /// the clock in W7-15's investigation, because WAI waits for an
+    /// interrupt that only arrives when cycles are spent.
+    ///
+    /// # Errors
+    /// Returns the opcode if unimplemented.
+    pub fn step_counted(&mut self, bus: &mut dyn ApuBus) -> Result<u8, u8> {
         if self.stopped {
-            return Ok(());
+            return Ok(1);
         }
         let opcode = self.fetch8(bus);
-        ops::execute(self, bus, opcode)
+        self.branch_taken = false;
+        ops::execute(self, bus, opcode)?;
+        Ok(timing::cycles(opcode, self.branch_taken))
     }
 }
 

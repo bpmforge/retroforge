@@ -341,15 +341,34 @@ impl SnesBus {
         // and grinding through them inside one bus access would stall the
         // whole emulator at exactly the moment a game is polling a port.
         spc_cycles = spc_cycles.min(64);
-        for _ in 0..spc_cycles {
+        // SPEND THE BUDGET AS CYCLES, NOT INSTRUCTIONS (ticket W7-08).
+        //
+        // This loop used to run `spc_cycles` ITERATIONS OF ONE
+        // INSTRUCTION EACH. Instructions are not one cycle — they are 2
+        // to 12 — so the APU ran 2-5x too fast, and the symptom was
+        // precise: on the first `$2140` read after the boot hand-over the
+        // SPC had already executed a 5-cycle instruction on 1 cycle of
+        // debt, clobbering the echo the 65816 was still waiting for.
+        let mut spent = 0u64;
+        while spent < spc_cycles {
             if self.apu.cpu.stopped || !self.apu.boot.is_running() {
                 // Nothing to execute: either halted, or the HLE boot
-                // handshake still owns the machine.
+                // handshake still owns the machine. Still costs a cycle —
+                // charging zero is what froze the clock in W7-15's
+                // investigation, since a halted CPU waits for an
+                // interrupt that only arrives when cycles are spent.
                 self.apu.tick_timers(1);
+                spent += 1;
                 continue;
             }
-            let _ = self.apu.step();
+            let cycles = self.apu.step_counted().unwrap_or(1);
+            spent += u64::from(cycles.max(1));
         }
+        // Anything overspent comes out of the next catch-up, so the APU
+        // cannot drift ahead one rounding error at a time.
+        self.apu_debt = self
+            .apu_debt
+            .saturating_sub(spent.saturating_sub(spc_cycles) * MASTER_PER_SPC_CYCLE);
     }
 
     /// VMAIN bits 0-1 select the address increment: 1, 32, 128, 128

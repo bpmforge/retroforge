@@ -214,15 +214,27 @@ impl Apu {
     /// Returns the opcode if unimplemented. All 256 are implemented as of
     /// W6-04a, so this cannot currently happen.
     pub fn step(&mut self) -> Result<(), u8> {
+        self.step_counted().map(|_| ())
+    }
+
+    /// Step one instruction and report its REAL cycle cost (ticket W7-08).
+    ///
+    /// This replaces a flat 2-cycles-per-instruction charge whose comment
+    /// said cycle counts were "the cycle-accurate executor's business".
+    /// They are this crate's business, and the cost of pretending
+    /// otherwise was concrete: `SnesBus::catch_up_apu` computed a cycle
+    /// budget and spent it one-instruction-per-cycle, so the APU outran
+    /// the CPU by 2-5x and clobbered port echoes before the 65816 could
+    /// read them.
+    ///
+    /// # Errors
+    /// Returns the opcode if unimplemented.
+    pub fn step_counted(&mut self) -> Result<u8, u8> {
         let mut cpu = self.cpu;
-        let r = cpu.step(self);
+        let r = cpu.step_counted(self);
         self.cpu = cpu;
-        // Cycle counts per instruction are the cycle-accurate executor's
-        // business (see the vectors' unused trace); until then each
-        // instruction advances the timers by a nominal 2 cycles, which
-        // keeps them monotonic and testable without pretending to an
-        // accuracy this ticket does not have.
-        self.tick_timers(2);
+        let cycles = r.unwrap_or(1);
+        self.tick_timers(u32::from(cycles));
         r
     }
 

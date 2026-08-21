@@ -228,15 +228,19 @@ fn parse_file(b: &[u8]) -> Vec<Vector> {
 }
 
 fn run_one(v: &Vector) -> Result<(), String> {
-    let mut cpu = Spc700 {
-        a: v.initial.a,
-        x: v.initial.x,
-        y: v.initial.y,
-        sp: v.initial.sp,
-        pc: v.initial.pc,
-        psw: v.initial.psw,
-        stopped: false,
-    };
+    // Built through `new()` rather than a struct literal: ticket W7-08
+    // added a crate-private `branch_taken` field, which an integration
+    // test (a separate crate) cannot name. Assigning the architectural
+    // registers is also the honest shape — those are the vector's inputs;
+    // `branch_taken` is a per-step output, not initial state.
+    let mut cpu = Spc700::new();
+    cpu.a = v.initial.a;
+    cpu.x = v.initial.x;
+    cpu.y = v.initial.y;
+    cpu.sp = v.initial.sp;
+    cpu.pc = v.initial.pc;
+    cpu.psw = v.initial.psw;
+    cpu.stopped = false;
     let mut bus = FlatApuBus::new();
     for (a, val) in &v.initial.ram {
         bus.mem[*a as usize] = *val;
@@ -346,5 +350,112 @@ fn singlestep_spc700_vectors() {
     assert!(
         fail == 0 && unimplemented.is_empty(),
         "spc700 vectors failed"
+    );
+}
+
+/// **The cycle table and its oracle must not disagree** (ticket W7-08).
+///
+/// `spc700::timing::CYCLES` was DERIVED from these vectors rather than
+/// transcribed from a document, and this test re-derives it from the same
+/// data. Writing 256 numbers by hand is how a plausible, subtly wrong
+/// emulator gets made; deriving them is only safe if the derivation is
+/// checked, which is what this is.
+///
+/// It also pins the two facts the table's shape depends on: exactly the
+/// branching opcodes vary, and a taken branch always costs `+2`.
+#[test]
+#[ignore = "needs the fetched SPC700 vectors (NFR-006); run via scripts/local-gate.sh"]
+fn spc700_cycle_table_matches_the_vectors() {
+    use rf_snes::apu::spc700::timing;
+
+    let Some(dir) = vectors_dir() else {
+        eprintln!("SKIP: run scripts/fetch-test-roms.sh singlestep-spc700");
+        return;
+    };
+
+    let mut checked = 0usize;
+    let mut branching_seen = Vec::new();
+    for opcode in 0u16..=255 {
+        let path = dir.join(format!("{opcode:02x}.json"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        // Every `"cycles": [...]` array's length is one execution's cycle
+        // count; collect the distinct lengths this opcode produces.
+        let mut lengths: Vec<usize> = Vec::new();
+        for case in text.split("\"cycles\":").skip(1) {
+            let Some(open) = case.find('[') else { continue };
+            let mut depth = 0i32;
+            let mut count = 0usize;
+            for (i, ch) in case[open..].char_indices() {
+                match ch {
+                    '[' => {
+                        depth += 1;
+                        if depth == 2 {
+                            count += 1;
+                        }
+                    }
+                    ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                let _ = i;
+            }
+            if !lengths.contains(&count) {
+                lengths.push(count);
+            }
+        }
+        if lengths.is_empty() {
+            continue;
+        }
+        lengths.sort_unstable();
+        let op = u8::try_from(opcode).expect("0..=255");
+        let base = u8::try_from(lengths[0]).expect("cycle counts fit a byte");
+        assert_eq!(
+            timing::CYCLES[opcode as usize],
+            base,
+            "opcode ${op:02X}: table says {} cycles, the vectors say {base}",
+            timing::CYCLES[opcode as usize]
+        );
+        if lengths.len() > 1 {
+            branching_seen.push(op);
+            assert_eq!(
+                lengths.len(),
+                2,
+                "opcode ${op:02X} shows {} distinct cycle counts; the table models only \
+                 not-taken and taken",
+                lengths.len()
+            );
+            let extra = u8::try_from(lengths[1] - lengths[0]).expect("fits");
+            assert_eq!(
+                extra,
+                timing::BRANCH_TAKEN_EXTRA,
+                "opcode ${op:02X} costs +{extra} when taken, not +{}",
+                timing::BRANCH_TAKEN_EXTRA
+            );
+            assert!(
+                timing::is_branching(op),
+                "opcode ${op:02X} varies with the branch but is not in BRANCHING"
+            );
+        } else {
+            assert!(
+                !timing::is_branching(op),
+                "opcode ${op:02X} is listed as branching but its cost never varies"
+            );
+        }
+        checked += 1;
+    }
+
+    assert_eq!(checked, 256, "every opcode must be checked, saw {checked}");
+    branching_seen.sort_unstable();
+    let mut declared = timing::BRANCHING.to_vec();
+    declared.sort_unstable();
+    assert_eq!(
+        branching_seen, declared,
+        "the BRANCHING list and the vectors disagree about which opcodes vary"
     );
 }

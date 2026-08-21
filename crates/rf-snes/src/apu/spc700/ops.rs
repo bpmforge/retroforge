@@ -193,6 +193,12 @@ fn branch(cpu: &mut Spc700, bus: &mut dyn ApuBus, take: bool) {
     let rel = cpu.fetch8(bus) as i8;
     if take {
         cpu.pc = cpu.pc.wrapping_add_signed(i16::from(rel));
+        // A taken branch costs +2 (ticket W7-08). Recorded here rather
+        // than inferred from the PC afterwards: every conditional branch
+        // in this core routes through this one helper, so this is the
+        // single place that knows the outcome, and reconstructing it from
+        // a PC delta would have to know each instruction's length.
+        cpu.branch_taken = true;
     }
 }
 
