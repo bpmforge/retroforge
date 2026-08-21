@@ -914,3 +914,354 @@ mod tests {
         assert_eq!(p.version, 106);
     }
 }
+
+// =====================================================================
+// Import (ticket W9-06)
+// =====================================================================
+
+/// Why one rule of an imported pack cannot be honoured.
+///
+/// **Every variant names the specific asset**, because criterion 2's
+/// whole content is that a partially-satisfiable pack is reported with
+/// its gaps identified rather than silently degraded. "Some tiles will
+/// not be replaced" is not a report; it is the absence of one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Unsatisfied {
+    /// The `<img>` this rule draws from is not present.
+    MissingImage { tile: String, image: String },
+    /// The rule is gated on a condition type this build cannot evaluate,
+    /// so it can never match (see the module doc).
+    UnevaluatedCondition { tile: String, condition: String },
+    /// The rule's replacement region falls outside the image it names.
+    RegionOutOfBounds {
+        tile: String,
+        image: String,
+        need_x: u32,
+        need_y: u32,
+        image_w: u32,
+        image_h: u32,
+    },
+}
+
+impl std::fmt::Display for Unsatisfied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unsatisfied::MissingImage { tile, image } => {
+                write!(f, "tile {tile}: image {image:?} is not in the pack")
+            }
+            Unsatisfied::UnevaluatedCondition { tile, condition } => write!(
+                f,
+                "tile {tile}: condition {condition:?} uses a type this build cannot evaluate, \
+                 so the rule can never match"
+            ),
+            Unsatisfied::RegionOutOfBounds {
+                tile,
+                image,
+                need_x,
+                need_y,
+                image_w,
+                image_h,
+            } => write!(
+                f,
+                "tile {tile}: needs {need_x}x{need_y} of {image:?}, which is {image_w}x{image_h}"
+            ),
+        }
+    }
+}
+
+/// What an imported image is, as far as this module needs to know.
+///
+/// Dimensions only — this module still decodes no pixels (see the module
+/// doc). The caller, which does own an image decoder, supplies the size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageInfo {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The result of importing a pack against the images that came with it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Import {
+    /// Every rule can be honoured.
+    Complete { pack: HdPack },
+    /// The pack loads, but some rules cannot be honoured. **The usable
+    /// rules are still usable** — a partial pack is not refused, because
+    /// refusing it would throw away work the author did do. What is
+    /// forbidden is applying it *quietly*.
+    Partial {
+        pack: HdPack,
+        unsatisfied: Vec<Unsatisfied>,
+    },
+}
+
+impl Import {
+    /// The pack either way.
+    #[must_use]
+    pub fn pack(&self) -> &HdPack {
+        match self {
+            Import::Complete { pack } | Import::Partial { pack, .. } => pack,
+        }
+    }
+
+    /// `true` when some rules cannot be honoured.
+    #[must_use]
+    pub fn is_partial(&self) -> bool {
+        matches!(self, Import::Partial { .. })
+    }
+
+    /// The gaps, empty when complete.
+    #[must_use]
+    pub fn unsatisfied(&self) -> &[Unsatisfied] {
+        match self {
+            Import::Complete { .. } => &[],
+            Import::Partial { unsatisfied, .. } => unsatisfied,
+        }
+    }
+
+    /// A line for the UI and the log.
+    ///
+    /// A partial import must be **visible**: this project's honesty
+    /// contract is that a player can always tell what is the game and
+    /// what is ours, and a pack that half-applies without saying so
+    /// breaks it in the most confusing possible way — some tiles change
+    /// and some do not, with no way to tell which was intended.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        match self {
+            Import::Complete { pack } => {
+                format!("imported {} tile rule(s); all satisfied", pack.tiles.len())
+            }
+            Import::Partial { pack, unsatisfied } => {
+                let mut s = format!(
+                    "imported {} tile rule(s), {} PARTIAL — these will not be replaced:",
+                    pack.tiles.len(),
+                    unsatisfied.len()
+                );
+                for u in unsatisfied {
+                    s.push_str(&format!("\n  - {u}"));
+                }
+                s
+            }
+        }
+    }
+}
+
+/// Import a parsed pack against the images that shipped with it.
+///
+/// `images` maps a `<img>` filename to its dimensions. A name absent from
+/// the map is a missing file.
+///
+/// This is the **consumer** of W8-11's tile identity, not a second
+/// implementation of it: matching still goes through [`HdPack::lookup`],
+/// and nothing here re-derives what a tile is.
+#[must_use]
+pub fn import(pack: HdPack, images: &BTreeMap<String, ImageInfo>) -> Import {
+    let mut unsatisfied = Vec::new();
+
+    for rule in &pack.tiles {
+        let tile = format!("{}@{}", rule.key.tile.to_field(), hex8(&rule.key.palette));
+
+        // A rule whose condition cannot be evaluated can never match.
+        // W8-11 already ledgers the condition NAMES; this names the
+        // affected TILE, which is what an author needs to act.
+        if let Some(expr) = &rule.condition {
+            for name in expr.split('&') {
+                let name = name.trim_start_matches('!');
+                let unevaluatable = pack
+                    .conditions
+                    .get(name)
+                    .is_none_or(|c| !EVALUATED_CONDITIONS.contains(&c.kind.as_str()));
+                if unevaluatable {
+                    unsatisfied.push(Unsatisfied::UnevaluatedCondition {
+                        tile: tile.clone(),
+                        condition: name.to_string(),
+                    });
+                }
+            }
+        }
+
+        let Some(name) = pack.images.get(rule.img) else {
+            // parse_hires already refuses an out-of-range index, so this
+            // is unreachable for a parsed pack — but a caller can build
+            // an HdPack by hand, and silently skipping would be the
+            // degradation this whole type exists to prevent.
+            unsatisfied.push(Unsatisfied::MissingImage {
+                tile: tile.clone(),
+                image: format!("<index {}>", rule.img),
+            });
+            continue;
+        };
+
+        let Some(info) = images.get(name) else {
+            unsatisfied.push(Unsatisfied::MissingImage {
+                tile: tile.clone(),
+                image: name.clone(),
+            });
+            continue;
+        };
+
+        // The replacement region must actually be inside the image. A
+        // pack whose coordinates run off the sheet would otherwise draw
+        // garbage or nothing, depending on the renderer.
+        let need_x = rule.x + 8 * pack.scale;
+        let need_y = rule.y + 8 * pack.scale;
+        if need_x > info.width || need_y > info.height {
+            unsatisfied.push(Unsatisfied::RegionOutOfBounds {
+                tile: tile.clone(),
+                image: name.clone(),
+                need_x,
+                need_y,
+                image_w: info.width,
+                image_h: info.height,
+            });
+        }
+    }
+
+    unsatisfied.sort();
+    unsatisfied.dedup();
+
+    if unsatisfied.is_empty() {
+        Import::Complete { pack }
+    } else {
+        Import::Partial { pack, unsatisfied }
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    fn images(pairs: &[(&str, u32, u32)]) -> BTreeMap<String, ImageInfo> {
+        pairs
+            .iter()
+            .map(|(n, w, h)| {
+                (
+                    (*n).to_string(),
+                    ImageInfo {
+                        width: *w,
+                        height: *h,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_fully_satisfiable_pack_imports_complete() {
+        // Anti-vacuity for every PARTIAL test below: an importer that
+        // reported PARTIAL always would pass them all while being wrong.
+        let pack =
+            parse_hires("<ver>106\n<scale>2\n<img>t.png\n<tile>0,5,AABBCCDD,0,0,1,N\n").unwrap();
+        let out = import(pack, &images(&[("t.png", 64, 64)]));
+        assert!(!out.is_partial(), "{}", out.summary());
+        assert!(out.summary().contains("all satisfied"));
+    }
+
+    #[test]
+    fn a_missing_image_makes_it_partial_and_names_the_tile() {
+        // Criterion 2: the specific assets are named, never silently
+        // degraded.
+        let pack = parse_hires("<ver>106\n<img>missing.png\n<tile>0,5,AABBCCDD,0,0,1,N\n").unwrap();
+        let out = import(pack, &images(&[]));
+        assert!(out.is_partial());
+        let msg = out.summary();
+        assert!(msg.contains("PARTIAL"), "{msg}");
+        assert!(msg.contains("missing.png"), "{msg}");
+        // The TILE is named too, not just the file — an author with 400
+        // rules needs to know which one.
+        assert!(msg.contains("AABBCCDD"), "{msg}");
+    }
+
+    #[test]
+    fn a_partial_pack_keeps_the_rules_it_can_honour() {
+        // A partial import is not a refusal: throwing the whole pack away
+        // would discard work the author did do. What is forbidden is
+        // applying it QUIETLY.
+        let pack = parse_hires(
+            "<ver>106\n<img>have.png\n<img>gone.png\n\
+             <tile>0,5,AABBCCDD,0,0,1,N\n<tile>1,6,00112233,0,0,1,N\n",
+        )
+        .unwrap();
+        let out = import(pack, &images(&[("have.png", 64, 64)]));
+        assert!(out.is_partial());
+        assert_eq!(out.unsatisfied().len(), 1);
+        // The satisfiable rule still resolves through W8-11's lookup.
+        let hit = out
+            .pack()
+            .lookup(&TileData::ChrRom(5), &[0xAA, 0xBB, 0xCC, 0xDD]);
+        assert!(hit.is_some(), "the usable rule must stay usable");
+    }
+
+    #[test]
+    fn a_rule_gated_on_an_unevaluated_condition_is_reported_as_unsatisfied() {
+        // W8-11 ledgers the condition NAME; W9-06 names the affected
+        // TILE, which is what an author can act on.
+        let pack = parse_hires(
+            "<ver>106\n<img>t.png\n\
+             <condition>c,memoryCheckConstant,8FFF,==,3F\n\
+             [c]<tile>0,5,AABBCCDD,0,0,1,N\n",
+        )
+        .unwrap();
+        let out = import(pack, &images(&[("t.png", 64, 64)]));
+        assert!(out.is_partial());
+        let msg = out.summary();
+        assert!(msg.contains("can never match"), "{msg}");
+        assert!(msg.contains("AABBCCDD"), "{msg}");
+    }
+
+    #[test]
+    fn a_region_running_off_the_sheet_is_reported_with_both_sizes() {
+        // Otherwise the renderer draws garbage or nothing, depending on
+        // which renderer.
+        let pack =
+            parse_hires("<ver>106\n<scale>4\n<img>t.png\n<tile>0,5,AABBCCDD,60,0,1,N\n").unwrap();
+        let out = import(pack, &images(&[("t.png", 64, 64)]));
+        assert!(out.is_partial());
+        let msg = out.summary();
+        assert!(msg.contains("92x32"), "needs both sides: {msg}");
+        assert!(msg.contains("64x64"), "needs both sides: {msg}");
+    }
+
+    #[test]
+    fn the_partial_summary_lists_every_gap_not_just_the_first() {
+        let pack = parse_hires(
+            "<ver>106\n<img>gone.png\n\
+             <tile>0,5,AABBCCDD,0,0,1,N\n<tile>0,6,00112233,0,0,1,N\n",
+        )
+        .unwrap();
+        let out = import(pack, &images(&[]));
+        assert_eq!(out.unsatisfied().len(), 2);
+        let msg = out.summary();
+        assert!(
+            msg.contains("AABBCCDD") && msg.contains("00112233"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn import_does_not_reimplement_tile_identity() {
+        // The ticket's first note: this is the CONSUMER of W8-11's
+        // identity, not a second implementation. Matching after import
+        // still goes through HdPack::lookup, including the default-tile
+        // fallback.
+        let pack = parse_hires(
+            "<ver>106\n<img>t.png\n\
+             <tile>0,5,AABBCCDD,0,0,1,Y\n<tile>0,5,00112233,8,8,1,N\n",
+        )
+        .unwrap();
+        let out = import(pack, &images(&[("t.png", 64, 64)]));
+        assert!(!out.is_partial());
+        // Exact match wins.
+        let exact = out
+            .pack()
+            .lookup(&TileData::ChrRom(5), &[0x00, 0x11, 0x22, 0x33])
+            .unwrap();
+        assert_eq!((exact.x, exact.y), (8, 8));
+        // Unmatched palette falls back to the default tile.
+        let dflt = out
+            .pack()
+            .lookup(&TileData::ChrRom(5), &[0xDE, 0xAD, 0xBE, 0xEF])
+            .unwrap();
+        assert_eq!((dflt.x, dflt.y), (0, 0));
+    }
+}
