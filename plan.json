@@ -4418,7 +4418,7 @@
     "ROADMAP P8's exit criteria are explicit that EACH feature ships with its own golden/A-B tests, per-game override knobs and honesty-contract labels — that is acceptance, not decoration."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
