@@ -4322,7 +4322,9 @@
    "write_scope": [
     "crates/rf-enhance/**",
     "crates/rf-snes/**"
-   ],
+   ,
+  "crates/rf-profiles/**"
+ ],
    "depends_on": [
     "W7-05"
    ],
@@ -4333,9 +4335,11 @@
    ],
    "notes": [
     "The third criterion is the whole difficulty: widescreen shows what the hardware never drew, so each layer needs a declared policy (extend, repeat, letterbox) rather than a global switch."
-   ],
+   ,
+  "SCOPE AMENDMENT + SPEC CORRECTION (2026-08-20, standing authority). (a) write_scope gains crates/rf-profiles/** because criterion 1 says the policies are 'declared per profile' and the schema has no place for them: GAME_PROFILES.md 2 has only a single global `widescreen = none|stitched|decoded`. (b) THE POLICY NAMES IN THIS TICKET'S NOTE ARE NOT bsnes-hd's. The note guesses 'extend, repeat, letterbox'; the criterion says 'on the bsnes-hd model', so its README was read (law 2). The real per-BG options are off / on / '< xy' or '> xy' (scanline-conditional) / autoHor / autoHor&Ver (the DEFAULT) / crop / cropAuto / disable, and sprites have their own clip / safe (default) / unsafe / disable. Implemented to the real model. THE AUTO POLICIES ARE CRITERION 3's MECHANISM, which is why this matters: 'autoHor' disables widescreen when the background spans full width with horizontal position 0 -- that is a HUD or a static full-screen image, and widening it reveals nothing the hardware ever drew. bsnes-hd also states plainly that 'Objects/Sprites will not be visible correctly in the widescreen areas', which is why its sprite default is 'safe' (render only if partially inside the classic 4:3 area) rather than 'on'."
+ ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
