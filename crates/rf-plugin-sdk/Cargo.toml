@@ -46,3 +46,17 @@ wasmtime = { version = "47", default-features = false, features = [
     "component-model",
     "std",
 ] }
+
+[dev-dependencies]
+# wat: compiles component WAT text into real component bytes, so criterion
+# 3's refusal is tested against an ACTUAL component that imports an
+# ungranted interface — not just against the error type's Display. Brad's
+# ruling calls criterion 3 "the one that decides whether the sandbox is
+# real", and a unit test over the mapping alone would leave the sandbox
+# itself unexercised.
+#
+# Dev-only, so it ships in nothing; `include-dev = true` in deny.toml means
+# NFR-011 still covers it (wat is Apache-2.0 WITH LLVM-exception, already
+# on the allowlist). Published from the same bytecodealliance/wasm-tools
+# repo wasmtime itself uses, so it tracks the same component-model spec.
+wat = "1"

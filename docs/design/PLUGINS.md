@@ -13,6 +13,46 @@ Lua; no shipping emulator has WASM plugins yet — so Lua is the compatibility
 idiom and WASM is our stability/sandbox play once the API has settled.
 Keeping native plugins in-tree until Phase 9 avoids freezing a bad ABI.
 
+### 1.1 The Tier-2 component world (ticket W9-03)
+
+The WASM tier landed in `crates/rf-plugin-sdk/`: `wit/plugin.wit` is the
+contract and `src/component.rs` is the host. Note what §1's table above
+does **not** say — it names the tier and its isolation story but specifies
+no world, so the world's shape is a W9-03 design decision recorded here
+rather than a pre-existing requirement being implemented.
+
+**One interface per capability, not one `host` interface.** That split is
+what makes the sandbox mechanical instead of advisory: the host links an
+interface *if and only if* the manifest grants the matching §2 capability,
+so a plugin that imports `write-memory` without being granted it is
+missing an import and cannot instantiate. Capability names match
+`manifest::Capabilities` field-for-field.
+
+**Nothing is stubbed.** There are deliberately no no-op host functions for
+ungranted capabilities, because a stub is exactly the failure FR-PLUG-006's
+sandbox exists to prevent: the plugin would run, do nothing, and report
+success, and the user would be told a mod was active while it was inert.
+
+Three refusals, each with its own diagnostic, and the distinction matters
+to whoever has to act on it:
+
+| Situation | Refusal | Whose problem |
+|---|---|---|
+| imports a capability the manifest does not grant | `CapabilitiesNotGranted`, listing **every** one at once | the plugin author's manifest |
+| imports a capability granted and declared, but with no host side in this build | `CapabilityNotImplemented`, naming it | **ours** — the manifest is correct |
+| imports an unknown interface, or one from another package | `UnknownImport` | neither; deny-by-default covers the unknown case |
+
+Implemented host-side today: `read-memory`, `write-memory` (ledgered — §2's
+mod boundary), `frame-events`, `scanline-events`. Declared in the world but
+not yet implemented: `read-ppu`, `draw-overlay`, `replace-layers`,
+`input-bindings`, `filesystem` — each needs renderer, input or cache
+plumbing outside `rf-plugin-sdk`, and each is refused **by name** rather
+than linked as an empty instance.
+
+`world plugin`'s single export, `on-frame`, is likewise a W9-03 choice and
+not something §1 dictated: it is the minimum a plugin needs to do anything
+per-frame, and more exports are cheaper to add later than to remove.
+
 ## 2. Capability model
 
 A plugin/script declares capabilities in its manifest; the UI shows them at

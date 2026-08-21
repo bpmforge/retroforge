@@ -1,0 +1,87 @@
+// RetroForge plugin world (ticket W9-03; docs/design/PLUGINS.md §1,
+// FR-PLUG-006).
+//
+// THIS FILE IS THE CONTRACT, and it is deliberately split one interface
+// per capability rather than one big `host` interface. That split is what
+// makes the sandbox mechanical instead of advisory: the host links an
+// interface if and only if the manifest grants the matching capability,
+// so a plugin that imports `write-memory` without being granted it is
+// missing an import and cannot instantiate at all. There is no code path
+// in which an ungranted call reaches a stub — see
+// `crates/rf-plugin-sdk/src/component.rs`.
+//
+// Capability names here match `manifest::Capabilities` field-for-field.
+// Adding a field there without adding an interface here (or vice versa)
+// is caught by `component::capability_for_import`'s exhaustive match.
+
+package retroforge:plugin@0.1.0;
+
+/// Read emulated CPU-visible memory. Observation only.
+interface read-memory {
+    read-u8: func(addr: u32) -> u8;
+}
+
+/// Read PPU memory: VRAM, OAM, palette.
+interface read-ppu {
+    read-vram: func(addr: u32) -> u8;
+    read-oam: func(index: u32) -> u8;
+}
+
+/// Per-frame callbacks.
+interface frame-events {
+    current-frame: func() -> u64;
+}
+
+/// Per-scanline callbacks. Separate from frame-events because §2 marks it
+/// "costs perf; explicit" — a plugin must ask for the expensive one by
+/// name.
+interface scanline-events {
+    current-scanline: func() -> u32;
+}
+
+/// Draw an overlay above the picture. Cannot alter the picture itself.
+interface draw-overlay {
+    draw-text: func(x: u32, y: u32, text: string);
+    draw-rect: func(x: u32, y: u32, w: u32, h: u32, argb: u32);
+}
+
+/// Replace whole rendered layers.
+interface replace-layers {
+    replace-layer: func(layer: u32, rgba: list<u8>);
+}
+
+/// THE MOD BOUNDARY (§2). Every write goes through the host's ledger, so
+/// "silently altering game behavior is impossible".
+interface write-memory {
+    write-u8: func(addr: u32, value: u8);
+}
+
+/// Register hotkeys / virtual buttons.
+interface input-bindings {
+    bind: func(name: string, key: string);
+}
+
+/// The plugin's OWN cache directory. Never raw filesystem access — the
+/// manifest's `filesystem` capability is `none` or `cache_dir`, and there
+/// is deliberately no interface for anything wider.
+interface filesystem {
+    read-file: func(name: string) -> list<u8>;
+    write-file: func(name: string, bytes: list<u8>);
+}
+
+/// What a plugin may import. A plugin imports only the interfaces its
+/// manifest grants; the rest are simply not linked.
+world plugin {
+    import read-memory;
+    import read-ppu;
+    import frame-events;
+    import scanline-events;
+    import draw-overlay;
+    import replace-layers;
+    import write-memory;
+    import input-bindings;
+    import filesystem;
+
+    /// Called once per frame after the core has produced a frame.
+    export on-frame: func(frame: u64);
+}
