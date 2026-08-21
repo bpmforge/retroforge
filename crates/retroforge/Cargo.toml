@@ -59,6 +59,10 @@ rf-debugger = { path = "../rf-debugger" }
 # same mediation reason, and `scripts/validate-arch.sh` restricts only the
 # console cores. Profiles are DATA, never code (ARCHITECTURE.md §3's own
 # table: "executable code (data only; code = plugins)").
+# rf-snes: the SNES core. Same exemption as rf-nes above -- the app
+# shell is the layer that owns save-state containers, and W7-09 needs
+# both the core's regions and rf-state's chunks in one place.
+rf-snes = { path = "../rf-snes" }
 rf-profiles = { path = "../rf-profiles" }
 # rf-plugin-sdk: the Lua script host (ticket W4-04). The shell owns the
 # REPL panel and the capability/ledger surfaces; the SDK owns the sandbox.

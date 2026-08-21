@@ -3973,7 +3973,9 @@
    "PMON BIT 0 DOES NOTHING, because voice 0 has no predecessor to be modulated by. A model that wrapped to voice 7 would sound plausible and be wrong, so there is a test that runs an identical voice with and without PMON bit 0 and requires bit-identical output.",
    "CRITERION 2 IS BLOCKED ON A REAL DEADLOCK, and the diagnosis carries good news with it. gilyon's spctest.sfc was run: the HLE BOOT HANDSHAKE COMPLETES WITH A REAL COMMERCIAL-STYLE ROM (boot state reaches Running and the APU executes uploaded code at $0306-$0309), which is the first end-to-end validation of W6-04b's HLE. But the two processors then deadlock — the 65816 spins at $00:818E and the SPC700 loops between $0306 and $0309, each waiting on a port value the other never writes — so test_num never leaves 0 across 40,000,000 instructions. That is a post-boot port-protocol bug, not a DSP one, and it belongs to the CPU<->APU ports rather than to this ticket. RECOMMEND filing it against W6-04b's area.",
    "CRITERION 3 HAS NO MATERIAL. It asks for 'audio RMS comparison against a reference for a designated SPC set'. No SPC set is designated anywhere in the board, tests/rom-manifest.toml or docs/TESTING.md, and no reference audio exists to compare against. RECOMMEND: designate the set and its reference, or amend the criterion — as written it cannot be satisfied by any amount of implementation work."
-  ],
+  ,
+  "FINDING FROM W7-09 (2026-08-20): THE S-DSP IS WIRED TO NOTHING. Verified three ways: (1) `grep` for `.mix(` across crates/rf-snes/src finds calls ONLY in tests/dsp.rs and tests/apu_ports.rs -- no production path mixes audio; (2) `Apu` never touches `self.dsp` except in the save-state code W7-09 just added; (3) $F3 (DSP DATA) has NO write arm in Apu::write_register at all, and its read arm returns a literal 0 with the comment 'DSP data - W6-04b'. So an SPC700 program cannot program a single DSP register, and a running machine produces no sound whatever this ticket's voices, BRR decode, echo and Gaussian interpolation do in isolation. This is the same disconnected-pipeline class as W6-03a's two VRAM buffers and W7-04's unwired $2134-$2136: every unit test passes because each unit is correct, and nothing assembles them. Whoever unblocks this ticket should treat 'the DSP register map at $F2/$F3 plus mixing into the audio output' as part of the work, and add an end-to-end test that runs SPC700 code which programs a voice and asserts non-silence -- a unit test on Dsp cannot catch a missing connection."
+ ],
    "points": 8,
    "status": "blocked",
    "stories": []
@@ -3986,7 +3988,9 @@
    "write_scope": [
     "crates/rf-state/**",
     "crates/rf-snes/**"
-   ],
+   ,
+  "crates/retroforge/**"
+ ],
    "depends_on": [
     "W7-07"
    ],
@@ -3998,9 +4002,13 @@
    ],
    "notes": [
     "The reachable-state hash RF-Scroller-S's replay uses is a good starting inventory of what has to round-trip, but it deliberately EXCLUDES VRAM/CGRAM as outputs — a save state must include them."
-   ],
+   ,
+  "SCOPE AMENDMENT (2026-08-20, standing authority): write_scope gains crates/retroforge/**. The container glue cannot live in either crate already listed. scripts/validate-arch.sh:11 FORBIDS a core from importing rf-state, so rf-snes cannot build a Container; and rf-state depends on nothing but bincode, sha2 and zstd, deliberately knowing no core, so the mapping cannot go there either without inverting that. The NES precedent settles it: rf-nes defines its own StateRegion enum and writes raw bytes through rf-core-api's StateWriter, and crates/retroforge/src/save_state.rs owns the region-to-tag table -- its own doc calls that table 'the whole of what this module knows that neither crate can'. SNES follows the same shape."
+ ,
+  "CLOSED 2026-08-20: all four criteria. rf-snes/src/state.rs defines nine StateRegions written through rf-core-api's StateWriter (no rf-state import -- the arch rule forbids it), and retroforge/src/snes_save_state.rs owns the region-to-tag table. ARAM rides in APU_ and the eight DMA channels in CPU_, because SAVE_STATES.md 2 defines nine core tags and neither has one of its own. THE TEST DESIGN IS THE INTERESTING PART: the obvious roundtrip check is CIRCULAR -- hashing the save payload cannot test the save payload, since a field missing from serialisation is missing from both sides and they agree however wrong the restore was. Proved by deleting the DSP echo ring and watching every test stay green. Fixed by comparing OBSERVABLE output (rendered scanlines + mixed audio, produced by the emulator not the format) and by a latch test that completes a pending write AFTER restoring -- the only way to see a field whose effect lands on the next write. Mutation-checked four ways: dropping master_cycles, the timing block, the whole APU region and the mode-7 latch each fail a different test. RESIDUAL GAP RECORDED IN THE TEST'S OWN DOC: a roundtrip only sees fields the ROM drives, and nothing can drive the S-DSP -- see the finding filed on W7-08."
+ ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {

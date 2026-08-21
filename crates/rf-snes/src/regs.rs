@@ -196,3 +196,39 @@ impl WramPort {
         self.address = (self.address & 0x0000_FFFF) | ((u32::from(v) & 1) << 16);
     }
 }
+
+impl MathUnit {
+    /// Serialise the multiply/divide unit (ticket W7-09).
+    ///
+    /// `shift`, `mpy_steps` and `div_steps` are mid-operation state: the
+    /// unit takes real cycles, and a game that starts a divide and reads
+    /// the result a few instructions later depends on how far it has got.
+    /// Saving only the operands would restart the arithmetic and hand back
+    /// a stale `rddiv`.
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        o.u8(self.wrmpya)?;
+        o.u16(self.wrdiv)?;
+        o.u16(self.rddiv)?;
+        o.u16(self.rdmpy)?;
+        o.u32(self.shift)?;
+        o.u8(self.mpy_steps)?;
+        o.u8(self.div_steps)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        self.wrmpya = i.u8()?;
+        self.wrdiv = i.u16()?;
+        self.rddiv = i.u16()?;
+        self.rdmpy = i.u16()?;
+        self.shift = i.u32()?;
+        self.mpy_steps = i.u8()?;
+        self.div_steps = i.u8()?;
+        Ok(())
+    }
+}

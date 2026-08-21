@@ -3383,6 +3383,7 @@ dependencies = [
  "rf-plugin-sdk",
  "rf-profiles",
  "rf-renderer",
+ "rf-snes",
  "rf-state",
  "rfd",
  "rtrb",

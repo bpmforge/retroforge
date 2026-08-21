@@ -171,3 +171,51 @@ impl IplBoot {
         }
     }
 }
+
+impl IplBoot {
+    /// Serialise the HLE boot handshake (ticket W7-09).
+    ///
+    /// The handshake is a multi-frame conversation between the CPU and the
+    /// APU, so a state saved during boot must resume it rather than
+    /// restart it — restarting would leave the CPU waiting on a `$BBAA`
+    /// that never comes again.
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        let (tag, arg) = match self.state {
+            BootState::Ready => (0u8, 0u8),
+            BootState::Transferring(n) => (1, n),
+            BootState::AwaitingBlock(n) => (2, n),
+            BootState::Running => (3, 0),
+        };
+        o.u8(tag)?;
+        o.u8(arg)?;
+        o.u16(self.address)?;
+        o.u16(self.entry)?;
+        o.usize(self.transferred)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        let tag = i.u8()?;
+        let arg = i.u8()?;
+        self.state = match tag {
+            0 => BootState::Ready,
+            1 => BootState::Transferring(arg),
+            2 => BootState::AwaitingBlock(arg),
+            3 => BootState::Running,
+            other => {
+                return Err(rf_core_api::StateError::Corrupt(format!(
+                    "IPL boot state tag {other} is not one of ready/transferring/awaiting/running"
+                )))
+            }
+        };
+        self.address = i.u16()?;
+        self.entry = i.u16()?;
+        self.transferred = i.usize()?;
+        Ok(())
+    }
+}

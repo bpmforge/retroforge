@@ -354,3 +354,74 @@ impl ApuBus for Apu {
         self.aram[usize::from(addr)]
     }
 }
+
+impl Apu {
+    /// Serialise the APU, **ARAM included** (ticket W7-09).
+    ///
+    /// ARAM rides in this region rather than a tag of its own because
+    /// `docs/design/SAVE_STATES.md` §2 defines nine core tags and none of
+    /// them is an APU-RAM tag. It belongs here on the merits anyway: the
+    /// SPC700's program, its samples and its variables all live in ARAM,
+    /// so an `APU_` chunk without it restores a processor with no code.
+    ///
+    /// `ports_in`/`ports_out` are both saved. They are the two directions
+    /// of `$2140`-`$2143`, and the famous handshakes are sensitive to
+    /// exactly which side has written what.
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        self.cpu.save(o)?;
+        o.bytes(&self.aram)?;
+        for t in &self.timers {
+            o.u32(t.divisor)?;
+            o.u8(t.target)?;
+            o.bool(t.enabled)?;
+            o.u32(t.stage)?;
+            o.u16(t.divider)?;
+            o.u8(t.counter)?;
+        }
+        o.bool(self.ipl_enabled)?;
+        for v in self.ports_in {
+            o.u8(v)?;
+        }
+        for v in self.ports_out {
+            o.u8(v)?;
+        }
+        o.u8(self.dsp_addr)?;
+        for v in self.aux {
+            o.u8(v)?;
+        }
+        self.boot.save(o)?;
+        self.dsp.save(o)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        self.cpu.load(i)?;
+        i.fill(&mut self.aram)?;
+        for t in &mut self.timers {
+            t.divisor = i.u32()?;
+            t.target = i.u8()?;
+            t.enabled = i.bool()?;
+            t.stage = i.u32()?;
+            t.divider = i.u16()?;
+            t.counter = i.u8()?;
+        }
+        self.ipl_enabled = i.bool()?;
+        for v in &mut self.ports_in {
+            *v = i.u8()?;
+        }
+        for v in &mut self.ports_out {
+            *v = i.u8()?;
+        }
+        self.dsp_addr = i.u8()?;
+        for v in &mut self.aux {
+            *v = i.u8()?;
+        }
+        self.boot.load(i)?;
+        self.dsp.load(i)
+    }
+}

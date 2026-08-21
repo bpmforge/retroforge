@@ -371,3 +371,45 @@ impl Cpu {
 
 #[cfg(test)]
 mod tests;
+
+impl Cpu {
+    /// Serialise the register file (ticket W7-09).
+    ///
+    /// `e` is not redundant with `p`: emulation mode is a latch the M/X
+    /// bits do not encode, and a restore that inferred it would put the
+    /// machine in native mode with a page-1 stack.
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        o.u16(self.a)?;
+        o.u16(self.x)?;
+        o.u16(self.y)?;
+        o.u16(self.sp)?;
+        o.u16(self.d)?;
+        o.u8(self.dbr)?;
+        o.u8(self.pbr)?;
+        o.u16(self.pc)?;
+        o.u8(self.p)?;
+        o.bool(self.e)?;
+        o.bool(self.stopped)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        self.a = i.u16()?;
+        self.x = i.u16()?;
+        self.y = i.u16()?;
+        self.sp = i.u16()?;
+        self.d = i.u16()?;
+        self.dbr = i.u8()?;
+        self.pbr = i.u8()?;
+        self.pc = i.u16()?;
+        self.p = i.u8()?;
+        self.e = i.bool()?;
+        self.stopped = i.bool()?;
+        Ok(())
+    }
+}

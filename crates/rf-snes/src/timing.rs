@@ -235,3 +235,63 @@ impl Joypads {
         self.latched = self.ports;
     }
 }
+
+impl Timing {
+    /// Serialise the raster clock (ticket W7-09).
+    ///
+    /// `vblank_start` is saved rather than recomputed from SETINI: it is
+    /// pushed into this type by the system when `$2133` is written, so a
+    /// restore that recomputed it would depend on region ordering.
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        o.u64(self.line_cycles)?;
+        o.u16(self.line)?;
+        o.u64(self.frame)?;
+        o.bool(self.nmi_flag)?;
+        o.u64(self.auto_joypad_remaining)?;
+        o.u16(self.vblank_start)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        self.line_cycles = i.u64()?;
+        self.line = i.u16()?;
+        self.frame = i.u64()?;
+        self.nmi_flag = i.bool()?;
+        self.auto_joypad_remaining = i.u64()?;
+        self.vblank_start = i.u16()?;
+        Ok(())
+    }
+}
+
+impl Joypads {
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        for v in self.ports {
+            o.u16(v)?;
+        }
+        for v in self.latched {
+            o.u16(v)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        for v in &mut self.ports {
+            *v = i.u16()?;
+        }
+        for v in &mut self.latched {
+            *v = i.u16()?;
+        }
+        Ok(())
+    }
+}

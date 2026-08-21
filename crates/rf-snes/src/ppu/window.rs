@@ -283,3 +283,118 @@ impl Mosaic {
         v - (v % u16::from(self.size))
     }
 }
+
+impl WindowLogic {
+    /// The 2-bit register encoding, for save states (ticket W7-09).
+    ///
+    /// The inverse, [`WindowLogic::from_bits`], already exists for the
+    /// `$212A`/`$212B` decode and masks to two bits, so a round trip
+    /// cannot produce an out-of-range value and needs no fallible form.
+    fn to_bits(self) -> u8 {
+        match self {
+            WindowLogic::Or => 0,
+            WindowLogic::And => 1,
+            WindowLogic::Xor => 2,
+            WindowLogic::Xnor => 3,
+        }
+    }
+}
+
+impl Windows {
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        o.u8(self.w1_left)?;
+        o.u8(self.w1_right)?;
+        o.u8(self.w2_left)?;
+        o.u8(self.w2_right)?;
+        for (a, b) in self.enable {
+            o.bool(a)?;
+            o.bool(b)?;
+        }
+        for (a, b) in self.invert {
+            o.bool(a)?;
+            o.bool(b)?;
+        }
+        for l in self.logic {
+            o.u8(l.to_bits())?;
+        }
+        o.u8(self.main_mask)?;
+        o.u8(self.sub_mask)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        self.w1_left = i.u8()?;
+        self.w1_right = i.u8()?;
+        self.w2_left = i.u8()?;
+        self.w2_right = i.u8()?;
+        for e in &mut self.enable {
+            *e = (i.bool()?, i.bool()?);
+        }
+        for v in &mut self.invert {
+            *v = (i.bool()?, i.bool()?);
+        }
+        for l in &mut self.logic {
+            *l = WindowLogic::from_bits(i.u8()?);
+        }
+        self.main_mask = i.u8()?;
+        self.sub_mask = i.u8()?;
+        Ok(())
+    }
+}
+
+impl ColorMath {
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        o.u8(self.clip_mode)?;
+        o.u8(self.prevent_mode)?;
+        o.bool(self.use_subscreen)?;
+        o.bool(self.subtract)?;
+        o.bool(self.half)?;
+        o.u8(self.enable)?;
+        o.u8(self.fixed_r)?;
+        o.u8(self.fixed_g)?;
+        o.u8(self.fixed_b)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        self.clip_mode = i.u8()?;
+        self.prevent_mode = i.u8()?;
+        self.use_subscreen = i.bool()?;
+        self.subtract = i.bool()?;
+        self.half = i.bool()?;
+        self.enable = i.u8()?;
+        self.fixed_r = i.u8()?;
+        self.fixed_g = i.u8()?;
+        self.fixed_b = i.u8()?;
+        Ok(())
+    }
+}
+
+impl Mosaic {
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        o.u8(self.size)?;
+        o.u8(self.enable)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        self.size = i.u8()?;
+        self.enable = i.u8()?;
+        Ok(())
+    }
+}

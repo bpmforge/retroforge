@@ -67,8 +67,8 @@ pub struct SnesBus {
     pub timing: Timing,
     pub joypads: Joypads,
     /// `$4016` strobe latch, and the serial shift position per port.
-    manual_latch: bool,
-    manual_shift: [u16; 2],
+    pub(crate) manual_latch: bool,
+    pub(crate) manual_shift: [u16; 2],
     /// `$420C` HDMAEN. HDMA itself is W7-07; this records what a ROM
     /// asked for so a mode-7 golden can say WHY it renders flat.
     pub hdmaen: u8,

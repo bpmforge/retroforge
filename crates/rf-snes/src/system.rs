@@ -23,7 +23,7 @@ pub struct SnesSystem {
     /// Master cycles elapsed since reset.
     pub master_cycles: u64,
     /// An NMI edge seen but not yet dispatched.
-    pending_nmi: bool,
+    pub(crate) pending_nmi: bool,
 }
 
 impl SnesSystem {

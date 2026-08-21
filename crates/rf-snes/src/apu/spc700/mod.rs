@@ -230,3 +230,32 @@ impl Spc700 {
         ops::execute(self, bus, opcode)
     }
 }
+
+impl Spc700 {
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        o.u8(self.a)?;
+        o.u8(self.x)?;
+        o.u8(self.y)?;
+        o.u8(self.sp)?;
+        o.u16(self.pc)?;
+        o.u8(self.psw)?;
+        o.bool(self.stopped)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        self.a = i.u8()?;
+        self.x = i.u8()?;
+        self.y = i.u8()?;
+        self.sp = i.u8()?;
+        self.pc = i.u16()?;
+        self.psw = i.u8()?;
+        self.stopped = i.bool()?;
+        Ok(())
+    }
+}

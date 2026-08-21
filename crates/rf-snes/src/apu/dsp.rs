@@ -617,3 +617,168 @@ impl Dsp {
         }
     }
 }
+
+impl EnvelopeStage {
+    fn to_bits(self) -> u8 {
+        match self {
+            EnvelopeStage::Release => 0,
+            EnvelopeStage::Attack => 1,
+            EnvelopeStage::Decay => 2,
+            EnvelopeStage::Sustain => 3,
+        }
+    }
+
+    fn from_bits(v: u8) -> Result<Self, rf_core_api::StateError> {
+        Ok(match v {
+            0 => EnvelopeStage::Release,
+            1 => EnvelopeStage::Attack,
+            2 => EnvelopeStage::Decay,
+            3 => EnvelopeStage::Sustain,
+            other => {
+                return Err(rf_core_api::StateError::Corrupt(format!(
+                    "envelope stage {other} is not one of release/attack/decay/sustain"
+                )))
+            }
+        })
+    }
+}
+
+impl Dsp {
+    /// Serialise the whole S-DSP (ticket W7-09).
+    ///
+    /// **The BRR decode cursor is state, not a cache.** `block`, `cursor`,
+    /// `index`, `prev` and the four-sample `history` are where a voice is
+    /// *inside* a compressed block; BRR is a delta format, so a restore
+    /// that dropped `prev` would decode the next block against silence and
+    /// produce a click, and one that dropped `history` would restart the
+    /// Gaussian interpolator mid-note.
+    ///
+    /// The echo ring is saved as its own history plus the offset into it,
+    /// for the same reason: it is a delay line, and its contents are
+    /// audible for `delay` milliseconds after the restore.
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        for v in &self.voices {
+            o.u16(v.start)?;
+            o.u16(v.loop_addr)?;
+            o.i8(v.vol_left)?;
+            o.i8(v.vol_right)?;
+            o.bool(v.keyed_on)?;
+            o.u16(v.pitch)?;
+            o.u8(v.envelope.stage.to_bits())?;
+            o.i16(v.envelope.level)?;
+            o.bool(v.envelope.adsr_enabled)?;
+            o.u8(v.envelope.attack_rate)?;
+            o.u8(v.envelope.decay_rate)?;
+            o.u8(v.envelope.sustain_rate)?;
+            o.u8(v.envelope.sustain_level)?;
+            o.u8(v.envelope.gain)?;
+            o.u16(v.pitch_counter)?;
+            for h in v.history {
+                o.i16(h)?;
+            }
+            o.u16(v.cursor)?;
+            o.usize(v.index)?;
+            match &v.block {
+                None => o.bool(false)?,
+                Some(b) => {
+                    o.bool(true)?;
+                    for s in b.samples {
+                        o.i16(s)?;
+                    }
+                    o.bool(b.loops)?;
+                    o.bool(b.end)?;
+                }
+            }
+            for p in v.prev {
+                o.i16(p)?;
+            }
+        }
+        o.u16(self.noise.state)?;
+        o.u8(self.echo.base_page)?;
+        o.u8(self.echo.delay)?;
+        o.i8(self.echo.feedback)?;
+        for f in self.echo.fir {
+            o.i8(f)?;
+        }
+        o.i8(self.echo.vol_left)?;
+        o.i8(self.echo.vol_right)?;
+        o.bool(self.echo.write_disabled)?;
+        o.usize(self.echo.offset)?;
+        for (l, r) in self.echo.history {
+            o.i16(l)?;
+            o.i16(r)?;
+        }
+        o.u8(self.noise_enable)?;
+        o.u8(self.pitch_mod)?;
+        o.u8(self.echo_enable)?;
+        o.i8(self.main_vol_left)?;
+        o.i8(self.main_vol_right)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        for v in &mut self.voices {
+            v.start = i.u16()?;
+            v.loop_addr = i.u16()?;
+            v.vol_left = i.i8()?;
+            v.vol_right = i.i8()?;
+            v.keyed_on = i.bool()?;
+            v.pitch = i.u16()?;
+            v.envelope.stage = EnvelopeStage::from_bits(i.u8()?)?;
+            v.envelope.level = i.i16()?;
+            v.envelope.adsr_enabled = i.bool()?;
+            v.envelope.attack_rate = i.u8()?;
+            v.envelope.decay_rate = i.u8()?;
+            v.envelope.sustain_rate = i.u8()?;
+            v.envelope.sustain_level = i.u8()?;
+            v.envelope.gain = i.u8()?;
+            v.pitch_counter = i.u16()?;
+            for h in &mut v.history {
+                *h = i.i16()?;
+            }
+            v.cursor = i.u16()?;
+            v.index = i.usize()?;
+            v.block = if i.bool()? {
+                let mut samples = [0i16; 16];
+                for s in &mut samples {
+                    *s = i.i16()?;
+                }
+                Some(BrrBlock {
+                    samples,
+                    loops: i.bool()?,
+                    end: i.bool()?,
+                })
+            } else {
+                None
+            };
+            for p in &mut v.prev {
+                *p = i.i16()?;
+            }
+        }
+        self.noise.state = i.u16()?;
+        self.echo.base_page = i.u8()?;
+        self.echo.delay = i.u8()?;
+        self.echo.feedback = i.i8()?;
+        for f in &mut self.echo.fir {
+            *f = i.i8()?;
+        }
+        self.echo.vol_left = i.i8()?;
+        self.echo.vol_right = i.i8()?;
+        self.echo.write_disabled = i.bool()?;
+        self.echo.offset = i.usize()?;
+        for h in &mut self.echo.history {
+            *h = (i.i16()?, i.i16()?);
+        }
+        self.noise_enable = i.u8()?;
+        self.pitch_mod = i.u8()?;
+        self.echo_enable = i.u8()?;
+        self.main_vol_left = i.i8()?;
+        self.main_vol_right = i.i8()?;
+        Ok(())
+    }
+}

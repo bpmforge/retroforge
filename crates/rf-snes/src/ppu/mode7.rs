@@ -223,3 +223,45 @@ fn character_pixel(ppu: &Ppu, tile: u8, x: u16, y: u16) -> u8 {
     let at = (usize::from(tile) * 64 + usize::from(y) * 8 + usize::from(x)) * 2 + 1;
     ppu.vram[at % ppu.vram.len()]
 }
+
+impl Mode7 {
+    /// Serialise the matrix (ticket W7-09).
+    ///
+    /// `latch` is the shared write-twice latch every matrix register
+    /// feeds. It is one byte of real machine state: a state saved between
+    /// the two halves of an `M7A` write and restored without it would
+    /// combine the new high byte with a zero low byte.
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        for v in [
+            self.a, self.b, self.c, self.d, self.x0, self.y0, self.hofs, self.vofs,
+        ] {
+            o.i16(v)?;
+        }
+        o.bool(self.flip_x)?;
+        o.bool(self.flip_y)?;
+        o.u8(self.screen_over)?;
+        o.u8(self.latch)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        self.a = i.i16()?;
+        self.b = i.i16()?;
+        self.c = i.i16()?;
+        self.d = i.i16()?;
+        self.x0 = i.i16()?;
+        self.y0 = i.i16()?;
+        self.hofs = i.i16()?;
+        self.vofs = i.i16()?;
+        self.flip_x = i.bool()?;
+        self.flip_y = i.bool()?;
+        self.screen_over = i.u8()?;
+        self.latch = i.u8()?;
+        Ok(())
+    }
+}

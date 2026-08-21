@@ -10,6 +10,7 @@ pub mod dma;
 pub mod mapping;
 pub mod ppu;
 pub mod regs;
+pub mod state;
 pub mod system;
 pub mod timing;
 

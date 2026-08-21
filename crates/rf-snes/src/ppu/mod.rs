@@ -785,3 +785,111 @@ enum Slot {
     /// A background index and its tilemap priority bit.
     Bg(u8, u8),
 }
+
+impl Ppu {
+    /// Serialise every PPU register (ticket W7-09).
+    ///
+    /// **`line_state` is deliberately absent** — see `crate::state`'s
+    /// module doc. It is per-frame scratch, cleared at frame start, and
+    /// states are taken at frame boundaries only.
+    ///
+    /// The three write-twice latches (`bgofs_latch`, `bghofs_latch`,
+    /// `cgram_latch`, `oam_latch`) ARE saved, and the two `Option` ones as
+    /// present-flag plus value: "no byte pending" and "a pending zero" are
+    /// different machines, and conflating them makes the next write to
+    /// `$2122` or `$2104` land as a whole word instead of half of one.
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        o.u8(self.bg_mode)?;
+        o.bool(self.bg3_priority)?;
+        for bg in &self.bgs {
+            o.u16(bg.tilemap_base)?;
+            o.u8(bg.tilemap_size)?;
+            o.u16(bg.char_base)?;
+            o.bool(bg.tile_size_16)?;
+            o.u16(bg.hofs)?;
+            o.u16(bg.vofs)?;
+            o.bool(bg.enabled)?;
+        }
+        o.u8(self.obj_size)?;
+        o.u16(self.obj_name_base)?;
+        o.u16(self.obj_name_select)?;
+        o.bool(self.obj_enabled)?;
+        o.u16(self.oam_addr)?;
+        o.bool(self.oam_priority_rotation)?;
+        o.bool(self.forced_blank)?;
+        o.u8(self.brightness)?;
+        self.mode7.save(o)?;
+        o.u8(self.setini.to_bits())?;
+        o.bool(self.overscan_changed)?;
+        self.windows.save(o)?;
+        self.color_math.save(o)?;
+        self.mosaic.save(o)?;
+        o.bool(self.direct_color)?;
+        o.bool(self.range_over)?;
+        o.bool(self.time_over)?;
+        o.u8(self.bgofs_latch)?;
+        o.u8(self.bghofs_latch)?;
+        o.u8(self.cgram_addr)?;
+        o.opt_u8(self.cgram_latch)?;
+        o.opt_u8(self.oam_latch)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        self.bg_mode = i.u8()?;
+        self.bg3_priority = i.bool()?;
+        for bg in &mut self.bgs {
+            bg.tilemap_base = i.u16()?;
+            bg.tilemap_size = i.u8()?;
+            bg.char_base = i.u16()?;
+            bg.tile_size_16 = i.bool()?;
+            bg.hofs = i.u16()?;
+            bg.vofs = i.u16()?;
+            bg.enabled = i.bool()?;
+        }
+        self.obj_size = i.u8()?;
+        self.obj_name_base = i.u16()?;
+        self.obj_name_select = i.u16()?;
+        self.obj_enabled = i.bool()?;
+        self.oam_addr = i.u16()?;
+        self.oam_priority_rotation = i.bool()?;
+        self.forced_blank = i.bool()?;
+        self.brightness = i.u8()?;
+        self.mode7.load(i)?;
+        self.setini.write_register(i.u8()?);
+        self.overscan_changed = i.bool()?;
+        self.windows.load(i)?;
+        self.color_math.load(i)?;
+        self.mosaic.load(i)?;
+        self.direct_color = i.bool()?;
+        self.range_over = i.bool()?;
+        self.time_over = i.bool()?;
+        self.bgofs_latch = i.u8()?;
+        self.bghofs_latch = i.u8()?;
+        self.cgram_addr = i.u8()?;
+        self.cgram_latch = i.opt_u8()?;
+        self.oam_latch = i.opt_u8()?;
+        // A restored PPU must not serve last frame's latched lines.
+        self.clear_line_state();
+        Ok(())
+    }
+}
+
+impl SetIni {
+    /// Re-encode as the `$2133` byte, so a save state stores the register
+    /// the ROM wrote rather than six booleans that could drift from it.
+    #[must_use]
+    pub fn to_bits(self) -> u8 {
+        u8::from(self.interlace)
+            | (u8::from(self.obj_interlace) << 1)
+            | (u8::from(self.overscan) << 2)
+            | (u8::from(self.pseudo_hires) << 3)
+            | (u8::from(self.extbg) << 6)
+            | (u8::from(self.external_sync) << 7)
+    }
+}

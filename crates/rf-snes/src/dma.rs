@@ -100,3 +100,66 @@ pub struct Dma {
 pub const CYCLES_PER_BYTE: u64 = 8;
 /// Master cycles charged once per active channel.
 pub const CYCLES_PER_CHANNEL: u64 = 8;
+
+impl Channel {
+    /// Serialise one channel (ticket W7-09).
+    ///
+    /// `table_addr`, `line_counter`, `hdma_done` and `do_transfer` are
+    /// mid-frame HDMA walk state. They are saved even though states are
+    /// taken at frame boundaries, where `hdma_init` is about to reload
+    /// them: a channel that terminated on a `$00` this frame stays
+    /// terminated until the next init, and dropping that would restart a
+    /// finished channel for the remainder of the frame.
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        o.u8(self.control)?;
+        o.u8(self.b_address)?;
+        o.u32(self.a_address)?;
+        o.u16(self.count)?;
+        o.u8(self.indirect_bank)?;
+        o.u16(self.table_addr)?;
+        o.u8(self.line_counter)?;
+        o.bool(self.hdma_done)?;
+        o.bool(self.do_transfer)
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        self.control = i.u8()?;
+        self.b_address = i.u8()?;
+        self.a_address = i.u32()?;
+        self.count = i.u16()?;
+        self.indirect_bank = i.u8()?;
+        self.table_addr = i.u16()?;
+        self.line_counter = i.u8()?;
+        self.hdma_done = i.bool()?;
+        self.do_transfer = i.bool()?;
+        Ok(())
+    }
+}
+
+impl Dma {
+    pub(crate) fn save(
+        &self,
+        o: &mut crate::state::StateOut,
+    ) -> Result<(), rf_core_api::StateError> {
+        for c in &self.channels {
+            c.save(o)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        i: &mut crate::state::StateIn,
+    ) -> Result<(), rf_core_api::StateError> {
+        for c in &mut self.channels {
+            c.load(i)?;
+        }
+        Ok(())
+    }
+}
