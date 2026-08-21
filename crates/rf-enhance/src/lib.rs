@@ -12,6 +12,7 @@
 pub mod bus;
 pub mod camera;
 pub mod decode;
+pub mod hud;
 pub mod level_view;
 pub mod loading;
 pub mod mods;

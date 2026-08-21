@@ -4362,9 +4362,11 @@
    ],
    "notes": [
     "Depends on W7-07 because HDMA is what makes most split-screen HUDs work, and section 3.2 says those events feed this directly."
-   ],
+   ,
+  "CLOSED 2026-08-21: all three criteria. rf-enhance/src/hud.rs. THE FRAMING THAT MADE IT TRACTABLE: a split-screen HUD is not a picture, it is a SCROLL DISCONTINUITY -- the game writes one scroll value for the status bar and another for the playfield part-way down the frame. That is why criterion 2 forbids pixel guessing and names ScrollWrite + HDMA: those events ARE the phenomenon, and pixels are only its consequence. scroll_tracker::compute_bands already turned those events into bands and left ScanlineBand::is_hud permanently false; this module is what fills it in, so no new event plumbing was needed. CRITERION 3 IS THE TRUST LADDER, NOT A NEW MECHANISM: D-004's Shadow is the default everywhere and means detect-and-record, never act, so a fresh install cannot have a HUD false positive alter the picture -- the verdict goes to the report card and Verdict::acted says which happened rather than leaving a caller to infer it. THREE JUDGEMENT CALLS, each mutation-checked: (a) EDGE BANDS ONLY -- a mid-screen scroll split is parallax or a water effect, and pinning one would freeze the wrong half of the picture; (b) THREE STABLE FRAMES before naming a HUD, because one frame of 'this band did not scroll' is just a paused game and would grow a HUD on every pause; (c) A PROFILE DECLARATION WINS OUTRIGHT AND ACTS WITHOUT THE LADDER (it is a human statement, not a heuristic), but the heuristic still RUNS and a disagreement is recorded -- being wrong here, where somebody checked, predicts being wrong on the next game where nobody wrote a profile. Also removed a dead guard the mutation run exposed: `std::ptr::eq(candidate, playfield)` could never fire, since a band cannot have a scroll different from its own."
+ ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
