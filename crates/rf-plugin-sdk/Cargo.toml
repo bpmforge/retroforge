@@ -19,3 +19,30 @@ workspace = true
 # notes: GitHub's runners all have one, but W3-06's 3-OS matrix is where
 # that first gets exercised.
 mlua = { version = "0.12.0", features = ["lua54", "vendored"] }
+
+# Tier-2 component runtime (ticket W9-03, on Brad's 2026-08-20 ruling that
+# TECH_STACK's "only when third-party demand is real" condition is met).
+#
+# `default-features = false` is a LICENCE decision, not a size one, and it
+# is load-bearing. With default features the tree resolves to 244 crates
+# and includes TWO NFR-011 problems:
+#   * `ittapi` / `ittapi-sys` at `GPL-2.0-only OR BSD-3-Clause` — the
+#     Intel VTune profiling hook. Dual-licensed, so BSD-3 is electable
+#     (the libzstd precedent), but it is copyleft-adjacent and nothing
+#     here profiles.
+#   * the whole `icu_*` / `zerovec` / `tinystr` family at `Unicode-3.0`,
+#     which is NOT on deny.toml's allowlist — only `unicode-ident` has a
+#     documented per-crate exception.
+# With the feature set below the tree is 114 crates and BOTH families are
+# gone, so `cargo deny check licenses` passes with no allowlist change.
+# deny.toml is outside this ticket's write_scope, which makes that the
+# difference between shipping and stalling.
+#
+# Features: `runtime` + `cranelift` to actually execute, `component-model`
+# for the WIT world (the tier's whole point), `std` for host types.
+wasmtime = { version = "47", default-features = false, features = [
+    "runtime",
+    "cranelift",
+    "component-model",
+    "std",
+] }

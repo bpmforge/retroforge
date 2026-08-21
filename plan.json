@@ -4593,7 +4593,7 @@
   "RULING (Brad, 2026-08-20, in response to the unattended loop\u2019s four blocking questions). ADD WASMTIME NOW \u2014 the TECH_STACK.md:34 condition \"only when third-party demand is real\" is declared MET, which was the product judgement blocking this. Add the row (wasmtime 46 components, the version that row already names), run the NFR-011 licence pass, then build the WIT world and the capability sandbox. write_scope is widened to docs/TECH_STACK.md so the precondition can be satisfied in-ticket. W5-07\u2019s Lua tier is the model for the capability MODEL even though the runtimes differ \u2014 criterion 3 (an ungranted capability is REFUSED with a diagnostic naming it, never silently no-opped) is the one that decides whether the sandbox is real."
  ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
