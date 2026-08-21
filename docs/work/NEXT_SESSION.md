@@ -31,19 +31,24 @@ does not read it as boilerplate.
 
 ## State of the tree (verified 2026-08-21)
 
-Branch `main`, HEAD `7b62cb3` *(chore(W8-09): close)*. **Working tree
-clean.** Four commits landed this session:
+Branch `main`, working tree clean, **both remotes in sync** (`origin`/Gitea
+and `github`). HEAD is the `docs(work)` commit that rewrote this file, or
+later. Six commits are new on both remotes since `f997d12` (W8-08) —
+deliberately listed by subject rather than by hash, so this table does not
+go stale the moment anything else is committed:
 
 | Commit | What |
 |---|---|
-| `1d5a777` | `docs(RF-L-09)` — Law 8, LESSONS.md RF-L-09, this file |
-| `33c8745` | `feat(W8-09)` — design doc + candidacy predicate + 7 tests |
-| `76f662b` | `chore(evidence)` — regenerated `local-gate.json` |
-| `7b62cb3` | `chore(W8-09)` — close: plan.json `done` + STATUS.md |
+| `chore(W8-09): claim` | the claim, local-only until this session pushed it |
+| `docs(RF-L-09)` | Law 8, LESSONS.md RF-L-09, this file |
+| `feat(W8-09)` | design doc + candidacy predicate + 7 tests |
+| `chore(evidence)` | regenerated `local-gate.json` |
+| `chore(W8-09): close` | plan.json `done` + STATUS.md |
+| `docs(work)` | this file, rewritten to the post-close state |
 
 `plan.json`: **W8-09 is `done`.**
 
-### Gate status — all seven green at HEAD
+### Gate status — all seven green at the close commit
 
 ```
 cargo fmt --all --check                                  OK
