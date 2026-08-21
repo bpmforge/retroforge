@@ -108,8 +108,32 @@ impl SnesSystem {
         let fast_rom = self.bus.fast_rom;
         let mut counting = crate::cpu::AccessCost::new(&mut self.bus, fast_rom);
         let result = self.cpu.step(&mut counting);
-        let spent = counting.master_cycles;
         let accesses = counting.accesses;
+        // **A HALTED CPU STILL BURNS TIME** (ticket W7-15).
+        //
+        // `Cpu::step` returns immediately while `stopped` (WAI or STP)
+        // without touching the bus, so `AccessCost` counts nothing and
+        // this used to add zero. That is a deadlock, not an optimisation:
+        // WAI waits for an interrupt, every interrupt this machine can
+        // raise comes from the raster, and the raster only moves when
+        // master cycles are spent. The CPU waited for a vblank that could
+        // never arrive.
+        //
+        // Measured before the fix: undisbeliever's hdmaen_latch_test ran
+        // 3,000,000 instructions and advanced the clock by 6,840 master
+        // cycles — still on frame 0, still in forced blank, spinning at
+        // $80:8069 forever. That is the whole reason all eighteen of
+        // those ROMs looked like they "never leave forced blank", and it
+        // was read as a per-dot rendering limitation for two tickets.
+        //
+        // One internal CPU cycle (`speed::FAST`, 6 master cycles) per
+        // halted step: on hardware WAI does not access the bus, but the
+        // clock keeps running, and 6 is what an internal cycle costs.
+        let spent = if counting.master_cycles == 0 && self.cpu.stopped {
+            u64::from(crate::cpu::speed::FAST)
+        } else {
+            counting.master_cycles
+        };
         self.master_cycles += spent;
 
         // The math unit advances in CPU cycles, not master cycles. One
