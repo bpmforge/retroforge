@@ -131,3 +131,38 @@ id = "no-hud"
 description = "Disable the HUD split (example only, off by default)"
 addr = 0xC500
 replace = [0xEA, 0xEA]
+
+# ---------------------------------------------------------------------
+# [text] -- translation and accessibility overlays (ticket W8-12,
+# GAME_PROFILES.md section 2).
+#
+# WHY THIS IS IN THE *DEMO* PROFILE AND NOT IN profiles/nes/rf-scroller.
+# RF-Scroller's HUD draws NO TEXT. init_video() fills nametable rows 0-1
+# with solid tiles ($0C and $0B -- the latter is sprite-0's opaque BG
+# collision partner), and there is no glyph set anywhere in the fixture.
+# Declaring a [text] table on the real profile would therefore mean
+# inventing strings the ROM never renders, and a profile that lies about
+# what a game says is precisely what this feature's honesty contract
+# exists to prevent. This file is already the schema DEMONSTRATION
+# profile with a placeholder identity, so it is where the table belongs
+# until a fixture with real glyphs exists.
+#
+# Note there is deliberately no `enabled` key: a profile describes what a
+# translation would be, the user decides whether to have one. Same rule
+# as [widescreen] and [mods].
+[[text.region]]
+id = "hud_banner"
+x = 0
+y = 0
+width = 256
+height = 16
+
+[[text.entry]]
+region = "hud_banner"
+# `original` is the game's own words, stored as TEXT rather than a hash,
+# because W8-12's third criterion requires the replaced text to stay
+# readable in the ledger -- naming only the region would leave a player
+# unable to tell what the game actually said.
+original = "GAME OVER"
+accessible = "The game has ended."
+translations = { fr = "PARTIE TERMINEE", es = "FIN DEL JUEGO" }

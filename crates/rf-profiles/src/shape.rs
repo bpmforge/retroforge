@@ -206,6 +206,35 @@ fn known_shape() -> Shape {
                 ("obj", Shape::Leaf),
             ]),
         ),
+        // `[text]` (ticket W8-12). This list is a SECOND source of truth
+        // beside the serde structs, and it has to be kept in step: the
+        // Profile struct has no `deny_unknown_fields`, so a table missing
+        // from here still deserialises fine and merely warns — which is
+        // exactly the silent drift `unknown_keys` exists to catch.
+        (
+            "text",
+            Shape::Object(vec![
+                (
+                    "region",
+                    Shape::ArrayOfObjects(vec![
+                        ("id", Shape::Leaf),
+                        ("x", Shape::Leaf),
+                        ("y", Shape::Leaf),
+                        ("width", Shape::Leaf),
+                        ("height", Shape::Leaf),
+                    ]),
+                ),
+                (
+                    "entry",
+                    Shape::ArrayOfObjects(vec![
+                        ("region", Shape::Leaf),
+                        ("original", Shape::Leaf),
+                        ("translations", Shape::Leaf),
+                        ("accessible", Shape::Leaf),
+                    ]),
+                ),
+            ]),
+        ),
         (
             "mods",
             Shape::Object(vec![(

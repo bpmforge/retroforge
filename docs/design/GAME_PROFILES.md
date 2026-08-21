@@ -107,7 +107,41 @@ id = "no-screen-shake"
 description = "..."
 addr = 0xC500
 replace = [0xEA, 0xEA]
+
+[[text.region]]                       # ticket W8-12: named boxes of on-screen text
+id = "banner"
+x = 0
+y = 0
+width = 256
+height = 16
+
+[[text.entry]]                        # what may replace one string, OFF by default
+region = "banner"
+original = "GAME OVER"                # the game's OWN words, verbatim
+accessible = "The game has ended."
+translations = { fr = "PARTIE TERMINEE", ja = "\u30b2\u30fc\u30e0\u30aa\u30fc\u30d0\u30fc" }
 ```
+
+`[text]` (ticket W8-12) declares translation and accessibility overlays.
+Like `[widescreen]` and `[mods]` it has **no `enabled` field**: a profile
+describes what a translation *would* be, and the user decides whether to
+have one — which is what keeps law 6's "a fresh install boots in Accuracy
+Mode" true of a machine that happens to load the profile.
+
+`original` is stored as **text rather than a hash**, and that is a
+requirement rather than a convenience. W8-12's third criterion is that
+"text an overlay replaces is identifiable in the ledger, so a player can
+always tell what was changed" — a ledger that named only the region would
+satisfy a careless reading and still leave the player unable to read what
+the game actually said. `rf_enhance::overlay` quotes `original` back into
+every ledger row.
+
+Regions are **declared, not detected**. `ENHANCEMENT_RUNTIME.md` §6 lists
+HUD/text detection as a later AI capability; a human writing the box down
+is what makes the feature work today and what makes a wrong overlay a
+wrong profile line rather than an opaque misfire. An entry naming an
+undeclared region is refused rather than ignored, since a typo'd id would
+otherwise silently drop one line of a translation.
 
 Decoder families (`decode.kind`) are implemented once in `rf-enhance` and
 parameterized by data: `metatile_screens`, `room_grid`, `tilemap_direct`,

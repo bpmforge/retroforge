@@ -62,6 +62,9 @@ pub struct Profile {
     pub mods: Option<Mods>,
     /// `[widescreen]` — per-BG-layer widescreen policies (ticket W8-05).
     pub widescreen: Option<Widescreen>,
+    /// `[text]` — translation and accessibility overlay declarations
+    /// (ticket W8-12).
+    pub text: Option<Text>,
 }
 
 impl Profile {
@@ -413,6 +416,61 @@ pub struct ModPatch {
     pub replace: Vec<u8>,
 }
 
+/// `[text]` (ticket W8-12): the text an overlay may replace, and what it
+/// may be replaced with.
+///
+/// **There is deliberately no `enabled` field**, for the same reason
+/// [`Widescreen`] has none and `[mods]` has none: a profile *describes*
+/// what a translation would be, the user decides whether to have one at
+/// all. A profile that could switch itself on would make law 6's "a fresh
+/// install boots in Accuracy Mode" false on any machine that happened to
+/// load it.
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+pub struct Text {
+    /// `[[text.region]]` — where readable text lives on screen.
+    #[serde(default, rename = "region")]
+    pub regions: Vec<TextRegion>,
+    /// `[[text.entry]]` — one original string and its replacements.
+    #[serde(default, rename = "entry")]
+    pub entries: Vec<TextEntry>,
+}
+
+/// One `[[text.region]]` row: a named rectangle of screen text.
+///
+/// Declared rather than detected. §6 lists "HUD/text detection" as a
+/// later AI capability; a profile author naming the box is what makes the
+/// feature work today, and it is also what makes it auditable — a human
+/// wrote down where the text is, so a wrong overlay is a wrong profile
+/// line rather than an opaque misfire.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TextRegion {
+    /// Stable name, used by the ledger so an entry says *where* it acted.
+    pub id: String,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// One `[[text.entry]]` row: an original string and what may replace it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TextEntry {
+    /// The [`TextRegion::id`] this applies to.
+    pub region: String,
+    /// **The game's own text, verbatim.** Recorded in the profile rather
+    /// than only hashed, because criterion 3 requires the replaced text
+    /// to stay identifiable: a player must be able to read what the game
+    /// said, not just be told that something was swapped.
+    pub original: String,
+    /// Translated replacement, keyed by language tag (e.g. `en`, `ja`).
+    #[serde(default)]
+    pub translations: BTreeMap<String, String>,
+    /// Accessibility replacement — expanded abbreviations, plain-language
+    /// rewording. Separate from a translation because they answer
+    /// different needs and a user may want one without the other.
+    pub accessible: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,6 +651,7 @@ mod tests {
             plugins: None,
             mods: None,
             widescreen: None,
+            text: None,
         }
     }
 }
