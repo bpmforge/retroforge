@@ -4047,7 +4047,9 @@
    "write_scope": [
     "crates/rf-nes/**",
     "crates/rf-cart/**"
-   ],
+   ,
+  "fixtures/**"
+ ],
    "depends_on": [
     "W6-05"
    ],
@@ -4067,7 +4069,7 @@
    "A NOTE ON THE ~96% FIGURE: criterion 1 quotes FR-CORE-027's own claim that mappers 7 and 28 extend coverage to approximately 96%. That number is the requirement's, not a measurement made here, and it is worth flagging that Action 53 is a HOMEBREW multicart — it adds compatibility with that collection rather than with commercial titles, so the commercial coverage figure is unlikely to move much. Recorded rather than silently restated as if verified."
   ],
    "points": 5,
-   "status": "blocked",
+   "status": "in_progress",
    "stories": []
   },
   {
