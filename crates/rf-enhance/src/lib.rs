@@ -12,6 +12,7 @@
 pub mod bus;
 pub mod camera;
 pub mod decode;
+pub mod distribution;
 pub mod experiments;
 pub mod hdpack;
 pub mod hud;

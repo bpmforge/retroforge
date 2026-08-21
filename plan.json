@@ -4648,10 +4648,14 @@
    ],
    "notes": [
     "'Community-safe: no ROM data, license metadata required' is ROADMAP P9's phrasing and is a hard requirement rather than a guideline — CLAUDE.md law 5 is the project-side counterpart.",
-    "The poisoned-archive test is the acceptance that matters: a format that merely DOCUMENTS the rule will eventually carry a ROM."
+    "The poisoned-archive test is the acceptance that matters: a format that merely DOCUMENTS the rule will eventually carry a ROM.",
+     "DESIGN: docs/design/DISTRIBUTION.md (written 2026-08-21).",
+     "HANDOFF 2026-08-21: ALL THREE CRITERIA COMPLETE. crates/rf-enhance/src/distribution.rs (16 unit tests), tests/intake_poisoned_bundle.rs (5 on-disk tests), bin/rf-intake.rs, docs/design/DISTRIBUTION.md. THE LOAD-BEARING DESIGN DECISION, and the obvious one is BACKWARDS: the ALLOWLIST over member kinds is the guard; sniff_rom is only the DIAGNOSTIC. A denylist of ROM signatures cannot work \u2014 renaming game.nes to data.bin defeats an extension check and a headerless dump (most SNES ROMs) defeats a magic-byte check. A bundle may carry ONLY profile/pack-manifest/pack-image/mod-patch/license/readme; there is deliberately NO `other`/`data` variant. An arbitrary blob is refused for being UNCLASSIFIABLE, not for resembling a ROM. Both run on every member, because the sniffer catches the one case the allowlist cannot: a ROM LABELLED as a legitimate pack-image.",
+     "WHAT PASSING DOES NOT MEAN, and a test asserts the wording: intake CANNOT prove a bundle contains no ROM data \u2014 a submitter can base64 a ROM into a readme. IntakeReport::summary() states exactly what a pass establishes (no member declared an uncarried kind; nothing matched a ROM signature) and says it is NOT proof. An ACCEPTED reading as \"verified ROM-free\" would be the same overclaim this project refuses everywhere else. LICENCE: three outcomes, and the split between the last two is the easy-to-miss half of FR-PROF-007 \u2014 absent is MissingLicense, recognised-and-unacceptable is DeniedLicense WITH THE REASON (NC/ND/GFDL/GPL/SSPL), and anything else is UnknownLicense, REFUSED rather than assumed permissive.",
+     "OUT OF SCOPE / follow-up. (1) NOTHING INVOKES rf-intake IN CI \u2014 .github/** is outside this write_scope, so FR-PROF-007\u2019s \"nothing activates without passing\" is currently a property of the CODE PATH, not of the repository\u2019s automation. The check is AVAILABLE, not ENFORCED. Wire `rf-intake <dir>` into ci.yml; exit codes are 0 accepted / 1 refused / 2 unreadable. (2) NO ARCHIVE CONTAINER: a bundle is a directory; .zip vs .tar.zst is a packaging decision for its own ticket and the intake rules are identical either way. (3) NO SIGNATURE OR AUTHORSHIP VERIFICATION: `provenance` is a required STRING and nothing checks that it is true."
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
