@@ -4445,7 +4445,7 @@
     "DESIGN: docs/design/FRAME_INTERPOLATION.md (written 2026-08-21, \u00a71\u2013\u00a77). \u00a77 DECLINES to implement blending; what ships in crates/rf-enhance/src/interpolation.rs is the candidacy predicate only \u2014 it decides whether a frame pair MAY be interpolated and blends nothing."
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
