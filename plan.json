@@ -4086,9 +4086,11 @@
    ],
    "notes": [
     "Law 6 applies directly: Accuracy Mode is the reference and enhancements are opt-in overlays over an unmodified simulation. A patch engine is the sharpest test of that rule in the project, because it modifies game LOGIC rather than presentation."
-   ],
+   ,
+  "CLOSED 2026-08-20: all three criteria. rf-enhance/src/mods.rs is the engine (ModEngine, ledger, apply/revert) and retroforge/src/mod_chunk.rs is the PROF save-state chunk plus the reconciliation policy. LAW 6 IS MECHANISED RATHER THAN DOCUMENTED: from_profile starts with an EMPTY enabled set whatever the profile declares (there is deliberately no `enabled` field in the schema for a profile to set), and is_accuracy_mode() is DERIVED from the enabled set rather than stored beside it, because a stored flag can disagree with reality and this is the one flag that must not. THE ASYMMETRY WORTH KNOWING: a state with NO PROF chunk loaded into a session WITH mods on is a mismatch too, not a pass -- the missing chunk means an unmodified machine took it, so the RAM is innocent and the code is not. That direction is the one most easily missed and has its own test. Apply validates range AND overlap over the whole set before writing a byte, since a half-applied set leaves an image that is neither the cartridge nor the mod; overlapping patches are refused naming both ids rather than resolved last-writer-wins, because that would make revert order-dependent. Every mutation check bites: mods-on-by-default fails three tests, and skipping the range check, the overlap check, the trailing-byte check or the no-PROF asymmetry each fails its own. The corpus profile profiles/nes/rf-scroller-demo already declared a [[mods.patch]], so there is an end-to-end test from real TOML on disk to an engine that offers it OFF."
+ ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
