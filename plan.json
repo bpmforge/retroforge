@@ -4483,7 +4483,7 @@
    "BLOCKED/OUT OF SCOPE (follow-up ticket recommended). (1) THE ONNX PATH AGAINST A REAL MODEL IS UNPROVEN BY AUTOMATION. An #[ignore]'d inference test needs a scripts/local-gate.sh row and a docs/evidence/local-gate.json row, and BOTH files are outside this write_scope; so is scripts/** for a runtime/weights fetcher. What IS proven without a runtime: that a missing dylib is an error rather than a process abort, and that a model whose output shape disagrees with the declared scale is refused. (2) docs/MODULE_DESIGN.md documents rf-ai's public API surface and lives at docs/ root, not docs/design/**, so the four new public modules are not recorded there \u2014 and rf-ai's own lib.rs module doc points readers at it. (3) sheet_of puts NO BOUND on sheet width, so a large animation set produces one inference call sized by input alone; that is the most likely way the one-call coherence guarantee meets a real model that will not accept it."
  ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
@@ -4507,7 +4507,7 @@
     "The round trip is the acceptance: a builder whose output its own loader rejects is the failure mode to design against."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
@@ -4528,10 +4528,11 @@
     "text an overlay replaces is identifiable in the ledger, so a player can always tell what was changed"
    ],
    "notes": [
-    "Same honesty contract as every other enhancement: the player must be able to tell what is the game and what is ours."
+    "Same honesty contract as every other enhancement: the player must be able to tell what is the game and what is ours.",
+     "SCOPE BLOCKER found 2026-08-21 while orienting (ticket was claimed, then released unworked so W8-11 could take lowest-id order). Criterion 1 says overlays are \"driven by profile declarations\", but this write_scope is crates/rf-enhance/** + profiles/** and the PROFILE SCHEMA lives in crates/rf-profiles/src/schema.rs. Profile has NO serde(deny_unknown_fields), so a [translation] table in a profile TOML is SILENTLY IGNORED rather than rejected \u2014 an in-scope example profile would look right and do nothing. Wiring it needs one Option<Translation> field on Profile plus the struct, i.e. crates/rf-profiles/**, which is OUT OF SCOPE; GAME_PROFILES.md \u00a72 (docs/design/**) documents the table and is also out of scope. Precedent says do not take this unattended: W8-11-era note records \"amending scope to add docs/** is a one-line ruling; it was not taken unattended\". RECOMMEND asking Brad to add crates/rf-profiles/** + docs/design/** to this write_scope, or splitting the schema field into its own ticket. Everything else \u2014 the overlay engine, the ledger, the Accuracy-Mode absence and criterion 3\u2019s replaced-text identifiability \u2014 is fully in scope."
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "todo",
    "stories": []
   },
   {
