@@ -13,6 +13,7 @@ pub mod bus;
 pub mod camera;
 pub mod decode;
 pub mod experiments;
+pub mod hdpack;
 pub mod hud;
 pub mod interpolation;
 pub mod level_view;
