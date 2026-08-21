@@ -4364,7 +4364,7 @@
     "Depends on W7-07 because HDMA is what makes most split-screen HUDs work, and section 3.2 says those events feed this directly."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
