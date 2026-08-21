@@ -4504,10 +4504,13 @@
     "a pack builder that records while playing, producing a pack the loader accepts — round-tripped in a test"
    ],
    "notes": [
-    "The round trip is the acceptance: a builder whose output its own loader rejects is the failure mode to design against."
+    "The round trip is the acceptance: a builder whose output its own loader rejects is the failure mode to design against.",
+     "SCOPE NOTE 2026-08-21: criterion 2 cites \"SCOPE's asset-replacement row\" for hires.txt import, but that row puts `Mesen hires.txt import` in the **Later / conditional** column, not `In scope (v1)`. Built anyway \u2014 a ticket asking for it IS the condition being met, and delivering more than the minimum is not a scope violation \u2014 but docs/SCOPE.md is outside this write_scope, so the row is unchanged and the discrepancy is recorded here instead. Same column, same row family, worth knowing for W8-12: `translation/accessibility overlays` is ALSO in a Later/conditional column (the AI row).",
+     "HANDOFF 2026-08-21: ALL THREE CRITERIA COMPLETE. crates/rf-enhance/src/hdpack.rs \u2014 Mesen v106 identity, hires.txt parse+write, three-tier matching, record-while-playing PackBuilder, 20 tests. FORMAT VERIFIED against Mesen\u2019s published spec (tag syntax, <tile> field order, the [name] bracket condition prefix, the default-tile Y/N flag), not recalled. THE ANTI-VACUITY DEVICE IS A HAND-WRITTEN hires.txt FIXTURE the builder never produced: a round trip over only our own output would prove builder and loader agree with each other while both disagree with Mesen, which is exactly what criterion 1 forbids. UNKNOWN CONDITIONS LOAD AND NEVER MATCH, deliberately against W8-05\u2019s refuse-unknown-policy precedent: refusing fails criterion 1 (real packs use all twelve types), treating them as true silently replaces tiles the author gated. Ledgered in HdPack::unevaluated. PNG IS OUT OF BAND BY DESIGN \u2014 a <tile> names an image index and (x,y); nothing here decodes pixels, since adding png/image to rf-enhance is a docs/TECH_STACK.md row outside this write_scope.",
+     "OUT OF SCOPE / follow-up. (1) NO RENDERER WIRING: hdpack::lookup is a pure function and nothing calls it from the enhanced pipeline yet; crates/rf-renderer/** is outside this write_scope. (2) NO REAL COMMUNITY PACK has been loaded end to end \u2014 the fixture is hand-written from the spec, and third-party packs are not gate fixtures (SCOPE forbids third-party assets as gate fixtures), so \u201cexisting community packs load\u201d is proven against the FORMAT, not against a downloaded pack. (3) Only hmirror/vmirror/bgpriority are in EVALUATED_CONDITIONS; the other nine Mesen condition types need PPU/CPU state this module is not given. (4) No <background> parsing \u2014 that tag needs the parallax feature SCOPE lists as out."
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
