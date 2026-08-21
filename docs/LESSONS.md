@@ -19,6 +19,7 @@ stable L-ids (RF-L-*; cross-project lessons cite shipwright's L-* ids).
 | RF-L-08 | 07-15 | traceability | L-05 reproduced exactly and freshly: 100/100 FR reachable + 33/33 stories green hid ~10 orphan deliverables (Alter Ego Tier-A fixture, breakpoint engine, trace/audio viewers, FM-01/FM-13), 5/6 all-of-the-set failures, and 10 stories "covered" only by planning tickets — AND the reviewer's own fix (W0-03's D-001 wording) introduced one of the orphans. The challenger pass is not optional, and the validator now reports planning-only coverage separately | process: challenger mandatory after every green (already D-002); product: validate-traceability planning-only line (shipped); experts: L-05 evidence++ | shipped (this arc) |
 | RF-L-09 | 08-21 | machine-safety | An unbounded `while` walk in new code (`interpolation.rs` candidacy) spun forever pushing zero-sized tuples; two concurrent `cargo test` runs reached 245 GB and 111 GB RSS, drove free memory to 194 MB, stalled `tccd`, blocked WindowServer's main thread in a TCC preflight, and **kernel-panicked the machine twice**. A hang in a test is not a hang in a test — on a workstation it is a denial of service against the developer | process: every hand-rolled index walk must have a provable-progress step; product: this crate's walks audited; experts: check idea — flag `while i < n` loops whose body can leave `i` unchanged | shipped (fix + regression test) |
 | RF-L-10 | 08-21 | test-isolation | A test writing evidence to a FIXED path under `CARGO_TARGET_TMPDIR` and calling `remove_dir_all` on it at start (`crates/retroforge/tests/mode_invariant_corpus.rs:196`) is not isolated between concurrent `cargo test` runs: one run's cleanup deletes the other's just-written file and the reader asserts on an empty string. Cost three red runs in one session \u2014 a gate at TEST=101/225, and BOTH stop-hook failures that could not be reproduced afterwards, because by the time anyone re-ran it the second process was gone. A flaky test is worse than a failing one: it teaches people to re-run instead of read | process: a test that writes to disk gets a PER-PROCESS path (`std::process::id()`), never a fixed one; a red run with a second `cargo test` in flight is suspect before it is believed; experts: check idea \u2014 flag fixed paths under CARGO_TARGET_TMPDIR combined with remove_dir_all | FIXED 2026-08-21 in W8-04 (crates/retroforge/tests/** is inside its write_scope); per-process suffix, proven by two concurrent runs both passing |
+| RF-L-11 | 08-21 | stale-docs | A comment that DESCRIBES SCOPE is a claim about code: it duplicates the truth, rots like any other duplicate, and nothing compiles it. Four in one session \u2014 `rf-profiles/shape.rs` beside the serde structs (a table missing there only WARNS), `wit/plugin.wit` read by nothing while a doc claimed drift was compiler-checked, `example-mode7` declaring a decoder family it never configured and loading cleanly for months, and `apu/dsp.rs` still describing a skeleton whose features had all landed. The last was worst because it PROPAGATED INTO THE PLAN: the stale doc told W7-08\u2019s notes the DSP was absent, those notes told the next executor, and it was restated into plan.json and STATUS.md \u2014 three layers of restatement, no compiler anywhere in the chain | process: when you add a second place that must agree with a first, write the test in the SAME commit; a scope claim in a doc comment needs an assertion or an expiry, not trust; READ THE CODE before repeating a doc\u2019s claim about it, especially one you are about to write into the board | fixed (all four corrected; drift tests added for the WIT world and the doc-site samples) |
 
 ## Details worth keeping (evidence pointers)
 
@@ -128,3 +129,39 @@ write_scope.
 never a fixed one. And a red run with a second `cargo test` in flight is
 **suspect before it is believed** — check for concurrency before
 diagnosing the code.
+
+## RF-L-11 — a scope comment is a claim about code (2026-08-21)
+
+**Four instances in one session**, all the same shape: a second place
+that must agree with a first, and nothing that checks it.
+
+| Where | The claim | Reality |
+|---|---|---|
+| `rf-profiles/src/shape.rs` | key tree beside the serde structs | a table missing there deserialises fine and only *warns* |
+| `rf-plugin-sdk/wit/plugin.wit` | doc said drift was caught by an exhaustive match | nothing read the file at all |
+| `profiles/snes/example-mode7` | `kind = "room_grid"` | configured nothing, decoded nothing, loaded cleanly for months |
+| `rf-snes/src/apu/dsp.rs` | "does NOT implement ... Gaussian, ADSR/GAIN, echo, pitch modulation or noise" | all five implemented, wired into `mix()`, 14 tests |
+
+**The fourth is the instructive one, because it escaped the file.** The
+stale doc told W7-08's notes the DSP was absent. Those notes told the next
+executor. The next executor wrote it into `plan.json` and `STATUS.md` as
+fact. Three layers of restatement and no compiler anywhere in the chain —
+and the person repeating it had spent the same session writing drift tests
+against exactly this pattern in other people's code.
+
+**Why "just keep docs updated" is not the lesson.** Every one of these was
+true when written. The defect is structural: a claim that lives only in
+prose has no failure mode. `WIT_WORLD` is now `include_str!`'d and tested
+(including an interface *count*, so adding one to the WIT and not the enum
+fails); the doc site `{{#include}}`s files CI compiles rather than copying
+them; `example-mode7`'s absent `[decode]` is asserted.
+
+**Standing rules.**
+
+1. Add a second place that must agree with a first → write the test in the
+   **same commit**.
+2. A scope claim in a doc comment needs an assertion or an expiry, not
+   trust.
+3. **Read the code before repeating a doc's claim about it** — especially
+   one you are about to write into the board, where it becomes someone
+   else's premise.

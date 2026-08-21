@@ -1,14 +1,25 @@
 //! S-DSP skeleton: BRR decoding and basic voice mixing (ticket W6-04b;
 //! `docs/design/EMULATION_CORES.md` §3.4).
 //!
-//! ## Scope: a skeleton, and it says so
+//! ## Scope: NO LONGER A SKELETON — this doc was stale
 //!
-//! The acceptance is "BRR decode + basic voice mixing, clean audio", with
-//! **sample-exactness deferred to W7**. So this decodes BRR correctly and
-//! mixes eight voices at a fixed rate, and does NOT implement the
-//! Gaussian interpolation filter, ADSR/GAIN envelopes, echo, pitch
-//! modulation or noise. Those are named here so their absence is a
-//! recorded decision rather than something to discover later.
+//! **The paragraph that used to be here said this module "does NOT
+//! implement the Gaussian interpolation filter, ADSR/GAIN envelopes,
+//! echo, pitch modulation or noise". Every one of those is implemented
+//! and wired into [`Dsp::mix`], and `crates/rf-snes/src/tests/dsp.rs`
+//! carries 14 tests over them.** The claim was true of W6-04b, whose
+//! acceptance was "BRR decode + basic voice mixing" with sample-exactness
+//! deferred; it stopped being true when the features landed and nobody
+//! updated this doc.
+//!
+//! That mattered: W7-08's own notes repeated the absence as fact and
+//! scoped its remaining work around it, which is how a stale doc turns
+//! into a stale plan. What is genuinely NOT established is
+//! **sample-exactness** — that the numbers these produce match hardware —
+//! which is exactly what W7-08's criteria 2 and 3 (BRR sample-exactness,
+//! and an audio RMS comparison against a reference SPC set) exist to
+//! check. Implemented and tested is not the same as verified against the
+//! machine, and this module should not claim the stronger thing.
 //!
 //! What "clean audio" means for this ticket: the mixer must not clip
 //! wrongly, must not produce discontinuities at loop points, and must
