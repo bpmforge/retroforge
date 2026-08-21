@@ -135,7 +135,6 @@ const BLANK_PIXEL: PpuPixel = PpuPixel {
     layer: PixelLayer::Backdrop,
     sprite_id: None,
     priority: 0,
-    dropped_by_limit: false,
 };
 
 /// Accumulates one frame's worth of [`CoreSink`] output into a

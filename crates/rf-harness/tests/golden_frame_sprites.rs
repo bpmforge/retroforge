@@ -505,12 +505,6 @@ fn synthetic_nrom_sprites_match_the_analytically_computed_golden_frame() {
             "scanline {y} pixel count"
         );
         actual.push(pixels.iter().map(|p| p.palette_index).collect());
-        for (x, p) in pixels.iter().enumerate() {
-            assert!(
-                !p.dropped_by_limit,
-                "dropped_by_limit is always false on the NES path (ruling) -- scanline {y} pixel {x}"
-            );
-        }
     }
 
     let expected = expected_frame();

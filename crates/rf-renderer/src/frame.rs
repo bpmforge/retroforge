@@ -144,7 +144,6 @@ mod tests {
                 layer: PixelLayer::Background(0),
                 sprite_id: None,
                 priority: 0,
-                dropped_by_limit: false,
             };
             NES_WIDTH
         ]
@@ -187,7 +186,6 @@ mod tests {
             layer: PixelLayer::Background(0),
             sprite_id: None,
             priority: 0,
-            dropped_by_limit: false,
         });
         // Must not panic despite `row.len() == NES_WIDTH + 1`.
         fb.video_scanline(0, &row);

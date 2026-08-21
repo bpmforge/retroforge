@@ -12,10 +12,14 @@
 /// SNES: up to four BG planes depending on the active mode), so this is not
 /// a fixed enumeration of console-specific planes — `Background(n)` is a
 /// core-defined plane index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PixelLayer {
     /// The PPU's universal backdrop color: no background or sprite pixel is
     /// opaque at this position.
+    ///
+    /// The `Default`, and the only defensible one: a zero-valued pixel is
+    /// one nothing has claimed, which is precisely the backdrop.
+    #[default]
     Backdrop,
     /// A background/tilemap plane. `n` is core-defined (NES: always 0;
     /// SNES: 0-3 depending on the active BG mode).
@@ -41,39 +45,67 @@ pub struct PpuPixel {
     /// Core-defined priority value used to resolve BG/sprite overlap
     /// (hardware priority bits, not a rendering hint).
     pub priority: u8,
-    /// Whether this pixel represents a sprite that hardware's per-scanline
-    /// sprite limit would drop (accurate CRT behavior: flicker /
-    /// disappearance). **On the NES path this is always `false`** — see the
-    /// ruling below. Always `false` for non-sprite pixels.
+}
+
+/// How colour math combines a [`SubPixel`] with the main-screen
+/// [`PpuPixel`] at the same x (ticket W7-16).
+///
+/// The core decides WHICH operation applies at each x — that is hardware
+/// state ($2130-$2132, the colour window, per-layer enables) — and the
+/// renderer performs it. Splitting it that way is what keeps law 4 intact:
+/// a core still emits palette indices, and the RGB that colour math
+/// produces (which need not exist anywhere in CGRAM) is computed by the
+/// only layer allowed to know about colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorMathOp {
+    /// No math at this x: the main-screen pixel stands alone.
+    #[default]
+    None,
+    /// `main + sub`, clamped.
+    Add,
+    /// `(main + sub) / 2`.
+    AddHalf,
+    /// `main - sub`, clamped at zero.
+    Subtract,
+    /// `(main - sub) / 2`.
+    SubtractHalf,
+}
+
+/// One sub-screen pixel, and how it combines with the main screen.
+///
+/// **A parallel channel, never a replacement.** Same rule as
+/// [`OverlayPixel`]: [`crate::CoreSink::video_scanline`] carries the
+/// accuracy-exact hardware framebuffer and nothing here may displace it
+/// (the W1-05a ruling on [`PpuPixel::palette_index`]). A consumer that
+/// ignores [`crate::CoreSink::sub_scanline`] still gets a correct main
+/// screen; it just cannot draw the blend.
+///
+/// ## Why this exists
+///
+/// Ticket W7-05 implemented colour math and could not deliver it. The
+/// blend produces an RGB value that need not exist in CGRAM, so it cannot
+/// travel through an indexed [`PpuPixel`], and a golden hash over palette
+/// indices could not see it if it did. W7-06 then found the same wall from
+/// the other side: hires modes 5/6 work because "the main/subscreen pixels
+/// are rendered as half-pixels of the high-resolution image" (fullsnes), so
+/// a core with no sub-screen draws half the picture. Both wanted this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SubPixel {
+    /// Raw palette-RAM value, exactly as [`PpuPixel::palette_index`].
+    /// Meaningless when `fixed` is set.
+    pub palette_index: u8,
+    /// Which layer produced this sub-screen pixel.
+    pub layer: PixelLayer,
+    /// How to combine with the main-screen pixel at this x.
+    pub op: ColorMathOp,
+    /// When set, the sub-screen source at this x is the scanline's fixed
+    /// colour (`$2132`, passed alongside the slice) rather than
+    /// `palette_index`.
     ///
-    /// # Ruling (Brad, 2026-08-03, raised during W1-05a)
-    ///
-    /// This doc previously said an enhancement bypassing the limit (W3-05)
-    /// "uses this flag to decide whether to draw it anyway". That is not
-    /// achievable through this struct: [`crate::CoreSink::video_scanline`]
-    /// carries exactly **one** `PpuPixel` per x, so emitting a limit-dropped
-    /// sprite there would displace the background or lower-index sprite the
-    /// CRT actually showed — which CLAUDE.md law 6 ("Accuracy Mode is the
-    /// reference") and FR-MODE-002's mode invariant both forbid.
-    ///
-    /// **The sink is therefore accuracy-exact**: it always carries the true
-    /// hardware framebuffer. W3-05's sprite-limit bypass reconstructs dropped
-    /// sprites from OAM (via [`crate::StateView`] / its SpriteHistorian),
-    /// which its own acceptance criteria already imply, not from this flag.
-    /// The field is retained for cores that can express a suppressed sprite
-    /// without displacing a real pixel.
-    ///
-    /// # Update (W3-05a, 2026-08-06)
-    ///
-    /// [`OverlayPixel`]/[`crate::CoreSink::overlay_scanline`] is that
-    /// mechanism, landed as a spike beneath the `StateView`-based route this
-    /// doc still names as the eventual (W3-05) destination — see
-    /// `rf-nes/src/ppu/sprites.rs`'s module doc for why the reconstruction
-    /// lives in `rf-nes` today rather than `rf-enhance`. Do not read this as
-    /// evidence `dropped_by_limit` was the intended carrier after all; it
-    /// remains always `false` on the NES path and is not used by the
-    /// sprite-limit bypass.
-    pub dropped_by_limit: bool,
+    /// A flag rather than a sentinel index because every index 0-255 is a
+    /// legitimate colour, so there is no value left over to mean "not an
+    /// index".
+    pub fixed: bool,
 }
 
 /// One overlay-only pixel: a sprite the hardware's per-scanline sprite limit

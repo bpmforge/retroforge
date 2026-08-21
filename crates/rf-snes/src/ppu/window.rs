@@ -254,6 +254,19 @@ impl ColorMath {
     pub fn fixed(&self) -> (u8, u8, u8) {
         (self.fixed_r, self.fixed_g, self.fixed_b)
     }
+
+    /// `$2132`'s fixed colour packed as BGR555, the form CGRAM uses.
+    ///
+    /// Packed here rather than at the sink so the core hands out one
+    /// colour encoding, not two — a renderer that had to know which of
+    /// `fixed()` and CGRAM used which layout would eventually get it
+    /// backwards.
+    #[must_use]
+    pub fn fixed_bgr555(&self) -> u16 {
+        u16::from(self.fixed_r & 0x1F)
+            | (u16::from(self.fixed_g & 0x1F) << 5)
+            | (u16::from(self.fixed_b & 0x1F) << 10)
+    }
 }
 
 /// `$2106` MOSAIC.

@@ -58,7 +58,6 @@ fn level_pixel(world_x: i64, world_y: i64) -> PpuPixel {
         layer: PixelLayer::Background(0),
         sprite_id: None,
         priority: 0,
-        dropped_by_limit: false,
     }
 }
 
@@ -73,7 +72,6 @@ fn hud_sentinel_pixel() -> PpuPixel {
         layer: PixelLayer::Background(0),
         sprite_id: None,
         priority: 0,
-        dropped_by_limit: false,
     }
 }
 
@@ -146,7 +144,6 @@ fn build_log(frames: u32) -> Vec<(Vec<CoreEvent>, Vec<PpuPixel>)> {
                 layer: PixelLayer::Backdrop,
                 sprite_id: None,
                 priority: 0,
-                dropped_by_limit: false,
             };
             WIDTH as usize * HEIGHT as usize
         ];

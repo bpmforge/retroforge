@@ -49,7 +49,6 @@ fn one_completed_visible_scanline_emits_exactly_one_video_scanline_call() {
         assert_eq!(p.palette_index, 0x0F);
         assert_eq!(p.layer, PixelLayer::Backdrop);
         assert_eq!(p.sprite_id, None);
-        assert!(!p.dropped_by_limit);
     }
 }
 

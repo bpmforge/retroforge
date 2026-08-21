@@ -163,7 +163,6 @@ mod tests {
             layer: PixelLayer::Backdrop,
             sprite_id: None,
             priority: 0,
-            dropped_by_limit: false,
         };
         let (mut writer, reader) = triple_buffer(FrameBundle::empty());
         writer.publish(FrameBundle::new(5, 1, 1, vec![one_pixel], Vec::new()));

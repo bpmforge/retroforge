@@ -168,7 +168,6 @@ mod tests {
             layer: rf_core_api::PixelLayer::Background(0),
             sprite_id: None,
             priority: 0,
-            dropped_by_limit: false,
         };
         let pixels = vec![px(0x21), px(0x0F)];
         let rgba = original_rgba_from_indexed(&pixels, 2, 1);

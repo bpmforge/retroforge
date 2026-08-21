@@ -77,7 +77,6 @@ fn backdrop() -> PpuPixel {
         layer: PixelLayer::Backdrop,
         sprite_id: None,
         priority: 0,
-        dropped_by_limit: false,
     }
 }
 
@@ -99,7 +98,6 @@ fn parse_runs_into_row(runs: &str) -> Vec<PpuPixel> {
                 layer: PixelLayer::Sprite,
                 sprite_id: Some(sprite_id),
                 priority: 0,
-                dropped_by_limit: false,
             };
         }
     }

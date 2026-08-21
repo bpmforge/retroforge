@@ -110,7 +110,6 @@ mod tests {
             layer: PixelLayer::Background(0),
             sprite_id: None,
             priority: 0,
-            dropped_by_limit: false,
         }
     }
 

@@ -145,7 +145,6 @@ mod tests {
             layer: PixelLayer::Backdrop,
             sprite_id: None,
             priority: 0,
-            dropped_by_limit: false,
         }
     }
 
@@ -164,14 +163,12 @@ mod tests {
                     layer: PixelLayer::Sprite,
                     sprite_id: Some(7),
                     priority: 3,
-                    dropped_by_limit: true,
                 },
                 PpuPixel {
                     palette_index: 2,
                     layer: PixelLayer::Background(1),
                     sprite_id: None,
                     priority: 1,
-                    dropped_by_limit: false,
                 },
             ],
         );

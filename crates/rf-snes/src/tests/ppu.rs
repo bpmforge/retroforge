@@ -268,11 +268,6 @@ fn dropped_sprites_go_to_the_overlay_and_never_into_the_pixel_stream() {
     let line = p.render_scanline(0);
 
     assert!(
-        line.pixels.iter().all(|px| !px.dropped_by_limit),
-        "PpuPixel::dropped_by_limit must stay false — the sink is \
-         accuracy-exact (rf_core_api::video's W1-05a ruling)"
-    );
-    assert!(
         line.overlay.iter().any(|o| o.opaque),
         "the suppressed sprites must be reported through the overlay channel"
     );
@@ -921,4 +916,103 @@ fn hires_is_requested_by_pseudo_hires_and_by_modes_5_and_6() {
             "pseudo-hires asks for 512 dots in every mode, including {mode}"
         );
     }
+}
+
+/// **A colour-math change is now detectable** (ticket W7-16, criterion 2).
+///
+/// This is the test the ticket says no existing test could be. Before the
+/// sub-screen channel, colour math produced an RGB value that could not
+/// travel through an indexed `PpuPixel`, so every golden hash and every
+/// A-B comparison in the project was blind to it: flipping add to subtract
+/// changed nothing any test could observe.
+///
+/// It asserts on the OPERATION the core reports per pixel, not on a blended
+/// colour, because the blend is the renderer's job — that split is what
+/// keeps law 4 intact.
+#[test]
+fn a_colour_math_change_is_visible_on_the_sub_screen_channel() {
+    use rf_core_api::ColorMathOp;
+
+    let mut p = ppu_with_tile();
+    for i in 0..32 {
+        set_tilemap(&mut p, 0, i, 1);
+    }
+    p.write_register(0x212C, 0x01); // TM: BG1 on the main screen
+    p.write_register(0x212D, 0x02); // TS: BG2 on the sub screen
+    p.bgs[1].enabled = true;
+    p.write_register(0x2131, 0x01); // CGADSUB: math on BG1, add, full
+    p.write_register(0x2132, 0x3F); // fixed colour: red 31 (bits 5-0 + R sel)
+
+    let (add, _fixed) = p.render_sub_scanline(0);
+    assert!(
+        add.iter().any(|s| s.op == ColorMathOp::Add),
+        "with $2131 enabling math on BG1 the sub-screen must report Add"
+    );
+
+    // Flip to SUBTRACT. Nothing about the main screen changes — which is
+    // exactly why this was invisible before.
+    let main_before = p.render_scanline(0);
+    p.write_register(0x2131, 0x81); // same, but subtract
+    let (sub, _) = p.render_sub_scanline(0);
+    let main_after = p.render_scanline(0);
+
+    assert!(
+        sub.iter().any(|s| s.op == ColorMathOp::Subtract),
+        "flipping $2131 bit 7 must change the reported operation"
+    );
+    assert_ne!(
+        add.iter().map(|s| s.op).collect::<Vec<_>>(),
+        sub.iter().map(|s| s.op).collect::<Vec<_>>(),
+        "add and subtract must be distinguishable through this channel"
+    );
+    assert_eq!(
+        main_before
+            .pixels
+            .iter()
+            .map(|p| p.palette_index)
+            .collect::<Vec<_>>(),
+        main_after
+            .pixels
+            .iter()
+            .map(|p| p.palette_index)
+            .collect::<Vec<_>>(),
+        "the MAIN screen is accuracy-exact and must not have moved - that is \
+         the W1-05a ruling, and it is why a second channel was needed at all"
+    );
+
+    // And disabling math entirely reports None.
+    p.write_register(0x2131, 0x00);
+    let (off, _) = p.render_sub_scanline(0);
+    assert!(
+        off.iter().all(|s| s.op == ColorMathOp::None),
+        "with no layer enabled for math, every pixel reports None"
+    );
+}
+
+/// `$212D` selects the SUB screen's layers, independently of `$212C`.
+#[test]
+fn the_sub_screen_has_its_own_layer_designation() {
+    let mut p = ppu_with_tile();
+    for i in 0..32 {
+        set_tilemap(&mut p, 0, i, 1);
+    }
+    p.write_register(0x212C, 0x01); // BG1 on main
+    p.write_register(0x212D, 0x00); // nothing on sub
+    let (empty, _) = p.render_sub_scanline(0);
+    assert!(
+        empty
+            .iter()
+            .all(|s| s.layer == rf_core_api::PixelLayer::Backdrop),
+        "with TS empty the sub screen is all backdrop"
+    );
+
+    p.write_register(0x212D, 0x01); // BG1 on sub as well
+    let (filled, _) = p.render_sub_scanline(0);
+    assert!(
+        filled
+            .iter()
+            .any(|s| s.layer != rf_core_api::PixelLayer::Backdrop),
+        "TS must select layers for the sub screen, or a game that sets it \
+         is configuring a screen nothing composes"
+    );
 }

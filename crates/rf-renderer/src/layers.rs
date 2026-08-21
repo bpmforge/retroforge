@@ -171,7 +171,6 @@ mod tests {
                 _ => None,
             },
             priority: 0,
-            dropped_by_limit: false,
         }
     }
 

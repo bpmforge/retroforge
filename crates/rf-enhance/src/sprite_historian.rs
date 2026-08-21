@@ -386,7 +386,6 @@ mod tests {
             layer: PixelLayer::Backdrop,
             sprite_id: None,
             priority: 0,
-            dropped_by_limit: false,
         }
     }
 
@@ -396,7 +395,6 @@ mod tests {
             layer: PixelLayer::Sprite,
             sprite_id: Some(sprite_id),
             priority: 0,
-            dropped_by_limit: false,
         }
     }
 

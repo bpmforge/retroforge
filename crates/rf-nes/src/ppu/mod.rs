@@ -732,7 +732,6 @@ const BLANK_PIXEL: PpuPixel = PpuPixel {
     layer: PixelLayer::Backdrop,
     sprite_id: None,
     priority: 0,
-    dropped_by_limit: false,
 };
 
 /// A transparent overlay pixel — [`Ppu::new`]'s initial `overlay_line_buffer`

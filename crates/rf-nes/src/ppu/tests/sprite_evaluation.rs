@@ -133,12 +133,6 @@ fn only_the_first_8_oam_order_sprites_render_the_9th_and_10th_are_invisible() {
         );
         assert_eq!(px.sprite_id, None);
     }
-    for x in 0..256usize {
-        assert!(
-            !ppu.line_buffer[x].dropped_by_limit,
-            "dropped_by_limit is always false on the NES path (ruling, sprites.rs doc) at x={x}"
-        );
-    }
 }
 
 /// The buggy diagonal scan's false-negative case: a genuine 9th in-range

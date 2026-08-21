@@ -131,10 +131,6 @@ fn more_than_8_sprites_on_one_scanline_satisfies_all_four_acceptance_criteria_at
                  the sink stays accuracy-exact whether or not the overlay is on"
             );
             assert_eq!(px.sprite_id, None);
-            assert!(
-                !px.dropped_by_limit,
-                "the NES path never sets this flag (ruling)"
-            );
         }
     }
 

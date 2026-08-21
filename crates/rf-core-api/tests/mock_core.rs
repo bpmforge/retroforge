@@ -32,28 +32,24 @@ fn make_scanline_pixels(y: u16) -> [PpuPixel; PIXELS_PER_LINE] {
             layer: PixelLayer::Backdrop,
             sprite_id: None,
             priority: 0,
-            dropped_by_limit: false,
         },
         PpuPixel {
             palette_index: base.wrapping_add(1),
             layer: PixelLayer::Background(0),
             sprite_id: None,
             priority: 1,
-            dropped_by_limit: false,
         },
         PpuPixel {
             palette_index: base.wrapping_add(2),
             layer: PixelLayer::Sprite,
             sprite_id: Some(3),
             priority: 2,
-            dropped_by_limit: false,
         },
         PpuPixel {
             palette_index: base.wrapping_add(3),
             layer: PixelLayer::Sprite,
             sprite_id: Some(9),
             priority: 3,
-            dropped_by_limit: true,
         },
     ]
 }
@@ -346,10 +342,7 @@ fn run_frame_emits_scanlines_with_indexed_pixel_metadata() {
     assert_eq!(first[0].layer, PixelLayer::Backdrop);
     assert_eq!(first[1].layer, PixelLayer::Background(0));
     assert_eq!(first[2].sprite_id, Some(3));
-    assert!(!first[2].dropped_by_limit);
     assert_eq!(first[3].sprite_id, Some(9));
-    assert!(first[3].dropped_by_limit);
-
     assert_eq!(sink.audio_calls, vec![vec![0, 1, -1, 2]]);
 }
 

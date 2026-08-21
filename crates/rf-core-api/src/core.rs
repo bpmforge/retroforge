@@ -5,7 +5,7 @@ use crate::error::{CoreError, StateError};
 use crate::event::{CoreEvent, EventMask};
 use crate::input::InputFrame;
 use crate::state_view::{StateReader, StateView, StateWriter};
-use crate::video::{OverlayPixel, PpuPixel};
+use crate::video::{OverlayPixel, PpuPixel, SubPixel};
 
 /// How [`EmulatorCore::reset`] should behave.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +105,25 @@ pub trait CoreSink {
     /// `CountingSink`) MUST forward it explicitly, or the overlay silently
     /// vanishes at that wrapper regardless of what the core emitted.
     fn overlay_scanline(&mut self, _y: u16, _pixels: &[OverlayPixel]) {}
+
+    /// One scanline's worth of SUB-SCREEN pixels, plus the scanline's
+    /// `$2132` fixed colour (ticket W7-16; see
+    /// [`crate::video::SubPixel`]).
+    ///
+    /// The third channel, and the same rule as [`Self::overlay_scanline`]:
+    /// **parallel to [`Self::video_scanline`], never a replacement.** A
+    /// sink that ignores this still receives the accuracy-exact main
+    /// screen; it simply cannot draw colour math or true hires, both of
+    /// which are defined by combining two screens.
+    ///
+    /// `fixed_color` is BGR555 and arrives once per line rather than per
+    /// pixel because `$2132` is a register — and an HDMA-written one, so
+    /// per-line delivery is what a gradient needs.
+    ///
+    /// Defaulted to a no-op so every existing implementor keeps compiling
+    /// unchanged. A sink that WRAPS another must forward it explicitly, or
+    /// the sub-screen vanishes at the wrapper exactly as the overlay would.
+    fn sub_scanline(&mut self, _y: u16, _pixels: &[SubPixel], _fixed_color: u16) {}
 
     /// A block of interleaved audio samples produced since the last call.
     fn audio(&mut self, samples: &[i16]);

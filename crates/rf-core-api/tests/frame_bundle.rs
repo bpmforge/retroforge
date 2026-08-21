@@ -17,7 +17,6 @@ fn pixel(palette_index: u8) -> PpuPixel {
         layer: PixelLayer::Background(0),
         sprite_id: None,
         priority: 0,
-        dropped_by_limit: false,
     }
 }
 

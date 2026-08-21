@@ -132,14 +132,12 @@ fn hash_indexed_video_is_more_precise_than_a_resolved_rgb_hash_would_be() {
         layer: PixelLayer::Background(0),
         sprite_id: None,
         priority: 0,
-        dropped_by_limit: false,
     };
     let as_sprite = PpuPixel {
         palette_index: 0x16,
         layer: PixelLayer::Sprite,
         sprite_id: Some(3),
         priority: 1,
-        dropped_by_limit: false,
     };
 
     assert_eq!(

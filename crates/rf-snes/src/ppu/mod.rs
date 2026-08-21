@@ -237,6 +237,10 @@ pub struct Ppu {
     /// Mode 7 register state (ticket W7-04).
     pub mode7: mode7::Mode7,
 
+    /// `$212D` TS — which layers are on the SUB screen (ticket W7-16).
+    /// Bits 0-3 are BG1-4, bit 4 is OBJ, exactly as `$212C`.
+    pub ts: u8,
+
     /// `$2133` SETINI (ticket W7-06).
     pub setini: SetIni,
     /// Set when `$2133` is written so the bus can push overscan into
@@ -301,6 +305,7 @@ impl Ppu {
             forced_blank: true,
             brightness: 0,
             mode7: mode7::Mode7::default(),
+            ts: 0,
             setini: SetIni::default(),
             overscan_changed: false,
             windows: window::Windows::default(),
@@ -382,6 +387,11 @@ impl Ppu {
                 }
                 self.obj_enabled = value & 0x10 != 0;
             }
+            // `$212D` TS — the SUB screen's layer designation. Not
+            // handled at all before ticket W7-16, because nothing could
+            // consume a sub-screen; a game that set it was silently
+            // configuring a screen this PPU did not compose.
+            0x212D => self.ts = value,
             _ => {}
         }
     }
@@ -538,6 +548,85 @@ impl Ppu {
         u16::from(self.vram[at]) | (u16::from(self.vram[at + 1]) << 8)
     }
 
+    /// Compose the SUB-SCREEN for a visible row (ticket W7-16).
+    ///
+    /// The sub-screen is the same composition with `$212D` (TS) selecting
+    /// the layers instead of `$212C` (TM), which is why this reuses the
+    /// main path wholesale rather than duplicating priority resolution: a
+    /// second copy of that order is a second thing to get wrong, and the
+    /// two orders are not merely similar, they are the same.
+    ///
+    /// Returns the pixels plus each x's colour-math operation, decided
+    /// here because the operation is hardware state — `$2130`'s prevent
+    /// mode against the colour window, `$2131`'s per-layer enable, and its
+    /// add/subtract and half bits. The renderer performs the arithmetic;
+    /// the core says whether and which.
+    #[must_use]
+    pub fn render_sub_scanline(&mut self, y: u16) -> (Vec<rf_core_api::SubPixel>, u16) {
+        use rf_core_api::{ColorMathOp, SubPixel};
+
+        let line = y + 1;
+        let mut shadow = self.with_line_state(line).unwrap_or_else(|| self.clone());
+        // Swap TM for TS: same composition, the other screen's layers.
+        let ts = shadow.ts;
+        for (i, bg) in shadow.bgs.iter_mut().enumerate() {
+            bg.enabled = ts & (1 << i) != 0;
+        }
+        shadow.obj_enabled = ts & 0x10 != 0;
+        let composed = shadow.render_scanline_live(line);
+
+        let math = &shadow.color_math;
+        let fixed = shadow.color_math.fixed_bgr555();
+        let pixels = composed
+            .pixels
+            .iter()
+            .enumerate()
+            .map(|(x, px)| {
+                let inside = shadow.windows.masks(5, x as u8);
+                // Which main-screen layer is being blended INTO decides
+                // whether $2131 enables math here at all. The main screen
+                // is what carries that layer, so it is read from `self`.
+                let main_layer = match self.layer_at(line, x) {
+                    Some(rf_core_api::PixelLayer::Background(n)) => usize::from(n),
+                    Some(rf_core_api::PixelLayer::Sprite) => 4,
+                    _ => 5,
+                };
+                let enabled = math.enable & (1 << main_layer) != 0;
+                let op = if !enabled || math.prevented(inside) {
+                    ColorMathOp::None
+                } else {
+                    match (math.subtract, math.half) {
+                        (false, false) => ColorMathOp::Add,
+                        (false, true) => ColorMathOp::AddHalf,
+                        (true, false) => ColorMathOp::Subtract,
+                        (true, true) => ColorMathOp::SubtractHalf,
+                    }
+                };
+                SubPixel {
+                    palette_index: px.palette_index,
+                    layer: px.layer,
+                    op,
+                    // With no sub-screen layer opaque here, hardware uses
+                    // the fixed colour rather than the backdrop.
+                    fixed: matches!(px.layer, rf_core_api::PixelLayer::Backdrop),
+                }
+            })
+            .collect();
+        (pixels, fixed)
+    }
+
+    /// The main screen's layer at one position, for the colour-math
+    /// enable test. Cheap enough at one line per call and always in step
+    /// with what `render_scanline` produced.
+    fn layer_at(&mut self, line: u16, x: usize) -> Option<rf_core_api::PixelLayer> {
+        let mut shadow = self.with_line_state(line).unwrap_or_else(|| self.clone());
+        shadow
+            .render_scanline_live(line)
+            .pixels
+            .get(x)
+            .map(|p| p.layer)
+    }
+
     /// Compose one visible scanline.
     ///
     /// Returns accuracy-exact pixels plus the overlay channel; see the
@@ -588,7 +677,6 @@ impl Ppu {
             layer: PixelLayer::Backdrop,
             sprite_id: None,
             priority: 0,
-            dropped_by_limit: false,
         };
         let mut pixels = vec![backdrop; WIDTH];
         let mut overlay = vec![
@@ -627,7 +715,6 @@ impl Ppu {
                         layer: PixelLayer::Background(0),
                         sprite_id: None,
                         priority: 0,
-                        dropped_by_limit: false,
                     };
                 }
                 // Sprites still compose over mode 7.
@@ -637,7 +724,6 @@ impl Ppu {
                         layer: PixelLayer::Sprite,
                         sprite_id: Some(id),
                         priority: objs.priority[x],
-                        dropped_by_limit: false,
                     };
                 }
             } else if let Some(p) = self.compose(x, &bg_pixels, &objs) {
@@ -690,7 +776,6 @@ impl Ppu {
                                 layer: PixelLayer::Sprite,
                                 sprite_id: Some(id),
                                 priority: pri,
-                                dropped_by_limit: false,
                             });
                         }
                     }
@@ -711,7 +796,6 @@ impl Ppu {
                                 layer: PixelLayer::Background(n),
                                 sprite_id: None,
                                 priority: pri,
-                                dropped_by_limit: false,
                             });
                         }
                     }

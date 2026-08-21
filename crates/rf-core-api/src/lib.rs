@@ -31,7 +31,7 @@ pub use frame_bundle::{FrameBundle, FrameBundleBuilder};
 pub use input::{InputFrame, MAX_INPUT_PORTS};
 pub use state_view::{StateReader, StateView, StateWriter};
 pub use triple_buffer::{triple_buffer, TripleBufferReader, TripleBufferWriter};
-pub use video::{OverlayPixel, PixelLayer, PpuPixel};
+pub use video::{ColorMathOp, OverlayPixel, PixelLayer, PpuPixel, SubPixel};
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-core-api";

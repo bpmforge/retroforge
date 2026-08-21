@@ -222,7 +222,6 @@ fn push_pixel_bytes(buf: &mut Vec<u8>, p: &PpuPixel) {
     buf.push(u8::from(p.sprite_id.is_some()));
     buf.push(p.sprite_id.unwrap_or(0));
     buf.push(p.priority);
-    buf.push(u8::from(p.dropped_by_limit));
 }
 
 /// The strong check's digest (module doc). `pub` so

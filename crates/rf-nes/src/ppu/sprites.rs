@@ -804,7 +804,6 @@ impl Ppu {
             layer,
             sprite_id,
             priority,
-            dropped_by_limit: false,
         };
 
         // Ticket W3-05a: the overlay layer, read-only over everything

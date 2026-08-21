@@ -69,8 +69,16 @@ struct WirePixel {
     layer_arg: u8,
     sprite_id: Option<u8>,
     priority: u8,
-    dropped_by_limit: bool,
 }
+
+// NOTE (ticket W7-16): `dropped_by_limit` was removed from this wire
+// struct along with the `PpuPixel` field it mirrored. **This format
+// carries no version number**, so a chunk written by an older build now
+// fails to decode rather than being migrated. That is acceptable here and
+// only here: a canvas chunk is regenerable enhancement data, and
+// `CacheError::Decode` is already handled as a miss. It would not be
+// acceptable for a save state, and the absence of a version field is
+// worth a ticket of its own.
 
 impl From<PpuPixel> for WirePixel {
     fn from(pixel: PpuPixel) -> Self {
@@ -85,7 +93,6 @@ impl From<PpuPixel> for WirePixel {
             layer_arg,
             sprite_id: pixel.sprite_id,
             priority: pixel.priority,
-            dropped_by_limit: pixel.dropped_by_limit,
         }
     }
 }
@@ -109,7 +116,6 @@ impl TryFrom<WirePixel> for PpuPixel {
             layer,
             sprite_id: wire.sprite_id,
             priority: wire.priority,
-            dropped_by_limit: wire.dropped_by_limit,
         })
     }
 }
@@ -203,7 +209,6 @@ mod tests {
                 _ => None,
             },
             priority: 1,
-            dropped_by_limit: false,
         }
     }
 
@@ -253,7 +258,6 @@ mod tests {
                 layer_arg: 0,
                 sprite_id: None,
                 priority: 0,
-                dropped_by_limit: false,
             })],
         };
         let bincode_bytes = bincode::encode_to_vec(&wire, bincode::config::standard()).unwrap();
