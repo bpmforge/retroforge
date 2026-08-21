@@ -4651,7 +4651,7 @@
     "The poisoned-archive test is the acceptance that matters: a format that merely DOCUMENTS the rule will eventually carry a ROM."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
