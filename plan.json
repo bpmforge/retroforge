@@ -4088,7 +4088,7 @@
     "Law 6 applies directly: Accuracy Mode is the reference and enhancements are opt-in overlays over an unmodified simulation. A patch engine is the sharpest test of that rule in the project, because it modifies game LOGIC rather than presentation."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
