@@ -225,6 +225,30 @@ const EXCLUDED: &[(&str, &str)] = &[
         "RedSpaceIndirectHDMA.sfc",
         "same picture and same reason as RedSpaceHDMA, via INDIRECT mode -- the channel          dereferences its pointer and reads the identical $1F, $1E, $1D gradient, which is          direct evidence that criterion 1's indirect-mode bank register works. Excluded for the          index-domain reason above, not for anything wrong with the transfer.",
     ),
+    (
+        "InterlaceFont.sfc",
+        "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed -- this one          included. Mode 5 is true hires, and fullsnes says how it works: 'the main/subscreen          pixels are rendered as half-pixels of the high-resolution image'. This core composes          ONE screen, so it draws the main screen's half-dots and nothing else, and the missing          half is not recoverable from what it has. InterlaceFont is the ROM that makes this          unmistakable: its point is sharp hires text, and every glyph comes out shredded with          alternate columns gone. Pinning any of these would assert that interlace and hires          render correctly when neither does. Unblocked by W7-16 (the sub-screen channel), which          W7-06's HANDOFF names.",
+    ),
+    (
+        "InterlaceMoogle.sfc",
+        "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed -- this one          included. Mode 5 is true hires, and fullsnes says how it works: 'the main/subscreen          pixels are rendered as half-pixels of the high-resolution image'. This core composes          ONE screen, so it draws the main screen's half-dots and nothing else, and the missing          half is not recoverable from what it has. InterlaceFont is the ROM that makes this          unmistakable: its point is sharp hires text, and every glyph comes out shredded with          alternate columns gone. Pinning any of these would assert that interlace and hires          render correctly when neither does. Unblocked by W7-16 (the sub-screen channel), which          W7-06's HANDOFF names.",
+    ),
+    (
+        "InterlaceMystHDMA.sfc",
+        "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed -- this one          included. Mode 5 is true hires, and fullsnes says how it works: 'the main/subscreen          pixels are rendered as half-pixels of the high-resolution image'. This core composes          ONE screen, so it draws the main screen's half-dots and nothing else, and the missing          half is not recoverable from what it has. InterlaceFont is the ROM that makes this          unmistakable: its point is sharp hires text, and every glyph comes out shredded with          alternate columns gone. Pinning any of these would assert that interlace and hires          render correctly when neither does. Unblocked by W7-16 (the sub-screen channel), which          W7-06's HANDOFF names.",
+    ),
+    (
+        "InterlaceRPG.sfc",
+        "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed -- this one          included. Mode 5 is true hires, and fullsnes says how it works: 'the main/subscreen          pixels are rendered as half-pixels of the high-resolution image'. This core composes          ONE screen, so it draws the main screen's half-dots and nothing else, and the missing          half is not recoverable from what it has. InterlaceFont is the ROM that makes this          unmistakable: its point is sharp hires text, and every glyph comes out shredded with          alternate columns gone. Pinning any of these would assert that interlace and hires          render correctly when neither does. Unblocked by W7-16 (the sub-screen channel), which          W7-06's HANDOFF names.",
+    ),
+    (
+        "InterlaceScroll.sfc",
+        "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed -- this one          included. Mode 5 is true hires, and fullsnes says how it works: 'the main/subscreen          pixels are rendered as half-pixels of the high-resolution image'. This core composes          ONE screen, so it draws the main screen's half-dots and nothing else, and the missing          half is not recoverable from what it has. InterlaceFont is the ROM that makes this          unmistakable: its point is sharp hires text, and every glyph comes out shredded with          alternate columns gone. Pinning any of these would assert that interlace and hires          render correctly when neither does. Unblocked by W7-16 (the sub-screen channel), which          W7-06's HANDOFF names.",
+    ),
+    (
+        "InterlaceSimpsonsHDMA.sfc",
+        "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed -- this one          included. Mode 5 is true hires, and fullsnes says how it works: 'the main/subscreen          pixels are rendered as half-pixels of the high-resolution image'. This core composes          ONE screen, so it draws the main screen's half-dots and nothing else, and the missing          half is not recoverable from what it has. InterlaceFont is the ROM that makes this          unmistakable: its point is sharp hires text, and every glyph comes out shredded with          alternate columns gone. Pinning any of these would assert that interlace and hires          render correctly when neither does. Unblocked by W7-16 (the sub-screen channel), which          W7-06's HANDOFF names.",
+    ),
 ];
 
 fn assert_supported_mode(name: &str, mode: u8) {

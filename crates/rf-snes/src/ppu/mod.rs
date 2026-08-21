@@ -51,6 +51,8 @@ use rf_core_api::{OverlayPixel, PixelLayer, PpuPixel};
 pub const WIDTH: usize = 256;
 /// Visible lines in the default (non-overscan) frame.
 pub const VISIBLE_LINES: u16 = 224;
+/// Visible lines with overscan enabled (`$2133` bit 2).
+pub const VISIBLE_LINES_OVERSCAN: u16 = 239;
 /// CGRAM holds 256 colours as 16-bit BGR555 entries.
 pub const CGRAM_ENTRIES: usize = 256;
 /// OAM: 512 bytes of low table plus 32 bytes of high table.
@@ -95,6 +97,81 @@ pub struct LineState {
     pub windows: window::Windows,
     pub color_math: window::ColorMath,
     pub mosaic: window::Mosaic,
+}
+
+/// `$2133` SETINI, decoded (ticket W7-06).
+///
+/// Bit meanings are quoted from fullsnes's SETINI table rather than
+/// recalled, because two of them are easy to get backwards:
+///
+/// * Bit 0 `V-Scanning (0=Non Interlace, 1=Interlace)`
+/// * Bit 1 `OBJ V-Direction Display (0=Low, 1=High Resolution/Smaller OBJs)`
+/// * Bit 2 `BG V-Direction Display (0=224 Lines, 1=239 Lines)` — this is
+///   overscan, and it is the BG bit, NOT bit 1.
+/// * Bit 3 `Horizontal Pseudo 512 Mode`, described as `SHIFT SUBSCREEN
+///   HALF DOT TO THE LEFT` — see [`SetIni::hires_needs_subscreen`].
+/// * Bits 4-5 `Not used`
+/// * Bit 6 `EXTBG Mode (Screen expand)`
+/// * Bit 7 `External Synchronization`
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SetIni {
+    /// Bit 0: interlaced field scanning.
+    pub interlace: bool,
+    /// Bit 1: high-resolution (smaller) sprites.
+    pub obj_interlace: bool,
+    /// Bit 2: 239 visible lines instead of 224.
+    pub overscan: bool,
+    /// Bit 3: pseudo-hires.
+    pub pseudo_hires: bool,
+    /// Bit 6: EXTBG, the mode-7 BG2 priority-bit expansion.
+    pub extbg: bool,
+    /// Bit 7: external sync (superimpose). Carried, never acted on —
+    /// there is no external LSI to sync to.
+    pub external_sync: bool,
+}
+
+impl SetIni {
+    pub fn write_register(&mut self, value: u8) {
+        self.interlace = value & 0x01 != 0;
+        self.obj_interlace = value & 0x02 != 0;
+        self.overscan = value & 0x04 != 0;
+        self.pseudo_hires = value & 0x08 != 0;
+        self.extbg = value & 0x40 != 0;
+        self.external_sync = value & 0x80 != 0;
+    }
+
+    /// Visible scanlines this frame: 239 with overscan, 224 without.
+    #[must_use]
+    pub fn visible_lines(&self) -> u16 {
+        if self.overscan {
+            VISIBLE_LINES_OVERSCAN
+        } else {
+            VISIBLE_LINES
+        }
+    }
+
+    /// True when the display is asking for a 512-dot line **that this PPU
+    /// cannot yet produce**, because producing it needs a sub-screen.
+    ///
+    /// Both routes to 512 dots are sub-screen effects, which is not
+    /// obvious from their names and is the single fact that decides how
+    /// much of hires can be built here:
+    ///
+    /// * Pseudo-hires (bit 3) is defined by fullsnes as `SHIFT SUBSCREEN
+    ///   HALF DOT TO THE LEFT` — it is *only* a sub-screen operation.
+    /// * True hires (modes 5 and 6) works because "the main/subscreen
+    ///   pixels are rendered as half-pixels of the high-resolution
+    ///   image": the two screens supply alternating half-dots.
+    ///
+    /// This core composes ONE screen and emits indexed pixels (law 4), so
+    /// it can produce the main screen's half of that image and nothing
+    /// else — which is exactly what a mode-5 ROM looks like here: half
+    /// the picture, against the backdrop. Carrying a sub-screen across
+    /// `CoreSink` is W7-16's contract change.
+    #[must_use]
+    pub fn hires_requested(&self, bg_mode: u8) -> bool {
+        self.pseudo_hires || bg_mode == 5 || bg_mode == 6
+    }
 }
 
 /// One composed scanline: the accuracy-exact pixels, plus the
@@ -160,6 +237,12 @@ pub struct Ppu {
     /// Mode 7 register state (ticket W7-04).
     pub mode7: mode7::Mode7,
 
+    /// `$2133` SETINI (ticket W7-06).
+    pub setini: SetIni,
+    /// Set when `$2133` is written so the bus can push overscan into
+    /// `Timing`, which owns the vblank boundary but not the register.
+    pub overscan_changed: bool,
+
     /// Windows, colour math and mosaic (ticket W7-05).
     pub windows: window::Windows,
     pub color_math: window::ColorMath,
@@ -218,10 +301,12 @@ impl Ppu {
             forced_blank: true,
             brightness: 0,
             mode7: mode7::Mode7::default(),
+            setini: SetIni::default(),
+            overscan_changed: false,
             windows: window::Windows::default(),
             color_math: window::ColorMath::default(),
             mosaic: window::Mosaic::default(),
-            line_state: vec![None; VISIBLE_LINES as usize],
+            line_state: vec![None; VISIBLE_LINES_OVERSCAN as usize],
             direct_color: false,
             range_over: false,
             time_over: false,
@@ -281,6 +366,10 @@ impl Ppu {
             0x2122 => self.write_cgram(value),
             0x211A..=0x2120 => self.mode7.write_register(offset, value),
             0x2106 => self.mosaic.write_register(value),
+            0x2133 => {
+                self.setini.write_register(value);
+                self.overscan_changed = true;
+            }
             0x2123..=0x212B | 0x212E | 0x212F => self.windows.write_register(offset, value),
             0x2131 | 0x2132 => self.color_math.write_register(offset, value),
             0x2130 => {

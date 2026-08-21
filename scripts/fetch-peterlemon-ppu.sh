@@ -78,6 +78,14 @@ ROMS=(
   "PPU/HDMA/RedSpaceHDMA/RedSpaceHDMA.sfc"
   "PPU/HDMA/RedSpaceIndirectHDMA/RedSpaceIndirectHDMA.sfc"
   "PPU/HDMA/Mode7HDMA/Mode7HDMA.sfc"
+  # Interlace (W7-06's criterion 3). All six of PPU/Interlace, enumerated
+  # at the pinned commit.
+  "PPU/Interlace/InterlaceFont/InterlaceFont.sfc"
+  "PPU/Interlace/InterlaceMoogle/InterlaceMoogle.sfc"
+  "PPU/Interlace/InterlaceMystHDMA/InterlaceMystHDMA.sfc"
+  "PPU/Interlace/InterlaceRPG/InterlaceRPG.sfc"
+  "PPU/Interlace/InterlaceScroll/InterlaceScroll.sfc"
+  "PPU/Interlace/InterlaceSimpsonsHDMA/InterlaceSimpsonsHDMA.sfc"
 )
 
 mkdir -p "$DEST"

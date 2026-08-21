@@ -44,6 +44,14 @@ pub const MASTER_PER_LINE: u64 = DOTS_PER_LINE * MASTER_PER_DOT;
 pub const LINES_PER_FRAME: u16 = 262;
 /// First scanline of vblank in 224-line mode.
 pub const VBLANK_START_LINE: u16 = 225;
+/// First scanline of vblank with overscan (`$2133` bit 2) enabled.
+///
+/// Overscan does not add lines to the frame — 262 is 262 either way. It
+/// moves the boundary, taking 15 lines from vblank and giving them to the
+/// display. That means vblank gets SHORTER, which is why a game that
+/// turns overscan on and keeps a long vblank DMA routine starts writing
+/// VRAM during active display.
+pub const VBLANK_START_LINE_OVERSCAN: u16 = 240;
 /// Roughly three scanlines, per §3.1's "starts ~line 225, 3-4 lines".
 pub const AUTO_JOYPAD_CYCLES: u64 = 4224;
 
@@ -75,6 +83,8 @@ pub struct Timing {
     pub nmi_flag: bool,
     /// Master cycles remaining in the auto-joypad window.
     pub auto_joypad_remaining: u64,
+    /// First vblank line: 225 normally, 240 with overscan (W7-06).
+    pub vblank_start: u16,
 }
 
 impl Default for Timing {
@@ -87,6 +97,7 @@ impl Timing {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            vblank_start: VBLANK_START_LINE,
             line_cycles: 0,
             line: 0,
             frame: 0,
@@ -103,7 +114,16 @@ impl Timing {
 
     #[must_use]
     pub fn in_vblank(&self) -> bool {
-        self.line >= VBLANK_START_LINE
+        self.line >= self.vblank_start
+    }
+
+    /// Set by the PPU when `$2133`'s overscan bit changes (ticket W7-06).
+    pub fn set_overscan(&mut self, overscan: bool) {
+        self.vblank_start = if overscan {
+            VBLANK_START_LINE_OVERSCAN
+        } else {
+            VBLANK_START_LINE
+        };
     }
 
     #[must_use]
@@ -174,13 +194,13 @@ impl Timing {
                     self.line = 0;
                     self.frame += 1;
                 }
-                if self.line < VBLANK_START_LINE {
+                if self.line < self.vblank_start {
                     events.visible_lines_crossed += 1;
                 }
                 if self.line == 0 {
                     events.frame_started = true;
                 }
-                if self.line == VBLANK_START_LINE {
+                if self.line == self.vblank_start {
                     // The NMI edge. The flag latches here and stays set
                     // until something reads $4210 — a game that never
                     // reads it still sees it on the next poll.

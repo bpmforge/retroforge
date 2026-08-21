@@ -130,6 +130,14 @@ impl SnesSystem {
         let irq_mode = self.bus.nmitimen.irq_mode();
         let auto_joypad = self.bus.nmitimen.auto_joypad();
         let timer = self.bus.irq;
+        // $2133's overscan bit moves the vblank boundary, and Timing owns
+        // that boundary while the PPU owns the register. Pushed here, once
+        // per write, rather than read every tick.
+        if self.bus.ppu.overscan_changed {
+            self.bus.ppu.overscan_changed = false;
+            let overscan = self.bus.ppu.setini.overscan;
+            self.bus.timing.set_overscan(overscan);
+        }
         let events = self
             .bus
             .timing
@@ -221,8 +229,12 @@ impl SnesSystem {
             n += 1;
         }
 
-        let mut frame = Vec::with_capacity(usize::from(crate::ppu::VISIBLE_LINES));
-        for y in 0..crate::ppu::VISIBLE_LINES {
+        // 224 or 239 lines, as SETINI asks (ticket W7-06). A frame that
+        // always emitted 224 would silently crop the bottom 15 lines of
+        // an overscan game rather than letterbox it.
+        let visible = self.bus.ppu.setini.visible_lines();
+        let mut frame = Vec::with_capacity(usize::from(visible));
+        for y in 0..visible {
             frame.push(
                 self.bus
                     .ppu

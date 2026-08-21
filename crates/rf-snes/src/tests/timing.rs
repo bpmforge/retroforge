@@ -270,3 +270,34 @@ fn an_interrupt_wakes_a_cpu_halted_by_wai() {
     cpu.interrupt(&mut bus, false);
     assert!(!cpu.stopped, "an interrupt is exactly what WAI waits for");
 }
+
+/// **Overscan moves the vblank boundary, it does not add lines** (ticket
+/// W7-06).
+///
+/// The frame is 262 lines either way; overscan takes 15 of them from
+/// vblank and gives them to the display. That is worth pinning because
+/// the consequence is counter-intuitive: turning overscan ON makes vblank
+/// SHORTER, so a game whose vblank DMA routine was comfortable at 224
+/// lines starts writing VRAM during active display at 239.
+#[test]
+fn overscan_shortens_vblank_rather_than_lengthening_the_frame() {
+    let mut t = Timing::new();
+    assert_eq!(t.vblank_start, 225);
+    t.line = 230;
+    assert!(t.in_vblank(), "line 230 is vblank in 224-line mode");
+
+    t.set_overscan(true);
+    assert_eq!(t.vblank_start, 240);
+    assert!(
+        !t.in_vblank(),
+        "line 230 is VISIBLE with overscan on - treating it as vblank is \
+         what crops the bottom of an overscan game"
+    );
+    assert_eq!(
+        LINES_PER_FRAME, 262,
+        "overscan must not change the frame length"
+    );
+
+    t.set_overscan(false);
+    assert!(t.in_vblank(), "and back again");
+}

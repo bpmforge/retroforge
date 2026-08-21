@@ -841,3 +841,80 @@ fn window_and_mosaic_registers_are_latched_per_scanline() {
          this is the bug that made an HDMA window a constant band"
     );
 }
+
+/// **`$2133` SETINI, decoded** (ticket W7-06).
+///
+/// Bit 1 is OBJ V-direction and bit 2 is BG V-direction; overscan is the
+/// BG one. Getting those two the wrong way round gives a PPU that changes
+/// sprite size when a game asks for 239 lines, so each bit is asserted
+/// alone rather than in a lump.
+#[test]
+fn setini_decodes_each_bit_independently() {
+    let mut p = Ppu::new();
+    for (value, expect) in [
+        (0x01, "interlace"),
+        (0x02, "obj_interlace"),
+        (0x04, "overscan"),
+        (0x08, "pseudo_hires"),
+        (0x40, "extbg"),
+        (0x80, "external_sync"),
+    ] {
+        p.write_register(0x2133, value);
+        let s = p.setini;
+        let got = [
+            ("interlace", s.interlace),
+            ("obj_interlace", s.obj_interlace),
+            ("overscan", s.overscan),
+            ("pseudo_hires", s.pseudo_hires),
+            ("extbg", s.extbg),
+            ("external_sync", s.external_sync),
+        ];
+        for (name, flag) in got {
+            assert_eq!(
+                flag,
+                name == expect,
+                "writing {value:#04X} set `{name}` to {flag}; only `{expect}` should be set"
+            );
+        }
+    }
+    // Bits 4-5 are documented "Not used" and must set nothing at all.
+    p.write_register(0x2133, 0x30);
+    assert_eq!(p.setini, super::super::ppu::SetIni::default());
+}
+
+/// Overscan is 239 lines, and it is bit 2 that does it.
+#[test]
+fn overscan_changes_the_visible_line_count() {
+    let mut p = Ppu::new();
+    assert_eq!(p.setini.visible_lines(), 224);
+    p.write_register(0x2133, 0x04);
+    assert_eq!(p.setini.visible_lines(), 239);
+    p.write_register(0x2133, 0x00);
+    assert_eq!(p.setini.visible_lines(), 224);
+}
+
+/// **Both routes to 512 dots need a sub-screen**, which is why this PPU
+/// reports hires as *requested* rather than pretending to render it.
+///
+/// Pseudo-hires is defined as shifting the sub-screen half a dot left,
+/// and true hires works by main and sub supplying alternating half-dots.
+/// A core that composes one screen can produce half the image either way.
+#[test]
+fn hires_is_requested_by_pseudo_hires_and_by_modes_5_and_6() {
+    let mut p = Ppu::new();
+    for mode in 0..=7u8 {
+        p.bg_mode = mode;
+        assert_eq!(
+            p.setini.hires_requested(mode),
+            mode == 5 || mode == 6,
+            "mode {mode} without pseudo-hires"
+        );
+    }
+    p.write_register(0x2133, 0x08);
+    for mode in 0..=7u8 {
+        assert!(
+            p.setini.hires_requested(mode),
+            "pseudo-hires asks for 512 dots in every mode, including {mode}"
+        );
+    }
+}
