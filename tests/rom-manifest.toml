@@ -53,8 +53,15 @@
 #   repo             git clone URL
 #   commit           40 lowercase hex chars, the pinned commit SHA; after
 #                    fetch, `git -C <dest> rev-parse HEAD` must equal this
-#   subpath          path within the repo passed to
-#                    `git sparse-checkout set --cone`
+#   subpaths         directories within the repo passed to
+#                    `git sparse-checkout set --cone` — a LIST, because
+#                    cone mode takes N of them (and always includes
+#                    root-level files regardless). One string could not
+#                    express an artifact whose content sits in several
+#                    sibling directories; fetching only part of it and
+#                    letting the consumer report the rest as missing would
+#                    manufacture a gap that is an artefact of the fetch
+#                    rather than of the artifact (ticket W9-06).
 #   dest             path under `roms/` (gitignored) the checkout lands at
 #                    — a DIRECTORY, not a file
 #
@@ -718,8 +725,42 @@ id = "singlestep-nes6502-src"
 license_status = "no-license-grant-fetch-only"
 repo = "https://github.com/SingleStepTests/ProcessorTests.git"
 commit = "bb11756436da8fd16cce86aef63dc6725f48836f"
-subpath = "nes6502/v1"
+subpaths = ["nes6502/v1"]
 dest = "roms/nes/singlestep-nes6502-src"
+
+# The one real community Mesen HD pack this repo tests against (W9-06
+# criterion 3: "a real community pack is imported end to end in a test").
+#
+# WHY A FETCH AND NOT A FIXTURE: no licence-clear HD pack exists. Every
+# pack in the wild is a derived work of copyrighted commercial game art,
+# and all three candidates surveyed (TasticHacks/Contra80s,
+# AxlRocks/Megaman-Super, ModernRetroDesign/ZII-mesen) report NO LICENSE
+# on GitHub. Brad ruled 2026-08-21 that the fetch-only posture already
+# carried by 81 entries here applies: fetch-from-origin only, never
+# vendored/mirrored/re-hosted, dest under gitignored roms/. The honest
+# caveat that ruling turned on: those 81 are hardware-conformance test
+# ROMs; this one is commercial game art, and that is a real difference.
+#
+# WHY THIS PACK: it is a genuine <ver>106 pack with 5,976 <tile> rules,
+# 302 <condition>s and 89 <img> refs — proving the importer against a
+# pack from the WILD rather than one we authored, which is the entire
+# point of the criterion. Contra80s was the obvious first candidate and
+# was rejected on inspection: it contains no hires.txt at all, only a
+# README and 47 MB of promo banners.
+#
+# WHY THREE SUBPATHS: hires.txt references 69 root images plus 10 under
+# Submerged/ and 10 under Cutscenes/. Cone mode always includes root
+# files, so those two directories are all that must be named — but
+# fetching only the root would make the importer report 20 tiles as
+# MissingImage for a gap OUR fetch created, not the pack's. That is the
+# silent-degradation failure this whole ticket is about.
+[[git_artifact]]
+id = "mesen-hdpack-megaman-super"
+license_status = "no-license-grant-fetch-only"
+repo = "https://github.com/AxlRocks/Megaman-Super.git"
+commit = "be6f9c23335666aaface41d4598a299a09ab110b"
+subpaths = ["Submerged", "Cutscenes"]
+dest = "roms/nes/mesen-hdpack-megaman-super"
 
 # RETIRED at W6-01a — the ticket that actually consumes these vectors.
 #

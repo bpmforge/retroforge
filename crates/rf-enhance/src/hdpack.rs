@@ -174,6 +174,19 @@ pub struct HdPack {
     /// Condition names present in the file whose type this build cannot
     /// evaluate. **Ledger, not an error** — see the module doc.
     pub unevaluated: Vec<String>,
+    /// Directives the file uses that this build does not implement, and
+    /// how many times each appeared. **Ledger, not an error**, for the
+    /// same reason `unevaluated` is one — but it must not stay silent.
+    ///
+    /// This exists because a real pack from the wild exposed the gap
+    /// (W9-06 criterion 3): AxlRocks/Megaman-Super carries 17 `<bgm>`
+    /// and 2 `<patch>` lines, and the parser's catch-all arm dropped
+    /// every one of them without a word. Audio packs and IPS patches are
+    /// both out of scope for this build (`docs/SCOPE.md`, asset
+    /// replacement row), so NOT implementing them is correct — dropping
+    /// them QUIETLY is the thing criterion 2 forbids, and it is the
+    /// exact failure the honesty contract in this module's doc is about.
+    pub unsupported: BTreeMap<String, usize>,
 }
 
 /// Why a `hires.txt` could not be loaded.
@@ -182,7 +195,9 @@ pub struct HdPack {
 /// fixing a 4,000-line `hires.txt` needs to be told *where*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HdPackError {
-    /// A tag had the wrong number of comma-separated fields.
+    /// A tag had FEWER comma-separated fields than it needs. Extra
+    /// trailing fields are not an error — see the `need` closure in
+    /// [`parse_hires`].
     FieldCount {
         line_no: usize,
         tag: String,
@@ -320,8 +335,21 @@ pub fn parse_hires(text: &str) -> Result<HdPack, HdPackError> {
                 field: s.to_string(),
             })
         };
+        // `n` is a MINIMUM, not an exact count. That is what Mesen's own
+        // loader does — `HdPackLoader.cpp` reads its tokens positionally
+        // and never checks that none remain — and it is not pedantry:
+        // every pack a recent HD Pack Builder emits carries two extra
+        // trailing fields on `<tile>`, so an exact check rejects the
+        // entire real-world corpus.
+        //
+        // This was found by importing a real pack (W9-06 criterion 3,
+        // AxlRocks/Megaman-Super), not by reading the spec — the
+        // published spec still documents seven `<tile>` fields and all
+        // 5,976 rules in that pack have nine. Requiring equality here is
+        // being stricter than the format's reference implementation,
+        // which for a compatibility importer is a defect, not rigour.
         let need = |n: usize| -> Result<(), HdPackError> {
-            if fields.len() == n {
+            if fields.len() >= n {
                 Ok(())
             } else {
                 Err(HdPackError::FieldCount {
@@ -376,6 +404,15 @@ pub fn parse_hires(text: &str) -> Result<HdPack, HdPackError> {
             }
             "tile" => {
                 // <tile>img,tileData,palette,x,y,brightness,defaultTile
+                //
+                // Seven is the documented minimum. HD Pack Builder adds
+                // two more — a per-image group id and a 0-255 index
+                // within that image — which are its own bookkeeping, not
+                // directives, and Mesen ignores them. They are NOT put in
+                // `unsupported`: that ledger is for whole directives a
+                // pack asked for and this build will not honour, and
+                // padding it with fields the reference implementation
+                // also discards would bury the real gaps.
                 need(7)?;
                 let rule = TileRule {
                     key: TileKey {
@@ -396,7 +433,14 @@ pub fn parse_hires(text: &str) -> Result<HdPack, HdPackError> {
                 };
                 pending.push((line_no, rule));
             }
-            _ => {}
+            // Anything else is a directive this build does not
+            // implement. It is COUNTED, not dropped: see
+            // `HdPack::unsupported`. Silently ignoring an unknown tag
+            // would let a pack half-apply without saying so, which is
+            // precisely the degradation this module exists to prevent.
+            other => {
+                *pack.unsupported.entry(other.to_string()).or_insert(0) += 1;
+            }
         }
     }
 
@@ -618,6 +662,10 @@ impl PackBuilder {
             conditions: BTreeMap::new(),
             options: Vec::new(),
             unevaluated: Vec::new(),
+            // A pack this builder wrote uses only directives this build
+            // implements, by construction — it cannot emit one it does
+            // not know about.
+            unsupported: BTreeMap::new(),
         }
     }
 }
@@ -932,6 +980,10 @@ pub enum Unsatisfied {
     /// The rule is gated on a condition type this build cannot evaluate,
     /// so it can never match (see the module doc).
     UnevaluatedCondition { tile: String, condition: String },
+    /// The pack uses a directive this build does not implement, so that
+    /// part of the pack will not apply. Not tied to one tile — it is a
+    /// whole-file fact, which is why it carries a count instead.
+    UnsupportedDirective { directive: String, count: usize },
     /// The rule's replacement region falls outside the image it names.
     RegionOutOfBounds {
         tile: String,
@@ -953,6 +1005,11 @@ impl std::fmt::Display for Unsatisfied {
                 f,
                 "tile {tile}: condition {condition:?} uses a type this build cannot evaluate, \
                  so the rule can never match"
+            ),
+            Unsatisfied::UnsupportedDirective { directive, count } => write!(
+                f,
+                "<{directive}> x{count}: this build does not implement that \
+                 directive, so those lines have no effect"
             ),
             Unsatisfied::RegionOutOfBounds {
                 tile,
@@ -1057,6 +1114,15 @@ impl Import {
 #[must_use]
 pub fn import(pack: HdPack, images: &BTreeMap<String, ImageInfo>) -> Import {
     let mut unsatisfied = Vec::new();
+
+    // Whole-file gaps first, so they lead the report rather than being
+    // buried under several thousand per-tile lines.
+    for (directive, count) in &pack.unsupported {
+        unsatisfied.push(Unsatisfied::UnsupportedDirective {
+            directive: directive.clone(),
+            count: *count,
+        });
+    }
 
     for rule in &pack.tiles {
         let tile = format!("{}@{}", rule.key.tile.to_field(), hex8(&rule.key.palette));

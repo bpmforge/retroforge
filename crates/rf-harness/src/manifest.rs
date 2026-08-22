@@ -100,8 +100,21 @@ pub struct GitArtifact {
     /// -C <dest> rev-parse HEAD` must equal this value exactly (see
     /// [`crate::fetch::fetch_git_artifact`]).
     pub commit: String,
-    /// Path within the repo passed to `git sparse-checkout set --cone`.
-    pub subpath: String,
+    /// Directories within the repo passed to `git sparse-checkout set
+    /// --cone`. **Cone mode takes N of them, and root-level files are
+    /// always included regardless** — which is the whole reason this is a
+    /// list rather than the single string it started as.
+    ///
+    /// One string could not express a pack whose images live in several
+    /// sibling directories, and the fallback (fetch only the root and let
+    /// the consumer report the rest as missing) would have manufactured a
+    /// gap that is an artefact of OUR fetch rather than of the artifact —
+    /// exactly the silent-degradation failure the hd-pack importer this
+    /// serves exists to prevent (ticket W9-06).
+    ///
+    /// Must not be empty; each entry is passed as its own argument, so a
+    /// path containing spaces is safe.
+    pub subpaths: Vec<String>,
     /// Path under `roms/` (gitignored, NFR-006) the checkout lands at —
     /// a directory, not a file (see module doc: this is the one
     /// deliberate exception to `fetch.rs`'s "every artifact is one file").
@@ -270,6 +283,16 @@ impl Manifest {
                 errors.push(ValidationError(format!(
                     "git_artifact {}: dest {:?} must start with \"roms/\" (NFR-006)",
                     g.id, g.dest
+                )));
+            }
+            // An empty list would silently degrade to `sparse-checkout
+            // set --cone` with no paths, which yields a root-only
+            // checkout rather than an error — the fetch would "succeed"
+            // while missing most of the artifact.
+            if g.subpaths.is_empty() {
+                errors.push(ValidationError(format!(
+                    "git_artifact {}: subpaths must not be empty",
+                    g.id
                 )));
             }
             if !is_lowercase_commit_hex(&g.commit) {
@@ -490,7 +513,7 @@ mod tests {
             license_status: LicenseStatus::NoLicenseGrantFetchOnly,
             repo: "https://example.invalid/repo.git".into(),
             commit: "b".repeat(40),
-            subpath: "sub/dir".into(),
+            subpaths: vec!["sub/dir".into()],
             dest: "roms/nes/g1-src".into(),
         }
     }
@@ -503,7 +526,7 @@ mod tests {
             license_status = "no-license-grant-fetch-only"
             repo = "https://example.invalid/repo.git"
             commit = "bb11756436da8fd16cce86aef63dc6725f48836f"
-            subpath = "nes6502/v1"
+            subpaths = ["nes6502/v1"]
             dest = "roms/nes/g1-src"
         "#;
         let manifest = Manifest::parse(text).unwrap();

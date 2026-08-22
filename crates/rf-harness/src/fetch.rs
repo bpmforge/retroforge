@@ -421,17 +421,12 @@ pub fn fetch_git_artifact(
             &git_artifact.repo,
         ],
     )?;
-    run(
-        "sparse-checkout set",
-        &[
-            "-C",
-            &dest_str,
-            "sparse-checkout",
-            "set",
-            "--cone",
-            &git_artifact.subpath,
-        ],
-    )?;
+    // Each subpath is its own argument — cone mode accepts N directories,
+    // and passing them as one space-joined string would both fail and
+    // mangle any path containing a space.
+    let mut sparse_args: Vec<&str> = vec!["-C", &dest_str, "sparse-checkout", "set", "--cone"];
+    sparse_args.extend(git_artifact.subpaths.iter().map(String::as_str));
+    run("sparse-checkout set", &sparse_args)?;
     run(
         "fetch",
         &[
@@ -744,7 +739,7 @@ mod tests {
             license_status: LicenseStatus::NoLicenseGrantFetchOnly,
             repo: "https://example.invalid/repo.git".into(),
             commit: commit.into(),
-            subpath: "sub/dir".into(),
+            subpaths: vec!["sub/dir".into()],
             dest: dest.into(),
         }
     }
