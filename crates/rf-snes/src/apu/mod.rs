@@ -24,6 +24,25 @@
 //! is known to do that — what they depend on is the handshake's
 //! observable behaviour, which is W6-04b's to get right.
 //!
+//! **CORRECTION 2026-08-21 (W7-08).** The sentence above is still true and
+//! was never the whole population. **Test ROMs read the IPL as data, and
+//! test ROMs are the things that verify this emulator.** All four of
+//! blargg's recovered SPC tests do exactly this at `$0490`:
+//!
+//! ```text
+//! MOV A, !$FFC0    ; read IPL byte 0
+//! CMP A, #$CD      ; the real IPL's first byte
+//! BNE *            ; spin forever otherwise
+//! JMP !$FFC0       ; ...and then EXECUTE it
+//! ```
+//!
+//! Against [`IPL_STUB`] they read `$EF` and hang on that `BNE` — the
+//! SPC700 sat at exactly one PC for 10,000,000 straight instructions
+//! before this was traced. The ruling stands and no bytes have been
+//! added; [`Apu::set_ipl_rom`] opens the "user supplies it" door the
+//! ruling explicitly left open, and the suite SKIPS without one, because a
+//! missing artifact is not a defect.
+//!
 //! ## Writes go to ARAM even when the IPL is banked in
 //!
 //! This is the part that looks like a bug and is not: `$FFC0-$FFFF` reads
@@ -156,6 +175,14 @@ pub struct Apu {
     pub ports_in: [u8; 4],
     pub ports_out: [u8; 4],
     /// `$F2` DSP address latch. The DSP itself is W6-04b.
+    /// The 64 bytes visible at `$FFC0`-`$FFFF` while `$F1` bit 7 is set.
+    ///
+    /// Defaults to [`IPL_STUB`], which is OURS — law 5 and Brad's ruling
+    /// of 2026-08-20 keep Nintendo's IPL out of git and out of every
+    /// fetch list. [`Apu::set_ipl_rom`] lets a user who dumped their own
+    /// console supply the real one; nothing in this repository ever ships
+    /// or downloads it.
+    pub ipl: [u8; IPL_LEN],
     pub dsp_addr: u8,
     /// SPC cycles accumulated toward the next DSP sample.
     dsp_cycles: u32,
@@ -192,6 +219,7 @@ impl Apu {
             ipl_enabled: true,
             ports_in: [0; 4],
             ports_out: [0; 4],
+            ipl: IPL_STUB,
             dsp_addr: 0,
             dsp_cycles: 0,
             last_sample: (0, 0),
@@ -275,6 +303,28 @@ impl Apu {
             // so this terminates (law 8).
             self.last_sample = self.dsp.mix(&mut self.aram);
         }
+    }
+
+    /// Supply a real SPC700 boot ROM for the `$FFC0`-`$FFFF` window.
+    ///
+    /// **This repository never ships, downloads or embeds one.** Law 5 is
+    /// "no ROM bytes in git" and Brad's 2026-08-20 ruling extended that to
+    /// "not in a fetch list either" — but it recorded "requiring the user
+    /// to supply it" as explicitly still open, and this is that door.
+    ///
+    /// It exists because a real program turned out to need it. blargg's
+    /// SPC test ROMs read `$FFC0` as DATA, compare it against `$CD` — the
+    /// first byte of the real IPL — spin forever if it differs, and then
+    /// `JMP !$FFC0` to execute it. The module doc above says "no
+    /// commercial title is known to do that", which is still true and was
+    /// never the whole population: **test ROMs do it, and they are the
+    /// things that verify this emulator.**
+    ///
+    /// Without a supplied ROM the stub is used and such a program hangs —
+    /// the honest outcome, and the same thing real hardware would do with
+    /// the wrong bytes there.
+    pub fn set_ipl_rom(&mut self, rom: [u8; IPL_LEN]) {
+        self.ipl = rom;
     }
 
     /// The CPU wrote one of `$2140`-`$2143`.
@@ -398,7 +448,7 @@ impl ApuBus for Apu {
             return self.read_register(addr);
         }
         if self.in_ipl_window(addr) {
-            return IPL_STUB[usize::from(addr - IPL_BASE)];
+            return self.ipl[usize::from(addr - IPL_BASE)];
         }
         self.aram[usize::from(addr)]
     }
@@ -427,7 +477,7 @@ impl ApuBus for Apu {
             };
         }
         if self.in_ipl_window(addr) {
-            return IPL_STUB[usize::from(addr - IPL_BASE)];
+            return self.ipl[usize::from(addr - IPL_BASE)];
         }
         self.aram[usize::from(addr)]
     }

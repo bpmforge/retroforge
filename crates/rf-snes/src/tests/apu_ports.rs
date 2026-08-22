@@ -4,6 +4,8 @@
 use crate::apu::boot::{BootAction, BootState, IplBoot};
 use crate::apu::dsp::{decode_brr, Dsp};
 use crate::apu::Apu;
+// `read`/`write` are ApuBus methods; the trait must be in scope to call them.
+use crate::apu::spc700::ApuBus;
 use crate::cpu::CpuBus;
 use crate::system::SnesSystem;
 use rf_cart::SnesMapMode;
@@ -457,4 +459,53 @@ fn a_settled_zero_kind_still_runs_immediately() {
     assert!(apu.boot.is_running());
     assert_eq!(apu.cpu.pc, 0x0400);
     assert_eq!(apu.boot.transferred, 0);
+}
+
+/// A user-supplied boot ROM replaces the stub in the `$FFC0` window.
+///
+/// The stub is ours by ruling (law 5, no ROM bytes in git, extended
+/// 2026-08-20 to "not in a fetch list either"), and that ruling recorded
+/// "requiring the user to supply it" as still open. This is that door,
+/// and it exists because blargg's SPC test ROMs read `$FFC0` as DATA,
+/// compare it against `$CD`, spin forever if it differs, and then jump to
+/// it — so they cannot run on a stub at all.
+#[test]
+fn a_user_supplied_boot_rom_is_what_the_ipl_window_reads() {
+    let mut apu = Apu::new();
+    // Bank the IPL in: $F1 bit 7.
+    apu.write_register(0x00F1, 0x80);
+    assert_eq!(
+        apu.read(0xFFC0),
+        0xEF,
+        "the default stub is SLEEP-filled and is NOT Nintendo's ROM"
+    );
+
+    let mut rom = [0u8; crate::apu::IPL_LEN];
+    rom[0] = 0xCD;
+    rom[1] = 0xEF;
+    rom[crate::apu::IPL_LEN - 1] = 0x42;
+    apu.set_ipl_rom(rom);
+
+    assert_eq!(
+        apu.read(0xFFC0),
+        0xCD,
+        "byte 0, not byte 1 — the offset is \
+        what blargg's CMP #$CD actually discriminates"
+    );
+    assert_eq!(apu.read(0xFFFF), 0x42, "and the window's last byte");
+}
+
+/// Writes still land in ARAM underneath a SUPPLIED rom, exactly as they
+/// do under the stub — the banking rule is about reads only.
+#[test]
+fn writes_still_reach_aram_under_a_supplied_boot_rom() {
+    let mut apu = Apu::new();
+    apu.write_register(0x00F1, 0x80);
+    let mut rom = [0xAAu8; crate::apu::IPL_LEN];
+    rom[0] = 0xCD;
+    apu.set_ipl_rom(rom);
+
+    apu.write(0xFFC0, 0x99);
+    assert_eq!(apu.read(0xFFC0), 0xCD, "the read still comes from the ROM");
+    assert_eq!(apu.aram[0xFFC0], 0x99, "and the write still reached ARAM");
 }
