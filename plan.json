@@ -4054,7 +4054,7 @@
     "timing.rs currently hardcodes 1364 master cycles x 262 lines with vblank at line 225, and speed.rs pins MASTER_CLOCK_HZ. Those are the concrete NTSC constants this ticket has to make configurable."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
