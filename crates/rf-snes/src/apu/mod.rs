@@ -251,6 +251,7 @@ impl Apu {
         let cycles = r.unwrap_or(1);
         self.tick_timers(u32::from(cycles));
         self.tick_dsp(u32::from(cycles));
+        self.poll_boot();
         r
     }
 
@@ -282,11 +283,21 @@ impl Apu {
     /// it hands over, this is a plain port write and the SPC700 program
     /// is what reads it.
     pub fn cpu_write_port(&mut self, index: usize, value: u8) {
+        // Store ONLY. The handshake is evaluated on the APU's own clock by
+        // `poll_boot`, because the real IPL is a polling program and
+        // cannot see a half-finished 16-bit write — see `IplBoot::poll`.
         self.ports_in[index] = value;
+    }
+
+    /// Advance the HLE boot handshake from the current port state.
+    ///
+    /// Called once per APU instruction, which is what makes it equivalent
+    /// to the IPL's own polling loop.
+    pub(crate) fn poll_boot(&mut self) {
         if self.boot.is_running() {
             return;
         }
-        match self.boot.cpu_wrote(index, value, self.ports_in) {
+        match self.boot.poll(self.ports_in) {
             boot::BootAction::Echo(v) => self.ports_out[0] = v,
             boot::BootAction::Store {
                 address,

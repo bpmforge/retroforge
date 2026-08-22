@@ -358,6 +358,11 @@ impl SnesBus {
                 // investigation, since a halted CPU waits for an
                 // interrupt that only arrives when cycles are spent.
                 self.apu.tick_timers(1);
+                // The HLE boot handshake is a POLLING program and this is
+                // the only place it gets to look: `step_counted` is not
+                // reached while it still owns the machine, so polling only
+                // there would leave the handshake frozen forever.
+                self.apu.poll_boot();
                 spent += 1;
                 continue;
             }

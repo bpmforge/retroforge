@@ -8,6 +8,19 @@ use crate::cpu::CpuBus;
 use crate::system::SnesSystem;
 use rf_cart::SnesMapMode;
 
+/// Write a port, then let the APU look.
+///
+/// **The handshake advances on the APU's clock, not on the CPU's store**
+/// (see `IplBoot::poll`), so a test that writes a port and asserts
+/// immediately is asserting against a machine that has not run yet. The
+/// separation is not pedantry: it is what lets a 16-bit `STA $2140` — two
+/// byte writes, port 0 first — be seen as one settled state rather than
+/// evaluated half-done, which is what broke blargg's entire SPC suite.
+fn write_port(apu: &mut Apu, index: usize, value: u8) {
+    apu.cpu_write_port(index, value);
+    apu.poll_boot();
+}
+
 // ---------------------------------------------------------------------
 // The handshake
 // ---------------------------------------------------------------------
@@ -32,16 +45,16 @@ fn the_handshake_transfers_a_block_and_runs_it() {
     let dest: u16 = 0x0200;
 
     // Step 2: kind != 0, destination in ports 2/3, then $CC in port 0.
-    apu.cpu_write_port(1, 0x01);
-    apu.cpu_write_port(2, dest as u8);
-    apu.cpu_write_port(3, (dest >> 8) as u8);
-    apu.cpu_write_port(0, 0xCC);
+    write_port(&mut apu, 1, 0x01);
+    write_port(&mut apu, 2, dest as u8);
+    write_port(&mut apu, 3, (dest >> 8) as u8);
+    write_port(&mut apu, 0, 0xCC);
     assert_eq!(apu.cpu_read_port(0), 0xCC, "the APU echoes $CC");
 
     // Step 3: data on port 1, incrementing counter on port 0.
     for (i, b) in program.iter().enumerate() {
-        apu.cpu_write_port(1, *b);
-        apu.cpu_write_port(0, i as u8);
+        write_port(&mut apu, 1, *b);
+        write_port(&mut apu, 0, i as u8);
         assert_eq!(
             apu.cpu_read_port(0),
             i as u8,
@@ -54,10 +67,10 @@ fn the_handshake_transfers_a_block_and_runs_it() {
     // Step 4/5: port 1 = 0 finishes, entry in ports 2/3, counter skips
     // by two.
     let entry: u16 = 0x0200;
-    apu.cpu_write_port(1, 0x00);
-    apu.cpu_write_port(2, entry as u8);
-    apu.cpu_write_port(3, (entry >> 8) as u8);
-    apu.cpu_write_port(0, 4 + 1);
+    write_port(&mut apu, 1, 0x00);
+    write_port(&mut apu, 2, entry as u8);
+    write_port(&mut apu, 3, (entry >> 8) as u8);
+    write_port(&mut apu, 0, 4 + 1);
 
     assert!(apu.boot.is_running(), "control handed to the SPC700");
     assert_eq!(apu.cpu.pc, entry, "...at the address the CPU supplied");
@@ -109,10 +122,10 @@ fn the_counter_distinguishes_the_next_byte_from_a_new_block() {
 #[test]
 fn a_zero_kind_byte_runs_without_transferring() {
     let mut apu = Apu::new();
-    apu.cpu_write_port(1, 0x00);
-    apu.cpu_write_port(2, 0x00);
-    apu.cpu_write_port(3, 0x04);
-    apu.cpu_write_port(0, 0xCC);
+    write_port(&mut apu, 1, 0x00);
+    write_port(&mut apu, 2, 0x00);
+    write_port(&mut apu, 3, 0x04);
+    write_port(&mut apu, 0, 0xCC);
     assert!(apu.boot.is_running());
     assert_eq!(apu.cpu.pc, 0x0400);
     assert_eq!(apu.boot.transferred, 0);
@@ -123,12 +136,12 @@ fn a_zero_kind_byte_runs_without_transferring() {
 #[test]
 fn port_writes_after_boot_are_not_reinterpreted_as_protocol() {
     let mut apu = Apu::new();
-    apu.cpu_write_port(1, 0x00);
-    apu.cpu_write_port(0, 0xCC);
+    write_port(&mut apu, 1, 0x00);
+    write_port(&mut apu, 0, 0xCC);
     assert!(apu.boot.is_running());
     let pc = apu.cpu.pc;
-    apu.cpu_write_port(0, 0xCC);
-    apu.cpu_write_port(1, 0x01);
+    write_port(&mut apu, 0, 0xCC);
+    write_port(&mut apu, 1, 0x01);
     assert_eq!(apu.cpu.pc, pc, "a later $CC must not restart anything");
 }
 
@@ -192,7 +205,16 @@ fn real_65816_code_completes_the_boot_handshake() {
         // to 2. Writing 1 here stores another byte instead and the
         // handshake never ends — which is exactly what this test caught
         // on its first run.
-        0xA9, 0x02, 0x8D, 0x40, 0x21, 0xDB, // STP
+        0xA9, 0x02, 0x8D, 0x40, 0x21,
+        // LDA $2140                 (let the APU actually run)
+        //
+        // NOT padding. The handshake advances on the APU's CLOCK now, not
+        // on the CPU's store (`IplBoot::poll`), so the CPU has to give the
+        // APU at least one tick after the final write for it to be seen.
+        // A port access settles the APU's debt, which is why a read does
+        // it. Real init code always goes on to do something; only a test
+        // writes the last byte and halts on the next instruction.
+        0xAD, 0x40, 0x21, 0xDB, // STP
     ];
     rom[..program.len()].copy_from_slice(program);
     rom[0x7FFC] = 0x00;
@@ -374,4 +396,65 @@ fn handing_control_to_the_spc700_still_echoes_the_final_counter() {
         other => panic!("expected a Run action, got {other:?}"),
     }
     assert_eq!(boot.state, BootState::Running);
+}
+
+/// A 16-bit `STA $2140` must not be evaluated half-done.
+///
+/// **This is the bug that cost blargg's entire SPC test suite** (ticket
+/// W7-08). Their uploader starts a transfer with one 16-bit store, which
+/// lands as two byte writes with port 0 FIRST — traced, not assumed:
+///
+/// ```text
+/// idx=0 val=CC  ports_in before [00, 00, 00, 04]
+/// idx=1 val=01  ports_in before [CC, 00, 00, 04]
+/// ```
+///
+/// An edge-triggered handshake reads the "kind" byte on the port-0 write,
+/// one instruction too early, sees `0`, and takes the "transfer nothing,
+/// just run" branch — jumping to an address nothing was uploaded to. The
+/// SPC700 then NOP-slides through empty ARAM ($00 is a NOP) while the
+/// 65816 spins forever waiting for a byte counter that is never echoed.
+///
+/// The failure is silent and looks like a DSP or CPU bug from every
+/// angle, which is why it survived three passes of this ticket.
+#[test]
+fn a_sixteen_bit_port_write_is_seen_settled_not_half_done() {
+    let mut apu = Apu::new();
+    apu.cpu_write_port(2, 0x00);
+    apu.cpu_write_port(3, 0x04);
+    apu.poll_boot();
+
+    // The two halves of one 16-bit store, port 0 first, with NO poll
+    // between them — the APU cannot run inside a single CPU instruction.
+    apu.cpu_write_port(0, 0xCC);
+    apu.cpu_write_port(1, 0x01);
+    apu.poll_boot();
+
+    assert!(
+        !apu.boot.is_running(),
+        "kind=$01 means TRANSFER; handing over here is the bug — the SPC700 \
+         would run from ${:04X} with nothing uploaded there",
+        apu.cpu.pc
+    );
+    assert_eq!(
+        apu.boot.state,
+        BootState::Transferring(0),
+        "the handshake must be waiting for the first byte's counter"
+    );
+    assert_eq!(apu.ports_out[0], 0xCC, "and must have echoed the $CC");
+}
+
+/// The zero-kind "just run" branch still works when it is genuinely what
+/// the CPU asked for — the fix must not make it unreachable.
+#[test]
+fn a_settled_zero_kind_still_runs_immediately() {
+    let mut apu = Apu::new();
+    apu.cpu_write_port(2, 0x00);
+    apu.cpu_write_port(3, 0x04);
+    apu.cpu_write_port(1, 0x00);
+    apu.cpu_write_port(0, 0xCC);
+    apu.poll_boot();
+    assert!(apu.boot.is_running());
+    assert_eq!(apu.cpu.pc, 0x0400);
+    assert_eq!(apu.boot.transferred, 0);
 }

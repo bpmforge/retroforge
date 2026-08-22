@@ -114,7 +114,36 @@ impl IplBoot {
     /// function returning an action, rather than reaching into ARAM
     /// directly, so the protocol can be tested without a machine around
     /// it — and so the one place that mutates memory stays visible.
-    pub fn cpu_wrote(&mut self, index: usize, value: u8, ports_in: [u8; 4]) -> BootAction {
+    /// Sample the ports and advance the handshake — **level-triggered on
+    /// the APU's clock, not edge-triggered on the CPU's store.**
+    ///
+    /// This distinction is the whole reason the function is shaped this
+    /// way, and getting it wrong cost blargg's entire SPC suite (W7-08).
+    /// The real IPL is a *polling program*: it reads `$F4`-`$F7` when it
+    /// runs, so it can never observe a half-finished write. A 16-bit
+    /// `STA $2140` — which is how blargg's uploader starts a transfer —
+    /// lands as TWO byte writes, port 0 first:
+    ///
+    /// ```text
+    /// idx=0 val=CC  ports_in before [00, 00, 00, 04]
+    /// idx=1 val=01  ports_in before [CC, 00, 00, 04]
+    /// ```
+    ///
+    /// Reacting to the port-0 write reads the "kind" byte one instruction
+    /// too early, sees `0`, and takes the "transfer nothing, just run"
+    /// branch — jumping to an address nothing was uploaded to. The SPC700
+    /// then NOP-slides through empty ARAM forever while the 65816 spins
+    /// waiting for a byte counter that is never echoed.
+    ///
+    /// Polling is also naturally **idempotent**, which is what makes it
+    /// safe to call every APU step: every accepted value advances the
+    /// value this is waiting for, so re-reading an unchanged port 0 never
+    /// matches twice.
+    pub fn poll(&mut self, ports_in: [u8; 4]) -> BootAction {
+        self.cpu_wrote(0, ports_in[0], ports_in)
+    }
+
+    pub(crate) fn cpu_wrote(&mut self, index: usize, value: u8, ports_in: [u8; 4]) -> BootAction {
         match self.state {
             BootState::Running => BootAction::None,
             BootState::Ready => {
