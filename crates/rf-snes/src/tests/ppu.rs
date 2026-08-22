@@ -1208,3 +1208,164 @@ fn the_two_half_dots_are_not_simply_duplicated() {
         "every pair is identical — the line was duplicated, not interleaved"
     );
 }
+
+// ---------------------------------------------------------------------
+// True hires (modes 5/6) — the double-rate background fetch (W7-06
+// criterion 3, third pass).
+//
+// Both tests below are REGRESSIONS FOR DEFECTS THAT SHIPPED, and each is
+// written so the broken version scores an exact, stated number rather
+// than "something looks off". That matters here more than usual: every
+// mode 5/6 ROM was on the golden suite's excluded list, so for two
+// passes of this ticket the hires path had no coverage at all and a
+// deliberate half-dot swap left the entire nine-command gate green.
+// ---------------------------------------------------------------------
+
+/// A mode-5 PPU with BG1 designated on BOTH screens and characters at
+/// word $1000. Mode 5 makes BG1 4bpp, so the tile writer below is 4bpp —
+/// `ppu_with_tile`'s 2bpp data would land in the wrong bitplanes.
+fn ppu_mode5() -> Ppu {
+    let mut p = Ppu::new();
+    p.forced_blank = false;
+    p.bg_mode = 5;
+    p.bgs[0].tilemap_base = 0;
+    p.bgs[0].char_base = 0x1000;
+    p.write_register(0x212C, 0x01); // TM: BG1 on the main screen
+    p.write_register(0x212D, 0x01); // TS: BG1 on the sub screen too
+    p
+}
+
+/// Write one 4bpp character whose plane 0 is `plane0` on every row and
+/// whose other three planes are clear, so each texel is colour 0 or 1.
+fn write_4bpp_char(p: &mut Ppu, char_base: u16, character: u16, plane0: u8) {
+    let tile_word = char_base + character * 16;
+    for row in 0..8u16 {
+        let at = usize::from(tile_word + row) * 2;
+        p.vram[at] = plane0; // planes 0/1 are the low/high byte of the word
+        p.vram[at + 1] = 0x00;
+    }
+}
+
+/// The two half-dots of a pair must be able to differ.
+///
+/// This is the whole point of true hires and it is what the first defect
+/// destroyed: both screens fetched the same 256-wide background, so every
+/// pair held the same texel twice and the 512 picture was the 256 picture
+/// with its columns duplicated. Measured on PeterLemon's InterlaceFont at
+/// the time: 55,842 of 57,344 pairs identical.
+///
+/// The fixture makes that unmissable rather than statistical. Plane 0 is
+/// `0b1010_1010`, so in 512-space the texels alternate opaque/transparent
+/// every single half-dot — a stripe one half-dot wide, which is a thing
+/// only a 512-wide picture can represent. **A correct fetch differs on
+/// all 256 pairs; the pre-fix fetch differed on ZERO.**
+#[test]
+fn the_two_half_dots_of_a_hires_pair_are_fetched_independently() {
+    let mut p = ppu_mode5();
+    // A hires tile is TWO characters side by side, so both halves need
+    // data or the right half of every tile is blank for the wrong reason.
+    write_4bpp_char(&mut p, 0x1000, 1, 0b1010_1010);
+    write_4bpp_char(&mut p, 0x1000, 2, 0b1010_1010);
+    for i in 0..32 {
+        set_tilemap(&mut p, 0, i, 1);
+    }
+
+    let line = p.render_scanline(0);
+    assert_eq!(line.pixels.len(), 512, "mode 5 emits 512 dots");
+
+    let differing = (0..256)
+        .filter(|n| line.pixels[2 * n].palette_index != line.pixels[2 * n + 1].palette_index)
+        .count();
+    assert_eq!(
+        differing, 256,
+        "every half-dot pair must differ for a one-half-dot stripe pattern; \
+         {differing}/256 did, and 0 is the signature of both screens \
+         fetching the same 256-wide background"
+    );
+
+    // Name the phase, not just the difference: the SUB screen owns the
+    // even half-dot and it is the one carrying colour 1 here.
+    assert_eq!(
+        line.pixels[0].palette_index, 1,
+        "even half-dot = sub screen"
+    );
+    assert_eq!(
+        line.pixels[1].palette_index, 0,
+        "odd half-dot = main screen"
+    );
+}
+
+/// A hires tile is SIXTEEN half-dots wide, so 32 tiles span the line.
+///
+/// The second defect treated it as eight, which reads 64 tiles where 32
+/// exist: a 32-wide tilemap wraps and **the line renders twice, side by
+/// side**. That is how it was caught — the PeterLemon font chart appeared
+/// twice across the frame — and it is what this test pins.
+///
+/// Tilemap entry 0 gets a character the others do not have, so the first
+/// tile is distinguishable. With 16-wide tiles it covers half-dots 0..16
+/// and half-dots 256..272 belong to entry 16, which is different. With
+/// the 8-wide bug, half-dot 256 lands on entry 32, which wraps back to
+/// entry 0 — and the two halves of the line come out identical.
+#[test]
+fn a_hires_tile_spans_sixteen_half_dots_so_the_line_does_not_repeat() {
+    let mut p = ppu_mode5();
+    write_4bpp_char(&mut p, 0x1000, 1, 0b1010_1010);
+    write_4bpp_char(&mut p, 0x1000, 2, 0b1010_1010);
+    // A solid pair for tile 0 only, so it cannot be confused with tile 16.
+    write_4bpp_char(&mut p, 0x1000, 3, 0xFF);
+    write_4bpp_char(&mut p, 0x1000, 4, 0xFF);
+    for i in 0..32 {
+        set_tilemap(&mut p, 0, i, 1);
+    }
+    set_tilemap(&mut p, 0, 0, 3);
+
+    let line = p.render_scanline(0);
+    let indices: Vec<u8> = line.pixels.iter().map(|p| p.palette_index).collect();
+    assert_ne!(
+        &indices[0..256],
+        &indices[256..512],
+        "the two halves of a hires line are different tiles; equal halves \
+         mean the tilemap wrapped because tiles were read as 8 half-dots wide"
+    );
+    assert!(
+        indices[0..16].iter().all(|&i| i == 1),
+        "entry 0's solid character must fill all sixteen of its half-dots"
+    );
+}
+
+/// Pseudo-hires does NOT take a phase, and that is not an oversight.
+///
+/// `$2133` bit 3 interleaves two genuinely independent 256-wide screens;
+/// modes 5/6 split one 512-wide picture. Both emit 512 dots, so
+/// `hires_requested` answers yes to both — which is exactly why the fetch
+/// asks a different question. With one BG designated on both screens,
+/// pseudo-hires SHOULD produce identical pairs: the duplication that is a
+/// defect in mode 5 is the correct answer here.
+#[test]
+fn pseudo_hires_interleaves_two_whole_screens_rather_than_splitting_one() {
+    let mut p = Ppu::new();
+    p.forced_blank = false;
+    p.bg_mode = 1;
+    p.bgs[0].tilemap_base = 0;
+    p.bgs[0].char_base = 0x1000;
+    p.write_register(0x212C, 0x01);
+    p.write_register(0x212D, 0x01);
+    p.write_register(0x2133, 0x08); // SETINI bit 3: pseudo-hires
+    write_4bpp_char(&mut p, 0x1000, 1, 0b1010_1010);
+    for i in 0..32 {
+        set_tilemap(&mut p, 0, i, 1);
+    }
+
+    let line = p.render_scanline(0);
+    assert_eq!(line.pixels.len(), 512, "pseudo-hires also emits 512 dots");
+    let differing = (0..256)
+        .filter(|n| line.pixels[2 * n].palette_index != line.pixels[2 * n + 1].palette_index)
+        .count();
+    assert_eq!(
+        differing, 0,
+        "the same layer on both screens must give identical pairs under \
+         pseudo-hires — applying the mode 5/6 double-rate fetch here would \
+         invent horizontal detail the hardware never drew"
+    );
+}

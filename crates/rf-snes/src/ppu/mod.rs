@@ -597,7 +597,13 @@ impl Ppu {
             bg.enabled = ts & (1 << i) != 0;
         }
         shadow.obj_enabled = ts & 0x10 != 0;
-        let composed = shadow.render_scanline_live(line);
+        // The SUB screen owns the EVEN half-dot of every pair on a
+        // true-hires line, so its backgrounds are fetched from the even
+        // 512-columns. On any other line this is `None` and the fetch is
+        // the ordinary 256-wide one — including pseudo-hires, which
+        // really is two independent screens.
+        let phase = shadow.hires_phase(bg::HiresPhase::Even);
+        let composed = shadow.render_scanline_live(line, phase);
 
         let math = &shadow.color_math;
         let fixed = shadow.color_math.fixed_bgr555();
@@ -644,8 +650,11 @@ impl Ppu {
     /// with what `render_scanline` produced.
     fn layer_at(&mut self, line: u16, x: usize) -> Option<rf_core_api::PixelLayer> {
         let mut shadow = self.with_line_state(line).unwrap_or_else(|| self.clone());
+        // This asks what the MAIN screen shows at `x`, so on a true-hires
+        // line it must ask the same half-dot the main screen owns.
+        let phase = shadow.hires_phase(bg::HiresPhase::Odd);
         shadow
-            .render_scanline_live(line)
+            .render_scanline_live(line, phase)
             .pixels
             .get(x)
             .map(|p| p.layer)
@@ -681,7 +690,9 @@ impl Ppu {
         // final state.
         if let Some(latched) = self.with_line_state(line) {
             let mut shadow = latched;
-            let composed = shadow.render_scanline_live(line);
+            // The MAIN screen owns the ODD half-dot on a true-hires line.
+            let phase = shadow.hires_phase(bg::HiresPhase::Odd);
+            let composed = shadow.render_scanline_live(line, phase);
             // Limit flags accumulate on the real PPU, not the shadow.
             self.range_over |= shadow.range_over;
             self.time_over |= shadow.time_over;
@@ -695,7 +706,8 @@ impl Ppu {
             }
             return composed;
         }
-        let composed = self.render_scanline_live(line);
+        let phase = self.hires_phase(bg::HiresPhase::Odd);
+        let composed = self.render_scanline_live(line, phase);
         if self.setini.hires_requested(self.bg_mode) {
             return self.render_scanline_hires(line, composed);
         }
@@ -712,22 +724,54 @@ impl Ppu {
     /// separate width field would have created a second source of truth
     /// that could disagree with the data beside it.
     ///
-    /// **Which screen supplies which half-dot** is the one fact worth
-    /// getting right, and both routes to 512 agree on it: pseudo-hires is
-    /// defined by fullsnes as `SHIFT SUBSCREEN HALF DOT TO THE LEFT`, so
-    /// the sub screen lands on the LEFT (even) dot of each pair and the
-    /// main screen on the RIGHT (odd). True hires in modes 5/6 works the
-    /// same way — "the main/subscreen pixels are rendered as half-pixels
-    /// of the high-resolution image". Swapping them shifts the entire
-    /// picture one half-dot and makes every hires ROM look subtly soft
-    /// rather than obviously wrong, which is exactly the kind of error a
-    /// screenshot comparison catches and an eyeball does not.
+    /// **Which screen supplies which half-dot**: pseudo-hires is defined
+    /// by fullsnes as `SHIFT SUBSCREEN HALF DOT TO THE LEFT`, so the sub
+    /// screen lands on the LEFT (even) dot of each pair and the main
+    /// screen on the RIGHT (odd). True hires in modes 5/6 agrees — "the
+    /// main/subscreen pixels are rendered as half-pixels of the
+    /// high-resolution image".
+    ///
+    /// **An earlier version of this comment claimed that swapping the two
+    /// would make a hires ROM "look subtly soft rather than obviously
+    /// wrong", and that an eyeball would pass it. Both halves were
+    /// false** (RF-L-11 — a doc comment is a claim about code, and this
+    /// one was never checked). Swapping the order changes 9,012 bytes of
+    /// InterlaceFont and is plainly visible. It also was not the bug: the
+    /// real defect was that BOTH screens fetched the same 256-wide
+    /// background, so both orders rendered the same mangled glyphs. The
+    /// fetch is what [`bg::HiresPhase`] fixed; this function only
+    /// interleaves.
     ///
     /// A sub-screen pixel whose source is the `$2132` fixed colour has no
     /// palette index to carry, so it contributes the backdrop index here.
     /// That is a deliberate narrowing: the fixed colour is a *colour
     /// math* input and this is the *picture* path, and law 4 forbids this
     /// crate from resolving either to RGB.
+    /// Which half-dot `screen` fetches from, or `None` when this line is
+    /// not TRUE hires.
+    ///
+    /// **Only modes 5 and 6 take a phase**, and that is the whole point
+    /// of this function existing rather than reusing
+    /// [`SetIni::hires_requested`], which deliberately answers a
+    /// different question: "does this line emit 512 dots?" Both routes to
+    /// 512 answer yes, but only one of them changes the BG fetch.
+    ///
+    /// * **pseudo-hires** (`$2133` bit 3, any mode) — genuinely two
+    ///   independent 256-wide screens, interleaved. `None` for both.
+    /// * **true hires** (modes 5/6) — ONE 512-wide picture fetched at
+    ///   double rate, split across the two screens. `Even`/`Odd`.
+    ///
+    /// Collapsing the two is what made every mode-5 ROM render the 256
+    /// picture with its columns duplicated; see [`bg::HiresPhase`] for
+    /// the measurement.
+    fn hires_phase(&self, screen: bg::HiresPhase) -> bg::HiresPhase {
+        if matches!(self.bg_mode, 5 | 6) {
+            screen
+        } else {
+            bg::HiresPhase::None
+        }
+    }
+
     fn render_scanline_hires(&mut self, y: u16, main: Scanline) -> Scanline {
         let (sub, _fixed_color) = self.render_sub_scanline(y);
         let width = main.pixels.len();
@@ -772,7 +816,7 @@ impl Ppu {
     /// `y` here is the **hardware scanline** (1-224), not a 0-based row —
     /// see [`Ppu::render_scanline`], which is the only caller and does the
     /// conversion.
-    fn render_scanline_live(&mut self, y: u16) -> Scanline {
+    fn render_scanline_live(&mut self, y: u16, phase: bg::HiresPhase) -> Scanline {
         let backdrop = PpuPixel {
             palette_index: 0,
             layer: PixelLayer::Backdrop,
@@ -795,7 +839,7 @@ impl Ppu {
             return Scanline { pixels, overlay };
         }
 
-        let bg_pixels = bg::render_backgrounds(self, y);
+        let bg_pixels = bg::render_backgrounds(self, y, phase);
         // Mode 7 replaces BG1 entirely: its "tilemap" is an affine
         // transform, so it is rendered by its own module and injected as
         // BG1's contribution rather than fetched through the tile path.

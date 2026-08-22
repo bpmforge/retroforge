@@ -233,6 +233,63 @@ const GOLDENS: &[(&str, &str)] = &[
         "GreenSpace.sfc",
         "4f81904a9b06c58572a0e5769b3b4ffb99e7bd4be88ee8c2b64a804f483d9dc6",
     ),
+    // ---- true hires, modes 5/6 (W7-06 criterion 3, third pass) ----
+    //
+    // These seven were EXCLUDED through two earlier passes of W7-06 and
+    // are pinned now because the frames were finally LOOKED AT and are
+    // right. What that look found first was that they were WRONG, and
+    // the two defects behind them are worth naming because neither was
+    // visible to any gate in this repository:
+    //
+    // 1. Both screens fetched the same 256-wide background, so the 512
+    //    picture was the 256 picture with every column duplicated --
+    //    55,842 of 57,344 half-dot pairs identical on InterlaceFont.
+    //    Fixed by bg::HiresPhase (a double-rate fetch, even columns to
+    //    the sub screen and odd to the main).
+    // 2. Hires tiles were treated as 8 half-dots wide, so 64 tiles were
+    //    read where 32 exist and a 32-wide tilemap WRAPPED -- the line
+    //    rendered twice, side by side. In modes 5/6 the size bit selects
+    //    16x8 or 16x16: sixteen half-dots either way.
+    //
+    // Pinning these closes the blind spot both defects hid in. Before
+    // this, deliberately swapping the half-dot order left all nine gate
+    // commands AND this suite green, because every mode 5/6 ROM was on
+    // the excluded list -- the hires path had no coverage at all.
+    // MosaicMode5.sfc: the moogle again under mosaic -- FLAT blocks of one colour, which is the check that mattered here (see the mosaic note in bg.rs: the wrong space to snap in fills every block with a two-colour stripe instead).
+    (
+        "MosaicMode5.sfc",
+        "1a8ca01511ba641085315ee0bdb6c6be51825638be061baa8ddf111562de6531",
+    ),
+    // InterlaceFont.sfc: the full printable-ASCII chart, sharp: ! through @ on the top row, A-Z, then a-z. Its whole purpose is 512-dot text and every glyph is correctly formed.
+    (
+        "InterlaceFont.sfc",
+        "91e6eb452f69150a5132807733123fa9b9e24552e4f5c3f49848ad5d996202a1",
+    ),
+    // InterlaceMoogle.sfc: a moogle's head with its red pompom, clean edges, no column striping.
+    (
+        "InterlaceMoogle.sfc",
+        "f79457795f7500ac6f15cf70e68a80096ea3f1bb3953ea54167191ea1644ee0e",
+    ),
+    // InterlaceMystHDMA.sfc: the Myst rocket-ship island against a pale sky, with the HDMA gradient behind it.
+    (
+        "InterlaceMystHDMA.sfc",
+        "59890c4751083acaa8be3b10005752016534788bb4626d77444e3f8cea17f48f",
+    ),
+    // InterlaceRPG.sfc: an RPG world map inside an ornate status frame, party sprite on the peak.
+    (
+        "InterlaceRPG.sfc",
+        "f3ed84a9615bdbe82d0b796df1e8141413bf29fe3a7c47c8fc48843c3ee1eaa4",
+    ),
+    // InterlaceScroll.sfc: a tiled star field, every tile identical and aligned.
+    (
+        "InterlaceScroll.sfc",
+        "919fc197aac3a5ae5f032518a08407a6f3a490d4a92daa4b930b324c456a7295",
+    ),
+    // InterlaceSimpsonsHDMA.sfc: Homer and Marge on the couch against the pink wall.
+    (
+        "InterlaceSimpsonsHDMA.sfc",
+        "61b4ac1d86957fd213820fbef52d61a46574d492560d2c25735aa75683b7538c",
+    ),
 ];
 
 /// Generous cap; the fade completes in well under this.
@@ -262,40 +319,12 @@ fn rom_dir() -> Option<std::path::PathBuf> {
 /// means to draw". Both entries name the ticket that will remove them.
 const EXCLUDED: &[(&str, &str)] = &[
     (
-        "MosaicMode5.sfc",
-        "mode 5 is HI-RES 512. **THE OLD REASON HERE IS OUT OF DATE AND THIS IS THE CORRECTION**: it said 'this PPU has no hi-res path at all', which was true until W7-06's second pass built Ppu::render_scanline_hires on top of W7-16's sub-screen channel. This ROM now renders 512 dots -- sub screen on the even half-dot, main on the odd -- which is why the golden harness had to become width-aware: it used to assert every line was exactly 256 and turned a correctly-widened hires frame into a HARNESS failure rather than a golden mismatch. STILL EXCLUDED, and for the reason that outlived the fix: this suite pins a golden only after the frame was rendered to a PNG and LOOKED AT, a standard that changed three of four outcomes when W7-05 applied it. Nobody has looked at the 512-dot frame yet, and pinning our own unverified output would record a picture nobody claims is right -- the same thing the old reason refused to do. The MOSAIC half remains correct and visible. TO REMOVE: look at the frame (RF_GOLDEN_DUMP=1 now emits a correctly-headed 512-wide PPM) and pin it.",
-    ),
-    (
         "RedSpaceHDMA.sfc",
         "the HDMA is CORRECT and the golden still cannot see it. Tracing the channel shows          exactly the right walk: $2121 <- $00 twice, then $2122 <- $1F, $1E, $1D ... one step          every 7 lines, 32 steps over 224 lines -- a red gradient down the screen. But the          demo draws NOTHING ELSE (VRAM is legitimately empty; it clears VRAM/WRAM/CGRAM and          parks in a one-instruction loop at $00:818B with NMI off), so every pixel of the frame          is palette index 0. This suite hashes palette INDICES, so a per-line CGRAM gradient is          invisible to it by construction, and the PPM dump resolves index 0 against ONE          end-of-frame palette snapshot -- which the gradient has by then walked down to $0000,          hence a black picture. Not a defect: the same index-vs-colour boundary that keeps          colour math out of the pixel stream (law 4). Covered instead by          tests::hdma::hdma_writes_a_different_backdrop_colour_on_each_line. W7-16 owns making          colour-domain output reachable.",
     ),
     (
         "RedSpaceIndirectHDMA.sfc",
         "same picture and same reason as RedSpaceHDMA, via INDIRECT mode -- the channel          dereferences its pointer and reads the identical $1F, $1E, $1D gradient, which is          direct evidence that criterion 1's indirect-mode bank register works. Excluded for the          index-domain reason above, not for anything wrong with the transfer.",
-    ),
-    (
-        "InterlaceFont.sfc",
-        "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed. THE OLD REASON HERE IS OUT OF DATE AND THIS IS THE CORRECTION: it said this core composes ONE screen so the missing half is not recoverable, which was true until W7-16 shipped CoreSink::sub_scanline and W7-06's second pass built Ppu::render_scanline_hires. Mode 5 now composes the full 512 dots -- the sub screen supplies the LEFT half-dot of each pair and the main screen the RIGHT, unit-tested in tests/ppu.rs. WHAT STILL BLOCKS A PIN IS VERIFICATION, NOT RENDERING. This module pins a golden only after the frame was rendered to a PNG and LOOKED AT, a standard that CHANGED THREE OF FOUR OUTCOMES when W7-05 applied it, so it is load-bearing rather than ceremonial. PeterLemon ships a reference .png beside every ROM, but scripts/fetch-peterlemon-ppu.sh fetches only the .sfc files, and comparing one programmatically needs a PNG decoder this workspace does not carry (a docs/TECH_STACK.md dependency row, outside W7-06 write_scope). Pinning the hash of our own unverified output would assert correctness nobody checked -- the same error the old reason warned about, one step further along. TO UNBLOCK: fetch the reference PNGs and compare programmatically, or have a human look at the six frames and pin them.",
-    ),
-    (
-        "InterlaceMoogle.sfc",
-        "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed. THE OLD REASON HERE IS OUT OF DATE AND THIS IS THE CORRECTION: it said this core composes ONE screen so the missing half is not recoverable, which was true until W7-16 shipped CoreSink::sub_scanline and W7-06's second pass built Ppu::render_scanline_hires. Mode 5 now composes the full 512 dots -- the sub screen supplies the LEFT half-dot of each pair and the main screen the RIGHT, unit-tested in tests/ppu.rs. WHAT STILL BLOCKS A PIN IS VERIFICATION, NOT RENDERING. This module pins a golden only after the frame was rendered to a PNG and LOOKED AT, a standard that CHANGED THREE OF FOUR OUTCOMES when W7-05 applied it, so it is load-bearing rather than ceremonial. PeterLemon ships a reference .png beside every ROM, but scripts/fetch-peterlemon-ppu.sh fetches only the .sfc files, and comparing one programmatically needs a PNG decoder this workspace does not carry (a docs/TECH_STACK.md dependency row, outside W7-06 write_scope). Pinning the hash of our own unverified output would assert correctness nobody checked -- the same error the old reason warned about, one step further along. TO UNBLOCK: fetch the reference PNGs and compare programmatically, or have a human look at the six frames and pin them.",
-    ),
-    (
-        "InterlaceMystHDMA.sfc",
-        "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed. THE OLD REASON HERE IS OUT OF DATE AND THIS IS THE CORRECTION: it said this core composes ONE screen so the missing half is not recoverable, which was true until W7-16 shipped CoreSink::sub_scanline and W7-06's second pass built Ppu::render_scanline_hires. Mode 5 now composes the full 512 dots -- the sub screen supplies the LEFT half-dot of each pair and the main screen the RIGHT, unit-tested in tests/ppu.rs. WHAT STILL BLOCKS A PIN IS VERIFICATION, NOT RENDERING. This module pins a golden only after the frame was rendered to a PNG and LOOKED AT, a standard that CHANGED THREE OF FOUR OUTCOMES when W7-05 applied it, so it is load-bearing rather than ceremonial. PeterLemon ships a reference .png beside every ROM, but scripts/fetch-peterlemon-ppu.sh fetches only the .sfc files, and comparing one programmatically needs a PNG decoder this workspace does not carry (a docs/TECH_STACK.md dependency row, outside W7-06 write_scope). Pinning the hash of our own unverified output would assert correctness nobody checked -- the same error the old reason warned about, one step further along. TO UNBLOCK: fetch the reference PNGs and compare programmatically, or have a human look at the six frames and pin them.",
-    ),
-    (
-        "InterlaceRPG.sfc",
-        "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed. THE OLD REASON HERE IS OUT OF DATE AND THIS IS THE CORRECTION: it said this core composes ONE screen so the missing half is not recoverable, which was true until W7-16 shipped CoreSink::sub_scanline and W7-06's second pass built Ppu::render_scanline_hires. Mode 5 now composes the full 512 dots -- the sub screen supplies the LEFT half-dot of each pair and the main screen the RIGHT, unit-tested in tests/ppu.rs. WHAT STILL BLOCKS A PIN IS VERIFICATION, NOT RENDERING. This module pins a golden only after the frame was rendered to a PNG and LOOKED AT, a standard that CHANGED THREE OF FOUR OUTCOMES when W7-05 applied it, so it is load-bearing rather than ceremonial. PeterLemon ships a reference .png beside every ROM, but scripts/fetch-peterlemon-ppu.sh fetches only the .sfc files, and comparing one programmatically needs a PNG decoder this workspace does not carry (a docs/TECH_STACK.md dependency row, outside W7-06 write_scope). Pinning the hash of our own unverified output would assert correctness nobody checked -- the same error the old reason warned about, one step further along. TO UNBLOCK: fetch the reference PNGs and compare programmatically, or have a human look at the six frames and pin them.",
-    ),
-    (
-        "InterlaceScroll.sfc",
-        "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed. THE OLD REASON HERE IS OUT OF DATE AND THIS IS THE CORRECTION: it said this core composes ONE screen so the missing half is not recoverable, which was true until W7-16 shipped CoreSink::sub_scanline and W7-06's second pass built Ppu::render_scanline_hires. Mode 5 now composes the full 512 dots -- the sub screen supplies the LEFT half-dot of each pair and the main screen the RIGHT, unit-tested in tests/ppu.rs. WHAT STILL BLOCKS A PIN IS VERIFICATION, NOT RENDERING. This module pins a golden only after the frame was rendered to a PNG and LOOKED AT, a standard that CHANGED THREE OF FOUR OUTCOMES when W7-05 applied it, so it is load-bearing rather than ceremonial. PeterLemon ships a reference .png beside every ROM, but scripts/fetch-peterlemon-ppu.sh fetches only the .sfc files, and comparing one programmatically needs a PNG decoder this workspace does not carry (a docs/TECH_STACK.md dependency row, outside W7-06 write_scope). Pinning the hash of our own unverified output would assert correctness nobody checked -- the same error the old reason warned about, one step further along. TO UNBLOCK: fetch the reference PNGs and compare programmatically, or have a human look at the six frames and pin them.",
-    ),
-    (
-        "InterlaceSimpsonsHDMA.sfc",
-        "ALL SIX PPU/Interlace ROMs run in BG MODE 5, checked rather than assumed. THE OLD REASON HERE IS OUT OF DATE AND THIS IS THE CORRECTION: it said this core composes ONE screen so the missing half is not recoverable, which was true until W7-16 shipped CoreSink::sub_scanline and W7-06's second pass built Ppu::render_scanline_hires. Mode 5 now composes the full 512 dots -- the sub screen supplies the LEFT half-dot of each pair and the main screen the RIGHT, unit-tested in tests/ppu.rs. WHAT STILL BLOCKS A PIN IS VERIFICATION, NOT RENDERING. This module pins a golden only after the frame was rendered to a PNG and LOOKED AT, a standard that CHANGED THREE OF FOUR OUTCOMES when W7-05 applied it, so it is load-bearing rather than ceremonial. PeterLemon ships a reference .png beside every ROM, but scripts/fetch-peterlemon-ppu.sh fetches only the .sfc files, and comparing one programmatically needs a PNG decoder this workspace does not carry (a docs/TECH_STACK.md dependency row, outside W7-06 write_scope). Pinning the hash of our own unverified output would assert correctness nobody checked -- the same error the old reason warned about, one step further along. TO UNBLOCK: fetch the reference PNGs and compare programmatically, or have a human look at the six frames and pin them.",
     ),
     (
         "HiColor1241DLair.sfc",

@@ -51,6 +51,53 @@ pub struct BgScanlines {
     pub layers: [BgScanline; 4],
 }
 
+/// Which half-dot of a **true hires** line this fetch samples.
+///
+/// Modes 5 and 6 fetch backgrounds at DOUBLE the horizontal rate: one
+/// 512-wide picture, whose even columns are composed into the sub screen
+/// and odd columns into the main screen. Both screens still produce 256
+/// dots, so nothing downstream of this module changes — only *which*
+/// 512-column each dot samples. Interleaving the two 256-wide results
+/// (sub on the even half-dot, main on the odd) reconstructs the one
+/// 512-wide picture the hardware drew.
+///
+/// **This is the difference between true hires and pseudo-hires, and
+/// getting it wrong is not a subtle error.** Pseudo-hires (`SETINI` bit
+/// 3) really is two independent 256-wide screens interleaved, so it uses
+/// [`HiresPhase::None`] for both. Rendering modes 5/6 that way instead
+/// makes the sub and main screens fetch the same BG at the same scroll,
+/// so the 512 picture becomes the 256 picture with every column
+/// DUPLICATED. Measured on `InterlaceFont` before this existed: 55,842 of
+/// 57,344 half-dot pairs identical (97.4%), each plane individually
+/// sharp, glyph edges serrated wherever the remaining 2.6% disagreed.
+///
+/// Scroll is doubled with the space: bsnes shifts `hscroll` left by one
+/// for hires, so `BGnHOFS` stays a 256-space value and this module walks
+/// 512-space. Tile width does NOT change — an 8-pixel tile is 8
+/// half-dots, which is exactly why 64 tiles span the line instead of 32.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HiresPhase {
+    /// Not a true-hires line: one BG pixel per dot, scroll in 256-space.
+    /// Pseudo-hires uses this for BOTH screens — see above.
+    #[default]
+    None,
+    /// Modes 5/6 SUB screen — the even (left) half-dot of each pair.
+    Even,
+    /// Modes 5/6 MAIN screen — the odd (right) half-dot.
+    Odd,
+}
+
+impl HiresPhase {
+    /// `(horizontal scale, half-dot offset)` for this phase.
+    fn scale(self) -> (u16, u16) {
+        match self {
+            HiresPhase::None => (1, 0),
+            HiresPhase::Even => (2, 0),
+            HiresPhase::Odd => (2, 1),
+        }
+    }
+}
+
 /// Bits per pixel for each layer in the active mode. `0` means the mode
 /// has no such layer.
 ///
@@ -104,41 +151,96 @@ pub fn palette_base(mode: u8, bg: usize) -> u8 {
 }
 
 /// Render every enabled background for scanline `y`.
+///
+/// `phase` is [`HiresPhase::None`] for every ordinary line; modes 5 and 6
+/// call this twice, once per half-dot. See [`HiresPhase`].
 #[must_use]
-pub fn render_backgrounds(ppu: &Ppu, y: u16) -> BgScanlines {
+pub fn render_backgrounds(ppu: &Ppu, y: u16, phase: HiresPhase) -> BgScanlines {
     let mut out = BgScanlines::default();
     let depths = bit_depths(ppu.bg_mode);
     for (bg, &depth) in depths.iter().enumerate() {
         if depth == 0 || !ppu.bgs[bg].enabled {
             continue;
         }
-        out.layers[bg] = render_layer(ppu, bg, y, depth, palette_base(ppu.bg_mode, bg));
+        out.layers[bg] = render_layer(ppu, bg, y, depth, palette_base(ppu.bg_mode, bg), phase);
     }
     out
 }
 
-fn render_layer(ppu: &Ppu, bg_index: usize, y: u16, depth: u8, palette_base: u8) -> BgScanline {
+fn render_layer(
+    ppu: &Ppu,
+    bg_index: usize,
+    y: u16,
+    depth: u8,
+    palette_base: u8,
+    phase: HiresPhase,
+) -> BgScanline {
     let bg = &ppu.bgs[bg_index];
     let mut out = BgScanline::default();
-    let tile_px = if bg.tile_size_16 { 16u16 } else { 8 };
+    // (2, 0) or (2, 1) on a true-hires line, (1, 0) otherwise — so every
+    // expression below is the non-hires one unchanged when scale is 1.
+    let (scale, half_dot) = phase.scale();
+
+    // **Horizontal and vertical tile size are not the same thing in modes
+    // 5 and 6.** `$2105`'s per-layer size bit selects 8×8 or 16×16
+    // everywhere else, but in true hires it selects 16×8 or 16×16 — the
+    // tile is SIXTEEN half-dots wide either way, carrying sixteen pixels
+    // of character data, which is what makes the extra horizontal
+    // resolution real. The tilemap therefore still spans the line in 32
+    // tiles, exactly as it does at 256.
+    //
+    // Treating a hires tile as 8 half-dots wide is a specific and
+    // recognisable failure: 64 tiles are read where 32 exist, so a 32-wide
+    // tilemap wraps and **the whole line renders twice side by side**.
+    // That is what this code did before the fix, and the doubled picture
+    // is how it was caught.
+    let hires = scale == 2;
+    let tile_w = if hires || bg.tile_size_16 { 16u16 } else { 8 };
+    let tile_h = if bg.tile_size_16 { 16u16 } else { 8 };
 
     for x in 0..WIDTH {
         // Offset-per-tile replaces this column's scroll wholesale rather
         // than adding to it (modes 2/4/6 only; a no-op elsewhere).
+        //
+        // **The OPT column stays in 256-space and an OPT-supplied scroll
+        // is NOT doubled**, while `bg.hofs` is. That is deliberate and it
+        // is the one asymmetry here: the OPT fetch happens once per eight
+        // DOTS at the dot rate, and `offset_per_tile` masks its index to
+        // the 32 columns that implies, so handing it a 512-space column
+        // would wrap it. Mode 6 is the only mode that is hires AND
+        // offset-per-tile, and no ROM in this suite uses it — so this
+        // pairing is UNVERIFIED and is written to leave the 256-space
+        // behaviour exactly as it was rather than to guess at hires.
         let column = (x as u16) / 8;
         let offsets = offset_per_tile(ppu, bg_index, column);
-        let hofs = offsets.h.unwrap_or(bg.hofs);
+        let hofs = offsets.h.unwrap_or_else(|| bg.hofs.wrapping_mul(scale));
         let vofs = offsets.v.unwrap_or(bg.vofs);
 
         // Mosaic snaps the SOURCE coordinate, so a block of pixels all
         // fetch the same texel. Snapping the output instead would blur
         // rather than blockify.
-        let mx = ppu.mosaic.snap(bg_index, x as u16);
+        //
+        // **The snap is taken in the SAME space the fetch walks** — 512
+        // on a true-hires line, 256 otherwise — so a size-N block is N
+        // half-dots of one colour.
+        //
+        // The alternative (snap the dot, then scale) was tried and is
+        // wrong, which MosaicMode5 shows directly: it makes both
+        // half-dots of a block resolve to the same *pair* of source
+        // pixels rather than the same pixel, so every block fills with a
+        // two-colour vertical stripe instead of a flat colour. That is a
+        // mosaic that does not mosaic. Checked by rendering both and
+        // looking at them, not by argument — the reasoning for the wrong
+        // one was perfectly plausible.
+        let mx = ppu.mosaic.snap(
+            bg_index,
+            (x as u16).wrapping_mul(scale).wrapping_add(half_dot),
+        );
         let my = ppu.mosaic.snap(bg_index, y);
         let world_x = mx.wrapping_add(hofs);
         let world_y = my.wrapping_add(vofs);
 
-        let entry = tilemap_entry(ppu, bg, world_x, world_y, tile_px);
+        let entry = tilemap_entry(ppu, bg, world_x, world_y, tile_w, tile_h);
         let character = entry & 0x03FF;
         let palette = ((entry >> 10) & 0x07) as u8;
         let priority = ((entry >> 13) & 0x01) as u8;
@@ -146,18 +248,21 @@ fn render_layer(ppu: &Ppu, bg_index: usize, y: u16, depth: u8, palette_base: u8)
         let flip_y = entry & 0x8000 != 0;
 
         // Position within the tile, honouring flips.
-        let mut px = world_x % tile_px;
-        let mut py = world_y % tile_px;
+        let mut px = world_x % tile_w;
+        let mut py = world_y % tile_h;
         if flip_x {
-            px = tile_px - 1 - px;
+            px = tile_w - 1 - px;
         }
         if flip_y {
-            py = tile_px - 1 - py;
+            py = tile_h - 1 - py;
         }
 
-        // A 16×16 tile is four 8×8 characters laid out 2×2, with the
-        // second row a full 16 characters further on — not 2, because the
-        // character map is 16 wide.
+        // A 16-wide tile is two 8×8 characters side by side, and a
+        // 16-tall one repeats that a full 16 characters further on — not
+        // 2, because the character map is 16 wide. The same expression
+        // covers all four shapes this mode can ask for (8×8, 16×16, and
+        // hires 16×8 / 16×16) because each term is zero when that
+        // dimension is only 8 wide.
         let sub = (px / 8) + (py / 8) * 16;
         let character = (character + sub) & 0x03FF;
         let colour = fetch_pixel(ppu, bg.char_base, character, px % 8, py % 8, depth);
@@ -183,9 +288,16 @@ fn render_layer(ppu: &Ppu, bg_index: usize, y: u16, depth: u8, palette_base: u8)
 /// The `& 1` terms are the screen-selection: a 64-wide map is two 1 KiB
 /// screens side by side, a 64-tall map is two stacked, and a 64×64 map is
 /// all four in the order top-left, top-right, bottom-left, bottom-right.
-fn tilemap_entry(ppu: &Ppu, bg: &BgLayer, world_x: u16, world_y: u16, tile_px: u16) -> u16 {
-    let tile_x = world_x / tile_px;
-    let tile_y = world_y / tile_px;
+fn tilemap_entry(
+    ppu: &Ppu,
+    bg: &BgLayer,
+    world_x: u16,
+    world_y: u16,
+    tile_w: u16,
+    tile_h: u16,
+) -> u16 {
+    let tile_x = world_x / tile_w;
+    let tile_y = world_y / tile_h;
 
     let wide = bg.tilemap_size & 0x01 != 0;
     let tall = bg.tilemap_size & 0x02 != 0;

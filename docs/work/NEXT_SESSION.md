@@ -41,65 +41,52 @@ it unsatisfiable; if RotZoom's only change came from the attribution bug,
 correct attribution should leave it unchanged. Do not amend it — fix
 attribution and re-measure.
 
-### B. RESOLVED 2026-08-21 — the frames were looked at, and they are WRONG. Do NOT pin. W7-06 crit 3 stays open, W7-10 stays blocked.
+### B. RESOLVED 2026-08-21 — two defects found and FIXED. W7-06 is closed; W7-10 is now claimable.
 
-Brad looked at the six Interlace frames and called them jagged. He was
-right, and the defect is not the one the code comment predicted.
+Brad looked at the six mode-5 Interlace frames and called them jagged. He
+was right, and the cause was not the half-dot ORDER that two earlier
+passes of this ticket kept reasoning about.
 
-**What the comment claimed** (`ppu/mod.rs`, `render_scanline_hires`):
-that getting the half-dot order backwards "makes every hires ROM look
-subtly soft rather than obviously wrong, which is exactly the kind of
-error a screenshot comparison catches and an eyeball does not." **Both
-halves of that are false.** Swapping the order changed 9,012 bytes of
-InterlaceFont alone and is plainly visible. And it does not matter which
-way round it goes: *both orders render mangled, serrated glyphs*, so
-order was never the question.
+**Defect 1 — no double-rate fetch.** Modes 5/6 are ONE 512-wide picture
+whose even columns feed the sub screen and odd columns the main screen.
+The code instead interleaved two independent 256-wide renders — which is
+*pseudo-hires*, a different mechanism that happens to share the same 512
+output. Both screens therefore fetched the same background at the same
+scroll, so the 512 picture was the 256 picture with every column
+duplicated: **55,842 of 57,344 half-dot pairs identical on
+InterlaceFont**, each plane individually sharp, glyph edges serrated
+wherever the remaining 2.6% disagreed. `bg::HiresPhase` now separates the
+two routes; `hires_requested()` still answers yes to both, because the
+question it asks ("does this line emit 512 dots?") is genuinely different.
 
-**The measurement that names the real defect.** Split a composed 512-dot
-frame back into its two half-dot planes and compare them pixel for
-pixel:
+**Defect 2 — hires tile width.** In modes 5/6 the `$2105` size bit selects
+**16×8 or 16×16**: a tile is sixteen half-dots wide, so 32 tiles span the
+line exactly as they do at 256. Treating it as eight read 64 tiles where
+32 exist, wrapped a 32-wide tilemap, and **rendered the whole line twice
+side by side** — which is how it was caught, from the PeterLemon font
+chart appearing twice across the frame.
 
-    InterlaceFont: half-dot pairs identical 55,842/57,344 = 97.4%
+**Also corrected:** mosaic must snap in the same space the fetch walks
+(512 on a hires line). Snapping the dot and scaling afterwards makes both
+half-dots of a block resolve to the same *pair* rather than the same
+pixel, filling every block with a two-colour vertical stripe instead of a
+flat colour. Both versions were rendered and looked at; the reasoning for
+the wrong one was perfectly plausible.
 
-Each plane is *individually* sharp and legible. The 512 picture is
-therefore very nearly the 256 picture with every column duplicated, and
-the residual 2.6% disagreement along glyph edges is exactly the
-serration on screen.
+**Evidence.** InterlaceFont renders the full printable-ASCII chart, sharp.
+Moogle, RPG, Scroll, MystHDMA and SimpsonsHDMA all render their intended
+pictures. MosaicMode5 shows flat mosaic blocks — which also discharges the
+criterion folded in from the withdrawn W7-17. All seven are now pinned
+goldens. Three new unit tests, each mutation-checked to fail on its own
+defect and only its own. Workspace 1,617 passing; nine-command gate green.
 
-**Why that is wrong, verified rather than guessed.** Instrumenting the
-hires entry point reports, for every Interlace ROM:
-
-    bg_mode=5  pseudo_hires=false  main_en=[BG1]  sub_ts=0x01/0x11
-
-So these are **true hires mode 5, not pseudo-hires**, and
-`hires_requested()` currently conflates two routes that need *different*
-implementations:
-
-- **pseudo-hires** (`SETINI` bit 3): interleaving two independent
-  256-wide renders IS the hardware behaviour. Current code is right.
-- **modes 5/6** (what actually fires here): main and sub are the even and
-  odd columns of ONE 512-wide picture produced by a **double-rate BG
-  fetch**. Interleaving two independent 256-wide renders of the same BG1
-  with the same scroll is not an approximation of that — it is a
-  duplication, which is what the 97.4% measures.
-
-`render_scanline_hires` does the same thing on both routes, which is the
-bug. The fix is a double-rate BG fetch for modes 5/6; the pseudo-hires
-path should keep the current composition.
-
-Two collateral facts worth keeping:
-
-- **`SETINI` bit 3 is latched correctly** (`value & 0x08`). That was
-  checked, not assumed — the ROM names say "Interlace" (bit 0) and a
-  wrong bit index would have produced the same duplication signature.
-- **The gate cannot see any of this.** Swapping the half-dot order left
-  all three golden tests passing, because no pinned golden covers the
-  hires path at all. Whatever fixes this is unverifiable until at least
-  one hires golden is pinned — add that to the hidden-gate list in §2.
-
-Repro: `RF_GOLDEN_DUMP=<dir> cargo test -p rf-snes --test
-peterlemon_golden -- --ignored`, then split the 512-wide PPM into even
-and odd columns and compare.
+**One clause still needs you:** criterion 1's *"and the renderer
+letterboxing"*. It is `rf-renderer`, and W7-06's write_scope is
+`crates/rf-snes/** + scripts/**` — unchanged through all three passes. The
+core half (SETINI decode, 224-vs-239 visible lines, vblank shortening)
+shipped in the first pass. This needs **either an rf-renderer ticket or a
+scope amendment**, and it was not filed unilaterally because splitting a
+ticket is your call.
 
 ### C. Rule on an artifact → unblocks W9-06 crit 3
 
@@ -158,11 +145,16 @@ node .github/scripts/verify-doc-samples.mjs              OK   (doc site)
    `#[cfg(feature = "gamepad")]` is never type-checked by the gate. A
    green default build hid a real compile error in W8-04. Use
    `cargo clippy -p retroforge --features gamepad --all-targets`.
-3. **The hires path has no golden at all.** Every mode 5/6 ROM is on the
-   waived list, so `render_scanline_hires` is uncovered even by the
-   `#[ignore]`d suite. Deliberately swapping its half-dot order left all
-   three golden tests passing (§1B). Until one hires golden is pinned,
-   *no* change to that function is verifiable by any gate.
+3. **The hires path had no golden at all — CLOSED 2026-08-21, and worth
+   keeping as the pattern.** Every mode 5/6 ROM sat on the excluded list,
+   so `render_scanline_hires` was uncovered even by the `#[ignore]`d
+   suite: deliberately swapping its half-dot order left all nine gate
+   commands *and* that suite green, while two real defects sat in the
+   code (§1B). Seven hires goldens are now pinned and re-running that
+   swap FAILS. **The general form: an entry on an exclusion list is a
+   hole in the gate, not a note about a ROM.** Before trusting a green
+   run on any subsystem, check whether its ROMs are actually in
+   `GOLDENS` or merely in `EXCLUDED`.
 
 **Run the suite with nothing else running.** RF-L-10 (now fixed) made two
 concurrent `cargo test` runs delete each other's evidence file; a red run
