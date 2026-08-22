@@ -215,3 +215,109 @@ fn undisbeliever_goldens_match() {
         failures.join("\n")
     );
 }
+
+/// Survey every fetched ROM: what it renders, and what it drives.
+///
+/// **A tool, not an assertion** — it prints and asserts nothing, because
+/// its job is to answer "can a golden here discriminate at all?" and the
+/// answer turned out to be mostly no.
+///
+/// Measured 2026-08-21 across all 29 ROMs (ticket W7-13 criterion 2):
+///
+/// * **2 distinct pixel hashes.** 13 ROMs render one identical frame
+///   (7 palette indices) and 16 render an entirely blank one (1 index).
+///   Different tests, same picture — the same index-domain vacuity that
+///   excludes the RedSpace pair from the PeterLemon suite, at scale.
+/// * **7 distinct mid-line write hashes**, 21 of them empty. The
+///   `inidisp_hammer` family DOES separate here — 1,988 writes over 70
+///   lines against 5,460 over 224 against a single write — and that
+///   signal did not exist before W7-15 recorded writes per line.
+///
+/// So "the undisbeliever set is green" cannot mean 29 pinned hashes: 21
+/// of them would pin the same two pictures and prove nothing. What these
+/// ROMs test — INIDISP brightness, forced-blank timing, DMA bugs — lives
+/// in the brightness and colour domains that law 4 keeps out of the
+/// indexed pixel stream.
+#[test]
+#[ignore = "tool: prints a survey, asserts nothing"]
+fn survey_the_whole_set() {
+    let Some(dir) = rom_dir() else {
+        eprintln!("SKIP");
+        return;
+    };
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".sfc"))
+        .collect();
+    names.sort();
+    eprintln!("{} ROMs", names.len());
+    for name in names {
+        let path = dir.join(&name);
+        let rom = std::fs::read(&path).unwrap();
+        let Ok(mut s) = SnesSystem::load(&rom) else {
+            eprintln!("{name:<38} LOAD FAILED");
+            continue;
+        };
+        let mut n = 0u64;
+        while n < MAX_INSTRUCTIONS {
+            if s.step().is_err() {
+                break;
+            }
+            n += 1;
+            if !s.bus.ppu.forced_blank && s.bus.ppu.brightness == 0x0F {
+                break;
+            }
+        }
+        let left = !s.bus.ppu.forced_blank && s.bus.ppu.brightness == 0x0F;
+        for _ in 0..SETTLE {
+            let _ = s.step();
+        }
+        let mut distinct = std::collections::BTreeSet::new();
+        let mut hasher = Sha256::new();
+        for y in 0..224u16 {
+            let line = s.bus.ppu.render_scanline(y);
+            let idx: Vec<u8> = line.pixels.iter().map(|p| p.palette_index).collect();
+            distinct.extend(idx.iter().copied());
+            hasher.update(&idx);
+        }
+        use std::fmt::Write;
+        let hex = hasher.finalize().iter().fold(String::new(), |mut a, b| {
+            let _ = write!(a, "{b:02x}");
+            a
+        });
+        let mut wh = Sha256::new();
+        for l in 0..240u16 {
+            for (dot, addr, val) in s.bus.ppu.line_writes_for_test(l) {
+                wh.update(l.to_le_bytes());
+                wh.update(dot.to_le_bytes());
+                wh.update(addr.to_le_bytes());
+                wh.update([val]);
+            }
+        }
+        let whex = wh.finalize().iter().fold(String::new(), |mut a, b| {
+            use std::fmt::Write as _;
+            let _ = write!(a, "{b:02x}");
+            a
+        });
+        let mid: usize = (0..240u16)
+            .map(|l| s.bus.ppu.line_writes_for_test(l).len())
+            .sum();
+        let lines_with: usize = (0..240u16)
+            .filter(|&l| !s.bus.ppu.line_writes_for_test(l).is_empty())
+            .count();
+        let regs: std::collections::BTreeSet<u16> = (0..240u16)
+            .flat_map(|l| s.bus.ppu.line_writes_for_test(l).into_iter().map(|w| w.1))
+            .collect();
+        eprintln!(
+            "{name:<38} blank_left={left:<5} mode={} idx={:<3} mid={mid:<6} \
+             lines={lines_with:<4} regs={:04X?} pix={} write={}",
+            s.bus.ppu.bg_mode,
+            distinct.len(),
+            regs.iter().collect::<Vec<_>>(),
+            &hex[..10],
+            &whex[..14]
+        );
+    }
+}
