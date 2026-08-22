@@ -103,13 +103,17 @@
 #    session (rainwarrior has no public repo by that name; pinobatch/
 #    holy-mapperel is a *different* project — NES cartridge PCB
 #    manufacturing test, not the mapper acid-test ROM).
-#  - blargg SPC timing / spc_timing (FR-CORE-036, tier B): research doc
-#    flags the canonical (blargg.org) home as dead and names
-#    gitlab.com/higan/snes-test-roms as a "[thin]" candidate mirror; the
-#    conductor's URL-liveness pass confirmed that host responds, but the
-#    exact ROM path/filename inside it was not located this session.
-# Neither has a [[suite]] row below; both are pre-existing "thin" flags
-# from the research doc, not new rot introduced by this ticket.
+#  - blargg SPC timing / spc_timing (FR-CORE-036, tier B): RESOLVED
+#    2026-08-21 (W7-08). The old flag said blargg.org was dead and named
+#    gitlab.com/higan/snes-test-roms as a "[thin]" candidate whose exact
+#    ROM path was never located. It is `blargg-spc-6/`, and all four ROMs
+#    are pinned below at commit 26e8aa91 — the same repository that
+#    already supplies gilyon. Kept rather than deleted because the shape
+#    of the gap is the useful part: the canonical home rotting did not
+#    mean the artifact was gone, only that nobody had looked in the
+#    mirror's directory listing.
+# Holy Diver Batman still has no [[suite]] row: a pre-existing "thin"
+# flag from the research doc, not new rot.
 
 # ---------------------------------------------------------------------------
 # Artifacts — NES, christopherpow/nes-test-roms aggregator
@@ -1525,3 +1529,59 @@ protocol = "golden_frame"
 artifact = "peterlemon-snes"
 rom = "mode7-suite"
 frame_budget = 600
+
+# ---------------------------------------------------------------------------
+# Artifacts — blargg's recovered SPC test ROMs (W7-08 criterion 3).
+#
+# Blargg's SPC test ROMs were long thought lost; byuu found them on an old
+# thumb drive and qwertymodo posted them to the nesdev forum. They are
+# WORK IN PROGRESS ROMs — the "6" is a version number, the last build
+# blargg sent byuu — which is exactly why byuu's own caveat is reproduced
+# here instead of being paraphrased away:
+#
+#   "passing these tests are not a proof of correctness as such. What they
+#    are, to me, is a proof of correctness of blargg's DSP core."
+#
+# So this set verifies against the reference IMPLEMENTATION, not against
+# silicon. That is the honest limit, and it is still a large step past
+# "implemented and unit-tested", which is what the S-DSP had before.
+#
+# Pinned to the same commit and repository that already supplies gilyon.
+# No license grant: fetch-from-origin only, never vendored or re-hosted.
+# ---------------------------------------------------------------------------
+
+[[artifact]]
+id = "blargg-spc-dsp6"
+license_status = "no-license-grant-fetch-only"
+sha256 = "b12038f865536a33003c9887e6f86fcbcb526b7f1766526ab30cb74b7380aa9a"
+mirrors = [
+  "https://gitlab.com/higan/snes-test-roms/-/raw/26e8aa91e0d3b90b901e7e693bc4a8244b391d7b/blargg-spc-6/spc_dsp6.sfc",
+]
+dest = "roms/snes/blargg-spc-6/spc_dsp6.sfc"
+
+[[artifact]]
+id = "blargg-spc-smp"
+license_status = "no-license-grant-fetch-only"
+sha256 = "2ed302c5b989675d4ab6b40001fd5166ac4c6e0188a6b1b6df878e4608999c03"
+mirrors = [
+  "https://gitlab.com/higan/snes-test-roms/-/raw/26e8aa91e0d3b90b901e7e693bc4a8244b391d7b/blargg-spc-6/spc_smp.sfc",
+]
+dest = "roms/snes/blargg-spc-6/spc_smp.sfc"
+
+[[artifact]]
+id = "blargg-spc-timer"
+license_status = "no-license-grant-fetch-only"
+sha256 = "f4799b994a91d78689073f4e31c3668ae46c100abd78177b9f4813506d6c9629"
+mirrors = [
+  "https://gitlab.com/higan/snes-test-roms/-/raw/26e8aa91e0d3b90b901e7e693bc4a8244b391d7b/blargg-spc-6/spc_timer.sfc",
+]
+dest = "roms/snes/blargg-spc-6/spc_timer.sfc"
+
+[[artifact]]
+id = "blargg-spc-mem-access-times"
+license_status = "no-license-grant-fetch-only"
+sha256 = "53dc8005959d54ccfc95b8d4222e1d51d21e3d9f3491058320f105edc1a4454a"
+mirrors = [
+  "https://gitlab.com/higan/snes-test-roms/-/raw/26e8aa91e0d3b90b901e7e693bc4a8244b391d7b/blargg-spc-6/spc_mem_access_times.sfc",
+]
+dest = "roms/snes/blargg-spc-6/spc_mem_access_times.sfc"
