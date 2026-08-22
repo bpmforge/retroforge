@@ -34,6 +34,9 @@
 
 pub mod boot;
 pub mod dsp;
+
+/// SPC cycles per DSP sample: 1.024 MHz / 32 kHz.
+const DSP_CYCLES_PER_SAMPLE: u32 = 32;
 pub mod spc700;
 
 use spc700::{ApuBus, Spc700};
@@ -154,6 +157,16 @@ pub struct Apu {
     pub ports_out: [u8; 4],
     /// `$F2` DSP address latch. The DSP itself is W6-04b.
     pub dsp_addr: u8,
+    /// SPC cycles accumulated toward the next DSP sample.
+    dsp_cycles: u32,
+    /// The most recent mixed stereo sample.
+    ///
+    /// Latched rather than discarded so the mixer's output is observable
+    /// and a future audio path has one obvious hook. Routing this into
+    /// `rf-audio` is NOT part of ticket W7-08 — that ticket is about the
+    /// DSP being correct and reachable, not about the sound reaching a
+    /// speaker.
+    pub last_sample: (i16, i16),
     /// `$F8`/`$F9`, two bytes of scratch with no hardware function.
     pub aux: [u8; 2],
     /// The HLE boot handshake (W6-04b).
@@ -180,6 +193,8 @@ impl Apu {
             ports_in: [0; 4],
             ports_out: [0; 4],
             dsp_addr: 0,
+            dsp_cycles: 0,
+            last_sample: (0, 0),
             aux: [0; 2],
             boot: boot::IplBoot::new(),
             dsp: dsp::Dsp::new(),
@@ -235,7 +250,30 @@ impl Apu {
         self.cpu = cpu;
         let cycles = r.unwrap_or(1);
         self.tick_timers(u32::from(cycles));
+        self.tick_dsp(u32::from(cycles));
         r
+    }
+
+    /// Advance the S-DSP's sample clock.
+    ///
+    /// The DSP emits one stereo sample every **32 SPC cycles**: the SPC700
+    /// runs at roughly 1.024 MHz and the DSP at 32 kHz, and 1024000/32000
+    /// is exactly 32. Anything else makes envelopes, the echo delay line
+    /// and the noise LFSR all run at the wrong rate together, which sounds
+    /// like a pitch bug rather than a clock bug.
+    ///
+    /// **Being programmable is not the same as running.** `$F2`/`$F3` let
+    /// a program reach the registers; without this, nothing would ever
+    /// advance an envelope, set ENDX, or move the echo buffer, so a
+    /// program polling ENVX would still spin forever (ticket W7-08).
+    pub(crate) fn tick_dsp(&mut self, cycles: u32) {
+        self.dsp_cycles += cycles;
+        while self.dsp_cycles >= DSP_CYCLES_PER_SAMPLE {
+            self.dsp_cycles -= DSP_CYCLES_PER_SAMPLE;
+            // `dsp_cycles` decreases by a positive constant on every pass,
+            // so this terminates (law 8).
+            self.last_sample = self.dsp.mix(&mut self.aram);
+        }
     }
 
     /// The CPU wrote one of `$2140`-`$2143`.
@@ -286,7 +324,7 @@ impl Apu {
         }
     }
 
-    fn read_register(&mut self, addr: u16) -> u8 {
+    pub(crate) fn read_register(&mut self, addr: u16) -> u8 {
         match addr {
             0xF0 => 0,
             0xF1 => {
@@ -296,7 +334,12 @@ impl Apu {
                 0
             }
             0xF2 => self.dsp_addr,
-            0xF3 => 0, // DSP data — W6-04b
+            // DSP data. This used to be a literal `0`, which meant the
+            // S-DSP was unreachable from the SPC700 and no game could
+            // produce sound at all (ticket W7-08) — blargg's spc_dsp6.sfc
+            // stalled forever on "Echo/basics" waiting for a read-back
+            // that could never change.
+            0xF3 => self.dsp.read_register(self.dsp_addr),
             0xF4..=0xF7 => self.ports_in[usize::from(addr - 0xF4)],
             0xF8 | 0xF9 => self.aux[usize::from(addr - 0xF8)],
             0xFA..=0xFC => 0, // timer targets are write-only
@@ -305,7 +348,7 @@ impl Apu {
         }
     }
 
-    fn write_register(&mut self, addr: u16, value: u8) {
+    pub(crate) fn write_register(&mut self, addr: u16, value: u8) {
         match addr {
             0xF1 => {
                 for (i, t) in self.timers.iter_mut().enumerate() {
@@ -323,6 +366,13 @@ impl Apu {
                 self.ipl_enabled = value & 0x80 != 0;
             }
             0xF2 => self.dsp_addr = value,
+            // The counterpart write arm, which did not exist at all.
+            // ARAM goes in because key-on resolves a voice's sample
+            // address through the $5D DIR directory that lives there.
+            0xF3 => {
+                let addr = self.dsp_addr;
+                self.dsp.write_register(addr, value, &self.aram);
+            }
             0xF4..=0xF7 => self.ports_out[usize::from(addr - 0xF4)] = value,
             0xF8 | 0xF9 => self.aux[usize::from(addr - 0xF8)] = value,
             0xFA..=0xFC => self.timers[usize::from(addr - 0xFA)].target = value,

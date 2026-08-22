@@ -17,44 +17,40 @@
 //! byte-identical at 20M, 40M and 60M instructions while the frame
 //! counter keeps climbing, so the 65816 is running and the test is not.
 //!
-//! **Why.** The S-DSP is not connected to the SPC700's bus. In
-//! `apu/mod.rs`'s `Apu::write_register` there is no `0xF3` arm at all, and
-//! the read arm is a literal `0xF3 => 0`. `$F2`/`$F3` are the ONLY way an
-//! SPC700 program reaches a DSP register, so no game and no test ROM can
-//! program one, and every read-back is zero. blargg's echo test writes
-//! its setup registers into the void and waits for a value that cannot
-//! arrive.
+//! **First cause, FIXED 2026-08-21.** The S-DSP was not connected to the
+//! SPC700's bus at all: `Apu::write_register` had no `0xF3` arm and its
+//! read arm was a literal `0xF3 => 0`. `$F2`/`$F3` are the ONLY path from
+//! an SPC700 program to a DSP register, so nothing could program one and
+//! every read-back was zero. There is now a 128-byte register file, the
+//! `$F2`/`$F3` plumbing, and a 32-cycle sample clock driving the mixer.
+//! **It did not make these ROMs pass** — which is exactly why the ticket
+//! note said not to assume one cause covered four.
 //!
-//! This was first found statically during W7-09 and recorded on W7-08's
-//! ticket; it is repeated here because **an outside ROM has now confirmed
-//! it independently**, and named the exact test that dies. That is a
-//! materially stronger claim than a `grep`.
+//! **Second cause, OPEN — and it is the IPL boot HLE, not the DSP.**
+//! Profiling `spc_dsp6` at 20M instructions shows both processors alive
+//! and waiting on each other:
 //!
-//! **What is NOT yet established.** All four ROMs stall, each on its own
-//! first test:
+//! * the 65816 spins in a two-instruction loop at `$00:815C`/`$815F`
+//!   (9.5M hits each) — a port-wait;
+//! * the SPC700's PC is up at `$C11F`, where **ARAM is all zeros**. It is
+//!   NOP-sliding through empty memory, because `$00` is a NOP;
+//! * `boot.is_running()` is true and `ipl_enabled` is false;
+//! * ports read `apu->cpu = [CC, BB, 00, 00]` with the CPU having written
+//!   counter `$00` and data `$20`.
 //!
-//! | ROM | last line printed |
-//! |---|---|
-//! | `spc_dsp6` | `Echo/basics` |
-//! | `spc_smp` | `CPU Instructions/Edge arith` |
-//! | `spc_timer` | `timer read vs write` |
-//! | `spc_mem_access_times` | `mem access times` |
+//! So `IplBoot::cpu_wrote` took its `BootState::Ready` "just run" branch —
+//! the one that fires when `ports_in[1] == 0` at the moment `$CC` lands —
+//! and jumped to an address nothing had been uploaded to. blargg's
+//! uploader then waits forever for a byte counter that will never be
+//! echoed. All four ROMs share that uploader, which fits them all
+//! stalling; it has NOT been confirmed as the cause for all four.
 //!
-//! The `$F2`/`$F3` gap explains `spc_dsp6` directly. It is a plausible
-//! common cause for the rest — a shared harness that programs the DSP
-//! before running anything would stall them all identically — but that
-//! has NOT been traced, and `spc_smp` stalling inside a CPU-instruction
-//! test is the kind of detail that turns a tidy single-cause story into a
-//! wrong one. Isolate each before believing one fix covers four.
-//!
-//! **What unblocking it needs.** A 128-byte S-DSP register file and the
-//! `$F2`/`$F3` plumbing that reads and writes it. `Dsp` today holds
-//! structured state (`voices`, `noise`, `echo`, plus a few named
-//! registers) with no register-map layer, so this is real work, not a
-//! wiring one-liner. Until it exists, criterion 1's five DSP features are
-//! unreachable from a running machine however well their unit tests pass
-//! — which is exactly the "implemented and tested is not verified against
-//! the machine" distinction W7-08's own notes call its remaining content.
+//! **What unblocking needs now.** Trace what blargg's uploader actually
+//! writes to `$2140`-`$2143` and in what order, then fix
+//! `IplBoot::cpu_wrote` to match. Do NOT guess at the protocol — the
+//! previous pass of this ticket already burned a cycle on a plausible
+//! port-protocol theory that was true but not actionable. Log the real
+//! write sequence first.
 //!
 //! ```text
 //! cargo run -p rf-harness --bin fetch-test-roms -- \
@@ -126,7 +122,7 @@ fn run(path: &std::path::Path) -> String {
 }
 
 #[test]
-#[ignore = "KNOWN-RED: the S-DSP is not wired to $F2/$F3 — see this module's doc"]
+#[ignore = "KNOWN-RED: the IPL boot HLE mis-takes its just-run branch — see this module's doc"]
 fn blargg_spc_tests_report_success() {
     let Some(dir) = rom_dir() else {
         eprintln!(

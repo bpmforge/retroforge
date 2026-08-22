@@ -2,6 +2,7 @@
 //! modulation (ticket W7-08).
 
 use crate::apu::dsp::{gaussian, Dsp, Echo, Envelope, EnvelopeStage, Noise, GAUSS};
+use crate::apu::Apu;
 
 /// The four Gaussian taps must sum to 2048 at every fraction — that is
 /// what makes the filter unity-gain.
@@ -237,4 +238,176 @@ fn a_dsp_with_nothing_keyed_on_is_still_silent() {
     for _ in 0..128 {
         assert_eq!(dsp.mix(&mut aram), (0, 0));
     }
+}
+
+// ---------------------------------------------------------------------
+// The DSP register file and its $F2/$F3 plumbing (ticket W7-08).
+//
+// Before this existed the S-DSP was unreachable: Apu::write_register had
+// no $F3 arm at all and its read arm was a literal 0, so no SPC700
+// program could program a single DSP register and a running machine
+// produced no sound whatever the mixer could do.
+// ---------------------------------------------------------------------
+
+/// `$F2` selects and `$F3` reads/writes — the only path there is.
+#[test]
+fn dsp_registers_are_reachable_through_f2_and_f3() {
+    let mut apu = Apu::new();
+    // $00 is voice 0's left volume.
+    apu.write_register(0xF2, 0x00);
+    apu.write_register(0xF3, 0x5A);
+    assert_eq!(apu.dsp.voices[0].vol_left, 0x5A, "the write must DECODE");
+
+    apu.write_register(0xF2, 0x00);
+    assert_eq!(
+        apu.read_register(0xF3),
+        0x5A,
+        "and read back — a literal 0 here is what made every DSP register \
+         write invisible to the program that made it"
+    );
+}
+
+/// Addresses are 7-bit: `$80`+ mirrors `$00`+.
+#[test]
+fn the_dsp_address_is_seven_bits() {
+    let mut apu = Apu::new();
+    apu.write_register(0xF2, 0x80); // mirrors $00
+    apu.write_register(0xF3, 0x33);
+    assert_eq!(apu.dsp.voices[0].vol_left, 0x33);
+}
+
+/// PITCH spans two registers, so each write must preserve the other half.
+#[test]
+fn pitch_is_fourteen_bits_across_two_registers() {
+    let mut dsp = Dsp::new();
+    let aram = [0u8; 64];
+    dsp.write_register(0x02, 0x34, &aram); // voice 0 pitch low
+    dsp.write_register(0x03, 0x12, &aram); // voice 0 pitch high
+    assert_eq!(dsp.voices[0].pitch, 0x1234);
+    // Rewriting only the low half must not clear the high half.
+    dsp.write_register(0x02, 0x78, &aram);
+    assert_eq!(
+        dsp.voices[0].pitch, 0x1278,
+        "a half-write that clobbers the other half retunes every voice \
+         whose pitch is set one byte at a time"
+    );
+    // The high register is 6 bits; bits above that are not pitch.
+    dsp.write_register(0x03, 0xFF, &aram);
+    assert_eq!(dsp.voices[0].pitch, 0x3F78);
+}
+
+/// Key-on resolves the sample address through the `$5D` DIR directory,
+/// and does it AT KEY-ON — not when SRCN is written.
+///
+/// The ordinary program order is SRCN first, DIR second. Resolving at
+/// SRCN-write time would use whatever DIR happened to hold then, which is
+/// the previous song's directory.
+#[test]
+fn key_on_resolves_the_sample_address_through_dir() {
+    let mut dsp = Dsp::new();
+    let mut aram = vec![0u8; 0x10000];
+    // Directory page $02, entry 3 -> start $ABCD, loop $1234.
+    let entry = 0x02 * 0x100 + 3 * 4;
+    aram[entry] = 0xCD;
+    aram[entry + 1] = 0xAB;
+    aram[entry + 2] = 0x34;
+    aram[entry + 3] = 0x12;
+
+    dsp.write_register(0x04, 3, &aram); // voice 0 SRCN = 3, DIR still 0
+    dsp.write_register(0x5D, 0x02, &aram); // DIR = $02, written AFTER
+    dsp.write_register(0x4C, 0x01, &aram); // KON voice 0
+
+    assert_eq!(dsp.voices[0].start, 0xABCD);
+    assert_eq!(dsp.voices[0].loop_addr, 0x1234);
+    assert!(dsp.voices[0].keyed_on);
+}
+
+/// A program-controlled DIR/SRCN can point past ARAM; that must not panic.
+#[test]
+fn a_directory_entry_past_aram_is_not_a_panic() {
+    let mut dsp = Dsp::new();
+    let aram = [0u8; 64]; // deliberately tiny
+    dsp.write_register(0x04, 0xFF, &aram);
+    dsp.write_register(0x5D, 0xFF, &aram);
+    dsp.write_register(0x4C, 0x01, &aram);
+    assert_eq!(dsp.voices[0].start, 0, "out-of-range reads as zero");
+}
+
+/// ENVX and OUTX report LIVE state, not the last value written to them.
+///
+/// Returning the written value would be a convincing lie: a program
+/// polling ENVX for an envelope to decay would spin forever.
+#[test]
+fn envx_and_outx_read_hardware_state_not_the_written_byte() {
+    let mut dsp = Dsp::new();
+    let aram = [0u8; 64];
+    dsp.write_register(0x08, 0x7F, &aram); // try to write ENVX
+    dsp.write_register(0x09, 0x7F, &aram); // try to write OUTX
+    assert_eq!(dsp.read_register(0x08), 0, "ENVX is hardware-written");
+    assert_eq!(dsp.read_register(0x09), 0, "OUTX is hardware-written");
+
+    dsp.voices[0].envelope.level = 0x7F0;
+    assert_eq!(dsp.read_register(0x08), 0x7F, "top 7 bits of the envelope");
+    dsp.voices[0].last_output = -0x100;
+    assert_eq!(dsp.read_register(0x09), 0xFF, "high byte of the output");
+}
+
+/// ENDX is cleared by ANY write to `$7C`, and the value written is
+/// ignored — storing it would leave a program that writes $FF believing
+/// every voice had ended.
+#[test]
+fn writing_endx_clears_it_regardless_of_value() {
+    let mut dsp = Dsp::new();
+    let aram = [0u8; 64];
+    dsp.endx = 0b1010_1010;
+    dsp.write_register(0x7C, 0xFF, &aram);
+    assert_eq!(dsp.read_register(0x7C), 0);
+}
+
+/// `$6C` FLG bit 5 disables echo WRITES while reads continue — how a game
+/// freezes an echo tail without clearing it.
+#[test]
+fn flg_bit_five_disables_echo_writes() {
+    let mut dsp = Dsp::new();
+    let aram = [0u8; 64];
+    dsp.write_register(0x6C, 0x00, &aram);
+    assert!(!dsp.echo.write_disabled);
+    dsp.write_register(0x6C, 0x20, &aram);
+    assert!(dsp.echo.write_disabled);
+}
+
+/// The eight FIR coefficients live one per voice row at `$xF`.
+#[test]
+fn the_fir_coefficients_are_one_per_voice_row() {
+    let mut dsp = Dsp::new();
+    let aram = [0u8; 64];
+    for i in 0..8u8 {
+        dsp.write_register(i * 0x10 + 0x0F, (i as i8 - 4) as u8, &aram);
+    }
+    assert_eq!(dsp.echo.fir, [-4, -3, -2, -1, 0, 1, 2, 3]);
+}
+
+/// The DSP is CLOCKED, not merely programmable: 32 SPC cycles per sample.
+///
+/// Being reachable through $F2/$F3 is not enough — without a sample clock
+/// nothing advances an envelope or moves the echo buffer, and a program
+/// polling ENVX still spins forever.
+#[test]
+fn the_dsp_is_clocked_by_the_apu() {
+    let mut apu = Apu::new();
+    apu.dsp.voices[0].envelope.level = 0x400;
+    apu.dsp.voices[0].envelope.stage = crate::apu::dsp::EnvelopeStage::Release;
+    let before = apu.dsp.voices[0].envelope.level;
+    // Drive the APU the way the machine does — through `step`, NOT by
+    // calling the sample clock directly. Calling `tick_dsp` here would
+    // test that the function works while leaving "does anything CALL it?"
+    // unasked, which is exactly how the mixer sat wired to nothing for
+    // three tickets.
+    for _ in 0..20_000 {
+        let _ = apu.step();
+    }
+    assert!(
+        apu.dsp.voices[0].envelope.level < before,
+        "a released envelope must decay once the DSP is actually running;          level stayed at {before}"
+    );
 }

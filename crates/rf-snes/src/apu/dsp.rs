@@ -256,6 +256,14 @@ impl Envelope {
 /// One of the eight voices.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Voice {
+    /// `$x4` SRCN — index into the sample directory at `$5D` DIR. The
+    /// register holds the INDEX; `start`/`loop_addr` below are what that
+    /// index resolves to, and the resolution happens at key-on because
+    /// that is when hardware reads the directory.
+    pub srcn: u8,
+    /// `$x9` OUTX — the voice's most recent output, latched so a program
+    /// can read it back. Hardware exposes the high byte.
+    pub last_output: i16,
     /// Start of the sample's BRR data in ARAM.
     pub start: u16,
     /// Where to jump on a looping block's end.
@@ -299,6 +307,12 @@ impl Voice {
 
     pub fn key_off(&mut self) {
         self.envelope.key_off();
+    }
+
+    /// Is the block the voice is currently playing flagged as the
+    /// sample's last? Drives ENDX (`$7C`).
+    fn hit_end(&self) -> bool {
+        self.block.as_ref().is_some_and(|b| b.end)
     }
 
     /// Hard stop, used when a non-looping sample ends.
@@ -521,7 +535,7 @@ impl Echo {
 }
 
 /// The eight-voice mixer.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Dsp {
     pub voices: [Voice; 8],
     pub noise: Noise,
@@ -535,6 +549,42 @@ pub struct Dsp {
     /// Master volume, signed, per channel.
     pub main_vol_left: i8,
     pub main_vol_right: i8,
+
+    /// The raw 128-byte register file.
+    ///
+    /// **This is the only way an SPC700 program can reach the DSP**: `$F2`
+    /// selects a register and `$F3` reads or writes it. Before this
+    /// existed, `Apu::write_register` had no `$F3` arm at all and its read
+    /// arm was a literal `0`, so no game and no test ROM could program a
+    /// single DSP register — blargg's `spc_dsp6.sfc` stalled forever on
+    /// `Echo/basics` writing into the void (ticket W7-08).
+    ///
+    /// Hardware reads back what was written for almost every register, so
+    /// this array is authoritative for reads and the decoded fields above
+    /// are the view [`Dsp::mix`] actually runs on. Keeping both is a
+    /// deliberate second copy, and the direction of truth is one-way:
+    /// [`Dsp::write_register`] is the ONLY writer of the decoded fields
+    /// from register data, so they cannot drift apart the way two
+    /// independently-maintained sources would.
+    ///
+    /// The exceptions — registers whose read does NOT come from here —
+    /// are listed on [`Dsp::read_register`].
+    pub regs: [u8; REG_COUNT],
+    /// `$5D` DIR — page of the sample directory in ARAM.
+    pub dir: u8,
+    /// `$7C` ENDX — per-voice "the sample hit its end block" flags. Set by
+    /// the mixer, cleared by ANY write to `$7C` (hardware ignores the
+    /// value written).
+    pub endx: u8,
+}
+
+/// The S-DSP has 128 registers, `$00`-`$7F`.
+pub const REG_COUNT: usize = 128;
+
+impl Default for Dsp {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Dsp {
@@ -549,6 +599,144 @@ impl Dsp {
             echo_enable: 0,
             main_vol_left: 0x7F,
             main_vol_right: 0x7F,
+            regs: [0; REG_COUNT],
+            dir: 0,
+            endx: 0,
+        }
+    }
+
+    /// Read one DSP register (`$F3` with `$F2` selecting `addr`).
+    ///
+    /// Addresses are 7-bit: `$80`-`$FF` mirror `$00`-`$7F`, which is what
+    /// the hardware does and what a program that leaves the high bit set
+    /// depends on.
+    ///
+    /// Almost everything reads back out of the register file. The three
+    /// exceptions are the registers hardware WRITES rather than stores,
+    /// and returning the last value the CPU wrote to them would be a
+    /// convincing lie — a program polling ENVX for an envelope to decay
+    /// would spin forever:
+    ///
+    /// * `$x8` ENVX — the voice's current envelope, top 7 bits.
+    /// * `$x9` OUTX — the voice's last output, high byte.
+    /// * `$7C` ENDX — per-voice sample-ended flags.
+    #[must_use]
+    pub fn read_register(&self, addr: u8) -> u8 {
+        let a = addr & 0x7F;
+        let voice = usize::from(a >> 4);
+        match a & 0x0F {
+            0x8 => (self.voices[voice].envelope.level >> 4) as u8,
+            0x9 => (self.voices[voice].last_output >> 8) as u8,
+            0xC if voice == 7 => self.endx,
+            _ => self.regs[usize::from(a)],
+        }
+    }
+
+    /// Write one DSP register (`$F3` with `$F2` selecting `addr`).
+    ///
+    /// `aram` is needed because **key-on resolves the sample address
+    /// here**: `$x4` SRCN is only an index into the directory at `$5D`
+    /// DIR, and hardware reads that directory when the voice keys on, not
+    /// when SRCN is written. Resolving at write time instead would use a
+    /// stale DIR for any program that sets SRCN first and DIR second —
+    /// which is the ordinary order.
+    pub fn write_register(&mut self, addr: u8, value: u8, aram: &[u8]) {
+        let a = addr & 0x7F;
+        self.regs[usize::from(a)] = value;
+        let voice = usize::from(a >> 4);
+        let signed = value as i8;
+
+        match a & 0x0F {
+            0x0 => self.voices[voice].vol_left = signed,
+            0x1 => self.voices[voice].vol_right = signed,
+            // PITCH is 14 bits across two registers, so each write has to
+            // preserve the other half rather than assume both arrive.
+            0x2 => {
+                let hi = self.voices[voice].pitch & 0x3F00;
+                self.voices[voice].pitch = hi | u16::from(value);
+            }
+            0x3 => {
+                let lo = self.voices[voice].pitch & 0x00FF;
+                self.voices[voice].pitch = (u16::from(value & 0x3F) << 8) | lo;
+            }
+            0x4 => self.voices[voice].srcn = value,
+            0x5 => {
+                // ADSR1: bit 7 selects ADSR over GAIN, bits 4-6 decay,
+                // bits 0-3 attack.
+                let env = &mut self.voices[voice].envelope;
+                env.adsr_enabled = value & 0x80 != 0;
+                env.decay_rate = (value >> 4) & 0x07;
+                env.attack_rate = value & 0x0F;
+            }
+            0x6 => {
+                // ADSR2: bits 5-7 sustain LEVEL, bits 0-4 sustain RATE.
+                let env = &mut self.voices[voice].envelope;
+                env.sustain_level = (value >> 5) & 0x07;
+                env.sustain_rate = value & 0x1F;
+            }
+            0x7 => self.voices[voice].envelope.gain = value,
+            // ENVX and OUTX are hardware-written. Ignoring the write is
+            // the behaviour; the value still lands in `regs` above and is
+            // simply never read back, because `read_register` sources
+            // both from live state.
+            0x8 | 0x9 => {}
+            // The eight FIR coefficients live one per voice row.
+            0xF => self.echo.fir[voice] = signed,
+            0xC => match voice {
+                0 => self.main_vol_left = signed,
+                1 => self.main_vol_right = signed,
+                2 => self.echo.vol_left = signed,
+                3 => self.echo.vol_right = signed,
+                4 => self.key_on_masked(value, aram),
+                5 => self.key_off(value),
+                6 => {
+                    // FLG. Bit 5 disables echo WRITES while still reading,
+                    // which is how a game freezes an echo tail without
+                    // clearing it.
+                    self.echo.write_disabled = value & 0x20 != 0;
+                }
+                // ENDX: hardware clears every flag on ANY write and
+                // ignores the value, so this must not store `value`.
+                _ => self.endx = 0,
+            },
+            0xD => match voice {
+                0 => self.echo.feedback = signed,
+                2 => self.pitch_mod = value,
+                3 => self.noise_enable = value,
+                4 => self.echo_enable = value,
+                5 => self.dir = value,
+                6 => self.echo.base_page = value,
+                7 => self.echo.delay = value,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    /// Key on the voices in `mask`, resolving each one's sample address
+    /// through the `$5D` DIR directory first.
+    ///
+    /// A directory entry is four bytes — start address then loop address,
+    /// both little-endian — at `DIR * $100 + SRCN * 4`. The reads are
+    /// bounds-checked against ARAM rather than trusted: `dir` and `srcn`
+    /// are both fully program-controlled, and `DIR = $FF` with a high
+    /// SRCN addresses past the end of a 64 KiB ARAM.
+    fn key_on_masked(&mut self, mask: u8, aram: &[u8]) {
+        let dir = self.dir;
+        for i in 0..8 {
+            if mask & (1 << i) == 0 {
+                continue;
+            }
+            let srcn = self.voices[i].srcn;
+            let entry = usize::from(dir) * 0x100 + usize::from(srcn) * 4;
+            let word = |off: usize| -> u16 {
+                let lo = aram.get(entry + off).copied().unwrap_or(0);
+                let hi = aram.get(entry + off + 1).copied().unwrap_or(0);
+                u16::from(lo) | (u16::from(hi) << 8)
+            };
+            self.voices[i].start = word(0);
+            self.voices[i].loop_addr = word(2);
+            self.voices[i].key_on();
         }
     }
 
@@ -564,6 +752,7 @@ impl Dsp {
     /// `ESA`/`EDL` really can have its echo overwrite its samples.
     pub fn mix(&mut self, aram: &mut [u8]) -> (i16, i16) {
         let noise = self.noise.step();
+        let mut endx = self.endx;
         let (mut l, mut r) = (0i32, 0i32);
         let (mut echo_l, mut echo_r) = (0i32, 0i32);
         let mut previous = 0i16;
@@ -582,6 +771,17 @@ impl Dsp {
             let s = v.next_output(aram, noise, self.noise_enable & (1 << i) != 0);
             v.pitch = base_pitch;
             previous = s;
+            // Latch OUTX so `$x9` reads the CURRENT output rather than
+            // whatever the CPU last wrote there.
+            v.last_output = s;
+            // ENDX is sticky: hardware sets the bit when the voice reaches
+            // a block with the END flag and only a write to `$7C` clears
+            // it, so this ORs rather than assigns. Assigning would make a
+            // looping sample's flag flicker and a program that polls it
+            // miss the event entirely.
+            if v.hit_end() {
+                endx |= 1 << i;
+            }
 
             let sl = (i32::from(s) * i32::from(v.vol_left)) >> 7;
             let sr = (i32::from(s) * i32::from(v.vol_right)) >> 7;
@@ -592,6 +792,8 @@ impl Dsp {
                 echo_r += sr;
             }
         }
+
+        self.endx = endx;
 
         let (el, er) = self.echo.process(
             aram,
