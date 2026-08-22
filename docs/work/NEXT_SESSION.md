@@ -123,7 +123,10 @@ workflow run since roughly **2026-08-07** was rejected before starting:
 of them a code failure**. The last genuinely green run was 2026-08-07.
 
 **Ruling (Brad, 2026-08-21): treat GitHub as storage and stop worrying
-about CI.** A red badge that means "no minutes left" is worse than no
+about CI. Made PERMANENT 2026-08-22: the Actions budget is not being
+increased**, so hosted CI will not run again and no claim anywhere in this
+repo may cite "green in CI" as evidence. One such claim was found and
+corrected on W5-05, which asserted the 3-OS build matrix was green.** A red badge that means "no minutes left" is worse than no
 badge, because it trains everyone to ignore the one that would have meant
 something. Recorded in `CLAUDE.md` under Build so the next session does not
 rediscover red CI and panic.
@@ -151,8 +154,12 @@ with NFR-004 timing, and mode-invariant failure evidence. Several of those
 have local counterparts in `scripts/local-gate.sh`; **which ones is not
 verified**, and that audit is worth doing before relying on it.
 
-The workflow files are left in place — they will simply work again if the
-budget is ever restored.
+The workflow files are left in place. They are correct and would run on a
+**self-hosted runner**, which GitHub does not bill for on private repos
+(the per-minute platform fee announced for March 2026 was postponed
+indefinitely). Gitea Actions on the `origin` remote is the other free
+path, and it is self-hosted by definition. Neither is set up, and neither
+should be until distribution is a real requirement — see W5-05.
 
 ---
 

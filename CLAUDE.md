@@ -49,14 +49,24 @@ Entry point for coding agents: `MASTER_PROMPT.md` → `plan.json` → `PLAYBOOK.
 test-ROM fetcher (network, gitignored `roms/`). GPU tests are headless via
 wgpu; on CI they fall back to llvmpipe/lavapipe (see .github/workflows/ci.yml).
 
-**GitHub is STORAGE, not a gate (ruling 2026-08-21).** GitHub Actions is
-out of budget: every run since ~2026-08-07 was rejected with *"The job was
+**GitHub is STORAGE, not a gate (ruling 2026-08-21, made PERMANENT
+2026-08-22).** Every run since ~2026-08-07 was rejected with *"The job was
 not started because an Actions budget is preventing further use"* — 166
-failures to 34 successes, and not one of them a code failure. **A red run
+failures to 34 successes, and not one of them a code failure. **Brad's
+ruling 2026-08-22: the Actions budget is not being increased.** So this is
+policy, not a dip to wait out: hosted CI will not run again, and no
+statement anywhere in this repo may cite "green in CI" as evidence. **A red run
 on GitHub is not a signal; do not chase it, and do not treat a green local
 gate as contradicted by it.** The nine-command gate in law 3 plus
 `scripts/local-gate.sh` and `scripts/docs-gate.sh` are what decide whether
 work is done.
+
+The workflow files stay in the tree — they are correct, and they would
+work on a **self-hosted runner**, which GitHub does not bill for on
+private repos (a planned per-minute platform fee was postponed
+indefinitely in 2026). Gitea Actions on the `origin` remote is the other
+free path. Neither is set up; both are open if 3-OS verification ever
+matters again.
 
 `scripts/docs-gate.sh` mirrors `docs.yml` (doc samples, plugin-SDK
 examples, profile validation, `mdbook build`) — needed because `mdbook
