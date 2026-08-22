@@ -4218,7 +4218,7 @@
    "WHAT THIS CHANGES FOR THE REMAINING WORK. The segmentation DESIGN is sound \u2014 the composition machinery works and 31 unchanged ROMs prove it is inert when it should be. What is missing is WRITE ATTRIBUTION: a write must be tagged with (LINE, dot) and vblank/forced-blank writes excluded, rather than trusting a bare dot(). That is a smaller and sharper problem than \"build per-dot\", and it is the actual next step. AND CRITERION 3 IS PROBABLY FINE AS WRITTEN: if RotZoom\u2019s only change came from the attribution bug, then with correct attribution RotZoom should be UNCHANGED and \"RotZoom, Perspective and the ten BGMAP goldens are unchanged\" becomes satisfiable. Do not amend it on my earlier say-so \u2014 fix attribution first and re-measure. No human needs to look at a frame for this ticket after all."
  ],
    "points": 8,
-   "status": "blocked",
+   "status": "in_progress",
    "stories": []
   },
   {
