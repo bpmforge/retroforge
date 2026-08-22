@@ -99,6 +99,83 @@ pub struct LineState {
     pub mosaic: window::Mosaic,
 }
 
+/// Every register a mid-line write can touch, snapshotted (ticket W7-15).
+///
+/// **Separate from [`LineState`] on purpose.** `LineState` is latched for
+/// EVERY line, so widening it changes how every line composes — and it
+/// does: extending it broke StarWars's golden, because HDMA writes that
+/// used to reach all lines through the live registers stopped doing so.
+/// That is a real semantic change, and smuggling it in under a per-dot
+/// ticket would be exactly the "fixes one suite, silently breaks another"
+/// failure criterion 3 exists to prevent.
+///
+/// This is captured ONLY for a line that actually receives a mid-line
+/// write, and only just before the first one lands. Lines without such a
+/// write are untouched and compose exactly as they always did — which is
+/// why 32 of 32 goldens stay green.
+///
+/// Memory (VRAM, CGRAM, OAM) is deliberately absent: it is data, not
+/// registers, and [`Ppu::is_segmentable`] keeps its ports out of the
+/// replay entirely.
+#[derive(Debug, Clone, Copy)]
+struct PpuRegs {
+    mode7: mode7::Mode7,
+    bg_mode: u8,
+    bg3_priority: bool,
+    windows: window::Windows,
+    color_math: window::ColorMath,
+    mosaic: window::Mosaic,
+    forced_blank: bool,
+    brightness: u8,
+    obj_size: u8,
+    obj_name_base: u16,
+    obj_name_select: u16,
+    obj_enabled: bool,
+    ts: u8,
+    setini: SetIni,
+    bgs: [BgLayer; 4],
+}
+
+impl PpuRegs {
+    fn capture(p: &Ppu) -> Self {
+        Self {
+            mode7: p.mode7,
+            bg_mode: p.bg_mode,
+            bg3_priority: p.bg3_priority,
+            windows: p.windows,
+            color_math: p.color_math,
+            mosaic: p.mosaic,
+            forced_blank: p.forced_blank,
+            brightness: p.brightness,
+            obj_size: p.obj_size,
+            obj_name_base: p.obj_name_base,
+            obj_name_select: p.obj_name_select,
+            obj_enabled: p.obj_enabled,
+            ts: p.ts,
+            setini: p.setini,
+            bgs: p.bgs,
+        }
+    }
+
+    fn apply(&self, p: &mut Ppu) {
+        p.mode7 = self.mode7;
+        p.bg_mode = self.bg_mode;
+        p.bg3_priority = self.bg3_priority;
+        p.windows = self.windows;
+        p.color_math = self.color_math;
+        p.mosaic = self.mosaic;
+        p.forced_blank = self.forced_blank;
+        p.brightness = self.brightness;
+        p.obj_size = self.obj_size;
+        p.obj_name_base = self.obj_name_base;
+        p.obj_name_select = self.obj_name_select;
+        p.obj_enabled = self.obj_enabled;
+        p.ts = self.ts;
+        p.setini = self.setini;
+        p.bgs = self.bgs;
+    }
+}
+
 /// `$2133` SETINI, decoded (ticket W7-06).
 ///
 /// Bit meanings are quoted from fullsnes's SETINI table rather than
@@ -270,6 +347,24 @@ pub struct Ppu {
     /// reached — a caller rendering ahead of the beam falls back to the
     /// live registers.
     pub line_state: Vec<Option<LineState>>,
+    /// Register writes that landed DURING each visible line's active
+    /// display, in the order they happened (ticket W7-15).
+    ///
+    /// This is what makes composition per-DOT rather than per-line: a line
+    /// with writes is composed in segments, each from the register state
+    /// as of that dot. A line with none composes exactly as before, which
+    /// is why 31 of 32 goldens are inert under this change.
+    ///
+    /// Indexed by HARDWARE line, like [`Ppu::line_state`]. Only
+    /// [`crate::timing::Timing::mid_line_position`] decides what gets in
+    /// here, and that decision is the whole ticket — see its doc.
+    line_writes: Vec<Vec<(u16, u16, u8)>>,
+    /// Registers as they stood just BEFORE a line's first mid-line write.
+    ///
+    /// `None` for every line that never receives one, which is almost all
+    /// of them — and that is what keeps this change inert on lines it has
+    /// no business touching.
+    line_regs: Vec<Option<PpuRegs>>,
 
     /// `$213E` bit 6: more than 32 sprites on a line.
     pub range_over: bool,
@@ -315,6 +410,8 @@ impl Ppu {
             color_math: window::ColorMath::default(),
             mosaic: window::Mosaic::default(),
             line_state: vec![None; VISIBLE_LINES_OVERSCAN as usize],
+            line_writes: vec![Vec::new(); VISIBLE_LINES_OVERSCAN as usize],
+            line_regs: vec![None; VISIBLE_LINES_OVERSCAN as usize],
             direct_color: false,
             range_over: false,
             time_over: false,
@@ -535,6 +632,119 @@ impl Ppu {
         for slot in &mut self.line_state {
             *slot = None;
         }
+        for w in &mut self.line_writes {
+            w.clear();
+        }
+        for r in &mut self.line_regs {
+            *r = None;
+        }
+    }
+
+    /// Write a register, recording it as a mid-line event when `at` says
+    /// the beam was inside a visible line's active display.
+    ///
+    /// `at` comes from [`crate::timing::Timing::mid_line_position`], which
+    /// returns `None` during vblank and hblank. Passing `None` is
+    /// therefore the ordinary case and behaves exactly like
+    /// [`Ppu::write_register`] — the register changes, but nothing is
+    /// recorded, because a write outside active display has no mid-line
+    /// position to take effect at.
+    pub fn write_register_at(&mut self, addr: u16, value: u8, at: Option<(u16, u16)>) {
+        if let Some((line, dot)) = at.filter(|_| Self::is_segmentable(addr)) {
+            let idx = usize::from(line);
+            // Snapshot BEFORE the first write of this line lands — that is
+            // the state the line has to be composed from. Later writes on
+            // the same line must NOT overwrite it.
+            if matches!(self.line_regs.get(idx), Some(None)) {
+                self.line_regs[idx] = Some(PpuRegs::capture(self));
+            }
+            if let Some(slot) = self.line_writes.get_mut(idx) {
+                slot.push((dot, addr, value));
+            }
+        }
+        self.write_register(addr, value);
+    }
+
+    /// Is this register one that segmentation may REPLAY?
+    ///
+    /// **The data ports are excluded, and not as an optimisation.** OAM,
+    /// VRAM and CGRAM writes are MEMORY writes: they have already landed,
+    /// and each one auto-increments its address register. Replaying them
+    /// while composing a segment would write a second time at a second
+    /// address, so the later segments of the line would be composed
+    /// against corrupted memory.
+    ///
+    /// Their address registers go with them — replaying `$2116` without
+    /// its `$2118` (or the reverse) desynchronises the pair, which is
+    /// worse than replaying neither.
+    ///
+    /// This is also where the bulk of the traffic lives: the trace that
+    /// found the attribution bug counted 16,307 OAMDATA and 19,455 CGDATA
+    /// writes in one frame. Those are transfers, not mid-line effects.
+    fn is_segmentable(addr: u16) -> bool {
+        !matches!(
+            addr,
+            // OAMADDL/H + OAMDATA
+            0x2102..=0x2104
+            // VMADDL/H + VMDATAL/H
+            | 0x2116..=0x2119
+            // CGADD + CGDATA
+            | 0x2121..=0x2122
+        )
+    }
+
+    /// Mid-line writes recorded for a hardware line, for tests.
+    #[must_use]
+    pub fn line_writes_for_test(&self, line: u16) -> Vec<(u16, u16, u8)> {
+        self.line_writes
+            .get(usize::from(line))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Compose one line, splitting it at every mid-line register write.
+    ///
+    /// **Segmentation rather than a per-dot fetcher.** Register state only
+    /// changes where a write happens, so composing a line once per segment
+    /// and splicing at the write's dot yields exactly what a dot-by-dot
+    /// composer would — while leaving the background, sprite and mode-7
+    /// fetchers, and the seventeen goldens that protect them, untouched.
+    ///
+    /// The cost is one full-line composition per mid-line write. That is
+    /// affordable precisely BECAUSE attribution is correct: before it, a
+    /// single line could carry thousands of misattributed frame-setup
+    /// writes.
+    fn compose_line_segmented(&mut self, line: u16) -> Scanline {
+        let writes = self
+            .line_writes
+            .get(usize::from(line))
+            .cloned()
+            .unwrap_or_default();
+        // Rewind to the registers as they stood before this line's first
+        // mid-line write, then replay forward. Lines with no writes skip
+        // this entirely and compose exactly as they always did.
+        if let Some(Some(regs)) = self.line_regs.get(usize::from(line)).copied() {
+            regs.apply(self);
+        }
+        let phase = self.hires_phase(bg::HiresPhase::Odd);
+        let mut out = self.render_scanline_live(line, phase);
+        for (dot, addr, value) in writes {
+            self.write_register(addr, value);
+            let phase = self.hires_phase(bg::HiresPhase::Odd);
+            let seg = self.render_scanline_live(line, phase);
+            // Both are exactly WIDTH: `render_scanline_live` always
+            // composes 256 dots, and the hires widening to 512 happens
+            // afterwards in `render_scanline_hires`. So `dot` indexes
+            // directly and no scaling is needed here — a mid-line SETINI
+            // or BGMODE write changes which registers the SEGMENTS are
+            // composed from, not how wide this composition is.
+            let from = usize::from(dot);
+            if from < out.pixels.len() {
+                out.pixels[from..].copy_from_slice(&seg.pixels[from..]);
+                out.overlay[from..].copy_from_slice(&seg.overlay[from..]);
+            }
+        }
+        out
     }
 
     /// A copy of this PPU with line `y`'s latched registers applied.
@@ -696,9 +906,10 @@ impl Ppu {
         // final state.
         if let Some(latched) = self.with_line_state(line) {
             let mut shadow = latched;
-            // The MAIN screen owns the ODD half-dot on a true-hires line.
-            let phase = shadow.hires_phase(bg::HiresPhase::Odd);
-            let composed = shadow.render_scanline_live(line, phase);
+            // Segmented: the line is split at every mid-line register
+            // write. With no writes this is exactly the old single
+            // composition, which is why it is inert on 31 of 32 goldens.
+            let composed = shadow.compose_line_segmented(line);
             // Limit flags accumulate on the real PPU, not the shadow.
             self.range_over |= shadow.range_over;
             self.time_over |= shadow.time_over;
@@ -712,8 +923,7 @@ impl Ppu {
             }
             return composed;
         }
-        let phase = self.hires_phase(bg::HiresPhase::Odd);
-        let composed = self.render_scanline_live(line, phase);
+        let composed = self.compose_line_segmented(line);
         if self.setini.hires_requested(self.bg_mode) {
             return self.render_scanline_hires(line, composed);
         }

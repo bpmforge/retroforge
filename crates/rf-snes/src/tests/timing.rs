@@ -458,3 +458,44 @@ fn pal_reaches_fewer_frames_than_ntsc_in_the_same_time() {
          {actual:.4} from {ntsc} vs {pal} frames"
     );
 }
+
+/// **The attribution rule itself** (ticket W7-15).
+///
+/// This is the function the whole per-dot upgrade turned on, and the
+/// first attempt failed precisely because it asked `dot()` alone. A bare
+/// dot cannot tell "dot N of the line being composed" from "somewhere in
+/// vblank", so frame-setup writes — thousands of them, all carrying small
+/// dot values — were recorded as mid-line and split line 0.
+#[test]
+fn only_a_visible_line_in_active_display_has_a_mid_line_position() {
+    use crate::timing::{MASTER_PER_DOT, WIDTH_DOTS};
+
+    let mut t = Timing::new();
+    // Line 0 is VBLANK, not the first visible line: fullsnes gives the
+    // visible range as "1-224". A write there is frame setup.
+    assert_eq!(t.line, 0);
+    assert_eq!(t.mid_line_position(), None, "line 0 is vblank");
+
+    // Line 1, early dots: the first visible line, actively drawing.
+    advance(&mut t, MASTER_PER_LINE);
+    assert_eq!(t.line, 1);
+    assert_eq!(t.mid_line_position(), Some((1, 0)));
+    advance(&mut t, u64::from(WIDTH_DOTS / 2) * MASTER_PER_DOT);
+    assert_eq!(t.mid_line_position(), Some((1, WIDTH_DOTS / 2)));
+
+    // Past the drawn dots is HBLANK — that write belongs to the NEXT
+    // line, which `latch_line` carries.
+    advance(&mut t, u64::from(WIDTH_DOTS / 2) * MASTER_PER_DOT);
+    assert!(t.dot() >= WIDTH_DOTS);
+    assert_eq!(
+        t.mid_line_position(),
+        None,
+        "hblank has no mid-line position"
+    );
+
+    // And vblank, where the bulk of register traffic actually lives.
+    let mut t = Timing::new();
+    advance(&mut t, MASTER_PER_LINE * u64::from(VBLANK_START_LINE));
+    assert!(t.in_vblank());
+    assert_eq!(t.mid_line_position(), None, "vblank writes are setup");
+}

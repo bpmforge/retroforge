@@ -101,6 +101,8 @@ impl Region {
 }
 /// First scanline of vblank in 224-line mode.
 pub const VBLANK_START_LINE: u16 = 225;
+/// Dots the composer actually draws. Beyond this is hblank.
+pub const WIDTH_DOTS: u16 = 256;
 /// First scanline of vblank with overscan (`$2133` bit 2) enabled.
 ///
 /// Overscan does not add lines to the frame — 262 is 262 either way. It
@@ -189,6 +191,33 @@ impl Timing {
     #[must_use]
     pub fn dot(&self) -> u16 {
         (self.line_cycles / MASTER_PER_DOT) as u16
+    }
+
+    /// Where the beam is, IF this moment is inside a visible line's active
+    /// display — `None` otherwise (ticket W7-15).
+    ///
+    /// **This is the write ATTRIBUTION that per-dot composition turned on,
+    /// and getting it wrong is what sank the first attempt.** That version
+    /// asked `dot()` alone, which cannot tell "dot N of the line being
+    /// composed" from "somewhere in vblank". Frame-setup writes — 16,307
+    /// OAMDATA, 19,455 CGDATA at one dot, and RotZoom's own Mode 7 matrix
+    /// at dots 1-3 — all carry small dot values, so they were recorded as
+    /// mid-line and split line 0. The result changed exactly one golden by
+    /// 105 pixels, all on row 0, which is what frame setup landing on the
+    /// first visible line looks like rather than a real mid-line effect.
+    ///
+    /// A write only counts as mid-line when the beam is on a VISIBLE line
+    /// and inside the dots the composer actually draws. Line 0 is vblank
+    /// (fullsnes: "1-224 ... visible"), and dots at or past [`WIDTH_DOTS`]
+    /// are hblank — a write there lands before the NEXT line, which
+    /// `Ppu::latch_line` already handles.
+    #[must_use]
+    pub fn mid_line_position(&self) -> Option<(u16, u16)> {
+        if self.line == 0 || self.in_vblank() {
+            return None;
+        }
+        let dot = self.dot();
+        (dot < WIDTH_DOTS).then_some((self.line, dot))
     }
 
     #[must_use]

@@ -24,6 +24,21 @@ fn ppu_with_tile() -> Ppu {
     p
 }
 
+/// A PPU whose whole first line draws BG1, so a test can tell "this half
+/// changed" from "everything was backdrop anyway".
+///
+/// Built because comparing backdrop to backdrop passes vacuously — the
+/// failure mode that made an earlier pass of the per-dot tests look green
+/// while asserting nothing.
+fn ppu_full_line() -> Ppu {
+    let mut p = ppu_with_tile();
+    for i in 0..32 {
+        set_tilemap(&mut p, 0, i, 1);
+    }
+    p.write_register(0x212C, 0x01); // TM: BG1 on the main screen
+    p
+}
+
 fn set_tilemap(p: &mut Ppu, base: u16, index: u16, entry: u16) {
     let at = usize::from(base + index) * 2;
     p.vram[at] = entry as u8;
@@ -1368,4 +1383,124 @@ fn pseudo_hires_interleaves_two_whole_screens_rather_than_splitting_one() {
          pseudo-hires — applying the mode 5/6 double-rate fetch here would \
          invent horizontal detail the hardware never drew"
     );
+}
+
+// ---------------------------------------------------------------------
+// Per-dot composition (ticket W7-15)
+// ---------------------------------------------------------------------
+
+/// **Criterion 1.** A register written mid-line takes effect AT ITS DOT:
+/// pixels left of it keep the old value, pixels from it rightward use the
+/// new one.
+///
+/// This is the whole feature. Composed per scanline, the entire line would
+/// take one value or the other and this test would fail whichever way the
+/// implementation guessed.
+#[test]
+fn a_mid_line_register_write_takes_effect_at_its_dot() {
+    let mut p = ppu_full_line();
+    // LATCH FIRST, exactly as the frame loop does: `latch_line` runs at
+    // the start of a line, so the latched state is what the line is
+    // composed FROM and the recorded writes are replayed on top of it.
+    // Without the latch the base composition would already include the
+    // write and there would be nothing to split — which is precisely how
+    // the first version of this test failed.
+    p.latch_line(1);
+    let before = p.render_scanline(0);
+    assert!(
+        before.pixels.iter().any(|px| px.palette_index != 0),
+        "the fixture must draw something, or this test compares backdrop \
+         to backdrop and passes vacuously"
+    );
+
+    // Mid-line at dot 128: turn BG1 off on the main screen ($212C).
+    // Hardware line for visible row 0 is 1.
+    let mut p2 = ppu_full_line();
+    p2.latch_line(1);
+    p2.write_register_at(0x212C, 0x00, Some((1, 128)));
+    let split = p2.render_scanline(0);
+
+    assert_eq!(
+        &split.pixels[..128]
+            .iter()
+            .map(|px| px.palette_index)
+            .collect::<Vec<_>>(),
+        &before.pixels[..128]
+            .iter()
+            .map(|px| px.palette_index)
+            .collect::<Vec<_>>(),
+        "dots before the write must be unchanged"
+    );
+    assert!(
+        split.pixels[128..].iter().all(|px| px.palette_index == 0),
+        "dots from the write's dot onward must reflect the NEW register \
+         value — BG1 disabled leaves the backdrop"
+    );
+}
+
+/// **Attribution, asserted directly.** A write is recorded against the
+/// line the beam was on, and only that line.
+///
+/// Tested on the RECORD rather than through the picture, deliberately.
+/// Going through the picture would entangle this with which registers
+/// `LineState` happens to latch — a separate, pre-existing concern that
+/// this ticket deliberately did not widen (see `PpuRegs`). What is being
+/// checked here is the thing that was actually broken: a bare `dot()`
+/// could not tell "dot N of the line being composed" from "somewhere in
+/// vblank", so frame-setup writes were recorded against line 0.
+#[test]
+fn a_write_is_recorded_against_the_line_the_beam_was_on() {
+    let mut p = ppu_full_line();
+    p.write_register_at(0x212C, 0x00, Some((50, 128)));
+
+    assert!(
+        p.line_writes_for_test(1).is_empty(),
+        "line 1 saw no mid-line write and must have recorded none"
+    );
+    assert_eq!(
+        p.line_writes_for_test(50),
+        vec![(128u16, 0x212Cu16, 0x00u8)],
+        "the write belongs to line 50, at dot 128"
+    );
+}
+
+/// An unattributed write (`None`) records nothing.
+///
+/// `None` is the ordinary case — hblank and vblank, which is where the
+/// overwhelming majority of register traffic lives. The trace that found
+/// the attribution bug counted 16,307 OAMDATA and 19,455 CGDATA writes in
+/// a single frame; treating those as mid-line events is what split line 0
+/// and changed RotZoom's golden.
+#[test]
+fn an_unattributed_write_records_nothing() {
+    let mut p = ppu_full_line();
+    p.write_register_at(0x212C, 0x00, None);
+    assert!(p.line_writes_for_test(1).is_empty());
+    for line in 0..64u16 {
+        assert!(p.line_writes_for_test(line).is_empty(), "line {line}");
+    }
+}
+
+/// The data ports are never replayed, whatever the beam was doing.
+///
+/// OAM, VRAM and CGRAM writes are MEMORY writes: they have already
+/// landed, and each auto-increments its address register. Replaying one
+/// while composing a segment would write again at a second address and
+/// compose the rest of the line against corrupted memory.
+#[test]
+fn the_data_ports_are_not_recorded_as_mid_line_writes() {
+    let mut p = ppu_full_line();
+    for addr in [
+        0x2102u16, 0x2103, 0x2104, 0x2116, 0x2117, 0x2118, 0x2119, 0x2121, 0x2122,
+    ] {
+        p.write_register_at(addr, 0x00, Some((1, 64)));
+    }
+    assert!(
+        p.line_writes_for_test(1).is_empty(),
+        "data-port writes must never enter the replay"
+    );
+
+    // ...while a control register at the same position IS recorded.
+    p.write_register_at(0x212C, 0x00, Some((1, 64)));
+    assert_eq!(p.line_writes_for_test(1).len(), 1);
 }

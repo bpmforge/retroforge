@@ -64,6 +64,20 @@ pub struct SnesBus {
     /// how port handshakes become timing-dependent and games become
     /// flaky on some runs and not others.
     pub apu_debt: u64,
+    /// True while an HDMA unit is transferring (ticket W7-15).
+    ///
+    /// **HDMA runs in HBLANK, before the line it configures is drawn**, so
+    /// its writes are line SETUP and must never be attributed as mid-line
+    /// events — `Ppu::latch_line` is what carries them, and it runs right
+    /// after. Without this flag every HDMA write splits the line it was
+    /// meant to set up: StarWars, a Mode 7 perspective demo driven almost
+    /// entirely by HDMA, turned its starfield into a regular grid of
+    /// dashes.
+    ///
+    /// It has to be a flag rather than a check on the beam position
+    /// because `hdma_run_line` is driven from the frame loop at whatever
+    /// dot the CPU happened to reach, not at a real hblank dot.
+    hdma_in_progress: bool,
     pub timing: Timing,
     pub joypads: Joypads,
     /// `$4016` strobe latch, and the serial shift position per port.
@@ -96,6 +110,7 @@ impl SnesBus {
             ppu: Ppu::new(),
             apu: Apu::new(),
             apu_debt: 0,
+            hdma_in_progress: false,
             timing: Timing::new(),
             joypads: Joypads::default(),
             manual_latch: false,
@@ -192,7 +207,19 @@ impl SnesBus {
         match offset {
             // $2100-$213F belong to the PPU, EXCEPT the VRAM port below,
             // which W6-02b built and which stores into `self.vram`.
-            0x2100..=0x2114 | 0x211A..=0x213F => self.ppu.write_register(offset, value),
+            0x2100..=0x2114 | 0x211A..=0x213F => {
+                // Per-dot (W7-15): the beam's position decides whether
+                // this is a MID-LINE write that splits the line being
+                // composed, or ordinary setup. `mid_line_position`
+                // returns None during vblank and hblank, which is the
+                // common case and behaves exactly as before.
+                let at = if self.hdma_in_progress {
+                    None
+                } else {
+                    self.timing.mid_line_position()
+                };
+                self.ppu.write_register_at(offset, value, at);
+            }
             0x2140..=0x2143 => {
                 self.catch_up_apu();
                 self.apu.cpu_write_port(usize::from(offset - 0x2140), value);
@@ -457,6 +484,16 @@ impl SnesBus {
     /// HUDs work, and it is the reason a mode-7 perspective demo looks
     /// like perspective rather than a flat rotated plane.
     pub fn hdma_run_line(&mut self) -> u64 {
+        // See `hdma_in_progress`: these writes are hblank line SETUP, not
+        // mid-line events, and attributing them mid-line splits the very
+        // line they configure.
+        self.hdma_in_progress = true;
+        let cycles = self.hdma_run_line_inner();
+        self.hdma_in_progress = false;
+        cycles
+    }
+
+    fn hdma_run_line_inner(&mut self) -> u64 {
         let mut cycles = 0u64;
         for ch in 0..8 {
             if self.hdmaen & (1 << ch) == 0 || self.dma.channels[ch].hdma_done {
