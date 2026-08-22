@@ -9,3 +9,6 @@
 
 # Built fixture ROM (law 5: no ROM bytes in git); rom.sha256 pins it.
 fixtures/nes/action53/build/
+
+# mdbook build output (docs.yml / scripts/local-gate.sh). Generated, never committed.
+docs/site/book/

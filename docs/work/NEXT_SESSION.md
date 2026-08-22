@@ -112,12 +112,47 @@ artifacts that did not exist.
 claims. A human can take W5-05 (release engineering v0, 3 pts) whenever
 you want it.
 
-### F. Watch the first CI run of `docs.yml`
+### F. RESOLVED 2026-08-21 — CI was never going to run. GitHub is storage now.
 
-GitHub Actions cannot run in the dev environment, so `mdbook build` is
-**unproven**. The verifier, the example build and the profile validation
-all pass locally, and the workflow uses only actions `ci.yml` already
-uses — but the first push to `main` is its real test.
+`docs.yml` had never executed, and neither had anything else. Every
+workflow run since roughly **2026-08-07** was rejected before starting:
+
+> The job was not started because an Actions budget is preventing further use.
+
+166 failures to 34 successes, both workflows, every commit — and **not one
+of them a code failure**. The last genuinely green run was 2026-08-07.
+
+**Ruling (Brad, 2026-08-21): treat GitHub as storage and stop worrying
+about CI.** A red badge that means "no minutes left" is worse than no
+badge, because it trains everyone to ignore the one that would have meant
+something. Recorded in `CLAUDE.md` under Build so the next session does not
+rediscover red CI and panic.
+
+**What was recovered.** `scripts/docs-gate.sh` now mirrors `docs.yml`:
+doc samples, plugin-SDK examples, profile validation, and `mdbook build`.
+The last of those **had never run anywhere** — the workflow was added and
+its very first run was already budget-blocked. It passes, so there was no
+latent breakage, and `docs/site/book/` is now gitignored (it was not, and
+a `git add -A` would have committed the whole built site).
+
+**What now runs NOWHERE — the honest cost of this ruling.** Treat changes
+in these three areas as unverified:
+
+1. **Linux.** Everything here is built and tested on darwin.
+2. **The software-rasterizer GPU path.** CI ran the golden-frame GPU suite
+   under `LIBGL_ALWAYS_SOFTWARE=1` on llvmpipe; locally it runs on Metal.
+   A backend divergence is exactly what that job existed to catch.
+3. **The cc65 deterministic fixture rebuild** of RF-Scroller,
+   RF-Scroller-S and the SNES mirror-map fixtures from source.
+
+`ci.yml` also carried debugger pay-for-use, the 5k-frame Accuracy-vs-
+Enhanced MVP boundary, the un-profiled scroller replay, the UI smoke flow
+with NFR-004 timing, and mode-invariant failure evidence. Several of those
+have local counterparts in `scripts/local-gate.sh`; **which ones is not
+verified**, and that audit is worth doing before relying on it.
+
+The workflow files are left in place — they will simply work again if the
+budget is ever restored.
 
 ---
 

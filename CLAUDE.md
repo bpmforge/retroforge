@@ -48,3 +48,20 @@ Entry point for coding agents: `MASTER_PROMPT.md` → `plan.json` → `PLAYBOOK.
 `cargo test --workspace` — no external deps needed until W0-03 adds the
 test-ROM fetcher (network, gitignored `roms/`). GPU tests are headless via
 wgpu; on CI they fall back to llvmpipe/lavapipe (see .github/workflows/ci.yml).
+
+**GitHub is STORAGE, not a gate (ruling 2026-08-21).** GitHub Actions is
+out of budget: every run since ~2026-08-07 was rejected with *"The job was
+not started because an Actions budget is preventing further use"* — 166
+failures to 34 successes, and not one of them a code failure. **A red run
+on GitHub is not a signal; do not chase it, and do not treat a green local
+gate as contradicted by it.** The nine-command gate in law 3 plus
+`scripts/local-gate.sh` and `scripts/docs-gate.sh` are what decide whether
+work is done.
+
+`scripts/docs-gate.sh` mirrors `docs.yml` (doc samples, plugin-SDK
+examples, profile validation, `mdbook build`) — needed because `mdbook
+build` had never executed anywhere until then. What CI covered and now
+runs NOWHERE, so treat changes in these areas as unverified: **Linux**
+(this is a darwin-only shop), the **software-rasterizer GPU path**
+(`LIBGL_ALWAYS_SOFTWARE=1` on llvmpipe, vs Metal locally), and the **cc65
+deterministic fixture rebuild** of RF-Scroller/RF-Scroller-S/mirror-maps.
