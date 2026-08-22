@@ -650,8 +650,14 @@ impl Ppu {
     /// with what `render_scanline` produced.
     fn layer_at(&mut self, line: u16, x: usize) -> Option<rf_core_api::PixelLayer> {
         let mut shadow = self.with_line_state(line).unwrap_or_else(|| self.clone());
-        // This asks what the MAIN screen shows at `x`, so on a true-hires
-        // line it must ask the same half-dot the main screen owns.
+        // Which main-screen layer is being blended into, for the sub
+        // pixel at dot `x`. On a true-hires line the main screen owns the
+        // ODD half-dot of the pair while this sub pixel will land on the
+        // EVEN one — asking `Odd` is still right, because the two
+        // half-dots are the same DOT and `$2131`'s per-layer enable is a
+        // per-dot decision, not a per-half-dot one. (Nothing in the
+        // golden suite can catch a mistake here: the goldens hash palette
+        // indices and this decides a `ColorMathOp`.)
         let phase = shadow.hires_phase(bg::HiresPhase::Odd);
         shadow
             .render_scanline_live(line, phase)
