@@ -42,6 +42,63 @@ pub const DOTS_PER_LINE: u64 = 341;
 pub const MASTER_PER_LINE: u64 = DOTS_PER_LINE * MASTER_PER_DOT;
 /// Scanlines per NTSC frame.
 pub const LINES_PER_FRAME: u16 = 262;
+
+/// Which console region's timing the frame clock runs at (ticket W7-10).
+///
+/// **Only two things differ, and the third is the one worth stating: the
+/// VISIBLE PICTURE DOES NOT.** PAL has more scanlines per frame and a
+/// slightly slower master clock; the PPU still renders 224 lines (239
+/// with overscan) in both, and a scanline is 1364 master cycles in both.
+/// The extra 50 PAL lines are all vblank.
+///
+/// That is why a PAL golden frame of a static picture is IDENTICAL to its
+/// NTSC counterpart, and why "PAL looks different" would be a bug rather
+/// than a feature. What actually differs is the frame PERIOD — 60.1 Hz
+/// against 50.0 Hz — so a game gets ~17% fewer frames per second and
+/// ~19% more vblank time in each one.
+///
+/// Figures verified against fullsnes and the Super Famicom Development
+/// Wiki rather than recalled: fullsnes gives the V counter as "0 to 261
+/// in NTSC mode" and "0 to 311 in PAL mode", and the PAL master clock is
+/// 21.281370 MHz (4.8x chroma, a 17.734475 MHz crystal multiplied by
+/// 6/5) against NTSC's 21.477270 MHz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Region {
+    #[default]
+    Ntsc,
+    Pal,
+}
+
+impl Region {
+    /// Master clock, in Hz.
+    #[must_use]
+    pub const fn master_clock_hz(self) -> u32 {
+        match self {
+            Region::Ntsc => 21_477_270,
+            Region::Pal => 21_281_370,
+        }
+    }
+
+    /// Scanlines per frame, vblank included.
+    #[must_use]
+    pub const fn lines_per_frame(self) -> u16 {
+        match self {
+            Region::Ntsc => LINES_PER_FRAME,
+            Region::Pal => 312,
+        }
+    }
+
+    /// Nominal frame rate, for display and for pacing.
+    ///
+    /// Derived, never a second hardcoded constant — 60.1 and 50.0 are
+    /// *consequences* of the clock and the line count, and writing them
+    /// down separately is how the two drift apart.
+    #[must_use]
+    pub fn frame_rate(self) -> f64 {
+        f64::from(self.master_clock_hz())
+            / (MASTER_PER_LINE * u64::from(self.lines_per_frame())) as f64
+    }
+}
 /// First scanline of vblank in 224-line mode.
 pub const VBLANK_START_LINE: u16 = 225;
 /// First scanline of vblank with overscan (`$2133` bit 2) enabled.
@@ -84,7 +141,12 @@ pub struct Timing {
     /// Master cycles remaining in the auto-joypad window.
     pub auto_joypad_remaining: u64,
     /// First vblank line: 225 normally, 240 with overscan (W7-06).
+    ///
+    /// **Region does not move this.** PAL renders the same 224/239 visible
+    /// lines; its extra scanlines are all vblank (W7-10).
     pub vblank_start: u16,
+    /// NTSC or PAL (ticket W7-10).
+    pub region: Region,
 }
 
 impl Default for Timing {
@@ -96,6 +158,16 @@ impl Default for Timing {
 impl Timing {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_region(Region::Ntsc)
+    }
+
+    /// A frame clock for `region`.
+    ///
+    /// NTSC is the default everywhere else because
+    /// `docs/design/EMULATION_CORES.md` §3 is NTSC-first and names PAL a
+    /// Phase 7 config; this is that config.
+    #[must_use]
+    pub fn with_region(region: Region) -> Self {
         Self {
             vblank_start: VBLANK_START_LINE,
             line_cycles: 0,
@@ -103,7 +175,14 @@ impl Timing {
             frame: 0,
             nmi_flag: false,
             auto_joypad_remaining: 0,
+            region,
         }
+    }
+
+    /// Scanlines in a frame under the active region.
+    #[must_use]
+    pub fn lines_per_frame(&self) -> u16 {
+        self.region.lines_per_frame()
     }
 
     /// Current dot within the scanline.
@@ -190,7 +269,7 @@ impl Timing {
             if self.line_cycles >= MASTER_PER_LINE {
                 self.line_cycles -= MASTER_PER_LINE;
                 self.line += 1;
-                if self.line >= LINES_PER_FRAME {
+                if self.line >= self.region.lines_per_frame() {
                     self.line = 0;
                     self.frame += 1;
                 }

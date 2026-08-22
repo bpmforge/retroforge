@@ -56,7 +56,7 @@
 use super::CpuBus;
 
 /// SNES master clock, in Hz.
-pub const MASTER_CLOCK_HZ: u32 = 21_477_270;
+pub const MASTER_CLOCK_HZ: u32 = crate::timing::Region::Ntsc.master_clock_hz();
 
 /// A fast access: 6 master cycles.
 pub const FAST: u8 = 6;

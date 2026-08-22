@@ -68,6 +68,27 @@ impl SnesSystem {
     /// For tests that want a specific mapping regardless of what a header
     /// claims. Not the path a front-end should use — [`Self::load`] is,
     /// because it is the one that produces the FR-CORE-013 diagnostic.
+    /// Select NTSC or PAL timing (ticket W7-10).
+    ///
+    /// **Call before running.** The region changes how many scanlines a
+    /// frame has, so switching mid-frame would leave the clock partway
+    /// through a frame length it no longer has — harmless for NTSC->PAL
+    /// (the frame just gets longer) and a skipped vblank for PAL->NTSC,
+    /// which is exactly the kind of one-off glitch that is impossible to
+    /// reproduce later.
+    ///
+    /// `docs/design/EMULATION_CORES.md` §3 is NTSC-first and names PAL a
+    /// Phase 7 config; a fresh system is NTSC.
+    pub fn set_region(&mut self, region: crate::timing::Region) {
+        self.bus.timing.region = region;
+    }
+
+    /// The active region.
+    #[must_use]
+    pub fn region(&self) -> crate::timing::Region {
+        self.bus.timing.region
+    }
+
     #[must_use]
     pub fn from_rom(rom: Vec<u8>, mode: SnesMapMode, sram_len: usize) -> Self {
         let mut system = Self {
