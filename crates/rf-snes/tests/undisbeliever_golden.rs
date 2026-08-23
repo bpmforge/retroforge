@@ -60,7 +60,8 @@ const GOLDENS: &[(&str, &str)] = &[
 ];
 
 /// Fetched and run, but not pinned, with the reason.
-const EXCLUDED: &[(&str, &str)] = &[(
+const EXCLUDED: &[(&str, &str)] = &[
+    (
     "hdmaen_latch_test.sfc",
     "leaves forced blank now (it did not before this ticket) but renders a frame that is \
      ENTIRELY palette index 0. Its hash is therefore the same as every other all-backdrop \
@@ -69,7 +70,115 @@ const EXCLUDED: &[(&str, &str)] = &[(
      pair from the PeterLemon suite. What it checks (HDMAEN latched at init, not mid-frame) \
      is already covered without a ROM by tests::hdma::enabling_a_channel_mid_frame_does_not_\
      transfer_until_the_next_init.",
-)];
+    ),
+    // ---- same picture as the pinned pair (W7-13, 2026-08-23) ----
+    (
+        "hdma-2100-glitch-2ch-0a.sfc",
+        "hashes IDENTICALLY to the two PINNED glitch ROMs (7 palette indices, same sha256). Pinning it would add a third copy of one picture and no discrimination at all -- what it actually tests is INIDISP/HDMA timing, which the indexed pixel stream does not carry (law 4). Measured 2026-08-23 across all 29 ROMs: TWO distinct pixel hashes total.",
+    ),
+    (
+        "hdma-2100-glitch-2ch-81.sfc",
+        "hashes IDENTICALLY to the two PINNED glitch ROMs (7 palette indices, same sha256). Pinning it would add a third copy of one picture and no discrimination at all -- what it actually tests is INIDISP/HDMA timing, which the indexed pixel stream does not carry (law 4). Measured 2026-08-23 across all 29 ROMs: TWO distinct pixel hashes total.",
+    ),
+    (
+        "hdma-21ff-2100-0f-glitch.sfc",
+        "hashes IDENTICALLY to the two PINNED glitch ROMs (7 palette indices, same sha256). Pinning it would add a third copy of one picture and no discrimination at all -- what it actually tests is INIDISP/HDMA timing, which the indexed pixel stream does not carry (law 4). Measured 2026-08-23 across all 29 ROMs: TWO distinct pixel hashes total.",
+    ),
+    (
+        "hdma-21ff-2100-glitch.sfc",
+        "hashes IDENTICALLY to the two PINNED glitch ROMs (7 palette indices, same sha256). Pinning it would add a third copy of one picture and no discrimination at all -- what it actually tests is INIDISP/HDMA timing, which the indexed pixel stream does not carry (law 4). Measured 2026-08-23 across all 29 ROMs: TWO distinct pixel hashes total.",
+    ),
+    (
+        "inidisp_d7_glitch_test.sfc",
+        "hashes IDENTICALLY to the two PINNED glitch ROMs (7 palette indices, same sha256). Pinning it would add a third copy of one picture and no discrimination at all -- what it actually tests is INIDISP/HDMA timing, which the indexed pixel stream does not carry (law 4). Measured 2026-08-23 across all 29 ROMs: TWO distinct pixel hashes total.",
+    ),
+    // ---- all-backdrop: index-domain vacuity ----
+    (
+        "hdmaen_latch_test_2.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    (
+        "inidisp_brightness_delay.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    (
+        "inidisp_forgot_to_force_blank.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    (
+        "scpu-a-dma-bug-1.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    (
+        "scpu-a-dma-bug-2.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    (
+        "scpu-a-dma-bug-3.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    (
+        "scpu-a-dma-bug-5.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    (
+        "scpu-a-dma-bug-ch0.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    (
+        "scpu-a-dma-bug-fix.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    (
+        "scpu-a-dma-bug-fix2.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    (
+        "scpu-a-dma-bug-r2.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    (
+        "scpu-a-dma-bug-strange.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    (
+        "scpu-a-dma-bug-two-regs.sfc",
+        "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
+    ),
+    // ---- discriminating, but the oracle needs a ruling ----
+    (
+        "inidisp_enable_display_mid_frame.sfc",
+        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: exactly ONE write, on one line. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
+    ),
+    (
+        "inidisp_hammer_0f.sfc",
+        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 1,988 writes across 70 lines. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
+    ),
+    (
+        "inidisp_hammer_0f00.sfc",
+        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 5,460 writes across all 224 lines. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
+    ),
+    (
+        "inidisp_hammer_0f0f.sfc",
+        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 5,460 writes across all 224 lines. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
+    ),
+    (
+        "inidisp_hammer_0f8f.sfc",
+        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 1,724 writes across 101 lines. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
+    ),
+    (
+        "inidisp_hammer_0f8f_fast.sfc",
+        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 5,460 writes across all 224 lines. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
+    ),
+    (
+        "inidisp_hammer_0f_long.sfc",
+        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 5,460 writes across all 224 lines. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
+    ),
+    (
+        "inidisp_hammer_8f0f.sfc",
+        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 1,844 writes across 108 lines, and it never leaves forced blank at all. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
+    ),
+];
 
 const MAX_INSTRUCTIONS: u64 = 20_000_000;
 const SETTLE: u64 = 200_000;
