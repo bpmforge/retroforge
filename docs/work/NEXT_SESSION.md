@@ -11,74 +11,68 @@ the correction is usually the useful part.
 
 ---
 
-## 1. THE THREE DECISIONS — this is the whole blocker list
+## 1. ONE TICKET OPEN — W7-08, blocked on a spec we do not have
 
-### A. W7-13 criterion 2 — which oracle? (5 pts, blocked)
+**Board: 139 of 140.** Everything else is closed. W7-08's remaining
+criteria need a **cycle-accurate S-DSP**, and that is blocked on a
+documented per-cycle schedule rather than on effort.
 
-*"The undisbeliever snes-test-roms set is green."* It cannot mean 29
-pinned hashes, and the measurement says why: **two distinct pixel hashes
-across 29 ROMs.** 13 render one identical 7-index frame, 16 render an
-entirely blank 1-index frame. What these ROMs test — INIDISP brightness,
-forced-blank timing, DMA bugs — is exactly what law 4 keeps out of the
-indexed pixel stream.
+### What is already true
 
-W7-15 created a signal that did not exist before: per-line **mid-line
-write records**, which give 7 distinct hashes and separate the
-`inidisp_hammer` family cleanly (1,988 writes over 70 lines, 5,460 over
-224, 1,724 over 101, 1,844 over 108, one ROM with exactly one write).
+* **Criterion 1 is met.** Gaussian interpolation, ADSR/GAIN, echo with its
+  ARAM ring buffer and FIR, pitch modulation and noise — all implemented,
+  wired into `mix()`, unit-tested.
+* The S-DSP is **reachable** (`$F2`/`$F3` register file) and **clocked**
+  (32 SPC cycles per sample). Before this it was wired to nothing.
+* blargg's four SPC ROMs **run and report real verdicts**, with no boot
+  ROM required. That is the first external oracle this project's S-DSP
+  and SPC timing have ever had.
+* Three real accuracy bugs are fixed, each verified against a source: the
+  EDL=0 echo buffer size, the FIR's per-tap shift and wrap/clamp/mask
+  sequence, and ENVX/OUTX being writable storage rather than read-only.
 
-* **(a)** Pin those ~8 on `(pixel hash + write hash)`. Discriminating —
-  but it pins OUR INSTRUMENTATION rather than rendered output, and
-  couples those goldens to `Ppu::is_segmentable`.
-* **(b)** Amend criterion 2 to the subset the index domain can cover.
-* **(c)** Leave it at 2 pinned and record the limit.
+### What remains, precisely
 
-All 29 ROMs are already accounted for (2 pinned, 27 excluded) and every
-excluded one is RUN and reported each pass, with its measurement written
-beside it. The 8 in family (c) say *"do not pin until the ruling lands"*.
-Criteria 1 and 3 are green.
+`spc_dsp6` reports `Failed 03`. Tracing every `$F2`/`$F3` access shows the
+failing check writes `$88` to ENVX and then **counts how many reads
+survive before the DSP overwrites it** — 4, then 1, then 1, then 0. It is
+measuring **where inside the 32-cycle sample** voice 0's ENVX is written.
+`Dsp::mix` updates all eight voices at once.
 
-### B. W7-08 criterion 3 — the IPL (8 pts, blocked)
+So criteria 2 and 3 need a 32-step state machine placing every register
+and memory access at its exact SPC cycle. That is what this suite exists
+to test — blargg's README calls his "the first DSP emulator with cycle
+accuracy… whereas previous DSP emulators emulated these only to the
+nearest sample".
 
-blargg's SPC test ROMs read `$FFC0` as DATA, compare it against `$CD`,
-spin forever otherwise, and then `JMP !$FFC0` to execute it. They need a
-**real SPC700 boot ROM**, which this project will never contain (law 5;
-Brad's 2026-08-20 ruling extended it to "not in a fetch list either").
+### Why it is BLOCKED and not merely hard
 
-`Apu::set_ipl_rom` is built and is the door that ruling left open: point
-`RF_SPC_IPL_ROM` at a 64-byte dump of your own console's IPL and the suite
-runs; without one it SKIPS. **No bytes were added to this repo.**
+**The complete 32-cycle schedule was not located.** Fragments are
+documented — sneslab has echo left inserted at cycle 22 and written at 29,
+right at 23 and 30, FIR coefficients read across 22–25; anomie has EFB at
+26 and PMON at 27 — but no full table for all eight voices.
 
-* **(a)** Accept user-supplied-only. Criterion 3 is then verifiable by
-  anyone with a dump, and unverifiable here.
-* **(b)** A **clean-room IPL** — write the documented boot ROM ourselves.
-  It would be our code, not Nintendo's bytes, and blargg only compares the
-  FIRST byte before jumping, so functional equivalence is what it needs.
-  The risk is real and is why this is not a coding decision: a faithful
-  reimplementation of a 64-byte ROM plausibly converges on identical
-  bytes, which is exactly the line law 5 draws.
-* **(c)** Amend criterion 3 again.
+Without a spec, building this means guessing placements and using a
+pass/fail ROM as a search oracle. That is slow, and it can converge on
+something that passes without being right — this project has already
+caught three plausible-but-wrong models in one week.
 
-Criterion 1 is met, and criterion 2 is half met (SPC timing suites pass;
-BRR sample-exactness is unverified and blargg is what would verify it).
+There is also a **licensing question that is Brad's, not mine**: the most
+likely complete source is emulator source code (snes_spc, ares), which is
+GPL. Reading it to reimplement is the same tainting question as the IPL,
+in a different family. Not taken unilaterally.
 
-### C. W5-05 — the hold, and what survives the CI ruling (3 pts, todo/held)
+### What would unblock it — any one of
 
-Criterion 1 (tagged 3-OS artifacts) is unreachable for **two independent**
-reasons: Brad's 2026-08-19 ruling that GitHub is code storage for a
-private repo, and the 2026-08-22 ruling that the Actions budget is not
-being increased. Cross-building Windows and Linux from the darwin dev
-machine is not a workaround worth pretending to — wgpu makes it awkward,
-and an artifact nobody has RUN on the target OS is not evidence of a
-release.
+| | Option |
+|---|---|
+| **(a)** | A doc carrying the complete per-cycle table. anomie's `apudsp.txt` is the canonical one; its host's certificate has expired, so a live mirror is needed |
+| **(b)** | A ruling that reading GPL emulator source to extract **timing facts** (not code) is acceptable |
+| **(c)** | Hardware measurement — needs a console and a capture rig |
+| **(d)** | Amend criteria 2 and 3 to what a sample-granular DSP can honestly claim, and file the cycle-accurate S-DSP as its own ticket |
 
-Criteria **2, 3 and 4 need no CI at all** and are real work whenever you
-want them: the golden `.rfstate`/`.rfreplay` fixture archive
-(FR-STATE-005), the accuracy table in release notes (TESTING.md §5), and
-the migration drill (R-F3 — which needs its own small ruling, because v0
-has no previous release to drill against).
-
----
+**(d) is probably the right shape.** Cycle accuracy is a phase of work,
+not a criterion buried inside an 8-point DSP ticket.
 
 ## 2. The gate is TEN commands now, and the blind spot is narrower
 
