@@ -142,6 +142,54 @@ if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# The four artifact-backed suites that ran NOWHERE until 2026-08-23.
+#
+# Every one of these is `#[ignore]`d, and the nine-command gate runs plain
+# `cargo test --workspace`, which skips ignored tests. So they existed,
+# passed locally when someone remembered, and were covered by nothing.
+# That is the exact blind spot that let a hires change ship broken in
+# `4ca5f93` and let the SNES per-dot path go untested through three passes
+# of W7-15 — a deliberate half-dot swap left the whole gate green.
+#
+# They fetch nothing and SKIP cleanly when their artifacts are absent, so
+# adding them costs nothing on a machine that has not fetched. What they
+# buy is that "I ran the local gate" now means these ran too.
+# ---------------------------------------------------------------------------
+
+echo "local-gate: running undisbeliever golden frames (release)..." >&2
+if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
+  -p rf-snes --test undisbeliever_golden -- --ignored --nocapture; then
+  echo "local-gate: undisbeliever goldens FAILED" >&2
+  exit 1
+fi
+
+# PAL vs NTSC (ticket W7-10). Uses the PeterLemon ROMs fetched above.
+echo "local-gate: running PAL/NTSC region goldens (release)..." >&2
+if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
+  -p rf-snes --test region_golden -- --ignored --nocapture; then
+  echo "local-gate: region goldens FAILED" >&2
+  exit 1
+fi
+
+# blargg's SPC test ROMs (ticket W7-08). Skips unless RF_SPC_IPL_ROM points
+# at a real SPC700 boot ROM the USER supplied -- this project never ships
+# or downloads one (law 5).
+echo "local-gate: running blargg SPC ROMs (release)..." >&2
+if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
+  -p rf-snes --test blargg_spc -- --ignored --nocapture; then
+  echo "local-gate: blargg SPC ROMs FAILED" >&2
+  exit 1
+fi
+
+# A real community Mesen HD pack, imported end to end (ticket W9-06).
+echo "local-gate: running the real HD-pack import (release)..." >&2
+if ! cargo test --release --manifest-path "$repo_root/Cargo.toml" \
+  -p rf-enhance --test mesen_hdpack_real -- --ignored --nocapture; then
+  echo "local-gate: HD-pack import FAILED" >&2
+  exit 1
+fi
+
 # SPC700 SingleStepTests vectors (ticket W6-04a): 256 opcode files, 1000
 # cases each. Local-only (NFR-006); needs the archive extracted, which
 # rf-harness does not do.

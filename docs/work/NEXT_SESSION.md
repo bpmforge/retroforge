@@ -1,238 +1,172 @@
-# NEXT SESSION — resume point (rewritten 2026-08-21, end of second run)
+# NEXT SESSION — resume point (rewritten 2026-08-23)
 
-Supersedes `docs/work/HANDOFF.md`'s "Current state"/"START HERE" sections;
-that file's *process* sections (read-order, block-note discipline) still
-apply. Read `CLAUDE.md` first.
+**Board: 137 of 140 done.** Everything that can be finished without a
+ruling has been. The three open tickets each need a decision from Brad,
+and each is a one-line answer rather than an investigation — the
+investigation is already recorded on the ticket.
 
-**Branch `main`, tree clean, both remotes at `0c87f44`. 133 of 140
-tickets done. `plan.json` reports `claimable now: (none)`.**
-
----
-
-## 1. WHAT BRAD NEEDS TO DO — this is the whole blocker list
-
-Seven tickets remain and **not one is blocked on programming.** Four need
-a human decision or an external artifact; two wait on those; one is held
-by board policy. Nothing here needs more code written first.
-
-### A. ~~Look at one frame~~ → RESOLVED 2026-08-21, no human action needed
-
-**Investigated and answered: per-dot has a WRITE-ATTRIBUTION defect. Do
-not re-pin RotZoom; the pinned `6ebfb8ce` is right.**
-
-Re-applying segmentation and diffing every golden: 31 of 32 ROMs
-byte-identical, RotZoom differs by 105 of 57,344 pixels — **all on row 0**,
-one span from x=26 rightward. A change confined to the first visible line
-is frame-setup writes landing on line 0, not a mid-line effect.
-
-Tracing every write treated as mid-line found `$2104` OAMDATA (16,307),
-`$2122` CGDATA (19,455 at one dot), `$210D` BG1HOFS (9,839), and
-`$211C`/`$211D` — RotZoom's own Mode 7 matrix — at dots 1-3. Bulk
-OAM/CGRAM transfers happen in **vblank**. `timing.dot()` cannot tell
-"dot N of the visible line" from "somewhere in vblank".
-
-**Remaining work on W7-15 crit 1** is therefore attribution, not
-composition: tag each write with **(line, dot)** and exclude
-vblank/forced-blank, then re-measure. The segmentation design itself is
-sound — 31 unchanged ROMs prove it is inert when it should be.
-
-**Also: criterion 3 is probably fine as written.** An earlier note called
-it unsatisfiable; if RotZoom's only change came from the attribution bug,
-correct attribution should leave it unchanged. Do not amend it — fix
-attribution and re-measure.
-
-### B. RESOLVED 2026-08-21 — two defects found and FIXED. W7-06 is closed; W7-10 is now claimable.
-
-Brad looked at the six mode-5 Interlace frames and called them jagged. He
-was right, and the cause was not the half-dot ORDER that two earlier
-passes of this ticket kept reasoning about.
-
-**Defect 1 — no double-rate fetch.** Modes 5/6 are ONE 512-wide picture
-whose even columns feed the sub screen and odd columns the main screen.
-The code instead interleaved two independent 256-wide renders — which is
-*pseudo-hires*, a different mechanism that happens to share the same 512
-output. Both screens therefore fetched the same background at the same
-scroll, so the 512 picture was the 256 picture with every column
-duplicated: **55,842 of 57,344 half-dot pairs identical on
-InterlaceFont**, each plane individually sharp, glyph edges serrated
-wherever the remaining 2.6% disagreed. `bg::HiresPhase` now separates the
-two routes; `hires_requested()` still answers yes to both, because the
-question it asks ("does this line emit 512 dots?") is genuinely different.
-
-**Defect 2 — hires tile width.** In modes 5/6 the `$2105` size bit selects
-**16×8 or 16×16**: a tile is sixteen half-dots wide, so 32 tiles span the
-line exactly as they do at 256. Treating it as eight read 64 tiles where
-32 exist, wrapped a 32-wide tilemap, and **rendered the whole line twice
-side by side** — which is how it was caught, from the PeterLemon font
-chart appearing twice across the frame.
-
-**Also corrected:** mosaic must snap in the same space the fetch walks
-(512 on a hires line). Snapping the dot and scaling afterwards makes both
-half-dots of a block resolve to the same *pair* rather than the same
-pixel, filling every block with a two-colour vertical stripe instead of a
-flat colour. Both versions were rendered and looked at; the reasoning for
-the wrong one was perfectly plausible.
-
-**Evidence.** InterlaceFont renders the full printable-ASCII chart, sharp.
-Moogle, RPG, Scroll, MystHDMA and SimpsonsHDMA all render their intended
-pictures. MosaicMode5 shows flat mosaic blocks — which also discharges the
-criterion folded in from the withdrawn W7-17. All seven are now pinned
-goldens. Three new unit tests, each mutation-checked to fail on its own
-defect and only its own. Workspace 1,617 passing; nine-command gate green.
-
-**One clause still needs you:** criterion 1's *"and the renderer
-letterboxing"*. It is `rf-renderer`, and W7-06's write_scope is
-`crates/rf-snes/** + scripts/**` — unchanged through all three passes. The
-core half (SETINI decode, 224-vs-239 visible lines, vblank shortening)
-shipped in the first pass. This needs **either an rf-renderer ticket or a
-scope amendment**, and it was not filed unilaterally because splitting a
-ticket is your call.
-
-### C. Rule on an artifact → unblocks W9-06 crit 3
-
-Needs a **licence-clear community HD pack**. `docs/SCOPE.md` puts
-third-party assets as gate fixtures in the OUT column, so this needs
-either a fetch-only artifact designation (`tests/rom-manifest.toml` has
-`LicenseStatus::NoLicenseGrantFetchOnly` for exactly this posture, which
-means widening scope to `rf-harness` + `tests/`) or an amended criterion.
-**Do not satisfy it with a pack we authored** — that would prove the
-importer against its own author, which is the whole point of the
-criterion.
-
-### D. Designate a reference set → unblocks W7-08 crit 3
-
-An audio RMS comparison needs a **designated** SPC reference set. None is
-designated or fetched. **Check it is obtainable and licence-clear before
-claiming**, or this stalls the way W7-05/W7-08/W7-11 already did on
-artifacts that did not exist.
-
-### E. Release the hold → W5-05
-
-`W5-04`/`W5-05` are **held** — the board excludes them from unattended
-claims. A human can take W5-05 (release engineering v0, 3 pts) whenever
-you want it.
-
-### F. RESOLVED 2026-08-21 — CI was never going to run. GitHub is storage now.
-
-`docs.yml` had never executed, and neither had anything else. Every
-workflow run since roughly **2026-08-07** was rejected before starting:
-
-> The job was not started because an Actions budget is preventing further use.
-
-166 failures to 34 successes, both workflows, every commit — and **not one
-of them a code failure**. The last genuinely green run was 2026-08-07.
-
-**Ruling (Brad, 2026-08-21): treat GitHub as storage and stop worrying
-about CI. Made PERMANENT 2026-08-22: the Actions budget is not being
-increased**, so hosted CI will not run again and no claim anywhere in this
-repo may cite "green in CI" as evidence. One such claim was found and
-corrected on W5-05, which asserted the 3-OS build matrix was green.** A red badge that means "no minutes left" is worse than no
-badge, because it trains everyone to ignore the one that would have meant
-something. Recorded in `CLAUDE.md` under Build so the next session does not
-rediscover red CI and panic.
-
-**What was recovered.** `scripts/docs-gate.sh` now mirrors `docs.yml`:
-doc samples, plugin-SDK examples, profile validation, and `mdbook build`.
-The last of those **had never run anywhere** — the workflow was added and
-its very first run was already budget-blocked. It passes, so there was no
-latent breakage, and `docs/site/book/` is now gitignored (it was not, and
-a `git add -A` would have committed the whole built site).
-
-**What now runs NOWHERE — the honest cost of this ruling.** Treat changes
-in these three areas as unverified:
-
-1. **Linux.** Everything here is built and tested on darwin.
-2. **The software-rasterizer GPU path.** CI ran the golden-frame GPU suite
-   under `LIBGL_ALWAYS_SOFTWARE=1` on llvmpipe; locally it runs on Metal.
-   A backend divergence is exactly what that job existed to catch.
-3. **The cc65 deterministic fixture rebuild** of RF-Scroller,
-   RF-Scroller-S and the SNES mirror-map fixtures from source.
-
-`ci.yml` also carried debugger pay-for-use, the 5k-frame Accuracy-vs-
-Enhanced MVP boundary, the un-profiled scroller replay, the UI smoke flow
-with NFR-004 timing, and mode-invariant failure evidence. Several of those
-have local counterparts in `scripts/local-gate.sh`; **which ones is not
-verified**, and that audit is worth doing before relying on it.
-
-The workflow files are left in place. They are correct and would run on a
-**self-hosted runner**, which GitHub does not bill for on private repos
-(the per-minute platform fee announced for March 2026 was postponed
-indefinitely). Gitea Actions on the `origin` remote is the other free
-path, and it is self-hosted by definition. Neither is set up, and neither
-should be until distribution is a real requirement — see W5-05.
+Read `plan.json`'s notes for the ticket you pick up. They are long on
+purpose: several of them record a claim that turned out to be FALSE, and
+the correction is usually the useful part.
 
 ---
 
-## 2. The gate is NINE commands, and still not enough
+## 1. THE THREE DECISIONS — this is the whole blocker list
+
+### A. W7-13 criterion 2 — which oracle? (5 pts, blocked)
+
+*"The undisbeliever snes-test-roms set is green."* It cannot mean 29
+pinned hashes, and the measurement says why: **two distinct pixel hashes
+across 29 ROMs.** 13 render one identical 7-index frame, 16 render an
+entirely blank 1-index frame. What these ROMs test — INIDISP brightness,
+forced-blank timing, DMA bugs — is exactly what law 4 keeps out of the
+indexed pixel stream.
+
+W7-15 created a signal that did not exist before: per-line **mid-line
+write records**, which give 7 distinct hashes and separate the
+`inidisp_hammer` family cleanly (1,988 writes over 70 lines, 5,460 over
+224, 1,724 over 101, 1,844 over 108, one ROM with exactly one write).
+
+* **(a)** Pin those ~8 on `(pixel hash + write hash)`. Discriminating —
+  but it pins OUR INSTRUMENTATION rather than rendered output, and
+  couples those goldens to `Ppu::is_segmentable`.
+* **(b)** Amend criterion 2 to the subset the index domain can cover.
+* **(c)** Leave it at 2 pinned and record the limit.
+
+All 29 ROMs are already accounted for (2 pinned, 27 excluded) and every
+excluded one is RUN and reported each pass, with its measurement written
+beside it. The 8 in family (c) say *"do not pin until the ruling lands"*.
+Criteria 1 and 3 are green.
+
+### B. W7-08 criterion 3 — the IPL (8 pts, blocked)
+
+blargg's SPC test ROMs read `$FFC0` as DATA, compare it against `$CD`,
+spin forever otherwise, and then `JMP !$FFC0` to execute it. They need a
+**real SPC700 boot ROM**, which this project will never contain (law 5;
+Brad's 2026-08-20 ruling extended it to "not in a fetch list either").
+
+`Apu::set_ipl_rom` is built and is the door that ruling left open: point
+`RF_SPC_IPL_ROM` at a 64-byte dump of your own console's IPL and the suite
+runs; without one it SKIPS. **No bytes were added to this repo.**
+
+* **(a)** Accept user-supplied-only. Criterion 3 is then verifiable by
+  anyone with a dump, and unverifiable here.
+* **(b)** A **clean-room IPL** — write the documented boot ROM ourselves.
+  It would be our code, not Nintendo's bytes, and blargg only compares the
+  FIRST byte before jumping, so functional equivalence is what it needs.
+  The risk is real and is why this is not a coding decision: a faithful
+  reimplementation of a 64-byte ROM plausibly converges on identical
+  bytes, which is exactly the line law 5 draws.
+* **(c)** Amend criterion 3 again.
+
+Criterion 1 is met, and criterion 2 is half met (SPC timing suites pass;
+BRR sample-exactness is unverified and blargg is what would verify it).
+
+### C. W5-05 — the hold, and what survives the CI ruling (3 pts, todo/held)
+
+Criterion 1 (tagged 3-OS artifacts) is unreachable for **two independent**
+reasons: Brad's 2026-08-19 ruling that GitHub is code storage for a
+private repo, and the 2026-08-22 ruling that the Actions budget is not
+being increased. Cross-building Windows and Linux from the darwin dev
+machine is not a workaround worth pretending to — wgpu makes it awkward,
+and an artifact nobody has RUN on the target OS is not evidence of a
+release.
+
+Criteria **2, 3 and 4 need no CI at all** and are real work whenever you
+want them: the golden `.rfstate`/`.rfreplay` fixture archive
+(FR-STATE-005), the accuracy table in release notes (TESTING.md §5), and
+the migration drill (R-F3 — which needs its own small ruling, because v0
+has no previous release to drill against).
+
+---
+
+## 2. The gate is TEN commands now, and the blind spot is narrower
 
 ```
-cargo fmt --all --check                                  OK
-cargo clippy --workspace --all-targets -- -D warnings    OK
-cargo test --workspace                                   OK — 1614 passing
-scripts/validate-arch.sh                                 OK
-node scripts/validate-plan.mjs                           OK
-node scripts/validate-traceability.mjs                   OK
-node scripts/validate-evidence.mjs                       OK
-cargo deny --all-features check licenses                 OK   (ort, wasmtime)
-node .github/scripts/verify-doc-samples.mjs              OK   (doc site)
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                                   1643 passing
+scripts/validate-arch.sh
+node scripts/validate-plan.mjs
+node scripts/validate-traceability.mjs
+node scripts/validate-evidence.mjs
+cargo deny --all-features check licenses
+node .github/scripts/verify-doc-samples.mjs
+scripts/docs-gate.sh                                     needs mdbook
 ```
 
-**Three things all nine miss.** All bit this session:
+**GitHub CI is not one of them and never will be again** (ruling
+2026-08-22, recorded in `CLAUDE.md`). Nothing in this repo may cite "green
+in CI" as evidence; one such claim was found on W5-05 and corrected.
 
-1. **The `#[ignore]`d goldens.** A hires change shipped in `4ca5f93` broke
-   `peterlemon_golden.rs` and the full gate stayed green through it. On
-   anything touching the PPU, run
-   `cargo test --release -p rf-snes --test peterlemon_golden -- --ignored`.
-2. **Feature-gated code.** CI leaves `gamepad` off, so
-   `#[cfg(feature = "gamepad")]` is never type-checked by the gate. A
-   green default build hid a real compile error in W8-04. Use
+**What all ten still miss:**
+
+1. **`#[ignore]`d suites.** `cargo test --workspace` skips them. This is
+   not theoretical: a hires change shipped broken in `4ca5f93` behind a
+   green gate, and a deliberate half-dot swap left every command green
+   through three passes of W7-15. **`scripts/local-gate.sh` now runs ten
+   of them**, including the four that ran nowhere until 2026-08-23
+   (`undisbeliever_golden`, `region_golden`, `blargg_spc`,
+   `mesen_hdpack_real`). Run it on anything touching the PPU, APU or DMA.
+2. **Feature-gated code.** CI left `gamepad` off, so
+   `#[cfg(feature = "gamepad")]` is never type-checked. Use
    `cargo clippy -p retroforge --features gamepad --all-targets`.
-3. **The hires path had no golden at all — CLOSED 2026-08-21, and worth
-   keeping as the pattern.** Every mode 5/6 ROM sat on the excluded list,
-   so `render_scanline_hires` was uncovered even by the `#[ignore]`d
-   suite: deliberately swapping its half-dot order left all nine gate
-   commands *and* that suite green, while two real defects sat in the
-   code (§1B). Seven hires goldens are now pinned and re-running that
-   swap FAILS. **The general form: an entry on an exclusion list is a
-   hole in the gate, not a note about a ROM.** Before trusting a green
-   run on any subsystem, check whether its ROMs are actually in
-   `GOLDENS` or merely in `EXCLUDED`.
+3. **Linux, the software-rasterizer GPU path, and the cc65 fixture
+   rebuild.** These only ever ran on CI. Treat changes in those areas as
+   unverified. Self-hosted runners are free on private repos and Gitea
+   Actions is available on `origin`; neither is set up, and neither should
+   be until distribution is a real requirement.
 
-**Run the suite with nothing else running.** RF-L-10 (now fixed) made two
-concurrent `cargo test` runs delete each other's evidence file; a red run
-with a second cargo in flight is *suspect before it is believed*.
+**Run the suite with nothing else running.** RF-L-10 (fixed) had two
+concurrent `cargo test` runs deleting each other's evidence file; a red
+run with a second cargo in flight is *suspect before it is believed*.
 
 ---
 
-## 3. Read RF-L-11 before writing a doc comment
+## 3. An exclusion is a hole in the gate, not a note about a ROM
 
-Four stale second-sources-of-truth were found and fixed in one session,
-and the fourth **propagated into the plan**: a stale `dsp.rs` scope
-comment told W7-08's notes the DSP was absent, and that was restated into
-`plan.json` and `STATUS.md` as fact. Three layers of restatement, no
-compiler anywhere in the chain.
+This bit the project twice in two days and is worth internalising.
 
-1. Add a second place that must agree with a first → write the test in the
-   **same commit**.
-2. A scope claim in a doc comment needs an assertion or an expiry.
-3. **Read the code before repeating a doc's claim about it.**
+* Every mode 5/6 ROM sat in `EXCLUDED`, so the hires path had **zero**
+  coverage while two real defects lived in it.
+* The three HiColor ROMs sat in `EXCLUDED` on the reason *"needs the
+  sub-screen this core does not have"* — which W7-16 made false. Nobody
+  re-read it. They turned out to be perfectly pinnable (155/240/155
+  distinct colours) and are now goldens.
+* 26 of 29 undisbeliever ROMs were in **neither** list: fetched, never
+  run, never reported, invisible.
 
-Full write-up: `docs/LESSONS.md` RF-L-11. RF-L-09 (unbounded walks, now
-CLAUDE.md Law 8) and RF-L-10 (fixed temp paths) are the other two from
-this run.
+So: before trusting a green suite, check whether its ROMs are in
+`GOLDENS` or merely in `EXCLUDED` — and re-read the reason.
 
 ---
 
-## 4. Standing follow-ups (none blocking)
+## 4. Read RF-L-11 before writing a doc comment
 
-1. **`rf-intake` is not wired into CI** (`.github/**` was outside W9-05's
-   scope), so FR-PROF-007's "nothing activates without passing" is a
-   property of the code path, not of the repository's automation.
-2. **`GAME_PROFILES.md` §2 does not document `[decode.room_grid]`** —
-   `RoomGridSpec`'s doc comment is the specification for now.
-3. **An RSS/wall-clock cap around `cargo test --workspace`** (RF-L-09's
-   proposal), still unbuilt and still the higher-value of its two guards.
-4. **Commercial-title profiles are permitted and unused** (W9-08 ruling) —
-   every claim needs an FR-PROF-003 citation the loader enforces.
-5. **No publishing step for the doc site** — `docs.yml` uploads the book
-   as an artifact; Pages is a repository-settings decision.
+**A doc comment is a claim about code, and it decays.** Corrected this
+session: `render_scanline_hires` claimed a swapped half-dot order would
+look "subtly soft" (it changes 9,012 bytes and is obvious); `apu/mod.rs`
+claimed no program reads the IPL as data (test ROMs do, and they are what
+verify this emulator); W5-05 claimed the 3-OS matrix was "green in CI".
+
+When a note records a measurement, give the number. "97.4% of half-dot
+pairs identical" survived three passes of a ticket; "looks wrong" would
+not have.
+
+---
+
+## 5. Standing follow-ups (none blocking)
+
+* **HDMA at its true H-position.** `hdma_run_line` fires from the frame
+  loop at whatever dot the CPU reached, so per-dot treats HDMA as line
+  setup. That is why `hdma-2100-glitch` and `hdma-21ff-glitch` still hash
+  identically to each other. Fixing it is beyond segmentation.
+* **Mode 6 is untested.** It is the only hires + offset-per-tile mode; no
+  ROM in the corpus uses it, so the OPT-column and scroll-doubling choices
+  there are made without an oracle.
+* **The SNES core is not wired into the app.** `crates/retroforge` never
+  constructs a `SnesSystem`, which is why W7-10 left a region toggle
+  unbuilt — it would have been wired to nothing. `FramePacer` also
+  hardcodes the NTSC period and takes no parameter.
+* **`FrameBundleBuilder` truncates to one width per frame**, so a frame
+  mixing 256- and 512-wide lines cannot be represented there.
