@@ -144,7 +144,13 @@ fn noise_replaces_a_voices_sample_source() {
 #[test]
 fn the_echo_buffer_length_follows_edl() {
     let mut e = Echo::default();
-    assert_eq!(e.buffer_len(), 16, "EDL 0 is a 4-sample minimum, not zero");
+    // **FOUR bytes — one stereo sample — not sixteen.** This assertion
+    // used to read 16 with the comment "EDL 0 is a 4-sample minimum",
+    // which was an assumption written down rather than checked. The
+    // buffer is EDL<<11 bytes, and at EDL=0 hardware still reserves one
+    // sample so the ring has somewhere to live (SNESdev/sneslab: "when
+    // EDL=0, the buffer is 4 bytes (1 sample) rather than 0").
+    assert_eq!(e.buffer_len(), 4, "EDL 0 is ONE stereo sample: 4 bytes");
     e.delay = 1;
     assert_eq!(e.buffer_len(), 2048);
     e.delay = 4;
@@ -333,23 +339,54 @@ fn a_directory_entry_past_aram_is_not_a_panic() {
     assert_eq!(dsp.voices[0].start, 0, "out-of-range reads as zero");
 }
 
-/// ENVX and OUTX report LIVE state, not the last value written to them.
+/// ENVX and OUTX are ORDINARY STORAGE that the DSP overwrites once per
+/// sample — they are not read-only.
 ///
-/// Returning the written value would be a convincing lie: a program
-/// polling ENVX for an envelope to decay would spin forever.
+/// **This test used to assert the opposite**, on the reasoning that
+/// returning a written value "would be a convincing lie: a program
+/// polling ENVX for an envelope to decay would spin forever". That
+/// reasoning was wrong, and blargg's `spc_dsp6` is what caught it — its
+/// very first check writes `$88` to `$08` and reads it straight back, and
+/// against the old model it read `00` and the ROM gave up.
+///
+/// SNESdev is explicit: "VxENVX is technically writable and not intended
+/// to be written to. The S-DSP updates this register once per sample."
+/// Both halves matter — the write sticks, AND the next sample lands on
+/// it, which is what stops a poller spinning forever.
 #[test]
-fn envx_and_outx_read_hardware_state_not_the_written_byte() {
+fn envx_and_outx_are_storage_the_dsp_overwrites_each_sample() {
     let mut dsp = Dsp::new();
     let aram = [0u8; 64];
-    dsp.write_register(0x08, 0x7F, &aram); // try to write ENVX
-    dsp.write_register(0x09, 0x7F, &aram); // try to write OUTX
-    assert_eq!(dsp.read_register(0x08), 0, "ENVX is hardware-written");
-    assert_eq!(dsp.read_register(0x09), 0, "OUTX is hardware-written");
 
+    // The write sticks and reads straight back.
+    dsp.write_register(0x08, 0x88, &aram);
+    assert_eq!(
+        dsp.read_register(0x08),
+        0x88,
+        "a written ENVX must read back before the next sample overwrites it"
+    );
+    dsp.write_register(0x09, 0x77, &aram);
+    assert_eq!(dsp.read_register(0x09), 0x77, "and OUTX likewise");
+
+    // ...and one sample of mixing lands on it.
+    let mut aram = vec![0u8; 0x10000];
     dsp.voices[0].envelope.level = 0x7F0;
-    assert_eq!(dsp.read_register(0x08), 0x7F, "top 7 bits of the envelope");
-    dsp.voices[0].last_output = -0x100;
-    assert_eq!(dsp.read_register(0x09), 0xFF, "high byte of the output");
+    let _ = dsp.mix(&mut aram);
+    // The envelope also STEPS during that sample, so the exact value is
+    // whatever the envelope now holds — asserting a hardcoded number here
+    // would pin the envelope's rate model rather than this register's
+    // update cadence, which is what the test is about.
+    let expected = (dsp.voices[0].envelope.level >> 4) as u8;
+    assert_eq!(
+        dsp.read_register(0x08),
+        expected,
+        "the DSP updates ENVX once per sample, from the live envelope"
+    );
+    assert_ne!(
+        dsp.read_register(0x08),
+        0x88,
+        "and that update must have landed on the CPU's written value"
+    );
 }
 
 /// ENDX is cleared by ANY write to `$7C`, and the value written is

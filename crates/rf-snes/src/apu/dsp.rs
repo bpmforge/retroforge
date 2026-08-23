@@ -474,10 +474,50 @@ impl Echo {
     #[must_use]
     pub fn buffer_len(&self) -> usize {
         if self.delay == 0 {
-            4 * 4
+            // **EDL=0 is FOUR bytes — one stereo sample — not zero and not
+            // four samples.** An earlier version returned 4*4 on the
+            // assumption of "a 4-sample minimum"; that was written down
+            // rather than checked. The buffer is `EDL << 11` bytes, and at
+            // EDL=0 hardware still reserves one sample's worth so the ring
+            // has somewhere to live.
+            4
         } else {
             usize::from(self.delay) * 2048
         }
+    }
+
+    /// The 8-tap FIR, exactly as the hardware sequences it.
+    ///
+    /// **The order and the intermediate width both matter**, and doing the
+    /// obvious thing instead — accumulate all eight taps in a wide
+    /// register and clamp once — is measurably different:
+    ///
+    /// ```text
+    /// S  = sum(i=0..6) (FIR[i] * x[n-7+i] >> 6)
+    /// S  = S & 0xFFFF                 // WRAPAROUND, not saturation
+    /// S += (FIR[7] * x[n] >> 6)
+    /// S  = clamp(S, -32768, 32767)    // and THIS one saturates
+    /// out = S & 0xFFFE                // echo buffer is 15-bit, left-aligned
+    /// ```
+    ///
+    /// Three things that are easy to get wrong and were: the shift is
+    /// **per tap** (`>> 6`) and not one `>> 7` over the sum; taps 0-6 CLIP
+    /// by wrapping at 16 bits while tap 7 CLAMPS; and the result has bit 0
+    /// cleared because the echo buffer stores 15 bits left-aligned.
+    ///
+    /// `FIR[0]` (`$0F`) multiplies the OLDEST sample and `FIR[7]` (`$7F`)
+    /// the newest — which this implementation already had right.
+    fn fir_tap(history: [i16; 8], coef: [i8; 8]) -> i16 {
+        let mut acc = 0i32;
+        for i in 0..7 {
+            acc += (i32::from(history[i]) * i32::from(coef[i])) >> 6;
+        }
+        // Wraparound to 16 bits. `as i16` is the truncation hardware does;
+        // clamping here instead would hide exactly the overflow this step
+        // is modelling.
+        acc = i32::from(acc as i16);
+        acc += (i32::from(history[7]) * i32::from(coef[7])) >> 6;
+        (acc.clamp(-0x8000, 0x7FFF) as i16) & !1
     }
 
     /// Process one stereo sample, returning the echo contribution.
@@ -500,14 +540,9 @@ impl Echo {
 
         self.history.rotate_left(1);
         self.history[7] = delayed;
-        let mut fir = (0i32, 0i32);
-        for (i, tap) in self.fir.iter().enumerate() {
-            fir.0 += i32::from(self.history[i].0) * i32::from(*tap);
-            fir.1 += i32::from(self.history[i].1) * i32::from(*tap);
-        }
         let fir = (
-            (fir.0 >> 7).clamp(-0x8000, 0x7FFF) as i16,
-            (fir.1 >> 7).clamp(-0x8000, 0x7FFF) as i16,
+            Self::fir_tap(core::array::from_fn(|i| self.history[i].0), self.fir),
+            Self::fir_tap(core::array::from_fn(|i| self.history[i].1), self.fir),
         );
 
         if !self.write_disabled {
@@ -625,9 +660,19 @@ impl Dsp {
         let a = addr & 0x7F;
         let voice = usize::from(a >> 4);
         match a & 0x0F {
-            0x8 => (self.voices[voice].envelope.level >> 4) as u8,
-            0x9 => (self.voices[voice].last_output >> 8) as u8,
             0xC if voice == 7 => self.endx,
+            // **ENVX and OUTX read out of the register FILE, not from live
+            // state** — they are ordinary storage that the DSP happens to
+            // overwrite once per sample (see `Dsp::mix`).
+            //
+            // An earlier version computed them live and ignored writes, on
+            // the reasoning that "returning the written value would be a
+            // convincing lie". That reasoning was wrong, and blargg's
+            // spc_dsp6 is what caught it: its very first check writes $88
+            // to `$08` and reads it straight back. SNESdev is explicit —
+            // "VxENVX is technically writable and not intended to be
+            // written to. The S-DSP updates this register once per
+            // sample." Between samples, a written value stands.
             _ => self.regs[usize::from(a)],
         }
     }
@@ -675,10 +720,9 @@ impl Dsp {
                 env.sustain_rate = value & 0x1F;
             }
             0x7 => self.voices[voice].envelope.gain = value,
-            // ENVX and OUTX are hardware-written. Ignoring the write is
-            // the behaviour; the value still lands in `regs` above and is
-            // simply never read back, because `read_register` sources
-            // both from live state.
+            // ENVX and OUTX need no decode: they are storage. The write
+            // already landed in `regs` above, which is what a read
+            // returns until the next sample overwrites it.
             0x8 | 0x9 => {}
             // The eight FIR coefficients live one per voice row.
             0xF => self.echo.fir[voice] = signed,
@@ -771,8 +815,6 @@ impl Dsp {
             let s = v.next_output(aram, noise, self.noise_enable & (1 << i) != 0);
             v.pitch = base_pitch;
             previous = s;
-            // Latch OUTX so `$x9` reads the CURRENT output rather than
-            // whatever the CPU last wrote there.
             v.last_output = s;
             // ENDX is sticky: hardware sets the bit when the voice reaches
             // a block with the END flag and only a write to `$7C` clears
@@ -794,6 +836,15 @@ impl Dsp {
         }
 
         self.endx = endx;
+        // **The DSP updates ENVX and OUTX once per sample.** That cadence
+        // is the whole behaviour: a value the CPU wrote stands until the
+        // next sample lands on it, which is what makes `$08` read back as
+        // written when a program writes and reads within one sample.
+        for i in 0..8 {
+            let v = &self.voices[i];
+            self.regs[i * 0x10 + 0x8] = (v.envelope.level >> 4) as u8;
+            self.regs[i * 0x10 + 0x9] = (v.last_output >> 8) as u8;
+        }
 
         let (el, er) = self.echo.process(
             aram,
