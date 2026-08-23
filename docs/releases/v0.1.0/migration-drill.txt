@@ -1,0 +1,24 @@
+--- .rfstate drill (rf-state) ---
+    Finished `release` profile [optimized] target(s) in 0.12s
+     Running tests/golden_fixture.rs (target/release/deps/golden_fixture-77af3c21a28f9bc2)
+
+running 3 tests
+test regenerate_golden_fixture ... ignored, run explicitly to intentionally regenerate the checked-in fixture
+test golden_fixture_loads_on_current_main_and_matches_expected_state ... ok
+migration drill: 0 archived fixture(s) still load
+test every_archived_release_fixture_still_loads ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+--- .rfreplay drill (rf-input) ---
+   Compiling rf-input v0.1.0 (/Users/bmatthews/Code/retroforge/crates/rf-input)
+    Finished `release` profile [optimized] target(s) in 1.73s
+     Running tests/release_replay_drill.rs (target/release/deps/release_replay_drill-1073e043a7527b1f)
+
+running 1 test
+replay drill: 0 archived replay(s) still parse
+test every_archived_release_replay_still_parses ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
