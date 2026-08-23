@@ -290,6 +290,47 @@ const GOLDENS: &[(&str, &str)] = &[
         "InterlaceSimpsonsHDMA.sfc",
         "61b4ac1d86957fd213820fbef52d61a46574d492560d2c25735aa75683b7538c",
     ),
+    // ---- HiColor, promoted from EXCLUDED (W7-13 criterion 1) ----
+    //
+    // These three were excluded on a reason that W7-16 made FALSE:
+    // "colour-math HIGH COLOUR, which needs the sub-screen this core does
+    // not have". CoreSink::sub_scanline shipped, so the core has it. An
+    // exclusion outliving its reason is the exact rot this suite keeps
+    // catching, so the reason was re-checked rather than the entry
+    // deleted.
+    //
+    // WHAT LOOKING AT THEM ESTABLISHED, and the caveat is the important
+    // half. The SHAPES are correct and unmistakable (see each entry). The
+    // COLOURS in a PPM dump are NOT, and cannot be: all three run mode 3
+    // with $2130 colour math enabled, and the dump resolves main-screen
+    // indices against a single palette with no blending -- so Myst's sky
+    // comes out bright yellow where hardware blends it. That is law 4
+    // working as designed, not a defect: colour math is the RENDERER's
+    // arithmetic and never enters the indexed pixel stream.
+    //
+    // So what these goldens pin is the MAIN-SCREEN COMPOSITION, which is
+    // exactly what this core is responsible for, and they pin it on real
+    // pictures with 155-240 distinct resolved colours rather than the
+    // all-backdrop frames that keep the RedSpace pair excluded. What they
+    // do NOT pin is the blend. If colour math ever regresses, these will
+    // stay green -- W7-16's sub-screen channel is what covers that, and
+    // tests::ppu::a_colour_math_change_is_visible_on_the_sub_screen_channel
+    // is the test that would fail.
+    // HiColor1241DLair.sfc: Dragon's Lair title art -- Dirk in front of a stone wall, with \"DIRK The DARING\" lettering. Shapes correct and legible.
+    (
+        "HiColor1241DLair.sfc",
+        "63c0b32521d40565ecaedc4827da9f95dfa5b976c96f54438c587ec4c5fcda1c",
+    ),
+    // HiColor3840.sfc: a smooth two-axis blue-to-green gradient, which is what a 3840-colour test draws. No banding, no tearing.
+    (
+        "HiColor3840.sfc",
+        "99d92bcefc6803ac39d0960b49f5abd487da8c8fc83a286d7053cecdf3463861",
+    ),
+    // HiColor575Myst.sfc: the Myst rocket-ship island against a sky, machinery and rock faces all correctly formed.
+    (
+        "HiColor575Myst.sfc",
+        "1ad785d8bf8d911de4d9496aad3fed1605e0a53f02d6030dad2c58d6359784b2",
+    ),
 ];
 
 /// Generous cap; the fade completes in well under this.
@@ -325,18 +366,6 @@ const EXCLUDED: &[(&str, &str)] = &[
     (
         "RedSpaceIndirectHDMA.sfc",
         "same picture and same reason as RedSpaceHDMA, via INDIRECT mode -- the channel          dereferences its pointer and reads the identical $1F, $1E, $1D gradient, which is          direct evidence that criterion 1's indirect-mode bank register works. Excluded for the          index-domain reason above, not for anything wrong with the transfer.",
-    ),
-    (
-        "HiColor1241DLair.sfc",
-        "colour-math HIGH COLOUR, which needs the sub-screen this core does not have. Probed          rather than guessed: all three run in mode 3 with $2130 colour math ENABLED          (enable=0x21) and use_subscreen=true. The scene comes out recognisable -- Myst's          structures are all there -- and WRONG, because every pixel that should be a blend of          main and sub is drawn as the main screen's raw colour: Myst's sky is flat yellow where          it should be a gradient. Recognisable-but-wrong is the most dangerous thing to pin,          because it survives an eyeball check. Unblocked by W7-16.",
-    ),
-    (
-        "HiColor3840.sfc",
-        "colour-math HIGH COLOUR, which needs the sub-screen this core does not have. Probed          rather than guessed: all three run in mode 3 with $2130 colour math ENABLED          (enable=0x21) and use_subscreen=true. The scene comes out recognisable -- Myst's          structures are all there -- and WRONG, because every pixel that should be a blend of          main and sub is drawn as the main screen's raw colour: Myst's sky is flat yellow where          it should be a gradient. Recognisable-but-wrong is the most dangerous thing to pin,          because it survives an eyeball check. Unblocked by W7-16.",
-    ),
-    (
-        "HiColor575Myst.sfc",
-        "colour-math HIGH COLOUR, which needs the sub-screen this core does not have. Probed          rather than guessed: all three run in mode 3 with $2130 colour math ENABLED          (enable=0x21) and use_subscreen=true. The scene comes out recognisable -- Myst's          structures are all there -- and WRONG, because every pixel that should be a blend of          main and sub is drawn as the main screen's raw colour: Myst's sky is flat yellow where          it should be a gradient. Recognisable-but-wrong is the most dangerous thing to pin,          because it survives an eyeball check. Unblocked by W7-16.",
     ),
 ];
 
