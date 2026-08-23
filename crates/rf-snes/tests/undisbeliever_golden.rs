@@ -145,40 +145,119 @@ const EXCLUDED: &[(&str, &str)] = &[
         "scpu-a-dma-bug-two-regs.sfc",
         "renders an ENTIRELY BLANK frame -- 1 distinct palette index -- so its hash is the same as every other all-backdrop frame in this project and cannot tell a correct blank screen from a PPU that drew nothing. Same index-domain vacuity that excludes the RedSpace pair from the PeterLemon suite. Measured 2026-08-23.",
     ),
-    // ---- discriminating, but the oracle needs a ruling ----
-    (
-        "inidisp_enable_display_mid_frame.sfc",
-        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: exactly ONE write, on one line. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
-    ),
-    (
-        "inidisp_hammer_0f.sfc",
-        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 1,988 writes across 70 lines. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
-    ),
-    (
-        "inidisp_hammer_0f00.sfc",
-        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 5,460 writes across all 224 lines. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
-    ),
+    // ---- exact duplicates of a pinned write golden ----
     (
         "inidisp_hammer_0f0f.sfc",
-        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 5,460 writes across all 224 lines. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
-    ),
-    (
-        "inidisp_hammer_0f8f.sfc",
-        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 1,724 writes across 101 lines. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
+        "byte-identical to inidisp_hammer_0f00 in BOTH dimensions -- same pixel hash AND same mid-line write record (5,460 writes across all 224 lines, sha256 55f75429...). Even the write-record oracle cannot separate these three, so one is pinned as their representative and the other two would add nothing. Measured 2026-08-23.",
     ),
     (
         "inidisp_hammer_0f8f_fast.sfc",
-        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 5,460 writes across all 224 lines. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
-    ),
-    (
-        "inidisp_hammer_0f_long.sfc",
-        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 5,460 writes across all 224 lines. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
-    ),
-    (
-        "inidisp_hammer_8f0f.sfc",
-        "EXCLUDED PENDING A RULING, NOT BECAUSE IT IS VACUOUS -- this is the one family where a discriminating golden is now possible. Its picture is indistinguishable from the others, but W7-15's per-dot write recording gives it a mid-line $2100 profile that IS distinct: 1,844 writes across 108 lines, and it never leaves forced blank at all. Hashing that record would discriminate, but it pins OUR INSTRUMENTATION rather than rendered output and couples the golden to Ppu::is_segmentable. See W7-13's notes for the three options; do not pin this until one is chosen.",
+        "byte-identical to inidisp_hammer_0f00 in BOTH dimensions -- same pixel hash AND same mid-line write record (5,460 writes across all 224 lines, sha256 55f75429...). Even the write-record oracle cannot separate these three, so one is pinned as their representative and the other two would add nothing. Measured 2026-08-23.",
     ),
 ];
+
+/// Pinned on the MID-LINE WRITE RECORD, not on the picture.
+///
+/// **Why a second dimension exists at all.** Across all 29 ROMs in this
+/// set there are only TWO distinct pixel hashes: 13 render one identical
+/// 7-index frame and 16 render an entirely blank one. What these ROMs
+/// test -- INIDISP brightness, forced-blank timing, DMA bugs -- is
+/// precisely what law 4 keeps out of the indexed pixel stream, so a
+/// picture hash cannot tell any of them apart. Pinning 29 of those would
+/// have read as full coverage while proving nothing.
+///
+/// W7-15's per-dot work created the signal that does discriminate: the
+/// sequence of `(line, dot, register, value)` writes that landed during
+/// active display. These six ROMs have six DIFFERENT such records --
+/// 1,988 writes over 70 lines, 5,460 over 224, 1,724 over 101, 1,844 over
+/// 108, and one with exactly one write -- and that is the thing they are
+/// actually testing.
+///
+/// **THE TRADE-OFF, stated because it is real and this choice is
+/// reversible.** These hashes pin OUR INSTRUMENTATION rather than
+/// rendered output, and they are coupled to [`Ppu::is_segmentable`]: a
+/// change to which registers may be replayed changes every hash here.
+/// That coupling is deliberate rather than tolerated. A change to what
+/// counts as a mid-line write changes what these ROMs are measuring, so
+/// these goldens SHOULD fail and be re-examined when it happens -- the
+/// failure is the signal, not noise. If it ever proves brittler than it
+/// is worth, delete this list: the suite falls back to two pixel goldens
+/// and every ROM here returns to EXCLUDED with its measurement intact.
+///
+/// Unlike the pixel goldens, these do NOT require the ROM to leave forced
+/// blank. `inidisp_hammer_8f0f` never does, and its write record is still
+/// perfectly well defined -- that is the point of measuring the driving
+/// rather than the drawing.
+const WRITE_GOLDENS: &[(&str, &str)] = &[
+    // exactly ONE write, on one line
+    (
+        "inidisp_enable_display_mid_frame.sfc",
+        "d3d165e1f78d86d9fbac9d1a05e58885b48420aa696f451c8374f11cca36e1a5",
+    ),
+    // 1,988 writes across 70 lines
+    (
+        "inidisp_hammer_0f.sfc",
+        "c3cd87e86cc5d55e428e67e909afaefeac34a957a50dc876f31a29ed21a1420e",
+    ),
+    // 5,460 across all 224 lines -- representative of the 0f00/0f0f/
+    // 0f8f_fast trio, which are byte-identical in both dimensions.
+    (
+        "inidisp_hammer_0f00.sfc",
+        "55f75429ff5510f53978bef709a27267dd6921616cd77a5187465c0ef527b9fa",
+    ),
+    // 1,724 across 101 lines
+    (
+        "inidisp_hammer_0f8f.sfc",
+        "298cb234b52f1c05e18a0ddad8aab645d1b5facba8670ae39dd7bab68b0f56a9",
+    ),
+    // 5,460 across all 224 lines, and DISTINCT from the trio above
+    (
+        "inidisp_hammer_0f_long.sfc",
+        "d606c1a795d362bcf1684158e9cf965d5e3d7aa51152c18aafa5b667e0a4b2d3",
+    ),
+    // 1,844 across 108 lines -- and this one never leaves forced blank
+    (
+        "inidisp_hammer_8f0f.sfc",
+        "113f7e212b4bbfc1aaeda197e07e5c3ecff38ddb670c85733a7b5a5645aaeff7",
+    ),
+];
+
+/// Run a ROM and hash the mid-line writes it drove.
+///
+/// Deliberately does NOT require the screen to come on: the record is
+/// about what the program DROVE, which is well defined even for a ROM
+/// that stays in forced blank the whole time.
+fn hash_write_record(path: &std::path::Path) -> Option<String> {
+    let rom = std::fs::read(path).ok()?;
+    let mut s = SnesSystem::load(&rom).ok()?;
+    let mut n = 0u64;
+    while n < MAX_INSTRUCTIONS {
+        if s.step().is_err() {
+            break;
+        }
+        n += 1;
+        if !s.bus.ppu.forced_blank && s.bus.ppu.brightness == 0x0F {
+            break;
+        }
+    }
+    for _ in 0..SETTLE {
+        let _ = s.step();
+    }
+    let mut h = Sha256::new();
+    for line in 0..240u16 {
+        for (dot, addr, val) in s.bus.ppu.line_writes_for_test(line) {
+            h.update(line.to_le_bytes());
+            h.update(dot.to_le_bytes());
+            h.update(addr.to_le_bytes());
+            h.update([val]);
+        }
+    }
+    use std::fmt::Write;
+    Some(h.finalize().iter().fold(String::new(), |mut a, b| {
+        let _ = write!(a, "{b:02x}");
+        a
+    }))
+}
 
 const MAX_INSTRUCTIONS: u64 = 20_000_000;
 const SETTLE: u64 = 200_000;
@@ -303,6 +382,35 @@ fn undisbeliever_goldens_match() {
             ));
         }
     }
+    // The write-record dimension. See WRITE_GOLDENS for why it exists and
+    // what it costs.
+    for (name, expected) in WRITE_GOLDENS {
+        let path = dir.join(name);
+        if !path.exists() {
+            eprintln!("SKIP {name}: not fetched");
+            continue;
+        }
+        let Some(actual) = hash_write_record(&path) else {
+            failures.push(format!("{name}: would not run"));
+            continue;
+        };
+        // Same stability rule as the pixel goldens: a record captured
+        // from a run that is not reproducible is a coin flip, not a pin.
+        let again = hash_write_record(&path).expect("second run");
+        if again != actual {
+            failures.push(format!("{name}: write record not stable across two runs"));
+            continue;
+        }
+        eprintln!("{name}: write record {actual}");
+        if actual != *expected {
+            failures.push(format!(
+                "{name} (write record)\n    expected {expected}\n    actual   {actual}\n    \
+                 If Ppu::is_segmentable changed, this SHOULD fail: it means what counts \
+                 as a mid-line write changed, so what this ROM measures changed too."
+            ));
+        }
+    }
+
     // Excluded ROMs are still RUN and reported, so an exclusion cannot
     // outlive its reason silently.
     for (name, why) in EXCLUDED {
@@ -420,13 +528,10 @@ fn survey_the_whole_set() {
             .flat_map(|l| s.bus.ppu.line_writes_for_test(l).into_iter().map(|w| w.1))
             .collect();
         eprintln!(
-            "{name:<38} blank_left={left:<5} mode={} idx={:<3} mid={mid:<6} \
-             lines={lines_with:<4} regs={:04X?} pix={} write={}",
+            "{name} | left={left} mode={} idx={} mid={mid} lines={lines_with} regs={:04X?}\n    pix {hex}\n    wri {whex}",
             s.bus.ppu.bg_mode,
             distinct.len(),
-            regs.iter().collect::<Vec<_>>(),
-            &hex[..10],
-            &whex[..14]
+            regs.iter().collect::<Vec<_>>()
         );
     }
 }
