@@ -12,7 +12,7 @@ a script that tags is a script that can tag the wrong thing.
 |---|---|---|
 | 1 | Full gate green | `cargo fmt --all --check`, `clippy -D warnings`, `cargo test --workspace`, `validate-arch`, `validate-plan`, `validate-traceability`, `validate-evidence`, `cargo deny check licenses`, `verify-doc-samples`, `scripts/docs-gate.sh` |
 | 2 | `scripts/local-gate.sh` green | Regenerates `docs/evidence/local-gate.json` and runs the ten artifact-backed suites the workspace gate skips |
-| 3 | **Migration drill EXECUTED** (R-F3, FR-STATE-005) | `docs/releases/<version>/migration-drill.txt` — every previously archived `.rfstate` still loads |
+| 3 | **Migration drill EXECUTED**, both halves (R-F3, FR-STATE-005) | `docs/releases/<version>/migration-drill.txt` — every previously archived `.rfstate` still **loads** (rf-state) and every `.rfreplay` still **parses** (rf-input) |
 | 4 | This release's fixtures archived | `fixtures/releases/<version>/` |
 | 5 | Host artifacts built | `target/release-artifacts/<version>/` |
 | 6 | Release notes with the accuracy table | `docs/releases/<version>/RELEASE_NOTES.md` |
@@ -64,3 +64,13 @@ CI ever was, since that gate is the one this project actually runs. It
 walks `fixtures/releases/` rather than naming files — a hardcoded list would
 need editing at every release, and the edit that gets forgotten is exactly
 the one that matters.
+
+R-F3 names **both** `.rfstate` and `.rfreplay`, so there are two drills.
+The replay half lives in `rf-input`'s
+`every_archived_release_replay_still_parses`, because parsing a replay is
+`rf-input`'s job — reaching across for it would have put a cross-crate
+dependency in a test purely to avoid creating a file. It asserts *parsing*
+only: a replay from an old release is not expected to replay identically
+on today's emulator, which would forbid every legitimate accuracy fix the
+project makes. What a user would actually lose is the file becoming
+unreadable, and that is what is pinned.

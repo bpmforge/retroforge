@@ -59,13 +59,22 @@ mkdir -p "$out_dir" "$fixture_dir" "$artifact_dir"
 # ---------------------------------------------------------------------------
 echo "release: migration drill over previously archived releases..." >&2
 drill_log="$out_dir/migration-drill.txt"
-if cargo test --release -p rf-state --test golden_fixture -- --nocapture \
-  > "$drill_log" 2>&1; then
-  drill_status="pass"
-else
+drill_status="pass"
+# BOTH halves: R-F3 names ".rfstate/.rfreplay". The state drill lives in
+# rf-state and the replay drill in rf-input, because parsing a replay is
+# rf-input's job and reaching across for it would put a cross-crate
+# dependency in a test purely to avoid creating a file.
+{
+  echo "--- .rfstate drill (rf-state) ---"
+  cargo test --release -p rf-state --test golden_fixture -- --nocapture 2>&1 || echo "STATE_DRILL_FAILED"
+  echo
+  echo "--- .rfreplay drill (rf-input) ---"
+  cargo test --release -p rf-input --test release_replay_drill -- --nocapture 2>&1 || echo "REPLAY_DRILL_FAILED"
+} > "$drill_log"
+if grep -q "STATE_DRILL_FAILED\|REPLAY_DRILL_FAILED" "$drill_log"; then
   drill_status="FAIL"
 fi
-prior_count="$(find "$repo_root/fixtures/releases" -name '*.rfstate' 2>/dev/null | wc -l | tr -d ' ')"
+prior_count="$(find "$repo_root/fixtures/releases" \( -name '*.rfstate' -o -name '*.rfreplay' \) 2>/dev/null | wc -l | tr -d ' ')"
 echo "release: drill $drill_status over $prior_count previously archived fixture(s)" >&2
 if [ "$drill_status" = "FAIL" ]; then
   echo "release: a previously released fixture no longer loads. See $drill_log" >&2

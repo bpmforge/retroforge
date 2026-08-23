@@ -3248,7 +3248,8 @@
     "docs/**",
     "scripts/**",
     "crates/rf-state/**",
-    "fixtures/**"
+    "fixtures/**",
+    "crates/rf-input/**"
    ],
    "depends_on": [
     "W3-06",
