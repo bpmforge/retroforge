@@ -76,6 +76,25 @@ pub const IPL_LEN: usize = 64;
 /// handshake.
 pub const IPL_STUB: [u8; IPL_LEN] = {
     let mut rom = [0xEFu8; IPL_LEN];
+    // **Byte 0 is $CD, and that one byte is a compatibility constant
+    // rather than borrowed code** (ticket W7-08).
+    //
+    // Programs check it. All four of blargg's SPC test ROMs do exactly
+    // this before they will run at all:
+    //
+    // ```text
+    // MOV A, !$FFC0 / CMP A, #$CD / BNE * / JMP !$FFC0
+    // ```
+    //
+    // Without it they spin at that `BNE` forever. $CD is also the SPC700
+    // opcode for `MOV X, #imm`, so a boot ROM that begins by setting up
+    // the stack pointer starts with this byte for a reason that is
+    // arithmetic, not authorship.
+    //
+    // Everything AFTER byte 0 is still ours and still `SLEEP` — see
+    // `Apu::reenter_ipl`, which HLEs re-entry rather than executing 64
+    // bytes of anyone's boot ROM.
+    rom[0] = 0xCD;
     // $FFFE/$FFFF = reset vector -> $FFC0.
     rom[IPL_LEN - 2] = 0xC0;
     rom[IPL_LEN - 1] = 0xFF;
@@ -278,6 +297,7 @@ impl Apu {
         self.cpu = cpu;
         let cycles = r.unwrap_or(1);
         self.tick_timers(u32::from(cycles));
+        self.reenter_ipl();
         self.tick_dsp(u32::from(cycles));
         self.poll_boot();
         r
@@ -303,6 +323,45 @@ impl Apu {
             // so this terminates (law 8).
             self.last_sample = self.dsp.mix(&mut self.aram);
         }
+    }
+
+    /// A program jumped into the IPL window: re-run the handshake.
+    ///
+    /// **This is the HLE covering re-entry, and it is why this emulator
+    /// needs no boot ROM at all** (ticket W7-08; Brad's 2026-08-20 ruling
+    /// chose HLE, and this is that ruling extended to the one case it did
+    /// not anticipate).
+    ///
+    /// Real hardware boots by EXECUTING the IPL, and a program that wants
+    /// another upload jumps back to `$FFC0` to do it again. blargg's SPC
+    /// test ROMs finish every sub-test that way. This emulator never
+    /// executed the IPL in the first place — [`IplBoot`] answers the port
+    /// protocol directly — so the jump would otherwise run into 64 bytes
+    /// of `SLEEP` and hang.
+    ///
+    /// Re-arming the handshake reproduces what the real ROM does
+    /// OBSERVABLY: republish `$AA`/`$BB`, wait for `$CC`, transfer, jump.
+    /// The SPC700 is halted because the HLE, not the SPC700, is what
+    /// performs the boot here; `BootAction::Run` restarts it at the entry
+    /// point the CPU supplies.
+    ///
+    /// The alternative was writing 64 bytes of SPC700 assembly that
+    /// implement the documented protocol. That was rejected on the
+    /// ticket's own terms: a faithful reimplementation of a 64-byte ROM
+    /// whose algorithm is fully documented plausibly converges on
+    /// identical bytes, which is exactly the line law 5 draws. This route
+    /// needs one byte ($CD, see [`IPL_STUB`]) and no instructions.
+    fn reenter_ipl(&mut self) {
+        if !self.boot.is_running() || self.cpu.stopped {
+            return;
+        }
+        if !self.in_ipl_window(self.cpu.pc) {
+            return;
+        }
+        self.boot = boot::IplBoot::new();
+        self.ports_out = boot::IplBoot::ready_ports();
+        // The HLE owns the machine again until it hands back.
+        self.cpu.stopped = true;
     }
 
     /// Supply a real SPC700 boot ROM for the `$FFC0`-`$FFFF` window.

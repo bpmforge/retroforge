@@ -474,10 +474,19 @@ fn a_user_supplied_boot_rom_is_what_the_ipl_window_reads() {
     let mut apu = Apu::new();
     // Bank the IPL in: $F1 bit 7.
     apu.write_register(0x00F1, 0x80);
+    // Byte 0 is $CD by design: programs read it as data and refuse to run
+    // otherwise (see IPL_STUB). It is a compatibility constant, not
+    // borrowed code -- everything after it is still SLEEP-filled and is
+    // NOT Nintendo's ROM.
     assert_eq!(
         apu.read(0xFFC0),
+        0xCD,
+        "byte 0 is the compatibility constant"
+    );
+    assert_eq!(
+        apu.read(0xFFC1),
         0xEF,
-        "the default stub is SLEEP-filled and is NOT Nintendo's ROM"
+        "and the rest of the default stub is still ours: SLEEP-filled"
     );
 
     let mut rom = [0u8; crate::apu::IPL_LEN];
