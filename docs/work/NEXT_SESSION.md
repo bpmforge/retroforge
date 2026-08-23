@@ -1,9 +1,11 @@
 # NEXT SESSION — resume point (rewritten 2026-08-23)
 
-**Board: 137 of 140 done.** Everything that can be finished without a
-ruling has been. The three open tickets each need a decision from Brad,
-and each is a one-line answer rather than an investigation — the
-investigation is already recorded on the ticket.
+**Board: 139 of 140 done.** One ticket is open — W7-08 — and it is
+blocked on a spec rather than on effort. Everything else is closed.
+
+Note the shape of that block before assuming it is a to-do: the oracle
+that would judge W7-08 now works and says what is missing. What it names
+is architectural.
 
 Read `plan.json`'s notes for the ticket you pick up. They are long on
 purpose: several of them record a claim that turned out to be FALSE, and
@@ -13,9 +15,8 @@ the correction is usually the useful part.
 
 ## 1. ONE TICKET OPEN — W7-08, blocked on a spec we do not have
 
-**Board: 139 of 140.** Everything else is closed. W7-08's remaining
-criteria need a **cycle-accurate S-DSP**, and that is blocked on a
-documented per-cycle schedule rather than on effort.
+W7-08's remaining criteria need a **cycle-accurate S-DSP**, and that is
+blocked on a documented per-cycle schedule rather than on effort.
 
 ### What is already true
 
@@ -79,7 +80,7 @@ not a criterion buried inside an 8-point DSP ticket.
 ```
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                                   1643 passing
+cargo test --workspace                                   1645 passing
 scripts/validate-arch.sh
 node scripts/validate-plan.mjs
 node scripts/validate-traceability.mjs
