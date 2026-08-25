@@ -4796,6 +4796,66 @@
    "points": 5,
    "status": "done",
    "stories": []
+  },
+  {
+   "id": "W10-01",
+   "title": "Play-view HUD fits the shipping window, and the app has a theme",
+   "phase": 10,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "docs/design/FRONTEND_UI.md",
+    "docs/STATUS.md",
+    "plan.json"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "at the window size main.rs actually opens, no labelled control in any panel is clipped off-screen; measured, not eyeballed",
+    "the persistent bottom bar carries only what docs/design/FRONTEND_UI.md §3.2 specifies (mode badge · FPS · A/V sync · profile chip) plus transport; every other control moves to the Esc overlay or a View menu",
+    "the window size is one pub const that main.rs and the regression test both read, so the test cannot go stale when the size changes",
+    "crate::accessibility::Palette drives egui through ctx.set_visuals, and ui_scale drives the zoom factor — the module is currently orphaned and its WCAG tests prove nothing about what renders",
+    "the permanently disabled 'Switch mode (W4-05)' button is removed from the overlay menu or made live",
+    "ui_smoke.rs and gamepad_nav.rs are updated deliberately for controls that moved behind a menu, not patched reflexively when they go red"
+   ],
+   "notes": [
+    "MEASURED 2026-08-25 (egui_kittest harness reading AccessKit bounding boxes, then deleted): the bottom bar needs 1539 px of content and main.rs opens the window at 768 px. Eight controls sit ENTIRELY off-screen and are unreachable: Heuristics, Compare, Layers (debug), Controls…, Library…, Settings…, Debug Viewers, Camera: Original — plus the status label, which is last in the row. Library, Settings and Controls therefore have NO reachable opener at the default window size.",
+    "No test caught it because tests/ui_smoke.rs pins HARNESS_SIZE to 1600x1000 — 2.08x the real window — with a comment calling that 'load-bearing, not cosmetic' precisely BECAUSE smaller sizes clip. The clipping was noticed and worked around in the test instead of fixed in the app. The shipping size is exercised nowhere. Same family as the four gate holes closed earlier in this arc.",
+    "Do NOT fix this with horizontal_wrapped. Three rows of mixed buttons, checkboxes and combos is uglier than one clipped row, and it hides the spec gap from the next reader.",
+    "The theme half is not polish for its own sake: there is ZERO style customization in the crate (no set_visuals, no Style, anywhere), which is why the primary action, a disabled button and a non-clickable status badge all render as the same grey rectangle. Meanwhile accessibility.rs already defines an AAA-verified accent (#5AAFFF), a high-contrast variant and a 0.5-4.0 ui_scale — and NOTHING imports it. Its tests assert the palette MATH is AAA-compliant, which passes forever whether or not egui ever sees those colours. Wiring it turns a vacuous suite into a real one.",
+    "Two smaller bugs to fix while in here: ComboBox::from_label(\"Mode\") renders the label to the RIGHT of the combo, so the bar reads 'Accuracy [v] Mode' backwards; and that combo duplicates the adjacent 'NES · Accuracy' badge, which says the same thing.",
+    "overlay_menu (app.rs:2262) already exists with Resume/States/Settings/Author/Controls/Quit, so three of the off-screen bar toggles duplicate a home that is already built. That makes this much smaller than a redesign.",
+    "Acceptance evidence for the subjective half is a before/after screenshot pair at the SAME window size in the commit body — the only check that tests the complaint bounding boxes cannot score. The 'before' is captured."
+   ],
+   "points": 5,
+   "status": "in_progress",
+   "stories": []
+  },
+  {
+   "id": "W10-02",
+   "title": "Enhance and Author become dock workspaces, not floating windows",
+   "phase": 10,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "docs/design/FRONTEND_UI.md",
+    "docs/STATUS.md",
+    "plan.json"
+   ],
+   "depends_on": [
+    "W10-01"
+   ],
+   "acceptance": [
+    "the Enhance and Author surfaces are tabs in a dock host rather than free-floating egui::Windows toggled by bar checkboxes",
+    "the layer rule that only debug_dock.rs may depend on egui_dock still holds, or ARCHITECTURE.md is amended with the reason and the dock host generalised deliberately",
+    "docs/design/FRONTEND_UI.md §2's workspace model and what ships agree, or the doc is corrected to what was actually decided"
+   ],
+   "notes": [
+    "This is the ROOT CAUSE of W10-01's symptom: egui_dock 0.20.1 is a dependency and is used, but only by debug_dock.rs. Enhance and Author became floating windows instead, and the only place to toggle a floating window is a checkbox in the bar — so every workspace that did not get docked added a control to the HUD. That is how one horizontal row came to carry transport, enhancement, window toggles and status behind 13 separators.",
+    "Split from W10-01 because it is an architecture change, not UI polish: egui_dock is confined to debug_dock.rs by an explicit layer rule, and making Enhance/Author dock tabs either breaks that rule or requires generalising the dock host into a shared surface. That decision deserves its own claim."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
   }
  ]
 }
