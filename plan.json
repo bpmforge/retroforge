@@ -4827,7 +4827,7 @@
     "Acceptance evidence for the subjective half is a before/after screenshot pair at the SAME window size in the commit body — the only check that tests the complaint bounding boxes cannot score. The 'before' is captured."
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {
@@ -4856,6 +4856,39 @@
    "points": 5,
    "status": "todo",
    "stories": []
+  },
+  {
+   "id": "W10-03",
+   "title": "The Library is the home screen, not a window you open",
+   "phase": 10,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "docs/design/FRONTEND_UI.md",
+    "docs/STATUS.md",
+    "plan.json"
+   ],
+   "depends_on": [
+    "W10-01"
+   ],
+   "acceptance": [
+    "with no ROM open the app shows docs/design/FRONTEND_UI.md §3.1's library home — search, console filters, a card grid — not an empty play area with a line of text in it",
+    "§3.1's three first-run states stay distinct and keep going through crate::library::first_run_state, which already unit-tests them (design review G-21): no folders configured, folders with zero recognised ROMs, and a populated grid must each say a different thing",
+    "opening a ROM replaces the home with the play view and closing it returns; the transition costs no re-scan",
+    "the home is measured at app::WINDOW_SIZE like the rest of the shell — nothing clipped, per tests/hud_fits.rs",
+    "any non-ASCII the home draws is added to app::PROPORTIONAL_GLYPHS and therefore checked by tests/glyphs_render.rs"
+   ],
+   "notes": [
+    "This is the LAST big gap between the shell and FRONTEND_UI.md §2's information architecture, which puts Library at the root: 'Library (home) -> Play view -> Workspaces'. What ships instead boots to an empty play view, and the library is a checkbox-toggled floating window — an app whose home screen is a void with one sentence in it.",
+    "W10-01 gave that void a proper empty state ('No ROM loaded' + how to open one) and that is the right FALLBACK, not the right home. Keep it for the case where the library is genuinely empty; it should not be what a user with a configured folder sees.",
+    "Most of the work already exists and should be REUSED, not rewritten: crate::library does the scanning and hash identity, crate::library_roots owns the folders, and library_window renders a grid with the three first-run states already separated. This ticket is mostly about WHERE that lives — a root surface rather than a floating window — which is why it is separate from W10-02's docking question.",
+    "Deliberately NOT in scope: box art (NON_GOALS #5 forbids network fetch), and §3.1's per-game context menu. Thumbnails are last-save-state screenshots or first-frame captures, both of which are local."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": [
+    "E2-S3"
+   ]
   }
  ]
 }

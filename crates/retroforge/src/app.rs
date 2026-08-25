@@ -107,10 +107,14 @@ const PROFILE_CHIP_BUDGET: usize = 20;
 /// also absent. `hud_tests::every_glyph_the_ui_draws_exists_in_the_font`
 /// asks the font instead of guessing.
 ///
-/// Verified present: `·` `…` `—` `○` `■` `★` `☆` `›`.
+/// This is what the UI **draws**, not what the font happens to have —
+/// `○` and `■` are present and were used until the A/V indicator moved
+/// to words, and they came straight back out. A vocabulary listing
+/// glyphs nothing renders is a claim nobody checks.
+///
+/// Verified present (wider than this list): `·` `…` `—` `○` `■` `★` `☆` `›`.
 /// Verified ABSENT, do not use: `◆` `◇` `●` `▸` `▪` `▫` `□`.
-pub const PROPORTIONAL_GLYPHS: &str =
-    "\u{b7}\u{2026}\u{2014}\u{25cb}\u{25a0}\u{2605}\u{2606}\u{203a}";
+pub const PROPORTIONAL_GLYPHS: &str = "\u{b7}\u{2026}\u{2014}\u{2605}\u{2606}\u{203a}";
 
 /// The non-ASCII characters drawn in the **monospace** font.
 ///
@@ -2601,30 +2605,49 @@ impl RetroForgeApp {
     /// reading; the core thread owns `AudioOut` and reports fill with
     /// each frame (`core_thread::FrameMsg::audio_fill`).
     fn av_sync_indicator(&mut self, ui: &mut egui::Ui) {
+        // **The state is in the WORD, not only the colour.** This
+        // indicator used to say everything with hue: red for starved,
+        // amber for ahead, green for healthy, one glyph for all three.
+        // That is WCAG 1.4.1 — colour as the sole carrier of meaning —
+        // and it fails for the eight percent of men with a red/green
+        // deficiency, on a washed-out projector, and in a screenshot
+        // printed in grey.
+        //
+        // Words rather than three distinct shapes because the bundled
+        // font does not HAVE three distinct shapes: the verified set is
+        // `○ ■ ★ ☆`, the stars are spoken for by the profile chip, and
+        // reaching outside that set is how three tofu boxes shipped.
+        // `low` / `ok` / `high` is unambiguous, always renders, and
+        // leaves the colour doing what colour is good at — carrying the
+        // same message a second time, faster.
         let Some(fill) = self.audio_fill else {
-            ui.add(readout(egui::RichText::new("\u{25cb} a/v").weak()));
+            ui.add(readout(egui::RichText::new("a/v \u{2014}").weak()))
+                .on_hover_text("No audio device open, so there is no buffer to report on.");
             return;
         };
         // Thresholds are about the buffer's job, not aesthetics: near
         // empty is an underrun about to be audible, near full means the
         // core is outrunning the device and will be throttled.
-        let (colour, tip) = if fill < 0.15 {
+        let (word, colour, tip) = if fill < 0.15 {
             (
+                "a/v low",
                 egui::Color32::from_rgb(220, 90, 80),
-                "audio buffer nearly empty — emulation is behind the audio clock",
+                "audio buffer nearly empty \u{2014} emulation is behind the audio clock",
             )
         } else if fill > 0.95 {
             (
+                "a/v high",
                 egui::Color32::from_rgb(230, 180, 40),
-                "audio buffer nearly full — the core is ahead and being throttled",
+                "audio buffer nearly full \u{2014} the core is ahead and being throttled",
             )
         } else {
             (
+                "a/v ok",
                 egui::Color32::from_rgb(110, 190, 120),
-                "audio buffer healthy — a/v in sync",
+                "audio buffer healthy \u{2014} a/v in sync",
             )
         };
-        ui.add(readout(egui::RichText::new("\u{25a0} a/v").color(colour)))
+        ui.add(readout(egui::RichText::new(word).color(colour)))
             .on_hover_text(format!("{tip}\nbuffer fill: {:.0}%", fill * 100.0));
     }
 

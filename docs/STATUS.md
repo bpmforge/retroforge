@@ -517,3 +517,26 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   the A/V indicator distinguishes its three severities by **colour
   alone**, which is a WCAG 1.4.1 gap; the glyph and hover text carry
   known-vs-unknown but not healthy-vs-starved.
+
+- **W10-01 CLOSED** (2026-08-25). Final fix: the A/V indicator's three
+  severities were separated by **colour alone** — WCAG 1.4.1, and it
+  fails for a red/green deficiency, a washed-out projector, or a
+  greyscale screenshot. Now `a/v low` / `a/v ok` / `a/v high`, with the
+  colour repeating the message rather than carrying it. **Words, not
+  three shapes, for a concrete reason:** the bundled font's verified set
+  is `○ ■ ★ ☆`, the stars are spoken for by the profile chip, and
+  reaching outside that set is exactly how three tofu boxes shipped.
+  `○` and `■` then came straight back out of `PROPORTIONAL_GLYPHS` — a
+  vocabulary listing glyphs nothing draws is a claim nobody checks.
+
+  Gate: fmt, clippy `-D warnings`, **workspace 1654 passing / 31
+  ignored**, validate-arch, validate-plan. Before/after screenshots at
+  768x720 are the evidence for the subjective half.
+
+  **W10-03 filed**: the Library becomes the home screen (§3.1/§2's IA),
+  which is the last large gap between this shell and the spec — the app
+  still boots to an empty play area, and the library is a checkbox-
+  toggled floating window. W10-01's empty state is the right FALLBACK
+  for an empty library, not the right home. Most of the work exists
+  (`crate::library`, `library_roots`, and the three first-run states
+  G-21 already forced apart) and should be moved, not rewritten.
