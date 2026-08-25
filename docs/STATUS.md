@@ -600,3 +600,37 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   `catch_unwind` the channel produces nothing and the test still fails,
   only later — so it is now 30 s. A red test that means "this laptop is
   busy" is worse than no test: it trains you to re-run.
+
+- **CORRECTION: the egui_dock "layer rule" I cited does not exist**
+  (2026-08-25, before any W10-02 code was written). Three commit
+  messages, W10-02's acceptance criterion 2 and an entry above all say
+  some version of *"egui_dock is confined to `debug_dock.rs` by an
+  explicit layer rule, so docking Enhance/Author is an architecture
+  decision."* **It is not true.** `debug_dock.rs`'s own module doc says
+  it is "the one module in this crate (**besides `crate::app`**) allowed
+  to depend on `egui_dock`" — `app.rs` is explicitly permitted — and
+  `scripts/validate-arch.sh` enforces nothing about `egui_dock` at all.
+  What it does enforce: core crates never import upper layers,
+  `rf-core-api` depends on no `rf-*`, only the app shell and harness
+  touch cores directly, the determinism lint, and exactly one `wgpu` in
+  `Cargo.lock`. I read a summary rather than the file and repeated it
+  until it looked settled.
+
+  **The real constraint is narrower and genuine.**
+  `rf_debugger::layout::DebugTab` is a lower-layer type; giving it
+  `Enhance`/`Author` variants would make `rf-debugger` carry enhancement
+  and authoring concepts and would put non-debug tabs into
+  `PersistedLayout`, which is versioned and already has files in users'
+  config dirs. A second dock host in `app.rs` avoids that entirely.
+
+  **And W10-02's root cause is now dead.** "Every workspace that did not
+  get docked added a toggle to the HUD" was true when filed; W10-01 moved
+  the toggles into menus and W10-03 deleted the Library window. Nothing
+  is left for docking to relieve except §2 conformance, which is a real
+  but much weaker reason — and it should be weighed on its own, not
+  inherited.
+
+  **Scope finding:** `enhance_window` is 94 lines and implements only the
+  *Features* third of §3.3's `[Compare][Features][Map]`. Compare is a
+  bottom-bar menu; Map does not exist as a tab. Docking what exists would
+  dock one third of a specified workspace.
