@@ -478,3 +478,42 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   process stopped (the known `injected_panic_on_core_thread` 5 s
   `recv_timeout` fails under CPU load; it failed twice today, both times
   with a release build running alongside, and passes 5/5 otherwise).
+
+- **W10-01 polish pass — `/frontend --polish`, and a third tofu box**
+  (2026-08-25): five changes, the skill's cap. (1) A **type scale** where
+  there had been exactly one size — §3.2's four readouts drop to `Small`
+  so ambient telemetry stops competing with the transport buttons. (2)
+  The two chrome strips get `raised`; the play area keeps `background`.
+  **No hairline**, deliberately: a border wants a mid-tone between the
+  two, every colour this app renders is one of five whose contrast is
+  asserted, and inventing a sixth to save a step would break that rule
+  for decoration on top of a boundary that already exists. (3) **Six
+  separators down to two** — one dividing controls from telemetry, one
+  before the status text; the rest is 12 px of grouping space. (4) A real
+  **empty state**: it used to be `ui.label(&self.status)`, the *same
+  sentence the status bar was already showing*, centred in 600 px of
+  nothing. (5) One eased hover on the primary action, hand-animated via
+  `animate_bool_responsive` because an immediate-mode button recomputes
+  its fill every frame and hover is otherwise a step function.
+
+  **THE FINDING: three tofu boxes, two of them shipped while fixing the
+  first.** A missing glyph does not fail, warn or log — egui draws a tofu
+  box and carries on, the accessibility tree reports the *correct* label,
+  and every assertion in the repo stays green. `◆` shipped that way; its
+  "fix" was `◇`, **also absent**; the healthy A/V dot was `●`, absent
+  too, and no screenshot could have caught that one because it only
+  renders with an audio device open. Probing `Fonts::has_glyph` gave the
+  real answer: present are `·` `…` `—` `○` `■` `★` `☆` `›`; absent are
+  `◆` `◇` `●` `▸` `▪` `▫` `□`. **The bundled monospace face has none of
+  them at all** — and the frame/scanline readout rendered `f12 · sl34` in
+  monospace, a tofu box between every frame number.
+  `crates/retroforge/tests/glyphs_render.rs` now asks the font instead of
+  guessing, per family, with a vacuity guard (`MONOSPACE_GLYPHS` is
+  empty, so one of the two tests would otherwise pass on nothing).
+
+  Gate: fmt, clippy `-D warnings`, **workspace 1654 passing / 31
+  ignored**, validate-arch — green, app rebuilt and confirmed running.
+  Deferred to ux-engineer, not fixed here (out of this agent's domain):
+  the A/V indicator distinguishes its three severities by **colour
+  alone**, which is a WCAG 1.4.1 gap; the glyph and hover text carry
+  known-vs-unknown but not healthy-vs-starved.

@@ -97,6 +97,41 @@ const PANEL_WINDOW_ORIGIN: [f32; 2] = [24.0, 56.0];
 /// character is.
 const PROFILE_CHIP_BUDGET: usize = 20;
 
+/// The non-ASCII characters this UI draws in the **proportional** font,
+/// and the only ones it may draw (ticket W10-01 polish pass).
+///
+/// egui's bundled font does not cover the Geometric Shapes block evenly,
+/// and a missing glyph renders as a tofu box rather than failing — so it
+/// is invisible to every test and visible only in a screenshot. This
+/// project shipped `◆` that way, then shipped `◇` as its "fix", which is
+/// also absent. `hud_tests::every_glyph_the_ui_draws_exists_in_the_font`
+/// asks the font instead of guessing.
+///
+/// Verified present: `·` `…` `—` `○` `■` `★` `☆` `›`.
+/// Verified ABSENT, do not use: `◆` `◇` `●` `▸` `▪` `▫` `□`.
+pub const PROPORTIONAL_GLYPHS: &str =
+    "\u{b7}\u{2026}\u{2014}\u{25cb}\u{25a0}\u{2605}\u{2606}\u{203a}";
+
+/// The non-ASCII characters drawn in the **monospace** font.
+///
+/// Empty, and that is a finding rather than an oversight: the bundled
+/// monospace face has **no** `·`, `…` or `—` at all, and the
+/// frame/scanline readout used to render `f12 · sl34` in monospace —
+/// a tofu box between every frame number.
+pub const MONOSPACE_GLYPHS: &str = "";
+
+/// One of §3.2's ambient readouts, at [`egui::TextStyle::Small`].
+///
+/// A named helper rather than `RichText::small()` at five call sites,
+/// because the point is that these four things are ONE class of thing
+/// and share one treatment — five independent `.small()` calls is how a
+/// type scale drifts back into five sizes.
+fn readout(text: impl Into<egui::RichText>) -> egui::Label {
+    // `selectable(false)`: these are readouts, and a text cursor
+    // appearing over the FPS counter is an affordance that leads nowhere.
+    egui::Label::new(text.into().small()).selectable(false)
+}
+
 /// `text` shortened to [`PROFILE_CHIP_BUDGET`] characters, keeping the
 /// **end** and eliding the front.
 ///
@@ -194,6 +229,11 @@ pub struct RetroForgeApp {
     /// rather than being read from here — the UI thread never touches the
     /// audio device.
     audio_fill: Option<f32>,
+    /// Ticket W10-01 polish pass: whether the Run button was hovered on
+    /// the previous frame — the state `animate_bool_responsive` needs to
+    /// ease between fills. An immediate-mode button has no memory of its
+    /// own, so without this the hover is a step function.
+    run_hovered: bool,
     /// Ticket W10-01: the rect the status bar's right-aligned readouts
     /// occupied last frame, and the right edge of the transport controls
     /// to their left. The bar is correct exactly when the first does not
@@ -513,6 +553,7 @@ impl RetroForgeApp {
             awaiting_stepped_frame: false,
             position: None,
             audio_fill: None,
+            run_hovered: false,
             status_readouts: None,
             fps: None,
             fps_frames: 0,
@@ -1941,6 +1982,36 @@ impl RetroForgeApp {
         // (verified in egui-0.35.0 context.rs:2145/2169 — this crate
         // pins versions newer than most training data, project law 2).
         ctx.all_styles_mut(|style| {
+            // A type scale, where before there was exactly one size.
+            // Hierarchy comes from SIZE, not from colour or weight —
+            // those are held in reserve for the two things that actually
+            // need to stand out (the primary action, and a warning).
+            //
+            // Small is where the §3.2 readouts live: FPS, A/V and the
+            // profile chip are ambient telemetry you glance at, not
+            // labels you read, and rendering them at body size gave
+            // them the same claim on the eye as the transport buttons.
+            use egui::{FontFamily, FontId, TextStyle};
+            style.text_styles = [
+                (
+                    TextStyle::Heading,
+                    FontId::new(17.0, FontFamily::Proportional),
+                ),
+                (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
+                (
+                    TextStyle::Button,
+                    FontId::new(13.0, FontFamily::Proportional),
+                ),
+                (
+                    TextStyle::Small,
+                    FontId::new(11.0, FontFamily::Proportional),
+                ),
+                (
+                    TextStyle::Monospace,
+                    FontId::new(11.5, FontFamily::Monospace),
+                ),
+            ]
+            .into();
             style.spacing.item_spacing = egui::vec2(8.0, 6.0);
             style.spacing.button_padding = egui::vec2(8.0, 3.0);
             for w in [
@@ -1975,187 +2046,217 @@ impl RetroForgeApp {
     /// `Enhance` is everything that changes the picture away from the
     /// unmodified simulation — the law 6 boundary, kept legible by giving
     /// it its own menu rather than interleaving it with window toggles.
+    /// The frame the two chrome panels share (ticket W10-01 polish pass).
+    ///
+    /// Both panels used to inherit `panel_fill`, which is the same colour
+    /// as the play area — so the app rendered as one flat rectangle with
+    /// text floating at the top and bottom of it, and the chrome had no
+    /// edge at all. `raised` plus a hairline gives each strip a body and
+    /// a boundary, which is the difference between "a bar" and "some
+    /// widgets that happen to be near the edge".
+    ///
+    /// **No border line.** The obvious move is a hairline along the edge
+    /// facing the play area, and it is wrong here for a specific reason:
+    /// there is no colour in the palette to draw it with. Every colour
+    /// this app renders is one of five whose contrast is asserted
+    /// (`accessibility::Palette::pairs`), a hairline wants a mid-tone
+    /// between `raised` and `background`, and inventing one would put an
+    /// unverified colour on screen to save a step. Two surfaces meeting
+    /// is already a boundary; the line would be decoration on top of a
+    /// boundary that exists.
+    fn chrome_frame(ui: &egui::Ui) -> egui::Frame {
+        egui::Frame::NONE
+            .fill(ui.visuals().widgets.inactive.bg_fill)
+            .inner_margin(egui::Margin::symmetric(10, 6))
+    }
+
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("menu_bar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Open ROM...").clicked() {
-                        self.open_rom();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Quit").clicked() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-
-                let has_core = self.core.is_some();
-                ui.menu_button("View", |ui| {
-                    // **Each of these closes the menu when it changes.**
-                    // Platform convention (a menu item you pick puts the
-                    // menu away), and it is also what makes the sequence
-                    // deterministic: a menu left open after a click sits
-                    // under the "View" button, so the next click on
-                    // "View" lands on a menu row instead. That is not
-                    // hypothetical — it opened the Controls window while
-                    // `tests/ui_smoke.rs` was trying to open the menu.
-                    //
-                    // Checkboxes, not "open" buttons: these five each own
-                    // a window whose visibility is a piece of app state,
-                    // and a checkbox is the control that SHOWS that state
-                    // — you can see at a glance what is open. It also
-                    // keeps the toggle semantics `tests/ui_smoke.rs`
-                    // exercises (open, assert, close, assert) meaningful
-                    // now that the controls live behind a menu.
-                    //
-                    // Ticket W2-07: opening the library triggers the first
-                    // scan (see `library_window`), so a cold start never
-                    // waits on a folder walk.
-                    if ui
-                        .checkbox(&mut self.show_library, "Library\u{2026}")
-                        .changed()
-                    {
-                        ui.close();
-                    }
-                    // Ticket W2-08: app-wide settings (FRONTEND_UI §2).
-                    if ui
-                        .checkbox(&mut self.show_settings, "Settings\u{2026}")
-                        .changed()
-                    {
-                        ui.close();
-                    }
-                    // Ticket W2-06's remap window. Pure UI-thread state —
-                    // bindings are sampled on this thread too
-                    // (`poll_input`), so a remap takes effect on the very
-                    // next frame with no round trip to the core thread.
-                    if ui
-                        .checkbox(&mut self.show_controls, "Controls\u{2026}")
-                        .changed()
-                    {
-                        ui.close();
-                    }
-                    ui.separator();
-                    // Ticket W4-03e criterion 2: the runtime camera
-                    // toggle. Disabled with no compositor at all (no GPU
-                    // device, `Self::compositor`'s doc) — there is
-                    // nothing to switch to, and enabling it would just
-                    // click through to `UltrawideUnavailable` every time.
-                    let camera_label = match self.camera {
-                        CameraToggle::Original => "Camera: Original",
-                        CameraToggle::Ultrawide => "Camera: Ultrawide",
-                    };
-                    if ui
-                        .add_enabled(
-                            has_core && self.compositor.is_some(),
-                            egui::Button::new(camera_label),
-                        )
-                        .clicked()
-                    {
-                        self.camera = self.camera.flipped();
-                        if self.camera == CameraToggle::Ultrawide {
-                            // Don't wait out the throttle interval for
-                            // the FIRST view after switching.
-                            self.ultrawide_refresh_countdown = 0;
+        egui::Panel::top("menu_bar")
+            .frame(Self::chrome_frame(ui))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.menu_button("File", |ui| {
+                        if ui.button("Open ROM...").clicked() {
+                            self.open_rom();
+                            ui.close();
                         }
-                    }
-                    if self.compositor.is_none() {
-                        ui.label("(no GPU device for ultrawide)");
-                    }
-                    ui.separator();
-                    // Ticket W3-03a: this DOES round-trip to the core
-                    // thread. W3-03 kept the layer textures current every
-                    // frame regardless of the checkbox, on the reasoning
-                    // that the upload was cheap next to the main one and
-                    // that a stale image would flash when the window
-                    // opened. True, but it left the core thread paying
-                    // for the split and two ~240 KB clones on every frame
-                    // of every session, open window or not — so the
-                    // toggle switches the work off at the source, exactly
-                    // as the debugger's event viewer does with
-                    // `SetEventMask` (DEBUGGER.md §6).
-                    if ui
-                        .checkbox(&mut self.show_layers, "Layers (debug)")
-                        .changed()
-                    {
-                        self.send_command(core_thread::CoreCommand::SetLayerExtraction(
-                            self.show_layers,
-                        ));
-                        ui.close();
-                    }
-                    // Ticket W4-06a criterion 3: layout is saved the
-                    // moment the window closes (not only on process exit
-                    // via `eframe::App::save`), so a session that opens,
-                    // rearranges panels and closes without a clean
-                    // shutdown still keeps the change.
-                    if ui
-                        .checkbox(&mut self.debug_panels.visible, "Debug Viewers")
-                        .changed()
-                    {
-                        if !self.debug_panels.visible {
-                            self.debug_panels.save();
+                        ui.separator();
+                        if ui.button("Quit").clicked() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                        ui.close();
-                    }
-                });
-
-                ui.menu_button("Enhance", |ui| {
-                    // Ticket W4-05 (FR-MODE-001): ARCHITECTURE §4's five
-                    // modes as presets. Persisted per game immediately,
-                    // same no-Apply-button stance as every other setting.
-                    //
-                    // `from_id_salt`, not `from_label`: `ComboBox::
-                    // from_label` renders its label to the RIGHT of the
-                    // control, so the old bottom bar read
-                    // "[Accuracy v] Mode" — backwards — and nobody
-                    // noticed because it sat next to a badge saying the
-                    // same word.
-                    let mut mode = self.current_game_settings.mode;
-                    ui.horizontal(|ui| {
-                        ui.label("Mode");
-                        egui::ComboBox::from_id_salt("mode_preset")
-                            .selected_text(mode.display_name())
-                            .show_ui(ui, |ui| {
-                                for option in crate::game_settings::Mode::all() {
-                                    ui.selectable_value(&mut mode, option, option.display_name());
-                                }
-                            });
                     });
-                    if mode != self.current_game_settings.mode {
-                        self.current_game_settings.mode = mode;
-                        self.save_current_game_settings();
-                    }
-                    ui.separator();
-                    if ui.button("Enhance\u{2026}").clicked() {
-                        self.show_enhance = !self.show_enhance;
-                        ui.close();
-                    }
-                    // Ticket W3-05a, FR-ENH-001: opt-in only, off by
-                    // default (law 6) — checking this does not touch the
-                    // accuracy simulation, only whether the dropped-
-                    // sprite overlay gets composited on top of it
-                    // (`Ppu`'s "Sprite-limit-bypass overlay" section).
-                    if ui
-                        .add_enabled(
-                            has_core,
-                            egui::Checkbox::new(&mut self.sprite_overlay, "De-flicker overlay"),
-                        )
-                        .changed()
-                    {
-                        self.send_command(CoreCommand::SetSpriteOverlay(self.sprite_overlay));
-                        // Ticket W2-07: persist immediately, keyed by
-                        // hash. No Apply button anywhere in this app's
-                        // settings — an unsaved change a crash discards
-                        // is the kind of small betrayal that makes people
-                        // stop trusting a settings screen.
-                        self.current_game_settings.sprite_overlay = self.sprite_overlay;
-                        self.save_current_game_settings();
-                    }
-                    ui.separator();
-                    self.heuristics_menu(ui);
-                    self.compare_menu(ui);
+
+                    let has_core = self.core.is_some();
+                    ui.menu_button("View", |ui| {
+                        // **Each of these closes the menu when it changes.**
+                        // Platform convention (a menu item you pick puts the
+                        // menu away), and it is also what makes the sequence
+                        // deterministic: a menu left open after a click sits
+                        // under the "View" button, so the next click on
+                        // "View" lands on a menu row instead. That is not
+                        // hypothetical — it opened the Controls window while
+                        // `tests/ui_smoke.rs` was trying to open the menu.
+                        //
+                        // Checkboxes, not "open" buttons: these five each own
+                        // a window whose visibility is a piece of app state,
+                        // and a checkbox is the control that SHOWS that state
+                        // — you can see at a glance what is open. It also
+                        // keeps the toggle semantics `tests/ui_smoke.rs`
+                        // exercises (open, assert, close, assert) meaningful
+                        // now that the controls live behind a menu.
+                        //
+                        // Ticket W2-07: opening the library triggers the first
+                        // scan (see `library_window`), so a cold start never
+                        // waits on a folder walk.
+                        if ui
+                            .checkbox(&mut self.show_library, "Library\u{2026}")
+                            .changed()
+                        {
+                            ui.close();
+                        }
+                        // Ticket W2-08: app-wide settings (FRONTEND_UI §2).
+                        if ui
+                            .checkbox(&mut self.show_settings, "Settings\u{2026}")
+                            .changed()
+                        {
+                            ui.close();
+                        }
+                        // Ticket W2-06's remap window. Pure UI-thread state —
+                        // bindings are sampled on this thread too
+                        // (`poll_input`), so a remap takes effect on the very
+                        // next frame with no round trip to the core thread.
+                        if ui
+                            .checkbox(&mut self.show_controls, "Controls\u{2026}")
+                            .changed()
+                        {
+                            ui.close();
+                        }
+                        ui.separator();
+                        // Ticket W4-03e criterion 2: the runtime camera
+                        // toggle. Disabled with no compositor at all (no GPU
+                        // device, `Self::compositor`'s doc) — there is
+                        // nothing to switch to, and enabling it would just
+                        // click through to `UltrawideUnavailable` every time.
+                        let camera_label = match self.camera {
+                            CameraToggle::Original => "Camera: Original",
+                            CameraToggle::Ultrawide => "Camera: Ultrawide",
+                        };
+                        if ui
+                            .add_enabled(
+                                has_core && self.compositor.is_some(),
+                                egui::Button::new(camera_label),
+                            )
+                            .clicked()
+                        {
+                            self.camera = self.camera.flipped();
+                            if self.camera == CameraToggle::Ultrawide {
+                                // Don't wait out the throttle interval for
+                                // the FIRST view after switching.
+                                self.ultrawide_refresh_countdown = 0;
+                            }
+                        }
+                        if self.compositor.is_none() {
+                            ui.label("(no GPU device for ultrawide)");
+                        }
+                        ui.separator();
+                        // Ticket W3-03a: this DOES round-trip to the core
+                        // thread. W3-03 kept the layer textures current every
+                        // frame regardless of the checkbox, on the reasoning
+                        // that the upload was cheap next to the main one and
+                        // that a stale image would flash when the window
+                        // opened. True, but it left the core thread paying
+                        // for the split and two ~240 KB clones on every frame
+                        // of every session, open window or not — so the
+                        // toggle switches the work off at the source, exactly
+                        // as the debugger's event viewer does with
+                        // `SetEventMask` (DEBUGGER.md §6).
+                        if ui
+                            .checkbox(&mut self.show_layers, "Layers (debug)")
+                            .changed()
+                        {
+                            self.send_command(core_thread::CoreCommand::SetLayerExtraction(
+                                self.show_layers,
+                            ));
+                            ui.close();
+                        }
+                        // Ticket W4-06a criterion 3: layout is saved the
+                        // moment the window closes (not only on process exit
+                        // via `eframe::App::save`), so a session that opens,
+                        // rearranges panels and closes without a clean
+                        // shutdown still keeps the change.
+                        if ui
+                            .checkbox(&mut self.debug_panels.visible, "Debug Viewers")
+                            .changed()
+                        {
+                            if !self.debug_panels.visible {
+                                self.debug_panels.save();
+                            }
+                            ui.close();
+                        }
+                    });
+
+                    ui.menu_button("Enhance", |ui| {
+                        // Ticket W4-05 (FR-MODE-001): ARCHITECTURE §4's five
+                        // modes as presets. Persisted per game immediately,
+                        // same no-Apply-button stance as every other setting.
+                        //
+                        // `from_id_salt`, not `from_label`: `ComboBox::
+                        // from_label` renders its label to the RIGHT of the
+                        // control, so the old bottom bar read
+                        // "[Accuracy v] Mode" — backwards — and nobody
+                        // noticed because it sat next to a badge saying the
+                        // same word.
+                        let mut mode = self.current_game_settings.mode;
+                        ui.horizontal(|ui| {
+                            ui.label("Mode");
+                            egui::ComboBox::from_id_salt("mode_preset")
+                                .selected_text(mode.display_name())
+                                .show_ui(ui, |ui| {
+                                    for option in crate::game_settings::Mode::all() {
+                                        ui.selectable_value(
+                                            &mut mode,
+                                            option,
+                                            option.display_name(),
+                                        );
+                                    }
+                                });
+                        });
+                        if mode != self.current_game_settings.mode {
+                            self.current_game_settings.mode = mode;
+                            self.save_current_game_settings();
+                        }
+                        ui.separator();
+                        if ui.button("Enhance\u{2026}").clicked() {
+                            self.show_enhance = !self.show_enhance;
+                            ui.close();
+                        }
+                        // Ticket W3-05a, FR-ENH-001: opt-in only, off by
+                        // default (law 6) — checking this does not touch the
+                        // accuracy simulation, only whether the dropped-
+                        // sprite overlay gets composited on top of it
+                        // (`Ppu`'s "Sprite-limit-bypass overlay" section).
+                        if ui
+                            .add_enabled(
+                                has_core,
+                                egui::Checkbox::new(&mut self.sprite_overlay, "De-flicker overlay"),
+                            )
+                            .changed()
+                        {
+                            self.send_command(CoreCommand::SetSpriteOverlay(self.sprite_overlay));
+                            // Ticket W2-07: persist immediately, keyed by
+                            // hash. No Apply button anywhere in this app's
+                            // settings — an unsaved change a crash discards
+                            // is the kind of small betrayal that makes people
+                            // stop trusting a settings screen.
+                            self.current_game_settings.sprite_overlay = self.sprite_overlay;
+                            self.save_current_game_settings();
+                        }
+                        ui.separator();
+                        self.heuristics_menu(ui);
+                        self.compare_menu(ui);
+                    });
                 });
             });
-        });
     }
 
     /// Ticket W3-05c (FR-ENH-012): the per-game report card, surfaced
@@ -2270,151 +2371,179 @@ impl RetroForgeApp {
     /// from the next reader. The controls moved to menus instead
     /// ([`Self::menu_bar`]).
     fn controls_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("controls").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let has_core = self.core.is_some();
-                let run_label = if self.running { "Pause" } else { "Run" };
-                // The primary action, and the only one in the bar drawn
-                // in the accent. Before W10-01 it was one of sixteen
-                // identical grey rectangles; the eye had nothing to find.
-                let accent = ui.visuals().selection.stroke.color;
-                if ui
-                    .add_enabled(
+        egui::Panel::bottom("controls")
+            .frame(Self::chrome_frame(ui))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let has_core = self.core.is_some();
+                    let run_label = if self.running { "Pause" } else { "Run" };
+                    // The primary action, and the only one in the bar drawn
+                    // in the accent. Before W10-01 it was one of sixteen
+                    // identical grey rectangles; the eye had nothing to find.
+                    //
+                    // **Hand-animated, because egui will not do it for you.**
+                    // In an immediate-mode UI a button's fill is recomputed
+                    // from scratch every frame, so hover is a step function
+                    // unless something carries state across frames.
+                    // `animate_bool_responsive` is that something: it eases
+                    // toward the target over `style.animation_time` and snaps
+                    // in on the way. Applied HERE ONLY — one moving element
+                    // in a status bar is a highlight, five is a fidget.
+                    let accent = ui.visuals().selection.stroke.color;
+                    let base = ui.visuals().widgets.inactive.bg_fill;
+                    let warmth = ui
+                        .ctx()
+                        .animate_bool_responsive(egui::Id::new("run_hover"), self.run_hovered);
+                    let run = ui.add_enabled(
                         has_core,
                         egui::Button::new(egui::RichText::new(run_label).strong())
-                            .fill(
-                                ui.visuals()
-                                    .widgets
-                                    .inactive
-                                    .bg_fill
-                                    .lerp_to_gamma(accent, 0.30),
-                            )
+                            .fill(base.lerp_to_gamma(accent, 0.30 + 0.22 * warmth))
                             .stroke(egui::Stroke::new(1.0, accent)),
-                    )
-                    .clicked()
-                {
-                    self.running = !self.running;
-                    self.send_command(if self.running {
-                        CoreCommand::Resume
-                    } else {
-                        CoreCommand::Pause
-                    });
-                }
-                if ui
-                    .add_enabled(has_core, egui::Button::new("Step Frame"))
-                    .clicked()
-                {
-                    self.running = false;
-                    self.awaiting_stepped_frame = true;
-                    self.send_command(CoreCommand::StepFrame);
-                }
-                if ui
-                    .add_enabled(has_core, egui::Button::new("Step Scanline"))
-                    .clicked()
-                {
-                    self.running = false;
-                    self.awaiting_stepped_frame = true;
-                    self.send_command(CoreCommand::StepScanline);
-                }
-                ui.separator();
-
-                // FRONTEND_UI.md §1: the honesty badge, with its hover
-                // breakdown and hold-to-peek. Not decoration — §1 is
-                // explicit that enhancement is never on silently, and
-                // this is where a user finds out what they are looking
-                // at. It stays in the bar for exactly that reason: a
-                // badge behind a menu is a badge nobody reads.
-                let badge = crate::enhance_ui::badge_text(
-                    "NES",
-                    &self.current_game_settings,
-                    self.profile_matched,
-                );
-                // A CHIP, not a button. It is a status readout that
-                // happens to carry a hover breakdown and a hold-to-peek
-                // gesture — rendering it as a button put it in a row of
-                // buttons looking exactly like them, so it read as
-                // "something to press" rather than "what you are looking
-                // at". `frame(false)` plus a sense keeps both behaviours
-                // and drops the affordance that was lying.
-                let response = ui.add(
-                    egui::Button::new(egui::RichText::new(badge).strong())
-                        .frame(false)
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            ui.visuals().widgets.inactive.bg_fill,
-                        )),
-                );
-                let breakdown = crate::enhance_ui::badge_breakdown(
-                    &self.current_game_settings,
-                    self.profile_matched,
-                );
-                response.clone().on_hover_ui(|ui| {
-                    for line in &breakdown {
-                        ui.label(line);
+                    );
+                    self.run_hovered = run.hovered();
+                    if run.clicked() {
+                        self.running = !self.running;
+                        self.send_command(if self.running {
+                            CoreCommand::Resume
+                        } else {
+                            CoreCommand::Pause
+                        });
                     }
-                });
-                // Held, not toggled: peeking is a gesture with an obvious
-                // end, and a toggle would leave someone stuck looking at
-                // the original wondering why their enhancements stopped.
-                self.peeking_original = response.is_pointer_button_down_on();
+                    if ui
+                        .add_enabled(has_core, egui::Button::new("Step Frame"))
+                        .clicked()
+                    {
+                        self.running = false;
+                        self.awaiting_stepped_frame = true;
+                        self.send_command(CoreCommand::StepFrame);
+                    }
+                    if ui
+                        .add_enabled(has_core, egui::Button::new("Step Scanline"))
+                        .clicked()
+                    {
+                        self.running = false;
+                        self.awaiting_stepped_frame = true;
+                        self.send_command(CoreCommand::StepScanline);
+                    }
+                    ui.separator();
 
-                // §3.2's remaining three, right-aligned so the status
-                // text has the first claim on the space.
-                // Where the transport controls and the honesty badge
-                // end. The right-hand readouts must not reach back past
-                // this, or they are drawn on top of them.
-                let left_edge = ui.min_rect().right();
-                // **Order matters, and it is a priority order.** In a
-                // right-to-left layout the FIRST item placed is the
-                // RIGHTMOST and gets its space first, so §3.2's fixed
-                // readouts are laid out before the status text and the
-                // status text lives on whatever is left. The other order
-                // is what shipped in the first draft of this ticket: an
-                // unbounded `Loaded /Users/.../Some Game (USA).nes`
-                // claimed the space first and pushed the FPS, A/V and
-                // profile chip off the left edge, under the mode badge —
-                // W10-01's own bug, re-created inside W10-01's fix.
-                let group =
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        match self.fps {
-                            Some(fps) => ui.monospace(format!("{fps:5.1} fps")),
-                            // A dash, not a hidden widget: the bar must not
-                            // change width when a reading arrives, or every
-                            // item left of it jumps a second after boot.
-                            None => ui.monospace("  --- fps"),
-                        };
-                        ui.separator();
-                        self.av_sync_indicator(ui);
-                        ui.separator();
-                        self.profile_chip(ui);
-                        ui.separator();
-                        if let Some((frame, scanline)) = self.position {
-                            ui.monospace(match scanline {
-                                Some(y) => format!("f{frame} \u{b7} sl{y}"),
-                                None => format!("f{frame} \u{b7} sl--"),
-                            });
-                            ui.separator();
+                    // FRONTEND_UI.md §1: the honesty badge, with its hover
+                    // breakdown and hold-to-peek. Not decoration — §1 is
+                    // explicit that enhancement is never on silently, and
+                    // this is where a user finds out what they are looking
+                    // at. It stays in the bar for exactly that reason: a
+                    // badge behind a menu is a badge nobody reads.
+                    let badge = crate::enhance_ui::badge_text(
+                        "NES",
+                        &self.current_game_settings,
+                        self.profile_matched,
+                    );
+                    // A CHIP, not a button. It is a status readout that
+                    // happens to carry a hover breakdown and a hold-to-peek
+                    // gesture — rendering it as a button put it in a row of
+                    // buttons looking exactly like them, so it read as
+                    // "something to press" rather than "what you are looking
+                    // at". `frame(false)` plus a sense keeps both behaviours
+                    // and drops the affordance that was lying.
+                    let response = ui.add(
+                        egui::Button::new(egui::RichText::new(badge).strong())
+                            .frame(false)
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                ui.visuals().widgets.inactive.bg_fill,
+                            )),
+                    );
+                    let breakdown = crate::enhance_ui::badge_breakdown(
+                        &self.current_game_settings,
+                        self.profile_matched,
+                    );
+                    response.clone().on_hover_ui(|ui| {
+                        for line in &breakdown {
+                            ui.label(line);
                         }
-                        // FM-13 criterion 3: "view too large for GPU,
-                        // reduced" — surfaced plainly, never swallowed
-                        // (`Self::refresh_ultrawide_render`'s doc).
-                        if let Some(msg) = &self.fm13_message {
-                            ui.colored_label(egui::Color32::from_rgb(230, 180, 40), msg);
-                            ui.separator();
-                        }
-                        // `truncate`, not a character budget: `self.status`
-                        // is `format!("Loaded {}", path.display())` on every
-                        // ROM open, so its width is the user's directory
-                        // depth. egui fits it to the space actually
-                        // remaining, which is the honest bound — a guess
-                        // about how wide a character is would be wrong at any
-                        // other `ui_scale`.
-                        ui.add(egui::Label::new(&self.status).truncate())
-                            .on_hover_text(&self.status);
                     });
-                self.status_readouts = Some((group.response.rect, left_edge));
+                    // Held, not toggled: peeking is a gesture with an obvious
+                    // end, and a toggle would leave someone stuck looking at
+                    // the original wondering why their enhancements stopped.
+                    self.peeking_original = response.is_pointer_button_down_on();
+
+                    // §3.2's remaining three, right-aligned so the status
+                    // text has the first claim on the space.
+                    // Where the transport controls and the honesty badge
+                    // end. The right-hand readouts must not reach back past
+                    // this, or they are drawn on top of them.
+                    let left_edge = ui.min_rect().right();
+                    // **Grouped by whitespace, not by rules.** Six
+                    // `ui.separator()` calls in a five-item bar is a habit
+                    // carried over from the sixteen-control row this
+                    // replaced, where they were the only thing keeping four
+                    // unrelated concerns apart. With one concern left they
+                    // are noise — a vertical rule between every readout
+                    // draws more ink than the readouts do. ONE survives:
+                    // the one dividing controls from telemetry, which is a
+                    // real boundary rather than a gap.
+                    //
+                    // Order is still a PRIORITY order. In a right-to-left
+                    // layout the FIRST item placed is the RIGHTMOST and
+                    // claims its space first, so §3.2's fixed readouts are
+                    // laid out before the status text and the status text
+                    // lives on whatever is left. The other order is what
+                    // shipped in the first draft of this ticket: an
+                    // unbounded `Loaded /Users/.../Some Game (USA).nes`
+                    // claimed the space first and pushed the FPS, A/V and
+                    // profile chip off the left edge, under the mode badge.
+                    let group =
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 12.0;
+                            match self.fps {
+                                Some(fps) => ui.add(readout(
+                                    egui::RichText::new(format!("{fps:5.1} fps")).monospace(),
+                                )),
+                                // A dash, not a hidden widget: the bar must not
+                                // change width when a reading arrives, or every
+                                // item left of it jumps a second after boot.
+                                None => {
+                                    ui.add(readout(egui::RichText::new("  --- fps").monospace()))
+                                }
+                            };
+                            self.av_sync_indicator(ui);
+                            self.profile_chip(ui);
+                            if let Some((frame, scanline)) = self.position {
+                                ui.add(readout(
+                                    egui::RichText::new(match scanline {
+                                        // ASCII only: the bundled
+                                        // monospace face has no `·`.
+                                        Some(y) => format!("f{frame} sl{y}"),
+                                        None => format!("f{frame} sl--"),
+                                    })
+                                    .monospace(),
+                                ));
+                            }
+                            // FM-13 criterion 3: "view too large for GPU,
+                            // reduced" — surfaced plainly, never swallowed
+                            // (`Self::refresh_ultrawide_render`'s doc). The one
+                            // readout allowed to interrupt, so it keeps its
+                            // warning colour.
+                            if let Some(msg) = &self.fm13_message {
+                                ui.add(readout(
+                                    egui::RichText::new(msg)
+                                        .color(egui::Color32::from_rgb(230, 180, 40)),
+                                ));
+                            }
+                            ui.separator();
+                            // `truncate`, not a character budget: `self.status`
+                            // is `format!("Loaded {}", path.display())` on every
+                            // ROM open, so its width is the user's directory
+                            // depth. egui fits it to the space actually
+                            // remaining, which is the honest bound — a guess
+                            // about how wide a character is would be wrong at
+                            // any other `ui_scale`.
+                            ui.add(egui::Label::new(&self.status).truncate())
+                                .on_hover_text(&self.status);
+                        });
+                    self.status_readouts = Some((group.response.rect, left_edge));
+                });
             });
-        });
     }
 
     /// The rect last frame's §3.2 readouts occupied, and the right edge
@@ -2450,14 +2579,14 @@ impl RetroForgeApp {
                     || path.display().to_string(),
                     |s| s.to_string_lossy().into(),
                 );
-                ui.label(format!("\u{25c7} {}", elide_front(&name)))
+                ui.add(readout(format!("\u{2605} {}", elide_front(&name))))
                     .on_hover_text(path.display().to_string());
             }
             (None, true) => {
-                ui.label("\u{25c7} profile");
+                ui.add(readout("\u{2605} profile"));
             }
             (None, false) => {
-                ui.weak("\u{25cb} no profile");
+                ui.add(readout(egui::RichText::new("\u{2606} no profile").weak()));
             }
         }
     }
@@ -2473,7 +2602,7 @@ impl RetroForgeApp {
     /// each frame (`core_thread::FrameMsg::audio_fill`).
     fn av_sync_indicator(&mut self, ui: &mut egui::Ui) {
         let Some(fill) = self.audio_fill else {
-            ui.weak("\u{25cb} a/v");
+            ui.add(readout(egui::RichText::new("\u{25cb} a/v").weak()));
             return;
         };
         // Thresholds are about the buffer's job, not aesthetics: near
@@ -2495,7 +2624,7 @@ impl RetroForgeApp {
                 "audio buffer healthy — a/v in sync",
             )
         };
-        ui.colored_label(colour, "\u{25cf} a/v")
+        ui.add(readout(egui::RichText::new("\u{25a0} a/v").color(colour)))
             .on_hover_text(format!("{tip}\nbuffer fill: {:.0}%", fill * 100.0));
     }
 
@@ -3385,6 +3514,38 @@ impl RetroForgeApp {
         self.show_enhance = open;
     }
 
+    /// What fills the play area before a ROM is open.
+    ///
+    /// It used to be `ui.label(&self.status)` — **the same sentence the
+    /// status bar was already showing**, at the same size, centred in
+    /// six hundred pixels of nothing. Two copies of one string is not an
+    /// empty state; it is the absence of one, and it was the loudest
+    /// "nobody designed this" signal in the window.
+    ///
+    /// What replaces it is the standard shape of an empty state: name
+    /// the situation, then say the one thing to do about it, with the
+    /// size difference carrying the hierarchy. The status bar keeps the
+    /// running commentary — that is its job — and this stops competing
+    /// with it.
+    fn empty_state(ui: &mut egui::Ui) {
+        ui.centered_and_justified(|ui| {
+            ui.vertical_centered(|ui| {
+                // Pushed off dead-centre: optically centred text sits a
+                // little above the true middle, and a block that starts
+                // exactly halfway down reads as low.
+                ui.add_space(ui.available_height() * 0.38);
+                ui.label(egui::RichText::new("No ROM loaded").heading());
+                ui.add_space(6.0);
+                ui.add(readout(
+                    egui::RichText::new(
+                        "File \u{203a} Open ROM\u{2026}   \u{b7}   View \u{203a} Library\u{2026}",
+                    )
+                    .weak(),
+                ));
+            });
+        });
+    }
+
     fn video_panel(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             // Ticket W4-05 (FRONTEND_UI.md §1): hold-to-peek forces the
@@ -3402,9 +3563,7 @@ impl RetroForgeApp {
                     if let Some(texture) = &self.texture {
                         ui.add(egui::Image::from_texture(texture).shrink_to_fit());
                     } else {
-                        ui.centered_and_justified(|ui| {
-                            ui.label(&self.status);
-                        });
+                        Self::empty_state(ui);
                     }
                 }
                 enhanced_view::ActiveView::Ultrawide { .. } => {
