@@ -70,6 +70,42 @@ pub const MIN_WINDOW_SIZE: [f32; 2] = [640.0, 480.0];
 /// can use to answer "is this running full speed?".
 const FPS_WINDOW_FRAMES: u32 = 30;
 
+/// Longest profile name the status chip will lay out, in characters.
+///
+/// The chip's text is a profile's file stem, so its width is decided by
+/// the *user's filesystem*, not by this code — unbounded, and therefore
+/// able to re-create W10-01's exact failure (a bar wider than the window)
+/// at run time on a build whose tests are green because the fixture is
+/// called `fixture.nes`. It is a chip: a fixed budget with the full value
+/// on hover is what a chip is.
+///
+/// The status *text* is not bounded this way — it gets
+/// `egui::Label::truncate`, which fits it to the space actually left
+/// after the fixed readouts rather than to a guess about how wide a
+/// character is.
+const PROFILE_CHIP_BUDGET: usize = 20;
+
+/// `text` shortened to [`PROFILE_CHIP_BUDGET`] characters, keeping the
+/// **end** and eliding the front.
+///
+/// The end, because both strings this is used on are paths and the
+/// distinguishing part of a path is its tail: `…/mario/prg/level1.nes`
+/// tells you something, `/Users/someone/very/long/…` tells you nothing.
+/// Counts `chars`, not bytes — slicing a UTF-8 path mid-codepoint would
+/// panic, and a ROM directory with a non-ASCII name is completely
+/// ordinary.
+fn elide_front(text: &str) -> std::borrow::Cow<'_, str> {
+    let count = text.chars().count();
+    if count <= PROFILE_CHIP_BUDGET {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let skip = count - (PROFILE_CHIP_BUDGET - 1);
+    std::borrow::Cow::Owned(format!(
+        "\u{2026}{}",
+        text.chars().skip(skip).collect::<String>()
+    ))
+}
+
 /// Every host key the default NES keymap binds — the fixed poll list
 /// `poll_input` checks each repaint (module doc).
 /// Which app-wide settings tab is showing (ticket W2-08; FRONTEND_UI §2's
@@ -146,6 +182,20 @@ pub struct RetroForgeApp {
     /// rather than being read from here — the UI thread never touches the
     /// audio device.
     audio_fill: Option<f32>,
+    /// Ticket W10-01: the rect the status bar's right-aligned readouts
+    /// occupied last frame, and the right edge of the transport controls
+    /// to their left. The bar is correct exactly when the first does not
+    /// reach back past the second.
+    ///
+    /// Instrumentation, because the accessibility tree cannot answer this
+    /// question: egui publishes AccessKit nodes for the bar's *buttons*
+    /// but **not for its plain labels**, so a test walking that tree can
+    /// see Run and Step Frame clip and is structurally blind to the FPS,
+    /// A/V, profile-chip and status readouts — the four things
+    /// FRONTEND_UI §3.2 actually specifies. Verified by dumping every
+    /// node in the panel: only `Role::Button` appears. Measured here
+    /// instead, and asserted by `tests/hud_fits.rs`.
+    status_readouts: Option<(egui::Rect, f32)>,
     fps: Option<f32>,
     /// Frames counted since [`Self::fps_window_start`].
     fps_frames: u32,
@@ -451,6 +501,7 @@ impl RetroForgeApp {
             awaiting_stepped_frame: false,
             position: None,
             audio_fill: None,
+            status_readouts: None,
             fps: None,
             fps_frames: 0,
             fps_window_start: std::time::Instant::now(),
@@ -1819,6 +1870,11 @@ impl RetroForgeApp {
         visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, col(p.accent));
         visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, col(p.accent));
         ctx.set_visuals(visuals);
+        // Safe to call every frame: `Context::set_zoom_factor` compares
+        // against the stored value and only requests a repaint when it
+        // actually differs (egui-0.35.0 `context.rs:2272`, read rather
+        // than assumed) — an unconditional repaint request here would
+        // make the app spin at 100% doing nothing.
         ctx.set_zoom_factor(a.ui_scale);
     }
 
@@ -2165,37 +2221,75 @@ impl RetroForgeApp {
 
                 // §3.2's remaining three, right-aligned so the status
                 // text has the first claim on the space.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some((frame, scanline)) = self.position {
-                        ui.monospace(match scanline {
-                            Some(y) => format!("f{frame} \u{b7} sl{y}"),
-                            None => format!("f{frame} \u{b7} sl--"),
-                        });
+                // Where the transport controls and the honesty badge
+                // end. The right-hand readouts must not reach back past
+                // this, or they are drawn on top of them.
+                let left_edge = ui.min_rect().right();
+                // **Order matters, and it is a priority order.** In a
+                // right-to-left layout the FIRST item placed is the
+                // RIGHTMOST and gets its space first, so §3.2's fixed
+                // readouts are laid out before the status text and the
+                // status text lives on whatever is left. The other order
+                // is what shipped in the first draft of this ticket: an
+                // unbounded `Loaded /Users/.../Some Game (USA).nes`
+                // claimed the space first and pushed the FPS, A/V and
+                // profile chip off the left edge, under the mode badge —
+                // W10-01's own bug, re-created inside W10-01's fix.
+                let group =
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        match self.fps {
+                            Some(fps) => ui.monospace(format!("{fps:5.1} fps")),
+                            // A dash, not a hidden widget: the bar must not
+                            // change width when a reading arrives, or every
+                            // item left of it jumps a second after boot.
+                            None => ui.monospace("  --- fps"),
+                        };
                         ui.separator();
-                    }
-                    ui.label(&self.status);
-                    // FM-13 criterion 3: "view too large for GPU,
-                    // reduced" — surfaced plainly, never swallowed
-                    // (`Self::refresh_ultrawide_render`'s doc).
-                    if let Some(msg) = &self.fm13_message {
+                        self.av_sync_indicator(ui);
                         ui.separator();
-                        ui.colored_label(egui::Color32::from_rgb(230, 180, 40), msg);
-                    }
-                    ui.separator();
-                    self.profile_chip(ui);
-                    ui.separator();
-                    self.av_sync_indicator(ui);
-                    ui.separator();
-                    match self.fps {
-                        Some(fps) => ui.monospace(format!("{fps:5.1} fps")),
-                        // A dash, not a hidden widget: the bar must not
-                        // change width when a reading arrives, or every
-                        // item left of it jumps a second after boot.
-                        None => ui.monospace("  --- fps"),
-                    };
-                });
+                        self.profile_chip(ui);
+                        ui.separator();
+                        if let Some((frame, scanline)) = self.position {
+                            ui.monospace(match scanline {
+                                Some(y) => format!("f{frame} \u{b7} sl{y}"),
+                                None => format!("f{frame} \u{b7} sl--"),
+                            });
+                            ui.separator();
+                        }
+                        // FM-13 criterion 3: "view too large for GPU,
+                        // reduced" — surfaced plainly, never swallowed
+                        // (`Self::refresh_ultrawide_render`'s doc).
+                        if let Some(msg) = &self.fm13_message {
+                            ui.colored_label(egui::Color32::from_rgb(230, 180, 40), msg);
+                            ui.separator();
+                        }
+                        // `truncate`, not a character budget: `self.status`
+                        // is `format!("Loaded {}", path.display())` on every
+                        // ROM open, so its width is the user's directory
+                        // depth. egui fits it to the space actually
+                        // remaining, which is the honest bound — a guess
+                        // about how wide a character is would be wrong at any
+                        // other `ui_scale`.
+                        ui.add(egui::Label::new(&self.status).truncate())
+                            .on_hover_text(&self.status);
+                    });
+                self.status_readouts = Some((group.response.rect, left_edge));
             });
         });
+    }
+
+    /// The rect last frame's §3.2 readouts occupied, and the right edge
+    /// of the controls to their left (ticket W10-01). `None` before the
+    /// first repaint.
+    ///
+    /// `#[doc(hidden)]` and named for its purpose: this exists so
+    /// `tests/hud_fits.rs` can assert the readouts fit, which the
+    /// accessibility tree cannot answer — see
+    /// [`Self::status_readouts`]'s own doc.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn status_readouts_for_test(&self) -> Option<(egui::Rect, f32)> {
+        self.status_readouts
     }
 
     /// §3.2's profile chip: whether a game profile claims this ROM.
@@ -2207,11 +2301,11 @@ impl RetroForgeApp {
     fn profile_chip(&mut self, ui: &mut egui::Ui) {
         match (&self.matched_profile, self.profile_matched) {
             (Some(path), _) => {
-                let name = path.file_stem().map_or_else(
+                let name: String = path.file_stem().map_or_else(
                     || path.display().to_string(),
                     |s| s.to_string_lossy().into(),
                 );
-                ui.label(format!("\u{25c6} {name}"))
+                ui.label(format!("\u{25c6} {}", elide_front(&name)))
                     .on_hover_text(path.display().to_string());
             }
             (None, true) => {
@@ -3309,5 +3403,51 @@ mod compare_tests {
         assert_eq!(&split[4..8], &[0, 0, 255, 255], "right half is enhanced");
         assert_ne!(split, b.original);
         assert_ne!(split, b.enhanced);
+    }
+}
+
+/// The status bar's own helpers (ticket W10-01).
+#[cfg(test)]
+mod hud_tests {
+    /// `elide_front` keeps the tail, because the distinguishing part of a
+    /// profile name is its end.
+    #[test]
+    fn elide_front_keeps_the_end_and_marks_the_cut() {
+        let long = "an-extremely-verbose-profile-name-nobody-would-choose";
+        let out = super::elide_front(long);
+        assert_eq!(out.chars().count(), super::PROFILE_CHIP_BUDGET);
+        assert!(
+            out.starts_with('\u{2026}'),
+            "the cut must be visible: {out}"
+        );
+        assert!(
+            long.ends_with(out.trim_start_matches('\u{2026}')),
+            "the surviving text must be the END of the original: {out}"
+        );
+    }
+
+    /// Short enough to fit is returned untouched — and borrowed, not
+    /// reallocated, on the path the bar takes every single frame.
+    #[test]
+    fn elide_front_leaves_a_short_name_alone() {
+        let short = "rf-scroller";
+        assert!(matches!(
+            super::elide_front(short),
+            std::borrow::Cow::Borrowed("rf-scroller")
+        ));
+    }
+
+    /// **Counts characters, not bytes.** A ROM directory with a
+    /// non-ASCII name is completely ordinary, and slicing UTF-8
+    /// mid-codepoint panics — which in this codepath would take the whole
+    /// status bar down every frame, on nothing worse than an accented
+    /// filename.
+    #[test]
+    fn elide_front_does_not_split_a_multibyte_character() {
+        // 30 chars, 60 bytes.
+        let name = "\u{e9}".repeat(30);
+        let out = super::elide_front(&name);
+        assert_eq!(out.chars().count(), super::PROFILE_CHIP_BUDGET);
+        assert!(out.chars().all(|c| c == '\u{2026}' || c == '\u{e9}'));
     }
 }
