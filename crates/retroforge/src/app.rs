@@ -46,6 +46,30 @@ use rf_enhance::trust::TrustState;
 /// play, far below the cost of a per-frame clone.
 const CANVAS_SNAPSHOT_REFRESH_INTERVAL: u32 = 30;
 
+/// The size `main.rs` opens the window at, and the size
+/// `tests/hud_fits.rs` proves the HUD fits inside (ticket W10-01).
+///
+/// 768 is three whole NES pixels wide (256 x 3), which is the point: the
+/// default window shows the picture at an integer scale
+/// (`settings::ScaleMode::Integer`) with nothing to spare. That makes it
+/// the *tightest* case the chrome has to survive, so it is the one worth
+/// asserting — a HUD tested only at some comfortable developer size is a
+/// HUD tested at a size no user runs.
+pub const WINDOW_SIZE: [f32; 2] = [768.0, 720.0];
+
+/// Floor for manual resizing. Below this the status bar cannot hold its
+/// own contents and would start clipping again — the exact failure
+/// W10-01 exists to fix — so the window refuses to get there rather than
+/// silently hiding controls.
+pub const MIN_WINDOW_SIZE: [f32; 2] = [640.0, 480.0];
+
+/// How many frames [`RetroForgeApp::note_frame`] averages before it will
+/// report an FPS reading. Averaging rather than timing one frame: a
+/// single-frame reading at 60 Hz swings several frames per second on
+/// scheduler noise alone, and a number that never settles is one nobody
+/// can use to answer "is this running full speed?".
+const FPS_WINDOW_FRAMES: u32 = 30;
+
 /// Every host key the default NES keymap binds — the fixed poll list
 /// `poll_input` checks each repaint (module doc).
 /// Which app-wide settings tab is showing (ticket W2-08; FRONTEND_UI §2's
@@ -56,6 +80,10 @@ enum SettingsTab {
     Video,
     Audio,
     Paths,
+    /// Ticket W10-01. `crate::accessibility` shipped in W8-04 with a UI
+    /// scale and a high-contrast palette and no way for a user to reach
+    /// either. This tab is that way.
+    Accessibility,
 }
 
 /// Open the gamepad backend, or carry on without one (ticket W2-06).
@@ -106,6 +134,23 @@ pub struct RetroForgeApp {
     /// indistinguishable from a dead button — which is exactly how it was
     /// first reported.
     position: Option<(u64, Option<u16>)>,
+    /// Ticket W10-01: frames-per-second for the status bar, `None` until
+    /// [`FPS_WINDOW_FRAMES`] frames have been seen. This is the first
+    /// answer the app has ever been able to give to "is it running at
+    /// full speed?" — before W10-01 the bar had no FPS at all, despite
+    /// `docs/design/FRONTEND_UI.md` §3.2 listing it as one of four things
+    /// the status bar shows.
+    /// Ticket W10-01: audio-buffer fill (0.0..=1.0) as of the last frame,
+    /// for §3.2's A/V sync indicator. `None` until a frame carries one.
+    /// The core thread owns `AudioOut`, so this arrives with the frame
+    /// rather than being read from here — the UI thread never touches the
+    /// audio device.
+    audio_fill: Option<f32>,
+    fps: Option<f32>,
+    /// Frames counted since [`Self::fps_window_start`].
+    fps_frames: u32,
+    /// Wall clock at the start of the current averaging window.
+    fps_window_start: std::time::Instant,
     /// Host-agnostic per-frame input latch (`rf_input`, FR-FE-003) — the
     /// UI thread's write side; `poll_input` samples it every repaint into
     /// the core thread's `SharedInputFrame` (module doc).
@@ -405,6 +450,10 @@ impl RetroForgeApp {
             running: false,
             awaiting_stepped_frame: false,
             position: None,
+            audio_fill: None,
+            fps: None,
+            fps_frames: 0,
+            fps_window_start: std::time::Instant::now(),
             input_latch: rf_input::InputLatch::new(),
             bindings,
             config_root,
@@ -1411,6 +1460,8 @@ impl RetroForgeApp {
                 self.screenshot_pending = false;
                 self.write_screenshots();
             }
+            self.audio_fill = msg.audio_fill;
+            self.note_frame();
             // Ticket W2-15: position travels with the frame.
             self.position = Some((msg.frame_count, msg.last_scanline));
             // Ticket W4-06a: OAM travels with the frame the same way
@@ -1713,6 +1764,78 @@ impl RetroForgeApp {
         }
     }
 
+    /// Count a delivered frame toward the status bar's FPS reading
+    /// (ticket W10-01).
+    ///
+    /// Counts frames that actually *reached the screen*, not repaints:
+    /// egui repaints for a mouse move, and an FPS number that rose when
+    /// you wiggled the pointer would be measuring the wrong machine.
+    fn note_frame(&mut self) {
+        self.fps_frames += 1;
+        if self.fps_frames < FPS_WINDOW_FRAMES {
+            return;
+        }
+        let elapsed = self.fps_window_start.elapsed().as_secs_f32();
+        // Guard the divide: a window that measures as zero seconds is a
+        // clock-resolution artifact, not 'infinite frames per second'.
+        if elapsed > 0.0 {
+            self.fps = Some(self.fps_frames as f32 / elapsed);
+        }
+        self.fps_frames = 0;
+        self.fps_window_start = std::time::Instant::now();
+    }
+
+    /// Apply the palette and UI scale from settings to egui (ticket
+    /// W10-01).
+    ///
+    /// `crate::accessibility` has defined an AAA-verified accent, a
+    /// high-contrast palette and a bounded `ui_scale` since W8-04, and
+    /// until this function existed **nothing imported it**: the module's
+    /// tests asserted the palette *arithmetic* was AAA-compliant, which
+    /// passes forever whether or not egui ever draws with those colours.
+    /// This is the line that makes those tests mean something.
+    ///
+    /// Style, not just colour. Every control in the old bar rendered as
+    /// the same grey rectangle — the primary action, a disabled button
+    /// and a *non-clickable status badge* were visually identical — so
+    /// the accent is spent on giving the active thing a visible edge.
+    fn apply_theme(&self, ctx: &egui::Context) {
+        let a = self.settings.accessibility.normalized();
+        let p = a.palette();
+        let col = |c: [u8; 3]| egui::Color32::from_rgb(c[0], c[1], c[2]);
+
+        let mut visuals = egui::Visuals::dark();
+        visuals.override_text_color = Some(col(p.text));
+        visuals.panel_fill = col(p.background);
+        visuals.window_fill = col(p.background);
+        visuals.extreme_bg_color = col(p.background).gamma_multiply(0.6);
+        visuals.hyperlink_color = col(p.accent);
+        visuals.selection.bg_fill = col(p.accent).gamma_multiply(0.35);
+        visuals.selection.stroke = egui::Stroke::new(1.0, col(p.accent));
+        // The focus ring. `accessibility::Palette::HIGH_CONTRAST`'s own
+        // doc calls this out: a focus indicator a user cannot
+        // distinguish is the one element that makes keyboard and gamepad
+        // navigation unusable.
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, col(p.accent));
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, col(p.accent));
+        ctx.set_visuals(visuals);
+        ctx.set_zoom_factor(a.ui_scale);
+    }
+
+    /// The menu bar (ticket W10-01; `docs/design/FRONTEND_UI.md` §2).
+    ///
+    /// Before W10-01 this held exactly one menu — File > Open ROM… — and
+    /// every other control in the app lived in one flat horizontal row
+    /// along the bottom. That row needed 1539 px of width in a window
+    /// `main.rs` opens at 768 px, so **eight controls were unreachable**,
+    /// among them the only openers for the Library, Settings and Controls
+    /// windows. The menus below are where those controls went.
+    ///
+    /// The split is by *concern*, which is what the old row lacked:
+    /// `View` is what you are looking at and which surfaces are open,
+    /// `Enhance` is everything that changes the picture away from the
+    /// unmodified simulation — the law 6 boundary, kept legible by giving
+    /// it its own menu rather than interleaving it with window toggles.
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("menu_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1721,11 +1844,265 @@ impl RetroForgeApp {
                         self.open_rom();
                         ui.close();
                     }
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+
+                let has_core = self.core.is_some();
+                ui.menu_button("View", |ui| {
+                    // Checkboxes, not "open" buttons: these five each own
+                    // a window whose visibility is a piece of app state,
+                    // and a checkbox is the control that SHOWS that state
+                    // — you can see at a glance what is open. It also
+                    // keeps the toggle semantics `tests/ui_smoke.rs`
+                    // exercises (open, assert, close, assert) meaningful
+                    // now that the controls live behind a menu.
+                    //
+                    // Ticket W2-07: opening the library triggers the first
+                    // scan (see `library_window`), so a cold start never
+                    // waits on a folder walk.
+                    ui.checkbox(&mut self.show_library, "Library\u{2026}");
+                    // Ticket W2-08: app-wide settings (FRONTEND_UI §2).
+                    ui.checkbox(&mut self.show_settings, "Settings\u{2026}");
+                    // Ticket W2-06's remap window. Pure UI-thread state —
+                    // bindings are sampled on this thread too
+                    // (`poll_input`), so a remap takes effect on the very
+                    // next frame with no round trip to the core thread.
+                    ui.checkbox(&mut self.show_controls, "Controls\u{2026}");
+                    ui.separator();
+                    // Ticket W4-03e criterion 2: the runtime camera
+                    // toggle. Disabled with no compositor at all (no GPU
+                    // device, `Self::compositor`'s doc) — there is
+                    // nothing to switch to, and enabling it would just
+                    // click through to `UltrawideUnavailable` every time.
+                    let camera_label = match self.camera {
+                        CameraToggle::Original => "Camera: Original",
+                        CameraToggle::Ultrawide => "Camera: Ultrawide",
+                    };
+                    if ui
+                        .add_enabled(
+                            has_core && self.compositor.is_some(),
+                            egui::Button::new(camera_label),
+                        )
+                        .clicked()
+                    {
+                        self.camera = self.camera.flipped();
+                        if self.camera == CameraToggle::Ultrawide {
+                            // Don't wait out the throttle interval for
+                            // the FIRST view after switching.
+                            self.ultrawide_refresh_countdown = 0;
+                        }
+                    }
+                    if self.compositor.is_none() {
+                        ui.label("(no GPU device for ultrawide)");
+                    }
+                    ui.separator();
+                    // Ticket W3-03a: this DOES round-trip to the core
+                    // thread. W3-03 kept the layer textures current every
+                    // frame regardless of the checkbox, on the reasoning
+                    // that the upload was cheap next to the main one and
+                    // that a stale image would flash when the window
+                    // opened. True, but it left the core thread paying
+                    // for the split and two ~240 KB clones on every frame
+                    // of every session, open window or not — so the
+                    // toggle switches the work off at the source, exactly
+                    // as the debugger's event viewer does with
+                    // `SetEventMask` (DEBUGGER.md §6).
+                    if ui
+                        .checkbox(&mut self.show_layers, "Layers (debug)")
+                        .changed()
+                    {
+                        self.send_command(core_thread::CoreCommand::SetLayerExtraction(
+                            self.show_layers,
+                        ));
+                    }
+                    // Ticket W4-06a criterion 3: layout is saved the
+                    // moment the window closes (not only on process exit
+                    // via `eframe::App::save`), so a session that opens,
+                    // rearranges panels and closes without a clean
+                    // shutdown still keeps the change.
+                    if ui
+                        .checkbox(&mut self.debug_panels.visible, "Debug Viewers")
+                        .changed()
+                        && !self.debug_panels.visible
+                    {
+                        self.debug_panels.save();
+                    }
+                });
+
+                ui.menu_button("Enhance", |ui| {
+                    // Ticket W4-05 (FR-MODE-001): ARCHITECTURE §4's five
+                    // modes as presets. Persisted per game immediately,
+                    // same no-Apply-button stance as every other setting.
+                    //
+                    // `from_id_salt`, not `from_label`: `ComboBox::
+                    // from_label` renders its label to the RIGHT of the
+                    // control, so the old bottom bar read
+                    // "[Accuracy v] Mode" — backwards — and nobody
+                    // noticed because it sat next to a badge saying the
+                    // same word.
+                    let mut mode = self.current_game_settings.mode;
+                    ui.horizontal(|ui| {
+                        ui.label("Mode");
+                        egui::ComboBox::from_id_salt("mode_preset")
+                            .selected_text(mode.display_name())
+                            .show_ui(ui, |ui| {
+                                for option in crate::game_settings::Mode::all() {
+                                    ui.selectable_value(&mut mode, option, option.display_name());
+                                }
+                            });
+                    });
+                    if mode != self.current_game_settings.mode {
+                        self.current_game_settings.mode = mode;
+                        self.save_current_game_settings();
+                    }
+                    ui.separator();
+                    if ui.button("Enhance\u{2026}").clicked() {
+                        self.show_enhance = !self.show_enhance;
+                        ui.close();
+                    }
+                    // Ticket W3-05a, FR-ENH-001: opt-in only, off by
+                    // default (law 6) — checking this does not touch the
+                    // accuracy simulation, only whether the dropped-
+                    // sprite overlay gets composited on top of it
+                    // (`Ppu`'s "Sprite-limit-bypass overlay" section).
+                    if ui
+                        .add_enabled(
+                            has_core,
+                            egui::Checkbox::new(&mut self.sprite_overlay, "De-flicker overlay"),
+                        )
+                        .changed()
+                    {
+                        self.send_command(CoreCommand::SetSpriteOverlay(self.sprite_overlay));
+                        // Ticket W2-07: persist immediately, keyed by
+                        // hash. No Apply button anywhere in this app's
+                        // settings — an unsaved change a crash discards
+                        // is the kind of small betrayal that makes people
+                        // stop trusting a settings screen.
+                        self.current_game_settings.sprite_overlay = self.sprite_overlay;
+                        self.save_current_game_settings();
+                    }
+                    ui.separator();
+                    self.heuristics_menu(ui);
+                    self.compare_menu(ui);
                 });
             });
         });
     }
 
+    /// Ticket W3-05c (FR-ENH-012): the per-game report card, surfaced
+    /// locally and only locally — NFR-005 forbids telemetry, and
+    /// `rf_enhance::trust` has no I/O of any kind, so there is nowhere
+    /// for this to leak to even by accident.
+    fn heuristics_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Heuristics\u{2026}", |ui| {
+            ui.label("Trust ladder (D-004) — fresh install is all-shadow");
+            ui.separator();
+            let mut changed = false;
+            for heuristic in HEURISTICS {
+                let before = self.current_game_settings.trust.state(heuristic);
+                let mut state = before;
+                ui.horizontal(|ui| {
+                    ui.label(*heuristic);
+                    ui.radio_value(&mut state, TrustState::Shadow, "Shadow");
+                    ui.radio_value(&mut state, TrustState::Advisory, "Advisory");
+                    ui.radio_value(&mut state, TrustState::Active, "Active");
+                });
+                if state != before {
+                    self.current_game_settings.trust.set_state(heuristic, state);
+                    changed = true;
+                }
+                if let Some(s) = self.current_game_settings.trust.suppression(heuristic) {
+                    ui.label(format!(
+                        "    suppressed in {}: {}",
+                        s.granted_in_scene, s.justification
+                    ));
+                }
+            }
+            if changed {
+                // Persist immediately, same stance as every other
+                // per-game setting: a toggle that survives only until the
+                // next crash is the small betrayal that makes people stop
+                // trusting a settings screen.
+                self.save_current_game_settings();
+            }
+            ui.separator();
+            let card = self.current_game_settings.trust.report_card();
+            if card.is_empty() {
+                ui.label("Report card: no contradictions recorded this session");
+            } else {
+                ui.label(format!("Report card ({} contradiction(s)):", card.len()));
+                for c in card {
+                    ui.label(format!("  [{}] {} — {}", c.scene, c.heuristic, c.detail));
+                }
+            }
+        });
+    }
+
+    /// Ticket W3-04 (FR-REND-005/FR-FE-005). Compare is off by default:
+    /// it is a comparison tool, and law 6's "a fresh install boots in
+    /// Accuracy Mode" reads the same way here — what you see by default
+    /// is the emulator's own output, not an instrument reading of it.
+    fn compare_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Compare\u{2026}", |ui| {
+            let mut mode = self.compare_mode;
+            ui.radio_value(&mut mode, rf_renderer::CompareMode::Off, "Off");
+            ui.radio_value(
+                &mut mode,
+                rf_renderer::CompareMode::Split {
+                    divider: self.compare_divider,
+                },
+                "Split screen",
+            );
+            ui.radio_value(
+                &mut mode,
+                rf_renderer::CompareMode::Blink { period_frames: 30 },
+                "A/B blink",
+            );
+            if let rf_renderer::CompareMode::Split { .. } = mode {
+                ui.separator();
+                // The "draggable divider" RENDERER.md §5 asks for. A
+                // slider rather than a hit-tested drag handle: same
+                // control, and it works with a keyboard.
+                ui.add(egui::Slider::new(&mut self.compare_divider, 0.0..=1.0).text("Divider"));
+                mode = rf_renderer::CompareMode::Split {
+                    divider: self.compare_divider,
+                };
+            }
+            self.compare_mode = mode;
+            ui.separator();
+            if ui.button("Screenshot (both buffers)").clicked() {
+                // Deferred to the next frame rather than taken here: with
+                // compare off, no buffers are being kept (W3-03a's rule),
+                // so the first frame that HAS them is the next one.
+                self.screenshot_pending = true;
+                self.status = "Screenshot: capturing next frame\u{2026}".to_string();
+                ui.close();
+            }
+        });
+    }
+
+    /// The status bar (ticket W10-01; `docs/design/FRONTEND_UI.md` §3.2).
+    ///
+    /// §3.2 specifies four things — **mode badge · FPS · A/V sync ·
+    /// profile chip** — and this is the first build in which the bar
+    /// holds those four things and not sixteen. What was here before mixed
+    /// transport, enhancement controls, window toggles and status text in
+    /// one non-wrapping `ui.horizontal` behind thirteen separators, needed
+    /// 1539 px, and got 768.
+    ///
+    /// **The status text is laid out FIRST from the right**, before any
+    /// optional item, using `with_layout(right_to_left)`. In the old row
+    /// it was last in a left-to-right sequence, which made the one widget
+    /// whose entire job is telling you what happened the single most
+    /// reliably invisible thing in the application.
+    ///
+    /// Not `horizontal_wrapped`: three rows of mixed buttons, checkboxes
+    /// and combos is uglier than one clipped row and hides the spec gap
+    /// from the next reader. The controls moved to menus instead
+    /// ([`Self::menu_bar`]).
     fn controls_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("controls").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1759,26 +2136,13 @@ impl RetroForgeApp {
                     self.send_command(CoreCommand::StepScanline);
                 }
                 ui.separator();
-                // Ticket W4-05 (FR-MODE-001): ARCHITECTURE §4's five modes
-                // as presets. Persisted per game immediately, same
-                // no-Apply-button stance as every other setting here.
-                let mut mode = self.current_game_settings.mode;
-                egui::ComboBox::from_label("Mode")
-                    .selected_text(mode.display_name())
-                    .show_ui(ui, |ui| {
-                        for option in crate::game_settings::Mode::all() {
-                            ui.selectable_value(&mut mode, option, option.display_name());
-                        }
-                    });
-                if mode != self.current_game_settings.mode {
-                    self.current_game_settings.mode = mode;
-                    self.save_current_game_settings();
-                }
 
                 // FRONTEND_UI.md §1: the honesty badge, with its hover
                 // breakdown and hold-to-peek. Not decoration — §1 is
-                // explicit that enhancement is never on silently, and this
-                // is where a user finds out what they are looking at.
+                // explicit that enhancement is never on silently, and
+                // this is where a user finds out what they are looking
+                // at. It stays in the bar for exactly that reason: a
+                // badge behind a menu is a badge nobody reads.
                 let badge = crate::enhance_ui::badge_text(
                     "NES",
                     &self.current_game_settings,
@@ -1799,223 +2163,101 @@ impl RetroForgeApp {
                 // the original wondering why their enhancements stopped.
                 self.peeking_original = response.is_pointer_button_down_on();
 
-                if ui.button("Enhance\u{2026}").clicked() {
-                    self.show_enhance = !self.show_enhance;
-                }
-                ui.separator();
-                // Ticket W3-05a, FR-ENH-001: opt-in only, off by default
-                // (law 6) — checking this does not touch the accuracy
-                // simulation, only whether the dropped-sprite overlay gets
-                // composited on top of it (`Ppu`'s module doc, "Sprite-
-                // limit-bypass overlay" section).
-                if ui
-                    .add_enabled(
-                        has_core,
-                        egui::Checkbox::new(&mut self.sprite_overlay, "De-flicker overlay"),
-                    )
-                    .changed()
-                {
-                    self.send_command(CoreCommand::SetSpriteOverlay(self.sprite_overlay));
-                    // Ticket W2-07: persist immediately, keyed by hash.
-                    // No Apply button anywhere in this app's settings —
-                    // an unsaved change a crash discards is the kind of
-                    // small betrayal that makes people stop trusting a
-                    // settings screen.
-                    self.current_game_settings.sprite_overlay = self.sprite_overlay;
-                    self.save_current_game_settings();
-                }
-                ui.separator();
-                // Ticket W3-03a: this DOES round-trip to the core thread
-                // now. W3-03 kept the layer textures current every frame
-                // regardless of the checkbox, on the reasoning that the
-                // upload was cheap next to the main one and that a stale
-                // image would flash when the window opened. True, but it
-                // left the core thread paying for the split and two ~240
-                // KB clones on every frame of every session, open window
-                // or not — so the toggle now switches the work off at the
-                // source, exactly as the debugger's event viewer does with
-                // `SetEventMask` (DEBUGGER.md §6, "closed panels register
-                // no event subscriptions").
-                //
-                // The stale-image concern is real but bounded: opening the
-                // window costs one frame (≤16.6 ms at 60 Hz) before layer
-                // data arrives, which is under a human's flicker threshold
-                // and far cheaper than paying for it forever.
-                // Ticket W3-04 (FR-REND-005/FR-FE-005). Compare is off by
-                // default: it is a comparison tool, and law 6's "a fresh
-                // install boots in Accuracy Mode" reads the same way here
-                // — what you see by default is the emulator's own output,
-                // not an instrument reading of it.
-                // Ticket W3-05c (FR-ENH-012): the per-game report card,
-                // surfaced locally and only locally — NFR-005 forbids
-                // telemetry, and `rf_enhance::trust` has no I/O of any
-                // kind, so there is nowhere for this to leak to even by
-                // accident.
-                ui.menu_button("Heuristics", |ui| {
-                    ui.label("Trust ladder (D-004) — fresh install is all-shadow");
-                    ui.separator();
-                    let mut changed = false;
-                    for heuristic in HEURISTICS {
-                        let before = self.current_game_settings.trust.state(heuristic);
-                        let mut state = before;
-                        ui.horizontal(|ui| {
-                            ui.label(*heuristic);
-                            ui.radio_value(&mut state, TrustState::Shadow, "Shadow");
-                            ui.radio_value(&mut state, TrustState::Advisory, "Advisory");
-                            ui.radio_value(&mut state, TrustState::Active, "Active");
+                // §3.2's remaining three, right-aligned so the status
+                // text has the first claim on the space.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some((frame, scanline)) = self.position {
+                        ui.monospace(match scanline {
+                            Some(y) => format!("f{frame} \u{b7} sl{y}"),
+                            None => format!("f{frame} \u{b7} sl--"),
                         });
-                        if state != before {
-                            self.current_game_settings.trust.set_state(heuristic, state);
-                            changed = true;
-                        }
-                        if let Some(s) = self.current_game_settings.trust.suppression(heuristic) {
-                            ui.label(format!(
-                                "    suppressed in {}: {}",
-                                s.granted_in_scene, s.justification
-                            ));
-                        }
-                    }
-                    if changed {
-                        // Persist immediately, same stance as every other
-                        // per-game setting in this menu: a toggle that
-                        // survives only until the next crash is the small
-                        // betrayal that makes people stop trusting a
-                        // settings screen.
-                        self.save_current_game_settings();
-                    }
-                    ui.separator();
-                    let card = self.current_game_settings.trust.report_card();
-                    if card.is_empty() {
-                        ui.label("Report card: no contradictions recorded this session");
-                    } else {
-                        ui.label(format!("Report card ({} contradiction(s)):", card.len()));
-                        for c in card {
-                            ui.label(format!("  [{}] {} — {}", c.scene, c.heuristic, c.detail));
-                        }
-                    }
-                });
-                ui.separator();
-                ui.menu_button("Compare", |ui| {
-                    let mut mode = self.compare_mode;
-                    ui.radio_value(&mut mode, rf_renderer::CompareMode::Off, "Off");
-                    ui.radio_value(
-                        &mut mode,
-                        rf_renderer::CompareMode::Split {
-                            divider: self.compare_divider,
-                        },
-                        "Split screen",
-                    );
-                    ui.radio_value(
-                        &mut mode,
-                        rf_renderer::CompareMode::Blink { period_frames: 30 },
-                        "A/B blink",
-                    );
-                    if let rf_renderer::CompareMode::Split { .. } = mode {
                         ui.separator();
-                        // The "draggable divider" RENDERER.md §5 asks for.
-                        // A slider rather than a hit-tested drag handle:
-                        // same control, and it works with a keyboard.
-                        ui.add(
-                            egui::Slider::new(&mut self.compare_divider, 0.0..=1.0).text("Divider"),
-                        );
-                        mode = rf_renderer::CompareMode::Split {
-                            divider: self.compare_divider,
-                        };
                     }
-                    self.compare_mode = mode;
+                    ui.label(&self.status);
+                    // FM-13 criterion 3: "view too large for GPU,
+                    // reduced" — surfaced plainly, never swallowed
+                    // (`Self::refresh_ultrawide_render`'s doc).
+                    if let Some(msg) = &self.fm13_message {
+                        ui.separator();
+                        ui.colored_label(egui::Color32::from_rgb(230, 180, 40), msg);
+                    }
                     ui.separator();
-                    if ui.button("Screenshot (both buffers)").clicked() {
-                        // Deferred to the next frame rather than taken
-                        // here: with compare off, no buffers are being
-                        // kept (W3-03a's rule), so the first frame that
-                        // HAS them is the next one.
-                        self.screenshot_pending = true;
-                        self.status = "Screenshot: capturing next frame\u{2026}".to_string();
-                        ui.close();
-                    }
+                    self.profile_chip(ui);
+                    ui.separator();
+                    self.av_sync_indicator(ui);
+                    ui.separator();
+                    match self.fps {
+                        Some(fps) => ui.monospace(format!("{fps:5.1} fps")),
+                        // A dash, not a hidden widget: the bar must not
+                        // change width when a reading arrives, or every
+                        // item left of it jumps a second after boot.
+                        None => ui.monospace("  --- fps"),
+                    };
                 });
-                ui.separator();
-                if ui
-                    .checkbox(&mut self.show_layers, "Layers (debug)")
-                    .changed()
-                {
-                    self.send_command(core_thread::CoreCommand::SetLayerExtraction(
-                        self.show_layers,
-                    ));
-                }
-                ui.separator();
-                // Ticket W2-06: the remap window. Pure UI-thread state —
-                // bindings are sampled on this thread too (`poll_input`),
-                // so a remap takes effect on the very next frame with no
-                // round trip to the core thread.
-                ui.checkbox(&mut self.show_controls, "Controls\u{2026}");
-                ui.separator();
-                // Ticket W2-07: the library. Opening it triggers the first
-                // scan (see `library_window`), so a cold start never waits
-                // on a folder walk.
-                ui.checkbox(&mut self.show_library, "Library\u{2026}");
-                ui.separator();
-                // Ticket W2-08: app-wide settings (FRONTEND_UI §2).
-                ui.checkbox(&mut self.show_settings, "Settings\u{2026}");
-                ui.separator();
-                // Ticket W4-06a criterion 3: layout is saved the moment the
-                // window closes (not only on process exit via
-                // `eframe::App::save` below), so a session that opens,
-                // rearranges panels, and closes without a clean shutdown
-                // still keeps the change.
-                if ui
-                    .checkbox(&mut self.debug_panels.visible, "Debug Viewers")
-                    .changed()
-                    && !self.debug_panels.visible
-                {
-                    self.debug_panels.save();
-                }
-                ui.separator();
-                // Ticket W4-03e acceptance criterion 2: the runtime camera
-                // toggle. Disabled with no compositor at all (no GPU
-                // device, `Self::compositor` doc) — there is nothing to
-                // switch to in that case, and enabling the button would
-                // just click through to `enhanced_view::ActiveView::
-                // UltrawideUnavailable` every time.
-                let camera_label = match self.camera {
-                    CameraToggle::Original => "Camera: Original",
-                    CameraToggle::Ultrawide => "Camera: Ultrawide",
-                };
-                if ui
-                    .add_enabled(
-                        has_core && self.compositor.is_some(),
-                        egui::Button::new(camera_label),
-                    )
-                    .clicked()
-                {
-                    self.camera = self.camera.flipped();
-                    if self.camera == CameraToggle::Ultrawide {
-                        // Don't wait out the throttle interval for the
-                        // FIRST view after switching — request now.
-                        self.ultrawide_refresh_countdown = 0;
-                    }
-                }
-                if self.compositor.is_none() {
-                    ui.label("(no GPU device for ultrawide)");
-                }
-                // FM-13 criterion 3: "view too large for GPU, reduced" —
-                // surfaced plainly, never swallowed
-                // (`Self::refresh_ultrawide_render`'s doc).
-                if let Some(msg) = &self.fm13_message {
-                    ui.separator();
-                    ui.colored_label(egui::Color32::from_rgb(230, 180, 40), msg);
-                }
-                ui.separator();
-                ui.label(&self.status);
-                if let Some((frame, scanline)) = self.position {
-                    ui.separator();
-                    ui.monospace(match scanline {
-                        Some(y) => format!("frame {frame} \u{b7} scanline {y}"),
-                        None => format!("frame {frame} \u{b7} scanline --"),
-                    });
-                }
             });
         });
+    }
+
+    /// §3.2's profile chip: whether a game profile claims this ROM.
+    ///
+    /// Says "no profile" rather than rendering nothing, because those are
+    /// different facts and the user cannot tell an absent chip from an
+    /// unmatched one — the same rule design review G-21 imposed on the
+    /// library's two empty states (`Self::library_window`).
+    fn profile_chip(&mut self, ui: &mut egui::Ui) {
+        match (&self.matched_profile, self.profile_matched) {
+            (Some(path), _) => {
+                let name = path.file_stem().map_or_else(
+                    || path.display().to_string(),
+                    |s| s.to_string_lossy().into(),
+                );
+                ui.label(format!("\u{25c6} {name}"))
+                    .on_hover_text(path.display().to_string());
+            }
+            (None, true) => {
+                ui.label("\u{25c6} profile");
+            }
+            (None, false) => {
+                ui.weak("\u{25c7} no profile");
+            }
+        }
+    }
+
+    /// §3.2's A/V sync indicator: is the audio buffer being kept fed?
+    ///
+    /// This is the honest reading of a real number, not an ornament.
+    /// W2-05 makes the *audio device* the clock, so a draining buffer is
+    /// the earliest visible sign that emulation is not keeping up —
+    /// earlier than the FPS counter beside it, which only falls once
+    /// frames are already being missed. `None` before any frame carries a
+    /// reading; the core thread owns `AudioOut` and reports fill with
+    /// each frame (`core_thread::FrameMsg::audio_fill`).
+    fn av_sync_indicator(&mut self, ui: &mut egui::Ui) {
+        let Some(fill) = self.audio_fill else {
+            ui.weak("\u{25cb} a/v");
+            return;
+        };
+        // Thresholds are about the buffer's job, not aesthetics: near
+        // empty is an underrun about to be audible, near full means the
+        // core is outrunning the device and will be throttled.
+        let (colour, tip) = if fill < 0.15 {
+            (
+                egui::Color32::from_rgb(220, 90, 80),
+                "audio buffer nearly empty — emulation is behind the audio clock",
+            )
+        } else if fill > 0.95 {
+            (
+                egui::Color32::from_rgb(230, 180, 40),
+                "audio buffer nearly full — the core is ahead and being throttled",
+            )
+        } else {
+            (
+                egui::Color32::from_rgb(110, 190, 120),
+                "audio buffer healthy — a/v in sync",
+            )
+        };
+        ui.colored_label(colour, "\u{25cf} a/v")
+            .on_hover_text(format!("{tip}\nbuffer fill: {:.0}%", fill * 100.0));
     }
 
     fn crash_dialog(&mut self, ctx: &egui::Context) {
@@ -2082,6 +2324,7 @@ impl RetroForgeApp {
                         (SettingsTab::Video, "Video"),
                         (SettingsTab::Audio, "Audio"),
                         (SettingsTab::Paths, "Paths"),
+                        (SettingsTab::Accessibility, "Accessibility"),
                     ] {
                         ui.selectable_value(&mut self.settings_tab, tab, label);
                     }
@@ -2089,6 +2332,51 @@ impl RetroForgeApp {
                 ui.separator();
 
                 match self.settings_tab {
+                    SettingsTab::Accessibility => {
+                        let a = &mut self.settings.accessibility;
+                        ui.label("UI scale");
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut a.ui_scale,
+                                    crate::accessibility::MIN_UI_SCALE
+                                        ..=crate::accessibility::MAX_UI_SCALE,
+                                )
+                                .text("x"),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.weak(
+                            "Bounded deliberately: below 0.5x the UI is unreadable, and a \
+                             user who cannot read the UI cannot open this window to undo it \
+                             (crate::accessibility's module doc).",
+                        );
+                        ui.separator();
+
+                        ui.label("Contrast");
+                        if ui
+                            .checkbox(&mut a.high_contrast, "High-contrast palette")
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        // The numbers, not a claim about them: these are
+                        // the ratios `accessibility`'s tests assert, read
+                        // from the palette actually in use.
+                        let p = self.settings.accessibility.palette();
+                        ui.weak(format!(
+                            "text {:.1}:1 · focus accent {:.1}:1 · WCAG AAA is {:.0}:1",
+                            p.text_contrast(),
+                            p.accent_contrast(),
+                            crate::accessibility::WCAG_AAA,
+                        ));
+                        ui.weak(
+                            "Off by default: high contrast is an accommodation, not an \
+                             improvement.",
+                        );
+                    }
                     SettingsTab::Video => {
                         ui.label("Scaling");
                         for mode in crate::settings::ScaleMode::ALL {
@@ -2302,7 +2590,16 @@ impl RetroForgeApp {
                 if ui.button("Controls\u{2026}").clicked() {
                     self.show_controls = true;
                 }
-                ui.add_enabled(false, egui::Button::new("Switch mode (W4-05)"));
+                // W10-01: the disabled "Switch mode (W4-05)" placeholder is
+                // gone. W4-05 shipped — the mode preset is live under
+                // Enhance > Mode — so what stood here was a permanently
+                // dead control advertising a ticket that had already
+                // closed, which is worse than an absent one: it tells the
+                // user the feature does not exist.
+                if ui.button("Mode\u{2026}").clicked() {
+                    self.show_overlay_menu = false;
+                    self.show_enhance = true;
+                }
                 ui.separator();
                 if ui.button("Quit").clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2873,6 +3170,7 @@ impl RetroForgeApp {
 impl eframe::App for RetroForgeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.apply_theme(&ctx);
         self.poll_input(&ctx);
         self.pump_core_events(&ctx);
         self.maybe_request_canvas_snapshot();

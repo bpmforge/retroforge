@@ -6,8 +6,15 @@
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    // Ticket W10-01: the size comes from `app::WINDOW_SIZE`, not a literal
+    // here. `tests/hud_fits.rs` asserts nothing is clipped at exactly this
+    // size, and a test with its own copy of the number would keep passing
+    // after someone changed the window — which is how the bar came to
+    // need 1539 px inside a 768 px window without a single red test.
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([768.0, 720.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size(retroforge::app::WINDOW_SIZE)
+            .with_min_inner_size(retroforge::app::MIN_WINDOW_SIZE),
         ..Default::default()
     };
     eframe::run_native(

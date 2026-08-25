@@ -146,6 +146,12 @@ pub struct AppSettings {
     pub video: VideoSettings,
     pub audio: AudioSettings,
     pub paths: PathSettings,
+    /// Ticket W10-01. `crate::accessibility` existed since W8-04 with no
+    /// home in the settings file and no consumer anywhere, so its UI
+    /// scale and high-contrast palette were unreachable by any user and
+    /// its WCAG tests measured a palette egui never saw. This is the
+    /// home; `crate::app` reads it into `ctx.set_visuals`.
+    pub accessibility: crate::accessibility::AccessibilitySettings,
     /// Tables and keys this build does not know, kept verbatim so a newer
     /// build's settings survive an older build touching the file (module
     /// doc).
@@ -160,6 +166,7 @@ struct KnownSettings {
     video: VideoSettings,
     audio: AudioSettings,
     paths: PathSettings,
+    accessibility: crate::accessibility::AccessibilitySettings,
 }
 
 impl AppSettings {
@@ -171,6 +178,7 @@ impl AppSettings {
     /// types means a bug rather than user input.
     pub fn to_toml(&self) -> Result<String, String> {
         let known = KnownSettings {
+            accessibility: self.accessibility.clone(),
             video: self.video.clone(),
             audio: self.audio.clone(),
             paths: self.paths.clone(),
@@ -194,7 +202,7 @@ impl AppSettings {
 
         let mut unknown = toml::Table::new();
         for (key, value) in &table {
-            if !matches!(key.as_str(), "video" | "audio" | "paths") {
+            if !matches!(key.as_str(), "video" | "audio" | "paths" | "accessibility") {
                 unknown.insert(key.clone(), value.clone());
             }
         }
@@ -208,6 +216,15 @@ impl AppSettings {
                 .unwrap_or_else(|| toml::Value::Table(toml::Table::new()))
         };
         Ok(Self {
+            // `normalized` on the way IN, not only at the widget: the
+            // module doc's point is that a settings file with
+            // `ui_scale = nan` or `= 40` bricks the window, and a user
+            // who cannot read the UI cannot open Settings to undo it.
+            accessibility: {
+                let a: crate::accessibility::AccessibilitySettings =
+                    section("accessibility").try_into().unwrap_or_default();
+                a.normalized()
+            },
             video: section("video").try_into().unwrap_or_default(),
             audio: section("audio").try_into().unwrap_or_default(),
             paths: section("paths").try_into().unwrap_or_default(),

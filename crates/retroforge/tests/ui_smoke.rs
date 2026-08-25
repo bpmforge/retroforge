@@ -44,12 +44,28 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
 use retroforge::app::RetroForgeApp;
 
-/// Large enough that the panel windows are laid out rather than clipped.
-/// This is load-bearing, not cosmetic — see the module doc's trap 1.
+/// Large enough that the panel WINDOWS — the floating `egui::Window`s
+/// each toggle opens — are laid out rather than clipped. This is
+/// load-bearing, not cosmetic: see the module doc's trap 1.
+///
+/// **It is not evidence that the app fits its own window** (ticket
+/// W10-01). Until 2026-08-25 this constant was the only size any UI test
+/// ran at, at 2.08x the width `main.rs` actually opens, and it hid eight
+/// permanently unreachable controls for months. The chrome is measured
+/// against `app::WINDOW_SIZE` in `tests/hud_fits.rs`; this size is for
+/// the floating windows only, and no claim about layout at the shipping
+/// size may rest on a test in this file.
 const HARNESS_SIZE: (f32, f32) = (1600.0, 1000.0);
 
-/// The five toggles in the controls bar, each with the title of the
+/// The five toggles in the **View menu**, each with the title of the
 /// window it opens. `R-A1`'s "open/close each core dockable panel".
+///
+/// They lived in the bottom bar until W10-01, where three of them
+/// (Library, Settings, Controls) were laid out past the right edge of the
+/// shipping window and could not be clicked at all — this test reached
+/// them only because [`HARNESS_SIZE`] is twice as wide as the real
+/// window. Behind a menu they are reachable at every size, which is why
+/// [`open_view_menu`] now precedes each click.
 const PANELS: &[(&str, &str)] = &[
     ("Layers (debug)", "Layers (debug)"),
     ("Controls\u{2026}", "Controls"),
@@ -57,6 +73,17 @@ const PANELS: &[(&str, &str)] = &[
     ("Settings\u{2026}", "Settings"),
     ("Debug Viewers", "Debug Viewers"),
 ];
+
+/// Open the View menu so its items are in the tree.
+///
+/// egui menus close on click, so this runs before **each** toggle rather
+/// than once for the loop — a menu that had already closed would make
+/// `get_by_role_and_label` panic on a missing node, which reads like a
+/// deleted control rather than a closed menu.
+fn open_view_menu(harness: &mut Harness<'_, RetroForgeApp>) {
+    harness.get_by_role_and_label(Role::Button, "View").click();
+    harness.run_steps(2);
+}
 
 /// A minimal NROM image. `roms/` is gitignored (NFR-006) and CI never has
 /// it, so the fixture is built in-test rather than fetched.
@@ -184,6 +211,7 @@ fn ui_smoke_boot_open_rom_present_a_frame_and_toggle_every_panel() {
              open assertion below would pass without the click doing anything"
         );
 
+        open_view_menu(&mut harness);
         harness
             .get_by_role_and_label(Role::CheckBox, toggle)
             .click();
@@ -195,6 +223,7 @@ fn ui_smoke_boot_open_rom_present_a_frame_and_toggle_every_panel() {
             open_windows(&harness)
         );
 
+        open_view_menu(&mut harness);
         harness
             .get_by_role_and_label(Role::CheckBox, toggle)
             .click();

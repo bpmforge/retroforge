@@ -363,3 +363,70 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
 - 2026-08-23 — **W7-08's blocker solved without a boot ROM — and the SPC/DSP has an external oracle for the first time.** Brad ruled "if you can download one from online to test with that is good, and I accept the risks". Downloading Nintendo's copyrighted firmware was **declined** — that is the infringing act itself, not a risk to accept on someone's behalf — and clean-room assembly was authorised instead. **It turned out to be unnecessary**, which verifying the mechanism first is what revealed: probing showed `ipl_enabled=true` at the check (the window *is* banked in) and that **byte 0 = `$CD` alone gets past the spin loop**. The fix is one constant and one hook: `IPL_STUB[0] = $CD`, a compatibility constant programs read as data (and just the opcode for `MOV X,#imm`, which any boot ROM setting up a stack pointer begins with), plus `Apu::reenter_ipl`, which HLEs the jump-back the way a real boot ROM re-runs its handshake. **No Nintendo bytes, no download, and no 64 bytes of clean-room assembly whose faithful reimplementation would plausibly have converged on the original anyway** — the exact law-5 risk being accepted. It extends the 2026-08-20 HLE ruling rather than reversing it. **What the oracle reports:** `spc_dsp6` → *Echo/basics **Failed 03***; `spc_smp` → *Passed 01* with hashes for three more groups; `spc_timer` and `spc_mem_access_times` producing real timing tables. Those are accuracy results, not infrastructure failures. **W7-08 stays open, honestly:** criteria 2 and 3 want these *green*, and they report failures. Closing on "the ROMs execute" would be exactly the ceremonial-green this project keeps catching. Remaining work is DSP/timing accuracy — starting with the echo unit and envelope rates, which `dsp.rs`'s own doc admits are a proportional step rather than the hardware rate table. **Workspace: 1645 passing**, ten-command gate + docs-gate green.
 - 2026-08-23 — **W7-08: three real DSP bugs fixed, each caught by the oracle and each verified against a source.** (1) **Echo buffer at EDL=0** was 16 bytes on a written-down assumption of "a 4-sample minimum"; it is **4 bytes — one stereo sample** (SNESdev: *"when EDL=0, the buffer is 4 bytes (1 sample) rather than 0"*). A unit test had the wrong number baked in with that assumption as its comment. (2) **The FIR filter** summed all eight taps then applied one `>>7` and one clamp. Hardware does `>>6` **per tap**, **wraps** at 16 bits after taps 0–6 while tap 7 **clamps**, then masks `& 0xFFFE` for the 15-bit left-aligned buffer — three separate differences. Tap *order* was already right. (3) **ENVX/OUTX are not read-only.** I had modelled them as computed-live with writes ignored *and written a test asserting it*, reasoning that returning a written value "would be a convincing lie". SNESdev: *"VxENVX is technically writable… The S-DSP updates this register once per sample."* Both halves matter — the write sticks, and the next sample lands on it. **The ROM caught it:** `spc_dsp6`'s first check writes `$88` to `$08` and reads it back; it read `00` and gave up. It now reads `88`, and the test progresses from 8 DSP reads to 24. **Why it still says `Failed 03`, now understood:** tracing every `$F2`/`$F3` access shows the failing check *counts how many reads survive before the DSP overwrites ENVX* — 4, then 1, then 1, then 0. It measures **where inside the 32-cycle sample** voice 0's ENVX is written; `mix()` updates all eight voices at once. **The remaining work is a cycle-accurate S-DSP** — architectural, not a bug fix, and exactly what this suite exists to test. Nothing regressed: 25 DSP tests, all 32 PeterLemon goldens, gilyon, undisbeliever, region suites green. **Workspace: 1645 passing.**
 - 2026-08-23 — **W7-08 blocked on a documented per-cycle schedule (Brad's call, on my recommendation). Board: 139/140.** This is a *different and much better* block than the one it carried for weeks: it was "no oracle exists and the ROMs hang forever"; it is now "the oracle works, names a specific architectural gap, and closing that gap needs a spec we don't have". **Banked:** criterion 1 met; the S-DSP reachable and clocked; blargg's four ROMs running and reporting real verdicts with no boot ROM; three source-verified accuracy fixes. **Remaining:** criteria 2 and 3 need a **cycle-accurate S-DSP** — a 32-step state machine placing every register and memory access at its exact SPC cycle, which is precisely what this suite exists to test. **Why blocked rather than hard:** the complete 32-cycle schedule was not located (fragments exist — echo at cycles 22/29 and 23/30, FIR coefficients 22–25, EFB 26, PMON 27 — but no full table for eight voices). Without a spec, building it means guessing placements and using a pass/fail ROM as a search oracle, which can converge on something that passes without being right — this project caught three plausible-but-wrong models in one week. There is also a licensing question that is **Brad's, not mine**: the likely complete source is GPL emulator code, and reading it to reimplement is the IPL tainting question in a different family. **Unblocked by any of:** a doc with the full table (anomie's `apudsp.txt` — canonical host's cert has expired, needs a live mirror); a ruling on extracting timing *facts* from GPL source; hardware measurement; or amending criteria 2–3 to what a sample-granular DSP can honestly claim and filing cycle accuracy as its own ticket. **The last is probably right** — cycle accuracy is a phase of work, not a criterion buried in an 8-point ticket.
+
+- **W10-01 — the HUD did not fit the window it ships in** (2026-08-25):
+  Brad, looking at the running app: *"the hud and navigation … is very
+  basic and not slick and the bottom bar overflows too much so you can't
+  see it all"*. **Measured** with a throwaway `egui_kittest` harness
+  reading AccessKit bounding boxes at the size `main.rs` actually opens:
+  the bar needed **1539 px** in a **768 px** window, and **eight controls
+  were laid out entirely off-screen** — Heuristics, Compare, Layers
+  (debug), Controls…, Library…, Settings…, Debug Viewers, Camera — plus
+  the status label, which was last in the row. **Library, Settings and
+  Controls therefore had no reachable opener at all.** Not a cosmetic
+  complaint: three windows were unopenable in a default install.
+
+  **A FIFTH HIDDEN GATE, same family as the four closed this arc.**
+  `tests/ui_smoke.rs` pins its harness to 1600x1000 — 2.08x the real
+  window — behind a comment calling that size *"load-bearing, not
+  cosmetic"*, **because smaller sizes clip**. The clipping had been
+  noticed and worked around *in the test* instead of fixed in the app,
+  and no test anywhere ran at the shipping size. 1645 tests were green
+  the whole time. `tests/hud_fits.rs` now measures against
+  `app::WINDOW_SIZE` — one constant `main.rs` also reads, so a test with
+  its own copy of the number cannot drift — and includes a vacuity guard
+  asserting the detector can still fail.
+
+  **A SIXTH: `accessibility.rs` was orphaned.** It has defined an
+  AAA-verified accent, a high-contrast palette and a bounded `ui_scale`
+  since W8-04, and **nothing imported it** — its tests asserted the
+  palette *arithmetic* was AAA-compliant, which passes forever whether or
+  not egui ever draws with those colours. That is why every control
+  rendered as the same grey rectangle: there was **zero** style
+  customization in the crate, no `set_visuals` anywhere. It now drives
+  `ctx.set_visuals`/`set_zoom_factor`, has a home in `settings.toml` and
+  an Accessibility tab, and is `normalized()` on load — the module doc's
+  own warning is that a settings file with `ui_scale = nan` bricks a
+  window whose Settings you then cannot open to fix it.
+
+  Shipped: bar thinned to FRONTEND_UI §3.2's four items (badge · FPS ·
+  A/V dot · profile chip) plus transport, with the status text laid out
+  **first from the right** rather than last; FPS and the A/V indicator
+  built (neither existed — A/V fill rides on `FrameMsg` because the core
+  thread owns `AudioOut`); the rest moved to View and Enhance menus; the
+  permanently-disabled `Switch mode (W4-05)` placeholder removed (W4-05
+  had *shipped* — a dead control advertising a closed ticket); and
+  `ComboBox::from_label("Mode")` fixed, which rendered its label to the
+  RIGHT and made the bar read "[Accuracy v] Mode" backwards.
+
+  Gate: fmt, clippy `-D warnings`, **workspace 1649 passing / 31
+  ignored**, validate-arch, validate-plan — all green locally.
+  **UNVERIFIED: no after-screenshot.** The workstation locked before one
+  could be taken, so the *subjective* half of Brad's complaint — "not
+  slick" — has NOT been signed off by eye. The `before` is captured. Do
+  not call the visual half done until someone looks at it.
+
+  Deliberately NOT done, split to **W10-02**: Enhance and Author are
+  still floating windows rather than dock tabs. That is the root cause —
+  every workspace that did not get docked added a toggle to the HUD — but
+  `egui_dock` is confined to `debug_dock.rs` by an explicit layer rule,
+  so docking them is an architecture decision, not UI polish. Also still
+  unbuilt from §3.2/§3.1: the status bar does not auto-hide, the profile
+  chip does not click through to an inspector, and the Library is a
+  window rather than the app's home screen.
+
+  One pre-existing flake seen and NOT caused here:
+  `core_thread::tests::injected_panic_on_core_thread_…` failed once under
+  machine load on a 5 s `recv_timeout`. 5/5 green on both the unmodified
+  and the modified tree when run alone; left as-is rather than papered
+  over, but it is a real timing sensitivity in that test.

@@ -80,6 +80,26 @@ everything else hidden until Esc/Start-long-press. Status bar (thin, can
 auto-hide): `NES · Accuracy` or `NES · Enhanced ⚡(3)` badge · FPS ·
 audio-buffer health dot · profile chip (name@rev, click → inspector).
 
+**Implementation status (ticket W10-01, 2026-08-25).** The status bar now
+holds those four things and nothing else — badge · FPS · audio-buffer dot ·
+profile chip — plus the three transport buttons, which are a deliberate
+departure from the wireframe: Run/Step Frame/Step Scanline are how a
+paused core is advanced at all, and putting them behind a menu would mean
+opening a menu between every single-step.
+
+Between W1-06 and W10-01 the bar instead carried sixteen controls behind
+thirteen separators, mixing transport, enhancement toggles, window
+toggles and status text. It needed **1539 px** and `main.rs` opens the
+window at **768**, so eight controls — including the only openers for
+Library, Settings and Controls — were laid out past the right edge and
+could not be clicked. `crates/retroforge/tests/hud_fits.rs` now measures
+this against `app::WINDOW_SIZE` and fails if it recurs.
+
+Still unbuilt from this section: the status bar does **not** auto-hide,
+and the profile chip does not click through to an inspector. §3.1's
+Library home is still a window rather than the app's home screen — the
+app boots to an empty play view, not to the grid.
+
 Save-state manager modal: 10 slots + auto-slots, each with screenshot,
 timestamp, mode-at-save, "contains mods" warning flag (PROF chunk); load
 warns on version-migrated states.

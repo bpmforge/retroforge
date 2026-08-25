@@ -181,6 +181,13 @@ pub enum LoopControl {
 /// One RGBA frame plus its dimensions, cheap to send across a channel
 /// (`Vec<u8>` is moved, not copied).
 pub struct FrameMsg {
+    /// Ticket W10-01: audio-buffer fill (0.0..=1.0) at the moment this
+    /// frame was produced, for the status bar's A/V sync indicator, or
+    /// `None` when no audio device opened. It rides on the frame because
+    /// `AudioOut` is owned by this thread and never leaves it — the UI
+    /// thread reading the device directly would be exactly the
+    /// cross-thread access ARCHITECTURE §3 forbids.
+    pub audio_fill: Option<f32>,
     pub rgba: Vec<u8>,
     pub width: usize,
     pub height: usize,
@@ -806,6 +813,7 @@ fn core_thread_main(
             // about.
             bundle_writer.publish(bundle);
             let msg = FrameMsg {
+                audio_fill: audio.as_ref().map(crate::audio_out::AudioOut::fill),
                 rgba: sink.to_vec(),
                 width: sink.width(),
                 height: sink.height(),
