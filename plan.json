@@ -4832,7 +4832,7 @@
   },
  {
   "id": "W10-02",
-  "title": "Enhance and Author become dock workspaces, not floating windows",
+  "title": "The Enhance workspace is §3.3's [Compare][Features][Map]",
   "phase": 10,
   "crate": "retroforge",
   "write_scope": [
@@ -4845,9 +4845,12 @@
    "W10-01"
   ],
   "acceptance": [
-   "the Enhance and Author surfaces are tabs in a dock host rather than free-floating egui::Windows toggled by bar checkboxes",
+   "the Enhance workspace presents §3.3's three tabs — Compare, Features, Map — in an egui_dock DockArea whose tab type lives in the retroforge crate",
    "rf-debugger's DebugTab does NOT gain Enhance/Author variants: that would put upper-layer concepts into a lower-layer crate and into PersistedLayout, which is versioned and already has files in users' config dirs",
-   "docs/design/FRONTEND_UI.md §2's workspace model and what ships agree, or the doc is corrected to what was actually decided"
+   "Compare's controls (off/split/blink, divider, both-buffer screenshot) move OUT of the bottom-bar Enhance menu and into the Compare tab; there is one route to them, not two",
+   "Map renders the stitched canvas with fog for unvisited cells (FR-ENH-004) and says plainly when nothing has been stitched yet, rather than showing a blank rectangle",
+   "nothing clips at app::WINDOW_SIZE (tests/hud_fits.rs), the new surface is covered by tests/renders.rs, and any non-ASCII it draws joins app::PROPORTIONAL_GLYPHS so tests/glyphs_render.rs checks it",
+   "what is NOT built is written into docs/design/FRONTEND_UI.md §3.3 with the reason, not left for the next reader to discover"
   ],
   "notes": [
    "CORRECTION 2026-08-25, before any code was written. The two notes this replaces were both wrong, and the error propagated into acceptance criterion 2, three W10-01/W10-03 commit messages and docs/STATUS.md.",
@@ -4855,10 +4858,13 @@
    "WRONG #2: 'this is the ROOT CAUSE of W10-01's symptom.' It was when filed, and it no longer is. W10-01 moved every window toggle out of the bar into the View and Enhance menus, and W10-03 deleted the Library window outright. No HUD pressure remains for docking to relieve.",
    "WHAT IS ACTUALLY LEFT is §2 conformance — 'Workspaces (dockable, per-game layout persisted): Debug / Enhance / Author' — a real but much weaker reason than defect repair, and it should be weighed as such rather than inherited from a dead root cause.",
    "THE REAL CONSTRAINT, found by reading rather than assumed: rf_debugger::layout::DebugTab is a LOWER-layer type. Giving it Enhance/Author variants would make rf-debugger carry enhancement and authoring concepts, and would put non-debug tabs into PersistedLayout, which has a LAYOUT_FORMAT_VERSION and existing files in users' config dirs. A second dock host in app.rs with its own tab enum avoids all of that, at the cost of a second persisted layout.",
-   "SCOPE FINDING: enhance_window is 94 lines and implements only the FEATURES third of §3.3's [Compare][Features][Map]. Compare lives in a bottom-bar menu; Map does not exist as a tab (the ultrawide camera is a View-menu toggle). Docking what exists would dock one third of a specified workspace, so 'build §3.3's three tabs' is probably the more valuable ticket and 'dock it' the container question. Brad's call — he splits bundled tickets."
+   "SCOPE FINDING: enhance_window is 94 lines and implements only the FEATURES third of §3.3's [Compare][Features][Map]. Compare lives in a bottom-bar menu; Map does not exist as a tab (the ultrawide camera is a View-menu toggle). Docking what exists would dock one third of a specified workspace, so 'build §3.3's three tabs' is probably the more valuable ticket and 'dock it' the container question. Brad's call — he splits bundled tickets.",
+   "SCOPE, decided with Brad 2026-08-25: build §3.3's CONTENT (the three tabs), because that is where the user-visible value is — Compare is currently buried in a bottom-bar menu and Map does not exist as a surface at all. Docking is the container, not the point.",
+   "DELIBERATELY NOT BUILT, and this is a data problem rather than a UI one: §3.3's 'live player marker' and 'original-viewport outline' need the canvas-space position of the CURRENT viewport, and that never reaches the UI thread — CoreEvent::CanvasSnapshot carries only rf_enhance::stitcher::Canvas, and UltrawideRender carries rgba/size/reduction. Drawing a marker would mean inventing a position. Record it in §3.3 rather than shipping a guess.",
+   "ALSO NOT BUILT: §2's 'per-game layout persisted' for this workspace. Debug's layout persistence is rf_debugger::layout's PersistedLayout; giving Enhance its own persisted layout is a second format and a second migration story, and it should be its own ticket once the tabs have proven their shape."
   ],
   "points": 5,
-  "status": "todo",
+  "status": "in_progress",
   "stories": []
  },
   {
