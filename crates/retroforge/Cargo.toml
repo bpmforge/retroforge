@@ -106,7 +106,12 @@ serde = { version = "1", features = ["derive"] }
 # at 0.35.0, so it moves in lockstep with the egui/wgpu pin
 # `docs/TECH_STACK.md` rule 2 requires rather than dragging a second
 # version in. Dev-only: nothing in the shipped binary touches it.
-egui_kittest = { version = "0.35.0", features = ["eframe"] }
+# `wgpu` (ticket W10-03) renders the real window OFF-SCREEN to an image.
+# Three defects this arc were visible in a screenshot and nowhere else —
+# two of them tofu boxes, one of which shipped as the FIX for the first.
+# See crates/retroforge/tests/renders.rs.
+egui_kittest = { version = "0.35.0", features = ["eframe", "wgpu"] }
+image = "0.25"
 criterion = "0.8.2"
 
 [features]

@@ -39,15 +39,22 @@
 //!    invisible button is nonetheless measurable. This is what caught the
 //!    original eight.
 //! 2. **Direct layout instrumentation**
-//!    ([`RetroForgeApp::status_readouts_for_test`]) — because egui
-//!    publishes nodes for the bar's *buttons* and **not for its plain
-//!    labels**. Verified by dumping every node in the panel: only
-//!    `Role::Button` appears. So instrument 1 is structurally blind to
-//!    the FPS, A/V, profile-chip and status readouts — which is to say,
-//!    blind to all four things FRONTEND_UI §3.2 actually specifies. A
-//!    first draft of this file asserted on those labels through the tree
-//!    and passed while the readouts were being drawn 132 px off the left
-//!    edge of the window.
+//!    ([`RetroForgeApp::status_readouts_for_test`]) — because the tree
+//!    cannot answer "did this group overflow?". A right-to-left group
+//!    that runs out of room does not clip its children; it lays them out
+//!    at progressively smaller x until they slide off the left edge
+//!    entirely, and with no truncation on the status text the readouts
+//!    were drawn at **x = -132** in a 768 px window.
+//!
+//! **A correction, recorded because the wrong version shipped in a
+//! commit message.** This file previously claimed egui publishes nodes
+//! for buttons and *not* for plain labels, "verified by dumping every
+//! node in the panel: only `Role::Button` appears". That was wrong, and
+//! the dump was wrong for a boring reason: a `Label` puts its text in
+//! AccessKit's **`value`** field and leaves `label` empty, and the dump
+//! only read `label`. Labels were in the tree the whole time. The
+//! instrumentation in point 2 is still needed — for the overflow reason
+//! above — but not for the reason first given.
 
 use std::path::{Path, PathBuf};
 
@@ -95,7 +102,14 @@ fn clipped_nodes(harness: &Harness<'_, RetroForgeApp>, width: f32) -> (Vec<Clipp
             continue;
         };
         rightmost = rightmost.max(bounds.x1 as f32);
-        let Some(label) = accesskit.label() else {
+        // **`label()` OR `value()`.** A `Label` widget puts its text in
+        // `value` and leaves `label` empty; a `Button` uses `label`.
+        // Reading only `label` — which this file did until W10-03 —
+        // silently skips every piece of static text in the window, so
+        // the detector below was measuring buttons and nothing else. It
+        // did not report a problem; it reported an empty list, which
+        // looks exactly like success.
+        let Some(label) = accesskit.label().or_else(|| accesskit.value()) else {
             continue;
         };
         if label.trim().is_empty() {

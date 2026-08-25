@@ -4885,7 +4885,7 @@
     "Deliberately NOT in scope: box art (NON_GOALS #5 forbids network fetch), and §3.1's per-game context menu. Thumbnails are last-save-state screenshots or first-frame captures, both of which are local."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "done",
    "stories": [
     "E2-S3"
    ]

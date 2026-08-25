@@ -238,6 +238,20 @@ pub struct RetroForgeApp {
     /// ease between fills. An immediate-mode button has no memory of its
     /// own, so without this the hover is a step function.
     run_hovered: bool,
+    /// Ticket W10-03: §3.1's search box, filtering the library home by
+    /// title. Not persisted — a search is a gesture within a session, and
+    /// an app that reopened tomorrow still filtered by "castle" would be
+    /// hiding the user's library with no visible cause.
+    library_search: String,
+    /// §3.1's console filter. `None` is "every console", deliberately
+    /// rather than a `Console::All` variant: `All` would be a console that
+    /// does not exist, and every match on `Console` in the codebase would
+    /// then have to handle it.
+    library_console_filter: Option<crate::library::Console>,
+    /// How many folder walks this session has done (ticket W10-03).
+    /// Counted so a test can prove the play-then-close round trip does
+    /// not re-scan — see `library_scan_count_for_test`.
+    library_scans: u32,
     /// Ticket W10-01: the rect the status bar's right-aligned readouts
     /// occupied last frame, and the right edge of the transport controls
     /// to their left. The bar is correct exactly when the first does not
@@ -289,8 +303,6 @@ pub struct RetroForgeApp {
     pad_backend: Option<rf_input::GilrsBackend>,
     /// Whether the Controls (remap) window is open.
     show_controls: bool,
-    /// Whether the Library window is open (ticket W2-07).
-    show_library: bool,
     /// Whether the app-wide Settings window is open (ticket W2-08).
     show_settings: bool,
     /// Which Settings tab is showing.
@@ -558,6 +570,9 @@ impl RetroForgeApp {
             position: None,
             audio_fill: None,
             run_hovered: false,
+            library_search: String::new(),
+            library_console_filter: None,
+            library_scans: 0,
             status_readouts: None,
             fps: None,
             fps_frames: 0,
@@ -571,7 +586,6 @@ impl RetroForgeApp {
             #[cfg(feature = "gamepad")]
             pad_backend: pad_backend_or_none(),
             show_controls: false,
-            show_library: false,
             show_settings: false,
             settings_tab: SettingsTab::Video,
             settings: app_settings,
@@ -2055,9 +2069,9 @@ impl RetroForgeApp {
     /// Both panels used to inherit `panel_fill`, which is the same colour
     /// as the play area — so the app rendered as one flat rectangle with
     /// text floating at the top and bottom of it, and the chrome had no
-    /// edge at all. `raised` plus a hairline gives each strip a body and
-    /// a boundary, which is the difference between "a bar" and "some
-    /// widgets that happen to be near the edge".
+    /// edge at all. Putting the chrome on `raised` gives each strip a
+    /// body and a boundary, which is the difference between "a bar" and
+    /// "some widgets that happen to be near the edge".
     ///
     /// **No border line.** The obvious move is a hairline along the edge
     /// facing the play area, and it is wrong here for a specific reason:
@@ -2084,6 +2098,18 @@ impl RetroForgeApp {
                             self.open_rom();
                             ui.close();
                         }
+                        // Ticket W10-03: the way BACK to the library.
+                        // Without it the home is reachable exactly once
+                        // per process — open a game and the only route to
+                        // a different one is to quit — which would make
+                        // the "home screen" really just a launcher.
+                        if ui
+                            .add_enabled(self.core.is_some(), egui::Button::new("Close ROM"))
+                            .clicked()
+                        {
+                            self.close_rom();
+                            ui.close();
+                        }
                         ui.separator();
                         if ui.button("Quit").clicked() {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2101,7 +2127,7 @@ impl RetroForgeApp {
                         // hypothetical — it opened the Controls window while
                         // `tests/ui_smoke.rs` was trying to open the menu.
                         //
-                        // Checkboxes, not "open" buttons: these five each own
+                        // Checkboxes, not "open" buttons: these four each own
                         // a window whose visibility is a piece of app state,
                         // and a checkbox is the control that SHOWS that state
                         // — you can see at a glance what is open. It also
@@ -2109,15 +2135,11 @@ impl RetroForgeApp {
                         // exercises (open, assert, close, assert) meaningful
                         // now that the controls live behind a menu.
                         //
-                        // Ticket W2-07: opening the library triggers the first
-                        // scan (see `library_window`), so a cold start never
-                        // waits on a folder walk.
-                        if ui
-                            .checkbox(&mut self.show_library, "Library\u{2026}")
-                            .changed()
-                        {
-                            ui.close();
-                        }
+                        // Ticket W10-03: there is no "Library…" toggle any
+                        // more. The library IS the home screen, so a menu
+                        // item opening a second copy of it in a floating
+                        // window would be two routes to one surface — the
+                        // duplication this ticket exists to remove.
                         // Ticket W2-08: app-wide settings (FRONTEND_UI §2).
                         if ui
                             .checkbox(&mut self.show_settings, "Settings\u{2026}")
@@ -3000,135 +3022,270 @@ impl RetroForgeApp {
         self.show_overlay_menu = open;
     }
 
-    /// The library window (ticket W2-07; FRONTEND_UI §3.1).
+    /// **The library home** (ticket W10-03; `docs/design/FRONTEND_UI.md`
+    /// §3.1, and §2's information architecture, which puts Library at the
+    /// root: *Library (home) → Play view → Workspaces*).
     ///
-    /// The three first-run states are decided by
-    /// [`crate::library::first_run_state`] rather than here, so the rule
-    /// design review G-21 raised — "no folders configured" and "folders
-    /// with nothing in them" must say different things, not both render an
-    /// empty grid — is unit-tested rather than only rendered.
-    fn library_window(&mut self, ctx: &egui::Context) {
-        if !self.show_library {
-            return;
-        }
+    /// Until W10-03 this was a floating window behind a checkbox, and the
+    /// app booted to an empty play area with one sentence in it. The
+    /// scanning, hash identity and the three first-run states were all
+    /// already here and unchanged — this ticket moved **where they live**,
+    /// not what they do.
+    ///
+    /// The three states stay distinct, and that is the point design review
+    /// G-21 forced: "no folders configured" and "folders with nothing in
+    /// them" are different facts, and an empty grid that says neither is
+    /// the bug. [`crate::library::first_run_state`] decides which, so the
+    /// rule is unit-tested rather than only rendered.
+    ///
+    /// Returns the ROM to open, if the user picked one.
+    fn library_home(&mut self, ui: &mut egui::Ui) {
         if self.library.is_none() {
             self.rescan_library();
         }
-
-        let mut open = self.show_library;
+        let library = self.library.clone().unwrap_or_default();
+        let state = crate::library::first_run_state(&self.library_roots, &library);
         let mut rescan = false;
         let mut to_play: Option<std::path::PathBuf> = None;
-        egui::Window::new("Library")
-            .default_pos(egui::pos2(PANEL_WINDOW_ORIGIN[0], PANEL_WINDOW_ORIGIN[1]))
-            .open(&mut open)
-            .collapsible(true)
-            .resizable(true)
-            .default_width(520.0)
-            .show(ctx, |ui| {
-                let library = self.library.clone().unwrap_or_default();
-                let state = crate::library::first_run_state(&self.library_roots, &library);
 
-                match &state {
-                    crate::library::FirstRunState::NoRootsConfigured => {
-                        ui.heading("No ROM folders yet");
-                        ui.label(
-                            "RetroForge finds games by scanning folders you choose. Nothing is \
-                             ever sent anywhere \u{2014} identification is done locally, by \
-                             hashing the file.",
-                        );
-                        if ui.button("Add a ROM folder\u{2026}").clicked() {
-                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                self.library_roots.push(folder);
-                                self.save_library_roots();
-                                rescan = true;
-                            }
-                        }
+        match &state {
+            crate::library::FirstRunState::NoRootsConfigured => {
+                Self::home_empty(ui, "No ROM folders yet", |ui| {
+                    ui.add(readout(egui::RichText::new(
+                        "RetroForge finds games by scanning folders you choose. Nothing is ever \
+                         sent anywhere \u{2014} identification is local, by hashing the file.",
+                    ).weak()));
+                    ui.add_space(10.0);
+                    if ui.button("Add a ROM folder\u{2026}").clicked() {
+                        rescan = self.pick_library_folder();
                     }
-                    crate::library::FirstRunState::NoRomsFound { roots } => {
-                        ui.heading("No ROMs found");
-                        for root in roots {
-                            ui.label(format!("0 ROMs found in {}", root.display()));
-                        }
-                        if ui.button("Add another folder\u{2026}").clicked() {
-                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                self.library_roots.push(folder);
-                                self.save_library_roots();
-                                rescan = true;
-                            }
-                        }
+                });
+            }
+            crate::library::FirstRunState::NoRomsFound { roots } => {
+                Self::home_empty(ui, "No ROMs found", |ui| {
+                    // Named, not summarised: "0 ROMs found" without the
+                    // path is indistinguishable from a scan that never ran.
+                    for root in roots {
+                        ui.add(readout(
+                            egui::RichText::new(format!("0 ROMs found in {}", root.display()))
+                                .weak(),
+                        ));
                     }
-                    crate::library::FirstRunState::Populated { count } => {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("{count} game(s)"));
-                            if ui.button("Rescan").clicked() {
-                                rescan = true;
-                            }
-                            if ui.button("Add folder\u{2026}").clicked() {
-                                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                    self.library_roots.push(folder);
-                                    self.save_library_roots();
-                                    rescan = true;
-                                }
-                            }
-                        });
-                        ui.separator();
-                        egui::ScrollArea::vertical()
-                            .max_height(360.0)
-                            .show(ui, |ui| {
-                                egui::Grid::new("library-grid")
-                                    .num_columns(3)
-                                    .striped(true)
-                                    .show(ui, |ui| {
-                                        for entry in &library.entries {
-                                            ui.label(&entry.title);
-                                            match &entry.identity {
-                                                crate::library::EntryIdentity::Recognized {
-                                                    console,
-                                                    normalized_sha256,
-                                                } => {
-                                                    ui.label(console.name());
-                                                    ui.label(
-                                                        normalized_sha256
-                                                            .chars()
-                                                            .take(12)
-                                                            .collect::<String>(),
-                                                    );
-                                                }
-                                                crate::library::EntryIdentity::Unrecognized {
-                                                    reason,
-                                                } => {
-                                                    ui.label("unrecognized");
-                                                    ui.label(reason);
-                                                }
-                                            }
-                                            if ui.button("Play").clicked() {
-                                                to_play = Some(entry.path.clone());
-                                            }
-                                            ui.end_row();
-                                        }
-                                    });
-                            });
+                    ui.add_space(10.0);
+                    if ui.button("Add another folder\u{2026}").clicked() {
+                        rescan = self.pick_library_folder();
                     }
-                }
+                });
+            }
+            crate::library::FirstRunState::Populated { count } => {
+                self.library_toolbar(ui, *count, &mut rescan);
+                ui.separator();
+                to_play = self.library_grid(ui, &library);
+            }
+        }
 
-                if !library.issues.is_empty() {
-                    ui.separator();
-                    ui.heading("Skipped");
-                    // NFR-010/FM-15: a refused path is named, never
-                    // silently dropped -- a scan that quietly ignores half
-                    // a library looks identical to one that found nothing.
-                    for issue in &library.issues {
-                        ui.label(format!("{issue:?}"));
-                    }
+        if !library.issues.is_empty() {
+            ui.separator();
+            // NFR-010/FM-15: a refused path is named, never silently
+            // dropped — a scan that quietly ignores half a library looks
+            // identical to one that found nothing.
+            ui.collapsing(format!("Skipped ({})", library.issues.len()), |ui| {
+                for issue in &library.issues {
+                    ui.add(readout(egui::RichText::new(format!("{issue:?}")).weak()));
                 }
             });
-        self.show_library = open;
+        }
+
         if rescan {
             self.rescan_library();
         }
         if let Some(path) = to_play {
             self.open_rom_path(&path);
         }
+    }
+
+    /// The shared shape of the two empty states: a title, then the one
+    /// thing to do about it, with size carrying the hierarchy.
+    ///
+    /// One helper rather than two hand-built blocks, because these two
+    /// states differ in *what they say*, not in how they look — and the
+    /// moment they are built separately they start to drift apart.
+    fn home_empty(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+        ui.vertical_centered(|ui| {
+            // Pushed off dead-centre: optically centred text sits a little
+            // above the true middle, and a block starting exactly halfway
+            // down reads as low.
+            ui.add_space(ui.available_height() * 0.30);
+            ui.label(egui::RichText::new(title).heading());
+            ui.add_space(6.0);
+            ui.scope(|ui| {
+                ui.set_max_width(420.0);
+                body(ui);
+            });
+        });
+    }
+
+    /// §3.1's search box and console filters. Returns the filtered titles.
+    fn library_toolbar(&mut self, ui: &mut egui::Ui, count: usize, rescan: &mut bool) {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.library_search)
+                    .hint_text("Search\u{2026}")
+                    .desired_width(180.0),
+            );
+            // `None` is "every console", which is why the filter is an
+            // Option rather than a Console with an `All` variant: `All`
+            // would be a console that does not exist, and every match on
+            // `Console` elsewhere would have to handle it.
+            for (label, filter) in [
+                ("All", None),
+                ("NES", Some(crate::library::Console::Nes)),
+                ("SNES", Some(crate::library::Console::Snes)),
+            ] {
+                ui.selectable_value(&mut self.library_console_filter, filter, label);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Add folder\u{2026}").clicked() {
+                    *rescan = self.pick_library_folder();
+                }
+                if ui.button("Rescan").clicked() {
+                    *rescan = true;
+                }
+                ui.add(readout(
+                    egui::RichText::new(format!("{count} game(s)")).weak(),
+                ));
+            });
+        });
+    }
+
+    /// §3.1's grid, filtered by the toolbar.
+    ///
+    /// Rows, not picture cards: §3.1 asks for thumbnails from "last
+    /// save-state screenshot or first-frame capture", and this build has
+    /// neither wired to the library yet. A grid of identical grey
+    /// placeholder rectangles would look more like the spec and tell the
+    /// user strictly less than the title does, so the cards wait until
+    /// there is an image to put in them. **No box art** either way —
+    /// NON_GOALS #5 rules out fetching it.
+    ///
+    /// Returns the ROM to open, if one was picked.
+    fn library_grid(
+        &self,
+        ui: &mut egui::Ui,
+        library: &crate::library::Library,
+    ) -> Option<std::path::PathBuf> {
+        let needle = self.library_search.trim().to_lowercase();
+        let matches: Vec<&crate::library::LibraryEntry> = library
+            .entries
+            .iter()
+            .filter(|e| {
+                let console_ok = match self.library_console_filter {
+                    None => true,
+                    Some(want) => matches!(
+                        &e.identity,
+                        crate::library::EntryIdentity::Recognized { console, .. }
+                            if *console == want
+                    ),
+                };
+                let text_ok = needle.is_empty() || e.title.to_lowercase().contains(&needle);
+                console_ok && text_ok
+            })
+            .collect();
+
+        if matches.is_empty() {
+            // A fourth state, and it is NOT one of `first_run_state`'s
+            // three: the library has games, the filter just excluded them
+            // all. Saying "no ROMs found" here would be a lie about the
+            // library, and rendering nothing would look like a bug.
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| {
+                ui.add(readout(
+                    egui::RichText::new("No games match this search.").weak(),
+                ));
+            });
+            return None;
+        }
+
+        let mut to_play = None;
+        // Rows, not an `egui::Grid`. A Grid sizes every column to its
+        // content, so the whole library huddled into the left third of
+        // the window with two thirds of empty space beside it — a list
+        // that looked like a rendering accident rather than the app's
+        // home screen. A row that lays its title out left-to-right and
+        // its Play button right-to-left fills the width by construction,
+        // at any window size, with no arithmetic to keep in sync.
+        egui::ScrollArea::vertical()
+            // `auto_shrink` off horizontally: otherwise the scroll area
+            // shrinks to its content and takes the rows back down to the
+            // left third, which is the same bug one level up.
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (i, entry) in matches.iter().enumerate() {
+                    // Striping by frame rather than by `Grid::striped`,
+                    // since the Grid is gone. Zebra rows earn their keep
+                    // at library scale even though three rows do not
+                    // need them.
+                    let fill = if i % 2 == 1 {
+                        ui.visuals().faint_bg_color
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    egui::Frame::NONE
+                        .fill(fill)
+                        .inner_margin(egui::Margin::symmetric(6, 3))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(&entry.title);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button("Play").clicked() {
+                                            to_play = Some(entry.path.clone());
+                                        }
+                                        match &entry.identity {
+                                            crate::library::EntryIdentity::Recognized {
+                                                console,
+                                                normalized_sha256,
+                                            } => {
+                                                ui.add(readout(
+                                                    egui::RichText::new(console.name()).weak(),
+                                                ))
+                                                .on_hover_text(format!(
+                                                    "sha256 (normalized): {normalized_sha256}"
+                                                ));
+                                            }
+                                            crate::library::EntryIdentity::Unrecognized {
+                                                reason,
+                                            } => {
+                                                // Still playable — §3.1 is
+                                                // explicit that an
+                                                // unidentified ROM gets a
+                                                // generic card, not a
+                                                // refusal.
+                                                ui.add(readout(
+                                                    egui::RichText::new("unrecognized").weak(),
+                                                ))
+                                                .on_hover_text(reason);
+                                            }
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                }
+            });
+        to_play
+    }
+
+    /// Open a folder picker and add what it returns to the roots.
+    /// `true` if a rescan is now owed.
+    fn pick_library_folder(&mut self) -> bool {
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            return false;
+        };
+        self.library_roots.push(folder);
+        self.save_library_roots();
+        true
     }
 
     /// Persist the current game's settings (ticket W2-07, FR-FE-002).
@@ -3144,9 +3301,70 @@ impl RetroForgeApp {
         }
     }
 
+    /// Stop the running core and return to the library home (ticket
+    /// W10-03).
+    ///
+    /// Sends `Shutdown` and drops the handle rather than merely pausing:
+    /// a paused core still owns its audio device and still costs a thread,
+    /// and "close" that leaves the game resident is not close. The
+    /// library is deliberately NOT rescanned — the scan is unchanged by
+    /// having played something, and re-walking the user's folders on every
+    /// return would make going back feel expensive.
+    fn close_rom(&mut self) {
+        self.send_command(CoreCommand::Shutdown);
+        self.core = None;
+        self.texture = None;
+        self.bg_layer_texture = None;
+        self.sprite_layer_texture = None;
+        self.ultrawide_texture = None;
+        self.ultrawide_render = None;
+        self.running = false;
+        self.position = None;
+        self.fps = None;
+        self.fps_frames = 0;
+        self.audio_fill = None;
+        self.crash = None;
+        self.status = "No ROM loaded".to_string();
+    }
+
     /// Rescan the configured roots.
     fn rescan_library(&mut self) {
+        self.library_scans += 1;
         self.library = Some(crate::library::scan(&self.library_roots));
+    }
+
+    /// Point the library at these roots and force a rescan (ticket
+    /// W10-03), so `tests/library_home.rs` can drive §3.1's three
+    /// first-run states without a folder-picker dialog no headless
+    /// harness can operate.
+    #[doc(hidden)]
+    pub fn set_library_roots_for_test(&mut self, roots: Vec<std::path::PathBuf>) {
+        self.library_roots = roots;
+        self.rescan_library();
+    }
+
+    /// Set §3.1's search text directly (ticket W10-03).
+    #[doc(hidden)]
+    pub fn set_library_search_for_test(&mut self, needle: &str) {
+        self.library_search = needle.to_string();
+    }
+
+    /// Close the running ROM, as File > Close ROM does (ticket W10-03).
+    #[doc(hidden)]
+    pub fn close_rom_for_test(&mut self) {
+        self.close_rom();
+    }
+
+    /// How many times the library has been scanned this session.
+    ///
+    /// Exists so a test can assert the round trip is FREE. "No rescan on
+    /// return" is otherwise unfalsifiable from the outside: a rescan of an
+    /// unchanged folder produces an identical library, so the only visible
+    /// difference is the folder walk itself.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn library_scan_count_for_test(&self) -> u32 {
+        self.library_scans
     }
 
     /// Persist the configured roots, reporting failure into the status line
@@ -3537,38 +3755,6 @@ impl RetroForgeApp {
         self.show_enhance = open;
     }
 
-    /// What fills the play area before a ROM is open.
-    ///
-    /// It used to be `ui.label(&self.status)` — **the same sentence the
-    /// status bar was already showing**, at the same size, centred in
-    /// six hundred pixels of nothing. Two copies of one string is not an
-    /// empty state; it is the absence of one, and it was the loudest
-    /// "nobody designed this" signal in the window.
-    ///
-    /// What replaces it is the standard shape of an empty state: name
-    /// the situation, then say the one thing to do about it, with the
-    /// size difference carrying the hierarchy. The status bar keeps the
-    /// running commentary — that is its job — and this stops competing
-    /// with it.
-    fn empty_state(ui: &mut egui::Ui) {
-        ui.centered_and_justified(|ui| {
-            ui.vertical_centered(|ui| {
-                // Pushed off dead-centre: optically centred text sits a
-                // little above the true middle, and a block that starts
-                // exactly halfway down reads as low.
-                ui.add_space(ui.available_height() * 0.38);
-                ui.label(egui::RichText::new("No ROM loaded").heading());
-                ui.add_space(6.0);
-                ui.add(readout(
-                    egui::RichText::new(
-                        "File \u{203a} Open ROM\u{2026}   \u{b7}   View \u{203a} Library\u{2026}",
-                    )
-                    .weak(),
-                ));
-            });
-        });
-    }
-
     fn video_panel(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             // Ticket W4-05 (FRONTEND_UI.md §1): hold-to-peek forces the
@@ -3583,10 +3769,29 @@ impl RetroForgeApp {
             };
             match enhanced_view::select_active_view(camera, self.ultrawide_render.as_ref()) {
                 enhanced_view::ActiveView::Original => {
-                    if let Some(texture) = &self.texture {
+                    // Ticket W10-03. Which surface this is depends on
+                    // whether a CORE exists, not on whether a texture
+                    // does. Keying it on the texture — the obvious
+                    // reading of "is there a picture to show?" — leaves
+                    // the library on screen for the whole gap between
+                    // pressing Play and the first frame arriving, so the
+                    // library visibly flashes back at you after you have
+                    // already chosen a game.
+                    if self.core.is_none() {
+                        // With no ROM open this surface IS the library:
+                        // §2's IA puts Library at the root.
+                        self.library_home(ui);
+                    } else if let Some(texture) = &self.texture {
                         ui.add(egui::Image::from_texture(texture).shrink_to_fit());
                     } else {
-                        Self::empty_state(ui);
+                        // Core up, no frame yet. One line rather than an
+                        // empty rectangle, because a black screen is
+                        // exactly what a ROM that FAILED to start also
+                        // looks like.
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(ui.available_height() * 0.45);
+                            ui.add(readout(egui::RichText::new(&self.status).weak()));
+                        });
                     }
                 }
                 enhanced_view::ActiveView::Ultrawide { .. } => {
@@ -3626,7 +3831,6 @@ impl eframe::App for RetroForgeApp {
         self.layers_debug_window(&ctx);
         self.enhance_window(&ctx);
         self.controls_window(&ctx);
-        self.library_window(&ctx);
         self.settings_window(&ctx);
         self.overlay_menu(&ctx);
         self.states_modal(&ctx);

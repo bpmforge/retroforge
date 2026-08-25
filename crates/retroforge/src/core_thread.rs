@@ -969,8 +969,22 @@ mod tests {
             });
         });
 
+        // **A liveness bound, not a performance assertion.** This waits
+        // on a path whose expensive step is `Backtrace::force_capture()`
+        // inside the panic hook — full symbolization, which in a debug
+        // build is not fast. Unloaded the whole test takes ~0.7 s, and
+        // the old 5 s bound was therefore a claim that the machine would
+        // never be more than ~7x busy. It failed three times on
+        // 2026-08-25 (W10-01/W10-03), every time with a release build or
+        // the wgpu render tests running alongside, and never once when
+        // run alone — a red test that meant "this laptop is busy".
+        //
+        // What the ticket actually demands is that a contained panic
+        // REPORTS rather than vanishing; if `catch_unwind` were removed
+        // the channel would never produce anything and this would still
+        // fail, just later. So the bound is generous on purpose.
         let evt = evt_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(30))
             .expect("core thread must report a crash before halting, not just vanish");
         match evt {
             CoreEvent::Crashed(report) => {

@@ -211,3 +211,28 @@ All hash-keyed, all human-inspectable.
 | 5 | Map tab (full-level demo surface) | W5-03 |
 | 8 | rewind UI, video recording, gamepad nav, accessibility pass | W8-* (planning ticket) |
 | 9 | full profile editor, plugin manager polish | W9-* (planning ticket) |
+
+**Implementation status (ticket W10-03, 2026-08-25).** §3.1 is now the
+app's home: with no ROM open the window shows the library — search box,
+All/NES/SNES filters, game count, Rescan, Add folder…, and a full-width
+zebra list of titles with console and Play. It was a checkbox-toggled
+floating window until W10-03, and the app booted to an empty play area.
+
+The three first-run states of §3.1 stay distinct and still go through
+`library::first_run_state`, which is unit-tested (design review G-21):
+no folders configured, folders with zero recognised ROMs (each folder
+named), and the populated list. A *fourth* state was added that
+`first_run_state` deliberately does not model — "the filter excluded
+everything" — because saying "no ROMs found" there would be a lie about
+the library and rendering nothing looks like a bug.
+
+`File ▸ Close ROM` is the way back; the return costs no rescan, which
+`tests/library_home.rs` asserts by counting folder walks across the
+round trip.
+
+Still not built from §3.1: thumbnails (last save-state screenshot or
+first-frame capture), and the per-game context menu. **No box art** —
+NON_GOALS #5 rules out fetching it. Rows rather than picture cards until
+there is an image to put in a card: a grid of identical grey
+placeholders would look more like the wireframe and tell the user
+strictly less than a title does.

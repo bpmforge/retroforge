@@ -540,3 +540,63 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   for an empty library, not the right home. Most of the work exists
   (`crate::library`, `library_roots`, and the three first-run states
   G-21 already forced apart) and should be moved, not rewritten.
+
+- **W10-03 — the Library is the home screen** (2026-08-25): §2's IA puts
+  Library at the root (*Library (home) → Play view → Workspaces*); what
+  shipped booted to an empty play area with the library behind a
+  checkbox. Now: no ROM open ⇒ the window **is** the library — search,
+  All/NES/SNES filters, count, Rescan, Add folder…, and a full-width
+  zebra list. `File ▸ Close ROM` is the way back, and the return costs no
+  rescan (asserted by counting folder walks across the round trip, since
+  a rescan of an unchanged folder is otherwise invisible from outside).
+  The scanning, hash identity and G-21's three first-run states were all
+  already here and are unchanged — this moved **where they live**. The
+  floating Library window and its View-menu toggle are gone: two routes
+  to one surface is the duplication this ticket exists to remove.
+
+  **A CORRECTION to what W10-01 committed.** That commit claimed egui
+  "publishes AccessKit nodes for the bar's buttons and **not** for its
+  plain labels", said it was *verified by dumping every node in the
+  panel*, and built a second instrument around it. **It is wrong.** A
+  `Label` puts its text in AccessKit's **`value`** field and leaves
+  `label` empty; the dump only read `label`. Labels were in the tree the
+  whole time. `hud_fits.rs`, `ui_smoke.rs` and the new tests now read
+  both — which means `hud_fits`'s clip detector had been measuring
+  buttons and nothing else, reporting an empty list, *which looks exactly
+  like success*. The layout instrument is still needed, for the real
+  reason (a right-to-left group does not clip, it slides off the left
+  edge), but not for the reason first given.
+
+  **A NEW CAPABILITY, and the honest reason for it.** Three defects this
+  arc were visible in a screenshot and NOWHERE else — `◆`, its equally
+  absent "fix" `◇`, and `●`, which no screenshot could have caught since
+  it only renders with an audio device open. Every test in this repo
+  examined the widget *tree*; nothing examined what was *drawn*.
+  `crates/retroforge/tests/renders.rs` now renders the real window
+  off-screen via `egui_kittest`'s `wgpu` feature and asserts the frame is
+  not degenerate (a blank window is one flat colour — and every other
+  test passes on one, because the tree is built either way). Frames are
+  written to `target/ui-renders/` for a human to look at.
+  **Deliberately no golden images**: a reference PNG for a UI under
+  active design goes stale on every legitimate change, and a golden
+  nobody trusts gets forced back into place until it asserts nothing.
+
+  This also removed the session's dependency on the workstation being
+  unlocked — three capture attempts today returned a black screen or the
+  lock screen.
+
+- **The `injected_panic_on_core_thread` flake, diagnosed and fixed**
+  (2026-08-25): it failed three times today and passed 5/5 whenever run
+  alone, so it was written off twice as load sensitivity. It is a real
+  defect in the test. The path it waits on has one expensive step —
+  `Backtrace::force_capture()` inside the panic hook, i.e. full
+  symbolization, which a debug build does not do quickly — and the bound
+  was **5 seconds** against a run that takes ~0.7 s unloaded. That is a
+  standing claim that the developer's machine will never be more than
+  ~7x busy. Measured after the fix: **6.75 s solo** on a machine merely
+  warm from this session, i.e. it would now fail with nothing else
+  running at all. The bound is a LIVENESS assertion — the ticket demands
+  that a contained panic reports rather than vanishing, and without
+  `catch_unwind` the channel produces nothing and the test still fails,
+  only later — so it is now 30 s. A red test that means "this laptop is
+  busy" is worse than no test: it trains you to re-run.

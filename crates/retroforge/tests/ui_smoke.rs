@@ -57,7 +57,7 @@ use retroforge::app::RetroForgeApp;
 /// size may rest on a test in this file.
 const HARNESS_SIZE: (f32, f32) = (1600.0, 1000.0);
 
-/// The five toggles in the **View menu**, each with the title of the
+/// The four toggles in the **View menu**, each with the title of the
 /// window it opens. `R-A1`'s "open/close each core dockable panel".
 ///
 /// They lived in the bottom bar until W10-01, where three of them
@@ -69,7 +69,12 @@ const HARNESS_SIZE: (f32, f32) = (1600.0, 1000.0);
 const PANELS: &[(&str, &str)] = &[
     ("Layers (debug)", "Layers (debug)"),
     ("Controls\u{2026}", "Controls"),
-    ("Library\u{2026}", "Library"),
+    // Ticket W10-03 removed the Library row DELIBERATELY, not because it
+    // went red: the library is the home screen now, so there is no
+    // floating Library window left to toggle and no menu item that would
+    // open one. `library_is_the_home_screen` below covers what this row
+    // used to, and covers it better — it asserts the library is reachable
+    // with no clicks at all, rather than that a checkbox opens a copy.
     ("Settings\u{2026}", "Settings"),
     ("Debug Viewers", "Debug Viewers"),
 ];
@@ -297,7 +302,15 @@ fn labels(harness: &Harness<'_, RetroForgeApp>) -> Vec<String> {
     harness
         .root()
         .children_recursive()
-        .filter_map(|n| n.accesskit_node().label())
+        // `label()` OR `value()`: a `Label` widget puts its text in
+        // `value` and leaves `label` empty. Reading only `label` makes
+        // this helper omit every piece of static text, which turns a
+        // failure message into a misleading one — it was read as "egui
+        // does not publish labels" for most of W10-01.
+        .filter_map(|n| {
+            let a = n.accesskit_node();
+            a.label().or_else(|| a.value())
+        })
         .collect()
 }
 
