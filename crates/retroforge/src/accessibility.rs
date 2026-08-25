@@ -107,23 +107,54 @@ impl AccessibilitySettings {
 ///
 /// Deliberately tiny: these are the pairs whose contrast is *asserted*.
 /// A palette with thirty entries and two tested pairs would be a palette
-/// nobody actually checked.
+/// nobody actually checked. Every field added here must come with its
+/// assertions — [`Palette::worst_contrast`] exists so that adding a
+/// colour without checking it is not possible by accident.
+///
+/// Two surfaces, not one (ticket W10-01). Until W10-01 there was a single
+/// `background`, which is why every control in the status bar rendered as
+/// the same flat rectangle: with nothing to sit *on*, a button, a
+/// disabled button and a non-clickable status badge are indistinguishable.
+/// `raised` is what a control is drawn on, and every text colour is
+/// verified against **both** surfaces — a palette checked only against
+/// the page background says nothing about the text actually inside the
+/// widgets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
-    /// Window background.
+    /// The page behind everything.
     pub background: [u8; 3],
-    /// Body text on `background`.
+    /// The surface a control is drawn on: buttons, menus, the status
+    /// chips. One step up from `background`, which is the whole point.
+    pub raised: [u8; 3],
+    /// Body text, on either surface.
     pub text: [u8; 3],
-    /// Text of a focused/selected widget.
+    /// Secondary text — units, placeholders, the "no profile" chip.
+    /// Dimmer than `text` on purpose, but still held to the same
+    /// standard: unreadable secondary text is unreadable text.
+    pub text_muted: [u8; 3],
+    /// Focus rings, selection, and the one colour the eye is meant to
+    /// find first.
     pub accent: [u8; 3],
 }
 
 impl Palette {
-    /// egui's dark theme, near enough for measurement.
+    /// The dark theme.
+    ///
+    /// Every one of the six text/surface pairs clears **AAA**, computed
+    /// before these values were written rather than checked afterwards;
+    /// the tests below re-derive them so a future edit cannot quietly
+    /// drop one below the line.
     pub const DEFAULT: Palette = Palette {
-        background: [0x1B, 0x1B, 0x1B],
-        text: [0xC8, 0xC8, 0xC8],
-        accent: [0x5A, 0xAF, 0xFF],
+        background: [0x14, 0x16, 0x1A],
+        raised: [0x1E, 0x22, 0x2A],
+        text: [0xD6, 0xDA, 0xE2],
+        text_muted: [0xA6, 0xAF, 0xBE],
+        // Lighter than the #5AAFFF this replaced, for one measured
+        // reason: #5AAFFF is AAA on `background` but only 6.84:1 on
+        // `raised`, and a focus ring is drawn on controls, which sit on
+        // `raised`. The value that matters is the one on the surface the
+        // ring is actually drawn on.
+        accent: [0x6F, 0xBA, 0xFF],
     };
 
     /// The high-contrast palette. Pure white on pure black gives 21:1 —
@@ -133,9 +164,49 @@ impl Palette {
     /// gamepad navigation unusable.
     pub const HIGH_CONTRAST: Palette = Palette {
         background: [0x00, 0x00, 0x00],
+        raised: [0x1A, 0x1A, 0x1A],
         text: [0xFF, 0xFF, 0xFF],
+        text_muted: [0xD0, 0xD0, 0xD0],
         accent: [0xFF, 0xD7, 0x00],
     };
+
+    /// Every (foreground, surface) pair this palette will ever render,
+    /// named, so a test can assert over the whole set instead of over a
+    /// hand-copied list that silently stops covering new fields.
+    #[must_use]
+    pub fn pairs(&self) -> [(&'static str, f32); 6] {
+        [
+            (
+                "text on background",
+                contrast_ratio(self.text, self.background),
+            ),
+            ("text on raised", contrast_ratio(self.text, self.raised)),
+            (
+                "text_muted on background",
+                contrast_ratio(self.text_muted, self.background),
+            ),
+            (
+                "text_muted on raised",
+                contrast_ratio(self.text_muted, self.raised),
+            ),
+            (
+                "accent on background",
+                contrast_ratio(self.accent, self.background),
+            ),
+            ("accent on raised", contrast_ratio(self.accent, self.raised)),
+        ]
+    }
+
+    /// The weakest pair, and its name. This is the number a palette is
+    /// actually worth: an average would let one unreadable pair hide
+    /// behind five good ones.
+    #[must_use]
+    pub fn worst_contrast(&self) -> (&'static str, f32) {
+        self.pairs().into_iter().fold(
+            ("", f32::INFINITY),
+            |acc, p| if p.1 < acc.1 { p } else { acc },
+        )
+    }
 
     /// Contrast of body text against the background.
     #[must_use]
@@ -211,35 +282,91 @@ mod tests {
         assert!((r - 4.54).abs() < 0.05, "expected ~4.54, got {r}");
     }
 
-    /// **Criterion 2, measured.** The claim "high-contrast theme" is only
-    /// worth making if the numbers back it.
+    /// **Every pair, on both surfaces, clears AAA — in both palettes.**
+    ///
+    /// Asserted over `Palette::pairs()` rather than over a hand-written
+    /// list, so a colour added to the struct without a matching
+    /// assertion is impossible: the new pair joins this loop or it does
+    /// not exist. The old version of this test checked two pairs against
+    /// a three-colour palette and was the entire evidence base for a
+    /// module nothing imported.
     #[test]
-    fn the_high_contrast_palette_clears_aaa() {
-        let p = Palette::HIGH_CONTRAST;
-        assert!(
-            p.text_contrast() >= WCAG_AAA,
-            "body text is {:.2}:1, below AAA {WCAG_AAA}",
-            p.text_contrast()
-        );
-        assert!(
-            p.accent_contrast() >= WCAG_AAA,
-            "the FOCUS accent is {:.2}:1, below AAA — a focus indicator a user cannot \
-             distinguish makes gamepad navigation unusable",
-            p.accent_contrast()
-        );
+    fn every_pair_in_every_palette_clears_aaa() {
+        for (name, palette) in [
+            ("DEFAULT", Palette::DEFAULT),
+            ("HIGH_CONTRAST", Palette::HIGH_CONTRAST),
+        ] {
+            for (pair, ratio) in palette.pairs() {
+                assert!(
+                    ratio >= WCAG_AAA,
+                    "{name}: {pair} is {ratio:.2}:1, below AAA ({WCAG_AAA}:1). \
+                     Text a user cannot read is not a theme."
+                );
+            }
+        }
     }
 
-    /// The default theme must still be legible; it is simply not the
-    /// accommodation.
+    /// **The accent clears AAA on `raised`, not merely on `background`.**
+    ///
+    /// Called out separately because it is the pair that is easiest to
+    /// get wrong and worst to get wrong. The focus ring is drawn on
+    /// *controls*, and controls sit on `raised` — so a palette verified
+    /// only against the page background can ship a focus indicator that
+    /// is genuinely hard to see, which is the one defect that makes
+    /// keyboard and gamepad navigation unusable. #5AAFFF, the accent
+    /// this replaced in W10-01, was AAA on `background` and 6.84:1 on
+    /// `raised`.
     #[test]
-    fn the_default_palette_clears_aa() {
+    fn the_accent_is_verified_against_the_surface_it_is_drawn_on() {
+        for (name, palette) in [
+            ("DEFAULT", Palette::DEFAULT),
+            ("HIGH_CONTRAST", Palette::HIGH_CONTRAST),
+        ] {
+            let ratio = contrast_ratio(palette.accent, palette.raised);
+            assert!(
+                ratio >= WCAG_AAA,
+                "{name}: the focus accent is {ratio:.2}:1 against `raised`"
+            );
+        }
+    }
+
+    /// **`raised` is actually distinguishable from `background`.**
+    ///
+    /// The reason the two surfaces exist. If they were equal every pair
+    /// above would still pass — the palette would be perfectly readable
+    /// and perfectly flat, which is the exact complaint W10-01 started
+    /// from: a primary action, a disabled button and a status badge all
+    /// rendering as the same rectangle. A vacuity guard, not a colour
+    /// preference.
+    #[test]
+    fn the_two_surfaces_are_actually_different() {
+        for (name, palette) in [
+            ("DEFAULT", Palette::DEFAULT),
+            ("HIGH_CONTRAST", Palette::HIGH_CONTRAST),
+        ] {
+            assert_ne!(
+                palette.raised, palette.background,
+                "{name}: a raised surface identical to the background is not a surface"
+            );
+            let separation = contrast_ratio(palette.raised, palette.background);
+            assert!(
+                separation > 1.05,
+                "{name}: `raised` is {separation:.3}:1 against `background` — \
+                 indistinguishable in practice"
+            );
+        }
+    }
+
+    /// `worst_contrast` reports the weakest pair, not an average — an
+    /// average would let one unreadable pair hide behind five good ones.
+    #[test]
+    fn worst_contrast_finds_the_weakest_pair() {
         let p = Palette::DEFAULT;
-        assert!(p.text_contrast() >= WCAG_AA, "{:.2}:1", p.text_contrast());
-        assert!(
-            p.accent_contrast() >= WCAG_AA,
-            "{:.2}:1",
-            p.accent_contrast()
-        );
+        let (name, worst) = p.worst_contrast();
+        assert!(!name.is_empty(), "the weakest pair must be named");
+        for (_, ratio) in p.pairs() {
+            assert!(worst <= ratio + f32::EPSILON, "{worst} was not the minimum");
+        }
     }
 
     /// Anti-vacuity: the high-contrast palette must actually be BETTER.

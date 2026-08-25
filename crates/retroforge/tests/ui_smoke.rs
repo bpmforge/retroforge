@@ -74,15 +74,42 @@ const PANELS: &[(&str, &str)] = &[
     ("Debug Viewers", "Debug Viewers"),
 ];
 
-/// Open the View menu so its items are in the tree.
+/// Ensure the View menu is open and `toggle` is reachable.
 ///
-/// egui menus close on click, so this runs before **each** toggle rather
-/// than once for the loop — a menu that had already closed would make
-/// `get_by_role_and_label` panic on a missing node, which reads like a
-/// deleted control rather than a closed menu.
-fn open_view_menu(harness: &mut Harness<'_, RetroForgeApp>) {
+/// **Idempotent on purpose.** A checkbox inside an egui menu does NOT
+/// close that menu when clicked, so after toggling one panel the menu is
+/// often still open — and clicking "View" again would *close* it,
+/// leaving the next `get_by_role_and_label` to panic on a missing node
+/// that reads like a deleted control rather than a closed menu. That is
+/// exactly how this failed once: W10-01's theme pass changed menu
+/// spacing, the open/closed rhythm shifted, and a helper that clicked
+/// unconditionally started dropping the menu on the second panel.
+/// Asking whether the item is already there is the only version that
+/// does not depend on that rhythm.
+fn ensure_view_menu_open(harness: &mut Harness<'_, RetroForgeApp>, toggle: &str) {
+    if harness
+        .query_by_role_and_label(Role::CheckBox, toggle)
+        .is_some()
+    {
+        return;
+    }
+    for n in harness.root().children_recursive() {
+        let a = n.accesskit_node();
+        if a.role() == Role::Window {
+            eprintln!("WIN {:?} {:?}", a.label(), a.bounding_box());
+        }
+    }
     harness.get_by_role_and_label(Role::Button, "View").click();
     harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::CheckBox, toggle)
+            .is_some(),
+        "`{toggle}` is not in the View menu even after opening it — most likely a \
+         floating window is covering the menu bar, which is what \
+         `app::PANEL_WINDOW_ORIGIN` exists to prevent. Tree has: {:?}",
+        labels(harness)
+    );
 }
 
 /// A minimal NROM image. `roms/` is gitignored (NFR-006) and CI never has
@@ -211,7 +238,7 @@ fn ui_smoke_boot_open_rom_present_a_frame_and_toggle_every_panel() {
              open assertion below would pass without the click doing anything"
         );
 
-        open_view_menu(&mut harness);
+        ensure_view_menu_open(&mut harness, toggle);
         harness
             .get_by_role_and_label(Role::CheckBox, toggle)
             .click();
@@ -223,7 +250,7 @@ fn ui_smoke_boot_open_rom_present_a_frame_and_toggle_every_panel() {
             open_windows(&harness)
         );
 
-        open_view_menu(&mut harness);
+        ensure_view_menu_open(&mut harness, toggle);
         harness
             .get_by_role_and_label(Role::CheckBox, toggle)
             .click();

@@ -52,6 +52,7 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
+use eframe::egui::accesskit::Role;
 use egui_kittest::kittest::{NodeT as _, Queryable as _};
 use egui_kittest::Harness;
 use retroforge::app::{RetroForgeApp, MIN_WINDOW_SIZE, WINDOW_SIZE};
@@ -291,6 +292,43 @@ fn the_hud_fits_the_window_the_app_actually_opens() {
         WINDOW_SIZE[0],
         "shipping window size, deep ROM path",
     );
+
+    // ---- 3c. a panel window must not cover the menu bar ------------
+    //
+    // The Controls window is two players x every NES button, each with a
+    // Clear: **1105 px of content in a 720 px window**. egui cannot
+    // honour a position for a window that does not fit, so it pinned the
+    // window to y=0 — on top of File / View / Enhance — and the menus
+    // were unclickable for as long as it was open. Since the View menu
+    // is now the only way to reach Library, Settings and Debug Viewers,
+    // that made the app navigationally dead, which is W10-01's original
+    // complaint wearing a different hat.
+    //
+    // Asserted at the SHIPPING height, because that is where a tall
+    // window overflows; at `ui_smoke.rs`'s 1000 px harness the Controls
+    // window fits and this failure does not occur at all.
+    let mut small_win = app_at(WINDOW_SIZE);
+    small_win.state_mut().show_controls_for_test(true);
+    small_win.run_steps(3);
+    let menu_bottom = small_win
+        .get_by_role_and_label(Role::Button, "View")
+        .rect()
+        .bottom();
+    for node in small_win.root().children_recursive() {
+        let accesskit = node.accesskit_node();
+        if accesskit.role() != Role::Window {
+            continue;
+        }
+        let (Some(label), Some(bounds)) = (accesskit.label(), accesskit.bounding_box()) else {
+            continue;
+        };
+        assert!(
+            bounds.y0 as f32 >= menu_bottom,
+            "the `{label}` window starts at y={:.0}, above the menu bar's bottom edge at \
+             y={menu_bottom:.0} — it is covering the only navigation the app has",
+            bounds.y0,
+        );
+    }
 
     // ---- 4. the smallest size a user can drag to -------------------
     //

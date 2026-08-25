@@ -430,3 +430,51 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   machine load on a 5 s `recv_timeout`. 5/5 green on both the unmodified
   and the modified tree when run alone; left as-is rather than papered
   over, but it is a real timing sensitivity in that test.
+
+- **W10-01, second pass — the theme, and two defects it exposed**
+  (2026-08-25, on Brad's ruling): Brad chose the accent-led palette over
+  a hierarchy-only pass. `accessibility::Palette` grew from three colours
+  to five — `background`, **`raised`**, `text`, `text_muted`, `accent` —
+  because a single surface is *why* every control rendered flat: with
+  nothing to sit **on**, a primary action, a disabled button and a
+  non-clickable status badge are the same rectangle. Every one of the six
+  text/surface pairs was computed **before** the values were written and
+  clears **AAA in both palettes**; the accent moved from `#5AAFFF` to
+  `#6FBAFF` for one measured reason — `#5AAFFF` is AAA on `background`
+  but **6.84:1 on `raised`**, and a focus ring is drawn on controls,
+  which sit on `raised`. The tests now assert over `Palette::pairs()`
+  rather than a hand-copied list, so a colour added without an assertion
+  is impossible, plus a vacuity guard that the two surfaces actually
+  differ (identical surfaces would pass every contrast check and still
+  be perfectly flat).
+
+  **Two real defects surfaced, neither of them cosmetic.** (1) The
+  Controls window is two players x every NES button with a Clear each —
+  **1105 px of content in a 720 px window**. egui cannot honour a
+  position for a window that does not fit, so it pinned the window to
+  y=0, **on top of the menu bar**, and File/View/Enhance were unclickable
+  while it was open. Since the View menu is now the only route to
+  Library, Settings and Debug Viewers, that left the app navigationally
+  dead — W10-01's original complaint wearing a different hat. Fixed with
+  a `ScrollArea` (which is what actually bounds it) plus a `max_height`
+  and a `PANEL_WINDOW_ORIGIN` below the menu bar. (2) The View menu did
+  not close on toggle, so it sat under the "View" button and the next
+  click on "View" landed on a menu row instead — it opened the Controls
+  window while `ui_smoke` was trying to open the menu.
+
+  Both were found by the UI tests, not by reading: `ui_smoke` went red on
+  the theme change and stayed red through two wrong theories before the
+  window rect was actually printed. `hud_fits.rs` now asserts no window
+  starts above the menu bar's bottom edge, verified to fail on a bad
+  `PANEL_WINDOW_ORIGIN`.
+
+  Also: `◆` was rendering as a tofu box in the shipped window — it is not
+  in egui's bundled font — swapped for `◇`/`○`, which are. Visible only
+  in a screenshot, which is the argument for the screenshot being
+  evidence rather than a formality.
+
+  Gate: fmt, clippy `-D warnings`, **workspace 1651 passing / 31
+  ignored**, validate-arch, validate-plan — green locally, with the app
+  process stopped (the known `injected_panic_on_core_thread` 5 s
+  `recv_timeout` fails under CPU load; it failed twice today, both times
+  with a release build running alongside, and passes 5/5 otherwise).

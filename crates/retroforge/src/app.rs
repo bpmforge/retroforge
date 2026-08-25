@@ -70,6 +70,18 @@ pub const MIN_WINDOW_SIZE: [f32; 2] = [640.0, 480.0];
 /// can use to answer "is this running full speed?".
 const FPS_WINDOW_FRAMES: u32 = 30;
 
+/// Where a floating panel window first appears (ticket W10-01).
+///
+/// **Below the menu bar, deliberately.** egui's default area position is
+/// the top-left corner, which in this app is exactly where File / View /
+/// Enhance live — so every window opened from the View menu came up
+/// covering the only navigation the app has, and the menu you opened it
+/// from was underneath it. Found because `tests/ui_smoke.rs` clicked
+/// "View" and hit the Controls window instead; it is a real defect, not
+/// a test artifact, and one nobody would have reported as a bug so much
+/// as a vague sense that the app fights back.
+const PANEL_WINDOW_ORIGIN: [f32; 2] = [24.0, 56.0];
+
 /// Longest profile name the status chip will lay out, in characters.
 ///
 /// The chip's text is a profile's file stem, so its width is decided by
@@ -1821,6 +1833,14 @@ impl RetroForgeApp {
     /// Counts frames that actually *reached the screen*, not repaints:
     /// egui repaints for a mouse move, and an FPS number that rose when
     /// you wiggled the pointer would be measuring the wrong machine.
+    /// Open or close the Controls window without going through the menu
+    /// (ticket W10-01), so `tests/hud_fits.rs` can assert where a
+    /// floating window lands without also depending on menu behaviour.
+    #[doc(hidden)]
+    pub fn show_controls_for_test(&mut self, show: bool) {
+        self.show_controls = show;
+    }
+
     fn note_frame(&mut self) {
         self.fps_frames += 1;
         if self.fps_frames < FPS_WINDOW_FRAMES {
@@ -1854,22 +1874,85 @@ impl RetroForgeApp {
         let a = self.settings.accessibility.normalized();
         let p = a.palette();
         let col = |c: [u8; 3]| egui::Color32::from_rgb(c[0], c[1], c[2]);
+        let (bg, raised, text, muted, accent) = (
+            col(p.background),
+            col(p.raised),
+            col(p.text),
+            col(p.text_muted),
+            col(p.accent),
+        );
 
-        let mut visuals = egui::Visuals::dark();
-        visuals.override_text_color = Some(col(p.text));
-        visuals.panel_fill = col(p.background);
-        visuals.window_fill = col(p.background);
-        visuals.extreme_bg_color = col(p.background).gamma_multiply(0.6);
-        visuals.hyperlink_color = col(p.accent);
-        visuals.selection.bg_fill = col(p.accent).gamma_multiply(0.35);
-        visuals.selection.stroke = egui::Stroke::new(1.0, col(p.accent));
-        // The focus ring. `accessibility::Palette::HIGH_CONTRAST`'s own
-        // doc calls this out: a focus indicator a user cannot
-        // distinguish is the one element that makes keyboard and gamepad
-        // navigation unusable.
-        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, col(p.accent));
-        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, col(p.accent));
-        ctx.set_visuals(visuals);
+        let mut v = egui::Visuals::dark();
+        v.panel_fill = bg;
+        v.window_fill = bg;
+        v.faint_bg_color = raised;
+        v.extreme_bg_color = bg;
+        v.override_text_color = Some(text);
+        v.hyperlink_color = accent;
+        v.window_stroke = egui::Stroke::new(1.0, raised);
+
+        // The four widget states, given four DIFFERENT looks. This is
+        // the whole point of the ticket's visual half: before W10-01 the
+        // crate set no visuals at all, so the primary action, a disabled
+        // button and a non-clickable status badge were three identical
+        // grey rectangles and the eye had nothing to sort them by.
+        //
+        // `noninteractive` is the flat one — it is what a *label* gets,
+        // and it must not look like something you can press.
+        v.widgets.noninteractive.bg_fill = bg;
+        v.widgets.noninteractive.weak_bg_fill = bg;
+        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, raised);
+        v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, muted);
+
+        // `inactive` is a resting control: it sits on `raised`, which is
+        // what says "this is a thing, and you may press it".
+        v.widgets.inactive.bg_fill = raised;
+        v.widgets.inactive.weak_bg_fill = raised;
+        v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text);
+
+        v.widgets.hovered.bg_fill = raised.lerp_to_gamma(accent, 0.18);
+        v.widgets.hovered.weak_bg_fill = raised.lerp_to_gamma(accent, 0.18);
+        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, accent);
+        v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, text);
+
+        v.widgets.active.bg_fill = raised.lerp_to_gamma(accent, 0.32);
+        v.widgets.active.weak_bg_fill = raised.lerp_to_gamma(accent, 0.32);
+        v.widgets.active.bg_stroke = egui::Stroke::new(1.0, accent);
+        v.widgets.active.fg_stroke = egui::Stroke::new(1.0, text);
+
+        // The focus ring. `accessibility::Palette`'s own doc calls this
+        // out: a focus indicator a user cannot distinguish is the one
+        // element that makes keyboard and gamepad navigation unusable —
+        // and the accent is verified against `raised`, the surface it is
+        // actually drawn on, not merely against the page background.
+        v.widgets.open.bg_fill = raised;
+        v.widgets.open.bg_stroke = egui::Stroke::new(1.0, accent);
+        v.selection.bg_fill = accent.gamma_multiply(0.35);
+        v.selection.stroke = egui::Stroke::new(1.0, accent);
+
+        ctx.set_visuals(v);
+
+        // Rounder than egui's default and with real breathing room. The
+        // old bar packed sixteen controls behind thirteen separators,
+        // which is why spacing had to be this tight; with five things in
+        // it there is room to let them be legible.
+        // `all_styles_mut`, not `style_mut`: egui 0.35 removed the latter
+        // (verified in egui-0.35.0 context.rs:2145/2169 — this crate
+        // pins versions newer than most training data, project law 2).
+        ctx.all_styles_mut(|style| {
+            style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+            style.spacing.button_padding = egui::vec2(8.0, 3.0);
+            for w in [
+                &mut style.visuals.widgets.noninteractive,
+                &mut style.visuals.widgets.inactive,
+                &mut style.visuals.widgets.hovered,
+                &mut style.visuals.widgets.active,
+                &mut style.visuals.widgets.open,
+            ] {
+                w.corner_radius = egui::CornerRadius::same(4);
+            }
+        });
         // Safe to call every frame: `Context::set_zoom_factor` compares
         // against the stored value and only requests a repaint when it
         // actually differs (egui-0.35.0 `context.rs:2272`, read rather
@@ -1908,6 +1991,15 @@ impl RetroForgeApp {
 
                 let has_core = self.core.is_some();
                 ui.menu_button("View", |ui| {
+                    // **Each of these closes the menu when it changes.**
+                    // Platform convention (a menu item you pick puts the
+                    // menu away), and it is also what makes the sequence
+                    // deterministic: a menu left open after a click sits
+                    // under the "View" button, so the next click on
+                    // "View" lands on a menu row instead. That is not
+                    // hypothetical — it opened the Controls window while
+                    // `tests/ui_smoke.rs` was trying to open the menu.
+                    //
                     // Checkboxes, not "open" buttons: these five each own
                     // a window whose visibility is a piece of app state,
                     // and a checkbox is the control that SHOWS that state
@@ -1919,14 +2011,29 @@ impl RetroForgeApp {
                     // Ticket W2-07: opening the library triggers the first
                     // scan (see `library_window`), so a cold start never
                     // waits on a folder walk.
-                    ui.checkbox(&mut self.show_library, "Library\u{2026}");
+                    if ui
+                        .checkbox(&mut self.show_library, "Library\u{2026}")
+                        .changed()
+                    {
+                        ui.close();
+                    }
                     // Ticket W2-08: app-wide settings (FRONTEND_UI §2).
-                    ui.checkbox(&mut self.show_settings, "Settings\u{2026}");
+                    if ui
+                        .checkbox(&mut self.show_settings, "Settings\u{2026}")
+                        .changed()
+                    {
+                        ui.close();
+                    }
                     // Ticket W2-06's remap window. Pure UI-thread state —
                     // bindings are sampled on this thread too
                     // (`poll_input`), so a remap takes effect on the very
                     // next frame with no round trip to the core thread.
-                    ui.checkbox(&mut self.show_controls, "Controls\u{2026}");
+                    if ui
+                        .checkbox(&mut self.show_controls, "Controls\u{2026}")
+                        .changed()
+                    {
+                        ui.close();
+                    }
                     ui.separator();
                     // Ticket W4-03e criterion 2: the runtime camera
                     // toggle. Disabled with no compositor at all (no GPU
@@ -1973,6 +2080,7 @@ impl RetroForgeApp {
                         self.send_command(core_thread::CoreCommand::SetLayerExtraction(
                             self.show_layers,
                         ));
+                        ui.close();
                     }
                     // Ticket W4-06a criterion 3: layout is saved the
                     // moment the window closes (not only on process exit
@@ -1982,9 +2090,11 @@ impl RetroForgeApp {
                     if ui
                         .checkbox(&mut self.debug_panels.visible, "Debug Viewers")
                         .changed()
-                        && !self.debug_panels.visible
                     {
-                        self.debug_panels.save();
+                        if !self.debug_panels.visible {
+                            self.debug_panels.save();
+                        }
+                        ui.close();
                     }
                 });
 
@@ -2164,8 +2274,23 @@ impl RetroForgeApp {
             ui.horizontal(|ui| {
                 let has_core = self.core.is_some();
                 let run_label = if self.running { "Pause" } else { "Run" };
+                // The primary action, and the only one in the bar drawn
+                // in the accent. Before W10-01 it was one of sixteen
+                // identical grey rectangles; the eye had nothing to find.
+                let accent = ui.visuals().selection.stroke.color;
                 if ui
-                    .add_enabled(has_core, egui::Button::new(run_label))
+                    .add_enabled(
+                        has_core,
+                        egui::Button::new(egui::RichText::new(run_label).strong())
+                            .fill(
+                                ui.visuals()
+                                    .widgets
+                                    .inactive
+                                    .bg_fill
+                                    .lerp_to_gamma(accent, 0.30),
+                            )
+                            .stroke(egui::Stroke::new(1.0, accent)),
+                    )
                     .clicked()
                 {
                     self.running = !self.running;
@@ -2204,7 +2329,21 @@ impl RetroForgeApp {
                     &self.current_game_settings,
                     self.profile_matched,
                 );
-                let response = ui.button(badge);
+                // A CHIP, not a button. It is a status readout that
+                // happens to carry a hover breakdown and a hold-to-peek
+                // gesture — rendering it as a button put it in a row of
+                // buttons looking exactly like them, so it read as
+                // "something to press" rather than "what you are looking
+                // at". `frame(false)` plus a sense keeps both behaviours
+                // and drops the affordance that was lying.
+                let response = ui.add(
+                    egui::Button::new(egui::RichText::new(badge).strong())
+                        .frame(false)
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            ui.visuals().widgets.inactive.bg_fill,
+                        )),
+                );
                 let breakdown = crate::enhance_ui::badge_breakdown(
                     &self.current_game_settings,
                     self.profile_matched,
@@ -2299,20 +2438,26 @@ impl RetroForgeApp {
     /// unmatched one — the same rule design review G-21 imposed on the
     /// library's two empty states (`Self::library_window`).
     fn profile_chip(&mut self, ui: &mut egui::Ui) {
+        // U+25C7 WHITE DIAMOND and U+25CB WHITE CIRCLE, both present in
+        // egui's bundled font. The first draft used U+25C6 BLACK DIAMOND,
+        // which is NOT, and rendered as a hollow tofu box in the shipped
+        // window — visible only in a screenshot, which is why the
+        // screenshot is part of this ticket's evidence and not a
+        // formality.
         match (&self.matched_profile, self.profile_matched) {
             (Some(path), _) => {
                 let name: String = path.file_stem().map_or_else(
                     || path.display().to_string(),
                     |s| s.to_string_lossy().into(),
                 );
-                ui.label(format!("\u{25c6} {}", elide_front(&name)))
+                ui.label(format!("\u{25c7} {}", elide_front(&name)))
                     .on_hover_text(path.display().to_string());
             }
             (None, true) => {
-                ui.label("\u{25c6} profile");
+                ui.label("\u{25c7} profile");
             }
             (None, false) => {
-                ui.weak("\u{25c7} no profile");
+                ui.weak("\u{25cb} no profile");
             }
         }
     }
@@ -2408,6 +2553,7 @@ impl RetroForgeApp {
         let mut open = self.show_settings;
         let mut changed = false;
         egui::Window::new("Settings")
+            .default_pos(egui::pos2(PANEL_WINDOW_ORIGIN[0], PANEL_WINDOW_ORIGIN[1]))
             .open(&mut open)
             .collapsible(true)
             .resizable(true)
@@ -2721,6 +2867,7 @@ impl RetroForgeApp {
         let mut rescan = false;
         let mut to_play: Option<std::path::PathBuf> = None;
         egui::Window::new("Library")
+            .default_pos(egui::pos2(PANEL_WINDOW_ORIGIN[0], PANEL_WINDOW_ORIGIN[1]))
             .open(&mut open)
             .collapsible(true)
             .resizable(true)
@@ -2882,99 +3029,114 @@ impl RetroForgeApp {
         let mut changed = false;
         let mut open = self.show_controls;
         egui::Window::new("Controls")
+            .default_pos(egui::pos2(PANEL_WINDOW_ORIGIN[0], PANEL_WINDOW_ORIGIN[1]))
             .open(&mut open)
             .collapsible(true)
             .resizable(true)
+            // Ticket W10-01. Two players x every NES button, each with a
+            // Clear, is 1105 px of content — TALLER THAN THE WHOLE APP
+            // WINDOW, which `main.rs` opens at 720. egui cannot honour a
+            // position for a window that does not fit, so it pinned this
+            // one to y=0, on top of the menu bar, and the File/View/
+            // Enhance menus became unclickable while it was open. Bound
+            // it to the viewport and scroll the overflow.
+            // `viewport_rect`, not `screen_rect`: egui 0.35 renamed it
+            // (verified in egui-0.35.0 context.rs:2819 — project law 2,
+            // this crate pins versions newer than most training data).
+            .max_height(ctx.viewport_rect().height() - PANEL_WINDOW_ORIGIN[1] - 24.0)
             .show(ctx, |ui| {
                 ui.label(&self.bindings_status);
                 ui.separator();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for port in 0..2usize {
+                        ui.heading(format!("Player {}", port + 1));
+                        egui::Grid::new(format!("controls-port-{port}"))
+                            .num_columns(3)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for button in rf_input::NesButton::ALL {
+                                    ui.label(button.name());
 
-                for port in 0..2usize {
-                    ui.heading(format!("Player {}", port + 1));
-                    egui::Grid::new(format!("controls-port-{port}"))
-                        .num_columns(3)
-                        .striped(true)
-                        .show(ui, |ui| {
-                            for button in rf_input::NesButton::ALL {
-                                ui.label(button.name());
-
-                                let bound = self
-                                    .bindings
-                                    .keys
-                                    .entries()
-                                    .iter()
-                                    .find(|(_, p, b)| *p == port && *b == button)
-                                    .map(|(key, _, _)| key.name());
-                                let label = match (self.awaiting_key, bound) {
-                                    (Some((p, b)), _) if p == port && b == button => {
-                                        "press a key\u{2026}".to_string()
-                                    }
-                                    (_, Some(name)) => name.to_string(),
-                                    (_, None) => "\u{2014}".to_string(),
-                                };
-                                if ui.button(label).clicked() {
-                                    self.awaiting_key = Some((port, button));
-                                }
-
-                                if ui.small_button("Clear").clicked() {
-                                    let bound_key = self
+                                    let bound = self
                                         .bindings
                                         .keys
                                         .entries()
                                         .iter()
                                         .find(|(_, p, b)| *p == port && *b == button)
-                                        .map(|(key, _, _)| *key);
-                                    if let Some(key) = bound_key {
-                                        self.bindings.keys.unbind(key);
-                                        changed = true;
+                                        .map(|(key, _, _)| key.name());
+                                    let label = match (self.awaiting_key, bound) {
+                                        (Some((p, b)), _) if p == port && b == button => {
+                                            "press a key\u{2026}".to_string()
+                                        }
+                                        (_, Some(name)) => name.to_string(),
+                                        (_, None) => "\u{2014}".to_string(),
+                                    };
+                                    if ui.button(label).clicked() {
+                                        self.awaiting_key = Some((port, button));
                                     }
-                                }
-                                ui.end_row();
-                            }
-                        });
-                    ui.separator();
-                }
 
-                ui.heading("Gamepad");
-                ui.label(format!(
-                    "{} pad(s) connected",
-                    self.pad_router.connected_count()
-                ));
-                egui::Grid::new("controls-pad")
-                    .num_columns(2)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        for pad_button in rf_input::PadButton::ALL {
-                            ui.label(pad_button.name());
-                            let current = self.bindings.pads.lookup(pad_button);
-                            let label = current.map_or("\u{2014}", rf_input::NesButton::name);
-                            egui::ComboBox::from_id_salt(pad_button.name())
-                                .selected_text(label)
-                                .show_ui(ui, |ui| {
-                                    if ui.selectable_label(current.is_none(), "\u{2014}").clicked()
-                                    {
-                                        self.bindings.pads.unbind(pad_button);
-                                        changed = true;
-                                    }
-                                    for nes in rf_input::NesButton::ALL {
-                                        if ui
-                                            .selectable_label(current == Some(nes), nes.name())
-                                            .clicked()
-                                        {
-                                            self.bindings.pads.bind(pad_button, nes);
+                                    if ui.small_button("Clear").clicked() {
+                                        let bound_key = self
+                                            .bindings
+                                            .keys
+                                            .entries()
+                                            .iter()
+                                            .find(|(_, p, b)| *p == port && *b == button)
+                                            .map(|(key, _, _)| *key);
+                                        if let Some(key) = bound_key {
+                                            self.bindings.keys.unbind(key);
                                             changed = true;
                                         }
                                     }
-                                });
-                            ui.end_row();
-                        }
-                    });
+                                    ui.end_row();
+                                }
+                            });
+                        ui.separator();
+                    }
 
-                ui.separator();
-                if ui.button("Restore defaults").clicked() {
-                    self.bindings = rf_input::Bindings::default();
-                    changed = true;
-                }
+                    ui.heading("Gamepad");
+                    ui.label(format!(
+                        "{} pad(s) connected",
+                        self.pad_router.connected_count()
+                    ));
+                    egui::Grid::new("controls-pad")
+                        .num_columns(2)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for pad_button in rf_input::PadButton::ALL {
+                                ui.label(pad_button.name());
+                                let current = self.bindings.pads.lookup(pad_button);
+                                let label = current.map_or("\u{2014}", rf_input::NesButton::name);
+                                egui::ComboBox::from_id_salt(pad_button.name())
+                                    .selected_text(label)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(current.is_none(), "\u{2014}")
+                                            .clicked()
+                                        {
+                                            self.bindings.pads.unbind(pad_button);
+                                            changed = true;
+                                        }
+                                        for nes in rf_input::NesButton::ALL {
+                                            if ui
+                                                .selectable_label(current == Some(nes), nes.name())
+                                                .clicked()
+                                            {
+                                                self.bindings.pads.bind(pad_button, nes);
+                                                changed = true;
+                                            }
+                                        }
+                                    });
+                                ui.end_row();
+                            }
+                        });
+
+                    ui.separator();
+                    if ui.button("Restore defaults").clicked() {
+                        self.bindings = rf_input::Bindings::default();
+                        changed = true;
+                    }
+                });
             });
         self.show_controls = open;
         if changed {
@@ -3001,6 +3163,7 @@ impl RetroForgeApp {
             return;
         }
         egui::Window::new("Layers (debug)")
+            .default_pos(egui::pos2(PANEL_WINDOW_ORIGIN[0], PANEL_WINDOW_ORIGIN[1]))
             .collapsible(true)
             .resizable(true)
             .show(ctx, |ui| {
@@ -3049,6 +3212,7 @@ impl RetroForgeApp {
             return;
         }
         egui::Window::new("Debug Viewers")
+            .default_pos(egui::pos2(PANEL_WINDOW_ORIGIN[0], PANEL_WINDOW_ORIGIN[1]))
             .collapsible(true)
             .resizable(true)
             .default_size([640.0, 480.0])
@@ -3132,6 +3296,7 @@ impl RetroForgeApp {
         }
         let mut open = self.show_enhance;
         egui::Window::new("Enhance")
+            .default_pos(egui::pos2(PANEL_WINDOW_ORIGIN[0], PANEL_WINDOW_ORIGIN[1]))
             .open(&mut open)
             .show(ctx, |ui| {
                 let rows = crate::enhance_ui::feature_rows(
