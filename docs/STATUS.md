@@ -754,3 +754,54 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   audio approximate (W7-08), no CI since ~2026-08-07 so Linux and the
   software-rasterizer path are verified by nothing, and no
   commercial-title profile authored despite the ruling permitting them.
+
+- **THE ENGINE DOES WHAT THE VISION PROMISES. THE PRODUCT DOES NOT YET.**
+  (2026-08-26, auditing `docs/VISION.md` against *reachability* rather
+  than against tests.) VISION §2 promises five things on top of accurate
+  cores: *"de-flickered sprites, ultrawide terrain, whole levels on one
+  screen, replaced art, live overlays."* A user running RetroForge today
+  can reach **two** of them.
+
+  The decisive evidence is one enum. `CoreCommand` has exactly **one**
+  enhancement variant — `SetSpriteOverlay`. There is no command for
+  temporal de-flicker, widescreen, full-level view, HD packs or scripts,
+  so the core thread cannot be told to do any of them.
+
+  | VISION §2 promise | Engine | Reachable in the app |
+  |---|---|---|
+  | De-flicker: sprite-limit bypass | yes | **yes** (8 call sites) |
+  | Ultrawide terrain | yes | **yes** (photographed, frame 1200) |
+  | De-flicker: temporal | `sprite_historian` + red-fixture proof | **no** — `.deflicker` has 0 readers outside the checkbox |
+  | Whole levels on one screen | `level_view::LevelSession` + demos | **no** — `open`/`scene` called from no non-test code |
+  | Replaced art (HD packs) | `rf_enhance::hdpack` + real-pack test | **no** — zero references in `crates/retroforge/src` |
+  | Live overlays (Lua) | `rf_plugin_sdk::ScriptHost` + demo | **no** — `script_panel` is an orphaned module |
+  | Widescreen: decoded | `widescreen.rs`, 441 lines, 8 tests | **no** — `WidescreenPolicies` has no caller in the product |
+
+  **Why the test suite never said so.** Every demo that proves these
+  features drives the LIBRARIES directly — `level_view_demo.rs` uses
+  `LevelSession` and `EmuStepper`, never `RetroForgeApp`; the same for
+  `lua_overlay_demo.rs`, `demo_capture.rs` and
+  `mesen_hdpack_real.rs`. They are honest proofs that the capability
+  exists, and they would all stay green forever if the shipped
+  application never called any of it. The MVP checklist items they
+  satisfy were satisfied legitimately; what nobody checked was whether a
+  *user* could get at them.
+
+  This is the same failure shape as the three orphan findings this arc —
+  `accessibility.rs` unimported (W10-01), `example-mode7` declaring
+  `room_grid` and decoding nothing (W9-08), `script_panel` unreferenced
+  (found today) — but at feature scale rather than module scale.
+
+  **W11 filed: six tickets, 36 points.** W11-01 temporal de-flicker,
+  W11-02 full-level view, W11-03 decoded widescreen, W11-04 Lua/plugin
+  host, W11-05 HD packs, W11-06 the ten curated profiles VISION §5 asks
+  for (there are five, all against our own fixtures, and Brad's
+  2026-08-20 ruling permitting commercial-title profiles from published
+  documentation is still unused). W11-06 is sequenced AFTER W11-02 on
+  purpose: a profile whose decoded level cannot be seen in the app is a
+  profile nobody can check by looking, and authoring ten of those would
+  multiply unverifiable content.
+
+  Each W11 ticket's acceptance requires an end-to-end test that drives
+  `RetroForgeApp` — precisely because the existing library-level proofs
+  are what let this go unnoticed.

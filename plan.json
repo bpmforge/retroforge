@@ -4959,6 +4959,181 @@
    "points": 2,
    "status": "todo",
    "stories": []
+  },
+  {
+   "id": "W11-01",
+   "title": "Temporal de-flicker reaches the running app",
+   "phase": 11,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-enhance/**",
+    "docs/design/**",
+    "docs/STATUS.md",
+    "plan.json"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "toggling 'De-flicker: temporal' in the Enhance workspace changes what the running emulator draws, not only a persisted bool",
+    "the mode-invariant guarantee still holds with it on: per-frame CORE state hashes are identical to Accuracy (ARCHITECTURE §2, law 6) — it is an overlay, never a perturbation",
+    "an end-to-end test drives it through RetroForgeApp, not through rf_enhance directly; the existing proof (rf_scroller_gem_blink_red_fixture) exercises the library and would stay green if the app never called it"
+   ],
+   "notes": [
+    "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. The evidence: `CoreCommand` has exactly one enhancement variant, `SetSpriteOverlay`. There is no command for de-flicker, widescreen, full-level view, HD packs or scripts, so the core thread cannot be told to do any of them.",
+    "`rf_enhance::sprite_historian::SpriteHistorian` is real and has its own red-fixture proof (crates/rf-enhance/tests/rf_scroller_gem_blink_red_fixture.rs, the RF-Scroller >8-sprites-per-scanline gem scene). `GameSettings::deflicker` exists, is persisted, and is offered as a checkbox.",
+    "MEASURED: `.deflicker` is read by ZERO call sites outside the UI modules that draw the checkbox. The setting round-trips to disk and is consumed by nothing."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W11-02",
+   "title": "Full-level view reaches the running app",
+   "phase": 11,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-enhance/**",
+    "docs/design/**",
+    "docs/STATUS.md",
+    "plan.json"
+   ],
+   "depends_on": [
+    "W11-01"
+   ],
+   "acceptance": [
+    "with a matching profile loaded, enabling 'Full-level view' renders the decoded level in the app — the thing VISION §2 calls 'whole levels on one screen'",
+    "the un-profiled path is unchanged and still says why the feature is unavailable rather than silently doing nothing",
+    "an end-to-end test drives it through RetroForgeApp; level_view_demo.rs drives LevelSession directly and would stay green if the app never called it"
+   ],
+   "notes": [
+    "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. The evidence: `CoreCommand` has exactly one enhancement variant, `SetSpriteOverlay`. There is no command for de-flicker, widescreen, full-level view, HD packs or scripts, so the core thread cannot be told to do any of them.",
+    "`crate::level_view::LevelSession` is real: `open`, `scene`, `entity_table_range`, plus offline demos (level_view_demo.rs, rf-enhance/tests/level_view_offline.rs) that produce artefacts.",
+    "MEASURED: `LevelSession::open` and `.scene(` are called from NO non-test code. app.rs uses only `level_view::find_matching_profile`, and only to populate the status bar's profile chip. The decoded level never reaches the screen in the shipped product.",
+    "This is the headline of the RF-Scroller demo and one of the four differentiators in VISION §3. It being library-only is the single largest gap between what the docs claim and what a user can do."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W11-03",
+   "title": "Decoded widescreen reaches the running app",
+   "phase": 11,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-enhance/**",
+    "docs/design/**",
+    "docs/STATUS.md",
+    "plan.json"
+   ],
+   "depends_on": [
+    "W11-02"
+   ],
+   "acceptance": [
+    "with a profile declaring widescreen policies, enabling 'Widescreen: decoded' widens what the app draws, per the profile's per-layer policy",
+    "policy refusals are surfaced, not swallowed: a layer the policy declines to widen says so (bsnes-hd's lesson, and the honesty contract)",
+    "an end-to-end test drives it through RetroForgeApp"
+   ],
+   "notes": [
+    "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. The evidence: `CoreCommand` has exactly one enhancement variant, `SetSpriteOverlay`. There is no command for de-flicker, widescreen, full-level view, HD packs or scripts, so the core thread cannot be told to do any of them.",
+    "`rf_enhance::widescreen` is real: 441 lines, 8 tests, `BgPolicy`, `LayerView`, `decide`, `WidescreenPolicies::from_profile`.",
+    "MEASURED: `WidescreenPolicies` and `widescreen::` are referenced by NOTHING in crates/retroforge/src or crates/rf-renderer/src. The policy engine has no caller in the product."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W11-04",
+   "title": "Lua overlays and the plugin host reach the running app",
+   "phase": 11,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-enhance/**",
+    "docs/design/**",
+    "docs/STATUS.md",
+    "plan.json"
+   ],
+   "depends_on": [
+    "W11-01"
+   ],
+   "acceptance": [
+    "a user can load and run a Lua overlay from the app, within the sandbox and budget rf_plugin_sdk already enforces",
+    "the capability prompt (FR-PLUG-002: plugins declare what they can do and ask before writing memory) is shown by the APP, not only modelled in the SDK",
+    "crate::script_panel stops being an orphan — its capability/status/ledger lines are rendered somewhere a user can see"
+   ],
+   "notes": [
+    "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. The evidence: `CoreCommand` has exactly one enhancement variant, `SetSpriteOverlay`. There is no command for de-flicker, widescreen, full-level view, HD packs or scripts, so the core thread cannot be told to do any of them.",
+    "`rf_plugin_sdk::ScriptHost`/`ScriptState` exist with a sandbox and budgets, and lua_overlay_demo.rs proves a script draws a live player-position overlay from profile-published addresses — an MVP checklist item.",
+    "MEASURED: `crate::script_panel` (capability_lines, status_line, ledger_lines) is called from NOWHERE. It is a third orphaned module, after `accessibility` (fixed in W10-01) and this. The Lua console tab in debug_dock renders pre-computed data, not a live host.",
+    "The demo drives the library directly and never touches RetroForgeApp, so it would stay green forever if the app never gained a script host."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W11-05",
+   "title": "Mesen HD packs reach the running app",
+   "phase": 11,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-enhance/**",
+    "docs/design/**",
+    "docs/STATUS.md",
+    "plan.json"
+   ],
+   "depends_on": [
+    "W11-03"
+   ],
+   "acceptance": [
+    "a user can import a Mesen HD pack from the app and see replaced art in the running game",
+    "pack provenance and any refused/unmatched tiles are reported rather than silently skipped (NFR-010/FM-15's rule for refused inputs)",
+    "an end-to-end test drives it through RetroForgeApp"
+   ],
+   "notes": [
+    "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. The evidence: `CoreCommand` has exactly one enhancement variant, `SetSpriteOverlay`. There is no command for de-flicker, widescreen, full-level view, HD packs or scripts, so the core thread cannot be told to do any of them.",
+    "`rf_enhance::hdpack` is real and `crates/rf-enhance/tests/mesen_hdpack_real.rs` runs against a real pack (scripts/local-gate.sh runs it).",
+    "MEASURED: no reference to hdpack/HdPack anywhere in crates/retroforge/src. 'Replaced art' is one of the five things VISION §2 promises, and it is not reachable in the product."
+   ],
+   "points": 5,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W11-06",
+   "title": "Ten curated game profiles, the VISION §5 number",
+   "phase": 11,
+   "crate": "retroforge",
+   "write_scope": [
+    "profiles/**",
+    "crates/rf-profiles/**",
+    "docs/**",
+    "plan.json"
+   ],
+   "depends_on": [
+    "W11-02"
+   ],
+   "acceptance": [
+    "at least ten profiles ship under /profiles, each with the FR-PROF-003 source citation the loader enforces",
+    "they cover more than one decoder family and more than one console, so the count is breadth rather than ten of the same shape",
+    "every claim is clean-room from published documentation (NFR-011); transcribed-from-disassembly is not acceptable provenance no matter how convenient",
+    "law 5 holds absolutely: no ROM bytes in git, and no copyrighted title hardcoded in engine code — a profile is data under /profiles, never a name baked into a crate"
+   ],
+   "notes": [
+    "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. (This one is a content gap rather than a wiring gap.)",
+    "VISION §5's 18-month criterion is '>=10 curated game profiles'. There are FIVE: nes/rf-rooms, nes/rf-scroller, nes/rf-scroller-demo, snes/example-mode7, snes/rf-rooms-flat — and every one is against our own fixtures.",
+    "Brad ruled 2026-08-20 that profiles for real, documented commercial titles ARE permitted, citing published documentation (DataCrystal and similar). THE PERMISSION HAS NEVER BEEN USED. W9-08's handoff records why: verifying real addresses against DataCrystal-class sources was not done, and shipping unverified addresses would be worse than shipping none.",
+    "Sequenced after W11-02 deliberately: a profile whose decoded level cannot be SEEN in the app is a profile nobody can check by looking. Authoring ten of those would multiply unverifiable content."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
   }
  ]
 }
