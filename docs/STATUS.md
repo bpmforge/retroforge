@@ -986,3 +986,22 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   Gate: fmt, clippy `-D warnings`, **workspace 1665 passing / 32
   ignored**, validate-arch, validate-plan — green. Photographed in
   `target/ui-tour/10-lua-overlay.png`.
+
+- **W10-05 — the Map tab feeds itself** (2026-08-26).
+  `maybe_request_canvas_snapshot` returned early unless
+  `camera == Ultrawide`, so §3.3's Map tab read "Nothing stitched yet"
+  while the canvas demonstrably existed. A user had to know to flip an
+  unrelated View-menu toggle, and nothing said so. Snapshots are now
+  requested when the workspace is **open**, on the same
+  "closed panels cost nothing" principle `debug_dock` uses for
+  `SetEventMask` — and with the same throttle, because
+  `CanvasAccumulator::current_canvas` clones the whole stitched canvas.
+
+  The test asserts **both** directions: nothing is composited before
+  anyone asks to see it (law 6 — otherwise the fix trades one bug for a
+  more expensive one), and opening the workspace alone is enough. It runs
+  on a real `WgpuTestRenderer`, since without a GPU it would pass by way
+  of "no GPU device" rather than by way of the fix.
+
+  Gate: fmt, clippy `-D warnings`, **workspace 1666 passing / 32
+  ignored**, validate-arch, validate-plan — green.

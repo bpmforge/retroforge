@@ -2008,7 +2008,26 @@ impl RetroForgeApp {
     }
 
     fn maybe_request_canvas_snapshot(&mut self) {
-        if self.camera != CameraToggle::Ultrawide || self.core.is_none() {
+        if self.core.is_none() {
+            return;
+        }
+        // Ticket W10-05: the Map TAB is a consumer of the stitched canvas
+        // in its own right, not a passenger on the camera toggle.
+        //
+        // It used to be gated on `camera == Ultrawide` alone, so a tab
+        // called "Map" sat reading "Nothing stitched yet" while the
+        // canvas demonstrably existed — the user had to know to flip an
+        // unrelated View-menu toggle, and nothing said so. Found by
+        // photographing the workspace at frame 308 of a live session
+        // against a canvas the same tour rendered in full at frame 1200.
+        //
+        // Same throttle either way: `CanvasAccumulator::current_canvas`
+        // clones the whole stitched canvas ("tens of MB/s for a level of
+        // any real size", W4-03e), so driving it from tab visibility must
+        // keep the interval, not drop it — which is why this is one
+        // condition and not a second request path.
+        let wanted = self.camera == CameraToggle::Ultrawide || self.show_enhance;
+        if !wanted {
             return;
         }
         if self.ultrawide_refresh_countdown == 0 {
@@ -3731,6 +3750,14 @@ impl RetroForgeApp {
     pub fn set_library_roots_for_test(&mut self, roots: Vec<std::path::PathBuf>) {
         self.library_roots = roots;
         self.rescan_library();
+    }
+
+    /// Whether a stitched-canvas texture exists for the Map tab
+    /// (ticket W10-05).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn has_stitched_map_for_test(&self) -> bool {
+        self.ultrawide_texture.is_some()
     }
 
     /// Load a plugin directory as File > Load script… does (W11-04).

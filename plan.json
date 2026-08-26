@@ -4957,7 +4957,7 @@
     "COST NOTE, from W3-03a's precedent: snapshots are not free — CanvasAccumulator::current_canvas clones the whole stitched canvas, 'tens of MB/s for a level of any real size' — which is why the existing code throttles to one per CANVAS_SNAPSHOT_REFRESH_INTERVAL repaints. Driving it from tab visibility must keep that throttle, not drop it."
    ],
    "points": 2,
-   "status": "todo",
+   "status": "done",
    "stories": []
   },
   {
