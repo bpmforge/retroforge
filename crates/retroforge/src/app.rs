@@ -1150,64 +1150,76 @@ impl RetroForgeApp {
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {
-                match self.author_watch.as_ref() {
-                    Some(w) => {
-                        let _ =
-                            ui.selectable_label(false, format!("watching {}", w.path().display()));
-                    }
-                    None => {
-                        let _ = ui.selectable_label(
-                            false,
-                            "No profile matched this ROM \u{2014} create one below.",
-                        );
-                    }
-                }
-                ui.separator();
-                // Ticket W9-02. Above the decode preview, and before the
-                // `author_watch` check that used to end this closure: the
-                // editor's whole point is that a profile can be brought
-                // into existence when there is no profile yet, so it
-                // cannot sit behind a control that requires one.
-                self.profile_editor_ui(ui);
-                if self.author_watch.is_none() {
-                    return;
-                }
-                ui.separator();
-                // §3.5's "error list inline". Errors first: a preview
-                // shown above its own errors invites the author to read
-                // the stale picture and miss why it is stale.
-                for e in &self.author_outcome.errors {
-                    let _ = ui.selectable_label(
-                        false,
-                        egui::RichText::new(e.line())
-                            .color(egui::Color32::from_rgb(0xE0, 0x50, 0x40)),
-                    );
-                }
-                for w in &self.author_outcome.warnings {
-                    let _ = ui.selectable_label(
-                        false,
-                        egui::RichText::new(w).color(egui::Color32::from_rgb(0xE0, 0x80, 0x30)),
-                    );
-                }
-                ui.separator();
-                match &self.author_outcome.level {
-                    Some(level) => {
-                        let _ = ui.selectable_label(
-                            false,
-                            format!("preview {}x{} metatiles", level.width, level.height),
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(crate::authoring::preview_text(level, 48, 14))
-                                    .monospace(),
-                            )
-                            .sense(egui::Sense::hover()),
-                        );
-                    }
-                    None => {
-                        let _ = ui.selectable_label(false, "no preview");
-                    }
-                }
+                // Ticket W10-04: the authoring preview is a decoded level
+                // rendered as text, whose length is the level's size —
+                // unbounded by anything this window controls.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        match self.author_watch.as_ref() {
+                            Some(w) => {
+                                let _ = ui.selectable_label(
+                                    false,
+                                    format!("watching {}", w.path().display()),
+                                );
+                            }
+                            None => {
+                                let _ = ui.selectable_label(
+                                    false,
+                                    "No profile matched this ROM \u{2014} create one below.",
+                                );
+                            }
+                        }
+                        ui.separator();
+                        // Ticket W9-02. Above the decode preview, and before the
+                        // `author_watch` check that used to end this closure: the
+                        // editor's whole point is that a profile can be brought
+                        // into existence when there is no profile yet, so it
+                        // cannot sit behind a control that requires one.
+                        self.profile_editor_ui(ui);
+                        if self.author_watch.is_none() {
+                            return;
+                        }
+                        ui.separator();
+                        // §3.5's "error list inline". Errors first: a preview
+                        // shown above its own errors invites the author to read
+                        // the stale picture and miss why it is stale.
+                        for e in &self.author_outcome.errors {
+                            let _ = ui.selectable_label(
+                                false,
+                                egui::RichText::new(e.line())
+                                    .color(egui::Color32::from_rgb(0xE0, 0x50, 0x40)),
+                            );
+                        }
+                        for w in &self.author_outcome.warnings {
+                            let _ = ui.selectable_label(
+                                false,
+                                egui::RichText::new(w)
+                                    .color(egui::Color32::from_rgb(0xE0, 0x80, 0x30)),
+                            );
+                        }
+                        ui.separator();
+                        match &self.author_outcome.level {
+                            Some(level) => {
+                                let _ = ui.selectable_label(
+                                    false,
+                                    format!("preview {}x{} metatiles", level.width, level.height),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(crate::authoring::preview_text(
+                                            level, 48, 14,
+                                        ))
+                                        .monospace(),
+                                    )
+                                    .sense(egui::Sense::hover()),
+                                );
+                            }
+                            None => {
+                                let _ = ui.selectable_label(false, "no preview");
+                            }
+                        }
+                    });
             });
         self.show_author = open;
     }
@@ -1284,76 +1296,86 @@ impl RetroForgeApp {
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {
-                if self.states_dir().is_none() {
-                    ui.label("No ROM open — save states are per game.");
-                }
-                for info in &self.state_slots {
-                    ui.horizontal(|ui| {
-                        let _ = ui.selectable_label(false, info.id.label());
-                        match &info.saved {
-                            Some(saved) => {
-                                // The two flags FRONTEND_UI §3.2 names,
-                                // plus the timestamp.
-                                //
-                                // `Label::sense(hover)` rather than a
-                                // bare `ui.label`: a plain label
-                                // contributes NO node to the
-                                // accessibility tree, so a screen reader
-                                // — and W4-09's harness, which is the
-                                // same tree — cannot see the mode badge
-                                // or the mods warning at all. Ticket
-                                // W4-09 recorded this trap for the
-                                // emulator viewport; it applies to any
-                                // information-bearing label, and these
-                                // three are the ones a user opens this
-                                // modal to read.
-                                // `selectable_label`, not `Label` with a
-                                // hover sense: measured against the real
-                                // accessibility tree, neither a bare
-                                // `ui.label` NOR a hover-sensed `Label`
-                                // contributes a node, so both are
-                                // invisible to a screen reader and to
-                                // W4-09's harness. A selectable label
-                                // renders the same and is a real widget.
-                                let badge = |ui: &mut egui::Ui, text: String| {
-                                    let _ = ui.selectable_label(false, text);
-                                };
-                                badge(ui, saved.mode.label().to_string());
-                                if saved.contains_mods {
-                                    let _ = ui.selectable_label(
-                                        false,
-                                        egui::RichText::new("\u{26a0} contains mods")
-                                            .color(egui::Color32::from_rgb(0xE0, 0x80, 0x30)),
-                                    );
-                                }
-                                badge(ui, Self::format_timestamp(saved.timestamp));
-                                badge(
-                                    ui,
-                                    if saved.thumbnail.is_some() {
-                                        "thumbnail".to_string()
-                                    } else {
-                                        "no thumbnail".to_string()
-                                    },
-                                );
-                                if ui.button(format!("Load {}", info.id.label())).clicked() {
-                                    action = Some((info.id, false));
-                                }
-                            }
-                            None => {
-                                let _ = ui.selectable_label(false, "empty");
-                            }
+                // Ticket W10-04: ten slots plus auto-slots, each with a
+                // screenshot, a timestamp and a mode — taller than a
+                // window bounded to a 720px viewport.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if self.states_dir().is_none() {
+                            ui.label("No ROM open — save states are per game.");
                         }
-                        if ui.button(format!("Save {}", info.id.label())).clicked() {
-                            action = Some((info.id, true));
+                        for info in &self.state_slots {
+                            ui.horizontal(|ui| {
+                                let _ = ui.selectable_label(false, info.id.label());
+                                match &info.saved {
+                                    Some(saved) => {
+                                        // The two flags FRONTEND_UI §3.2 names,
+                                        // plus the timestamp.
+                                        //
+                                        // `Label::sense(hover)` rather than a
+                                        // bare `ui.label`: a plain label
+                                        // contributes NO node to the
+                                        // accessibility tree, so a screen reader
+                                        // — and W4-09's harness, which is the
+                                        // same tree — cannot see the mode badge
+                                        // or the mods warning at all. Ticket
+                                        // W4-09 recorded this trap for the
+                                        // emulator viewport; it applies to any
+                                        // information-bearing label, and these
+                                        // three are the ones a user opens this
+                                        // modal to read.
+                                        // `selectable_label`, not `Label` with a
+                                        // hover sense: measured against the real
+                                        // accessibility tree, neither a bare
+                                        // `ui.label` NOR a hover-sensed `Label`
+                                        // contributes a node, so both are
+                                        // invisible to a screen reader and to
+                                        // W4-09's harness. A selectable label
+                                        // renders the same and is a real widget.
+                                        let badge = |ui: &mut egui::Ui, text: String| {
+                                            let _ = ui.selectable_label(false, text);
+                                        };
+                                        badge(ui, saved.mode.label().to_string());
+                                        if saved.contains_mods {
+                                            let _ = ui.selectable_label(
+                                                false,
+                                                egui::RichText::new("\u{26a0} contains mods")
+                                                    .color(egui::Color32::from_rgb(
+                                                        0xE0, 0x80, 0x30,
+                                                    )),
+                                            );
+                                        }
+                                        badge(ui, Self::format_timestamp(saved.timestamp));
+                                        badge(
+                                            ui,
+                                            if saved.thumbnail.is_some() {
+                                                "thumbnail".to_string()
+                                            } else {
+                                                "no thumbnail".to_string()
+                                            },
+                                        );
+                                        if ui.button(format!("Load {}", info.id.label())).clicked()
+                                        {
+                                            action = Some((info.id, false));
+                                        }
+                                    }
+                                    None => {
+                                        let _ = ui.selectable_label(false, "empty");
+                                    }
+                                }
+                                if ui.button(format!("Save {}", info.id.label())).clicked() {
+                                    action = Some((info.id, true));
+                                }
+                            });
+                        }
+                        if !self.state_warnings.is_empty() {
+                            ui.separator();
+                            for line in &self.state_warnings {
+                                ui.colored_label(egui::Color32::from_rgb(0xE0, 0x80, 0x30), line);
+                            }
                         }
                     });
-                }
-                if !self.state_warnings.is_empty() {
-                    ui.separator();
-                    for line in &self.state_warnings {
-                        ui.colored_label(egui::Color32::from_rgb(0xE0, 0x80, 0x30), line);
-                    }
-                }
             });
         if let Some((slot, is_save)) = action {
             if is_save {
@@ -2895,190 +2917,210 @@ impl RetroForgeApp {
                 });
                 ui.separator();
 
-                match self.settings_tab {
-                    SettingsTab::Accessibility => {
-                        let a = &mut self.settings.accessibility;
-                        ui.label("UI scale");
-                        if ui
-                            .add(
-                                egui::Slider::new(
-                                    &mut a.ui_scale,
-                                    crate::accessibility::MIN_UI_SCALE
-                                        ..=crate::accessibility::MAX_UI_SCALE,
-                                )
-                                .text("x"),
-                            )
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                        ui.weak(
-                            "Bounded deliberately: below 0.5x the UI is unreadable, and a \
+                // Ticket W10-04: the tab strip stays put; the CONTENT
+                // scrolls. Paths lists one row per configured library
+                // folder, which is as many as the user has added, and the
+                // Accessibility tab's contrast readouts sit below a
+                // slider — both can exceed a window bounded to the
+                // viewport.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        match self.settings_tab {
+                            SettingsTab::Accessibility => {
+                                let a = &mut self.settings.accessibility;
+                                ui.label("UI scale");
+                                if ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut a.ui_scale,
+                                            crate::accessibility::MIN_UI_SCALE
+                                                ..=crate::accessibility::MAX_UI_SCALE,
+                                        )
+                                        .text("x"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                ui.weak(
+                                    "Bounded deliberately: below 0.5x the UI is unreadable, and a \
                              user who cannot read the UI cannot open this window to undo it \
                              (crate::accessibility's module doc).",
-                        );
-                        ui.separator();
+                                );
+                                ui.separator();
 
-                        ui.label("Contrast");
-                        if ui
-                            .checkbox(&mut a.high_contrast, "High-contrast palette")
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                        // The numbers, not a claim about them: these are
-                        // the ratios `accessibility`'s tests assert, read
-                        // from the palette actually in use.
-                        let p = self.settings.accessibility.palette();
-                        ui.weak(format!(
-                            "text {:.1}:1 · focus accent {:.1}:1 · WCAG AAA is {:.0}:1",
-                            p.text_contrast(),
-                            p.accent_contrast(),
-                            crate::accessibility::WCAG_AAA,
-                        ));
-                        ui.weak(
-                            "Off by default: high contrast is an accommodation, not an \
+                                ui.label("Contrast");
+                                if ui
+                                    .checkbox(&mut a.high_contrast, "High-contrast palette")
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                // The numbers, not a claim about them: these are
+                                // the ratios `accessibility`'s tests assert, read
+                                // from the palette actually in use.
+                                let p = self.settings.accessibility.palette();
+                                ui.weak(format!(
+                                    "text {:.1}:1 · focus accent {:.1}:1 · WCAG AAA is {:.0}:1",
+                                    p.text_contrast(),
+                                    p.accent_contrast(),
+                                    crate::accessibility::WCAG_AAA,
+                                ));
+                                ui.weak(
+                                    "Off by default: high contrast is an accommodation, not an \
                              improvement.",
-                        );
-                    }
-                    SettingsTab::Video => {
-                        ui.label("Scaling");
-                        for mode in crate::settings::ScaleMode::ALL {
-                            if ui
-                                .radio_value(
-                                    &mut self.settings.video.scale_mode,
-                                    mode,
-                                    mode.label(),
-                                )
-                                .changed()
-                            {
-                                changed = true;
+                                );
                             }
-                        }
-                        ui.separator();
+                            SettingsTab::Video => {
+                                ui.label("Scaling");
+                                for mode in crate::settings::ScaleMode::ALL {
+                                    if ui
+                                        .radio_value(
+                                            &mut self.settings.video.scale_mode,
+                                            mode,
+                                            mode.label(),
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                }
+                                ui.separator();
 
-                        ui.label("Shader");
-                        // W3-02a owns the shader set; until it lands the
-                        // only honest options are "none" and whatever a
-                        // config already names, so this is a text field
-                        // rather than a dropdown pretending to a catalogue.
-                        let mut shader = self.settings.video.shader.clone().unwrap_or_default();
-                        if ui.text_edit_singleline(&mut shader).changed() {
-                            self.settings.video.shader =
-                                (!shader.trim().is_empty()).then(|| shader.trim().to_string());
-                            changed = true;
-                        }
-                        ui.small(
+                                ui.label("Shader");
+                                // W3-02a owns the shader set; until it lands the
+                                // only honest options are "none" and whatever a
+                                // config already names, so this is a text field
+                                // rather than a dropdown pretending to a catalogue.
+                                let mut shader =
+                                    self.settings.video.shader.clone().unwrap_or_default();
+                                if ui.text_edit_singleline(&mut shader).changed() {
+                                    self.settings.video.shader = (!shader.trim().is_empty())
+                                        .then(|| shader.trim().to_string());
+                                    changed = true;
+                                }
+                                ui.small(
                             "Shader names arrive with W3-02a; empty means the plain pipeline.",
                         );
-                        ui.separator();
+                                ui.separator();
 
-                        if ui
-                            .checkbox(&mut self.settings.video.vsync, "V-sync")
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                        ui.small(
+                                if ui
+                                    .checkbox(&mut self.settings.video.vsync, "V-sync")
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                ui.small(
                             "Takes effect on restart (the window surface is created at startup).",
                         );
-                    }
-                    SettingsTab::Audio => {
-                        let mut device = self.settings.audio.device.clone().unwrap_or_default();
-                        ui.label("Output device (empty = system default)");
-                        if ui.text_edit_singleline(&mut device).changed() {
-                            self.settings.audio.device =
-                                (!device.trim().is_empty()).then(|| device.trim().to_string());
-                            changed = true;
-                        }
-                        ui.small("Takes effect on restart.");
-                        ui.separator();
+                            }
+                            SettingsTab::Audio => {
+                                let mut device =
+                                    self.settings.audio.device.clone().unwrap_or_default();
+                                ui.label("Output device (empty = system default)");
+                                if ui.text_edit_singleline(&mut device).changed() {
+                                    self.settings.audio.device = (!device.trim().is_empty())
+                                        .then(|| device.trim().to_string());
+                                    changed = true;
+                                }
+                                ui.small("Takes effect on restart.");
+                                ui.separator();
 
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut self.settings.audio.latency_ms, 10..=200)
-                                    .text("Buffer latency (ms)"),
-                            )
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                        ui.small(
+                                if ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut self.settings.audio.latency_ms,
+                                            10..=200,
+                                        )
+                                        .text("Buffer latency (ms)"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                ui.small(
                             "Lower is more responsive, higher survives a stalled frame. Takes \
                              effect on restart.",
                         );
-                        ui.separator();
+                                ui.separator();
 
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut self.settings.audio.volume, 0.0..=1.0)
-                                    .text("Volume"),
-                            )
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                    }
-                    SettingsTab::Paths => {
-                        ui.label("Library folders");
-                        let mut remove: Option<usize> = None;
-                        for (index, folder) in self
-                            .settings
-                            .paths
-                            .library_folders
-                            .clone()
-                            .iter()
-                            .enumerate()
-                        {
-                            ui.horizontal(|ui| {
-                                ui.label(folder.display().to_string());
-                                if ui.small_button("Remove").clicked() {
-                                    remove = Some(index);
+                                if ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut self.settings.audio.volume,
+                                            0.0..=1.0,
+                                        )
+                                        .text("Volume"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
                                 }
-                            });
-                        }
-                        if let Some(index) = remove {
-                            self.settings.paths.library_folders.remove(index);
-                            changed = true;
-                        }
-                        if ui.button("Add folder\u{2026}").clicked() {
-                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                if !self.settings.paths.library_folders.contains(&folder) {
-                                    self.settings.paths.library_folders.push(folder);
+                            }
+                            SettingsTab::Paths => {
+                                ui.label("Library folders");
+                                let mut remove: Option<usize> = None;
+                                for (index, folder) in self
+                                    .settings
+                                    .paths
+                                    .library_folders
+                                    .clone()
+                                    .iter()
+                                    .enumerate()
+                                {
+                                    ui.horizontal(|ui| {
+                                        ui.label(folder.display().to_string());
+                                        if ui.small_button("Remove").clicked() {
+                                            remove = Some(index);
+                                        }
+                                    });
+                                }
+                                if let Some(index) = remove {
+                                    self.settings.paths.library_folders.remove(index);
+                                    changed = true;
+                                }
+                                if ui.button("Add folder\u{2026}").clicked() {
+                                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                        if !self.settings.paths.library_folders.contains(&folder) {
+                                            self.settings.paths.library_folders.push(folder);
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                                ui.separator();
+
+                                ui.label("Cache");
+                                let mut cache = self
+                                    .settings
+                                    .paths
+                                    .cache_dir
+                                    .clone()
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_default();
+                                if ui.text_edit_singleline(&mut cache).changed() {
+                                    self.settings.paths.cache_dir = (!cache.trim().is_empty())
+                                        .then(|| std::path::PathBuf::from(cache.trim()));
+                                    changed = true;
+                                }
+                                ui.small(
+                                    "Empty = the default location under the config directory.",
+                                );
+                                if ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut self.settings.paths.cache_cap_mb,
+                                            128..=32_768,
+                                        )
+                                        .text("Cache cap (MB)"),
+                                    )
+                                    .changed()
+                                {
                                     changed = true;
                                 }
                             }
                         }
-                        ui.separator();
-
-                        ui.label("Cache");
-                        let mut cache = self
-                            .settings
-                            .paths
-                            .cache_dir
-                            .clone()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default();
-                        if ui.text_edit_singleline(&mut cache).changed() {
-                            self.settings.paths.cache_dir = (!cache.trim().is_empty())
-                                .then(|| std::path::PathBuf::from(cache.trim()));
-                            changed = true;
-                        }
-                        ui.small("Empty = the default location under the config directory.");
-                        if ui
-                            .add(
-                                egui::Slider::new(
-                                    &mut self.settings.paths.cache_cap_mb,
-                                    128..=32_768,
-                                )
-                                .text("Cache cap (MB)"),
-                            )
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                    }
-                }
+                    });
 
                 ui.separator();
                 ui.small(&self.bindings_status);

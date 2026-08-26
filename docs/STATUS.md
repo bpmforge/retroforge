@@ -1005,3 +1005,40 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
 
   Gate: fmt, clippy `-D warnings`, **workspace 1666 passing / 32
   ignored**, validate-arch, validate-plan — green.
+
+- **W10-04 — every surface that can overflow can scroll, and a lint that
+  keeps it that way** (2026-08-26). The audit found **five app windows
+  with no scroll area**: Settings (222 lines across four tabs, whose
+  Paths tab lists one row per library folder a user adds), Author (a
+  decoded level rendered as text), States (ten slots plus auto-slots),
+  and two that turned out to be genuinely bounded. Settings, Author and
+  States now scroll.
+
+  **The third criterion, answered.** It asked for a check that would
+  catch a NEW unscrollable surface *or a written statement of why none is
+  practical*. Both halves apply, and the split is the interesting part:
+
+  A **runtime** check is not practical, for reasons established by
+  trying. The accessibility tree cannot tell clipped from scrolled — egui
+  reports laid-out rects for `ScrollArea` children scrolled out of view,
+  so a probe on the Controls window reported 31 "clipped" nodes that were
+  every one of them reachable. A rendered frame cannot either: it shows
+  that content stops, not whether the rest is reachable, which is exactly
+  how I reviewed a cut-off profile inspector and saw nothing wrong.
+
+  A **source lint** is practical, and it catches the thing that actually
+  went wrong twice — a surface written without a scroll area that nobody
+  noticed. `tests/surfaces_can_scroll.rs` finds every window and
+  dock-pane function and requires a `ScrollArea` or an entry in a
+  `BOUNDED` list **with a stated reason**, where "it fits today" is
+  explicitly not one. It caught `enhance_window` on its first run — a
+  legitimate exception, since it hosts the §3.3 dock whose tabs scroll
+  themselves. A second test fails if `BOUNDED` names a function that no
+  longer exists, so an excuse cannot rot and be inherited by whatever
+  takes that name next. Both were verified to fail before being trusted.
+
+  The module doc is explicit that it is a lint: it cannot prove a
+  `ScrollArea` wraps the RIGHT content, only that one exists.
+
+  Gate: fmt, clippy `-D warnings`, **workspace 1668 passing / 32
+  ignored**, validate-arch, validate-plan — green. **W10 is now 5 of 5.**

@@ -4927,7 +4927,7 @@
     "WHY A TEST IS HARD, stated rather than hidden: an accessibility-tree walk cannot distinguish 'clipped and unreachable' from 'scrolled out of view but reachable' — egui reports laid-out rects for ScrollArea children even when scrolled off screen, so a probe on the Controls window reported 31 'clipped' nodes that were all perfectly reachable. The render check (tests/renders.rs) sees the truth but only for the state it photographs. If no practical automated check exists, say so in the acceptance evidence instead of shipping a vacuous one."
    ],
    "points": 3,
-   "status": "todo",
+   "status": "done",
    "stories": []
   },
   {
