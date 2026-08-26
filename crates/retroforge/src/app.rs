@@ -252,6 +252,12 @@ pub struct RetroForgeApp {
     /// Counted so a test can prove the play-then-close round trip does
     /// not re-scan — see `library_scan_count_for_test`.
     library_scans: u32,
+    /// Ticket W10-02: the Enhance workspace (FRONTEND_UI §3.3's
+    /// [Compare][Features][Map]). Its own dock, with its own tab type in
+    /// `crate::enhance_dock` — deliberately NOT `rf_debugger`'s
+    /// `DebugTab`, which is a lower-layer type and the thing
+    /// `PersistedLayout` serialises.
+    enhance: crate::enhance_dock::EnhanceWorkspace,
     /// Ticket W10-01: the rect the status bar's right-aligned readouts
     /// occupied last frame, and the right edge of the transport controls
     /// to their left. The bar is correct exactly when the first does not
@@ -573,6 +579,7 @@ impl RetroForgeApp {
             library_search: String::new(),
             library_console_filter: None,
             library_scans: 0,
+            enhance: crate::enhance_dock::EnhanceWorkspace::new(),
             status_readouts: None,
             fps: None,
             fps_frames: 0,
@@ -2279,7 +2286,6 @@ impl RetroForgeApp {
                         }
                         ui.separator();
                         self.heuristics_menu(ui);
-                        self.compare_menu(ui);
                     });
                 });
             });
@@ -2334,48 +2340,11 @@ impl RetroForgeApp {
         });
     }
 
-    /// Ticket W3-04 (FR-REND-005/FR-FE-005). Compare is off by default:
-    /// it is a comparison tool, and law 6's "a fresh install boots in
-    /// Accuracy Mode" reads the same way here — what you see by default
-    /// is the emulator's own output, not an instrument reading of it.
-    fn compare_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("Compare\u{2026}", |ui| {
-            let mut mode = self.compare_mode;
-            ui.radio_value(&mut mode, rf_renderer::CompareMode::Off, "Off");
-            ui.radio_value(
-                &mut mode,
-                rf_renderer::CompareMode::Split {
-                    divider: self.compare_divider,
-                },
-                "Split screen",
-            );
-            ui.radio_value(
-                &mut mode,
-                rf_renderer::CompareMode::Blink { period_frames: 30 },
-                "A/B blink",
-            );
-            if let rf_renderer::CompareMode::Split { .. } = mode {
-                ui.separator();
-                // The "draggable divider" RENDERER.md §5 asks for. A
-                // slider rather than a hit-tested drag handle: same
-                // control, and it works with a keyboard.
-                ui.add(egui::Slider::new(&mut self.compare_divider, 0.0..=1.0).text("Divider"));
-                mode = rf_renderer::CompareMode::Split {
-                    divider: self.compare_divider,
-                };
-            }
-            self.compare_mode = mode;
-            ui.separator();
-            if ui.button("Screenshot (both buffers)").clicked() {
-                // Deferred to the next frame rather than taken here: with
-                // compare off, no buffers are being kept (W3-03a's rule),
-                // so the first frame that HAS them is the next one.
-                self.screenshot_pending = true;
-                self.status = "Screenshot: capturing next frame\u{2026}".to_string();
-                ui.close();
-            }
-        });
-    }
+    // `compare_menu` is gone (ticket W10-02). Compare is a TAB of the
+    // Enhance workspace now, per FRONTEND_UI §3.3, and a menu that opened
+    // a second copy of the same three radio buttons would be two routes
+    // to one control — the duplication W10-03 removed for the Library and
+    // the same mistake in a smaller place.
 
     /// The status bar (ticket W10-01; `docs/design/FRONTEND_UI.md` §3.2).
     ///
@@ -3343,6 +3312,13 @@ impl RetroForgeApp {
         self.rescan_library();
     }
 
+    /// Open the Enhance workspace without going through the menu
+    /// (ticket W10-02), so `tests/renders.rs` can photograph it.
+    #[doc(hidden)]
+    pub fn show_enhance_for_test(&mut self, show: bool) {
+        self.show_enhance = show;
+    }
+
     /// Set §3.1's search text directly (ticket W10-03).
     #[doc(hidden)]
     pub fn set_library_search_for_test(&mut self, needle: &str) {
@@ -3660,98 +3636,63 @@ impl RetroForgeApp {
     /// Every string here comes from `crate::enhance_ui`, which is tested
     /// headlessly — this only lays them out, so there is no judgement in
     /// this function that could disagree with what those tests assert.
+    /// The Enhance workspace (ticket W10-02; FRONTEND_UI §3.3).
+    ///
+    /// A window hosting a dock area rather than a pile of headings: §3.3
+    /// specifies three tabs, and until W10-02 only one of them existed
+    /// here. Compare was a bottom-bar menu and Map was nowhere at all.
+    ///
+    /// This function owns none of the drawing. `crate::enhance_dock`
+    /// renders the tabs from an [`crate::enhance_dock::EnhanceCtx`] and
+    /// reports back what the user did; everything that needs the core
+    /// thread, per-game persistence or the GPU stays here, where the rest
+    /// of it already lives.
     fn enhance_window(&mut self, ctx: &egui::Context) {
         if !self.show_enhance {
             return;
         }
         let mut open = self.show_enhance;
+        let mut actions = crate::enhance_dock::EnhanceActions::default();
         egui::Window::new("Enhance")
             .default_pos(egui::pos2(PANEL_WINDOW_ORIGIN[0], PANEL_WINDOW_ORIGIN[1]))
+            // Wide enough that §3.3's three panes each have usable
+            // width at the DEFAULT split; the feature rows wrap rather
+            // than clip below this, but starting a workspace already
+            // wrapping reads as broken.
+            .default_size([660.0, 420.0])
+            // Bounded to the viewport for the same reason the Controls
+            // window is (W10-01): egui cannot honour a position for a
+            // window that does not fit, and pins it to y=0 on top of the
+            // menu bar.
+            .max_height(ctx.viewport_rect().height() - PANEL_WINDOW_ORIGIN[1] - 24.0)
             .open(&mut open)
             .show(ctx, |ui| {
-                let rows = crate::enhance_ui::feature_rows(
-                    &self.current_game_settings,
-                    self.profile_matched,
-                );
-                ui.heading("Features");
-                let mut changed = false;
-                for row in &rows {
-                    ui.horizontal(|ui| {
-                        let available =
-                            row.availability == crate::enhance_ui::Availability::Available;
-                        let mut enabled = row.enabled;
-                        // Unavailable rows are shown DISABLED and
-                        // explained, never hidden — FRONTEND_UI.md §3.3's
-                        // honesty contract. Hiding them would tell a user
-                        // the feature does not exist.
-                        if ui
-                            .add_enabled(available, egui::Checkbox::new(&mut enabled, row.label))
-                            .changed()
-                        {
-                            match row.id {
-                                "sprite_overlay" => {
-                                    self.current_game_settings.sprite_overlay = enabled;
-                                    self.sprite_overlay = enabled;
-                                    self.send_command(CoreCommand::SetSpriteOverlay(enabled));
-                                }
-                                "deflicker" => self.current_game_settings.deflicker = enabled,
-                                "widescreen_decoded" => {
-                                    self.current_game_settings.widescreen_decoded = enabled;
-                                }
-                                "full_level_view" => {
-                                    self.current_game_settings.full_level_view = enabled;
-                                }
-                                _ => {}
-                            }
-                            changed = true;
-                        }
-                        ui.label(format!("({})", row.scope));
-                        if let Some(h) = row.heuristic {
-                            ui.label(format!(
-                                "[{}]",
-                                crate::enhance_ui::ladder_chip(
-                                    &self.current_game_settings.trust,
-                                    h
-                                )
-                            ));
-                        }
-                        if let Some(why) = row.availability.explanation() {
-                            ui.label(format!("— {why}"));
-                        }
-                    });
-                }
-                if changed {
-                    self.save_current_game_settings();
-                }
-
-                ui.separator();
-                egui::CollapsingHeader::new("Report card (D-004)").show(ui, |ui| {
-                    let card = self.current_game_settings.trust.report_card();
-                    if card.is_empty() {
-                        ui.label("No contradictions recorded this session.");
-                    }
-                    for c in card {
-                        ui.label(format!("[{}] {} — {}", c.scene, c.heuristic, c.detail));
-                    }
-                });
-
-                ui.separator();
-                egui::CollapsingHeader::new("Profile inspector")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        for line in crate::enhance_ui::profile_inspector_lines(
-                            None,
-                            &[],
-                            &[
-                                "base profile".to_string(),
-                                "user overrides (profiles.d)".to_string(),
-                                "per-session toggles".to_string(),
-                            ],
-                        ) {
-                            ui.label(line);
-                        }
-                    });
+                let mut view = crate::enhance_dock::EnhanceCtx {
+                    settings: &mut self.current_game_settings,
+                    profile_matched: self.profile_matched,
+                    compare_mode: &mut self.compare_mode,
+                    compare_divider: &mut self.compare_divider,
+                    map_texture: self.ultrawide_texture.as_ref(),
+                    fm13_message: self.fm13_message.as_deref(),
+                    has_compositor: self.compositor.is_some(),
+                };
+                actions = self.enhance.ui(ui, &mut view);
             });
+
+        if let Some(on) = actions.sprite_overlay_set {
+            self.sprite_overlay = on;
+            self.send_command(CoreCommand::SetSpriteOverlay(on));
+        }
+        if actions.settings_changed {
+            self.save_current_game_settings();
+        }
+        if actions.screenshot_requested {
+            // Deferred to the next frame rather than taken here: with
+            // compare off, no buffers are being kept (W3-03a's rule), so
+            // the first frame that HAS them is the next one.
+            self.screenshot_pending = true;
+            self.status = "Screenshot: capturing next frame\u{2026}".to_string();
+        }
         self.show_enhance = open;
     }
 

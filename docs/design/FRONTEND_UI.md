@@ -130,6 +130,33 @@ Feature rows are generated from capability flags (profile `[capabilities]` +
 generic feature registry) — the UI cannot offer what the honesty contract
 (ARCHITECTURE §2) says is unavailable.
 
+**Implementation status (ticket W10-02, 2026-08-25).** All three tabs
+exist, in an `egui_dock` dock area (`crate::enhance_dock`) opening with
+Compare and Features side by side and Map below — Compare and Features
+are used *together*, and a layout that makes you flip between them hides
+the only thing the pairing is for. Before W10-02 only **Features** was
+built: Compare was a bottom-bar menu and Map existed nowhere. Compare now
+has exactly one route; the menu entry is gone.
+
+The tab type is `crate::enhance_dock::EnhanceTab`, deliberately **not**
+`rf_debugger::layout::DebugTab`: that is a lower-layer type and it is
+what `PersistedLayout` serialises, so Enhance tabs in it would leak into
+a versioned format with files already in users' config directories.
+
+**Not built, with the reason.** §3.3's *live player marker* and
+*original-viewport outline* need the canvas-space position of the current
+viewport, and **that never reaches the UI thread** —
+`CoreEvent::CanvasSnapshot` carries only `rf_enhance::stitcher::Canvas`,
+and `UltrawideRender` carries rgba, size and the FM-13 reduction. Drawing
+a marker would mean inventing a position, so it waits for the data. §3.3's
+*export* is likewise unbuilt; the Compare tab's both-buffers screenshot is
+the only capture path today.
+
+**Also not built:** §2's "per-game layout persisted" for this workspace.
+Debug's layout persistence is `rf_debugger::layout::PersistedLayout`;
+giving Enhance its own is a second format and a second migration story,
+and it should wait until these tabs have proven their shape.
+
 ### 3.4 Debug workspace
 
 egui_dock tree, default layout (persisted per game, resettable):

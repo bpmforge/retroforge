@@ -39,6 +39,7 @@ pub mod bindings_store;
 pub mod canvas_accum;
 pub mod core_thread;
 pub mod debug_dock;
+pub mod enhance_dock;
 pub mod enhance_ui;
 pub mod enhanced_view;
 pub mod game_settings;

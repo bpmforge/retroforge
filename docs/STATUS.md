@@ -634,3 +634,36 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   *Features* third of §3.3's `[Compare][Features][Map]`. Compare is a
   bottom-bar menu; Map does not exist as a tab. Docking what exists would
   dock one third of a specified workspace.
+
+- **W10-02 — the Enhance workspace is §3.3's `[Compare][Features][Map]`**
+  (2026-08-25, rescoped with Brad). The ticket as filed said "dock
+  Enhance and Author"; its root cause had died with W10-01/W10-03 (see
+  the correction above) and `enhance_window` turned out to implement only
+  the **Features** third of the spec — Compare was a bottom-bar menu, Map
+  existed nowhere. Brad's call: build the content, not the container.
+
+  All three tabs now live in an `egui_dock` area (`crate::enhance_dock`),
+  Compare and Features side by side with Map below, because those two are
+  used *together* — toggle a feature, look at what it did — and a layout
+  that makes you flip between them hides the only thing the pairing is
+  for. Compare has exactly one route; the menu entry is gone.
+
+  The tab type is `EnhanceTab` in this crate, **not** `DebugTab`: that is
+  a lower-layer type and the thing `PersistedLayout` serialises. No
+  `&mut RetroForgeApp` reaches the module — tabs read an `EnhanceCtx` and
+  report an `EnhanceActions`, so command sending, persistence and GPU
+  work stay app-side.
+
+  **The render check earned its keep immediately.** The first build put
+  the feature rows in `ui.horizontal`, and the rendered frame showed them
+  cut off mid-word — "(generic) [shad", "(requires pro". No assertion in
+  this repo would have caught it: the widget tree is identical either
+  way, and the strings are correct. `horizontal_wrapped` fixes it, which
+  is the *opposite* call from W10-01's bottom bar, and deliberately: this
+  is a resizable dock pane whose content is prose, and prose that wraps is
+  normal while prose cut off at "(requires pro" is not.
+
+  Deferred with reasons written into §3.3: the live player marker and
+  viewport outline (a DATA gap — the canvas-space position of the current
+  viewport never reaches the UI thread), §3.3's export, and §2's per-game
+  layout persistence for this workspace.

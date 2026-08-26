@@ -123,6 +123,18 @@ fn the_window_actually_draws_something_at_every_size_and_state() {
     assert_not_blank(&populated, WINDOW_SIZE, "populated library home");
     save(&populated, "home-populated");
 
+    // §3.3's Enhance workspace (ticket W10-02). Photographed because two
+    // of its three tabs did not exist before, and because a dock area
+    // renders only the ACTIVE tab per leaf — a layout that opens with
+    // everything stacked behind one tab is a real defect that no
+    // tree-based assertion notices.
+    let enhance = render(WINDOW_SIZE, |app| {
+        app.set_library_roots_for_test(roots.clone());
+        app.show_enhance_for_test(true);
+    });
+    assert_not_blank(&enhance, WINDOW_SIZE, "Enhance workspace");
+    save(&enhance, "enhance-workspace");
+
     // The smallest size a user can drag to. `main.rs` enforces this
     // floor, so it is reachable — and a home that collapses there is a
     // home that collapses in practice.
