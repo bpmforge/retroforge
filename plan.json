@@ -4987,36 +4987,39 @@
    "status": "done",
    "stories": []
   },
-  {
-   "id": "W11-02",
-   "title": "Full-level view reaches the running app",
-   "phase": 11,
-   "crate": "retroforge",
-   "write_scope": [
-    "crates/retroforge/**",
-    "crates/rf-enhance/**",
-    "docs/design/**",
-    "docs/STATUS.md",
-    "plan.json"
-   ],
-   "depends_on": [
-    "W11-01"
-   ],
-   "acceptance": [
-    "with a matching profile loaded, enabling 'Full-level view' renders the decoded level in the app — the thing VISION §2 calls 'whole levels on one screen'",
-    "the un-profiled path is unchanged and still says why the feature is unavailable rather than silently doing nothing",
-    "an end-to-end test drives it through RetroForgeApp; level_view_demo.rs drives LevelSession directly and would stay green if the app never called it"
-   ],
-   "notes": [
-    "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. The evidence: `CoreCommand` has exactly one enhancement variant, `SetSpriteOverlay`. There is no command for de-flicker, widescreen, full-level view, HD packs or scripts, so the core thread cannot be told to do any of them.",
-    "`crate::level_view::LevelSession` is real: `open`, `scene`, `entity_table_range`, plus offline demos (level_view_demo.rs, rf-enhance/tests/level_view_offline.rs) that produce artefacts.",
-    "MEASURED: `LevelSession::open` and `.scene(` are called from NO non-test code. app.rs uses only `level_view::find_matching_profile`, and only to populate the status bar's profile chip. The decoded level never reaches the screen in the shipped product.",
-    "This is the headline of the RF-Scroller demo and one of the four differentiators in VISION §3. It being library-only is the single largest gap between what the docs claim and what a user can do."
-   ],
-   "points": 8,
-   "status": "todo",
-   "stories": []
-  },
+ {
+  "id": "W11-02",
+  "title": "Full-level view reaches the running app",
+  "phase": 11,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**",
+   "crates/rf-enhance/**",
+   "docs/design/**",
+   "docs/STATUS.md",
+   "plan.json"
+  ],
+  "depends_on": [
+   "W11-01"
+  ],
+  "acceptance": [
+   "with a matching profile loaded, enabling 'Full-level view' renders the decoded level in the app — the thing VISION §2 calls 'whole levels on one screen'",
+   "the un-profiled path is unchanged and still says why the feature is unavailable rather than silently doing nothing",
+   "an end-to-end test drives it through RetroForgeApp; level_view_demo.rs drives LevelSession directly and would stay green if the app never called it"
+  ],
+  "notes": [
+   "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. The evidence: `CoreCommand` has exactly one enhancement variant, `SetSpriteOverlay`. There is no command for de-flicker, widescreen, full-level view, HD packs or scripts, so the core thread cannot be told to do any of them.",
+   "`crate::level_view::LevelSession` is real: `open`, `scene`, `entity_table_range`, plus offline demos (level_view_demo.rs, rf-enhance/tests/level_view_offline.rs) that produce artefacts.",
+   "MEASURED: `LevelSession::open` and `.scene(` are called from NO non-test code. app.rs uses only `level_view::find_matching_profile`, and only to populate the status bar's profile chip. The decoded level never reaches the screen in the shipped product.",
+   "This is the headline of the RF-Scroller demo and one of the four differentiators in VISION §3. It being library-only is the single largest gap between what the docs claim and what a user can do.",
+   "SCOPE DISCOVERY 2026-08-26, before code. This is not 'wire up an existing feature' — THE PIXEL PRODUCER DOES NOT EXIST. `SceneLayer::DecodedLevel` has no renderer anywhere: scene_graph.rs's own module doc says no producer exists for it, `enhanced_view::compose_ultrawide` carries an `unreachable!` for any layer that is not `StitchedCanvas`, and the only thing in the repo that renders a decoded level is `authoring::preview_text`, which draws ASCII. level_view_demo.rs asserts on the SceneGraph's SHAPE and never produces a pixel, which is why this looked finished.",
+   "TRACTABLE, though. `DecodedLevel` carries `metatiles` (column-major ids) plus `metatile_tiles` (CHR tile ids per metatile), and `rf_debugger::pattern` already has `decode_tile` and `tile_to_rgba`. The producer belongs in `crate::enhanced_view` — ARCHITECTURE §3 names it the SceneGraph -> CompositeLayer mediator, handle resolution is explicitly OUTSIDE rf-enhance, and retroforge is a layer that may depend on rf-debugger (rf-enhance may not).",
+   "THE DATA PROBLEM, and the design chosen for it. `LevelSession::scene` needs a `&dyn Fn(u32) -> u8` CPU peek and the entity-table bytes, and only the core thread can produce those without touching core state. But rendering needs the GPU, which is the UI thread's. Resolution: the profile declares WHICH addresses matter, so the app computes that address list once and asks the core for exactly those values per frame — a bounded probe rather than shipping RAM. Keeps the peek on the core thread, the composite on the UI thread, and costs nothing while the feature is off."
+  ],
+  "points": 8,
+  "status": "in_progress",
+  "stories": []
+ },
   {
    "id": "W11-03",
    "title": "Decoded widescreen reaches the running app",
