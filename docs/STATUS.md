@@ -1108,3 +1108,57 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
 
   Gate: fmt, clippy `-D warnings`, **workspace 1676 passing / 32
   ignored**, validate-arch, validate-plan — green.
+
+## Where W11 stands, and the four decisions it is waiting on (2026-08-26)
+
+**149 of 154 tickets done.** Every item that could be completed without a
+ruling has been. The five that remain each need Brad, and none is
+waiting on effort.
+
+**Reached in this arc — the vision's promises, by reachability rather
+than by test coverage.** VISION §2 promises five things on top of
+accurate cores. This morning a user could reach two.
+
+| Promise | Reachable |
+|---|---|
+| De-flicker: sprite-limit bypass | yes (was already) |
+| Ultrawide terrain | yes (was already) |
+| De-flicker: temporal | **yes — W11-01** |
+| Whole levels on one screen | **yes — W11-02** |
+| Live overlays (Lua) | **yes — W11-04** |
+| Replaced art (HD packs) | no — blocked, W11-05 |
+| Widescreen: decoded | no — blocked, W11-03 |
+
+**W11-07 cannot be done as filed, and that is the headline.** Its
+`write_scope` is `crates/retroforge/**` + `crates/rf-renderer/**`, which
+excludes both cores — and the work is *in* the cores.
+`rf_core_api::EmulatorCore`, the architecture's core contract, is
+implemented by **two test mocks and by neither `rf-nes` nor `rf-snes`**.
+`validate-arch.sh` rule 3 enforces the dependency direction; nothing
+enforces adoption, so the contract was declared, tested against mocks,
+and never used. The shell then grew around one concrete core because
+that was the only thing to grow around. Three options are recorded on the
+ticket; picking one is a scope decision, not an implementation detail.
+
+**The four decisions:**
+
+1. **W11-07 / SNES.** Implement `EmulatorCore` for both cores and drive
+   the shell through it (the architecture as designed, large, same blast
+   radius as W11-08), or add a second bespoke SNES path in
+   `core_thread` (smaller, and how one shell ends up with two
+   half-consoles). Either way the ticket needs a wider `write_scope`.
+2. **W11-06 / ten profiles.** Permitted is not verifiable: a commercial
+   profile's offsets cannot be checked without the ROM, and law 5 keeps
+   ROMs out of git. Three routes are on the ticket — a locally-held
+   ROM verified against and gitignored; a ruling that offsets may ship
+   marked UNVERIFIED with the UI saying so; or more in-repo fixtures,
+   which is breadth without commercial coverage.
+3. **W7-08 / S-DSP.** Still blocked on a documented per-cycle schedule
+   that does not exist in any source this project holds. Unchanged.
+4. **CI.** Untouched all arc and worth restating: nothing has run since
+   ~2026-08-07, so Linux, the software-rasterizer GPU path and the cc65
+   fixture rebuild are verified by nothing at all. Every claim in this
+   ledger rests on a local gate on one darwin machine.
+
+**W11-03 and W11-05 are blocked only on W11-07** — W11-08 removed the
+frame-size wall that was the other half of each.
