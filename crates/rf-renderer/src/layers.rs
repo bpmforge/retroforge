@@ -63,11 +63,18 @@ const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
 /// Two independently renderable RGBA layers extracted from the same
 /// `CoreSink::video_scanline` stream [`crate::frame::FrameBuffer`]
 /// consumes — `bg_rgba`/`sprite_rgba` below, each
-/// `NES_WIDTH * NES_HEIGHT * 4` bytes, row-major, top-to-bottom (module
-/// doc for the exclusivity/transparency contract).
+/// `width * height * 4` bytes, row-major, top-to-bottom (module doc for
+/// the exclusivity/transparency contract).
+///
+/// Carries its size for the same reason `FrameBuffer` does (ticket
+/// W11-08): layer extraction is one of the consumers that assumed
+/// 256x240, and a SNES or HD-pack frame would have had its layers
+/// silently truncated to an NES-shaped rectangle.
 pub struct LayeredFrame {
     bg_rgba: Vec<u8>,
     sprite_rgba: Vec<u8>,
+    width: usize,
+    height: usize,
 }
 
 impl LayeredFrame {
@@ -77,9 +84,20 @@ impl LayeredFrame {
     /// [`crate::frame::FrameBuffer::new`]'s opaque-black default).
     #[must_use]
     pub fn new() -> Self {
+        Self::with_size(NES_WIDTH, NES_HEIGHT)
+    }
+
+    /// Layers of an arbitrary size (ticket W11-08), clamped to at least
+    /// one pixel per axis for the same reason
+    /// [`crate::frame::FrameBuffer::with_size`] is.
+    #[must_use]
+    pub fn with_size(width: usize, height: usize) -> Self {
+        let (width, height) = (width.max(1), height.max(1));
         LayeredFrame {
-            bg_rgba: vec![0u8; NES_WIDTH * NES_HEIGHT * 4],
-            sprite_rgba: vec![0u8; NES_WIDTH * NES_HEIGHT * 4],
+            bg_rgba: vec![0u8; width * height * 4],
+            sprite_rgba: vec![0u8; width * height * 4],
+            width,
+            height,
         }
     }
 
@@ -100,12 +118,12 @@ impl LayeredFrame {
 
     #[must_use]
     pub fn width(&self) -> usize {
-        NES_WIDTH
+        self.width
     }
 
     #[must_use]
     pub fn height(&self) -> usize {
-        NES_HEIGHT
+        self.height
     }
 }
 
@@ -118,14 +136,14 @@ impl Default for LayeredFrame {
 impl CoreSink for LayeredFrame {
     fn video_scanline(&mut self, y: u16, pixels: &[PpuPixel]) {
         let row = y as usize;
-        if row >= NES_HEIGHT {
+        if row >= self.height {
             // Same "degrade, never index out of bounds" stance as
             // `FrameBuffer::video_scanline` — a core emitting an
             // out-of-range scanline is a core bug, not a renderer panic.
             return;
         }
-        let row_start = row * NES_WIDTH * 4;
-        for (x, pixel) in pixels.iter().enumerate().take(NES_WIDTH) {
+        let row_start = row * self.width * 4;
+        for (x, pixel) in pixels.iter().enumerate().take(self.width) {
             let offset = row_start + x * 4;
             let resolved = {
                 let [r, g, b] = palette_index_to_rgb(pixel.palette_index);

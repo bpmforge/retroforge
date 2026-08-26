@@ -5113,36 +5113,39 @@
   "status": "blocked",
   "stories": []
  },
-  {
-   "id": "W11-06",
-   "title": "Ten curated game profiles, the VISION §5 number",
-   "phase": 11,
-   "crate": "retroforge",
-   "write_scope": [
-    "profiles/**",
-    "crates/rf-profiles/**",
-    "docs/**",
-    "plan.json"
-   ],
-   "depends_on": [
-    "W11-02"
-   ],
-   "acceptance": [
-    "at least ten profiles ship under /profiles, each with the FR-PROF-003 source citation the loader enforces",
-    "they cover more than one decoder family and more than one console, so the count is breadth rather than ten of the same shape",
-    "every claim is clean-room from published documentation (NFR-011); transcribed-from-disassembly is not acceptable provenance no matter how convenient",
-    "law 5 holds absolutely: no ROM bytes in git, and no copyrighted title hardcoded in engine code — a profile is data under /profiles, never a name baked into a crate"
-   ],
-   "notes": [
-    "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. (This one is a content gap rather than a wiring gap.)",
-    "VISION §5's 18-month criterion is '>=10 curated game profiles'. There are FIVE: nes/rf-rooms, nes/rf-scroller, nes/rf-scroller-demo, snes/example-mode7, snes/rf-rooms-flat — and every one is against our own fixtures.",
-    "Brad ruled 2026-08-20 that profiles for real, documented commercial titles ARE permitted, citing published documentation (DataCrystal and similar). THE PERMISSION HAS NEVER BEEN USED. W9-08's handoff records why: verifying real addresses against DataCrystal-class sources was not done, and shipping unverified addresses would be worse than shipping none.",
-    "Sequenced after W11-02 deliberately: a profile whose decoded level cannot be SEEN in the app is a profile nobody can check by looking. Authoring ten of those would multiply unverifiable content."
-   ],
-   "points": 8,
-   "status": "todo",
-   "stories": []
-  },
+ {
+  "id": "W11-06",
+  "title": "Ten curated game profiles, the VISION §5 number",
+  "phase": 11,
+  "crate": "retroforge",
+  "write_scope": [
+   "profiles/**",
+   "crates/rf-profiles/**",
+   "docs/**",
+   "plan.json"
+  ],
+  "depends_on": [
+   "W11-02"
+  ],
+  "acceptance": [
+   "at least ten profiles ship under /profiles, each with the FR-PROF-003 source citation the loader enforces",
+   "they cover more than one decoder family and more than one console, so the count is breadth rather than ten of the same shape",
+   "every claim is clean-room from published documentation (NFR-011); transcribed-from-disassembly is not acceptable provenance no matter how convenient",
+   "law 5 holds absolutely: no ROM bytes in git, and no copyrighted title hardcoded in engine code — a profile is data under /profiles, never a name baked into a crate"
+  ],
+  "notes": [
+   "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. (This one is a content gap rather than a wiring gap.)",
+   "VISION §5's 18-month criterion is '>=10 curated game profiles'. There are FIVE: nes/rf-rooms, nes/rf-scroller, nes/rf-scroller-demo, snes/example-mode7, snes/rf-rooms-flat — and every one is against our own fixtures.",
+   "Brad ruled 2026-08-20 that profiles for real, documented commercial titles ARE permitted, citing published documentation (DataCrystal and similar). THE PERMISSION HAS NEVER BEEN USED. W9-08's handoff records why: verifying real addresses against DataCrystal-class sources was not done, and shipping unverified addresses would be worse than shipping none.",
+   "Sequenced after W11-02 deliberately: a profile whose decoded level cannot be SEEN in the app is a profile nobody can check by looking. Authoring ten of those would multiply unverifiable content.",
+   "BLOCKED 2026-08-26, and the reason is evidence rather than effort. Reaching ten profiles means five more, and the acceptance forbids 'ten of the same shape' — so they must be commercial titles, which Brad's 2026-08-20 ruling permits from published documentation. PERMITTED IS NOT VERIFIABLE. A profile's value is its decode offsets and camera addresses, and there is no way to check those without running the ROM they describe. Law 5 forbids ROM bytes in git and we hold none, so every claim in such a profile would ship untested. W9-08 refused exactly this and called the result a vacuous artifact: profiles/snes/example-mode7 declared `kind = \"room_grid\"` from W4-02 until 2026-08-21 while configuring NOTHING, and LOADED CLEANLY the whole time. Authoring five of those would multiply the problem by five and move a number in VISION §5.",
+   "WHAT WOULD UNBLOCK IT, so this is a decision rather than a dead end: (a) a lawfully-obtained commercial ROM present on the developer's machine but never committed, with the profile's offsets verified against it locally and the ROM excluded by .gitignore as `roms/` already is; or (b) a ruling that a profile citing published documentation may ship with its offsets marked UNVERIFIED and a loader that says so in the UI — which is honest, but means the profile chip would start meaning 'someone wrote this down' rather than 'this was checked'; or (c) more in-repo fixtures exercising genuinely different decoder families, which is breadth but not the commercial coverage VISION §5's number is a proxy for.",
+   "A SEPARATE DEFECT FOUND WHILE INVESTIGATING, and it blocks path (a) too. `rf_profiles::schema::IdentityEntry` carries FOUR hash families (sha256, sha1, md5, crc32) and `IdentityEntry::matches` checks every family the entry specifies. `crate::level_view::find_matching_profile` — the ONLY matcher the app uses — ignores three of them: it compares `i.sha256.as_deref() == Some(normalized_sha256)` and nothing else. A profile authored from a published No-Intro CRC32, which is the realistic way to identify a commercial title one does not hold, would load fine and never match anything. The schema and the matcher have diverged, and the schema's own `matches` method is dead code as far as the app is concerned."
+  ],
+  "points": 8,
+  "status": "blocked",
+  "stories": []
+ },
  {
   "id": "W11-07",
   "title": "The app can actually open a SNES ROM",
@@ -5175,32 +5178,61 @@
   "status": "todo",
   "stories": []
  },
+ {
+  "id": "W11-08",
+  "title": "The display path carries frames that are not 256x240",
+  "phase": 11,
+  "crate": "rf-renderer",
+  "write_scope": [
+   "crates/rf-renderer/**",
+   "crates/retroforge/**",
+   "docs/**",
+   "plan.json"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "rf_renderer::FrameBuffer carries a frame of a size given at construction, not a constant: NES 256x240, SNES 256x224, SNES hires 512 wide, and an HD-pack frame scale-times larger",
+   "every consumer of the fixed size is updated with it — the compare path, layer extraction, the overlay composite and the texture upload all currently assume NES_WIDTH/NES_HEIGHT",
+   "the NES path is byte-identical afterwards: a 10k-frame determinism double-run and the blargg/nestest goldens are the proof, since this touches the code every frame flows through",
+   "the three tickets blocked on this (W11-03, W11-05, W11-07) each record that they are unblocked, or say what still blocks them"
+  ],
+  "notes": [
+   "THE KEYSTONE, found 2026-08-26 by claiming W11-03 and W11-05 in turn and reading what each needed. `rf_renderer::FrameBuffer` is documented and sized as `NES_WIDTH * NES_HEIGHT * 4` with both dimensions `const`. Three of the four remaining feature tickets need a frame that is not that size, and none of them can move until this does.",
+   "W11-03 WIDESCREEN needs MORE columns than 256 — that is what widescreen IS.",
+   "W11-05 HD PACKS need a frame `HdPack::scale` times larger: a pack replaces each 8x8 tile with a scale-times version, so a 4x pack is a 1024x960 frame. `rf_enhance::hdpack` parses, writes, looks up by (tile, palette) and builds packs, and `mesen_hdpack_real.rs` runs against a real pack — all of it produces RULES, and none of it can be composited into a 256x240 buffer.",
+   "W11-07 SNES needs 256x224, and 512 wide in hires modes 5/6. The SNES CORE ALREADY EMITS variable-width scanlines — rf-harness's golden runner was made width-aware for exactly that in W7-06 — so the core has been ahead of the shell here for some time.",
+   "RISK, and why criterion 3 is worded as it is: this is the buffer every frame passes through, so the change is small in surface and large in blast radius. The NES path must come out byte-identical, and the 10k-frame determinism double-run plus the blargg/nestest goldens are what can actually show that. They are `#[ignore]`d and run from scripts/local-gate.sh, so closing this ticket means running the local gate, not just `cargo test`.",
+   "CLOSED 2026-08-26. Evidence, stated precisely rather than as 'the gate is green': (1) `alter_ego_five_minute_replay_final_hash_and_golden_frames` — FIVE EMULATED MINUTES through the modified FrameBuffer, checked against a final state hash AND golden frames, passing in release; (2) the 10k-frame determinism double-run, release, both halves; (3) rf-renderer's pre-existing exact-pixel tests (`video_scanline_writes_resolved_rgb_into_the_right_row` and the overlay pair), which assert byte offsets and values and pass unchanged; (4) workspace 1673 passing.",
+   "WHAT WAS NOT RUN, and why that is not a gap: scripts/local-gate.sh's PeterLemon/undisbeliever/region golden FRAMES are SNES-side and go through rf-harness's own sink — `grep FrameBuffer` across rf-harness/src matches nothing. They are not evidence for or against this change. Only crate::core_thread (the live app) and tests construct a FrameBuffer at all, which is the whole blast radius."
+  ],
+  "points": 8,
+  "status": "done",
+  "stories": []
+ },
   {
-   "id": "W11-08",
-   "title": "The display path carries frames that are not 256x240",
+   "id": "W11-09",
+   "title": "The profile matcher uses every hash family the schema declares",
    "phase": 11,
-   "crate": "rf-renderer",
+   "crate": "retroforge",
    "write_scope": [
-    "crates/rf-renderer/**",
     "crates/retroforge/**",
+    "crates/rf-profiles/**",
     "docs/**",
     "plan.json"
    ],
    "depends_on": [],
    "acceptance": [
-    "rf_renderer::FrameBuffer carries a frame of a size given at construction, not a constant: NES 256x240, SNES 256x224, SNES hires 512 wide, and an HD-pack frame scale-times larger",
-    "every consumer of the fixed size is updated with it — the compare path, layer extraction, the overlay composite and the texture upload all currently assume NES_WIDTH/NES_HEIGHT",
-    "the NES path is byte-identical afterwards: a 10k-frame determinism double-run and the blargg/nestest goldens are the proof, since this touches the code every frame flows through",
-    "the three tickets blocked on this (W11-03, W11-05, W11-07) each record that they are unblocked, or say what still blocks them"
+    "a profile identified by crc32, md5 or sha1 alone matches its ROM in the app, not only one identified by normalized sha256",
+    "matching goes through rf_profiles::schema::IdentityEntry::matches rather than a second hand-written comparison, so the schema has one matcher and not two",
+    "a test loads a profile per hash family and asserts each matches, and that a wrong hash does not — the negative half matters, since a matcher that returned true always would pass the positive half"
    ],
    "notes": [
-    "THE KEYSTONE, found 2026-08-26 by claiming W11-03 and W11-05 in turn and reading what each needed. `rf_renderer::FrameBuffer` is documented and sized as `NES_WIDTH * NES_HEIGHT * 4` with both dimensions `const`. Three of the four remaining feature tickets need a frame that is not that size, and none of them can move until this does.",
-    "W11-03 WIDESCREEN needs MORE columns than 256 — that is what widescreen IS.",
-    "W11-05 HD PACKS need a frame `HdPack::scale` times larger: a pack replaces each 8x8 tile with a scale-times version, so a 4x pack is a 1024x960 frame. `rf_enhance::hdpack` parses, writes, looks up by (tile, palette) and builds packs, and `mesen_hdpack_real.rs` runs against a real pack — all of it produces RULES, and none of it can be composited into a 256x240 buffer.",
-    "W11-07 SNES needs 256x224, and 512 wide in hires modes 5/6. The SNES CORE ALREADY EMITS variable-width scanlines — rf-harness's golden runner was made width-aware for exactly that in W7-06 — so the core has been ahead of the shell here for some time.",
-    "RISK, and why criterion 3 is worded as it is: this is the buffer every frame passes through, so the change is small in surface and large in blast radius. The NES path must come out byte-identical, and the 10k-frame determinism double-run plus the blargg/nestest goldens are what can actually show that. They are `#[ignore]`d and run from scripts/local-gate.sh, so closing this ticket means running the local gate, not just `cargo test`."
+    "FOUND 2026-08-26 while investigating whether W11-06's commercial profiles are authorable. `IdentityEntry` carries sha256, sha1, md5 AND crc32, and `IdentityEntry::matches` correctly checks every family an entry specifies. `crate::level_view::find_matching_profile` — the only matcher the app calls — compares `i.sha256.as_deref() == Some(normalized_sha256)` and ignores the other three.",
+    "SO THE SCHEMA'S OWN MATCHER IS DEAD CODE as far as the product is concerned, and a profile authored from a published No-Intro CRC32 loads cleanly and never matches anything. That is the realistic way to identify a commercial title nobody in this project holds a copy of, so the gap is not academic.",
+    "The fix needs `rf_cart::RomIdentity` rather than a bare `&str` at the call site: the app currently threads `current_game_hash: Option<String>`, which is the normalized sha256 and cannot express the other families. `RomIdentity` already carries normalized AND raw hashes for all four.",
+    "WORTH DECIDING WHILE HERE: whether a published RAW hash should match too. `RomIdentity::raw` is documented 'diagnostics only' and normalization exists so a headered and a headerless dump of the same game share an identity — but No-Intro publishes hashes of the file as distributed, which for NES is often the headered one. Matching raw as well would make published hashes usable directly; matching only normalized keeps one identity per game. This is a real trade and should be recorded, not settled by accident."
    ],
-   "points": 8,
+   "points": 3,
    "status": "todo",
    "stories": []
   }

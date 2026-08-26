@@ -21,11 +21,24 @@ pub const NES_WIDTH: usize = 256;
 /// nesdev.org/wiki/PPU_rendering).
 pub const NES_HEIGHT: usize = 240;
 
-/// One accumulated RGBA frame, `NES_WIDTH * NES_HEIGHT * 4` bytes, row
-/// major, top-to-bottom, alpha always opaque (`0xFF`) — the NES PPU has no
+/// One accumulated RGBA frame, `width * height * 4` bytes, row major,
+/// top-to-bottom, alpha always opaque (`0xFF`) — the NES PPU has no
 /// transparency concept at the frame-output boundary.
+///
+/// **The size is carried, not assumed** (ticket W11-08). Until then both
+/// dimensions were the `NES_WIDTH`/`NES_HEIGHT` constants, and that one
+/// fact blocked three separate features at once: widescreen needs more
+/// than 256 columns, an HD pack needs a frame `HdPack::scale` times
+/// larger, and SNES needs 256x224 — 512 wide in hires modes 5/6, which
+/// the SNES core has emitted since W7-06 while the shell could not
+/// represent it.
+///
+/// [`FrameBuffer::new`] still produces an NES-sized buffer, so every
+/// existing caller keeps the frame it had.
 pub struct FrameBuffer {
     rgba: Vec<u8>,
+    width: usize,
+    height: usize,
 }
 
 impl FrameBuffer {
@@ -33,12 +46,28 @@ impl FrameBuffer {
     /// display shows before the first scanline ever arrives.
     #[must_use]
     pub fn new() -> Self {
-        let mut rgba = vec![0u8; NES_WIDTH * NES_HEIGHT * 4];
+        Self::with_size(NES_WIDTH, NES_HEIGHT)
+    }
+
+    /// A buffer of an arbitrary size (ticket W11-08).
+    ///
+    /// Zero in either axis is clamped to one rather than producing an
+    /// empty buffer: every consumer indexes by `row * width * 4`, and a
+    /// zero-sized frame turns that into a silent no-op that looks
+    /// exactly like a core emitting nothing.
+    #[must_use]
+    pub fn with_size(width: usize, height: usize) -> Self {
+        let (width, height) = (width.max(1), height.max(1));
+        let mut rgba = vec![0u8; width * height * 4];
         // Alpha channel only; RGB already zeroed by `vec!`.
         for px in rgba.chunks_exact_mut(4) {
             px[3] = 0xFF;
         }
-        FrameBuffer { rgba }
+        FrameBuffer {
+            rgba,
+            width,
+            height,
+        }
     }
 
     /// Row-major RGBA bytes, `width() * height() * 4` long.
@@ -49,12 +78,12 @@ impl FrameBuffer {
 
     #[must_use]
     pub fn width(&self) -> usize {
-        NES_WIDTH
+        self.width
     }
 
     #[must_use]
     pub fn height(&self) -> usize {
-        NES_HEIGHT
+        self.height
     }
 
     /// Copy of [`Self::rgba`] for callers (e.g. a cross-thread channel)
@@ -75,15 +104,15 @@ impl Default for FrameBuffer {
 impl CoreSink for FrameBuffer {
     fn video_scanline(&mut self, y: u16, pixels: &[PpuPixel]) {
         let row = y as usize;
-        if row >= NES_HEIGHT {
+        if row >= self.height {
             // A core emitting an out-of-range scanline index is a core
             // bug, not a reason for the renderer to panic/index out of
             // bounds — drop it silently, same "degrade, never crash"
             // stance as `palette_index_to_rgb`'s masking.
             return;
         }
-        let row_start = row * NES_WIDTH * 4;
-        for (x, pixel) in pixels.iter().enumerate().take(NES_WIDTH) {
+        let row_start = row * self.width * 4;
+        for (x, pixel) in pixels.iter().enumerate().take(self.width) {
             let [r, g, b] = palette_index_to_rgb(pixel.palette_index);
             let offset = row_start + x * 4;
             self.rgba[offset] = r;
@@ -103,11 +132,11 @@ impl CoreSink for FrameBuffer {
     /// own priority rules already guarantee that) untouched.
     fn overlay_scanline(&mut self, y: u16, pixels: &[OverlayPixel]) {
         let row = y as usize;
-        if row >= NES_HEIGHT {
+        if row >= self.height {
             return; // same "degrade, never crash" stance as video_scanline.
         }
-        let row_start = row * NES_WIDTH * 4;
-        for (x, pixel) in pixels.iter().enumerate().take(NES_WIDTH) {
+        let row_start = row * self.width * 4;
+        for (x, pixel) in pixels.iter().enumerate().take(self.width) {
             if !pixel.opaque {
                 continue;
             }
@@ -259,5 +288,89 @@ mod tests {
         fb.overlay_scanline(u16::MAX, &overlay);
         // No panic reaching here is the assertion; buffer stays untouched.
         assert_eq!(fb.rgba()[3], 0xFF);
+    }
+}
+
+/// Ticket W11-08's own tests: the buffer carries its size.
+#[cfg(test)]
+mod variable_size_tests {
+    use super::*;
+    use rf_core_api::PixelLayer;
+
+    /// **The default is unchanged.** Every existing caller uses `new()`,
+    /// and this change must not move the NES frame by a byte — the
+    /// determinism goldens and the blargg/nestest suites all flow through
+    /// this buffer.
+    #[test]
+    fn new_is_still_exactly_an_nes_frame() {
+        let fb = FrameBuffer::new();
+        assert_eq!((fb.width(), fb.height()), (NES_WIDTH, NES_HEIGHT));
+        assert_eq!(fb.rgba().len(), NES_WIDTH * NES_HEIGHT * 4);
+        assert!(
+            fb.rgba().chunks_exact(4).all(|p| p == [0, 0, 0, 0xFF]),
+            "an unbooted display is opaque black, as it was before W11-08"
+        );
+    }
+
+    /// A SNES frame: 256x224, the size the app could not represent.
+    #[test]
+    fn a_snes_sized_buffer_addresses_its_own_last_row() {
+        let mut fb = FrameBuffer::with_size(256, 224);
+        assert_eq!((fb.width(), fb.height()), (256, 224));
+        let row: Vec<PpuPixel> = (0..256)
+            .map(|_| PpuPixel {
+                palette_index: 0x16,
+                layer: PixelLayer::Background(0),
+                sprite_id: None,
+                priority: 0,
+            })
+            .collect();
+        // Row 223 exists here and does NOT in a 240-high buffer's terms —
+        // the point being that the bound is the buffer's own, not a
+        // constant.
+        fb.video_scanline(223, &row);
+        let want = palette_index_to_rgb(0x16);
+        let o = 223 * 256 * 4;
+        assert_eq!([fb.rgba()[o], fb.rgba()[o + 1], fb.rgba()[o + 2]], want);
+    }
+
+    /// A hires SNES frame is 512 dots wide — the width the SNES core has
+    /// emitted since W7-06 while the shell could not hold it.
+    #[test]
+    fn a_hires_width_buffer_accepts_a_512_dot_scanline() {
+        let mut fb = FrameBuffer::with_size(512, 224);
+        let row: Vec<PpuPixel> = (0..512)
+            .map(|i| PpuPixel {
+                palette_index: u8::try_from(i % 64).unwrap_or(0),
+                layer: PixelLayer::Background(0),
+                sprite_id: None,
+                priority: 0,
+            })
+            .collect();
+        fb.video_scanline(0, &row);
+        // The 511th dot must have landed: a 256-wide buffer would have
+        // dropped everything past 255 and this is what would have caught
+        // that silently-halved frame.
+        let want = palette_index_to_rgb(u8::try_from(511 % 64).unwrap());
+        let o = 511 * 4;
+        assert_eq!([fb.rgba()[o], fb.rgba()[o + 1], fb.rgba()[o + 2]], want);
+    }
+
+    /// An HD-pack-scale frame: 4x an NES frame.
+    #[test]
+    fn an_hd_pack_scale_buffer_is_the_size_it_says() {
+        let fb = FrameBuffer::with_size(NES_WIDTH * 4, NES_HEIGHT * 4);
+        assert_eq!(fb.rgba().len(), 1024 * 960 * 4);
+    }
+
+    /// Zero is clamped rather than producing an empty buffer, because
+    /// every consumer indexes by `row * width * 4` and a zero-sized frame
+    /// turns that into a silent no-op indistinguishable from a core
+    /// emitting nothing.
+    #[test]
+    fn a_zero_sized_request_is_clamped_not_empty() {
+        let fb = FrameBuffer::with_size(0, 0);
+        assert_eq!((fb.width(), fb.height()), (1, 1));
+        assert_eq!(fb.rgba().len(), 4);
     }
 }

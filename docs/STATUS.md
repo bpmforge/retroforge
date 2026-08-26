@@ -1042,3 +1042,37 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
 
   Gate: fmt, clippy `-D warnings`, **workspace 1668 passing / 32
   ignored**, validate-arch, validate-plan — green. **W10 is now 5 of 5.**
+
+- **W11-08 — the display path carries frames that are not 256x240**
+  (2026-08-26). `FrameBuffer` and `LayeredFrame` now carry their own
+  dimensions instead of reading the `NES_WIDTH`/`NES_HEIGHT` constants.
+  `new()` still produces exactly an NES frame, so every existing caller
+  keeps what it had; `with_size()` is the new door. Zero is clamped to
+  one, because every consumer indexes by `row * width * 4` and a
+  zero-sized frame turns that into a silent no-op indistinguishable from
+  a core emitting nothing.
+
+  **This one constant was blocking three features**: widescreen (more
+  than 256 columns), HD packs (`HdPack::scale` times larger — a 4x pack
+  is 1024x960), and SNES (256x224, and 512 wide in hires modes 5/6,
+  which the SNES core has emitted since W7-06 while the shell could not
+  hold it). The tests name those three sizes; the hires one asserts the
+  **511th dot landed**, since a 256-wide buffer would have silently
+  halved the frame rather than failed.
+
+  **The byte-identity evidence, stated precisely rather than as "the gate
+  is green":**
+  1. `alter_ego_five_minute_replay_final_hash_and_golden_frames` — five
+     emulated minutes through the modified buffer, checked against a
+     final state hash **and golden frames**, release, passing.
+  2. The 10k-frame determinism double-run, release, both halves.
+  3. rf-renderer's pre-existing exact-pixel tests, which assert byte
+     offsets and values, passing unchanged.
+  4. Workspace 1673 passing / 32 ignored.
+
+  **What was NOT run, and why it is not a gap:** `local-gate.sh`'s
+  PeterLemon/undisbeliever/region golden *frames* are SNES-side and go
+  through rf-harness's own sink — `grep FrameBuffer crates/rf-harness/src`
+  matches nothing. They are evidence neither for nor against this change.
+  Only `core_thread` and tests construct a `FrameBuffer` at all; that is
+  the entire blast radius.
