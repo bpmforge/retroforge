@@ -849,3 +849,61 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   are independent. The discriminating assertions are the three
   `core_thread` unit tests instead, and the test file's own module doc
   says so rather than letting its name imply more than it checks.
+
+- **W11-02 — the full-level view reaches the app, and a path bug that
+  had disabled every profile** (2026-08-26).
+
+  **The ticket was mis-scoped, and reading found it before code did.**
+  This was not "wire up an existing feature": `SceneLayer::DecodedLevel`
+  had **no pixel producer anywhere**. `scene_graph.rs`'s own doc says so,
+  `compose_ultrawide` carries an `unreachable!` for any layer but
+  `StitchedCanvas`, and the only thing in the repo that rendered a
+  decoded level was `authoring::preview_text`, which draws **ASCII**.
+  `level_view_demo.rs` asserts on the scene's SHAPE and never produced a
+  pixel, which is why this looked finished for months.
+
+  `enhanced_view::render_level_rgba` is that producer. It lives in this
+  crate because ARCHITECTURE §3 makes this module the SceneGraph ->
+  CompositeLayer mediator and because turning tile ids into pixels needs
+  `rf_debugger::pattern`, which `rf-enhance` may not depend on. Its test
+  asserts on PIXELS — specifically that they are not uniform, since a
+  producer returning the right number of zero bytes satisfies every
+  structural check anyone would write about it.
+
+  **THE BUG THAT MATTERED MORE THAN THE FEATURE.** `app.rs` resolved
+  profiles with `Path::new("profiles")` — relative to the process working
+  directory. **Launched from anywhere but the repository root, NO PROFILE
+  EVER MATCHED.** The status chip always read "no profile" and every
+  profile-gated feature row stayed disabled saying "requires profile" —
+  which is indistinguishable from the honesty contract working correctly.
+  I read exactly that in this session's own screenshot tour and took it
+  for correct behaviour. Now: `RETROFORGE_PROFILES_DIR`, then `profiles/`
+  beside the executable, then the working directory.
+
+  **The bounded probe.** `LevelSession::scene` needs a CPU peek and the
+  entity table; only the core thread can read without perturbing state,
+  and only the UI thread has the GPU. So the profile declares WHICH
+  addresses matter (at most four camera bytes plus the entity table), the
+  app computes that list once, and `CoreCommand::SetLevelProbe` asks for
+  exactly it. `None` when off, costing nothing.
+
+  **§3.3's viewport outline, previously recorded as impossible.** W10-02's
+  notes said the canvas-space position of the live viewport never reaches
+  the UI thread — true then, and still true for the STITCHED canvas. For
+  the decoded LEVEL the profile declares the camera's own address, so the
+  probe supplies it and the Map tab now draws the outline.
+
+  **And one more inert spot, visible in the same frame.** The Profile
+  inspector was hardcoded to `None` with an empty capability list, so it
+  read "no profile matched this ROM's normalized hash" on the same screen
+  as a status bar reading "profile". It now receives the matched title
+  and the profile's own declared capabilities.
+
+  Gate: fmt, clippy `-D warnings`, **workspace 1664 passing / 32
+  ignored**, validate-arch, validate-plan — green. Photographed in
+  `target/ui-tour/09-full-level-view.png`.
+
+  Running tally of shipped-and-inert things this arc, every one found by
+  LOOKING rather than by a test: `accessibility.rs`, `script_panel.rs`,
+  the dead Map tab, three enhancement toggles, the profiles path, and the
+  profile inspector.

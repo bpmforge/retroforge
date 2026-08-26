@@ -93,6 +93,12 @@ fn photograph_every_major_surface() {
     #[allow(unsafe_code)]
     unsafe {
         std::env::set_var("RETROFORGE_CONFIG_DIR", &dir);
+        // W11-02: without this the tour photographs "no profile" against
+        // a ROM that has one — which is how the bug hid.
+        std::env::set_var(
+            "RETROFORGE_PROFILES_DIR",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles"),
+        );
     }
 
     // A library the home screen can actually show. The fixture is copied
@@ -152,6 +158,14 @@ fn photograph_every_major_surface() {
     harness.state_mut().show_enhance_for_test(true);
     harness.run_steps(3);
     shot(&mut harness, "03-enhance-workspace");
+
+    // Ticket W11-02: the decoded level, with the live viewport outline
+    // over it. The promise VISION §2 calls "whole levels on one screen",
+    // photographed because until now nothing could turn a decoded level
+    // into a picture at all.
+    harness.state_mut().set_full_level_view_for_test(true);
+    run_emulated_frames(&mut harness, 900, Duration::from_secs(30));
+    shot(&mut harness, "09-full-level-view");
     harness.state_mut().show_enhance_for_test(false);
 
     harness.state_mut().show_debug_panels_for_test(true);

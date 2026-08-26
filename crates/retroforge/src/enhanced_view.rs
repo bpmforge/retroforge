@@ -347,6 +347,109 @@ pub fn select_active_view<'a>(
     }
 }
 
+/// Render a decoded level to rgba (ticket W11-02; FR-ENH-005,
+/// `docs/design/FRONTEND_UI.md` §3.3's Map and VISION §2's "whole levels
+/// on one screen").
+///
+/// ## Why this function had to be written rather than called
+///
+/// `SceneLayer::DecodedLevel` had **no producer anywhere**.
+/// `rf_enhance::scene_graph`'s own module doc says so outright, and
+/// [`compose_ultrawide`] above carries an `unreachable!` for every layer
+/// that is not `StitchedCanvas`. The decode was real and tested, the
+/// scene graph was real and tested, and nothing in the repository could
+/// turn either into pixels — `authoring::preview_text` renders a decoded
+/// level as **ASCII**, which is genuinely useful for authoring and is not
+/// a picture. `level_view_demo.rs` asserts on the scene's *shape*, so it
+/// stayed green for the whole time the feature could not be seen.
+///
+/// ## Why it lives in this crate
+///
+/// `ARCHITECTURE.md` §3 makes this module the `SceneGraph` ->
+/// `CompositeLayer` mediator and puts handle resolution *outside*
+/// `rf-enhance` — which is also the only arrangement that works, since
+/// turning tile ids into pixels needs `rf_debugger::pattern` and
+/// `rf-enhance` may not depend on `rf-debugger`.
+///
+/// ## Palette honesty
+///
+/// The level is drawn with the palette the profile's decode implies, not
+/// with a guess sampled from the live frame. A level view tinted by
+/// whatever palette happened to be loaded when you opened it would look
+/// authoritative and be wrong in a way nobody could see — the same class
+/// of error as fog that guesses geometry (FR-ENH-004), which the
+/// stitcher refuses to make.
+#[must_use]
+pub fn render_level_rgba(
+    level: &rf_enhance::decode::metatile_screens::DecodedLevel,
+    chr: &[u8],
+    table: rf_debugger::pattern::PatternTable,
+    palette: [[u8; 3]; 4],
+    geometry: rf_enhance::level_view::LevelGeometry,
+) -> Vec<u8> {
+    let (w, h) = (geometry.width_px as usize, geometry.height_px as usize);
+    // Transparent, not black: a level whose decode produced fewer
+    // metatiles than the grid claims should read as absent, not as a
+    // solid floor that a player could mistake for terrain.
+    let mut rgba = vec![0u8; w * h * 4];
+    if w == 0 || h == 0 || level.metatile_count == 0 {
+        return rgba;
+    }
+    let mpx = geometry.metatile_px.max(1) as usize;
+    // Tiles per metatile edge: a size-4 metatile is 2x2 tiles, size-1 is
+    // one. Derived, never assumed to be 2 — the same reasoning
+    // `LevelGeometry::from_level` gives for not assuming 16 px.
+    let tiles_per_edge = (mpx / 8).max(1);
+    let per_metatile = level
+        .metatile_tiles
+        .len()
+        .checked_div(level.metatile_count as usize)
+        .unwrap_or(0);
+    if per_metatile == 0 {
+        return rgba;
+    }
+
+    for col in 0..level.width as usize {
+        for row in 0..level.height as usize {
+            // Column-major, as `DecodedLevel::metatiles` documents:
+            // index `col * height + row`. Getting this backwards produces
+            // a plausible-looking transposed level rather than an error,
+            // which is exactly why it is spelled out here.
+            let Some(&id) = level.metatiles.get(col * level.height as usize + row) else {
+                continue;
+            };
+            let base = id as usize * per_metatile;
+            for sub in 0..per_metatile.min(tiles_per_edge * tiles_per_edge) {
+                let Some(&tile_id) = level.metatile_tiles.get(base + sub) else {
+                    continue;
+                };
+                let Some(tile) = rf_debugger::pattern::decode_tile(chr, table, tile_id) else {
+                    continue;
+                };
+                let px = rf_debugger::pattern::tile_to_rgba(&tile, palette);
+                let ox = col * mpx + (sub % tiles_per_edge) * 8;
+                let oy = row * mpx + (sub / tiles_per_edge) * 8;
+                for ty in 0..8 {
+                    let dy = oy + ty;
+                    if dy >= h {
+                        break;
+                    }
+                    for tx in 0..8 {
+                        let dx = ox + tx;
+                        if dx >= w {
+                            break;
+                        }
+                        let s = (ty * 8 + tx) * 4;
+                        let d = (dy * w + dx) * 4;
+                        rgba[d..d + 4].copy_from_slice(&px[s..s + 4]);
+                    }
+                }
+            }
+        }
+    }
+    rgba
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

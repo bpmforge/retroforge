@@ -181,6 +181,10 @@ pub enum LoopControl {
 /// One RGBA frame plus its dimensions, cheap to send across a channel
 /// (`Vec<u8>` is moved, not copied).
 pub struct FrameMsg {
+    /// Ticket W11-02: the bytes the full-level view asked for, or `None`
+    /// when no probe is armed. Peeked on this thread because only this
+    /// thread can read memory without perturbing the machine.
+    pub level_probe: Option<LevelProbeData>,
     /// Ticket W10-01: audio-buffer fill (0.0..=1.0) at the moment this
     /// frame was produced, for the status bar's A/V sync indicator, or
     /// `None` when no audio device opened. It rides on the frame because
@@ -265,6 +269,26 @@ pub enum CoreEvent {
 }
 
 /// What the UI thread can ask the core thread to do (FR-DBG-004).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelProbe {
+    /// Addresses `rf_enhance::level_view::live_camera` will read, derived
+    /// from the profile's `[camera]` spec.
+    pub addrs: Vec<u32>,
+    /// Start of the profile's `[entities].table`.
+    pub table_addr: u32,
+    /// How many bytes of it to read.
+    pub table_len: usize,
+}
+
+/// The bytes a [`LevelProbe`] asked for, as of this frame.
+#[derive(Debug, Clone, Default)]
+pub struct LevelProbeData {
+    /// Parallel to `LevelProbe::addrs`.
+    pub values: Vec<u8>,
+    /// The entity table.
+    pub table: Vec<u8>,
+}
+
 pub enum CoreCommand {
     Pause,
     Resume,
@@ -286,6 +310,17 @@ pub enum CoreCommand {
     /// sprite_historian::SpriteHistorian::observe` takes `&[PpuPixel]`,
     /// never `&mut`).
     SetDeflicker(bool),
+    /// Ticket W11-02: which bytes the full-level view needs each frame.
+    ///
+    /// A BOUNDED probe, not "send the UI some RAM". The profile declares
+    /// which addresses matter — `[camera].x/.y` (at most four bytes) and
+    /// `[entities].table` — so the app computes that list once and asks
+    /// for exactly it. `None` switches the probe off and costs nothing.
+    ///
+    /// The split exists because the two halves live on different threads
+    /// and cannot swap: only the core thread can peek without perturbing
+    /// state, and only the UI thread has the GPU to composite with.
+    SetLevelProbe(Option<LevelProbe>),
     /// Ticket W3-03a: opt into (or out of) per-frame layer extraction —
     /// the BG-only/sprite-only split `FanoutSink` feeds
     /// [`rf_renderer::LayeredFrame`], plus the two ~240 KB buffer clones
@@ -631,6 +666,8 @@ fn core_thread_main(
     // Allocated only while de-flicker is on. `None` is the whole cost of
     // the feature being off: no buffer, no per-scanline copy, nothing.
     let mut overlay_capture: Option<Vec<rf_core_api::OverlayPixel>> = None;
+    // Ticket W11-02: `None` until the full-level view asks for something.
+    let mut level_probe: Option<LevelProbe> = None;
     let mut sink = rf_renderer::FrameBuffer::new();
     // Ticket W3-03: same-frame BG/sprite layer extraction, fed alongside
     // `sink` via `FanoutSink` at every call site below.
@@ -733,6 +770,9 @@ fn core_thread_main(
                 }
                 CoreCommand::SetSpriteOverlay(enabled) => {
                     stepper.set_sprite_overlay_enabled(enabled);
+                }
+                CoreCommand::SetLevelProbe(probe) => {
+                    level_probe = probe;
                 }
                 CoreCommand::SetDeflicker(enabled) => {
                     historian.set_enabled(enabled);
@@ -925,10 +965,28 @@ fn core_thread_main(
             // accuracy-exact indexed frame instead of cloning it. A clone
             // would be ~500 KB per frame for a feature that is off by
             // default.
+            let probe_data = level_probe.as_ref().map(|probe| LevelProbeData {
+                // `peek` is the non-perturbing read (`EmuStepper::peek`'s
+                // own doc) — the same one the debugger's memory viewer
+                // uses, and the reason this can run every frame without
+                // touching the simulation.
+                values: probe
+                    .addrs
+                    .iter()
+                    .map(|a| stepper.peek(u16::try_from(*a).unwrap_or(u16::MAX)))
+                    .collect(),
+                table: (0..probe.table_len)
+                    .map(|i| {
+                        let addr = probe.table_addr as usize + i;
+                        stepper.peek(u16::try_from(addr).unwrap_or(u16::MAX))
+                    })
+                    .collect(),
+            });
             let display = display_rgba(&mut historian, &bundle, &sink, overlay_capture.as_deref());
             bundle_writer.publish(bundle);
             let msg = FrameMsg {
                 audio_fill: audio.as_ref().map(crate::audio_out::AudioOut::fill),
+                level_probe: probe_data,
                 rgba: display,
                 width: sink.width(),
                 height: sink.height(),

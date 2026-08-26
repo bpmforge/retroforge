@@ -70,6 +70,21 @@ pub const MIN_WINDOW_SIZE: [f32; 2] = [640.0, 480.0];
 /// can use to answer "is this running full speed?".
 const FPS_WINDOW_FRAMES: u32 = 30;
 
+/// The four shades a decoded level is drawn with (ticket W11-02).
+///
+/// A neutral ramp, NOT a palette sampled from the live frame. A level
+/// view tinted by whatever palette happened to be loaded when you opened
+/// it would look authoritative and be wrong in a way nobody could check
+/// — the same class of error as fog that guesses geometry, which
+/// FR-ENH-004 forbids the stitcher from making. When a profile learns to
+/// declare its level palette, this is the constant that gives way.
+const LEVEL_PALETTE: [[u8; 3]; 4] = [
+    [0x10, 0x12, 0x16],
+    [0x44, 0x4C, 0x5A],
+    [0x8A, 0x95, 0xA6],
+    [0xD6, 0xDA, 0xE2],
+];
+
 /// Where a floating panel window first appears (ticket W10-01).
 ///
 /// **Below the menu bar, deliberately.** egui's default area position is
@@ -130,7 +145,7 @@ pub const MONOSPACE_GLYPHS: &str = "";
 /// because the point is that these four things are ONE class of thing
 /// and share one treatment — five independent `.small()` calls is how a
 /// type scale drifts back into five sizes.
-fn readout(text: impl Into<egui::RichText>) -> egui::Label {
+pub(crate) fn readout(text: impl Into<egui::RichText>) -> egui::Label {
     // `selectable(false)`: these are readouts, and a text cursor
     // appearing over the FPS counter is an affordance that leads nowhere.
     egui::Label::new(text.into().small()).selectable(false)
@@ -257,6 +272,18 @@ pub struct RetroForgeApp {
     /// Counted so a test can prove the play-then-close round trip does
     /// not re-scan — see `library_scan_count_for_test`.
     library_scans: u32,
+    /// Ticket W11-02: the decoded level for the running ROM, when a
+    /// profile matched and declared one. `None` otherwise, which is the
+    /// ordinary case and never an error.
+    level_session: Option<crate::level_view::LevelSession>,
+    /// The decoded level as an egui texture. Built ONCE — a level does
+    /// not change while you play it, so re-rendering it per frame would
+    /// be ~688 KB of work to produce an identical image. The only thing
+    /// that moves is the viewport outline, and that is painted over the
+    /// texture rather than baked into it.
+    level_texture: Option<egui::TextureHandle>,
+    /// Where the live camera is in level space, from the bounded probe.
+    level_camera: Option<(i64, i64)>,
     /// Ticket W10-02: the Enhance workspace (FRONTEND_UI §3.3's
     /// [Compare][Features][Map]). Its own dock, with its own tab type in
     /// `crate::enhance_dock` — deliberately NOT `rf_debugger`'s
@@ -585,6 +612,9 @@ impl RetroForgeApp {
             library_search: String::new(),
             library_console_filter: None,
             library_scans: 0,
+            level_session: None,
+            level_texture: None,
+            level_camera: None,
             enhance: crate::enhance_dock::EnhanceWorkspace::new(),
             status_readouts: None,
             fps: None,
@@ -1410,9 +1440,17 @@ impl RetroForgeApp {
                 .map_or_else(|| bytes.clone(), |_| bytes[16..].to_vec()),
         );
         self.matched_profile = self.current_game_hash.as_ref().and_then(|hash| {
-            crate::level_view::find_matching_profile(std::path::Path::new("profiles"), hash)
+            crate::level_view::find_matching_profile(&Self::profiles_root(), hash)
                 .map(|(_, path)| path)
         });
+        // Ticket W11-02: decode the level now, once. `None` when no
+        // profile matched or it declares no decodable level — both
+        // ordinary, neither an error (`LevelSession::open`'s own doc).
+        self.level_session = self.current_game_hash.as_ref().and_then(|hash| {
+            crate::level_view::LevelSession::open(&Self::profiles_root(), &bytes, hash)
+        });
+        self.level_texture = None;
+        self.level_camera = None;
 
         self.current_game_settings = match (&self.config_root, &self.current_game_hash) {
             (Some(root), Some(hash)) => crate::game_settings::load(root, hash),
@@ -1470,6 +1508,9 @@ impl RetroForgeApp {
                 // had just reset it.
                 if self.current_game_settings.deflicker {
                     self.send_command(CoreCommand::SetDeflicker(true));
+                }
+                if self.current_game_settings.full_level_view {
+                    self.set_level_probe(true);
                 }
                 // Ticket W3-03a: a fresh core thread starts with layer
                 // extraction OFF. If the Layers window was already open
@@ -1605,6 +1646,23 @@ impl RetroForgeApp {
             }
             self.audio_fill = msg.audio_fill;
             self.last_frame_rgba = Some(msg.rgba.clone());
+            // Ticket W11-02: the probe's bytes become a live camera. The
+            // `read` closure is a lookup into what the CORE peeked, not a
+            // read of anything on this thread — the UI never touches
+            // emulator memory (ARCHITECTURE §3).
+            if let (Some(probe), Some(session)) = (&msg.level_probe, &self.level_session) {
+                let addrs = Self::probe_addrs(session);
+                let values = probe.values.clone();
+                let read = move |addr: u32| -> u8 {
+                    addrs
+                        .iter()
+                        .position(|a| *a == addr)
+                        .and_then(|i| values.get(i).copied())
+                        .unwrap_or(0)
+                };
+                let cam = rf_enhance::level_view::live_camera(&session.profile, &read);
+                self.level_camera = Some((cam.x, cam.y));
+            }
             self.note_frame();
             // Ticket W2-15: position travels with the frame.
             self.position = Some((msg.frame_count, msg.last_scanline));
@@ -3297,6 +3355,112 @@ impl RetroForgeApp {
         }
     }
 
+    /// Where game profiles live.
+    ///
+    /// **This was `Path::new("profiles")` until W11-02 — a path relative
+    /// to the process working directory.** It resolved only when the app
+    /// happened to be launched from the repository root, so for anyone
+    /// running the built binary from anywhere else NO PROFILE EVER
+    /// MATCHED: the status bar's chip always read "no profile", and every
+    /// profile-gated feature row stayed disabled saying "requires
+    /// profile". It looked exactly like correct honest behaviour, which
+    /// is why it survived — including in this session's own screenshot
+    /// tour, where I read "no profile" against a ROM that has one and
+    /// took it for the honesty contract working.
+    ///
+    /// Resolution order, most specific first:
+    /// 1. `RETROFORGE_PROFILES_DIR`, for tests, portable installs and
+    ///    anyone with an opinion — the same escape hatch
+    ///    `RETROFORGE_CONFIG_DIR` provides for config.
+    /// 2. `profiles/` beside the executable, which is where an installed
+    ///    build's data sits.
+    /// 3. `profiles/` under the working directory, which is what a
+    ///    `cargo run` from the repository root gets.
+    ///
+    /// Returns the first that exists, and the last as a fallback so the
+    /// failure is a profile that does not match rather than a panic.
+    fn profiles_root() -> std::path::PathBuf {
+        if let Some(dir) = std::env::var_os("RETROFORGE_PROFILES_DIR") {
+            return std::path::PathBuf::from(dir);
+        }
+        if let Some(beside) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|p| p.join("profiles")))
+            .filter(|p| p.is_dir())
+        {
+            return beside;
+        }
+        std::path::PathBuf::from("profiles")
+    }
+
+    /// The addresses the profile's `[camera]` spec will be read at.
+    ///
+    /// Derived from the profile rather than guessed, and bounded: at most
+    /// four bytes (`x` and `y`, each one or two bytes little-endian). A
+    /// probe that shipped a RAM page instead would work and would be a
+    /// standing invitation for the UI to start reading things nobody
+    /// declared.
+    fn probe_addrs(session: &crate::level_view::LevelSession) -> Vec<u32> {
+        let mut addrs = Vec::new();
+        if let Some(camera) = session.profile.camera.as_ref() {
+            for axis in [camera.x.as_ref(), camera.y.as_ref()].into_iter().flatten() {
+                addrs.push(axis.addr);
+                if axis.ty == "u16" {
+                    addrs.push(axis.addr + 1);
+                }
+            }
+        }
+        addrs
+    }
+
+    /// Arm or disarm the level probe (ticket W11-02).
+    fn set_level_probe(&mut self, on: bool) {
+        let probe = on
+            .then_some(self.level_session.as_ref())
+            .flatten()
+            .map(|session| {
+                let (table_addr, table_len) = session.entity_table_range().unwrap_or((0, 0));
+                core_thread::LevelProbe {
+                    addrs: Self::probe_addrs(session),
+                    table_addr,
+                    table_len,
+                }
+            });
+        // `None` when the feature is off OR no level decoded, so the core
+        // stops peeking either way.
+        self.send_command(CoreCommand::SetLevelProbe(probe));
+        if !on {
+            self.level_camera = None;
+        }
+    }
+
+    /// The decoded level as a texture, built once per ROM.
+    fn level_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        if let Some(tex) = &self.level_texture {
+            return Some(tex.clone());
+        }
+        let session = self.level_session.as_ref()?;
+        let chr = self.debug_panels.data.chr_rom.as_deref()?;
+        let rgba = enhanced_view::render_level_rgba(
+            &session.level,
+            chr,
+            rf_debugger::pattern::PatternTable::Left,
+            LEVEL_PALETTE,
+            session.geometry,
+        );
+        let (w, h) = (
+            session.geometry.width_px as usize,
+            session.geometry.height_px as usize,
+        );
+        if w == 0 || h == 0 || rgba.len() != w * h * 4 {
+            return None;
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+        let tex = ctx.load_texture("decoded-level", image, egui::TextureOptions::NEAREST);
+        self.level_texture = Some(tex.clone());
+        Some(tex)
+    }
+
     /// Stop the running core and return to the library home (ticket
     /// W10-03).
     ///
@@ -3337,6 +3501,28 @@ impl RetroForgeApp {
     pub fn set_library_roots_for_test(&mut self, roots: Vec<std::path::PathBuf>) {
         self.library_roots = roots;
         self.rescan_library();
+    }
+
+    /// Turn on the full-level view exactly as its Enhance-workspace row
+    /// does, probe and all (ticket W11-02).
+    #[doc(hidden)]
+    pub fn set_full_level_view_for_test(&mut self, on: bool) {
+        self.current_game_settings.full_level_view = on;
+        self.set_level_probe(on);
+    }
+
+    /// Whether a decoded level exists for the running ROM.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn has_decoded_level_for_test(&self) -> bool {
+        self.level_session.is_some()
+    }
+
+    /// The live camera position the probe reported, in level space.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn level_camera_for_test(&self) -> Option<(i64, i64)> {
+        self.level_camera
     }
 
     /// Open the Enhance workspace without going through the menu
@@ -3751,7 +3937,40 @@ impl RetroForgeApp {
             .max_height(ctx.viewport_rect().height() - PANEL_WINDOW_ORIGIN[1] - 24.0)
             .open(&mut open)
             .show(ctx, |ui| {
+                let level_texture = self.level_texture(ui.ctx());
                 let mut view = crate::enhance_dock::EnhanceCtx {
+                    level_texture: level_texture.as_ref(),
+                    profile_title: self
+                        .level_session
+                        .as_ref()
+                        .map(|s| s.profile.meta.title.clone()),
+                    profile_capabilities: self.level_session.as_ref().map_or_else(Vec::new, |s| {
+                        let c = &s.profile.capabilities;
+                        // The profile's OWN declared capabilities, not a
+                        // list this file invents — the honesty contract
+                        // says the UI cannot offer what the profile does
+                        // not claim.
+                        vec![
+                            ("full_level", c.full_level),
+                            (
+                                "widescreen",
+                                c.widescreen != rf_profiles::schema::WidescreenMode::None,
+                            ),
+                            ("hud_separation", c.hud_separation),
+                            ("entity_overlay", c.entity_overlay),
+                            ("fast_load", c.fast_load),
+                            ("smooth_camera", c.smooth_camera),
+                        ]
+                    }),
+                    level_camera: self.level_camera,
+                    // The original viewport, which is what the outline
+                    // outlines. Taken from the live frame rather than
+                    // hardcoded to 256x240 so a PAL or hires frame is
+                    // outlined at its real size.
+                    viewport_size: self.texture.as_ref().map_or((256.0, 240.0), |t| {
+                        let s = t.size();
+                        (s[0] as f32, s[1] as f32)
+                    }),
                     settings: &mut self.current_game_settings,
                     profile_matched: self.profile_matched,
                     compare_mode: &mut self.compare_mode,
@@ -3769,6 +3988,9 @@ impl RetroForgeApp {
         }
         if let Some(on) = actions.deflicker_set {
             self.send_command(CoreCommand::SetDeflicker(on));
+        }
+        if let Some(on) = actions.full_level_set {
+            self.set_level_probe(on);
         }
         if actions.settings_changed {
             self.save_current_game_settings();

@@ -5017,7 +5017,7 @@
    "THE DATA PROBLEM, and the design chosen for it. `LevelSession::scene` needs a `&dyn Fn(u32) -> u8` CPU peek and the entity-table bytes, and only the core thread can produce those without touching core state. But rendering needs the GPU, which is the UI thread's. Resolution: the profile declares WHICH addresses matter, so the app computes that address list once and asks the core for exactly those values per frame — a bounded probe rather than shipping RAM. Keeps the peek on the core thread, the composite on the UI thread, and costs nothing while the feature is off."
   ],
   "points": 8,
-  "status": "in_progress",
+  "status": "done",
   "stories": []
  },
   {

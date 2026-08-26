@@ -62,6 +62,21 @@ pub struct EnhanceCtx<'a> {
     pub compare_divider: &'a mut f32,
     /// The stitched-canvas texture, when one has been composited.
     pub map_texture: Option<&'a egui::TextureHandle>,
+    /// Ticket W11-02: the DECODED level texture, when a profile matched
+    /// and the full-level view is on. §3.3's Map is "stitched/decoded
+    /// canvas" — both, and this is the second one.
+    pub level_texture: Option<&'a egui::TextureHandle>,
+    /// Where the live camera is in level space, and how big the original
+    /// viewport is, for §3.3's viewport outline.
+    pub level_camera: Option<(i64, i64)>,
+    pub viewport_size: (f32, f32),
+    /// Ticket W11-02: the matched profile's title and declared
+    /// capabilities, for the inspector. It was hardcoded to `None` and an
+    /// empty capability list, so the inspector said "no profile matched"
+    /// on the same screen as a status bar reading "profile" — a
+    /// contradiction a user could see and nobody had.
+    pub profile_title: Option<String>,
+    pub profile_capabilities: Vec<(&'static str, bool)>,
     /// FM-13's "view too large for GPU, reduced" message, if any.
     pub fm13_message: Option<&'a str>,
     /// Whether a GPU compositor exists at all. Without one there is
@@ -86,6 +101,9 @@ pub struct EnhanceActions {
     /// told. Before W11-01 this row wrote a bool to disk and nothing
     /// read it — the checkbox was the whole feature.
     pub deflicker_set: Option<bool>,
+    /// Ticket W11-02: the full-level view was toggled; the level probe
+    /// must be armed or disarmed.
+    pub full_level_set: Option<bool>,
     /// The Compare tab asked for a both-buffers screenshot.
     pub screenshot_requested: bool,
 }
@@ -269,7 +287,10 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                         actions.deflicker_set = Some(enabled);
                     }
                     "widescreen_decoded" => ctx.settings.widescreen_decoded = enabled,
-                    "full_level_view" => ctx.settings.full_level_view = enabled,
+                    "full_level_view" => {
+                        ctx.settings.full_level_view = enabled;
+                        actions.full_level_set = Some(enabled);
+                    }
                     _ => {}
                 }
                 actions.settings_changed = true;
@@ -310,8 +331,8 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
         .default_open(true)
         .show(ui, |ui| {
             for line in crate::enhance_ui::profile_inspector_lines(
-                None,
-                &[],
+                ctx.profile_title.as_deref(),
+                &ctx.profile_capabilities,
                 &[
                     "base profile".to_string(),
                     "user overrides (profiles.d)".to_string(),
@@ -333,12 +354,28 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
 /// library's empty states, and the reason it is worth repeating is that a
 /// blank rectangle is indistinguishable from a bug.
 fn map_ui(ui: &mut egui::Ui, ctx: &EnhanceCtx<'_>) {
+    // §3.3's Map is "stitched/decoded canvas" — BOTH. The decoded level
+    // comes first when it exists, because it is the authored truth about
+    // the level while the stitched canvas is what play happened to
+    // reveal.
+    if let Some(level) = ctx.level_texture {
+        let response = ui.add(egui::Image::from_texture(level).shrink_to_fit());
+        draw_viewport_outline(ui, response.rect, ctx);
+        ui.add_space(4.0);
+        ui.add(crate::app::readout(
+            egui::RichText::new(
+                "Decoded from the game's own level data via its profile. The outline is where \
+                 the original 256x240 viewport is right now.",
+            )
+            .weak(),
+        ));
+        return;
+    }
     // The image branch below is deliberately NOT inside a scroll area:
     // `shrink_to_fit` sizes the canvas to the pane, so it cannot overflow
     // — and inside a scroll area `available_size` is effectively
     // unbounded, which would make `shrink_to_fit` grow the image without
-    // limit instead of fitting it. The text branches are short enough to
-    // fit any pane a dock tab can have.
+    // limit instead of fitting it.
     if !ctx.has_compositor {
         ui.label("No GPU device, so no stitched map can be composited.");
         return;
@@ -360,4 +397,41 @@ fn map_ui(ui: &mut egui::Ui, ctx: &EnhanceCtx<'_>) {
             );
         }
     }
+}
+
+/// §3.3's "original-viewport outline", over the decoded level.
+///
+/// Recorded as impossible in W10-02's notes — correctly, at the time: the
+/// canvas-space position of the live viewport never reached the UI
+/// thread. W11-02's bounded probe supplies it for the LEVEL view, where
+/// the camera's own address is declared by the profile. It is still
+/// unavailable over the STITCHED canvas, which is a different coordinate
+/// space with no profile behind it.
+fn draw_viewport_outline(ui: &egui::Ui, image: egui::Rect, ctx: &EnhanceCtx<'_>) {
+    let Some((cam_x, cam_y)) = ctx.level_camera else {
+        return;
+    };
+    let Some(level) = ctx.level_texture else {
+        return;
+    };
+    let size = level.size();
+    let (lw, lh) = (size[0] as f32, size[1] as f32);
+    if lw <= 0.0 || lh <= 0.0 || image.width() <= 0.0 {
+        return;
+    }
+    // Level pixels -> screen pixels. The image was drawn with
+    // `shrink_to_fit`, so one scale applies to both axes.
+    let scale = image.width() / lw;
+    let (vw, vh) = ctx.viewport_size;
+    let origin = egui::pos2(
+        image.left() + (cam_x as f32).clamp(0.0, lw) * scale,
+        image.top() + (cam_y as f32).clamp(0.0, lh) * scale,
+    );
+    let rect = egui::Rect::from_min_size(origin, egui::vec2(vw * scale, vh * scale));
+    ui.painter().rect_stroke(
+        rect.intersect(image),
+        0.0,
+        egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
+        egui::StrokeKind::Inside,
+    );
 }
