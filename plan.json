@@ -5020,35 +5020,38 @@
   "status": "done",
   "stories": []
  },
-  {
-   "id": "W11-03",
-   "title": "Decoded widescreen reaches the running app",
-   "phase": 11,
-   "crate": "retroforge",
-   "write_scope": [
-    "crates/retroforge/**",
-    "crates/rf-enhance/**",
-    "docs/design/**",
-    "docs/STATUS.md",
-    "plan.json"
-   ],
-   "depends_on": [
-    "W11-02"
-   ],
-   "acceptance": [
-    "with a profile declaring widescreen policies, enabling 'Widescreen: decoded' widens what the app draws, per the profile's per-layer policy",
-    "policy refusals are surfaced, not swallowed: a layer the policy declines to widen says so (bsnes-hd's lesson, and the honesty contract)",
-    "an end-to-end test drives it through RetroForgeApp"
-   ],
-   "notes": [
-    "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. The evidence: `CoreCommand` has exactly one enhancement variant, `SetSpriteOverlay`. There is no command for de-flicker, widescreen, full-level view, HD packs or scripts, so the core thread cannot be told to do any of them.",
-    "`rf_enhance::widescreen` is real: 441 lines, 8 tests, `BgPolicy`, `LayerView`, `decide`, `WidescreenPolicies::from_profile`.",
-    "MEASURED: `WidescreenPolicies` and `widescreen::` are referenced by NOTHING in crates/retroforge/src or crates/rf-renderer/src. The policy engine has no caller in the product."
-   ],
-   "points": 5,
-   "status": "todo",
-   "stories": []
-  },
+ {
+  "id": "W11-03",
+  "title": "Decoded widescreen reaches the running app",
+  "phase": 11,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**",
+   "crates/rf-enhance/**",
+   "docs/design/**",
+   "docs/STATUS.md",
+   "plan.json"
+  ],
+  "depends_on": [
+   "W11-02",
+   "W11-07"
+  ],
+  "acceptance": [
+   "with a profile declaring widescreen policies, enabling 'Widescreen: decoded' widens what the app draws, per the profile's per-layer policy",
+   "policy refusals are surfaced, not swallowed: a layer the policy declines to widen says so (bsnes-hd's lesson, and the honesty contract)",
+   "an end-to-end test drives it through RetroForgeApp"
+  ],
+  "notes": [
+   "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. The evidence: `CoreCommand` has exactly one enhancement variant, `SetSpriteOverlay`. There is no command for de-flicker, widescreen, full-level view, HD packs or scripts, so the core thread cannot be told to do any of them.",
+   "`rf_enhance::widescreen` is real: 441 lines, 8 tests, `BgPolicy`, `LayerView`, `decide`, `WidescreenPolicies::from_profile`.",
+   "MEASURED: `WidescreenPolicies` and `widescreen::` are referenced by NOTHING in crates/retroforge/src or crates/rf-renderer/src. The policy engine has no caller in the product.",
+   "BLOCKED 2026-08-26 on W11-07, before any code was written. Widescreen is a SNES feature: `widescreen::decide` takes a per-BG `LayerView` (tilemap width/height, hofs, vofs) and `WidescreenPolicies::from_profile` reads a SNES profile's policy set. THE APP CANNOT OPEN A SNES ROM — `core_thread::spawn` calls `EmuStepper::from_ines_bytes` and a probe against the SNES fixture returns `NotNesImage`. Wiring a widescreen toggle into a shell that cannot run the console it applies to would be building a control for a state no user can reach.",
+   "SECOND BLOCKER, independent of the first: `rf_renderer::FrameBuffer` is hardcoded to NES_WIDTH x NES_HEIGHT. Widening a frame has nowhere to be represented. W11-07's acceptance covers it because SNES needs it anyway (256x224, and 512 in hires)."
+  ],
+  "points": 5,
+  "status": "blocked",
+  "stories": []
+ },
   {
    "id": "W11-04",
    "title": "Lua overlays and the plugin host reach the running app",
@@ -5133,6 +5136,35 @@
     "VISION §5's 18-month criterion is '>=10 curated game profiles'. There are FIVE: nes/rf-rooms, nes/rf-scroller, nes/rf-scroller-demo, snes/example-mode7, snes/rf-rooms-flat — and every one is against our own fixtures.",
     "Brad ruled 2026-08-20 that profiles for real, documented commercial titles ARE permitted, citing published documentation (DataCrystal and similar). THE PERMISSION HAS NEVER BEEN USED. W9-08's handoff records why: verifying real addresses against DataCrystal-class sources was not done, and shipping unverified addresses would be worse than shipping none.",
     "Sequenced after W11-02 deliberately: a profile whose decoded level cannot be SEEN in the app is a profile nobody can check by looking. Authoring ten of those would multiply unverifiable content."
+   ],
+   "points": 8,
+   "status": "todo",
+   "stories": []
+  },
+  {
+   "id": "W11-07",
+   "title": "The app can actually open a SNES ROM",
+   "phase": 11,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-renderer/**",
+    "docs/**",
+    "plan.json"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "clicking Play on a SNES ROM in the library starts it, rather than failing with NotNesImage",
+    "the display path carries a frame that is not 256x240: rf_renderer::FrameBuffer is fixed at NES_WIDTH x NES_HEIGHT today, and SNES frames (256x224, 512 wide in hires modes 5/6) cannot be represented in it at all",
+    "an end-to-end test drives RetroForgeApp with a SNES fixture and asserts a frame reaches the screen",
+    "docs/VISION.md §5's 18-month claim is corrected or substantiated: 'SNES core boots the plain-LoROM/HiROM commercial mainstream' is true of the CORE and false of the PRODUCT until this ships"
+   ],
+   "notes": [
+    "FOUND 2026-08-26 while claiming W11-03, by asking what `decide()` needs rather than assuming the feature was wireable. Widescreen is a SNES concept (per-BG tilemap size and hofs/vofs, bsnes-hd's policy), so W11-03 cannot be reached at all until this is.",
+    "MEASURED, not inferred. `core_thread::spawn` calls `EmuStepper::from_ines_bytes` and nothing else; `EmuStepper` has no SNES constructor. A probe against fixtures/snes/rf-scroller-s/build/rf-scroller-s.sfc returns `SNES OPEN: REFUSED -> NotNesImage`.",
+    "WORSE THAN A MISSING FEATURE, because the product ADVERTISES it. `library::ROM_EXTENSIONS` includes sfc/smc/fig, the scanner identifies the file correctly (`Recognized { console: Snes, .. }`), the library lists it with a Play button, and §3.1's console filter has a SNES option. A user with a SNES ROM sees it offered and gets 'Failed to open ROM: NotNesImage' when they click.",
+    "THE STRUCTURAL HALF is the display path, and it is the expensive part: `rf_renderer::FrameBuffer` is documented and sized as `NES_WIDTH * NES_HEIGHT * 4`, hardcoded. The SNES core already emits variable-width scanlines (the hires work made modes 5/6 emit 512 dots, and rf-harness's golden runner was made width-aware for exactly that), so the CORE is ahead of the shell here.",
+    "The rf-snes crate is not the gap: 65816 and SPC700 vector suites, gilyon cputest, PeterLemon PPU goldens, Mode 7, windowing/mosaic/colour-math and SNES save states all pass. Every one of those runs through rf-harness, never through the app — the same library-versus-product split W11 exists to close."
    ],
    "points": 8,
    "status": "todo",

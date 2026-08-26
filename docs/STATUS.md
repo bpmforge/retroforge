@@ -907,3 +907,43 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   LOOKING rather than by a test: `accessibility.rs`, `script_panel.rs`,
   the dead Map tab, three enhancement toggles, the profiles path, and the
   profile inspector.
+
+- **THE APP CANNOT OPEN A SNES ROM** (2026-08-26, found while claiming
+  W11-03). `core_thread::spawn` calls `EmuStepper::from_ines_bytes` and
+  nothing else; `EmuStepper` has no SNES constructor. A probe against
+  `fixtures/snes/rf-scroller-s/build/rf-scroller-s.sfc` returns
+  **`NotNesImage`**.
+
+  **It is worse than a missing feature, because the product advertises
+  it.** `library::ROM_EXTENSIONS` includes `sfc`/`smc`/`fig`, the scanner
+  identifies the file correctly — `Recognized { console: Snes, .. }` —
+  the library lists it with a Play button, and §3.1's console filter has
+  a SNES option. A user with a SNES ROM sees it offered, clicks Play, and
+  gets "Failed to open ROM: NotNesImage".
+
+  **rf-snes is not the gap.** 65816 and SPC700 vector suites, gilyon
+  cputest, PeterLemon PPU goldens, Mode 7, windowing/mosaic/colour-math,
+  SNES save states and replays all pass. Every one of them runs through
+  `rf-harness` — never through the app. The same library-versus-product
+  split W11 exists to close, at console scale.
+
+  **VISION §5's 18-month criterion is therefore half true.** "SNES core
+  boots the plain-LoROM/HiROM commercial mainstream; Mode 7 games render"
+  is true of the CORE and false of the PRODUCT. This session's earlier
+  review said "SNES: yes" on the strength of the test suite; that was
+  reading the crates, not the shell.
+
+  **W11-07 filed** (8 pts). Its second half is structural and is the
+  expensive part: `rf_renderer::FrameBuffer` is documented and sized as
+  `NES_WIDTH * NES_HEIGHT * 4`, hardcoded, so a SNES frame (256x224, and
+  512 wide in hires modes 5/6) has nowhere to be represented. The SNES
+  core already emits variable-width scanlines — rf-harness's golden
+  runner was made width-aware for exactly that — so the core is ahead of
+  the shell here.
+
+- **W11-03 BLOCKED on W11-07**, before any code was written. Widescreen
+  is a SNES concept: `widescreen::decide` takes a per-BG `LayerView`
+  (tilemap size, hofs/vofs) and `WidescreenPolicies::from_profile` reads
+  a SNES profile's policy set. Wiring a widescreen toggle into a shell
+  that cannot run the console it applies to would be building a control
+  for a state no user can reach.
