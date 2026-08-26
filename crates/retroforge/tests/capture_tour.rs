@@ -154,6 +154,16 @@ fn photograph_every_major_surface() {
     );
     shot(&mut harness, "02-play-view");
 
+    // Ticket W11-04: the shipped Lua overlay, running in the app and
+    // drawing over the live frame. FR-PLUG-001 and an MVP checklist item
+    // — proven since W4-04 against the LIBRARY, and unreachable in the
+    // product until now.
+    let plugin =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/examples/player-overlay");
+    harness.state_mut().load_script_for_test(&plugin);
+    run_emulated_frames(&mut harness, 600, Duration::from_secs(20));
+    shot(&mut harness, "10-lua-overlay");
+
     // ---- the workspaces, over a live session ------------------------
     harness.state_mut().show_enhance_for_test(true);
     harness.run_steps(3);

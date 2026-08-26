@@ -947,3 +947,42 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   a SNES profile's policy set. Wiring a widescreen toggle into a shell
   that cannot run the console it applies to would be building a control
   for a state no user can reach.
+
+- **W11-04 — Lua overlays reach the app** (2026-08-26). `rf_plugin_sdk`
+  shipped a sandbox, a capability model, a budget and a write ledger;
+  `plugins/examples/player-overlay` shipped a working script;
+  `lua_overlay_demo.rs` proved the marker follows the player. All true,
+  and **no path existed to load a script in the application** — no menu
+  entry, no host, no memory window, and `crate::script_panel` called from
+  nowhere at all.
+
+  `File ▸ Load script…` takes a plugin **directory**, not a bare `.lua`:
+  `plugin.toml` is what declares the capabilities the sandbox grants, and
+  having the shell invent a capability set is exactly the decision
+  FR-PLUG-002 assigns to the plugin author and the user. The host lives
+  on the UI thread — `mlua::Lua` is not `Send`, which the SDK's own
+  `sandbox` doc gives as the reason its `Bridge` is `Rc`-backed — and the
+  memory it reads is published from the core thread as a bounded 8 KiB
+  window at `$6000` (`SetScriptWindow`), the same shape as W11-02's
+  probe. A window rather than "all of memory" on purpose: `read_u8`
+  returning 0 outside it is then a sandbox rather than an accident.
+
+  The overlay is painted **over** the frame and never into it. An overlay
+  that modified the framebuffer would be an enhancement pretending to be
+  an observer, which is the line ARCHITECTURE §2 draws.
+
+  `script_panel` is no longer an orphan: the Lua console tab now shows
+  the live host's capabilities, status and write ledger. That is the
+  third orphaned module this arc, after `accessibility.rs` (W10-01) and
+  the profile inspector's hardcoded `None` (W11-02).
+
+  The end-to-end test asserts the marker **moves** between frame ~240 and
+  ~900 while holding Right — a script fed a constant, a window of zeroes,
+  or the wrong base address would draw a stationary marker and pass
+  everything else. It also asserts a directory with no manifest is
+  refused *with a reason*, since a script that failed to load and one
+  that drew nothing look identical on screen.
+
+  Gate: fmt, clippy `-D warnings`, **workspace 1665 passing / 32
+  ignored**, validate-arch, validate-plan — green. Photographed in
+  `target/ui-tour/10-lua-overlay.png`.

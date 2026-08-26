@@ -185,6 +185,10 @@ pub struct FrameMsg {
     /// when no probe is armed. Peeked on this thread because only this
     /// thread can read memory without perturbing the machine.
     pub level_probe: Option<LevelProbeData>,
+    /// Ticket W11-04: the bytes of the script's memory window, when one
+    /// is armed. Peeked on this thread, for the same reason the level
+    /// probe is.
+    pub script_window: Option<Vec<u8>>,
     /// Ticket W10-01: audio-buffer fill (0.0..=1.0) at the moment this
     /// frame was produced, for the status bar's A/V sync indicator, or
     /// `None` when no audio device opened. It rides on the frame because
@@ -321,6 +325,14 @@ pub enum CoreCommand {
     /// and cannot swap: only the core thread can peek without perturbing
     /// state, and only the UI thread has the GPU to composite with.
     SetLevelProbe(Option<LevelProbe>),
+    /// Ticket W11-04: the memory window a loaded Lua script sees.
+    ///
+    /// `(base, len)`, or `None` when no script is loaded. Bounded and
+    /// declared, like `SetLevelProbe` — a script gets the window the
+    /// shell publishes and nothing else, which is what makes
+    /// `MemoryWindow::read_u8` returning 0 outside it a sandbox rather
+    /// than an accident.
+    SetScriptWindow(Option<(u32, usize)>),
     /// Ticket W3-03a: opt into (or out of) per-frame layer extraction —
     /// the BG-only/sprite-only split `FanoutSink` feeds
     /// [`rf_renderer::LayeredFrame`], plus the two ~240 KB buffer clones
@@ -668,6 +680,8 @@ fn core_thread_main(
     let mut overlay_capture: Option<Vec<rf_core_api::OverlayPixel>> = None;
     // Ticket W11-02: `None` until the full-level view asks for something.
     let mut level_probe: Option<LevelProbe> = None;
+    // Ticket W11-04: `None` until a script is loaded.
+    let mut script_window: Option<(u32, usize)> = None;
     let mut sink = rf_renderer::FrameBuffer::new();
     // Ticket W3-03: same-frame BG/sprite layer extraction, fed alongside
     // `sink` via `FanoutSink` at every call site below.
@@ -773,6 +787,9 @@ fn core_thread_main(
                 }
                 CoreCommand::SetLevelProbe(probe) => {
                     level_probe = probe;
+                }
+                CoreCommand::SetScriptWindow(window) => {
+                    script_window = window;
                 }
                 CoreCommand::SetDeflicker(enabled) => {
                     historian.set_enabled(enabled);
@@ -982,11 +999,17 @@ fn core_thread_main(
                     })
                     .collect(),
             });
+            let script_bytes = script_window.map(|(base, len)| {
+                (0..len)
+                    .map(|i| stepper.peek(u16::try_from(base as usize + i).unwrap_or(u16::MAX)))
+                    .collect::<Vec<u8>>()
+            });
             let display = display_rgba(&mut historian, &bundle, &sink, overlay_capture.as_deref());
             bundle_writer.publish(bundle);
             let msg = FrameMsg {
                 audio_fill: audio.as_ref().map(crate::audio_out::AudioOut::fill),
                 level_probe: probe_data,
+                script_window: script_bytes,
                 rgba: display,
                 width: sink.width(),
                 height: sink.height(),

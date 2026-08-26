@@ -78,6 +78,17 @@ const FPS_WINDOW_FRAMES: u32 = 30;
 /// — the same class of error as fog that guesses geometry, which
 /// FR-ENH-004 forbids the stitcher from making. When a profile learns to
 /// declare its level palette, this is the constant that gives way.
+/// Where a script's memory window starts, and how long it is (ticket
+/// W11-04).
+///
+/// PRG-RAM at `$6000`, 8 KiB — where cc65 puts a game's globals, and the
+/// window `lua_overlay_demo.rs` publishes. It is a WINDOW rather than
+/// "all of memory" on purpose: `MemoryWindow::read_u8` returns 0 outside
+/// it, so what a script can see is a decision the shell makes rather
+/// than an accident of what happened to be mapped.
+const SCRIPT_WINDOW_BASE: u32 = 0x6000;
+const SCRIPT_WINDOW_LEN: usize = 0x2000;
+
 const LEVEL_PALETTE: [[u8; 3]; 4] = [
     [0x10, 0x12, 0x16],
     [0x44, 0x4C, 0x5A],
@@ -284,6 +295,20 @@ pub struct RetroForgeApp {
     level_texture: Option<egui::TextureHandle>,
     /// Where the live camera is in level space, from the bounded probe.
     level_camera: Option<(i64, i64)>,
+    /// Ticket W11-04: the loaded Lua script, if any.
+    ///
+    /// Lives on the UI thread, deliberately and necessarily:
+    /// `mlua::Lua` is not `Send`, which `rf_plugin_sdk::sandbox`'s own
+    /// doc gives as the reason its `Bridge` uses `Rc<RefCell<..>>` rather
+    /// than `Arc<Mutex<..>>`. The memory it reads is published to it from
+    /// the core thread instead.
+    script_host: Option<rf_plugin_sdk::ScriptHost>,
+    /// What the script asked to draw on the last frame it ran.
+    script_overlay: Vec<rf_plugin_sdk::sandbox::OverlayCmd>,
+    /// Why the last script load failed, for the console to show. A script
+    /// that refuses to load must SAY so — a silently absent overlay is
+    /// indistinguishable from one that drew nothing.
+    script_status: Option<String>,
     /// Ticket W10-02: the Enhance workspace (FRONTEND_UI §3.3's
     /// [Compare][Features][Map]). Its own dock, with its own tab type in
     /// `crate::enhance_dock` — deliberately NOT `rf_debugger`'s
@@ -615,6 +640,9 @@ impl RetroForgeApp {
             level_session: None,
             level_texture: None,
             level_camera: None,
+            script_host: None,
+            script_overlay: Vec::new(),
+            script_status: None,
             enhance: crate::enhance_dock::EnhanceWorkspace::new(),
             status_readouts: None,
             fps: None,
@@ -1650,6 +1678,32 @@ impl RetroForgeApp {
             // `read` closure is a lookup into what the CORE peeked, not a
             // read of anything on this thread — the UI never touches
             // emulator memory (ARCHITECTURE §3).
+            // Ticket W11-04: publish this frame's window, run the
+            // script, collect what it wants drawn. Order matters — a
+            // script that reads memory BEFORE the window is published
+            // would see the previous frame and draw one frame behind.
+            if let (Some(bytes), Some(host)) = (&msg.script_window, self.script_host.as_mut()) {
+                host.bridge().publish(
+                    rf_plugin_sdk::sandbox::MemoryWindow {
+                        base: SCRIPT_WINDOW_BASE,
+                        bytes: bytes.clone(),
+                    },
+                    std::collections::BTreeMap::new(),
+                );
+                host.on_frame(msg.frame_count);
+                self.script_overlay = host.bridge().take_overlay();
+                // Ticket W11-04: the Lua console tab shows the LIVE host.
+                // `crate::script_panel` had been an orphan since W4-04 —
+                // its capability, status and ledger lines were written,
+                // tested, and called from nowhere. These are those calls.
+                self.debug_panels.data.script =
+                    Some(Box::new(crate::debug_dock::ScriptPanelData {
+                        status: crate::script_panel::status_line(host),
+                        capabilities: crate::script_panel::capability_lines(host),
+                        ledger: crate::script_panel::ledger_lines(host),
+                        console: host.log.lines(),
+                    }));
+            }
             if let (Some(probe), Some(session)) = (&msg.level_probe, &self.level_session) {
                 let addrs = Self::probe_addrs(session);
                 let values = probe.values.clone();
@@ -2190,6 +2244,29 @@ impl RetroForgeApp {
                             self.open_rom();
                             ui.close();
                         }
+                        ui.separator();
+                        // Ticket W11-04 (FR-PLUG-001). Until W11-04 there
+                        // was no way to load a script at all: the SDK,
+                        // the sandbox, the budget and a shipped example
+                        // plugin all existed, and nothing in the app
+                        // could run any of it.
+                        if ui.button("Load script\u{2026}").clicked() {
+                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                self.load_script(&dir);
+                            }
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                self.script_host.is_some(),
+                                egui::Button::new("Unload script"),
+                            )
+                            .clicked()
+                        {
+                            self.unload_script();
+                            ui.close();
+                        }
+                        ui.separator();
                         // Ticket W10-03: the way BACK to the library.
                         // Without it the home is reachable exactly once
                         // per process — open a game and the only route to
@@ -3355,6 +3432,159 @@ impl RetroForgeApp {
         }
     }
 
+    /// Paint the script's overlay commands over the video rect.
+    ///
+    /// Coordinates are in EMULATED pixels — the script thinks in the
+    /// game's own space, which is the only space its memory reads mean
+    /// anything in — so they are scaled to wherever the frame landed on
+    /// screen. Colours come from the NES palette by index, the same
+    /// mapping the PPU output uses, so a script cannot name a colour the
+    /// hardware could not show.
+    fn draw_script_overlay(&self, ui: &egui::Ui, video: egui::Rect) {
+        if self.script_overlay.is_empty() {
+            return;
+        }
+        let Some(texture) = &self.texture else { return };
+        let size = texture.size();
+        let (fw, fh) = (size[0] as f32, size[1] as f32);
+        if fw <= 0.0 || fh <= 0.0 {
+            return;
+        }
+        let sx = video.width() / fw;
+        let sy = video.height() / fh;
+        let map = |x: i32, y: i32| {
+            egui::pos2(
+                video.left() + (x as f32) * sx,
+                video.top() + (y as f32) * sy,
+            )
+        };
+        let colour = |index: u8| {
+            let [r, g, b] = rf_renderer::palette_index_to_rgb(index);
+            egui::Color32::from_rgb(r, g, b)
+        };
+        let painter = ui.painter_at(video);
+        for cmd in &self.script_overlay {
+            match *cmd {
+                rf_plugin_sdk::sandbox::OverlayCmd::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color_index,
+                } => {
+                    let rect = egui::Rect::from_min_max(
+                        map(x, y),
+                        map(x + i32::from(width), y + i32::from(height)),
+                    );
+                    painter.rect_stroke(
+                        rect,
+                        0.0,
+                        egui::Stroke::new(1.5, colour(color_index)),
+                        egui::StrokeKind::Middle,
+                    );
+                }
+                rf_plugin_sdk::sandbox::OverlayCmd::Line {
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    color_index,
+                } => {
+                    painter.line_segment(
+                        [map(x0, y0), map(x1, y1)],
+                        egui::Stroke::new(1.5, colour(color_index)),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Load a Lua overlay script from a plugin directory (ticket
+    /// W11-04).
+    ///
+    /// Takes the DIRECTORY, not the script: a plugin is its manifest plus
+    /// its source, and `plugin.toml` is what declares the capabilities
+    /// the sandbox will grant. Loading a bare `.lua` would mean the shell
+    /// inventing a capability set, which is precisely the decision
+    /// FR-PLUG-002 says belongs to the plugin author and the user.
+    fn load_script(&mut self, dir: &std::path::Path) {
+        let manifest_path = dir.join("plugin.toml");
+        let source_path = dir.join("main.lua");
+        let (manifest_src, source) = match (
+            std::fs::read_to_string(&manifest_path),
+            std::fs::read_to_string(&source_path),
+        ) {
+            (Ok(m), Ok(s)) => (m, s),
+            _ => {
+                self.script_status = Some(format!(
+                    "{} needs both plugin.toml and main.lua",
+                    dir.display()
+                ));
+                return;
+            }
+        };
+        let manifest = match rf_plugin_sdk::Manifest::parse(&manifest_src) {
+            Ok(m) => m,
+            Err(e) => {
+                self.script_status = Some(format!("manifest: {e}"));
+                return;
+            }
+        };
+        let bridge = rf_plugin_sdk::sandbox::Bridge::default();
+        // Labels BEFORE load: a script resolving `rf.profile.addr` once
+        // at load time is the natural way to write one, so the labels
+        // have to already be there (`ScriptHost::load_with_bridge`'s own
+        // doc, and lua_overlay_demo.rs learned it the same way).
+        bridge.publish(
+            rf_plugin_sdk::sandbox::MemoryWindow::default(),
+            self.profile_labels(),
+        );
+        match rf_plugin_sdk::ScriptHost::load_with_bridge(
+            manifest,
+            &source,
+            rf_plugin_sdk::Budget::default(),
+            bridge,
+        ) {
+            Ok(host) => {
+                self.script_host = Some(host);
+                self.script_overlay.clear();
+                self.script_status = Some(format!("Loaded {}", dir.display()));
+                self.send_command(CoreCommand::SetScriptWindow(Some((
+                    SCRIPT_WINDOW_BASE,
+                    SCRIPT_WINDOW_LEN,
+                ))));
+            }
+            Err(e) => {
+                // Named, never swallowed: a script that failed to load
+                // and one that drew nothing look identical on screen.
+                self.script_status = Some(format!("script refused to load: {e}"));
+            }
+        }
+    }
+
+    /// Unload the running script and stop the core peeking for it.
+    fn unload_script(&mut self) {
+        self.script_host = None;
+        self.script_overlay.clear();
+        self.script_status = Some("No script loaded".to_string());
+        self.send_command(CoreCommand::SetScriptWindow(None));
+    }
+
+    /// The matched profile's published addresses, which is what
+    /// FR-PLUG-001's "using profile-published labels" means.
+    fn profile_labels(&self) -> std::collections::BTreeMap<String, u32> {
+        self.level_session
+            .as_ref()
+            .map(|s| {
+                s.profile
+                    .memory_map
+                    .iter()
+                    .map(|e| (e.label.clone(), e.addr))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Where game profiles live.
     ///
     /// **This was `Path::new("profiles")` until W11-02 — a path relative
@@ -3501,6 +3731,27 @@ impl RetroForgeApp {
     pub fn set_library_roots_for_test(&mut self, roots: Vec<std::path::PathBuf>) {
         self.library_roots = roots;
         self.rescan_library();
+    }
+
+    /// Load a plugin directory as File > Load script… does (W11-04).
+    #[doc(hidden)]
+    pub fn load_script_for_test(&mut self, dir: &std::path::Path) {
+        self.load_script(dir);
+    }
+
+    /// What the script asked to draw on the last frame it ran.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn script_overlay_for_test(&self) -> Vec<rf_plugin_sdk::sandbox::OverlayCmd> {
+        self.script_overlay.clone()
+    }
+
+    /// The script status line — load failures included, since a script
+    /// that refused to load and one that drew nothing look identical.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn script_status_for_test(&self) -> Option<String> {
+        self.script_status.clone()
     }
 
     /// Turn on the full-level view exactly as its Enhance-workspace row
@@ -4032,7 +4283,13 @@ impl RetroForgeApp {
                         // §2's IA puts Library at the root.
                         self.library_home(ui);
                     } else if let Some(texture) = &self.texture {
-                        ui.add(egui::Image::from_texture(texture).shrink_to_fit());
+                        let response = ui.add(egui::Image::from_texture(texture).shrink_to_fit());
+                        // Ticket W11-04: what the script asked to draw,
+                        // painted OVER the frame and never into it. An
+                        // overlay that modified the framebuffer would be
+                        // an enhancement pretending to be an observer —
+                        // the line ARCHITECTURE §2 draws.
+                        self.draw_script_overlay(ui, response.rect);
                     } else {
                         // Core up, no frame yet. One line rather than an
                         // empty rectangle, because a black screen is

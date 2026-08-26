@@ -5079,7 +5079,7 @@
     "The demo drives the library directly and never touches RetroForgeApp, so it would stay green forever if the app never gained a script host."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "done",
    "stories": []
   },
   {
