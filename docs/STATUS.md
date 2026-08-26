@@ -667,3 +667,42 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   viewport outline (a DATA gap — the canvas-space position of the current
   viewport never reaches the UI thread), §3.3's export, and §2's per-game
   layout persistence for this workspace.
+
+- **Scrollbars: a regression I shipped, and a default that hid it**
+  (2026-08-25). Brad, on the rendered Enhance workspace: *"I did not see
+  in that image a scroll bar to scroll for things that need to scroll."*
+  Right on both counts.
+
+  **The regression:** `enhance_dock.rs` shipped in W10-02 with **zero**
+  `ScrollArea`s. All three §3.3 tabs clipped their content with no way to
+  reach it — the profile inspector was cut off mid-list in the very frame
+  that shipped. Features and Compare are now scrolled; Map's image branch
+  deliberately is not, because `shrink_to_fit` inside a scroll area sees
+  effectively unbounded available space and would grow the canvas without
+  limit instead of fitting it.
+
+  **The more interesting half:** egui's default scroll style is
+  `floating` — a thin bar that fades in only on hover. A pane full of
+  content it cannot show then looks *identical* to a pane whose content
+  simply ends, which is why this survived a render review: I looked at
+  the frame and saw text that stopped. `apply_theme` now sets
+  `ScrollStyle::solid()` app-wide. A scrollbar is a readout of how much
+  you are not looking at, not merely a control.
+
+  **What the tooling could and could not do.** The render check caught
+  the *clipping* (that is how the "(requires pro" truncation was found an
+  hour earlier) but not the *unreachability*, because a frame cannot show
+  whether the missing content is scrollable. An accessibility-tree probe
+  cannot separate the two either: egui reports laid-out rects for
+  `ScrollArea` children even when scrolled out of view, so a probe on the
+  Controls window reported **31 "clipped" nodes that were all perfectly
+  reachable**. Recorded rather than papered over — W10-04 asks for a real
+  check or a written statement that none is practical.
+
+  **W10-04 filed** with the audit so far: `debug_dock.rs` has scroll in 6
+  of 11 pane functions; of the five without, `pattern_ui`/`palette_ui`
+  are fixed-size images and `memory_rows_ui` is called from a scrolled
+  parent, `event_timeline_ui` is vertically bounded but computes its
+  width, and `audio_ui` is unverified. `settings_window`,
+  `author_window`, `states_modal` and `layers_debug_window` are
+  unaudited.

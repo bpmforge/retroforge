@@ -173,6 +173,10 @@ impl egui_dock::TabViewer for Viewer<'_, '_> {
 /// install boots in Accuracy Mode" reads the same way here — what you see
 /// by default is the emulator's own output, not a reading of it.
 fn compare_ui(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut EnhanceActions) {
+    scrolled(ui, |ui| compare_body(ui, ctx, actions));
+}
+
+fn compare_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut EnhanceActions) {
     let mut mode = *ctx.compare_mode;
     ui.radio_value(&mut mode, rf_renderer::CompareMode::Off, "Off");
     ui.radio_value(
@@ -205,6 +209,31 @@ fn compare_ui(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enhance
 
 /// §3.3's Features tab: one row per feature, with scope and provenance.
 fn features_ui(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut EnhanceActions) {
+    // **A dock pane is a container the user can shrink to nothing.** This
+    // tab's content is unbounded — a feature row per registry entry, a
+    // report card that grows with every contradiction recorded, and a
+    // profile inspector listing every precedence layer — so without a
+    // scroll area the bottom of it is simply unreachable. It shipped that
+    // way in W10-02's first build: the rendered frame cut the profile
+    // inspector off at "1. base profile" with no way to see line 2, and
+    // no assertion noticed, because the widget tree is identical whether
+    // or not the pixels are reachable.
+    scrolled(ui, |ui| features_body(ui, ctx, actions));
+}
+
+/// A pane's content, in a vertical scroll area that fills the pane.
+///
+/// `auto_shrink` off in both axes: left on, the scroll area shrinks to
+/// its content and the pane's background stops where the text stops,
+/// which reads as a rendering fault rather than as empty space.
+fn scrolled<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, body)
+        .inner
+}
+
+fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut EnhanceActions) {
     let rows = crate::enhance_ui::feature_rows(ctx.settings, ctx.profile_matched);
     for row in &rows {
         // **`horizontal_wrapped`, and the opposite call from the status
@@ -297,6 +326,12 @@ fn features_ui(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enhanc
 /// library's empty states, and the reason it is worth repeating is that a
 /// blank rectangle is indistinguishable from a bug.
 fn map_ui(ui: &mut egui::Ui, ctx: &EnhanceCtx<'_>) {
+    // The image branch below is deliberately NOT inside a scroll area:
+    // `shrink_to_fit` sizes the canvas to the pane, so it cannot overflow
+    // — and inside a scroll area `available_size` is effectively
+    // unbounded, which would make `shrink_to_fit` grow the image without
+    // limit instead of fitting it. The text branches are short enough to
+    // fit any pane a dock tab can have.
     if !ctx.has_compositor {
         ui.label("No GPU device, so no stitched map can be composited.");
         return;

@@ -4899,6 +4899,36 @@
    "stories": [
     "E2-S3"
    ]
+  },
+  {
+   "id": "W10-04",
+   "title": "Every surface that can overflow can be scrolled, and says so",
+   "phase": 10,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "docs/design/FRONTEND_UI.md",
+    "docs/STATUS.md",
+    "plan.json"
+   ],
+   "depends_on": [
+    "W10-02"
+   ],
+   "acceptance": [
+    "every dock pane and window whose content can exceed its container is inside a ScrollArea; the audit is written down, naming the surfaces checked and the ones deliberately left alone",
+    "a surface deliberately without a ScrollArea says why in a comment (a fixed-size image or a fixed row count cannot overflow; unbounded prose or a growing list can)",
+    "there is a check that would catch a NEW unscrollable overflow, or a written statement of why no such check is practical — not silence"
+   ],
+   "notes": [
+    "Brad, looking at the rendered Enhance workspace 2026-08-25: 'I did not see in that image a scroll bar to scroll for things that need to scroll'. He was right twice over.",
+    "FIRST: crates/retroforge/src/enhance_dock.rs shipped in W10-02 with ZERO ScrollAreas, so all three §3.3 tabs clipped their content with no way to reach it — the profile inspector was cut off mid-list. Fixed in the same session; this ticket is the rest of the audit, not that fix.",
+    "SECOND, and the more interesting half: egui's DEFAULT scroll style is `floating` — a thin bar that fades in only on hover. A pane full of content it cannot show then looks identical to a pane whose content simply ends. app::apply_theme now sets ScrollStyle::solid() app-wide, so a scrollbar is a visible readout of how much you are not looking at, rather than a control you have to already suspect exists.",
+    "AUDIT SO FAR (measured, not guessed). debug_dock.rs: 6 of 11 pane functions contain a ScrollArea. The five that do not are pattern_ui and palette_ui (fixed-size images, cannot overflow), memory_rows_ui (called from memory_ui, which has one), event_timeline_ui (allocate_exact_size of row_height * TIMELINE_ROWS.len() — bounded vertically, but its WIDTH is computed and may exceed a narrow pane, so horizontal scroll is the open question), and audio_ui (unverified — per-channel scopes plus controls). app.rs windows are unaudited: settings_window, author_window, states_modal and layers_debug_window have not been checked.",
+    "WHY A TEST IS HARD, stated rather than hidden: an accessibility-tree walk cannot distinguish 'clipped and unreachable' from 'scrolled out of view but reachable' — egui reports laid-out rects for ScrollArea children even when scrolled off screen, so a probe on the Controls window reported 31 'clipped' nodes that were all perfectly reachable. The render check (tests/renders.rs) sees the truth but only for the state it photographs. If no practical automated check exists, say so in the acceptance evidence instead of shipping a vacuous one."
+   ],
+   "points": 3,
+   "status": "todo",
+   "stories": []
   }
  ]
 }

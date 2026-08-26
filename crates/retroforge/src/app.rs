@@ -2037,6 +2037,18 @@ impl RetroForgeApp {
                 ),
             ]
             .into();
+            // **Scrollbars you can see without hovering.** egui's default
+            // is `ScrollStyle::floating` — a thin bar that fades in only
+            // when the pointer is over the area — and the effect is that
+            // a pane full of content it cannot show looks identical to a
+            // pane whose content simply ends. That is how W10-02 shipped
+            // an Enhance workspace whose profile inspector was cut off
+            // mid-list: the content WAS reachable, and nothing on screen
+            // said so. `solid` keeps the bar and its trough visible
+            // whenever there is anything to scroll, which is the whole
+            // point of a scrollbar — it is a readout of how much you are
+            // not looking at, not just a control.
+            style.spacing.scroll = egui::style::ScrollStyle::solid();
             style.spacing.item_spacing = egui::vec2(8.0, 6.0);
             style.spacing.button_padding = egui::vec2(8.0, 3.0);
             for w in [
