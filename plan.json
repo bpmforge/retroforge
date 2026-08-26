@@ -4929,6 +4929,36 @@
    "points": 3,
    "status": "todo",
    "stories": []
+  },
+  {
+   "id": "W10-05",
+   "title": "The Map tab renders the canvas it says is missing",
+   "phase": 10,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "docs/design/FRONTEND_UI.md",
+    "docs/STATUS.md",
+    "plan.json"
+   ],
+   "depends_on": [
+    "W10-02"
+   ],
+   "acceptance": [
+    "with a stitched canvas in existence, §3.3's Map tab shows it — it does not depend on the View-menu camera toggle having been flipped first",
+    "the canvas-snapshot request is driven by whether the Map tab is VISIBLE, on the same 'closed panels cost nothing' principle debug_dock uses for SetEventMask, so an unopened Map tab still costs no per-frame clone",
+    "'nothing stitched yet' is shown only when the canvas is genuinely empty, and that case is distinguishable from 'the map is not being fed'",
+    "photographed in tests/capture_tour.rs with a canvas that exists, so the fix is visible rather than asserted"
+   ],
+   "notes": [
+    "FOUND BY THE SCREENSHOT TOUR, 2026-08-26, and by nothing else. tests/capture_tour.rs photographed the Enhance workspace at frame 308 of a live RF-Scroller session: the Map tab read 'Nothing stitched yet — play for a moment and the map fills in.' The canvas DID exist — the same tour's ultrawide shot at frame 1200 shows a fully stitched level.",
+    "CAUSE: EnhanceCtx::map_texture is app.rs's self.ultrawide_texture, and that is only populated while camera == CameraToggle::Ultrawide, because maybe_request_canvas_snapshot returns early otherwise. So the Map tab is inert unless the user has separately flipped View > Camera to Ultrawide, and nothing on the tab says so. A surface that is blank for a reason the user cannot see is the exact failure W10-02's own map_ui doc claims to avoid ('every empty case says WHICH empty case it is') — it enumerated three cases and missed this fourth one.",
+    "The honest fix is to make the Map tab a CONSUMER of the canvas in its own right rather than a passenger on the camera toggle: request snapshots when the tab is visible, throttled the same way, and keep the camera toggle for what it is (which view fills the play area).",
+    "COST NOTE, from W3-03a's precedent: snapshots are not free — CanvasAccumulator::current_canvas clones the whole stitched canvas, 'tens of MB/s for a level of any real size' — which is why the existing code throttles to one per CANVAS_SNAPSHOT_REFRESH_INTERVAL repaints. Driving it from tab visibility must keep that throttle, not drop it."
+   ],
+   "points": 2,
+   "status": "todo",
+   "stories": []
   }
  ]
 }

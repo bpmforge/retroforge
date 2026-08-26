@@ -706,3 +706,51 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   width, and `audio_ui` is unverified. `settings_window`,
   `author_window`, `states_modal` and `layers_debug_window` are
   unaudited.
+
+- **A photographed tour of the product, and what it found** (2026-08-26).
+  Brad: *"does it do everything we set out to have it do? can we
+  screenshot them as well"*. `crates/retroforge/tests/capture_tour.rs`
+  photographs seven surfaces over a **live RF-Scroller session** —
+  library home, play view, Enhance, Debug, Settings, Controls, and the
+  ultrawide camera — into `target/ui-tour/`. `#[ignore]`d like the other
+  artefact-writing tests. It passes a real `WgpuTestRenderer`, which sets
+  `cc.wgpu_render_state` and is what `RetroForgeApp::new` builds its
+  `EnhancedCompositor` from; without it the most interesting surface in
+  the product photographs as "no GPU device".
+
+  **The first tour was a lie, and its own status bar said so.** It called
+  `run_steps` 900 times and photographed a flat grey rectangle — with
+  `f3 sl239` in the corner. `run_steps` repaints the UI; the core runs on
+  its OWN thread in wall-clock time, so spinning the UI as fast as
+  possible advances the emulator by almost nothing. It was photographing
+  the boot screen and captioning it "the product". Now paced to real
+  frames, and it ASSERTS ≥120 emulated frames so it cannot regress to
+  that silently. A second pass was needed for the map: RF-Scroller's
+  player does not move on its own, so an unattended run visits one screen
+  and the ultrawide camera over a one-screen canvas photographs as an
+  ordinary play view — truthful, and a picture of nothing happening. The
+  tour now holds ArrowRight.
+
+  **Evidence produced:** play view at 59.6 fps with live telemetry; the
+  ultrawide camera over a fully stitched level at frame 1200 (the
+  wideNES-class differentiator, working); the debug workspace with live
+  pattern tables, palette RAM and an event timeline showing
+  ScrollWrite/OamRewrite/DmaStart over a running game.
+
+  **W10-05 filed, found by the tour and by nothing else:** at frame 308
+  the §3.3 Map tab read "Nothing stitched yet" while the canvas
+  demonstrably existed. `EnhanceCtx::map_texture` is
+  `app.rs`'s `ultrawide_texture`, populated only while
+  `camera == Ultrawide` — so the Map tab is inert unless the user has
+  separately flipped View ▸ Camera, and nothing says so. Worse for being
+  in a function whose own doc claims "every empty case says WHICH empty
+  case it is": it enumerated three and missed the fourth.
+
+  **Goals check against docs/VISION.md §5.** The 6-month MVP criteria are
+  met (all 11 `docs/MVP.md` items). Of the 18-month "platform real"
+  criteria, SNES LoROM/HiROM + Mode 7, format stability at v1, HD-pack
+  import and a daily-drivable debugger are met; **≥10 curated profiles is
+  NOT — there are 5, all against our own fixtures.** Unchanged gaps: SNES
+  audio approximate (W7-08), no CI since ~2026-08-07 so Linux and the
+  software-rasterizer path are verified by nothing, and no
+  commercial-title profile authored despite the ruling permitting them.

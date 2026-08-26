@@ -3331,6 +3331,34 @@ impl RetroForgeApp {
         self.show_enhance = show;
     }
 
+    /// The last frame number the core reported, for a test that needs to
+    /// wait until a ROM has actually run rather than merely started.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn frame_count_for_test(&self) -> u64 {
+        self.position.map_or(0, |(f, _)| f)
+    }
+
+    /// Open the debug-viewer dock without the menu (screenshot tour).
+    #[doc(hidden)]
+    pub fn show_debug_panels_for_test(&mut self, show: bool) {
+        self.debug_panels.visible = show;
+    }
+
+    /// Open the Settings window without the menu (screenshot tour).
+    #[doc(hidden)]
+    pub fn show_settings_for_test(&mut self, show: bool) {
+        self.show_settings = show;
+    }
+
+    /// Switch to the Ultrawide camera and request a canvas snapshot now
+    /// (screenshot tour), rather than waiting out the refresh throttle.
+    #[doc(hidden)]
+    pub fn set_ultrawide_for_test(&mut self) {
+        self.camera = CameraToggle::Ultrawide;
+        self.ultrawide_refresh_countdown = 0;
+    }
+
     /// Set §3.1's search text directly (ticket W10-03).
     #[doc(hidden)]
     pub fn set_library_search_for_test(&mut self, needle: &str) {
