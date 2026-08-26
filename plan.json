@@ -4984,7 +4984,7 @@
     "MEASURED: `.deflicker` is read by ZERO call sites outside the UI modules that draw the checkbox. The setting round-trips to disk and is consumed by nothing."
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": []
   },
   {

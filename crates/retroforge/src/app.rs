@@ -238,6 +238,11 @@ pub struct RetroForgeApp {
     /// ease between fills. An immediate-mode button has no memory of its
     /// own, so without this the hover is a step function.
     run_hovered: bool,
+    /// Ticket W11-01: the last frame's rgba as the UI received it, kept
+    /// so a test can prove an enhancement changed the PICTURE rather than
+    /// merely that a command was sent. A core thread that accepted
+    /// `SetDeflicker` and ignored it would pass any plumbing assertion.
+    last_frame_rgba: Option<Vec<u8>>,
     /// Ticket W10-03: §3.1's search box, filtering the library home by
     /// title. Not persisted — a search is a gesture within a session, and
     /// an app that reopened tomorrow still filtered by "castle" would be
@@ -576,6 +581,7 @@ impl RetroForgeApp {
             position: None,
             audio_fill: None,
             run_hovered: false,
+            last_frame_rgba: None,
             library_search: String::new(),
             library_console_filter: None,
             library_scans: 0,
@@ -1457,6 +1463,14 @@ impl RetroForgeApp {
                 if self.sprite_overlay {
                     self.send_command(CoreCommand::SetSpriteOverlay(true));
                 }
+                // Ticket W11-01, same shape and the same reason: a fresh
+                // core starts with de-flicker OFF (law 6), so a game the
+                // user had turned it on for must have it re-applied here
+                // or the setting would appear checked against a core that
+                // had just reset it.
+                if self.current_game_settings.deflicker {
+                    self.send_command(CoreCommand::SetDeflicker(true));
+                }
                 // Ticket W3-03a: a fresh core thread starts with layer
                 // extraction OFF. If the Layers window was already open
                 // before this reload, re-assert it — the identical
@@ -1590,6 +1604,7 @@ impl RetroForgeApp {
                 self.write_screenshots();
             }
             self.audio_fill = msg.audio_fill;
+            self.last_frame_rgba = Some(msg.rgba.clone());
             self.note_frame();
             // Ticket W2-15: position travels with the frame.
             self.position = Some((msg.frame_count, msg.last_scanline));
@@ -3331,6 +3346,35 @@ impl RetroForgeApp {
         self.show_enhance = show;
     }
 
+    /// Start the core running, as the Run button does (ticket W11-01).
+    #[doc(hidden)]
+    pub fn resume_for_test(&mut self) {
+        self.running = true;
+        self.send_command(CoreCommand::Resume);
+    }
+
+    /// Toggle temporal de-flicker exactly as the Enhance workspace's
+    /// checkbox does, command and all (ticket W11-01).
+    #[doc(hidden)]
+    pub fn set_deflicker_for_test(&mut self, on: bool) {
+        self.current_game_settings.deflicker = on;
+        self.send_command(CoreCommand::SetDeflicker(on));
+    }
+
+    /// The rgba of the most recent frame the UI received.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn last_frame_rgba_for_test(&self) -> Option<Vec<u8>> {
+        self.last_frame_rgba.clone()
+    }
+
+    /// The core's crash message, if it reported one.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn crash_message_for_test(&self) -> Option<String> {
+        self.crash.as_ref().map(|c| c.message.clone())
+    }
+
     /// The last frame number the core reported, for a test that needs to
     /// wait until a ROM has actually run rather than merely started.
     #[doc(hidden)]
@@ -3722,6 +3766,9 @@ impl RetroForgeApp {
         if let Some(on) = actions.sprite_overlay_set {
             self.sprite_overlay = on;
             self.send_command(CoreCommand::SetSpriteOverlay(on));
+        }
+        if let Some(on) = actions.deflicker_set {
+            self.send_command(CoreCommand::SetDeflicker(on));
         }
         if actions.settings_changed {
             self.save_current_game_settings();

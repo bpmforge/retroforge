@@ -275,6 +275,17 @@ pub enum CoreCommand {
     /// produce a `CoreEvent::Frame`; the next running/stepped frame simply
     /// reflects the new setting.
     SetSpriteOverlay(bool),
+    /// Ticket W11-01 (FR-ENH-002): temporal de-flicker on/off.
+    ///
+    /// A SECOND enhancement command, and until W11-01 there was exactly
+    /// one — which is the whole reason `GameSettings::deflicker` round-
+    /// tripped to disk and changed nothing anyone could see. Like
+    /// `SetSpriteOverlay` this only ever affects what is DRAWN: the
+    /// reconstruction runs over a shared reference to the accuracy-exact
+    /// frame and cannot perturb the simulation (`rf_enhance::
+    /// sprite_historian::SpriteHistorian::observe` takes `&[PpuPixel]`,
+    /// never `&mut`).
+    SetDeflicker(bool),
     /// Ticket W3-03a: opt into (or out of) per-frame layer extraction —
     /// the BG-only/sprite-only split `FanoutSink` feeds
     /// [`rf_renderer::LayeredFrame`], plus the two ~240 KB buffer clones
@@ -464,6 +475,58 @@ pub struct CoreHandle {
 /// deliberately no-ops `overlay_scanline` (see its own `CoreSink` impl doc):
 /// `FrameBundle::video` must stay accuracy-exact regardless of any
 /// enhancement overlay.
+/// The frame the UI will actually see (ticket W11-01, FR-ENH-002).
+///
+/// With de-flicker **off** this is exactly `sink.to_vec()` — the frame
+/// `FrameBuffer` already composited, byte for byte. The feature costs
+/// nothing when nobody asked for it, which is law 6's requirement and not
+/// merely an optimisation.
+///
+/// With it **on**, the frame is rebuilt:
+///
+/// 1. `SpriteHistorian::observe` reconstructs the accuracy-exact INDEXED
+///    frame, redrawing flicker candidates it recognises from cache. It
+///    takes `&[PpuPixel]` — a shared reference, never `&mut` — which is
+///    the structural half of the mode-invariant proof: nothing here can
+///    perturb the simulation, and `FrameBundle::video` stays exactly as
+///    the PPU produced it.
+/// 2. The reconstruction is converted to rgba through the same palette
+///    the original pipeline uses.
+/// 3. **The dropped-sprite overlay is re-composited on top**, if it was
+///    captured. This step is the one that is easy to miss and expensive
+///    to get wrong: the overlay is painted into rgba inside
+///    `FrameBuffer`, so rebuilding from indexed pixels throws it away.
+///    Two enhancements aimed at the same artifact would then have
+///    silently cancelled each other — the user switches on both, and one
+///    of them stops working with nothing to say so.
+fn display_rgba(
+    historian: &mut rf_enhance::sprite_historian::SpriteHistorian,
+    bundle: &rf_core_api::FrameBundle,
+    sink: &rf_renderer::FrameBuffer,
+    overlay: Option<&[rf_core_api::OverlayPixel]>,
+) -> Vec<u8> {
+    if !historian.enabled() {
+        return sink.to_vec();
+    }
+    let (w, h) = (sink.width(), sink.height());
+    let reconstructed = historian.observe(&bundle.video, w as u16, h as u16);
+    let mut rgba = rf_renderer::original_rgba_from_indexed(&reconstructed, w as u32, h as u32);
+    if let Some(overlay) = overlay {
+        for (i, pixel) in overlay.iter().enumerate().take(w * h) {
+            if !pixel.opaque {
+                continue;
+            }
+            let [r, g, b] = rf_renderer::palette_index_to_rgb(pixel.palette_index);
+            let o = i * 4;
+            rgba[o] = r;
+            rgba[o + 1] = g;
+            rgba[o + 2] = b;
+            rgba[o + 3] = 0xFF;
+        }
+    }
+    rgba
+}
+
 struct FanoutSink<'a> {
     frame: &'a mut rf_renderer::FrameBuffer,
     /// `None` when layer extraction is off (ticket W3-03a) — the split is
@@ -475,6 +538,18 @@ struct FanoutSink<'a> {
     /// built at all, which is not fatal — a silent emulator is far better
     /// than one that refuses to start because a machine has no sound card.
     audio: Option<&'a mut crate::audio_out::AudioOut>,
+    /// Ticket W11-01: the dropped-sprite overlay, captured as PIXELS
+    /// rather than only painted into `frame`.
+    ///
+    /// `None` unless temporal de-flicker is on, on the same "only pay
+    /// when someone is looking" rule W3-03a applied to layer extraction.
+    /// It exists because the two enhancements meet in different spaces:
+    /// the overlay is composited into rgba inside `FrameBuffer`, while
+    /// de-flicker reconstructs INDEXED pixels — so rebuilding the frame
+    /// from reconstructed indices would silently erase an overlay the
+    /// user had also switched on. Capturing the overlay lets it be
+    /// re-composited instead of quietly dropped.
+    overlay: Option<&'a mut Vec<rf_core_api::OverlayPixel>>,
 }
 
 impl rf_core_api::CoreSink for FanoutSink<'_> {
@@ -488,6 +563,16 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
 
     fn overlay_scanline(&mut self, y: u16, pixels: &[rf_core_api::OverlayPixel]) {
         self.frame.overlay_scanline(y, pixels);
+        if let Some(buffer) = self.overlay.as_deref_mut() {
+            let row = y as usize;
+            let width = self.frame.width();
+            let start = row * width;
+            if start + width <= buffer.len() {
+                for (x, pixel) in pixels.iter().enumerate().take(width) {
+                    buffer[start + x] = *pixel;
+                }
+            }
+        }
     }
 
     fn audio(&mut self, samples: &[i16]) {
@@ -538,6 +623,14 @@ fn core_thread_main(
     // safe: `spawn` already returned `Err` and never reached here if this
     // would fail.
     let mut stepper = EmuStepper::from_ines_bytes(&rom).expect("rom already validated by spawn()");
+    // Ticket W11-01: temporal de-flicker (FR-ENH-002). Lives on the CORE
+    // thread because that is where the accuracy-exact indexed frame is,
+    // and dies with it — it holds per-identity history that means nothing
+    // across a ROM change.
+    let mut historian = rf_enhance::sprite_historian::SpriteHistorian::new();
+    // Allocated only while de-flicker is on. `None` is the whole cost of
+    // the feature being off: no buffer, no per-scanline copy, nothing.
+    let mut overlay_capture: Option<Vec<rf_core_api::OverlayPixel>> = None;
     let mut sink = rf_renderer::FrameBuffer::new();
     // Ticket W3-03: same-frame BG/sprite layer extraction, fed alongside
     // `sink` via `FanoutSink` at every call site below.
@@ -616,6 +709,7 @@ fn core_thread_main(
                             layers: layers_enabled.then_some(&mut layers),
                             bundle: &mut bundle_builder,
                             audio: audio.as_mut(),
+                            overlay: overlay_capture.as_mut(),
                         },
                     );
                     stepper.pause();
@@ -633,11 +727,24 @@ fn core_thread_main(
                         layers: layers_enabled.then_some(&mut layers),
                         bundle: &mut bundle_builder,
                         audio: audio.as_mut(),
+                        overlay: overlay_capture.as_mut(),
                     });
                     stepped = true;
                 }
                 CoreCommand::SetSpriteOverlay(enabled) => {
                     stepper.set_sprite_overlay_enabled(enabled);
+                }
+                CoreCommand::SetDeflicker(enabled) => {
+                    historian.set_enabled(enabled);
+                    overlay_capture = enabled.then(|| {
+                        vec![
+                            rf_core_api::OverlayPixel {
+                                palette_index: 0,
+                                opaque: false,
+                            };
+                            sink.width() * sink.height()
+                        ]
+                    });
                 }
                 CoreCommand::SetLayerExtraction(enabled) => {
                     layers_enabled = enabled;
@@ -752,6 +859,7 @@ fn core_thread_main(
                     layers: layers_enabled.then_some(&mut layers),
                     bundle: &mut bundle_builder,
                     audio: audio.as_mut(),
+                    overlay: overlay_capture.as_mut(),
                 },
             ),
             Some(producer) => {
@@ -766,6 +874,7 @@ fn core_thread_main(
                             layers: layers_enabled.then_some(&mut layers),
                             bundle: &mut bundle_builder,
                             audio: audio.as_mut(),
+                            overlay: overlay_capture.as_mut(),
                         },
                         &mut |pc, cycle, text| {
                             if wants_cpu {
@@ -811,10 +920,16 @@ fn core_thread_main(
             // that wakes on the `FrameMsg` channel never sees a
             // `frame_bundle` older than the frame it was just notified
             // about.
+            // Ticket W11-01: built HERE, before `bundle` is moved into
+            // `publish`, so the reconstruction can borrow the
+            // accuracy-exact indexed frame instead of cloning it. A clone
+            // would be ~500 KB per frame for a feature that is off by
+            // default.
+            let display = display_rgba(&mut historian, &bundle, &sink, overlay_capture.as_deref());
             bundle_writer.publish(bundle);
             let msg = FrameMsg {
                 audio_fill: audio.as_ref().map(crate::audio_out::AudioOut::fill),
-                rgba: sink.to_vec(),
+                rgba: display,
                 width: sink.width(),
                 height: sink.height(),
                 frame_count: stepper.frame_count(),
@@ -1436,5 +1551,131 @@ mod tests {
         // Any NesLoadError is fine here; the point is this returns
         // synchronously rather than spawning a thread that immediately
         // crash-reports.
+    }
+
+    use rf_core_api::CoreSink as _;
+
+    /// A frame of `n` opaque pixels of `index`, rest background.
+    fn indexed_frame(
+        w: usize,
+        h: usize,
+        spots: &[(usize, usize, u8)],
+    ) -> Vec<rf_core_api::PpuPixel> {
+        let mut v = vec![
+            rf_core_api::PpuPixel {
+                palette_index: 0x0F,
+                layer: rf_core_api::PixelLayer::Background(0),
+                sprite_id: None,
+                priority: 0,
+            };
+            w * h
+        ];
+        for &(x, y, idx) in spots {
+            v[y * w + x] = rf_core_api::PpuPixel {
+                palette_index: idx,
+                layer: rf_core_api::PixelLayer::Sprite,
+                sprite_id: Some(1),
+                priority: 0,
+            };
+        }
+        v
+    }
+
+    /// **Off costs exactly nothing.** Byte-for-byte the frame
+    /// `FrameBuffer` already composited — law 6's requirement, not an
+    /// optimisation, and the assertion that makes "opt-in" true rather
+    /// than merely claimed.
+    #[test]
+    fn display_rgba_is_the_untouched_frame_when_deflicker_is_off() {
+        let mut historian = rf_enhance::sprite_historian::SpriteHistorian::new();
+        let sink = rf_renderer::FrameBuffer::new();
+        let mut builder =
+            rf_core_api::FrameBundleBuilder::new(sink.width() as u16, sink.height() as u16);
+        let bundle = builder.take(0);
+        assert!(!historian.enabled(), "precondition: off by default");
+        assert_eq!(
+            display_rgba(&mut historian, &bundle, &sink, None),
+            sink.to_vec(),
+            "with de-flicker off the display frame must be the accuracy frame, unchanged"
+        );
+    }
+
+    /// **The overlay survives the rebuild.** The bug this guards is
+    /// specific and silent: the dropped-sprite overlay is composited into
+    /// rgba inside `FrameBuffer`, while de-flicker reconstructs INDEXED
+    /// pixels — so rebuilding from indices throws the overlay away. A
+    /// user with both enhancements on would have watched one of them stop
+    /// working, with nothing on screen to say which or why.
+    #[test]
+    fn the_sprite_overlay_survives_a_deflicker_rebuild() {
+        let mut historian = rf_enhance::sprite_historian::SpriteHistorian::new();
+        historian.set_enabled(true);
+        let sink = rf_renderer::FrameBuffer::new();
+        let (w, h) = (sink.width(), sink.height());
+
+        let mut builder =
+            rf_core_api::FrameBundleBuilder::new(sink.width() as u16, sink.height() as u16);
+        for y in 0..h {
+            builder.video_scanline(y as u16, &indexed_frame(w, 1, &[])[..w]);
+        }
+        let bundle = builder.take(1);
+
+        // One opaque overlay pixel, in a colour the background is not.
+        let mut overlay = vec![
+            rf_core_api::OverlayPixel {
+                palette_index: 0,
+                opaque: false,
+            };
+            w * h
+        ];
+        let (ox, oy) = (10usize, 20usize);
+        overlay[oy * w + ox] = rf_core_api::OverlayPixel {
+            palette_index: 0x16,
+            opaque: true,
+        };
+
+        let rgba = display_rgba(&mut historian, &bundle, &sink, Some(&overlay));
+        let want = rf_renderer::palette_index_to_rgb(0x16);
+        let o = (oy * w + ox) * 4;
+        assert_eq!(
+            [rgba[o], rgba[o + 1], rgba[o + 2]],
+            want,
+            "the overlay pixel was erased by the de-flicker rebuild"
+        );
+
+        // And the guard against a vacuous version of the assertion above:
+        // if the background happened to be the same colour, it would pass
+        // with the overlay dropped.
+        let bg = rf_renderer::palette_index_to_rgb(0x0F);
+        assert_ne!(
+            want, bg,
+            "the overlay colour must differ from the background, or this test proves nothing"
+        );
+    }
+
+    /// **`FrameBundle::video` is never perturbed.** The mode invariant in
+    /// its smallest form: the accuracy-exact frame the rest of the system
+    /// hashes must be identical before and after a reconstruction ran
+    /// over it. `SpriteHistorian::observe` takes `&[PpuPixel]` so this
+    /// cannot fail — which is exactly why it is worth pinning, since a
+    /// future signature change would be silent otherwise.
+    #[test]
+    fn deflicker_cannot_perturb_the_accuracy_frame() {
+        let mut historian = rf_enhance::sprite_historian::SpriteHistorian::new();
+        historian.set_enabled(true);
+        let sink = rf_renderer::FrameBuffer::new();
+        let w = sink.width();
+        let mut builder =
+            rf_core_api::FrameBundleBuilder::new(sink.width() as u16, sink.height() as u16);
+        for y in 0..sink.height() {
+            builder.video_scanline(y as u16, &indexed_frame(w, 1, &[(5, 0, 0x21)])[..w]);
+        }
+        let bundle = builder.take(2);
+        let before = bundle.video.clone();
+        let _ = display_rgba(&mut historian, &bundle, &sink, None);
+        assert_eq!(
+            bundle.video, before,
+            "the accuracy-exact frame changed while an enhancement observed it"
+        );
     }
 }

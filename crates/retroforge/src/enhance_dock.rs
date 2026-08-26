@@ -82,6 +82,10 @@ pub struct EnhanceActions {
     pub settings_changed: bool,
     /// The sprite-limit-bypass overlay was toggled; the core must be told.
     pub sprite_overlay_set: Option<bool>,
+    /// Ticket W11-01: temporal de-flicker was toggled; the core must be
+    /// told. Before W11-01 this row wrote a bool to disk and nothing
+    /// read it — the checkbox was the whole feature.
+    pub deflicker_set: Option<bool>,
     /// The Compare tab asked for a both-buffers screenshot.
     pub screenshot_requested: bool,
 }
@@ -260,7 +264,10 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                         ctx.settings.sprite_overlay = enabled;
                         actions.sprite_overlay_set = Some(enabled);
                     }
-                    "deflicker" => ctx.settings.deflicker = enabled,
+                    "deflicker" => {
+                        ctx.settings.deflicker = enabled;
+                        actions.deflicker_set = Some(enabled);
+                    }
                     "widescreen_decoded" => ctx.settings.widescreen_decoded = enabled,
                     "full_level_view" => ctx.settings.full_level_view = enabled,
                     _ => {}

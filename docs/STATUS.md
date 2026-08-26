@@ -805,3 +805,47 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   Each W11 ticket's acceptance requires an end-to-end test that drives
   `RetroForgeApp` — precisely because the existing library-level proofs
   are what let this go unnoticed.
+
+- **W11-01 — temporal de-flicker reaches the running app** (2026-08-26).
+  First of the W11 wave, chosen first because it is the smallest of the
+  five unreachable features and therefore the cheapest place to establish
+  the pattern the other four copy: a `CoreCommand` variant, a core-thread
+  consumer, and an end-to-end test that drives `RetroForgeApp`.
+
+  `CoreCommand` now has **two** enhancement variants instead of one.
+  `SetDeflicker` is handled on the core thread by an
+  `rf_enhance::sprite_historian::SpriteHistorian`, and `GameSettings::
+  deflicker` — which had been persisted and offered as a checkbox since
+  W3-05 while being read by nothing — is applied on ROM load exactly as
+  `sprite_overlay` is.
+
+  **The composition trap, which is the interesting part.** The two
+  de-flicker mechanisms meet in *different spaces*: the sprite-limit
+  overlay is painted into rgba inside `FrameBuffer`, while temporal
+  reconstruction works on INDEXED pixels. Rebuilding the display frame
+  from reconstructed indices therefore **erases an overlay the user also
+  switched on** — two enhancements aimed at the same artifact silently
+  cancelling, with nothing on screen to say which stopped. `FanoutSink`
+  now captures the overlay as pixels (allocated only while de-flicker is
+  on, the same "only pay when someone is looking" rule W3-03a applied to
+  layer extraction) and `display_rgba` re-composites it.
+  `the_sprite_overlay_survives_a_deflicker_rebuild` was verified to FAIL
+  when the re-composite is removed.
+
+  **`FrameBundle::video` is never touched.** The display frame is built
+  before `bundle_writer.publish`, borrowing the accuracy-exact frame
+  rather than cloning it (~500 KB/frame for a feature that is off by
+  default), and `SpriteHistorian::observe` takes `&[PpuPixel]` — never
+  `&mut`. `deflicker_cannot_perturb_the_accuracy_frame` pins it.
+
+  **An honesty note on the end-to-end test.**
+  `deflicker_reaches_the_app.rs` proves REACHABILITY — the toggle reaches
+  the core, the core keeps running, frames keep arriving. Its
+  `assert_ne!` does NOT prove the reconstruction bites: any two frames of
+  a moving game differ, so it would pass against a core that accepted the
+  command and ignored it. Making it discriminating would mean comparing
+  the same emulated frame rendered both ways, which a free-running core
+  on its own thread cannot be asked for — repaint timing and frame timing
+  are independent. The discriminating assertions are the three
+  `core_thread` unit tests instead, and the test file's own module doc
+  says so rather than letting its name imply more than it checks.
