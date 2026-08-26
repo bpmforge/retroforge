@@ -28,13 +28,13 @@ fn the_rf_scroller_level_renders_to_a_non_uniform_image() {
         panic!("fixture ROM missing — this test is about pixels and cannot run without one");
     };
     let cart = rf_cart::Cartridge::load(&rom).expect("valid cartridge");
-    let hash = match &cart {
+    let hashes = match &cart {
         rf_cart::Cartridge::Nes { identity, .. } | rf_cart::Cartridge::Snes { identity, .. } => {
-            identity.normalized.sha256.clone()
+            identity.normalized.clone()
         }
     };
     let profiles = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles");
-    let session = LevelSession::open(&profiles, &rom, &hash)
+    let session = LevelSession::open(&profiles, &rom, &hashes)
         .expect("RF-Scroller has a profile with a decodable level");
 
     // CHR comes from the ROM's own character bank, the same source the

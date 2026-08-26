@@ -387,6 +387,16 @@ pub struct RetroForgeApp {
     /// could not compute would be settings that silently apply to the wrong
     /// game later.
     current_game_hash: Option<String>,
+    /// Ticket W11-09: every hash family for the running ROM, not just the
+    /// normalized sha256 `current_game_hash` holds.
+    ///
+    /// Profile matching needs all four — `IdentityEntry` declares
+    /// sha256, sha1, md5 and crc32, and a profile identified by a
+    /// published No-Intro CRC32 is the only way to name a commercial
+    /// title nobody here holds a copy of. `current_game_hash` stays as
+    /// the per-game settings key, which is a different job: one identity
+    /// per game, chosen once.
+    current_game_hashes: Option<rf_cart::RomHashes>,
     /// The current game's settings, loaded on open and written back the
     /// moment one changes.
     current_game_settings: crate::game_settings::GameSettings,
@@ -664,6 +674,7 @@ impl RetroForgeApp {
             library_roots: library_roots.clone(),
             library: None,
             current_game_hash: None,
+            current_game_hashes: None,
             current_game_settings: crate::game_settings::GameSettings::default(),
             awaiting_key: None,
             bindings_status,
@@ -1474,11 +1485,14 @@ impl RetroForgeApp {
         // Ticket W2-07 (FR-FE-002): identify the ROM and load its settings
         // BEFORE the core starts, so a game configured for Enhanced mode
         // opens in it rather than flipping a frame later.
-        self.current_game_hash = match rf_cart::Cartridge::load(&bytes) {
-            Ok(rf_cart::Cartridge::Nes { identity, .. }) => Some(identity.normalized.sha256),
-            Ok(rf_cart::Cartridge::Snes { identity, .. }) => Some(identity.normalized.sha256),
+        self.current_game_hashes = match rf_cart::Cartridge::load(&bytes) {
+            Ok(
+                rf_cart::Cartridge::Nes { identity, .. }
+                | rf_cart::Cartridge::Snes { identity, .. },
+            ) => Some(identity.normalized),
             Err(_) => None,
         };
+        self.current_game_hash = self.current_game_hashes.as_ref().map(|h| h.sha256.clone());
         // Ticket W5-06: keep the header-stripped image and find the
         // profile that claims this ROM, so the author workspace has both
         // the bytes to decode and the file to watch. Both are `None` for
@@ -1489,15 +1503,15 @@ impl RetroForgeApp {
                 .strip_prefix(b"NES\x1a")
                 .map_or_else(|| bytes.clone(), |_| bytes[16..].to_vec()),
         );
-        self.matched_profile = self.current_game_hash.as_ref().and_then(|hash| {
-            crate::level_view::find_matching_profile(&Self::profiles_root(), hash)
+        self.matched_profile = self.current_game_hashes.as_ref().and_then(|hashes| {
+            crate::level_view::find_matching_profile(&Self::profiles_root(), hashes)
                 .map(|(_, path)| path)
         });
         // Ticket W11-02: decode the level now, once. `None` when no
         // profile matched or it declares no decodable level — both
         // ordinary, neither an error (`LevelSession::open`'s own doc).
-        self.level_session = self.current_game_hash.as_ref().and_then(|hash| {
-            crate::level_view::LevelSession::open(&Self::profiles_root(), &bytes, hash)
+        self.level_session = self.current_game_hashes.as_ref().and_then(|hashes| {
+            crate::level_view::LevelSession::open(&Self::profiles_root(), &bytes, hashes)
         });
         self.level_texture = None;
         self.level_camera = None;

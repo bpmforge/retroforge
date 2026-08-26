@@ -57,8 +57,8 @@ impl LevelSession {
     /// decodable level, or the decode fails — see the module doc for why
     /// none of those is an error.
     #[must_use]
-    pub fn open(profiles_root: &Path, rom: &[u8], normalized_sha256: &str) -> Option<Self> {
-        let (profile, source) = find_matching_profile(profiles_root, normalized_sha256)?;
+    pub fn open(profiles_root: &Path, rom: &[u8], hashes: &rf_cart::RomHashes) -> Option<Self> {
+        let (profile, source) = find_matching_profile(profiles_root, hashes)?;
         let spec = metatile_screens::spec_from_profile(&profile).ok()?;
         // Offsets are into the NORMALIZED image. Handing the raw file
         // through would shift every table by the 16-byte iNES header and
@@ -137,7 +137,10 @@ impl LevelSession {
 /// file hash would fail for the same game in different packaging while
 /// appearing to work for whichever copy the author happened to have.
 #[must_use]
-pub fn find_matching_profile(root: &Path, normalized_sha256: &str) -> Option<(Profile, PathBuf)> {
+pub fn find_matching_profile(
+    root: &Path,
+    hashes: &rf_cart::RomHashes,
+) -> Option<(Profile, PathBuf)> {
     let mut found = Vec::new();
     collect_profiles(root, &mut found);
     found.sort();
@@ -145,12 +148,18 @@ pub fn find_matching_profile(root: &Path, normalized_sha256: &str) -> Option<(Pr
         let Ok(outcome) = rf_profiles::load_file(&path) else {
             continue; // a broken profile must not stop a good one loading
         };
-        if outcome
-            .profile
-            .identity
-            .iter()
-            .any(|i| i.sha256.as_deref() == Some(normalized_sha256))
-        {
+        // Ticket W11-09: `IdentityEntry::matches` — the schema's OWN
+        // matcher, checking every hash family an entry declares.
+        //
+        // This used to be a second, weaker comparison written here:
+        // `i.sha256.as_deref() == Some(normalized_sha256)`, ignoring
+        // sha1, md5 and crc32 entirely. The schema has carried all four
+        // since W4-02, so a profile identified by a published No-Intro
+        // CRC32 — the only realistic way to identify a commercial title
+        // nobody in this project holds a copy of — loaded cleanly and
+        // matched nothing, for ever, silently. Two matchers for one
+        // schema is how that happens; there is one now.
+        if outcome.profile.identity.iter().any(|i| i.matches(hashes)) {
             return Some((outcome.profile, path));
         }
     }

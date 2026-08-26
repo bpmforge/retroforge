@@ -1076,3 +1076,35 @@ Iteration 3 of the wave-gate loop (cap 3, not exceeded). Iteration 1 (2026-08-05
   matches nothing. They are evidence neither for nor against this change.
   Only `core_thread` and tests construct a `FrameBuffer` at all; that is
   the entire blast radius.
+
+- **W11-09 — the profile matcher uses every hash family the schema
+  declares** (2026-08-26). `IdentityEntry` has carried sha256, sha1, md5
+  and crc32 since W4-02, and `IdentityEntry::matches` checks every family
+  an entry specifies. `level_view::find_matching_profile` — the only
+  matcher the app calls — compared normalized sha256 and ignored the
+  other three, so the schema's own matcher was dead code as far as the
+  product went. **Two matchers for one schema is how that happens.**
+  There is one now.
+
+  It matters beyond tidiness: a profile identified by a published
+  No-Intro **CRC32** is the realistic way to name a commercial title
+  nobody in this project holds a copy of, and such a profile loaded
+  cleanly and matched nothing, silently, for ever. That is W11-06's
+  path (a) blocked by a bug rather than by policy.
+
+  The app now threads `rf_cart::RomHashes` where it threaded a bare
+  sha256 `String`; `current_game_hash` stays as the per-game settings
+  key, which is a different job (one identity per game, chosen once).
+
+  **How the test first failed is worth recording:** not because the
+  matcher was wrong, but because the minimal profile the test wrote was
+  missing `meta.profile_version` and the loader rejected it. Checked
+  which before touching code, rather than "fixing" a matcher that was
+  already right. Then verified the test genuinely depends on the fix —
+  reverting to the sha256-only comparison makes it fail with exactly the
+  message it was written for. The negative case carries as much weight:
+  a matcher returning `Some` unconditionally would pass every positive
+  assertion.
+
+  Gate: fmt, clippy `-D warnings`, **workspace 1676 passing / 32
+  ignored**, validate-arch, validate-plan — green.

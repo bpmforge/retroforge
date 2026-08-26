@@ -195,8 +195,9 @@ fn capture_the_full_level_demo() {
         eprintln!("SKIP: fixture ROM not built — run fixtures/nes/rf-scroller/build.sh");
         return;
     };
-    let sha = rf_cart::hash::identity_nes(&rom).normalized.sha256;
-    let session = LevelSession::open(&root.join("profiles"), &rom, &sha)
+    let hashes = rf_cart::hash::identity_nes(&rom).normalized;
+    let sha = hashes.sha256.clone();
+    let session = LevelSession::open(&root.join("profiles"), &rom, &hashes)
         .expect("the shipped RF-Scroller profile must match the fixture");
 
     // The game's own CHR and background palette, read through the

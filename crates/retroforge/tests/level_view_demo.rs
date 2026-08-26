@@ -52,12 +52,12 @@ fn fixture() -> Option<Vec<u8>> {
 
 fn session(rom: &[u8]) -> LevelSession {
     let cart = rf_cart::Cartridge::load(rom).expect("valid cartridge");
-    let sha = match &cart {
+    let hashes = match &cart {
         rf_cart::Cartridge::Nes { identity, .. } | rf_cart::Cartridge::Snes { identity, .. } => {
-            identity.normalized.sha256.clone()
+            identity.normalized.clone()
         }
     };
-    LevelSession::open(&repo_root().join("profiles"), rom, &sha).expect(
+    LevelSession::open(&repo_root().join("profiles"), rom, &hashes).expect(
         "the shipped RF-Scroller profile must match the fixture by normalized sha256 — if this \
          fails, the profile's [[identity]] has drifted from the ROM CI builds",
     )
@@ -206,7 +206,15 @@ fn a_rom_with_no_profile_degrades_to_no_session() {
         LevelSession::open(
             &repo_root().join("profiles"),
             &synthetic,
-            "0000000000000000000000000000000000000000000000000000000000000000",
+            // Ticket W11-09: all four families, none of which any shipped
+            // profile claims — so this still asserts "no match", and now
+            // asserts it against the matcher that checks all of them.
+            &rf_cart::RomHashes {
+                crc32: "00000000".to_string(),
+                md5: "0".repeat(32),
+                sha1: "0".repeat(40),
+                sha256: "0".repeat(64),
+            },
         )
         .is_none(),
         "an unknown ROM must simply have no enhanced level, not an error"
