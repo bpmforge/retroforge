@@ -5082,35 +5082,37 @@
    "status": "done",
    "stories": []
   },
-  {
-   "id": "W11-05",
-   "title": "Mesen HD packs reach the running app",
-   "phase": 11,
-   "crate": "retroforge",
-   "write_scope": [
-    "crates/retroforge/**",
-    "crates/rf-enhance/**",
-    "docs/design/**",
-    "docs/STATUS.md",
-    "plan.json"
-   ],
-   "depends_on": [
-    "W11-03"
-   ],
-   "acceptance": [
-    "a user can import a Mesen HD pack from the app and see replaced art in the running game",
-    "pack provenance and any refused/unmatched tiles are reported rather than silently skipped (NFR-010/FM-15's rule for refused inputs)",
-    "an end-to-end test drives it through RetroForgeApp"
-   ],
-   "notes": [
-    "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. The evidence: `CoreCommand` has exactly one enhancement variant, `SetSpriteOverlay`. There is no command for de-flicker, widescreen, full-level view, HD packs or scripts, so the core thread cannot be told to do any of them.",
-    "`rf_enhance::hdpack` is real and `crates/rf-enhance/tests/mesen_hdpack_real.rs` runs against a real pack (scripts/local-gate.sh runs it).",
-    "MEASURED: no reference to hdpack/HdPack anywhere in crates/retroforge/src. 'Replaced art' is one of the five things VISION §2 promises, and it is not reachable in the product."
-   ],
-   "points": 5,
-   "status": "todo",
-   "stories": []
-  },
+ {
+  "id": "W11-05",
+  "title": "Mesen HD packs reach the running app",
+  "phase": 11,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**",
+   "crates/rf-enhance/**",
+   "docs/design/**",
+   "docs/STATUS.md",
+   "plan.json"
+  ],
+  "depends_on": [
+   "W11-03",
+   "W11-08"
+  ],
+  "acceptance": [
+   "a user can import a Mesen HD pack from the app and see replaced art in the running game",
+   "pack provenance and any refused/unmatched tiles are reported rather than silently skipped (NFR-010/FM-15's rule for refused inputs)",
+   "an end-to-end test drives it through RetroForgeApp"
+  ],
+  "notes": [
+   "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. The evidence: `CoreCommand` has exactly one enhancement variant, `SetSpriteOverlay`. There is no command for de-flicker, widescreen, full-level view, HD packs or scripts, so the core thread cannot be told to do any of them.",
+   "`rf_enhance::hdpack` is real and `crates/rf-enhance/tests/mesen_hdpack_real.rs` runs against a real pack (scripts/local-gate.sh runs it).",
+   "MEASURED: no reference to hdpack/HdPack anywhere in crates/retroforge/src. 'Replaced art' is one of the five things VISION §2 promises, and it is not reachable in the product.",
+   "BLOCKED 2026-08-26 on W11-08, before any code. An HD pack replaces each 8x8 tile with a `HdPack::scale`-times version, so the composited frame is scale times larger than 256x240 — and `rf_renderer::FrameBuffer` is hardcoded to exactly 256x240. The pack machinery is complete (parse_hires, write_hires, lookup by tile+palette, PackBuilder, and mesen_hdpack_real.rs against a real pack); what is missing is a frame big enough to draw the result into."
+  ],
+  "points": 5,
+  "status": "blocked",
+  "stories": []
+ },
   {
    "id": "W11-06",
    "title": "Ten curated game profiles, the VISION §5 number",
@@ -5141,30 +5143,62 @@
    "status": "todo",
    "stories": []
   },
+ {
+  "id": "W11-07",
+  "title": "The app can actually open a SNES ROM",
+  "phase": 11,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**",
+   "crates/rf-renderer/**",
+   "docs/**",
+   "plan.json"
+  ],
+  "depends_on": [
+   "W11-08"
+  ],
+  "acceptance": [
+   "clicking Play on a SNES ROM in the library starts it, rather than failing with NotNesImage",
+   "the display path carries a frame that is not 256x240: rf_renderer::FrameBuffer is fixed at NES_WIDTH x NES_HEIGHT today, and SNES frames (256x224, 512 wide in hires modes 5/6) cannot be represented in it at all",
+   "an end-to-end test drives RetroForgeApp with a SNES fixture and asserts a frame reaches the screen",
+   "docs/VISION.md §5's 18-month claim is corrected or substantiated: 'SNES core boots the plain-LoROM/HiROM commercial mainstream' is true of the CORE and false of the PRODUCT until this ships"
+  ],
+  "notes": [
+   "FOUND 2026-08-26 while claiming W11-03, by asking what `decide()` needs rather than assuming the feature was wireable. Widescreen is a SNES concept (per-BG tilemap size and hofs/vofs, bsnes-hd's policy), so W11-03 cannot be reached at all until this is.",
+   "MEASURED, not inferred. `core_thread::spawn` calls `EmuStepper::from_ines_bytes` and nothing else; `EmuStepper` has no SNES constructor. A probe against fixtures/snes/rf-scroller-s/build/rf-scroller-s.sfc returns `SNES OPEN: REFUSED -> NotNesImage`.",
+   "WORSE THAN A MISSING FEATURE, because the product ADVERTISES it. `library::ROM_EXTENSIONS` includes sfc/smc/fig, the scanner identifies the file correctly (`Recognized { console: Snes, .. }`), the library lists it with a Play button, and §3.1's console filter has a SNES option. A user with a SNES ROM sees it offered and gets 'Failed to open ROM: NotNesImage' when they click.",
+   "THE STRUCTURAL HALF is the display path, and it is the expensive part: `rf_renderer::FrameBuffer` is documented and sized as `NES_WIDTH * NES_HEIGHT * 4`, hardcoded. The SNES core already emits variable-width scanlines (the hires work made modes 5/6 emit 512 dots, and rf-harness's golden runner was made width-aware for exactly that), so the CORE is ahead of the shell here.",
+   "The rf-snes crate is not the gap: 65816 and SPC700 vector suites, gilyon cputest, PeterLemon PPU goldens, Mode 7, windowing/mosaic/colour-math and SNES save states all pass. Every one of those runs through rf-harness, never through the app — the same library-versus-product split W11 exists to close.",
+   "W11-08 SPLIT OUT 2026-08-26: the variable-frame-size work is the keystone for THREE tickets (this one, W11-03 widescreen, W11-05 HD packs), so it is its own claim rather than buried inside SNES support. This ticket keeps the SNES-specific half: a core constructor that is not from_ines_bytes, and a spawn path that picks one by cartridge type."
+  ],
+  "points": 8,
+  "status": "todo",
+  "stories": []
+ },
   {
-   "id": "W11-07",
-   "title": "The app can actually open a SNES ROM",
+   "id": "W11-08",
+   "title": "The display path carries frames that are not 256x240",
    "phase": 11,
-   "crate": "retroforge",
+   "crate": "rf-renderer",
    "write_scope": [
-    "crates/retroforge/**",
     "crates/rf-renderer/**",
+    "crates/retroforge/**",
     "docs/**",
     "plan.json"
    ],
    "depends_on": [],
    "acceptance": [
-    "clicking Play on a SNES ROM in the library starts it, rather than failing with NotNesImage",
-    "the display path carries a frame that is not 256x240: rf_renderer::FrameBuffer is fixed at NES_WIDTH x NES_HEIGHT today, and SNES frames (256x224, 512 wide in hires modes 5/6) cannot be represented in it at all",
-    "an end-to-end test drives RetroForgeApp with a SNES fixture and asserts a frame reaches the screen",
-    "docs/VISION.md §5's 18-month claim is corrected or substantiated: 'SNES core boots the plain-LoROM/HiROM commercial mainstream' is true of the CORE and false of the PRODUCT until this ships"
+    "rf_renderer::FrameBuffer carries a frame of a size given at construction, not a constant: NES 256x240, SNES 256x224, SNES hires 512 wide, and an HD-pack frame scale-times larger",
+    "every consumer of the fixed size is updated with it — the compare path, layer extraction, the overlay composite and the texture upload all currently assume NES_WIDTH/NES_HEIGHT",
+    "the NES path is byte-identical afterwards: a 10k-frame determinism double-run and the blargg/nestest goldens are the proof, since this touches the code every frame flows through",
+    "the three tickets blocked on this (W11-03, W11-05, W11-07) each record that they are unblocked, or say what still blocks them"
    ],
    "notes": [
-    "FOUND 2026-08-26 while claiming W11-03, by asking what `decide()` needs rather than assuming the feature was wireable. Widescreen is a SNES concept (per-BG tilemap size and hofs/vofs, bsnes-hd's policy), so W11-03 cannot be reached at all until this is.",
-    "MEASURED, not inferred. `core_thread::spawn` calls `EmuStepper::from_ines_bytes` and nothing else; `EmuStepper` has no SNES constructor. A probe against fixtures/snes/rf-scroller-s/build/rf-scroller-s.sfc returns `SNES OPEN: REFUSED -> NotNesImage`.",
-    "WORSE THAN A MISSING FEATURE, because the product ADVERTISES it. `library::ROM_EXTENSIONS` includes sfc/smc/fig, the scanner identifies the file correctly (`Recognized { console: Snes, .. }`), the library lists it with a Play button, and §3.1's console filter has a SNES option. A user with a SNES ROM sees it offered and gets 'Failed to open ROM: NotNesImage' when they click.",
-    "THE STRUCTURAL HALF is the display path, and it is the expensive part: `rf_renderer::FrameBuffer` is documented and sized as `NES_WIDTH * NES_HEIGHT * 4`, hardcoded. The SNES core already emits variable-width scanlines (the hires work made modes 5/6 emit 512 dots, and rf-harness's golden runner was made width-aware for exactly that), so the CORE is ahead of the shell here.",
-    "The rf-snes crate is not the gap: 65816 and SPC700 vector suites, gilyon cputest, PeterLemon PPU goldens, Mode 7, windowing/mosaic/colour-math and SNES save states all pass. Every one of those runs through rf-harness, never through the app — the same library-versus-product split W11 exists to close."
+    "THE KEYSTONE, found 2026-08-26 by claiming W11-03 and W11-05 in turn and reading what each needed. `rf_renderer::FrameBuffer` is documented and sized as `NES_WIDTH * NES_HEIGHT * 4` with both dimensions `const`. Three of the four remaining feature tickets need a frame that is not that size, and none of them can move until this does.",
+    "W11-03 WIDESCREEN needs MORE columns than 256 — that is what widescreen IS.",
+    "W11-05 HD PACKS need a frame `HdPack::scale` times larger: a pack replaces each 8x8 tile with a scale-times version, so a 4x pack is a 1024x960 frame. `rf_enhance::hdpack` parses, writes, looks up by (tile, palette) and builds packs, and `mesen_hdpack_real.rs` runs against a real pack — all of it produces RULES, and none of it can be composited into a 256x240 buffer.",
+    "W11-07 SNES needs 256x224, and 512 wide in hires modes 5/6. The SNES CORE ALREADY EMITS variable-width scanlines — rf-harness's golden runner was made width-aware for exactly that in W7-06 — so the core has been ahead of the shell here for some time.",
+    "RISK, and why criterion 3 is worded as it is: this is the buffer every frame passes through, so the change is small in surface and large in blast radius. The NES path must come out byte-identical, and the 10k-frame determinism double-run plus the blargg/nestest goldens are what can actually show that. They are `#[ignore]`d and run from scripts/local-gate.sh, so closing this ticket means running the local gate, not just `cargo test`."
    ],
    "points": 8,
    "status": "todo",
