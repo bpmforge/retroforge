@@ -5498,7 +5498,7 @@
     "the Enhance panel's 'background tiles only' limitation notice is removed, because it is no longer true"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED 2026-08-27 as a DECLARED limit rather than a discovered one. W11-05 delivered background tile replacement end to end and states in the Enhance panel that sprite art will not appear. Mesen packs do replace sprite tiles, so a pack whose sprites silently did nothing would be exactly the half-applied confusion hdpack::Import::summary exists to prevent — hence saying so in the UI and filing this, rather than leaving a silent gap.",
     "WHY IT WAS NOT DONE IN W11-05, measured rather than guessed: sprite fetches are PER SCANLINE, not per tile. `sprites.rs`'s `run_sprite_fetch_dot` phase 7 has the bank, tile index, attribute and x for a sprite on the scanline it is being fetched FOR — so an 8-pixel-tall sprite yields eight observations of the same tile and something must collapse them to one placement at the sprite's top row. On top of that 8x16 mode spans two tiles selected from OAM byte 1 itself, and vertical flip inverts which row is which. That is its own positioning problem with its own tests, comparable in size to the background one W11-05 solved.",
