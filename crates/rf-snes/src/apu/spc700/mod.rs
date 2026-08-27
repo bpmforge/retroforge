@@ -198,6 +198,24 @@ impl Spc700 {
         v
     }
 
+    /// The "idle" cycle that is really a RE-READ of the byte just fetched
+    /// (ticket W7-18).
+    ///
+    /// **There are no internal cycles on the SPC700.** Overload's
+    /// hardware traces (`spc700_inst_op.pdf`, Kris Bleakley 2014, via
+    /// nesdev forum t=16140): "there's no such thing as an internal
+    /// operation on the SPC700. Like the 6502, every cycle is either a
+    /// read or a write" — what other emulators call an idle cycle is a
+    /// re-read of the previously accessed address, and his tables mark it
+    /// `IO` on the address bus of the byte just read.
+    ///
+    /// It matters because the read is REAL: it reaches the bus, costs a
+    /// cycle at its own point in time, and on an I/O address has whatever
+    /// side effect that register has.
+    pub fn idle_reread(&mut self, bus: &mut dyn ApuBus) {
+        let _ = bus.read(self.pc.wrapping_sub(1));
+    }
+
     pub fn fetch16(&mut self, bus: &mut dyn ApuBus) -> u16 {
         let lo = self.fetch8(bus);
         let hi = self.fetch8(bus);

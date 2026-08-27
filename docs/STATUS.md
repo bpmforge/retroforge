@@ -1688,3 +1688,48 @@ that way.
   upscaled, that the pack's colour is visible in the drawn pixels, and
   that unloading returns to 256×240. Workspace **1712 passing**;
   ten-command gate green.
+
+- **W7-18 — the SPC700 charges time per memory access** (2026-08-27,
+  partial; blocked on a decision, not on effort).
+
+  **My premise for this ticket was wrong, and measuring caught it.** It
+  was filed saying `spc_mem_access_times` measures `$F0`'s waitstates.
+  Tracing every write to `$F0` across all four ROMs found **zero** — no
+  test ROM touches TEST at all. The ROM measures *when* inside an
+  instruction each access happens.
+
+  **The spec was then located**: Overload's `spc700_inst_op.pdf` (Kris
+  Bleakley, 2014), derived from **logic-analyzer traces of real
+  hardware** — stronger provenance than anything this project has used,
+  and squarely inside NFR-011. It gives per-cycle Address Bus / Data Bus
+  / RWB for all 256 opcodes across ~30 addressing modes. With it came a
+  model correction: **there are no internal cycles on the SPC700.** Every
+  cycle is a read or a write; what other emulators call idle is a re-read
+  of the previous address.
+
+  Landed: `$F0`'s waitstate fields applied per access on the documented
+  0/1/4/9 ladder; the clock advanced **at** each access rather than in
+  one lump after the instruction; and Overload's idle re-reads for every
+  indexed mode (`dp+X`, `dp+Y`, `!abs+X/Y`, `[dp+X]`, `[dp]+Y`, `(X)`,
+  and the `dp,rel` branches).
+
+  Measured: the ROM's unknown-classification markers went **8 → 0**, and
+  every opcode in its trace now shows its access at the cycle Overload's
+  table gives — `dp` at 3, `!abs` at 4, `dp+X` at 4, `!abs+X/Y` at 5,
+  `[dp]+Y` and `[dp+X]` at 6. Checked against the document line by line.
+
+  **Why it stopped rather than continuing:** the ROM still reports
+  `Failed 02` and compares an internal checksum it never prints an
+  expectation for. Past this point each edit changes the checksum without
+  saying whether it moved closer — the search-oracle mode that blocked
+  W7-08 and that has already produced three plausible-but-wrong models
+  here. I stopped at the last change justifiable from the document alone.
+
+  **The decision worth making before spending more:** the nesdev thread
+  that names Overload's document also records higan and Overload
+  *disagreeing* on `(dp),Y` and the CALL/RET/RTI stack orders, with no
+  arbiter as of 2017. This ROM may encode higan's order rather than the
+  hardware's — in which case passing it would mean matching a bug.
+
+  Nothing regressed: all SNES goldens, the SPC700 vector suite and gilyon
+  green and unchanged. Workspace **1716 passing**.

@@ -71,6 +71,7 @@ fn resolve(cpu: &mut Spc700, bus: &mut dyn ApuBus, mode: AddrMode) -> (Option<u1
         }
         AddrMode::DirectX => {
             let o = cpu.fetch8(bus);
+            cpu.idle_reread(bus);
             let a = cpu.dp(o.wrapping_add(cpu.x));
             (Some(a), bus.read(a))
         }
@@ -79,25 +80,40 @@ fn resolve(cpu: &mut Spc700, bus: &mut dyn ApuBus, mode: AddrMode) -> (Option<u1
             (Some(a), bus.read(a))
         }
         AddrMode::AbsoluteX => {
-            let a = cpu.fetch16(bus).wrapping_add(u16::from(cpu.x));
+            let base = cpu.fetch16(bus);
+            cpu.idle_reread(bus);
+            let a = base.wrapping_add(u16::from(cpu.x));
             (Some(a), bus.read(a))
         }
         AddrMode::AbsoluteY => {
-            let a = cpu.fetch16(bus).wrapping_add(u16::from(cpu.y));
+            let base = cpu.fetch16(bus);
+            cpu.idle_reread(bus);
+            let a = base.wrapping_add(u16::from(cpu.y));
             (Some(a), bus.read(a))
         }
         AddrMode::IndirectX => {
+            // Entry 14a: a ONE-byte instruction still reads `PC+1` on
+            // cycle 2 — the next opcode, fetched and thrown away.
+            let _ = bus.read(cpu.pc);
             let a = cpu.dp(cpu.x);
             (Some(a), bus.read(a))
         }
         AddrMode::IndirectDpX => {
             let o = cpu.fetch8(bus);
+            cpu.idle_reread(bus);
             let ptr = cpu.read_dp16(bus, o.wrapping_add(cpu.x));
             (Some(ptr), bus.read(ptr))
         }
         AddrMode::IndirectDpY => {
             let o = cpu.fetch8(bus);
-            let ptr = cpu.read_dp16(bus, o).wrapping_add(u16::from(cpu.y));
+            let base = cpu.read_dp16(bus, o);
+            // Entry 10: the idle cycle re-reads `DO+1`, the pointer's HIGH
+            // byte, AFTER both pointer bytes are in — not before them.
+            // higan puts its idle between the operand and the pointer
+            // read; Overload's order is the one measured on hardware and
+            // the one that matches the 6502/65816 family.
+            let _ = bus.read(cpu.dp(o.wrapping_add(1)));
+            let ptr = base.wrapping_add(u16::from(cpu.y));
             (Some(ptr), bus.read(ptr))
         }
     }
@@ -380,6 +396,11 @@ pub fn execute(cpu: &mut Spc700, bus: &mut dyn ApuBus, opcode: u8) -> Result<(),
         }
         0xF9 => {
             let o = cpu.fetch8(bus);
+            // `dp+Y` indexes exactly as `dp+X` does — Overload entry 12a's
+            // cycle 3 is an idle re-read of the operand byte. Handled here
+            // rather than in `resolve` only because these two opcodes are
+            // the whole of the `dp+Y` family and never went through it.
+            cpu.idle_reread(bus);
             cpu.x = bus.read(cpu.dp(o.wrapping_add(cpu.y)));
             cpu.set_nz(cpu.x);
         }
@@ -395,6 +416,7 @@ pub fn execute(cpu: &mut Spc700, bus: &mut dyn ApuBus, opcode: u8) -> Result<(),
         }
         0xD9 => {
             let o = cpu.fetch8(bus);
+            cpu.idle_reread(bus);
             let a = cpu.dp(o.wrapping_add(cpu.y));
             bus.write(a, cpu.x);
         }
@@ -414,6 +436,7 @@ pub fn execute(cpu: &mut Spc700, bus: &mut dyn ApuBus, opcode: u8) -> Result<(),
         }
         0xFB => {
             let o = cpu.fetch8(bus);
+            cpu.idle_reread(bus);
             cpu.y = bus.read(cpu.dp(o.wrapping_add(cpu.x)));
             cpu.set_nz(cpu.y);
         }
@@ -429,6 +452,7 @@ pub fn execute(cpu: &mut Spc700, bus: &mut dyn ApuBus, opcode: u8) -> Result<(),
         }
         0xDB => {
             let o = cpu.fetch8(bus);
+            cpu.idle_reread(bus);
             let a = cpu.dp(o.wrapping_add(cpu.x));
             bus.write(a, cpu.y);
         }
@@ -618,14 +642,20 @@ pub fn execute(cpu: &mut Spc700, bus: &mut dyn ApuBus, opcode: u8) -> Result<(),
         0xD0 => branch(cpu, bus, !cpu.flag(flags::Z)),
         0xF0 => branch(cpu, bus, cpu.flag(flags::Z)),
         0x2E | 0xDE => {
-            // CBNE dp / dp+X: compare then branch.
+            // CBNE dp / dp+X (Overload entries 11 and 12c): the operand
+            // byte is read then RE-READ before the branch operand.
+            // Compare then branch.
             let o = cpu.fetch8(bus);
             let addr = if opcode == 0x2E {
                 cpu.dp(o)
             } else {
+                // `dp+X` (entry 12c) pays the same indexing re-read every
+                // other `dp+X` mode does; plain `dp` (entry 11) does not.
+                cpu.idle_reread(bus);
                 cpu.dp(o.wrapping_add(cpu.x))
             };
             let v = bus.read(addr);
+            let _ = bus.read(addr);
             branch(cpu, bus, cpu.a != v);
         }
         0x6E => {
@@ -720,6 +750,11 @@ pub fn execute(cpu: &mut Spc700, bus: &mut dyn ApuBus, opcode: u8) -> Result<(),
             let o = cpu.fetch8(bus);
             let addr = cpu.dp(o);
             let v = bus.read(addr);
+            // Overload entry 11 (`dp, rel`): the direct-page byte is on
+            // the address bus for TWO cycles, 3 and 4 — read then
+            // re-read. It is not an internal cycle; the second access
+            // really happens.
+            let _ = bus.read(addr);
             let bit = opcode >> 5;
             let set = v & (1 << bit) != 0;
             let want_set = opcode & 0x10 == 0;
