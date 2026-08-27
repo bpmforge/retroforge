@@ -651,6 +651,10 @@ pub struct Echo {
     /// The FIR output computed at cycles 22-25, consumed by the DAC at
     /// 26/27 and by the write-back at 29/30.
     last_fir: (i16, i16),
+    /// `ESA` as latched at cycle 29, for the NEXT sample's read.
+    esa_latched: u8,
+    /// The ring length in bytes, latched only when the offset wraps.
+    len_latched: usize,
 }
 
 impl Default for Echo {
@@ -667,15 +671,26 @@ impl Default for Echo {
             history: [(0, 0); 8],
             at: 0,
             last_fir: (0, 0),
+            esa_latched: 0,
+            len_latched: 4,
         }
     }
 }
 
 impl Echo {
-    /// Buffer length in bytes: `delay` x 2 KiB, with a 4-sample floor.
+    /// Buffer length in bytes from the CURRENT `EDL`.
+    ///
+    /// **Only the low four bits count.** `EDL` is `----dddd`; treating the
+    /// whole byte as a delay lets a program specify a 512 KiB ring inside
+    /// a 64 KiB ARAM, which is not a rounding difference but a different
+    /// buffer.
+    ///
+    /// This is the length as of right now. What the ring actually wraps
+    /// on is [`Echo::len_latched`], sampled only when the offset is zero
+    /// — see [`Echo::latch`].
     #[must_use]
     pub fn buffer_len(&self) -> usize {
-        if self.delay == 0 {
+        if self.delay & 0x0F == 0 {
             // **EDL=0 is FOUR bytes — one stereo sample — not zero and not
             // four samples.** An earlier version returned 4*4 on the
             // assumption of "a 4-sample minimum"; that was written down
@@ -684,8 +699,27 @@ impl Echo {
             // has somewhere to live.
             4
         } else {
-            usize::from(self.delay) * 2048
+            usize::from(self.delay & 0x0F) * 2048
         }
+    }
+
+    /// Cycle 29: latch `EDL` (only at a wrap) and `ESA` (for next sample).
+    ///
+    /// Both halves are documented and both are observable:
+    ///
+    /// * `EDL` — "If idx==0, set idx_max = EDL<<9". A new delay does NOT
+    ///   take effect until the ring next comes back round, so the
+    ///   document notes it "can take up to .24s for a newly written value
+    ///   to actually take effect". Reading `EDL` live instead makes the
+    ///   buffer resize mid-flight, which no hardware ever does.
+    /// * `ESA` — "the register is accessed 32 cycles before the value is
+    ///   used for a write; at a sample level, this causes writes to
+    ///   appear to be delayed by at least a full sample".
+    pub fn latch(&mut self) {
+        if self.offset == 0 {
+            self.len_latched = self.buffer_len().max(4);
+        }
+        self.esa_latched = self.base_page;
     }
 
     /// The 8-tap FIR, exactly as the hardware sequences it.
@@ -733,7 +767,11 @@ impl Echo {
     /// program can rewrite `FFC7` between two samples and hear the change
     /// one sample earlier than a naive model predicts.
     pub fn read_and_filter(&mut self, aram: &[u8]) -> (i16, i16) {
-        let base = usize::from(self.base_page) * 256;
+        // The LATCHED page, not the live register: a write to `$6D`
+        // reaches the buffer a sample later than the program made it.
+        let base = usize::from(self.esa_latched) * 256;
+        // "The echo buffer will wrap within 16 bits" — ARAM is 64 KiB, so
+        // the modulo is that wrap rather than a safety net bolted on.
         self.at = (base + self.offset) % aram.len().max(1);
 
         let read = |a: &[u8], i: usize| -> i16 {
@@ -790,12 +828,22 @@ impl Echo {
         aram[(i + 1) % n] = b[1];
     }
 
-    /// Cycle 30: step the ring, wrapping when it passes the buffer end.
+    /// Cycle 30: "Increment the echo offset, and set to 0 if it exceeds
+    /// the buffer length."
+    ///
+    /// Against the LATCHED length, and as an increment-then-compare
+    /// rather than a modulo. The two differ whenever `EDL` shrank since
+    /// the last wrap: a modulo against the new length would snap the
+    /// offset back immediately, where hardware runs on to the end of the
+    /// buffer it started.
     pub fn advance(&mut self) {
-        let len = self.buffer_len().max(4);
-        // `offset` grows by 4 and is reduced modulo a positive `len`, so
-        // this cannot fail to make progress (law 8).
-        self.offset = (self.offset + 4) % len;
+        // `offset` grows by a positive constant and is reset to 0 the
+        // moment it reaches the (positive) latched length, so it cannot
+        // fail to make progress (law 8).
+        self.offset += 4;
+        if self.offset >= self.len_latched.max(4) {
+            self.offset = 0;
+        }
     }
 
     /// Process one stereo sample in one call.
@@ -804,6 +852,11 @@ impl Echo {
     /// unit tests drive directly. [`Dsp::tick`] does NOT use it — it
     /// calls the three phases above at their documented cycles.
     pub fn process(&mut self, aram: &mut [u8], dry: (i16, i16)) -> (i16, i16) {
+        // Stand in for the PREVIOUS sample's cycle 29, so a caller that
+        // sets `ESA`/`EDL` and immediately mixes sees them take effect —
+        // which is what every sample-granular caller means. `Dsp::tick`
+        // does the latch at its real cycle instead.
+        self.latch();
         self.read_and_filter(aram);
         self.write_back(aram, dry.0, EchoChannel::Left);
         self.write_back(aram, dry.1, EchoChannel::Right);
@@ -1353,6 +1406,10 @@ impl Dsp {
                     self.echo_send.0.clamp(-0x8000, 0x7FFF) as i16,
                     EchoChannel::Left,
                 );
+                // "Load EDL - if the current echo offset is 0, apply
+                // EDL. Load ESA for future use." AFTER the write above,
+                // which still belongs to the buffer being left behind.
+                self.echo.latch();
                 if first_half {
                     // "Clear internal KON bits for any channels keyed on
                     // in the previous 2 samples."
@@ -1546,6 +1603,8 @@ impl Dsp {
         o.usize(self.echo.at)?;
         o.i16(self.echo.last_fir.0)?;
         o.i16(self.echo.last_fir.1)?;
+        o.u8(self.echo.esa_latched)?;
+        o.usize(self.echo.len_latched)?;
         for v in &self.voices {
             o.i16(v.last_output)?;
             o.u8(v.srcn)?;
@@ -1652,6 +1711,8 @@ impl Dsp {
         self.noise_rate = i.u8()?;
         self.echo.at = i.usize()?;
         self.echo.last_fir = (i.i16()?, i.i16()?);
+        self.echo.esa_latched = i.u8()?;
+        self.echo.len_latched = i.usize()?;
         for v in &mut self.voices {
             v.last_output = i.i16()?;
             v.srcn = i.u8()?;
