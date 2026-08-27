@@ -2,7 +2,12 @@
 **/*.rs.bk
 *.pdb
 .DS_Store
-/roms/
+# `/roms/*` and not `/roms/`: git does not descend into an EXCLUDED
+# directory, so a negation inside one can never re-include anything.
+# Excluding the contents instead is what lets the README below survive
+# while every ROM byte stays out (law 5, ticket W11-06).
+/roms/*
+!/roms/README.md
 *.sav
 *.state
 .code-search/

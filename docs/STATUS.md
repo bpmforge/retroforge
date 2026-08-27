@@ -1162,3 +1162,56 @@ ticket; picking one is a scope decision, not an implementation detail.
 
 **W11-03 and W11-05 are blocked only on W11-07** — W11-08 removed the
 frame-size wall that was the other half of each.
+
+## Brad's four rulings (2026-08-26), and what changed
+
+**1. SNES — adopt `EmulatorCore` in both cores, split three ways.** W11-07
+could not be built as filed: its `write_scope` was
+`crates/retroforge/**` + `crates/rf-renderer/**`, and the work is *in the
+cores*. Replaced by **W11-10** (rf-nes implements the trait, and the
+shell drives it through the trait), **W11-11** (rf-snes implements it),
+**W11-12** (the app opens a SNES ROM), all three scoped to include
+`rf-core-api`, `rf-nes` and `rf-snes`. W11-07 is kept and re-pointed
+rather than deleted, because its evidence — the `NotNesImage` probe, the
+advertise-but-refuse behaviour — is why the split exists. W11-03 now
+waits on W11-12.
+
+The NES one is first on purpose: it is the console the shell already
+works with, so it is a refactor with a known-good output to check
+against, rather than a new console *and* a new abstraction at once. If
+the trait cannot express what the shell needs, that is far cheaper to
+find out there. Measured: `core_thread` calls **20 distinct
+`EmuStepper` methods**; `EmulatorCore` has 14 plus `StateView`, and most
+map (the five memory readers onto `StateView`, the three setters onto
+`CoreConfig`). It is a design exercise, not a rename.
+
+**2. Profiles — `roms/` created, Brad supplies ROMs.** Verification
+happens locally; only the profile (facts plus citations) is ever
+committed. `.gitignore` changed from `/roms/` to `/roms/*` plus
+`!/roms/README.md`, because **git does not descend into an excluded
+directory**, so a negation inside one can never re-include anything —
+the README would have been silently untracked. Verified three ways:
+`roms/nes` ignored, a `.nes` inside it ignored, the README tracked.
+
+**3. S-DSP — W7-08 UNBLOCKED. The schedule exists and has been found.**
+**Anomie's S-DSP Doc** (updates by jwdonal), `$Revision: 1212$`,
+2015-09-28 — `apudsp.txt`, section "SOUND GENERATION", "The full sample
+generation loop is as follows". All 32 cycles, explicitly. Echo: read at
+cycle 22 (left) and 23 (right), FIR coefficients FFC0–FFC7 loaded across
+22–25, written back at 29 and 30, and **EDL applies only when the echo
+offset is 0** — the same class of detail as the EDL=0 bug this ticket
+already fixed by hand. Gaussian: 4-point against a 512-entry coefficient
+table. ADSR/GAIN: driven by the global counter updated at cycle 29.
+
+This was blocked since 2026-08-23 on "a spec we do not have". It was
+published documentation all along, which is exactly what NFR-011's
+clean-room standard asks for. **Cite it; do not transcribe from bsnes or
+ares** — that is the provenance NFR-011 rules out however convenient.
+blargg's SPC ROMs remain the oracle that says whether it was implemented
+correctly.
+
+**4. CI — self-hosted runner on this darwin machine, Linux later.**
+Restores a gate that has not run since ~2026-08-07 without touching the
+Actions budget. Darwin-only at first, so Linux and the
+software-rasterizer path stay unverified and must keep being described
+that way.
