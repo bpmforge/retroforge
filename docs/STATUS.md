@@ -1474,3 +1474,39 @@ that way.
 
   Evidence: workspace **1693 passing**, fmt, clippy `-D warnings`,
   validate-arch, validate-plan.
+
+- **W7-17 — `$F0` TEST is implemented, and RF-L-12 is written**
+  (2026-08-27). The register previously had **no write arm at all** — it
+  fell through `write_register`'s `_ => {}`, so every bit of it was
+  inert. Now stored, with the documented bits honoured: bit 1 gates ARAM
+  writes (clear = read-only to the SPC700 *and* the S-DSP); bits 0 and 3
+  gate the timers and have **opposite senses** — bit 0 set breaks them,
+  bit 3 clear breaks them, and both must agree; bit 2 halts the CPU,
+  modelled rather than ignored so a deliberate crash does not read as
+  working code. Power-on `$0A`. Five tests, and it round-trips in the
+  save state.
+
+  **The waitstate fields are decoded but deliberately not applied.**
+  `test_ram_waits`/`test_io_waits` turn bits 4-5 and 6-7 into the
+  documented 0/1/4/9 cycles and a test pins that table, but nothing
+  charges them — because applying them needs the SPC700 to charge time
+  **per memory access**, not per instruction. `step_counted` runs a whole
+  instruction and then charges its total, so no single read or write can
+  cost `1 + wait`. fullsnes supplies the other half (a per-opcode table
+  of which internal cycles take I/O timing versus RAM timing) which is
+  unusable until accesses are individually timed.
+
+  That is the same refactor the `spc_dsp6` phase probe was built to avoid
+  doing speculatively — now wanted for a better reason: not as a guess at
+  why a ROM disagrees, but because a documented register cannot be
+  implemented without it. Likely its own ticket. Note the default makes
+  the gap invisible to ordinary software: TEST powers on with both
+  selectors at 0, so only a ROM that deliberately writes it can see —
+  which is exactly what `spc_mem_access_times` does.
+
+  `docs/LESSONS.md` gains **RF-L-12 — the harness that reads the verdict
+  is part of the evidence**, covering both oracle defects. `write_scope`
+  was widened to reach it, with the HANDOFF note `plan.json` requires.
+
+  Evidence: workspace **1698 passing**, fmt, clippy `-D warnings`,
+  validate-arch, validate-plan.

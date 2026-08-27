@@ -192,6 +192,9 @@ impl Timer {
 pub struct Apu {
     pub cpu: Spc700,
     pub aram: Vec<u8>,
+    /// `$F0` TEST. Power-on value `$0A`, per fullsnes: RAM writes enabled
+    /// (bit 1) and timers permitted (bit 3), no waitstates.
+    pub test: u8,
     pub timers: [Timer; 3],
     /// `$F1` bit 7 — is the IPL region banked over ARAM?
     pub ipl_enabled: bool,
@@ -237,6 +240,7 @@ impl Apu {
         let mut apu = Self {
             cpu: Spc700::new(),
             aram: vec![0; ARAM_LEN],
+            test: 0x0A,
             timers: [Timer::new(128), Timer::new(128), Timer::new(16)],
             // The APU powers up with the IPL banked in — that is how it
             // boots at all.
@@ -444,7 +448,48 @@ impl Apu {
     ///
     /// Timer edges come OUT of the DSP tick and are applied here, so the
     /// DSP never reaches up into the timers.
+    /// `$F0` bit 1: when clear, ARAM is read-only to the SPC700 and the
+    /// S-DSP.
+    #[must_use]
+    pub fn ram_writes_enabled(&self) -> bool {
+        self.test & 0x02 != 0
+    }
+
+    /// Do `$F0`'s two timer controls both permit the timers to run?
+    ///
+    /// Bit 0 set breaks them; bit 3 clear breaks them. Opposite senses,
+    /// and both must be satisfied.
+    #[must_use]
+    pub fn timers_permitted(&self) -> bool {
+        self.test & 0x01 == 0 && self.test & 0x08 != 0
+    }
+
+    /// `$F0` bits 4-5 / 6-7: waitstate cycles added to a RAM or I/O
+    /// access, over the 1-cycle base.
+    ///
+    /// STORED AND REPORTED, NOT YET APPLIED. Applying them needs the
+    /// SPC700 to charge time per memory ACCESS rather than per
+    /// instruction; see this ticket's notes.
+    #[must_use]
+    pub fn test_ram_waits(&self) -> u32 {
+        [0, 1, 4, 9][usize::from((self.test >> 4) & 0x03)]
+    }
+
+    #[must_use]
+    pub fn test_io_waits(&self) -> u32 {
+        [0, 1, 4, 9][usize::from((self.test >> 6) & 0x03)]
+    }
+
     pub fn tick_clock(&mut self, cycles: u32) {
+        if !self.timers_permitted() {
+            // `$F0` has the timers held off; the DSP still runs.
+            for _ in 0..cycles {
+                if let Some(s) = self.dsp.tick(&mut self.aram).sample {
+                    self.last_sample = s;
+                }
+            }
+            return;
+        }
         for _ in 0..cycles {
             // Fixed trip count: terminates by construction (law 8).
             let t = self.dsp.tick(&mut self.aram);
@@ -502,6 +547,40 @@ impl Apu {
                 }
                 self.ipl_enabled = value & 0x80 != 0;
             }
+            // **`$F0` TEST had no write arm at all** — it fell through to
+            // `_ => {}`, so every bit of it was inert (ticket W7-17).
+            //
+            // fullsnes, `00F0h - TEST - Testing functions (W)`:
+            //
+            // ```text
+            //   0    Timer-Enable     (0=Normal, 1=Timers don't work)
+            //   1    RAM Write Enable (0=Disable/Read-only, 1=Enable)
+            //   2    Crash SPC700     (0=Normal, 1=Crashes the CPU)
+            //   3    Timer-Disable    (0=Timers don't work, 1=Normal)
+            //   4-5  Waitstates on RAM Access         (0..3 = 0/1/4/9)
+            //   6-7  Waitstates on I/O and ROM Access (0..3 = 0/1/4/9)
+            // ```
+            //
+            // "Default setting is 0Ah, software should never change this
+            // register." Bits 0 and 3 are two independent controls that
+            // BOTH have to permit the timers, and their senses are
+            // opposite — bit 0 is active-high to break them, bit 3 is
+            // active-low. Reading either alone gets it backwards.
+            //
+            // The waitstate fields are STORED BUT NOT YET ACTED ON; see
+            // `test_ram_waits`/`test_io_waits` and the note on this
+            // ticket. Honouring them needs per-access timing inside the
+            // SPC700, not a per-instruction cycle count.
+            0xF0 => {
+                self.test = value;
+                // Bit 2 crashes the CPU on hardware. Modelled as a halt
+                // rather than ignored: a program that sets it has stopped
+                // the machine, and silently continuing would make a
+                // deliberate crash look like working code.
+                if value & 0x04 != 0 {
+                    self.cpu.stopped = true;
+                }
+            }
             0xF2 => self.dsp_addr = value,
             // The counterpart write arm, which did not exist at all.
             // ARAM goes in because key-on resolves a voice's sample
@@ -537,7 +616,13 @@ impl ApuBus for Apu {
         // Note: NOT gated on the IPL window. Writes always reach ARAM,
         // even where the IPL is currently being read from — see the
         // module doc.
-        self.aram[usize::from(addr)] = value;
+        //
+        // They ARE gated on `$F0` bit 1, which makes ARAM read-only when
+        // clear. The default `$0A` has it set, so this changes nothing
+        // until a program deliberately clears it.
+        if self.ram_writes_enabled() {
+            self.aram[usize::from(addr)] = value;
+        }
     }
 
     fn peek(&self, addr: u16) -> u8 {
@@ -592,6 +677,7 @@ impl Apu {
             o.u8(v)?;
         }
         o.u8(self.dsp_addr)?;
+        o.u8(self.test)?;
         for v in self.aux {
             o.u8(v)?;
         }
@@ -620,6 +706,7 @@ impl Apu {
             *v = i.u8()?;
         }
         self.dsp_addr = i.u8()?;
+        self.test = i.u8()?;
         for v in &mut self.aux {
             *v = i.u8()?;
         }

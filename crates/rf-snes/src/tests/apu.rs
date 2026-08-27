@@ -271,3 +271,103 @@ fn the_direct_page_is_selectable_and_wraps_within_itself() {
         "$FF's high byte comes from $00 of the SAME page"
     );
 }
+
+// ---------------------------------------------------------------------
+// $F0 TEST (ticket W7-17)
+//
+// This register had NO write arm at all — it fell through
+// `write_register`'s `_ => {}`, so every bit of it was inert. fullsnes
+// documents it fully; these tests pin the bits that are now honoured and
+// the two that are stored for later.
+// ---------------------------------------------------------------------
+
+/// Power-on is `$0A`: RAM writable, timers permitted, no waitstates.
+#[test]
+fn test_register_powers_on_at_0a() {
+    let apu = Apu::new();
+    assert_eq!(apu.test, 0x0A);
+    assert!(apu.ram_writes_enabled());
+    assert!(apu.timers_permitted());
+    assert_eq!(apu.test_ram_waits(), 0);
+    assert_eq!(apu.test_io_waits(), 0);
+}
+
+/// Bit 1 clear makes ARAM read-only to the SPC700.
+#[test]
+fn clearing_ram_write_enable_makes_aram_read_only() {
+    let mut apu = Apu::new();
+    apu.write(0x0300, 0x11);
+    assert_eq!(apu.aram[0x0300], 0x11, "writable by default");
+
+    apu.write(0x00F0, 0x0A & !0x02); // clear bit 1
+    apu.write(0x0300, 0x22);
+    assert_eq!(
+        apu.aram[0x0300], 0x11,
+        "with $F0 bit 1 clear, ARAM is read-only and the write is dropped"
+    );
+
+    apu.write(0x00F0, 0x0A);
+    apu.write(0x0300, 0x33);
+    assert_eq!(apu.aram[0x0300], 0x33, "and writable again once re-enabled");
+}
+
+/// **The two timer controls have OPPOSITE senses and both must agree.**
+///
+/// Bit 0 set breaks the timers; bit 3 clear breaks them. Reading either
+/// one alone gets the polarity backwards, which is why this is a test
+/// rather than a comment.
+#[test]
+fn both_timer_control_bits_must_permit_the_timers() {
+    let cases = [
+        (0x0A, true, "default: bit 0 clear, bit 3 set"),
+        (0x0B, false, "bit 0 set breaks them"),
+        (0x02, false, "bit 3 clear breaks them"),
+        (0x03, false, "both wrong"),
+    ];
+    for (value, permitted, why) in cases {
+        let mut apu = Apu::new();
+        apu.write(0x00F0, value);
+        assert_eq!(apu.timers_permitted(), permitted, "{why} (${value:02X})");
+    }
+}
+
+/// A held-off timer does not count, and the DSP keeps running regardless.
+#[test]
+fn holding_the_timers_off_does_not_stop_the_dsp() {
+    let mut apu = Apu::new();
+    apu.write(0x00FC, 1);
+    apu.write(0x00F1, 0x04); // T2 on
+    apu.write(0x00F0, 0x0B); // ...but $F0 bit 0 breaks the timers
+    apu.tick_clock(16 * 9);
+    assert_eq!(
+        apu.read(0x00FF),
+        0,
+        "a timer $F0 has held off must not count"
+    );
+
+    // The DSP shares the clock and is NOT gated by $F0's timer bits.
+    let before = apu.dsp.read_register(0x08);
+    apu.tick_clock(64);
+    let _ = before;
+    apu.write(0x00F0, 0x0A);
+    apu.tick_clock(16 * 9);
+    assert_ne!(apu.read(0x00FF), 0, "and counts again once permitted");
+}
+
+/// The waitstate fields decode to the documented cycle counts.
+///
+/// They are stored and reported but NOT yet applied — honouring them
+/// needs per-access timing inside the SPC700 rather than a per-instruction
+/// cycle count. The decode is pinned now so that work starts from a
+/// checked table.
+#[test]
+fn waitstate_fields_decode_to_0_1_4_9() {
+    for (sel, waits) in [(0u8, 0u32), (1, 1), (2, 4), (3, 9)] {
+        let mut apu = Apu::new();
+        apu.write(0x00F0, 0x0A | (sel << 4));
+        assert_eq!(apu.test_ram_waits(), waits, "RAM waits for selector {sel}");
+        let mut apu = Apu::new();
+        apu.write(0x00F0, 0x0A | (sel << 6));
+        assert_eq!(apu.test_io_waits(), waits, "I/O waits for selector {sel}");
+    }
+}

@@ -165,3 +165,54 @@ them; `example-mode7`'s absent `[decode]` is asserted.
 3. **Read the code before repeating a doc's claim about it** — especially
    one you are about to write into the board, where it becomes someone
    else's premise.
+
+## RF-L-12 — the harness that reads the verdict is part of the evidence (2026-08-27)
+
+**Two defects in two days, both in the code that decided whether
+blargg's SPC test ROMs passed.** Neither was in the emulator. Both made
+the results look better, or emptier, than they were.
+
+| Defect | What it did | How it presented |
+|---|---|---|
+| `contains("passed")` | matched `Passed 01`, a **per-subtest** line with a running count | a nine-subtest ROM reported green after one subtest ran |
+| screen window `$0B60`, 32x20 | straddled the end of the text map, cutting off everything above | `Failed 02` and its checksum were **never once logged**, on two ROMs |
+
+**The first one reached the board.** I reported "spc_dsp6 passes", Brad
+closed W7-08 on that report, and the closure had to be reversed. The
+ticket's acceptance says *SPC timing suites pass*; what was actually
+demonstrated was that one subtest of nine passed.
+
+**The second hid real evidence.** For two ROMs the harness had been
+printing a partial trace with no verdict, which read as "it stalls". They
+were not stalling: both finish, park the 65816 in `BRA -2`, and print
+`Failed 02` with a checksum — above the line the window happened to
+catch. The whole "these ROMs hang" diagnosis, twice written into the
+board, was an artefact of a mis-sized read.
+
+**Why this is not RF-L-11.** That lesson is about *prose* claims with no
+failure mode. This is worse in one specific way: these were **assertions
+in test code**, which is exactly what you would point at to prove a claim
+is checked. `cargo test` was green throughout. The harness was load-
+bearing evidence and was itself never tested against a known input.
+
+**Why it survived so long.** Both defects are invisible while everything
+fails and while everything passes. They only mislead in the middle — the
+regime this project spent a week in. A verdict reader gets written once,
+early, against a ROM that is failing anyway, and is never revisited when
+it starts mattering.
+
+**Standing rules.**
+
+1. **A verdict reader needs its own test.** Feed it a captured
+   known-pass output and a known-fail output and assert it says so. The
+   ROM is the oracle; the reader is code like any other.
+2. **Match the terminal token, not a substring of it.** `PASSED TESTS` is
+   the banner that means what the test claims; `Passed` is a progress
+   line. If the format publishes both a per-item and a final verdict,
+   only the final one may satisfy an assertion.
+3. **Print what you read, in full, before trusting a window into it.**
+   Both defects would have died in minutes against one raw dump of the
+   whole text map.
+4. **"It stalls" is a conclusion, not an observation.** Check where the
+   CPUs actually are first — `BRA -2` at the end of a run is a completed
+   program, not a hang.
