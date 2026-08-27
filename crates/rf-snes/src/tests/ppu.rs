@@ -575,7 +575,7 @@ fn cgwsel_bit_zero_selects_direct_colour() {
 // Mode 7 (ticket W7-04)
 // ---------------------------------------------------------------------
 
-use crate::ppu::mode7;
+use crate::ppu::{mode7, MAX_WIDTH, WIDTH};
 
 /// A mode-7 PPU with an identity matrix and a recognisable playfield.
 ///
@@ -687,8 +687,8 @@ fn screen_over_modes_differ_only_outside_the_playfield() {
 #[test]
 fn hd_mode7_evaluates_the_same_transform_at_higher_density() {
     let p = ppu_mode7();
-    let base = mode7::render_scanline(&p, 0, 1);
-    let hd = mode7::render_scanline(&p, 0, 4);
+    let base = mode7::render_scanline(&p, 0, 1, WIDTH);
+    let hd = mode7::render_scanline(&p, 0, 4, WIDTH);
 
     assert_eq!(base.len(), 256);
     assert_eq!(hd.len(), 1024, "four samples per hardware pixel");
@@ -718,7 +718,7 @@ fn the_accuracy_path_renders_mode_7_at_hardware_density() {
         "render_scanline must never widen itself; HD-Mode-7 is opt-in"
     );
     // And it is bit-identical to an explicit density of 1.
-    let explicit = mode7::render_scanline(&p, 0, 1);
+    let explicit = mode7::render_scanline(&p, 0, 1, WIDTH);
     for (x, sample) in explicit.iter().enumerate().take(crate::ppu::WIDTH) {
         assert_eq!(line.pixels[x].palette_index, sample.unwrap_or(0));
     }
@@ -1503,4 +1503,84 @@ fn the_data_ports_are_not_recorded_as_mid_line_writes() {
     // ...while a control register at the same position IS recorded.
     p.write_register_at(0x212C, 0x00, Some((1, 64)));
     assert_eq!(p.line_writes_for_test(1).len(), 1);
+}
+
+// ---------------------------------------------------------------------
+// Caller-specified width (ticket W11-13)
+// ---------------------------------------------------------------------
+
+/// The centre of a widened line is **byte-identical** to a 256 render.
+///
+/// Law 6: widening is an opt-in overlay over an unmodified simulation, so
+/// the accuracy path must not shift by so much as a dot. This is the
+/// structural half of that promise; the goldens are the empirical half.
+#[test]
+fn widening_does_not_disturb_the_centre() {
+    let mut narrow = ppu_full_line();
+    let mut wide = ppu_full_line();
+    let reference = narrow.render_scanline(0);
+    let widened = wide.render_scanline_at(0, 400);
+
+    let pad = (400 - WIDTH) / 2;
+    assert_eq!(widened.pixels.len(), 400);
+    for x in 0..WIDTH {
+        assert_eq!(
+            widened.pixels[x + pad].palette_index,
+            reference.pixels[x].palette_index,
+            "dot {x} of the picture moved when the frame was widened"
+        );
+        assert_eq!(widened.pixels[x + pad].layer, reference.pixels[x].layer);
+    }
+}
+
+/// Asking for the hardware width is the hardware path, exactly.
+#[test]
+fn render_scanline_at_256_is_render_scanline() {
+    let mut a = ppu_full_line();
+    let mut b = ppu_full_line();
+    let plain = a.render_scanline(0);
+    let asked = b.render_scanline_at(0, WIDTH);
+    assert_eq!(plain.pixels.len(), asked.pixels.len());
+    for (l, r) in plain.pixels.iter().zip(asked.pixels.iter()) {
+        assert_eq!(l.palette_index, r.palette_index);
+        assert_eq!(l.layer, r.layer);
+    }
+}
+
+/// **The extra columns carry real tilemap content, not backdrop.**
+///
+/// This is the difference between fetching and stretching, and it is the
+/// only assertion that can tell them apart. The tilemap is filled across
+/// its full 32-column width, so the columns either side of the visible
+/// 256 address tiles that genuinely exist — a stretch, a mirror or a
+/// backdrop fill would all fail here.
+#[test]
+fn the_widened_margins_are_fetched_not_backdrop() {
+    let mut p = ppu_full_line();
+    let width = 400;
+    let line = p.render_scanline_at(0, width);
+    let pad = (width - WIDTH) / 2;
+
+    for x in 0..pad {
+        assert_eq!(
+            line.pixels[x].layer,
+            PixelLayer::Background(0),
+            "left margin dot {x} should be fetched tilemap, not backdrop"
+        );
+        assert_eq!(
+            line.pixels[width - 1 - x].layer,
+            PixelLayer::Background(0),
+            "right margin dot {} should be fetched tilemap, not backdrop",
+            width - 1 - x
+        );
+    }
+}
+
+/// A width beyond `MAX_WIDTH` is clamped, not silently truncated.
+#[test]
+fn an_over_wide_request_is_clamped() {
+    let mut p = ppu_full_line();
+    assert_eq!(p.render_scanline_at(0, 4096).pixels.len(), MAX_WIDTH);
+    // And below the hardware width it cannot shrink the picture.
+    assert_eq!(p.render_scanline_at(0, 64).pixels.len(), WIDTH);
 }

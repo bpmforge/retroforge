@@ -162,9 +162,19 @@ pub type Mode7Scanline = Vec<Option<u8>>;
 /// Accuracy Mode). [`Ppu::render_scanline`] never passes anything else;
 /// only a caller that has explicitly opted in does.
 #[must_use]
-pub fn render_scanline(ppu: &Ppu, y: u16, samples_per_pixel: u32) -> Mode7Scanline {
+pub fn render_scanline(
+    ppu: &Ppu,
+    y: u16,
+    samples_per_pixel: u32,
+    out_width: usize,
+) -> Mode7Scanline {
     let m = &ppu.mode7;
-    let width = super::WIDTH as u32 * samples_per_pixel;
+    let width = out_width as u32 * samples_per_pixel;
+    // Mode 7 is a projection, not a tilemap fetch, so widening it is the
+    // one case that needs no special handling: extending the screen-x
+    // range simply projects more of the same plane. The pad keeps the
+    // centre column identical to a 256 render.
+    let pad = (out_width.saturating_sub(super::WIDTH) / 2) as i32;
     let mut out = Vec::with_capacity(width as usize);
 
     let sy = if m.flip_y { 255 - y } else { y };
@@ -180,7 +190,9 @@ pub fn render_scanline(ppu: &Ppu, y: u16, samples_per_pixel: u32) -> Mode7Scanli
             i as i32
         };
         // Screen x in 8.8, so a density of N steps 256/N per sample.
-        let sx_fixed = (sx_num * 256) / samples_per_pixel as i32;
+        // Shift into 256-space so the centre projects exactly as it does
+        // at 256 and the extra columns extend the plane either side.
+        let sx_fixed = (sx_num * 256) / samples_per_pixel as i32 - pad * 256;
         let cx_fixed = sx_fixed + ((i32::from(m.hofs) - i32::from(m.x0)) * 256);
 
         // **The products are computed in i64, and that is a fix, not a

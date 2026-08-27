@@ -49,6 +49,20 @@ use rf_core_api::{OverlayPixel, PixelLayer, PpuPixel};
 
 /// Visible width of a non-hires scanline.
 pub const WIDTH: usize = 256;
+
+/// The widest picture the PPU will compose.
+///
+/// **Why a fixed cap rather than a `Vec`.** The per-scanline layer
+/// buffers are hot: four backgrounds plus objects, 224 times a frame.
+/// Sizing them to a constant keeps them off the heap, at the cost of
+/// carrying an explicit `width` alongside so callers know how much of
+/// each buffer means anything.
+///
+/// 512 covers both users: true-hires modes 5 and 6 sample 512 columns,
+/// and 16:9 widescreen at this height wants 398 (or 426 at 240 rows).
+/// A caller asking for more is clamped rather than silently truncated —
+/// see [`Ppu::render_scanline_at`].
+pub const MAX_WIDTH: usize = 512;
 /// Visible lines in the default (non-overscan) frame.
 pub const VISIBLE_LINES: u16 = 224;
 /// Visible lines with overscan enabled (`$2133` bit 2).
@@ -714,7 +728,7 @@ impl Ppu {
     /// affordable precisely BECAUSE attribution is correct: before it, a
     /// single line could carry thousands of misattributed frame-setup
     /// writes.
-    fn compose_line_segmented(&mut self, line: u16) -> Scanline {
+    fn compose_line_segmented(&mut self, line: u16, width: usize) -> Scanline {
         let writes = self
             .line_writes
             .get(usize::from(line))
@@ -727,11 +741,11 @@ impl Ppu {
             regs.apply(self);
         }
         let phase = self.hires_phase(bg::HiresPhase::Odd);
-        let mut out = self.render_scanline_live(line, phase);
+        let mut out = self.render_scanline_live(line, phase, width);
         for (dot, addr, value) in writes {
             self.write_register(addr, value);
             let phase = self.hires_phase(bg::HiresPhase::Odd);
-            let seg = self.render_scanline_live(line, phase);
+            let seg = self.render_scanline_live(line, phase, width);
             // Both are exactly WIDTH: `render_scanline_live` always
             // composes 256 dots, and the hires widening to 512 happens
             // afterwards in `render_scanline_hires`. So `dot` indexes
@@ -813,7 +827,9 @@ impl Ppu {
         // the ordinary 256-wide one — including pseudo-hires, which
         // really is two independent screens.
         let phase = shadow.hires_phase(bg::HiresPhase::Even);
-        let composed = shadow.render_scanline_live(line, phase);
+        // The sub screen feeds colour math, which is a 256-space
+        // per-dot operation; widening is a main-screen concern.
+        let composed = shadow.render_scanline_live(line, phase, WIDTH);
 
         let math = &shadow.color_math;
         let fixed = shadow.color_math.fixed_bgr555();
@@ -870,7 +886,7 @@ impl Ppu {
         // indices and this decides a `ColorMathOp`.)
         let phase = shadow.hires_phase(bg::HiresPhase::Odd);
         shadow
-            .render_scanline_live(line, phase)
+            .render_scanline_live(line, phase, WIDTH)
             .pixels
             .get(x)
             .map(|p| p.layer)
@@ -881,7 +897,37 @@ impl Ppu {
     /// Returns accuracy-exact pixels plus the overlay channel; see the
     /// module doc for why dropped sprites are never in the first.
     #[must_use]
+    /// Compose one visible row at the hardware's 256 dots.
+    ///
+    /// Unchanged, and deliberately kept as its own entry point: every
+    /// accuracy caller goes through here, and it is `render_scanline_at`
+    /// with the one width that is not an enhancement.
     pub fn render_scanline(&mut self, y: u16) -> Scanline {
+        self.render_scanline_at(y, WIDTH)
+    }
+
+    /// Compose one visible row at a caller-specified width.
+    ///
+    /// **The extra columns are fetched, not stretched.** Output column
+    /// `x` is 256-space column `x - (width - 256) / 2`, so the centre is
+    /// the picture hardware would draw and the margins show tilemap the
+    /// screen edge would have cut off. That is bsnes-hd's technique, and
+    /// it works here because tilemap addressing is modular: a negative
+    /// column wraps to real tiles rather than off the end.
+    ///
+    /// **`width == WIDTH` is the accuracy path and is byte-identical**,
+    /// which is structural rather than merely tested — the pad is zero,
+    /// every derived index reduces to the old expression, and
+    /// [`Ppu::render_scanline`] is the only thing the accuracy callers
+    /// use. Law 6: widening is an opt-in overlay over an unmodified
+    /// simulation.
+    ///
+    /// `width` is clamped to `WIDTH..=MAX_WIDTH`. A true-hires line
+    /// ignores the request entirely and composes at 256 before its own
+    /// widening to 512 — combining hires with widescreen is not modelled,
+    /// and quietly half-doing it would be worse than declining.
+    pub fn render_scanline_at(&mut self, y: u16, width: usize) -> Scanline {
+        let width = width.clamp(WIDTH, MAX_WIDTH);
         // **`y` is a 0-based VISIBLE ROW; the hardware scanline is one
         // more** (ticket W7-13). fullsnes: the V counter runs 0-261 with
         // "1-224 (or 1-239 if overscan is enabled) visible on the
@@ -909,7 +955,12 @@ impl Ppu {
             // Segmented: the line is split at every mid-line register
             // write. With no writes this is exactly the old single
             // composition, which is why it is inert on 31 of 32 goldens.
-            let composed = shadow.compose_line_segmented(line);
+            let width = if shadow.setini.hires_requested(shadow.bg_mode) {
+                WIDTH
+            } else {
+                width
+            };
+            let composed = shadow.compose_line_segmented(line, width);
             // Limit flags accumulate on the real PPU, not the shadow.
             self.range_over |= shadow.range_over;
             self.time_over |= shadow.time_over;
@@ -923,7 +974,12 @@ impl Ppu {
             }
             return composed;
         }
-        let composed = self.compose_line_segmented(line);
+        let width = if self.setini.hires_requested(self.bg_mode) {
+            WIDTH
+        } else {
+            width
+        };
+        let composed = self.compose_line_segmented(line, width);
         if self.setini.hires_requested(self.bg_mode) {
             return self.render_scanline_hires(line, composed);
         }
@@ -1032,20 +1088,20 @@ impl Ppu {
     /// `y` here is the **hardware scanline** (1-224), not a 0-based row —
     /// see [`Ppu::render_scanline`], which is the only caller and does the
     /// conversion.
-    fn render_scanline_live(&mut self, y: u16, phase: bg::HiresPhase) -> Scanline {
+    fn render_scanline_live(&mut self, y: u16, phase: bg::HiresPhase, width: usize) -> Scanline {
         let backdrop = PpuPixel {
             palette_index: 0,
             layer: PixelLayer::Backdrop,
             sprite_id: None,
             priority: 0,
         };
-        let mut pixels = vec![backdrop; WIDTH];
+        let mut pixels = vec![backdrop; width];
         let mut overlay = vec![
             OverlayPixel {
                 palette_index: 0,
                 opaque: false
             };
-            WIDTH
+            width
         ];
 
         if self.forced_blank {
@@ -1055,7 +1111,7 @@ impl Ppu {
             return Scanline { pixels, overlay };
         }
 
-        let bg_pixels = bg::render_backgrounds(self, y, phase);
+        let bg_pixels = bg::render_backgrounds(self, y, phase, width);
         // Mode 7 replaces BG1 entirely: its "tilemap" is an affine
         // transform, so it is rendered by its own module and injected as
         // BG1's contribution rather than fetched through the tile path.
@@ -1063,12 +1119,12 @@ impl Ppu {
         // Density 1 — hardware. Law 6: Accuracy Mode is the reference and
         // HD-Mode-7 is an opt-in overlay, so nothing on this path can
         // reach for a higher density.
-        let mode7_line = (self.bg_mode == 7).then(|| mode7::render_scanline(self, y, 1));
-        let objs = obj::render_objects(self, y);
+        let mode7_line = (self.bg_mode == 7).then(|| mode7::render_scanline(self, y, 1, width));
+        let objs = obj::render_objects(self, y, width);
         self.range_over |= objs.range_over;
         self.time_over |= objs.time_over;
 
-        for x in 0..WIDTH {
+        for x in 0..width {
             if let Some(line) = &mode7_line {
                 if let Some(index) = line[x] {
                     pixels[x] = PpuPixel {

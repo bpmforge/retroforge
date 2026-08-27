@@ -37,7 +37,7 @@
 //! stream would displace what the CRT actually showed. See the `ppu`
 //! module doc.
 
-use super::{Ppu, OAM_LEN, WIDTH};
+use super::{Ppu, MAX_WIDTH, OAM_LEN, WIDTH};
 
 /// Maximum sprites evaluated onto one scanline.
 pub const MAX_SPRITES_PER_LINE: usize = 32;
@@ -122,11 +122,13 @@ pub fn decode_sprite(ppu: &Ppu, index: u8) -> Sprite {
 #[derive(Debug, Clone)]
 pub struct ObjScanline {
     /// `(palette index, sprite id)` per x, for sprites that survived.
-    pub pixels: [Option<(u8, u8)>; WIDTH],
-    pub priority: [u8; WIDTH],
+    /// Sized to [`MAX_WIDTH`]; only the first `width` entries of a given
+    /// render are meaningful.
+    pub pixels: [Option<(u8, u8)>; MAX_WIDTH],
+    pub priority: [u8; MAX_WIDTH],
     /// Palette index per x for sprites the limits DROPPED. Never merged
     /// into `pixels` — see the module doc.
-    pub dropped: [Option<u8>; WIDTH],
+    pub dropped: [Option<u8>; MAX_WIDTH],
     pub range_over: bool,
     pub time_over: bool,
 }
@@ -134,9 +136,9 @@ pub struct ObjScanline {
 impl Default for ObjScanline {
     fn default() -> Self {
         Self {
-            pixels: [None; WIDTH],
-            priority: [0; WIDTH],
-            dropped: [None; WIDTH],
+            pixels: [None; MAX_WIDTH],
+            priority: [0; MAX_WIDTH],
+            dropped: [None; MAX_WIDTH],
             range_over: false,
             time_over: false,
         }
@@ -145,7 +147,14 @@ impl Default for ObjScanline {
 
 /// Evaluate and render sprites for scanline `y`.
 #[must_use]
-pub fn render_objects(ppu: &Ppu, y: u16) -> ObjScanline {
+pub fn render_objects(ppu: &Ppu, y: u16, width: usize) -> ObjScanline {
+    // Sprites keep their 256-space X and are shifted right by the same
+    // pad the backgrounds use, so a sprite standing in the middle of the
+    // picture stays in the middle. A sprite that hardware would clip at
+    // the screen edge becomes visible in the widened area — which is the
+    // honest consequence of showing more of the world, and exactly the
+    // kind of thing a game's own profile may decline.
+    let pad = (width.saturating_sub(WIDTH) / 2) as i16;
     let mut out = ObjScanline::default();
     if !ppu.obj_enabled {
         return out;
@@ -196,10 +205,10 @@ pub fn render_objects(ppu: &Ppu, y: u16) -> ObjScanline {
     // Draw survivors lowest-priority first so the earliest-evaluated
     // sprite ends up on top.
     for s in &drawable {
-        draw_sprite(ppu, s, y, &mut out, false);
+        draw_sprite(ppu, s, y, &mut out, false, width, pad);
     }
     for s in range_dropped.iter().chain(sliver_dropped.iter()) {
-        draw_sprite(ppu, s, y, &mut out, true);
+        draw_sprite(ppu, s, y, &mut out, true, width, pad);
     }
     out
 }
@@ -211,7 +220,15 @@ fn intersects(s: &Sprite, y: u16) -> bool {
     dy < s.height
 }
 
-fn draw_sprite(ppu: &Ppu, s: &Sprite, y: u16, out: &mut ObjScanline, dropped: bool) {
+fn draw_sprite(
+    ppu: &Ppu,
+    s: &Sprite,
+    y: u16,
+    out: &mut ObjScanline,
+    dropped: bool,
+    width: usize,
+    pad: i16,
+) {
     let row = {
         let dy = y.wrapping_sub(u16::from(s.y)) & 0xFF;
         if s.flip_y {
@@ -222,8 +239,8 @@ fn draw_sprite(ppu: &Ppu, s: &Sprite, y: u16, out: &mut ObjScanline, dropped: bo
     };
 
     for dx in 0..s.width {
-        let x = s.x + dx as i16;
-        if x < 0 || x >= WIDTH as i16 {
+        let x = s.x + dx as i16 + pad;
+        if x < 0 || x >= width as i16 {
             continue;
         }
         let x = x as usize;

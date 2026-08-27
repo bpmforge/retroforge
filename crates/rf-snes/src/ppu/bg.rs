@@ -24,23 +24,26 @@
 //! base, in the order left/right then top/bottom. With 16×16 tiles the
 //! same map covers twice the pixels in each direction.
 
-use super::{BgLayer, Ppu, WIDTH};
+use super::{BgLayer, Ppu, MAX_WIDTH, WIDTH};
 
 /// One background's contribution to a scanline.
 #[derive(Debug, Clone)]
 pub struct BgScanline {
     /// Palette index per x, or `None` where the tile pixel is
     /// transparent (colour 0).
-    pub pixels: [Option<u8>; WIDTH],
+    /// Sized to [`MAX_WIDTH`]; only the first `width` entries of a given
+    /// render are meaningful. A fixed array keeps this off the heap on a
+    /// per-scanline path.
+    pub pixels: [Option<u8>; MAX_WIDTH],
     /// The tilemap priority bit of whatever produced that pixel.
-    pub priority: [u8; WIDTH],
+    pub priority: [u8; MAX_WIDTH],
 }
 
 impl Default for BgScanline {
     fn default() -> Self {
         Self {
-            pixels: [None; WIDTH],
-            priority: [0; WIDTH],
+            pixels: [None; MAX_WIDTH],
+            priority: [0; MAX_WIDTH],
         }
     }
 }
@@ -155,14 +158,22 @@ pub fn palette_base(mode: u8, bg: usize) -> u8 {
 /// `phase` is [`HiresPhase::None`] for every ordinary line; modes 5 and 6
 /// call this twice, once per half-dot. See [`HiresPhase`].
 #[must_use]
-pub fn render_backgrounds(ppu: &Ppu, y: u16, phase: HiresPhase) -> BgScanlines {
+pub fn render_backgrounds(ppu: &Ppu, y: u16, phase: HiresPhase, width: usize) -> BgScanlines {
     let mut out = BgScanlines::default();
     let depths = bit_depths(ppu.bg_mode);
     for (bg, &depth) in depths.iter().enumerate() {
         if depth == 0 || !ppu.bgs[bg].enabled {
             continue;
         }
-        out.layers[bg] = render_layer(ppu, bg, y, depth, palette_base(ppu.bg_mode, bg), phase);
+        out.layers[bg] = render_layer(
+            ppu,
+            bg,
+            y,
+            depth,
+            palette_base(ppu.bg_mode, bg),
+            phase,
+            width,
+        );
     }
     out
 }
@@ -174,6 +185,7 @@ fn render_layer(
     depth: u8,
     palette_base: u8,
     phase: HiresPhase,
+    width: usize,
 ) -> BgScanline {
     let bg = &ppu.bgs[bg_index];
     let mut out = BgScanline::default();
@@ -198,7 +210,16 @@ fn render_layer(
     let tile_w = if hires || bg.tile_size_16 { 16u16 } else { 8 };
     let tile_h = if bg.tile_size_16 { 16u16 } else { 8 };
 
-    for x in 0..WIDTH {
+    // **Widening puts the extra columns EITHER SIDE of the 256-dot
+    // picture, not on one end.** Output column `x` is 256-space column
+    // `x - pad`, so the centre is byte-identical to a 256 render and the
+    // new area is scenery the tilemap already contained. That is
+    // bsnes-hd's model, and it is why this is a fetch and not a stretch:
+    // `hofs + sx` addresses the tilemap modularly, so a negative or
+    // over-wide `sx` lands on real tiles rather than off the end.
+    let pad = (width.saturating_sub(WIDTH) / 2) as i32;
+    for x in 0..width {
+        let sx = x as i32 - pad;
         // Offset-per-tile replaces this column's scroll wholesale rather
         // than adding to it (modes 2/4/6 only; a no-op elsewhere).
         //
@@ -211,7 +232,7 @@ fn render_layer(
         // offset-per-tile, and no ROM in this suite uses it — so this
         // pairing is UNVERIFIED and is written to leave the 256-space
         // behaviour exactly as it was rather than to guess at hires.
-        let column = (x as u16) / 8;
+        let column = (sx.rem_euclid(256) / 8) as u16;
         let offsets = offset_per_tile(ppu, bg_index, column);
         let hofs = offsets.h.unwrap_or_else(|| bg.hofs.wrapping_mul(scale));
         let vofs = offsets.v.unwrap_or(bg.vofs);
@@ -232,9 +253,14 @@ fn render_layer(
         // mosaic that does not mosaic. Checked by rendering both and
         // looking at them, not by argument — the reasoning for the wrong
         // one was perfectly plausible.
+        // `sx as u16` truncates a negative column to the top of the
+        // 16-bit range, which is exactly the wrap the tilemap addressing
+        // wants: column -1 fetches the tile at 65535, and `world_x`
+        // masks down to the map's own size. So the left-hand extra
+        // columns show the scenery that is genuinely to the left.
         let mx = ppu.mosaic.snap(
             bg_index,
-            (x as u16).wrapping_mul(scale).wrapping_add(half_dot),
+            (sx as u16).wrapping_mul(scale).wrapping_add(half_dot),
         );
         let my = ppu.mosaic.snap(bg_index, y);
         let world_x = mx.wrapping_add(hofs);

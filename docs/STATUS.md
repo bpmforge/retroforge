@@ -1510,3 +1510,49 @@ that way.
 
   Evidence: workspace **1698 passing**, fmt, clippy `-D warnings`,
   validate-arch, validate-plan.
+
+- **W11-13 — the SNES PPU renders a caller-specified width** (2026-08-27).
+  `Ppu::render_scanline_at(y, width)` composes any width from 256 to
+  `MAX_WIDTH` by **fetching** the extra tilemap columns;
+  `Ppu::render_scanline(y)` is now a wrapper over it at `WIDTH`.
+
+  **The model.** Output column `x` is 256-space column
+  `x - (width - 256) / 2`, so the extra columns sit either side of the
+  picture hardware would draw — bsnes-hd's technique. It works because
+  tilemap addressing is modular: `sx as u16` truncates a negative column
+  to the top of the 16-bit range, which is exactly the wrap wanted, so
+  the left margin shows the scenery genuinely to the left rather than a
+  mirror or a stretch. Sprites keep their 256-space X and shift by the
+  same pad. Mode 7 needed no special handling — it is a projection, so a
+  wider screen-x range simply projects more of the same plane.
+
+  **Why a second entry point rather than changing `render_scanline`'s
+  signature**, which is what the ticket literally asked for: it makes
+  "byte-identical at 256" a property of the **code shape** rather than a
+  claim resting on whether the right goldens were run. Every accuracy
+  caller goes through `render_scanline`, the pad is zero there, and every
+  derived index reduces to the old expression. It also avoided touching
+  ~20 call sites that have nothing to do with widening.
+
+  `MAX_WIDTH = 512` is a fixed cap, not heap buffers — the per-scanline
+  layer arrays are hot (four backgrounds plus objects, 224 times a
+  frame), and 512 covers both users: true-hires modes 5/6 sample 512
+  columns, and 16:9 at this height wants 398. Over-wide requests are
+  **clamped, not truncated**.
+
+  **Hires + widescreen is declined rather than half-done:** a true-hires
+  line ignores the width and composes at 256 before its own widening to
+  512. Quietly doing part of it would be worse than saying so.
+
+  Evidence: **all four SNES golden suites green and unchanged** —
+  PeterLemon, undisbeliever, region and mirror-map, *including the
+  `#[ignore]`d ones*, which is the gate a plain `cargo test --workspace`
+  does not cover. Four new tests: the centre is unmoved when widened,
+  `render_scanline_at(256)` equals `render_scanline`, the margins are
+  `Background(0)` rather than `Backdrop` — the only assertion that
+  distinguishes fetching from stretching — and over-wide clamps.
+  Workspace **1702 passing**, fmt, clippy `-D warnings`, validate-arch,
+  validate-plan.
+
+  W11-03 is unblocked for its part (a). It still needs a profile for the
+  `rf-scroller-s` fixture, and `profiles/` is outside its `write_scope`.
