@@ -1608,3 +1608,35 @@ that way.
   this feature was inert. All four SNES golden suites unchanged including
   the `#[ignore]`d ones. Workspace **1703 passing**; ten-command gate and
   docs-gate green.
+
+- **W11-05 stage 1 — the NES PPU reports the tiles it drew** (2026-08-27).
+  `Ppu::set_tile_capture` / `Ppu::drawn_tiles` yield a `DrawnTile` per
+  background tile per frame — index, pattern base, palette, and where it
+  landed — recorded at `reload_shift_registers`, the one place the tile
+  index and its attribute bits exist together with the scroll state that
+  positions them. Plus `chr()`/`chr_is_ram()` as non-observing borrows,
+  for CHR-RAM packs whose rules key on tile *bytes*.
+
+  **The cheap route was rejected deliberately.** Snapshotting scroll at
+  frame end needs no core change at all — the app already receives
+  nametable VRAM and palette RAM every frame, and a CHR-ROM tile index
+  *is* the nametable byte. It is wrong for any game that changes scroll
+  mid-frame, which is how nearly every NES status bar is drawn, and
+  shipping it would be W9-08's vacuous artifact.
+
+  **A bug the test caught:** clearing the capture at the pre-render wrap
+  recorded that line's prefetch for scanline 0 and then wiped it, so
+  every frame lost its top-left two tiles — 7678 instead of 7680. The
+  clear now happens when the pre-render line *begins*.
+
+  Pay-for-use, not serialised (the exhaustive destructure in
+  `ppu/state.rs` forced that decision rather than letting it default).
+
+  Stage 2 is the app-side half: plumb the tiles, decode the pack's PNGs
+  (`image = 0.25` is already a dependency), composite at `scale`, surface
+  `Import::summary`/`unsatisfied` in the UI, and an end-to-end test.
+  Sprites are **not** covered yet, and whether stage 2 covers them or
+  declares the limit should be decided rather than discovered.
+
+  Evidence: workspace **1706 passing**, fmt, clippy `-D warnings`,
+  validate-arch, validate-plan.
