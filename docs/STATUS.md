@@ -1430,3 +1430,47 @@ that way.
 
   Evidence: workspace **1693 passing**, fmt, clippy `-D warnings`,
   validate-arch, validate-plan.
+
+- **CORRECTION (2026-08-27, second pass): the IPL re-entry diagnosis
+  above is wrong, and the truth is better.** Two errors, both mine.
+
+  **`Apu::reenter_ipl` is not broken.** I called its guard
+  "contradictory" and "close to dead code" because it requires
+  `self.boot.is_running()`. `BootState::Running` means **the uploaded
+  program is running** — the handshake has already handed over — so
+  `is_running()` reads "the SPC700 program is live", not "the handshake
+  is live". The guard is correct as written. Inverting it broke all four
+  ROMs precisely because it was already right.
+
+  **Re-entry does fire.** Tracing every entry into the IPL window shows
+  `pc=$FFC0` with all three guards satisfied, and tracing the handshake
+  shows complete second uploads — byte by byte, through the counter
+  wraparound at 255 and the skip-by-two block transition, ending in a
+  fresh `Run`.
+
+  **The ROMs are not stalling. They finish and report failure.** All four
+  end with the 65816 parked at `$00808F` on `80 FE` — `BRA -2`, the
+  conventional end-of-program halt, not a wait on the APU. The SPC700
+  halted at `$FFC0` is the normal resting state after the last upload.
+
+  **And the harness could not see the report.** The screen reader took a
+  32x20 window starting at VRAM word `$0B60`, which straddles the end of
+  the text map and cut off everything above it. Reading the full 32x32
+  map at `$0800` recovers verdicts that had never been logged:
+  `spc_timer.sfc` prints `033A4611 Failed 02` and
+  `spc_mem_access_times.sfc` prints `953BF4D9 Failed 02`, each with a
+  checksum. `spc_smp.sfc` prints **thirty** opcode checksums, not the
+  three we had been seeing.
+
+  That is **two oracle defects found in two days** — the pass-substring
+  and this window — and both made results look better or emptier than
+  they were. The lesson is the same one twice: *the harness that reads
+  the verdict is part of the evidence, and it was never itself checked.*
+
+  Net effect: the failures are real, legible, and carry checksums to
+  compare against, which is a far better starting point than "it stalls".
+  Nothing about timer or memory-access accuracy is settled either way;
+  `$F0` TEST is still entirely unimplemented.
+
+  Evidence: workspace **1693 passing**, fmt, clippy `-D warnings`,
+  validate-arch, validate-plan.

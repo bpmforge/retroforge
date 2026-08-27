@@ -120,8 +120,9 @@ fn exported_skeleton_passes_retroforge_tool_profile_validate_with_no_warnings() 
          exit 0 with one) — stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("ok"),
-        "expected the CLI's own `<path>: ok` line — stdout:\n{stdout}"
+        stdout.contains(": ok"),
+        "expected the CLI's own `<path>: ok` line — matching bare \"ok\" would \
+         also accept it inside a filename or another word — stdout:\n{stdout}"
     );
 
     let _ = std::fs::remove_file(&path);

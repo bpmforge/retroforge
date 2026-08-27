@@ -103,8 +103,14 @@ fn dsp_start_phase_does_not_change_the_verdict() {
              depend on the DSP's starting cycle"
         );
     }
+    // NOT `contains("Passed")`. That is the same flaw the acceptance test
+    // carried until 2026-08-27: `Passed NN` is a per-subtest line with a
+    // running count, so matching it reports success when only the first
+    // subtest ran. The invariant this probe actually establishes is the
+    // AGREEMENT above — the verdict must not depend on the DSP's starting
+    // cycle — and asserting a verdict here would just re-import the bug.
     assert!(
-        first.contains("Passed"),
-        "spc_dsp6 should pass at every phase, got {first:?}"
+        !first.is_empty(),
+        "every phase should at least reach the ROM's own output, got {first:?}"
     );
 }

@@ -84,8 +84,17 @@ const MAX_INSTRUCTIONS: u64 = 60_000_000;
 /// VRAM as ASCII, not assumed** — the first kilowords hold 1bpp font
 /// glyph data that reads as convincing garbage, and the text tilemap
 /// starts well after them.
-const STATUS_WORD: u16 = 0x0B60;
-const STATUS_LEN: usize = 32 * 20;
+/// The whole 32x32 text tilemap, not a 20-row window part-way into it.
+///
+/// **The old window started at `$0B60` and was 32x20**, which straddled
+/// the end of the map and cut off text the ROMs had actually printed. It
+/// hid a real verdict: `spc_timer.sfc` prints a hash and `Failed 02`
+/// ABOVE the line the window caught, so the harness reported only
+/// "timer read vs write 1111111222" and the ROM's own failure code never
+/// reached the log. An oracle that cannot see the verdict is not an
+/// oracle.
+const STATUS_WORD: u16 = 0x0800;
+const STATUS_LEN: usize = 32 * 32;
 
 const ROMS: &[&str] = &[
     "spc_dsp6.sfc",
