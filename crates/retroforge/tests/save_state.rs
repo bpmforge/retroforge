@@ -245,20 +245,26 @@ fn battery_sram_persists_to_disk_and_reloads() {
     stepper.poke_bus(0x6000, 0xC3);
     stepper.poke_bus(0x7FFF, 0x3C);
 
-    let path = save_state::write_battery_ram(stepper.bus_for_battery(), &dir, &hex).expect("write");
+    let path =
+        save_state::write_battery_ram(stepper.bus_for_battery().expect("NES fixture"), &dir, &hex)
+            .expect("write");
     assert_eq!(path, save_state::battery_ram_path(&dir, &hex));
 
     let mut fresh = EmuStepper::from_ines_bytes(&rom).expect("test rom loads");
     assert_eq!(fresh.peek(0x6000), 0x00, "a fresh machine starts blank");
-    let loaded =
-        save_state::read_battery_ram(fresh.bus_for_battery_mut(), &dir, &hex).expect("read");
+    let loaded = save_state::read_battery_ram(
+        fresh.bus_for_battery_mut().expect("NES fixture"),
+        &dir,
+        &hex,
+    )
+    .expect("read");
     assert!(loaded, "the .sav exists, so it must report a load");
     assert_eq!(fresh.peek(0x6000), 0xC3);
     assert_eq!(fresh.peek(0x7FFF), 0x3C);
 
     // No file for an unknown ROM is not an error -- it is first boot.
     let missing = save_state::read_battery_ram(
-        fresh.bus_for_battery_mut(),
+        fresh.bus_for_battery_mut().expect("NES fixture"),
         &dir,
         "0000000000000000000000000000000000000000000000000000000000000000",
     )
@@ -267,8 +273,12 @@ fn battery_sram_persists_to_disk_and_reloads() {
 
     // A truncated .sav is refused, not padded.
     std::fs::write(save_state::battery_ram_path(&dir, &hex), [0u8; 16]).expect("truncate");
-    let err = save_state::read_battery_ram(fresh.bus_for_battery_mut(), &dir, &hex)
-        .expect_err("a truncated .sav must be refused");
+    let err = save_state::read_battery_ram(
+        fresh.bus_for_battery_mut().expect("NES fixture"),
+        &dir,
+        &hex,
+    )
+    .expect_err("a truncated .sav must be refused");
     assert!(
         matches!(err, SaveStateError::Core(_)),
         "a size mismatch is the core's refusal, got: {err}"

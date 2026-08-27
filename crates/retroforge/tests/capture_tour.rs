@@ -106,6 +106,7 @@ fn photograph_every_major_surface() {
     // the repo checkout around it.
     let games = dir.join("games");
     std::fs::create_dir_all(&games).expect("games dir");
+    let games_dir = games.clone();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
     assert!(
         fixture.exists(),
@@ -201,6 +202,26 @@ fn photograph_every_major_surface() {
     harness.state_mut().set_ultrawide_for_test();
     run_emulated_frames(&mut harness, 1200, Duration::from_secs(30));
     shot(&mut harness, "07-ultrawide-camera");
+
+    // Ticket W11-12: the SNES, in the app. VISION §5's "SNES core boots
+    // the plain-LoROM/HiROM commercial mainstream" was true of the CORE
+    // and false of the PRODUCT until now.
+    let snes_src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/snes/rf-scroller-s/build/rf-scroller-s.sfc");
+    if snes_src.exists() {
+        let snes = games_dir.join("RF-Scroller-S.sfc");
+        std::fs::copy(&snes_src, &snes).expect("copy snes fixture");
+        harness.state_mut().open_rom_path(&snes);
+        harness.run_steps(2);
+        harness.state_mut().resume_for_test();
+        // Relative to THIS session: the app's frame readout still holds
+        // the NES run's count until a new frame lands, so an absolute
+        // target is already satisfied and the shot catches the
+        // core-up-no-frame-yet state instead of the game.
+        let from = harness.state().frame_count_for_test();
+        run_emulated_frames(&mut harness, from + 120, Duration::from_secs(25));
+        shot(&mut harness, "11-snes-play-view");
+    }
 
     println!("TOUR COMPLETE -> {}", out_dir().display());
 }

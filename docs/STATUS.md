@@ -1262,3 +1262,54 @@ that way.
   against a final hash and golden frames** (release), the **10k-frame
   determinism double-run** (release, both halves), workspace **1680
   passing / 32 ignored**, clippy `-D warnings`, validate-arch.
+
+- **W11-12 — the app opens a SNES ROM** (2026-08-27). Clicking Play on a
+  SNES image starts it and frames reach the screen
+  (`target/ui-tour/11-snes-play-view.png`, `f1320 sl223` — 223 being the
+  last visible line of a 224-line frame, correct for SETINI without
+  overscan). **VISION §5's "SNES core boots the plain-LoROM/HiROM
+  commercial mainstream" is now true of the PRODUCT, not only the core.**
+
+  **Two gates, not one.** `core_thread::spawn` calling
+  `from_ines_bytes` was the known blocker; behind it sat
+  `rom_open::validate_nes`, returning `NotNesImage` before `spawn` was
+  ever reached. That second gate was honest when written in W1-06 —
+  there was no SNES core to hand bytes to — and became a quiet duplicate
+  the moment there was one.
+
+  **Three of my own bugs, each caught by something specific:**
+  1. **Frame counting still read the NES bus**, which returns 0 on a SNES
+     session — and `run_until_next_frame` compared that counter against
+     itself to decide whether a frame had advanced, so the answer was
+     always "no" and the app presented nothing.
+  2. **A hang, and law 8's exact scenario.** The replacement counter
+     incremented only on the `Step::Frame` path, while two existing tests
+     loop `step_scanline` waiting for `frame_count` to change — so they
+     spun for ever. Killed on sight, loop found *before* re-running, fix
+     verified under a hard 180 s timeout. Now **one** method,
+     `EmuStepper::advance`, is the only thing that calls the core, and it
+     counts a frame whenever any granularity reports `frame_complete`.
+  3. **Loading a save state no longer restored the frame count.**
+     `frame_count()` used to read `NesBus::frame_count`, which *is*
+     serialized, so a state taken six frames in reported frame 0.
+     `resync_frame_count()` adopts the restored machine's own count.
+
+  **And a defect the screenshot found:** the honesty badge read
+  "NES · Accuracy" on a SNES game — a hardcoded string, true for a year,
+  that became a false statement on the one surface FRONTEND_UI §1 exists
+  to keep honest.
+
+  **SNES save states are refused with a reason** rather than silently
+  written: `.rfstate` is a NES container and W8-02's SNES format is not
+  wired to the slot UI. A file that loads cleanly and restores nothing is
+  worse than one never written.
+
+  **Observed, not claimed:** the tour advanced 120 SNES frames in ~23 s
+  of wall clock while the in-app readout showed 56.9 fps. Those disagree;
+  I have not established which is right or whether the repaint-poll loop
+  dominates. Worth measuring before anyone cites SNES performance.
+
+  Evidence: alter_ego five-minute replay against final hash **and golden
+  frames** (release), 10k-frame determinism double-run (release),
+  workspace **1686 passing / 32 ignored**, clippy `-D warnings`,
+  validate-arch, validate-plan.

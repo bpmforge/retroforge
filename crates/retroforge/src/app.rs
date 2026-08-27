@@ -295,6 +295,13 @@ pub struct RetroForgeApp {
     level_texture: Option<egui::TextureHandle>,
     /// Where the live camera is in level space, from the bounded probe.
     level_camera: Option<(i64, i64)>,
+    /// Which console the running ROM is (ticket W11-12).
+    ///
+    /// The honesty badge said "NES" unconditionally until the app could
+    /// open a SNES ROM — at which point a hardcoded string became a
+    /// false statement on the one surface FRONTEND_UI §1 exists to keep
+    /// honest.
+    console_label: &'static str,
     /// Ticket W11-04: the loaded Lua script, if any.
     ///
     /// Lives on the UI thread, deliberately and necessarily:
@@ -650,6 +657,7 @@ impl RetroForgeApp {
             level_session: None,
             level_texture: None,
             level_camera: None,
+            console_label: "NES",
             script_host: None,
             script_overlay: Vec::new(),
             script_status: None,
@@ -1493,6 +1501,10 @@ impl RetroForgeApp {
             Err(_) => None,
         };
         self.current_game_hash = self.current_game_hashes.as_ref().map(|h| h.sha256.clone());
+        self.console_label = match rf_cart::Cartridge::load(&bytes) {
+            Ok(rf_cart::Cartridge::Snes { .. }) => "SNES",
+            _ => "NES",
+        };
         // Ticket W5-06: keep the header-stripped image and find the
         // profile that claims this ROM, so the author workspace has both
         // the bytes to decode and the file to watch. Both are `None` for
@@ -2646,7 +2658,7 @@ impl RetroForgeApp {
                     // at. It stays in the bar for exactly that reason: a
                     // badge behind a menu is a badge nobody reads.
                     let badge = crate::enhance_ui::badge_text(
-                        "NES",
+                        self.console_label,
                         &self.current_game_settings,
                         self.profile_matched,
                     );

@@ -78,7 +78,6 @@
 //! `hash_kind=full-v1` ([`crate::save_state::HASH_KIND`]); the old
 //! `reachable-v1` names the narrower hash and must not be reused for this
 //! one (SAVE_STATES.md §3).
-use rf_core_api::EmulatorCore as _;
 use rf_core_api::{CoreSink, InputFrame};
 use rf_nes::{Cpu, NesBus, NesLoadError};
 
@@ -154,7 +153,147 @@ impl CoreSink for CountingSink<'_> {
     }
 }
 
-/// Owns one running NES machine and the run/paused state a debugger UI
+/// Empty stand-ins for the NES-only debug views, on a SNES session.
+const EMPTY_VRAM: [u8; 0x1000] = [0; 0x1000];
+const EMPTY_PALETTE: [u8; 32] = [0; 32];
+const EMPTY_OAM: [u8; 256] = [0; 256];
+const EMPTY_PRG_RAM: [u8; 0x2000] = [0; 0x2000];
+
+/// Why a ROM could not be opened (ticket W11-12).
+///
+/// Three variants rather than one string, because the three failures
+/// send a user to three different places: a bad NES image, a bad SNES
+/// image, and a file that is neither.
+#[derive(Debug)]
+pub enum OpenError {
+    /// `rf-nes` refused an image `rf-cart` identified as NES.
+    Nes(NesLoadError),
+    /// `rf-snes` refused an image `rf-cart` identified as SNES.
+    Snes(String),
+    /// Neither console claims this file.
+    Unrecognized(String),
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::Nes(e) => write!(f, "not a usable NES image: {e:?}"),
+            OpenError::Snes(e) => write!(f, "not a usable SNES image: {e}"),
+            OpenError::Unrecognized(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for OpenError {}
+
+/// Owns one running machine and the run/paused state a debugger UI
+/// drives it with.
+///
+/// Which console this session is running (ticket W11-12).
+///
+/// **Emulation is unified; console-specific *inspection* is not.** Every
+/// method that advances the machine goes through
+/// [`rf_core_api::EmulatorCore`] — one code path, both consoles. What
+/// branches here is the debugger's reach-through: the NES pattern viewer
+/// wants a `NesBus`, the register readout wants a 6502 `pc`, and neither
+/// has a trait expression yet (`StateView::cpu_regs` is an untyped
+/// `&[u8]` with no agreed encoding).
+///
+/// **This is not the "second bespoke SNES path" Brad ruled against on
+/// 2026-08-26**, and the difference is worth being exact about. That
+/// ruling was against duplicating ~20 methods of *emulation* behaviour,
+/// which is how one shell ends up with two half-consoles that drift.
+/// Emulation is not duplicated here at all — it is one `dyn
+/// EmulatorCore` call. Only inspection branches.
+///
+/// Closing the three remaining trait gaps — typed CPU registers, an
+/// out-of-band bus write, APU access — is what would let this become a
+/// plain `Box<dyn EmulatorCore>`. Doing it before then would mean
+/// downcasting: bypassing the trait while appearing to use it.
+enum Machine {
+    Nes(Box<rf_nes::core::NesCore>),
+    Snes(Box<rf_snes::core::SnesCore>),
+}
+
+impl Machine {
+    fn as_core(&mut self) -> &mut dyn rf_core_api::EmulatorCore {
+        match self {
+            Machine::Nes(c) => c.as_mut(),
+            Machine::Snes(c) => c.as_mut(),
+        }
+    }
+
+    fn as_core_ref(&self) -> &dyn rf_core_api::EmulatorCore {
+        match self {
+            Machine::Nes(c) => c.as_ref(),
+            Machine::Snes(c) => c.as_ref(),
+        }
+    }
+
+    /// The NES bus, or `None` on a SNES session.
+    fn nes_bus(&self) -> Option<&rf_nes::NesBus> {
+        match self {
+            Machine::Nes(c) => Some(c.bus()),
+            Machine::Snes(_) => None,
+        }
+    }
+
+    fn nes_bus_mut(&mut self) -> Option<&mut rf_nes::NesBus> {
+        match self {
+            Machine::Nes(c) => Some(c.bus_mut()),
+            Machine::Snes(_) => None,
+        }
+    }
+
+    fn nes_cpu(&self) -> Option<&rf_nes::Cpu> {
+        match self {
+            Machine::Nes(c) => Some(c.cpu()),
+            Machine::Snes(_) => None,
+        }
+    }
+
+    /// Every mutating NES-only action goes through a named method rather
+    /// than an inlined `if let`, so a SNES session is a documented no-op
+    /// instead of an expression that happens not to typecheck.
+    fn bus_write(&mut self, addr: u16, value: u8) {
+        use rf_nes::CpuBus as _;
+        if let Some(bus) = self.nes_bus_mut() {
+            bus.write(addr, value);
+        }
+    }
+
+    fn set_sprite_overlay(&mut self, enabled: bool) {
+        if let Some(bus) = self.nes_bus_mut() {
+            bus.set_sprite_overlay_enabled(enabled);
+        }
+    }
+
+    fn set_controller(&mut self, port: usize, buttons: u8) {
+        if let Some(bus) = self.nes_bus_mut() {
+            bus.set_controller_buttons(port, buttons);
+        }
+    }
+
+    fn set_channel_capture(&mut self, on: bool) {
+        if let Some(bus) = self.nes_bus_mut() {
+            bus.apu_mut().set_channel_capture(on);
+        }
+    }
+
+    fn take_channel_samples(&mut self) -> Option<[Vec<i16>; rf_nes::apu::CHANNEL_COUNT]> {
+        self.nes_bus_mut()
+            .map(|b| b.apu_mut().take_channel_samples())
+    }
+
+    #[cfg(test)]
+    fn set_cycle_budget(&mut self, budget: u64) {
+        match self {
+            Machine::Nes(c) => c.set_cycle_budget(budget),
+            Machine::Snes(c) => c.set_frame_budget(budget),
+        }
+    }
+}
+
 /// drives it through. See module doc.
 pub struct EmuStepper {
     /// Ticket W11-10: the machine, behind `rf_core_api::EmulatorCore`.
@@ -172,7 +311,23 @@ pub struct EmuStepper {
     /// WRITE for the memory editor, and APU access for channel capture.
     /// Boxing before those close would mean bypassing the trait through a
     /// downcast, which is worse than holding the concrete type honestly.
-    core: rf_nes::core::NesCore,
+    machine: Machine,
+    /// Frames completed this session (ticket W11-12).
+    ///
+    /// Incremented by [`Self::advance`] — the ONE place that calls the
+    /// core — so every granularity counts. Counting only on the
+    /// `Step::Frame` path is a hang, not a miscount: a caller stepping
+    /// scanlines and waiting for `frame_count` to move waits for ever,
+    /// and two of this module's own tests do exactly that.
+    ///
+    /// Counted by the SHELL, from `StepResult::frame_complete`, rather
+    /// than read off a console's own counter. `NesBus::frame_count`
+    /// exists; the SNES has no equivalent the shell can reach, so
+    /// consulting the NES bus returned 0 forever on a SNES session — and
+    /// since `run_until_next_frame` compared that counter against itself
+    /// to decide whether a frame had advanced, the answer was always
+    /// "no" and the app presented nothing. One counter, both consoles.
+    frames: u64,
     state: RunState,
     /// Defensive loop bound in master cycles — [`CYCLE_BUDGET`] in
     /// production, overridden much smaller by tests that need to prove the
@@ -196,8 +351,53 @@ impl EmuStepper {
     /// from it, starting [`RunState::Paused`] (a freshly opened ROM waits
     /// for the user to press Run, matching a debugger-first workflow).
     ///
+    /// Build a session for whichever console this image is (ticket
+    /// W11-12).
+    ///
+    /// Until now `core_thread::spawn` called
+    /// [`Self::from_ines_bytes`] unconditionally, so a SNES ROM was
+    /// refused with `NotNesImage` — while the library scanner happily
+    /// identified it as `Recognized { console: Snes }`, listed it with a
+    /// Play button and offered a SNES filter. The product advertised a
+    /// feature it could not perform.
+    ///
     /// # Errors
-    /// Returns [`NesLoadError`] for anything `NesBus::from_ines_bytes`
+    /// [`OpenError::Nes`] or [`OpenError::Snes`] for an image the
+    /// matching core refuses, and [`OpenError::Unrecognized`] for one
+    /// neither claims.
+    pub fn open(raw: &[u8]) -> Result<Self, OpenError> {
+        // `rf_cart` decides which console this is, rather than this
+        // function sniffing magic bytes a second time — one identifier,
+        // used by the library scanner and by this, so a file cannot be
+        // listed as one console and opened as another.
+        match rf_cart::Cartridge::load(raw) {
+            Ok(rf_cart::Cartridge::Nes { .. }) => {
+                Self::from_ines_bytes(raw).map_err(OpenError::Nes)
+            }
+            Ok(rf_cart::Cartridge::Snes { .. }) => Self::from_snes_bytes(raw),
+            Err(e) => Err(OpenError::Unrecognized(format!("{e}"))),
+        }
+    }
+
+    /// Build a SNES session.
+    ///
+    /// # Errors
+    /// [`OpenError::Snes`] for an image `rf_snes` refuses.
+    pub fn from_snes_bytes(raw: &[u8]) -> Result<Self, OpenError> {
+        let core =
+            rf_snes::core::SnesCore::load(raw).map_err(|e| OpenError::Snes(format!("{e}")))?;
+        let identity = rf_cart::hash::identity_snes(raw);
+        let mut rom_sha256 = [0u8; 32];
+        hex_to_bytes(&identity.normalized.sha256, &mut rom_sha256);
+        Ok(EmuStepper {
+            machine: Machine::Snes(Box::new(core)),
+            frames: 0,
+            state: RunState::Paused,
+            cycle_budget: CYCLE_BUDGET,
+            last_scanline: None,
+            rom_sha256,
+        })
+    }
     /// rejects (bad magic, unimplemented mapper, ...).
     pub fn from_ines_bytes(raw: &[u8]) -> Result<Self, NesLoadError> {
         let mut core = rf_nes::core::NesCore::from_ines_bytes(raw)?;
@@ -224,7 +424,8 @@ impl EmuStepper {
         let mut rom_sha256 = [0u8; 32];
         hex_to_bytes(&identity.normalized.sha256, &mut rom_sha256);
         Ok(EmuStepper {
-            core,
+            machine: Machine::Nes(Box::new(core)),
+            frames: 0,
             state: RunState::Paused,
             cycle_budget: CYCLE_BUDGET,
             rom_sha256,
@@ -244,31 +445,34 @@ impl EmuStepper {
     /// `crate::save_state`'s `.sav` helpers take a bus, so a caller that
     /// owns a stepper needs a way to hand one over.
     #[must_use]
-    pub fn bus_for_battery(&self) -> &NesBus {
-        self.core.bus()
+    pub fn bus_for_battery(&self) -> Option<&NesBus> {
+        self.machine.nes_bus()
     }
 
     /// Mutable counterpart of [`Self::bus_for_battery`], for loading a
     /// `.sav` at startup.
-    pub fn bus_for_battery_mut(&mut self) -> &mut NesBus {
-        self.core.bus_mut()
+    pub fn bus_for_battery_mut(&mut self) -> Option<&mut NesBus> {
+        self.machine.nes_bus_mut()
     }
 
     /// Borrowed CPU, for `crate::save_state`'s serializer.
-    pub(crate) fn cpu_for_state(&self) -> &Cpu {
-        self.core.cpu()
+    pub(crate) fn cpu_for_state(&self) -> Option<&Cpu> {
+        self.machine.nes_cpu()
     }
 
     /// Borrowed bus, for `crate::save_state`'s serializer.
-    pub(crate) fn bus_for_state(&self) -> &NesBus {
-        self.core.bus()
+    pub(crate) fn bus_for_state(&self) -> Option<&NesBus> {
+        self.machine.nes_bus()
     }
 
     /// Both halves mutably, for `crate::save_state`'s loader — one call
     /// rather than two accessors, so a caller cannot restore a CPU into a
     /// bus from a different state.
-    pub(crate) fn machine_for_state(&mut self) -> (&mut Cpu, &mut NesBus) {
-        self.core.parts_mut()
+    pub(crate) fn machine_for_state(&mut self) -> Option<(&mut Cpu, &mut NesBus)> {
+        match &mut self.machine {
+            Machine::Nes(c) => Some(c.parts_mut()),
+            Machine::Snes(_) => None,
+        }
     }
 
     /// Test-only hook to prove [`CYCLE_BUDGET`]'s termination guarantee
@@ -280,7 +484,7 @@ impl EmuStepper {
         // Ticket W11-10: the bound lives in the core now, so the lever
         // has to reach it. Setting only the shell-side copy left the
         // termination proofs asserting against a budget nothing read.
-        self.core.set_cycle_budget(budget);
+        self.machine.set_cycle_budget(budget);
     }
 
     /// Current run/paused state.
@@ -297,7 +501,7 @@ impl EmuStepper {
     /// Total frames completed since power-on (`NesBus::frame_count`).
     #[must_use]
     pub fn frame_count(&self) -> u64 {
-        self.core.bus().frame_count()
+        self.frames
     }
 
     /// Last visible scanline drawn, for the transport position readout
@@ -324,7 +528,7 @@ impl EmuStepper {
     /// is a `JSR` (ticket W4-06e).
     #[must_use]
     pub fn peek(&self, addr: u16) -> u8 {
-        self.core.bus().peek(addr)
+        self.machine.as_core_ref().peek(u32::from(addr))
     }
 
     /// Out-of-band bus write — the write-side counterpart to
@@ -342,8 +546,7 @@ impl EmuStepper {
     /// PPU registers — see its own doc). Also the generically useful
     /// write-side of a debugger memory view.
     pub fn poke_bus(&mut self, addr: u16, value: u8) {
-        use rf_nes::CpuBus;
-        self.core.bus_mut().write(addr, value);
+        self.machine.bus_write(addr, value);
     }
 
     /// The full 256-byte OAM as last written — forwards `NesBus::oam`
@@ -351,19 +554,25 @@ impl EmuStepper {
     /// check reads this to prove its sprite table actually landed).
     #[must_use]
     pub fn oam(&self) -> &[u8; 256] {
-        self.core.bus().oam()
+        self.machine
+            .nes_bus()
+            .map_or(&EMPTY_OAM, rf_nes::NesBus::oam)
     }
 
     /// The PPU's nametable VRAM (ticket W4-06d) — forwards
     /// `NesBus::vram()`, a non-observing borrow.
     pub fn vram(&self) -> &[u8; 0x1000] {
-        self.core.bus().vram()
+        self.machine
+            .nes_bus()
+            .map_or(&EMPTY_VRAM, rf_nes::NesBus::vram)
     }
 
     /// The PPU's palette RAM (ticket W4-06d) — forwards
     /// `NesBus::palette()`, raw and unmirrored.
     pub fn palette(&self) -> &[u8; 32] {
-        self.core.bus().palette()
+        self.machine
+            .nes_bus()
+            .map_or(&EMPTY_PALETTE, rf_nes::NesBus::palette)
     }
 
     /// Side-effect-free 2 KiB WRAM snapshot (`$0000-$07FF`, the real
@@ -395,7 +604,9 @@ impl EmuStepper {
     /// annotates.
     #[must_use]
     pub fn prg_ram(&self) -> &[u8; 0x2000] {
-        self.core.bus().prg_ram()
+        self.machine
+            .nes_bus()
+            .map_or(&EMPTY_PRG_RAM, rf_nes::NesBus::prg_ram)
     }
 
     /// Whether the sprite-limit-bypass overlay is currently recording
@@ -404,13 +615,15 @@ impl EmuStepper {
     /// Mode).
     #[must_use]
     pub fn sprite_overlay_enabled(&self) -> bool {
-        self.core.bus().sprite_overlay_enabled()
+        self.machine
+            .nes_bus()
+            .is_some_and(rf_nes::NesBus::sprite_overlay_enabled)
     }
 
     /// Opt into (or out of) the sprite-limit-bypass overlay (ticket
     /// W3-05a) — forwards `NesBus::set_sprite_overlay_enabled`.
     pub fn set_sprite_overlay_enabled(&mut self, enabled: bool) {
-        self.core.bus_mut().set_sprite_overlay_enabled(enabled);
+        self.machine.set_sprite_overlay(enabled);
     }
 
     /// Widen (or narrow) which `CoreEvent`s this machine emits (ticket
@@ -426,9 +639,9 @@ impl EmuStepper {
     /// back in makes that invariant hold by construction rather than by
     /// caller discipline.
     pub fn set_event_mask(&mut self, mask: rf_core_api::EventMask) {
-        self.core
-            .bus_mut()
-            .set_event_mask(mask.union(CAMERA_BASELINE_EVENT_MASK));
+        if let Some(bus) = self.machine.nes_bus_mut() {
+            bus.set_event_mask(mask.union(CAMERA_BASELINE_EVENT_MASK));
+        }
     }
 
     /// Stop advancing on repaint ticks. Idempotent.
@@ -477,9 +690,7 @@ impl EmuStepper {
             scanlines: 0,
             last_scanline: self.last_scanline,
         };
-        let result = self
-            .core
-            .step(rf_core_api::Step::Instruction, &mut counting);
+        let result = self.advance(rf_core_api::Step::Instruction, &mut counting);
         self.last_scanline = counting.last_scanline;
         self.state = RunState::Paused;
         u32::try_from(result.cycles).unwrap_or(u32::MAX)
@@ -492,12 +703,12 @@ impl EmuStepper {
     /// [`rf_nes::apu::Apu::set_channel_capture`] and the invariance test
     /// in `tests/audio_scope_invariance.rs`.
     pub fn set_audio_channel_capture(&mut self, on: bool) {
-        self.core.bus_mut().apu_mut().set_channel_capture(on);
+        self.machine.set_channel_capture(on);
     }
 
     /// Drain the per-channel scope streams captured since the last call.
     pub fn take_audio_channel_samples(&mut self) -> [Vec<i16>; rf_nes::apu::CHANNEL_COUNT] {
-        self.core.bus_mut().apu_mut().take_channel_samples()
+        self.machine.take_channel_samples().unwrap_or_default()
     }
 
     /// The CPU's current program counter — the address the NEXT
@@ -505,14 +716,14 @@ impl EmuStepper {
     /// run-to-cursor both compare against.
     #[must_use]
     pub fn pc(&self) -> u16 {
-        self.core.cpu().pc
+        self.machine.nes_cpu().map_or(0, |c| c.pc)
     }
 
     /// The CPU's stack pointer, for step-over/step-out's frame tracking
     /// (`rf_debugger::breakpoint::frame_has_returned`).
     #[must_use]
     pub fn sp(&self) -> u8 {
-        self.core.cpu().s
+        self.machine.nes_cpu().map_or(0, |c| c.s)
     }
 
     pub fn step_frame(&mut self, sink: &mut dyn CoreSink) -> u64 {
@@ -539,11 +750,44 @@ impl EmuStepper {
             scanlines: 0,
             last_scanline: self.last_scanline,
         };
-        self.core.step(rf_core_api::Step::Scanline, &mut counting);
+        self.advance(rf_core_api::Step::Scanline, &mut counting);
         let n = counting.scanlines;
         self.last_scanline = counting.last_scanline;
         self.state = RunState::Paused;
         n
+    }
+
+    /// Adopt the machine's own frame count after a state load.
+    ///
+    /// The NES container carries `NesBus::frame_count`, so a restored
+    /// machine knows how many frames it has seen; the shell's counter
+    /// does not, and would otherwise keep counting from wherever this
+    /// session happened to be. SNES states are refused today
+    /// (`SaveStateError::UnsupportedConsole`), so there is nothing to
+    /// adopt on that path yet.
+    pub(crate) fn resync_frame_count(&mut self) {
+        if let Some(bus) = self.machine.nes_bus() {
+            self.frames = bus.frame_count();
+        }
+    }
+
+    /// Drive the core one step, counting a frame if one completed.
+    ///
+    /// Every path through this type goes through here. The alternative —
+    /// each caller remembering to bump the counter — lasted about ten
+    /// minutes: `step_scanline` did not, so
+    /// `step_scanline_calls_accumulate_a_full_visible_frame_between_frame_boundaries`
+    /// span for ever waiting on a number nothing was incrementing.
+    fn advance(
+        &mut self,
+        granularity: rf_core_api::Step,
+        sink: &mut dyn CoreSink,
+    ) -> rf_core_api::StepResult {
+        let result = self.machine.as_core().step(granularity, sink);
+        if result.frame_complete {
+            self.frames += 1;
+        }
+        result
     }
 
     /// Called once per UI repaint. If [`RunState::Running`], advances
@@ -571,12 +815,8 @@ impl EmuStepper {
     /// [`Self::latch_and_advance_frame`], never this alone (module doc's
     /// "one shared latch-then-advance path").
     fn latch_input(&mut self, frame: InputFrame) {
-        self.core
-            .bus_mut()
-            .set_controller_buttons(0, frame.ports[0] as u8);
-        self.core
-            .bus_mut()
-            .set_controller_buttons(1, frame.ports[1] as u8);
+        self.machine.set_controller(0, frame.ports[0] as u8);
+        self.machine.set_controller(1, frame.ports[1] as u8);
     }
 
     /// THE one shared latch-then-advance path (module doc, ticket W1-07):
@@ -647,14 +887,18 @@ impl EmuStepper {
     /// See [`Self::state_hash`].
     #[must_use]
     pub fn full_state_bytes(&self) -> Vec<u8> {
+        // NES-only: `rf_nes::StateRegion` is a NES concept, and SNES
+        // state has its own container (W8-02). An empty vector on a SNES
+        // session is honest — this hash is used to compare NES runs —
+        // and a panic here would take down a session for a diagnostic.
+        let (Some(bus), Some(cpu)) = (self.machine.nes_bus(), self.machine.nes_cpu()) else {
+            return Vec::new();
+        };
         let mut buf = StateBuf::default();
         for region in rf_nes::StateRegion::ALL {
-            self.core
-                .bus()
-                .save_region(self.core.cpu(), region, &mut buf)
-                .unwrap_or_else(|e| {
-                    panic!("state_hash: core refused to serialize {region:?}: {e}")
-                });
+            bus.save_region(cpu, region, &mut buf).unwrap_or_else(|e| {
+                panic!("state_hash: core refused to serialize {region:?}: {e}")
+            });
         }
         buf.bytes
     }
@@ -692,8 +936,12 @@ impl EmuStepper {
         on_instruction: &mut dyn FnMut(u16, u64, String),
     ) -> u64 {
         self.latch_input(frame);
-        let start = self.core.bus().frame_count();
-        let deadline = self.core.bus().master_cycle() + self.cycle_budget;
+        let start = self.frames;
+        let deadline = self
+            .machine
+            .nes_bus()
+            .map_or(0, rf_nes::NesBus::master_cycle)
+            + self.cycle_budget;
         let mut counting = CountingSink {
             inner: sink,
             scanlines: 0,
@@ -704,17 +952,30 @@ impl EmuStepper {
         // time, because the trace callback has to run BEFORE each
         // instruction executes — that is what makes the line a record of
         // what was about to happen rather than of what already had.
-        while self.core.bus().master_cycle() < deadline {
-            let pc = self.core.cpu().pc;
-            let cycle = self.core.bus().master_cycle();
-            on_instruction(
-                pc,
-                cycle,
-                rf_nes::trace::format_trace_line(self.core.cpu(), self.core.bus(), cycle),
-            );
-            self.core
-                .step(rf_core_api::Step::Instruction, &mut counting);
-            let now = self.core.bus().frame_count();
+        while self
+            .machine
+            .nes_bus()
+            .map_or(0, rf_nes::NesBus::master_cycle)
+            < deadline
+        {
+            let pc = self.machine.nes_cpu().map_or(0, |c| c.pc);
+            let cycle = self
+                .machine
+                .nes_bus()
+                .map_or(0, rf_nes::NesBus::master_cycle);
+            // The trace line is 6502-shaped (nestest format), so it is
+            // NES-only by construction; a SNES session traces nothing
+            // rather than emitting a plausible-looking blank line.
+            let line = match (self.machine.nes_cpu(), self.machine.nes_bus()) {
+                (Some(cpu), Some(bus)) => rf_nes::trace::format_trace_line(cpu, bus, cycle),
+                _ => String::new(),
+            };
+            on_instruction(pc, cycle, line);
+            self.advance(rf_core_api::Step::Instruction, &mut counting);
+            let now = self
+                .machine
+                .nes_bus()
+                .map_or(0, rf_nes::NesBus::frame_count);
             if now != start {
                 advanced = now - start;
                 break;
@@ -725,7 +986,7 @@ impl EmuStepper {
     }
 
     fn run_until_next_frame(&mut self, sink: &mut dyn CoreSink) -> u64 {
-        let start = self.core.bus().frame_count();
+        let _start = self.frames;
         // Wrapped so the position readout keeps updating while running,
         // not only when single-stepping (ticket W2-15) — a readout that
         // froze during Run would be worse than none.
@@ -739,15 +1000,12 @@ impl EmuStepper {
         // core's business now — `rf_nes::core::NesCore::step` — and the
         // shell keeps only what it owns: the scanline readout and the
         // frame count.
-        let result = self.core.step(rf_core_api::Step::Frame, &mut counting);
+        let result = self.advance(rf_core_api::Step::Frame, &mut counting);
         let advanced = if result.frame_complete {
-            let now = self.core.bus().frame_count();
-            debug_assert_eq!(
-                now,
-                start + 1,
-                "one Step::Frame must advance exactly one frame"
-            );
-            now - start
+            // One `Step::Frame` is one frame, by the trait's own
+            // definition — no console counter consulted. `advance` did
+            // the counting.
+            1
         } else {
             // The cycle budget fired: a machine that cannot reach a frame
             // boundary (a JAM opcode) reports zero rather than spinning.
@@ -1283,7 +1541,10 @@ impl EmuStepper {
     /// same reader `rf-nes`'s `dmc_dma_during_read4` suite uses).
     #[must_use]
     pub fn screen_text_for_test(&self) -> String {
-        self.core.bus().ppu_vram_ascii()
+        self.machine
+            .nes_bus()
+            .map(rf_nes::NesBus::ppu_vram_ascii)
+            .unwrap_or_default()
     }
 }
 

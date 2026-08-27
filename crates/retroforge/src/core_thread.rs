@@ -38,7 +38,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use rf_core_api::InputFrame;
-use rf_nes::NesLoadError;
 
 use crate::canvas_accum::CanvasAccumulator;
 use crate::pacer::FramePacer;
@@ -457,11 +456,18 @@ where
 /// # Errors
 /// Returns [`NesLoadError`] if `rom` is not a loadable iNES/NES 2.0 NROM
 /// image.
-pub fn spawn(rom: Vec<u8>) -> Result<CoreHandle, NesLoadError> {
+pub fn spawn(rom: Vec<u8>) -> Result<CoreHandle, crate::stepper::OpenError> {
+    // Ticket W11-12: whichever console this image is. This line called
+    // `from_ines_bytes` unconditionally until now, which is why a SNES
+    // ROM was refused with `NotNesImage` — while the library scanner
+    // identified it correctly as `Recognized { console: Snes }`, listed
+    // it with a Play button, and offered a SNES filter. The product
+    // advertised a feature it could not perform.
+    //
     // Validate up front so a bad ROM is a synchronous `Result`, not a
     // channel message the UI has to poll for — the same pattern
     // `rom_open::load_rom_bytes` uses for the file-dialog path.
-    EmuStepper::from_ines_bytes(&rom)?;
+    EmuStepper::open(&rom)?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (evt_tx, evt_rx) = mpsc::channel();
@@ -669,7 +675,7 @@ fn core_thread_main(
     // boundary awkwardly) keeps this thread self-contained. `expect` is
     // safe: `spawn` already returned `Err` and never reached here if this
     // would fail.
-    let mut stepper = EmuStepper::from_ines_bytes(&rom).expect("rom already validated by spawn()");
+    let mut stepper = EmuStepper::open(&rom).expect("rom already validated by spawn()");
     // Ticket W11-01: temporal de-flicker (FR-ENH-002). Lives on the CORE
     // thread because that is where the accuracy-exact indexed frame is,
     // and dies with it — it holds per-identity history that means nothing

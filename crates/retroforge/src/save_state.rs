@@ -103,6 +103,16 @@ const REGION_TAGS: [(StateRegion, [u8; 4]); 9] = [
 /// a caller can tell "the file is wrong" from "this machine refused it".
 #[derive(Debug)]
 pub enum SaveStateError {
+    /// This session is not running a console `.rfstate` can carry
+    /// (ticket W11-12).
+    ///
+    /// `.rfstate` is a NES container: its chunks are `rf_nes::
+    /// StateRegion`s. SNES save states have their own format (W8-02) and
+    /// are not wired into this slot UI yet. Refusing with a reason beats
+    /// writing a NES container describing a SNES machine's absence — a
+    /// file that loads cleanly and restores nothing is worse than one
+    /// that was never written.
+    UnsupportedConsole,
     /// The container itself is malformed, or its ROM hash does not match.
     Container(ContainerError),
     /// A required core chunk is missing from an otherwise valid container.
@@ -117,6 +127,11 @@ pub enum SaveStateError {
 impl std::fmt::Display for SaveStateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SaveStateError::UnsupportedConsole => write!(
+                f,
+                "save states are not available for this console yet: .rfstate carries NES \
+                 state, and the SNES container (W8-02) is not wired into the slot UI"
+            ),
             SaveStateError::Container(e) => write!(f, "{e}"),
             SaveStateError::MissingChunk(tag) => write!(
                 f,
@@ -297,9 +312,16 @@ impl EmuStepper {
     /// # Errors
     /// See [`build_container`].
     pub fn save_state(&self, timestamp: u64) -> Result<Container, SaveStateError> {
+        // Ticket W11-12: `.rfstate` is a NES container. SNES save states
+        // are W8-02's own format and are not wired into this slot UI yet
+        // — refused with a reason rather than silently writing a NES
+        // container full of a SNES machine's absence.
+        let (Some(cpu), Some(bus)) = (self.cpu_for_state(), self.bus_for_state()) else {
+            return Err(SaveStateError::UnsupportedConsole);
+        };
         build_container(
-            self.cpu_for_state(),
-            self.bus_for_state(),
+            cpu,
+            bus,
             self.rom_sha256(),
             env!("CARGO_PKG_VERSION"),
             timestamp,
@@ -319,7 +341,21 @@ impl EmuStepper {
         container: &Container,
     ) -> Result<Vec<LoadWarning>, SaveStateError> {
         container.verify_rom(self.rom_sha256())?;
-        let (cpu, bus) = self.machine_for_state();
-        apply_container(cpu, bus, container)
+        let Some((cpu, bus)) = self.machine_for_state() else {
+            return Err(SaveStateError::UnsupportedConsole);
+        };
+        let warnings = apply_container(cpu, bus, container)?;
+        // Ticket W11-12: **a restored machine restores its frame count
+        // too.** The shell counts frames itself now (one counter, both
+        // consoles — see `EmuStepper::advance`), and a save state is the
+        // one moment the machine's own clock jumps somewhere the shell
+        // did not step it to. Without this resync, loading a state taken
+        // six frames in reported frame 0, and everything keyed on the
+        // frame number — the transport readout, the replay comparison,
+        // the trace's cycle stamps — silently disagreed with the machine
+        // it was describing. `golden_fixture_loads_and_drives_the_machine_identically`
+        // caught it immediately.
+        self.resync_frame_count();
+        Ok(warnings)
     }
 }

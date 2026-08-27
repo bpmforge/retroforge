@@ -5051,7 +5051,10 @@
    "MEASURED: `WidescreenPolicies` and `widescreen::` are referenced by NOTHING in crates/retroforge/src or crates/rf-renderer/src. The policy engine has no caller in the product.",
    "BLOCKED 2026-08-26 on W11-07, before any code was written. Widescreen is a SNES feature: `widescreen::decide` takes a per-BG `LayerView` (tilemap width/height, hofs, vofs) and `WidescreenPolicies::from_profile` reads a SNES profile's policy set. THE APP CANNOT OPEN A SNES ROM — `core_thread::spawn` calls `EmuStepper::from_ines_bytes` and a probe against the SNES fixture returns `NotNesImage`. Wiring a widescreen toggle into a shell that cannot run the console it applies to would be building a control for a state no user can reach.",
    "SECOND BLOCKER, independent of the first: `rf_renderer::FrameBuffer` is hardcoded to NES_WIDTH x NES_HEIGHT. Widening a frame has nowhere to be represented. W11-07's acceptance covers it because SNES needs it anyway (256x224, and 512 in hires).",
-   "RE-POINTED 2026-08-26 from W11-07 to W11-12 (the app opens a SNES ROM), which is the ticket that now delivers what this was waiting for. W11-08 already removed the other blocker: the display path carries frames wider than 256."
+   "RE-POINTED 2026-08-26 from W11-07 to W11-12 (the app opens a SNES ROM), which is the ticket that now delivers what this was waiting for. W11-08 already removed the other blocker: the display path carries frames wider than 256.",
+   "SCOPE RE-MEASURED 2026-08-27, while W11-12 was in its gate. This is NOT wiring, and W11-08 did not unblock it the way it appeared to. `rf_snes::ppu::WIDTH` is a hardcoded `const 256`, and `Ppu::render_scanline(y)` takes no width — so widening needs the PPU to FETCH EXTRA TILEMAP COLUMNS beyond the visible window, which is bsnes-hd's actual technique and real PPU work. W11-08 made a wider FRAME representable; it did nothing about a PPU that only ever composes 256 dots.",
+   "SECOND GAP, equally concrete: NO SHIPPED PROFILE CAN DRIVE IT. `widescreen::WidescreenPolicies::from_profile` reads `profile.widescreen`'s per-BG policy names, and the only SNES profile that declares any is `profiles/snes/example-mode7` — whose `[[identity]]` is all zeros and therefore matches nothing. The one bootable SNES fixture, `rf-scroller-s`, has no profile at all. So even with PPU support there would be nothing to switch on.",
+   "HONEST DECOMPOSITION, so the next session does not rediscover this: (a) rf-snes PPU renders a caller-specified width by fetching the extra columns, with the accuracy path unchanged at 256 — that is the expensive half and belongs in rf-snes; (b) a profile for the rf-scroller-s fixture, which is legitimate in-repo work since it is our own fixture with published build rules (unlike W11-06's commercial titles, whose offsets cannot be verified); (c) the app wiring, which is small once (a) and (b) exist."
   ],
   "points": 5,
   "status": "blocked",
@@ -5319,37 +5322,44 @@
   "status": "done",
   "stories": []
  },
-  {
-   "id": "W11-12",
-   "title": "The app opens a SNES ROM",
-   "phase": 11,
-   "crate": "retroforge",
-   "write_scope": [
-    "crates/rf-core-api/**",
-    "crates/rf-nes/**",
-    "crates/rf-snes/**",
-    "crates/retroforge/**",
-    "docs/**",
-    "plan.json"
-   ],
-   "depends_on": [
-    "W11-11"
-   ],
-   "acceptance": [
-    "clicking Play on a SNES ROM in the library starts it, rather than failing with NotNesImage",
-    "core_thread is generic over EmulatorCore and picks a core by cartridge type, with no second bespoke path",
-    "an end-to-end test drives RetroForgeApp with a SNES fixture and asserts a frame reaches the screen",
-    "docs/VISION.md §5's 18-month claim is substantiated rather than corrected: 'SNES core boots the plain-LoROM/HiROM commercial mainstream' becomes true of the PRODUCT, not only the core",
-    "W11-03 and W11-05 record that they are unblocked, or say what still blocks them"
-   ],
-   "notes": [
-    "BRAD'S RULING 2026-08-26: adopt `EmulatorCore` in both cores rather than adding a second bespoke SNES path, and split the work three ways. The alternative — branching `core_thread` on cartridge type and duplicating ~20 methods of behaviour — is how one shell ends up with two half-consoles: every future feature gets written twice or forgotten once. Write scope widened to include the core crates, which W11-07 as originally filed excluded, making it unbuildable as written.",
-    "THIRD OF THREE, and the smallest once the first two land: `core_thread::spawn` calls `EmuStepper::from_ines_bytes` unconditionally today, and a probe against fixtures/snes/rf-scroller-s/build/rf-scroller-s.sfc returns `NotNesImage`.",
-    "REMEMBER WHAT MAKES THIS URGENT rather than merely missing: the product ADVERTISES the feature. library::ROM_EXTENSIONS includes sfc/smc/fig, the scanner identifies the file correctly as `Recognized { console: Snes, .. }`, the library lists it with a Play button, and §3.1's console filter has a SNES option. A user with a SNES ROM sees it offered and gets an error."
-   ],
-   "points": 5,
-   "status": "in_progress",
-   "stories": []
-  }
+ {
+  "id": "W11-12",
+  "title": "The app opens a SNES ROM",
+  "phase": 11,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/rf-core-api/**",
+   "crates/rf-nes/**",
+   "crates/rf-snes/**",
+   "crates/retroforge/**",
+   "docs/**",
+   "plan.json"
+  ],
+  "depends_on": [
+   "W11-11"
+  ],
+  "acceptance": [
+   "clicking Play on a SNES ROM in the library starts it, rather than failing with NotNesImage",
+   "core_thread is generic over EmulatorCore and picks a core by cartridge type, with no second bespoke path",
+   "an end-to-end test drives RetroForgeApp with a SNES fixture and asserts a frame reaches the screen",
+   "docs/VISION.md §5's 18-month claim is substantiated rather than corrected: 'SNES core boots the plain-LoROM/HiROM commercial mainstream' becomes true of the PRODUCT, not only the core",
+   "W11-03 and W11-05 record that they are unblocked, or say what still blocks them"
+  ],
+  "notes": [
+   "BRAD'S RULING 2026-08-26: adopt `EmulatorCore` in both cores rather than adding a second bespoke SNES path, and split the work three ways. The alternative — branching `core_thread` on cartridge type and duplicating ~20 methods of behaviour — is how one shell ends up with two half-consoles: every future feature gets written twice or forgotten once. Write scope widened to include the core crates, which W11-07 as originally filed excluded, making it unbuildable as written.",
+   "THIRD OF THREE, and the smallest once the first two land: `core_thread::spawn` calls `EmuStepper::from_ines_bytes` unconditionally today, and a probe against fixtures/snes/rf-scroller-s/build/rf-scroller-s.sfc returns `NotNesImage`.",
+   "REMEMBER WHAT MAKES THIS URGENT rather than merely missing: the product ADVERTISES the feature. library::ROM_EXTENSIONS includes sfc/smc/fig, the scanner identifies the file correctly as `Recognized { console: Snes, .. }`, the library lists it with a Play button, and §3.1's console filter has a SNES option. A user with a SNES ROM sees it offered and gets an error.",
+   "CLOSED 2026-08-27. Clicking Play on a SNES ROM starts it and frames reach the screen — photographed at target/ui-tour/11-snes-play-view.png, f1320 sl223 (223 is the last visible line of a 224-line frame, correct for SETINI without overscan).",
+   "TWO GATES, not one. core_thread::spawn calling from_ines_bytes was the known blocker; behind it sat rom_open::validate_nes, which returned NotNesImage for any SNES image before spawn was ever reached. That second gate was honest when written in W1-06 — there was no SNES core to hand bytes to — and became a quiet duplicate the moment there was one.",
+   "THREE OF MY OWN BUGS, each caught by something specific. (1) FRAME COUNTING STILL READ THE NES BUS, which returns 0 on a SNES session, and run_until_next_frame compared that counter against itself to decide whether a frame had advanced — so the answer was always no and the app presented nothing. (2) A HANG, and it was law 8's exact scenario: the replacement counter incremented only on the Step::Frame path, and two existing tests loop step_scanline waiting for frame_count to change, so they spun for ever. Killed on sight, loop found before re-running, fix verified under a hard 180s timeout. Now ONE method — EmuStepper::advance — is the only thing that calls the core, and it counts a frame whenever any granularity reports frame_complete. (3) LOADING A SAVE STATE NO LONGER RESTORED THE FRAME COUNT: frame_count() used to read NesBus::frame_count, which IS serialized, so a state taken six frames in reported frame 0. resync_frame_count() adopts the restored machine's own count.",
+   "AND A DEFECT THE SCREENSHOT FOUND: the honesty badge read 'NES · Accuracy' on a SNES game. A hardcoded string that was true for a year became a false statement on the one surface FRONTEND_UI §1 exists to keep honest.",
+   "SNES SAVE STATES ARE REFUSED WITH A REASON rather than silently written: .rfstate is a NES container (its chunks are rf_nes::StateRegions) and W8-02's SNES format is not wired into the slot UI. A file that loads cleanly and restores nothing is worse than one that was never written.",
+   "OBSERVED, NOT CLAIMED: the screenshot tour advanced 120 SNES frames in ~23s of wall clock while the in-app readout showed 56.9 fps. Those disagree and I have not established which is right or whether the repaint-poll loop dominates. Worth measuring before anyone cites SNES performance.",
+   "EVIDENCE: alter_ego five-minute replay against final hash AND golden frames (release), 10k-frame determinism double-run (release, both halves), workspace 1686 passing / 32 ignored, clippy -D warnings, validate-arch, validate-plan."
+  ],
+  "points": 5,
+  "status": "done",
+  "stories": []
+ }
  ]
 }

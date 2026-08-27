@@ -163,8 +163,13 @@ pub fn resolve_rom_bytes(bytes: Vec<u8>) -> Result<Vec<u8>, RomOpenError> {
 /// can open if `rf-cart` sniffs it as NES.
 fn validate_nes(bytes: Vec<u8>) -> Result<Vec<u8>, RomOpenError> {
     match Cartridge::load(&bytes) {
-        Ok(Cartridge::Nes { .. }) => Ok(bytes),
-        Ok(Cartridge::Snes { .. }) => Err(RomOpenError::NotNesImage),
+        // Ticket W11-12: BOTH consoles. This arm returned
+        // `NotNesImage` from W1-06 until now, which was honest while
+        // there was no SNES core to hand the bytes to — and became a
+        // second, quieter gate the moment there was one. `spawn`
+        // dispatches on cartridge type; this only has to stop deciding
+        // for it.
+        Ok(Cartridge::Nes { .. } | Cartridge::Snes { .. }) => Ok(bytes),
         Err(e) => Err(RomOpenError::Cart(e)),
     }
 }
