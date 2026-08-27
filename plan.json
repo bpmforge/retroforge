@@ -5273,7 +5273,7 @@
     "RISK is the same shape as W11-08's and should be treated the same way: this is the path every frame flows through, so `cargo test` is not sufficient evidence and the ignored release suites are."
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   },
   {
