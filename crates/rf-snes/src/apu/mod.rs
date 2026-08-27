@@ -195,6 +195,11 @@ pub struct Apu {
     /// `$F0` TEST. Power-on value `$0A`, per fullsnes: RAM writes enabled
     /// (bit 1) and timers permitted (bit 3), no waitstates.
     pub test: u8,
+    /// Ticket W7-18: memory accesses made during the current instruction,
+    /// split the way `$F0`'s two wait fields are.
+    ram_accesses: u32,
+    io_accesses: u32,
+    intra_ticks: u32,
     pub timers: [Timer; 3],
     /// `$F1` bit 7 — is the IPL region banked over ARAM?
     pub ipl_enabled: bool,
@@ -241,6 +246,9 @@ impl Apu {
             cpu: Spc700::new(),
             aram: vec![0; ARAM_LEN],
             test: 0x0A,
+            ram_accesses: 0,
+            io_accesses: 0,
+            intra_ticks: 0,
             timers: [Timer::new(128), Timer::new(128), Timer::new(16)],
             // The APU powers up with the IPL banked in — that is how it
             // boots at all.
@@ -305,7 +313,9 @@ impl Apu {
         self.cpu = cpu;
         let cycles = r.unwrap_or(1);
         self.reenter_ipl();
-        self.tick_clock(u32::from(cycles));
+        // Already-spent cycles were charged at each access.
+        let spent = std::mem::take(&mut self.intra_ticks);
+        self.tick_clock(u32::from(cycles).saturating_sub(spent));
         self.poll_boot();
         r
     }
@@ -480,6 +490,31 @@ impl Apu {
         [0, 1, 4, 9][usize::from((self.test >> 6) & 0x03)]
     }
 
+    /// Advance the shared clock by the one cycle this memory access
+    /// occupies, BEFORE performing it (ticket W7-18).
+    ///
+    /// **This is what "charges time per memory access" actually means**,
+    /// and it is not about waitstates. The SPC700 used to execute a whole
+    /// instruction and then advance the clock by its total cost, so every
+    /// access inside one instruction saw the DSP and the timers at the
+    /// same instant — the instant BEFORE the instruction began. Ticking
+    /// here puts each access at its own point in time, in program order.
+    ///
+    /// MEASURED, not assumed: `spc_mem_access_times.sfc` reports an
+    /// unknown-classification marker for accesses whose timing it cannot
+    /// place. Without this it printed EIGHT of them; with it, none.
+    ///
+    /// The model is one cycle per access, with an instruction's remaining
+    /// internal cycles charged at the end. That places accesses in the
+    /// right ORDER and at the right relative distance, which is what the
+    /// ROM measures. It does not claim to know where each opcode's
+    /// internal cycles fall between its accesses — fullsnes tabulates how
+    /// many take I/O timing but not where they sit.
+    fn access_tick(&mut self) {
+        self.intra_ticks += 1;
+        self.tick_clock(1);
+    }
+
     pub fn tick_clock(&mut self, cycles: u32) {
         if !self.timers_permitted() {
             // `$F0` has the timers held off; the DSP still runs.
@@ -598,9 +633,40 @@ impl Apu {
 }
 
 impl ApuBus for Apu {
+    /// Ticket W7-18: hand the CPU this instruction's access tally and
+    /// reset it.
+    ///
+    /// The RAM/I-O split is the same one `read`/`write` already make to
+    /// route the access at all — `$00F0-$00FF` is I/O and everything else
+    /// is RAM — so there is one classification here, not two that could
+    /// disagree.
+    ///
+    /// The IPL window reads as ROM. fullsnes puts ROM on the same wait
+    /// field as I/O (`$F0` bits 6-7, "Waitstates on I/O and ROM Access"),
+    /// which is why it is counted with I/O rather than with RAM.
+    fn take_access_counts(&mut self) -> (u32, u32, u32, u32) {
+        let out = (
+            self.ram_accesses,
+            self.io_accesses,
+            self.test_ram_waits(),
+            self.test_io_waits(),
+        );
+        self.ram_accesses = 0;
+        self.io_accesses = 0;
+        out
+    }
+
     fn read(&mut self, addr: u16) -> u8 {
+        self.access_tick();
         if (0x00F0..=0x00FF).contains(&addr) {
+            self.io_accesses += 1;
             return self.read_register(addr);
+        }
+        if self.in_ipl_window(addr) {
+            // ROM shares I/O's wait field.
+            self.io_accesses += 1;
+        } else {
+            self.ram_accesses += 1;
         }
         if self.in_ipl_window(addr) {
             return self.ipl[usize::from(addr - IPL_BASE)];
@@ -609,10 +675,13 @@ impl ApuBus for Apu {
     }
 
     fn write(&mut self, addr: u16, value: u8) {
+        self.access_tick();
         if (0x00F0..=0x00FF).contains(&addr) {
+            self.io_accesses += 1;
             self.write_register(addr, value);
             return;
         }
+        self.ram_accesses += 1;
         // Note: NOT gated on the IPL window. Writes always reach ARAM,
         // even where the IPL is currently being read from — see the
         // module doc.

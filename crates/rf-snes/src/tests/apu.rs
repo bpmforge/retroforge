@@ -205,10 +205,17 @@ fn the_three_timers_are_independent() {
                              // never counted". Any test asserting a timer moved must avoid landing
                              // on a multiple of 16.
     apu.tick_clock(336);
+    // Four setup writes each cost a cycle of their own (W7-18: a CPU
+    // access advances the shared clock), so the cycle-0 edge passes
+    // BEFORE `$F1` enables anything. T0 sees only 128 and 256 — two, not
+    // the three it saw when writes were free. That is the accurate
+    // answer: a timer cannot count an edge that passed before it was
+    // switched on.
     assert_eq!(
         apu.read(0x00FD),
-        3,
-        "T0 counted, including the edge at cycle 0"
+        2,
+        "T0 counts the edges at 128 and 256; the one at cycle 0 passed \
+         while the setup writes were still running"
     );
     assert_eq!(apu.read(0x00FE), 0, "T1 was never enabled");
     assert_eq!(apu.read(0x00FF), 21 & 0x0F, "T2 counted, and much faster");
@@ -370,4 +377,88 @@ fn waitstate_fields_decode_to_0_1_4_9() {
         apu.write(0x00F0, 0x0A | (sel << 6));
         assert_eq!(apu.test_io_waits(), waits, "I/O waits for selector {sel}");
     }
+}
+
+// ---------------------------------------------------------------------
+// $F0 waitstates actually charged (ticket W7-18)
+// ---------------------------------------------------------------------
+
+/// Run one instruction placed at `$0200` and report its cycle cost.
+fn cost_of(program: &[u8], test: u8) -> u8 {
+    let mut apu = Apu::new();
+    apu.write(0x00F0, test);
+    for (i, b) in program.iter().enumerate() {
+        apu.aram[0x0200 + i] = *b;
+    }
+    apu.cpu.pc = 0x0200;
+    apu.step_counted().expect("implemented opcode")
+}
+
+/// **At the power-on `$0A` nothing changes.** This is the accuracy path,
+/// and it is unchanged by construction rather than by luck: both wait
+/// fields are zero, so every product in `access_waits` has a zero factor.
+#[test]
+fn the_default_test_register_adds_no_cycles() {
+    // NOP ($00) is 2 cycles: one fetch plus one internal.
+    assert_eq!(cost_of(&[0x00], 0x0A), 2);
+}
+
+/// One RAM waitstate costs one cycle per RAM access AND per internal
+/// cycle that takes RAM timing.
+///
+/// NOP is fullsnes's own worked example for the internal-cycle split:
+/// "Opcode 00h (NOP) has one internal cycle (and it's having RAM
+/// timings)." So with `$F0` bits 4-5 = 1 it pays twice — once for the
+/// opcode fetch, once for that internal cycle.
+#[test]
+fn a_ram_waitstate_is_charged_per_access_and_per_internal_cycle() {
+    let base = cost_of(&[0x00], 0x0A);
+    let waited = cost_of(&[0x00], 0x0A | (1 << 4));
+    assert_eq!(
+        waited,
+        base + 2,
+        "NOP: one fetch + one RAM-timed internal cycle, one wait each"
+    );
+}
+
+/// The 4- and 9-wait selectors are the documented 0/1/4/9 ladder, not a
+/// raw two-bit value.
+#[test]
+fn the_wait_ladder_is_0_1_4_9_not_the_selector() {
+    let base = cost_of(&[0x00], 0x0A);
+    for (sel, wait) in [(1u8, 1u8), (2, 4), (3, 9)] {
+        assert_eq!(
+            cost_of(&[0x00], 0x0A | (sel << 4)),
+            base + wait * 2,
+            "selector {sel} must cost {wait} cycles per access, not {sel}"
+        );
+    }
+}
+
+/// **An I/O access pays the I/O field, not the RAM one**, and that is the
+/// distinction the whole change exists to make. `MOV A, $F3` reads a
+/// hardware register; the RAM wait must not touch it and the I/O wait
+/// must.
+#[test]
+fn io_accesses_pay_the_io_field_and_ram_accesses_do_not() {
+    // E4 dp -> MOV A, dp. Reading $F3 goes to the DSP, not to ARAM.
+    let program = [0xE4, 0xF3];
+    let base = cost_of(&program, 0x0A);
+
+    let io_waited = cost_of(&program, 0x0A | (1 << 6));
+    assert!(
+        io_waited > base,
+        "an I/O read must pay the I/O wait field: {base} -> {io_waited}"
+    );
+
+    // With only the RAM field set, the $F3 read itself pays nothing —
+    // though the opcode/operand fetches from ARAM still do, so this
+    // asserts the two fields are counted separately rather than that the
+    // total is unchanged.
+    let ram_waited = cost_of(&program, 0x0A | (1 << 4));
+    assert_ne!(
+        ram_waited, io_waited,
+        "the two wait fields must be charged to different accesses; \
+         if these agree, every access is being counted as one kind"
+    );
 }

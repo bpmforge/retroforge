@@ -80,3 +80,39 @@ pub fn cycles(opcode: u8, taken: bool) -> u8 {
             0
         }
 }
+
+/// How many of an opcode's INTERNAL cycles take I/O timing rather than
+/// RAM timing.
+///
+/// Transcribed from fullsnes, "SPC700 Waitstates on Internal Cycles":
+/// "Below lists the number of I/O-Waitstates applied on Internal Cycles
+/// of SPC700 opcodes 00h..FFh (that implies: any further Internal Cycles
+/// have RAM-Waitstates)."
+///
+/// Its own worked example: "Opcode 00h (NOP) has one internal cycle (and
+/// it's having RAM timings). Opcode 01h (TCALL) has 3 internal cycles
+/// (and all 3 of them have I/O timings)." — which is why entry `00` is 0
+/// and entry `01` is 3.
+///
+/// **This only matters when `$F0` asks for waitstates.** At the power-on
+/// `$0A` both wait fields are zero, every product below is zero, and the
+/// cycle count is exactly what it always was.
+#[rustfmt::skip]
+pub const IO_WAIT_INTERNAL_CYCLES: [u8; 256] = [
+    0, 3, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 2,
+    2, 3, 0, 3, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1,
+    0, 3, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 3, 2,
+    0, 3, 0, 3, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 3,
+    0, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 3,
+    2, 3, 0, 3, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0,
+    0, 3, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 2, 1,
+    0, 3, 0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1,
+    0, 3, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0,
+    2, 3, 0, 3, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 10, 3,
+    1, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1,
+    0, 3, 0, 3, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+    1, 3, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 7,
+    2, 3, 0, 3, 1, 1, 1, 1, 0, 1, 0, 1, 0, 0, 4, 1,
+    0, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0,
+    0, 3, 0, 3, 1, 1, 1, 1, 0, 1, 0, 1, 0, 0, 3, 0,
+];

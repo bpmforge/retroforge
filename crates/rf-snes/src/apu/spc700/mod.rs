@@ -49,6 +49,19 @@ pub trait ApuBus {
     fn write(&mut self, addr: u16, value: u8);
     /// Side-effect-free read, for debuggers and tests.
     fn peek(&self, addr: u16) -> u8;
+
+    /// How many memory accesses of each kind this instruction made, and
+    /// what a waitstate costs for each — taken and reset (ticket W7-18).
+    ///
+    /// Returns `(ram_accesses, io_accesses, ram_wait, io_wait)`.
+    ///
+    /// **Default: nothing.** A bus with no `$F0` TEST register has no
+    /// waitstates, which is exactly the flat bus the SPC700 vector suite
+    /// runs on — those vectors exercise the instruction set, not the
+    /// hardware around it, and charging them waits would be wrong.
+    fn take_access_counts(&mut self) -> (u32, u32, u32, u32) {
+        (0, 0, 0, 0)
+    }
 }
 
 /// A flat 64 KiB bus with no I/O, for the vector suite.
@@ -246,14 +259,53 @@ impl Spc700 {
         if self.stopped {
             return Ok(1);
         }
+        // Reset the bus's per-instruction access tally before the opcode
+        // fetch, which is itself an access and must be counted.
+        let _ = bus.take_access_counts();
         let opcode = self.fetch8(bus);
         self.branch_taken = false;
         ops::execute(self, bus, opcode)?;
-        Ok(timing::cycles(opcode, self.branch_taken))
+        let base = timing::cycles(opcode, self.branch_taken);
+        Ok(base + Self::access_waits(bus, opcode, base))
     }
 }
 
 impl Spc700 {
+    /// The extra cycles `$F0`'s waitstate fields add to one instruction.
+    ///
+    /// **Zero at the power-on `$0A`**, where both wait fields are 0 — so
+    /// the accuracy path is not merely tested to be unchanged, it cannot
+    /// change: every product below has a zero factor.
+    ///
+    /// fullsnes, `$F0` TEST: "Normal memory access time is 1 cycle
+    /// (adding 0/1/4/9 waits gives access times of 1/2/5/10 cycles)". The
+    /// documented cycle table already counts the 1, so only the wait is
+    /// added here.
+    ///
+    /// **Internal cycles pay too**, and are split by opcode: fullsnes's
+    /// per-opcode table gives how many take I/O timing, and "any further
+    /// Internal Cycles have RAM-Waitstates". The internal count is
+    /// derived rather than tabulated a second time — it is whatever the
+    /// documented total is minus the accesses actually made, which means
+    /// the two tables cannot drift apart because there is only one.
+    fn access_waits(bus: &mut dyn ApuBus, opcode: u8, base: u8) -> u8 {
+        let (ram, io, ram_wait, io_wait) = bus.take_access_counts();
+        if ram_wait == 0 && io_wait == 0 {
+            return 0;
+        }
+        let accesses = ram + io;
+        let internal = u32::from(base).saturating_sub(accesses);
+        let io_internal =
+            u32::from(timing::IO_WAIT_INTERNAL_CYCLES[usize::from(opcode)]).min(internal);
+        let ram_internal = internal - io_internal;
+        let total = (ram + ram_internal) * ram_wait + (io + io_internal) * io_wait;
+        // Saturating rather than wrapping: fullsnes notes 4 and 9 waits
+        // "doesn't work with some opcodes" on real hardware, so an
+        // extreme value is already outside what software relies on —
+        // wrapping it into a tiny count would be the worse failure.
+        u8::try_from(total).unwrap_or(u8::MAX)
+    }
+
     pub(crate) fn save(
         &self,
         o: &mut crate::state::StateOut,
