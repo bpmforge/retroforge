@@ -5282,37 +5282,43 @@
   "status": "done",
   "stories": []
  },
-  {
-   "id": "W11-11",
-   "title": "rf-snes implements EmulatorCore",
-   "phase": 11,
-   "crate": "retroforge",
-   "write_scope": [
-    "crates/rf-core-api/**",
-    "crates/rf-nes/**",
-    "crates/rf-snes/**",
-    "crates/retroforge/**",
-    "docs/**",
-    "plan.json"
-   ],
-   "depends_on": [
-    "W11-10"
-   ],
-   "acceptance": [
-    "rf_snes implements rf_core_api::EmulatorCore over SnesSystem",
-    "the SNES frame reaches a CoreSink as scanlines, the way the NES one does — SnesSystem::render_frame returns rows today, which is a different shape from the sink contract",
-    "save_state/load_state round-trip a SNES machine, and the existing SNES save-state work (W8-02) is reused rather than re-derived",
-    "a test drives a SNES fixture through the TRAIT and asserts frames come out, without touching the app"
-   ],
-   "notes": [
-    "BRAD'S RULING 2026-08-26: adopt `EmulatorCore` in both cores rather than adding a second bespoke SNES path, and split the work three ways. The alternative — branching `core_thread` on cartridge type and duplicating ~20 methods of behaviour — is how one shell ends up with two half-consoles: every future feature gets written twice or forgotten once. Write scope widened to include the core crates, which W11-07 as originally filed excluded, making it unbuildable as written.",
-    "SECOND OF THREE. `rf_snes::SnesSystem` exposes load / step / run_until / render_frame / palette_rgb — no `CoreSink` anywhere in the crate. The frame shape is the real work: `render_frame(max_instructions) -> Result<Vec<Vec<u8>>, u8>` returns rows AFTER the fact, whereas `CoreSink::video_scanline` is called DURING the frame, which is what lets layer extraction, the compare path and the debugger see a frame as it is produced.",
-    "W11-08 already removed the other half of this: the display path can carry 256x224 and 512-wide hires frames now."
-   ],
-   "points": 8,
-   "status": "todo",
-   "stories": []
-  },
+ {
+  "id": "W11-11",
+  "title": "rf-snes implements EmulatorCore",
+  "phase": 11,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/rf-core-api/**",
+   "crates/rf-nes/**",
+   "crates/rf-snes/**",
+   "crates/retroforge/**",
+   "docs/**",
+   "plan.json"
+  ],
+  "depends_on": [
+   "W11-10"
+  ],
+  "acceptance": [
+   "rf_snes implements rf_core_api::EmulatorCore over SnesSystem",
+   "the SNES frame reaches a CoreSink as scanlines, the way the NES one does — SnesSystem::render_frame returns rows today, which is a different shape from the sink contract",
+   "save_state/load_state round-trip a SNES machine, and the existing SNES save-state work (W8-02) is reused rather than re-derived",
+   "a test drives a SNES fixture through the TRAIT and asserts frames come out, without touching the app"
+  ],
+  "notes": [
+   "BRAD'S RULING 2026-08-26: adopt `EmulatorCore` in both cores rather than adding a second bespoke SNES path, and split the work three ways. The alternative — branching `core_thread` on cartridge type and duplicating ~20 methods of behaviour — is how one shell ends up with two half-consoles: every future feature gets written twice or forgotten once. Write scope widened to include the core crates, which W11-07 as originally filed excluded, making it unbuildable as written.",
+   "SECOND OF THREE. `rf_snes::SnesSystem` exposes load / step / run_until / render_frame / palette_rgb — no `CoreSink` anywhere in the crate. The frame shape is the real work: `render_frame(max_instructions) -> Result<Vec<Vec<u8>>, u8>` returns rows AFTER the fact, whereas `CoreSink::video_scanline` is called DURING the frame, which is what lets layer extraction, the compare path and the debugger see a frame as it is produced.",
+   "W11-08 already removed the other half of this: the display path can carry 256x224 and 512-wide hires frames now.",
+   "CLOSED 2026-08-27. rf_snes::core::SnesCore implements EmulatorCore, driven by a test with the real rf-scroller-s fixture that asserts on PIXELS — every prior SNES proof (65816/SPC700 vectors, gilyon cputest, PeterLemon goldens, Mode 7, colour math) ran through rf-harness and never through the trait the shell speaks.",
+   "THE SHAPE DIFFERENCE, which is the actual reason one shell could not drive both consoles. rf-nes PUSHES: the PPU queues completed scanlines as the CPU runs and drain_video hands them to a CoreSink MID-FRAME, which is what lets layer extraction, the compare view and the debugger watch a frame being built. rf-snes PULLS: SnesSystem::render_frame runs to a settled vblank and THEN asks Ppu::render_scanline for each visible line — deliberate since W7-06, because mid-frame register writes are normal on this machine and composing as you go would compose half-written state. The adapter runs the frame, then replays the settled picture into the sink line by line.",
+   "WHAT A SINK THEREFORE DOES NOT GET is the TIMING of those lines. For a settled-composition renderer that information does not exist to report, and it is written into the module doc rather than left for a future mid-frame-effects feature to discover.",
+   "Overlay rides alongside: `Scanline` carries `overlay` with `pixels`, and forwarding only the pixels would make the 32-per-line sprite suppression invisible to the feature built to show it. The test asserts one overlay row per video row.",
+   "peek ANSWERS FOR MEMORY AND REFUSES REGISTERS. A SNES register read can latch — $2139 advances the VRAM read address — so peek resolves through mapping::map and answers for Rom/Wram/Sram, reporting quiescent 0 for Register/Open. Routing a debugger viewer through the CPU read path would make it a participant in the simulation, which ARCHITECTURE §2 forbids: a viewer that changes what it observes is worse than one with blanks in it.",
+   "Frames are asserted at 224 OR 239 lines, not a fixed number: SETINI's overscan bit decides, and a core that always emitted 224 would silently crop an overscan game's bottom fifteen rows (W7-06). W11-08 is what made either representable — the display path was hardcoded to 256x240 until then."
+  ],
+  "points": 8,
+  "status": "done",
+  "stories": []
+ },
   {
    "id": "W11-12",
    "title": "The app opens a SNES ROM",
@@ -5342,7 +5348,7 @@
     "REMEMBER WHAT MAKES THIS URGENT rather than merely missing: the product ADVERTISES the feature. library::ROM_EXTENSIONS includes sfc/smc/fig, the scanner identifies the file correctly as `Recognized { console: Snes, .. }`, the library lists it with a Play button, and §3.1's console filter has a SNES option. A user with a SNES ROM sees it offered and gets an error."
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "stories": []
   }
  ]
