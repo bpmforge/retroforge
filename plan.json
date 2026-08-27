@@ -5178,7 +5178,8 @@
    "crates/rf-enhance/**",
    "docs/design/**",
    "docs/STATUS.md",
-   "plan.json"
+   "plan.json",
+   "crates/rf-nes/**"
   ],
   "depends_on": [
    "W11-03",
@@ -5194,10 +5195,11 @@
    "`rf_enhance::hdpack` is real and `crates/rf-enhance/tests/mesen_hdpack_real.rs` runs against a real pack (scripts/local-gate.sh runs it).",
    "MEASURED: no reference to hdpack/HdPack anywhere in crates/retroforge/src. 'Replaced art' is one of the five things VISION §2 promises, and it is not reachable in the product.",
    "BLOCKED 2026-08-26 on W11-08, before any code. An HD pack replaces each 8x8 tile with a `HdPack::scale`-times version, so the composited frame is scale times larger than 256x240 — and `rf_renderer::FrameBuffer` is hardcoded to exactly 256x240. The pack machinery is complete (parse_hires, write_hires, lookup by tile+palette, PackBuilder, and mesen_hdpack_real.rs against a real pack); what is missing is a frame big enough to draw the result into.",
-   "UNBLOCKED 2026-08-27 — the recorded blocker is gone and the status was simply stale. This ticket was blocked on 'rf_renderer::FrameBuffer is hardcoded to exactly 256x240', so an HD pack's scale-times-larger composite had nowhere to be drawn. W11-08 added FrameBuffer::with_size, and W11-03 proved it live by resizing the buffer when decoded widescreen turns on. Both dependencies (W11-03, W11-08) are done. The pack machinery was already complete — parse_hires, write_hires, lookup by tile+palette, PackBuilder, and mesen_hdpack_real.rs against a real pack — so what is left is the same shape W11-03 turned out to be: a path from a UI action to the running core, plus the honesty half (provenance and refused tiles reported, not silently skipped)."
+   "UNBLOCKED 2026-08-27 — the recorded blocker is gone and the status was simply stale. This ticket was blocked on 'rf_renderer::FrameBuffer is hardcoded to exactly 256x240', so an HD pack's scale-times-larger composite had nowhere to be drawn. W11-08 added FrameBuffer::with_size, and W11-03 proved it live by resizing the buffer when decoded widescreen turns on. Both dependencies (W11-03, W11-08) are done. The pack machinery was already complete — parse_hires, write_hires, lookup by tile+palette, PackBuilder, and mesen_hdpack_real.rs against a real pack — so what is left is the same shape W11-03 turned out to be: a path from a UI action to the running core, plus the honesty half (provenance and refused tiles reported, not silently skipped).",
+   "HANDOFF — WRITE_SCOPE WIDENED 2026-08-27 to include crates/rf-nes/**, per plan.json's rule that widening needs a note here. WHAT FOR, and it is deliberately the SMALL version: two READ-ONLY accessors, `Ppu::chr()` and the scroll state, mirroring the existing `vram()`/`palette()`/`oam()` borrows exactly — the same 'a borrow cannot have a side effect, so the guarantee is structural' property those three already document. WHY ANY CORE CHANGE AT ALL: an HD pack rule is keyed on TileData + palette. The app ALREADY receives nametable VRAM, palette RAM and OAM every frame (W4-06d), and for a CHR-ROM game the tile index IS the nametable byte — so most of tile identity is already in hand. What is missing is CHR (for CHR-RAM games, where TileData is the tile's BYTES) and the scroll position (to map a screen cell to a nametable cell). WHY NOT THE BIGGER DESIGN: the obvious alternative is a per-tile observation stream out of the PPU, which is what `hdpack::TileObservation` was shaped for. That would be real core surgery in a dot-accurate renderer and would have to cost nothing when packs are off. Two borrows the app reads when it needs them is smaller, cheaper and cannot perturb anything — including A12 edge timing, which is exactly why `Ppu::vram`'s doc calls non-observing the load-bearing property."
   ],
   "points": 5,
-  "status": "todo",
+  "status": "in_progress",
   "stories": []
  },
  {
