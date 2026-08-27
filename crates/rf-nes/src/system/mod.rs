@@ -339,6 +339,12 @@ impl NesBus {
         self.ppu.chr()
     }
 
+    /// The sprite tiles of the frame just completed (ticket W11-14).
+    #[must_use]
+    pub fn completed_sprites(&self) -> &[crate::ppu::DrawnSprite] {
+        self.ppu.completed_sprites()
+    }
+
     /// Is CHR writable (CHR-RAM)? Forwards [`Ppu::chr_is_ram`].
     #[must_use]
     pub fn chr_is_ram(&self) -> bool {

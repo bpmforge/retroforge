@@ -1733,3 +1733,38 @@ that way.
 
   Nothing regressed: all SNES goldens, the SPC700 vector suite and gilyon
   green and unchanged. Workspace **1716 passing**.
+
+- **W11-14 — HD packs replace sprite art** (2026-08-27). The Enhance
+  panel's "background tiles only" notice is **gone**, because it is no
+  longer true.
+
+  **The per-scanline problem**, solved as the note predicted: sprite
+  pattern fetches happen on every scanline a sprite covers, so a naive
+  capture records an 8-pixel sprite **eight times**, each copy claiming a
+  different row — a pack would draw its replacement eight times down the
+  screen. Capture happens once, at the fetch for the sprite's top row.
+  8×16 emits two placements (a pack replaces 8×8 art), with the bank from
+  OAM byte 1's own bit 0 rather than `PPUCTRL`, and vertical flip
+  swapping which half is on top. Flips are reported so replacement art is
+  mirrored the same way — otherwise a character faces the wrong way.
+
+  **The priority decision turned out not to need priority modelling at
+  all.** A replacement may only paint where the *original* frame shows
+  the same layer. The PPU already resolved priority when it drew the
+  frame, and `FrameBundle` already carries `PpuPixel::layer` per pixel —
+  so masking against it is free and exactly right: a sprite behind the
+  background is masked out, and so is a background tile with a sprite
+  standing in front of it.
+
+  **That second half was a bug in W11-05**, found while doing this:
+  background replacements were painting over sprites. Nothing caught it
+  because the fixture's replaced tiles happened not to overlap a sprite.
+  A test now pins both directions.
+
+  `FrameMsg`'s two HD fields became one boxed `HdFrame` — not tidying:
+  `CoreEvent` travels through a channel every frame, so two inline
+  vectors would grow it for every session whether a pack is loaded or not.
+
+  Evidence: 7 PPU capture tests and 8 compositor tests (7 new between
+  them), plus the existing end-to-end app test still green with masking
+  applied. Workspace **1723 passing**; NES and SNES suites unchanged.

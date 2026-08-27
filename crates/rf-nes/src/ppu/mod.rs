@@ -450,6 +450,25 @@ pub struct DrawnTile {
     pub palette: u8,
 }
 
+/// One sprite tile the PPU drew, and where it landed.
+///
+/// Separate from [`DrawnTile`] because a sprite carries flips that a
+/// background tile cannot: a pack's replacement art has to be mirrored
+/// the same way the original was, or a character faces the wrong way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawnSprite {
+    /// Screen x of the tile's leftmost pixel.
+    pub x: i16,
+    /// Screen y of the tile's TOP row. Sprites display at OAM `y + 1`.
+    pub y: i16,
+    pub tile: u8,
+    pub base: u16,
+    /// Sprite palette 0-3 (`$3F10`-relative, not `$3F00`).
+    pub palette: u8,
+    pub flip_x: bool,
+    pub flip_y: bool,
+}
+
 pub struct Ppu {
     // ---- CPU-visible registers ($2000-$2007) ----
     pub(super) ctrl: u8,
@@ -475,6 +494,10 @@ pub struct Ppu {
     pub(super) tile_capture: bool,
     /// Tiles of the frame currently being drawn.
     pub(super) drawn_tiles: Vec<DrawnTile>,
+    /// Sprite tiles of the frame being drawn, and of the last complete
+    /// one — the same two-buffer arrangement, for the same reason.
+    pub(super) drawn_sprites: Vec<DrawnSprite>,
+    pub(super) completed_sprites: Vec<DrawnSprite>,
     /// The last COMPLETE frame's tiles, which is what readers get.
     ///
     /// **Two buffers, because the consumer and the capture window do not
@@ -804,6 +827,8 @@ impl Ppu {
             tile_capture: false,
             drawn_tiles: Vec::new(),
             completed_tiles: Vec::new(),
+            drawn_sprites: Vec::new(),
+            completed_sprites: Vec::new(),
             chr_is_ram,
             vram: [0; 0x1000],
             palette: [0; 32],
@@ -899,6 +924,8 @@ impl Ppu {
         if !on {
             self.drawn_tiles = Vec::new();
             self.completed_tiles = Vec::new();
+            self.drawn_sprites = Vec::new();
+            self.completed_sprites = Vec::new();
         }
     }
 
@@ -909,6 +936,12 @@ impl Ppu {
     #[must_use]
     pub fn completed_tiles(&self) -> &[DrawnTile] {
         &self.completed_tiles
+    }
+
+    /// The sprite tiles of the frame just completed (ticket W11-14).
+    #[must_use]
+    pub fn completed_sprites(&self) -> &[DrawnSprite] {
+        &self.completed_sprites
     }
 
     /// The cartridge's CHR, pattern tables included.
@@ -1338,6 +1371,7 @@ impl Ppu {
                     // collecting the next one — the pre-render line's own
                     // prefetch (dots 329/337) belongs to the coming frame.
                     self.completed_tiles = std::mem::take(&mut self.drawn_tiles);
+                    self.completed_sprites = std::mem::take(&mut self.drawn_sprites);
                 }
                 next
             };

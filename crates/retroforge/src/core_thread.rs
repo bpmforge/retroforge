@@ -179,6 +179,25 @@ pub enum LoopControl {
 
 /// One RGBA frame plus its dimensions, cheap to send across a channel
 /// (`Vec<u8>` is moved, not copied).
+/// Everything an HD pack needs about one frame (tickets W11-05, W11-14).
+///
+/// **Boxed and kept together on purpose.** The two halves are meaningless
+/// apart — placements say what to replace, the layer map says where a
+/// replacement is allowed to paint — and `FrameMsg` travels through a
+/// channel on every frame, so a pair of vectors inline would grow the
+/// whole enum for every session, pack or no pack.
+#[derive(Debug, Clone)]
+pub struct HdFrame {
+    /// Where every background and sprite tile of this frame landed.
+    pub placements: Vec<rf_enhance::hd_render::Placement>,
+    /// Which layer drew each pixel — the PPU's own priority answer,
+    /// reused rather than re-derived. A replacement paints only where the
+    /// original shows the same layer, so a sprite behind the background
+    /// is masked out for free, as is a background tile with a sprite
+    /// standing in front of it.
+    pub layers: Vec<rf_enhance::hd_render::Layer>,
+}
+
 pub struct FrameMsg {
     /// Ticket W11-02: the bytes the full-level view asked for, or `None`
     /// when no probe is armed. Peeked on this thread because only this
@@ -202,7 +221,7 @@ pub struct FrameMsg {
     /// pack and its images stay on the UI thread — this is the small half
     /// of the pair, and shipping decoded tilesets across the channel
     /// every frame would not be.
-    pub hd_placements: Option<Vec<rf_enhance::hd_render::Placement>>,
+    pub hd: Option<Box<HdFrame>>,
     pub rgba: Vec<u8>,
     pub width: usize,
     pub height: usize,
@@ -1132,13 +1151,34 @@ fn core_thread_main(
                     .collect::<Vec<u8>>()
             });
             let display = display_rgba(&mut historian, &bundle, &sink, overlay_capture.as_deref());
+            // Ticket W11-14: read the layer map BEFORE the bundle is
+            // handed off — it is moved by `publish`, and the mask is a
+            // cheap projection of it rather than a second copy of the
+            // pixels.
+            let mut hd_layers = hd_capture.then(|| {
+                bundle
+                    .video
+                    .iter()
+                    .map(|p| match p.layer {
+                        rf_core_api::PixelLayer::Sprite => rf_enhance::hd_render::Layer::Sprite,
+                        // Backdrop counts as background: nothing drew
+                        // there, so a background replacement may.
+                        _ => rf_enhance::hd_render::Layer::Background,
+                    })
+                    .collect::<Vec<_>>()
+            });
             bundle_writer.publish(bundle);
             let msg = FrameMsg {
                 audio_fill: audio.as_ref().map(crate::audio_out::AudioOut::fill),
                 level_probe: probe_data,
                 script_window: script_bytes,
                 // Built only when a pack is loaded — see SetTileCapture.
-                hd_placements: hd_capture.then(|| stepper.hd_placements()),
+                hd: hd_capture.then(|| {
+                    Box::new(HdFrame {
+                        placements: stepper.hd_placements(),
+                        layers: hd_layers.take().unwrap_or_default(),
+                    })
+                }),
                 rgba: display,
                 width: sink.width(),
                 height: sink.height(),

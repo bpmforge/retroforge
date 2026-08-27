@@ -143,3 +143,98 @@ fn capture_off_reports_nothing() {
         "with capture off the PPU must not accumulate tiles"
     );
 }
+
+// ---------------------------------------------------------------------
+// Sprite tiles (ticket W11-14)
+// ---------------------------------------------------------------------
+
+/// A PPU with one 8x8 sprite in OAM slot 0, sprites and background on.
+fn ppu_with_sprite(y: u8, tile: u8, attr: u8, x: u8) -> super::Ppu {
+    let mut p = ppu_with_grid();
+    p.oam[0] = y;
+    p.oam[1] = tile;
+    p.oam[2] = attr;
+    p.oam[3] = x;
+    // Slots 1..63 park off-screen so only slot 0 is ever in range.
+    for i in 1..64 {
+        p.oam[i * 4] = 0xFF;
+    }
+    p.write_register(1, 0b0001_1000); // PPUMASK: background + sprites
+    p
+}
+
+/// **One sprite is reported ONCE, not once per scanline.**
+///
+/// Sprite pattern fetches happen every scanline the sprite covers, so a
+/// naive capture records an 8-pixel sprite eight times — each copy
+/// claiming a different row, and a pack would then draw its replacement
+/// eight times down the screen. This is the assertion that catches it.
+#[test]
+fn an_eight_pixel_sprite_is_reported_once_at_its_top_row() {
+    let mut p = ppu_with_sprite(40, 0x2A, 0x00, 72);
+    run_captured_frame(&mut p);
+    let sprites: Vec<_> = p.completed_sprites().iter().collect();
+    assert_eq!(
+        sprites.len(),
+        1,
+        "one 8x8 sprite must produce exactly one placement, got {}",
+        sprites.len()
+    );
+    let s = sprites[0];
+    assert_eq!(s.tile, 0x2A);
+    assert_eq!(s.x, 72);
+    // Sprites display at OAM y + 1 — the classic off-by-one that puts a
+    // whole sprite layer one row high.
+    assert_eq!(s.y, 41, "a sprite draws at OAM y + 1");
+    assert!(!s.flip_x && !s.flip_y);
+}
+
+/// An 8x16 sprite is TWO tiles, because a pack replaces 8x8 art.
+///
+/// The bank comes from OAM byte 1's own bit 0 in this mode, not from
+/// `PPUCTRL`, and the pair is `tile & 0xFE` then `+1`.
+#[test]
+fn a_tall_sprite_is_reported_as_two_tiles_eight_rows_apart() {
+    let mut p = ppu_with_sprite(40, 0x07, 0x00, 72);
+    p.write_register(0, 0b0010_0000); // PPUCTRL bit 5: 8x16 sprites
+    run_captured_frame(&mut p);
+    let s = p.completed_sprites();
+    assert_eq!(s.len(), 2, "8x16 is two 8x8 tiles, got {}", s.len());
+    assert_eq!((s[0].tile, s[1].tile), (0x06, 0x07), "tile & 0xFE, then +1");
+    assert_eq!(
+        (s[0].base, s[1].base),
+        (0x1000, 0x1000),
+        "odd tile index selects the $1000 bank, from OAM itself"
+    );
+    assert_eq!(s[1].y - s[0].y, 8, "the halves are eight rows apart");
+}
+
+/// Vertical flip swaps which half of a tall sprite is on top.
+#[test]
+fn a_vertically_flipped_tall_sprite_swaps_its_halves() {
+    let mut p = ppu_with_sprite(40, 0x07, 0x80, 72); // attr bit 7: flip Y
+    p.write_register(0, 0b0010_0000);
+    run_captured_frame(&mut p);
+    let s = p.completed_sprites();
+    assert_eq!(s.len(), 2);
+    assert_eq!(
+        (s[0].tile, s[1].tile),
+        (0x07, 0x06),
+        "flipped: the lower tile is drawn at the top"
+    );
+    assert!(
+        s[0].flip_y,
+        "the flip is reported so a pack can mirror its art"
+    );
+}
+
+/// Horizontal flip is reported, because a pack's replacement has to be
+/// mirrored the same way or the character faces the wrong direction.
+#[test]
+fn horizontal_flip_is_reported() {
+    let mut p = ppu_with_sprite(40, 0x2A, 0x40, 72);
+    run_captured_frame(&mut p);
+    let s = p.completed_sprites();
+    assert_eq!(s.len(), 1);
+    assert!(s[0].flip_x);
+}

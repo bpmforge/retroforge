@@ -50,6 +50,20 @@ pub struct Placement {
     pub tile: TileData,
     /// The four palette bytes the pack's rules are keyed on.
     pub palette: [u8; 4],
+    /// Which layer drew this tile. A replacement may only paint pixels
+    /// the ORIGINAL frame drew from the same layer — see [`composite`].
+    pub layer: Layer,
+    /// Sprite mirroring. A pack's replacement art must be flipped the
+    /// same way the original was, or a character faces the wrong way.
+    pub flip_x: bool,
+    pub flip_y: bool,
+}
+
+/// Which layer a tile came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    Background,
+    Sprite,
 }
 
 /// What compositing did, for the UI.
@@ -97,6 +111,7 @@ pub fn composite(
     images: &[PackImage],
     placements: &[Placement],
     original: &[u8],
+    layers: &[Layer],
     width: usize,
     height: usize,
 ) -> (Vec<u8>, CompositeReport) {
@@ -136,15 +151,20 @@ pub fn composite(
         };
         if blit(
             &mut out,
-            out_w,
-            out_h,
+            (out_w, out_h),
             img,
-            rule.x as usize,
-            rule.y as usize,
-            i32::from(p.x) * scale as i32,
-            i32::from(p.y) * scale as i32,
+            (rule.x as usize, rule.y as usize),
+            (i32::from(p.x) * scale as i32, i32::from(p.y) * scale as i32),
             TILE * scale,
             rule.brightness,
+            (p.flip_x, p.flip_y),
+            &Mask {
+                layers,
+                want: p.layer,
+                width,
+                height,
+                scale,
+            },
         ) {
             report.replaced += 1;
         } else {
@@ -154,7 +174,46 @@ pub fn composite(
     (out, report)
 }
 
-/// Copy one `side`x`side` block, clipping at every edge.
+/// Which original pixels a replacement is allowed to paint over.
+///
+/// **This is what makes priority work without modelling priority.** The
+/// original frame already has the PPU's own answer baked in: a sprite
+/// behind the background simply is not visible there. So a replacement
+/// paints only where the original shows that same layer, and a
+/// behind-background sprite is masked out for free — as is a background
+/// tile that a sprite is standing in front of.
+///
+/// Without it, the two failure modes are opposite and both wrong: a
+/// sprite replacement paints over the wall it is hiding behind, and a
+/// background replacement erases the character standing on it.
+struct Mask<'a> {
+    layers: &'a [Layer],
+    want: Layer,
+    width: usize,
+    height: usize,
+    scale: usize,
+}
+
+impl Mask<'_> {
+    /// May a replacement paint the OUTPUT pixel at `(x, y)`?
+    fn allows(&self, x: usize, y: usize) -> bool {
+        if self.layers.is_empty() {
+            // No mask supplied: paint everything, which is what a caller
+            // with no layer information means.
+            return true;
+        }
+        let (sx, sy) = (x / self.scale, y / self.scale);
+        if sx >= self.width || sy >= self.height {
+            return false;
+        }
+        self.layers
+            .get(sy * self.width + sx)
+            .is_some_and(|l| *l == self.want)
+    }
+}
+
+/// Copy one `side`x`side` block, clipping at every edge and honouring
+/// both the sprite flips and the layer mask.
 ///
 /// Returns `false` when the source rectangle is not wholly inside the
 /// image — a rule whose coordinates run off its own tileset is a pack
@@ -162,30 +221,38 @@ pub fn composite(
 #[allow(clippy::too_many_arguments)]
 fn blit(
     out: &mut [u8],
-    out_w: usize,
-    out_h: usize,
+    (out_w, out_h): (usize, usize),
     img: &PackImage,
-    sx: usize,
-    sy: usize,
-    dx: i32,
-    dy: i32,
+    (sx, sy): (usize, usize),
+    (dx, dy): (i32, i32),
     side: usize,
     brightness: f32,
+    (flip_x, flip_y): (bool, bool),
+    mask: &Mask<'_>,
 ) -> bool {
     if sx + side > img.width as usize || sy + side > img.height as usize {
         return false;
     }
+    let mut painted = false;
     for row in 0..side {
         let ty = dy + row as i32;
         if ty < 0 || ty as usize >= out_h {
             continue;
         }
+        // Mirroring reads the SOURCE from the far end; the destination
+        // walks forward either way, so a flipped tile still lands in the
+        // same screen cell.
+        let srow = if flip_y { side - 1 - row } else { row };
         for col in 0..side {
             let tx = dx + col as i32;
             if tx < 0 || tx as usize >= out_w {
                 continue;
             }
-            let s = ((sy + row) * img.width as usize + (sx + col)) * 4;
+            if !mask.allows(tx as usize, ty as usize) {
+                continue;
+            }
+            let scol = if flip_x { side - 1 - col } else { col };
+            let s = ((sy + srow) * img.width as usize + (sx + scol)) * 4;
             let d = (ty as usize * out_w + tx as usize) * 4;
             if s + 4 > img.rgba.len() || d + 4 > out.len() {
                 continue;
@@ -201,9 +268,12 @@ fn blit(
                 out[d + c] = v.clamp(0.0, 255.0) as u8;
             }
             out[d + 3] = img.rgba[s + 3];
+            painted = true;
         }
     }
-    true
+    // A rule whose every pixel was masked away did not replace anything,
+    // and saying it did would overstate what the pack achieved.
+    painted
 }
 
 #[cfg(test)]
@@ -275,8 +345,11 @@ mod tests {
             y: 0,
             tile: TileData::ChrRom(1),
             palette: [0; 4],
+            layer: Layer::Background,
+            flip_x: false,
+            flip_y: false,
         }];
-        let (out, report) = composite(&p, &[], &placements, &original, 16, 16);
+        let (out, report) = composite(&p, &[], &placements, &original, &[], 16, 16);
         assert_eq!(out.len(), 32 * 32 * 4, "scale 2 doubles both axes");
         assert_eq!(report.replaced, 0);
         assert_eq!(report.unmatched, 1);
@@ -298,8 +371,11 @@ mod tests {
             y: 0,
             tile: TileData::ChrRom(1),
             palette: [0; 4],
+            layer: Layer::Background,
+            flip_x: false,
+            flip_y: false,
         }];
-        let (out, report) = composite(&p, &[img], &placements, &original, 16, 16);
+        let (out, report) = composite(&p, &[img], &placements, &original, &[], 16, 16);
         assert_eq!(report.replaced, 1);
         assert_eq!(report.unmatched, 0);
         // Inside the replaced 16x16 block (8 tile px * scale 2): green.
@@ -327,8 +403,11 @@ mod tests {
             y: 0,
             tile: TileData::ChrRom(1),
             palette: [0; 4],
+            layer: Layer::Background,
+            flip_x: false,
+            flip_y: false,
         }];
-        let (out, report) = composite(&p, &[img], &placements, &original, 16, 16);
+        let (out, report) = composite(&p, &[img], &placements, &original, &[], 16, 16);
         assert_eq!(report.replaced, 1, "it was drawn, not skipped");
         // x = -3 means original x 0..4 show the tile's columns 3..7.
         assert_eq!(&out[0..4], &[0, 0, 0xFF, 0xFF], "leftmost visible column");
@@ -352,10 +431,125 @@ mod tests {
             y: 0,
             tile: TileData::ChrRom(1),
             palette: [0; 4],
+            layer: Layer::Background,
+            flip_x: false,
+            flip_y: false,
         }];
-        let (_out, report) = composite(&p, &[img], &placements, &original, 16, 16);
+        let (_out, report) = composite(&p, &[img], &placements, &original, &[], 16, 16);
         assert_eq!(report.replaced, 0);
         assert_eq!(report.unmatched, 1);
+    }
+
+    /// **A replacement may only paint its own layer.**
+    ///
+    /// This is the bug the mask exists to prevent, and it has two
+    /// opposite halves: a background replacement must not erase a sprite
+    /// standing in front of it, and a sprite replacement must not paint
+    /// over the wall it is hiding behind. The original frame already
+    /// carries the PPU's own priority answer, so masking against it gets
+    /// both right without modelling priority at all.
+    #[test]
+    fn a_replacement_paints_only_where_its_own_layer_shows() {
+        let p = pack(1, vec![rule(1, [0; 4], 0, 0)]);
+        let img = solid(8, [0, 0xFF, 0]);
+        let original = black_frame(16, 16);
+        // The left half of the cell is a sprite standing in front of the
+        // background tile the pack replaces.
+        let mut layers = vec![Layer::Background; 16 * 16];
+        for y in 0..16 {
+            for x in 0..4 {
+                layers[y * 16 + x] = Layer::Sprite;
+            }
+        }
+        let placements = vec![Placement {
+            x: 0,
+            y: 0,
+            tile: TileData::ChrRom(1),
+            palette: [0; 4],
+            layer: Layer::Background,
+            flip_x: false,
+            flip_y: false,
+        }];
+        let (out, report) = composite(&p, &[img], &placements, &original, &layers, 16, 16);
+        assert_eq!(report.replaced, 1, "the tile was still replaced");
+        // Where the sprite is, the original survives.
+        assert_eq!(
+            &out[0..4],
+            &[0, 0, 0, 0xFF],
+            "a background replacement must not erase the sprite in front of it"
+        );
+        // Where the background shows, the pack's art is drawn.
+        // Row 0, column 6 — past the sprite in the left four columns.
+        let i = 6 * 4;
+        assert_eq!(
+            &out[i..i + 4],
+            &[0, 0xFF, 0, 0xFF],
+            "background was replaced"
+        );
+    }
+
+    /// A rule every one of whose pixels is masked away replaced nothing,
+    /// and must not be counted as a replacement.
+    #[test]
+    fn a_fully_masked_rule_is_not_counted_as_replaced() {
+        let p = pack(1, vec![rule(1, [0; 4], 0, 0)]);
+        let img = solid(8, [0, 0xFF, 0]);
+        let original = black_frame(16, 16);
+        let layers = vec![Layer::Sprite; 16 * 16];
+        let placements = vec![Placement {
+            x: 0,
+            y: 0,
+            tile: TileData::ChrRom(1),
+            palette: [0; 4],
+            layer: Layer::Background,
+            flip_x: false,
+            flip_y: false,
+        }];
+        let (_out, report) = composite(&p, &[img], &placements, &original, &layers, 16, 16);
+        assert_eq!(report.replaced, 0);
+        assert_eq!(report.unmatched, 1, "it matched a rule but painted nothing");
+    }
+
+    /// A flipped sprite's replacement art is mirrored the same way.
+    #[test]
+    fn a_flipped_sprite_mirrors_its_replacement() {
+        let p = pack(1, vec![rule(1, [0; 4], 0, 0)]);
+        // Left half red, right half blue, so a mirror is visible.
+        let mut rgba = Vec::new();
+        for _ in 0..8 {
+            for x in 0..8 {
+                let c = if x < 4 { [0xFF, 0, 0] } else { [0, 0, 0xFF] };
+                rgba.extend_from_slice(&[c[0], c[1], c[2], 0xFF]);
+            }
+        }
+        let img = PackImage {
+            width: 8,
+            height: 8,
+            rgba,
+        };
+        let original = black_frame(16, 16);
+        let mk = |flip_x: bool| Placement {
+            x: 0,
+            y: 0,
+            tile: TileData::ChrRom(1),
+            palette: [0; 4],
+            layer: Layer::Background,
+            flip_x,
+            flip_y: false,
+        };
+        let one = std::slice::from_ref(&img);
+        let (plain, _) = composite(&p, one, &[mk(false)], &original, &[], 16, 16);
+        let (flipped, _) = composite(&p, one, &[mk(true)], &original, &[], 16, 16);
+        assert_eq!(
+            &plain[0..4],
+            &[0xFF, 0, 0, 0xFF],
+            "unflipped: red on the left"
+        );
+        assert_eq!(
+            &flipped[0..4],
+            &[0, 0, 0xFF, 0xFF],
+            "flipped: the right half of the art is now on the left"
+        );
     }
 
     /// The report must never read as complete when it is not.

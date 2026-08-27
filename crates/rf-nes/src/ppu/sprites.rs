@@ -550,6 +550,9 @@ impl Ppu {
                 let addr_lo = bank | ((tile_index as u16) << 4) | fine_row;
                 let addr_hi = addr_lo | 0x08;
                 let pattern_hi = self.mem_read(addr_hi);
+                if real && self.tile_capture {
+                    self.capture_sprite(candidate);
+                }
                 if real {
                     self.active_sprites[slot] = SpriteUnit {
                         pattern_lo: self.sprite_pattern_lo_latch,
@@ -561,6 +564,66 @@ impl Ppu {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Record a sprite's tiles ONCE, at the fetch for its top row
+    /// (ticket W11-14).
+    ///
+    /// **Sprite fetches are per SCANLINE, so this must not record per
+    /// call** — an 8-pixel sprite is fetched eight times and would
+    /// otherwise produce eight copies of one tile, each claiming a
+    /// different row. Evaluation runs one scanline ahead, so the fetch
+    /// during scanline N is for display on N+1, and the top row is the
+    /// fetch where `scanline == y`.
+    ///
+    /// The row is taken UNFLIPPED here deliberately: `flip_y` mirrors
+    /// which pattern row lands where, but the sprite still occupies the
+    /// same screen rows, and it is the screen position a pack needs.
+    ///
+    /// 8x16 sprites are two tiles and are recorded as two placements —
+    /// the pack replaces 8x8 art, so a tall sprite is two rules, not one.
+    /// The bank comes from OAM byte 1's own bit 0 in that mode
+    /// (nesdev.org/wiki/PPU_OAM), not from `PPUCTRL`.
+    fn capture_sprite(&mut self, candidate: EvaluatedSprite) {
+        if u16::from(candidate.y) != self.scanline {
+            return;
+        }
+        let top = i16::from(candidate.y).wrapping_add(1);
+        let x = i16::from(candidate.x);
+        let palette = candidate.attr & 0x03;
+        let flip_x = candidate.attr & 0x40 != 0;
+        let flip_y = candidate.attr & 0x80 != 0;
+        let mk = |base: u16, tile: u8, y: i16| super::DrawnSprite {
+            x,
+            y,
+            tile,
+            base,
+            palette,
+            flip_x,
+            flip_y,
+        };
+        if self.sprite_height() == 16 {
+            let bank = if candidate.tile & 0x01 != 0 {
+                0x1000u16
+            } else {
+                0x0000u16
+            };
+            let upper = candidate.tile & 0xFE;
+            // With vertical flip the two halves swap: the tile drawn at
+            // the top of the screen is the one that would otherwise be at
+            // the bottom.
+            let (first, second) = if flip_y {
+                (upper + 1, upper)
+            } else {
+                (upper, upper + 1)
+            };
+            self.drawn_sprites.push(mk(bank, first, top));
+            self.drawn_sprites
+                .push(mk(bank, second, top.wrapping_add(8)));
+        } else {
+            let base = self.sprite_pattern_table_base();
+            self.drawn_sprites.push(mk(base, candidate.tile, top));
         }
     }
 

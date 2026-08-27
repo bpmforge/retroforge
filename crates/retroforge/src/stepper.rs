@@ -610,15 +610,16 @@ impl EmuStepper {
     #[must_use]
     pub fn hd_placements(&self) -> Vec<rf_enhance::hd_render::Placement> {
         let tiles = self.completed_tiles();
-        if tiles.is_empty() {
-            return Vec::new();
-        }
         let palette = self.palette();
         let chr = self.chr();
         let chr_is_ram = self
             .machine
             .nes_bus()
             .is_some_and(rf_nes::NesBus::chr_is_ram);
+        let sprites = self
+            .machine
+            .nes_bus()
+            .map_or(&[][..], rf_nes::NesBus::completed_sprites);
         tiles
             .iter()
             .map(|t| {
@@ -657,8 +658,44 @@ impl EmuStepper {
                     y: t.y as i16,
                     tile,
                     palette: colours,
+                    layer: rf_enhance::hd_render::Layer::Background,
+                    // Background tiles cannot be flipped on the NES.
+                    flip_x: false,
+                    flip_y: false,
                 }
             })
+            .chain(sprites.iter().map(|s| {
+                // **Sprite palettes are `$3F10`-relative**, not `$3F00`.
+                // Using the background base here would key every sprite
+                // rule on the wrong four bytes and match nothing — the
+                // kind of failure that looks like "packs do not work".
+                let p = 0x10 + usize::from(s.palette & 0x03) * 4;
+                let colours = [
+                    palette[0] & 0x3F,
+                    palette[p + 1] & 0x3F,
+                    palette[p + 2] & 0x3F,
+                    palette[p + 3] & 0x3F,
+                ];
+                let tile = if chr_is_ram {
+                    let at = usize::from(s.base) + usize::from(s.tile) * 16;
+                    let mut bytes = [0u8; 16];
+                    for (i, b) in bytes.iter_mut().enumerate() {
+                        *b = chr.get(at + i).copied().unwrap_or(0);
+                    }
+                    rf_enhance::hdpack::TileData::ChrRam(bytes)
+                } else {
+                    rf_enhance::hdpack::TileData::ChrRom(u32::from(s.base) / 16 + u32::from(s.tile))
+                };
+                rf_enhance::hd_render::Placement {
+                    x: s.x,
+                    y: s.y,
+                    tile,
+                    palette: colours,
+                    layer: rf_enhance::hd_render::Layer::Sprite,
+                    flip_x: s.flip_x,
+                    flip_y: s.flip_y,
+                }
+            }))
             .collect()
     }
 

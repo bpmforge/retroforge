@@ -356,14 +356,10 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                 if let Some(r) = ctx.hd_report {
                     ui.label(r.summary());
                 }
-                // The scope limit, stated rather than discovered. A
-                // pack whose sprite art silently never applies is
-                // exactly the half-applied confusion this panel
-                // exists to prevent.
-                ui.label(
-                    "Background tiles only \u{2014} sprite replacement is not \
-                     implemented, so a pack's sprite art will not appear.",
-                );
+                // (W11-05 printed a "background tiles only" limitation
+                // here. W11-14 implemented sprite replacement, so the
+                // notice is GONE rather than left to mislead — a stale
+                // limitation notice is its own kind of dishonesty.)
                 for u in ctx.hd_unsatisfied {
                     ui.label(format!("    {u}"));
                 }

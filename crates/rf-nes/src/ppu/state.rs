@@ -41,6 +41,8 @@ impl Ppu {
             tile_capture: _,
             drawn_tiles: _,
             completed_tiles: _,
+            drawn_sprites: _,
+            completed_sprites: _,
             vram: _,    // VRAM chunk
             palette: _, // CGRM chunk
             mirroring,

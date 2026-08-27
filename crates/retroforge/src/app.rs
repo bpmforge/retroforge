@@ -1762,10 +1762,16 @@ impl RetroForgeApp {
             // the core thread because the pack and its decoded tilesets
             // live on this side — shipping them across the channel every
             // frame would be the expensive half of the pair.
-            let (rgba, size) = match (&self.hd_pack, &msg.hd_placements) {
-                (Some((pack, images)), Some(placements)) => {
+            let (rgba, size) = match (&self.hd_pack, &msg.hd) {
+                (Some((pack, images)), Some(hd)) => {
                     let (out, report) = rf_enhance::hd_render::composite(
-                        pack, images, placements, &msg.rgba, msg.width, msg.height,
+                        pack,
+                        images,
+                        &hd.placements,
+                        &msg.rgba,
+                        &hd.layers,
+                        msg.width,
+                        msg.height,
                     );
                     self.hd_report = Some(report);
                     let s = pack.scale.max(1) as usize;
