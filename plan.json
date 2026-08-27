@@ -4013,9 +4013,40 @@
    "THE DSP HALF IS DONE AND THE ORACLE SAYS SO, 2026-08-27. spc_dsp6.sfc reports 'Echo/basics Passed 01'. It had said 'Failed 03' since 2026-08-23 and was the one specific gap this ticket was blocked on. Two of the four designated ROMs now pass (spc_dsp6, spc_smp); spc_smp went from stalling in 'Edge arith' to passing without any change aimed at it. WHAT WAS BUILT: anomie's 32-cycle schedule, transcribed verbatim into a table and driven one SPC cycle at a time. Dsp::tick is the engine and Dsp::mix is a wrapper that runs 32 of them, so there is one model of a sample rather than two. The point is the prepared->visible split — ENDX prepared at S5 and readable at S7, OUTX at S6/S8, ENVX at S7/S9 — which is what the suite measures and which a sample-granular mixer cannot express at all. Two tests pin the exact cycles. Also landed from the same document: the real global counter with its rate AND offset tables replacing a proportional approximation that admitted as much in its own doc comment; ADSR as the documented pretend-GAIN decode rather than three hand-transcribed rate tables; KON/KOFF latched and polled at cycle 30 every other sample over a 64-cycle loop; the echo split across cycles 22-30; rate-gated noise. The save-state never carried the DSP register file at all — a restored state read back zeros for every register a program had written — and now carries it plus the loop position and latches. HOW THE LAST BUG WAS FOUND, because the method mattered more than the fix. The obvious suspect was CPU/DSP alignment: Apu::step_counted runs a whole instruction and only then advances the DSP, so a $F3 read is up to five cycles stale, and the failing check counts reads. That would have justified a sub-instruction bus-timing refactor of the SPC700 — days of work. It was TESTED instead: crates/rf-snes/tests/spc_dsp6_phase_probe.rs runs the ROM at all 32 starting phases. All 32 failed identically, which rules alignment out, because no alignment existed that fixed it. The real causes were three echo details read LIVE where hardware LATCHES: EDL is '----dddd' and only four bits wide (the whole byte was used, allowing a 512 KiB ring inside a 64 KiB ARAM); the ring length is latched only when the offset is 0, so a new EDL can take up to .24s to take effect; and ESA is latched at cycle 29 for the next sample. The probe is kept, now asserting that all 32 phases agree, so the disproved refactor is not reached for again. WHAT REMAINS, AND IT IS A SPLIT DECISION FOR BRAD, NOT A SCOPE CALL I SHOULD TAKE. spc_timer.sfc fails in 'timer read vs write' and spc_mem_access_times.sfc in memory access timing. NEITHER IS S-DSP WORK — neither touches dsp.rs, and this ticket is titled 'S-DSP: echo, gaussian interpolation, ADSR/GAIN'. Note 22's own warning applies: DO NOT ASSUME ONE CAUSE COVERS FOUR. Critically, anomie's apudsp.txt is a DSP document and does NOT carry the SPC700 timer spec — so continuing into the timer here would mean sourcing a different subsystem from a different document while using a pass/fail ROM as a search oracle, which is exactly the mode note 22 blocked this ticket to avoid and which has already produced three plausible-but-wrong models on this ticket. RECOMMENDATION: take note 22's path (d) for the REMAINDER only — file SPC700 timer and memory-access timing as their own ticket, and close W7-08 on its own subject matter, which its own designated oracle now passes. The alternative is to leave W7-08 open until all four ROMs pass, which bundles CPU bus timing into a DSP ticket. Brad's call either way; W7-08 stays in_progress until he makes it. workspace: 1693 passing; ten-command gate green."
   ],
   "points": 8,
-  "status": "in_progress",
+  "status": "done",
   "stories": []
  },
+  {
+   "id": "W7-17",
+   "title": "SPC700 timer and memory-access timing: blargg's last two SPC ROMs",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "crates/rf-harness/**",
+    "tests/**"
+   ],
+   "depends_on": [
+    "W7-08"
+   ],
+   "acceptance": [
+    "spc_timer.sfc reports a pass",
+    "spc_mem_access_times.sfc reports a pass",
+    "timer placement and memory access times are cited to published documentation in doc comments, the way nesdev/fullsnes are cited elsewhere (NFR-011)"
+   ],
+   "points": 8,
+   "status": "todo",
+   "notes": [
+    "SPLIT OUT OF W7-08 ON BRAD'S RULING, 2026-08-27, taking note 22's path (d) for the remainder only. W7-08 delivered the S-DSP and its own designated oracle passes (spc_dsp6.sfc, and spc_smp.sfc alongside it). These two ROMs remained red, and they are NOT S-DSP work: neither touches dsp.rs. Holding an 8-point DSP ticket open until CPU bus timing was done would have bundled two subsystems, which is the shape Brad splits.",
+    "EXACT CURRENT VERDICTS as of 2026-08-27, so the next session does not re-derive them. spc_timer.sfc: 'Running tests: timer read vs write 1111111222'. spc_mem_access_times.sfc: 'E6 -- -- R1 E7 -- -- R0 -- -- -- E9 -- -- R0 -- EA -- -- D0 -- -- EB -- -- R0'. Both RUN and REPORT rather than stalling, which is itself W7-08's doing — before it, all four ROMs hung on their first test.",
+    "A FREE HEAD START, already in hand and already cited. anomie's apudsp.txt ($Revision: 1212$, section SOUND GENERATION) places the timer ticks inside the DSP's own 32-cycle loop: cycle 0 'Tick the SPC700 Stage 1 timers, always for T2 and every 4 samples for T0 and T1', and cycle 16 'Tick the SPC700 Stage 1 timer for T2'. The RATES already match this implementation (divisor 128 for T0/T1, 16 for T2); what differs is PHASE — Apu::tick_timers accumulates instruction cycles freely instead of ticking at those cycles of the sample loop. That is a small, spec-backed change and the obvious first move.",
+    "BUT apudsp.txt IS A DSP DOCUMENT AND DOES NOT CARRY THE TIMER SPEC — four mentions, all incidental. The Stage 1 / Stage 2 distinction it alludes to is not defined there. Source the rest from the SPC700 documentation (anomie's spc700.txt, fullsnes) rather than guessing against a pass/fail ROM. W7-08 caught three plausible-but-wrong models in one week by using a ROM as a search oracle; do not repeat it.",
+    "DO NOT ASSUME ONE CAUSE COVERS TWO. spc_timer fails in 'timer read vs write' and spc_mem_access_times in memory access times. They are plausibly related and have not been traced to a common cause. Isolate each before believing one fix covers both — the same warning W7-08 carried about four ROMs, which turned out to be correct.",
+    "A DISPROVED THEORY, RECORDED SO IT IS NOT RE-ATTEMPTED. Apu::step_counted executes a whole instruction and only then advances the DSP by that instruction's cycle cost, so a $F3 read sees state up to five cycles stale. That looks like the obvious cause of any SPC timing disagreement and would justify a sub-instruction bus-timing refactor of the SPC700 — days of work. crates/rf-snes/tests/spc_dsp6_phase_probe.rs tested it by running spc_dsp6 at all 32 starting phases; all 32 agreed, ruling alignment out for THAT ROM. The probe is kept and now asserts the phases agree. Re-run it before reaching for the refactor: if every phase still agrees, the problem is structural and lives elsewhere.",
+    "THE ORACLE IS ALREADY WIRED. crates/rf-snes/tests/blargg_spc.rs runs all four ROMs; they are pinned by sha256 in tests/rom-manifest.toml at commit 26e8aa91 and fetched, not assumed. The honest limit is byuu's, quoted in the set's own README: 'passing these tests are not a proof of correctness as such. What they are, to me, is a proof of correctness of blargg's DSP core.' This verifies against a reference IMPLEMENTATION, not silicon."
+   ],
+   "stories": []
+  },
   {
    "id": "W7-09",
    "title": "SNES save states: .rfstate chunks for the SNES core",
@@ -5039,7 +5070,8 @@
   ],
   "depends_on": [
    "W11-02",
-   "W11-12"
+   "W11-12",
+   "W11-13"
   ],
   "acceptance": [
    "with a profile declaring widescreen policies, enabling 'Widescreen: decoded' widens what the app draws, per the profile's per-layer policy",
@@ -5056,7 +5088,8 @@
    "SCOPE RE-MEASURED 2026-08-27, while W11-12 was in its gate. This is NOT wiring, and W11-08 did not unblock it the way it appeared to. `rf_snes::ppu::WIDTH` is a hardcoded `const 256`, and `Ppu::render_scanline(y)` takes no width — so widening needs the PPU to FETCH EXTRA TILEMAP COLUMNS beyond the visible window, which is bsnes-hd's actual technique and real PPU work. W11-08 made a wider FRAME representable; it did nothing about a PPU that only ever composes 256 dots.",
    "SECOND GAP, equally concrete: NO SHIPPED PROFILE CAN DRIVE IT. `widescreen::WidescreenPolicies::from_profile` reads `profile.widescreen`'s per-BG policy names, and the only SNES profile that declares any is `profiles/snes/example-mode7` — whose `[[identity]]` is all zeros and therefore matches nothing. The one bootable SNES fixture, `rf-scroller-s`, has no profile at all. So even with PPU support there would be nothing to switch on.",
    "HONEST DECOMPOSITION, so the next session does not rediscover this: (a) rf-snes PPU renders a caller-specified width by fetching the extra columns, with the accuracy path unchanged at 256 — that is the expensive half and belongs in rf-snes; (b) a profile for the rf-scroller-s fixture, which is legitimate in-repo work since it is our own fixture with published build rules (unlike W11-06's commercial titles, whose offsets cannot be verified); (c) the app wiring, which is small once (a) and (b) exist.",
-   "STATUS CORRECTED 2026-08-27: no longer 'blocked'. Its dependency W11-12 is done, so nothing is waiting on another ticket — what remains is SIZE, recorded above: the SNES PPU is hardcoded to 256 dots and no bootable SNES ROM has a profile. Claimable, and larger than its 5 points suggest."
+   "STATUS CORRECTED 2026-08-27: no longer 'blocked'. Its dependency W11-12 is done, so nothing is waiting on another ticket — what remains is SIZE, recorded above: the SNES PPU is hardcoded to 256 dots and no bootable SNES ROM has a profile. Claimable, and larger than its 5 points suggest.",
+   "SCOPE RULING (Brad, 2026-08-27): part (a) of the decomposition above — a variable-width SNES PPU — is now its own ticket, W11-13, and this ticket depends on it. THE REASON IS WRITE_SCOPE, not size alone: this ticket may touch crates/retroforge/** and crates/rf-enhance/** but NOT crates/rf-snes/**, and rf_snes::ppu::WIDTH is a const baked into fixed-size array TYPES across bg.rs, obj.rs, mod.rs and mode7.rs. Doing (a) here would have meant widening a 5-point ticket's scope to cover a PPU refactor. The alternative offered was exactly that, and it was declined. WHAT IS LEFT HERE once W11-13 lands: (b) a profile for the rf-scroller-s fixture — still needed, still not written, and note that profiles/ is ALSO outside this write_scope, so raise that when claiming — and (c) the app wiring, which is small once (a) and (b) exist. The widescreen policy engine itself already exists and is tested; it has simply never had a caller in the product."
   ],
   "points": 5,
   "status": "todo",
@@ -5363,6 +5396,35 @@
   "points": 5,
   "status": "done",
   "stories": []
- }
+ },
+  {
+   "id": "W11-13",
+   "title": "The SNES PPU renders a caller-specified width",
+   "phase": 11,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "tests/**"
+   ],
+   "depends_on": [
+    "W11-12"
+   ],
+   "acceptance": [
+    "Ppu::render_scanline accepts a width and composes that many dots, fetching the extra tilemap columns rather than stretching",
+    "the accuracy path is unchanged at 256: a default-width render is byte-identical to today's output, proven by the existing goldens",
+    "a test renders a wider-than-256 scanline and asserts the extra columns carry real tilemap content, not backdrop"
+   ],
+   "points": 8,
+   "status": "todo",
+   "notes": [
+    "SPLIT OUT OF W11-03 ON BRAD'S RULING, 2026-08-27. W11-03's own notes had already decomposed the work into (a) a variable-width PPU, (b) a profile for the rf-scroller-s fixture, and (c) the app wiring — and identified (a) as 'the expensive half [that] belongs in rf-snes'. W11-03's write_scope covers crates/retroforge/** and crates/rf-enhance/** but NOT crates/rf-snes/**, so it could not legally do (a) at all. Filing it here keeps that write_scope honest instead of widening a 5-point ticket to cover a PPU refactor.",
+    "MEASURED, NOT ESTIMATED, 2026-08-27. rf_snes::ppu::WIDTH is a `pub const WIDTH: usize = 256` and it is baked into FIXED-SIZE ARRAY TYPES across the whole PPU, not merely used as a loop bound: bg.rs has `pixels: [Option<u8>; WIDTH]` and `priority: [u8; WIDTH]`; obj.rs has `pixels: [Option<(u8, u8)>; WIDTH]`, `priority: [u8; WIDTH]` and `dropped: [Option<u8>; WIDTH]`; mod.rs allocates `vec![backdrop; WIDTH]` and iterates `0..WIDTH`; mode7.rs derives its sample count from it. Making width a runtime value means changing those array types (to Vec, or to const generics) and every construction site. That is why this is 8 points and not a parameter addition.",
+    "WHAT W11-08 DID AND DID NOT DO. W11-08 made a wider FRAME representable in the display path — rf_renderer::FrameBuffer is no longer hardcoded to NES dimensions. It did nothing about a PPU that only ever composes 256 dots. W11-03's notes record this correction explicitly ('W11-08 did not unblock it the way it appeared to'); do not re-read the earlier note and conclude otherwise.",
+    "THE TECHNIQUE is bsnes-hd's: fetch tilemap columns beyond the visible window so the widened area carries real scenery rather than a stretch or a mirror. That is also why the honesty contract matters — some layers cannot be widened correctly (a status bar, a fixed HUD, a Mode 7 floor), and rf_enhance::widescreen already models that as a per-BG policy with refusals. This ticket only has to make the WIDTH available; deciding which layers get it is W11-03's job and its engine already exists (441 lines, 8 tests, BgPolicy/LayerView/decide).",
+    "ACCURACY MODE IS THE REFERENCE (law 6). Widening is an opt-in overlay; the 256-dot path must stay byte-identical. The PeterLemon goldens and the region suites are the proof of that and must be run unchanged, not re-baselined.",
+    "AFTER THIS, W11-03 STILL NEEDS A PROFILE. widescreen::WidescreenPolicies::from_profile reads a profile's per-BG policy names, and the only SNES profile declaring any is profiles/snes/example-mode7, whose [[identity]] is all zeros and matches nothing. The one bootable SNES fixture, rf-scroller-s, has no profile. That is W11-03's part (b) and is legitimate in-repo work — our own fixture with published build rules, unlike W11-06's commercial titles whose offsets cannot be verified."
+   ],
+   "stories": []
+  }
  ]
 }
