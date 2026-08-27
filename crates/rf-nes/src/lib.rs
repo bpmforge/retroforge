@@ -17,6 +17,7 @@
 //! to depend on, not an upper layer.
 
 pub mod apu;
+pub mod core;
 pub mod cpu;
 pub mod mappers;
 pub mod ppu;

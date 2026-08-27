@@ -431,6 +431,18 @@ impl NesBus {
     /// PRG-RAM is "always backed, 8 KiB" for every cartridge this crate
     /// loads (mapper 0 has no PRG-RAM-disable register), so this is a
     /// direct slice of `prg_ram`, not a `peek`-style dispatch through the
+    /// The 2 KiB of internal RAM, borrowed (ticket W11-10).
+    ///
+    /// A borrow, unlike `EmuStepper::wram_snapshot`, which builds a copy
+    /// by peeking each address. `rf_core_api::StateView::wram` is a
+    /// `&[u8]`, so the trait needs to lend this rather than hand over a
+    /// temporary — and a snapshot per frame would be 2 KiB of copying to
+    /// produce bytes the caller only reads.
+    #[must_use]
+    pub fn ram(&self) -> &[u8; RAM_SIZE] {
+        &self.ram
+    }
+
     /// full memory map.
     pub fn prg_ram(&self) -> &[u8; PRG_RAM_SIZE] {
         &self.prg_ram
