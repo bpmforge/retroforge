@@ -55,7 +55,6 @@ pub mod boot;
 pub mod dsp;
 
 /// SPC cycles per DSP sample: 1.024 MHz / 32 kHz.
-const DSP_CYCLES_PER_SAMPLE: u32 = 32;
 pub mod spc700;
 
 use spc700::{ApuBus, Spc700};
@@ -204,7 +203,6 @@ pub struct Apu {
     pub ipl: [u8; IPL_LEN],
     pub dsp_addr: u8,
     /// SPC cycles accumulated toward the next DSP sample.
-    dsp_cycles: u32,
     /// The most recent mixed stereo sample.
     ///
     /// Latched rather than discarded so the mixer's output is observable
@@ -240,7 +238,6 @@ impl Apu {
             ports_out: [0; 4],
             ipl: IPL_STUB,
             dsp_addr: 0,
-            dsp_cycles: 0,
             last_sample: (0, 0),
             aux: [0; 2],
             boot: boot::IplBoot::new(),
@@ -315,13 +312,19 @@ impl Apu {
     /// a program reach the registers; without this, nothing would ever
     /// advance an envelope, set ENDX, or move the echo buffer, so a
     /// program polling ENVX would still spin forever (ticket W7-08).
+    ///
+    /// **This ticks ONE CYCLE AT A TIME, not one sample at a time**, and
+    /// the difference is the whole of W7-08's second half. Batching 32
+    /// cycles into a single `mix` call makes every register in the DSP
+    /// change at the same instant, so a program cannot observe that ENDX,
+    /// OUTX and ENVX become readable three steps apart — which is the
+    /// property blargg's SPC suite exists to measure. See [`Dsp::tick`].
     pub(crate) fn tick_dsp(&mut self, cycles: u32) {
-        self.dsp_cycles += cycles;
-        while self.dsp_cycles >= DSP_CYCLES_PER_SAMPLE {
-            self.dsp_cycles -= DSP_CYCLES_PER_SAMPLE;
-            // `dsp_cycles` decreases by a positive constant on every pass,
-            // so this terminates (law 8).
-            self.last_sample = self.dsp.mix(&mut self.aram);
+        for _ in 0..cycles {
+            // Fixed trip count: terminates by construction (law 8).
+            if let Some(s) = self.dsp.tick(&mut self.aram) {
+                self.last_sample = s;
+            }
         }
     }
 

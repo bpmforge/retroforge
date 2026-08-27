@@ -1,7 +1,10 @@
 //! S-DSP: Gaussian interpolation, ADSR/GAIN, echo, noise, pitch
 //! modulation (ticket W7-08).
 
-use crate::apu::dsp::{gaussian, Dsp, Echo, Envelope, EnvelopeStage, Noise, GAUSS};
+use crate::apu::dsp::{
+    counter_fires, gaussian, Dsp, Echo, Envelope, EnvelopeStage, Noise, COUNTER_MAX, COUNTER_RATES,
+    GAUSS, LOOP_CYCLES,
+};
 use crate::apu::Apu;
 
 /// The four Gaussian taps must sum to 2048 at every fraction — that is
@@ -49,14 +52,35 @@ fn the_filter_interpolates_between_neighbouring_samples() {
     );
 }
 
+/// Drive an envelope for `n` samples on a real global counter.
+///
+/// The counter is not decoration: rates fire on
+/// `(counter + offset) % rate == 0`, so an envelope stepped with a
+/// constant counter either never moves or moves every single sample.
+/// Every envelope test below needs a counter that actually counts.
+fn run_envelope(e: &mut Envelope, n: u32) -> u16 {
+    let mut counter = COUNTER_MAX;
+    for _ in 0..n {
+        e.step(counter);
+        counter = if counter == 0 {
+            COUNTER_MAX
+        } else {
+            counter - 1
+        };
+    }
+    counter
+}
+
 /// ADSR walks attack -> decay -> sustain, and key-off drops to release.
 #[test]
 fn adsr_moves_through_its_stages() {
     let mut e = Envelope {
         adsr_enabled: true,
-        attack_rate: 16,
-        decay_rate: 32,
-        sustain_rate: 8,
+        // aaaa = %1111 is the fast attack: R=31, E += 1024, so the level
+        // crosses 0x7FF in two samples.
+        attack_rate: 0x0F,
+        decay_rate: 7,
+        sustain_rate: 0x1F,
         sustain_level: 3,
         ..Envelope::default()
     };
@@ -64,55 +88,189 @@ fn adsr_moves_through_its_stages() {
     assert_eq!(e.stage, EnvelopeStage::Attack);
     assert_eq!(e.level, 0, "attack starts from silence");
 
+    let mut counter = COUNTER_MAX;
     let mut guard = 0;
     while e.stage == EnvelopeStage::Attack && guard < 10_000 {
-        e.step();
+        e.step(counter);
+        counter = if counter == 0 {
+            COUNTER_MAX
+        } else {
+            counter - 1
+        };
         guard += 1;
     }
     assert_eq!(e.stage, EnvelopeStage::Decay);
-    assert_eq!(e.level, Envelope::MAX, "attack ends at full level");
+    assert_eq!(e.level, Envelope::MAX, "attack ends clamped at full level");
 
-    while e.stage == EnvelopeStage::Decay && guard < 20_000 {
-        e.step();
+    while e.stage == EnvelopeStage::Decay && guard < 200_000 {
+        e.step(counter);
+        counter = if counter == 0 {
+            COUNTER_MAX
+        } else {
+            counter - 1
+        };
         guard += 1;
     }
     assert_eq!(e.stage, EnvelopeStage::Sustain);
-    let expected = (i32::from(e.sustain_level) + 1) * i32::from(Envelope::MAX) / 8;
-    assert!(
-        (i32::from(e.level) - expected).abs() < 64,
-        "decay should settle near the sustain level: {} vs {expected}",
+    // "When the upper 3 bits of E equal the Sustain Level, enter the
+    // Sustain state" — so the level lands inside that 256-wide band,
+    // NOT on a computed fraction of full scale.
+    assert_eq!(
+        (e.level >> 8) as u8,
+        e.sustain_level,
+        "decay hands over when the top 3 bits match lll, got {:#x}",
         e.level
     );
 
     e.key_off();
     assert_eq!(e.stage, EnvelopeStage::Release);
-    for _ in 0..1000 {
-        e.step();
-    }
+    // Release is R=31 (every sample), E -= 8: 0x7FF needs at most 256.
+    run_envelope(&mut e, 1000);
     assert_eq!(e.level, 0, "release reaches silence");
     assert!(e.is_silent());
 }
 
-/// A voice with no envelope configured is SILENT, not full volume — the
-/// safe default.
+/// Attack with `aaaa == %1111` is the documented special case: rate 31
+/// and `E += 1024`, so it saturates in two steps rather than following
+/// the pretend-GAIN path the other fifteen rates use.
+#[test]
+fn the_fastest_attack_saturates_in_two_steps() {
+    let mut e = Envelope {
+        adsr_enabled: true,
+        attack_rate: 0x0F,
+        ..Envelope::default()
+    };
+    e.key_on();
+    run_envelope(&mut e, 1);
+    assert_eq!(e.level, 1024);
+    run_envelope(&mut e, 1);
+    assert_eq!(e.level, Envelope::MAX, "clamped, not wrapped");
+    assert_eq!(e.stage, EnvelopeStage::Decay, "overflow ends the attack");
+}
+
+/// Rate 0 is `Inf` in the counter table: it NEVER fires.
+///
+/// This is how a voice holds a level indefinitely, and it is the one
+/// entry a naive "every N samples" divider cannot express — dividing by
+/// zero is not the same as never.
+#[test]
+fn rate_zero_never_fires() {
+    for counter in [0u16, 1, 1040, 536, COUNTER_MAX, 0x1234] {
+        assert!(!counter_fires(counter, 0), "rate 0 fired at {counter}");
+    }
+}
+
+/// The counter offsets keep different rates in a fixed relative phase.
+///
+/// Rates 2 and 3 have offsets 1040 and 536 against periods 1536 and
+/// 1280. If the offsets were dropped — the obvious simplification — both
+/// would fire together whenever the counter hit a common multiple, and
+/// two voices set to neighbouring rates would beat against each other
+/// instead of staying spread out.
+#[test]
+fn counter_offsets_are_not_decoration() {
+    let fires = |rate: u8| -> Vec<u16> {
+        (0..=COUNTER_MAX)
+            .filter(|&c| counter_fires(c, rate))
+            .collect()
+    };
+    let two = fires(2);
+    let three = fires(3);
+    assert!(!two.is_empty() && !three.is_empty());
+    // With the offsets applied the two rates never land on the same
+    // counter value across the whole cycle.
+    let shared: Vec<_> = two.iter().filter(|c| three.contains(c)).collect();
+    assert!(
+        shared.is_empty(),
+        "rates 2 and 3 should stay out of phase, but share {} values",
+        shared.len()
+    );
+}
+
+/// Every rate in the table fires at exactly its documented period.
+#[test]
+fn each_rate_fires_at_its_documented_period() {
+    for rate in 1..32u8 {
+        let period = u32::from(COUNTER_RATES[usize::from(rate)]);
+        let hits = (0..period * 4).filter(|&i| {
+            let c = (COUNTER_MAX as u32).wrapping_sub(i) as u16;
+            counter_fires(c, rate)
+        });
+        assert_eq!(
+            hits.count() as u32,
+            4,
+            "rate {rate} should fire 4 times in {} samples",
+            period * 4
+        );
+    }
+}
+
+/// An unconfigured envelope is SILENT, not full volume — the safe
+/// default.
 #[test]
 fn an_unconfigured_envelope_is_silent() {
     let mut e = Envelope::default();
-    e.step();
+    run_envelope(&mut e, 1);
     assert_eq!(e.level, 0);
     assert!(e.is_silent());
 }
 
+/// Direct Gain (`$x7` bit 7 clear) sets the level outright: `E = g * 16`,
+/// and the rate does not matter.
 #[test]
 fn gain_mode_sets_the_level_directly() {
     let mut e = Envelope {
         adsr_enabled: false,
         gain: 0x40,
+        stage: EnvelopeStage::Attack,
         ..Envelope::default()
     };
-    e.step();
+    run_envelope(&mut e, 1);
     assert_eq!(e.level, 0x400);
     assert!(!e.is_silent());
+}
+
+/// The four GAIN modes each move the level their documented way.
+#[test]
+fn the_four_gain_modes_move_the_level_as_documented() {
+    // Rate 31 fires every sample, so one step is one adjustment.
+    let mk = |mode: u8, level: i16| Envelope {
+        adsr_enabled: false,
+        gain: 0x80 | (mode << 5) | 0x1F,
+        level,
+        stage: EnvelopeStage::Attack,
+        ..Envelope::default()
+    };
+
+    let mut lin_dec = mk(0, 0x400);
+    run_envelope(&mut lin_dec, 1);
+    assert_eq!(lin_dec.level, 0x400 - 32, "linear decrease is E -= 32");
+
+    let mut exp_dec = mk(1, 0x400);
+    run_envelope(&mut exp_dec, 1);
+    assert_eq!(
+        exp_dec.level,
+        0x400 - (((0x400 - 1) >> 8) + 1),
+        "exp decrease is E -= ((E-1)>>8)+1"
+    );
+
+    let mut lin_inc = mk(2, 0x400);
+    run_envelope(&mut lin_inc, 1);
+    assert_eq!(lin_inc.level, 0x400 + 32, "linear increase is E += 32");
+
+    // Bent increase steps by 32 below 0x600 and by 8 at or above it.
+    let mut bent_low = mk(3, 0x100);
+    run_envelope(&mut bent_low, 1);
+    assert_eq!(bent_low.level, 0x100 + 32);
+
+    let mut bent_high = mk(3, 0x600);
+    // The bend reads the PRE-CLAMP level from the previous update, so
+    // prime it by running one step from a level already in the high
+    // region rather than asserting on the very first sample.
+    bent_high.step(COUNTER_MAX);
+    let before = bent_high.level;
+    bent_high.step(COUNTER_MAX - 1);
+    assert_eq!(bent_high.level, before + 8, "above 0x600 the bend is +8");
 }
 
 /// The LFSR must never latch to zero — an all-zero state is a fixed
@@ -323,9 +481,87 @@ fn key_on_resolves_the_sample_address_through_dir() {
     dsp.write_register(0x5D, 0x02, &aram); // DIR = $02, written AFTER
     dsp.write_register(0x4C, 0x01, &aram); // KON voice 0
 
+    // **The write alone does nothing**, and that is the accurate
+    // behaviour: KON is polled at cycle 30 every other sample and each
+    // voice acts at its own S3c "using previously loaded values". A
+    // key-on that took effect the instant the register was written was
+    // the old model, and it is exactly the timing blargg's suite
+    // measures.
+    assert!(
+        !dsp.voices[0].keyed_on,
+        "KON is latched at cycle 30, not acted on at write time"
+    );
+
+    let mut aram = vec![0u8; 0x10000];
+    aram[entry] = 0xCD;
+    aram[entry + 1] = 0xAB;
+    aram[entry + 2] = 0x34;
+    aram[entry + 3] = 0x12;
+    // Two samples covers the every-other-sample poll from any starting
+    // phase.
+    for _ in 0..2 {
+        let _ = dsp.mix(&mut aram);
+    }
+
     assert_eq!(dsp.voices[0].start, 0xABCD);
     assert_eq!(dsp.voices[0].loop_addr, 0x1234);
     assert!(dsp.voices[0].keyed_on);
+}
+
+/// ENDX, OUTX and ENVX become readable at three DIFFERENT cycles.
+///
+/// This is the property the whole 32-cycle machine exists to provide, and
+/// the one a sample-granular mixer cannot have at all: it updates every
+/// register at one instant, so the three distances below are all zero.
+///
+/// For voice 0 the document places the preparations at S5/S6/S7 and the
+/// reads at S7/S8/S9 — cycles 0, 1, 2 and 2, 3, 4 of the loop. So a value
+/// the CPU writes into ENVX survives until cycle 4, OUTX until 3, and the
+/// three do not fall together.
+///
+/// Source: anomie's `apudsp.txt` `$Revision: 1212$`, SOUND GENERATION.
+#[test]
+fn outx_and_envx_become_visible_at_their_own_cycles() {
+    let overwritten_after = |reg: u8| -> Option<u16> {
+        let mut dsp = Dsp::new();
+        let mut aram = vec![0u8; 0x10000];
+        dsp.write_register(reg, 0x88, &aram);
+        assert_eq!(dsp.read_register(reg), 0x88, "the write must stick");
+        // One full 64-cycle loop is enough to see any placement.
+        for c in 0..LOOP_CYCLES {
+            dsp.tick(&mut aram);
+            if dsp.read_register(reg) != 0x88 {
+                return Some(c + 1);
+            }
+        }
+        None
+    };
+
+    let outx = overwritten_after(0x09).expect("OUTX must be overwritten within one loop");
+    let envx = overwritten_after(0x08).expect("ENVX must be overwritten within one loop");
+
+    // Voice 0's S8 is cycle 3 and its S9 is cycle 4; a fresh DSP starts
+    // at cycle 0, so the tick that lands on each is the 4th and the 5th.
+    assert_eq!(outx, 4, "OUTX becomes readable at voice 0's S8 (cycle 3)");
+    assert_eq!(envx, 5, "ENVX becomes readable at voice 0's S9 (cycle 4)");
+    assert!(
+        envx > outx,
+        "ENVX must land AFTER OUTX — they are one step apart, not simultaneous"
+    );
+}
+
+/// A sample takes exactly 32 cycles, and the loop is 64 long.
+#[test]
+fn a_sample_is_thirty_two_cycles_and_the_loop_is_sixty_four() {
+    let mut dsp = Dsp::new();
+    let mut aram = vec![0u8; 0x10000];
+    let mut produced = 0;
+    for _ in 0..LOOP_CYCLES {
+        if dsp.tick(&mut aram).is_some() {
+            produced += 1;
+        }
+    }
+    assert_eq!(produced, 2, "64 cycles is exactly two samples");
 }
 
 /// A program-controlled DIR/SRCN can point past ARAM; that must not panic.
@@ -376,15 +612,20 @@ fn envx_and_outx_are_storage_the_dsp_overwrites_each_sample() {
     // whatever the envelope now holds — asserting a hardcoded number here
     // would pin the envelope's rate model rather than this register's
     // update cadence, which is what the test is about.
-    let expected = (dsp.voices[0].envelope.level >> 4) as u8;
-    assert_eq!(
-        dsp.read_register(0x08),
-        expected,
-        "the DSP updates ENVX once per sample, from the live envelope"
+    // **ENVX lags the envelope by design.** The value is prepared at the
+    // voice's S7 and only becomes readable at S9, so a read taken after
+    // a whole sample sees the level as it stood when S7 ran — not the
+    // live level now. That gap is not slop: it is the quantity
+    // `spc_dsp6` counts reads to measure.
+    let live = (dsp.voices[0].envelope.level >> 4) as u8;
+    let visible = dsp.read_register(0x08);
+    assert!(
+        visible.abs_diff(live) <= 1,
+        "ENVX must track the envelope within one preparation step: \
+         visible {visible}, live {live}"
     );
     assert_ne!(
-        dsp.read_register(0x08),
-        0x88,
+        visible, 0x88,
         "and that update must have landed on the CPU's written value"
     );
 }

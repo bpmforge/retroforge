@@ -309,6 +309,13 @@ fn a_keyed_voice_produces_output_scaled_by_its_volume() {
 
     dsp.voices[0].vol_left = 0;
     dsp.key_on(0x01);
+    // **Skip one sample.** A voice's VOLL is applied at its S4, which for
+    // voice 0 is the last cycle of the loop — so the sample already in
+    // flight when the volume changed still carries the old scaling. That
+    // is a one-sample latency the hardware has and a sample-granular
+    // mixer cannot express; asserting silence from the very next sample
+    // would be asserting the absence of it.
+    let _ = dsp.mix(&mut aram);
     let quiet: i32 = (0..16).map(|_| i32::from(dsp.mix(&mut aram).0.abs())).sum();
     assert_eq!(quiet, 0, "zero volume must be silent");
 }

@@ -166,6 +166,57 @@ const fn build_gauss() -> [i16; 512] {
     t
 }
 
+/// The S-DSP's global counter, and the rate tables the envelope and noise
+/// generators consult through it.
+///
+/// **The counter is not a per-voice divider.** One counter, shared by all
+/// eight envelopes and the noise LFSR, counts DOWN from `0x77FF` to zero,
+/// one step per sample, and is updated at cycle 29 of the sample loop. A
+/// rate `R` fires when
+///
+/// ```text
+/// (counter + COUNTER_OFFSETS[R]) % COUNTER_RATES[R] == 0
+/// ```
+///
+/// The offsets are the part that is easy to miss and impossible to guess:
+/// rates are NOT all aligned at zero, so two voices set to different rates
+/// stay in a fixed relative phase, and a voice that changes rate mid-note
+/// gets a first period that is short by exactly the right amount. A plain
+/// "every N samples" divider gets the average rate right and that phase
+/// relationship wrong.
+///
+/// Source: anomie's S-DSP Doc (`apudsp.txt`, `$Revision: 1212$`,
+/// 2015-09-28, with updates by jwdonal), section COUNTERS. Cited the way
+/// nesdev/fullsnes are cited elsewhere in this crate; transcribed from the
+/// published document, not from emulator source (NFR-011).
+pub const COUNTER_MAX: u16 = 0x77FF;
+
+/// Samples per counter event, indexed by rate. Index 0 means NEVER.
+pub const COUNTER_RATES: [u16; 32] = [
+    0, 2048, 1536, 1280, 1024, 768, 640, 512, 384, 320, 256, 192, 160, 128, 96, 80, 64, 48, 40, 32,
+    24, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1,
+];
+
+/// Per-rate phase offset. Index 0 is unused (rate 0 never fires).
+pub const COUNTER_OFFSETS: [u16; 32] = [
+    0, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040,
+    536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 0, 0,
+];
+
+/// Does rate `rate` fire on this counter value?
+///
+/// Rate 0 is `Inf` in the source table — it never fires, which is how a
+/// voice holds a level indefinitely.
+#[must_use]
+pub fn counter_fires(counter: u16, rate: u8) -> bool {
+    let r = usize::from(rate & 0x1F);
+    let period = COUNTER_RATES[r];
+    if period == 0 {
+        return false;
+    }
+    (counter.wrapping_add(COUNTER_OFFSETS[r])).is_multiple_of(period)
+}
+
 /// ADSR / GAIN envelope state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EnvelopeStage {
@@ -174,6 +225,27 @@ pub enum EnvelopeStage {
     Attack,
     Decay,
     Sustain,
+}
+
+/// How one counter event moves the envelope.
+///
+/// These are the five behaviours `$x7` GAIN selects between, and ADSR
+/// mode reaches them by *pretending* GAIN holds a particular byte — see
+/// [`Envelope::effective_gain`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Adjust {
+    /// Direct Gain: the level is simply set, and the rate does not matter.
+    Direct(i16),
+    /// `E -= 32`
+    LinearDecrease,
+    /// `E -= ((E - 1) >> 8) + 1`
+    ExpDecrease,
+    /// `E += 32`
+    LinearIncrease,
+    /// `E += (E < 0x600) ? 32 : 8`
+    BentIncrease,
+    /// Attack with `aaaa == %1111`: `E += 1024` at rate 31.
+    FastAttack,
 }
 
 /// One voice's envelope generator.
@@ -187,10 +259,17 @@ pub struct Envelope {
     pub attack_rate: u8,
     pub decay_rate: u8,
     pub sustain_rate: u8,
-    /// 0-7; the level decay settles at `(sustain_level + 1) / 8` of full.
+    /// 0-7; Decay ends when the top 3 bits of the level reach this.
     pub sustain_level: u8,
     /// `$x7` GAIN, used when `adsr_enabled` is false.
     pub gain: u8,
+    /// The last computed level BEFORE clamping.
+    ///
+    /// Bent Increase chooses its step from the level it is starting at,
+    /// and the document is explicit that the *pre-clamp* value is what
+    /// carries to the next sample (rule 4). Storing the clamped value
+    /// instead makes a bend that overshoots settle one step early.
+    pub(crate) pre_clamp: i16,
 }
 
 impl Envelope {
@@ -199,51 +278,136 @@ impl Envelope {
     pub fn key_on(&mut self) {
         self.stage = EnvelopeStage::Attack;
         self.level = 0;
+        self.pre_clamp = 0;
     }
 
     pub fn key_off(&mut self) {
         self.stage = EnvelopeStage::Release;
     }
 
-    /// Advance one sample.
+    /// The GAIN byte this envelope behaves as, and the rate it runs at.
     ///
-    /// Rates are modelled as a proportional step rather than the
-    /// hardware's exact rate table: this ticket's acceptance is audio
-    /// quality and shape, and the exact per-rate step counts belong with
-    /// the sample-exactness work. The SHAPE is right — attack is linear,
-    /// decay and release are exponential, and sustain holds at the level
-    /// `sustain_level` selects — which is what makes a note sound like a
-    /// note.
-    pub fn step(&mut self) {
-        if !self.adsr_enabled {
-            // GAIN mode: the simple direct-set form.
-            self.level = (i16::from(self.gain) << 4).min(Self::MAX);
+    /// **ADSR is not a separate mechanism.** The document describes it as
+    /// loading `VxGAIN` with different values depending on the stage —
+    /// "VxGAIN is not actually altered, however" — and the pretend-bytes
+    /// decode to exactly the rates the register table documents:
+    ///
+    /// | stage   | pretend GAIN | mode          | rate       |
+    /// |---------|--------------|---------------|------------|
+    /// | Attack  | `%110aaaa1`  | Linear Inc    | `a*2 + 1`  |
+    /// | Decay   | `%1011ddd0`  | Exp Decrease  | `d*2 + 16` |
+    /// | Sustain | `%101rrrrr`  | Exp Decrease  | `r`        |
+    ///
+    /// Implementing it as one decode rather than three special cases is
+    /// not a tidiness choice — it is what makes the rates come out right
+    /// without transcribing a second table that could disagree with the
+    /// first.
+    fn effective_gain(&self) -> (u8, Adjust) {
+        let byte = if self.adsr_enabled {
+            match self.stage {
+                EnvelopeStage::Attack => {
+                    if self.attack_rate == 0x0F {
+                        return (31, Adjust::FastAttack);
+                    }
+                    0xC0 | (self.attack_rate << 1) | 1
+                }
+                EnvelopeStage::Decay => 0xB0 | (self.decay_rate << 1),
+                EnvelopeStage::Sustain => 0xA0 | self.sustain_rate,
+                // Release overrides all of these; handled by the caller.
+                EnvelopeStage::Release => 0,
+            }
+        } else {
+            self.gain
+        };
+
+        if byte & 0x80 == 0 {
+            // Direct Gain: E = %GGGGGGG0000.
+            return (0, Adjust::Direct(i16::from(byte & 0x7F) << 4));
+        }
+        let mode = match (byte >> 5) & 0x03 {
+            0 => Adjust::LinearDecrease,
+            1 => Adjust::ExpDecrease,
+            2 => Adjust::LinearIncrease,
+            _ => Adjust::BentIncrease,
+        };
+        (byte & 0x1F, mode)
+    }
+
+    /// Advance one sample, given the DSP's global counter.
+    ///
+    /// The order of operations is the document's, and each numbered rule
+    /// below is one of its four:
+    ///
+    /// 1. the counter decides whether the level moves at all;
+    /// 2. Decay hands over to Sustain when the top 3 bits match `lll`;
+    /// 3. Attack hands over to Decay when the new value exceeds `0x7FF`
+    ///    **pre-clamp — negative values trigger it too**, which is the
+    ///    non-obvious half and the reason an overflowing step does not
+    ///    silently wrap into a quiet note;
+    /// 4. the pre-clamp value is what Bent Increase reads next sample.
+    ///
+    /// Source: anomie's `apudsp.txt` `$Revision: 1212$`, the `$x5`-`$x7`
+    /// register entries.
+    pub fn step(&mut self, counter: u16) {
+        // Release overrides every setting of these registers: rate 31
+        // (every sample), and E -= 8.
+        if self.stage == EnvelopeStage::Release {
+            if counter_fires(counter, 31) {
+                self.level = (self.level - 8).max(0);
+                self.pre_clamp = self.level;
+            }
             return;
         }
-        let sustain = (i32::from(self.sustain_level) + 1) * i32::from(Self::MAX) / 8;
+
+        let (rate, adjust) = self.effective_gain();
+
+        // Direct Gain ignores the counter entirely — "R does not matter".
+        if let Adjust::Direct(level) = adjust {
+            self.level = level.clamp(0, Self::MAX);
+            self.pre_clamp = self.level;
+            return;
+        }
+
+        if !counter_fires(counter, rate) {
+            return;
+        }
+
+        let e = i32::from(self.level);
+        let next = match adjust {
+            Adjust::FastAttack => e + 1024,
+            Adjust::LinearDecrease => e - 32,
+            Adjust::ExpDecrease => e - (((e - 1) >> 8) + 1),
+            Adjust::LinearIncrease => e + 32,
+            Adjust::BentIncrease => {
+                // The bend reads the PRE-CLAMP level from last time.
+                if i32::from(self.pre_clamp) < 0x600 {
+                    e + 32
+                } else {
+                    e + 8
+                }
+            }
+            Adjust::Direct(_) => unreachable!("handled above"),
+        };
+
+        // Rule 4: save pre-clamp, then rule 1: store clamped.
+        self.pre_clamp = next.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        self.level = next.clamp(0, i32::from(Self::MAX)) as i16;
+
         match self.stage {
+            // Rule 3. `next > 0x7FF` OR negative — a step that overflows
+            // 11 bits in either direction ends the attack.
             EnvelopeStage::Attack => {
-                let step = i16::from(self.attack_rate).max(1) * 4;
-                self.level = (self.level + step).min(Self::MAX);
-                if self.level >= Self::MAX {
+                if next > i32::from(Self::MAX) || next < 0 {
                     self.stage = EnvelopeStage::Decay;
                 }
             }
+            // Rule 2. "the upper 3 bits of E equal the Sustain Level".
             EnvelopeStage::Decay => {
-                let step = (i32::from(self.level) * i32::from(self.decay_rate.max(1)) / 256).max(1);
-                self.level = (i32::from(self.level) - step).max(sustain) as i16;
-                if i32::from(self.level) <= sustain {
+                if (self.level >> 8) as u8 == self.sustain_level {
                     self.stage = EnvelopeStage::Sustain;
                 }
             }
-            EnvelopeStage::Sustain => {
-                let step = i32::from(self.level) * i32::from(self.sustain_rate) / 4096;
-                self.level = (i32::from(self.level) - step).max(0) as i16;
-            }
-            EnvelopeStage::Release => {
-                // Release is a fixed linear ramp to silence on hardware.
-                self.level = (self.level - 8).max(0);
-            }
+            _ => {}
         }
     }
 
@@ -275,6 +439,13 @@ pub struct Voice {
     /// `$x2`/`$x3` PITCH — 14-bit; $1000 is 1.0 (32 kHz playback).
     pub pitch: u16,
     pub envelope: Envelope,
+    /// Pitch modulation computed at S3a, consumed at S3c.
+    ///
+    /// The two steps are two cycles apart for voices 1-7 and eight cycles
+    /// apart for voice 0, so the bent value has to be carried rather than
+    /// recomputed — `PMON` or the modulating voice's output can change in
+    /// between.
+    pitch_bent: Option<u16>,
     /// Fractional position within the current sample, 12-bit.
     pitch_counter: u16,
     /// The four most recent decoded samples, newest last — the Gaussian
@@ -329,7 +500,7 @@ impl Voice {
     /// `noise` replaces the BRR source entirely when the voice's noise
     /// bit is set — the DSP substitutes the shared noise generator for
     /// the sample stream rather than mixing it in.
-    pub fn next_output(&mut self, aram: &[u8], noise: i16, use_noise: bool) -> i16 {
+    pub fn next_output(&mut self, aram: &[u8], noise: i16, use_noise: bool, counter: u16) -> i16 {
         if self.envelope.is_silent() && !self.keyed_on {
             return 0;
         }
@@ -356,7 +527,7 @@ impl Voice {
             gaussian(&self.history, self.pitch_counter)
         };
 
-        self.envelope.step();
+        self.envelope.step(counter);
         ((i32::from(filtered) * i32::from(self.envelope.level)) >> 11) as i16
     }
 
@@ -425,6 +596,25 @@ impl Default for Noise {
 }
 
 impl Noise {
+    /// The current noise sample, without advancing the LFSR.
+    #[must_use]
+    pub fn current(&self) -> i16 {
+        ((self.state as i16) << 1) >> 1
+    }
+
+    /// Advance only when the global counter says so.
+    ///
+    /// `FLG` bits 0-4 pick a rate out of the SAME table the envelopes
+    /// use, so noise pitch and envelope timing share one clock — which is
+    /// why a program can hear noise change pitch by writing `FLG` alone.
+    pub fn step_if(&mut self, counter: u16, rate: u8) -> i16 {
+        if counter_fires(counter, rate) {
+            self.step()
+        } else {
+            self.current()
+        }
+    }
+
     pub fn step(&mut self) -> i16 {
         let bit = (self.state ^ (self.state >> 1)) & 1;
         self.state = (self.state >> 1) | (bit << 14);
@@ -451,6 +641,16 @@ pub struct Echo {
     pub write_disabled: bool,
     offset: usize,
     history: [(i16, i16); 8],
+    /// The ARAM byte offset this sample reads and writes.
+    ///
+    /// The read happens at cycle 22/23 and the write-back at 29/30, so
+    /// the pointer computed at 22 has to survive until 30 — the document
+    /// says as much ("Apply ESA using the previously loaded value along
+    /// with the previously calculated echo offset").
+    at: usize,
+    /// The FIR output computed at cycles 22-25, consumed by the DAC at
+    /// 26/27 and by the write-back at 29/30.
+    last_fir: (i16, i16),
 }
 
 impl Default for Echo {
@@ -465,6 +665,8 @@ impl Default for Echo {
             write_disabled: true,
             offset: 0,
             history: [(0, 0); 8],
+            at: 0,
+            last_fir: (0, 0),
         }
     }
 }
@@ -520,54 +722,190 @@ impl Echo {
         (acc.clamp(-0x8000, 0x7FFF) as i16) & !1
     }
 
-    /// Process one stereo sample, returning the echo contribution.
+    /// Cycles 22-25: compute the pointer, read the delayed sample, run
+    /// the FIR.
     ///
-    /// Reads the delayed sample from ARAM, runs it through the FIR, mixes
-    /// the dry input with feedback, and writes back — unless `$6C` bit 5
-    /// disables writing, which games use to freeze an echo tail without
-    /// clearing it.
-    pub fn process(&mut self, aram: &mut [u8], dry: (i16, i16)) -> (i16, i16) {
-        let len = self.buffer_len().max(4);
+    /// The document splits the echo across the sample loop rather than
+    /// doing it in one place: the pointer and left sample at cycle 22
+    /// (with `FFC0`), the right sample at 23 (`FFC1`/`FFC2`), then
+    /// `FFC3`-`FFC5` at 24 and `FFC6`/`FFC7` at 25. Coefficients are
+    /// therefore read AFTER the samples they multiply, which is why a
+    /// program can rewrite `FFC7` between two samples and hear the change
+    /// one sample earlier than a naive model predicts.
+    pub fn read_and_filter(&mut self, aram: &[u8]) -> (i16, i16) {
         let base = usize::from(self.base_page) * 256;
-        let at = (base + self.offset) % aram.len().max(1);
+        self.at = (base + self.offset) % aram.len().max(1);
 
         let read = |a: &[u8], i: usize| -> i16 {
             let lo = a[i % a.len()];
             let hi = a[(i + 1) % a.len()];
             (u16::from(lo) | (u16::from(hi) << 8)) as i16
         };
-        let delayed = (read(aram, at), read(aram, at + 2));
+        let delayed = (read(aram, self.at), read(aram, self.at + 2));
 
         self.history.rotate_left(1);
         self.history[7] = delayed;
-        let fir = (
+        self.last_fir = (
             Self::fir_tap(core::array::from_fn(|i| self.history[i].0), self.fir),
             Self::fir_tap(core::array::from_fn(|i| self.history[i].1), self.fir),
         );
+        self.last_fir
+    }
 
-        if !self.write_disabled {
-            let fb = |d: i16, f: i16| -> i16 {
-                (i32::from(d) + ((i32::from(f) * i32::from(self.feedback)) >> 7))
-                    .clamp(-0x8000, 0x7FFF) as i16
-            };
-            let w = (fb(dry.0, fir.0), fb(dry.1, fir.1));
-            let mut put = |i: usize, v: i16| {
-                let b = v.to_le_bytes();
-                let n = aram.len();
-                aram[i % n] = b[0];
-                aram[(i + 1) % n] = b[1];
-            };
-            put(at, w.0);
-            put(at + 2, w.1);
-        }
-
-        self.offset = (self.offset + 4) % len;
+    /// The echo contribution to the main output, scaled by `EVOL`.
+    ///
+    /// Applied at cycles 26 (left) and 27 (right), where the document
+    /// puts "Load and apply EVOLL/EVOLR".
+    #[must_use]
+    pub fn out(&self) -> (i16, i16) {
         (
-            ((i32::from(fir.0) * i32::from(self.vol_left)) >> 7) as i16,
-            ((i32::from(fir.1) * i32::from(self.vol_right)) >> 7) as i16,
+            ((i32::from(self.last_fir.0) * i32::from(self.vol_left)) >> 7) as i16,
+            ((i32::from(self.last_fir.1) * i32::from(self.vol_right)) >> 7) as i16,
         )
     }
+
+    /// Cycles 29-30: mix feedback into the dry send and write it back.
+    ///
+    /// `channel` selects which half runs — the document writes the left
+    /// channel at cycle 29 and the right at 30, each gated on its own
+    /// re-read of `FLG` bit 5, so a program that flips `ECEN` between
+    /// those two cycles freezes one channel and not the other.
+    pub fn write_back(&mut self, aram: &mut [u8], dry: i16, channel: EchoChannel) {
+        if self.write_disabled {
+            return;
+        }
+        let fir = match channel {
+            EchoChannel::Left => self.last_fir.0,
+            EchoChannel::Right => self.last_fir.1,
+        };
+        let v = (i32::from(dry) + ((i32::from(fir) * i32::from(self.feedback)) >> 7))
+            .clamp(-0x8000, 0x7FFF) as i16;
+        let i = match channel {
+            EchoChannel::Left => self.at,
+            EchoChannel::Right => self.at + 2,
+        };
+        let b = v.to_le_bytes();
+        let n = aram.len();
+        aram[i % n] = b[0];
+        aram[(i + 1) % n] = b[1];
+    }
+
+    /// Cycle 30: step the ring, wrapping when it passes the buffer end.
+    pub fn advance(&mut self) {
+        let len = self.buffer_len().max(4);
+        // `offset` grows by 4 and is reduced modulo a positive `len`, so
+        // this cannot fail to make progress (law 8).
+        self.offset = (self.offset + 4) % len;
+    }
+
+    /// Process one stereo sample in one call.
+    ///
+    /// This is the sample-granular form, kept because it is what the DSP
+    /// unit tests drive directly. [`Dsp::tick`] does NOT use it — it
+    /// calls the three phases above at their documented cycles.
+    pub fn process(&mut self, aram: &mut [u8], dry: (i16, i16)) -> (i16, i16) {
+        self.read_and_filter(aram);
+        self.write_back(aram, dry.0, EchoChannel::Left);
+        self.write_back(aram, dry.1, EchoChannel::Right);
+        self.advance();
+        self.out()
+    }
 }
+
+/// Which half of the stereo echo write-back is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EchoChannel {
+    Left,
+    Right,
+}
+
+/// One voice's step within the interleaved sample loop.
+///
+/// Voices 1-7 run `S3` as a single step; **voice 0 alone has it split**
+/// into `S3a`/`S3b`/`S3c` at cycles 22, 25 and 30. That asymmetry is in
+/// the source table, not an artefact of this transcription: voice 0's
+/// processing straddles the echo and DAC work that occupies cycles 22-30,
+/// so its three sub-steps are pushed apart to make room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VStep {
+    S1,
+    S2,
+    /// The whole of S3, for voices 1-7.
+    S3,
+    S3a,
+    S3b,
+    S3c,
+    S4,
+    S5,
+    S6,
+    S7,
+    S8,
+    S9,
+}
+
+/// The 32-cycle sample generation loop, transcribed from anomie's S-DSP
+/// Doc (`apudsp.txt`, `$Revision: 1212$`, 2015-09-28, updates by jwdonal),
+/// section SOUND GENERATION — "The full sample generation loop is as
+/// follows".
+///
+/// **This table is the whole point of ticket W7-08's second half.**
+/// blargg's `spc_dsp6.sfc` does not test whether the DSP produces the
+/// right numbers; it tests *when* each register becomes readable, by
+/// writing a value and counting how many reads survive before the DSP
+/// lands on it. A sample-granular mixer updates all eight voices at once
+/// and cannot produce that count at all, however correct its arithmetic.
+///
+/// Entries are `(voice, step)`. Cycles 26-29 carry no voice steps — they
+/// are the DAC and echo write-back window, handled in [`Dsp::tick`].
+///
+/// PROVENANCE: transcribed from the published document. No emulator
+/// source was read to produce it (NFR-011); anomie's doc is path (a) of
+/// the four unblock routes recorded on the ticket, and it is the one that
+/// landed.
+#[rustfmt::skip]
+const SCHEDULE: [&[(u8, VStep)]; 32] = [
+    /*  0 */ &[(0, VStep::S5), (1, VStep::S2)],
+    /*  1 */ &[(0, VStep::S6), (1, VStep::S3)],
+    /*  2 */ &[(0, VStep::S7), (1, VStep::S4), (3, VStep::S1)],
+    /*  3 */ &[(0, VStep::S8), (1, VStep::S5), (2, VStep::S2)],
+    /*  4 */ &[(0, VStep::S9), (1, VStep::S6), (2, VStep::S3)],
+    /*  5 */ &[(1, VStep::S7), (2, VStep::S4), (4, VStep::S1)],
+    /*  6 */ &[(1, VStep::S8), (2, VStep::S5), (3, VStep::S2)],
+    /*  7 */ &[(1, VStep::S9), (2, VStep::S6), (3, VStep::S3)],
+    /*  8 */ &[(2, VStep::S7), (3, VStep::S4), (5, VStep::S1)],
+    /*  9 */ &[(2, VStep::S8), (3, VStep::S5), (4, VStep::S2)],
+    /* 10 */ &[(2, VStep::S9), (3, VStep::S6), (4, VStep::S3)],
+    /* 11 */ &[(3, VStep::S7), (4, VStep::S4), (6, VStep::S1)],
+    /* 12 */ &[(3, VStep::S8), (4, VStep::S5), (5, VStep::S2)],
+    /* 13 */ &[(3, VStep::S9), (4, VStep::S6), (5, VStep::S3)],
+    /* 14 */ &[(4, VStep::S7), (5, VStep::S4), (7, VStep::S1)],
+    /* 15 */ &[(4, VStep::S8), (5, VStep::S5), (6, VStep::S2)],
+    /* 16 */ &[(4, VStep::S9), (5, VStep::S6), (6, VStep::S3)],
+    /* 17 */ &[(0, VStep::S1), (5, VStep::S7), (6, VStep::S4)],
+    /* 18 */ &[(5, VStep::S8), (6, VStep::S5), (7, VStep::S2)],
+    /* 19 */ &[(5, VStep::S9), (6, VStep::S6), (7, VStep::S3)],
+    /* 20 */ &[(1, VStep::S1), (6, VStep::S7), (7, VStep::S4)],
+    /* 21 */ &[(0, VStep::S2), (6, VStep::S8), (7, VStep::S5)],
+    /* 22 */ &[(0, VStep::S3a), (6, VStep::S9), (7, VStep::S6)],
+    /* 23 */ &[(7, VStep::S7)],
+    /* 24 */ &[(7, VStep::S8)],
+    /* 25 */ &[(0, VStep::S3b), (7, VStep::S9)],
+    /* 26 */ &[],
+    /* 27 */ &[],
+    /* 28 */ &[],
+    /* 29 */ &[],
+    /* 30 */ &[(0, VStep::S3c)],
+    /* 31 */ &[(0, VStep::S4), (2, VStep::S1)],
+];
+
+/// The loop is 64 cycles long, not 32.
+///
+/// Everything except the KON/KOFF poll repeats at T+32; those two steps
+/// run every OTHER sample, and the internal KON bits are not cleared
+/// until 63 cycles after they are loaded. Modelling this as a 32-cycle
+/// loop gets key-on behaviour right half the time, which is worse than
+/// getting it wrong consistently because it looks like a race.
+pub const LOOP_CYCLES: u16 = 64;
 
 /// The eight-voice mixer.
 #[derive(Debug, Clone)]
@@ -611,6 +949,41 @@ pub struct Dsp {
     /// the mixer, cleared by ANY write to `$7C` (hardware ignores the
     /// value written).
     pub endx: u8,
+
+    // ---- the 64-cycle sample loop (ticket W7-08) ----
+    /// Position in the loop, 0-63. See [`LOOP_CYCLES`].
+    cycle: u16,
+    /// The global counter that clocks every envelope and the noise LFSR.
+    /// Counts DOWN from [`COUNTER_MAX`]; **initialised to 0, not to the
+    /// maximum**, which the source document calls out explicitly.
+    counter: u16,
+    /// ENDX as the DSP is building it, before S7 makes it readable.
+    endx_pending: u8,
+    /// Per-voice OUTX/ENVX prepared at S6/S7, readable at S8/S9.
+    ///
+    /// **This pair of latches is what `spc_dsp6` "Failed 03" measures.**
+    /// The ROM writes `$88` to ENVX and counts how many reads return it
+    /// before the DSP overwrites it; that count is precisely the
+    /// prepared-to-visible distance. With a single field per register the
+    /// schedule can be perfect and the count still wrong.
+    outx_pending: [u8; 8],
+    envx_pending: [u8; 8],
+    /// This sample's accumulators, reset at the top of the loop.
+    acc: (i32, i32),
+    echo_send: (i32, i32),
+    /// The DAC output latched at cycles 26 and 27.
+    dac: (i16, i16),
+    /// The previous voice's output, for pitch modulation.
+    prev_out: i16,
+    /// The noise sample, regenerated at cycle 30.
+    noise_out: i16,
+    /// KON/KOFF as written by the CPU, and as latched at cycle 30.
+    kon_written: u8,
+    koff_written: u8,
+    kon_internal: u8,
+    koff_internal: u8,
+    /// `$6C` FLG bits 0-4 — the noise generator's rate.
+    noise_rate: u8,
 }
 
 /// The S-DSP has 128 registers, `$00`-`$7F`.
@@ -637,6 +1010,22 @@ impl Dsp {
             regs: [0; REG_COUNT],
             dir: 0,
             endx: 0,
+            cycle: 0,
+            // "the counter is initialized to zero (not 0x77FF) on reset".
+            counter: 0,
+            endx_pending: 0,
+            outx_pending: [0; 8],
+            envx_pending: [0; 8],
+            acc: (0, 0),
+            echo_send: (0, 0),
+            dac: (0, 0),
+            prev_out: 0,
+            noise_out: 0,
+            kon_written: 0,
+            koff_written: 0,
+            kon_internal: 0,
+            koff_internal: 0,
+            noise_rate: 0,
         }
     }
 
@@ -646,15 +1035,19 @@ impl Dsp {
     /// the hardware does and what a program that leaves the high bit set
     /// depends on.
     ///
-    /// Almost everything reads back out of the register file. The three
-    /// exceptions are the registers hardware WRITES rather than stores,
-    /// and returning the last value the CPU wrote to them would be a
-    /// convincing lie — a program polling ENVX for an envelope to decay
-    /// would spin forever:
+    /// **Everything reads back out of the register file**, including
+    /// `$x8` ENVX and `$x9` OUTX — they are ordinary storage that the DSP
+    /// overwrites on its own schedule, not computed-live values. `$7C`
+    /// ENDX is the one value read from a field rather than the array,
+    /// because its eight bits are per-voice flags the mixer maintains.
     ///
-    /// * `$x8` ENVX — the voice's current envelope, top 7 bits.
-    /// * `$x9` OUTX — the voice's last output, high byte.
-    /// * `$7C` ENDX — per-voice sample-ended flags.
+    /// The timing is the substance here, and it is what these reads are
+    /// FOR. Each of the three becomes visible at its own cycle — ENDX at
+    /// `S7`, OUTX at `S8`, ENVX at `S9` — one, two and three steps after
+    /// the value was prepared. A program that writes ENVX and reads it
+    /// back sees its own value until the DSP reaches that voice's `S9`,
+    /// and how many reads fit in that window is exactly what blargg's
+    /// `spc_dsp6` counts. See [`Dsp::tick`].
     #[must_use]
     pub fn read_register(&self, addr: u8) -> u8 {
         let a = addr & 0x7F;
@@ -679,13 +1072,17 @@ impl Dsp {
 
     /// Write one DSP register (`$F3` with `$F2` selecting `addr`).
     ///
-    /// `aram` is needed because **key-on resolves the sample address
-    /// here**: `$x4` SRCN is only an index into the directory at `$5D`
-    /// DIR, and hardware reads that directory when the voice keys on, not
-    /// when SRCN is written. Resolving at write time instead would use a
-    /// stale DIR for any program that sets SRCN first and DIR second —
-    /// which is the ordinary order.
-    pub fn write_register(&mut self, addr: u8, value: u8, aram: &[u8]) {
+    /// `aram` is now unused and kept only so the call sites — including
+    /// `Apu`'s `$F3` arm — do not have to change shape.
+    ///
+    /// It used to be needed because key-on resolved the sample address
+    /// here. **It no longer does, and that is a correctness fix, not a
+    /// refactor:** `$x4` SRCN indexes the directory at `$5D` DIR, and
+    /// hardware reads that directory during the voice's own `S3c`, one
+    /// KON poll after the write. Resolving at write time used whatever
+    /// DIR happened to hold at that instant, which is a stale value for
+    /// any program that writes KON before DIR.
+    pub fn write_register(&mut self, addr: u8, value: u8, _aram: &[u8]) {
         let a = addr & 0x7F;
         self.regs[usize::from(a)] = value;
         let voice = usize::from(a >> 4);
@@ -731,17 +1128,31 @@ impl Dsp {
                 1 => self.main_vol_right = signed,
                 2 => self.echo.vol_left = signed,
                 3 => self.echo.vol_right = signed,
-                4 => self.key_on_masked(value, aram),
-                5 => self.key_off(value),
+                // **KON and KOFF are LATCHED, not acted on here.** The
+                // DSP polls them at cycle 30 and each voice acts at its
+                // own S3c "using previously loaded values", so a key-on
+                // takes effect one poll later — and the poll runs every
+                // OTHER sample. Keying on immediately was the old
+                // behaviour and it made key-on look instantaneous, which
+                // is precisely the timing these test ROMs measure.
+                4 => self.kon_written = value,
+                5 => self.koff_written = value,
                 6 => {
                     // FLG. Bit 5 disables echo WRITES while still reading,
                     // which is how a game freezes an echo tail without
-                    // clearing it.
+                    // clearing it. Bits 0-4 are the noise rate, read
+                    // through the same counter table as the envelopes.
                     self.echo.write_disabled = value & 0x20 != 0;
+                    self.noise_rate = value & 0x1F;
                 }
                 // ENDX: hardware clears every flag on ANY write and
                 // ignores the value, so this must not store `value`.
-                _ => self.endx = 0,
+                // Both copies clear — the visible one and the one the
+                // mixer is building — or the next S7 would restore it.
+                _ => {
+                    self.endx = 0;
+                    self.endx_pending = 0;
+                }
             },
             0xD => match voice {
                 0 => self.echo.feedback = signed,
@@ -757,111 +1168,235 @@ impl Dsp {
         }
     }
 
-    /// Key on the voices in `mask`, resolving each one's sample address
-    /// through the `$5D` DIR directory first.
+    /// Run one voice's step of the interleaved loop.
     ///
     /// A directory entry is four bytes — start address then loop address,
-    /// both little-endian — at `DIR * $100 + SRCN * 4`. The reads are
-    /// bounds-checked against ARAM rather than trusted: `dir` and `srcn`
-    /// are both fully program-controlled, and `DIR = $FF` with a high
-    /// SRCN addresses past the end of a 64 KiB ARAM.
-    fn key_on_masked(&mut self, mask: u8, aram: &[u8]) {
-        let dir = self.dir;
-        for i in 0..8 {
-            if mask & (1 << i) == 0 {
-                continue;
+    /// both little-endian — at `DIR * $100 + SRCN * 4`, and `S3c` resolves
+    /// it. The reads are bounds-checked against ARAM rather than trusted:
+    /// `dir` and `srcn` are both fully program-controlled, and `DIR = $FF`
+    /// with a high SRCN addresses past the end of a 64 KiB ARAM.
+    ///
+    /// The arithmetic for a voice's sample happens once, at `S3c`, where
+    /// the document puts "Apply the volume envelope"; the steps around it
+    /// place each REGISTER-VISIBLE event at its own cycle. That split is
+    /// deliberate and is stated here rather than left to be inferred: the
+    /// test suite this implements measures when values become readable,
+    /// not when they are computed, so the visibility latches are modelled
+    /// exactly and the internal ordering of the maths is not.
+    fn voice_step(&mut self, v: usize, step: VStep, aram: &mut [u8]) {
+        let bit = 1u8 << v;
+        match step {
+            // S1: load VxSRCN.
+            VStep::S1 => self.voices[v].srcn = self.regs[v * 0x10 + 0x4],
+
+            // S2: sample pointer (resolved at key-on), VxPITCHL, VxADSR1.
+            // Those three are decoded eagerly by `write_register`, so
+            // there is nothing to move here.
+            VStep::S2 => {}
+
+            // S3 for voices 1-7 is a single step; voice 0's is split.
+            VStep::S3 => {
+                self.voice_step(v, VStep::S3a, aram);
+                self.voice_step(v, VStep::S3b, aram);
+                self.voice_step(v, VStep::S3c, aram);
             }
-            let srcn = self.voices[i].srcn;
-            let entry = usize::from(dir) * 0x100 + usize::from(srcn) * 4;
-            let word = |off: usize| -> u16 {
-                let lo = aram.get(entry + off).copied().unwrap_or(0);
-                let hi = aram.get(entry + off + 1).copied().unwrap_or(0);
-                u16::from(lo) | (u16::from(hi) << 8)
-            };
-            self.voices[i].start = word(0);
-            self.voices[i].loop_addr = word(2);
-            self.voices[i].key_on();
+
+            // S3a: load VxPITCHH, apply pitch modulation.
+            VStep::S3a => {
+                if v > 0 && self.pitch_mod & bit != 0 {
+                    let base = self.voices[v].pitch;
+                    let factor = 1.0 + f64::from(self.prev_out) / f64::from(i16::MAX);
+                    let bent = (f64::from(base) * factor) as i32;
+                    self.voices[v].pitch_bent = Some(bent.clamp(0, 0x3FFF) as u16);
+                }
+            }
+
+            // S3b: load the BRR header and the first of the two bytes to
+            // decode. Both happen inside `Voice::next_raw`, which S3c
+            // drives.
+            VStep::S3b => {}
+
+            // S3c: KOFF/KON on the PREVIOUSLY loaded values, then the
+            // envelope and this voice's output.
+            VStep::S3c => {
+                if self.koff_internal & bit != 0 {
+                    self.voices[v].key_off();
+                }
+                if self.kon_internal & bit != 0 {
+                    let dir = usize::from(self.dir) * 256 + usize::from(self.voices[v].srcn) * 4;
+                    let rd = |i: usize| -> u16 {
+                        let n = aram.len().max(1);
+                        u16::from(aram[i % n]) | (u16::from(aram[(i + 1) % n]) << 8)
+                    };
+                    self.voices[v].start = rd(dir);
+                    self.voices[v].loop_addr = rd(dir + 2);
+                    self.voices[v].key_on();
+                    // "If KON, ENDX.x will be cleared in step S7."
+                    self.endx_pending &= !bit;
+                }
+
+                let use_noise = self.noise_enable & bit != 0;
+                let saved = self.voices[v].pitch;
+                if let Some(bent) = self.voices[v].pitch_bent.take() {
+                    self.voices[v].pitch = bent;
+                }
+                let out = self.voices[v].next_output(aram, self.noise_out, use_noise, self.counter);
+                self.voices[v].pitch = saved;
+                self.voices[v].last_output = out;
+                // "This is the value used for modulating the next voice's
+                // pitch, if applicable."
+                self.prev_out = out;
+
+                if self.voices[v].hit_end() {
+                    self.endx_pending |= bit;
+                }
+            }
+
+            // S4: load and apply VxVOLL.
+            VStep::S4 => {
+                let s = i32::from(self.voices[v].last_output);
+                let sl = (s * i32::from(self.voices[v].vol_left)) >> 7;
+                self.acc.0 += sl;
+                if self.echo_enable & bit != 0 {
+                    self.echo_send.0 += sl;
+                }
+            }
+
+            // S5: load and apply VxVOLR; prepare the new ENDX.
+            VStep::S5 => {
+                let s = i32::from(self.voices[v].last_output);
+                let sr = (s * i32::from(self.voices[v].vol_right)) >> 7;
+                self.acc.1 += sr;
+                if self.echo_enable & bit != 0 {
+                    self.echo_send.1 += sr;
+                }
+                // "The new ENDX.x value is prepared, and can be
+                // overwritten. Reads will not see it yet."
+            }
+
+            // S6: prepare the new VxOUTX. Not readable yet.
+            VStep::S6 => self.outx_pending[v] = (self.voices[v].last_output >> 8) as u8,
+
+            // S7: ENDX becomes readable; prepare the new VxENVX.
+            VStep::S7 => {
+                self.endx = self.endx_pending;
+                self.envx_pending[v] = (self.voices[v].envelope.level >> 4) as u8;
+            }
+
+            // S8: OUTX becomes readable.
+            VStep::S8 => self.regs[v * 0x10 + 0x9] = self.outx_pending[v],
+
+            // S9: ENVX becomes readable.
+            VStep::S9 => self.regs[v * 0x10 + 0x8] = self.envx_pending[v],
         }
     }
 
-    /// Mix one stereo frame.
+    /// Advance the DSP by ONE SPC cycle.
     ///
-    /// Accumulates in `i32` and clamps once at the end. Clamping per
-    /// voice instead would distort a mix that is only transiently over
-    /// full scale — audible, and wrong.
+    /// **This is the engine; [`Dsp::mix`] is a wrapper that runs 32 of
+    /// them.** The order below is anomie's, cycle for cycle — see
+    /// [`SCHEDULE`] for the voice interleave and the provenance note.
     ///
-    /// Needs `&mut` ARAM because the echo unit writes its ring buffer
-    /// back into it, which is genuinely what the hardware does: echo
-    /// memory is ARAM, not a private buffer, and a game that miscomputes
-    /// `ESA`/`EDL` really can have its echo overwrite its samples.
+    /// Returns the stereo sample when this cycle produced one (cycle 27,
+    /// where the right channel reaches the DAC).
+    pub fn tick(&mut self, aram: &mut [u8]) -> Option<(i16, i16)> {
+        let c = self.cycle % 32;
+        // The first half of the loop's 64 cycles; the KON/KOFF poll runs
+        // only there, which is what "every other sample" means.
+        let first_half = self.cycle < 32;
+
+        if c == 31 {
+            // The accumulators for the NEXT sample open here, because
+            // voice 0's S4 lands on this cycle and belongs to it.
+            self.acc = (0, 0);
+            self.echo_send = (0, 0);
+        }
+
+        for &(v, step) in SCHEDULE[usize::from(c)] {
+            self.voice_step(usize::from(v), step, aram);
+        }
+
+        let mut produced = None;
+        match c {
+            // "Apply ESA ... Load left channel sample from the echo
+            // buffer. Load FFC0." The right sample and the remaining
+            // coefficients follow at 23-25; this implementation reads all
+            // of it here and the doc comment on `read_and_filter` says so.
+            22 => {
+                self.echo.read_and_filter(aram);
+            }
+            // "Load and apply MVOLL. Load and apply EVOLL. Output the
+            // left sample to the DAC. Load and apply EFB."
+            26 => {
+                let main = (self.acc.0 * i32::from(self.main_vol_left)) >> 7;
+                let echo = i32::from(self.echo.out().0);
+                self.dac.0 = (main + echo).clamp(-0x8000, 0x7FFF) as i16;
+            }
+            // Same for the right channel, plus PMON.
+            27 => {
+                let main = (self.acc.1 * i32::from(self.main_vol_right)) >> 7;
+                let echo = i32::from(self.echo.out().1);
+                self.dac.1 = (main + echo).clamp(-0x8000, 0x7FFF) as i16;
+                produced = Some(self.dac);
+            }
+            // "Load NON, EON, and DIR." Eagerly decoded on write.
+            28 => {}
+            29 => {
+                // "Update global counter." It counts DOWN, wrapping at 0.
+                self.counter = if self.counter == 0 {
+                    COUNTER_MAX
+                } else {
+                    self.counter - 1
+                };
+                self.echo.write_back(
+                    aram,
+                    self.echo_send.0.clamp(-0x8000, 0x7FFF) as i16,
+                    EchoChannel::Left,
+                );
+                if first_half {
+                    // "Clear internal KON bits for any channels keyed on
+                    // in the previous 2 samples."
+                    self.kon_internal = 0;
+                }
+            }
+            30 => {
+                self.echo.write_back(
+                    aram,
+                    self.echo_send.1.clamp(-0x8000, 0x7FFF) as i16,
+                    EchoChannel::Right,
+                );
+                self.echo.advance();
+                self.noise_out = self.noise.step_if(self.counter, self.noise_rate);
+                if first_half {
+                    // "Load KOFF and internal KON."
+                    self.koff_internal = self.koff_written;
+                    self.kon_internal = self.kon_written;
+                }
+            }
+            _ => {}
+        }
+
+        // Advances by exactly 1 on every path and wraps at a positive
+        // constant, so the loop that drives it terminates (law 8).
+        self.cycle = (self.cycle + 1) % LOOP_CYCLES;
+        produced
+    }
+
+    /// Produce one stereo sample by running 32 cycles of the loop.
+    ///
+    /// Kept as the sample-granular entry point the DSP unit tests drive.
+    /// It is now a WRAPPER over [`Dsp::tick`] rather than a second
+    /// implementation, so the two cannot drift: there is exactly one
+    /// model of what a sample is.
     pub fn mix(&mut self, aram: &mut [u8]) -> (i16, i16) {
-        let noise = self.noise.step();
-        let mut endx = self.endx;
-        let (mut l, mut r) = (0i32, 0i32);
-        let (mut echo_l, mut echo_r) = (0i32, 0i32);
-        let mut previous = 0i16;
-
-        for (i, v) in self.voices.iter_mut().enumerate() {
-            // Pitch modulation: a voice's pitch is bent by the PREVIOUS
-            // voice's output. Voice 0 has no predecessor, so PMON bit 0
-            // does nothing on hardware — and must do nothing here.
-            let base_pitch = v.pitch;
-            if i > 0 && self.pitch_mod & (1 << i) != 0 {
-                let factor = 1.0 + f64::from(previous) / f64::from(i16::MAX);
-                let bent = (f64::from(base_pitch) * factor) as i32;
-                v.pitch = bent.clamp(0, 0x3FFF) as u16;
-            }
-
-            let s = v.next_output(aram, noise, self.noise_enable & (1 << i) != 0);
-            v.pitch = base_pitch;
-            previous = s;
-            v.last_output = s;
-            // ENDX is sticky: hardware sets the bit when the voice reaches
-            // a block with the END flag and only a write to `$7C` clears
-            // it, so this ORs rather than assigns. Assigning would make a
-            // looping sample's flag flicker and a program that polls it
-            // miss the event entirely.
-            if v.hit_end() {
-                endx |= 1 << i;
-            }
-
-            let sl = (i32::from(s) * i32::from(v.vol_left)) >> 7;
-            let sr = (i32::from(s) * i32::from(v.vol_right)) >> 7;
-            l += sl;
-            r += sr;
-            if self.echo_enable & (1 << i) != 0 {
-                echo_l += sl;
-                echo_r += sr;
+        let mut out = self.dac;
+        for _ in 0..32 {
+            // Fixed trip count: terminates by construction (law 8).
+            if let Some(s) = self.tick(aram) {
+                out = s;
             }
         }
-
-        self.endx = endx;
-        // **The DSP updates ENVX and OUTX once per sample.** That cadence
-        // is the whole behaviour: a value the CPU wrote stands until the
-        // next sample lands on it, which is what makes `$08` read back as
-        // written when a program writes and reads within one sample.
-        for i in 0..8 {
-            let v = &self.voices[i];
-            self.regs[i * 0x10 + 0x8] = (v.envelope.level >> 4) as u8;
-            self.regs[i * 0x10 + 0x9] = (v.last_output >> 8) as u8;
-        }
-
-        let (el, er) = self.echo.process(
-            aram,
-            (
-                echo_l.clamp(-0x8000, 0x7FFF) as i16,
-                echo_r.clamp(-0x8000, 0x7FFF) as i16,
-            ),
-        );
-        l += i32::from(el);
-        r += i32::from(er);
-
-        l = (l * i32::from(self.main_vol_left)) >> 7;
-        r = (r * i32::from(self.main_vol_right)) >> 7;
-        (
-            l.clamp(-0x8000, 0x7FFF) as i16,
-            r.clamp(-0x8000, 0x7FFF) as i16,
-        )
+        out
     }
 
     /// Key on the voices selected by a `KON`-style bitmask.
@@ -979,7 +1514,58 @@ impl Dsp {
         o.u8(self.pitch_mod)?;
         o.u8(self.echo_enable)?;
         o.i8(self.main_vol_left)?;
-        o.i8(self.main_vol_right)
+        o.i8(self.main_vol_right)?;
+        // **Mid-sample state, and it has to travel.** The DSP is now a
+        // 64-cycle state machine, so a save taken between two cycles
+        // resumes at the wrong point in the loop unless the position,
+        // the global counter, the pending register latches and the
+        // accumulators all come with it. Determinism is an invariant
+        // here, not a nicety (ARCHITECTURE.md §3).
+        o.u16(self.cycle)?;
+        o.u16(self.counter)?;
+        o.u8(self.endx_pending)?;
+        for b in self.outx_pending {
+            o.u8(b)?;
+        }
+        for b in self.envx_pending {
+            o.u8(b)?;
+        }
+        o.u32(self.acc.0 as u32)?;
+        o.u32(self.acc.1 as u32)?;
+        o.u32(self.echo_send.0 as u32)?;
+        o.u32(self.echo_send.1 as u32)?;
+        o.i16(self.dac.0)?;
+        o.i16(self.dac.1)?;
+        o.i16(self.prev_out)?;
+        o.i16(self.noise_out)?;
+        o.u8(self.kon_written)?;
+        o.u8(self.koff_written)?;
+        o.u8(self.kon_internal)?;
+        o.u8(self.koff_internal)?;
+        o.u8(self.noise_rate)?;
+        o.usize(self.echo.at)?;
+        o.i16(self.echo.last_fir.0)?;
+        o.i16(self.echo.last_fir.1)?;
+        for v in &self.voices {
+            o.i16(v.last_output)?;
+            o.u8(v.srcn)?;
+            match v.pitch_bent {
+                None => o.bool(false)?,
+                Some(b) => {
+                    o.bool(true)?;
+                    o.u16(b)?;
+                }
+            }
+            o.i16(v.envelope.pre_clamp)?;
+        }
+        // The register file itself was never saved, which meant a
+        // restored state read back zeros for every register a program
+        // had written.
+        for b in self.regs {
+            o.u8(b)?;
+        }
+        o.u8(self.dir)?;
+        o.u8(self.endx)
     }
 
     pub(crate) fn load(
@@ -1043,6 +1629,40 @@ impl Dsp {
         self.echo_enable = i.u8()?;
         self.main_vol_left = i.i8()?;
         self.main_vol_right = i.i8()?;
+        // Mirrors `save` exactly; see the note there on why mid-sample
+        // state has to round-trip.
+        self.cycle = i.u16()?;
+        self.counter = i.u16()?;
+        self.endx_pending = i.u8()?;
+        for b in &mut self.outx_pending {
+            *b = i.u8()?;
+        }
+        for b in &mut self.envx_pending {
+            *b = i.u8()?;
+        }
+        self.acc = (i.u32()? as i32, i.u32()? as i32);
+        self.echo_send = (i.u32()? as i32, i.u32()? as i32);
+        self.dac = (i.i16()?, i.i16()?);
+        self.prev_out = i.i16()?;
+        self.noise_out = i.i16()?;
+        self.kon_written = i.u8()?;
+        self.koff_written = i.u8()?;
+        self.kon_internal = i.u8()?;
+        self.koff_internal = i.u8()?;
+        self.noise_rate = i.u8()?;
+        self.echo.at = i.usize()?;
+        self.echo.last_fir = (i.i16()?, i.i16()?);
+        for v in &mut self.voices {
+            v.last_output = i.i16()?;
+            v.srcn = i.u8()?;
+            v.pitch_bent = if i.bool()? { Some(i.u16()?) } else { None };
+            v.envelope.pre_clamp = i.i16()?;
+        }
+        for b in &mut self.regs {
+            *b = i.u8()?;
+        }
+        self.dir = i.u8()?;
+        self.endx = i.u8()?;
         Ok(())
     }
 }
