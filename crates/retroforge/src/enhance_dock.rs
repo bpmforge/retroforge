@@ -80,6 +80,11 @@ pub struct EnhanceCtx<'a> {
     /// Ticket W11-03: why each background did or did not widen. `Some` is
     /// a refusal with its reason.
     pub widescreen_decisions: [Option<&'static str>; 4],
+    /// Ticket W11-05: what the loaded HD pack's import said, what it
+    /// could not satisfy, and what the last frame actually replaced.
+    pub hd_summary: Option<&'a str>,
+    pub hd_unsatisfied: &'a [String],
+    pub hd_report: Option<rf_enhance::hd_render::CompositeReport>,
     /// FM-13's "view too large for GPU, reduced" message, if any.
     pub fm13_message: Option<&'a str>,
     /// Whether a GPU compositor exists at all. Without one there is
@@ -332,6 +337,37 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                 }
             }
         }
+    }
+
+    // **Ticket W11-05: an HD pack reports itself, in the UI.**
+    //
+    // Three different facts, and conflating them would hide the one
+    // that matters: what the pack CLAIMS (rules parsed), what could
+    // not be honoured (missing images, conditions this build cannot
+    // evaluate), and what the last frame actually REPLACED. A pack
+    // can import cleanly and still replace nothing, which looks
+    // identical to "the feature is broken" without the third line.
+    if let Some(summary) = ctx.hd_summary {
+        ui.separator();
+        egui::CollapsingHeader::new("HD pack")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(summary);
+                if let Some(r) = ctx.hd_report {
+                    ui.label(r.summary());
+                }
+                // The scope limit, stated rather than discovered. A
+                // pack whose sprite art silently never applies is
+                // exactly the half-applied confusion this panel
+                // exists to prevent.
+                ui.label(
+                    "Background tiles only \u{2014} sprite replacement is not \
+                     implemented, so a pack's sprite art will not appear.",
+                );
+                for u in ctx.hd_unsatisfied {
+                    ui.label(format!("    {u}"));
+                }
+            });
     }
 
     ui.separator();

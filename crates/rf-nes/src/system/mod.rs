@@ -319,6 +319,32 @@ impl NesBus {
         self.ppu.palette()
     }
 
+    /// Ticket W11-05: start or stop recording the tiles the PPU draws —
+    /// forwards [`Ppu::set_tile_capture`].
+    pub fn set_tile_capture(&mut self, on: bool) {
+        self.ppu.set_tile_capture(on);
+    }
+
+    /// The background tiles of the frame just completed — forwards
+    /// [`Ppu::completed_tiles`]. Empty unless capture is on.
+    #[must_use]
+    pub fn completed_tiles(&self) -> &[crate::ppu::DrawnTile] {
+        self.ppu.completed_tiles()
+    }
+
+    /// The cartridge's CHR — forwards [`Ppu::chr`], a non-observing
+    /// borrow like [`NesBus::vram`].
+    #[must_use]
+    pub fn chr(&self) -> &[u8] {
+        self.ppu.chr()
+    }
+
+    /// Is CHR writable (CHR-RAM)? Forwards [`Ppu::chr_is_ram`].
+    #[must_use]
+    pub fn chr_is_ram(&self) -> bool {
+        self.ppu.chr_is_ram()
+    }
+
     /// Whether the sprite-limit-bypass overlay is currently recording
     /// (ticket W3-05a) — forwards [`Ppu::sprite_overlay_enabled`].
     #[must_use]

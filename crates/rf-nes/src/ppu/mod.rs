@@ -473,7 +473,19 @@ pub struct Ppu {
     /// **Off by default and free when off** — the capture is one branch
     /// at each reload dot, and the vector is never allocated.
     pub(super) tile_capture: bool,
+    /// Tiles of the frame currently being drawn.
     pub(super) drawn_tiles: Vec<DrawnTile>,
+    /// The last COMPLETE frame's tiles, which is what readers get.
+    ///
+    /// **Two buffers, because the consumer and the capture window do not
+    /// line up.** A frame's visible tiles finish at scanline 239, but the
+    /// only frame-boundary signal this crate has is the pre-render line
+    /// wrapping to scanline 0 — twenty-two scanlines later, by which time
+    /// the NEXT frame's prefetch has already been recorded. A single
+    /// buffer therefore hands the reader two tiles of the coming frame
+    /// instead of the whole of the finished one, which is exactly what it
+    /// did: `drawn_tiles` returned 2 or 3 every frame.
+    pub(super) completed_tiles: Vec<DrawnTile>,
     pub(super) chr: Vec<u8>,
     chr_is_ram: bool,
     /// Nametable RAM: 4 logical 1 KiB banks addressed via `mirroring`, laid
@@ -791,6 +803,7 @@ impl Ppu {
             chr,
             tile_capture: false,
             drawn_tiles: Vec::new(),
+            completed_tiles: Vec::new(),
             chr_is_ram,
             vram: [0; 0x1000],
             palette: [0; 32],
@@ -885,15 +898,17 @@ impl Ppu {
         self.tile_capture = on;
         if !on {
             self.drawn_tiles = Vec::new();
+            self.completed_tiles = Vec::new();
         }
     }
 
-    /// The background tiles drawn during the frame just completed.
+    /// The background tiles of the frame just completed.
     ///
-    /// Empty unless [`Ppu::set_tile_capture`] is on.
+    /// Named for what it returns: the PUBLISHED buffer, not the one still
+    /// filling. Empty unless [`Ppu::set_tile_capture`] is on.
     #[must_use]
-    pub fn drawn_tiles(&self) -> &[DrawnTile] {
-        &self.drawn_tiles
+    pub fn completed_tiles(&self) -> &[DrawnTile] {
+        &self.completed_tiles
     }
 
     /// The cartridge's CHR, pattern tables included.
@@ -1319,7 +1334,10 @@ impl Ppu {
                 // missing its top-left two tiles. The test caught it as
                 // 7678 tiles instead of 7680.
                 if next == PRERENDER_SCANLINE && self.tile_capture {
-                    self.drawn_tiles.clear();
+                    // PUBLISH the frame that just finished, then start
+                    // collecting the next one — the pre-render line's own
+                    // prefetch (dots 329/337) belongs to the coming frame.
+                    self.completed_tiles = std::mem::take(&mut self.drawn_tiles);
                 }
                 next
             };

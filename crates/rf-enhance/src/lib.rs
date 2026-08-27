@@ -14,6 +14,7 @@ pub mod camera;
 pub mod decode;
 pub mod distribution;
 pub mod experiments;
+pub mod hd_render;
 pub mod hdpack;
 pub mod hud;
 pub mod interpolation;

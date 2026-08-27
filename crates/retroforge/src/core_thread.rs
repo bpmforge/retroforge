@@ -195,6 +195,14 @@ pub struct FrameMsg {
     /// thread reading the device directly would be exactly the
     /// cross-thread access ARCHITECTURE §3 forbids.
     pub audio_fill: Option<f32>,
+    /// Ticket W11-05: where every background tile of this frame landed
+    /// and what it was, or `None` when no pack is loaded.
+    ///
+    /// Built on the core thread because only it may read the PPU. The
+    /// pack and its images stay on the UI thread — this is the small half
+    /// of the pair, and shipping decoded tilesets across the channel
+    /// every frame would not be.
+    pub hd_placements: Option<Vec<rf_enhance::hd_render::Placement>>,
     pub rgba: Vec<u8>,
     pub width: usize,
     pub height: usize,
@@ -351,6 +359,13 @@ pub enum CoreCommand {
     /// core stops reaching the widening code at all rather than widening
     /// to 256 (law 6).
     SetWidescreen(Option<WidescreenRequest>),
+    /// Ticket W11-05: record the tiles the PPU draws, for HD packs.
+    ///
+    /// **Pay-for-use, and that is why it is a command rather than always
+    /// on**: a frame draws ~7680 background tiles, and building and
+    /// shipping that list every frame for a session with no pack loaded
+    /// would be pure waste.
+    SetTileCapture(bool),
     /// Ticket W11-02: which bytes the full-level view needs each frame.
     ///
     /// A BOUNDED probe, not "send the UI some RAM". The profile declares
@@ -736,6 +751,7 @@ fn core_thread_main(
     // Widescreen (W11-03). `None` is off, and off means the core never
     // reaches its widening path at all.
     let mut widescreen: Option<WidescreenRequest> = None;
+    let mut hd_capture = false;
     let mut last_decisions: Option<[Option<&'static str>; 4]> = None;
     // Ticket W4-10a: `None` is the shipped, untraced state. The run loop
     // below tests this once per frame and takes the ordinary path — the
@@ -853,6 +869,10 @@ fn core_thread_main(
                 }
                 CoreCommand::SetLayerExtraction(enabled) => {
                     layers_enabled = enabled;
+                }
+                CoreCommand::SetTileCapture(on) => {
+                    stepper.set_tile_capture(on);
+                    hd_capture = on;
                 }
                 CoreCommand::SetWidescreen(request) => {
                     // **The frame buffer has to grow with the picture.**
@@ -1117,6 +1137,8 @@ fn core_thread_main(
                 audio_fill: audio.as_ref().map(crate::audio_out::AudioOut::fill),
                 level_probe: probe_data,
                 script_window: script_bytes,
+                // Built only when a pack is loaded — see SetTileCapture.
+                hd_placements: hd_capture.then(|| stepper.hd_placements()),
                 rgba: display,
                 width: sink.width(),
                 height: sink.height(),

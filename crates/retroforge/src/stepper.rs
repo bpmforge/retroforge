@@ -575,6 +575,93 @@ impl EmuStepper {
             .map_or(&EMPTY_PALETTE, rf_nes::NesBus::palette)
     }
 
+    /// Ticket W11-05: record the tiles the NES PPU draws. No-op on SNES —
+    /// Mesen HD packs are an NES format.
+    pub fn set_tile_capture(&mut self, on: bool) {
+        if let Some(bus) = self.machine.nes_bus_mut() {
+            bus.set_tile_capture(on);
+        }
+    }
+
+    /// The background tiles of the frame just completed. Empty unless
+    /// capture is on, and always empty on SNES.
+    #[must_use]
+    pub fn completed_tiles(&self) -> &[rf_nes::ppu::DrawnTile] {
+        self.machine
+            .nes_bus()
+            .map_or(&[], rf_nes::NesBus::completed_tiles)
+    }
+
+    /// The NES cartridge's CHR, for a pack rule keyed on tile bytes.
+    #[must_use]
+    pub fn chr(&self) -> &[u8] {
+        self.machine.nes_bus().map_or(&[], rf_nes::NesBus::chr)
+    }
+
+    /// Ticket W11-05: the tiles this frame drew, as HD-pack placements.
+    ///
+    /// **Built here, in the shell, and that is the layer boundary doing
+    /// its job** (ARCHITECTURE §6): `rf-enhance` is console-agnostic and
+    /// `rf-nes` may not depend on it, so neither can name the other's
+    /// type. The mediator converts, exactly as it does for widescreen's
+    /// `LayerView`.
+    ///
+    /// Empty on SNES and whenever capture is off.
+    #[must_use]
+    pub fn hd_placements(&self) -> Vec<rf_enhance::hd_render::Placement> {
+        let tiles = self.completed_tiles();
+        if tiles.is_empty() {
+            return Vec::new();
+        }
+        let palette = self.palette();
+        let chr = self.chr();
+        let chr_is_ram = self
+            .machine
+            .nes_bus()
+            .is_some_and(rf_nes::NesBus::chr_is_ram);
+        tiles
+            .iter()
+            .map(|t| {
+                // A pack rule is keyed on the FOUR palette bytes: the
+                // universal backdrop at $3F00 plus the three colours of
+                // the tile's own background palette. Entry 0 of every
+                // palette mirrors the backdrop on hardware, so using
+                // `palette[0]` here is the value a pack author sees.
+                let p = usize::from(t.palette & 0x03) * 4;
+                let colours = [
+                    palette[0] & 0x3F,
+                    palette[p + 1] & 0x3F,
+                    palette[p + 2] & 0x3F,
+                    palette[p + 3] & 0x3F,
+                ];
+                let tile = if chr_is_ram {
+                    // CHR RAM: the rule is keyed on the tile's BYTES,
+                    // because the index means nothing when the game
+                    // rewrites the pattern table as it plays.
+                    let at = usize::from(t.base) + usize::from(t.tile) * 16;
+                    let mut bytes = [0u8; 16];
+                    for (i, b) in bytes.iter_mut().enumerate() {
+                        *b = chr.get(at + i).copied().unwrap_or(0);
+                    }
+                    rf_enhance::hdpack::TileData::ChrRam(bytes)
+                } else {
+                    // CHR ROM: the tile's index within the whole of CHR,
+                    // so a tile in the $1000 table is 256 higher than the
+                    // same index in the $0000 one — which is what Mesen's
+                    // own writer emits.
+                    let index = u32::from(t.base) / 16 + u32::from(t.tile);
+                    rf_enhance::hdpack::TileData::ChrRom(index)
+                };
+                rf_enhance::hd_render::Placement {
+                    x: t.x,
+                    y: t.y as i16,
+                    tile,
+                    palette: colours,
+                }
+            })
+            .collect()
+    }
+
     /// Side-effect-free 2 KiB WRAM snapshot (`$0000-$07FF`, the real
     /// backing 2 KiB — not its `$0800`-stepped mirrors, same span
     /// `Self::state_hash`'s own doc already enumerates as "reachable

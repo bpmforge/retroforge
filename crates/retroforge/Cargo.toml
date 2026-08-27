@@ -10,6 +10,13 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# image: decode the PNGs a Mesen HD pack ships (ticket W11-05). PNG ONLY
+# and default-features off — a pack is PNG by the format's own spec, and
+# the default feature set drags in every codec `image` supports for no
+# reason. This crate is also a dev-dependency below (W10-03 screenshots);
+# the two entries unify per build, so `cargo build` gets png alone and the
+# test build gets whatever the dev entry asks for.
+image = { version = "0.25", default-features = false, features = ["png"] }
 rf-core-api = { path = "../rf-core-api" }
 # rf-nes: to actually run a core (pre-flight note, ticket W1-06 plan.json
 # entry) — exempt from "cores only via rf-core-api" as the app shell

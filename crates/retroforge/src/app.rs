@@ -226,6 +226,16 @@ pub struct RetroForgeApp {
     /// Ticket W11-03: why each background did or did not widen. `Some` is
     /// a refusal with its reason; `None` means widened (or off).
     widescreen_decisions: [Option<&'static str>; 4],
+    /// Ticket W11-05: the loaded HD pack and its decoded images.
+    hd_pack: Option<(
+        rf_enhance::hdpack::HdPack,
+        Vec<rf_enhance::hd_render::PackImage>,
+    )>,
+    /// What the import said, and what it could not satisfy.
+    hd_summary: Option<String>,
+    hd_unsatisfied: Vec<String>,
+    /// What the last composite actually replaced.
+    hd_report: Option<rf_enhance::hd_render::CompositeReport>,
     core: Option<CoreHandle>,
     texture: Option<egui::TextureHandle>,
     /// Ticket W3-03: the same frame's BG-only layer as a separate egui
@@ -653,6 +663,10 @@ impl RetroForgeApp {
 
         RetroForgeApp {
             widescreen_decisions: [None; 4],
+            hd_pack: None,
+            hd_summary: None,
+            hd_unsatisfied: Vec::new(),
+            hd_report: None,
             core: None,
             texture: None,
             bg_layer_texture: None,
@@ -1743,8 +1757,24 @@ impl RetroForgeApp {
                 self.write_screenshots();
             }
             self.audio_fill = msg.audio_fill;
-            self.last_frame_rgba = Some(msg.rgba.clone());
-            self.last_frame_size = Some((msg.width, msg.height));
+            // Ticket W11-05: apply the HD pack, if one is loaded and the
+            // core reported this frame's tiles. Done HERE rather than on
+            // the core thread because the pack and its decoded tilesets
+            // live on this side — shipping them across the channel every
+            // frame would be the expensive half of the pair.
+            let (rgba, size) = match (&self.hd_pack, &msg.hd_placements) {
+                (Some((pack, images)), Some(placements)) => {
+                    let (out, report) = rf_enhance::hd_render::composite(
+                        pack, images, placements, &msg.rgba, msg.width, msg.height,
+                    );
+                    self.hd_report = Some(report);
+                    let s = pack.scale.max(1) as usize;
+                    (out, (msg.width * s, msg.height * s))
+                }
+                _ => (msg.rgba.clone(), (msg.width, msg.height)),
+            };
+            self.last_frame_rgba = Some(rgba);
+            self.last_frame_size = Some(size);
             // Ticket W11-02: the probe's bytes become a live camera. The
             // `read` closure is a lookup into what the CORE peeked, not a
             // read of anything on this thread — the UI never touches
@@ -3911,6 +3941,94 @@ impl RetroForgeApp {
     /// Toggle temporal de-flicker exactly as the Enhance workspace's
     /// checkbox does, command and all (ticket W11-01).
     #[doc(hidden)]
+    /// Ticket W11-05: load a Mesen HD pack from a directory.
+    ///
+    /// The directory is the pack as distributed: a `hires.txt` beside the
+    /// PNGs it names. Everything about it is reported rather than
+    /// assumed — a pack that half-applies silently is the most confusing
+    /// possible outcome, which is why `hdpack::Import` exists and why the
+    /// result of this is kept for the UI rather than logged.
+    ///
+    /// # Errors
+    /// The pack is not loaded if `hires.txt` is missing or unparsable.
+    /// A pack whose IMAGES are missing still loads — that is a `Partial`
+    /// import, and refusing it would throw away work the author did do.
+    pub fn load_hd_pack(&mut self, dir: &std::path::Path) -> Result<(), String> {
+        let text = std::fs::read_to_string(dir.join("hires.txt"))
+            .map_err(|e| format!("no hires.txt in {}: {e}", dir.display()))?;
+        let pack = rf_enhance::hdpack::parse_hires(&text).map_err(|e| format!("{e:?}"))?;
+
+        // Decode what the pack names. This crate owns the image decoder;
+        // `rf_enhance::hdpack` deliberately decodes no pixels and takes
+        // only dimensions, so the split is respected in both directions.
+        let mut infos = std::collections::BTreeMap::new();
+        let mut images = Vec::new();
+        for name in &pack.images {
+            match image::open(dir.join(name)) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    infos.insert(
+                        name.clone(),
+                        rf_enhance::hdpack::ImageInfo {
+                            width: rgba.width(),
+                            height: rgba.height(),
+                        },
+                    );
+                    images.push(rf_enhance::hd_render::PackImage {
+                        width: rgba.width(),
+                        height: rgba.height(),
+                        rgba: rgba.into_raw(),
+                    });
+                }
+                Err(_) => {
+                    // A named image that will not decode is NOT fatal: it
+                    // becomes `Unsatisfied::MissingImage`, which the panel
+                    // shows. An empty placeholder keeps `img` indices
+                    // aligned with `pack.images`, which the rules index by.
+                    images.push(rf_enhance::hd_render::PackImage {
+                        width: 0,
+                        height: 0,
+                        rgba: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        let import = rf_enhance::hdpack::import(pack, &infos);
+        self.hd_summary = Some(import.summary());
+        self.hd_unsatisfied = import
+            .unsatisfied()
+            .iter()
+            .map(|u| format!("{u:?}"))
+            .collect();
+        self.hd_pack = Some((import.pack().clone(), images));
+        self.send_command(CoreCommand::SetTileCapture(true));
+        Ok(())
+    }
+
+    /// Unload the pack and stop paying for tile capture.
+    pub fn clear_hd_pack(&mut self) {
+        self.hd_pack = None;
+        self.hd_summary = None;
+        self.hd_unsatisfied.clear();
+        self.hd_report = None;
+        self.send_command(CoreCommand::SetTileCapture(false));
+    }
+
+    /// What the last import said, for the UI.
+    #[doc(hidden)]
+    pub fn hd_summary_for_test(&self) -> Option<&str> {
+        self.hd_summary.as_deref()
+    }
+
+    /// What the last COMPOSITE said — how many tiles the pack actually
+    /// replaced this frame, which is a different question from whether
+    /// its rules loaded.
+    #[doc(hidden)]
+    pub fn hd_report_for_test(&self) -> Option<rf_enhance::hd_render::CompositeReport> {
+        self.hd_report
+    }
+
     /// Ticket W11-03: turn decoded widescreen on or off.
     ///
     /// **The profile decides the policies; the user decides whether it is
@@ -4354,6 +4472,9 @@ impl RetroForgeApp {
                 let level_texture = self.level_texture(ui.ctx());
                 let mut view = crate::enhance_dock::EnhanceCtx {
                     widescreen_decisions: self.widescreen_decisions,
+                    hd_summary: self.hd_summary.as_deref(),
+                    hd_unsatisfied: &self.hd_unsatisfied,
+                    hd_report: self.hd_report,
                     level_texture: level_texture.as_ref(),
                     profile_title: self
                         .level_session

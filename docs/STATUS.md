@@ -1640,3 +1640,51 @@ that way.
 
   Evidence: workspace **1706 passing**, fmt, clippy `-D warnings`,
   validate-arch, validate-plan.
+
+- **W11-05 — a Mesen HD pack reaches the running game** (2026-08-27).
+  `load_hd_pack` reads a pack directory (`hires.txt` beside its PNGs),
+  decodes the images, imports it and turns on tile capture; the core
+  thread ships each frame's placements; the app composites at the pack's
+  scale and draws the result. The pack machinery had been complete and
+  tested since W9-06 — what was missing was any way to load one and see
+  it.
+
+  **The bug the end-to-end test caught**, and the reason a unit test
+  could not have: the capture window and the frame boundary did not line
+  up. A frame's visible tiles finish at scanline 239, but this crate's
+  only frame-boundary signal is the pre-render line wrapping to scanline
+  0 — twenty-two scanlines later, by which time the *next* frame's
+  prefetch has been recorded. A single buffer handed the reader 2 or 3
+  tiles of the coming frame instead of the 7680 of the finished one.
+  Fixed with a published buffer, the settled-frame model the rest of the
+  system already uses. Every piece was individually correct and nothing
+  assembled them — this ticket's own diagnosis, turned on itself.
+
+  A second one it caught: `rf-scroller`, like real NES software, waits
+  several vblanks before enabling rendering and draws its first tile
+  around **frame 57**. A test loading the pack at frame 30 finds nothing
+  to replace and blames the plumbing.
+
+  **The honesty half is three separate facts** in the Enhance panel,
+  because conflating them hides the one that matters: what the pack
+  *claims*, what could not be *honoured*, and what the last frame
+  actually *replaced*. A pack can import cleanly and replace nothing,
+  which looks identical to a broken feature without the third line.
+
+  **Sprites are not covered, and the panel says so** rather than leaving
+  it to be discovered — filed as **W11-14** with the measurement of why
+  it is its own ticket (per-scanline fetches, 8×16 spanning two tiles,
+  vertical flip, and a sprite-priority decision the compositor does not
+  model).
+
+  New runtime dependency `image` 0.25 (png feature only), promoted from
+  dev-only with a TECH_STACK §2 record. `cargo deny check licenses` was
+  run before and after and reports the same single pre-existing rejection
+  (`libfuzzer-sys`, NCSA) — no new licence surface.
+
+  Evidence: `crates/retroforge/tests/hdpack_reaches_the_app.rs` drives
+  `RetroForgeApp` with a real pack it writes itself, asserting the frame
+  grows to 512×480, that tiles were **replaced** rather than merely
+  upscaled, that the pack's colour is visible in the drawn pixels, and
+  that unloading returns to 256×240. Workspace **1712 passing**;
+  ten-command gate green.

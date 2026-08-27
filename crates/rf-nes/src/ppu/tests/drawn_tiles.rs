@@ -28,32 +28,37 @@ fn ppu_with_grid() -> super::Ppu {
     p
 }
 
-/// Run until exactly one complete frame has been captured, and stop
-/// where it can be read.
+/// Run until one complete frame has been PUBLISHED, and stop there.
 ///
-/// **Where you stop matters.** The capture is cleared when the pre-render
-/// line BEGINS, so a run that happens to end there reports nothing — that
-/// is not a bug, it is reading between frames. This stops at the start of
-/// post-render, where the frame just drawn is complete and the next clear
-/// has not happened.
+/// **Where you stop matters, and it is the publish point.** A frame's
+/// visible tiles finish at scanline 239, but they are published when the
+/// pre-render line begins — twenty-two scanlines later. Reading before
+/// that gives the previous frame; reading much later gives it too, since
+/// the next publish is a whole frame away. This stops immediately after
+/// the publish, so `drawn_tiles` is the frame just drawn.
 ///
-/// Both loops are bounded by a tick budget of three frames and assert
-/// rather than spin: an unbounded `while` here would be a hang, and a
-/// hanging test is a denial of service, not a failing test (law 8).
+/// Both loops are bounded by a tick budget and assert rather than spin:
+/// an unbounded `while` here would be a hang, and a hanging test is a
+/// denial of service, not a failing test (law 8).
 fn run_captured_frame(p: &mut super::Ppu) {
-    const BUDGET: u32 = 341 * 262 * 3;
+    const BUDGET: u32 = 341 * 262 * 4;
     let mut ticks = 0u32;
-    // 1. Reach the pre-render line, where the capture resets.
-    while !(p.scanline == 261 && p.dot == 0) {
-        p.tick();
-        ticks += 1;
-        assert!(ticks < BUDGET, "never reached the pre-render line");
-    }
-    // 2. Run forward to post-render: one whole frame, uncleared.
-    while p.scanline != 240 {
-        p.tick();
-        ticks += 1;
-        assert!(ticks < BUDGET, "never reached post-render");
+    // Two publishes: the first may hand over a partial frame collected
+    // from whatever power-on state the PPU started in.
+    for _ in 0..2 {
+        // Leave the pre-render line, so the next entry to it is a real
+        // boundary rather than the one we are already standing on.
+        while p.scanline == 261 {
+            p.tick();
+            ticks += 1;
+            assert!(ticks < BUDGET, "never left the pre-render line");
+        }
+        // ...then run to the instant it begins again: the publish.
+        while p.scanline != 261 {
+            p.tick();
+            ticks += 1;
+            assert!(ticks < BUDGET, "never reached the next pre-render line");
+        }
     }
 }
 
@@ -61,7 +66,7 @@ fn run_captured_frame(p: &mut super::Ppu) {
 fn every_visible_cell_is_reported_once_and_in_the_right_place() {
     let mut p = ppu_with_grid();
     run_captured_frame(&mut p);
-    let tiles = p.drawn_tiles();
+    let tiles = p.completed_tiles();
 
     assert!(
         !tiles.is_empty(),
@@ -116,7 +121,7 @@ fn fine_x_shifts_the_reported_tiles_left() {
     p.write_register(5, 3); // $2005 PPUSCROLL: X = 3 -> fine X = 3
     p.write_register(5, 0); // ...and Y = 0
     run_captured_frame(&mut p);
-    let row0: Vec<_> = p.drawn_tiles().iter().filter(|t| t.y == 0).collect();
+    let row0: Vec<_> = p.completed_tiles().iter().filter(|t| t.y == 0).collect();
     assert!(!row0.is_empty(), "row 0 must still be reported");
     let min_x = row0.iter().map(|t| t.x).min().unwrap();
     assert_eq!(
@@ -134,7 +139,7 @@ fn capture_off_reports_nothing() {
     p.set_tile_capture(false);
     run_captured_frame(&mut p);
     assert!(
-        p.drawn_tiles().is_empty(),
+        p.completed_tiles().is_empty(),
         "with capture off the PPU must not accumulate tiles"
     );
 }

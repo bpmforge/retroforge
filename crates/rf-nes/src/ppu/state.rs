@@ -40,6 +40,7 @@ impl Ppu {
             // scratch and are rebuilt before anyone can read them.
             tile_capture: _,
             drawn_tiles: _,
+            completed_tiles: _,
             vram: _,    // VRAM chunk
             palette: _, // CGRM chunk
             mirroring,
