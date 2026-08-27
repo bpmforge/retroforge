@@ -4074,7 +4074,7 @@
     "the default $0A path is unchanged: every existing SPC700 vector and golden suite passes without re-baselining"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED 2026-08-27 on Brad's ruling, splitting the whole remainder of W7-17 out of a ticket titled for something else. W7-17 delivered the timer phase-lock and $F0 TEST; this is the one change everything left depends on.",
     "WHY IT IS ONE CHANGE AND NOT THREE. $F0's waitstate fields are already decoded and unit-tested (Apu::test_ram_waits / test_io_waits, 0/1/4/9 over a 1-cycle base) and CANNOT BE APPLIED without per-access timing. fullsnes's per-opcode table of which internal cycles take I/O timing versus RAM timing ('number_of_I/O_waits = list_entry; number_of_RAM_waits = total_number_of_internal_cycles - list_entry') is unusable for the same reason. And spc_mem_access_times measures exactly this. One change unlocks all three.",
