@@ -77,6 +77,9 @@ pub struct EnhanceCtx<'a> {
     /// contradiction a user could see and nobody had.
     pub profile_title: Option<String>,
     pub profile_capabilities: Vec<(&'static str, bool)>,
+    /// Ticket W11-03: why each background did or did not widen. `Some` is
+    /// a refusal with its reason.
+    pub widescreen_decisions: [Option<&'static str>; 4],
     /// FM-13's "view too large for GPU, reduced" message, if any.
     pub fm13_message: Option<&'a str>,
     /// Whether a GPU compositor exists at all. Without one there is
@@ -101,6 +104,9 @@ pub struct EnhanceActions {
     /// told. Before W11-01 this row wrote a bool to disk and nothing
     /// read it — the checkbox was the whole feature.
     pub deflicker_set: Option<bool>,
+    /// Ticket W11-03: decoded widescreen was toggled; the core must be
+    /// told, with the profile's policies.
+    pub widescreen_set: Option<bool>,
     /// Ticket W11-02: the full-level view was toggled; the level probe
     /// must be armed or disarmed.
     pub full_level_set: Option<bool>,
@@ -286,7 +292,14 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                         ctx.settings.deflicker = enabled;
                         actions.deflicker_set = Some(enabled);
                     }
-                    "widescreen_decoded" => ctx.settings.widescreen_decoded = enabled,
+                    "widescreen_decoded" => {
+                        // Until W11-03 this ONLY set the field: the toggle
+                        // round-tripped to disk and changed nothing anyone
+                        // could see, because no command existed to carry it
+                        // to the core.
+                        ctx.settings.widescreen_decoded = enabled;
+                        actions.widescreen_set = Some(enabled);
+                    }
                     "full_level_view" => {
                         ctx.settings.full_level_view = enabled;
                         actions.full_level_set = Some(enabled);
@@ -306,6 +319,19 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                 ui.label(format!("\u{2014} {why}"));
             }
         });
+        // **Ticket W11-03: a refusal says so, right under the toggle that
+        // caused it.** bsnes-hd's lesson is that widening the wrong layer
+        // looks like a bug in the GAME — a status bar smeared across the
+        // margins — so the policy declines those layers. A user who is
+        // not told why simply sees a picture narrower than they asked for
+        // and concludes the feature is broken.
+        if row.id == "widescreen_decoded" && row.enabled {
+            for (i, reason) in ctx.widescreen_decisions.iter().enumerate() {
+                if let Some(why) = reason {
+                    ui.label(format!("    BG{}: kept 4:3 \u{2014} {why}", i + 1));
+                }
+            }
+        }
     }
 
     ui.separator();

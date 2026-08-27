@@ -269,9 +269,23 @@ pub enum CoreEvent {
     /// every frame would be tens of MB/s at 60Hz for a level of any real
     /// size, so this only happens when the UI thread actually asks.
     CanvasSnapshot(rf_enhance::stitcher::Canvas),
+    /// Ticket W11-03 (FR-ENH-004): what the widescreen policy decided,
+    /// per background, and WHY when the answer was no.
+    ///
+    /// **Refusals are surfaced, not swallowed.** bsnes-hd's lesson is
+    /// that widening the wrong layer looks like a bug in the game: a
+    /// status bar smeared across the margins, a full-screen image
+    /// repeated. So a layer the policy declines keeps its 4:3 width AND
+    /// says so, rather than the user seeing a narrower picture than they
+    /// asked for with no explanation. Sent only when the decision
+    /// CHANGES, not every frame.
+    WidescreenDecisions([Option<&'static str>; 4]),
 }
 
-/// What the UI thread can ask the core thread to do (FR-DBG-004).
+/// Which bytes the full-level view needs read each frame (ticket W11-02).
+///
+/// (This previously carried `CoreCommand`'s doc comment, orphaned when
+/// this struct was inserted beneath it — RF-L-11's pattern exactly.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LevelProbe {
     /// Addresses `rf_enhance::level_view::live_camera` will read, derived
@@ -292,6 +306,24 @@ pub struct LevelProbeData {
     pub table: Vec<u8>,
 }
 
+/// A widescreen request: how wide, and the profile's per-layer policies.
+///
+/// **The POLICIES travel, not the decisions.** A decision depends on
+/// where the layer is scrolled to, which changes every frame, so the core
+/// thread re-decides with live geometry rather than the UI deciding once
+/// against a stale view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WidescreenRequest {
+    /// Output width in dots. Clamped by the PPU to `MAX_WIDTH`.
+    pub width: usize,
+    /// The profile's `[widescreen]` policies.
+    pub policies: rf_enhance::widescreen::WidescreenPolicies,
+}
+
+/// What the UI thread can ask the core thread to do (FR-DBG-004).
+///
+/// Not `Clone` or `Debug`: `ArmTrace` carries a `TraceProducer`, which is
+/// neither.
 pub enum CoreCommand {
     Pause,
     Resume,
@@ -313,6 +345,12 @@ pub enum CoreCommand {
     /// sprite_historian::SpriteHistorian::observe` takes `&[PpuPixel]`,
     /// never `&mut`).
     SetDeflicker(bool),
+    /// Ticket W11-03 (FR-ENH-004): decoded widescreen on/off.
+    ///
+    /// `None` turns it off and restores the accuracy path exactly — the
+    /// core stops reaching the widening code at all rather than widening
+    /// to 256 (law 6).
+    SetWidescreen(Option<WidescreenRequest>),
     /// Ticket W11-02: which bytes the full-level view needs each frame.
     ///
     /// A BOUNDED probe, not "send the UI some RAM". The profile declares
@@ -695,6 +733,10 @@ fn core_thread_main(
     // Ticket W3-03a: off until the UI asks, so a closed debug window costs
     // nothing on the frame path (see `CoreCommand::SetLayerExtraction`).
     let mut layers_enabled = false;
+    // Widescreen (W11-03). `None` is off, and off means the core never
+    // reaches its widening path at all.
+    let mut widescreen: Option<WidescreenRequest> = None;
+    let mut last_decisions: Option<[Option<&'static str>; 4]> = None;
     // Ticket W4-10a: `None` is the shipped, untraced state. The run loop
     // below tests this once per frame and takes the ordinary path — the
     // whole cost of the debugger's tracing existing, on a session that is
@@ -812,6 +854,37 @@ fn core_thread_main(
                 CoreCommand::SetLayerExtraction(enabled) => {
                     layers_enabled = enabled;
                 }
+                CoreCommand::SetWidescreen(request) => {
+                    // **The frame buffer has to grow with the picture.**
+                    // `FrameBuffer::video_scanline` truncates to its own
+                    // width (`take(self.width)`), so a core emitting 400
+                    // dots into a 256-wide buffer loses the margins in
+                    // silence — the enhancement would look like it did
+                    // nothing at all.
+                    let height = sink.height();
+                    let width = request.as_ref().map_or(rf_snes::ppu::WIDTH, |r| {
+                        r.width.clamp(rf_snes::ppu::WIDTH, rf_snes::ppu::MAX_WIDTH)
+                    });
+                    if width != sink.width() {
+                        sink = rf_renderer::FrameBuffer::with_size(width, height);
+                    }
+                    if let Some(buf) = overlay_capture.as_mut() {
+                        buf.resize(
+                            width * height,
+                            rf_core_api::OverlayPixel {
+                                palette_index: 0,
+                                opaque: false,
+                            },
+                        );
+                    }
+                    widescreen = request;
+                    if widescreen.is_none() {
+                        stepper.set_widescreen_off();
+                        // Force a re-send if it is switched back on, so the
+                        // UI never shows a stale set of reasons.
+                        last_decisions = None;
+                    }
+                }
                 CoreCommand::SetEventMask(mask) => {
                     stepper.set_event_mask(mask);
                 }
@@ -914,6 +987,34 @@ fn core_thread_main(
         // being possible, which is DEBUGGER.md §6's pay-for-use rule and
         // what `benches/debugger_idle.rs` measures. The test below is the
         // entire per-frame cost.
+        // **Widescreen decides EVERY FRAME**, because `auto` asks where
+        // the layer is scrolled to and that changes as the player moves.
+        // Deciding once when the toggle was flipped would freeze a HUD's
+        // verdict onto a scrolling layer, or the reverse.
+        if let Some(req) = &widescreen {
+            if let Some(views) = stepper.bg_layer_views() {
+                let decisions = req.policies.decide_all(views);
+                let bg = std::array::from_fn(|i| decisions[i].widens());
+                // `clip` is the one policy that keeps sprites inside the
+                // 4:3 frame; `safe` and `unsafe` both let them into the
+                // margins, differing in how much of a sprite must be
+                // inside to qualify.
+                let obj = req.policies.obj != rf_enhance::widescreen::ObjPolicy::Clip;
+                stepper.set_widescreen(req.width, bg, obj);
+                let reasons: [Option<&'static str>; 4] =
+                    std::array::from_fn(|i| decisions[i].reason());
+                // Only on change: this is a UI explanation, not telemetry.
+                if last_decisions != Some(reasons) {
+                    last_decisions = Some(reasons);
+                    if frame_tx
+                        .send(CoreEvent::WidescreenDecisions(reasons))
+                        .is_err()
+                    {
+                        return LoopControl::Stop; // UI thread hung up.
+                    }
+                }
+            }
+        }
         let ran = match trace.as_mut() {
             None => stepper.tick_running_with_input(
                 input.load(),
@@ -1209,6 +1310,9 @@ mod tests {
             CoreEvent::CanvasSnapshot(_) => {
                 panic!("expected a crash report, got a canvas snapshot")
             }
+            CoreEvent::WidescreenDecisions(_) => {
+                panic!("expected a crash report, got widescreen decisions")
+            }
         }
 
         // The spawned thread's own top-level closure must return
@@ -1340,6 +1444,9 @@ mod tests {
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
+            CoreEvent::WidescreenDecisions(_) => {
+                panic!("expected a frame, got widescreen decisions")
+            }
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -1378,6 +1485,9 @@ mod tests {
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
+            CoreEvent::WidescreenDecisions(_) => {
+                panic!("expected a frame, got widescreen decisions")
+            }
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -1445,6 +1555,9 @@ mod tests {
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
+            CoreEvent::WidescreenDecisions(_) => {
+                panic!("expected a frame, got widescreen decisions")
+            }
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -1486,6 +1599,9 @@ mod tests {
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
+            CoreEvent::WidescreenDecisions(_) => {
+                panic!("expected a frame, got widescreen decisions")
+            }
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -1521,6 +1637,9 @@ mod tests {
             CoreEvent::Frame(msg) => msg.frame_count,
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
+            CoreEvent::WidescreenDecisions(_) => {
+                panic!("expected a frame, got widescreen decisions")
+            }
         };
 
         let bundle = core.frame_bundle.latest();

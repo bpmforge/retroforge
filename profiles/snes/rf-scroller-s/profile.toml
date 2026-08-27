@@ -1,0 +1,60 @@
+# Profile for RetroForge's OWN SNES scrolling fixture (ticket W11-03).
+#
+# WHY THIS ONE IS LEGITIMATE IN-REPO WORK, where W11-06's ten curated
+# profiles are blocked: `rf-scroller-s` is a fixture this project builds
+# from source in `fixtures/snes/rf-scroller-s`, with published build
+# rules and a deterministic output. Its layer layout is not reverse-
+# engineered or guessed — it is written down in the fixture's own source,
+# so every policy below can be checked rather than believed. A commercial
+# title's per-layer behaviour cannot be verified that way, which is
+# exactly why W11-06 waits.
+#
+# It also fills a concrete gap: until this file existed, NO bootable SNES
+# ROM had a profile at all, so the widescreen policy engine had nothing
+# to read and the toggle could not be exercised end to end.
+
+[meta]
+profile_version = "0.1"
+title = "RF-Scroller-S (RetroForge test fixture)"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge W11-03"]
+sources = [
+  "fixtures/snes/rf-scroller-s -- this project's own fixture, built from source in-tree",
+]
+
+[[identity]]
+sha256 = "fd77844dcd40a37ca31d15db25c73c391e816f61d80910ef0552f122c059de7a"
+sha1 = "76b325e20810a8fb2a0f54e07f19a984b461e8b8"
+revision = "1.0"
+
+[capabilities]
+# Decoded widescreen is what this profile exists to enable. Everything
+# else stays false: the fixture has no entity table, no HUD to separate
+# and no level format to decode, and claiming otherwise would be the
+# honesty-contract violation GAME_PROFILES.md warns about -- the UI
+# offers exactly what the profile declares.
+full_level = false
+hud_separation = false
+entity_overlay = false
+widescreen = "decoded"
+fast_load = false
+smooth_camera = false
+
+# Per-layer widescreen policy (FR-ENH-004).
+#
+# `auto` is bsnes-hd's test and this crate's default: a background that
+# spans the full width at horizontal position 0 is not scrolling content,
+# it is a HUD or a static image, and the columns beyond 256 hold nothing
+# it ever meant to show. Naming it explicitly rather than relying on the
+# default is deliberate -- a profile is a claim, and a claim that is only
+# a default is not written down anywhere a reader can check.
+[widescreen]
+bg1 = "auto"
+bg2 = "auto"
+bg3 = "auto"
+bg4 = "auto"
+# `safe` -- draw a sprite only if part of it falls inside the classic
+# area. bsnes-hd's default. `unsafe` "causes artifacts in many games" by
+# its own documentation, and this fixture gives no reason to take that.
+obj = "safe"

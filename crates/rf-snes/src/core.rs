@@ -53,6 +53,15 @@ pub struct SnesCore {
     system: SnesSystem,
     config: CoreConfig,
     budget: u64,
+    /// The widescreen request: output width and which layers may use it.
+    ///
+    /// **`WIDTH` means off, and off is the default** — a fresh core
+    /// renders 4:3 and never reaches the widening path at all (law 6:
+    /// Accuracy Mode is the reference and enhancements are opt-in
+    /// overlays). The mask travels with the width because a refusal is
+    /// part of the request, not a separate setting the renderer could
+    /// forget to consult.
+    widescreen: (usize, crate::ppu::WidenMask),
 }
 
 impl SnesCore {
@@ -66,6 +75,7 @@ impl SnesCore {
             system: SnesSystem::load(raw)?,
             config: CoreConfig::default(),
             budget: FRAME_INSTRUCTION_BUDGET,
+            widescreen: (crate::ppu::WIDTH, crate::ppu::WidenMask::ALL),
         })
     }
 
@@ -82,6 +92,26 @@ impl SnesCore {
 
     /// Shrink the instruction budget, so a termination test can drive the
     /// bound instead of asserting a constant exists.
+    /// Ask for a widened picture, with a per-layer mask (ticket W11-03).
+    ///
+    /// `width <= WIDTH` turns widescreen OFF and restores the accuracy
+    /// path exactly. Clamped to the PPU's `MAX_WIDTH`.
+    pub fn set_widescreen(&mut self, width: usize, mask: crate::ppu::WidenMask) {
+        self.widescreen = (width.clamp(crate::ppu::WIDTH, crate::ppu::MAX_WIDTH), mask);
+    }
+
+    /// The width this core is currently emitting.
+    #[must_use]
+    pub fn frame_width(&self) -> usize {
+        self.widescreen.0
+    }
+
+    /// Each background's geometry, for a widescreen policy decision.
+    #[must_use]
+    pub fn bg_geometry(&self) -> [crate::ppu::BgGeometry; 4] {
+        self.system.bus.ppu.bg_geometry()
+    }
+
     pub fn set_frame_budget(&mut self, budget: u64) {
         self.budget = budget;
     }
@@ -94,8 +124,16 @@ impl SnesCore {
     /// exactly the feature built to show it.
     fn emit_frame(&mut self, sink: &mut dyn CoreSink) {
         let visible = self.system.bus.ppu.setini.visible_lines();
+        let (width, mask) = self.widescreen;
         for y in 0..visible {
-            let line = self.system.bus.ppu.render_scanline(y);
+            let line = if width > crate::ppu::WIDTH {
+                self.system.bus.ppu.render_scanline_masked(y, width, mask)
+            } else {
+                // The accuracy path, untouched. Not `render_scanline_masked`
+                // with a full mask — the point is that widescreen being off
+                // means this code is not reached at all (law 6).
+                self.system.bus.ppu.render_scanline(y)
+            };
             sink.video_scanline(y, &line.pixels);
             sink.overlay_scanline(y, &line.overlay);
         }

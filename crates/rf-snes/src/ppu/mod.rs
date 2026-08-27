@@ -63,6 +63,38 @@ pub const WIDTH: usize = 256;
 /// A caller asking for more is clamped rather than silently truncated —
 /// see [`Ppu::render_scanline_at`].
 pub const MAX_WIDTH: usize = 512;
+
+/// Which layers may use the widened columns.
+///
+/// Widening is not all-or-nothing: `rf_enhance::widescreen` decides per
+/// background, and a layer it declines must stay inside the 4:3 frame.
+/// Carrying that as an explicit mask rather than a bool means the
+/// refusal reaches the renderer instead of being lost between the policy
+/// and the picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WidenMask {
+    pub bg: [bool; 4],
+    pub obj: bool,
+}
+
+impl WidenMask {
+    /// Widen everything — what a plain [`Ppu::render_scanline_at`] means.
+    pub const ALL: Self = Self {
+        bg: [true; 4],
+        obj: true,
+    };
+    /// Widen nothing: every layer stays at 4:3.
+    pub const NONE: Self = Self {
+        bg: [false; 4],
+        obj: false,
+    };
+}
+
+impl Default for WidenMask {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
 /// Visible lines in the default (non-overscan) frame.
 pub const VISIBLE_LINES: u16 = 224;
 /// Visible lines with overscan enabled (`$2133` bit 2).
@@ -296,9 +328,28 @@ pub struct BgLayer {
     pub enabled: bool,
 }
 
+/// One background's geometry, as the widescreen policy engine needs it.
+///
+/// **Raw numbers, deliberately.** `rf_enhance::widescreen::LayerView` is
+/// the same shape, and this does NOT reuse it: a core may not import an
+/// upper layer (ARCHITECTURE §6). The caller in `retroforge` converts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BgGeometry {
+    /// Tilemap width in DOTS — 256 for a 32-tile map, 512 for 64.
+    pub tilemap_width: u16,
+    pub tilemap_height: u16,
+    pub hofs: u16,
+    pub vofs: u16,
+    pub enabled: bool,
+}
+
 /// The S-PPU.
 #[derive(Debug, Clone)]
 pub struct Ppu {
+    /// Which layers the current render may widen. Set by
+    /// [`Ppu::render_scanline_masked`] and reset to [`WidenMask::ALL`]
+    /// by every accuracy render, so it cannot leak between frames.
+    pub widen_mask: WidenMask,
     pub vram: Vec<u8>,
     pub cgram: [u16; CGRAM_ENTRIES],
     pub oam: [u8; OAM_LEN],
@@ -402,6 +453,7 @@ impl Ppu {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            widen_mask: WidenMask::ALL,
             vram: vec![0; 64 * 1024],
             cgram: [0; CGRAM_ENTRIES],
             oam: [0; OAM_LEN],
@@ -906,6 +958,31 @@ impl Ppu {
         self.render_scanline_at(y, WIDTH)
     }
 
+    /// Each background's geometry, for a widescreen policy decision.
+    ///
+    /// Tile sizes are converted to DOTS here rather than in the caller,
+    /// because "is this map wider than the screen" is a question about
+    /// dots and doing the conversion at the far end is how a 16x16-tile
+    /// layer gets mistaken for a narrow one.
+    #[must_use]
+    pub fn bg_geometry(&self) -> [BgGeometry; 4] {
+        std::array::from_fn(|i| {
+            let bg = &self.bgs[i];
+            let tile = if bg.tile_size_16 { 16u16 } else { 8 };
+            // `$2107`-`$210A` bits 0-1: bit 0 doubles the width, bit 1
+            // the height, each in TILES.
+            let cols = if bg.tilemap_size & 0x01 != 0 { 64 } else { 32 };
+            let rows = if bg.tilemap_size & 0x02 != 0 { 64 } else { 32 };
+            BgGeometry {
+                tilemap_width: cols * tile,
+                tilemap_height: rows * tile,
+                hofs: bg.hofs,
+                vofs: bg.vofs,
+                enabled: bg.enabled,
+            }
+        })
+    }
+
     /// Compose one visible row at a caller-specified width.
     ///
     /// **The extra columns are fetched, not stretched.** Output column
@@ -927,7 +1004,23 @@ impl Ppu {
     /// widening to 512 — combining hires with widescreen is not modelled,
     /// and quietly half-doing it would be worse than declining.
     pub fn render_scanline_at(&mut self, y: u16, width: usize) -> Scanline {
+        self.render_scanline_masked(y, width, WidenMask::ALL)
+    }
+
+    /// Compose one visible row at `width`, widening only the layers the
+    /// mask permits.
+    ///
+    /// **This is what makes a policy REFUSAL visible** (ticket W11-03,
+    /// FR-ENH-004). `rf_enhance::widescreen` decides per background
+    /// whether widening is honest — a status bar or a full-screen image
+    /// has nothing beyond 256 it ever meant to show — and a layer it
+    /// declines simply stops at the 4:3 frame rather than being smeared
+    /// or repeated into the margins. A caller that ignored the mask would
+    /// produce a picture that looks wider and is wrong, which is the
+    /// failure bsnes-hd's per-layer policies exist to prevent.
+    pub fn render_scanline_masked(&mut self, y: u16, width: usize, mask: WidenMask) -> Scanline {
         let width = width.clamp(WIDTH, MAX_WIDTH);
+        self.widen_mask = mask;
         // **`y` is a 0-based VISIBLE ROW; the hardware scanline is one
         // more** (ticket W7-13). fullsnes: the V counter runs 0-261 with
         // "1-224 (or 1-239 if overscan is enabled) visible on the
@@ -1111,7 +1204,7 @@ impl Ppu {
             return Scanline { pixels, overlay };
         }
 
-        let bg_pixels = bg::render_backgrounds(self, y, phase, width);
+        let bg_pixels = bg::render_backgrounds(self, y, phase, width, self.widen_mask.bg);
         // Mode 7 replaces BG1 entirely: its "tilemap" is an affine
         // transform, so it is rendered by its own module and injected as
         // BG1's contribution rather than fetched through the tile path.
@@ -1120,7 +1213,7 @@ impl Ppu {
         // HD-Mode-7 is an opt-in overlay, so nothing on this path can
         // reach for a higher density.
         let mode7_line = (self.bg_mode == 7).then(|| mode7::render_scanline(self, y, 1, width));
-        let objs = obj::render_objects(self, y, width);
+        let objs = obj::render_objects(self, y, width, self.widen_mask.obj);
         self.range_over |= objs.range_over;
         self.time_over |= objs.time_over;
 

@@ -26,6 +26,26 @@
 
 use super::{BgLayer, Ppu, MAX_WIDTH, WIDTH};
 
+/// How wide this render is, and whether this layer may use it.
+///
+/// One value rather than two parameters: the width and the permission are
+/// never meaningful apart — a widened frame with a layer that declined is
+/// still a widened frame, and a caller that passed one without the other
+/// would silently widen a layer policy had refused.
+#[derive(Debug, Clone, Copy)]
+pub struct Span {
+    pub width: usize,
+    pub widen: bool,
+}
+
+impl Span {
+    /// Where the 256-dot picture starts inside `width`.
+    #[must_use]
+    pub fn pad(self) -> i32 {
+        (self.width.saturating_sub(WIDTH) / 2) as i32
+    }
+}
+
 /// One background's contribution to a scanline.
 #[derive(Debug, Clone)]
 pub struct BgScanline {
@@ -158,7 +178,13 @@ pub fn palette_base(mode: u8, bg: usize) -> u8 {
 /// `phase` is [`HiresPhase::None`] for every ordinary line; modes 5 and 6
 /// call this twice, once per half-dot. See [`HiresPhase`].
 #[must_use]
-pub fn render_backgrounds(ppu: &Ppu, y: u16, phase: HiresPhase, width: usize) -> BgScanlines {
+pub fn render_backgrounds(
+    ppu: &Ppu,
+    y: u16,
+    phase: HiresPhase,
+    width: usize,
+    widen: [bool; 4],
+) -> BgScanlines {
     let mut out = BgScanlines::default();
     let depths = bit_depths(ppu.bg_mode);
     for (bg, &depth) in depths.iter().enumerate() {
@@ -172,7 +198,10 @@ pub fn render_backgrounds(ppu: &Ppu, y: u16, phase: HiresPhase, width: usize) ->
             depth,
             palette_base(ppu.bg_mode, bg),
             phase,
-            width,
+            Span {
+                width,
+                widen: widen[bg],
+            },
         );
     }
     out
@@ -185,8 +214,9 @@ fn render_layer(
     depth: u8,
     palette_base: u8,
     phase: HiresPhase,
-    width: usize,
+    span: Span,
 ) -> BgScanline {
+    let (width, widen) = (span.width, span.widen);
     let bg = &ppu.bgs[bg_index];
     let mut out = BgScanline::default();
     // (2, 0) or (2, 1) on a true-hires line, (1, 0) otherwise — so every
@@ -217,9 +247,16 @@ fn render_layer(
     // bsnes-hd's model, and it is why this is a fetch and not a stretch:
     // `hofs + sx` addresses the tilemap modularly, so a negative or
     // over-wide `sx` lands on real tiles rather than off the end.
-    let pad = (width.saturating_sub(WIDTH) / 2) as i32;
+    let pad = span.pad();
     for x in 0..width {
         let sx = x as i32 - pad;
+        // **A layer the policy declined to widen stops at the 4:3 frame.**
+        // Leaving it out of the margins is what makes a refusal visible:
+        // a HUD that should not scroll simply is not there, rather than
+        // being smeared or repeated into the new columns.
+        if !widen && !(0..WIDTH as i32).contains(&sx) {
+            continue;
+        }
         // Offset-per-tile replaces this column's scroll wholesale rather
         // than adding to it (modes 2/4/6 only; a no-op elsewhere).
         //

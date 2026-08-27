@@ -57,6 +57,14 @@ const CANVAS_SNAPSHOT_REFRESH_INTERVAL: u32 = 30;
 /// HUD tested at a size no user runs.
 pub const WINDOW_SIZE: [f32; 2] = [768.0, 720.0];
 
+/// How wide decoded widescreen renders, in dots (ticket W11-03).
+///
+/// 400 is 16:9 at the SNES's 224 visible lines (398.2, rounded to an even
+/// number so the 72-dot margin splits evenly either side of the 256-dot
+/// picture). The PPU clamps to its own `MAX_WIDTH`, so this cannot ask
+/// for something the renderer will not deliver.
+pub const WIDESCREEN_WIDTH: usize = 400;
+
 /// Floor for manual resizing. Below this the status bar cannot hold its
 /// own contents and would start clipping again — the exact failure
 /// W10-01 exists to fix — so the window refuses to get there rather than
@@ -215,6 +223,9 @@ fn pad_backend_or_none() -> Option<rf_input::GilrsBackend> {
 
 /// The whole application's UI-thread-owned state.
 pub struct RetroForgeApp {
+    /// Ticket W11-03: why each background did or did not widen. `Some` is
+    /// a refusal with its reason; `None` means widened (or off).
+    widescreen_decisions: [Option<&'static str>; 4],
     core: Option<CoreHandle>,
     texture: Option<egui::TextureHandle>,
     /// Ticket W3-03: the same frame's BG-only layer as a separate egui
@@ -269,6 +280,8 @@ pub struct RetroForgeApp {
     /// merely that a command was sent. A core thread that accepted
     /// `SetDeflicker` and ignored it would pass any plumbing assertion.
     last_frame_rgba: Option<Vec<u8>>,
+    /// Dimensions of `last_frame_rgba` (ticket W11-03).
+    last_frame_size: Option<(usize, usize)>,
     /// Ticket W10-03: §3.1's search box, filtering the library home by
     /// title. Not persisted — a search is a gesture within a session, and
     /// an app that reopened tomorrow still filtered by "castle" would be
@@ -639,6 +652,7 @@ impl RetroForgeApp {
             .unwrap_or_default();
 
         RetroForgeApp {
+            widescreen_decisions: [None; 4],
             core: None,
             texture: None,
             bg_layer_texture: None,
@@ -651,6 +665,7 @@ impl RetroForgeApp {
             audio_fill: None,
             run_hovered: false,
             last_frame_rgba: None,
+            last_frame_size: None,
             library_search: String::new(),
             library_console_filter: None,
             library_scans: 0,
@@ -1641,6 +1656,13 @@ impl RetroForgeApp {
                 // stale by the time we'd paint them" reasoning this
                 // function's own doc already gives for `latest_frame`.
                 CoreEvent::CanvasSnapshot(canvas) => latest_canvas = Some(canvas),
+                // Ticket W11-03: keep the policy's reasons so the Enhance
+                // panel can say WHY a layer stayed narrow. Stored rather
+                // than logged: a refusal the user cannot see is the same
+                // as a swallowed one.
+                CoreEvent::WidescreenDecisions(reasons) => {
+                    self.widescreen_decisions = reasons;
+                }
                 CoreEvent::Crashed(report) => {
                     self.crash = Some(report);
                     self.running = false;
@@ -1722,6 +1744,7 @@ impl RetroForgeApp {
             }
             self.audio_fill = msg.audio_fill;
             self.last_frame_rgba = Some(msg.rgba.clone());
+            self.last_frame_size = Some((msg.width, msg.height));
             // Ticket W11-02: the probe's bytes become a live camera. The
             // `read` closure is a lookup into what the CORE peeked, not a
             // read of anything on this thread — the UI never touches
@@ -3888,6 +3911,42 @@ impl RetroForgeApp {
     /// Toggle temporal de-flicker exactly as the Enhance workspace's
     /// checkbox does, command and all (ticket W11-01).
     #[doc(hidden)]
+    /// Ticket W11-03: turn decoded widescreen on or off.
+    ///
+    /// **The profile decides the policies; the user decides whether it is
+    /// on.** A profile that declares no `[widescreen]` table still gets a
+    /// widened picture with default policies — `auto` per background,
+    /// which is bsnes-hd's own default and refuses the layers that should
+    /// not move. What a profile CANNOT do is switch this on by itself
+    /// (law 6), which `WidescreenPolicies::from_profile` enforces by
+    /// leaving `enabled` false whatever the file says.
+    pub fn set_widescreen(&mut self, on: bool) {
+        if !on {
+            self.widescreen_decisions = [None; 4];
+            self.send_command(CoreCommand::SetWidescreen(None));
+            return;
+        }
+        let mut policies = self
+            .level_session
+            .as_ref()
+            .and_then(|s| rf_enhance::widescreen::WidescreenPolicies::from_profile(&s.profile).ok())
+            .unwrap_or_default();
+        policies.enabled = true;
+        self.send_command(CoreCommand::SetWidescreen(Some(
+            crate::core_thread::WidescreenRequest {
+                width: WIDESCREEN_WIDTH,
+                policies,
+            },
+        )));
+    }
+
+    /// What the widescreen policy last decided, per background: `Some`
+    /// reason means that layer stayed at 4:3.
+    #[must_use]
+    pub fn widescreen_decisions(&self) -> [Option<&'static str>; 4] {
+        self.widescreen_decisions
+    }
+
     pub fn set_deflicker_for_test(&mut self, on: bool) {
         self.current_game_settings.deflicker = on;
         self.send_command(CoreCommand::SetDeflicker(on));
@@ -3896,6 +3955,15 @@ impl RetroForgeApp {
     /// The rgba of the most recent frame the UI received.
     #[doc(hidden)]
     #[must_use]
+    /// The dimensions of the last frame the core delivered.
+    ///
+    /// Ticket W11-03: a widescreen test needs to prove the picture got
+    /// WIDER, and the RGBA blob alone cannot say that.
+    #[doc(hidden)]
+    pub fn frame_size_for_test(&self) -> Option<(usize, usize)> {
+        self.last_frame_size
+    }
+
     pub fn last_frame_rgba_for_test(&self) -> Option<Vec<u8>> {
         self.last_frame_rgba.clone()
     }
@@ -4285,6 +4353,7 @@ impl RetroForgeApp {
             .show(ctx, |ui| {
                 let level_texture = self.level_texture(ui.ctx());
                 let mut view = crate::enhance_dock::EnhanceCtx {
+                    widescreen_decisions: self.widescreen_decisions,
                     level_texture: level_texture.as_ref(),
                     profile_title: self
                         .level_session
@@ -4337,6 +4406,9 @@ impl RetroForgeApp {
         }
         if let Some(on) = actions.full_level_set {
             self.set_level_probe(on);
+        }
+        if let Some(on) = actions.widescreen_set {
+            self.set_widescreen(on);
         }
         if actions.settings_changed {
             self.save_current_game_settings();

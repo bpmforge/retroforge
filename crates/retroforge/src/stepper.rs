@@ -622,6 +622,47 @@ impl EmuStepper {
 
     /// Opt into (or out of) the sprite-limit-bypass overlay (ticket
     /// W3-05a) — forwards `NesBus::set_sprite_overlay_enabled`.
+    /// Ticket W11-03: ask the SNES core for a widened picture.
+    ///
+    /// A no-op on NES, and deliberately silent about it: widescreen is a
+    /// SNES feature (`rf_enhance::widescreen` decides per SNES background
+    /// layer), and a NES session simply has nothing to widen. Returning
+    /// an error the caller would have to ignore would be noise.
+    pub fn set_widescreen(&mut self, width: usize, bg: [bool; 4], obj: bool) {
+        if let Machine::Snes(core) = &mut self.machine {
+            core.set_widescreen(width, rf_snes::ppu::WidenMask { bg, obj });
+        }
+    }
+
+    /// Turn widescreen off, restoring the accuracy path exactly.
+    pub fn set_widescreen_off(&mut self) {
+        if let Machine::Snes(core) = &mut self.machine {
+            core.set_widescreen(rf_snes::ppu::WIDTH, rf_snes::ppu::WidenMask::ALL);
+        }
+    }
+
+    /// Each SNES background's geometry, as the widescreen policy engine
+    /// wants it. `None` on NES.
+    ///
+    /// **The conversion happens HERE, in the shell, and that is the layer
+    /// boundary doing its job** (ARCHITECTURE §6): `rf-snes` may not
+    /// import `rf-enhance`, so the core hands out plain numbers and the
+    /// mediator turns them into a `LayerView`.
+    #[must_use]
+    pub fn bg_layer_views(&self) -> Option<[rf_enhance::widescreen::LayerView; 4]> {
+        let Machine::Snes(core) = &self.machine else {
+            return None;
+        };
+        let g = core.bg_geometry();
+        Some(std::array::from_fn(|i| rf_enhance::widescreen::LayerView {
+            tilemap_width: g[i].tilemap_width,
+            tilemap_height: g[i].tilemap_height,
+            hofs: g[i].hofs,
+            vofs: g[i].vofs,
+            enabled: g[i].enabled,
+        }))
+    }
+
     pub fn set_sprite_overlay_enabled(&mut self, enabled: bool) {
         self.machine.set_sprite_overlay(enabled);
     }

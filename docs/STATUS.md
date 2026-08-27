@@ -1556,3 +1556,55 @@ that way.
 
   W11-03 is unblocked for its part (a). It still needs a profile for the
   `rf-scroller-s` fixture, and `profiles/` is outside its `write_scope`.
+
+- **W11-03 — decoded widescreen reaches a user** (2026-08-27). The path
+  that did not exist: Enhance toggle → `EnhanceActions::widescreen_set` →
+  `RetroForgeApp::set_widescreen` (reads the matched profile's
+  `[widescreen]` policies) → `CoreCommand::SetWidescreen` → core thread
+  decides **per frame** against live layer geometry →
+  `EmuStepper::set_widescreen` → `SnesCore` →
+  `Ppu::render_scanline_masked`.
+
+  Before this, the `widescreen_decoded` checkbox set a field that
+  round-tripped to disk and changed nothing anyone could see, and
+  `WidescreenPolicies` was referenced by **nothing** in
+  `crates/retroforge/src`.
+
+  **Decided every frame, not once at toggle time**: the `auto` policy
+  asks where a layer is scrolled to, and that changes as the player
+  moves. Deciding once would freeze a HUD's verdict onto a scrolling
+  layer, or the reverse.
+
+  **Refusals are surfaced.** A declined layer keeps its 4:3 width —
+  `WidenMask` carries the decision *into* the renderer, so it is simply
+  absent from the margins rather than smeared or repeated — and its
+  reason comes back as `CoreEvent::WidescreenDecisions` and prints under
+  the toggle that caused it. bsnes-hd's lesson is that widening the wrong
+  layer looks like a bug in the *game*.
+
+  **A bug this found:** `FrameBuffer::video_scanline` truncates to its
+  own width (`take(self.width)`), so a core emitting 400 dots into a
+  256-wide buffer loses the margins **in silence**. The buffer is now
+  resized with the picture. Without that the whole feature would have
+  looked inert with every unit test green.
+
+  **Off is off** (law 6): `width <= WIDTH` means the core never reaches
+  the widening path, and the test asserts the frame returns to 256 when
+  cleared — not merely that it stops growing.
+
+  `profiles/snes/rf-scroller-s/profile.toml` is the **first profile any
+  bootable SNES ROM has had**. Legitimate in-repo work: our own fixture,
+  built from source in-tree with published rules, so every policy is
+  checkable rather than believed — explicitly not W11-06's commercial
+  titles.
+
+  Also fixed in passing: `LevelProbe` was carrying `CoreCommand`'s doc
+  comment, orphaned when the struct was inserted beneath it — RF-L-11's
+  exact pattern, made visible by adding a variant.
+
+  Evidence: `crates/retroforge/tests/widescreen_reaches_the_app.rs`
+  drives `RetroForgeApp` itself, not the library — a test calling
+  `decide_all` directly would have stayed green through the entire period
+  this feature was inert. All four SNES golden suites unchanged including
+  the `#[ignore]`d ones. Workspace **1703 passing**; ten-command gate and
+  docs-gate green.

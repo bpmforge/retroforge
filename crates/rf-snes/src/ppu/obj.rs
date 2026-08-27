@@ -147,14 +147,14 @@ impl Default for ObjScanline {
 
 /// Evaluate and render sprites for scanline `y`.
 #[must_use]
-pub fn render_objects(ppu: &Ppu, y: u16, width: usize) -> ObjScanline {
+pub fn render_objects(ppu: &Ppu, y: u16, width: usize, widen: bool) -> ObjScanline {
     // Sprites keep their 256-space X and are shifted right by the same
     // pad the backgrounds use, so a sprite standing in the middle of the
     // picture stays in the middle. A sprite that hardware would clip at
     // the screen edge becomes visible in the widened area — which is the
     // honest consequence of showing more of the world, and exactly the
     // kind of thing a game's own profile may decline.
-    let pad = (width.saturating_sub(WIDTH) / 2) as i16;
+    let span = crate::ppu::bg::Span { width, widen };
     let mut out = ObjScanline::default();
     if !ppu.obj_enabled {
         return out;
@@ -205,10 +205,10 @@ pub fn render_objects(ppu: &Ppu, y: u16, width: usize) -> ObjScanline {
     // Draw survivors lowest-priority first so the earliest-evaluated
     // sprite ends up on top.
     for s in &drawable {
-        draw_sprite(ppu, s, y, &mut out, false, width, pad);
+        draw_sprite(ppu, s, y, &mut out, false, span);
     }
     for s in range_dropped.iter().chain(sliver_dropped.iter()) {
-        draw_sprite(ppu, s, y, &mut out, true, width, pad);
+        draw_sprite(ppu, s, y, &mut out, true, span);
     }
     out
 }
@@ -226,9 +226,11 @@ fn draw_sprite(
     y: u16,
     out: &mut ObjScanline,
     dropped: bool,
-    width: usize,
-    pad: i16,
+    span: crate::ppu::bg::Span,
 ) {
+    let width = span.width;
+    let pad = span.pad() as i16;
+    let widen = span.widen;
     let row = {
         let dy = y.wrapping_sub(u16::from(s.y)) & 0xFF;
         if s.flip_y {
@@ -241,6 +243,12 @@ fn draw_sprite(
     for dx in 0..s.width {
         let x = s.x + dx as i16 + pad;
         if x < 0 || x >= width as i16 {
+            continue;
+        }
+        // Sprites declined for widening stay inside the 4:3 frame, so a
+        // game whose off-screen sprites are staging rather than scenery
+        // does not have them pop into the margins.
+        if !widen && !(pad..pad + WIDTH as i16).contains(&x) {
             continue;
         }
         let x = x as usize;
