@@ -5073,7 +5073,8 @@
    "crates/rf-enhance/**",
    "docs/design/**",
    "docs/STATUS.md",
-   "plan.json"
+   "plan.json",
+   "profiles/**"
   ],
   "depends_on": [
    "W11-02",
@@ -5096,10 +5097,11 @@
    "SECOND GAP, equally concrete: NO SHIPPED PROFILE CAN DRIVE IT. `widescreen::WidescreenPolicies::from_profile` reads `profile.widescreen`'s per-BG policy names, and the only SNES profile that declares any is `profiles/snes/example-mode7` — whose `[[identity]]` is all zeros and therefore matches nothing. The one bootable SNES fixture, `rf-scroller-s`, has no profile at all. So even with PPU support there would be nothing to switch on.",
    "HONEST DECOMPOSITION, so the next session does not rediscover this: (a) rf-snes PPU renders a caller-specified width by fetching the extra columns, with the accuracy path unchanged at 256 — that is the expensive half and belongs in rf-snes; (b) a profile for the rf-scroller-s fixture, which is legitimate in-repo work since it is our own fixture with published build rules (unlike W11-06's commercial titles, whose offsets cannot be verified); (c) the app wiring, which is small once (a) and (b) exist.",
    "STATUS CORRECTED 2026-08-27: no longer 'blocked'. Its dependency W11-12 is done, so nothing is waiting on another ticket — what remains is SIZE, recorded above: the SNES PPU is hardcoded to 256 dots and no bootable SNES ROM has a profile. Claimable, and larger than its 5 points suggest.",
-   "SCOPE RULING (Brad, 2026-08-27): part (a) of the decomposition above — a variable-width SNES PPU — is now its own ticket, W11-13, and this ticket depends on it. THE REASON IS WRITE_SCOPE, not size alone: this ticket may touch crates/retroforge/** and crates/rf-enhance/** but NOT crates/rf-snes/**, and rf_snes::ppu::WIDTH is a const baked into fixed-size array TYPES across bg.rs, obj.rs, mod.rs and mode7.rs. Doing (a) here would have meant widening a 5-point ticket's scope to cover a PPU refactor. The alternative offered was exactly that, and it was declined. WHAT IS LEFT HERE once W11-13 lands: (b) a profile for the rf-scroller-s fixture — still needed, still not written, and note that profiles/ is ALSO outside this write_scope, so raise that when claiming — and (c) the app wiring, which is small once (a) and (b) exist. The widescreen policy engine itself already exists and is tested; it has simply never had a caller in the product."
+   "SCOPE RULING (Brad, 2026-08-27): part (a) of the decomposition above — a variable-width SNES PPU — is now its own ticket, W11-13, and this ticket depends on it. THE REASON IS WRITE_SCOPE, not size alone: this ticket may touch crates/retroforge/** and crates/rf-enhance/** but NOT crates/rf-snes/**, and rf_snes::ppu::WIDTH is a const baked into fixed-size array TYPES across bg.rs, obj.rs, mod.rs and mode7.rs. Doing (a) here would have meant widening a 5-point ticket's scope to cover a PPU refactor. The alternative offered was exactly that, and it was declined. WHAT IS LEFT HERE once W11-13 lands: (b) a profile for the rf-scroller-s fixture — still needed, still not written, and note that profiles/ is ALSO outside this write_scope, so raise that when claiming — and (c) the app wiring, which is small once (a) and (b) exist. The widescreen policy engine itself already exists and is tested; it has simply never had a caller in the product.",
+   "HANDOFF — WRITE_SCOPE WIDENED 2026-08-27 to include profiles/**, per this file's rule that widening requires a HANDOFF note. REASON: part (b) of this ticket's own decomposition is a profile for the rf-scroller-s fixture, and there is no other way to write one. This is legitimate in-repo work — our own test fixture, with published build rules — and explicitly NOT the commercial-title profiling that W11-06 is blocked on, whose per-game offsets cannot be verified. Only the rf-scroller-s profile is added."
   ],
   "points": 5,
-  "status": "todo",
+  "status": "in_progress",
   "stories": []
  },
   {
