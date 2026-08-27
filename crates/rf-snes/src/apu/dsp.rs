@@ -951,6 +951,22 @@ const SCHEDULE: [&[(u8, VStep)]; 32] = [
     /* 31 */ &[(0, VStep::S4), (2, VStep::S1)],
 ];
 
+/// What one SPC cycle of the DSP produced.
+///
+/// The timer flags are here rather than on `Apu` because the timers are
+/// clocked BY the DSP: they are edges of the shared clock, and the DSP is
+/// what knows where in the loop it is. `Apu` applies them — the DSP does
+/// not reach up into the timers itself, which would invert the layering.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DspTick {
+    /// The stereo sample, when the DAC completed one this cycle.
+    pub sample: Option<(i16, i16)>,
+    /// The 64 kHz stage-1 edge: T2. Cycles 0 and 16.
+    pub tick_fast: bool,
+    /// The 8 kHz stage-1 edge: T0 and T1. Cycle 0 of every fourth sample.
+    pub tick_slow: bool,
+}
+
 /// The loop is 64 cycles long, not 32.
 ///
 /// Everything except the KON/KOFF poll repeats at T+32; those two steps
@@ -1037,6 +1053,8 @@ pub struct Dsp {
     koff_internal: u8,
     /// `$6C` FLG bits 0-4 — the noise generator's rate.
     noise_rate: u8,
+    /// Which of the four samples of the 8 kHz timer period this is.
+    sample_in_four: u8,
 }
 
 /// The S-DSP has 128 registers, `$00`-`$7F`.
@@ -1079,6 +1097,7 @@ impl Dsp {
             kon_internal: 0,
             koff_internal: 0,
             noise_rate: 0,
+            sample_in_four: 0,
         }
     }
 
@@ -1350,9 +1369,10 @@ impl Dsp {
     /// them.** The order below is anomie's, cycle for cycle — see
     /// [`SCHEDULE`] for the voice interleave and the provenance note.
     ///
-    /// Returns the stereo sample when this cycle produced one (cycle 27,
-    /// where the right channel reaches the DAC).
-    pub fn tick(&mut self, aram: &mut [u8]) -> Option<(i16, i16)> {
+    /// Returns what this cycle produced: a stereo sample when the DAC
+    /// output completed, and the SPC700 timer edges when the shared clock
+    /// reached them.
+    pub fn tick(&mut self, aram: &mut [u8]) -> DspTick {
         let c = self.cycle % 32;
         // The first half of the loop's 64 cycles; the KON/KOFF poll runs
         // only there, which is what "every other sample" means.
@@ -1369,7 +1389,35 @@ impl Dsp {
             self.voice_step(usize::from(v), step, aram);
         }
 
-        let mut produced = None;
+        let mut out = DspTick::default();
+
+        // **The SPC700 timers are clocked by the DSP, not alongside it.**
+        // fullsnes: "The SPC and DSP chips are started via same /RESET and
+        // clocked via same 2.048MHz signal, causing the SPC Timers to be
+        // incremented in sync with DSP timings: at T1 and T17". Its `T1`
+        // and `T17` are this table's cycles 0 and 16 — fullsnes numbers
+        // the loop one higher throughout (its `T23` is the echo-left read
+        // that anomie puts at 22), and the two agree once that constant
+        // offset is applied. anomie states the same placement from the
+        // other side: cycle 0 "Tick the SPC700 Stage 1 timers, always for
+        // T2 and every 4 samples for T0 and T1", cycle 16 "Tick the
+        // SPC700 Stage 1 timer for T2".
+        //
+        // The RATES were already right (128 cycles for T0/T1, 16 for T2).
+        // What was wrong is that they ran on a free accumulator of
+        // instruction cycles, so their PHASE against the DSP was
+        // arbitrary — and a timer whose phase is arbitrary is exactly
+        // what a read-vs-write test measures.
+        if c == 0 {
+            out.tick_fast = true;
+            if self.sample_in_four == 0 {
+                out.tick_slow = true;
+            }
+            self.sample_in_four = (self.sample_in_four + 1) % 4;
+        } else if c == 16 {
+            out.tick_fast = true;
+        }
+
         match c {
             // "Apply ESA ... Load left channel sample from the echo
             // buffer. Load FFC0." The right sample and the remaining
@@ -1390,7 +1438,7 @@ impl Dsp {
                 let main = (self.acc.1 * i32::from(self.main_vol_right)) >> 7;
                 let echo = i32::from(self.echo.out().1);
                 self.dac.1 = (main + echo).clamp(-0x8000, 0x7FFF) as i16;
-                produced = Some(self.dac);
+                out.sample = Some(self.dac);
             }
             // "Load NON, EON, and DIR." Eagerly decoded on write.
             28 => {}
@@ -1436,7 +1484,7 @@ impl Dsp {
         // Advances by exactly 1 on every path and wraps at a positive
         // constant, so the loop that drives it terminates (law 8).
         self.cycle = (self.cycle + 1) % LOOP_CYCLES;
-        produced
+        out
     }
 
     /// Produce one stereo sample by running 32 cycles of the loop.
@@ -1449,7 +1497,7 @@ impl Dsp {
         let mut out = self.dac;
         for _ in 0..32 {
             // Fixed trip count: terminates by construction (law 8).
-            if let Some(s) = self.tick(aram) {
+            if let Some(s) = self.tick(aram).sample {
                 out = s;
             }
         }
@@ -1600,6 +1648,7 @@ impl Dsp {
         o.u8(self.kon_internal)?;
         o.u8(self.koff_internal)?;
         o.u8(self.noise_rate)?;
+        o.u8(self.sample_in_four)?;
         o.usize(self.echo.at)?;
         o.i16(self.echo.last_fir.0)?;
         o.i16(self.echo.last_fir.1)?;
@@ -1709,6 +1758,7 @@ impl Dsp {
         self.kon_internal = i.u8()?;
         self.koff_internal = i.u8()?;
         self.noise_rate = i.u8()?;
+        self.sample_in_four = i.u8()?;
         self.echo.at = i.usize()?;
         self.echo.last_fir = (i.i16()?, i.i16()?);
         self.echo.esa_latched = i.u8()?;

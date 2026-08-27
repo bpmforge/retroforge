@@ -105,7 +105,7 @@ fn the_timers_have_the_documented_rates() {
 fn a_disabled_timer_does_not_count() {
     let mut apu = Apu::new();
     apu.write(0x00FA, 1); // T0 target = 1
-    apu.tick_timers(10_000);
+    apu.tick_clock(10_000);
     assert_eq!(apu.read(0x00FD), 0, "a timer with no enable bit stays put");
 }
 
@@ -114,7 +114,7 @@ fn an_enabled_timer_counts_at_its_target() {
     let mut apu = Apu::new();
     apu.write(0x00FA, 4); // T0: tick every 4 * 128 = 512 cycles
     apu.write(0x00F1, 0x01); // enable T0 (and bank the IPL out)
-    apu.tick_timers(512 * 3);
+    apu.tick_clock(512 * 3);
     assert_eq!(apu.read(0x00FD), 3, "three counter increments");
 }
 
@@ -126,10 +126,10 @@ fn reading_a_timer_counter_clears_it() {
     let mut apu = Apu::new();
     apu.write(0x00FC, 1); // T2 target 1 -> every 16 cycles
     apu.write(0x00F1, 0x04); // enable T2
-    apu.tick_timers(16 * 5);
+    apu.tick_clock(16 * 5);
     assert_eq!(apu.read(0x00FF), 5);
     assert_eq!(apu.read(0x00FF), 0, "the read cleared it");
-    apu.tick_timers(16 * 2);
+    apu.tick_clock(16 * 2);
     assert_eq!(apu.read(0x00FF), 2, "and it keeps counting afterwards");
 }
 
@@ -140,7 +140,7 @@ fn peeking_a_timer_counter_does_not_clear_it() {
     let mut apu = Apu::new();
     apu.write(0x00FC, 1);
     apu.write(0x00F1, 0x04);
-    apu.tick_timers(16 * 3);
+    apu.tick_clock(16 * 3);
     assert_eq!(apu.peek(0x00FF), 3);
     assert_eq!(apu.peek(0x00FF), 3, "peek is repeatable");
     assert_eq!(apu.read(0x00FF), 3, "and the real read still sees it");
@@ -153,7 +153,7 @@ fn the_timer_counter_is_four_bits() {
     let mut apu = Apu::new();
     apu.write(0x00FC, 1);
     apu.write(0x00F1, 0x04);
-    apu.tick_timers(16 * 20);
+    apu.tick_clock(16 * 20);
     assert_eq!(apu.read(0x00FF), 20 & 0x0F, "wraps at 16, not saturating");
 }
 
@@ -163,9 +163,9 @@ fn a_target_of_zero_means_256() {
     let mut apu = Apu::new();
     apu.write(0x00FC, 0);
     apu.write(0x00F1, 0x04);
-    apu.tick_timers(16 * 255);
+    apu.tick_clock(16 * 255);
     assert_eq!(apu.read(0x00FF), 0, "255 ticks is not yet 256");
-    apu.tick_timers(16);
+    apu.tick_clock(16);
     assert_eq!(apu.read(0x00FF), 1);
 }
 
@@ -174,10 +174,10 @@ fn enabling_a_timer_resets_its_divider() {
     let mut apu = Apu::new();
     apu.write(0x00FC, 4);
     apu.write(0x00F1, 0x04);
-    apu.tick_timers(16 * 3); // part-way to the target
+    apu.tick_clock(16 * 3); // part-way to the target
     apu.write(0x00F1, 0x00); // disable
     apu.write(0x00F1, 0x04); // re-enable
-    apu.tick_timers(16 * 3);
+    apu.tick_clock(16 * 3);
     assert_eq!(
         apu.read(0x00FF),
         0,
@@ -192,15 +192,24 @@ fn the_three_timers_are_independent() {
     apu.write(0x00FB, 1);
     apu.write(0x00FC, 1);
     apu.write(0x00F1, 0x05); // T0 and T2 only
-                             // 336 cycles: T0 gets 2 ticks (336/128), T2 gets 21 (336/16).
+                             // 336 cycles from a fresh APU. The timers are phase-locked to the
+                             // DSP's sample loop, so T0 fires at cycles 0, 128 and 256 — THREE
+                             // edges, not the two a `336 / 128` division would predict. The tick
+                             // at cycle 0 is a real edge: the DSP starts there and the document
+                             // puts the 8 kHz stage-1 tick on it. T2 fires at 0, 16, ... 320,
+                             // which is 21 either way.
                              //
                              // The exact number matters, and picking it carelessly cost a false
                              // failure here: the counter is FOUR bits, so 256 cycles would give T2
                              // exactly 16 ticks and read back as 0 — indistinguishable from "T2
                              // never counted". Any test asserting a timer moved must avoid landing
                              // on a multiple of 16.
-    apu.tick_timers(336);
-    assert_eq!(apu.read(0x00FD), 2, "T0 counted");
+    apu.tick_clock(336);
+    assert_eq!(
+        apu.read(0x00FD),
+        3,
+        "T0 counted, including the edge at cycle 0"
+    );
     assert_eq!(apu.read(0x00FE), 0, "T1 was never enabled");
     assert_eq!(apu.read(0x00FF), 21 & 0x0F, "T2 counted, and much faster");
 }

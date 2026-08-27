@@ -557,7 +557,7 @@ fn a_sample_is_thirty_two_cycles_and_the_loop_is_sixty_four() {
     let mut aram = vec![0u8; 0x10000];
     let mut produced = 0;
     for _ in 0..LOOP_CYCLES {
-        if dsp.tick(&mut aram).is_some() {
+        if dsp.tick(&mut aram).sample.is_some() {
             produced += 1;
         }
     }

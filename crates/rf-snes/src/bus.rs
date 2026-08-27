@@ -384,7 +384,11 @@ impl SnesBus {
                 // charging zero is what froze the clock in W7-15's
                 // investigation, since a halted CPU waits for an
                 // interrupt that only arrives when cycles are spent.
-                self.apu.tick_timers(1);
+                // The DSP is clocked by the same signal, so it advances
+                // here too. It previously did not: a halted or still-booting
+                // SPC700 froze the DSP with it, which is not what sharing a
+                // clock means.
+                self.apu.tick_clock(1);
                 // The HLE boot handshake is a POLLING program and this is
                 // the only place it gets to look: `step_counted` is not
                 // reached while it still owns the machine, so polling only

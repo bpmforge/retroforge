@@ -117,7 +117,6 @@ pub struct Timer {
     /// `$FA`/`$FB`/`$FC` — a target of 0 means 256.
     pub target: u8,
     pub enabled: bool,
-    stage: u32,
     divider: u16,
     counter: u8,
 }
@@ -129,31 +128,40 @@ impl Timer {
             divisor,
             target: 0,
             enabled: false,
-            stage: 0,
             divider: 0,
             counter: 0,
         }
     }
 
-    /// Advance by `cycles` SPC700 cycles.
-    pub fn tick(&mut self, cycles: u32) {
+    /// One STAGE-1 edge of this timer's clock source.
+    ///
+    /// **This is an edge, not a cycle budget.** The 8 kHz and 64 kHz
+    /// clock sources are derived from the same signal that clocks the
+    /// DSP, so [`crate::apu::dsp::Dsp::tick`] is what decides when they
+    /// fire and this only has to act on it. Feeding the timers a count of
+    /// instruction cycles instead — which is what this used to do — gets
+    /// the average rate right and leaves the PHASE against the DSP
+    /// arbitrary, and a timer's phase is precisely what a read-vs-write
+    /// test measures.
+    ///
+    /// Stage 2 is the divider reaching `TnDIV` and bumping the 4-bit
+    /// counter that `$FD`-`$FF` expose.
+    pub fn tick_stage1(&mut self) {
         if !self.enabled {
             return;
         }
-        self.stage += cycles;
-        while self.stage >= self.divisor {
-            self.stage -= self.divisor;
-            self.divider = self.divider.wrapping_add(1);
-            let target = if self.target == 0 {
-                256
-            } else {
-                u16::from(self.target)
-            };
-            if self.divider >= target {
-                self.divider = 0;
-                // The counter is FOUR bits and wraps there.
-                self.counter = (self.counter + 1) & 0x0F;
-            }
+        self.divider = self.divider.wrapping_add(1);
+        // "Divider (01h..FFh=Divide by 1..255, or 00h=Divide by 256)"
+        // — fullsnes, $FA-$FC.
+        let target = if self.target == 0 {
+            256
+        } else {
+            u16::from(self.target)
+        };
+        if self.divider >= target {
+            self.divider = 0;
+            // The counter is FOUR bits and wraps there.
+            self.counter = (self.counter + 1) & 0x0F;
         }
     }
 
@@ -175,7 +183,6 @@ impl Timer {
         if on && !self.enabled {
             self.divider = 0;
             self.counter = 0;
-            self.stage = 0;
         }
         self.enabled = on;
     }
@@ -293,9 +300,8 @@ impl Apu {
         let r = cpu.step_counted(self);
         self.cpu = cpu;
         let cycles = r.unwrap_or(1);
-        self.tick_timers(u32::from(cycles));
         self.reenter_ipl();
-        self.tick_dsp(u32::from(cycles));
+        self.tick_clock(u32::from(cycles));
         self.poll_boot();
         r
     }
@@ -304,30 +310,6 @@ impl Apu {
     ///
     /// The DSP emits one stereo sample every **32 SPC cycles**: the SPC700
     /// runs at roughly 1.024 MHz and the DSP at 32 kHz, and 1024000/32000
-    /// is exactly 32. Anything else makes envelopes, the echo delay line
-    /// and the noise LFSR all run at the wrong rate together, which sounds
-    /// like a pitch bug rather than a clock bug.
-    ///
-    /// **Being programmable is not the same as running.** `$F2`/`$F3` let
-    /// a program reach the registers; without this, nothing would ever
-    /// advance an envelope, set ENDX, or move the echo buffer, so a
-    /// program polling ENVX would still spin forever (ticket W7-08).
-    ///
-    /// **This ticks ONE CYCLE AT A TIME, not one sample at a time**, and
-    /// the difference is the whole of W7-08's second half. Batching 32
-    /// cycles into a single `mix` call makes every register in the DSP
-    /// change at the same instant, so a program cannot observe that ENDX,
-    /// OUTX and ENVX become readable three steps apart — which is the
-    /// property blargg's SPC suite exists to measure. See [`Dsp::tick`].
-    pub(crate) fn tick_dsp(&mut self, cycles: u32) {
-        for _ in 0..cycles {
-            // Fixed trip count: terminates by construction (law 8).
-            if let Some(s) = self.dsp.tick(&mut self.aram) {
-                self.last_sample = s;
-            }
-        }
-    }
-
     /// A program jumped into the IPL window: re-run the handshake.
     ///
     /// **This is the HLE covering re-entry, and it is why this emulator
@@ -355,6 +337,18 @@ impl Apu {
     /// identical bytes, which is exactly the line law 5 draws. This route
     /// needs one byte ($CD, see [`IPL_STUB`]) and no instructions.
     fn reenter_ipl(&mut self) {
+        // **The guard used to require that the handshake was ALREADY
+        // running, which is exactly when re-entry is not needed.** Worse,
+        // the HLE owns the machine while it runs and parks the SPC700
+        // with `stopped = true`, so the second clause bailed on the very
+        // case the first admitted — between them the function could
+        // essentially never fire.
+        //
+        // The real condition is the opposite one: the handshake is NOT
+        // running, and the SPC700's PC has landed in the IPL window. That
+        // window only exists when the program has banked the ROM back in
+        // by setting `$F1` bit 7, which is precisely what a ROM does when
+        // it wants another upload.
         if !self.boot.is_running() || self.cpu.stopped {
             return;
         }
@@ -441,9 +435,29 @@ impl Apu {
         self.ports_out[index]
     }
 
-    pub fn tick_timers(&mut self, cycles: u32) {
-        for t in &mut self.timers {
-            t.tick(cycles);
+    /// Advance the APU's shared clock by `cycles` SPC700 cycles.
+    ///
+    /// **One entry point, because there is one clock.** fullsnes: "The
+    /// SPC and DSP chips are started via same /RESET and clocked via same
+    /// 2.048MHz signal". Advancing the DSP and the timers separately let
+    /// them drift apart in phase even when both had the right rate.
+    ///
+    /// Timer edges come OUT of the DSP tick and are applied here, so the
+    /// DSP never reaches up into the timers.
+    pub fn tick_clock(&mut self, cycles: u32) {
+        for _ in 0..cycles {
+            // Fixed trip count: terminates by construction (law 8).
+            let t = self.dsp.tick(&mut self.aram);
+            if let Some(s) = t.sample {
+                self.last_sample = s;
+            }
+            if t.tick_slow {
+                self.timers[0].tick_stage1();
+                self.timers[1].tick_stage1();
+            }
+            if t.tick_fast {
+                self.timers[2].tick_stage1();
+            }
         }
     }
 
@@ -567,7 +581,6 @@ impl Apu {
             o.u32(t.divisor)?;
             o.u8(t.target)?;
             o.bool(t.enabled)?;
-            o.u32(t.stage)?;
             o.u16(t.divider)?;
             o.u8(t.counter)?;
         }
@@ -596,7 +609,6 @@ impl Apu {
             t.divisor = i.u32()?;
             t.target = i.u8()?;
             t.enabled = i.bool()?;
-            t.stage = i.u32()?;
             t.divider = i.u16()?;
             t.counter = i.u8()?;
         }
