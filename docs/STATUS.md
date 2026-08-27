@@ -1363,3 +1363,70 @@ that way.
   Evidence: workspace **1693 passing**, `cargo fmt --check`, clippy
   `-D warnings`, validate-arch, validate-plan; blargg oracle re-run twice
   and phase-swept.
+
+- **CORRECTION (2026-08-27): the W7-08 entry above over-claims, and the
+  oracle was what let it through.** The entry says `spc_dsp6.sfc`
+  **Failed 03 → PASSED** and `spc_smp.sfc` **→ PASSED**. Neither ROM
+  passes. Both printed `Passed 01` and stopped, and the acceptance test's
+  check was `text.to_ascii_lowercase().contains("passed")`.
+
+  blargg's ROMs print `Passed NN` after **each subtest**, with a running
+  count, and print `PASSED TESTS` once at the end when all of them have
+  passed. So the check matched subtest 1 and reported the whole ROM
+  green. `spc_dsp6.sfc` carries nine subtests — Echo/basics,
+  Echo/esa_changes, Echo/edl_changes, Echo/wrap_around, Echo/zero_length,
+  Echo/echo calc, Echo/edl 0 quirk, Echo/edl lengths, Envelope/envelope
+  rates — of which **one ran**. `spc_smp.sfc` carries nine more and also
+  ran one.
+
+  The criterion is now `contains("PASSED TESTS")`, all four ROMs are
+  correctly red, and **W7-08 returns to `blocked`**: law 3 requires all
+  acceptance to pass before `done`, and Brad's ruling to close it was
+  made on my incorrect report.
+
+  **What is not walked back:** the S-DSP work and its fixes are real.
+  Echo/basics went from `Failed 03` to passing because EDL's four-bit
+  width, the latched ring length and the latched ESA were genuinely
+  wrong, each verified against anomie's document. The schedule, the
+  global counter, the ADSR decode and the register-file save-state are
+  real deliveries. What was wrong was the claim about **coverage**, not
+  the code.
+
+  **Why the rest never runs, which is the substantive finding.** All four
+  ROMs end with the SPC700 **halted at `$FFC0`**, boot handshake not
+  running, IPL banked back in — measured by sampling both CPUs' PCs, and
+  byte-identical at 20M and 400M instructions, so they are stopped rather
+  than slow. blargg's ROMs run one subtest per upload and jump to `$FFC0`
+  to request the next. `Apu::reenter_ipl` exists to HLE that and never
+  fires: its guard demands the handshake already be running — which is
+  when re-entry is *not* needed — and that the CPU not be stopped, which
+  the HLE itself sets. It is also only reachable from `step_counted`,
+  which `SnesBus` skips once the CPU halts.
+
+  Inverting that guard made all four ROMs stop printing any verdict,
+  while a counter in the same build reported **zero** firings, which does
+  not explain the regression. So the re-entry model is not understood and
+  is recorded as such rather than patched on a theory. That is now
+  W7-17's primary content, and its "timer and memory-access timing"
+  title no longer describes the work.
+
+- **W7-17 — the SPC700 timers run on the DSP's clock** (2026-08-27,
+  partial). fullsnes: the SPC and DSP "are started via same /RESET and
+  clocked via same 2.048MHz signal, causing the SPC Timers to be
+  incremented in sync with DSP timings: at T1 and T17" — this
+  implementation's cycles 0 and 16, fullsnes numbering the loop one
+  higher throughout. anomie states the same placement independently, and
+  the two agree once that constant offset is applied. The **rates** were
+  already right; the **phase** was arbitrary, because timers advanced on
+  a free accumulator of instruction cycles while the DSP ran its own
+  loop. `Apu::tick_timers` and `Apu::tick_dsp` are now one
+  `Apu::tick_clock`, and the halted/booting path advances the DSP too
+  rather than freezing it.
+
+  Neither verdict changed, which is reported rather than buried. It does
+  remove the timers as a suspect. `$F0` TEST is still unhandled entirely
+  — it falls through `write_register`'s `_ => {}` arm — and fullsnes
+  documents it fully; that is what `spc_mem_access_times` tests.
+
+  Evidence: workspace **1693 passing**, fmt, clippy `-D warnings`,
+  validate-arch, validate-plan.

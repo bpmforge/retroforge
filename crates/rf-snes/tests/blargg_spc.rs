@@ -94,6 +94,13 @@ const ROMS: &[&str] = &[
     "spc_mem_access_times.sfc",
 ];
 
+/// The banner blargg's ROMs print once, after ALL their subtests pass.
+///
+/// Per-subtest lines read `Passed NN` / `Failed NN` with a running count,
+/// so matching on "passed" alone reports a whole ROM green when only its
+/// first subtest ran.
+const FINAL_BANNER: &str = "PASSED TESTS";
+
 fn rom_dir() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("RF_BLARGG_SPC") {
         return Some(p.into());
@@ -182,7 +189,23 @@ fn blargg_spc_tests_report_success() {
         // reaches a verdict is a FAILURE, not an inconclusive — that
         // distinction is the whole reason this test is red rather than
         // quietly skipping.
-        if !text.to_ascii_lowercase().contains("passed") {
+        //
+        // **THE VERDICT IS THE FINAL BANNER, NOT ANY "Passed".** This
+        // check used to be `contains("passed")` case-insensitively, and
+        // that was wrong in a way that reported success: these ROMs run
+        // MANY subtests and print `Passed NN` after each one, where NN is
+        // a running count. `spc_dsp6.sfc` alone carries Echo/basics,
+        // Echo/esa_changes, Echo/edl_changes, Echo/wrap_around,
+        // Echo/zero_length, Echo/echo calc, Echo/edl 0 quirk,
+        // Echo/edl lengths and Envelope/envelope rates. A run that
+        // finished the FIRST of those and then stalled printed
+        // "Echo/basics Passed 01" — and the old check called that a pass
+        // for the whole ROM.
+        //
+        // The ROM prints `PASSED TESTS` once, at the end, when every
+        // subtest has passed. That is the only string that means what
+        // this test claims.
+        if !text.contains(FINAL_BANNER) {
             failures.push(format!("{name}: {text:?}"));
         }
     }
