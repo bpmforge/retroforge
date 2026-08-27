@@ -32,8 +32,16 @@ impl Ppu {
             read_buffer,
             chr: _,        // VRAM chunk (only when it is CHR RAM)
             chr_is_ram: _, // fixed by the cartridge, not machine state
-            vram: _,       // VRAM chunk
-            palette: _,    // CGRM chunk
+            // Ticket W11-05: an OBSERVATION facility, not machine state.
+            // Deliberately not serialised — whether someone is watching
+            // tiles is a property of this session's UI, and a save made
+            // with an HD pack open must not turn the capture on for
+            // whoever loads it. The tiles themselves are one frame's
+            // scratch and are rebuilt before anyone can read them.
+            tile_capture: _,
+            drawn_tiles: _,
+            vram: _,    // VRAM chunk
+            palette: _, // CGRM chunk
             mirroring,
             bg_pattern_shift_lo,
             bg_pattern_shift_hi,

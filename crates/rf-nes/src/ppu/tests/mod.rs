@@ -45,6 +45,7 @@
 //! module's expected values are hand-computed from).
 mod blargg_roms;
 mod catch_up;
+mod drawn_tiles;
 mod event_emission;
 mod fetch_pipeline;
 mod frame_timing;

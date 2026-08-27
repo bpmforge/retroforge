@@ -427,6 +427,29 @@ const EMPTY_SPRITE_UNIT: SpriteUnit = SpriteUnit {
 
 /// The 2C02 PPU. See the module doc for scope, the `CoreSink` emission
 /// seam, and the `palette_index` semantics commitment.
+/// One background tile the PPU actually drew, and where it landed.
+///
+/// **Recorded at the moment the shift registers are reloaded**, which is
+/// the only place the tile index and its attribute bits exist together
+/// with the scroll state that positions them. A caller cannot reconstruct
+/// this from a frame-end snapshot of `v`: a game that changes scroll
+/// mid-frame — which is how nearly every status bar is drawn — would have
+/// every tile placed against the wrong scroll (ticket W11-05).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawnTile {
+    /// Screen x of the tile's leftmost pixel. Signed: fine-X scrolling
+    /// pushes the first tile of a line partly off the left edge.
+    pub x: i16,
+    /// Visible scanline the tile's top row lands on.
+    pub y: u16,
+    /// Pattern index within the pattern table `base` selects.
+    pub tile: u8,
+    /// `$0000` or `$1000` — `PPUCTRL` bit 4 at fetch time.
+    pub base: u16,
+    /// Background palette 0-3, from the attribute byte's quadrant.
+    pub palette: u8,
+}
+
 pub struct Ppu {
     // ---- CPU-visible registers ($2000-$2007) ----
     pub(super) ctrl: u8,
@@ -446,6 +469,11 @@ pub struct Ppu {
 
     // ---- PPU-side memory ----
     /// Pattern table data (CHR ROM/RAM), `$0000-$1FFF` on the PPU bus.
+    /// Ticket W11-05: record every background tile drawn this frame.
+    /// **Off by default and free when off** — the capture is one branch
+    /// at each reload dot, and the vector is never allocated.
+    pub(super) tile_capture: bool,
+    pub(super) drawn_tiles: Vec<DrawnTile>,
     pub(super) chr: Vec<u8>,
     chr_is_ram: bool,
     /// Nametable RAM: 4 logical 1 KiB banks addressed via `mirroring`, laid
@@ -761,6 +789,8 @@ impl Ppu {
             w: false,
             read_buffer: 0,
             chr,
+            tile_capture: false,
+            drawn_tiles: Vec::new(),
             chr_is_ram,
             vram: [0; 0x1000],
             palette: [0; 32],
@@ -844,6 +874,46 @@ impl Ppu {
 
     /// Current `OAMADDR` (test/debug visibility, same as the old
     /// `ppu_stub` this ticket replaces).
+    /// Ticket W11-05: start or stop recording the tiles the PPU draws.
+    ///
+    /// Pay-for-use (`ARCHITECTURE` §5): with this off the render path
+    /// costs one already-predicted branch per reload dot and allocates
+    /// nothing. Turning it off also drops what was collected, so a
+    /// disabled capture cannot leave a stale frame's tiles behind for a
+    /// caller to mistake for the current one.
+    pub fn set_tile_capture(&mut self, on: bool) {
+        self.tile_capture = on;
+        if !on {
+            self.drawn_tiles = Vec::new();
+        }
+    }
+
+    /// The background tiles drawn during the frame just completed.
+    ///
+    /// Empty unless [`Ppu::set_tile_capture`] is on.
+    #[must_use]
+    pub fn drawn_tiles(&self) -> &[DrawnTile] {
+        &self.drawn_tiles
+    }
+
+    /// The cartridge's CHR, pattern tables included.
+    ///
+    /// A plain non-observing borrow, exactly like [`Ppu::vram`] — reading
+    /// it cannot perturb A12 edge timing, which is why that method's doc
+    /// calls non-observing the load-bearing property. Needed because an
+    /// HD pack rule for a CHR-RAM game is keyed on the tile's BYTES
+    /// rather than its index.
+    #[must_use]
+    pub fn chr(&self) -> &[u8] {
+        &self.chr
+    }
+
+    /// Is CHR writable (CHR-RAM) rather than fixed ROM?
+    #[must_use]
+    pub fn chr_is_ram(&self) -> bool {
+        self.chr_is_ram
+    }
+
     pub fn oam_addr(&self) -> u8 {
         self.oam_addr
     }
@@ -1237,7 +1307,21 @@ impl Ppu {
                 }
                 0
             } else {
-                self.scanline + 1
+                let next = self.scanline + 1;
+                // Ticket W11-05: clear a frame's tiles when the PRE-RENDER
+                // line BEGINS, not when it ends.
+                //
+                // The pre-render line's dots 329/337 prefetch the first two
+                // tiles of scanline 0 — they belong to the frame about to
+                // be drawn. Clearing at the pre-render WRAP (the natural
+                // place, and where this code first put it) recorded those
+                // two and then immediately wiped them, so every frame was
+                // missing its top-left two tiles. The test caught it as
+                // 7678 tiles instead of 7680.
+                if next == PRERENDER_SCANLINE && self.tile_capture {
+                    self.drawn_tiles.clear();
+                }
+                next
             };
         } else {
             self.dot += 1;

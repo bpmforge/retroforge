@@ -217,7 +217,63 @@ impl Ppu {
     /// (the high byte already holds the in-progress tile from the ongoing
     /// per-dot shifts) — nesdev: "the first two tiles for the next scanline
     /// are fetched, and loaded into the shift registers."
+    /// Where the tile being reloaded at `dot` will actually appear.
+    ///
+    /// **A reloaded tile is not the tile being displayed.** It goes into
+    /// the LOW byte of a 16-bit shifter whose HIGH bits feed the output,
+    /// so it becomes visible eight shifts later — pixel `dot + 7`, not
+    /// `dot - 1`. Getting this wrong puts every tile one tile-width left
+    /// of where it was drawn, which looks plausible on a repeating
+    /// background and is obvious on a status bar.
+    ///
+    /// The two prefetch reloads (dots 329 and 337) load the first two
+    /// tiles of the NEXT scanline, landing at its pixels 0 and 8.
+    ///
+    /// Fine X shifts the whole window left, so it is subtracted from the
+    /// result rather than folded into the fetch.
+    fn drawn_tile_position(&self, dot: u16) -> Option<(i16, u16)> {
+        let fine_x = i16::from(self.x);
+        if dot >= 329 {
+            // Prefetch for the next scanline. On the pre-render line that
+            // is scanline 0, which is why this wraps rather than adding.
+            let y = if self.scanline == super::PRERENDER_SCANLINE {
+                0
+            } else {
+                self.scanline + 1
+            };
+            if y >= super::POSTRENDER_SCANLINE {
+                return None;
+            }
+            let x0 = if dot == 329 { 0i16 } else { 8 };
+            return Some((x0 - fine_x, y));
+        }
+        // Same scanline, and only if it is a visible one.
+        if self.scanline >= super::POSTRENDER_SCANLINE {
+            return None;
+        }
+        let x = i16::try_from(dot + 7).ok()? - fine_x;
+        // Tiles reloaded late in the line are fetched but never displayed:
+        // the fetch window runs to dot 256, and anything landing at or
+        // past the 256th pixel is off the right edge.
+        if x >= 256 {
+            return None;
+        }
+        Some((x, self.scanline))
+    }
+
     fn reload_shift_registers(&mut self) {
+        if self.tile_capture {
+            if let Some((x, y)) = self.drawn_tile_position(self.dot) {
+                let tile = super::DrawnTile {
+                    x,
+                    y,
+                    tile: self.nt_latch,
+                    base: self.bg_pattern_table_base(),
+                    palette: self.at_latch,
+                };
+                self.drawn_tiles.push(tile);
+            }
+        }
         self.bg_pattern_shift_lo = (self.bg_pattern_shift_lo & 0xFF00) | self.pt_lo_latch as u16;
         self.bg_pattern_shift_hi = (self.bg_pattern_shift_hi & 0xFF00) | self.pt_hi_latch as u16;
         let attr_lo_fill = if self.at_latch & 0x01 != 0 {
