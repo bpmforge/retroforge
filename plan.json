@@ -5422,7 +5422,7 @@
     "a test renders a wider-than-256 scanline and asserts the extra columns carry real tilemap content, not backdrop"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "SPLIT OUT OF W11-03 ON BRAD'S RULING, 2026-08-27. W11-03's own notes had already decomposed the work into (a) a variable-width PPU, (b) a profile for the rf-scroller-s fixture, and (c) the app wiring — and identified (a) as 'the expensive half [that] belongs in rf-snes'. W11-03's write_scope covers crates/retroforge/** and crates/rf-enhance/** but NOT crates/rf-snes/**, so it could not legally do (a) at all. Filing it here keeps that write_scope honest instead of widening a 5-point ticket to cover a PPU refactor.",
     "MEASURED, NOT ESTIMATED, 2026-08-27. rf_snes::ppu::WIDTH is a `pub const WIDTH: usize = 256` and it is baked into FIXED-SIZE ARRAY TYPES across the whole PPU, not merely used as a loop bound: bg.rs has `pixels: [Option<u8>; WIDTH]` and `priority: [u8; WIDTH]`; obj.rs has `pixels: [Option<(u8, u8)>; WIDTH]`, `priority: [u8; WIDTH]` and `dropped: [Option<u8>; WIDTH]`; mod.rs allocates `vec![backdrop; WIDTH]` and iterates `0..WIDTH`; mode7.rs derives its sample count from it. Making width a runtime value means changing those array types (to Vec, or to const generics) and every construction site. That is why this is 8 points and not a parameter addition.",
