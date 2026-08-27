@@ -1313,3 +1313,53 @@ that way.
   frames** (release), 10k-frame determinism double-run (release),
   workspace **1686 passing / 32 ignored**, clippy `-D warnings`,
   validate-arch, validate-plan.
+
+- **W7-08 — the S-DSP runs anomie's 32-cycle schedule, and blargg's DSP
+  oracle passes** (2026-08-27). The block this ticket had carried since
+  2026-08-23 was "the oracle names a specific architectural gap and
+  closing it needs a spec we do not have". The spec was located —
+  anomie's S-DSP Doc (`apudsp.txt`, `$Revision: 1212$`, 2015-09-28,
+  updates by jwdonal), section SOUND GENERATION. That is **path (a)** of
+  the four unblock routes recorded on the ticket; **path (b), reading GPL
+  emulator source for timing facts, was NOT taken** and was not needed,
+  so provenance stays clean-room (NFR-011).
+
+  `Dsp::tick` now advances **one SPC cycle** through a transcribed
+  32-entry interleave table, and `Dsp::mix` is a wrapper that runs 32 of
+  them — one model of a sample, not two. The substance is the
+  prepared→visible split the suite exists to measure: ENDX prepared at
+  S5 and readable at S7, OUTX at S6/S8, ENVX at S7/S9. A sample-granular
+  mixer updates all three at one instant and cannot express that however
+  correct its arithmetic.
+
+  Also landed from the same document: the real global counter with its
+  rate **and offset** tables, replacing a proportional approximation that
+  said so in its own doc comment; ADSR as the documented pretend-GAIN
+  decode; KON/KOFF latched and polled every other sample over a 64-cycle
+  loop; the echo split across cycles 22–30; rate-gated noise. The
+  save-state had never carried the DSP register file at all — a restored
+  state read back zeros for every register a program had written.
+
+  **The last bug was found by disproving the obvious theory rather than
+  acting on it.** CPU/DSP alignment was the natural suspect and would
+  have justified a multi-day sub-instruction bus-timing refactor of the
+  SPC700. `crates/rf-snes/tests/spc_dsp6_phase_probe.rs` ran the ROM at
+  all 32 starting phases; all 32 failed identically, which ruled
+  alignment out. The real causes were three echo details read live where
+  hardware latches them — EDL's four-bit width, the ring length latched
+  at the wrap, ESA latched at cycle 29. The probe is kept, now asserting
+  that all 32 phases agree.
+
+  Oracle: `spc_dsp6.sfc` **Failed 03 → PASSED**, `spc_smp.sfc` **stalled
+  in "Edge arith" → PASSED**. `spc_timer.sfc` and
+  `spc_mem_access_times.sfc` still fail, in timer read-vs-write and
+  memory access timing — **neither is S-DSP work and neither is claimed
+  here**. W7-08 stays `in_progress` pending Brad's ruling on whether
+  those become their own ticket (note 22's path (d)); `apudsp.txt` is a
+  DSP document and does not carry the SPC700 timer spec, so continuing
+  into it here would mean guessing against a pass/fail ROM — the exact
+  mode this ticket was blocked to avoid.
+
+  Evidence: workspace **1693 passing**, `cargo fmt --check`, clippy
+  `-D warnings`, validate-arch, validate-plan; blargg oracle re-run twice
+  and phase-swept.
