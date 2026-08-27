@@ -5246,36 +5246,42 @@
    "status": "done",
    "stories": []
   },
-  {
-   "id": "W11-10",
-   "title": "rf-nes implements EmulatorCore, and the shell drives it through the trait",
-   "phase": 11,
-   "crate": "retroforge",
-   "write_scope": [
-    "crates/rf-core-api/**",
-    "crates/rf-nes/**",
-    "crates/rf-snes/**",
-    "crates/retroforge/**",
-    "docs/**",
-    "plan.json"
-   ],
-   "depends_on": [],
-   "acceptance": [
-    "rf_nes implements rf_core_api::EmulatorCore — load, reset, run_frame, step, save_state, load_state, state_view, config",
-    "crate::core_thread drives the NES through the TRAIT rather than through EmuStepper's inherent methods; the 20 methods it calls today are either covered by the trait, by StateView, or by CoreConfig, and any that are not are named in the notes with what they need",
-    "the NES path is byte-identical afterwards, proven the way W11-08 was: the five-minute alter_ego replay against its final hash AND golden frames, plus the 10k-frame determinism double-run, both in release",
-    "EmulatorCore stops being implemented only by test mocks — a fact scripts/validate-arch.sh should arguably enforce, and the ticket says whether it now does"
-   ],
-   "notes": [
-    "BRAD'S RULING 2026-08-26: adopt `EmulatorCore` in both cores rather than adding a second bespoke SNES path, and split the work three ways. The alternative — branching `core_thread` on cartridge type and duplicating ~20 methods of behaviour — is how one shell ends up with two half-consoles: every future feature gets written twice or forgotten once. Write scope widened to include the core crates, which W11-07 as originally filed excluded, making it unbuildable as written.",
-    "FIRST OF THREE, and deliberately the NES one: it is the console the shell already works with, so this is a refactor with a known-good output to check against rather than a new console AND a new abstraction at once. If the trait cannot express what the shell needs, that is far cheaper to discover here.",
-    "MEASURED 2026-08-26: `core_thread` calls 20 distinct `EmuStepper` methods — latch_and_advance_frame, latch_and_advance_frame_traced, tick_running_with_input, step_scanline, pause, resume, is_paused, frame_count, last_scanline, peek, vram, oam, palette, wram_snapshot, prg_ram, save_state, load_state, set_sprite_overlay_enabled, set_event_mask, set_audio_channel_capture. `EmulatorCore` has 14 methods plus `StateView`; most of those 20 map onto it (the five memory readers onto StateView, the three setters onto CoreConfig). The mapping is a design exercise, not a mechanical rename.",
-    "RISK is the same shape as W11-08's and should be treated the same way: this is the path every frame flows through, so `cargo test` is not sufficient evidence and the ignored release suites are."
-   ],
-   "points": 8,
-   "status": "in_progress",
-   "stories": []
-  },
+ {
+  "id": "W11-10",
+  "title": "rf-nes implements EmulatorCore, and the shell drives it through the trait",
+  "phase": 11,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/rf-core-api/**",
+   "crates/rf-nes/**",
+   "crates/rf-snes/**",
+   "crates/retroforge/**",
+   "docs/**",
+   "plan.json"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "rf_nes implements rf_core_api::EmulatorCore — load, reset, run_frame, step, save_state, load_state, state_view, config",
+   "crate::core_thread drives the NES through the TRAIT rather than through EmuStepper's inherent methods; the 20 methods it calls today are either covered by the trait, by StateView, or by CoreConfig, and any that are not are named in the notes with what they need",
+   "the NES path is byte-identical afterwards, proven the way W11-08 was: the five-minute alter_ego replay against its final hash AND golden frames, plus the 10k-frame determinism double-run, both in release",
+   "EmulatorCore stops being implemented only by test mocks — a fact scripts/validate-arch.sh should arguably enforce, and the ticket says whether it now does"
+  ],
+  "notes": [
+   "BRAD'S RULING 2026-08-26: adopt `EmulatorCore` in both cores rather than adding a second bespoke SNES path, and split the work three ways. The alternative — branching `core_thread` on cartridge type and duplicating ~20 methods of behaviour — is how one shell ends up with two half-consoles: every future feature gets written twice or forgotten once. Write scope widened to include the core crates, which W11-07 as originally filed excluded, making it unbuildable as written.",
+   "FIRST OF THREE, and deliberately the NES one: it is the console the shell already works with, so this is a refactor with a known-good output to check against rather than a new console AND a new abstraction at once. If the trait cannot express what the shell needs, that is far cheaper to discover here.",
+   "MEASURED 2026-08-26: `core_thread` calls 20 distinct `EmuStepper` methods — latch_and_advance_frame, latch_and_advance_frame_traced, tick_running_with_input, step_scanline, pause, resume, is_paused, frame_count, last_scanline, peek, vram, oam, palette, wram_snapshot, prg_ram, save_state, load_state, set_sprite_overlay_enabled, set_event_mask, set_audio_channel_capture. `EmulatorCore` has 14 methods plus `StateView`; most of those 20 map onto it (the five memory readers onto StateView, the three setters onto CoreConfig). The mapping is a design exercise, not a mechanical rename.",
+   "RISK is the same shape as W11-08's and should be treated the same way: this is the path every frame flows through, so `cargo test` is not sufficient evidence and the ignored release suites are.",
+   "CLOSED 2026-08-27. rf_nes::core::NesCore implements all eight EmulatorCore methods plus the `peek` this ticket added, and EmuStepper holds a NesCore rather than a raw (bus, cpu) pair — all four emulation loops go through the trait.",
+   "TWO REAL REGRESSIONS, both caught by tests that already existed, both invisible without them. (1) THE CYCLE BUDGET SILENTLY GREW ~12x: the original is `4 * 29_781`, four frames of CPU cycles; the first version here wrote `4 * 341 * 262 * 4`, four frames of DOTS. A jammed core would have spun twelve times longer before reporting. (2) `Step::Scanline` STOPPED AT A FRAME BOUNDARY: a scanline step stops when a scanline is DRAINED, and the first frame after power-on ends before any visible scanline exists, so a fresh stepper returned zero for a step that had simply not got there yet. retroforge::stepper looped on `scanlines > 0` alone since W1-06.",
+   "AND A PROCESS NOTE WORTH KEEPING: the first attempt at fixing (2) SILENTLY DID NOTHING — cargo fmt had reflowed the struct literal so the search pattern missed, and the edit no-oped. It was caught only because a probe still printed rows=0. Every scripted edit in this repo should assert its replacement count; this one did not.",
+   "TRAIT ADDITION: `EmulatorCore::peek(addr) -> u8`. StateView lends raw memories, which is right for walking a region, but cannot answer 'what does the CPU see at $6000?' — that goes through the mapper, and mapping is what a bus does. Three shipped features need exactly that: the debugger's memory viewer, W11-02's level probe, W11-04's script window. Both test mocks got honest implementations consistent with their own state_view, not unimplemented!().",
+   "DELIBERATELY NOT BOXED. EmuStepper holds a concrete NesCore, not Box<dyn EmulatorCore>, because three things still have no trait expression: typed CPU registers (StateView::cpu_regs is an untyped &[u8] with no agreed encoding), an out-of-band bus WRITE for the debugger's memory editor, and APU access for channel capture. Boxing before those close would mean bypassing the trait through a downcast, which is worse than holding the concrete type honestly. W11-12 closes them, when there are two cores to be generic over.",
+   "EVIDENCE, to the W11-08 standard because this is the path every frame flows through: alter_ego_five_minute_replay_final_hash_and_golden_frames (five emulated minutes, final state hash AND golden frames, release) and the 10k-frame determinism double-run (release, both halves), plus workspace 1680 passing / 32 ignored, clippy -D warnings, validate-arch."
+  ],
+  "points": 8,
+  "status": "done",
+  "stories": []
+ },
   {
    "id": "W11-11",
    "title": "rf-snes implements EmulatorCore",

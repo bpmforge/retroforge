@@ -1215,3 +1215,50 @@ Restores a gate that has not run since ~2026-08-07 without touching the
 Actions budget. Darwin-only at first, so Linux and the
 software-rasterizer path stay unverified and must keep being described
 that way.
+
+- **W11-10 — the core contract has a real implementation, and the shell
+  uses it** (2026-08-27). `rf_nes::core::NesCore` implements all eight
+  `EmulatorCore` methods plus the `peek` this ticket added, and
+  `EmuStepper` holds a `NesCore` instead of a raw `(bus, cpu)` pair. All
+  four emulation loops — instruction, scanline, frame, traced — go
+  through the trait. The run-until-next-frame loop **moved into
+  `rf-nes`**: the shell had been owning the definition of "one NES
+  frame", and how many CPU steps make a frame, when video and audio
+  drain, and what to do when a boundary never arrives are facts about the
+  machine, not the window drawing it.
+
+  **The trait needed less than expected.** `step(Step::Frame) ->
+  StepResult { frame_complete }` already expresses the cycle-budget
+  escape, and `CoreConfig` is documented as the event-mask path. No
+  signature change was needed for either. It needed **one** addition:
+  `peek(addr)`, because `StateView` lends raw memories but cannot answer
+  "what does the CPU see at `$6000`?" — that goes through the mapper.
+
+  **Two real regressions, both caught by tests that already existed.**
+  (1) The cycle budget silently grew ~12×: the original is `4 * 29_781`,
+  four frames of **CPU cycles**; my first version wrote
+  `4 * 341 * 262 * 4`, four frames of **dots**. A jammed core would have
+  spun twelve times longer before reporting. (2) `Step::Scanline` stopped
+  at a frame boundary — but a scanline step stops when a scanline is
+  *drained*, and the first frame after power-on ends before any visible
+  scanline exists, so a fresh stepper returned zero for a step that had
+  simply not got there yet.
+
+  **A process note worth keeping:** the first attempt at fixing (2)
+  **silently did nothing**. `cargo fmt` had reflowed the struct literal,
+  the search pattern missed, and the edit no-oped — caught only because a
+  probe still printed `rows=0`. Every scripted edit here should assert
+  its replacement count. This one did not.
+
+  **Deliberately not boxed.** `EmuStepper` holds a concrete `NesCore`
+  because three things still have no trait expression: typed CPU
+  registers (`StateView::cpu_regs` is an untyped `&[u8]`), an
+  out-of-band bus **write** for the memory editor, and APU access for
+  channel capture. Boxing before those close means bypassing the trait
+  through a downcast — worse than holding the concrete type honestly.
+  W11-12 closes them, when there are two cores to be generic over.
+
+  Evidence, to the W11-08 standard: the alter_ego **five-minute replay
+  against a final hash and golden frames** (release), the **10k-frame
+  determinism double-run** (release, both halves), workspace **1680
+  passing / 32 ignored**, clippy `-D warnings`, validate-arch.

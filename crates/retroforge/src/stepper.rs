@@ -78,6 +78,7 @@
 //! `hash_kind=full-v1` ([`crate::save_state::HASH_KIND`]); the old
 //! `reachable-v1` names the narrower hash and must not be reused for this
 //! one (SAVE_STATES.md §3).
+use rf_core_api::EmulatorCore as _;
 use rf_core_api::{CoreSink, InputFrame};
 use rf_nes::{Cpu, NesBus, NesLoadError};
 
@@ -156,8 +157,22 @@ impl CoreSink for CountingSink<'_> {
 /// Owns one running NES machine and the run/paused state a debugger UI
 /// drives it through. See module doc.
 pub struct EmuStepper {
-    bus: NesBus,
-    cpu: Cpu,
+    /// Ticket W11-10: the machine, behind `rf_core_api::EmulatorCore`.
+    ///
+    /// `EmuStepper` used to hold `bus: NesBus` and `cpu: Cpu` directly
+    /// and own the run-until-next-frame loop — which meant the SHELL
+    /// owned the definition of "one NES frame". That loop now lives in
+    /// `rf_nes::core::NesCore`, and everything below drives it through
+    /// the trait.
+    ///
+    /// Concrete `NesCore` rather than `Box<dyn EmulatorCore>`, and that
+    /// is W11-12's job rather than an oversight: three things the
+    /// debugger needs have no trait expression yet — typed CPU registers
+    /// (`StateView::cpu_regs` is an untyped `&[u8]`), an out-of-band bus
+    /// WRITE for the memory editor, and APU access for channel capture.
+    /// Boxing before those close would mean bypassing the trait through a
+    /// downcast, which is worse than holding the concrete type honestly.
+    core: rf_nes::core::NesCore,
     state: RunState,
     /// Defensive loop bound in master cycles — [`CYCLE_BUDGET`] in
     /// production, overridden much smaller by tests that need to prove the
@@ -185,7 +200,8 @@ impl EmuStepper {
     /// Returns [`NesLoadError`] for anything `NesBus::from_ines_bytes`
     /// rejects (bad magic, unimplemented mapper, ...).
     pub fn from_ines_bytes(raw: &[u8]) -> Result<Self, NesLoadError> {
-        let mut bus = NesBus::from_ines_bytes(raw)?;
+        let mut core = rf_nes::core::NesCore::from_ines_bytes(raw)?;
+        let bus = core.bus_mut();
         // Ticket W4-03e: the enhanced camera's scroll/scene tracking
         // (`crate::canvas_accum::CanvasAccumulator`, driven by
         // `crate::core_thread`) needs `CoreEvent::Scanline`/`ScrollWrite`
@@ -200,7 +216,6 @@ impl EmuStepper {
         // turning it on here does not touch Law 6 (Accuracy Mode stays an
         // unmodified simulation; this is metadata plumbing, not gameplay).
         bus.set_event_mask(CAMERA_BASELINE_EVENT_MASK);
-        let cpu = Cpu::power_on(&mut bus);
         // Ticket W2-04: the NORMALIZED hash (header stripped), matching
         // `tests/rom-manifest.toml` and `.rfreplay`'s `rom_sha256`, so the
         // same cartridge dumped with a different header still matches its
@@ -209,8 +224,7 @@ impl EmuStepper {
         let mut rom_sha256 = [0u8; 32];
         hex_to_bytes(&identity.normalized.sha256, &mut rom_sha256);
         Ok(EmuStepper {
-            bus,
-            cpu,
+            core,
             state: RunState::Paused,
             cycle_budget: CYCLE_BUDGET,
             rom_sha256,
@@ -231,30 +245,30 @@ impl EmuStepper {
     /// owns a stepper needs a way to hand one over.
     #[must_use]
     pub fn bus_for_battery(&self) -> &NesBus {
-        &self.bus
+        self.core.bus()
     }
 
     /// Mutable counterpart of [`Self::bus_for_battery`], for loading a
     /// `.sav` at startup.
     pub fn bus_for_battery_mut(&mut self) -> &mut NesBus {
-        &mut self.bus
+        self.core.bus_mut()
     }
 
     /// Borrowed CPU, for `crate::save_state`'s serializer.
     pub(crate) fn cpu_for_state(&self) -> &Cpu {
-        &self.cpu
+        self.core.cpu()
     }
 
     /// Borrowed bus, for `crate::save_state`'s serializer.
     pub(crate) fn bus_for_state(&self) -> &NesBus {
-        &self.bus
+        self.core.bus()
     }
 
     /// Both halves mutably, for `crate::save_state`'s loader — one call
     /// rather than two accessors, so a caller cannot restore a CPU into a
     /// bus from a different state.
     pub(crate) fn machine_for_state(&mut self) -> (&mut Cpu, &mut NesBus) {
-        (&mut self.cpu, &mut self.bus)
+        self.core.parts_mut()
     }
 
     /// Test-only hook to prove [`CYCLE_BUDGET`]'s termination guarantee
@@ -263,6 +277,10 @@ impl EmuStepper {
     #[cfg(test)]
     fn set_cycle_budget_for_test(&mut self, budget: u64) {
         self.cycle_budget = budget;
+        // Ticket W11-10: the bound lives in the core now, so the lever
+        // has to reach it. Setting only the shell-side copy left the
+        // termination proofs asserting against a budget nothing read.
+        self.core.set_cycle_budget(budget);
     }
 
     /// Current run/paused state.
@@ -279,7 +297,7 @@ impl EmuStepper {
     /// Total frames completed since power-on (`NesBus::frame_count`).
     #[must_use]
     pub fn frame_count(&self) -> u64 {
-        self.bus.frame_count()
+        self.core.bus().frame_count()
     }
 
     /// Last visible scanline drawn, for the transport position readout
@@ -306,7 +324,7 @@ impl EmuStepper {
     /// is a `JSR` (ticket W4-06e).
     #[must_use]
     pub fn peek(&self, addr: u16) -> u8 {
-        self.bus.peek(addr)
+        self.core.bus().peek(addr)
     }
 
     /// Out-of-band bus write — the write-side counterpart to
@@ -325,7 +343,7 @@ impl EmuStepper {
     /// write-side of a debugger memory view.
     pub fn poke_bus(&mut self, addr: u16, value: u8) {
         use rf_nes::CpuBus;
-        self.bus.write(addr, value);
+        self.core.bus_mut().write(addr, value);
     }
 
     /// The full 256-byte OAM as last written — forwards `NesBus::oam`
@@ -333,19 +351,19 @@ impl EmuStepper {
     /// check reads this to prove its sprite table actually landed).
     #[must_use]
     pub fn oam(&self) -> &[u8; 256] {
-        self.bus.oam()
+        self.core.bus().oam()
     }
 
     /// The PPU's nametable VRAM (ticket W4-06d) — forwards
     /// `NesBus::vram()`, a non-observing borrow.
     pub fn vram(&self) -> &[u8; 0x1000] {
-        self.bus.vram()
+        self.core.bus().vram()
     }
 
     /// The PPU's palette RAM (ticket W4-06d) — forwards
     /// `NesBus::palette()`, raw and unmirrored.
     pub fn palette(&self) -> &[u8; 32] {
-        self.bus.palette()
+        self.core.bus().palette()
     }
 
     /// Side-effect-free 2 KiB WRAM snapshot (`$0000-$07FF`, the real
@@ -377,7 +395,7 @@ impl EmuStepper {
     /// annotates.
     #[must_use]
     pub fn prg_ram(&self) -> &[u8; 0x2000] {
-        self.bus.prg_ram()
+        self.core.bus().prg_ram()
     }
 
     /// Whether the sprite-limit-bypass overlay is currently recording
@@ -386,13 +404,13 @@ impl EmuStepper {
     /// Mode).
     #[must_use]
     pub fn sprite_overlay_enabled(&self) -> bool {
-        self.bus.sprite_overlay_enabled()
+        self.core.bus().sprite_overlay_enabled()
     }
 
     /// Opt into (or out of) the sprite-limit-bypass overlay (ticket
     /// W3-05a) — forwards `NesBus::set_sprite_overlay_enabled`.
     pub fn set_sprite_overlay_enabled(&mut self, enabled: bool) {
-        self.bus.set_sprite_overlay_enabled(enabled);
+        self.core.bus_mut().set_sprite_overlay_enabled(enabled);
     }
 
     /// Widen (or narrow) which `CoreEvent`s this machine emits (ticket
@@ -408,7 +426,8 @@ impl EmuStepper {
     /// back in makes that invariant hold by construction rather than by
     /// caller discipline.
     pub fn set_event_mask(&mut self, mask: rf_core_api::EventMask) {
-        self.bus
+        self.core
+            .bus_mut()
             .set_event_mask(mask.union(CAMERA_BASELINE_EVENT_MASK));
     }
 
@@ -450,17 +469,20 @@ impl EmuStepper {
     /// queue (`Ppu::drain`'s own warning, and the trap `event_emission.rs`
     /// records having fallen into).
     pub fn step_instruction(&mut self, sink: &mut dyn CoreSink) -> u32 {
+        // Ticket W11-10: through the trait. The CPU step and the two
+        // drains that used to be written out here are one instruction's
+        // worth of machine, and `rf_nes::core::NesCore` owns that now.
         let mut counting = CountingSink {
             inner: sink,
             scanlines: 0,
             last_scanline: self.last_scanline,
         };
-        let cycles = self.cpu.step(&mut self.bus);
-        self.bus.drain_video(&mut counting);
-        self.bus.drain_audio(&mut counting);
+        let result = self
+            .core
+            .step(rf_core_api::Step::Instruction, &mut counting);
         self.last_scanline = counting.last_scanline;
         self.state = RunState::Paused;
-        cycles
+        u32::try_from(result.cycles).unwrap_or(u32::MAX)
     }
 
     /// Turn per-channel audio capture on or off (ticket W4-10b).
@@ -470,12 +492,12 @@ impl EmuStepper {
     /// [`rf_nes::apu::Apu::set_channel_capture`] and the invariance test
     /// in `tests/audio_scope_invariance.rs`.
     pub fn set_audio_channel_capture(&mut self, on: bool) {
-        self.bus.apu_mut().set_channel_capture(on);
+        self.core.bus_mut().apu_mut().set_channel_capture(on);
     }
 
     /// Drain the per-channel scope streams captured since the last call.
     pub fn take_audio_channel_samples(&mut self) -> [Vec<i16>; rf_nes::apu::CHANNEL_COUNT] {
-        self.bus.apu_mut().take_channel_samples()
+        self.core.bus_mut().apu_mut().take_channel_samples()
     }
 
     /// The CPU's current program counter — the address the NEXT
@@ -483,14 +505,14 @@ impl EmuStepper {
     /// run-to-cursor both compare against.
     #[must_use]
     pub fn pc(&self) -> u16 {
-        self.cpu.pc
+        self.core.cpu().pc
     }
 
     /// The CPU's stack pointer, for step-over/step-out's frame tracking
     /// (`rf_debugger::breakpoint::frame_has_returned`).
     #[must_use]
     pub fn sp(&self) -> u8 {
-        self.cpu.s
+        self.core.cpu().s
     }
 
     pub fn step_frame(&mut self, sink: &mut dyn CoreSink) -> u64 {
@@ -507,26 +529,17 @@ impl EmuStepper {
     /// more, see module doc), or 0 only if [`CYCLE_BUDGET`]'s defensive
     /// bound fired before any scanline completed.
     pub fn step_scanline(&mut self, sink: &mut dyn CoreSink) -> u32 {
-        let deadline = self.bus.master_cycle() + self.cycle_budget;
+        // Ticket W11-10: the loop, the cycle budget and the per-
+        // instruction audio drain all live in `rf_nes::core::NesCore`
+        // now. The budget in particular is core knowledge — it exists
+        // because `Cpu::step` is not guaranteed to reach a boundary — and
+        // the shell had been the one enforcing it.
         let mut counting = CountingSink {
             inner: sink,
             scanlines: 0,
             last_scanline: self.last_scanline,
         };
-        while self.bus.master_cycle() < deadline {
-            self.cpu.step(&mut self.bus);
-            self.bus.drain_video(&mut counting);
-            // Ticket W2-05: audio drains on the same cadence as video —
-            // per instruction, not per frame — so the ring is fed steadily
-            // instead of in one ~800-sample burst at each frame boundary.
-            // A burst is what makes a small ring underrun between frames
-            // (`docs/design/FAILURE_MODES.md` FM-02); the drain costs one
-            // branch when nothing is queued.
-            self.bus.drain_audio(&mut counting);
-            if counting.scanlines > 0 {
-                break;
-            }
-        }
+        self.core.step(rf_core_api::Step::Scanline, &mut counting);
         let n = counting.scanlines;
         self.last_scanline = counting.last_scanline;
         self.state = RunState::Paused;
@@ -558,8 +571,12 @@ impl EmuStepper {
     /// [`Self::latch_and_advance_frame`], never this alone (module doc's
     /// "one shared latch-then-advance path").
     fn latch_input(&mut self, frame: InputFrame) {
-        self.bus.set_controller_buttons(0, frame.ports[0] as u8);
-        self.bus.set_controller_buttons(1, frame.ports[1] as u8);
+        self.core
+            .bus_mut()
+            .set_controller_buttons(0, frame.ports[0] as u8);
+        self.core
+            .bus_mut()
+            .set_controller_buttons(1, frame.ports[1] as u8);
     }
 
     /// THE one shared latch-then-advance path (module doc, ticket W1-07):
@@ -632,8 +649,9 @@ impl EmuStepper {
     pub fn full_state_bytes(&self) -> Vec<u8> {
         let mut buf = StateBuf::default();
         for region in rf_nes::StateRegion::ALL {
-            self.bus
-                .save_region(&self.cpu, region, &mut buf)
+            self.core
+                .bus()
+                .save_region(self.core.cpu(), region, &mut buf)
                 .unwrap_or_else(|e| {
                     panic!("state_hash: core refused to serialize {region:?}: {e}")
                 });
@@ -674,26 +692,29 @@ impl EmuStepper {
         on_instruction: &mut dyn FnMut(u16, u64, String),
     ) -> u64 {
         self.latch_input(frame);
-        let start = self.bus.frame_count();
-        let deadline = self.bus.master_cycle() + self.cycle_budget;
+        let start = self.core.bus().frame_count();
+        let deadline = self.core.bus().master_cycle() + self.cycle_budget;
         let mut counting = CountingSink {
             inner: sink,
             scanlines: 0,
             last_scanline: self.last_scanline,
         };
         let mut advanced = 0;
-        while self.bus.master_cycle() < deadline {
-            let pc = self.cpu.pc;
-            let cycle = self.bus.master_cycle();
+        // Ticket W11-10: `Step::Instruction` through the trait, one at a
+        // time, because the trace callback has to run BEFORE each
+        // instruction executes — that is what makes the line a record of
+        // what was about to happen rather than of what already had.
+        while self.core.bus().master_cycle() < deadline {
+            let pc = self.core.cpu().pc;
+            let cycle = self.core.bus().master_cycle();
             on_instruction(
                 pc,
                 cycle,
-                rf_nes::trace::format_trace_line(&self.cpu, &self.bus, cycle),
+                rf_nes::trace::format_trace_line(self.core.cpu(), self.core.bus(), cycle),
             );
-            self.cpu.step(&mut self.bus);
-            self.bus.drain_video(&mut counting);
-            self.bus.drain_audio(&mut counting);
-            let now = self.bus.frame_count();
+            self.core
+                .step(rf_core_api::Step::Instruction, &mut counting);
+            let now = self.core.bus().frame_count();
             if now != start {
                 advanced = now - start;
                 break;
@@ -704,8 +725,7 @@ impl EmuStepper {
     }
 
     fn run_until_next_frame(&mut self, sink: &mut dyn CoreSink) -> u64 {
-        let start = self.bus.frame_count();
-        let deadline = self.bus.master_cycle() + self.cycle_budget;
+        let start = self.core.bus().frame_count();
         // Wrapped so the position readout keeps updating while running,
         // not only when single-stepping (ticket W2-15) — a readout that
         // froze during Run would be worse than none.
@@ -714,22 +734,25 @@ impl EmuStepper {
             scanlines: 0,
             last_scanline: self.last_scanline,
         };
-        let mut advanced = 0;
-        while self.bus.master_cycle() < deadline {
-            self.cpu.step(&mut self.bus);
-            self.bus.drain_video(&mut counting);
-            self.bus.drain_audio(&mut counting);
-            let now = self.bus.frame_count();
-            if now != start {
-                debug_assert_eq!(
-                    now,
-                    start + 1,
-                    "a single Cpu::step must not be able to cross a whole frame boundary twice"
-                );
-                advanced = now - start;
-                break;
-            }
-        }
+        // Ticket W11-10: one call through the trait. The loop, its
+        // deadline, and the per-instruction video/audio drains are the
+        // core's business now — `rf_nes::core::NesCore::step` — and the
+        // shell keeps only what it owns: the scanline readout and the
+        // frame count.
+        let result = self.core.step(rf_core_api::Step::Frame, &mut counting);
+        let advanced = if result.frame_complete {
+            let now = self.core.bus().frame_count();
+            debug_assert_eq!(
+                now,
+                start + 1,
+                "one Step::Frame must advance exactly one frame"
+            );
+            now - start
+        } else {
+            // The cycle budget fired: a machine that cannot reach a frame
+            // boundary (a JAM opcode) reports zero rather than spinning.
+            0
+        };
         self.last_scanline = counting.last_scanline;
         advanced
     }
@@ -1260,7 +1283,7 @@ impl EmuStepper {
     /// same reader `rf-nes`'s `dmc_dma_during_read4` suite uses).
     #[must_use]
     pub fn screen_text_for_test(&self) -> String {
-        self.bus.ppu_vram_ascii()
+        self.core.bus().ppu_vram_ascii()
     }
 }
 

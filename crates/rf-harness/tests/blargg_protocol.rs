@@ -90,6 +90,18 @@ impl EmulatorCore for ScriptedCore {
     fn config(&mut self) -> &mut CoreConfig {
         &mut self.config
     }
+
+    fn peek(&self, addr: u32) -> u8 {
+        // This core's "memory" is the scripted frame it is currently
+        // serving, which `state_view` already lends as `mapper_state`.
+        // Reading through the same buffer keeps the two views consistent;
+        // anything past its end is quiescent zero, as an unmapped read
+        // would be.
+        self.script[self.current_index()]
+            .get(addr as usize)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 fn mock_region(view: StateView<'_>) -> &[u8] {

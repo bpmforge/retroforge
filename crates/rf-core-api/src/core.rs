@@ -178,4 +178,27 @@ pub trait EmulatorCore {
 
     /// Mutable access to this core's accuracy/compatibility switches.
     fn config(&mut self) -> &mut CoreConfig;
+
+    /// Read one byte at a CPU-bus address **without perturbing the
+    /// machine** (ticket W11-10).
+    ///
+    /// [`Self::state_view`] lends the raw memories — WRAM, VRAM, CGRAM,
+    /// OAM — and that is the right shape for a viewer that wants to walk
+    /// a whole region. It cannot answer "what does the CPU see at
+    /// `$6000`?", because that goes through the mapper, and mapping is
+    /// exactly what a bus does.
+    ///
+    /// Three shipped features need this and nothing else will do: the
+    /// debugger's memory viewer, the full-level view's camera probe
+    /// (W11-02) and the plugin host's memory window (W11-04). It is on
+    /// the trait rather than on a concrete core so the shell can keep
+    /// working when the core underneath it is a different console.
+    ///
+    /// Non-perturbing is a hard requirement, not a courtesy: this runs
+    /// every frame while a game is playing, and a peek with side effects
+    /// would make the enhancement layer a participant in the simulation
+    /// — the exact thing ARCHITECTURE §2's honesty contract forbids.
+    /// Reads of open-bus or unmapped addresses return whatever the core
+    /// considers the quiescent value; they must not latch anything.
+    fn peek(&self, addr: u32) -> u8;
 }

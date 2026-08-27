@@ -209,6 +209,13 @@ impl EmulatorCore for MockCore {
     fn config(&mut self) -> &mut CoreConfig {
         &mut self.config
     }
+
+    fn peek(&self, addr: u32) -> u8 {
+        // The mock's whole point is being predictable: a byte derived
+        // from the address, so a caller can assert it got the address it
+        // asked for rather than a constant.
+        (addr & 0xFF) as u8
+    }
 }
 
 /// Records every call made through `CoreSink`. If `forbidden` overlaps the

@@ -44,19 +44,28 @@ use rf_core_api::{
 
 use crate::{Cpu, NesBus};
 
-/// Four NTSC frames' worth of master cycles.
+/// Four NTSC frames' worth of CPU cycles (29,781 per frame).
 ///
-/// Generous on purpose: it is a defence against a machine that can never
-/// finish a frame, not a frame-pacing mechanism. A budget tight enough to
-/// interrupt ordinary emulation would turn a correctness backstop into a
-/// source of dropped frames.
-pub const CYCLE_BUDGET: u64 = 4 * 341 * 262 * 4;
+/// **The exact value `retroforge::stepper` used before W11-10**, and it
+/// is copied rather than re-derived on purpose: this is a defensive
+/// bound whose only job is to stop a machine that can never finish a
+/// frame, and changing it while moving it would have made a behaviour
+/// change look like a refactor. A first attempt here used
+/// `4 * 341 * 262 * 4` — "four frames of dots" — which is roughly twelve
+/// times larger and would have let a jammed core spin twelve times
+/// longer before reporting.
+///
+/// Generous on purpose all the same: a budget tight enough to interrupt
+/// ordinary emulation would turn a correctness backstop into a source of
+/// dropped frames.
+pub const CYCLE_BUDGET: u64 = 4 * 29_781;
 
 /// The NES as an [`EmulatorCore`].
 pub struct NesCore {
     bus: NesBus,
     cpu: Cpu,
     config: CoreConfig,
+    cycle_budget: u64,
 }
 
 impl NesCore {
@@ -72,6 +81,7 @@ impl NesCore {
             bus,
             cpu,
             config: CoreConfig::default(),
+            cycle_budget: CYCLE_BUDGET,
         })
     }
 
@@ -80,6 +90,41 @@ impl NesCore {
     #[must_use]
     pub fn bus(&self) -> &NesBus {
         &self.bus
+    }
+
+    /// Shrink the defensive cycle budget.
+    ///
+    /// Exists so the termination proofs can actually drive the bound
+    /// rather than assert that a constant appears in the source.
+    /// `retroforge::stepper`'s tests have set a tiny budget since W1-06
+    /// for exactly that reason, and W11-10 briefly broke them by moving
+    /// the budget here without bringing the lever with it — the tests
+    /// went red, which is what they are for.
+    pub fn set_cycle_budget(&mut self, budget: u64) {
+        self.cycle_budget = budget;
+    }
+
+    /// Borrow the CPU, for the debugger's register readout.
+    ///
+    /// Not reachable through `EmulatorCore` today:
+    /// `StateView::cpu_regs` is an untyped `&[u8]` with no stated
+    /// encoding, so a shell wanting `pc` would have to agree a layout
+    /// with every core out of band. Closing that is W11-12's problem,
+    /// and naming it here beats inventing a byte order nobody agreed to.
+    #[must_use]
+    pub fn cpu(&self) -> &Cpu {
+        &self.cpu
+    }
+
+    /// Both halves, mutably, for a state serializer that must write the
+    /// CPU and the bus as one consistent snapshot.
+    ///
+    /// A pair rather than two calls because the borrow checker would
+    /// otherwise refuse the second — and because a snapshot taken from
+    /// two separate borrows at two moments is exactly the kind of torn
+    /// state a save file must never contain.
+    pub fn parts_mut(&mut self) -> (&mut Cpu, &mut NesBus) {
+        (&mut self.cpu, &mut self.bus)
     }
 
     /// Mutable bus access, for out-of-band writes (the debugger's
@@ -134,7 +179,7 @@ impl EmulatorCore for NesCore {
     fn step(&mut self, granularity: Step, sink: &mut dyn CoreSink) -> StepResult {
         let start_frame = self.bus.frame_count();
         let start_cycle = self.bus.master_cycle();
-        let deadline = start_cycle + CYCLE_BUDGET;
+        let deadline = start_cycle + self.cycle_budget;
         let mut frame_complete = false;
 
         match granularity {
@@ -154,12 +199,23 @@ impl EmulatorCore for NesCore {
                     inner: sink,
                     seen: 0,
                 };
+                // **A scanline step does not stop at a frame boundary.**
+                // It stops when a scanline has been DRAINED, which is not
+                // the same thing: the first frame after power-on ends
+                // BEFORE any visible scanline is produced (the boot
+                // artifact), so breaking on the boundary returns "zero
+                // scanlines" for a step that had simply not got there
+                // yet. `retroforge::stepper` looped on `scanlines > 0`
+                // alone from W1-06, and its test caught this the moment
+                // W11-10 changed it.
                 while self.bus.master_cycle() < deadline {
-                    if self.tick(&mut counting, start_frame) {
-                        frame_complete = true;
-                        break;
-                    }
-                    if want_scanline && counting.seen > 0 {
+                    let crossed = self.tick(&mut counting, start_frame);
+                    frame_complete |= crossed;
+                    if want_scanline {
+                        if counting.seen > 0 {
+                            break;
+                        }
+                    } else if crossed {
                         break;
                     }
                 }
@@ -209,6 +265,13 @@ impl EmulatorCore for NesCore {
 
     fn config(&mut self) -> &mut CoreConfig {
         &mut self.config
+    }
+
+    fn peek(&self, addr: u32) -> u8 {
+        // `NesBus::peek` is the non-perturbing read the debugger has used
+        // since W1-07 — it deliberately does not touch the PPU's
+        // read-latch or any mapper side effect.
+        self.bus.peek(u16::try_from(addr & 0xFFFF).unwrap_or(0))
     }
 }
 
