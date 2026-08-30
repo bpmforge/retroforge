@@ -1768,3 +1768,65 @@ that way.
   Evidence: 7 PPU capture tests and 8 compositor tests (7 new between
   them), plus the existing end-to-end app test still green with masking
   applied. Workspace **1723 passing**; NES and SNES suites unchanged.
+
+- **Doc accuracy pass — the doc set described a CI that has not existed for
+  three weeks** (2026-08-30, no code changed). Triggered by a plain "what
+  is the status" question, which is how it surfaced: answering it honestly
+  required contradicting five documents.
+
+  **The finding, stated once:** *five separate places claimed a mechanism
+  was "CI-enforced" when hosted Actions has rejected every run since
+  ~2026-08-07 and, by the 2026-08-22 ruling, will not run again.* Every
+  one of them had a **real local mechanism to point at instead**, which is
+  why this was a citation bug rather than a coverage gap — `README.md`
+  ("can never perturb the simulation (CI-enforced)") → the
+  `mode_invariant_5k` / `mode_invariant_corpus` suites; `ARCHITECTURE.md`
+  §4 ("Invariant tested in CI") → the same two; `CONSTRAINTS.md`
+  ("Enforced by `scripts/validate-arch.sh` in CI") → law 3's fourth
+  command; `design/SAVE_STATES.md` ("(CI-enforced)") → the `determinism`
+  and `save_state` suites; `VISION.md` ("enforced in CI from day one") →
+  the `mode_invariant_*` suites. Each now cites the command that actually
+  runs, the way `RELEASE_CHECKLIST.md` already did for FR-STATE-005.
+
+  **`TESTING.md` gained a §0** rather than a rewrite. Its "every PR",
+  "nightly" and "Tier A/B" labels are not false — they say **which gate a
+  suite belongs to**, which is still the design. What was missing was
+  anything saying where they execute. §0 says it once, names the six
+  things that actually run, and repeats the three areas covered by
+  nothing: Linux, the software-rasterizer GPU path, the cc65 fixture
+  rebuild. **`SRS.md`'s 22 `| CI |` verification cells were deliberately
+  left alone** and §0 qualifies them instead — that column names a *class*
+  of verification, and 22 coordinated cell edits is a different task than
+  an accuracy pass. Recorded here so it is not re-found as an oversight.
+
+  **`MVP.md`'s product-floor box was the one outright false tick.** It read
+  `[x]` for "macOS + Linux + Windows builds from CI" citing
+  `.github/workflows/ci.yml` — a build that cannot have run. Now `[~]`,
+  naming darwin as the only verified OS, with the reasoning left in
+  `RELEASE_CHECKLIST.md` rather than restated. The rest of that line
+  (normalized-hash library, bindings, per-game settings, the measured
+  60.15 fps) is verified and stays.
+
+  **New information this pass produced, and it is Brad's call:
+  phases 2-6 have every ticket closed and NO recorded exit gate.** Only
+  Phase 1 has one (2026-08-06). This is the 2026-08-05 finding —
+  "R-05's phase gate is not enforced anywhere in code" — showing up as
+  five phases of accumulated consequence. `ROADMAP.md` now marks the two
+  facts **separately per phase** (*tickets closed*, proved by `plan.json`;
+  *exit gate recorded*, proved by this ledger) rather than collapsing them
+  into a ✅ that would manufacture verification nobody performed. The
+  choice is retroactive gates or an R-05 amendment saying ticket
+  completion is the exit; a docs edit cannot make it.
+
+  **Board, re-derived rather than inherited:** `validate-plan` — 161
+  tickets · 865 pts · **157 done / 4 blocked** · **claimable now: (none)**.
+  The four are W7-08, W7-17, W7-18 (SPC700/S-DSP accuracy) and W11-06 (ten
+  curated profiles); each waits on a ruling, none on effort.
+  `validate-traceability` — 101/101 FR/NFR reachable, 33/33 stories
+  covered, 9 decisions, zero dangling refs.
+
+  Gate: `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`,
+  `cargo test --workspace`, `scripts/validate-arch.sh` (`arch OK`) all
+  green, exit 0. **Workspace 1723 passing, 0 failed, 33 ignored** —
+  measured, and identical to the count the W11-14 entry claims at this
+  commit. `scripts/docs-gate.sh` green (this pass edits docs).

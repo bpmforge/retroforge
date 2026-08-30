@@ -70,7 +70,9 @@ game looks like unchained" — and can trust both.
 - Enhancement runtime demonstrates: generic map stitching with ultrawide
   view on an unprofiled game, and a full-level profile demo on RF-Scroller
   (our in-repo fixture platformer — self-contained fixture doctrine D-001).
-- Accuracy-vs-Enhanced state-hash invariant enforced in CI from day one.
+- Accuracy-vs-Enhanced state-hash invariant enforced from day one — by the
+  `mode_invariant_*` suites in the local gate; hosted CI has not run since
+  ~2026-08-07 (`docs/TESTING.md` §0).
 
 **18 months — platform real**
 - SNES core boots the plain-LoROM/HiROM commercial mainstream; Mode 7 games

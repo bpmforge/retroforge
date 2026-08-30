@@ -15,7 +15,8 @@ Hard lines. Violating one is an incident, not a trade-off.
   (`docs/ARCHITECTURE.md` §4).
 - **One-way layering.** `rf-nes`/`rf-snes` depend only on `rf-core-api` +
   `rf-cart`. No core crate imports renderer, enhancement, profile, plugin,
-  or UI crates. Enforced by `scripts/validate-arch.sh` in CI.
+  or UI crates. Enforced by `scripts/validate-arch.sh`, the fourth command
+  of the law-3 local gate (it runs nowhere else — see `docs/TESTING.md` §0).
 - **Indexed-pixel contract.** Pixels cross the core boundary as indexed
   color + source metadata (layer, sprite id, priority), never premixed RGB
   (ARCHITECTURE §5). Every enhancement feature depends on this; it cannot

@@ -1,6 +1,8 @@
 # RetroForge — MVP Definition
 
-Status: target = end of Phase 5 · 2026-07-06
+Status: **acceptance pass closed W5-04** · checklist re-audited 2026-08-30.
+Every box below is ticked except the 3-OS half of the product floor, which
+is claimed-but-unverifiable and now marked as such.
 
 ## 1. What the MVP proves
 
@@ -110,10 +112,17 @@ Capture: `docs/demo/rf-scroller-full-level.png`, regenerated from
       contains an address literal.
 
 Product floor
-- [x] macOS + Linux + Windows builds from CI; ROM library with normalized-
-      hash identity; input remap (keyboard + one gamepad); per-game settings
-      persist; 60 fps with enhancement on (M-class hardware)
-      — 3-OS matrix in `.github/workflows/ci.yml` (`build` job);
+- [~] **PARTIAL — the 3-OS half is not verified and cannot be re-earned as
+      written.** macOS + Linux + Windows builds from CI; ROM library with
+      normalized-hash identity; input remap (keyboard + one gamepad);
+      per-game settings persist; 60 fps with enhancement on (M-class
+      hardware)
+      — the 3-OS matrix still exists in `.github/workflows/ci.yml`
+      (`build` job) and is presumably still correct, but it has not run
+      since ~2026-08-07 and will not run again; **only darwin is
+      verified**. Reasoning and the routes back (self-hosted runner,
+      Gitea Actions) live in `docs/RELEASE_CHECKLIST.md` — not restated
+      here. Everything else on this line IS verified:
       `crate::library` keyed on normalized hashes (W2-07);
       `crate::bindings_store` (W2-06, keyboard + gilrs);
       `crate::game_settings` (W2-07); **60.15 fps measured with FrameBundle

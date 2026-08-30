@@ -1,8 +1,19 @@
 # RetroForge — Roadmap
 
-Status: Phase 0 complete → Phase 1 ready · 2026-07-06
-Ticket IDs `W<phase>-<n>` live in `plan.json`. **A phase's tickets may not
-start until the previous phase's exit criteria pass** (RISKS R-05). Durations
+Status: re-audited 2026-08-30 — **157 of 161 tickets done, 4 blocked, none
+claimable**. Ticket IDs `W<phase>-<n>` live in `plan.json`. **A phase's
+tickets may not start until the previous phase's exit criteria pass**
+(RISKS R-05).
+
+**Two different facts, deliberately kept apart in the markers below.**
+*Tickets closed* is proved by `plan.json`. *Exit gate recorded* means a
+criteria-to-evidence pass was actually run and written into
+`docs/STATUS.md`. **Only Phase 1 has one** (2026-08-06). Phases 2-6 have
+every ticket closed with no recorded exit gate — consistent with the
+finding already in the ledger that "R-05's phase gate is not enforced
+anywhere in code" (STATUS 2026-08-05). Whether to run retroactive gates
+or amend R-05 so that ticket completion *is* the exit is Brad's call; it
+is not resolved by this doc. Durations
 assume AI-agent-driven implementation with maintainer review; they are
 planning ranges, not commitments.
 
@@ -12,7 +23,7 @@ Goal: decisions made, contracts written, workspace scaffolded.
 Exit: research briefs + ARCHITECTURE + design/* + SRS/TESTING/plan.json
 committed; workspace compiles; CI green. **Done 2026-07-06.**
 
-## Phase 1 — NES core MVP (order of weeks)
+## Phase 1 — NES core MVP ✅ tickets closed · **exit gate PASSED 2026-08-06**
 
 Goal: first pixels from a deterministic NROM machine.
 Key tickets: W0-02 (iNES/NES2.0 parse + normalized hashing), W1-01 (6502
@@ -49,7 +60,7 @@ determinism criterion keeps its 10k-frame scale, which is the part that
 catches drift a short run hides; only its *state scope* is staged, because
 a hash cannot cover PPU/APU internals before the core can serialize them.
 
-## Phase 2 — NES compatibility (weeks)
+## Phase 2 — NES compatibility ✅ tickets closed · no exit gate recorded
 
 Goal: the ~91.5% mapper set + audio + states.
 Key tickets: W2-02 (MMC1/UxROM/CNROM), W2-03 (MMC3 + A12 IRQ), W2-01
@@ -73,7 +84,7 @@ Exit criteria:
 - RF-Scroller (in-repo fixture, W2-10) plays start-to-finish and Alter Ego
   plays by hand without visible faults.
 
-## Phase 3 — Renderer modernization (weeks)
+## Phase 3 — Renderer modernization ✅ tickets closed · no exit gate recorded
 
 Goal: wgpu pipelines + the indexed-pixel contract paying off.
 Key tickets: W3-01 (device/surface/original pipeline, integer/aspect,
@@ -86,7 +97,7 @@ demonstrably removes flicker on a test scene while Accuracy mode is
 pixel-identical to Phase-2 goldens; 60 fps sustained with shader chain on
 M-class hardware.
 
-## Phase 4 — Enhancement framework (weeks)
+## Phase 4 — Enhancement framework ✅ tickets closed · no exit gate recorded
 
 Goal: the platform part — events, profiles, overlays, invariant.
 Key tickets: W4-01 (CoreSink event bus + subscription masks + mode-
@@ -99,7 +110,7 @@ Exit criteria: mode-invariant test green in CI; profile matches by
 normalized hash and toggles features; Lua script draws an overlay from live
 RAM reads; enhancement state serializes into ENHC chunks.
 
-## Phase 5 — Game-aware prototype (weeks) → **MVP** (`docs/MVP.md`)
+## Phase 5 — Game-aware prototype → **MVP** (`docs/MVP.md`) ✅ tickets closed (W5-04 acceptance pass) · no exit gate recorded
 
 Goal: prove the thesis on open-source homebrew.
 Key tickets: W4-03 (scroll telemetry + IRQ split + scene hashing +
@@ -111,7 +122,7 @@ Exit criteria: MVP acceptance checklist (MVP.md) passes end-to-end on
 RF-Scroller + one non-profiled game (stitcher-only ultrawide; Alter Ego or
 a second fixture).
 
-## Phase 6 — SNES core MVP (months — R-01)
+## Phase 6 — SNES core MVP ✅ tickets closed · no exit gate recorded
 
 Goal: 65C816 machine boots test ROMs.
 Key tickets: W6-00 (phase-entry refinement — done 2026-08-19),
@@ -141,7 +152,7 @@ detail. W6-04a's notes carry the three options.
 Exit criteria: 65816 + spc700 vector suites 100%; gilyon cputest/spctest
 pass; libSFX-built fixture ROMs render golden frames; input works.
 
-## Phase 7 — SNES compatibility (months)
+## Phase 7 — SNES compatibility ⏳ 15 of 18 tickets done · **W7-08, W7-17, W7-18 blocked** (SPC700/S-DSP accuracy, all on rulings)
 
 Goal: the commercial mainstream plays.
 Key tickets: W7-01 is the phase-entry planning ticket — it expands into:
@@ -154,7 +165,7 @@ Exit criteria: PeterLemon CPU/PPU/Mode-7 golden set green; 3 designated
 plain-LoROM commercial titles (user-supplied) playable start-to-credits
 sampled; RF-Scroller-S (in-repo SNES fixture) plays; save states roundtrip.
 
-## Phase 8 — Advanced enhancements (months, parallelizable)
+## Phase 8 — Advanced enhancements ✅ tickets closed
 
 Widescreen per-BG-layer policies for SNES (bsnes-hd model) + NES profile
 tier; temporal de-flicker (OAM history reconstruction); HUD separation
@@ -165,7 +176,7 @@ rewind; room-stitching for top-down profiles; smooth-camera experiments
 Exit criteria: each feature ships with its own golden/A-B tests + per-game
 override knobs + honesty-contract UI labels.
 
-## Phase 9 — Ecosystem (ongoing)
+## Phase 9 — Ecosystem ⏳ W9 closed; W10/W11 reachability arc closed except **W11-06** (ten curated profiles, blocked on ROMs)
 
 Profile editor UI; plugin SDK stabilization (wasmtime component tier, WIT
 world, capability sandbox); pack/profile/mod distribution format

@@ -109,7 +109,8 @@ Modes are *configuration presets* over the same binary, not code paths:
 5. **Game-Aware** — Enhanced + a matched profile; unlocks profile-gated
    features (full-level view, HUD split, entity overlays).
 
-Invariant tested in CI: for identical ROM + input log, Accuracy and Enhanced
+Invariant tested by `retroforge`'s `mode_invariant_5k` (`--ignored`, run in
+the local gate) and `mode_invariant_corpus`: for identical ROM + input log, Accuracy and Enhanced
 modes produce **identical core state hashes** every frame (enhancement cannot
 perturb simulation).
 

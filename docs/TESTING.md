@@ -1,8 +1,40 @@
 # RetroForge — Test Strategy
 
-Status: Phase 2 baseline · 2026-07-06
+Status: Phase 2 baseline · 2026-07-06 · CI banner added 2026-08-30
 Sources: `docs/research/accuracy-and-testing.md` (suite provenance + URLs),
 SRS verification column, `docs/design/SAVE_STATES.md`.
+
+## 0. Where these gates actually run (read before trusting a "CI" label)
+
+**There is no CI.** Hosted GitHub Actions has rejected every run since
+~2026-08-07 on the Actions budget, and Brad ruled 2026-08-22 that the
+budget is not being increased — so this is permanent policy, not a dip
+(`CLAUDE.md` → Build). A self-hosted runner and Gitea Actions are both
+free and both open; neither is set up.
+
+Read every "every PR", "nightly", "Tier A/B" and "in CI" phrase in this
+document as **which gate a suite belongs to**, not as a claim that
+something ran. What actually executes today is:
+
+- law 3's four commands — `cargo fmt --check`, `cargo clippy --workspace
+  -- -D warnings`, `cargo test --workspace`, `scripts/validate-arch.sh`;
+- `scripts/local-gate.sh` (adds the fetched-corpus suites and the
+  evidence rows of §4) and `scripts/docs-gate.sh` (doc samples,
+  plugin-SDK examples, profile validation, `mdbook build`);
+- `node scripts/validate-plan.mjs` and `node scripts/validate-traceability.mjs`.
+
+All of it runs on **one darwin machine**. Three things CI used to cover
+run nowhere and must be described as unverified wherever they are
+claimed: **Linux**, the **software-rasterizer GPU path**
+(`LIBGL_ALWAYS_SOFTWARE=1` on llvmpipe, versus Metal locally), and the
+**cc65 deterministic fixture rebuild** of RF-Scroller / RF-Scroller-S /
+mirror-maps. A red run on GitHub is not a signal and does not contradict
+a green local gate.
+
+`docs/SRS.md`'s `Verification` column still uses `CI` as a *class* of
+verification for 22 requirements. That naming was left alone deliberately
+— it describes the kind of check, not where it ran — and this section is
+what qualifies it.
 
 ## 1. Test pyramid
 

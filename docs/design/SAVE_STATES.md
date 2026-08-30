@@ -3,7 +3,8 @@
 ## 1. Requirements
 
 - Deterministic: loading a state and replaying the same input log reproduces
-  identical machine state (CI-enforced).
+  identical machine state — enforced by the `determinism` and `save_state`
+  suites in the local gate, not by CI (`docs/TESTING.md` §0).
 - Versioned: states survive emulator upgrades or fail *loudly* with a reason.
 - Layered: core state and enhancement state are independent — an
   Accuracy-mode session can load a state saved in Enhanced mode.
