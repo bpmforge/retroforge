@@ -1,0 +1,166 @@
+# The law-3 gate, on the self-hosted darwin runner.
+#
+# WHY THIS FILE EXISTS AND ci.yml WAS NOT EDITED (ticket W12-01).
+# ci.yml's `gate` job is the LINUX definition of this gate. It is correct
+# as written — it simply cannot run, because hosted Actions has rejected
+# every job since ~2026-08-07 on the budget and, by Brad's 2026-08-22
+# ruling, will not run again. Editing it in place would destroy the record
+# of what a Linux gate should do and rewrite comments that are themselves
+# documentation. So there are two files and two truths: the Linux gate
+# that would work on a Linux runner, and this one, which actually runs.
+#
+# WHAT THIS RESTORES, AND WHAT IT DOES NOT. Exactly ONE of the three areas
+# CI used to cover: the cc65 deterministic fixture rebuild. **Linux** and
+# the **software-rasterizer GPU path** (LIBGL_ALWAYS_SOFTWARE=1 on
+# llvmpipe) are still verified by NOTHING — this machine is darwin and
+# renders on Metal, which is a different claim, not the same one. See
+# docs/TESTING.md section 0; do not let a green badge here be read as
+# three-platform coverage.
+name: Gate (darwin, self-hosted)
+
+# LAW 8, MADE EXPLICIT IN THE TRIGGER. `cargo test --workspace` here runs
+# UNATTENDED on the developer's own workstation — the machine an
+# interpolation.rs loop panicked twice on 2026-08-21 (RF-L-09). So:
+# push-to-main only, never pull_request (a PR from anywhere would run
+# arbitrary code on Brad's desk), plus manual dispatch.
+on:
+  push: { branches: [main] }
+  workflow_dispatch:
+
+# One gate at a time. Without this a burst of pushes queues jobs that each
+# want the whole machine; cancelling the superseded run is strictly better
+# than racing it, since only the newest commit's answer matters.
+concurrency:
+  group: gate-darwin
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: [self-hosted, macOS, ARM64]
+    # Generous but finite. The workspace cold-builds in ~13 min and the
+    # suite runs in ~10; an hour is room for a cold cache without letting
+    # a hung test hold the machine indefinitely (law 8 again — a test that
+    # hangs is not a failing test, it is a denial of service).
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # validate-evidence.mjs's staleness check needs full history:
+          # git rev-list / git merge-base --is-ancestor silently degrade —
+          # never error — on a shallow clone, which would make that gate
+          # pass while enforcing nothing. A self-hosted runner REUSES its
+          # _work directory across jobs, so this is worth re-verifying
+          # here rather than assuming hosted behaviour carries over.
+          fetch-depth: 0
+
+      # No dtolnay/rust-toolchain and no Swatinem/rust-cache, on purpose.
+      # The toolchain is pinned by rust-toolchain.toml and already
+      # installed on this machine, and _work persists between jobs, so a
+      # cache action would upload artifacts to GitHub to re-download what
+      # never left. This step instead PROVES the environment rather than
+      # mutating it: an unattended job must not brew-install onto the
+      # developer's workstation behind their back, so a missing tool fails
+      # loudly with the command to fix it.
+      # A launchd LaunchAgent does NOT inherit an interactive shell's
+      # PATH — node arrives via fnm's multishell in a terminal and would
+      # simply be absent here. Written through $GITHUB_PATH rather than a
+      # workflow-level `env: PATH:` so $HOME expands and no username is
+      # hardcoded, and so the runner's own bundled node is left alone.
+      - name: PATH for a non-interactive service session
+        run: |
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: verify toolchain and tools (never install)
+        run: |
+          set -euo pipefail
+          fail=0
+          need() {
+            if ! command -v "$1" >/dev/null 2>&1; then
+              echo "MISSING: $1 — install with: $2" >&2; fail=1
+            else
+              echo "ok: $1 -> $(command -v "$1")"
+            fi
+          }
+          need cargo   'rustup toolchain install (see rust-toolchain.toml)'
+          need node    'brew install node'
+          need cc65    'brew install cc65'
+          need ca65    'brew install cc65'
+          need cargo-deny 'cargo install cargo-deny --locked --version 0.20.2'
+          rustc --version
+          exit $fail
+
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: arch boundaries
+        run: scripts/validate-arch.sh
+      - name: board validators (D-002)
+        run: node scripts/validate-plan.mjs && node scripts/validate-traceability.mjs
+      - name: local evidence gate (W0-07)
+        run: node scripts/validate-evidence.mjs
+
+      # THE ONE AREA A DARWIN RUNNER GENUINELY RESTORES. cc65 assembles
+      # both the NES and the SNES fixtures (ca65 handles 65816), and each
+      # script refuses a hash mismatch rather than re-pinning silently —
+      # so these steps prove the checked-in .sha256 files still describe
+      # what the sources build, which has been verified NOWHERE since
+      # ~2026-08-07.
+      - name: build SNES mirror-map fixtures (W6-06)
+        run: fixtures/snes/mirror-map/build.sh
+      - name: build RF-Scroller-S fixture (W6-05)
+        run: fixtures/snes/rf-scroller-s/build.sh
+      - name: build RF-Scroller fixture ROM (D-001)
+        run: fixtures/nes/rf-scroller/build.sh
+
+      # No WGPU_BACKEND=gl / LIBGL_ALWAYS_SOFTWARE=1 here. Those force
+      # llvmpipe, which is the Linux job's point; on this machine the
+      # honest thing to exercise is Metal, the backend a darwin user
+      # actually gets. The software-rasterizer path remains unverified and
+      # docs/TESTING.md section 0 says so.
+      - name: tests
+        run: cargo test --workspace
+
+      - name: licence gate (NFR-011, W0-06)
+        run: cargo deny check licenses
+
+      - name: mode-invariant failure evidence (R-F4)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mode-invariant-evidence-darwin
+          path: target/tmp/mode-invariant-evidence/
+          if-no-files-found: ignore
+
+  # -------------------------------------------------------------------
+  # THE HEAVY SUITES ARE DELIBERATELY NOT ON THE PUSH TRIGGER.
+  #
+  # These are the #[ignore]d wall-clock measurements — the 10k-frame
+  # determinism double-run, the 5k-frame mode-invariant boundary, the
+  # debugger idle-cost benchmark. They are the gates a plain
+  # `cargo test --workspace` does NOT cover, so they matter; but they are
+  # long, they are measurements rather than hermetic tests, and under law
+  # 8 running them unattended on the developer's workstation on every push
+  # is the exposure this ticket was told to bound rather than inherit.
+  #
+  # So: one click, attended, when someone wants the answer. Splitting them
+  # out is not a downgrade — nothing ran them at all before today.
+  # -------------------------------------------------------------------
+  heavy:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: determinism 10k-frame double-run (release, W1-08)
+        run: cargo test --release -p retroforge --test determinism -- --ignored
+      - name: MVP boundary — 5k-frame Accuracy vs Enhanced (W5-08)
+        run: cargo test --release -p retroforge --test mode_invariant_5k -- --ignored --nocapture
+      - name: debugger pay-for-use (W4-10a)
+        run: cargo test --release -p retroforge --test debugger_idle_cost -- --ignored --nocapture
+      - name: un-profiled scroller replay (W5-08)
+        run: cargo test -p retroforge --test unprofiled_scroller_replay
+      - name: UI smoke flow (W4-09, R-A1) + NFR-004 timing
+        run: cargo test -p retroforge --test ui_smoke -- --nocapture
