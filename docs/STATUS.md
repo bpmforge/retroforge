@@ -1830,3 +1830,54 @@ that way.
   green, exit 0. **Workspace 1723 passing, 0 failed, 33 ignored** —
   measured, and identical to the count the W11-14 entry claims at this
   commit. `scripts/docs-gate.sh` green (this pass edits docs).
+
+- **Ruling #4's premise tested and it HOLDS: a job ran on this machine
+  today** (2026-08-31). The first Actions job to execute anywhere since
+  ~2026-08-07.
+
+  **The premise nobody had tested.** Ruling #4 (2026-08-26) rests on
+  "GitHub does not bill self-hosted minutes on private repos". That is
+  true of *minutes* — but the rejection this project has collected 166
+  times reads *"The job was not started because an Actions budget is
+  preventing further use"*, and **whether that gates job SCHEDULING or
+  only BILLABLE scheduling decides whether the ruling is viable at all**.
+  Nobody had checked, and porting ~200 lines of `ci.yml` to darwin before
+  checking would have been the expensive way to find out.
+
+  **The discriminator was free and it was unambiguous.** A ten-line
+  `workflow_dispatch` probe (`runs-on: [self-hosted, macOS, ARM64]`, one
+  `echo`, `timeout-minutes: 5`) went to **`queued`** and stayed there.
+  Every hosted run fails in **4-5 seconds with zero steps executed** —
+  including this repo's own CI and docs runs on the 2026-08-30 docs push,
+  and the scheduled Nightly at 03:34 that same morning. Queued is not
+  rejected. **The budget blocks billable runners, not the scheduler.**
+
+  **Then it actually ran**, which is the half that `queued` does not
+  prove: an ephemeral runner registered, took the job, and reported
+  `success` in 4 seconds — `self-hosted scheduling works` and
+  `Darwin ... 25.6.0 ... arm64` in the log. Registered, ran, deregistered;
+  **no launchd service, nothing persistent installed**.
+
+  **What this does NOT restore, stated before anyone infers otherwise.**
+  A darwin runner recovers **one** of the three areas CI used to cover —
+  the **cc65 deterministic fixture rebuild** (cc65 2.19 is already on this
+  machine via brew). **Linux and the software-rasterizer GPU path
+  (`LIBGL_ALWAYS_SOFTWARE=1` on llvmpipe) stay verified by nothing**, and
+  `TESTING.md` §0 must keep saying so. §0's "neither is set up" is
+  **unchanged by this entry** — a probe is not a gate, and yesterday's
+  pass exists precisely because five documents claimed a mechanism ran
+  when it did not.
+
+  **Not a `runs-on` flip, and the port is not filed yet.** `ci.yml`'s
+  `gate` job is Linux-shaped: `sudo apt-get install -y cc65`,
+  `libasound2-dev`/`libudev-dev` in `build`, the llvmpipe path. The
+  substitutions want enumerating up front rather than discovering one
+  failed run at a time. **Law 8 is a design input here, not a footnote**:
+  an auto-triggered `cargo test --workspace` runs unattended on the
+  workstation an `interpolation.rs` loop panicked twice, so trigger scope
+  (`push: [main]` only, no `pull_request`), an explicit
+  `timeout-minutes`, and whether the heavy suites belong in an automated
+  job at all are decisions the ticket must make rather than inherit.
+
+  The probe workflow is **deleted in this same commit** — it existed to
+  answer one question and it answered it.
