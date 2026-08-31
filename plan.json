@@ -5507,6 +5507,36 @@
    "DONE 2026-08-27. HD packs replace sprite art, and the Enhance panel's 'background tiles only' notice is gone because it is no longer true. THE PER-SCANLINE PROBLEM, solved the way the note predicted: sprite pattern fetches happen on every scanline a sprite covers, so a naive capture records an 8-pixel sprite EIGHT times, each copy claiming a different row — a pack would draw its replacement eight times down the screen. Ppu::capture_sprite records once, at the fetch for the sprite's top row (evaluation runs a scanline ahead, so that is `scanline == y`), and a test asserts exactly one placement per sprite. 8x16 emits TWO placements because a pack replaces 8x8 art, with the bank taken from OAM byte 1's own bit 0 rather than PPUCTRL, and vertical flip swapping which half is on top. Flips are reported so the replacement can be mirrored — otherwise a character faces the wrong way. Sprites draw at OAM y + 1, which is pinned by a test because it is the classic off-by-one that puts a whole sprite layer one row high. THE PRIORITY DECISION THIS TICKET HAD TO MAKE, and it turned out not to need priority modelling at all: a replacement may only paint pixels where the ORIGINAL frame shows the same layer. The PPU already resolved priority when it drew the frame, and FrameBundle already carries PpuPixel::layer per pixel, so masking against it is free and exactly right — a sprite behind the background is masked out, and so is a background tile with a sprite standing in front of it. THAT SECOND HALF WAS A BUG IN W11-05, found while doing this: background replacements were painting over sprites. Nothing caught it because the fixture's replaced tiles happened not to overlap a sprite. A test now pins both directions. ALSO: a rule whose every pixel is masked away is reported as UNMATCHED, not replaced — counting it would overstate what the pack achieved. FrameMsg's two HD fields became one boxed HdFrame. Not tidying: clippy's large_enum_variant fired because CoreEvent travels through a channel every frame, so two inline vectors would grow it for every session whether a pack is loaded or not. EVIDENCE: 7 PPU capture tests (4 new, covering once-per-sprite, 8x16 as two tiles, vertical-flip swap, and horizontal flip reporting), 8 compositor tests (3 new, covering the layer mask in both directions, the fully-masked rule, and mirrored art), and the existing end-to-end app test still green with masking applied. workspace 1723 passing; ten-command gate green; NES and SNES suites unchanged."
    ],
    "stories": []
+  },
+  {
+   "id": "W12-01",
+   "title": "The local gate runs unattended on a self-hosted darwin runner",
+   "phase": 12,
+   "crate": "infra",
+   "write_scope": [
+    ".github/**",
+    "scripts/**",
+    "docs/TESTING.md",
+    "docs/STATUS.md"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "a push to main triggers a job that runs the law-3 gate on the self-hosted darwin runner and reports its real result, verified by reading a completed run rather than by the workflow file existing",
+    "cc65 comes from brew rather than apt, and the deterministic fixture rebuild (RF-Scroller, RF-Scroller-S, mirror-maps) runs and passes in that job — this is the ONE of three CI-covered areas a darwin runner restores",
+    "the job is bounded against law 8: push-to-main only (no pull_request), an explicit job-level timeout, and a written decision on whether the heavy suites run unattended",
+    "docs/TESTING.md §0 is updated ONLY after a green run, and says darwin-only: Linux and the software-rasterizer GPU path remain verified by nothing"
+   ],
+   "points": 5,
+   "status": "in_progress",
+   "notes": [
+    "FILED 2026-08-31 after ruling #4's premise was TESTED rather than assumed. The premise was 'GitHub does not bill self-hosted minutes on private repos' — true of MINUTES, but every rejection since ~2026-08-07 reads 'The job was not started because an Actions budget is preventing further use', and whether that gates JOB SCHEDULING or only BILLABLE scheduling decided whether this ticket could exist at all. A ten-line workflow_dispatch probe went to QUEUED (hosted runs are REJECTED in 4-5s with zero steps executed), then an ephemeral runner took it and reported success in 4s on Darwin arm64. The scheduler is not budget-gated. Probe deleted the same day; the finding is in STATUS 2026-08-31.",
+    "DO NOT EDIT ci.yml — ADD gate-darwin.yml. ci.yml's `gate` job is the LINUX definition and it is correct as written; it simply cannot run. Editing it in place would destroy the record of what a Linux gate should do, and its comments are load-bearing documentation. Two workflows keep two truths: the Linux gate that would work on a Linux runner, and the darwin gate that actually runs. The substitutions are known up front rather than discovered one failed run at a time: brew cc65 (2.19 already installed) instead of `sudo apt-get install -y cc65`; no libasound2-dev/libudev-dev; Metal instead of the LIBGL_ALWAYS_SOFTWARE=1 llvmpipe path.",
+    "LAW 8 IS A DESIGN INPUT, NOT A FOOTNOTE, AND THE EXPOSURE IS NEW. A launchd service means jobs fire on Brad's workstation on every push to main, UNATTENDED — including `cargo test --workspace`, on the machine an interpolation.rs loop panicked twice on 2026-08-21 (RF-L-09). That is why trigger scope (push:[main] only, never pull_request), an explicit job-level timeout, and whether the heavy suites belong in an automated job at all are decisions this ticket must MAKE rather than inherit from ci.yml's defaults. Recorded before the first unattended run, not after.",
+    "CHECK BEFORE TRUSTING THE EVIDENCE STEP: ci.yml's gate job runs validate-evidence.mjs under `fetch-depth: 0`, and its own comment says git rev-list / git merge-base --is-ancestor 'silently degrade — never error — on a shallow clone', which would make the gate pass while enforcing nothing. A self-hosted runner REUSES _work across jobs, which is a different environment from a fresh hosted checkout. Verify the staleness check still has the history it needs there, or the same silent-degradation trap arrives by a new route.",
+    "SCOPE HONESTY, so 'CI is back' does not become the next false claim this project has to correct. A darwin runner restores exactly ONE of the three areas CI used to cover: the cc65 deterministic fixture rebuild. LINUX and the SOFTWARE-RASTERIZER GPU PATH stay verified by nothing and TESTING.md §0 must keep saying so. §0's 'neither is set up' may not be flipped until a real gate-darwin.yml run comes back green — a workflow file existing is exactly the class of claim the 2026-08-30 accuracy pass spent itself correcting.",
+    "RUNNER LOCATION IS PART OF THE DELIVERABLE. svc.sh install bakes the runner's ABSOLUTE PATH into the launchd plist. The probe ran from the session scratchpad, which is session-specific and gets cleaned — a service pointing there would break silently and look exactly like 'CI stopped running', the failure mode this arc exists to eliminate. Moved to ~/actions-runner (deregistered, so a plain mv was clean) before any registration. Registration and svc.sh install are BRAD'S commands: the permission classifier blocks them, correctly, and non-ephemeral this time since a service that deregisters after one job defeats the point."
+   ],
+   "stories": []
   }
  ]
 }
