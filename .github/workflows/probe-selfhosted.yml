@@ -1,0 +1,21 @@
+# TEMPORARY PROBE — delete once it has answered its one question.
+#
+# Ruling #4 (2026-08-26) assumes GitHub does not bill self-hosted minutes
+# on private repos. That is true of MINUTES, but every rejection since
+# ~2026-08-07 reads "The job was not started because an Actions budget is
+# preventing further use" — and whether that gates JOB SCHEDULING or only
+# BILLABLE scheduling decides whether ruling #4 is viable at all.
+#
+# This workflow does nothing but find out. workflow_dispatch only, so it
+# never fires on push; five-minute cap so a scheduling hang cannot sit on
+# the developer's workstation.
+name: Self-hosted probe
+on: { workflow_dispatch: }
+jobs:
+  probe:
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 5
+    steps:
+      - run: |
+          echo "self-hosted scheduling works"
+          uname -a
