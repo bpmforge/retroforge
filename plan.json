@@ -5537,6 +5537,33 @@
     "RUNNER LOCATION IS PART OF THE DELIVERABLE. svc.sh install bakes the runner's ABSOLUTE PATH into the launchd plist. The probe ran from the session scratchpad, which is session-specific and gets cleaned — a service pointing there would break silently and look exactly like 'CI stopped running', the failure mode this arc exists to eliminate. Moved to ~/actions-runner (deregistered, so a plain mv was clean) before any registration. Registration and svc.sh install are BRAD'S commands: the permission classifier blocks them, correctly, and non-ephemeral this time since a service that deregisters after one job defeats the point."
    ],
    "stories": []
+  },
+  {
+   "id": "W13-01",
+   "title": "The debugger's \"daily-drivable for ROM hackers\" bar, written down",
+   "phase": 13,
+   "crate": "infra",
+   "write_scope": [
+    "plan.json",
+    "docs/ROADMAP.md",
+    "docs/design/DEBUGGER.md",
+    "docs/work/VISION_PLAN.md"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "every row of DEBUGGER.md §§1-6 is graded against what ships, with the file or symbol that satisfies it named — a grade with no citation is not a grade",
+    "the phrase \"daily-drivable for ROM hackers\" is replaced by a TESTABLE bar: a numbered criteria list an executor can pass or fail without asking what it meant",
+    "the gaps the grading finds are filed as tickets with real write_scope and depends_on, so VISION_PLAN.md's `points: ?` for the closure work becomes a number",
+    "no debugger code is written by this ticket — it is a phase-entry planning ticket in W6-00 and W7-01's shape"
+   ],
+   "points": 2,
+   "status": "in_progress",
+   "notes": [
+    "FILED AND CLAIMED 2026-09-03. It is the ONLY item on docs/work/VISION_PLAN.md's queue that needs no ruling from Brad: the other four board tickets are ruling-gated and the rest of Phase 13 waits on D-2 (ROM supply) or D-5 (does Phase 13 exist at all).",
+    "WHY A PLANNING TICKET AND NOT A BUILD TICKET. VISION §5 promises 'debugger suite at daily-drivable for ROM hackers quality' and that is the ONLY 18-month criterion with no defined test — no ticket, no criterion, never measured. Work cannot be planned toward a phrase. W6-00 and W7-01 are the precedent for this shape: crate infra, 2 points, scoped to plan.json + ROADMAP.md, output is a board expansion rather than code.",
+    "PHASE 13 HAS NO ROADMAP SECTION and that is deliberate, not an oversight: whether Phase 13 exists at all is decision D-5. W12-01 already sits at phase 12 with no ROADMAP section either, so validate-plan is content — it groups by wave and does not require a matching doc heading."
+   ],
+   "stories": []
   }
  ]
 }
