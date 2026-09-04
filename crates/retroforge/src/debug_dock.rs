@@ -1291,6 +1291,8 @@ fn scope_plot(ui: &mut egui::Ui, trace: &rf_debugger::audio_scope::ScopeTrace) {
 pub enum AnnotationRequest {
     /// Persist the store for the open game (`crate::annotation_store`).
     Save,
+    /// Push the armed watchpoints into the running core (ticket W13-02e).
+    InstallWatches,
     /// Build a profile skeleton from the store and open it in the profile
     /// editor — GAME_PROFILES.md §3 step 2.
     ExportSkeleton,
@@ -1415,6 +1417,82 @@ pub struct AnnotationPanelData {
     pub request: Option<AnnotationRequest>,
     /// Whether the store has changed since the last successful save.
     pub dirty: bool,
+    /// Ticket W13-02e: the armed watchpoints, in the order they were
+    /// added. Lives beside the annotations because promotion is the
+    /// point — a watch is how a ROM hacker finds the address an
+    /// annotation is eventually about (DEBUGGER.md §1's "watchpoints
+    /// double as profile probes").
+    pub watches: Vec<rf_core_api::MemWatch>,
+    pub watch_form: WatchForm,
+    /// How many times each watch has fired since it was armed, by id.
+    /// A count rather than a log: the useful question at the bench is
+    /// "does this address get touched at all", and a per-hit log would
+    /// grow without bound in exactly the sessions where the answer is
+    /// obviously yes.
+    pub watch_hits: std::collections::BTreeMap<u32, u64>,
+    /// Next id to hand out. Monotonic and never reused, so a stale hit
+    /// report can never be attributed to a different watch.
+    pub next_watch_id: u32,
+}
+
+/// The add-a-watchpoint form's raw text (ticket W13-02e).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WatchForm {
+    pub space_is_ppu: bool,
+    /// 0 = read, 1 = write, 2 = any.
+    pub access: u8,
+    pub start: String,
+    /// Blank means a one-byte watch — `start == end`, since the range is
+    /// inclusive at both ends.
+    pub end: String,
+    /// Blank means "any value".
+    pub value_mask: String,
+    pub value_equals: String,
+}
+
+impl WatchForm {
+    /// Parse the form into a watch with `id`, or say what is unusable.
+    ///
+    /// # Errors
+    /// A human-readable reason, shown on the disabled button rather than
+    /// after a rejected press.
+    pub fn parse(&self, id: u32) -> Result<rf_core_api::MemWatch, String> {
+        let start = u32::from_str_radix(self.start.trim(), 16)
+            .map_err(|_| "start address must be hexadecimal".to_string())?;
+        let end = match self.end.trim() {
+            "" => start,
+            other => u32::from_str_radix(other, 16)
+                .map_err(|_| "end address must be hexadecimal".to_string())?,
+        };
+        if end < start {
+            return Err("the end address is below the start".to_string());
+        }
+        let hex_byte = |text: &str, what: &str| -> Result<u8, String> {
+            match text.trim() {
+                "" => Ok(0),
+                other => {
+                    u8::from_str_radix(other, 16).map_err(|_| format!("{what} must be a hex byte"))
+                }
+            }
+        };
+        Ok(rf_core_api::MemWatch {
+            id,
+            space: if self.space_is_ppu {
+                rf_core_api::WatchSpace::Ppu
+            } else {
+                rf_core_api::WatchSpace::Cpu
+            },
+            start,
+            end,
+            access: match self.access {
+                0 => rf_core_api::WatchAccess::Read,
+                1 => rf_core_api::WatchAccess::Write,
+                _ => rf_core_api::WatchAccess::Any,
+            },
+            value_mask: hex_byte(&self.value_mask, "the value mask")?,
+            value_equals: hex_byte(&self.value_equals, "the value")?,
+        })
+    }
 }
 
 impl AnnotationPanelData {
@@ -1432,6 +1510,30 @@ impl AnnotationPanelData {
         self.editing = None;
         self.form = AnnotationForm::default();
         self.dirty = false;
+        // A new game is a new machine: watches armed against the last
+        // game's addresses would fire on unrelated memory and their hit
+        // counts would be someone else's session.
+        self.watches.clear();
+        self.watch_hits.clear();
+        self.request = Some(AnnotationRequest::InstallWatches);
+    }
+
+    /// Whether anything is watched — the app reads this to decide whether
+    /// the core needs a `MEM_WATCH` subscription at all (DEBUGGER.md §6's
+    /// pay-for-use: no watches, no events).
+    #[must_use]
+    pub fn has_watches(&self) -> bool {
+        !self.watches.is_empty()
+    }
+
+    /// Fold this frame's events into the per-watch hit counts.
+    pub fn record_watch_hits(&mut self, events: &[rf_core_api::CoreEvent]) {
+        if self.watches.is_empty() {
+            return;
+        }
+        for id in rf_debugger::breakpoint::watch_hits(events) {
+            *self.watch_hits.entry(id).or_insert(0) += 1;
+        }
     }
 }
 
@@ -1494,8 +1596,172 @@ fn annotations_ui(ui: &mut egui::Ui, data: &mut AnnotationPanelData) {
         ui.separator();
         annotation_list_ui(ui, data);
         ui.separator();
+        watchpoint_ui(ui, data);
+        ui.separator();
         annotation_import_ui(ui, data);
     });
+}
+
+/// Watchpoints and their promotion (ticket W13-02e; DEBUGGER.md section 1).
+///
+/// In *this* panel rather than a separate one because promotion is the
+/// point: section 1's last bullet has a watchpoint becoming a `memory_map`
+/// annotation "with one click", and a click that has to cross two panels
+/// is not that. A watch is how a ROM hacker *finds* the address an
+/// annotation is eventually about.
+fn watchpoint_ui(ui: &mut egui::Ui, data: &mut AnnotationPanelData) {
+    egui::CollapsingHeader::new(format!("Watchpoints ({})", data.watches.len()))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("space");
+                ui.selectable_value(&mut data.watch_form.space_is_ppu, false, "CPU");
+                ui.selectable_value(&mut data.watch_form.space_is_ppu, true, "PPU");
+                ui.separator();
+                ui.selectable_value(&mut data.watch_form.access, 0, "read");
+                ui.selectable_value(&mut data.watch_form.access, 1, "write");
+                ui.selectable_value(&mut data.watch_form.access, 2, "any");
+            });
+            ui.horizontal(|ui| {
+                ui.label("$");
+                ui.add(egui::TextEdit::singleline(&mut data.watch_form.start).desired_width(64.0));
+                ui.label("to $");
+                ui.add(egui::TextEdit::singleline(&mut data.watch_form.end).desired_width(64.0))
+                    .on_hover_text("blank watches a single byte");
+                ui.label("value &");
+                ui.add(
+                    egui::TextEdit::singleline(&mut data.watch_form.value_mask).desired_width(36.0),
+                );
+                ui.label("==");
+                ui.add(
+                    egui::TextEdit::singleline(&mut data.watch_form.value_equals)
+                        .desired_width(36.0),
+                );
+            });
+
+            let parsed = data.watch_form.parse(data.next_watch_id);
+            let (enabled, hint) = match &parsed {
+                Ok(_) => (true, String::new()),
+                Err(why) => (false, why.clone()),
+            };
+            ui.horizontal(|ui| {
+                let button = ui.add_enabled(enabled, egui::Button::new("Arm"));
+                let button = if hint.is_empty() {
+                    button
+                } else {
+                    button.on_disabled_hover_text(hint.clone())
+                };
+                if button.clicked() {
+                    if let Ok(watch) = parsed {
+                        data.watches.push(watch);
+                        // Ids are never reused, so a hit reported for an id
+                        // that has been disarmed is ignored rather than
+                        // credited to whatever took its slot.
+                        data.next_watch_id = data.next_watch_id.wrapping_add(1);
+                        data.watch_form = WatchForm::default();
+                        data.request = Some(AnnotationRequest::InstallWatches);
+                    }
+                }
+                if !enabled {
+                    ui.label(egui::RichText::new(hint).small().weak());
+                }
+                if data.watches.len() > rf_core_api::MAX_WATCHES {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0xE0, 0x80, 0x30),
+                        format!("only the first {} are armed", rf_core_api::MAX_WATCHES),
+                    );
+                }
+            });
+
+            if data.watches.is_empty() {
+                ui.label(
+                    egui::RichText::new("Nothing watched - the core pays no cost.")
+                        .small()
+                        .weak(),
+                );
+                return;
+            }
+
+            // Same collect-then-apply discipline as the annotation list:
+            // mutating while iterating is what makes a list panel panic on
+            // the frame someone presses a button.
+            let mut disarm: Option<usize> = None;
+            let mut promote: Option<usize> = None;
+            for (i, w) in data.watches.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(match w.space {
+                            rf_core_api::WatchSpace::Cpu => "CPU",
+                            rf_core_api::WatchSpace::Ppu => "PPU",
+                        })
+                        .small()
+                        .weak(),
+                    );
+                    ui.monospace(if w.start == w.end {
+                        format!("${:04X}", w.start)
+                    } else {
+                        format!("${:04X}-${:04X}", w.start, w.end)
+                    });
+                    ui.label(
+                        egui::RichText::new(match w.access {
+                            rf_core_api::WatchAccess::Read => "read",
+                            rf_core_api::WatchAccess::Write => "write",
+                            rf_core_api::WatchAccess::Any => "any",
+                        })
+                        .small()
+                        .weak(),
+                    );
+                    let hits = data.watch_hits.get(&w.id).copied().unwrap_or(0);
+                    ui.label(format!("{hits} hits"));
+                    if ui
+                        .add_enabled(
+                            w.space == rf_core_api::WatchSpace::Cpu,
+                            egui::Button::new("promote").small(),
+                        )
+                        .on_hover_text("turn this watch into a labelled annotation")
+                        .on_disabled_hover_text(
+                            "a profile's memory_map is CPU-bus addressed, so a PPU watch has no \
+                             row to become",
+                        )
+                        .clicked()
+                    {
+                        promote = Some(i);
+                    }
+                    if ui.small_button("disarm").clicked() {
+                        disarm = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = promote {
+                let watch = data.watches[i];
+                // Promotion FILLS THE FORM rather than storing straight
+                // away: section 1 gives the click address, size and label,
+                // and only the first two are things a watch knows. The
+                // source FR-DBG-005 requires is a human's to write, and
+                // inventing one would be the exact provenance failure
+                // CONSTRAINTS section 2 exists to prevent.
+                data.form = AnnotationForm {
+                    space_is_rom: false,
+                    addr: format!("{:X}", watch.start),
+                    len: (watch.end - watch.start + 1).to_string(),
+                    ty: if watch.end > watch.start { "u16" } else { "u8" }.to_string(),
+                    label: String::new(),
+                    source: String::new(),
+                    notes: String::new(),
+                    count: String::new(),
+                };
+                data.editing = None;
+                data.status = Some(format!(
+                    "promoted ${:04X} - give it a label and a source",
+                    watch.start
+                ));
+            }
+            if let Some(i) = disarm {
+                let removed = data.watches.remove(i);
+                data.watch_hits.remove(&removed.id);
+                data.request = Some(AnnotationRequest::InstallWatches);
+            }
+        });
 }
 
 fn annotation_form_ui(ui: &mut egui::Ui, data: &mut AnnotationPanelData) {

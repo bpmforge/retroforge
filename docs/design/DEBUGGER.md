@@ -109,13 +109,13 @@ citation is not a grade.**
 | 1 | run/pause/frame/scanline/instruction step | `EmuStepper` + `Step::{Instruction,Scanline,Frame}` (`rf-core-api/src/core.rs`) | **met** |
 | 1 | step-over / step-out / run-to-cursor | `breakpoint::StepMode::{Into,Over,Out,ToCursor}`, `step_over_is_a_call` (JSR-only, tail-call safe) | **met** |
 | 1 | breakpoints: PC exec | `Condition::Pc` | **met** |
-| 1 | breakpoints: **memory read/write/access**, CPU *and* PPU spaces | only `Condition::MemoryEquals` — tests what memory *holds* at an instruction boundary, not what was *written*. The module doc says so deliberately. No PPU address space at all. | **GAP** |
-| 1 | value-conditional `addr==X && val&mask` | `MemoryEquals` has no mask | **partial** |
+| 1 | breakpoints: **memory read/write/access**, CPU *and* PPU spaces | `Condition::Watch` + `rf_core_api::WatchTable`, evaluated in the core's own buses (W13-02e) — **NES only**, see W13-02h | **met (NES)** |
+| 1 | value-conditional `addr==X && val&mask` | `MemWatch::{value_mask,value_equals}` (W13-02e) | **met** |
 | 1 | scanline/dot position (NES) | `Condition::Position` | **met** |
-| 1 | H/V position (SNES) | nothing | **GAP** |
+| 1 | H/V position (SNES) | nothing — and the SNES core emits no `CoreEvent` at all (W13-02h), so no core-reported break can arrive there yet | **GAP** |
 | 1 | IRQ/NMI entry, mapper events | `EventKind::{Irq,Nmi,MapperIrq}` | **met** (bank-switch not distinguished) |
 | 1 | zero cost when the table is empty | `BreakpointTable::check`, and `benches/debugger_idle.rs` measures it | **met** |
-| 1 | watchpoint "promoted" to a `memory_map` annotation in one click | nothing | **GAP** |
+| 1 | watchpoint "promoted" to a `memory_map` annotation in one click | `annotation::promote_watch` + the Annotations panel's `promote` button (W13-02e) | **met** |
 | 2 | per-chip rings, CPU/PPU/APU/DMA/mapper | `TraceKind::ALL` — all five | **met** |
 | 2 | never blocks the core thread; overflow drops oldest + truncation flag | two-ring split (transport drops newest, `TraceScrollback` drops oldest), reasoned from rtrb 0.3's own API in the module doc | **met** |
 | 2 | NES trace **nestest.log-compatible** | `rf_nes::trace::format_trace_line`, shared with the golden diff | **met** |
@@ -196,7 +196,17 @@ capability that only tests can reach is not a capability a ROM hacker has.
 `W13-02a` is the unblocker for the SNES half: until `SnesCore::state_view`
 is real, every SNES viewer has nothing to draw.
 
-**Closed so far: `W13-02f`** (2026-09-04) — bars **B-6**, **B-7** and the
+**Closed so far: `W13-02e`, `W13-02f`.**
+
+`W13-02e` (2026-09-04) — bars **B-4** and **B-5**. Watchpoints are
+evaluated **inside the core** and reported as
+`CoreEvent::MemWatch`, a variant that had been in the contract since
+W4-00 with no producer. It also found that the SNES core emits **no
+`CoreEvent` of any kind** (`grep` returns zero lines), so every
+event-borne debugger facility is NES-only whatever its own code says —
+filed as `W13-02h`.
+
+`W13-02f` (2026-09-04) — bars **B-6**, **B-7** and the
 trace half of **B-8**, which is most of §4. It also found and fixed a
 second reachability wall on the way: **a tab that is in `DebugTab` but in
 no layout could not be opened at all**, because `restore_layout` only

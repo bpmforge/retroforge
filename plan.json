@@ -5674,7 +5674,13 @@
     "crates/rf-debugger/src/annotation.rs",
     "crates/rf-nes/**",
     "crates/rf-snes/**",
-    "crates/retroforge/src/debug_dock.rs"
+    "crates/retroforge/src/debug_dock.rs",
+    "crates/rf-core-api/**",
+    "crates/retroforge/src/app.rs",
+    "crates/retroforge/src/stepper.rs",
+    "crates/retroforge/src/core_thread.rs",
+    "crates/retroforge/tests/**",
+    "docs/design/DEBUGGER.md"
    ],
    "depends_on": [],
    "acceptance": [
@@ -5683,10 +5689,17 @@
     "the empty-table fast path is unchanged and benches/debugger_idle.rs still reports idle within noise of debugger-compiled-out (bar B-10)"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "FILED BY W13-01, 2026-09-03. Condition::MemoryEquals tests what memory HOLDS at an instruction boundary, not what was WRITTEN — breakpoint.rs's own module doc says the distinction decided the design. A real watchpoint needs a hook at the bus access, which is why the cores are in the write_scope and this is not a pure rf-debugger ticket.",
-    "LAW 4 IS THE CONSTRAINT: a bus hook must not perturb the simulation. Whatever shape it takes has to leave the mode-invariant suites green, and that is a criterion to check rather than a hope."
+    "LAW 4 IS THE CONSTRAINT: a bus hook must not perturb the simulation. Whatever shape it takes has to leave the mode-invariant suites green, and that is a criterion to check rather than a hope.",
+    "HANDOFF 2026-09-04: write_scope WIDENED, recorded as the schema note requires. rf-core-api because the watch TYPE has to live where both cores see it — and because rf_core_api::CoreEvent::MemWatch and EventMask::MEM_WATCH have been in that crate since W4-00/W4-01 WITH NO PRODUCER. This ticket is their producer; the channel was designed for exactly this and then had nothing to carry. app.rs/stepper.rs/core_thread.rs because the core runs on its own thread, so installing a watch is a CoreCommand, not a call (law 4). docs/design/DEBUGGER.md for the same reason W13-02f widened: W13-01's section 7.1 grading table would otherwise still read GAP for rows this ticket closed.",
+    "NO TRAIT CHANGE WAS NEEDED, which is worth recording because it was the expected cost. WatchTable is a fixed-capacity value type, so CoreConfig stays Copy and 'core.config().watches.set(..)' is the whole installation path — no new EmulatorCore method, and the two test mocks in rf-core-api/tests and rf-harness/tests did not have to change. MAX_WATCHES is 8 and the cap is stated with its reason rather than left as a magic number; WatchTable::set REPORTS refusals, because a watch someone believes is armed and is not looks exactly like the game never touching the address.",
+    "DONE 2026-09-04, ON THE NES. CRITERION 1: read, write and any-access watches in BOTH address spaces, with the value+mask condition. CPU space hooks read_untimed/write_untimed by WRAPPING them rather than editing their bodies — read_untimed has a dozen return points across its address decode and a watch that fired on eleven of them would be the silent-miss this design refuses. The DMC-DMA no-op re-reads go through the same wrapper deliberately: they are real bus reads with real side effects, which is the entire content of dmc_dma_during_read4. PPU space hooks Ppu::mem_read/mem_write, next to observe_ppu_bus_address, because that is already the one place every real PPU-bus access passes through. A write is reported BEFORE it lands so the condition tests the value arriving; a read AFTER, so it tests the value the machine actually got. CRITERION 2: promote_watch turns a CPU-space watch into a memory_map annotation, and the UI fills the FORM rather than storing — address and size are what a watch knows, and the source FR-DBG-005 requires is a human's to write. A PPU watch returns None: a profile's memory_map is CPU-bus addressed, so it has no row to become. CRITERION 3: measured, not asserted — debugger_idle_cost reports compiled-out 1.144 ms/frame vs idle 1.122 ms/frame, 0.981x against a 1.05x budget.",
+    "WATCHES ARE EXCLUDED FROM SAVE STATE, by name, in ppu/state.rs's exhaustive destructure — the same treatment event_mask and accuracy_mode already get. They are caller configuration, not machine state: restoring them would carry whoever saved the state's watchpoints into your session, and would make a save file's contents depend on what someone happened to be debugging.",
+    "A SEMANTIC BUG FOUND BY THE END-TO-END TEST, and the fix is a real behaviour change: sync_event_subscription gated the whole subscription on debug_panels.visible, so closing the debug window silently stopped an armed watch from counting. That is DEBUGGER.md section 6's rule for the event VIEWER and it is right for a viewer, but a watch is armed until it is disarmed — one that quietly stopped would read as 'the game never touches this address', the worst answer a debugger can give. Now: viewer needs visible, watches do not, and pay-for-use still holds because nothing armed means no subscription.",
+    "SNES IS NOT COVERED AND THE REASON IS BIGGER THAN THIS TICKET — filed as W13-02h. 'grep -rn CoreEvent crates/rf-snes/src' returns ZERO lines: the SNES core emits no CoreEvent of any kind, so there is no channel for a watch hit to come back on. Installation is already core-agnostic (it goes through CoreConfig, which is on the trait), so a SNES session installs watches through the identical call today and simply gets no reports. Stated here rather than left to be rediscovered.",
+    "EVIDENCE: tests/watchpoints_reach_the_app.rs arms a read watch on $2002 (PPUSTATUS — every NES program polls it in its vblank wait, so a hit is guaranteed without the test needing to know the fixture's RAM map, and a failure cannot be ambiguous between 'watchpoints are broken' and 'the game does not touch that byte'), runs 20 frames and asserts hits, then promotes and disarms. Plus 5 WatchTable unit tests in rf-core-api, 2 in rf-debugger (the watch breakpoint fires on the core's REPORT, not on a peek; a disabled watch stops being installed) and 1 promotion test. Workspace 1741 passing / 0 failed / 33 ignored, up from 1733. Mode-invariant suites green, which is what says the watch does not perturb: law 4 is checked by state-hash equality, not by inspection."
    ],
    "stories": []
   },
@@ -5741,6 +5754,31 @@
    "status": "todo",
    "notes": [
     "FILED BY W13-01, 2026-09-03. The NES half of §2 is met by rf_nes::trace::format_trace_line and shared with the nestest golden diff; the SNES half does not exist. m/x-awareness is the part that makes this more than string formatting — operand width depends on processor-status bits, so the disassembler needs the machine's state, not just the bytes."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W13-02h",
+   "title": "The SNES core emits no CoreEvent at all",
+   "phase": 13,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "crates/retroforge/src/stepper.rs"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "SnesCore emits the CoreEvent variants its hardware has an analogue for — at minimum FrameStart, FrameEnd, VblankStart, Scanline and MemWatch — gated by EventMask exactly as rf-nes gates its own, so an unsubscribed session pays nothing",
+    "an armed watchpoint on a SNES session reports hits (W13-02e's facility, which already installs on both cores through CoreConfig and today reports on neither)",
+    "the event timeline panel shows SNES events, rather than an empty list a user reads as 'nothing happened'",
+    "no SNES golden frame, vector suite or save-state test is re-baselined: events are observation, and a core that changed behaviour when subscribed would fail the mode-invariant suites"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FILED BY W13-02e, 2026-09-04, and MEASURED rather than suspected: 'grep -rn CoreEvent crates/rf-snes/src' returns ZERO lines. FR-CORE-006's whole subscription channel — the one the enhancement runtime, the event timeline and now watchpoints all ride on — has no producer on SNES.",
+    "SCOPE OF THE CONSEQUENCE, so it is not rediscovered per feature: every CoreEvent consumer is NES-only today whatever its own code says. That includes the event timeline viewer, scroll telemetry, and W13-02e's watchpoints. W13-02a is the sibling gap on the STATE side (SnesCore::state_view returns empty slices); this is the same half-console shape on the EVENT side, and the two are independent — neither blocks the other.",
+    "START FROM rf-nes's OWN SHAPE rather than inventing one: the NES core queues events on the PPU (Ppu::queue_event) because that is where the frame boundary and the event mask already live, and NesBus::set_event_mask pushes the mask down to it. The SNES core has no equivalent owner yet, and choosing one — ppu, bus, or system — is the design decision this ticket makes."
    ],
    "stories": []
   }

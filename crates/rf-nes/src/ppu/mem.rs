@@ -110,18 +110,36 @@ impl Ppu {
     pub(super) fn mem_read(&mut self, addr: u16) -> u8 {
         let addr = addr & 0x3FFF;
         self.observe_ppu_bus_address(addr);
-        match addr {
+        let value = match addr {
             0x0000..=0x1FFF => self.chr_read(addr),
             0x2000..=0x3EFF => self.vram[self.nametable_offset(addr)],
             0x3F00..=0x3FFF => self.palette_read(addr),
             _ => unreachable!("addr masked to 14 bits above"),
-        }
+        };
+        // Ticket W13-02e: the PPU-space half of DEBUGGER.md §1's
+        // "CPU and PPU address spaces separately". Reported AFTER the
+        // read so the value a watch tests is the one the PPU actually
+        // got, next to `observe_ppu_bus_address` because this is already
+        // the one place every real PPU-bus access passes through.
+        self.note_watch_access(
+            rf_core_api::WatchSpace::Ppu,
+            rf_core_api::WatchAccess::Read,
+            u32::from(addr),
+            value,
+        );
+        value
     }
 
     /// One PPU-bus write at `addr & 0x3FFF` — same ranges as [`Ppu::mem_read`].
     pub(super) fn mem_write(&mut self, addr: u16, value: u8) {
         let addr = addr & 0x3FFF;
         self.observe_ppu_bus_address(addr);
+        self.note_watch_access(
+            rf_core_api::WatchSpace::Ppu,
+            rf_core_api::WatchAccess::Write,
+            u32::from(addr),
+            value,
+        );
         match addr {
             0x0000..=0x1FFF => self.chr_write(addr, value),
             0x2000..=0x3EFF => {

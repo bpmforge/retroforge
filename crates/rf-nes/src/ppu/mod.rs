@@ -776,6 +776,11 @@ pub struct Ppu {
     /// default) — every gating check below is then a single `u32` AND
     /// against a `const`, and [`Ppu::events`] never grows.
     event_mask: EventMask,
+    /// Ticket W13-02e: the debugger's watchpoints. Not part of the
+    /// machine's state — it is a debugger setting, so `state.rs` does not
+    /// serialize it and a save state cannot silently carry someone else's
+    /// watchpoints into your session.
+    watches: rf_core_api::WatchTable,
     /// Events queued since the last [`Ppu::drain`], oldest first — the
     /// `CoreEvent` sibling of `completed` (module doc). Holds BOTH this
     /// PPU's own tick/register-write-driven events AND, pushed via
@@ -867,6 +872,7 @@ impl Ppu {
             a12_low_since: None,
             pending_a12_edges: 0,
             event_mask: EventMask::NONE,
+            watches: rf_core_api::WatchTable::new(),
             events: Vec::new(),
         }
     }
@@ -1000,6 +1006,38 @@ impl Ppu {
     /// and this module's own tests configure a bare `Ppu` directly, with no
     /// `NesBus`/`EmulatorCore` in the loop. `NONE` (Accuracy mode's
     /// default, law 6) until called.
+    /// Install the debugger's watchpoints (ticket W13-02e), pushed to the
+    /// PPU for the same reason [`Ppu::set_event_mask`] is: this is where
+    /// the event queue lives, so this is where a hit can be reported from
+    /// without either bus needing its own channel.
+    pub fn set_watches(&mut self, watches: rf_core_api::WatchTable) {
+        self.watches = watches;
+    }
+
+    /// The installed watchpoints — read by both buses on every access,
+    /// which is why `WatchTable::is_armed` is checked first.
+    pub(crate) fn watches(&self) -> &rf_core_api::WatchTable {
+        &self.watches
+    }
+
+    /// Report a watch hit, if this access trips one and anybody is
+    /// subscribed. Observation only: it queues an event on the channel
+    /// `EventMask` already gates and touches nothing else.
+    pub(crate) fn note_watch_access(
+        &mut self,
+        space: rf_core_api::WatchSpace,
+        access: rf_core_api::WatchAccess,
+        addr: u32,
+        value: u8,
+    ) {
+        if !self.watches.is_armed() || !self.event_mask().is_subscribed(EventMask::MEM_WATCH) {
+            return;
+        }
+        if let Some(id) = self.watches.hit(space, access, addr, value) {
+            self.queue_event(CoreEvent::MemWatch { id });
+        }
+    }
+
     pub fn set_event_mask(&mut self, mask: EventMask) {
         self.event_mask = mask;
     }

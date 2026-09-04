@@ -992,10 +992,26 @@ impl RetroForgeApp {
         let Some(request) = self.debug_panels.annotations.request.take() else {
             return;
         };
+        // Ticket W13-02e: installing watches is the one request that does
+        // not need a game identity — disarming is exactly what a session
+        // with no ROM should do, and `adopt` asks for it on every open.
+        if request == crate::debug_dock::AnnotationRequest::InstallWatches {
+            let watches = self.debug_panels.annotations.watches.clone();
+            let refused = watches.len().saturating_sub(rf_core_api::MAX_WATCHES);
+            self.send_command(crate::core_thread::CoreCommand::SetWatches(watches));
+            self.debug_panels.annotations.problem = (refused > 0).then(|| {
+                format!(
+                    "{refused} watchpoint(s) refused: the core holds {}",
+                    rf_core_api::MAX_WATCHES
+                )
+            });
+            return;
+        }
         let Some(identity) = self.debug_panels.annotations.identity.clone() else {
             return;
         };
         match request {
+            crate::debug_dock::AnnotationRequest::InstallWatches => unreachable!("handled above"),
             crate::debug_dock::AnnotationRequest::Save => {
                 let Some(root) = self.config_root.clone() else {
                     self.debug_panels.annotations.problem =
@@ -2003,6 +2019,13 @@ impl RetroForgeApp {
             // read-only discipline W4-06c's diff panel relies on.
             self.debug_panels.data.vram = *msg.vram;
             self.debug_panels.data.palette_ram = *msg.palette_ram;
+            // Ticket W13-02e: fold this frame's MemWatch events into the
+            // per-watch hit counts BEFORE the events are handed to the
+            // viewer, because the viewer's list is replaced every frame
+            // and a count that only existed there would reset with it.
+            self.debug_panels
+                .annotations
+                .record_watch_hits(&latest_bundle_events);
             self.debug_panels.data.events = latest_bundle_events;
             // Ticket W4-06b: WRAM/PRG-RAM travel with the frame the same
             // way OAM already does — see `core_thread::FrameMsg::wram`'s
@@ -4532,7 +4555,16 @@ impl RetroForgeApp {
     /// `NONE` when every debug window is closed can never starve
     /// `crate::canvas_accum`.
     fn sync_event_subscription(&mut self) {
-        let wants = self.debug_panels.visible && self.debug_panels.wants_event_subscription();
+        // The event VIEWER only needs events while it is on screen, which
+        // is DEBUGGER.md §6's "closed panels register no event
+        // subscriptions". A WATCHPOINT is different and the distinction is
+        // deliberate (ticket W13-02e): a watch is armed until it is
+        // disarmed, so closing the debug window must not silently stop it
+        // counting — a watch that quietly stopped would read as "the game
+        // never touches this address", the worst answer a debugger can
+        // give. Pay-for-use still holds: nothing armed, no subscription.
+        let wants = (self.debug_panels.visible && self.debug_panels.wants_event_subscription())
+            || self.debug_panels.annotations.has_watches();
         if wants == self.event_subscription_active {
             return;
         }

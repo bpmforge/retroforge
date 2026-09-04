@@ -483,6 +483,15 @@ pub enum CoreCommand {
     /// requested here, so this can never starve the enhanced-camera
     /// pipeline (see that function's own doc).
     SetEventMask(rf_core_api::EventMask),
+    /// Ticket W13-02e: replace the core's memory watchpoints.
+    ///
+    /// A command rather than a direct call because the core lives on its
+    /// own thread and law 4 forbids the UI thread touching it — the same
+    /// reason `SetEventMask` is a command. The whole set travels each
+    /// time: a watch table is at most `rf_core_api::MAX_WATCHES` entries,
+    /// so sending the set is cheaper than reasoning about deltas, and it
+    /// makes "what is armed" one value rather than a history.
+    SetWatches(Vec<rf_core_api::MemWatch>),
     Shutdown,
 }
 
@@ -926,6 +935,13 @@ fn core_thread_main(
                 }
                 CoreCommand::SetEventMask(mask) => {
                     stepper.set_event_mask(mask);
+                }
+                CoreCommand::SetWatches(watches) => {
+                    // The refusal count is dropped here deliberately: the
+                    // UI already knows how many it sent and what
+                    // `MAX_WATCHES` is, so it reports the overflow without
+                    // a round trip.
+                    let _ = stepper.set_watches(&watches);
                 }
                 CoreCommand::RequestCanvasSnapshot => {
                     canvas_accum.flush();

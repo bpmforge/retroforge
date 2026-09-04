@@ -2009,3 +2009,79 @@ that way.
   widening for that one file is recorded as a HANDOFF note on the ticket.
   Gate: **1733 passing, 0 failed, 33 ignored** (up from 1723), exit 0,
   `arch OK`; `validate-plan` 170 tickets · 904 pts.
+
+- **W13-02e — real watchpoints, and one action promotes one to an
+  annotation** (2026-09-04). `Condition::MemoryEquals` tested what memory
+  *held* at an instruction boundary; a watchpoint tests what the machine
+  *did*, at the cycle it did it. Only the bus can see that, so the
+  evaluation lives in the core and the hit comes back as
+  **`CoreEvent::MemWatch` — a variant that has been in the contract since
+  W4-00/W4-01 with no producer.** This ticket is its producer.
+
+  **No trait change was needed**, which is worth recording because it was
+  the expected cost. `WatchTable` is a fixed-capacity value type, so
+  `CoreConfig` stays `Copy` and `core.config().watches.set(..)` is the
+  whole installation path — no new `EmulatorCore` method, and the two test
+  mocks did not have to change. `MAX_WATCHES` is 8 with its reason stated
+  rather than left as a magic number, and `WatchTable::set` **reports**
+  refusals: a watch someone believes is armed and is not looks exactly like
+  the game never touching the address.
+
+  **Where the hooks went, and why.** CPU space **wraps**
+  `read_untimed`/`write_untimed` rather than editing their bodies — the
+  read has a dozen return points across its address decode, and a watch
+  that fired on eleven of them would be the silent miss this design
+  refuses. The DMC-DMA no-op re-reads go through the same wrapper
+  deliberately: they are real bus reads with real side effects, which is
+  the entire content of `dmc_dma_during_read4`. PPU space hooks
+  `Ppu::mem_read`/`mem_write`, beside `observe_ppu_bus_address`, already
+  the one place every real PPU-bus access passes through. A write is
+  reported **before** it lands so the condition tests the value arriving; a
+  read **after**, so it tests the value the machine got.
+
+  **Promotion fills the form rather than storing.** DEBUGGER.md §1's click
+  gives "address, size, label" — and only the first two are things a watch
+  knows. The `source` FR-DBG-005 requires is a human's to write, and
+  inventing one would be the exact provenance failure CONSTRAINTS §2
+  exists to prevent. A PPU-space watch refuses: a profile's `[[memory_map]]`
+  is CPU-bus addressed, so it has no row to become.
+
+  **Watches are excluded from save state by name**, in `ppu/state.rs`'s
+  exhaustive destructure, the same treatment `event_mask` and
+  `accuracy_mode` already get — restoring them would carry whoever saved
+  the state's watchpoints into your session.
+
+  **A semantic bug the end-to-end test found, and the fix is a real
+  behaviour change.** `sync_event_subscription` gated the whole
+  subscription on `debug_panels.visible`, so **closing the debug window
+  silently stopped an armed watch counting**. That is §6's rule for the
+  event *viewer* and it is right for a viewer; a watch is armed until it is
+  disarmed, and one that quietly stopped would read as "the game never
+  touches this address" — the worst answer a debugger can give. Now the
+  viewer needs `visible` and watches do not, with pay-for-use intact
+  because nothing armed means no subscription.
+
+  **SNES is not covered, and the reason is bigger than this ticket.**
+  `grep -rn CoreEvent crates/rf-snes/src` returns **zero lines**: the SNES
+  core emits no `CoreEvent` of any kind, so there is no channel for a hit
+  to come back on. Installation is already core-agnostic (it goes through
+  `CoreConfig`, which is on the trait), so a SNES session installs watches
+  through the identical call today and simply gets no reports. Filed as
+  **W13-02h** — the event-side sibling of W13-02a's state-side gap, and
+  independent of it. Every `CoreEvent` consumer is NES-only until it lands:
+  the event timeline, scroll telemetry, and these watchpoints.
+
+  Criterion 3 **measured, not asserted**: `debugger_idle_cost` reports
+  compiled-out **1.144 ms/frame** vs idle **1.122 ms/frame** — 0.981×
+  against a 1.05× budget. Law 4 is checked by the mode-invariant suites
+  rather than by inspection, and they are green.
+
+  Evidence: `tests/watchpoints_reach_the_app.rs` arms a read watch on
+  `$2002` (PPUSTATUS — every NES program polls it in its vblank wait, so a
+  hit is guaranteed without the test knowing the fixture's RAM map, and a
+  failure cannot be ambiguous between "watchpoints are broken" and "the
+  game does not touch that byte"), runs 20 frames, asserts hits, then
+  promotes and disarms. Plus 5 `WatchTable` unit tests, 2 breakpoint-engine
+  tests and 1 promotion test. Gate: **1741 passing, 0 failed, 33 ignored**
+  (up from 1733), exit 0, `arch OK`; `validate-plan` 171 tickets · 909 pts;
+  docs-gate green.

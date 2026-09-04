@@ -375,6 +375,13 @@ impl NesBus {
     /// `event_mask` lives on that shared config struct) — no
     /// `EmulatorCore` exists in this crate yet (module doc, "Mapper
     /// scope"), so today only tests/benches call this directly.
+    /// Install the debugger's watchpoints (ticket W13-02e) — pushed to
+    /// the PPU, which owns the event queue a hit is reported on, exactly
+    /// as [`NesBus::set_event_mask`] pushes the mask.
+    pub fn set_watches(&mut self, watches: rf_core_api::WatchTable) {
+        self.ppu.set_watches(watches);
+    }
+
     pub fn set_event_mask(&mut self, mask: EventMask) {
         self.ppu.set_event_mask(mask);
     }
@@ -505,6 +512,26 @@ impl NesBus {
     /// nothing enforces that mechanically, so a future ticket reusing this
     /// (e.g. DMC DMA) needs to preserve the same discipline.
     fn read_untimed(&mut self, addr: u16) -> u8 {
+        let value = self.read_untimed_inner(addr);
+        // Ticket W13-02e, DEBUGGER.md §1's CPU address space. Wrapping
+        // rather than editing the body: `read_untimed` has a dozen return
+        // points across its address decode, and a watch that fired on only
+        // eleven of them would be the silent-miss failure `WatchTable::set`
+        // already refuses to commit. The DMC-DMA no-op re-reads below call
+        // this too, deliberately — they are real bus reads with real side
+        // effects, which is the entire content of `dmc_dma_during_read4`.
+        if self.ppu.watches().is_armed() {
+            self.ppu.note_watch_access(
+                rf_core_api::WatchSpace::Cpu,
+                rf_core_api::WatchAccess::Read,
+                u32::from(addr),
+                value,
+            );
+        }
+        value
+    }
+
+    fn read_untimed_inner(&mut self, addr: u16) -> u8 {
         let value = match addr {
             0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)],
             0x2000..=0x3FFF => self.ppu.read_register((addr & 0x0007) as u8),
@@ -612,6 +639,21 @@ impl NesBus {
     /// `read_untimed`'s doc — the same reasoning, and the same
     /// caller-must-tick obligation, applies to OAM DMA's "put" cycles).
     fn write_untimed(&mut self, addr: u16, value: u8) {
+        if self.ppu.watches().is_armed() {
+            // Before the write, so a watch sees the value being written
+            // rather than having to infer it — DEBUGGER.md §1's condition
+            // is `addr==X && val&mask`, and `val` is what is arriving.
+            self.ppu.note_watch_access(
+                rf_core_api::WatchSpace::Cpu,
+                rf_core_api::WatchAccess::Write,
+                u32::from(addr),
+                value,
+            );
+        }
+        self.write_untimed_inner(addr, value);
+    }
+
+    fn write_untimed_inner(&mut self, addr: u16, value: u8) {
         self.open_bus = value;
         match addr {
             0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)] = value,

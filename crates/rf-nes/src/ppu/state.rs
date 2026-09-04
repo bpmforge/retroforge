@@ -107,6 +107,13 @@ impl Ppu {
             // session emits. `crate::ppu`'s own doc calls it a
             // subscription, and FR-CORE-006 makes it the caller's choice.
             event_mask: _,
+            // Caller configuration for the same reason (ticket W13-02e):
+            // watchpoints are a debugger setting, not something the
+            // machine evolved into. Restoring them from a file would
+            // carry whoever saved the state's watchpoints into your
+            // session, and worse, would make a save state's contents
+            // depend on what someone was debugging when they wrote it.
+            watches: _,
             // Caller configuration too, and excluded for the same reason
             // (ticket W3-07): `accuracy_mode` is what the *app* asked for
             // via `CoreConfig`, not something the machine evolved into.

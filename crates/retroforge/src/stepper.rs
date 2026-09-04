@@ -803,6 +803,22 @@ impl EmuStepper {
     /// moment the event panel is opened once. Always unioning the baseline
     /// back in makes that invariant hold by construction rather than by
     /// caller discipline.
+    /// Install the debugger's watchpoints (ticket W13-02e).
+    ///
+    /// Goes through `CoreConfig`, not a concrete bus method, because this
+    /// is the one debugger facility that already works the same way on
+    /// both cores: `EmulatorCore::config` is on the trait, so a SNES
+    /// session installs watches through the identical call — whether the
+    /// SNES core can yet *report* a hit is a separate question, recorded
+    /// on W13-02h.
+    ///
+    /// Returns how many watches the core refused for want of room, so a
+    /// caller can say so rather than leaving someone watching an address
+    /// that is not actually armed.
+    pub fn set_watches(&mut self, watches: &[rf_core_api::MemWatch]) -> usize {
+        self.machine.as_core().config().watches.set(watches)
+    }
+
     pub fn set_event_mask(&mut self, mask: rf_core_api::EventMask) {
         if let Some(bus) = self.machine.nes_bus_mut() {
             bus.set_event_mask(mask.union(CAMERA_BASELINE_EVENT_MASK));
@@ -1751,6 +1767,7 @@ pub mod exec_control {
         stepper: &EmuStepper,
         table: &BreakpointTable,
         events: &[rf_debugger::breakpoint::EventKind],
+        watch_hits: &[u32],
     ) -> Option<Hit> {
         if !table.armed() {
             // The one-branch fast path — see BreakpointTable::armed.
@@ -1763,6 +1780,7 @@ pub mod exec_control {
             dot: 0,
             peek: &peek,
             events,
+            watch_hits,
         })
     }
 
@@ -1773,7 +1791,7 @@ pub mod exec_control {
         table: &BreakpointTable,
     ) -> StopReason {
         stepper.step_instruction(sink);
-        match check(stepper, table, &[]) {
+        match check(stepper, table, &[], &[]) {
             Some(hit) => StopReason::Breakpoint(hit),
             None => StopReason::Completed,
         }
@@ -1840,7 +1858,7 @@ pub mod exec_control {
     ) -> StopReason {
         for _ in 0..INSTRUCTION_BUDGET {
             stepper.step_instruction(sink);
-            if let Some(hit) = check(stepper, table, &[]) {
+            if let Some(hit) = check(stepper, table, &[], &[]) {
                 return StopReason::Breakpoint(hit);
             }
             if done(stepper) {

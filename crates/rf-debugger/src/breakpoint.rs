@@ -56,6 +56,22 @@ pub enum Condition {
     Position { scanline: u16, dot: u16 },
     /// Break when the core reports one of these events this step.
     Event(EventKind),
+    /// Break on a memory ACCESS — DEBUGGER.md §1's "memory read/write/
+    /// access (CPU and PPU address spaces separately), value-conditional
+    /// (`addr==X && val&mask`)" (ticket W13-02e).
+    ///
+    /// ## Why this is not `MemoryEquals` with more fields
+    ///
+    /// [`Condition::MemoryEquals`] tests what memory *holds* at an
+    /// instruction boundary; this tests what the machine *did*, at the
+    /// cycle it did it. Nothing this crate can see distinguishes them —
+    /// only the bus can — so the condition is evaluated **inside the
+    /// core** ([`rf_core_api::WatchTable`]) and arrives back here as a
+    /// [`rf_core_api::CoreEvent::MemWatch`] carrying the id. That is why
+    /// this variant stores the whole [`rf_core_api::MemWatch`]: the
+    /// debugger owns the definition, the core owns the evaluation, and the
+    /// id is the join.
+    Watch(rf_core_api::MemWatch),
 }
 
 /// The event classes a breakpoint can arm on (criterion 1's "IRQ/mapper
@@ -89,6 +105,10 @@ pub struct BreakCtx<'a> {
     pub peek: &'a dyn Fn(u16) -> u8,
     /// Event classes the core reported for the instruction just executed.
     pub events: &'a [EventKind],
+    /// Ids of watchpoints the core reported tripping this step, from
+    /// [`rf_core_api::CoreEvent::MemWatch`] (ticket W13-02e). Empty when
+    /// nothing is watched, which is the normal case.
+    pub watch_hits: &'a [u32],
 }
 
 /// Which breakpoint stopped execution.
@@ -110,6 +130,7 @@ pub struct BreakpointTable {
     memory: Vec<(u32, u16, u8)>,
     position: Vec<(u32, u16, u16)>,
     events: Vec<(u32, EventKind)>,
+    watches: Vec<(u32, rf_core_api::MemWatch)>,
     armed: bool,
 }
 
@@ -155,6 +176,7 @@ impl BreakpointTable {
         self.memory.clear();
         self.position.clear();
         self.events.clear();
+        self.watches.clear();
         for b in self.all.iter().filter(|b| b.enabled) {
             match &b.condition {
                 Condition::Pc(addr) => self.pc.push((b.id, *addr)),
@@ -165,12 +187,25 @@ impl BreakpointTable {
                     self.position.push((b.id, *scanline, *dot));
                 }
                 Condition::Event(kind) => self.events.push((b.id, *kind)),
+                Condition::Watch(watch) => self.watches.push((b.id, *watch)),
             }
         }
         self.armed = !self.pc.is_empty()
             || !self.memory.is_empty()
             || !self.position.is_empty()
-            || !self.events.is_empty();
+            || !self.events.is_empty()
+            || !self.watches.is_empty();
+    }
+
+    /// The watchpoints to install in the core (ticket W13-02e).
+    ///
+    /// The debugger defines them; only the bus can evaluate them, so this
+    /// is what crosses the boundary — a caller pushes the result into
+    /// `CoreConfig::watches` and the core reports hits back as
+    /// `CoreEvent::MemWatch`.
+    #[must_use]
+    pub fn watches(&self) -> Vec<rf_core_api::MemWatch> {
+        self.watches.iter().map(|(_, w)| *w).collect()
     }
 
     /// Check every armed breakpoint against `ctx`, cheapest kind first.
@@ -210,6 +245,14 @@ impl BreakpointTable {
                 });
             }
         }
+        for (id, watch) in &self.watches {
+            if ctx.watch_hits.contains(&watch.id) {
+                return Some(Hit {
+                    id: *id,
+                    condition: Condition::Watch(*watch),
+                });
+            }
+        }
         for (id, addr, value) in &self.memory {
             if (ctx.peek)(*addr) == *value {
                 return Some(Hit {
@@ -236,6 +279,23 @@ pub enum StepMode {
     Out,
     /// Run until the PC reaches an address.
     ToCursor(u16),
+}
+
+/// Extract the watchpoint ids a core reported this step (ticket W13-02e).
+///
+/// The core's answer arrives as [`rf_core_api::CoreEvent::MemWatch`] in
+/// the frame's event list, mixed in with everything else a subscriber
+/// asked for; this is the one place that filtering is written, so a caller
+/// feeding [`BreakCtx::watch_hits`] cannot get it subtly wrong.
+#[must_use]
+pub fn watch_hits(events: &[rf_core_api::CoreEvent]) -> Vec<u32> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            rf_core_api::CoreEvent::MemWatch { id } => Some(*id),
+            _ => None,
+        })
+        .collect()
 }
 
 /// 6502 opcodes the step logic must recognise. Named rather than inlined
@@ -278,6 +338,23 @@ mod tests {
             dot: 0,
             peek,
             events,
+            watch_hits: &[],
+        }
+    }
+
+    /// The same helper with watch hits, for the W13-02e cases below.
+    fn ctx_with_watches<'a>(
+        pc: u16,
+        peek: &'a dyn Fn(u16) -> u8,
+        watch_hits: &'a [u32],
+    ) -> BreakCtx<'a> {
+        BreakCtx {
+            pc,
+            scanline: 0,
+            dot: 0,
+            peek,
+            events: &[],
+            watch_hits,
         }
     }
 
@@ -410,5 +487,39 @@ mod tests {
         assert!(!frame_has_returned(0xFD, 0xFD), "exactly at entry");
         assert!(frame_has_returned(0xFD, 0xFE), "popped past entry");
         assert!(frame_has_returned(0xFB, 0xFD), "unwound two levels");
+    }
+
+    /// W13-02e: a watch condition fires on the core's report, not on a
+    /// peek — that is the whole distinction from `MemoryEquals`.
+    #[test]
+    fn a_watch_breakpoint_fires_on_the_cores_report_and_is_installable() {
+        use rf_core_api::{MemWatch, WatchAccess, WatchSpace};
+        let watch = MemWatch::unconditional(9, WatchSpace::Cpu, 0x0086, WatchAccess::Write);
+        let mut table = BreakpointTable::new();
+        table.add(Breakpoint {
+            id: 1,
+            condition: Condition::Watch(watch),
+            enabled: true,
+        });
+
+        let peek = |_: u16| 0u8;
+        // Nothing reported: no hit, however the memory happens to read.
+        assert!(table.check(&ctx_with_watches(0, &peek, &[])).is_none());
+        // The core reported this watch's id.
+        let hit = table
+            .check(&ctx_with_watches(0, &peek, &[9]))
+            .expect("a reported watch id must break");
+        assert_eq!(hit.id, 1);
+        assert_eq!(hit.condition, Condition::Watch(watch));
+        // A different watch's id is not this breakpoint.
+        assert!(table.check(&ctx_with_watches(0, &peek, &[8])).is_none());
+
+        // And the table hands the core what to install.
+        assert_eq!(table.watches(), vec![watch]);
+        table.set_enabled(1, false);
+        assert!(
+            table.watches().is_empty(),
+            "a disabled watch must not stay armed in the core"
+        );
     }
 }

@@ -66,6 +66,11 @@ pub struct NesCore {
     cpu: Cpu,
     config: CoreConfig,
     cycle_budget: u64,
+    /// Ticket W13-02e: what was last pushed to the bus, so the sync at the
+    /// top of [`NesCore::step`] copies only when the caller has actually
+    /// changed something. `CoreConfig` is `Copy` and comparable, so this
+    /// is a value comparison, not a heap check.
+    pushed_watches: rf_core_api::WatchTable,
 }
 
 impl NesCore {
@@ -82,6 +87,7 @@ impl NesCore {
             cpu,
             config: CoreConfig::default(),
             cycle_budget: CYCLE_BUDGET,
+            pushed_watches: rf_core_api::WatchTable::new(),
         })
     }
 
@@ -177,6 +183,14 @@ impl EmulatorCore for NesCore {
     }
 
     fn step(&mut self, granularity: Step, sink: &mut dyn CoreSink) -> StepResult {
+        // `CoreConfig` is documented as the path a consumer configures a
+        // core through, and this is what makes that true for watchpoints:
+        // a caller sets `core.config().watches` and the next step picks it
+        // up, with no second setter to keep in sync (ticket W13-02e).
+        if self.config.watches != self.pushed_watches {
+            self.bus.set_watches(self.config.watches);
+            self.pushed_watches = self.config.watches;
+        }
         let start_frame = self.bus.frame_count();
         let start_cycle = self.bus.master_cycle();
         let deadline = start_cycle + self.cycle_budget;

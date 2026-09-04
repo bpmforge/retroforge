@@ -269,6 +269,48 @@ impl AnnotationStore {
     }
 }
 
+/// Promote a watchpoint to an annotation — DEBUGGER.md §1's last bullet,
+/// "a watchpoint can be 'promoted' to a `memory_map` annotation with one
+/// click (address, size, label)" (ticket W13-02e).
+///
+/// The watch supplies address and size; the caller supplies the two things
+/// a watch cannot know — what the address *means* and where that claim
+/// came from. `source` is still required, and this function does not
+/// bypass [`AnnotationStore::add`]'s check: it builds the value, and `add`
+/// remains the one gate.
+///
+/// ## Only a CPU-space watch promotes
+///
+/// A profile's `[[memory_map]]` is addressed on the **CPU** bus
+/// (GAME_PROFILES.md §2), so a PPU-space watch has no row to become.
+/// Returning `None` says so, rather than silently emitting a row whose
+/// address means something else entirely — the same reason
+/// [`AnnotationStore::ram_labels`] refuses to label a bus operand with a
+/// ROM offset.
+#[must_use]
+pub fn promote_watch(
+    watch: rf_core_api::MemWatch,
+    label: &str,
+    ty: &str,
+    source: &str,
+) -> Option<Annotation> {
+    if watch.space != rf_core_api::WatchSpace::Cpu {
+        return None;
+    }
+    Some(Annotation {
+        space: AddressSpace::Ram,
+        addr: watch.start,
+        // The watch's range is inclusive at both ends, so a one-byte watch
+        // has start == end and this is 1 — not 0.
+        len: watch.end.saturating_sub(watch.start).saturating_add(1),
+        ty: ty.to_string(),
+        label: label.to_string(),
+        notes: None,
+        source: source.to_string(),
+        count: None,
+    })
+}
+
 /// One RAM annotation reduced to what [`label_operands`] needs.
 ///
 /// `len` is clamped to at least 1 by [`AnnotationStore::ram_labels`]: a
@@ -526,5 +568,40 @@ mod tests {
         assert_eq!(label_operands("$$$", &labels), "$$$");
         assert_eq!(label_operands("LDA $", &labels), "LDA $");
         assert_eq!(label_operands("$0 $0", &labels), "$0 {zero} $0 {zero}");
+    }
+
+    /// DEBUGGER.md §1's promotion bullet, and the two things it must not
+    /// get wrong: the inclusive range becomes a length of 1, and a
+    /// PPU-space watch has no `[[memory_map]]` row to become.
+    #[test]
+    fn a_watchpoint_promotes_to_a_memory_map_annotation() {
+        use rf_core_api::{MemWatch, WatchAccess, WatchSpace};
+
+        let one_byte = MemWatch::unconditional(3, WatchSpace::Cpu, 0x0086, WatchAccess::Write);
+        let a = promote_watch(one_byte, "player_x", "u8", "https://example.test/session")
+            .expect("a CPU-space watch promotes");
+        assert_eq!(a.space, AddressSpace::Ram);
+        assert_eq!(a.addr, 0x0086);
+        assert_eq!(a.len, 1, "start == end is ONE byte, not zero");
+
+        let two_byte = MemWatch {
+            end: 0x0087,
+            ..one_byte
+        };
+        let a = promote_watch(two_byte, "player_x", "u16", "https://example.test/session").unwrap();
+        assert_eq!(a.len, 2);
+
+        // And it still has to pass the store's gate.
+        let mut store = AnnotationStore::new();
+        assert!(store.add(a).is_ok());
+        let sourceless = promote_watch(one_byte, "player_x", "u8", "   ").unwrap();
+        assert!(matches!(
+            store.add(sourceless),
+            Err(AnnotationError::EmptySource { .. })
+        ));
+
+        // A PPU-space watch has no memory_map row to become.
+        let ppu = MemWatch::unconditional(4, WatchSpace::Ppu, 0x2000, WatchAccess::Any);
+        assert!(promote_watch(ppu, "nametable", "u8", "https://example.test/s").is_none());
     }
 }

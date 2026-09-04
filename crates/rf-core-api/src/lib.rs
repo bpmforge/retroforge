@@ -22,6 +22,7 @@ mod input;
 mod state_view;
 mod triple_buffer;
 mod video;
+mod watch;
 
 pub use cart::CartImage;
 pub use core::{CoreConfig, CoreSink, EmulatorCore, ResetKind, Step, StepResult};
@@ -32,6 +33,7 @@ pub use input::{InputFrame, MAX_INPUT_PORTS};
 pub use state_view::{StateReader, StateView, StateWriter};
 pub use triple_buffer::{triple_buffer, TripleBufferReader, TripleBufferWriter};
 pub use video::{ColorMathOp, OverlayPixel, PixelLayer, PpuPixel, SubPixel};
+pub use watch::{MemWatch, WatchAccess, WatchSpace, WatchTable, MAX_WATCHES};
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-core-api";

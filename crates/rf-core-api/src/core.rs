@@ -68,6 +68,18 @@ pub struct CoreConfig {
     /// Kept as a plain bitmask here so individual cores can define their
     /// own switches without changing this shared struct's shape.
     pub extra_flags: u32,
+    /// Memory watchpoints the core evaluates on its own buses (ticket
+    /// W13-02e; DEBUGGER.md §1). Empty by default, and
+    /// [`crate::WatchTable::is_armed`] is the single bool a core checks
+    /// before looking at an access — an unwatched session pays one
+    /// predictable branch.
+    ///
+    /// Here rather than behind a new `EmulatorCore` method for the same
+    /// reason `event_mask` is: consumers only ever reach a core through
+    /// `&mut dyn EmulatorCore`, and `fn config(&mut self) -> &mut
+    /// CoreConfig` is already the path. It is a fixed-capacity value type
+    /// precisely so this struct stays `Copy`.
+    pub watches: crate::WatchTable,
 }
 
 impl Default for CoreConfig {
@@ -76,6 +88,7 @@ impl Default for CoreConfig {
             accuracy_mode: true,
             event_mask: EventMask::NONE,
             extra_flags: 0,
+            watches: crate::WatchTable::new(),
         }
     }
 }
