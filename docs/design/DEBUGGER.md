@@ -87,3 +87,110 @@ subscriptions (EventMask filtering in ARCHITECTURE §5); the breakpoint fast
 path is one branch; viewers snapshot only visible regions. CI includes a
 benchmark asserting Accuracy-mode frame time with debugger idle ==
 debugger-compiled-out frame time within noise.
+
+---
+
+## 7. The "daily-drivable for ROM hackers" bar (W13-01, 2026-09-03)
+
+`docs/VISION.md` §5 makes "debugger suite at *daily-drivable for ROM
+hackers* quality" an 18-month success criterion. It was the only one of
+those criteria with **no ticket, no test and no definition** — a phrase,
+not a bar. This section replaces the phrase. §§1-6 above are the design and
+are unchanged; this section grades what ships against them and states what
+passing means.
+
+### 7.1 Grading — §§1-6 against what ships
+
+Every verdict cites the symbol or file that satisfies it. **A grade with no
+citation is not a grade.**
+
+| § | Promised | Ships | Verdict |
+|---|---|---|---|
+| 1 | run/pause/frame/scanline/instruction step | `EmuStepper` + `Step::{Instruction,Scanline,Frame}` (`rf-core-api/src/core.rs`) | **met** |
+| 1 | step-over / step-out / run-to-cursor | `breakpoint::StepMode::{Into,Over,Out,ToCursor}`, `step_over_is_a_call` (JSR-only, tail-call safe) | **met** |
+| 1 | breakpoints: PC exec | `Condition::Pc` | **met** |
+| 1 | breakpoints: **memory read/write/access**, CPU *and* PPU spaces | only `Condition::MemoryEquals` — tests what memory *holds* at an instruction boundary, not what was *written*. The module doc says so deliberately. No PPU address space at all. | **GAP** |
+| 1 | value-conditional `addr==X && val&mask` | `MemoryEquals` has no mask | **partial** |
+| 1 | scanline/dot position (NES) | `Condition::Position` | **met** |
+| 1 | H/V position (SNES) | nothing | **GAP** |
+| 1 | IRQ/NMI entry, mapper events | `EventKind::{Irq,Nmi,MapperIrq}` | **met** (bank-switch not distinguished) |
+| 1 | zero cost when the table is empty | `BreakpointTable::check`, and `benches/debugger_idle.rs` measures it | **met** |
+| 1 | watchpoint "promoted" to a `memory_map` annotation in one click | nothing | **GAP** |
+| 2 | per-chip rings, CPU/PPU/APU/DMA/mapper | `TraceKind::ALL` — all five | **met** |
+| 2 | never blocks the core thread; overflow drops oldest + truncation flag | two-ring split (transport drops newest, `TraceScrollback` drops oldest), reasoned from rtrb 0.3's own API in the module doc | **met** |
+| 2 | NES trace **nestest.log-compatible** | `rf_nes::trace::format_trace_line`, shared with the golden diff | **met** |
+| 2 | SNES trace in **bsnes convention** (bank:addr, m/x-aware) | nothing | **GAP** |
+| 2 | trace-to-file, lz4 framing, background writer | `lz4_flex` 0.14 + `trace_capture::write_loop` (`finish()` called explicitly) | **met** |
+| 3 | Pattern/CHR — NES | `pattern::decode_pattern_table` + `tile_to_rgba` | **met** |
+| 3 | Nametable — NES, scroll + mirroring + attributes | `nametable::decode_nametable` | **met** |
+| 3 | Palette — NES 32-entry | `palette::decode_palette` | **met** |
+| 3 | OAM — 64 entries, per-scanline occupancy, `dropped_by_limit` | `oam::{decode_oam,scanline_occupancy,dropped_by_limit,diff_oam}` | **met** |
+| 3 | Event viewer — dot/scanline scatter | `event_timeline::build_timeline` | **met** |
+| 3 | Trace viewer with filters | `trace::TraceScrollback` + `DebugTab::Trace` | **met** |
+| 3 | Audio — channel scopes, mute/solo | `audio_scope::{MuteState,mix_host_side,trace}` | **met** |
+| 3 | Memory hex — **live edit (pause-gated), goto/find, annotation coloring** | `memory_view::{build_rows,byte_at}` only. The panel has none of the three; the "find" box in `debug_dock.rs` is the *trace* filter. | **GAP** |
+| 3 | **the entire SNES column** — 2/4/8bpp CHR, per-BG tilemaps, Mode 7 view, CGRAM 256 + color math, 128-entry OAM w/ 32-per-line, VRAM/CGRAM/ARAM spaces, HDMA lanes, DSP voice + BRR | **nothing.** No provider in `rf-debugger/src` mentions SNES; `DebugTab` has nine variants and none is console-aware. | **GAP (the largest)** |
+| 4 | annotation store, typed, with `source_url` + confidence | `annotation::{Annotation,AnnotationStore}`, sourceless entries refused at `add` | **met** |
+| 4 | DataCrystal TSV import | `datacrystal::parse_tsv` | **met** (library only — see below) |
+| 4 | export to profile skeleton | `profile_export::export_skeleton` | **met** (library only — see below) |
+| 4 | **the workflow reaches a user** | `AnnotationStore`, `parse_tsv` and `export_skeleton` are called from **tests and nothing else**. `crates/retroforge/src` never constructs an annotation store. | **GAP** |
+| 4 | persisted per normalized ROM hash; JSON import/export | nothing | **GAP** |
+| 4 | cross-links: labels inline in trace rows, annotation coloring in memory | nothing | **GAP** |
+| 5 | Lua console REPL (`rf.mem`, `rf.bp.add`, …) | `DebugTab::LuaConsole` (W4-04), reachable | **met** |
+| 6 | pay-for-use; idle == compiled-out within noise, **measured** | `crates/retroforge/benches/debugger_idle.rs` | **met** |
+
+**One root cause sits under most of the SNES rows, and it is worth naming
+once rather than nine times.** `SnesCore::state_view()`
+(`crates/rf-snes/src/core.rs`) returns **empty slices** for `cpu_regs`,
+`vram`, `cgram`, `oam`, `ppu_regs` and `mapper_state` — only `wram` is
+real. The shell then answers `None` for `bus()`, `bus_mut()` and `cpu()`
+on `Machine::Snes` (`crates/retroforge/src/stepper.rs`). So a SNES debug
+panel has no data source to render *even if it were written*. This is the
+half-console shape W11-10's close note predicted, arriving on the debugger
+side: the trait was adopted, and one implementation of it is a stub.
+
+### 7.2 The bar
+
+**B-0 — the walkthrough, which is what "daily-drivable" means.** A ROM
+hacker, using only the running application and no source edits, can: load a
+game, find an unknown quantity in RAM by watching it change, label it,
+promote the label to an annotation with a source citation, export a profile
+skeleton, and load that profile back — **on either console**. B-1 to B-9
+are that sentence decomposed into pass/fail parts; B-0 is passed by an
+end-to-end test that performs it, not by inspection.
+
+1. **B-1 — one debugger, two consoles.** Every viewer with a SNES column in
+   §3 renders real data with a SNES ROM loaded. *Test: an app-level test
+   opens the RF-Scroller-S fixture and asserts each provider returns
+   non-empty output.*
+2. **B-2 — no stub `StateView`.** No core returns an empty slice for a
+   memory the console physically has. *Test: a per-core assertion over
+   every `StateView` field.*
+3. **B-3 — memory is an editor, not a dump.** Goto, find, live edit gated
+   on pause, and annotated ranges visibly coloured.
+4. **B-4 — real watchpoints.** Break on memory read / write / access in the
+   CPU *and* PPU address spaces, with a value+mask condition.
+5. **B-5 — one action promotes a watchpoint to an annotation** (address,
+   size, label), per §1's last bullet.
+6. **B-6 — the export path is reachable from the UI**, not only from
+   tests: annotations → profile skeleton without leaving the window.
+7. **B-7 — annotations survive a restart**, keyed by normalized ROM hash,
+   with JSON import/export.
+8. **B-8 — labels appear where the work happens**: inline in trace rows
+   (`LDA $0086 {player_x_screen}`) and as colour in the memory view.
+9. **B-9 — the SNES trace is diffable against a reference emulator**
+   (bsnes convention: bank:addr, m/x-aware disassembly).
+10. **B-10 — pay-for-use is not lost while doing the above.**
+    `debugger_idle` stays within noise of debugger-compiled-out. *Already
+    met; carried as a regression criterion, not new work.*
+
+**Not in the bar, deliberately.** Nothing here asks for features §§1-6 do
+not already promise. This is a conformance bar against the project's own
+design doc plus the reachability standard the W10/W11 arc established — a
+capability that only tests can reach is not a capability a ROM hacker has.
+
+### 7.3 What closes it
+
+`W13-02a` … `W13-02g` in `plan.json` (**32 points**, filed by this
+ticket). `W13-02a` is first because it is the unblocker: until
+`SnesCore::state_view` is real, every SNES viewer has nothing to draw.

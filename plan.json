@@ -5557,11 +5557,184 @@
     "no debugger code is written by this ticket — it is a phase-entry planning ticket in W6-00 and W7-01's shape"
    ],
    "points": 2,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "FILED AND CLAIMED 2026-09-03. It is the ONLY item on docs/work/VISION_PLAN.md's queue that needs no ruling from Brad: the other four board tickets are ruling-gated and the rest of Phase 13 waits on D-2 (ROM supply) or D-5 (does Phase 13 exist at all).",
     "WHY A PLANNING TICKET AND NOT A BUILD TICKET. VISION §5 promises 'debugger suite at daily-drivable for ROM hackers quality' and that is the ONLY 18-month criterion with no defined test — no ticket, no criterion, never measured. Work cannot be planned toward a phrase. W6-00 and W7-01 are the precedent for this shape: crate infra, 2 points, scoped to plan.json + ROADMAP.md, output is a board expansion rather than code.",
-    "PHASE 13 HAS NO ROADMAP SECTION and that is deliberate, not an oversight: whether Phase 13 exists at all is decision D-5. W12-01 already sits at phase 12 with no ROADMAP section either, so validate-plan is content — it groups by wave and does not require a matching doc heading."
+    "PHASE 13 HAS NO ROADMAP SECTION and that is deliberate, not an oversight: whether Phase 13 exists at all is decision D-5. W12-01 already sits at phase 12 with no ROADMAP section either, so validate-plan is content — it groups by wave and does not require a matching doc heading.",
+    "DONE 2026-09-03. All four criteria met. THE GRADING is DEBUGGER.md \u00a77.1: every row of \u00a7\u00a71-6 graded with the symbol that satisfies it named. Met: all of \u00a72 except the SNES trace format, all of \u00a73's NES column, \u00a75 (Lua console), \u00a76 (benches/debugger_idle.rs measures pay-for-use rather than asserting it), and most of \u00a71's execution control including step-over/out/to-cursor. GAPS, seven of them, all cited. THE BAR is \u00a77.2: B-0 is the walkthrough sentence (find an unknown quantity in RAM, label it, promote it, export a profile skeleton, load it back \u2014 on EITHER console, using only the running app) and B-1..B-10 are that sentence decomposed into pass/fail parts. Nothing in the bar asks for a feature \u00a7\u00a71-6 do not already promise; it is a conformance bar plus the reachability standard W10/W11 established. EXPANSION: W13-02a..W13-02g, 32 points, four claimable immediately. TWO FINDINGS WORTH THE TICKET ON THEIR OWN. (1) SnesCore::state_view() returns EMPTY SLICES for cpu_regs, vram, cgram, oam, ppu_regs and mapper_state \u2014 only wram is real \u2014 and stepper.rs answers None for bus()/cpu() on Machine::Snes, so the whole SNES viewer column is UNBUILDABLE rather than merely unbuilt. W11-10 predicted exactly this shape. (2) AnnotationStore, datacrystal::parse_tsv and profile_export::export_skeleton are called from tests and from NOWHERE in crates/retroforge/src \u2014 the profile-authoring pipeline VISION \u00a73 sells as a differentiator exists as a test fixture. NO CODE WAS WRITTEN, per criterion 4."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W13-02a",
+   "title": "SnesCore::state_view stops returning empty slices",
+   "phase": 13,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "crates/rf-core-api/**",
+    "crates/retroforge/src/stepper.rs"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "StateView from SnesCore reports real vram, cgram, oam, ppu_regs, cpu_regs and mapper_state — a per-field assertion, one per memory the console physically has (bar B-2)",
+    "Machine::Snes stops answering None for the shell's debugger accessors, or the accessor is replaced by something the trait can answer for both cores",
+    "the NES path is unchanged: every existing debugger provider test and the RF-Scroller goldens pass without re-baselining"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FILED BY W13-01, 2026-09-03, and it is FIRST because it is the unblocker: until this lands every SNES debug panel has nothing to draw, so W13-02b/c/g are unbuildable rather than merely unbuilt.",
+    "MEASURED, not assumed: crates/rf-snes/src/core.rs state_view() returns cpu_regs: &[], vram: &[], cgram: &[], oam: &[], ppu_regs: &[], mapper_state: &[] — only wram is real. crates/retroforge/src/stepper.rs then answers None for bus(), bus_mut() and cpu() on Machine::Snes. This is the half-console shape W11-10's close note predicted, arriving on the debugger side: the trait was adopted and one implementation of it is a stub.",
+    "SCOPE WARNING FOR WHOEVER CLAIMS IT: W11-10's close note lists three things the trait still cannot express — typed CPU registers (cpu_regs is an untyped &[u8]), an out-of-band bus WRITE for the memory editor, and APU access for channel capture. This ticket only needs the first. The write belongs to W13-02d; do not widen."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W13-02b",
+   "title": "The SNES viewer column: CHR, tilemaps, CGRAM, OAM, memory spaces",
+   "phase": 13,
+   "crate": "rf-debugger",
+   "write_scope": [
+    "crates/rf-debugger/**",
+    "crates/retroforge/src/debug_dock.rs"
+   ],
+   "depends_on": [
+    "W13-02a"
+   ],
+   "acceptance": [
+    "2/4/8bpp CHR decode per BG char-base; per-BG tilemaps with flip and priority flags; CGRAM 256 with a colour-math preview; 128-entry OAM with 32-per-line occupancy and size/base decode; VRAM/CGRAM/ARAM as memory-view spaces with 24-bit addressing (DEBUGGER.md §3's SNES column)",
+    "an app-level test opens the RF-Scroller-S fixture and asserts every one of those providers returns non-empty output (bar B-1)",
+    "the panels are console-aware rather than duplicated: a NES ROM shows the NES column and a SNES ROM the SNES one, in the same DebugTab"
+   ],
+   "points": 8,
+   "status": "todo",
+   "notes": [
+    "FILED BY W13-01, 2026-09-03. DEBUGGER.md §7.1 grades this whole column as GAP: no provider in rf-debugger/src mentions SNES, and DebugTab's nine variants are not console-aware.",
+    "Mode 7, HDMA lanes and the DSP voice/BRR view are DELIBERATELY NOT HERE — they are W13-02c. Each is its own decoder with its own oracle, and bundling them into an already-8-point ticket is the shape Brad splits."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W13-02c",
+   "title": "Mode 7 view, HDMA channel lanes, DSP voice and BRR source",
+   "phase": 13,
+   "crate": "rf-debugger",
+   "write_scope": [
+    "crates/rf-debugger/**",
+    "crates/retroforge/src/debug_dock.rs"
+   ],
+   "depends_on": [
+    "W13-02b"
+   ],
+   "acceptance": [
+    "Mode 7 view renders the 1024x1024 playfield with the camera trapezoid overlaid (DEBUGGER.md §3)",
+    "the event viewer draws HDMA channel lanes per scanline alongside the existing dot/scanline scatter",
+    "the audio panel shows per-voice DSP state and a BRR source view, next to the existing channel scopes"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FILED BY W13-01, 2026-09-03. Split from W13-02b because each of the three is a decoder in its own right rather than another view of memory the column already exposes."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W13-02d",
+   "title": "The memory view is an editor, not a dump",
+   "phase": 13,
+   "crate": "rf-debugger",
+   "write_scope": [
+    "crates/rf-debugger/src/memory_view.rs",
+    "crates/retroforge/src/debug_dock.rs",
+    "crates/rf-core-api/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "goto an address, find a byte sequence, and edit a byte live with the edit GATED ON PAUSE (DEBUGGER.md §3's memory-hex row, bar B-3)",
+    "annotated ranges are visibly coloured in the hex view (bar B-8's memory half)",
+    "law 4 holds: the write goes through the core's own bus, never around it, and nothing mutates core state off the core thread"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED BY W13-01, 2026-09-03. Today memory_view.rs is build_rows + byte_at and nothing else; the 'find' box in debug_dock.rs is the TRACE filter, not a memory search.",
+    "THIS IS THE TICKET W11-10's NOTE WAS WAITING FOR: 'an out-of-band bus WRITE for the memory editor' is one of the three things it lists as having no trait expression. Adding it to EmulatorCore is in scope here and is why rf-core-api is in the write_scope."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W13-02e",
+   "title": "Real watchpoints, and one action promotes one to an annotation",
+   "phase": 13,
+   "crate": "rf-debugger",
+   "write_scope": [
+    "crates/rf-debugger/src/breakpoint.rs",
+    "crates/rf-debugger/src/annotation.rs",
+    "crates/rf-nes/**",
+    "crates/rf-snes/**",
+    "crates/retroforge/src/debug_dock.rs"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "break on memory READ, WRITE and ACCESS in the CPU and PPU address spaces separately, with a value+mask condition (DEBUGGER.md §1, bar B-4)",
+    "a watchpoint is promoted to a memory_map annotation in one action, carrying address, size and label (DEBUGGER.md §1's last bullet, bar B-5)",
+    "the empty-table fast path is unchanged and benches/debugger_idle.rs still reports idle within noise of debugger-compiled-out (bar B-10)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FILED BY W13-01, 2026-09-03. Condition::MemoryEquals tests what memory HOLDS at an instruction boundary, not what was WRITTEN — breakpoint.rs's own module doc says the distinction decided the design. A real watchpoint needs a hook at the bus access, which is why the cores are in the write_scope and this is not a pure rf-debugger ticket.",
+    "LAW 4 IS THE CONSTRAINT: a bus hook must not perturb the simulation. Whatever shape it takes has to leave the mode-invariant suites green, and that is a criterion to check rather than a hope."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W13-02f",
+   "title": "The annotation to profile-export workflow reaches a user",
+   "phase": 13,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-debugger/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "annotations can be created, listed, edited and exported to a profile skeleton from the running app, without leaving the window (bar B-6)",
+    "annotations persist per normalized ROM hash under the user data dir and import/export as JSON (bar B-7)",
+    "trace rows render annotation labels inline, in DEBUGGER.md §4's own shape: LDA $0086 {player_x_screen} (bar B-8's trace half)",
+    "the DataCrystal TSV import dialog is reachable from the UI, not only from tests"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED BY W13-01, 2026-09-03, and this is the REACHABILITY gap of the set — the same class the whole W10/W11 arc existed to close. MEASURED: AnnotationStore, datacrystal::parse_tsv and profile_export::export_skeleton are called from crates/retroforge/tests/** and from NOWHERE in crates/retroforge/src. The library is complete and the user cannot reach it.",
+    "WHY THIS MATTERS MORE THAN ITS 3 POINTS SUGGEST: VISION §3 sells 'Debugger -> annotation -> profile export pipeline' as a DIFFERENTIATOR against Mesen's tiles-only HD Pack Builder. Today that pipeline exists as a test fixture."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W13-02g",
+   "title": "The SNES CPU trace is diffable against a reference emulator",
+   "phase": 13,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "crates/rf-debugger/src/trace.rs"
+   ],
+   "depends_on": [
+    "W13-02a"
+   ],
+   "acceptance": [
+    "SNES CPU trace lines follow bsnes conventions — bank:addr, m/x-aware disassembly (DEBUGGER.md §2, bar B-9)",
+    "one formatter serves both the on-screen trace viewer and any golden diff, the way rf_nes::trace::format_trace_line already does for the NES",
+    "a golden trace fixture pins the format so it cannot drift silently"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED BY W13-01, 2026-09-03. The NES half of §2 is met by rf_nes::trace::format_trace_line and shared with the nestest golden diff; the SNES half does not exist. m/x-awareness is the part that makes this more than string formatting — operand width depends on processor-status bits, so the disassembler needs the machine's state, not just the bytes."
    ],
    "stories": []
   }

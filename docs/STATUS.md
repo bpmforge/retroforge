@@ -1881,3 +1881,57 @@ that way.
 
   The probe workflow is **deleted in this same commit** — it existed to
   answer one question and it answered it.
+
+- **W13-01 — the debugger's "daily-drivable" bar, written down** (2026-09-03,
+  no code changed). VISION §5's only 18-month criterion with **no ticket, no
+  test and no definition** now has all three.
+
+  **The grading is `docs/design/DEBUGGER.md` §7.1** — every row of §§1-6
+  against what ships, with the symbol that satisfies it named, because a
+  grade with no citation is not a grade. **Met:** execution control
+  including step-over/out/to-cursor (`StepMode`, JSR-only so a tail call
+  cannot hang it), all five trace rings, the nestest-compatible NES trace
+  formatter shared with the golden diff, lz4 trace-to-file, the whole NES
+  viewer column, the Lua console, and §6's pay-for-use — which
+  `benches/debugger_idle.rs` **measures** rather than asserts. **Seven
+  gaps**, each cited.
+
+  **The bar is §7.2, and B-0 is the whole thing in one sentence:** a ROM
+  hacker, using only the running app, can find an unknown quantity in RAM,
+  label it, promote the label to an annotation with a citation, export a
+  profile skeleton and load it back — **on either console**. B-1..B-10
+  decompose that into pass/fail parts. Nothing in the bar asks for a
+  feature §§1-6 do not already promise: it is a conformance bar plus the
+  reachability standard W10/W11 established, since a capability only tests
+  can reach is not a capability a user has.
+
+  **Two findings that would justify the ticket on their own.**
+  (1) **`SnesCore::state_view()` returns empty slices** for `cpu_regs`,
+  `vram`, `cgram`, `oam`, `ppu_regs` and `mapper_state` — only `wram` is
+  real — and `stepper.rs` answers `None` for `bus()`/`cpu()` on
+  `Machine::Snes`. The entire SNES viewer column is therefore
+  **unbuildable**, not merely unbuilt: a panel written today would have no
+  data source. This is precisely the half-console shape W11-10's close note
+  predicted, arriving on the debugger side — the trait was adopted and one
+  implementation of it is a stub.
+  (2) **The profile-authoring pipeline is a test fixture.**
+  `AnnotationStore`, `datacrystal::parse_tsv` and
+  `profile_export::export_skeleton` are called from `crates/retroforge/
+  tests/**` and from **nowhere** in `crates/retroforge/src`. VISION §3
+  sells "Debugger → annotation → profile export" as a differentiator
+  against Mesen's tiles-only pack builder; a user cannot reach it.
+
+  **Expansion: `W13-02a`..`W13-02g`, 32 points**, replacing
+  `VISION_PLAN.md`'s `points: ?`. `W13-02a` (real `StateView` for SNES) is
+  first because it unblocks three of the others. **Four are claimable
+  immediately** — W13-02a/d/e/f — and they are the first claimable tickets
+  the board has had since 2026-08-30, because the debugger needs neither a
+  ROM nor a ruling.
+
+  Board: `validate-plan` **170 tickets · 904 pts · 158 done / 4 blocked /
+  7 todo**; W13: 8 tickets / 34 pts. `validate-traceability` 101/101
+  reachable, 33/33 covered, zero dangling refs. Law-3 gate re-run and
+  **measured, not inherited**: exit 0, **1723 passing, 0 failed, 33
+  ignored** across 124 suites — identical to the 2026-08-30 count, which is
+  what a no-code ticket should produce. `scripts/docs-gate.sh` green.
+  No code written (criterion 4).

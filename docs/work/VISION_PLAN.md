@@ -1,7 +1,13 @@
 # RetroForge — plan to the vision
 
 Date: 2026-09-03 · Companion to `docs/work/VISION_GAP.md` (the register this
-plans against) · **Nothing filed in `plan.json`**
+plans against)
+
+**Filing status.** Only **W13-01** and the seven tickets it expanded into
+(`W13-02a`..`W13-02g`) are on the board. Everything else in §3 is a
+*proposal*: it stays out of `plan.json` until the ruling that releases it
+is made, because a ticket filed against an unmade decision is a ticket
+nobody can claim.
 
 **Read the gap register first.** This file does not restate the evidence; it
 sequences the work that closes it.
@@ -95,8 +101,25 @@ emit a **testable bar** — because "daily-drivable for ROM hackers" is
 currently a phrase, not a criterion, and no work can be planned toward it.
 The ticket's output is that bar plus whatever gap tickets it expands into.
 
-Expected expansion: **W13-02**, `points: ?` — genuinely unsizable until
-W13-01 runs. That is the correct estimate, not a missing one.
+**RAN 2026-09-03. Expansion filed: `W13-02a` … `W13-02g`, 32 points.**
+The `points: ?` above is now a number, and the grading is
+`docs/design/DEBUGGER.md` §7. Four of the seven are **claimable today**
+(`W13-02a`, `W13-02d`, `W13-02e`, `W13-02f`) — the first items on this
+whole plan that are, since the debugger needs no ROM and no ruling.
+
+The finding that reorders the set: **`SnesCore::state_view()` returns empty
+slices** for `cpu_regs`, `vram`, `cgram`, `oam`, `ppu_regs` and
+`mapper_state` — only `wram` is real — and the shell answers `None` for
+`bus()`/`cpu()` on `Machine::Snes`. So the entire SNES viewer column is not
+merely unbuilt, it is **unbuildable** until `W13-02a` lands. That is
+W11-10's predicted half-console shape arriving on the debugger side.
+
+The second finding is a reachability gap of the class the W10/W11 arc
+existed to close: `AnnotationStore`, `datacrystal::parse_tsv` and
+`profile_export::export_skeleton` are called **from tests and nowhere in
+`crates/retroforge/src`**. VISION §3 sells that pipeline as a
+differentiator against Mesen's tiles-only pack builder; today a user cannot
+reach it (`W13-02f`).
 
 ### Released by D-1
 
@@ -195,7 +218,9 @@ absorbed silently.
 ## 4. What the queue looks like as one line
 
 ```
-NOW      W13-01 (debugger bar)          — no ruling needed
+DONE     W13-01 (debugger bar)          — ran 2026-09-03, expanded to W13-02a..g
+NOW      W13-02a (SNES StateView)       — unblocks the whole SNES viewer column
+   also  W13-02d/e/f claimable          — memory editor, watchpoints, export reachability
 D-1      W12-01 (runner)                — finish the stalled ticket
 D-3      W7-18 → W7-17 → W7-08          — the SPC/DSP chain, in that order
 D-4      W12-02 (R-05)                  — 2 pts or ~35, Brad's branch
@@ -208,11 +233,12 @@ D-2  ┌─  W11-06 (ten profiles)  ┐
 D-5      decides whether W13-* exists at all
 ```
 
-Sized work: **~28 points** of tickets that can be written down today
+Sized work: **~60 points** of tickets that can be written down today
 (W13-01 2, W12-01 ~2 remaining, W7-18/17/08 chain, W12-02 2, W11-06 8,
-W13-03 8, W13-04 5, W13-05 5, W13-06 3, W13-07 3 — minus the branches D-4
-and D-5 may delete). Unsized: **W13-02 and the W13-03 expansion**, both
-`?` on purpose.
+W13-03 8, W13-04 5, W13-05 5, W13-06 3, W13-07 3, and W13-02a..g's 32 —
+minus the branches D-4 and D-5 may delete). Still unsized: **the W13-03
+expansion**, `?` on purpose until the commercial pass runs and produces its
+defect register.
 
 ---
 
@@ -224,7 +250,7 @@ and D-5 may delete). Unsized: **W13-02 and the W13-03 expansion**, both
 | Profile + Lua + pack formats stable at v1 | W13-04, W13-05, W13-06 |
 | ≥10 curated game profiles | W11-06 (D-2) |
 | Mesen HD-pack import path working | **already met** — W9-06, W11-05, W11-14 |
-| Debugger daily-drivable for ROM hackers | W13-01 defines it, W13-02 closes it |
+| Debugger daily-drivable for ROM hackers | W13-01 **defined it** — `DEBUGGER.md` §7, bar B-0..B-10; `W13-02a`..`W13-02g` (32 pts) close it |
 | Community authors without touching Rust | W13-07, or an amended criterion |
 | Project survives its founder | not plannable as a ticket; the doc set is the mechanism and W13-07's cold-reader proxy is the closest available test |
 
