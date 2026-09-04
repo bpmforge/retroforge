@@ -79,14 +79,14 @@ amount of engineering removes the dependency.
 Ordered. Each row carries the four fields `validate-plan.mjs` checks, so
 filing is mechanical if Brad says to file.
 
-### Claimable today — needs no ruling
+### Done — the entry point, and it needed no ruling
 
-**W13-01 — the debugger's "daily-drivable" bar, written down**
+**W13-01 — the debugger's "daily-drivable" bar, written down** ✅ 2026-09-03
 - `phase: 13` · `crate: infra` · `points: 2`
-- `write_scope: ["plan.json", "docs/ROADMAP.md", "docs/design/DEBUGGER.md"]`
+- `write_scope: ["plan.json", "docs/ROADMAP.md", "docs/design/DEBUGGER.md", "docs/work/VISION_PLAN.md"]`
 - `depends_on: []`
-- **Releasing ruling: none. This is the only item on the whole plan that
-  can be claimed right now.**
+- **Releasing ruling: none — it was the only item on the whole plan that
+  could be claimed as filed.**
 
 Shape it as a **phase-entry planning ticket**, exactly like W6-00 and W7-01
 (both `crate: infra`, both `points: 2`, both scoped to `plan.json` +
@@ -104,8 +104,20 @@ The ticket's output is that bar plus whatever gap tickets it expands into.
 **RAN 2026-09-03. Expansion filed: `W13-02a` … `W13-02g`, 32 points.**
 The `points: ?` above is now a number, and the grading is
 `docs/design/DEBUGGER.md` §7. Four of the seven are **claimable today**
-(`W13-02a`, `W13-02d`, `W13-02e`, `W13-02f`) — the first items on this
-whole plan that are, since the debugger needs no ROM and no ruling.
+(`W13-02d`, `W13-02e`, `W13-02f`) — the first items on this whole plan
+that are, since the debugger needs no ROM and no ruling.
+
+**`W13-02a` is the exception, and it needs a ruling after all — D-6.**
+Making `SnesCore::state_view()` report real `cpu_regs` runs straight into
+the gap W11-10's close note already named: `StateView::cpu_regs` is an
+untyped `&[u8]` and the trait has **no expression for typed CPU
+registers**. Choosing one is a contract change to `rf-core-api` that both
+cores implement, which is ruling #1's shape, not a fill-in-the-stub:
+
+| Branch | Gets | Costs |
+|---|---|---|
+| Typed registers on the trait | the architecture as designed; one debugger over two consoles | touches `rf-core-api`, `rf-nes` and `rf-snes` together |
+| A SNES-shaped byte layout the shell decodes | smaller, no contract change | how one shell ends up with two half-consoles — the exact failure W11-07 was split to avoid |
 
 The finding that reorders the set: **`SnesCore::state_view()` returns empty
 slices** for `cpu_regs`, `vram`, `cgram`, `oam`, `ppu_regs` and
