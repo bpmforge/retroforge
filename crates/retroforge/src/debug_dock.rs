@@ -275,6 +275,12 @@ pub struct DebugPanels {
     pub visible: bool,
     pub dock_state: DockState<DebugTab>,
     pub data: PanelData,
+    /// Ticket W13-02f: the annotation store, its forms and its pending
+    /// request. Kept beside [`PanelData`] rather than inside it so the
+    /// trace panel can borrow the labels (shared) while it borrows its own
+    /// scrollback (mutable) — two fields, two borrows, no clone per
+    /// repaint.
+    pub annotations: AnnotationPanelData,
     pattern_table: PatternTable,
 }
 
@@ -288,6 +294,7 @@ impl DebugPanels {
             visible: false,
             dock_state: load_layout(),
             data: PanelData::default(),
+            annotations: AnnotationPanelData::default(),
             pattern_table: PatternTable::Left,
         }
     }
@@ -320,14 +327,77 @@ impl DebugPanels {
     /// `rf_debugger`'s decode functions, called from the small `*_ui`
     /// helpers below).
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        self.tab_picker_ui(ui);
         let style = egui_dock::Style::from_egui(ui.style().as_ref());
         let mut viewer = PanelTabViewer {
             data: &mut self.data,
+            annotations: &mut self.annotations,
             pattern_table: &mut self.pattern_table,
         };
         egui_dock::DockArea::new(&mut self.dock_state)
             .style(style)
             .show_inside(ui, &mut viewer);
+    }
+}
+
+impl DebugPanels {
+    /// The "Add panel" menu — every [`DebugTab`] not currently docked.
+    ///
+    /// ## Why this exists, and why it is part of ticket W13-02f
+    ///
+    /// A tab that is in the enum but in no layout **cannot be opened**:
+    /// `restore_layout` only ever shows what the persisted file (or
+    /// [`layout::default_layout`]) names, and until now nothing could add
+    /// one. Two panels were already in that state — `LuaConsole`
+    /// (DEBUGGER.md §5, shipped by W4-04) and `OamDiff` (FR-DBG-006,
+    /// shipped by W4-06c) — with working UI nobody could reach.
+    ///
+    /// It is in *this* ticket because the same wall applies to
+    /// `Annotations`: putting it in `default_layout` alone would reach a
+    /// fresh install and no one else, since anybody who has opened the
+    /// debug window has a persisted layout that predates the variant. The
+    /// ticket's criterion is that the workflow reaches a **user**, so the
+    /// affordance is part of the criterion rather than an extra.
+    /// Dock `tab` if it is not already open, and do nothing if it is.
+    ///
+    /// The picker's one action, as a method so the end-to-end test drives
+    /// the same door a user does rather than a second one that could
+    /// diverge from it.
+    pub fn open_tab(&mut self, tab: DebugTab) {
+        if self.dock_state.iter_all_tabs().any(|(_, t)| *t == tab) {
+            return;
+        }
+        // `push_to_focused_leaf` verified against the vendored egui_dock
+        // 0.20.1 source, not recall (`DockState::push_to_focused_leaf`,
+        // dock_state/mod.rs:468) — the same discipline the layout
+        // capture/restore in this module already follows.
+        self.dock_state.push_to_focused_leaf(tab);
+    }
+
+    fn tab_picker_ui(&mut self, ui: &mut egui::Ui) {
+        let open: Vec<DebugTab> = self
+            .dock_state
+            .iter_all_tabs()
+            .map(|(_, tab)| *tab)
+            .collect();
+        let missing: Vec<DebugTab> = DebugTab::ALL
+            .into_iter()
+            .filter(|t| !open.contains(t))
+            .collect();
+        ui.horizontal(|ui| {
+            ui.menu_button("Add panel", |ui| {
+                if missing.is_empty() {
+                    ui.label("Every panel is already open.");
+                    return;
+                }
+                for tab in missing {
+                    if ui.button(tab.label()).clicked() {
+                        self.open_tab(tab);
+                        ui.close();
+                    }
+                }
+            });
+        });
     }
 }
 
@@ -456,6 +526,7 @@ pub struct ScriptPanelData {
 }
 
 struct PanelTabViewer<'a> {
+    annotations: &'a mut AnnotationPanelData,
     data: &'a mut PanelData,
     pattern_table: &'a mut PatternTable,
 }
@@ -464,19 +535,7 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
     type Tab = DebugTab;
 
     fn title(&mut self, tab: &mut DebugTab) -> egui::WidgetText {
-        match tab {
-            DebugTab::Pattern => "Pattern",
-            DebugTab::Nametable => "Nametable",
-            DebugTab::Palette => "Palette",
-            DebugTab::Oam => "OAM",
-            DebugTab::EventTimeline => "Events",
-            DebugTab::Memory => "Memory",
-            DebugTab::OamDiff => "OAM diff",
-            DebugTab::LuaConsole => "Lua",
-            DebugTab::Trace => "Trace",
-            DebugTab::Audio => "Audio",
-        }
-        .into()
+        tab.label().into()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut DebugTab) {
@@ -494,7 +553,12 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
                 self.data.oam_diff_scanline,
             ),
             DebugTab::LuaConsole => lua_console_ui(ui, self.data.script.as_deref()),
-            DebugTab::Trace => trace_ui(ui, self.data.trace.as_deref_mut()),
+            DebugTab::Trace => trace_ui(
+                ui,
+                self.data.trace.as_deref_mut(),
+                &self.annotations.store.ram_labels(),
+            ),
+            DebugTab::Annotations => annotations_ui(ui, self.annotations),
             DebugTab::Audio => audio_ui(ui, self.data.audio.as_deref_mut()),
         }
     }
@@ -943,7 +1007,11 @@ pub enum TraceRequest {
 
 /// The Trace tab (DEBUGGER.md §2-3's "Trace viewer | scrollback of ring
 /// buffer w/ filters").
-fn trace_ui(ui: &mut egui::Ui, data: Option<&mut TracePanelData>) {
+fn trace_ui(
+    ui: &mut egui::Ui,
+    data: Option<&mut TracePanelData>,
+    labels: &[rf_debugger::annotation::RamLabel<'_>],
+) {
     let Some(data) = data else {
         ui.label("No session — open a ROM to trace.");
         return;
@@ -1048,7 +1116,17 @@ fn trace_ui(ui: &mut egui::Ui, data: Option<&mut TracePanelData>) {
     let rows: Vec<String> = data
         .scrollback
         .filtered(&data.filter)
-        .map(|e| format!("{:<10} {}", e.kind.label(), e.text))
+        .map(|e| {
+            format!(
+                "{:<10} {}",
+                e.kind.label(),
+                // DEBUGGER.md §4's cross-link: `LDA $0086` renders as
+                // `LDA $0086 {player_x_screen}` once that address is
+                // annotated. Free when nothing is annotated —
+                // `label_operands` returns early on an empty lookup.
+                rf_debugger::annotation::label_operands(&e.text, labels)
+            )
+        })
         .collect();
     if rows.is_empty() {
         ui.label(if data.armed {
@@ -1187,4 +1265,447 @@ fn scope_plot(ui: &mut egui::Ui, trace: &rf_debugger::audio_scope::ScopeTrace) {
             egui::Color32::from_rgb(0x60, 0xC0, 0x80),
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// Annotations panel (ticket W13-02f; DEBUGGER.md §4).
+//
+// W13-01's grading found the whole §4 workflow reachable only from tests:
+// `AnnotationStore`, `datacrystal::parse_tsv` and
+// `profile_export::export_skeleton` were called from
+// `crates/retroforge/tests/**` and from nowhere in `src`. VISION §3 sells
+// "Debugger → annotation → profile export" as the differentiator against
+// Mesen's tiles-only pack builder, so a pipeline only a test can drive is
+// the differentiator not shipping. This panel is that pipeline's front
+// door.
+// ---------------------------------------------------------------------
+
+/// What the app must do on the panel's behalf, because the panel has no
+/// filesystem and no session.
+///
+/// A request rather than a direct call: this module draws, `crate::app`
+/// owns the config root, the ROM identity and the profile editor. The same
+/// split every other panel here uses (`TraceRequest`, and the audio
+/// panel's mute state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnotationRequest {
+    /// Persist the store for the open game (`crate::annotation_store`).
+    Save,
+    /// Build a profile skeleton from the store and open it in the profile
+    /// editor — GAME_PROFILES.md §3 step 2.
+    ExportSkeleton,
+}
+
+/// The identity an export needs, filled by `crate::app` when a ROM opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationIdentity {
+    pub title: String,
+    pub normalized_sha256: String,
+    pub console: rf_debugger::profile_export::Console,
+}
+
+/// The add/edit form's raw text. Strings rather than parsed values because
+/// a half-typed address is a normal state of a form, not an error to
+/// report on every keystroke.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnnotationForm {
+    pub space_is_rom: bool,
+    pub addr: String,
+    pub len: String,
+    pub ty: String,
+    pub label: String,
+    pub source: String,
+    pub notes: String,
+    pub count: String,
+}
+
+impl AnnotationForm {
+    /// Fill the form from an existing annotation, for editing.
+    fn from_annotation(a: &rf_debugger::annotation::Annotation) -> Self {
+        use rf_debugger::annotation::AddressSpace;
+        AnnotationForm {
+            space_is_rom: a.space == AddressSpace::Rom,
+            addr: format!("{:X}", a.addr),
+            len: a.len.to_string(),
+            ty: a.ty.clone(),
+            label: a.label.clone(),
+            source: a.source.clone(),
+            notes: a.notes.clone().unwrap_or_default(),
+            count: a.count.map(|c| c.to_string()).unwrap_or_default(),
+        }
+    }
+
+    /// Parse the form, or say which field is not usable yet.
+    ///
+    /// Public because it is the panel's contract with the app: the
+    /// end-to-end test drives the same parse the Add button does, rather
+    /// than a second construction path that could diverge from it.
+    ///
+    /// `source` and `label` are checked here **and** by
+    /// `AnnotationStore::add`. That is not redundancy for its own sake: the
+    /// store's check is the structural guarantee, this one exists so the
+    /// button can be disabled with a reason instead of the user pressing it
+    /// and being told no.
+    pub fn parse(&self) -> Result<rf_debugger::annotation::Annotation, String> {
+        use rf_debugger::annotation::{AddressSpace, Annotation};
+        let addr = u32::from_str_radix(self.addr.trim(), 16)
+            .map_err(|_| "address must be hexadecimal".to_string())?;
+        let len = match self.len.trim() {
+            "" => 1,
+            other => other
+                .parse::<u32>()
+                .map_err(|_| "length must be a number".to_string())?,
+        };
+        if self.label.trim().is_empty() {
+            return Err("a label is required".to_string());
+        }
+        if self.source.trim().is_empty() {
+            // FR-DBG-005 and CONSTRAINTS §2: provenance is not optional.
+            return Err("a source is required (FR-DBG-005)".to_string());
+        }
+        let count = match self.count.trim() {
+            "" => None,
+            other => Some(
+                other
+                    .parse::<u32>()
+                    .map_err(|_| "count must be a number".to_string())?,
+            ),
+        };
+        Ok(Annotation {
+            space: if self.space_is_rom {
+                AddressSpace::Rom
+            } else {
+                AddressSpace::Ram
+            },
+            addr,
+            len,
+            ty: match self.ty.trim() {
+                "" => "u8".to_string(),
+                other => other.to_string(),
+            },
+            label: self.label.trim().to_string(),
+            notes: match self.notes.trim() {
+                "" => None,
+                other => Some(other.to_string()),
+            },
+            source: self.source.trim().to_string(),
+            count: if self.space_is_rom { count } else { None },
+        })
+    }
+}
+
+/// Everything the annotations tab draws and the app acts on.
+#[derive(Debug, Default)]
+pub struct AnnotationPanelData {
+    pub store: rf_debugger::annotation::AnnotationStore,
+    /// `None` until a ROM is open. The panel then refuses to author,
+    /// because an annotation with no game to belong to has nowhere to be
+    /// saved and no identity to export against.
+    pub identity: Option<AnnotationIdentity>,
+    pub form: AnnotationForm,
+    /// Index being edited, or `None` when the form is an "add".
+    pub editing: Option<usize>,
+    pub import_text: String,
+    pub import_is_rom: bool,
+    /// Last thing that went right, shown until the next action.
+    pub status: Option<String>,
+    /// Last thing that went wrong. Separate from `status` so a success
+    /// message cannot quietly overwrite an error the user has not read.
+    pub problem: Option<String>,
+    pub request: Option<AnnotationRequest>,
+    /// Whether the store has changed since the last successful save.
+    pub dirty: bool,
+}
+
+impl AnnotationPanelData {
+    /// Adopt a freshly loaded store for a newly opened game.
+    pub fn adopt(
+        &mut self,
+        store: rf_debugger::annotation::AnnotationStore,
+        identity: Option<AnnotationIdentity>,
+        problem: Option<String>,
+    ) {
+        self.store = store;
+        self.identity = identity;
+        self.problem = problem;
+        self.status = None;
+        self.editing = None;
+        self.form = AnnotationForm::default();
+        self.dirty = false;
+    }
+}
+
+fn annotations_ui(ui: &mut egui::Ui, data: &mut AnnotationPanelData) {
+    let Some(identity) = data.identity.clone() else {
+        ui.label("No game open — open a ROM to annotate it.");
+        ui.label(
+            egui::RichText::new(
+                "Annotations are stored per normalized ROM hash, so they need a game to belong to.",
+            )
+            .small()
+            .weak(),
+        );
+        return;
+    };
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(&identity.title).strong());
+        ui.label(
+            egui::RichText::new(format!("{} annotations", data.store.len()))
+                .small()
+                .weak(),
+        );
+        if data.dirty {
+            ui.label(egui::RichText::new("• unsaved").small());
+        }
+    });
+
+    ui.horizontal(|ui| {
+        if ui.button("Save").clicked() {
+            data.request = Some(AnnotationRequest::Save);
+        }
+        if ui
+            .add_enabled(
+                !data.store.is_empty(),
+                egui::Button::new("Export profile skeleton\u{2026}"),
+            )
+            .on_hover_text("Builds a schema-v0 profile from these annotations and opens it in the profile editor")
+            .clicked()
+        {
+            data.request = Some(AnnotationRequest::ExportSkeleton);
+        }
+    });
+
+    if let Some(problem) = &data.problem {
+        ui.colored_label(egui::Color32::from_rgb(0xE0, 0x80, 0x30), problem);
+    }
+    if let Some(status) = &data.status {
+        ui.label(egui::RichText::new(status).small().weak());
+    }
+
+    ui.separator();
+    // The panel stacks a form, a list and an import box; on a short pane
+    // the import box is the first thing to fall off the bottom, and it is
+    // the half of the workflow a new author reaches for. The list keeps
+    // its own bounded scroll inside this one so the Save/Export controls
+    // stay put no matter how many labels exist.
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        annotation_form_ui(ui, data);
+        ui.separator();
+        annotation_list_ui(ui, data);
+        ui.separator();
+        annotation_import_ui(ui, data);
+    });
+}
+
+fn annotation_form_ui(ui: &mut egui::Ui, data: &mut AnnotationPanelData) {
+    ui.label(egui::RichText::new(match data.editing {
+        Some(i) => format!("Editing #{i}"),
+        None => "New annotation".to_string(),
+    }));
+    egui::Grid::new("annotation_form")
+        .num_columns(2)
+        .show(ui, |ui| {
+            ui.label("space");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut data.form.space_is_rom, false, "RAM");
+                ui.selectable_value(&mut data.form.space_is_rom, true, "ROM");
+            });
+            ui.end_row();
+            ui.label("address $");
+            ui.add(egui::TextEdit::singleline(&mut data.form.addr).desired_width(80.0));
+            ui.end_row();
+            ui.label("length");
+            ui.add(egui::TextEdit::singleline(&mut data.form.len).desired_width(60.0));
+            ui.end_row();
+            ui.label("type");
+            ui.add(egui::TextEdit::singleline(&mut data.form.ty).desired_width(80.0));
+            ui.end_row();
+            ui.label("label");
+            ui.add(egui::TextEdit::singleline(&mut data.form.label).desired_width(200.0));
+            ui.end_row();
+            ui.label("source");
+            ui.add(egui::TextEdit::singleline(&mut data.form.source).desired_width(280.0));
+            ui.end_row();
+            ui.label("notes");
+            ui.add(egui::TextEdit::multiline(&mut data.form.notes).desired_rows(2));
+            ui.end_row();
+            if data.form.space_is_rom {
+                ui.label("count");
+                ui.add(egui::TextEdit::singleline(&mut data.form.count).desired_width(60.0));
+                ui.end_row();
+            }
+        });
+
+    // The parse runs every repaint so the button can carry the reason it
+    // is disabled — CONSTRAINTS §2's required provenance shown as a
+    // condition of the control, not as a rejection after the fact.
+    let parsed = data.form.parse();
+    ui.horizontal(|ui| {
+        let (enabled, hint) = match &parsed {
+            Ok(_) => (true, String::new()),
+            Err(why) => (false, why.clone()),
+        };
+        let button = ui.add_enabled(
+            enabled,
+            egui::Button::new(if data.editing.is_some() {
+                "Apply"
+            } else {
+                "Add"
+            }),
+        );
+        let button = if hint.is_empty() {
+            button
+        } else {
+            button.on_disabled_hover_text(hint.clone())
+        };
+        if button.clicked() {
+            if let Ok(annotation) = parsed {
+                let outcome = match data.editing {
+                    Some(i) => data.store.replace(i, annotation),
+                    None => data.store.add(annotation),
+                };
+                match outcome {
+                    Ok(()) => {
+                        data.dirty = true;
+                        data.problem = None;
+                        data.status = Some(match data.editing {
+                            Some(i) => format!("updated #{i}"),
+                            None => "added".to_string(),
+                        });
+                        data.editing = None;
+                        data.form = AnnotationForm::default();
+                    }
+                    Err(e) => data.problem = Some(e.to_string()),
+                }
+            }
+        }
+        if data.editing.is_some() && ui.button("Cancel").clicked() {
+            data.editing = None;
+            data.form = AnnotationForm::default();
+        }
+        if !enabled {
+            ui.label(egui::RichText::new(hint).small().weak());
+        }
+    });
+}
+
+fn annotation_list_ui(ui: &mut egui::Ui, data: &mut AnnotationPanelData) {
+    use rf_debugger::annotation::AddressSpace;
+    if data.store.is_empty() {
+        ui.label("No annotations yet.");
+        return;
+    }
+    // Actions are collected and applied after the loop: mutating the store
+    // while iterating it is the classic shape that makes a list panel
+    // panic on the frame someone presses delete.
+    let mut edit: Option<usize> = None;
+    let mut delete: Option<usize> = None;
+    egui::ScrollArea::vertical()
+        .max_height(220.0)
+        .show(ui, |ui| {
+            for (i, a) in data.store.entries().iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(match a.space {
+                            AddressSpace::Ram => "RAM",
+                            AddressSpace::Rom => "ROM",
+                        })
+                        .small()
+                        .weak(),
+                    );
+                    ui.monospace(format!("${:04X}", a.addr));
+                    ui.label(&a.label);
+                    ui.label(egui::RichText::new(&a.ty).small().weak());
+                    if ui.small_button("edit").clicked() {
+                        edit = Some(i);
+                    }
+                    if ui.small_button("delete").clicked() {
+                        delete = Some(i);
+                    }
+                });
+            }
+        });
+    if let Some(i) = edit {
+        if let Some(a) = data.store.get(i) {
+            data.form = AnnotationForm::from_annotation(a);
+            data.editing = Some(i);
+        }
+    }
+    if let Some(i) = delete {
+        if data.store.remove(i).is_some() {
+            data.dirty = true;
+            data.status = Some(format!("deleted #{i}"));
+            // An edit targeting the row that just vanished must not carry
+            // on pointing at whatever slid into its index.
+            if data.editing == Some(i) {
+                data.editing = None;
+                data.form = AnnotationForm::default();
+            }
+        }
+    }
+}
+
+fn annotation_import_ui(ui: &mut egui::Ui, data: &mut AnnotationPanelData) {
+    use rf_debugger::annotation::AddressSpace;
+    egui::CollapsingHeader::new("Import DataCrystal TSV")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Paste address/len/label rows. Notes are never imported — CONSTRAINTS §2 \
+                     requires prose to be written fresh, not transcribed.",
+                )
+                .small()
+                .weak(),
+            );
+            ui.horizontal(|ui| {
+                ui.label("space");
+                ui.selectable_value(&mut data.import_is_rom, false, "RAM");
+                ui.selectable_value(&mut data.import_is_rom, true, "ROM");
+            });
+            ui.add(
+                egui::TextEdit::multiline(&mut data.import_text)
+                    .desired_rows(4)
+                    .code_editor(),
+            );
+            if ui
+                .add_enabled(
+                    !data.import_text.trim().is_empty(),
+                    egui::Button::new("Import"),
+                )
+                .clicked()
+            {
+                let space = if data.import_is_rom {
+                    AddressSpace::Rom
+                } else {
+                    AddressSpace::Ram
+                };
+                match rf_debugger::datacrystal::parse_tsv(&data.import_text, space) {
+                    Ok(rows) => {
+                        let mut added = 0usize;
+                        let mut refused = 0usize;
+                        for row in rows {
+                            match data.store.add(row) {
+                                Ok(()) => added += 1,
+                                Err(_) => refused += 1,
+                            }
+                        }
+                        data.dirty |= added > 0;
+                        data.problem = None;
+                        data.status = Some(if refused == 0 {
+                            format!("imported {added}")
+                        } else {
+                            // Refusals are counted, never silent: an
+                            // import that quietly drops rows is how a
+                            // profile ends up missing facts its author
+                            // believes it has.
+                            format!("imported {added}, refused {refused}")
+                        });
+                        data.import_text.clear();
+                    }
+                    Err(e) => data.problem = Some(e.to_string()),
+                }
+            }
+        });
 }

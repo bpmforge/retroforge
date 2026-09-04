@@ -62,6 +62,18 @@ const BOUNDED: &[(&str, &str)] = &[
         "a helper called from memory_ui, which has the scroll area",
     ),
     (
+        "tab_picker_ui",
+        "one menu button; the menu it opens lists at most DebugTab::ALL, which is 11 entries          and is pinned by a test in rf_debugger::layout",
+    ),
+    (
+        "annotation_form_ui",
+        "a fixed grid — eight labelled fields and a button row — plus the notes editor, which          scrolls inside itself; a helper called from annotations_ui, which has the scroll area",
+    ),
+    (
+        "annotation_import_ui",
+        "a collapsing header over a fixed control set whose only growable child is a          TextEdit::multiline, which scrolls inside itself; a helper called from annotations_ui,          which has the scroll area",
+    ),
+    (
         "event_timeline_ui",
         "allocate_exact_size of row_height * TIMELINE_ROWS.len() — a compile-time row count",
     ),

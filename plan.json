@@ -5697,7 +5697,8 @@
    "crate": "retroforge",
    "write_scope": [
     "crates/retroforge/**",
-    "crates/rf-debugger/**"
+    "crates/rf-debugger/**",
+    "docs/design/DEBUGGER.md"
    ],
    "depends_on": [],
    "acceptance": [
@@ -5707,10 +5708,15 @@
     "the DataCrystal TSV import dialog is reachable from the UI, not only from tests"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "FILED BY W13-01, 2026-09-03, and this is the REACHABILITY gap of the set — the same class the whole W10/W11 arc existed to close. MEASURED: AnnotationStore, datacrystal::parse_tsv and profile_export::export_skeleton are called from crates/retroforge/tests/** and from NOWHERE in crates/retroforge/src. The library is complete and the user cannot reach it.",
-    "WHY THIS MATTERS MORE THAN ITS 3 POINTS SUGGEST: VISION §3 sells 'Debugger -> annotation -> profile export pipeline' as a DIFFERENTIATOR against Mesen's tiles-only HD Pack Builder. Today that pipeline exists as a test fixture."
+    "WHY THIS MATTERS MORE THAN ITS 3 POINTS SUGGEST: VISION §3 sells 'Debugger -> annotation -> profile export pipeline' as a DIFFERENTIATOR against Mesen's tiles-only HD Pack Builder. Today that pipeline exists as a test fixture.",
+    "HANDOFF 2026-09-04: write_scope WIDENED by one path, docs/design/DEBUGGER.md, and this note is the record the schema note requires. Reason: W13-01 wrote the section 7.1 grading table yesterday and this ticket closes four of its rows. Leaving them reading GAP would be a stale-doc defect of exactly the class the 2026-08-30 accuracy pass spent itself correcting — a grading table is only useful if it is true. No other section of that file was touched.",
+    "DONE 2026-09-04. All four criteria met, and the ticket found a second reachability wall on the way. CRITERION 1: DebugTab::Annotations — create, edit, delete, and an Export that builds the skeleton and opens it in the W9-02 profile editor rather than writing a file (GAME_PROFILES.md section 3 hands step 2 to step 3, not to a directory, and a second save path would be a second thing to keep correct). The export appends the identity export_skeleton cannot know, so the profile can actually match the game it came from. CRITERION 2: crate::annotation_store, <config>/retroforge/annotations/<hash>.rfannot, mirroring game_settings' one-file-per-hash shape. The stored format IS the interchange format, so export is the file and import is dropping someone else's next to yours. Unlike game_settings, a corrupt file REPORTS rather than falling back to empty: an unreadable setting must not stop you playing, but showing an empty list to someone whose labels failed to parse invites them to re-label everything and save over it. CRITERION 3: annotation::label_operands renders LDA $0086 as LDA $0086 {player_x_screen}, matching COVERAGE not equality so the high byte of a 16-bit quantity is labelled too; ROM annotations never label a bus operand, since a file offset equal to an address is a coincidence, not a fact. CRITERION 4: the TSV import dialog is in the panel, with its refusals counted rather than silent.",
+    "THE SECOND WALL, found while doing criterion 1 and worth more than its size: A TAB THAT IS IN DebugTab BUT IN NO LAYOUT CANNOT BE OPENED. restore_layout only ever shows what the persisted file (or default_layout) names, and nothing could add one. LuaConsole (DEBUGGER.md section 5, shipped W4-04) and OamDiff (FR-DBG-006, shipped W4-06c) were both in that state — working UI nobody could reach. Fixed by an 'Add panel' picker over DebugTab::ALL, which is in this ticket rather than a follow-up because the same wall applies to Annotations: default_layout alone reaches a fresh install and NOBODY ELSE. Compounding it, the dock persists to std::env::temp_dir()/retroforge-debug-dock-layout.toml — a machine-global path, NOT the config root — so it is shared across sessions and RETROFORGE_CONFIG_DIR does not isolate it. That is not a guess: the end-to-end test asserted the default layout and FAILED on this machine's stale file, which is how the wall was measured rather than assumed.",
+    "W10-04'S GUARD FIRED ON THIS TICKET'S OWN CODE, which is the discipline working: surfaces_can_scroll named all four new *_ui functions. annotations_ui gained a ScrollArea; the other three are in BOUNDED with the reason their content cannot exceed the container (a fixed grid, a collapsing header over a TextEdit that scrolls itself, and a menu over an 11-entry const that a rf_debugger::layout test pins).",
+    "EVIDENCE: tests/annotations_reach_the_app.rs drives RetroForgeApp through the whole B-0 walkthrough — label an address through the panel's own form parse, import a DataCrystal table, save through the app's request path, export, and reopen the app to find the labels still there. The skeleton is fed to rf_profiles::load_str, the REAL validator, because an export test that only checks the TOML parses proves nothing (W4-06b's vacuity trap). Plus 4 new rf-debugger annotation tests (JSON round trip, edit/delete with a stale index, the doc's own labelling example, and the law-8 termination cases for the operand scanner), 3 annotation_store persistence tests and 1 layout test. Workspace 1733 passing / 0 failed / 33 ignored, up from 1723; ten-command gate green; cargo deny check licenses reports the same single pre-existing rejection (libfuzzer-sys, NCSA) before and after serde_json."
    ],
    "stories": []
   },

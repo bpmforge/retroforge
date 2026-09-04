@@ -1935,3 +1935,77 @@ that way.
   ignored** across 124 suites — identical to the 2026-08-30 count, which is
   what a no-code ticket should produce. `scripts/docs-gate.sh` green.
   No code written (criterion 4).
+
+- **W13-02f — the annotation → profile-export workflow reaches a user**
+  (2026-09-04). VISION §3 sells "Debugger → annotation → profile export" as
+  the differentiator against Mesen's tiles-only pack builder. Until today
+  that pipeline was a **test fixture**: `AnnotationStore`,
+  `datacrystal::parse_tsv` and `profile_export::export_skeleton` were called
+  from `crates/retroforge/tests/**` and from nowhere in `src`.
+
+  **The panel** (`DebugTab::Annotations`) creates, edits and deletes
+  annotations, imports a DataCrystal TSV with its refusals **counted rather
+  than silent**, and exports a skeleton **into the W9-02 profile editor**
+  rather than to a file — GAME_PROFILES.md §3 hands step 2 to step 3, not
+  to a directory, and a second save path would be a second thing to keep
+  correct. The export appends the `[[identity]]` that `export_skeleton`
+  cannot know, without which the profile could never match the game it came
+  from.
+
+  **Persistence** is `<config>/retroforge/annotations/<hash>.rfannot`,
+  mirroring `game_settings`' one-file-per-hash shape. Two decisions worth
+  recording. **The stored format is the interchange format** — DEBUGGER.md
+  §4 offers SQLite or RON for storage and names JSON for exchange; using
+  JSON for both means "export" is the file and "import" is dropping someone
+  else's beside yours, instead of two representations to keep in sync. And
+  **unlike `game_settings`, a corrupt file reports instead of falling back
+  to empty**: an unreadable setting must not stop you playing, but showing
+  an empty list to someone whose labels failed to parse invites them to
+  re-label everything and save over it. Import runs through
+  `AnnotationStore::add`, never straight through `Deserialize`, because
+  FR-DBG-005's required `source` lives in `add` and not in the type.
+
+  **A SECOND REACHABILITY WALL, found on the way, and it is the finding
+  worth keeping.** *A tab that is in `DebugTab` but in no layout cannot be
+  opened at all.* `restore_layout` only ever shows what the persisted file
+  (or `default_layout`) names, and nothing could add one. **`LuaConsole`
+  (DEBUGGER.md §5, shipped by W4-04) and `OamDiff` (FR-DBG-006, shipped by
+  W4-06c) were both in that state** — working UI nobody could reach. An
+  "Add panel" picker over `DebugTab::ALL` now opens any of them.
+
+  It belongs in this ticket rather than a follow-up because the same wall
+  applies to `Annotations`: putting it in `default_layout` alone would
+  reach a fresh install **and nobody else**. Compounding it, the dock
+  persists to `std::env::temp_dir()/retroforge-debug-dock-layout.toml` — a
+  machine-**global** path, not the config root — so it is shared across
+  sessions and `RETROFORGE_CONFIG_DIR` does not isolate it. **That was
+  measured, not guessed:** the end-to-end test asserted the default layout
+  and failed on this machine's stale file, which is how the wall surfaced.
+
+  **W10-04's guard fired on this ticket's own code**, which is the
+  discipline working rather than a nuisance: `surfaces_can_scroll` named
+  all four new `*_ui` functions. `annotations_ui` gained a `ScrollArea`;
+  the other three are in `BOUNDED` with the reason their content cannot
+  exceed the container.
+
+  Evidence: `tests/annotations_reach_the_app.rs` drives `RetroForgeApp`
+  through the whole B-0 walkthrough — label an address through the panel's
+  own form parse, import a table, save through the app's request path,
+  export, then reopen the app and find the labels still there — and feeds
+  the skeleton to `rf_profiles::load_str`, the **real** validator, because
+  an export test that only checks the TOML parses proves nothing (W4-06b's
+  vacuity trap). Plus 4 new `rf-debugger` annotation tests (JSON round
+  trip, edit/delete with a stale index, the doc's own labelling example,
+  and law-8 termination for the operand scanner), 3 persistence tests and 1
+  layout test.
+
+  `serde_json` becomes a direct dependency of `rf-debugger`, recorded in
+  `TECH_STACK.md` §2; it was already in `Cargo.lock` at 1.0.151, and
+  `cargo deny check licenses` reports the same single pre-existing
+  rejection (`libfuzzer-sys`, NCSA) before and after.
+
+  Bars closed: **B-6**, **B-7**, and the trace half of **B-8**.
+  `DEBUGGER.md` §7.1's four §4 rows updated accordingly — the write_scope
+  widening for that one file is recorded as a HANDOFF note on the ticket.
+  Gate: **1733 passing, 0 failed, 33 ignored** (up from 1723), exit 0,
+  `arch OK`; `validate-plan` 170 tickets · 904 pts.

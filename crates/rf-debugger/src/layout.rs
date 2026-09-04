@@ -66,6 +66,56 @@ pub enum DebugTab {
     /// channel scopes, mute/solo per channel"). Additive like every
     /// variant above, so [`LAYOUT_FORMAT_VERSION`] does not move.
     Audio,
+    /// `Annotations` (ticket W13-02f, DEBUGGER.md §4): the annotation
+    /// store, its DataCrystal TSV import and the profile-skeleton export
+    /// — the RE workflow's own panel. Additive like every variant above,
+    /// so [`LAYOUT_FORMAT_VERSION`] does not move.
+    Annotations,
+}
+
+impl DebugTab {
+    /// Every tab, in the order a picker should list them.
+    ///
+    /// Exists because a variant that is in this enum but in no layout is
+    /// **unreachable**: there was no way to open a tab the persisted
+    /// layout did not already contain, which is how `LuaConsole` and
+    /// `OamDiff` came to ship with UI nobody could see (W13-02f's close
+    /// note). A picker needs the list, and the list needs one home.
+    pub const ALL: [DebugTab; 11] = [
+        DebugTab::Pattern,
+        DebugTab::Nametable,
+        DebugTab::Palette,
+        DebugTab::Oam,
+        DebugTab::OamDiff,
+        DebugTab::Memory,
+        DebugTab::EventTimeline,
+        DebugTab::Trace,
+        DebugTab::Audio,
+        DebugTab::Annotations,
+        DebugTab::LuaConsole,
+    ];
+
+    /// The tab's on-screen name.
+    ///
+    /// Here rather than in the frontend so the dock's tab strip and the
+    /// picker that adds a tab cannot drift into two different names for
+    /// one panel.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            DebugTab::Pattern => "Pattern",
+            DebugTab::Nametable => "Nametable",
+            DebugTab::Palette => "Palette",
+            DebugTab::Oam => "OAM",
+            DebugTab::EventTimeline => "Events",
+            DebugTab::Memory => "Memory",
+            DebugTab::OamDiff => "OAM diff",
+            DebugTab::LuaConsole => "Lua",
+            DebugTab::Trace => "Trace",
+            DebugTab::Audio => "Audio",
+            DebugTab::Annotations => "Annotations",
+        }
+    }
 }
 
 /// Which axis a [`PersistedNode::Split`] divides along — matches
@@ -135,7 +185,17 @@ pub fn default_layout() -> PersistedLayout {
                     active: 0,
                 }),
                 second: Box::new(PersistedNode::Leaf {
-                    tabs: vec![DebugTab::Palette, DebugTab::Oam, DebugTab::Memory],
+                    // `Annotations` (W13-02f) ships in the default layout
+                    // as well as in the picker: a fresh install should
+                    // find the RE workflow without hunting for it, and the
+                    // picker is what reaches everyone whose layout file
+                    // predates the tab.
+                    tabs: vec![
+                        DebugTab::Palette,
+                        DebugTab::Oam,
+                        DebugTab::Memory,
+                        DebugTab::Annotations,
+                    ],
                     active: 0,
                 }),
             }),
@@ -244,5 +304,41 @@ mod tests {
     #[test]
     fn default_layout_carries_the_current_format_version() {
         assert_eq!(default_layout().version, LAYOUT_FORMAT_VERSION);
+    }
+
+    /// W13-02f: a fresh install must find the RE workflow without hunting,
+    /// and every variant must be reachable from the picker.
+    #[test]
+    fn every_tab_is_listed_and_the_annotations_panel_ships_in_the_default_layout() {
+        fn tabs(node: &PersistedNode, out: &mut Vec<DebugTab>) {
+            match node {
+                PersistedNode::Leaf { tabs, .. } => out.extend(tabs.iter().copied()),
+                PersistedNode::Split { first, second, .. } => {
+                    tabs(first, out);
+                    tabs(second, out);
+                }
+            }
+        }
+        let mut present = Vec::new();
+        tabs(&default_layout().root, &mut present);
+        assert!(
+            present.contains(&DebugTab::Annotations),
+            "the annotation workflow must be one click away on a fresh install"
+        );
+
+        // `ALL` is what the picker iterates, so a variant missing from it
+        // is a panel nobody can open — the state `LuaConsole` and
+        // `OamDiff` were in before this ticket.
+        for tab in present {
+            assert!(
+                DebugTab::ALL.contains(&tab),
+                "{tab:?} is in the default layout but not in DebugTab::ALL"
+            );
+        }
+        assert_eq!(
+            DebugTab::ALL.len(),
+            11,
+            "a new variant must be added to ALL or it cannot be opened"
+        );
     }
 }

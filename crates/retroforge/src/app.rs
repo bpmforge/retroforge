@@ -938,6 +938,120 @@ impl RetroForgeApp {
         self.current_game_hash = hash;
     }
 
+    /// Load the open game's annotations into the debug panel (ticket
+    /// W13-02f).
+    ///
+    /// A ROM this build could not identify gets **no identity**, which the
+    /// panel renders as "no game open": annotations keyed by a hash we
+    /// could not compute would be annotations that silently attach to the
+    /// wrong game later — the same reasoning `current_game_hash`'s own doc
+    /// gives for per-game settings.
+    fn load_annotations_for_current_game(&mut self, path: &std::path::Path) {
+        let title = path.file_stem().map_or_else(
+            || "Untitled".to_string(),
+            |s| s.to_string_lossy().into_owned(),
+        );
+        let identity =
+            self.current_game_hash
+                .clone()
+                .map(|hash| crate::debug_dock::AnnotationIdentity {
+                    title,
+                    normalized_sha256: hash,
+                    console: if self.console_label == "SNES" {
+                        rf_debugger::profile_export::Console::Snes
+                    } else {
+                        rf_debugger::profile_export::Console::Nes
+                    },
+                });
+        let loaded = match (&self.config_root, &self.current_game_hash) {
+            (Some(root), Some(hash)) => crate::annotation_store::load(root, hash),
+            _ => crate::annotation_store::Loaded::default(),
+        };
+        let problem = loaded.problem.clone().or_else(|| {
+            // Rows the file held that the store's invariants refused.
+            // Reported, because an author who sees 12 of their 14 labels
+            // needs to be told why, not left to wonder.
+            (!loaded.rejected.is_empty()).then(|| {
+                format!(
+                    "{} annotation(s) in the file were refused",
+                    loaded.rejected.len()
+                )
+            })
+        });
+        self.debug_panels
+            .annotations
+            .adopt(loaded.store, identity, problem);
+    }
+
+    /// Act on whatever the annotations panel asked for this frame (ticket
+    /// W13-02f).
+    ///
+    /// The panel has no filesystem and no profile editor; this method has
+    /// both. Called once per repaint, like `pump_trace`.
+    fn pump_annotation_request(&mut self) {
+        let Some(request) = self.debug_panels.annotations.request.take() else {
+            return;
+        };
+        let Some(identity) = self.debug_panels.annotations.identity.clone() else {
+            return;
+        };
+        match request {
+            crate::debug_dock::AnnotationRequest::Save => {
+                let Some(root) = self.config_root.clone() else {
+                    self.debug_panels.annotations.problem =
+                        Some("no config directory — annotations cannot be saved".to_string());
+                    return;
+                };
+                match crate::annotation_store::save(
+                    &root,
+                    &identity.normalized_sha256,
+                    &self.debug_panels.annotations.store,
+                ) {
+                    Ok(path) => {
+                        self.debug_panels.annotations.dirty = false;
+                        self.debug_panels.annotations.problem = None;
+                        self.debug_panels.annotations.status =
+                            Some(format!("saved to {}", path.display()));
+                    }
+                    Err(e) => self.debug_panels.annotations.problem = Some(e),
+                }
+            }
+            crate::debug_dock::AnnotationRequest::ExportSkeleton => {
+                let meta = rf_debugger::profile_export::ExportMeta {
+                    title: identity.title.clone(),
+                    console: identity.console,
+                    region: "ntsc".to_string(),
+                    authors: Vec::new(),
+                };
+                match rf_debugger::profile_export::export_skeleton(
+                    self.debug_panels.annotations.store.entries(),
+                    &meta,
+                ) {
+                    Ok(text) => {
+                        // Straight into the profile editor rather than to
+                        // a file: W9-02 already owns "edit a profile and
+                        // save only what the real loader accepts", and
+                        // GAME_PROFILES.md §3 step 2 hands the skeleton to
+                        // step 3 rather than to a directory. A second save
+                        // path would be a second thing to keep correct.
+                        let mut draft = crate::profile_editor::Draft::from_text(&text);
+                        // `export_skeleton` emits no `[[identity]]` — it
+                        // has the annotations, not the ROM. Without this
+                        // the skeleton could never match the game it came
+                        // from.
+                        draft.append_identity(&identity.normalized_sha256, None);
+                        self.editor_draft = Some(draft);
+                        self.debug_panels.annotations.problem = None;
+                        self.debug_panels.annotations.status = Some(
+                            "exported — the profile editor now holds the skeleton".to_string(),
+                        );
+                    }
+                    Err(e) => self.debug_panels.annotations.problem = Some(e.to_string()),
+                }
+            }
+        }
+    }
+
     /// Poll the watched profile and re-decode if it changed (ticket
     /// W5-06, FRONTEND_UI §3.5's "hot-reloads on save").
     ///
@@ -984,6 +1098,33 @@ impl RetroForgeApp {
     /// The open draft, mutably \u{2014} the headless harness's way to put a
     /// specific buffer in front of the real widget code without typing it
     /// character by character through synthesised key events.
+    /// The annotations panel's state (ticket W13-02f).
+    ///
+    /// Public for the same reason `set_game_hash_for_test` is: the
+    /// end-to-end test that proves the §4 workflow reaches a user lives in
+    /// another crate and cannot see a `#[cfg(test)]` method. The panel
+    /// itself is what the UI mutates, so this is the same door, not a
+    /// second one.
+    pub fn debug_annotations_mut(&mut self) -> &mut crate::debug_dock::AnnotationPanelData {
+        &mut self.debug_panels.annotations
+    }
+
+    /// Open a debug tab, exactly as the "Add panel" picker does (ticket
+    /// W13-02f).
+    pub fn debug_open_tab(&mut self, tab: rf_debugger::layout::DebugTab) {
+        self.debug_panels.open_tab(tab);
+    }
+
+    /// Which debug tabs are currently docked (ticket W13-02f's picker).
+    #[must_use]
+    pub fn debug_tabs_for_test(&self) -> Vec<rf_debugger::layout::DebugTab> {
+        self.debug_panels
+            .dock_state
+            .iter_all_tabs()
+            .map(|(_, tab)| *tab)
+            .collect()
+    }
+
     pub fn author_draft_mut(&mut self) -> Option<&mut crate::profile_editor::Draft> {
         self.editor_draft.as_mut()
     }
@@ -1561,6 +1702,12 @@ impl RetroForgeApp {
             (Some(root), Some(hash)) => crate::game_settings::load(root, hash),
             _ => crate::game_settings::GameSettings::default(),
         };
+
+        // Ticket W13-02f: this game's annotations, keyed by the same
+        // normalized hash the settings above use. Loaded here rather than
+        // when the panel is first drawn, so the labels are already there
+        // the moment someone opens the tab.
+        self.load_annotations_for_current_game(path);
 
         match core_thread::spawn(bytes) {
             Ok(handle) => {
@@ -4623,6 +4770,9 @@ impl eframe::App for RetroForgeApp {
         self.maybe_request_canvas_snapshot();
         self.sync_event_subscription();
         self.pump_trace();
+        // Ticket W13-02f: whatever the annotations panel asked for last
+        // frame (save, or export to the profile editor).
+        self.pump_annotation_request();
         self.pump_audio_scopes();
 
         self.menu_bar(ui);

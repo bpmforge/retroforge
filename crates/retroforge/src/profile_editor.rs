@@ -222,6 +222,22 @@ impl Draft {
         }
     }
 
+    /// A new, unsaved profile from TOML text somebody else produced.
+    ///
+    /// Ticket W13-02f uses it for the annotation → skeleton export: the
+    /// skeleton has never been a file, so it has no path, and it is dirty
+    /// from the first frame because nothing on disk matches it yet. That
+    /// is [`Draft::from_form`]'s state exactly, with the text coming from
+    /// [`rf_debugger::profile_export::export_skeleton`] instead of a form.
+    #[must_use]
+    pub fn from_text(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            path: None,
+            saved_text: None,
+        }
+    }
+
     /// Open an existing profile for editing.
     ///
     /// Reads the file's *bytes as text* rather than loading and
