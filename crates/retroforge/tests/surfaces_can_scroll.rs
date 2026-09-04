@@ -70,6 +70,21 @@ const BOUNDED: &[(&str, &str)] = &[
         "a fixed grid — eight labelled fields and a button row — plus the notes editor, which          scrolls inside itself; a helper called from annotations_ui, which has the scroll area",
     ),
     (
+        "snes_mode7_ui",
+        "four register lines over a fixed 256x256 thumbnail of the playfield — the playfield is \
+         1024 square on every SNES, so neither the image nor the text can grow with the ROM",
+    ),
+    (
+        "snes_hdma_lanes_ui",
+        "a strip of exactly eight channel rows sized to the available width; the hardware has \
+         eight HDMA channels and 262 lines, both constants",
+    ),
+    (
+        "snes_dsp_ui",
+        "a grid of exactly eight voice rows plus a fixed-height BRR waveform; the DSP has eight \
+         voices, and the preview decodes a bounded number of blocks",
+    ),
+    (
         "snes_pattern_ui",
         "a fixed 128x128 tile page over a BG selector of at most four buttons — the same reason \
          pattern_ui is here, and the page size is a constant rather than a function of the ROM",

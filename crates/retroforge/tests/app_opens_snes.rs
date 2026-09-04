@@ -272,3 +272,56 @@ fn every_snes_viewer_has_something_to_draw() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **Mode 7, HDMA lanes and the DSP voices reach the panels**
+/// (ticket W13-02c). Like the viewer test above, this asserts on the
+/// *inputs* each panel decodes rather than on pixels.
+#[test]
+fn the_mode7_hdma_and_dsp_views_are_fed() {
+    let dir = std::env::temp_dir().join(format!("retroforge_snesc_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+
+    let snes = Path::new(env!("CARGO_MANIFEST_DIR")).join(SNES);
+    let rom: PathBuf = dir.join("rf-scroller-s.sfc");
+    std::fs::copy(&snes, &rom).expect("copy fixture");
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(WINDOW_SIZE[0], WINDOW_SIZE[1]))
+        .build_eframe(|cc| RetroForgeApp::new(cc));
+    harness.run();
+    harness.state_mut().show_debug_for_test(true);
+    harness.state_mut().open_rom_path(&rom);
+    harness.run_steps(2);
+    harness.state_mut().resume_for_test();
+    run_frames(&mut harness, 30, Duration::from_secs(60));
+
+    let snes = harness
+        .state()
+        .snes_debug_frame_for_test()
+        .expect("the capture must be on with the debug window open");
+
+    // The lane record is one byte per hardware line and is reset each
+    // frame, so its LENGTH is the invariant — the fixture may or may not
+    // use HDMA, and "no transfers" is a real answer the panel states.
+    assert_eq!(
+        snes.hdma_lanes.len(),
+        262,
+        "one lane byte per hardware line"
+    );
+    assert_eq!(snes.voices.len(), 8, "the DSP has eight voices");
+
+    // The camera trapezoid comes from the same projection the renderer
+    // samples with, so it is defined for whatever matrix is live — even
+    // the all-zero one a game that never entered mode 7 leaves behind.
+    let corners = rf_snes::debug::mode7_camera_corners(&snes.mode7, 256, 224);
+    assert_eq!(corners.len(), 4);
+
+    // And a BRR decode over real ARAM does not panic on whatever bytes
+    // happen to be there — a debugger that crashes on uninitialised audio
+    // memory is worse than one that shows noise.
+    let block = rf_snes::debug::decode_brr_block(&snes.aram, snes.voices[0].start, (0, 0));
+    assert_eq!(block.samples.len(), 16);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

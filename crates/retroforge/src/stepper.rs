@@ -596,6 +596,9 @@ impl EmuStepper {
             oam: view.oam.to_vec(),
             ppu_regs: view.ppu_regs.to_vec(),
             aram: core.system().bus.apu.aram.clone(),
+            mode7: core.system().bus.ppu.mode7,
+            hdma_lanes: core.system().bus.hdma_lanes().to_vec(),
+            voices: rf_snes::debug::voice_views(&core.system().bus.apu.dsp),
         })
     }
 

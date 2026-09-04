@@ -5651,7 +5651,12 @@
    "crate": "rf-debugger",
    "write_scope": [
     "crates/rf-debugger/**",
-    "crates/retroforge/src/debug_dock.rs"
+    "crates/retroforge/src/debug_dock.rs",
+    "crates/rf-snes/**",
+    "crates/retroforge/src/stepper.rs",
+    "crates/retroforge/src/core_thread.rs",
+    "crates/retroforge/tests/**",
+    "docs/design/DEBUGGER.md"
    ],
    "depends_on": [
     "W13-02b"
@@ -5662,9 +5667,15 @@
     "the audio panel shows per-voice DSP state and a BRR source view, next to the existing channel scopes"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
-    "FILED BY W13-01, 2026-09-03. Split from W13-02b because each of the three is a decoder in its own right rather than another view of memory the column already exposes."
+    "FILED BY W13-01, 2026-09-03. Split from W13-02b because each of the three is a decoder in its own right rather than another view of memory the column already exposes.",
+    "HANDOFF 2026-09-04: write_scope widened to rf-snes (the decoders and the HDMA recording), the frame path, tests/** and DEBUGGER.md — the same reasons the sibling tickets recorded.",
+    "DONE 2026-09-04. CRITERION 1: the playfield renders at 1/4 scale (1024 square is past any pane, and 256 is what makes the trapezoid's SHAPE readable, which is the whole point) with the camera outline over it. THE OUTLINE COMES FROM THE RENDERER'S OWN PROJECTION: debug::mode7_project is now the single implementation of the matrix multiply and ppu::mode7::render_scanline DELEGATES to it, so the outline a viewer draws cannot disagree with the picture the renderer produced. All rf-snes suites including the Mode 7 goldens stayed green through that refactor, which is what says it is the same math. Corners are wrapped into the playfield with rem_euclid, because a corner at -50 is reading 974 rather than sitting off the edge.",
+    "CRITERION 2: SnesBus records which channels actually TRANSFERRED on each line — not merely which are enabled in $420C, which is the difference between 'armed' and 'did something'. Recorded unconditionally, and the measurement is the justification: 262 bytes and at most eight bit-ORs per line, against the ~245 KB frame the same loop already produces; gating it would cost more in plumbing than it saves. Cleared where HDMA itself re-initialises, so the view shows THIS frame rather than an accumulation. A frame with no transfers says so in words — a blank strip alone reads as a broken viewer rather than as 'no HDMA'.",
+    "CRITERION 3: eight voice rows (srcn, pitch shown BOTH raw and as a ratio because $1000 is 1.0 and '4096' means nothing to a musician, envelope, volumes, last output) plus a BRR waveform for the selected voice. A BRR BLOCK IS NINE BYTES, not eight — one header plus eight of packed nibbles — and a decoder assuming eight would drift a byte per block and turn a sample into noise within a few dozen. The nibbles are SIGNED 4-bit, and filters 1-3 are RECURSIVE, which is why the preview decodes sequentially from the sample start rather than random-access: a random-access decoder would draw a different waveform than the DSP plays.",
+    "MODE 7 SHARES THE TILEMAP TAB rather than getting its own. Mode 7 has no tilemap in the BGnSC sense — its map IS the playfield — so a separate tab would be one the NES always leaves empty. Which view is shown follows the LIVE BG mode, so a game entering mode 7 does not leave the user on a panel that no longer describes it; and when the mode is not 7 the matrix is still shown, labelled as not in use, because the registers are real whatever mode is running.",
+    "EVIDENCE: 4 more unit tests in rf_snes::debug (the mode-7 interleave, an identity matrix giving exactly the screen rectangle, a rotation giving corners that are NOT axis-aligned, and the nine-byte BRR block with its end/loop flags and the ninth byte supplying samples 14-15) plus an app-level test that the three views are fed on a real fixture — including that a BRR decode over whatever bytes are in real ARAM does not panic, because a debugger that crashes on uninitialised audio memory is worse than one that shows noise. W10-04's scroll guard fired on all three new surfaces; each is in BOUNDED with the reason its content cannot grow (eight channels, eight voices, a 1024-square playfield — all hardware constants). Workspace 1765 passing / 0 failed / 33 ignored, up from 1760."
    ],
    "stories": []
   },

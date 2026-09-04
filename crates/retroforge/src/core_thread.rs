@@ -218,6 +218,17 @@ pub struct SnesDebugFrame {
     /// 64 KiB of APU RAM — the third memory-view space DEBUGGER.md §3
     /// names for SNES, alongside VRAM and CGRAM.
     pub aram: Vec<u8>,
+    /// Ticket W13-02c: the mode-7 matrix, for the playfield view and its
+    /// camera trapezoid. Carried whatever the current BG mode is — a
+    /// viewer showing the matrix of a game that has left mode 7 is
+    /// showing the truth about the registers, and the panel says which
+    /// mode is live.
+    pub mode7: rf_snes::ppu::mode7::Mode7,
+    /// Ticket W13-02c: which HDMA channels transferred on each hardware
+    /// line of this frame, one bit per channel.
+    pub hdma_lanes: Vec<u8>,
+    /// Ticket W13-02c: the eight DSP voices.
+    pub voices: Vec<rf_snes::debug::VoiceView>,
 }
 
 pub struct FrameMsg {

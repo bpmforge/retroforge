@@ -211,12 +211,10 @@ pub fn render_scanline(
         // before and after. It was a latent crash, not a wrong picture,
         // which is why a release build never noticed and the goldens
         // could be pinned over it.
-        let vx = ((i64::from(m.a) * i64::from(cx_fixed)) / 256) as i32
-            + i32::from(m.b) * cy
-            + (i32::from(m.x0) * 256);
-        let vy = ((i64::from(m.c) * i64::from(cx_fixed)) / 256) as i32
-            + i32::from(m.d) * cy
-            + (i32::from(m.y0) * 256);
+        // Ticket W13-02c: ONE implementation of the matrix multiply,
+        // shared with the debugger's camera trapezoid, so the outline a
+        // viewer draws cannot disagree with the picture drawn here.
+        let (vx, vy) = crate::debug::mode7_project(m, cx_fixed, cy);
 
         out.push(sample(ppu, vx >> 8, vy >> 8));
     }
@@ -248,8 +246,7 @@ fn sample(ppu: &Ppu, px: i32, py: i32) -> Option<u8> {
 
 /// One pixel of a mode-7 character: 8bpp, read from the ODD bytes.
 fn character_pixel(ppu: &Ppu, tile: u8, x: u16, y: u16) -> u8 {
-    let at = (usize::from(tile) * 64 + usize::from(y) * 8 + usize::from(x)) * 2 + 1;
-    ppu.vram[at % ppu.vram.len()]
+    crate::debug::mode7_character_pixel(&ppu.vram, tile, x, y)
 }
 
 impl Mode7 {

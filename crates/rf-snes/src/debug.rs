@@ -364,3 +364,307 @@ mod tests {
         assert_eq!(line_occupancy(&sprites, 100, 0), 0);
     }
 }
+
+// -----------------------------------------------------------------------
+// Mode 7, HDMA and DSP views (ticket W13-02c; DEBUGGER.md §3's remaining
+// SNES cells).
+// -----------------------------------------------------------------------
+
+/// The mode-7 playfield is a fixed 128x128 tiles of 8x8 pixels.
+pub const MODE7_SIDE: usize = 1024;
+
+/// One pixel of the mode-7 playfield, at playfield coordinates.
+///
+/// **The tilemap is in the EVEN bytes of VRAM and the character data in
+/// the ODD bytes of the same words** — interleaved, not two regions. A
+/// viewer that read them as separate blocks would draw the map out of
+/// tiles it never referenced.
+///
+/// Returns the raw 8bpp index; 0 is transparent, as everywhere else.
+#[must_use]
+pub fn mode7_pixel(vram: &[u8], px: u16, py: u16) -> u8 {
+    if vram.is_empty() {
+        return 0;
+    }
+    let px = px & 0x3FF;
+    let py = py & 0x3FF;
+    let tile_index = (py / 8) * 128 + px / 8;
+    let tile = vram[(usize::from(tile_index) * 2) % vram.len()];
+    mode7_character_pixel(vram, tile, px & 7, py & 7)
+}
+
+/// One pixel of a mode-7 character: 8bpp, read from the ODD bytes.
+#[must_use]
+pub fn mode7_character_pixel(vram: &[u8], tile: u8, x: u16, y: u16) -> u8 {
+    if vram.is_empty() {
+        return 0;
+    }
+    let at = (usize::from(tile) * 64 + usize::from(y) * 8 + usize::from(x)) * 2 + 1;
+    vram[at % vram.len()]
+}
+
+/// Project a screen position onto the mode-7 playfield.
+///
+/// The single implementation of the matrix multiply — `ppu::mode7::
+/// render_scanline` calls it for every sample it draws, and the debugger's
+/// camera trapezoid calls it for the screen's four corners. Two callers,
+/// one formula, so the outline a viewer draws cannot disagree with the
+/// picture the renderer produced.
+///
+/// `cx_fixed` is screen x in 8.8 with `(hofs - x0) * 256` already folded
+/// in; `cy` is the integer screen y with `vofs - y0` folded in. Products
+/// are computed in `i64` because a perfectly ordinary matrix overflows
+/// `i32` — see `render_scanline`'s own doc for the worked example.
+#[must_use]
+pub fn mode7_project(m: &crate::ppu::mode7::Mode7, cx_fixed: i32, cy: i32) -> (i32, i32) {
+    let vx = ((i64::from(m.a) * i64::from(cx_fixed)) / 256) as i32
+        + i32::from(m.b) * cy
+        + (i32::from(m.x0) * 256);
+    let vy = ((i64::from(m.c) * i64::from(cx_fixed)) / 256) as i32
+        + i32::from(m.d) * cy
+        + (i32::from(m.y0) * 256);
+    (vx, vy)
+}
+
+/// Where the screen's four corners land on the playfield, clockwise from
+/// top-left — DEBUGGER.md §3's "camera trapezoid".
+///
+/// A trapezoid rather than a rectangle because that is what a rotated or
+/// perspective-scaled matrix produces, and seeing its shape is the entire
+/// value of the view: a game whose corners cross each other has a matrix
+/// that folds the plane over itself.
+#[must_use]
+pub fn mode7_camera_corners(
+    m: &crate::ppu::mode7::Mode7,
+    width: u16,
+    height: u16,
+) -> [(i32, i32); 4] {
+    let corner = |sx: u16, sy: u16| {
+        let sx = if m.flip_x { width - 1 - sx } else { sx };
+        let sy = if m.flip_y { 255 - sy } else { sy };
+        let cy = i32::from(sy) + i32::from(m.vofs) - i32::from(m.y0);
+        let cx_fixed = i32::from(sx) * 256 + ((i32::from(m.hofs) - i32::from(m.x0)) * 256);
+        let (vx, vy) = mode7_project(m, cx_fixed, cy);
+        (vx >> 8, vy >> 8)
+    };
+    [
+        corner(0, 0),
+        corner(width - 1, 0),
+        corner(width - 1, height - 1),
+        corner(0, height - 1),
+    ]
+}
+
+/// Which HDMA channels transferred on each scanline of the last frame.
+///
+/// One byte per hardware line, bit `n` set when channel `n` ran a transfer
+/// unit on it — DEBUGGER.md §3's "HDMA channel lanes per scanline".
+///
+/// Recorded unconditionally rather than behind the debug capture, and the
+/// measurement is why: it is 262 bytes and at most eight bit-ORs per line,
+/// against the ~245 KB frame the same loop is already producing. Gating it
+/// would cost more in branch and plumbing than it saves.
+pub type HdmaLanes = Vec<u8>;
+
+/// One DSP voice, reduced to what a viewer shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoiceView {
+    pub index: u8,
+    pub srcn: u8,
+    /// Where this voice's BRR data starts in ARAM, as resolved at key-on.
+    pub start: u16,
+    pub loop_addr: u16,
+    pub vol_left: i8,
+    pub vol_right: i8,
+    /// `$1000` is 1.0 — 32 kHz playback.
+    pub pitch: u16,
+    pub keyed_on: bool,
+    pub envelope_level: u16,
+    pub last_output: i16,
+}
+
+/// Reduce the DSP's eight voices to what a viewer shows.
+///
+/// A projection rather than a borrow, because this crosses a thread on the
+/// frame message like every other debug view (law 4).
+#[must_use]
+pub fn voice_views(dsp: &crate::apu::dsp::Dsp) -> Vec<VoiceView> {
+    dsp.voices
+        .iter()
+        .enumerate()
+        .map(|(i, v)| VoiceView {
+            index: i as u8,
+            srcn: v.srcn,
+            start: v.start,
+            loop_addr: v.loop_addr,
+            vol_left: v.vol_left,
+            vol_right: v.vol_right,
+            pitch: v.pitch,
+            keyed_on: v.keyed_on,
+            // The DSP's level is 11-bit and signed in the struct; a
+            // viewer wants the magnitude, and a negative level is a
+            // transient the envelope clamps rather than something to show
+            // as a huge unsigned number.
+            envelope_level: v.envelope.level.max(0) as u16,
+            last_output: v.last_output,
+        })
+        .collect()
+}
+
+/// One decoded BRR block: nine bytes in, sixteen samples out.
+///
+/// **A BRR block is 9 bytes, not 8**: one header plus eight of packed
+/// nibbles. The header carries the shift, the filter, and the end/loop
+/// flags — a decoder that assumed 8-byte blocks would drift a byte per
+/// block and turn a sample into noise within a few dozen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrrBlock {
+    pub shift: u8,
+    pub filter: u8,
+    pub end: bool,
+    pub loops: bool,
+    pub samples: [i16; 16],
+}
+
+/// Decode one BRR block from ARAM at `addr`.
+///
+/// `prev` is the two previous samples the filters need (`(older, newer)`),
+/// which is why decoding a run of blocks has to be sequential rather than
+/// random-access: filters 1-3 are recursive.
+#[must_use]
+pub fn decode_brr_block(aram: &[u8], addr: u16, prev: (i16, i16)) -> BrrBlock {
+    let at = usize::from(addr);
+    let byte = |i: usize| aram.get((at + i) % aram.len().max(1)).copied().unwrap_or(0);
+    let header = byte(0);
+    let shift = header >> 4;
+    let filter = (header >> 2) & 0x03;
+
+    let (mut older, mut newer) = prev;
+    let mut samples = [0i16; 16];
+    for (i, slot) in samples.iter_mut().enumerate() {
+        let packed = byte(1 + i / 2);
+        let nibble = if i.is_multiple_of(2) {
+            packed >> 4
+        } else {
+            packed & 0x0F
+        };
+        // The nibble is SIGNED 4-bit, so 8..15 are negative.
+        let mut s = i32::from((nibble as i8) << 4 >> 4);
+        // Shift 13-15 are invalid on hardware and behave as a very large
+        // shift of the sign bit; clamping keeps a corrupt sample from
+        // producing a wild value in a viewer.
+        s = if shift <= 12 {
+            (s << shift) >> 1
+        } else {
+            (s >> 3) << 11
+        };
+        let (o, n) = (i32::from(older), i32::from(newer));
+        s += match filter {
+            1 => n + ((-n) >> 4),
+            2 => (n * 2) + ((-n * 3) >> 5) - o + (o >> 4),
+            3 => (n * 2) + ((-n * 13) >> 6) - o + ((o * 3) >> 4),
+            _ => 0,
+        };
+        let clamped = s.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        *slot = clamped;
+        older = newer;
+        newer = clamped;
+    }
+    BrrBlock {
+        shift,
+        filter,
+        end: header & 0x01 != 0,
+        loops: header & 0x02 != 0,
+        samples,
+    }
+}
+
+#[cfg(test)]
+mod w13_02c_tests {
+    use super::*;
+    use crate::ppu::mode7::Mode7;
+
+    /// The interleave: tilemap in the EVEN bytes, characters in the ODD
+    /// bytes of the same words.
+    #[test]
+    fn the_mode7_playfield_is_interleaved_not_two_regions() {
+        let mut vram = vec![0u8; 0x10000];
+        // Tilemap entry (0,0) -> tile 2, at the EVEN byte of word 0.
+        vram[0] = 2;
+        // Tile 2, pixel (0,0) -> colour 0x55, at the ODD byte.
+        vram[(2 * 64) * 2 + 1] = 0x55;
+        assert_eq!(mode7_pixel(&vram, 0, 0), 0x55);
+        // The even byte beside it is tilemap data, not a pixel.
+        assert_eq!(mode7_character_pixel(&vram, 2, 0, 0), 0x55);
+        // The playfield wraps at 1024.
+        assert_eq!(mode7_pixel(&vram, 1024, 1024), 0x55);
+    }
+
+    /// The identity matrix projects the screen onto itself, so the
+    /// trapezoid is the screen rectangle — the case where a sign error is
+    /// most visible.
+    #[test]
+    fn an_identity_matrix_gives_a_rectangle_the_size_of_the_screen() {
+        let m = Mode7 {
+            a: 0x0100,
+            b: 0,
+            c: 0,
+            d: 0x0100,
+            ..Mode7::default()
+        };
+        let corners = mode7_camera_corners(&m, 256, 224);
+        assert_eq!(corners[0], (0, 0));
+        assert_eq!(corners[1], (255, 0));
+        assert_eq!(corners[2], (255, 223));
+        assert_eq!(corners[3], (0, 223));
+    }
+
+    /// A rotation produces a genuine trapezoid — the whole point of
+    /// drawing the outline rather than a rectangle.
+    #[test]
+    fn a_rotated_matrix_produces_corners_that_are_not_axis_aligned() {
+        let m = Mode7 {
+            a: 0x00B5,
+            b: 0xFF4B_u16 as i16,
+            c: 0x00B5,
+            d: 0x00B5,
+            ..Mode7::default()
+        };
+        let corners = mode7_camera_corners(&m, 256, 224);
+        assert_ne!(
+            corners[0].1, corners[1].1,
+            "the top edge must not stay flat under rotation"
+        );
+    }
+
+    /// A BRR block is NINE bytes: one header plus eight of nibble pairs.
+    /// The filter-0 case is the one with no recursion, so it pins the
+    /// unpacking on its own.
+    #[test]
+    fn a_brr_block_is_nine_bytes_and_filter_zero_is_pure_unpacking() {
+        let mut aram = vec![0u8; 0x10000];
+        // shift 0, filter 0, no flags.
+        aram[0] = 0x00;
+        // First nibble 1, second nibble -1 (0xF).
+        aram[1] = 0x1F;
+        let block = decode_brr_block(&aram, 0, (0, 0));
+        assert_eq!(block.shift, 0);
+        assert_eq!(block.filter, 0);
+        assert!(!block.end && !block.loops);
+        // shift 0 is `(s << 0) >> 1`, so 1 -> 0 and -1 -> -1.
+        assert_eq!(block.samples[0], 0);
+        assert_eq!(block.samples[1], -1);
+
+        // The header's low two bits are the END and LOOP flags.
+        aram[0] = 0x03;
+        let block = decode_brr_block(&aram, 0, (0, 0));
+        assert!(block.end && block.loops);
+
+        // The NINTH byte belongs to this block, not the next one: a
+        // decoder assuming 8 would read the next block's header as data.
+        aram[0] = 0x40; // shift 4
+        aram[8] = 0x70;
+        let block = decode_brr_block(&aram, 0, (0, 0));
+        assert_ne!(block.samples[14], 0, "byte 8 supplies samples 14 and 15");
+    }
+}

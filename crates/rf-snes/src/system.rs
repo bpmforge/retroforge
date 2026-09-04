@@ -197,6 +197,9 @@ impl SnesSystem {
         // per visible scanline. Its cost is charged like MDMA's, because
         // it steals the same bus.
         if events.frame_started {
+            // Ticket W13-02c: the lane view shows THIS frame, so the
+            // record resets where HDMA itself re-initialises.
+            self.bus.clear_hdma_lanes();
             self.bus.hdma_init();
             self.bus.ppu.clear_line_state();
             // Ticket W13-02h: the frame boundary, in the order

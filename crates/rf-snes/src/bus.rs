@@ -109,6 +109,14 @@ pub struct SnesBus {
     /// Ticket W13-02e's watchpoints, evaluated here because only a bus
     /// can see an access.
     watches: rf_core_api::WatchTable,
+    /// Ticket W13-02c: which HDMA channels transferred on each hardware
+    /// line of the frame in progress, one bit per channel.
+    ///
+    /// Recorded unconditionally rather than behind the debug capture, and
+    /// the measurement is the reason: 262 bytes and at most eight bit-ORs
+    /// per line, against the ~245 KB frame the same loop already produces.
+    /// Gating it would cost more in plumbing than it saves.
+    hdma_lanes: Vec<u8>,
 }
 
 impl SnesBus {
@@ -158,6 +166,19 @@ impl SnesBus {
         }
     }
 
+    /// Which HDMA channels transferred on each line of the frame in
+    /// progress (ticket W13-02c).
+    #[must_use]
+    pub fn hdma_lanes(&self) -> &[u8] {
+        &self.hdma_lanes
+    }
+
+    /// Clear the lane record — called at each frame start, so the view
+    /// shows THIS frame rather than an accumulation over the session.
+    pub fn clear_hdma_lanes(&mut self) {
+        self.hdma_lanes.fill(0);
+    }
+
     /// Take everything queued since the last call.
     pub fn drain_events(&mut self) -> Vec<rf_core_api::CoreEvent> {
         std::mem::take(&mut self.events)
@@ -169,6 +190,7 @@ impl SnesBus {
             events: Vec::new(),
             event_mask: rf_core_api::EventMask::NONE,
             watches: rf_core_api::WatchTable::new(),
+            hdma_lanes: vec![0; 262],
             rom,
             sram: vec![0; sram_len],
             wram: vec![0; WRAM_LEN],
@@ -579,6 +601,13 @@ impl SnesBus {
                 continue;
             }
             if self.dma.channels[ch].do_transfer {
+                // Ticket W13-02c: this is the moment a channel actually
+                // moves bytes on this line, which is what the lane view
+                // shows — not merely being enabled in $420C.
+                let line = usize::from(self.timing.line);
+                if let Some(slot) = self.hdma_lanes.get_mut(line) {
+                    *slot |= 1 << ch;
+                }
                 cycles += CYCLES_PER_CHANNEL + self.hdma_transfer_unit(ch);
             }
 

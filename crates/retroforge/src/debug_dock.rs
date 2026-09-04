@@ -254,6 +254,8 @@ pub struct PanelData {
     /// Which memory space the SNES memory view is showing: 0 VRAM,
     /// 1 CGRAM, 2 ARAM.
     pub snes_space: usize,
+    /// Which DSP voice the BRR preview is showing (ticket W13-02c).
+    pub snes_voice: usize,
 }
 
 impl Default for PanelData {
@@ -275,6 +277,7 @@ impl Default for PanelData {
             snes: None,
             snes_bg: 0,
             snes_space: 0,
+            snes_voice: 0,
         }
     }
 }
@@ -347,6 +350,10 @@ impl DebugPanels {
                         | DebugTab::Palette
                         | DebugTab::Oam
                         | DebugTab::Memory
+                        // Ticket W13-02c: the HDMA lanes and the DSP
+                        // voices ride on the same capture.
+                        | DebugTab::EventTimeline
+                        | DebugTab::Audio
                 )
             })
     }
@@ -582,7 +589,19 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
                 None => pattern_ui(ui, self.data.chr_rom.as_deref(), self.pattern_table),
             },
             DebugTab::Nametable => match self.data.snes.as_deref() {
-                Some(snes) => snes_tilemap_ui(ui, snes, &mut self.data.snes_bg),
+                // Mode 7 has no tilemap in the BGnSC sense — its map IS
+                // the playfield — so it shares this tab rather than
+                // getting one the NES would leave empty. Which view is
+                // shown follows the live BG mode, so a game entering
+                // mode 7 does not leave the user on a panel that no
+                // longer describes it.
+                Some(snes) => {
+                    if snes.ppu_regs.get(0x05).copied().unwrap_or(0) & 0x07 == 7 {
+                        snes_mode7_ui(ui, snes);
+                    } else {
+                        snes_tilemap_ui(ui, snes, &mut self.data.snes_bg);
+                    }
+                }
                 None => nametable_ui(ui, &self.data.vram),
             },
             DebugTab::Palette => match self.data.snes.as_deref() {
@@ -593,7 +612,13 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
                 Some(snes) => snes_oam_ui(ui, snes, self.data.oam_diff_scanline),
                 None => oam_ui(ui, &self.data.oam),
             },
-            DebugTab::EventTimeline => event_timeline_ui(ui, &self.data.events),
+            DebugTab::EventTimeline => {
+                event_timeline_ui(ui, &self.data.events);
+                if let Some(snes) = self.data.snes.as_deref() {
+                    ui.separator();
+                    snes_hdma_lanes_ui(ui, snes);
+                }
+            }
             DebugTab::Memory => match self.data.snes.as_deref() {
                 Some(snes) => snes_memory_ui(ui, snes, &mut self.data.snes_space),
                 None => memory_ui(
@@ -617,7 +642,13 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
                 &self.annotations.store.ram_labels(),
             ),
             DebugTab::Annotations => annotations_ui(ui, self.annotations),
-            DebugTab::Audio => audio_ui(ui, self.data.audio.as_deref_mut()),
+            DebugTab::Audio => {
+                audio_ui(ui, self.data.audio.as_deref_mut());
+                if let Some(snes) = self.data.snes.as_deref() {
+                    ui.separator();
+                    snes_dsp_ui(ui, snes, &mut self.data.snes_voice);
+                }
+            }
         }
     }
 }
@@ -2482,4 +2513,235 @@ fn snes_memory_ui(ui: &mut egui::Ui, snes: &SnesDebugFrame, space: &mut usize) {
             }
         });
     });
+}
+
+// ---------------------------------------------------------------------
+// Mode 7, HDMA lanes and the DSP voice view (ticket W13-02c).
+// ---------------------------------------------------------------------
+
+/// The mode-7 playfield with the camera trapezoid drawn over it
+/// (DEBUGGER.md §3: "Mode 7 view (1024x1024 playfield + camera
+/// trapezoid)").
+fn snes_mode7_ui(ui: &mut egui::Ui, snes: &SnesDebugFrame) {
+    let mode = snes
+        .ppu_regs
+        .first()
+        .map_or(0, |_| snes.ppu_regs.get(0x05).copied().unwrap_or(0) & 0x07);
+    if mode != 7 {
+        // Shown, not hidden: the registers are real whatever mode is
+        // live, and a game that has just left mode 7 still has the matrix
+        // that put it where it is. Saying which mode is running is the
+        // honest version of both.
+        ui.label(
+            egui::RichText::new(format!("BG mode {mode} — the matrix below is not in use"))
+                .small()
+                .weak(),
+        );
+    }
+    let m = &snes.mode7;
+    ui.monospace(format!(
+        "A {:6}  B {:6}   X0 {:5}  HOFS {:5}",
+        m.a, m.b, m.x0, m.hofs
+    ));
+    ui.monospace(format!(
+        "C {:6}  D {:6}   Y0 {:5}  VOFS {:5}",
+        m.c, m.d, m.y0, m.vofs
+    ));
+    ui.label(
+        egui::RichText::new(format!(
+            "screen-over {} · flip {}{}",
+            m.screen_over,
+            if m.flip_x { "H" } else { "" },
+            if m.flip_y { "V" } else { "-" }
+        ))
+        .small()
+        .weak(),
+    );
+
+    // The playfield at 1/4 scale: 1024 square is far past any pane, and a
+    // 256-square thumbnail is what makes the trapezoid's SHAPE readable,
+    // which is the whole point of the view.
+    const SHOWN: usize = 256;
+    const STEP: u16 = (rf_snes::debug::MODE7_SIDE / SHOWN) as u16;
+    let mut img = egui::ColorImage::new([SHOWN, SHOWN], vec![egui::Color32::BLACK; SHOWN * SHOWN]);
+    for y in 0..SHOWN {
+        for x in 0..SHOWN {
+            let index =
+                rf_snes::debug::mode7_pixel(&snes.vram, (x as u16) * STEP, (y as u16) * STEP);
+            let [r, g, b] = rf_snes::debug::cgram_rgb(&snes.cgram, index);
+            img.pixels[y * SHOWN + x] = egui::Color32::from_rgb(r, g, b);
+        }
+    }
+    let texture = ui
+        .ctx()
+        .load_texture("snes-mode7", img, egui::TextureOptions::NEAREST);
+    let response = ui
+        .add(egui::Image::new(&texture).fit_to_exact_size(egui::vec2(SHOWN as f32, SHOWN as f32)));
+
+    // The trapezoid, in the same 1/4 scale, from the projection the
+    // renderer itself uses.
+    let corners = rf_snes::debug::mode7_camera_corners(m, 256, 224);
+    let origin = response.rect.min;
+    let scale = SHOWN as f32 / rf_snes::debug::MODE7_SIDE as f32;
+    let points: Vec<egui::Pos2> = corners
+        .iter()
+        .map(|(x, y)| {
+            // Wrapped into the playfield, because that is where those
+            // samples actually read from — a corner at -50 is reading
+            // 974, not off the edge.
+            let wx = (x.rem_euclid(rf_snes::debug::MODE7_SIDE as i32)) as f32;
+            let wy = (y.rem_euclid(rf_snes::debug::MODE7_SIDE as i32)) as f32;
+            origin + egui::vec2(wx * scale, wy * scale)
+        })
+        .collect();
+    let painter = ui.painter_at(response.rect);
+    let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(0xFF, 0xC8, 0x50));
+    for i in 0..4 {
+        painter.line_segment([points[i], points[(i + 1) % 4]], stroke);
+    }
+}
+
+/// HDMA channel lanes: one row per channel, one column per scanline
+/// (DEBUGGER.md §3's "+ HDMA channel lanes per scanline").
+fn snes_hdma_lanes_ui(ui: &mut egui::Ui, snes: &SnesDebugFrame) {
+    ui.label(
+        egui::RichText::new("HDMA — a mark where a channel moved bytes on that line")
+            .small()
+            .weak(),
+    );
+    let lines = snes.hdma_lanes.len().min(262);
+    let width = ui.available_width().min(lines as f32 * 2.0).max(64.0);
+    let row_h = 10.0;
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, row_h * 8.0 + 4.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(0x14));
+    let x_of = |line: usize| rect.min.x + (line as f32 / lines.max(1) as f32) * rect.width();
+    for ch in 0..8usize {
+        let y = rect.min.y + ch as f32 * row_h + 2.0;
+        for (line, mask) in snes.hdma_lanes.iter().take(lines).enumerate() {
+            if mask & (1 << ch) != 0 {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(x_of(line), y),
+                        egui::vec2((rect.width() / lines.max(1) as f32).max(1.0), row_h - 2.0),
+                    ),
+                    0.0,
+                    egui::Color32::from_rgb(0x60, 0xC0, 0xF0),
+                );
+            }
+        }
+    }
+    // A frame in which nothing ran is a real answer, and a blank strip
+    // alone would read as a broken viewer rather than as "no HDMA".
+    if snes.hdma_lanes.iter().all(|m| *m == 0) {
+        ui.label(
+            egui::RichText::new("no HDMA transfers this frame")
+                .small()
+                .weak(),
+        );
+    }
+}
+
+/// DSP voice states and a BRR preview (DEBUGGER.md §3: "+DSP voice
+/// states, BRR source view").
+fn snes_dsp_ui(ui: &mut egui::Ui, snes: &SnesDebugFrame, selected: &mut usize) {
+    egui::Grid::new("snes-dsp").striped(true).show(ui, |ui| {
+        ui.label("v");
+        ui.label("srcn");
+        ui.label("pitch");
+        ui.label("env");
+        ui.label("vol L/R");
+        ui.label("out");
+        ui.end_row();
+        for v in &snes.voices {
+            let on = v.keyed_on;
+            let tag = |t: String| {
+                let text = egui::RichText::new(t).monospace();
+                if on {
+                    text.strong()
+                } else {
+                    text.weak()
+                }
+            };
+            if ui
+                .add(egui::Button::selectable(
+                    *selected == usize::from(v.index),
+                    format!("{}", v.index),
+                ))
+                .clicked()
+            {
+                *selected = usize::from(v.index);
+            }
+            ui.label(tag(format!("{:02X}", v.srcn)));
+            // $1000 is 1.0 — showing the ratio as well as the raw value,
+            // because "4096" means nothing and "1.00x" is the thing a
+            // musician is looking for.
+            ui.label(tag(format!(
+                "{:04X} {:.2}x",
+                v.pitch,
+                f32::from(v.pitch) / 4096.0
+            )));
+            ui.label(tag(format!("{:4}", v.envelope_level)));
+            ui.label(tag(format!("{:4}/{:4}", v.vol_left, v.vol_right)));
+            ui.label(tag(format!("{:6}", v.last_output)));
+            ui.end_row();
+        }
+    });
+
+    let Some(voice) = snes.voices.get(*selected) else {
+        return;
+    };
+    ui.separator();
+    ui.label(
+        egui::RichText::new(format!(
+            "voice {} BRR at ${:04X} (loop ${:04X})",
+            voice.index, voice.start, voice.loop_addr
+        ))
+        .small()
+        .weak(),
+    );
+
+    // Decode a short run from the sample's start. Sequential, because
+    // filters 1-3 are recursive — a random-access decoder would draw a
+    // different waveform than the DSP plays.
+    const BLOCKS: usize = 8;
+    let mut prev = (0i16, 0i16);
+    let mut samples: Vec<i16> = Vec::with_capacity(BLOCKS * 16);
+    let mut addr = voice.start;
+    let mut ended = false;
+    for _ in 0..BLOCKS {
+        let block = rf_snes::debug::decode_brr_block(&snes.aram, addr, prev);
+        samples.extend_from_slice(&block.samples);
+        prev = (block.samples[14], block.samples[15]);
+        if block.end {
+            ended = true;
+            break;
+        }
+        addr = addr.wrapping_add(9);
+    }
+    if ended {
+        ui.label(egui::RichText::new("end flag reached").small().weak());
+    }
+
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().min(320.0), 60.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(0x14));
+    let mid = rect.center().y;
+    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x80, 0xE0, 0x90));
+    for (i, pair) in samples.windows(2).enumerate() {
+        let x0 = rect.min.x + (i as f32 / samples.len().max(1) as f32) * rect.width();
+        let x1 = rect.min.x + ((i + 1) as f32 / samples.len().max(1) as f32) * rect.width();
+        let scale = rect.height() / 2.0 / f32::from(i16::MAX);
+        painter.line_segment(
+            [
+                egui::pos2(x0, mid - f32::from(pair[0]) * scale),
+                egui::pos2(x1, mid - f32::from(pair[1]) * scale),
+            ],
+            stroke,
+        );
+    }
 }

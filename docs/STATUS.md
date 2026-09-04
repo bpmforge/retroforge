@@ -2340,3 +2340,54 @@ Phase 13 work, and D-4 blocks only a docs ticket.
   filing time because each is its own decoder with its own oracle.
   **Phase 13's debugger arc: six of nine closed**; `W13-02c`, `W13-02g` and
   `W13-02i` are claimable.
+
+- **W13-02c — Mode 7, HDMA lanes, and the DSP voice/BRR view**
+  (2026-09-04). This closes **the whole of DEBUGGER.md §3**.
+
+  **The camera trapezoid uses the renderer's own projection.**
+  `debug::mode7_project` is now the single implementation of the matrix
+  multiply and `ppu::mode7::render_scanline` delegates to it, so the
+  outline a viewer draws cannot disagree with the picture the renderer
+  produced. Every Mode 7 golden stayed green through that refactor, which
+  is what says it is the same math. Corners are wrapped into the playfield
+  with `rem_euclid`, because a corner at −50 is reading 974 rather than
+  sitting off the edge.
+
+  **The HDMA lanes record what actually transferred**, not what `$420C`
+  enabled — the difference between "armed" and "did something". Recorded
+  unconditionally, and the measurement is the justification: 262 bytes and
+  at most eight bit-ORs per line, against the ~245 KB frame the same loop
+  already produces. Cleared where HDMA itself re-initialises, so the view
+  is this frame rather than an accumulation. A frame with no transfers
+  **says so in words** — a blank strip alone reads as a broken viewer.
+
+  **A BRR block is nine bytes, not eight** — one header plus eight of
+  packed nibbles — and a decoder assuming eight would drift a byte per
+  block and turn a sample into noise within a few dozen. The nibbles are
+  signed 4-bit, and filters 1-3 are **recursive**, which is why the preview
+  decodes sequentially from the sample start: a random-access decoder would
+  draw a different waveform than the DSP plays. Pitch is shown both raw and
+  as a ratio, because `$1000` is 1.0 and "4096" means nothing to a
+  musician.
+
+  **Mode 7 shares the tilemap tab** rather than getting its own: Mode 7 has
+  no tilemap in the `BGnSC` sense — its map *is* the playfield — so a
+  separate tab would be one the NES always leaves empty. Which view shows
+  follows the live BG mode, and when the mode is not 7 the matrix is still
+  shown, labelled as not in use, because the registers are real whatever is
+  running.
+
+  Evidence: 4 more `rf_snes::debug` unit tests (the Mode 7 interleave, an
+  identity matrix giving exactly the screen rectangle, a rotation giving
+  corners that are **not** axis-aligned, and the nine-byte BRR block with
+  its flags), plus an app-level test that the three views are fed on a real
+  fixture — including that a BRR decode over whatever bytes are in real
+  ARAM does not panic, because a debugger that crashes on uninitialised
+  audio memory is worse than one that shows noise. W10-04's scroll guard
+  fired on all three new surfaces; each is in `BOUNDED` with the reason its
+  content cannot grow (eight channels, eight voices, a 1024-square
+  playfield — all hardware constants). Gate: **1765 passing, 0 failed, 33
+  ignored** (up from 1760), exit 0, `arch OK`.
+
+  **Phase 13's debugger arc: seven of nine closed.** `W13-02g` (SNES trace)
+  and `W13-02i` (the D-6 `cpu_regs` question) remain.
