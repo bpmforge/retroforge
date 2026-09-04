@@ -5683,7 +5683,7 @@
     "the empty-table fast path is unchanged and benches/debugger_idle.rs still reports idle within noise of debugger-compiled-out (bar B-10)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED BY W13-01, 2026-09-03. Condition::MemoryEquals tests what memory HOLDS at an instruction boundary, not what was WRITTEN — breakpoint.rs's own module doc says the distinction decided the design. A real watchpoint needs a hook at the bus access, which is why the cores are in the write_scope and this is not a pure rf-debugger ticket.",
     "LAW 4 IS THE CONSTRAINT: a bus hook must not perturb the simulation. Whatever shape it takes has to leave the mode-invariant suites green, and that is a criterion to check rather than a hope."
