@@ -5657,7 +5657,7 @@
     "law 4 holds: the write goes through the core's own bus, never around it, and nothing mutates core state off the core thread"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED BY W13-01, 2026-09-03. Today memory_view.rs is build_rows + byte_at and nothing else; the 'find' box in debug_dock.rs is the TRACE filter, not a memory search.",
     "THIS IS THE TICKET W11-10's NOTE WAS WAITING FOR: 'an out-of-band bus WRITE for the memory editor' is one of the three things it lists as having no trait expression. Adding it to EmulatorCore is in scope here and is why rf-core-api is in the write_scope."
