@@ -2238,3 +2238,48 @@ deregisters after one job defeats the point.
 **claimable now: W13-02a**. D-4 (R-05) and D-5 (does Phase 13 exist) were
 not put to Brad this round: D-5 is answered in practice by two sessions of
 Phase 13 work, and D-4 blocks only a docs ticket.
+
+- **W13-02a — `SnesCore::state_view` stops returning empty slices**
+  (2026-09-04). The unblocker: the SNES viewer column was not merely
+  unbuilt but **unbuildable**, because a panel written that day would have
+  had no data source. `W13-02b` and `W13-02g` are now claimable.
+
+  All five memories are real — wram (128 KiB, already was), vram (64 KiB),
+  cgram (512 B), oam (544 = 512 plus the high table) and ppu_regs.
+  **Two buffers exist and each has a reason.** `cgram_bytes`: `StateView`
+  lends `&[u8]` and the PPU stores CGRAM as `[u16; 256]`; a word array
+  cannot be lent as bytes without `unsafe`, which this workspace forbids
+  outright. It is little-endian — the order `$2122` writes them in — so a
+  viewer reading a pair back sees what the ROM wrote. `ppu_regs`: the SNES
+  PPU is *decoded* into typed fields rather than kept as a register array,
+  so the file is **rebuilt from the live fields** rather than shadowed at
+  write time. A shadow updated inside `write_register` would be a second
+  copy that can silently disagree with what the renderer reads — the exact
+  failure `SnesBus`'s own doc warns about for VRAM ("every game would draw
+  a black screen with nothing obviously wrong anywhere"). Both refresh at
+  the end of every step: ~570 bytes against a frame already carrying
+  ~245 KB of pixels.
+
+  **`ppu_regs` is indexed so `[n]` is `$21nn`**, covering `$2100-$213F`. A
+  viewer asking for `$2105` reads index 5 rather than learning a private
+  field order — the difference between "the register file" and "some
+  struct dump".
+
+  **Two fields are empty on purpose and a test asserts it**, so filling
+  them later is deliberate rather than quiet. `cpu_regs` is W13-02i's
+  (ruling D-6). `mapper_state` is the *correct* report for a plain
+  LoROM/HiROM: no bank registers, no IRQ counter, and `StateView`'s own doc
+  says "empty slice for mappers with no persistent state".
+
+  Criterion 2 landed as **`EmuStepper::state_view`** rather than by
+  teaching the existing accessors: `vram()`/`palette()`/`oam()` return
+  `&[u8; 0x1000]` and friends, NES-sized *by type*, so 64 KiB of SNES VRAM
+  can never come back through them.
+
+  Evidence: 3 tests — one asserts a length per field; one **writes through
+  the machine's own registers** (`$2121`/`$2122` for a CGRAM entry,
+  `$2105` for the BG mode) and reads the values back out of the view,
+  because a view with the right lengths and zero content would pass a
+  length test and still be useless; and an app-level one proves the shell
+  surfaces it on a real SNES fixture. Gate: **1753 passing, 0 failed, 33
+  ignored** (up from 1750), exit 0, `arch OK`; the NES path unchanged.

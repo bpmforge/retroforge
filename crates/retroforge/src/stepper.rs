@@ -559,6 +559,23 @@ impl EmuStepper {
             .map_or(&EMPTY_OAM, rf_nes::NesBus::oam)
     }
 
+    /// Every memory the running console exposes, through the one
+    /// accessor that answers for **both** cores (ticket W13-02a).
+    ///
+    /// The typed helpers below it (`vram`, `palette`, `oam`) are
+    /// NES-shaped by their return types — `&[u8; 0x1000]` is a NES
+    /// nametable, not 64 KiB of SNES VRAM — so they answer with an empty
+    /// default on a SNES session and always will. This is what a viewer
+    /// that wants to serve both consoles reads instead; W13-02b builds
+    /// those viewers on it.
+    ///
+    /// `cpu_regs` is empty on SNES by decision, not omission — see
+    /// `rf_snes::core::SnesCore::state_view` and W13-02i.
+    #[must_use]
+    pub fn state_view(&self) -> rf_core_api::StateView<'_> {
+        self.machine.as_core_ref().state_view()
+    }
+
     /// The PPU's nametable VRAM (ticket W4-06d) — forwards
     /// `NesBus::vram()`, a non-observing borrow.
     pub fn vram(&self) -> &[u8; 0x1000] {

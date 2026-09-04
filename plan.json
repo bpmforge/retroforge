@@ -5576,7 +5576,10 @@
    "write_scope": [
     "crates/rf-snes/**",
     "crates/rf-core-api/**",
-    "crates/retroforge/src/stepper.rs"
+    "crates/retroforge/src/stepper.rs",
+    "crates/rf-snes/tests/**",
+    "crates/retroforge/tests/**",
+    "docs/design/DEBUGGER.md"
    ],
    "depends_on": [],
    "acceptance": [
@@ -5586,12 +5589,19 @@
     "the NES path is unchanged: every existing debugger provider test and the RF-Scroller goldens pass without re-baselining"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "FILED BY W13-01, 2026-09-03, and it is FIRST because it is the unblocker: until this lands every SNES debug panel has nothing to draw, so W13-02b/c/g are unbuildable rather than merely unbuilt.",
     "MEASURED, not assumed: crates/rf-snes/src/core.rs state_view() returns cpu_regs: &[], vram: &[], cgram: &[], oam: &[], ppu_regs: &[], mapper_state: &[] — only wram is real. crates/retroforge/src/stepper.rs then answers None for bus(), bus_mut() and cpu() on Machine::Snes. This is the half-console shape W11-10's close note predicted, arriving on the debugger side: the trait was adopted and one implementation of it is a stub.",
     "SCOPE WARNING FOR WHOEVER CLAIMS IT: W11-10's close note lists three things the trait still cannot express — typed CPU registers (cpu_regs is an untyped &[u8]), an out-of-band bus WRITE for the memory editor, and APU access for channel capture. This ticket only needs the first. The write belongs to W13-02d; do not widen.",
-    "SPLIT ON BRAD'S RULING 2026-09-04 (decision D-6). Filed asking for six StateView fields; FIVE of them — vram, cgram, oam, ppu_regs, mapper_state — are raw byte arrays with no design question at all, and the SNES viewer column W13-02b needs exactly those five and NOT cpu_regs. Only cpu_regs carries the D-6 question (StateView::cpu_regs is an untyped &[u8], so either the trait grows typed registers or each core picks a layout the shell must know). Splitting unblocks 16 points today and defers the contract change until W13-02b gives it a real second consumer to be designed against — adding a contract method for one implementation is how a trait grows methods nobody can implement meaningfully."
+    "SPLIT ON BRAD'S RULING 2026-09-04 (decision D-6). Filed asking for six StateView fields; FIVE of them — vram, cgram, oam, ppu_regs, mapper_state — are raw byte arrays with no design question at all, and the SNES viewer column W13-02b needs exactly those five and NOT cpu_regs. Only cpu_regs carries the D-6 question (StateView::cpu_regs is an untyped &[u8], so either the trait grows typed registers or each core picks a layout the shell must know). Splitting unblocks 16 points today and defers the contract change until W13-02b gives it a real second consumer to be designed against — adding a contract method for one implementation is how a trait grows methods nobody can implement meaningfully.",
+    "HANDOFF 2026-09-04: write_scope widened to the two tests/** trees and docs/design/DEBUGGER.md, the same three reasons the sibling tickets recorded.",
+    "DONE 2026-09-04. All five memories are real: wram (128 KiB, already was), vram (64 KiB), cgram (512 bytes), oam (544 — 512 plus the 32-byte high table) and ppu_regs. TWO BUFFERS EXIST AND EACH HAS A REASON. cgram_bytes: StateView lends &[u8] and the PPU stores CGRAM as [u16; 256]; a word array cannot be lent as bytes without unsafe, which this workspace forbids outright. It is little-endian, the order $2122 writes them in, so a viewer reading a pair back sees what the ROM wrote. ppu_regs: the SNES PPU is DECODED into typed fields, not a raw register array, so the file is rebuilt from the live fields rather than shadowed at write time — a shadow updated inside write_register would be a second copy that can silently disagree with what the renderer reads, which is the exact failure SnesBus's own doc warns about for VRAM. Both are refreshed at the end of every step, ~570 bytes against a frame that already carries ~245 KB of pixels.",
+    "ppu_regs IS INDEXED SO [n] IS $21nn, covering $2100-$213F. A viewer asking for $2105 reads index 5 rather than learning a private field order — which is the difference between 'the register file' and 'some struct dump'. Registers this core does not model read back as zero. Populated today: $2100, $2101, $2102/03, $2105, $2107-$210A, $210B/0C, $212C/2D, $213E.",
+    "mapper_state IS EMPTY AND THAT IS THE CORRECT REPORT, not a stub. A plain LoROM/HiROM cartridge has no bank registers and no IRQ counter — StateView's own doc says 'empty slice for mappers with no persistent state'. It becomes non-empty when a core supports a cartridge chip that has some (SA-1, SuperFX), and rf_cart reports none of those yet.",
+    "cpu_regs IS EMPTY BY DECISION and a test ASSERTS the emptiness, so filling it later is a deliberate change rather than something that quietly happens. It is W13-02i's (Brad's ruling 2026-09-04, D-6).",
+    "CRITERION 2 landed as EmuStepper::state_view rather than by teaching the existing accessors: vram()/palette()/oam() return &[u8; 0x1000] and friends, which are NES-SIZED BY TYPE — 64 KiB of SNES VRAM cannot come back through a 4 KiB nametable borrow. So the criterion's second clause is what applied: one accessor the trait can answer for both cores, which is what W13-02b's viewers read.",
+    "EVIDENCE: 3 tests. One asserts a length per field (and asserts cpu_regs/mapper_state are empty on purpose); one WRITES THROUGH THE MACHINE'S OWN REGISTERS — $2121/$2122 for a CGRAM entry, $2105 for the BG mode — and reads the values back out of the view, because a view reporting the right LENGTHS with zero CONTENT would pass a length test and still be useless; and an app-level one proves the shell surfaces it on a real SNES fixture. Workspace 1753 passing / 0 failed / 33 ignored, up from 1750; the NES path is unchanged (criterion 3)."
    ],
    "stories": []
   },

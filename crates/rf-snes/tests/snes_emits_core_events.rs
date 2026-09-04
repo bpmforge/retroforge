@@ -11,6 +11,7 @@ use rf_core_api::{
     PpuPixel, Step, WatchAccess, WatchSpace,
 };
 use rf_snes::core::SnesCore;
+use rf_snes::cpu::CpuBus;
 
 #[derive(Default)]
 struct Collector {
@@ -180,4 +181,82 @@ fn subscribing_does_not_change_what_the_machine_does() {
     );
     assert!(a.events.is_empty());
     assert!(!b.events.is_empty());
+}
+
+// -----------------------------------------------------------------------
+// Ticket W13-02a: StateView stops returning empty slices.
+// -----------------------------------------------------------------------
+
+/// Bar B-2, per field. Until this ticket `SnesCore::state_view()` returned
+/// **empty slices** for everything but `wram`, so the entire SNES viewer
+/// column was not merely unbuilt but *unbuildable*: a panel written that
+/// day would have had no data source.
+#[test]
+fn state_view_reports_every_memory_the_console_physically_has() {
+    let mut core = core();
+    let mut sink = Collector::default();
+    core.step(Step::Frame, &mut sink);
+
+    let view = core.state_view();
+    assert!(!view.wram.is_empty(), "wram");
+    assert_eq!(view.wram.len(), 128 * 1024, "the SNES has 128 KiB of WRAM");
+    assert_eq!(view.vram.len(), 64 * 1024, "and 64 KiB of VRAM");
+    assert_eq!(
+        view.cgram.len(),
+        512,
+        "CGRAM is 256 entries of 15-bit colour, lent as little-endian bytes"
+    );
+    assert_eq!(
+        view.oam.len(),
+        544,
+        "OAM is 512 bytes plus the 32-byte high table"
+    );
+    assert_eq!(view.ppu_regs.len(), rf_snes::core::PPU_REG_COUNT);
+
+    // `cpu_regs` is deliberately empty until W13-02i decides how the
+    // contract expresses registers (Brad's ruling 2026-09-04, D-6). This
+    // asserts the *decision*, so that filling it later is a deliberate
+    // change rather than something that quietly happens.
+    assert!(
+        view.cpu_regs.is_empty(),
+        "cpu_regs is W13-02i's, not this ticket's"
+    );
+    // Empty is the correct report for a plain LoROM: no bank registers,
+    // no IRQ counter, nothing to serialize.
+    assert!(view.mapper_state.is_empty());
+}
+
+/// A view that reports the right LENGTHS but stale or zero CONTENT would
+/// pass the test above and still be useless. This writes through the
+/// machine's own registers and reads the values back out of the view.
+#[test]
+fn the_view_reports_what_was_actually_written_not_zeroes() {
+    let mut core = core();
+    let mut sink = Collector::default();
+    core.step(Step::Frame, &mut sink);
+
+    // Write CGRAM entry 1 through $2121/$2122, the way a ROM does.
+    core.system_mut().bus.write(0x002121, 0x01);
+    core.system_mut().bus.write(0x002122, 0x34);
+    core.system_mut().bus.write(0x002122, 0x12);
+    // And set a BG mode through $2105.
+    core.system_mut().bus.write(0x002105, 0x09);
+    core.step(Step::Frame, &mut sink);
+
+    let view = core.state_view();
+    assert_eq!(
+        (view.cgram[2], view.cgram[3]),
+        (0x34, 0x12),
+        "CGRAM entry 1 must read back little-endian, as $2122 wrote it"
+    );
+    assert_eq!(
+        view.ppu_regs[0x05] & 0x0F,
+        0x09,
+        "ppu_regs is indexed so [n] is $21nn — $2105's mode and BG3 bit"
+    );
+
+    // The snapshot tracks the machine rather than being taken once.
+    core.system_mut().bus.write(0x002105, 0x07);
+    core.step(Step::Frame, &mut sink);
+    assert_eq!(core.state_view().ppu_regs[0x05] & 0x07, 0x07);
 }

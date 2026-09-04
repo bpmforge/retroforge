@@ -140,15 +140,15 @@ citation is not a grade.**
 | 5 | Lua console REPL (`rf.mem`, `rf.bp.add`, …) | `DebugTab::LuaConsole` (W4-04), reachable | **met** |
 | 6 | pay-for-use; idle == compiled-out within noise, **measured** | `crates/retroforge/benches/debugger_idle.rs` | **met** |
 
-**One root cause sits under most of the SNES rows, and it is worth naming
-once rather than nine times.** `SnesCore::state_view()`
-(`crates/rf-snes/src/core.rs`) returns **empty slices** for `cpu_regs`,
-`vram`, `cgram`, `oam`, `ppu_regs` and `mapper_state` — only `wram` is
-real. The shell then answers `None` for `bus()`, `bus_mut()` and `cpu()`
-on `Machine::Snes` (`crates/retroforge/src/stepper.rs`). So a SNES debug
-panel has no data source to render *even if it were written*. This is the
-half-console shape W11-10's close note predicted, arriving on the debugger
-side: the trait was adopted, and one implementation of it is a stub.
+**One root cause sat under most of the SNES rows, and W13-02a removed it
+(2026-09-04).** `SnesCore::state_view()` used to return **empty slices**
+for `cpu_regs`, `vram`, `cgram`, `oam`, `ppu_regs` and `mapper_state` —
+only `wram` was real. The shell still answers `None` for `bus()`, `bus_mut()` and `cpu()`
+on `Machine::Snes` — those are NES-sized *by type*, so 64 KiB of SNES VRAM
+could never come back through a 4 KiB nametable borrow. `EmuStepper::
+state_view` is the accessor that answers for both, and is what the SNES
+viewers read. `cpu_regs` stays empty by decision (W13-02i, ruling D-6) and
+`mapper_state` because a plain LoROM has no bank registers to report.
 
 ### 7.2 The bar
 
@@ -196,7 +196,10 @@ capability that only tests can reach is not a capability a ROM hacker has.
 `W13-02a` is the unblocker for the SNES half: until `SnesCore::state_view`
 is real, every SNES viewer has nothing to draw.
 
-**Closed so far: `W13-02d`, `W13-02e`, `W13-02f`, `W13-02h`.**
+**Closed so far: `W13-02a`, `W13-02d`, `W13-02e`, `W13-02f`, `W13-02h`.**
+
+`W13-02a` (2026-09-04) — bar **B-2**, the unblocker. The SNES viewer
+column is now buildable: `W13-02b` and `W13-02g` are claimable.
 
 `W13-02h` (2026-09-04) — the SNES core emitted **no `CoreEvent` of any
 kind**, so FR-CORE-006's whole subscription channel had no producer there

@@ -49,12 +49,29 @@ use crate::SnesSystem;
 pub const FRAME_INSTRUCTION_BUDGET: u64 = 4_000_000;
 
 /// The SNES as an [`EmulatorCore`].
+/// Registers `$2100`-`$213F`, the range `StateView::ppu_regs` covers
+/// (ticket W13-02a).
+pub const PPU_REG_COUNT: usize = 0x40;
+
 pub struct SnesCore {
     system: SnesSystem,
     config: CoreConfig,
     /// Ticket W13-02e: what was last pushed to the bus, so the sync at the
     /// top of `step` copies only when the caller changed something.
     pushed_watches: rf_core_api::WatchTable,
+    /// Ticket W13-02a: CGRAM as bytes, refreshed each step.
+    ///
+    /// `StateView` lends `&[u8]` and the PPU stores CGRAM as `[u16; 256]`
+    /// — a word array cannot be lent as bytes without either `unsafe`
+    /// (which this workspace forbids outright) or a buffer. So: a buffer,
+    /// 512 bytes, rebuilt at the end of each step. Little-endian, which is
+    /// the order `$2122` writes them in, so a viewer reading a pair back
+    /// sees exactly what the ROM wrote.
+    cgram_bytes: Vec<u8>,
+    /// Ticket W13-02a: the PPU register file, reconstructed. See
+    /// [`SnesCore::refresh_state_snapshots`] for the layout and for why
+    /// this is rebuilt rather than shadowed at write time.
+    ppu_regs: Vec<u8>,
     budget: u64,
     /// The widescreen request: output width and which layers may use it.
     ///
@@ -78,6 +95,8 @@ impl SnesCore {
             system: SnesSystem::load(raw)?,
             config: CoreConfig::default(),
             pushed_watches: rf_core_api::WatchTable::new(),
+            cgram_bytes: Vec::new(),
+            ppu_regs: Vec::new(),
             budget: FRAME_INSTRUCTION_BUDGET,
             widescreen: (crate::ppu::WIDTH, crate::ppu::WidenMask::ALL),
         })
@@ -142,6 +161,96 @@ impl SnesCore {
             sink.overlay_scanline(y, &line.overlay);
         }
         self.drain_events(sink);
+    }
+
+    /// Rebuild the byte views `state_view` lends (ticket W13-02a).
+    ///
+    /// Called at the end of every step, because a debugger reads state
+    /// between steps and a snapshot older than the last instruction would
+    /// be a viewer showing the wrong frame. ~570 bytes of copying against
+    /// a frame that already carries ~245 KB of pixels.
+    ///
+    /// ## Why the registers are rebuilt rather than shadowed at write time
+    ///
+    /// A shadow array updated inside `write_register` would be a second
+    /// copy of state that can silently disagree with the decoded fields
+    /// the renderer actually uses — the exact failure `SnesBus`'s own doc
+    /// warns about for VRAM ("writes would land here while rendering read
+    /// `ppu.vram`, so every game would draw a black screen with nothing
+    /// obviously wrong anywhere"). Deriving them from the live fields
+    /// cannot drift, and pays only when someone is looking.
+    ///
+    /// ## Layout
+    ///
+    /// Indexed so `ppu_regs[n]` is register `$21nn` — a viewer asking for
+    /// `$2105` reads index 5, rather than having to learn a private field
+    /// order. Registers this core does not model read back as zero;
+    /// [`PPU_REG_COUNT`] covers `$2100-$213F`.
+    fn refresh_state_snapshots(&mut self) {
+        let ppu = &self.system.bus.ppu;
+
+        self.cgram_bytes.clear();
+        self.cgram_bytes.reserve(ppu.cgram.len() * 2);
+        for word in &ppu.cgram {
+            self.cgram_bytes.extend_from_slice(&word.to_le_bytes());
+        }
+
+        self.ppu_regs.clear();
+        self.ppu_regs.resize(PPU_REG_COUNT, 0);
+        let mut set = |offset: usize, value: u8| {
+            if let Some(slot) = self.ppu_regs.get_mut(offset) {
+                *slot = value;
+            }
+        };
+        // $2100 INIDISP: forced blank in bit 7, brightness in bits 0-3.
+        set(
+            0x00,
+            (u8::from(ppu.forced_blank) << 7) | (ppu.brightness & 0x0F),
+        );
+        // $2101 OBSEL: size in bits 5-7, name select in 3-4, base in 0-2.
+        set(
+            0x01,
+            ((ppu.obj_size & 0x07) << 5)
+                | (((ppu.obj_name_select >> 13) as u8 & 0x03) << 3)
+                | ((ppu.obj_name_base >> 14) as u8 & 0x07),
+        );
+        // $2102/$2103 OAMADDL/H — the word address, plus the rotation bit.
+        set(0x02, (ppu.oam_addr >> 1) as u8);
+        set(
+            0x03,
+            ((ppu.oam_addr >> 9) as u8 & 0x01) | (u8::from(ppu.oam_priority_rotation) << 7),
+        );
+        // $2105 BGMODE: tile sizes in bits 4-7, BG3 priority in 3, mode in 0-2.
+        let mut bgmode = (ppu.bg_mode & 0x07) | (u8::from(ppu.bg3_priority) << 3);
+        for (i, bg) in ppu.bgs.iter().enumerate() {
+            bgmode |= u8::from(bg.tile_size_16) << (4 + i);
+        }
+        set(0x05, bgmode);
+        // $2107-$210A BGnSC: tilemap base in bits 2-7, size in 0-1.
+        for (i, bg) in ppu.bgs.iter().enumerate() {
+            set(
+                0x07 + i,
+                (((bg.tilemap_base >> 10) as u8 & 0x3F) << 2) | (bg.tilemap_size & 0x03),
+            );
+        }
+        // $210B/$210C BGnNBA: two 4-bit char bases per register.
+        for pair in 0..2usize {
+            let lo = (ppu.bgs[pair * 2].char_base >> 12) as u8 & 0x0F;
+            let hi = (ppu.bgs[pair * 2 + 1].char_base >> 12) as u8 & 0x0F;
+            set(0x0B + pair, lo | (hi << 4));
+        }
+        // $212C TM / $212D TS: which layers are on each screen.
+        let mut tm = u8::from(ppu.obj_enabled) << 4;
+        for (i, bg) in ppu.bgs.iter().enumerate() {
+            tm |= u8::from(bg.enabled) << i;
+        }
+        set(0x2C, tm);
+        set(0x2D, ppu.ts);
+        // $213E STAT77: range-over in bit 6, time-over in bit 7.
+        set(
+            0x3E,
+            (u8::from(ppu.range_over) << 6) | (u8::from(ppu.time_over) << 7),
+        );
     }
 
     /// Hand everything the bus queued to the sink (ticket W13-02h).
@@ -222,6 +331,10 @@ impl EmulatorCore for SnesCore {
             }
         }
 
+        // Ticket W13-02a: refresh the byte views a debugger reads between
+        // steps, before reporting the step as finished.
+        self.refresh_state_snapshots();
+
         // Every step drains, not only a completed frame: an Instruction or
         // Scanline step that trips a watchpoint must report it at the step
         // that caused it, which is the whole point of single-stepping with
@@ -254,12 +367,27 @@ impl EmulatorCore for SnesCore {
 
     fn state_view(&self) -> StateView<'_> {
         StateView {
+            // **Deliberately empty, and this is a filed decision rather
+            // than an omission.** `StateView::cpu_regs` is an untyped
+            // `&[u8]` with a "core-defined field order", so filling it
+            // here would publish a byte layout every consumer must decode
+            // per console — the half-console shape W11-07 was split to
+            // avoid. W13-02i owns choosing a real expression, and depends
+            // on W13-02b so it is designed against a second consumer
+            // rather than against a guess (Brad's ruling 2026-09-04, D-6).
             cpu_regs: &[],
             wram: &self.system.bus.wram,
-            vram: &[],
-            cgram: &[],
-            oam: &[],
-            ppu_regs: &[],
+            vram: &self.system.bus.ppu.vram,
+            cgram: &self.cgram_bytes,
+            oam: &self.system.bus.ppu.oam,
+            ppu_regs: &self.ppu_regs,
+            // **Empty is the correct report here, not a stub.** A plain
+            // LoROM/HiROM cartridge has no bank registers and no IRQ
+            // counter — there is nothing to serialize, which is exactly
+            // what this field's own doc calls for ("empty slice for
+            // mappers with no persistent state"). It becomes non-empty
+            // when a core supports a cartridge chip that has some (SA-1,
+            // SuperFX), and `rf_cart` reports none of those yet.
             mapper_state: &[],
         }
     }

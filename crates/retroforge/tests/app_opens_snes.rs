@@ -157,3 +157,43 @@ fn a_snes_session_feeds_the_event_timeline() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Throws away everything a frame produces — this test is about the
+/// memories the core exposes afterwards, not about what it drew.
+#[derive(Default)]
+struct Discard;
+
+impl rf_core_api::CoreSink for Discard {
+    fn video_scanline(&mut self, _y: u16, _pixels: &[rf_core_api::PpuPixel]) {}
+    fn audio(&mut self, _samples: &[i16]) {}
+    fn event(&mut self, _ev: rf_core_api::CoreEvent) {}
+}
+
+/// **A SNES session exposes real memories through the shell** (ticket
+/// W13-02a). `EmuStepper::state_view` is the one accessor that answers for
+/// both cores; the NES-typed `vram`/`palette`/`oam` helpers beside it
+/// cannot, because their return types are NES-sized.
+#[test]
+fn a_snes_session_exposes_its_memories_through_the_shell() {
+    let dir = std::env::temp_dir().join(format!("retroforge_snessv_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+
+    let snes = Path::new(env!("CARGO_MANIFEST_DIR")).join(SNES);
+    let rom: PathBuf = dir.join("rf-scroller-s.sfc");
+    std::fs::copy(&snes, &rom).expect("copy fixture");
+
+    let mut stepper =
+        retroforge::stepper::EmuStepper::open(&std::fs::read(&rom).expect("read")).expect("open");
+    let mut sink = Discard;
+    stepper.step_frame(&mut sink);
+
+    let view = stepper.state_view();
+    assert_eq!(view.wram.len(), 128 * 1024);
+    assert_eq!(view.vram.len(), 64 * 1024);
+    assert_eq!(view.cgram.len(), 512);
+    assert_eq!(view.oam.len(), 544);
+    assert!(!view.ppu_regs.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
