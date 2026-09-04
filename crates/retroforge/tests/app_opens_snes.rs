@@ -117,3 +117,43 @@ fn a_file_that_is_neither_console_is_refused() {
         }
     }
 }
+
+/// **The event timeline is fed on a SNES session** (ticket W13-02h).
+///
+/// Before it, `grep -rn CoreEvent crates/rf-snes/src` returned zero lines:
+/// the panel rendered an empty list for every SNES game, which a user
+/// reads as "nothing happened" rather than "this core reports nothing".
+#[test]
+fn a_snes_session_feeds_the_event_timeline() {
+    let dir = std::env::temp_dir().join(format!("retroforge_snesev_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+
+    let snes = Path::new(env!("CARGO_MANIFEST_DIR")).join(SNES);
+    assert!(snes.exists(), "SNES fixture missing: {}", snes.display());
+    let rom: PathBuf = dir.join("rf-scroller-s.sfc");
+    std::fs::copy(&snes, &rom).expect("copy fixture");
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(WINDOW_SIZE[0], WINDOW_SIZE[1]))
+        .build_eframe(|cc| RetroForgeApp::new(cc));
+    harness.run();
+    // The subscription is gated on the debug window being open
+    // (DEBUGGER.md §6's pay-for-use), so this is what a user does.
+    harness.state_mut().show_debug_for_test(true);
+    harness
+        .state_mut()
+        .debug_open_tab(rf_debugger::layout::DebugTab::EventTimeline);
+    harness.state_mut().open_rom_path(&rom);
+    harness.run_steps(2);
+    harness.state_mut().resume_for_test();
+    run_frames(&mut harness, 10, Duration::from_secs(60));
+
+    let events = harness.state().debug_events_for_test();
+    assert!(
+        !events.is_empty(),
+        "a running SNES session must report events to the timeline"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -52,6 +52,9 @@ pub const FRAME_INSTRUCTION_BUDGET: u64 = 4_000_000;
 pub struct SnesCore {
     system: SnesSystem,
     config: CoreConfig,
+    /// Ticket W13-02e: what was last pushed to the bus, so the sync at the
+    /// top of `step` copies only when the caller changed something.
+    pushed_watches: rf_core_api::WatchTable,
     budget: u64,
     /// The widescreen request: output width and which layers may use it.
     ///
@@ -74,6 +77,7 @@ impl SnesCore {
         Ok(Self {
             system: SnesSystem::load(raw)?,
             config: CoreConfig::default(),
+            pushed_watches: rf_core_api::WatchTable::new(),
             budget: FRAME_INSTRUCTION_BUDGET,
             widescreen: (crate::ppu::WIDTH, crate::ppu::WidenMask::ALL),
         })
@@ -137,6 +141,18 @@ impl SnesCore {
             sink.video_scanline(y, &line.pixels);
             sink.overlay_scanline(y, &line.overlay);
         }
+        self.drain_events(sink);
+    }
+
+    /// Hand everything the bus queued to the sink (ticket W13-02h).
+    ///
+    /// Drained at the frame boundary and at the end of every step, so a
+    /// single-stepping debugger sees a watch hit at the instruction that
+    /// caused it rather than at the next frame.
+    fn drain_events(&mut self, sink: &mut dyn CoreSink) {
+        for ev in self.system.bus.drain_events() {
+            sink.event(ev);
+        }
     }
 }
 
@@ -157,6 +173,17 @@ impl EmulatorCore for SnesCore {
     }
 
     fn step(&mut self, granularity: Step, sink: &mut dyn CoreSink) -> StepResult {
+        // Ticket W13-02h/W13-02e: `CoreConfig` is the documented path a
+        // consumer configures a core through, and this is what makes that
+        // true here. Pushed on entry rather than on a setter so there is
+        // exactly one place the bus can disagree with the config.
+        if self.system.bus.event_mask() != self.config.event_mask {
+            self.system.bus.set_event_mask(self.config.event_mask);
+        }
+        if self.config.watches != self.pushed_watches {
+            self.system.bus.set_watches(self.config.watches);
+            self.pushed_watches = self.config.watches;
+        }
         let start_frame = self.system.bus.timing.frame;
         let mut instructions = 0u64;
         let frame_complete;
@@ -194,6 +221,13 @@ impl EmulatorCore for SnesCore {
                 }
             }
         }
+
+        // Every step drains, not only a completed frame: an Instruction or
+        // Scanline step that trips a watchpoint must report it at the step
+        // that caused it, which is the whole point of single-stepping with
+        // one armed. `emit_frame` has already drained on a frame boundary,
+        // so this is empty in that case rather than a double delivery.
+        self.drain_events(sink);
 
         StepResult {
             // Instructions, not master cycles: this core counts its

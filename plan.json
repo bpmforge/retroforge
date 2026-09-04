@@ -5774,7 +5774,11 @@
    "crate": "rf-snes",
    "write_scope": [
     "crates/rf-snes/**",
-    "crates/retroforge/src/stepper.rs"
+    "crates/retroforge/src/stepper.rs",
+    "crates/rf-snes/tests/**",
+    "crates/retroforge/src/app.rs",
+    "crates/retroforge/tests/**",
+    "docs/design/DEBUGGER.md"
    ],
    "depends_on": [],
    "acceptance": [
@@ -5784,11 +5788,17 @@
     "no SNES golden frame, vector suite or save-state test is re-baselined: events are observation, and a core that changed behaviour when subscribed would fail the mode-invariant suites"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "FILED BY W13-02e, 2026-09-04, and MEASURED rather than suspected: 'grep -rn CoreEvent crates/rf-snes/src' returns ZERO lines. FR-CORE-006's whole subscription channel — the one the enhancement runtime, the event timeline and now watchpoints all ride on — has no producer on SNES.",
     "SCOPE OF THE CONSEQUENCE, so it is not rediscovered per feature: every CoreEvent consumer is NES-only today whatever its own code says. That includes the event timeline viewer, scroll telemetry, and W13-02e's watchpoints. W13-02a is the sibling gap on the STATE side (SnesCore::state_view returns empty slices); this is the same half-console shape on the EVENT side, and the two are independent — neither blocks the other.",
-    "START FROM rf-nes's OWN SHAPE rather than inventing one: the NES core queues events on the PPU (Ppu::queue_event) because that is where the frame boundary and the event mask already live, and NesBus::set_event_mask pushes the mask down to it. The SNES core has no equivalent owner yet, and choosing one — ppu, bus, or system — is the design decision this ticket makes."
+    "START FROM rf-nes's OWN SHAPE rather than inventing one: the NES core queues events on the PPU (Ppu::queue_event) because that is where the frame boundary and the event mask already live, and NesBus::set_event_mask pushes the mask down to it. The SNES core has no equivalent owner yet, and choosing one — ppu, bus, or system — is the design decision this ticket makes.",
+    "HANDOFF 2026-09-04: write_scope widened to the two tests/** trees, app.rs (two test accessors) and docs/design/DEBUGGER.md, for the same reasons W13-02d and W13-02e recorded.",
+    "DONE 2026-09-04. THE DESIGN DECISION THIS TICKET WAS FILED TO MAKE — where the event queue lives — resolved to the BUS, not the PPU. rf-nes queues on its PPU because that is where its frame boundary, its event mask and its scanline counter all are. On the SNES they are not in one place: the frame clock is crate::timing::Timing (on the bus), watch hits come from SnesBus's own read/write, and the PPU knows about neither. The bus is the one owner that can see all of them.",
+    "EMISSION POINTS, each at the place that already knew: FrameEnd then FrameStart at timing Events::frame_started, in the order both variants' docs specify and rf-nes already uses; VblankStart at Events::vblank_started and — deliberately — WHETHER OR NOT the ROM enabled NMI, because a subscriber is watching the machine, not the program's interrupt configuration; one Scanline per visible line crossed, queued before that line's HDMA so the event marks the line's start; MemWatch from CpuBus::read/write, after a read (so the condition tests what the CPU got, register side effects included) and before a write (so it tests the value arriving).",
+    "CoreConfig IS NOW A REAL PATH ON THIS CORE, which it was not before: SnesCore::step pushes config.event_mask and config.watches to the bus on entry, so there is exactly one place the bus can disagree with the config. Note the asymmetry that remains and is NOT this ticket's to fix: rf-nes's mask lives on its Ppu and is not read from CoreConfig, so EmuStepper::set_event_mask still sets both. Recorded rather than quietly unified.",
+    "EVERY STEP DRAINS, not only a completed frame. An Instruction or Scanline step that trips a watchpoint has to report it at the step that caused it — that is the whole point of single-stepping with one armed. emit_frame drains first on a frame boundary, so the second drain is empty rather than a double delivery.",
+    "EVIDENCE: 4 tests in rf-snes/tests/snes_emits_core_events.rs — an unsubscribed core emits NOTHING (pay-for-use, ARCHITECTURE section 5); a subscribed one reports FrameStart/FrameEnd/VblankStart and >100 Scanlines per frame with FrameEnd before FrameStart; a watchpoint installed through CoreConfig reports hits and stops when cleared; and SUBSCRIBING DOES NOT CHANGE WHAT THE MACHINE DOES, compared by WRAM after three frames — a core whose debugger changed the game would be worse than one with no debugger. Plus an app-level test that a running SNES session actually feeds the event timeline, which is criterion 3. The test ROM is a 32 KiB LoROM built in the test rather than a fixture: the events come from the frame clock, which advances whatever the CPU does, so a fixture would only make the test depend on something else being right. Workspace 1750 passing / 0 failed / 33 ignored, up from 1745; no SNES golden, vector or save-state test was re-baselined (criterion 4)."
    ],
    "stories": []
   }

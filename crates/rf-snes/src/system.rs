@@ -199,8 +199,26 @@ impl SnesSystem {
         if events.frame_started {
             self.bus.hdma_init();
             self.bus.ppu.clear_line_state();
+            // Ticket W13-02h: the frame boundary, in the order
+            // `CoreEvent::FrameEnd`/`FrameStart` document — "after the
+            // last scanline" then "before the first" — both landing at
+            // this one instant, exactly as rf-nes emits them.
+            if self.bus.wants(rf_core_api::EventMask::FRAME_END) {
+                self.bus.queue_event(rf_core_api::CoreEvent::FrameEnd);
+            }
+            if self.bus.wants(rf_core_api::EventMask::FRAME_START) {
+                self.bus.queue_event(rf_core_api::CoreEvent::FrameStart);
+            }
         }
         for _ in 0..events.visible_lines_crossed {
+            // Ticket W13-02h: one `Scanline` per visible line crossed,
+            // carrying the line it is about — the same payload contract
+            // rf-nes's own `CoreEvent::Scanline` has. Queued before the
+            // line's HDMA so the event marks the line's start.
+            if self.bus.wants(rf_core_api::EventMask::SCANLINE) {
+                let line = self.bus.timing.line;
+                self.bus.queue_event(rf_core_api::CoreEvent::Scanline(line));
+            }
             self.master_cycles += self.bus.hdma_run_line();
             // Latch AFTER this line's HDMA: the transfer that happens in
             // the preceding hblank is what this line is drawn with.
@@ -213,6 +231,12 @@ impl SnesSystem {
 
         // Delivery. NMI is edge-triggered on the vblank transition and
         // ignores the I flag; IRQ is level-ish and masked by it.
+        // Ticket W13-02h: the vblank edge is reported whether or not the
+        // ROM enabled NMI — a subscriber is watching the machine, not the
+        // program's interrupt configuration.
+        if events.vblank_started && self.bus.wants(rf_core_api::EventMask::VBLANK_START) {
+            self.bus.queue_event(rf_core_api::CoreEvent::VblankStart);
+        }
         if events.vblank_started && self.bus.nmitimen.nmi_enabled() {
             self.pending_nmi = true;
         }

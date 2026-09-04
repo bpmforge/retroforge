@@ -88,12 +88,87 @@ pub struct SnesBus {
     pub hdmaen: u8,
     /// `$420B` write that is pending execution.
     pending_dma: u8,
+    /// Ticket W13-02h: the events this core has produced and not yet
+    /// handed to the sink.
+    ///
+    /// ## Why the queue lives on the bus, not the PPU
+    ///
+    /// `rf-nes` queues on its PPU because that is where its frame
+    /// boundary, its event mask and its scanline counter all are. On the
+    /// SNES they are not in one place: the frame clock is
+    /// [`crate::timing::Timing`] (here on the bus), the watchpoint hits
+    /// come from this type's own `read`/`write`, and the PPU knows about
+    /// neither. The bus is the one owner that can see all of them, so it
+    /// is where the queue goes.
+    events: Vec<rf_core_api::CoreEvent>,
+    /// What the consumer subscribed to. `EventMask::NONE` by default, so
+    /// an unsubscribed session never builds a `CoreEvent` at all
+    /// (ARCHITECTURE §5's pay-for-use, and the same discipline
+    /// `Ppu::event_mask` follows in rf-nes).
+    event_mask: rf_core_api::EventMask,
+    /// Ticket W13-02e's watchpoints, evaluated here because only a bus
+    /// can see an access.
+    watches: rf_core_api::WatchTable,
 }
 
 impl SnesBus {
+    /// Subscribe the consumer to a set of events (ticket W13-02h).
+    ///
+    /// Replaces the mask outright, the same contract
+    /// `rf_nes::Ppu::set_event_mask` has.
+    pub fn set_event_mask(&mut self, mask: rf_core_api::EventMask) {
+        self.event_mask = mask;
+    }
+
+    #[must_use]
+    pub fn event_mask(&self) -> rf_core_api::EventMask {
+        self.event_mask
+    }
+
+    /// Install the debugger's watchpoints (ticket W13-02e).
+    pub fn set_watches(&mut self, watches: rf_core_api::WatchTable) {
+        self.watches = watches;
+    }
+
+    /// Queue an event. Callers check the mask first, so this never has to.
+    pub(crate) fn queue_event(&mut self, ev: rf_core_api::CoreEvent) {
+        self.events.push(ev);
+    }
+
+    /// Whether `bit` is subscribed — the check every emission site makes
+    /// before it builds a `CoreEvent`.
+    pub(crate) fn wants(&self, bit: rf_core_api::EventMask) -> bool {
+        self.event_mask.is_subscribed(bit)
+    }
+
+    /// Report a watch hit, if this access trips one and anyone is
+    /// listening. Observation only.
+    fn note_watch_access(
+        &mut self,
+        space: rf_core_api::WatchSpace,
+        access: rf_core_api::WatchAccess,
+        addr: u32,
+        value: u8,
+    ) {
+        if !self.watches.is_armed() || !self.wants(rf_core_api::EventMask::MEM_WATCH) {
+            return;
+        }
+        if let Some(id) = self.watches.hit(space, access, addr, value) {
+            self.events.push(rf_core_api::CoreEvent::MemWatch { id });
+        }
+    }
+
+    /// Take everything queued since the last call.
+    pub fn drain_events(&mut self) -> Vec<rf_core_api::CoreEvent> {
+        std::mem::take(&mut self.events)
+    }
+
     #[must_use]
     pub fn new(rom: Vec<u8>, sram_len: usize, mode: SnesMapMode) -> Self {
         Self {
+            events: Vec::new(),
+            event_mask: rf_core_api::EventMask::NONE,
+            watches: rf_core_api::WatchTable::new(),
             rom,
             sram: vec![0; sram_len],
             wram: vec![0; WRAM_LEN],
@@ -574,10 +649,28 @@ impl CpuBus for SnesBus {
             Target::Open => self.open_bus,
         };
         self.open_bus = value;
+        // Ticket W13-02h: reported AFTER the read, so a watch's value
+        // condition tests what the CPU actually got — including a
+        // register read's side effect, which is the point of watching a
+        // register at all.
+        self.note_watch_access(
+            rf_core_api::WatchSpace::Cpu,
+            rf_core_api::WatchAccess::Read,
+            addr,
+            value,
+        );
         value
     }
 
     fn write(&mut self, addr: u32, value: u8) {
+        // Before the write lands, so the condition tests the value
+        // arriving (`MemWatch::value_mask`'s own doc).
+        self.note_watch_access(
+            rf_core_api::WatchSpace::Cpu,
+            rf_core_api::WatchAccess::Write,
+            addr,
+            value,
+        );
         self.open_bus = value;
         match self.target(addr) {
             Target::Wram(i) => self.wram[i] = value,

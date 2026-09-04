@@ -2126,3 +2126,53 @@ that way.
   W13-02d, W13-02e, W13-02f, which is bars B-3 through B-8. What is left is
   the SNES half: `W13-02a` (state), `W13-02h` (events), and `W13-02b`/`c`
   behind them, plus `W13-02g`.
+
+- **W13-02h — the SNES core now emits `CoreEvent`s; before today it emitted
+  none** (2026-09-04). `grep -rn CoreEvent crates/rf-snes/src` returned
+  **zero lines**: FR-CORE-006's whole subscription channel — the one the
+  enhancement runtime, the event timeline and W13-02e's watchpoints all
+  ride on — had no producer on SNES, so every consumer was NES-only
+  whatever its own code said.
+
+  **The design decision the ticket was filed to make** — where the queue
+  lives — resolved to the **bus, not the PPU**. rf-nes queues on its PPU
+  because that is where its frame boundary, its event mask and its scanline
+  counter all are; on the SNES they are not in one place (the frame clock
+  is `timing::Timing` on the bus, watch hits come from `SnesBus`'s own
+  `read`/`write`, and the PPU knows about neither). The bus is the one
+  owner that can see all of them.
+
+  Each emission sits where the machine already knew: `FrameEnd` then
+  `FrameStart` at `Events::frame_started`, in the order both variants' docs
+  specify; `VblankStart` at `Events::vblank_started` and **whether or not
+  the ROM enabled NMI**, because a subscriber is watching the machine, not
+  the program's interrupt configuration; one `Scanline` per visible line
+  crossed; `MemWatch` from the bus's own accessors — after a read, so the
+  condition tests what the CPU got (register side effects included), and
+  before a write, so it tests the value arriving.
+
+  **`CoreConfig` is now a real path on this core**, which it was not:
+  `SnesCore::step` pushes `event_mask` and `watches` on entry, so there is
+  one place the bus can disagree with the config. The remaining asymmetry
+  is recorded rather than quietly unified: rf-nes's mask lives on its `Ppu`
+  and is *not* read from `CoreConfig`, so `EmuStepper::set_event_mask`
+  still sets both.
+
+  Evidence: 4 tests in `rf-snes/tests/snes_emits_core_events.rs` — an
+  unsubscribed core emits **nothing**; a subscribed one reports the frame
+  boundary, vblank and >100 scanlines per frame with `FrameEnd` before
+  `FrameStart`; a watchpoint installed through `CoreConfig` reports hits
+  and stops when cleared; and **subscribing does not change what the
+  machine does**, compared by WRAM after three frames — a core whose
+  debugger changed the game would be worse than one with no debugger. Plus
+  an app-level test that a running SNES session actually feeds the event
+  timeline. The test image is a 32 KiB LoROM built in the test rather than
+  a fixture: these events come from the frame clock, which advances
+  whatever the CPU is doing, so a fixture would only make the test depend
+  on something else being right.
+
+  Gate: **1750 passing, 0 failed, 33 ignored** (up from 1745), exit 0,
+  `arch OK`; no SNES golden, vector or save-state test re-baselined.
+  **Phase 13's debugger arc: four of eight closed** (d, e, f, h). What
+  remains is `W13-02a` (SNES `StateView`, waiting on **D-6**) and
+  `W13-02b`/`c`/`g` behind it.

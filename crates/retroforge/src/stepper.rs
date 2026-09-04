@@ -806,11 +806,10 @@ impl EmuStepper {
     /// Install the debugger's watchpoints (ticket W13-02e).
     ///
     /// Goes through `CoreConfig`, not a concrete bus method, because this
-    /// is the one debugger facility that already works the same way on
-    /// both cores: `EmulatorCore::config` is on the trait, so a SNES
-    /// session installs watches through the identical call — whether the
-    /// SNES core can yet *report* a hit is a separate question, recorded
-    /// on W13-02h.
+    /// is the one debugger facility that works the same way on both
+    /// cores: `EmulatorCore::config` is on the trait, so a SNES session
+    /// installs — and since W13-02h *reports* — through the identical
+    /// call.
     ///
     /// Returns how many watches the core refused for want of room, so a
     /// caller can say so rather than leaving someone watching an address
@@ -820,6 +819,12 @@ impl EmuStepper {
     }
 
     pub fn set_event_mask(&mut self, mask: rf_core_api::EventMask) {
+        // Ticket W13-02h: the SNES core reads its mask from `CoreConfig`
+        // at the top of every step, so setting it there covers BOTH cores
+        // — the NES bus call below stays because rf-nes's own mask lives
+        // on its PPU and is not read from the config (a pre-existing
+        // asymmetry, not one this ticket introduces).
+        self.machine.as_core().config().event_mask = mask.union(CAMERA_BASELINE_EVENT_MASK);
         if let Some(bus) = self.machine.nes_bus_mut() {
             bus.set_event_mask(mask.union(CAMERA_BASELINE_EVENT_MASK));
         }

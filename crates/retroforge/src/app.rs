@@ -4161,6 +4161,21 @@ impl RetroForgeApp {
         self.send_command(CoreCommand::StepScanline);
     }
 
+    /// The debug panels' last frame of `CoreEvent`s (ticket W13-02h) —
+    /// exactly what the event-timeline panel plots.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn debug_events_for_test(&self) -> &[rf_core_api::CoreEvent] {
+        &self.debug_panels.data.events
+    }
+
+    /// Show or hide the debug window, as the menu item does — the event
+    /// subscription is gated on it (DEBUGGER.md §6).
+    #[doc(hidden)]
+    pub fn show_debug_for_test(&mut self, show: bool) {
+        self.debug_panels.visible = show;
+    }
+
     /// The memory panel's last live WRAM snapshot (ticket W13-02d).
     #[doc(hidden)]
     #[must_use]
