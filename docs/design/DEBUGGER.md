@@ -109,10 +109,10 @@ citation is not a grade.**
 | 1 | run/pause/frame/scanline/instruction step | `EmuStepper` + `Step::{Instruction,Scanline,Frame}` (`rf-core-api/src/core.rs`) | **met** |
 | 1 | step-over / step-out / run-to-cursor | `breakpoint::StepMode::{Into,Over,Out,ToCursor}`, `step_over_is_a_call` (JSR-only, tail-call safe) | **met** |
 | 1 | breakpoints: PC exec | `Condition::Pc` | **met** |
-| 1 | breakpoints: **memory read/write/access**, CPU *and* PPU spaces | `Condition::Watch` + `rf_core_api::WatchTable`, evaluated in the core's own buses (W13-02e) — **NES only**, see W13-02h | **met (NES)** |
+| 1 | breakpoints: **memory read/write/access**, CPU *and* PPU spaces | `Condition::Watch` + `rf_core_api::WatchTable`, evaluated in each core's own buses (W13-02e, W13-02h) — CPU space on **both** consoles, PPU space on NES | **met** |
 | 1 | value-conditional `addr==X && val&mask` | `MemWatch::{value_mask,value_equals}` (W13-02e) | **met** |
 | 1 | scanline/dot position (NES) | `Condition::Position` | **met** |
-| 1 | H/V position (SNES) | nothing — and the SNES core emits no `CoreEvent` at all (W13-02h), so no core-reported break can arrive there yet | **GAP** |
+| 1 | H/V position (SNES) | nothing. The channel exists now (W13-02h), so this is a missing *condition* rather than a missing mechanism | **GAP** |
 | 1 | IRQ/NMI entry, mapper events | `EventKind::{Irq,Nmi,MapperIrq}` | **met** (bank-switch not distinguished) |
 | 1 | zero cost when the table is empty | `BreakpointTable::check`, and `benches/debugger_idle.rs` measures it | **met** |
 | 1 | watchpoint "promoted" to a `memory_map` annotation in one click | `annotation::promote_watch` + the Annotations panel's `promote` button (W13-02e) | **met** |
@@ -196,7 +196,14 @@ capability that only tests can reach is not a capability a ROM hacker has.
 `W13-02a` is the unblocker for the SNES half: until `SnesCore::state_view`
 is real, every SNES viewer has nothing to draw.
 
-**Closed so far: `W13-02d`, `W13-02e`, `W13-02f`.**
+**Closed so far: `W13-02d`, `W13-02e`, `W13-02f`, `W13-02h`.**
+
+`W13-02h` (2026-09-04) — the SNES core emitted **no `CoreEvent` of any
+kind**, so FR-CORE-006's whole subscription channel had no producer there
+and every consumer was NES-only whatever its own code said. The queue went
+on the **bus**, not the PPU: rf-nes queues on its PPU because that is where
+its frame boundary, mask and scanline counter all are, and on the SNES they
+are not in one place.
 
 `W13-02d` (2026-09-04) — bars **B-3** and the memory half of **B-8**. Live
 edit is gated on pause and that is a *correctness* rule, not a UI nicety:
