@@ -5784,7 +5784,7 @@
     "no SNES golden frame, vector suite or save-state test is re-baselined: events are observation, and a core that changed behaviour when subscribed would fail the mode-invariant suites"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED BY W13-02e, 2026-09-04, and MEASURED rather than suspected: 'grep -rn CoreEvent crates/rf-snes/src' returns ZERO lines. FR-CORE-006's whole subscription channel — the one the enhancement runtime, the event timeline and now watchpoints all ride on — has no producer on SNES.",
     "SCOPE OF THE CONSEQUENCE, so it is not rediscovered per feature: every CoreEvent consumer is NES-only today whatever its own code says. That includes the event timeline viewer, scroll telemetry, and W13-02e's watchpoints. W13-02a is the sibling gap on the STATE side (SnesCore::state_view returns empty slices); this is the same half-console shape on the EVENT side, and the two are independent — neither blocks the other.",
