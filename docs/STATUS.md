@@ -2176,3 +2176,65 @@ that way.
   **Phase 13's debugger arc: four of eight closed** (d, e, f, h). What
   remains is `W13-02a` (SNES `StateView`, waiting on **D-6**) and
   `W13-02b`/`c`/`g` behind it.
+
+## Brad's four rulings (2026-09-04), and what changed
+
+Asked for after `docs/work/VISION_PLAN.md` §1's decision sheet had sat
+unanswered through two sessions of Phase 13 work, with every remaining
+board item behind one of them.
+
+**1. D-6 / SNES `StateView` — SPLIT, do not rule the contract yet.**
+W13-02a asked for six `StateView` fields. **Five — `vram`, `cgram`, `oam`,
+`ppu_regs`, `mapper_state` — are raw byte arrays with no design question at
+all**, and W13-02b (the SNES viewer column, the largest remaining piece)
+needs exactly those five and *not* `cpu_regs`. Only `cpu_regs` carries the
+D-6 question, because `StateView::cpu_regs` is an untyped `&[u8]`: either
+the trait grows typed registers or each core picks a layout the shell must
+know. W13-02a is now the five memories and is **claimable**; **W13-02i**
+carries `cpu_regs` and depends on W13-02b — deliberately, because deciding
+a contract with one consumer is deciding against a guess. It also inherits
+the question W13-02d deferred for the same reason (an out-of-band bus
+write) and the third item W11-10's note listed (APU access).
+
+**2. D-2 / ROMs — Brad supplies them.** `roms/` already exists and is
+gitignored (ruling #2, 2026-08-26). Verification happens locally; only the
+profile — facts plus citations — is ever committed. This is the critical
+path: W11-06 and W13-03 both wait on it, and the whole v1-freeze chain
+(W13-04/05/06) waits on them, because **freezing a format before real
+games have pushed on it freezes it around our own six fixtures**.
+
+**3. D-3 / `spc_mem_access_times.sfc` is NOT the oracle.** W7-18's
+criterion "reports PASSED TESTS" is replaced by conformance to **Overload's
+`spc700_inst_op.pdf`** — logic-analyzer traces of real hardware, the
+strongest provenance this project has used, and exactly what NFR-011 asks
+for. That criterion was already met and verified opcode by opcode (the
+ROM's unknown-classification markers went 8 → 0). The reason is on the
+ticket: the nesdev thread naming Overload's document also records **higan
+and Overload disagreeing** on `(dp),Y` and the CALL/RET/RTI stack orders
+with no arbiter as of 2017, and the ROM compares an internal checksum it
+never prints an expectation for — so passing it might mean matching a bug,
+and each further edit moves a number that says nothing. **W7-18 is done.**
+The ROM is re-filed on W7-17 as a **known-red with its reason**, never
+silently waived.
+
+**A consequence this ruling does NOT cover, flagged rather than assumed:**
+W7-17 is still not claimable, because it also depends on **W7-08**, which
+remains `blocked` on the four blargg **S-DSP** ROMs. Those are a different
+oracle with no recorded higan/Overload dispute, so the ruling does not
+extend to them by implication. Whether anomie's 32-cycle schedule is the
+closing standard there the way Overload's traces now are for W7-18 is its
+own call.
+
+**4. D-1 / the runner is a persistent LaunchAgent.** The workflow's law-8
+exposure is already bounded — push-to-main only, a 60-minute cap,
+cancel-in-progress, and the heavy suites split out to `workflow_dispatch`.
+An on-demand runner is a ritual, not a gate: an unstarted one is a silently
+skipped gate, which is the failure this whole arc exists to end.
+**Registration is Brad's command** — the permission classifier blocks it,
+correctly, and it must be non-ephemeral this time since a runner that
+deregisters after one job defeats the point.
+
+**Board after the rulings:** `validate-plan` — 172 tickets · 914 pts ·
+**claimable now: W13-02a**. D-4 (R-05) and D-5 (does Phase 13 exist) were
+not put to Brad this round: D-5 is answered in practice by two sessions of
+Phase 13 work, and D-4 blocks only a docs ticket.
