@@ -96,6 +96,14 @@ const CYCLE_BUDGET: u64 = 4 * 29_781;
 /// debugger-driven mask change can never silently starve scene tracking.
 /// A single named constant rather than two call sites each spelling out
 /// the same union keeps them from drifting apart.
+/// Instruction cap for the traced frame loop (ticket W13-02g).
+///
+/// A frame is ~10k instructions on either console; this is generous
+/// enough never to truncate a real frame and finite enough that a core
+/// that stops completing frames cannot hang the caller. Law 8: a test
+/// that hangs is a denial of service, not a failing test.
+pub const TRACED_INSTRUCTION_BUDGET: u64 = 2_000_000;
+
 pub const CAMERA_BASELINE_EVENT_MASK: rf_core_api::EventMask =
     rf_core_api::EventMask::SCANLINE.union(rf_core_api::EventMask::SCROLL_WRITE);
 
@@ -574,6 +582,26 @@ impl EmuStepper {
     #[must_use]
     pub fn state_view(&self) -> rf_core_api::StateView<'_> {
         self.machine.as_core_ref().state_view()
+    }
+
+    /// One bsnes-shaped trace line for a SNES session, or empty on a NES
+    /// one (ticket W13-02g).
+    ///
+    /// The peek is `SnesCore::peek`, which resolves through the same
+    /// mapping the CPU uses and **answers 0 for a register rather than
+    /// reading it** — a trace that latched `$2139` while describing the
+    /// instruction would change the run it is describing.
+    fn snes_trace_line(&self) -> String {
+        let Machine::Snes(core) = &self.machine else {
+            return String::new();
+        };
+        struct CorePeek<'a>(&'a rf_snes::core::SnesCore);
+        impl rf_snes::trace::TracePeek for CorePeek<'_> {
+            fn peek(&self, addr: u32) -> u8 {
+                rf_core_api::EmulatorCore::peek(self.0, addr)
+            }
+        }
+        rf_snes::trace::format_trace_line(&core.system().cpu, &CorePeek(core))
     }
 
     /// The SNES debug memories, or `None` on a NES session (ticket
@@ -1171,6 +1199,16 @@ impl EmuStepper {
             .nes_bus()
             .map_or(0, rf_nes::NesBus::master_cycle)
             + self.cycle_budget;
+        // **LAW 8, and this loop had no working guard for a SNES session
+        // until ticket W13-02g.** Every exit below used to read through
+        // `nes_bus()`, which is `None` on SNES: the deadline compared 0
+        // against a budget (always true), and the frame check compared 0
+        // against `self.frames` (never true on a fresh stepper). Both
+        // exits were dead and the loop ran forever — a latent hang that
+        // nothing reached only because nothing had traced a SNES session
+        // yet. This counter advances on EVERY path through the body,
+        // whatever the console, which is what law 8 asks for.
+        let mut instructions = 0u64;
         let mut counting = CountingSink {
             inner: sink,
             scanlines: 0,
@@ -1186,27 +1224,32 @@ impl EmuStepper {
             .nes_bus()
             .map_or(0, rf_nes::NesBus::master_cycle)
             < deadline
+            && instructions < TRACED_INSTRUCTION_BUDGET
         {
+            instructions += 1;
             let pc = self.machine.nes_cpu().map_or(0, |c| c.pc);
             let cycle = self
                 .machine
                 .nes_bus()
                 .map_or(0, rf_nes::NesBus::master_cycle);
-            // The trace line is 6502-shaped (nestest format), so it is
-            // NES-only by construction; a SNES session traces nothing
-            // rather than emitting a plausible-looking blank line.
+            // Ticket W13-02g: each console's own formatter, so the
+            // viewer and any golden diff read the same text. The NES line
+            // is nestest-shaped; the SNES line follows bsnes conventions
+            // (bank:addr, m/x-aware) — DEBUGGER.md §2.
             let line = match (self.machine.nes_cpu(), self.machine.nes_bus()) {
                 (Some(cpu), Some(bus)) => rf_nes::trace::format_trace_line(cpu, bus, cycle),
-                _ => String::new(),
+                _ => self.snes_trace_line(),
             };
             on_instruction(pc, cycle, line);
             self.advance(rf_core_api::Step::Instruction, &mut counting);
-            let now = self
-                .machine
-                .nes_bus()
-                .map_or(0, rf_nes::NesBus::frame_count);
-            if now != start {
-                advanced = now - start;
+            // `self.frames` rather than the NES bus's own counter: it is
+            // incremented by `advance` from `StepResult::frame_complete`,
+            // so it is the one frame count that exists for both consoles.
+            // (The two were also different counters that merely both
+            // started at zero — comparing one against `start`, taken from
+            // the other, was correct only by coincidence.)
+            if self.frames != start {
+                advanced = self.frames - start;
                 break;
             }
         }

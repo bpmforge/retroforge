@@ -119,7 +119,7 @@ citation is not a grade.**
 | 2 | per-chip rings, CPU/PPU/APU/DMA/mapper | `TraceKind::ALL` — all five | **met** |
 | 2 | never blocks the core thread; overflow drops oldest + truncation flag | two-ring split (transport drops newest, `TraceScrollback` drops oldest), reasoned from rtrb 0.3's own API in the module doc | **met** |
 | 2 | NES trace **nestest.log-compatible** | `rf_nes::trace::format_trace_line`, shared with the golden diff | **met** |
-| 2 | SNES trace in **bsnes convention** (bank:addr, m/x-aware) | nothing | **GAP** |
+| 2 | SNES trace in **bsnes convention** (bank:addr, m/x-aware) | `rf_snes::trace` — all 256 opcodes, width-aware, shared by the viewer and the golden (W13-02g) | **met** |
 | 2 | trace-to-file, lz4 framing, background writer | `lz4_flex` 0.14 + `trace_capture::write_loop` (`finish()` called explicitly) | **met** |
 | 3 | Pattern/CHR — NES | `pattern::decode_pattern_table` + `tile_to_rgba` | **met** |
 | 3 | Nametable — NES, scroll + mirroring + attributes | `nametable::decode_nametable` | **met** |
@@ -198,7 +198,14 @@ capability that only tests can reach is not a capability a ROM hacker has.
 is real, every SNES viewer has nothing to draw.
 
 **Closed so far: `W13-02a`, `W13-02b`, `W13-02c`, `W13-02d`, `W13-02e`,
-`W13-02f`, `W13-02h`** — seven of nine, and **the whole of §3**.
+`W13-02f`, `W13-02g`, `W13-02h`** — eight of nine, and **all of §§1-6 bar
+one row**. Only `W13-02i` (the `cpu_regs` contract question, ruling D-6)
+remains.
+
+`W13-02g` (2026-09-04) — a 65C816 disassembler, because none existed. It
+takes `P` and `e` rather than only bytes: `LDA #$12` is two bytes with `M`
+set and three without, and a width guess reports the wrong instruction
+*length*, starting every following line mid-instruction.
 
 `W13-02c` (2026-09-04) — the Mode 7 playfield with its camera trapezoid,
 HDMA channel lanes, and the DSP voice/BRR view. The trapezoid uses the

@@ -2391,3 +2391,52 @@ Phase 13 work, and D-4 blocks only a docs ticket.
 
   **Phase 13's debugger arc: seven of nine closed.** `W13-02g` (SNES trace)
   and `W13-02i` (the D-6 `cpu_regs` question) remain.
+
+- **W13-02g — the SNES trace, in bsnes convention** (2026-09-04). A 65C816
+  disassembler had to be written: none existed. All 256 opcodes with their
+  addressing modes, transcribed from the W65C816S opcode matrix and
+  cross-checked against fullsnes (NFR-011). **There are no illegal opcodes
+  on this chip**, which is why there is no `illegal` flag here and
+  `rf_nes::trace` has one.
+
+  **Why it takes `P` and `e` and not just bytes.** On a 6502 `LDA #$12` is
+  always two bytes; on a 65816 it is two or **three** by the `M` flag, and
+  `LDX` by `X`. A width guess does not merely misprint an operand — it
+  reports the wrong instruction *length*, and every following line starts
+  mid-instruction. Emulation mode pins both widths to 8 whatever `P` holds,
+  so `e` is a parameter too.
+
+  **A latent hang was found and fixed, and it is the finding worth
+  keeping.** `latch_and_advance_frame_traced` took **every** exit through
+  `nes_bus()`, which is `None` on a SNES session: the deadline compared 0
+  against a budget (always true) and the frame check compared 0 against
+  `self.frames` (never true on a fresh stepper). **Both exits were dead and
+  the loop ran forever.** It was pre-existing — nothing had traced a SNES
+  session, so nothing reached it — and this ticket's test exposed it by
+  hanging for 600 seconds. Per **law 8** the run was killed and the loop
+  found *before* anything was re-run. Fixed with an instruction counter
+  that advances on every path whatever the console, plus switching the
+  frame check to `self.frames`, which comes from `StepResult::frame_complete`
+  and is the one frame count both consoles have. Noted while there: the old
+  check compared the NES bus's own counter against a `start` taken from
+  `self.frames` — two different counters that were only ever equal by
+  coincidence.
+
+  **One of my own test assertions was wrong, informatively.** I asserted
+  the flag string contains `M` or `m`. A 65816 **comes out of reset as a
+  6502**, so the first traced line of any SNES session is an
+  emulation-mode line, where bit 5 is unused and bit 4 is `B` rather than
+  `X` — `format_flags` renders `nv-BdIzc` deliberately, because printing M
+  and X there would describe registers the chip does not have in that mode.
+
+  Evidence: 9 tests including the **golden line pinned byte for byte**
+  (criterion 3), both m/x width directions, emulation-mode forcing,
+  `SEP`/`REP` always being one operand byte however the widths stand, a
+  branch target relative to the *next* instruction and staying in bank,
+  long addressing printing six hex digits, block move printing **source**
+  first though it **encodes** destination first (the classic block-move
+  bug), and a completeness sweep over all 256 entries. Gate: **1775
+  passing, 0 failed, 33 ignored** (up from 1765), exit 0, `arch OK`.
+
+  **Phase 13's debugger arc: eight of nine closed.** Only `W13-02i` — the
+  `cpu_regs` contract question from ruling D-6 — remains.

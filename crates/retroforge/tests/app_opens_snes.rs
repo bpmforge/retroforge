@@ -325,3 +325,56 @@ fn the_mode7_hdma_and_dsp_views_are_fed() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A SNES session traces in bsnes convention** (ticket W13-02g).
+/// Before it, `EmuStepper`'s trace path was 6502-shaped by construction
+/// and a SNES session emitted an empty line for every instruction.
+#[test]
+fn a_snes_session_produces_bsnes_shaped_trace_lines() {
+    let dir = std::env::temp_dir().join(format!("retroforge_snestrace_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+
+    let snes = Path::new(env!("CARGO_MANIFEST_DIR")).join(SNES);
+    let rom: PathBuf = dir.join("rf-scroller-s.sfc");
+    std::fs::copy(&snes, &rom).expect("copy fixture");
+
+    let mut stepper =
+        retroforge::stepper::EmuStepper::open(&std::fs::read(&rom).expect("read")).expect("open");
+    let mut sink = Discard;
+    let mut lines: Vec<String> = Vec::new();
+    stepper.latch_and_advance_frame_traced(
+        rf_core_api::InputFrame::default(),
+        &mut sink,
+        &mut |_pc, _cycle, line| {
+            if lines.len() < 8 {
+                lines.push(line);
+            }
+        },
+    );
+
+    assert!(!lines.is_empty(), "a traced frame must produce lines");
+    let first = &lines[0];
+    // bank:addr, which is the shape that makes a 65816 trace diffable
+    // against a reference emulator at all.
+    assert!(
+        first.len() > 7 && first.as_bytes()[2] == b':',
+        "expected a bank:addr prefix, got {first:?}"
+    );
+    assert!(first.contains("A:"), "{first:?}");
+    assert!(first.contains("DB:"), "and the data bank: {first:?}");
+    // The flag field is eight characters. It shows M and X in native
+    // mode — and B in emulation mode, where the chip has no M or X to
+    // show. A 65816 comes out of reset AS A 6502, so the first traced
+    // line of any SNES session is an emulation-mode line: asserting on
+    // 'M' here would be asserting that the CPU had already run `XCE`,
+    // which no ROM has at instruction one.
+    let flags = first.rsplit("P:").next().expect("a P: field");
+    assert_eq!(flags.len(), 8, "flag string in {first:?}");
+    assert!(
+        flags.contains('b') || flags.contains('B') || flags.contains('m') || flags.contains('M'),
+        "expected an emulation-mode B or a native-mode M in {first:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

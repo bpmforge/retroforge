@@ -15,6 +15,7 @@ pub mod regs;
 pub mod state;
 pub mod system;
 pub mod timing;
+pub mod trace;
 
 pub use bus::SnesBus;
 pub use mapping::{map, Target};

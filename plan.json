@@ -5789,7 +5789,11 @@
    "crate": "rf-snes",
    "write_scope": [
     "crates/rf-snes/**",
-    "crates/rf-debugger/src/trace.rs"
+    "crates/rf-debugger/src/trace.rs",
+    "crates/rf-snes/tests/**",
+    "crates/retroforge/src/stepper.rs",
+    "crates/retroforge/tests/**",
+    "docs/design/DEBUGGER.md"
    ],
    "depends_on": [
     "W13-02a"
@@ -5800,9 +5804,15 @@
     "a golden trace fixture pins the format so it cannot drift silently"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
-    "FILED BY W13-01, 2026-09-03. The NES half of §2 is met by rf_nes::trace::format_trace_line and shared with the nestest golden diff; the SNES half does not exist. m/x-awareness is the part that makes this more than string formatting — operand width depends on processor-status bits, so the disassembler needs the machine's state, not just the bytes."
+    "FILED BY W13-01, 2026-09-03. The NES half of §2 is met by rf_nes::trace::format_trace_line and shared with the nestest golden diff; the SNES half does not exist. m/x-awareness is the part that makes this more than string formatting — operand width depends on processor-status bits, so the disassembler needs the machine's state, not just the bytes.",
+    "HANDOFF 2026-09-04: write_scope widened to the tests trees, retroforge/src/stepper.rs (the shared trace path lives there) and DEBUGGER.md — the same reasons the sibling tickets recorded.",
+    "DONE 2026-09-04. A 65C816 disassembler had to be written: none existed. All 256 opcodes with their addressing modes, transcribed from the W65C816S opcode matrix and cross-checked against fullsnes (NFR-011), in rf_snes::trace with the table in its own file so the matrix is readable as a matrix. There are NO illegal opcodes on this chip, which is why there is no `illegal` flag here and rf_nes::trace has one; WDM ($42) is the single reserved slot and behaves as a two-byte NOP.",
+    "WHY THE DISASSEMBLER TAKES P AND e AND NOT JUST BYTES: on a 6502 'LDA #$12' is always two bytes; on a 65816 it is two or THREE by the M flag, and LDX by X. A width guess does not merely misprint an operand — it reports the wrong instruction LENGTH, and every following line of the trace starts mid-instruction. Emulation mode pins both widths to 8 whatever P holds, which is why `e` is a parameter too: a trace taken before the first XCE would otherwise read every immediate as 16-bit.",
+    "A LATENT HANG WAS FOUND AND FIXED, AND IT IS THE FINDING WORTH KEEPING. latch_and_advance_frame_traced took EVERY exit through nes_bus(), which is None on a SNES session: the deadline compared 0 against a budget (always true) and the frame check compared 0 against self.frames (never true on a fresh stepper). BOTH exits were dead and the loop ran forever. It was pre-existing — nothing had traced a SNES session, so nothing reached it — and this ticket's test is what exposed it, by hanging for 600 seconds. Per law 8 the run was killed and the loop found BEFORE anything was re-run. Fixed with an instruction counter that advances on every path whatever the console, plus switching the frame check to self.frames, which is incremented from StepResult::frame_complete and is therefore the one frame count that exists for both consoles. Noted while there: the old check compared the NES bus's own counter against `start` taken from self.frames — two different counters that were only ever equal by coincidence.",
+    "A TEST ASSERTION OF MINE WAS WRONG IN AN INFORMATIVE WAY: I asserted the flag string contains M or m. A 65816 comes out of reset AS A 6502, so the first traced line of any SNES session is an EMULATION-mode line, where bit 5 is unused and bit 4 is B rather than X — format_flags renders that as 'nv-BdIzc' deliberately, because printing M and X there would describe registers the chip does not have in that mode. The assertion now checks the field's shape and accepts either mode.",
+    "EVIDENCE: 9 tests in rf-snes/tests/trace_format.rs, including criterion 3's GOLDEN LINE pinned byte for byte, the m/x width cases in both directions, emulation-mode forcing, SEP/REP always being one operand byte however the widths stand, a branch target relative to the NEXT instruction and staying in bank, long addressing printing six hex digits, block move printing SOURCE-first though it ENCODES destination-first (the classic block-move bug), and a completeness sweep over all 256 entries. Plus an app-level test that a real SNES fixture produces bank:addr lines through the shared path — criterion 2. Workspace 1775 passing / 0 failed / 33 ignored, up from 1765."
    ],
    "stories": []
   },
