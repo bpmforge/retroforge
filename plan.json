@@ -5662,7 +5662,7 @@
     "the audio panel shows per-voice DSP state and a BRR source view, next to the existing channel scopes"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED BY W13-01, 2026-09-03. Split from W13-02b because each of the three is a decoder in its own right rather than another view of memory the column already exposes."
    ],
