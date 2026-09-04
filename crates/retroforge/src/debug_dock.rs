@@ -245,6 +245,15 @@ pub struct PanelData {
     pub prg_ram: [u8; 0x2000],
     /// Ticket W13-02d: the memory panel's goto/find/edit state.
     pub memory: MemoryPanelData,
+    /// Ticket W13-02b: the SNES session's memories, or `None` on NES.
+    /// **This is what makes the panels console-aware**: every viewer below
+    /// checks it and draws the SNES column when it is `Some`.
+    pub snes: Option<Box<crate::core_thread::SnesDebugFrame>>,
+    /// Which BG layer the SNES tilemap viewer is showing.
+    pub snes_bg: usize,
+    /// Which memory space the SNES memory view is showing: 0 VRAM,
+    /// 1 CGRAM, 2 ARAM.
+    pub snes_space: usize,
 }
 
 impl Default for PanelData {
@@ -263,6 +272,9 @@ impl Default for PanelData {
             wram: [0u8; 0x0800],
             prg_ram: [0u8; 0x2000],
             memory: MemoryPanelData::default(),
+            snes: None,
+            snes_bg: 0,
+            snes_space: 0,
         }
     }
 }
@@ -315,6 +327,28 @@ impl DebugPanels {
         self.dock_state
             .iter_all_tabs()
             .any(|(_, tab)| *tab == DebugTab::EventTimeline)
+    }
+
+    /// Whether a SNES-capable viewer is docked, so `crate::app` can turn
+    /// the frame-side capture on (ticket W13-02b).
+    ///
+    /// Keyed on the panels being **open**, not on the console: the cost is
+    /// 128 KiB per frame and a closed panel must not pay it (DEBUGGER.md
+    /// §6). The core answers `None` on a NES session anyway, so asking
+    /// while a NES game runs is free.
+    #[must_use]
+    pub fn wants_snes_capture(&self) -> bool {
+        self.visible
+            && self.dock_state.iter_all_tabs().any(|(_, tab)| {
+                matches!(
+                    tab,
+                    DebugTab::Pattern
+                        | DebugTab::Nametable
+                        | DebugTab::Palette
+                        | DebugTab::Oam
+                        | DebugTab::Memory
+                )
+            })
     }
 
     /// Persist the current layout (ticket criterion 3) — `crate::app`
@@ -543,18 +577,33 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut DebugTab) {
         match tab {
-            DebugTab::Pattern => pattern_ui(ui, self.data.chr_rom.as_deref(), self.pattern_table),
-            DebugTab::Nametable => nametable_ui(ui, &self.data.vram),
-            DebugTab::Palette => palette_ui(ui, &self.data.palette_ram),
-            DebugTab::Oam => oam_ui(ui, &self.data.oam),
+            DebugTab::Pattern => match self.data.snes.as_deref() {
+                Some(snes) => snes_pattern_ui(ui, snes, &mut self.data.snes_bg),
+                None => pattern_ui(ui, self.data.chr_rom.as_deref(), self.pattern_table),
+            },
+            DebugTab::Nametable => match self.data.snes.as_deref() {
+                Some(snes) => snes_tilemap_ui(ui, snes, &mut self.data.snes_bg),
+                None => nametable_ui(ui, &self.data.vram),
+            },
+            DebugTab::Palette => match self.data.snes.as_deref() {
+                Some(snes) => snes_palette_ui(ui, snes),
+                None => palette_ui(ui, &self.data.palette_ram),
+            },
+            DebugTab::Oam => match self.data.snes.as_deref() {
+                Some(snes) => snes_oam_ui(ui, snes, self.data.oam_diff_scanline),
+                None => oam_ui(ui, &self.data.oam),
+            },
             DebugTab::EventTimeline => event_timeline_ui(ui, &self.data.events),
-            DebugTab::Memory => memory_ui(
-                ui,
-                &self.data.wram,
-                &self.data.prg_ram,
-                &mut self.data.memory,
-                &self.annotations.store.ram_labels(),
-            ),
+            DebugTab::Memory => match self.data.snes.as_deref() {
+                Some(snes) => snes_memory_ui(ui, snes, &mut self.data.snes_space),
+                None => memory_ui(
+                    ui,
+                    &self.data.wram,
+                    &self.data.prg_ram,
+                    &mut self.data.memory,
+                    &self.annotations.store.ram_labels(),
+                ),
+            },
             DebugTab::OamDiff => oam_diff_ui(
                 ui,
                 &self.data.previous_oam,
@@ -2140,4 +2189,297 @@ fn annotation_import_ui(ui: &mut egui::Ui, data: &mut AnnotationPanelData) {
                 }
             }
         });
+}
+
+// ---------------------------------------------------------------------
+// The SNES viewer column (ticket W13-02b; DEBUGGER.md §3's SNES cells).
+//
+// Every panel here is the SNES arm of a tab the NES already had, chosen
+// by whether `PanelData::snes` is `Some` — one DebugTab, two consoles,
+// which is criterion 3. The decode itself lives in `rf_snes::debug`
+// (see that module's doc for why it cannot live in `rf-debugger`).
+// ---------------------------------------------------------------------
+
+use crate::core_thread::SnesDebugFrame;
+
+/// Bit depths per BG for the current mode, from `$2105`.
+fn snes_bg_depths(snes: &SnesDebugFrame) -> [u8; 4] {
+    let mode = snes.ppu_regs.get(0x05).copied().unwrap_or(0) & 0x07;
+    rf_snes::ppu::bg::bit_depths(mode)
+}
+
+/// Character base for a BG, from `$210B`/`$210C`, in VRAM words.
+fn snes_char_base(snes: &SnesDebugFrame, bg: usize) -> u16 {
+    let reg = snes.ppu_regs.get(0x0B + bg / 2).copied().unwrap_or(0);
+    let nibble = if bg.is_multiple_of(2) {
+        reg & 0x0F
+    } else {
+        reg >> 4
+    };
+    u16::from(nibble) << 12
+}
+
+/// Tilemap base and size code for a BG, from `$2107`-`$210A`.
+fn snes_tilemap_reg(snes: &SnesDebugFrame, bg: usize) -> (u16, u8) {
+    let reg = snes.ppu_regs.get(0x07 + bg).copied().unwrap_or(0);
+    ((u16::from(reg >> 2)) << 10, reg & 0x03)
+}
+
+fn snes_bg_selector(ui: &mut egui::Ui, snes: &SnesDebugFrame, bg: &mut usize) {
+    let depths = snes_bg_depths(snes);
+    ui.horizontal(|ui| {
+        for (i, depth) in depths.iter().enumerate() {
+            // A layer the current mode does not have is shown disabled
+            // rather than hidden, so the mode's shape is visible: mode 1
+            // having no BG4 is a fact about the game, not a missing
+            // feature of the viewer.
+            let exists = *depth > 0;
+            let label = if exists {
+                format!("BG{} ({depth}bpp)", i + 1)
+            } else {
+                format!("BG{}", i + 1)
+            };
+            if ui
+                .add_enabled(exists, egui::Button::selectable(*bg == i, label))
+                .clicked()
+            {
+                *bg = i;
+            }
+        }
+    });
+    if depths[*bg] == 0 {
+        // Fall back rather than render a layer this mode does not have.
+        *bg = depths.iter().position(|d| *d > 0).unwrap_or(0);
+    }
+}
+
+/// CHR viewer: a page of tiles decoded at the selected BG's depth and
+/// character base (DEBUGGER.md §3: "VRAM char data per BG char-base,
+/// 2/4/8bpp decode").
+fn snes_pattern_ui(ui: &mut egui::Ui, snes: &SnesDebugFrame, bg: &mut usize) {
+    snes_bg_selector(ui, snes, bg);
+    let depth = snes_bg_depths(snes)[*bg].max(2);
+    let char_base = snes_char_base(snes, *bg);
+    ui.label(
+        egui::RichText::new(format!(
+            "char base ${:04X} words · {}bpp · first 256 tiles",
+            char_base, depth
+        ))
+        .small()
+        .weak(),
+    );
+
+    // 16x16 tiles of 8x8 pixels, drawn through the game's own palette for
+    // this layer so the page reads as the artwork rather than as indices.
+    const TILES: usize = 16;
+    let side = TILES * 8;
+    let mut img = egui::ColorImage::new([side, side], vec![egui::Color32::BLACK; side * side]);
+    let palette_base = u16::from(rf_snes::ppu::bg::palette_base(
+        snes.ppu_regs.get(0x05).copied().unwrap_or(0) & 0x07,
+        *bg,
+    ));
+    for ty in 0..TILES {
+        for tx in 0..TILES {
+            let character = (ty * TILES + tx) as u16;
+            for py in 0..8u16 {
+                for px in 0..8u16 {
+                    let index =
+                        rf_snes::debug::tile_pixel(&snes.vram, char_base, character, px, py, depth);
+                    // Index 0 is transparent on every SNES layer, so it is
+                    // drawn as the backdrop rather than as palette entry 0
+                    // — otherwise every tile sits on a coloured block that
+                    // the game never draws.
+                    let colour = if index == 0 {
+                        egui::Color32::from_gray(0x18)
+                    } else {
+                        let entry = (palette_base as usize + index as usize).min(255) as u8;
+                        let [r, g, b] = rf_snes::debug::cgram_rgb(&snes.cgram, entry);
+                        egui::Color32::from_rgb(r, g, b)
+                    };
+                    img.pixels[(ty * 8 + py as usize) * side + tx * 8 + px as usize] = colour;
+                }
+            }
+        }
+    }
+    let texture = ui
+        .ctx()
+        .load_texture("snes-chr", img, egui::TextureOptions::NEAREST);
+    ui.add(egui::Image::new(&texture).fit_to_original_size(2.0));
+}
+
+/// Tilemap viewer: the selected BG's map with its flip and priority flags
+/// (DEBUGGER.md §3: "per-BG tilemaps w/ tile flip/prio flags").
+fn snes_tilemap_ui(ui: &mut egui::Ui, snes: &SnesDebugFrame, bg: &mut usize) {
+    snes_bg_selector(ui, snes, bg);
+    let (base, size) = snes_tilemap_reg(snes, *bg);
+    let (w, h) = rf_snes::debug::tilemap_dimensions(size);
+    ui.label(
+        egui::RichText::new(format!("base ${base:04X} words · {w}x{h} tiles"))
+            .small()
+            .weak(),
+    );
+    egui::ScrollArea::both().show(ui, |ui| {
+        egui::Grid::new("snes-tilemap")
+            .striped(true)
+            .show(ui, |ui| {
+                // The first 16x16 corner: a full 64x64 map is 4096 cells
+                // and a hex grid of that size is unreadable anyway.
+                for ty in 0..16u16.min(h) {
+                    for tx in 0..16u16.min(w) {
+                        let cell = rf_snes::debug::tilemap_entry(&snes.vram, base, size, tx, ty);
+                        let mut text =
+                            egui::RichText::new(format!("{:03X}", cell.character)).monospace();
+                        if cell.priority {
+                            text = text.strong();
+                        }
+                        let flips = match (cell.flip_x, cell.flip_y) {
+                            (false, false) => "",
+                            (true, false) => "H",
+                            (false, true) => "V",
+                            (true, true) => "HV",
+                        };
+                        ui.add(egui::Label::new(text)).on_hover_text(format!(
+                            "tile {:03X} · palette {} · priority {} · flip {}",
+                            cell.character,
+                            cell.palette,
+                            u8::from(cell.priority),
+                            if flips.is_empty() { "none" } else { flips }
+                        ));
+                    }
+                    ui.end_row();
+                }
+            });
+    });
+}
+
+/// CGRAM viewer: 256 entries, plus the colour-math state that decides how
+/// they combine (DEBUGGER.md §3: "CGRAM 256, color-math preview").
+fn snes_palette_ui(ui: &mut egui::Ui, snes: &SnesDebugFrame) {
+    ui.label(
+        egui::RichText::new("CGRAM — 256 entries, BGR555")
+            .small()
+            .weak(),
+    );
+    let cell = egui::vec2(14.0, 14.0);
+    egui::Grid::new("snes-cgram")
+        .spacing([1.0, 1.0])
+        .show(ui, |ui| {
+            for row in 0..16 {
+                for col in 0..16 {
+                    let index = (row * 16 + col) as u8;
+                    let [r, g, b] = rf_snes::debug::cgram_rgb(&snes.cgram, index);
+                    let (rect, response) = ui.allocate_exact_size(cell, egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, 0.0, egui::Color32::from_rgb(r, g, b));
+                    response.on_hover_text(format!("${index:02X} — #{r:02X}{g:02X}{b:02X}"));
+                }
+                ui.end_row();
+            }
+        });
+    // The colour-math preview §3 asks for: what $2130/$2131 would do to
+    // these colours, stated rather than simulated, because the arithmetic
+    // is per-pixel and depends on which layers a pixel came from.
+    let cgwsel = snes.ppu_regs.get(0x30).copied().unwrap_or(0);
+    let cgadsub = snes.ppu_regs.get(0x31).copied().unwrap_or(0);
+    ui.separator();
+    ui.label(format!(
+        "colour math: {} · {}{} · layers {:05b}",
+        if cgadsub & 0x80 != 0 {
+            "subtract"
+        } else {
+            "add"
+        },
+        if cgadsub & 0x40 != 0 { "half" } else { "full" },
+        if cgwsel & 0x01 != 0 {
+            " · direct colour"
+        } else {
+            ""
+        },
+        cgadsub & 0x1F,
+    ));
+}
+
+/// OAM viewer: 128 entries with the high table decoded, plus the
+/// 32-per-line occupancy (DEBUGGER.md §3: "128 entries, 32/line ...
+/// size/base decode").
+fn snes_oam_ui(ui: &mut egui::Ui, snes: &SnesDebugFrame, scanline: u16) {
+    let sprites = rf_snes::debug::decode_oam(&snes.oam);
+    let obsel = snes.ppu_regs.get(0x01).copied().unwrap_or(0);
+    let obj_size = (obsel >> 5) & 0x07;
+    let (small, big) = rf_snes::debug::obj_sizes(obj_size);
+    let on_line = rf_snes::debug::line_occupancy(&sprites, scanline, obj_size);
+
+    ui.horizontal(|ui| {
+        ui.label(format!("sizes {small:?} / {big:?}"));
+        ui.separator();
+        let over = on_line > rf_snes::debug::OBJ_PER_LINE_LIMIT;
+        let text = format!(
+            "line {scanline}: {on_line}/{}",
+            rf_snes::debug::OBJ_PER_LINE_LIMIT
+        );
+        if over {
+            // The same honesty the NES panel's 8-per-line bar has: the
+            // hardware drops sprites past the limit, and a viewer that
+            // did not say so would show sprites the player cannot see.
+            ui.colored_label(egui::Color32::from_rgb(0xE0, 0x80, 0x30), text);
+        } else {
+            ui.label(text);
+        }
+    });
+    egui::ScrollArea::vertical()
+        .max_height(260.0)
+        .show(ui, |ui| {
+            egui::Grid::new("snes-oam").striped(true).show(ui, |ui| {
+                for s in sprites.iter().filter(|s| s.y != 0xF0) {
+                    ui.monospace(format!("{:3}", s.index));
+                    ui.monospace(format!("{:4},{:3}", s.x, s.y));
+                    ui.monospace(format!("t{:03X}", s.tile));
+                    ui.monospace(format!("p{}", s.palette));
+                    ui.monospace(format!("pr{}", s.priority));
+                    ui.label(if s.large { "large" } else { "small" });
+                    ui.label(match (s.flip_x, s.flip_y) {
+                        (false, false) => "",
+                        (true, false) => "H",
+                        (false, true) => "V",
+                        (true, true) => "HV",
+                    });
+                    ui.end_row();
+                }
+            });
+        });
+}
+
+/// Memory view over the three SNES-only spaces (DEBUGGER.md §3:
+/// "+VRAM/CGRAM/ARAM/DMA regs spaces, 24-bit addressing").
+fn snes_memory_ui(ui: &mut egui::Ui, snes: &SnesDebugFrame, space: &mut usize) {
+    ui.horizontal(|ui| {
+        ui.selectable_value(space, 0, "VRAM");
+        ui.selectable_value(space, 1, "CGRAM");
+        ui.selectable_value(space, 2, "ARAM");
+    });
+    let (bytes, label): (&[u8], &str) = match space {
+        1 => (&snes.cgram, "CGRAM ($00-$FF, 2 bytes per entry)"),
+        2 => (&snes.aram, "ARAM ($0000-$FFFF)"),
+        _ => (&snes.vram, "VRAM ($0000-$FFFF)"),
+    };
+    ui.label(egui::RichText::new(label).small().weak());
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        // The first 2 KiB. These spaces are 64 KiB and a hex dump of that
+        // is 4096 rows — the goto/find controls W13-02d added are what
+        // reach the rest, and wiring them to these spaces is W13-02c's.
+        let shown = &bytes[..bytes.len().min(0x800)];
+        let rows = rf_debugger::memory_view::build_rows(0, shown);
+        egui::Grid::new("snes-memory").striped(true).show(ui, |ui| {
+            for row in &rows {
+                ui.monospace(format!("{:04X}", row.addr));
+                ui.monospace(
+                    row.bytes
+                        .iter()
+                        .map(|b| format!("{b:02X} "))
+                        .collect::<String>(),
+                );
+                ui.end_row();
+            }
+        });
+    });
 }

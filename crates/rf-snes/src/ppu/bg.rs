@@ -387,24 +387,12 @@ fn tilemap_entry(
 /// shapes in scrambled colours.
 #[must_use]
 pub fn fetch_pixel(ppu: &Ppu, char_base: u16, character: u16, px: u16, py: u16, depth: u8) -> u8 {
-    let words_per_tile = match depth {
-        8 => 32u16,
-        4 => 16,
-        _ => 8,
-    };
-    let tile_word = char_base.wrapping_add(character.wrapping_mul(words_per_tile));
-    let bit = 7 - px;
-
-    let mut colour = 0u16;
-    // One pass per bitplane PAIR: 1 pair for 2bpp, 2 for 4bpp, 4 for 8bpp.
-    for pair in 0..(depth / 2) {
-        let word = ppu.vram_word(tile_word.wrapping_add(u16::from(pair) * 8).wrapping_add(py));
-        let lo = (word >> bit) & 1;
-        let hi = (word >> (8 + bit)) & 1;
-        colour |= lo << (pair * 2);
-        colour |= hi << (pair * 2 + 1);
-    }
-    colour as u8
+    // Ticket W13-02b: ONE implementation of the interleaved bitplane
+    // layout, shared with the debugger's tile viewer. The layout above is
+    // the most easily mis-transcribed thing in this crate — a second copy
+    // in `rf-debugger` would have been free to drift from the renderer
+    // that actually draws the game.
+    crate::debug::tile_pixel(&ppu.vram, char_base, character, px, py, depth)
 }
 
 /// Per-column scroll offsets read from BG3's tilemap (modes 2, 4 and 6).

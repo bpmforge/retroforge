@@ -576,6 +576,29 @@ impl EmuStepper {
         self.machine.as_core_ref().state_view()
     }
 
+    /// The SNES debug memories, or `None` on a NES session (ticket
+    /// W13-02b).
+    ///
+    /// Returns owned copies because they cross a thread boundary on the
+    /// frame message; four of the five come straight from
+    /// [`Self::state_view`], and ARAM is the one that does not — the APU's
+    /// RAM is not a `StateView` field, so it is read from the concrete
+    /// core here rather than by widening the contract for one consumer.
+    #[must_use]
+    pub fn snes_debug_snapshot(&self) -> Option<crate::core_thread::SnesDebugFrame> {
+        let Machine::Snes(core) = &self.machine else {
+            return None;
+        };
+        let view = self.machine.as_core_ref().state_view();
+        Some(crate::core_thread::SnesDebugFrame {
+            vram: view.vram.to_vec(),
+            cgram: view.cgram.to_vec(),
+            oam: view.oam.to_vec(),
+            ppu_regs: view.ppu_regs.to_vec(),
+            aram: core.system().bus.apu.aram.clone(),
+        })
+    }
+
     /// The PPU's nametable VRAM (ticket W4-06d) — forwards
     /// `NesBus::vram()`, a non-observing borrow.
     pub fn vram(&self) -> &[u8; 0x1000] {

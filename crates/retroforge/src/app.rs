@@ -537,6 +537,8 @@ pub struct RetroForgeApp {
     /// re-sends the command when `debug_panels.wants_event_subscription()`
     /// actually *changes* rather than every single repaint.
     event_subscription_active: bool,
+    /// Ticket W13-02b: whether `SetSnesDebugCapture(true)` was last sent.
+    snes_capture_active: bool,
     /// Ticket W4-10a: the UI-thread half of the trace transport, present
     /// only while a capture is armed.
     trace_drain: Option<crate::trace_capture::TraceDrain>,
@@ -736,6 +738,7 @@ impl RetroForgeApp {
             awaiting_canvas_snapshot: false,
             debug_panels: crate::debug_dock::DebugPanels::new(),
             event_subscription_active: false,
+            snes_capture_active: false,
             trace_drain: None,
             trace_writer: None,
             show_states: false,
@@ -1759,6 +1762,11 @@ impl RetroForgeApp {
                 self.debug_panels.data.oam = [0u8; 256];
                 self.debug_panels.data.previous_oam = [0u8; 256];
                 self.debug_panels.data.events = Vec::new();
+                // Ticket W13-02b: and the previous game's SNES memories,
+                // for the same reason — opening a NES ROM after a SNES one
+                // must not leave the SNES column drawn against it.
+                self.debug_panels.data.snes = None;
+                self.snes_capture_active = false;
                 self.debug_panels.data.wram = [0u8; 0x0800];
                 self.debug_panels.data.prg_ram = [0u8; 0x2000];
                 // A fresh `EmuStepper` (inside `core_thread::spawn` below)
@@ -2040,6 +2048,10 @@ impl RetroForgeApp {
             // palette viewers. Carried on the frame message like OAM, so
             // the UI thread never reaches into the core — the same
             // read-only discipline W4-06c's diff panel relies on.
+            // Ticket W13-02b: the SNES memories, when the core captured
+            // them. `None` on a NES session and whenever the capture is
+            // off, which is what makes the panels console-aware.
+            self.debug_panels.data.snes = msg.snes;
             self.debug_panels.data.vram = *msg.vram;
             self.debug_panels.data.palette_ram = *msg.palette_ram;
             // Ticket W13-02e: fold this frame's MemWatch events into the
@@ -4176,6 +4188,14 @@ impl RetroForgeApp {
         self.debug_panels.visible = show;
     }
 
+    /// The SNES debug memories the last frame carried, if any (ticket
+    /// W13-02b) — the input every SNES viewer decodes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn snes_debug_frame_for_test(&self) -> Option<&crate::core_thread::SnesDebugFrame> {
+        self.debug_panels.data.snes.as_deref()
+    }
+
     /// The memory panel's last live WRAM snapshot (ticket W13-02d).
     #[doc(hidden)]
     #[must_use]
@@ -4623,7 +4643,21 @@ impl RetroForgeApp {
     /// what's requested here (that function's own doc), so narrowing to
     /// `NONE` when every debug window is closed can never starve
     /// `crate::canvas_accum`.
+    /// Turn the SNES debug-memory capture on or off to match what is
+    /// docked (ticket W13-02b) — the same shape as
+    /// [`Self::sync_event_subscription`], and for the same reason: 128 KiB
+    /// per frame is not a cost to pay while nobody is looking.
+    fn sync_snes_capture(&mut self) {
+        let wants = self.debug_panels.wants_snes_capture();
+        if wants == self.snes_capture_active {
+            return;
+        }
+        self.snes_capture_active = wants;
+        self.send_command(CoreCommand::SetSnesDebugCapture(wants));
+    }
+
     fn sync_event_subscription(&mut self) {
+        self.sync_snes_capture();
         // The event VIEWER only needs events while it is on screen, which
         // is DEBUGGER.md §6's "closed panels register no event
         // subscriptions". A WATCHPOINT is different and the distinction is

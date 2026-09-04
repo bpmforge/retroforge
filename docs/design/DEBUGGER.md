@@ -129,7 +129,8 @@ citation is not a grade.**
 | 3 | Trace viewer with filters | `trace::TraceScrollback` + `DebugTab::Trace` | **met** |
 | 3 | Audio — channel scopes, mute/solo | `audio_scope::{MuteState,mix_host_side,trace}` | **met** |
 | 3 | Memory hex — **live edit (pause-gated), goto/find, annotation coloring** | `memory_view::{parse_addr,parse_bytes,find_bytes}` + the panel's editor, `CoreCommand::PokeBus` (W13-02d) | **met** |
-| 3 | **the entire SNES column** — 2/4/8bpp CHR, per-BG tilemaps, Mode 7 view, CGRAM 256 + color math, 128-entry OAM w/ 32-per-line, VRAM/CGRAM/ARAM spaces, HDMA lanes, DSP voice + BRR | **nothing.** No provider in `rf-debugger/src` mentions SNES; `DebugTab` has nine variants and none is console-aware. | **GAP (the largest)** |
+| 3 | SNES column: 2/4/8bpp CHR, per-BG tilemaps, CGRAM 256 + colour math, 128-entry OAM w/ 32-per-line, VRAM/CGRAM/ARAM spaces | `rf_snes::debug` + the console-aware arms of the five panels (W13-02b) | **met** |
+| 3 | SNES column: Mode 7 view, HDMA lanes, DSP voice + BRR | nothing | **GAP** (W13-02c) |
 | 4 | annotation store, typed, with `source_url` + confidence | `annotation::{Annotation,AnnotationStore}`, sourceless entries refused at `add` | **met** |
 | 4 | DataCrystal TSV import | `datacrystal::parse_tsv` | **met** (library only — see below) |
 | 4 | export to profile skeleton | `profile_export::export_skeleton` | **met** (library only — see below) |
@@ -196,7 +197,15 @@ capability that only tests can reach is not a capability a ROM hacker has.
 `W13-02a` is the unblocker for the SNES half: until `SnesCore::state_view`
 is real, every SNES viewer has nothing to draw.
 
-**Closed so far: `W13-02a`, `W13-02d`, `W13-02e`, `W13-02f`, `W13-02h`.**
+**Closed so far: `W13-02a`, `W13-02b`, `W13-02d`, `W13-02e`, `W13-02f`,
+`W13-02h`** — six of nine, and bars **B-1** through **B-8** except the
+Mode 7/HDMA/DSP cells.
+
+`W13-02b` (2026-09-04) — bar **B-1**. The decoders live in `rf_snes::debug`
+rather than `rf-debugger`, because SNES tile data is not "just bytes" the
+way NES CHR is: depth depends on the BG mode and the bitplane pairs are
+interleaved. `ppu::bg::fetch_pixel` now **delegates** to the shared
+decoder — one implementation, two callers.
 
 `W13-02a` (2026-09-04) — bar **B-2**, the unblocker. The SNES viewer
 column is now buildable: `W13-02b` and `W13-02g` are claimable.

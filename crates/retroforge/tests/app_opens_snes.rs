@@ -197,3 +197,78 @@ fn a_snes_session_exposes_its_memories_through_the_shell() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **Bar B-1: every SNES viewer has real data to draw** (ticket W13-02b).
+///
+/// The providers are decoded here rather than screenshotted, for the same
+/// reason `memory_viewer_poke_bus` drives functions instead of pixels: the
+/// egui half is the accepted human-verifiable part, and what a test can
+/// prove is that each viewer's *input* exists and decodes.
+#[test]
+fn every_snes_viewer_has_something_to_draw() {
+    let dir = std::env::temp_dir().join(format!("retroforge_snesview_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+
+    let snes = Path::new(env!("CARGO_MANIFEST_DIR")).join(SNES);
+    let rom: PathBuf = dir.join("rf-scroller-s.sfc");
+    std::fs::copy(&snes, &rom).expect("copy fixture");
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(WINDOW_SIZE[0], WINDOW_SIZE[1]))
+        .build_eframe(|cc| RetroForgeApp::new(cc));
+    harness.run();
+    // The capture is pay-for-use: opening the debug window is what turns
+    // it on, exactly as it turns on the event subscription.
+    harness.state_mut().show_debug_for_test(true);
+    harness.state_mut().open_rom_path(&rom);
+    harness.run_steps(2);
+    harness.state_mut().resume_for_test();
+    run_frames(&mut harness, 30, Duration::from_secs(60));
+
+    let snes = harness
+        .state()
+        .snes_debug_frame_for_test()
+        .expect("a SNES session with the debug window open must capture its memories");
+
+    assert_eq!(snes.vram.len(), 64 * 1024, "the CHR and tilemap viewers");
+    assert_eq!(snes.cgram.len(), 512, "the palette viewer");
+    assert_eq!(snes.oam.len(), 544, "the sprite viewer");
+    assert_eq!(snes.aram.len(), 64 * 1024, "the ARAM memory space");
+    assert!(
+        !snes.ppu_regs.is_empty(),
+        "every viewer needs the registers"
+    );
+
+    // A running game must have put SOMETHING in VRAM — a viewer fed
+    // 64 KiB of zeroes would pass a length check and draw a blank page.
+    assert!(
+        snes.vram.iter().any(|b| *b != 0),
+        "the fixture draws, so its VRAM cannot be empty"
+    );
+    assert!(snes.cgram.iter().any(|b| *b != 0), "and it sets a palette");
+
+    // The decoders reach real values through the register file, not
+    // through assumptions: $2105's mode picks the bit depths the CHR
+    // viewer decodes at.
+    let mode = snes.ppu_regs[0x05] & 0x07;
+    let depths = rf_snes::ppu::bg::bit_depths(mode);
+    assert!(depths[0] > 0, "BG1 always exists, in every mode");
+    let sprites = rf_snes::debug::decode_oam(&snes.oam);
+    assert_eq!(sprites.len(), 128);
+
+    // And the NES path stays NES: opening a NES ROM clears the column.
+    let nes = Path::new(env!("CARGO_MANIFEST_DIR")).join(NES);
+    let nes_rom: PathBuf = dir.join("rf-scroller.nes");
+    std::fs::copy(&nes, &nes_rom).expect("copy nes fixture");
+    harness.state_mut().open_rom_path(&nes_rom);
+    harness.run_steps(2);
+    harness.state_mut().resume_for_test();
+    run_frames(&mut harness, 5, Duration::from_secs(30));
+    assert!(
+        harness.state().snes_debug_frame_for_test().is_none(),
+        "a NES session must not leave the previous SNES game's memories on screen"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -2283,3 +2283,60 @@ Phase 13 work, and D-4 blocks only a docs ticket.
   length test and still be useless; and an app-level one proves the shell
   surfaces it on a real SNES fixture. Gate: **1753 passing, 0 failed, 33
   ignored** (up from 1750), exit 0, `arch OK`; the NES path unchanged.
+
+- **W13-02b — the SNES viewer column** (2026-09-04). Bar **B-1**: CHR at
+  2/4/8bpp per BG char-base, per-BG tilemaps with flip and priority, CGRAM
+  256 with the colour-math state, 128-entry OAM with the 32-per-line
+  occupancy, and VRAM/CGRAM/ARAM as memory spaces.
+
+  **The real design question was where the decoders live, and the answer
+  is `rf-snes`, not `rf-debugger`.** `rf-debugger` may not depend on a core
+  (validate-arch rule 3), and its NES decoders get away with it because NES
+  CHR is *just bytes* — two bitplanes eight bytes apart, no register state.
+  SNES tile data is not: a pixel's value depends on the layer's bit depth
+  (2/4/8, chosen by the BG mode) and the bitplane pairs are interleaved at
+  +0/+8/+16/+24 words. `bg::fetch_pixel`'s own doc calls getting that wrong
+  "the mistake that makes graphics come out with the right shapes in
+  scrambled colours". A copy in `rf-debugger` would have been this crate's
+  most easily mis-transcribed knowledge, free to drift from the renderer
+  that draws the game. So `rf_snes::debug` holds it and **`bg::fetch_pixel`
+  now delegates to it** — one implementation, two callers, and all 263
+  rf-snes tests including every golden stayed green through that refactor,
+  which is what says the shared version is the same version.
+
+  **The capture is gated, for a measured reason.** SNES VRAM is 64 KiB and
+  ARAM another 64, so cloning them every frame of every session would be
+  ~7.7 MB/s of copying for panels that are usually closed.
+  `SetSnesDebugCapture` is the switch, driven by whether a SNES-capable tab
+  is docked *and* the window is open — the trade `SetLayerExtraction`
+  already makes for its two 240 KB buffers.
+
+  **Console-awareness is one field, not a second set of tabs.**
+  `PanelData::snes` is `Some` on a SNES session and `None` otherwise, and
+  each viewer picks its arm from that, so a user does not learn two panel
+  layouts (criterion 3). Opening a NES ROM after a SNES one clears it, and
+  a test asserts that direction specifically.
+
+  **Four details that would have been wrong if guessed**, each pinned by a
+  test: tilemap quadrants are **not contiguous** (a 64-wide map puts its
+  right half at +0x400, a 64×64 map's bottom-left at +0x800 — a viewer
+  ignoring it shows the same quadrant four times); CGRAM is BGR555 with
+  **blue in the high bits**, scaled `*255/31` so full scale is 255 and not
+  248; OAM's high table supplies X's ninth bit and the size select two bits
+  per sprite, and **X is signed 9-bit**, so `0x110` means −240 — a decoder
+  stopping at 512 bytes would put every sprite past x=255 on the wrong side
+  of the screen; and index 0 is transparent on every SNES layer, so the CHR
+  page draws it as backdrop rather than as palette entry 0.
+
+  Evidence: 6 unit tests in `rf_snes::debug`, plus an app-level test that
+  opens RF-Scroller-S with the debug window open and asserts every viewer's
+  input exists, decodes, **and is not all zeroes** — a viewer fed 64 KiB of
+  zeroes would pass a length check and draw a blank page. W10-04's scroll
+  guard fired on two new surfaces; both are in `BOUNDED` with the reason
+  their content cannot grow. Gate: **1760 passing, 0 failed, 33 ignored**
+  (up from 1753), exit 0, `arch OK`.
+
+  Mode 7, HDMA lanes and the DSP voice/BRR view are **W13-02c**, split at
+  filing time because each is its own decoder with its own oracle.
+  **Phase 13's debugger arc: six of nine closed**; `W13-02c`, `W13-02g` and
+  `W13-02i` are claimable.

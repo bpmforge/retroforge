@@ -198,6 +198,28 @@ pub struct HdFrame {
     pub layers: Vec<rf_enhance::hd_render::Layer>,
 }
 
+/// A SNES session's debug memories, snapshotted on the core thread
+/// (ticket W13-02b).
+///
+/// Copies, not borrows: project law 4 keeps the UI thread out of a
+/// running core, so what the viewers decode is a snapshot that travelled
+/// on the frame — exactly the shape the NES viewers' `vram`/`oam` fields
+/// already have, only bigger.
+#[derive(Debug, Clone)]
+pub struct SnesDebugFrame {
+    /// 64 KiB.
+    pub vram: Vec<u8>,
+    /// 512 bytes, little-endian BGR555 (`rf_snes::debug::cgram_rgb`).
+    pub cgram: Vec<u8>,
+    /// 544 bytes: 512 of entries plus the 32-byte high table.
+    pub oam: Vec<u8>,
+    /// `$2100`-`$213F`, indexed so `[n]` is `$21nn`.
+    pub ppu_regs: Vec<u8>,
+    /// 64 KiB of APU RAM — the third memory-view space DEBUGGER.md §3
+    /// names for SNES, alongside VRAM and CGRAM.
+    pub aram: Vec<u8>,
+}
+
 pub struct FrameMsg {
     /// Ticket W11-02: the bytes the full-level view asked for, or `None`
     /// when no probe is armed. Peeked on this thread because only this
@@ -265,6 +287,15 @@ pub struct FrameMsg {
     /// snapshotting them here cannot perturb A12 edge timing (see
     /// `rf_nes::Ppu::vram`'s doc for why that matters).
     pub vram: Box<[u8; 0x1000]>,
+    /// Ticket W13-02b: the SNES memories the viewer column needs, or
+    /// `None` on a NES session **and** whenever nobody is looking.
+    ///
+    /// Gated for a real reason rather than symmetry: SNES VRAM alone is
+    /// 64 KiB, so cloning it on every frame of every session would be
+    /// ~3.8 MB/s of copying for a panel that is usually closed — the same
+    /// trade `SetLayerExtraction` already makes for its two 240 KB
+    /// buffers. `CoreCommand::SetSnesDebugCapture` is the switch.
+    pub snes: Option<Box<SnesDebugFrame>>,
     pub palette_ram: Box<[u8; 32]>,
     /// Ticket W4-06b: the same frame's 2 KiB WRAM snapshot
     /// (`EmuStepper::wram_snapshot`, side-effect-free — same "read-only is
@@ -425,6 +456,13 @@ pub enum CoreCommand {
     /// [`CoreEvent::Frame`], so the first frame carrying layers is the
     /// next one the core produces anyway (≤16.6 ms later at 60 Hz).
     SetLayerExtraction(bool),
+    /// Ticket W13-02b: capture the SNES debug memories on each frame.
+    ///
+    /// Off by default and driven by whether a SNES-capable debug panel is
+    /// docked, for the same pay-for-use reason `SetLayerExtraction` exists
+    /// (DEBUGGER.md §6): 64 KiB of VRAM plus 64 KiB of ARAM per frame is
+    /// not something to pay for while nobody is looking.
+    SetSnesDebugCapture(bool),
     /// Ticket W4-03e: ask for a `CoreEvent::CanvasSnapshot` of the current
     /// scene's stitched canvas (see that variant's doc). Also flushes the
     /// canvas accumulator's cache (`CanvasAccumulator::flush`) — piggy-
@@ -790,6 +828,10 @@ fn core_thread_main(
     // reaches its widening path at all.
     let mut widescreen: Option<WidescreenRequest> = None;
     let mut hd_capture = false;
+    // Ticket W13-02b: whether to snapshot the SNES debug memories each
+    // frame. Off until a panel asks — 128 KiB per frame is not a cost to
+    // pay while nobody is looking.
+    let mut snes_debug_capture = false;
     let mut last_decisions: Option<[Option<&'static str>; 4]> = None;
     // Ticket W4-10a: `None` is the shipped, untraced state. The run loop
     // below tests this once per frame and takes the ordinary path — the
@@ -904,6 +946,9 @@ fn core_thread_main(
                             sink.width() * sink.height()
                         ]
                     });
+                }
+                CoreCommand::SetSnesDebugCapture(enabled) => {
+                    snes_debug_capture = enabled;
                 }
                 CoreCommand::SetLayerExtraction(enabled) => {
                     layers_enabled = enabled;
@@ -1238,6 +1283,11 @@ fn core_thread_main(
                         .collect()
                 } else {
                     Vec::new()
+                },
+                snes: if snes_debug_capture {
+                    stepper.snes_debug_snapshot().map(Box::new)
+                } else {
+                    None
                 },
                 vram: Box::new(*stepper.vram()),
                 palette_ram: Box::new(*stepper.palette()),

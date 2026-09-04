@@ -70,6 +70,16 @@ const BOUNDED: &[(&str, &str)] = &[
         "a fixed grid — eight labelled fields and a button row — plus the notes editor, which          scrolls inside itself; a helper called from annotations_ui, which has the scroll area",
     ),
     (
+        "snes_pattern_ui",
+        "a fixed 128x128 tile page over a BG selector of at most four buttons — the same reason \
+         pattern_ui is here, and the page size is a constant rather than a function of the ROM",
+    ),
+    (
+        "snes_palette_ui",
+        "CGRAM's 256 entries in a fixed 16x16 arrangement plus one colour-math line; the grid \
+         cannot grow, because the hardware has exactly 256 entries",
+    ),
+    (
         "watchpoint_ui",
         "a collapsing header over a fixed control set plus one row per armed watch, and the core          holds at most rf_core_api::MAX_WATCHES of them; a helper called from annotations_ui,          which has the scroll area",
     ),

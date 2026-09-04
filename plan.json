@@ -5612,7 +5612,13 @@
    "crate": "rf-debugger",
    "write_scope": [
     "crates/rf-debugger/**",
-    "crates/retroforge/src/debug_dock.rs"
+    "crates/retroforge/src/debug_dock.rs",
+    "crates/rf-snes/**",
+    "crates/retroforge/src/app.rs",
+    "crates/retroforge/src/core_thread.rs",
+    "crates/retroforge/src/stepper.rs",
+    "crates/retroforge/tests/**",
+    "docs/design/DEBUGGER.md"
    ],
    "depends_on": [
     "W13-02a"
@@ -5623,10 +5629,18 @@
     "the panels are console-aware rather than duplicated: a NES ROM shows the NES column and a SNES ROM the SNES one, in the same DebugTab"
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "FILED BY W13-01, 2026-09-03. DEBUGGER.md §7.1 grades this whole column as GAP: no provider in rf-debugger/src mentions SNES, and DebugTab's nine variants are not console-aware.",
-    "Mode 7, HDMA lanes and the DSP voice/BRR view are DELIBERATELY NOT HERE — they are W13-02c. Each is its own decoder with its own oracle, and bundling them into an already-8-point ticket is the shape Brad splits."
+    "Mode 7, HDMA lanes and the DSP voice/BRR view are DELIBERATELY NOT HERE — they are W13-02c. Each is its own decoder with its own oracle, and bundling them into an already-8-point ticket is the shape Brad splits.",
+    "HANDOFF 2026-09-04: write_scope widened to rf-snes (the decoders had to live there — see the next note), the frame path (app.rs/core_thread.rs/stepper.rs, because a snapshot has to cross a thread), tests/**, and DEBUGGER.md's grading table.",
+    "THE DECODERS LIVE IN rf-snes, NOT rf-debugger, AND THAT WAS THE REAL DESIGN QUESTION. rf-debugger may not depend on a core (validate-arch rule 3), and its NES decoders get away with it because NES CHR is JUST BYTES — two bitplanes eight bytes apart, no register state. SNES tile data is not: a pixel's value depends on the layer's bit depth (2/4/8, chosen by the BG mode) and the bitplane pairs are interleaved at +0/+8/+16/+24 words. bg::fetch_pixel's own doc calls that 'the mistake that makes graphics come out with the right shapes in scrambled colours'. Reimplementing it in rf-debugger would have been a second copy of this crate's most easily mis-transcribed knowledge, free to drift from the renderer that draws the game. So rf_snes::debug holds it and bg::fetch_pixel now DELEGATES to it — one implementation, two callers, and all 263 rf-snes tests including every golden stayed green through that refactor, which is what says the shared version is the same version.",
+    "EVERYTHING IN rf_snes::debug TAKES BYTE SLICES, NOT &Ppu, and that is what makes it usable at all: the debugger reads a SNAPSHOT that travelled to the UI thread on a frame message (law 4), never a live core.",
+    "THE CAPTURE IS GATED, for a measured reason and not for symmetry: SNES VRAM is 64 KiB and ARAM another 64, so cloning them every frame of every session would be ~7.7 MB/s of copying for panels that are usually closed. CoreCommand::SetSnesDebugCapture is the switch, driven by whether a SNES-capable tab is docked AND the window is open — the same trade SetLayerExtraction already makes for its two 240 KB buffers (DEBUGGER.md section 6).",
+    "CONSOLE-AWARENESS IS ONE FIELD, not a second set of tabs: PanelData::snes is Some on a SNES session and None otherwise, and each of the five viewers picks its arm from that. Criterion 3 asked for the same DebugTab to serve both consoles and this is how — a user does not learn two panel layouts. Opening a NES ROM after a SNES one clears the field, so the previous game's memories cannot be drawn against the new one; a test asserts that direction specifically.",
+    "DETAILS THAT WOULD HAVE BEEN WRONG IF GUESSED, each pinned by a unit test: tilemap quadrants are NOT contiguous (a 64-wide map puts its right half at +0x400 and a 64x64 map's bottom-left at +0x800, so a viewer ignoring it shows the same quadrant four times); CGRAM is BGR555 with BLUE in the high bits and scales by *255/31 so full scale is 255 and not 248; OAM's high table supplies X's ninth bit and the size select two bits per sprite, four sprites to a byte, and X is a SIGNED 9-bit value so 0x110 means -240 — a decoder stopping at 512 bytes would put every sprite past x=255 on the wrong side of the screen; and palette index 0 is transparent on every SNES layer, so the CHR page draws it as backdrop rather than as palette entry 0.",
+    "EVIDENCE: 6 unit tests in rf_snes::debug (the interleaved bitplane read, tilemap quadrants, entry flags, BGR555 scaling, the OAM high table, and per-line occupancy including sprites that wrap) plus an app-level test that opens the RF-Scroller-S fixture with the debug window open and asserts every viewer's input exists, decodes, AND IS NOT ALL ZEROES — a viewer fed 64 KiB of zeroes would pass a length check and draw a blank page. W10-04's scroll guard fired on two of the new surfaces and both are now in BOUNDED with the reason their content cannot grow. Workspace 1760 passing / 0 failed / 33 ignored, up from 1753.",
+    "WHAT IS DELIBERATELY NOT HERE, so it is not read as missing: Mode 7's playfield view, HDMA channel lanes and the DSP voice/BRR view are W13-02c, split at filing time because each is its own decoder with its own oracle. The SNES memory spaces show their first 2 KiB; wiring W13-02d's goto/find to them is W13-02c's too."
    ],
    "stories": []
   },
