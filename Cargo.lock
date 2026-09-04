@@ -4342,6 +4342,7 @@ dependencies = [
  "rf-profiles",
  "rf-renderer",
  "serde",
+ "serde_json",
  "toml",
 ]
 

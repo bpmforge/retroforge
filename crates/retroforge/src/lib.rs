@@ -32,6 +32,7 @@
 //! makes that testable in practice rather than in principle.
 
 pub mod accessibility;
+pub mod annotation_store;
 pub mod app;
 pub mod audio_out;
 pub mod authoring;

@@ -22,7 +22,8 @@ use std::fmt;
 /// becomes a `[[rom_map]]` row. The two tables' shapes differ slightly
 /// (`rom_map` also carries `count`; `memory_map` does not) — see
 /// [`crate::profile_export`] for the mapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AddressSpace {
     /// CPU-bus address (WRAM, PRG-RAM, MMIO, ...) — `GAME_PROFILES.md`
     /// §2's `[[memory_map]]`.
@@ -47,7 +48,7 @@ pub enum AddressSpace {
 /// doc) — CONSTRAINTS §2 requires prose to be written fresh by a human,
 /// never transcribed from a wiki table, so the one channel this store has
 /// for prose is UI-authored only, not import-populated.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Annotation {
     pub space: AddressSpace,
     /// RAM address (`space == Ram`) or ROM file offset (`space == Rom`).
@@ -158,6 +159,193 @@ impl AnnotationStore {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// One stored annotation by index, or `None` if the index is stale.
+    ///
+    /// Indices are how the UI addresses a row, and a panel can hold one
+    /// across a repaint in which the store shrank — so this returns
+    /// `Option` rather than indexing, and every mutator below does the
+    /// same. A debugger that panics because a list got shorter is worse
+    /// than one that does nothing.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&Annotation> {
+        self.entries.get(index)
+    }
+
+    /// Replace the annotation at `index`, re-checking the same invariants
+    /// [`Self::add`] enforces.
+    ///
+    /// Editing goes through the same gate as insertion deliberately:
+    /// otherwise an edit could blank a `source` that `add` would have
+    /// refused, and FR-DBG-005's guarantee would hold only for annotations
+    /// nobody had touched since.
+    ///
+    /// # Errors
+    /// [`AnnotationError::EmptySource`]/[`AnnotationError::EmptyLabel`] as
+    /// [`Self::add`]; the stored annotation is left unchanged in that case.
+    pub fn replace(&mut self, index: usize, annotation: Annotation) -> Result<(), AnnotationError> {
+        if annotation.source.trim().is_empty() {
+            return Err(AnnotationError::EmptySource {
+                addr: annotation.addr,
+            });
+        }
+        if annotation.label.trim().is_empty() {
+            return Err(AnnotationError::EmptyLabel {
+                addr: annotation.addr,
+            });
+        }
+        if let Some(slot) = self.entries.get_mut(index) {
+            *slot = annotation;
+        }
+        Ok(())
+    }
+
+    /// Remove the annotation at `index`, returning it. `None` if the index
+    /// is out of range.
+    pub fn remove(&mut self, index: usize) -> Option<Annotation> {
+        (index < self.entries.len()).then(|| self.entries.remove(index))
+    }
+
+    /// Serialize the store as JSON — DEBUGGER.md §4's "import/export as
+    /// JSON", and also the on-disk persistence format (see
+    /// [`Self::from_json`] for why those are deliberately one format and
+    /// not two).
+    ///
+    /// # Errors
+    /// Propagates a `serde_json` failure. In practice this cannot fail for
+    /// these types, but returning the error beats an `unwrap` in a path a
+    /// user's data travels through.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(&self.entries)
+    }
+
+    /// Parse a store from JSON, **through [`Self::add`]**.
+    ///
+    /// ## Why import re-validates rather than deserializing straight in
+    ///
+    /// `#[derive(Deserialize)]` onto `Vec<Annotation>` would happily
+    /// accept `"source": ""` — the invariant FR-DBG-005 asks for lives in
+    /// [`Self::add`], not in the type. A file edited by hand, or written
+    /// by an older build, could then put an unsourced annotation into a
+    /// store that every other code path is entitled to assume cannot hold
+    /// one, and the exporter would be the thing that discovered it.
+    /// Import is a public entry point, so it uses the same gate.
+    ///
+    /// Rejected rows are **reported, not silently dropped**: the count
+    /// comes back with the store so a caller can say "14 imported, 2
+    /// rejected" rather than quietly losing two.
+    ///
+    /// # Errors
+    /// Propagates a `serde_json` parse failure (a file that is not
+    /// annotation JSON at all).
+    pub fn from_json(text: &str) -> Result<(Self, Vec<AnnotationError>), serde_json::Error> {
+        let raw: Vec<Annotation> = serde_json::from_str(text)?;
+        let mut store = AnnotationStore::new();
+        let mut rejected = Vec::new();
+        for annotation in raw {
+            if let Err(e) = store.add(annotation) {
+                rejected.push(e);
+            }
+        }
+        Ok((store, rejected))
+    }
+
+    /// The `addr -> label` lookup [`label_operands`] needs, RAM-space only.
+    ///
+    /// ROM annotations are file offsets, not bus addresses, so labelling a
+    /// `$8000` operand with a `rom_map` row whose offset happens to be
+    /// `0x8000` would be a coincidence rendered as a fact.
+    #[must_use]
+    pub fn ram_labels(&self) -> Vec<RamLabel<'_>> {
+        self.entries
+            .iter()
+            .filter(|a| a.space == AddressSpace::Ram)
+            .map(|a| RamLabel {
+                addr: a.addr,
+                len: a.len.max(1),
+                label: a.label.as_str(),
+            })
+            .collect()
+    }
+}
+
+/// One RAM annotation reduced to what [`label_operands`] needs.
+///
+/// `len` is clamped to at least 1 by [`AnnotationStore::ram_labels`]: a
+/// zero-length annotation covers nothing, and silently labelling nothing
+/// is harder to notice than labelling the one byte the author meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RamLabel<'a> {
+    pub addr: u32,
+    pub len: u32,
+    pub label: &'a str,
+}
+
+/// Append `{label}` after every `$`-prefixed operand in `text` that a RAM
+/// annotation covers — DEBUGGER.md §4's cross-link, in its own example's
+/// shape: `LDA $0086` becomes `LDA $0086 {player_x_screen}`.
+///
+/// UI-free and pure so it can be unit-tested without a trace, a core or an
+/// egui context, like everything else in this crate.
+///
+/// ## Coverage, not equality
+///
+/// An annotation with `len > 1` covers a range: a 2-byte `player_x` at
+/// `$0086` labels a read of `$0087` too, because that read *is* touching
+/// `player_x`. Matching only the base address would leave the high byte of
+/// every 16-bit quantity unlabelled, which is precisely the case a ROM
+/// hacker is trying to see.
+///
+/// ## Why the operand is parsed rather than the address matched
+///
+/// A trace line is text by the time it reaches the viewer
+/// ([`crate::trace::TraceEntry::text`]), and `TraceEntry::addr` holds the
+/// *PC*, not the operand. Scanning for `$hex` is therefore the only way to
+/// reach the operand, and it is exactly what the doc's example needs.
+#[must_use]
+pub fn label_operands(text: &str, labels: &[RamLabel<'_>]) -> String {
+    // Cheap reject first: most lines have no `$` at all.
+    if !text.contains('$') || labels.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            // ADVANCE FIRST, unconditionally (project law 8): every path
+            // through this loop moves `i`, so it cannot spin.
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut j = i + 1;
+        while j < bytes.len() && bytes[j].is_ascii_hexdigit() {
+            j += 1;
+        }
+        let digits = &text[start + 1..j];
+        out.push_str(&text[start..j]);
+        i = j.max(start + 1);
+        if digits.is_empty() {
+            continue;
+        }
+        let Ok(addr) = u32::from_str_radix(digits, 16) else {
+            continue;
+        };
+        // First covering annotation wins. Two annotations covering one
+        // address is an authoring mistake; rendering both would make the
+        // line unreadable and rendering neither would hide the mistake.
+        if let Some(hit) = labels
+            .iter()
+            .find(|l| addr >= l.addr && addr < l.addr.saturating_add(l.len))
+        {
+            out.push_str(" {");
+            out.push_str(hit.label);
+            out.push('}');
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -234,5 +422,109 @@ mod tests {
     fn new_store_is_empty() {
         assert!(AnnotationStore::new().is_empty());
         assert_eq!(AnnotationStore::new().len(), 0);
+    }
+
+    /// W13-02f criterion 2's round trip, and the reason import goes
+    /// through `add`: a hand-edited file must not be able to smuggle in
+    /// what `add` refuses.
+    #[test]
+    fn json_round_trips_and_import_re_enforces_the_source_rule() {
+        let mut store = AnnotationStore::new();
+        store.add(valid(AddressSpace::Ram, 0x0086)).unwrap();
+        store.add(valid(AddressSpace::Rom, 0x1234)).unwrap();
+
+        let json = store.to_json().unwrap();
+        let (back, rejected) = AnnotationStore::from_json(&json).unwrap();
+        assert!(rejected.is_empty());
+        assert_eq!(back.entries(), store.entries());
+
+        // A file someone edited by hand, blanking a source.
+        let tampered = json.replace("https://example.test/ram-map", "   ");
+        let (loaded, rejected) = AnnotationStore::from_json(&tampered).unwrap();
+        assert_eq!(loaded.len(), 0, "unsourced rows must not enter the store");
+        assert_eq!(rejected.len(), 2, "and they must be REPORTED, not dropped");
+        assert!(matches!(rejected[0], AnnotationError::EmptySource { .. }));
+    }
+
+    #[test]
+    fn edit_and_delete_address_rows_by_index_and_survive_a_stale_one() {
+        let mut store = AnnotationStore::new();
+        store.add(valid(AddressSpace::Ram, 0x0086)).unwrap();
+        store.add(valid(AddressSpace::Ram, 0x0090)).unwrap();
+
+        let mut edited = valid(AddressSpace::Ram, 0x0086);
+        edited.label = "player_x_screen".to_string();
+        store.replace(0, edited).unwrap();
+        assert_eq!(store.get(0).unwrap().label, "player_x_screen");
+
+        // An edit may not blank what `add` would have refused.
+        let mut blanked = valid(AddressSpace::Ram, 0x0086);
+        blanked.source = "  ".to_string();
+        assert!(matches!(
+            store.replace(0, blanked),
+            Err(AnnotationError::EmptySource { .. })
+        ));
+        assert_eq!(store.get(0).unwrap().source, "https://example.test/ram-map");
+
+        assert_eq!(store.remove(0).unwrap().addr, 0x0086);
+        assert_eq!(store.len(), 1);
+        // A panel holding a stale index across a repaint must not panic.
+        assert!(store.remove(7).is_none());
+        assert!(store.get(7).is_none());
+        assert!(store.replace(7, valid(AddressSpace::Ram, 1)).is_ok());
+    }
+
+    /// DEBUGGER.md §4's own example, verbatim.
+    #[test]
+    fn trace_operands_are_labelled_in_the_docs_own_shape() {
+        let mut store = AnnotationStore::new();
+        let mut a = valid(AddressSpace::Ram, 0x0086);
+        a.label = "player_x_screen".to_string();
+        a.len = 2;
+        store.add(a).unwrap();
+        let labels = store.ram_labels();
+
+        assert_eq!(
+            label_operands("LDA $0086", &labels),
+            "LDA $0086 {player_x_screen}"
+        );
+        // len 2 covers the high byte: reading $0087 IS reading player_x.
+        assert_eq!(
+            label_operands("LDA $0087", &labels),
+            "LDA $0087 {player_x_screen}"
+        );
+        assert_eq!(label_operands("LDA $0088", &labels), "LDA $0088");
+        // Untouched when there is nothing to say, including for text with
+        // no operand at all.
+        assert_eq!(label_operands("CLC", &labels), "CLC");
+        assert_eq!(label_operands("LDA $0086", &[]), "LDA $0086");
+    }
+
+    /// A ROM annotation is a FILE OFFSET. Labelling a bus operand with it
+    /// would render a coincidence as a fact.
+    #[test]
+    fn rom_offsets_never_label_a_bus_operand() {
+        let mut store = AnnotationStore::new();
+        store.add(valid(AddressSpace::Rom, 0x8000)).unwrap();
+        assert_eq!(
+            label_operands("LDA $8000", &store.ram_labels()),
+            "LDA $8000"
+        );
+    }
+
+    /// Law 8: the hand-rolled walk in `label_operands` must advance on
+    /// every path. A lone `$`, a `$` at end-of-string and a run of them are
+    /// the shapes that would spin an index that only moves on a match.
+    #[test]
+    fn the_operand_scanner_terminates_on_degenerate_input() {
+        let labels: Vec<RamLabel<'_>> = vec![RamLabel {
+            addr: 0,
+            len: 1,
+            label: "zero",
+        }];
+        assert_eq!(label_operands("$", &labels), "$");
+        assert_eq!(label_operands("$$$", &labels), "$$$");
+        assert_eq!(label_operands("LDA $", &labels), "LDA $");
+        assert_eq!(label_operands("$0 $0", &labels), "$0 {zero} $0 {zero}");
     }
 }
