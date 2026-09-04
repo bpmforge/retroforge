@@ -5707,7 +5707,7 @@
     "the DataCrystal TSV import dialog is reachable from the UI, not only from tests"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED BY W13-01, 2026-09-03, and this is the REACHABILITY gap of the set — the same class the whole W10/W11 arc existed to close. MEASURED: AnnotationStore, datacrystal::parse_tsv and profile_export::export_skeleton are called from crates/retroforge/tests/** and from NOWHERE in crates/retroforge/src. The library is complete and the user cannot reach it.",
     "WHY THIS MATTERS MORE THAN ITS 3 POINTS SUGGEST: VISION §3 sells 'Debugger -> annotation -> profile export pipeline' as a DIFFERENTIATOR against Mesen's tiles-only HD Pack Builder. Today that pipeline exists as a test fixture."
