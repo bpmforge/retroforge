@@ -5800,7 +5800,7 @@
     "a golden trace fixture pins the format so it cannot drift silently"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED BY W13-01, 2026-09-03. The NES half of §2 is met by rf_nes::trace::format_trace_line and shared with the nestest golden diff; the SNES half does not exist. m/x-awareness is the part that makes this more than string formatting — operand width depends on processor-status bits, so the disassembler needs the machine's state, not just the bytes."
    ],
