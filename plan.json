@@ -5586,7 +5586,7 @@
     "the NES path is unchanged: every existing debugger provider test and the RF-Scroller goldens pass without re-baselining"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED BY W13-01, 2026-09-03, and it is FIRST because it is the unblocker: until this lands every SNES debug panel has nothing to draw, so W13-02b/c/g are unbuildable rather than merely unbuilt.",
     "MEASURED, not assumed: crates/rf-snes/src/core.rs state_view() returns cpu_regs: &[], vram: &[], cgram: &[], oam: &[], ppu_regs: &[], mapper_state: &[] — only wram is real. crates/retroforge/src/stepper.rs then answers None for bus(), bus_mut() and cpu() on Machine::Snes. This is the half-console shape W11-10's close note predicted, arriving on the debugger side: the trait was adopted and one implementation of it is a stub.",
