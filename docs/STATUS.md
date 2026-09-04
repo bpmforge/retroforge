@@ -2085,3 +2085,44 @@ that way.
   tests and 1 promotion test. Gate: **1741 passing, 0 failed, 33 ignored**
   (up from 1733), exit 0, `arch OK`; `validate-plan` 171 tickets · 909 pts;
   docs-gate green.
+
+- **W13-02d — the memory view is an editor, not a dump** (2026-09-04).
+  `memory_view` was `build_rows` + `byte_at` and nothing else; the "find"
+  box in `debug_dock` was the *trace* filter. Now: goto accepts `$`, `0x`
+  or bare hex, because a ROM hacker types all three and none is wrong;
+  find takes hex bytes spaced or run together and searches the rows **as
+  one contiguous run**, so a match straddling a row boundary is found —
+  a byte sequence does not care where the dump happens to wrap — walking
+  matches on repeated presses and wrapping rather than silently stopping
+  at the end. Annotated ranges are tinted and carry their label on hover,
+  from the same `ram_labels` lookup the trace panel uses.
+
+  **Live edit is gated on pause, and that is a correctness rule.** A poke
+  sent while the machine runs lands at whatever cycle the command queue
+  happens to drain on, so the same edit produces a different machine every
+  time — and determinism is what this project rests on. Two guards for one
+  rule, because this one writes to a live machine: the panel hides the
+  editor when running, and `pump_memory_poke` refuses and **says so**
+  rather than queueing. A byte that does not parse cancels rather than
+  writing: putting "whatever parsed" into live memory is not a recoverable
+  mistake, and neither is writing zero.
+
+  **The trait-level `poke` W11-10 asked for is deliberately still not
+  added**, and that is the decision rather than an oversight.
+  `EmuStepper::poke_bus` already routes through `rf_nes::CpuBus::write` —
+  the write a real instruction uses, so `$2001` genuinely toggles
+  rendering. Promoting it to `EmulatorCore` would be speculative today: the
+  memory panel is NES-shaped and there is no second core that can *display*
+  memory to need a generic write. It belongs with W13-02b.
+
+  Evidence: `tests/memory_editor_writes_the_machine.rs` asserts a running
+  core **refuses** the write and says so, then pauses, commits the same
+  edit, steps one scanline (a paused core sends no frames, so that is how
+  the panel's snapshot refreshes at all) and finds the byte in the machine.
+  Plus 3 `memory_view` unit tests. Gate: **1745 passing, 0 failed, 33
+  ignored** (up from 1741), exit 0, `arch OK`.
+
+  **Phase 13's debugger arc now stands at three of seven closed** —
+  W13-02d, W13-02e, W13-02f, which is bars B-3 through B-8. What is left is
+  the SNES half: `W13-02a` (state), `W13-02h` (events), and `W13-02b`/`c`
+  behind them, plus `W13-02g`.

@@ -1068,6 +1068,29 @@ impl RetroForgeApp {
         }
     }
 
+    /// Apply a byte the memory editor committed (ticket W13-02d).
+    ///
+    /// Refuses while the core is running rather than queueing: the panel
+    /// already hides the editor when not paused, and a poke that arrived
+    /// after a resume would land at an unrepeatable cycle. Two guards for
+    /// one rule, because this one writes to a live machine.
+    fn pump_memory_poke(&mut self) {
+        let paused = !self.running;
+        self.debug_panels.data.memory.paused = paused;
+        let Some((addr, value)) = self.debug_panels.data.memory.poke.take() else {
+            return;
+        };
+        if !paused {
+            self.debug_panels.data.memory.status =
+                Some("not written: the core is running".to_string());
+            return;
+        }
+        let Ok(addr) = u16::try_from(addr) else {
+            return;
+        };
+        self.send_command(core_thread::CoreCommand::PokeBus { addr, value });
+    }
+
     /// Poll the watched profile and re-decode if it changed (ticket
     /// W5-06, FRONTEND_UI §3.5's "hot-reloads on save").
     ///
@@ -4114,6 +4137,37 @@ impl RetroForgeApp {
         self.send_command(CoreCommand::Resume);
     }
 
+    /// Pause the core, as the Pause button does (ticket W13-02d).
+    #[doc(hidden)]
+    pub fn pause_for_test(&mut self) {
+        self.running = false;
+        self.send_command(CoreCommand::Pause);
+    }
+
+    /// The memory panel's state (ticket W13-02d) — the same door the UI
+    /// uses, for the end-to-end test that proves an edit reaches the
+    /// machine.
+    #[doc(hidden)]
+    pub fn debug_memory_mut(&mut self) -> &mut crate::debug_dock::MemoryPanelData {
+        &mut self.debug_panels.data.memory
+    }
+
+    /// Step one scanline, as the debugger's step control does — the
+    /// smallest advance that makes the core send a fresh frame message,
+    /// which is how a paused session's memory view refreshes at all
+    /// (ticket W13-02d).
+    #[doc(hidden)]
+    pub fn step_scanline_for_test(&mut self) {
+        self.send_command(CoreCommand::StepScanline);
+    }
+
+    /// The memory panel's last live WRAM snapshot (ticket W13-02d).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn wram_for_test(&self) -> &[u8; 0x0800] {
+        &self.debug_panels.data.wram
+    }
+
     /// Toggle temporal de-flicker exactly as the Enhance workspace's
     /// checkbox does, command and all (ticket W11-01).
     #[doc(hidden)]
@@ -4805,6 +4859,9 @@ impl eframe::App for RetroForgeApp {
         // Ticket W13-02f: whatever the annotations panel asked for last
         // frame (save, or export to the profile editor).
         self.pump_annotation_request();
+        // Ticket W13-02d: one edit from the memory panel, if the user
+        // committed one this frame.
+        self.pump_memory_poke();
         self.pump_audio_scopes();
 
         self.menu_bar(ui);

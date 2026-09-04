@@ -5648,7 +5648,11 @@
    "write_scope": [
     "crates/rf-debugger/src/memory_view.rs",
     "crates/retroforge/src/debug_dock.rs",
-    "crates/rf-core-api/**"
+    "crates/rf-core-api/**",
+    "crates/retroforge/src/app.rs",
+    "crates/retroforge/src/core_thread.rs",
+    "crates/retroforge/tests/**",
+    "docs/design/DEBUGGER.md"
    ],
    "depends_on": [],
    "acceptance": [
@@ -5657,10 +5661,16 @@
     "law 4 holds: the write goes through the core's own bus, never around it, and nothing mutates core state off the core thread"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "FILED BY W13-01, 2026-09-03. Today memory_view.rs is build_rows + byte_at and nothing else; the 'find' box in debug_dock.rs is the TRACE filter, not a memory search.",
-    "THIS IS THE TICKET W11-10's NOTE WAS WAITING FOR: 'an out-of-band bus WRITE for the memory editor' is one of the three things it lists as having no trait expression. Adding it to EmulatorCore is in scope here and is why rf-core-api is in the write_scope."
+    "THIS IS THE TICKET W11-10's NOTE WAS WAITING FOR: 'an out-of-band bus WRITE for the memory editor' is one of the three things it lists as having no trait expression. Adding it to EmulatorCore is in scope here and is why rf-core-api is in the write_scope.",
+    "HANDOFF 2026-09-04: write_scope widened to app.rs, core_thread.rs, tests/** and docs/design/DEBUGGER.md — the same three reasons as W13-02e (the core runs on its own thread so a write is a CoreCommand; the end-to-end test lives in tests/; W13-01's grading table would otherwise still read GAP for a row this closes).",
+    "THE TRAIT-LEVEL `poke` W11-10 ASKED FOR IS DELIBERATELY STILL NOT ADDED, and this is the decision, not an oversight. EmuStepper::poke_bus already exists and routes through rf_nes::CpuBus::write, which is the write a real instruction uses — so writing $2001 genuinely toggles rendering. Promoting it to EmulatorCore would be speculative today: the memory panel is NES-shaped (PanelData carries a NES WRAM and PRG-RAM window), and there is no second core that can DISPLAY memory to need a generic write. It belongs with W13-02b, when a SNES memory view exists. Adding a contract method for one implementation is how a trait grows methods nobody can implement meaningfully.",
+    "DONE 2026-09-04. CRITERION 1: goto accepts $, 0x or bare hex because a ROM hacker types all three; find takes hex bytes spaced or run together, searches the rows as one contiguous run so a match STRADDLING a row boundary is found, walks matches on repeated presses and wraps rather than silently stopping at the end; edit is click-a-byte, type, Enter. CRITERION 2: annotated ranges are tinted and carry the label on hover, using the same AnnotationStore::ram_labels the trace panel uses — one lookup, not two. CRITERION 3 (law 4): the write goes through a CoreCommand::PokeBus to the core thread, never around it.",
+    "LIVE EDIT IS GATED ON PAUSE AND THAT IS A CORRECTNESS RULE, not a UI nicety. A poke sent while the machine runs lands at whatever cycle the command queue happens to drain on, so the same edit produces a different machine every time — and determinism is what this project rests on. Two guards for one rule because this one writes to a live machine: the panel hides the editor when running, and pump_memory_poke refuses and SAYS SO rather than queueing.",
+    "A BAD BYTE CANCELS RATHER THAN WRITING. `u8::from_str_radix` failing means the user typed something that is not a byte; writing 'whatever parsed' into live memory is not a recoverable mistake, and neither is writing zero.",
+    "EVIDENCE: tests/memory_editor_writes_the_machine.rs drives RetroForgeApp — asserts a running core REFUSES the write and says so, then pauses, commits the same edit, steps one scanline (a paused core sends no frames, so that is how the panel's snapshot refreshes at all) and finds the byte in the machine. Plus 3 memory_view unit tests covering the prefix forms a hacker types, the half-typed-byte rejection, and a find that crosses a row boundary. Workspace 1745 passing / 0 failed / 33 ignored, up from 1741."
    ],
    "stories": []
   },

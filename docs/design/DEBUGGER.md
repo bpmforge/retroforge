@@ -128,7 +128,7 @@ citation is not a grade.**
 | 3 | Event viewer — dot/scanline scatter | `event_timeline::build_timeline` | **met** |
 | 3 | Trace viewer with filters | `trace::TraceScrollback` + `DebugTab::Trace` | **met** |
 | 3 | Audio — channel scopes, mute/solo | `audio_scope::{MuteState,mix_host_side,trace}` | **met** |
-| 3 | Memory hex — **live edit (pause-gated), goto/find, annotation coloring** | `memory_view::{build_rows,byte_at}` only. The panel has none of the three; the "find" box in `debug_dock.rs` is the *trace* filter. | **GAP** |
+| 3 | Memory hex — **live edit (pause-gated), goto/find, annotation coloring** | `memory_view::{parse_addr,parse_bytes,find_bytes}` + the panel's editor, `CoreCommand::PokeBus` (W13-02d) | **met** |
 | 3 | **the entire SNES column** — 2/4/8bpp CHR, per-BG tilemaps, Mode 7 view, CGRAM 256 + color math, 128-entry OAM w/ 32-per-line, VRAM/CGRAM/ARAM spaces, HDMA lanes, DSP voice + BRR | **nothing.** No provider in `rf-debugger/src` mentions SNES; `DebugTab` has nine variants and none is console-aware. | **GAP (the largest)** |
 | 4 | annotation store, typed, with `source_url` + confidence | `annotation::{Annotation,AnnotationStore}`, sourceless entries refused at `add` | **met** |
 | 4 | DataCrystal TSV import | `datacrystal::parse_tsv` | **met** (library only — see below) |
@@ -136,7 +136,7 @@ citation is not a grade.**
 | 4 | **the workflow reaches a user** | `DebugTab::Annotations` — create/edit/delete, TSV import, and an export that lands in the profile editor (W13-02f) | **met** |
 | 4 | persisted per normalized ROM hash; JSON import/export | `crate::annotation_store` in the frontend — `<config>/retroforge/annotations/<hash>.rfannot`, and the stored file *is* the interchange file (W13-02f) | **met** |
 | 4 | cross-links: labels inline in trace rows | `annotation::label_operands`, applied in the trace panel (W13-02f) | **met** |
-| 4 | cross-links: annotation coloring in the memory view | nothing | **GAP** (W13-02d) |
+| 4 | cross-links: annotation coloring in the memory view | annotated ranges tinted, label on hover, from the same `ram_labels` lookup the trace panel uses (W13-02d) | **met** |
 | 5 | Lua console REPL (`rf.mem`, `rf.bp.add`, …) | `DebugTab::LuaConsole` (W4-04), reachable | **met** |
 | 6 | pay-for-use; idle == compiled-out within noise, **measured** | `crates/retroforge/benches/debugger_idle.rs` | **met** |
 
@@ -196,7 +196,13 @@ capability that only tests can reach is not a capability a ROM hacker has.
 `W13-02a` is the unblocker for the SNES half: until `SnesCore::state_view`
 is real, every SNES viewer has nothing to draw.
 
-**Closed so far: `W13-02e`, `W13-02f`.**
+**Closed so far: `W13-02d`, `W13-02e`, `W13-02f`.**
+
+`W13-02d` (2026-09-04) — bars **B-3** and the memory half of **B-8**. Live
+edit is gated on pause and that is a *correctness* rule, not a UI nicety:
+a poke sent while the machine runs lands at whatever cycle the command
+queue drains on, so the same edit would produce a different machine every
+time.
 
 `W13-02e` (2026-09-04) — bars **B-4** and **B-5**. Watchpoints are
 evaluated **inside the core** and reported as

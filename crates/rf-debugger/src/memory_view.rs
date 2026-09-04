@@ -140,3 +140,111 @@ mod tests {
         assert_eq!(byte_at(&all, 0x1000), None); // in the gap
     }
 }
+
+/// Parse a user-typed address (ticket W13-02d's "goto").
+///
+/// Hex, with or without a `$` or `0x` prefix, because a ROM hacker types
+/// all three and none of them is wrong. Returns `None` for anything else —
+/// including an empty box, which is a form mid-edit, not an error.
+#[must_use]
+pub fn parse_addr(text: &str) -> Option<u32> {
+    let t = text.trim();
+    let t = t
+        .strip_prefix('$')
+        .or_else(|| t.strip_prefix("0x"))
+        .or_else(|| t.strip_prefix("0X"))
+        .unwrap_or(t);
+    if t.is_empty() {
+        return None;
+    }
+    u32::from_str_radix(t, 16).ok()
+}
+
+/// Parse a byte sequence to search for — hex bytes, whitespace-separated
+/// (`"4C 00 80"`) or run together (`"4C0080"`).
+///
+/// Returns `None` rather than a partial match on malformed input: a
+/// search that silently dropped the byte someone mistyped would report
+/// hits for a pattern they did not ask for.
+#[must_use]
+pub fn parse_bytes(text: &str) -> Option<Vec<u8>> {
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.is_empty() || !compact.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(compact.len() / 2);
+    let bytes = compact.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        // The index advances unconditionally (project law 8): every path
+        // through this body moves `i` by 2 before it can loop.
+        let pair = std::str::from_utf8(&bytes[i..i + 2]).ok()?;
+        out.push(u8::from_str_radix(pair, 16).ok()?);
+        i += 2;
+    }
+    Some(out)
+}
+
+/// Address of the first occurrence of `needle` at or after `from`, or
+/// `None`.
+///
+/// Searches the rows as one contiguous run, so a match that straddles a
+/// row boundary is found — a byte sequence does not care where the
+/// hex dump happens to wrap.
+#[must_use]
+pub fn find_bytes(rows: &[MemoryRow], needle: &[u8], from: u32) -> Option<u32> {
+    if needle.is_empty() {
+        return None;
+    }
+    let mut flat: Vec<u8> = Vec::new();
+    let base = rows.first()?.addr;
+    for row in rows {
+        flat.extend_from_slice(&row.bytes);
+    }
+    let start = from.saturating_sub(base) as usize;
+    if start >= flat.len() {
+        return None;
+    }
+    flat[start..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|offset| base + (start + offset) as u32)
+}
+
+#[cfg(test)]
+mod w13_02d_tests {
+    use super::*;
+
+    #[test]
+    fn an_address_is_hex_with_or_without_the_prefix_a_hacker_happens_to_type() {
+        assert_eq!(parse_addr("86"), Some(0x86));
+        assert_eq!(parse_addr("$0086"), Some(0x86));
+        assert_eq!(parse_addr("0x86"), Some(0x86));
+        assert_eq!(parse_addr("  $C000 "), Some(0xC000));
+        assert_eq!(parse_addr(""), None);
+        assert_eq!(parse_addr("zz"), None);
+    }
+
+    #[test]
+    fn a_search_pattern_is_hex_bytes_spaced_or_not_and_never_partial() {
+        assert_eq!(parse_bytes("4C 00 80"), Some(vec![0x4C, 0x00, 0x80]));
+        assert_eq!(parse_bytes("4C0080"), Some(vec![0x4C, 0x00, 0x80]));
+        // An odd number of nibbles is a half-typed byte, not a pattern.
+        assert_eq!(parse_bytes("4C 0"), None);
+        assert_eq!(parse_bytes("zz"), None);
+        assert_eq!(parse_bytes("   "), None);
+    }
+
+    #[test]
+    fn find_crosses_row_boundaries_and_respects_the_starting_point() {
+        let bytes: Vec<u8> = (0..48u8).collect();
+        let rows = build_rows(0x0000, &bytes);
+        // 0x0F,0x10 straddles the first row boundary (ROW_WIDTH is 16).
+        assert_eq!(find_bytes(&rows, &[0x0F, 0x10], 0), Some(0x0F));
+        assert_eq!(find_bytes(&rows, &[0x20], 0), Some(0x20));
+        // Searching from past a match does not find it again.
+        assert_eq!(find_bytes(&rows, &[0x0F, 0x10], 0x11), None);
+        assert_eq!(find_bytes(&rows, &[0xFF], 0), None);
+        assert_eq!(find_bytes(&rows, &[], 0), None);
+    }
+}

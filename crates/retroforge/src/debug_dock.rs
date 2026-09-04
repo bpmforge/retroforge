@@ -243,6 +243,8 @@ pub struct PanelData {
     /// live range (`EmuStepper::prg_ram`'s own doc for why WRAM alone
     /// isn't enough).
     pub prg_ram: [u8; 0x2000],
+    /// Ticket W13-02d: the memory panel's goto/find/edit state.
+    pub memory: MemoryPanelData,
 }
 
 impl Default for PanelData {
@@ -260,6 +262,7 @@ impl Default for PanelData {
             events: Vec::new(),
             wram: [0u8; 0x0800],
             prg_ram: [0u8; 0x2000],
+            memory: MemoryPanelData::default(),
         }
     }
 }
@@ -545,7 +548,13 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
             DebugTab::Palette => palette_ui(ui, &self.data.palette_ram),
             DebugTab::Oam => oam_ui(ui, &self.data.oam),
             DebugTab::EventTimeline => event_timeline_ui(ui, &self.data.events),
-            DebugTab::Memory => memory_ui(ui, &self.data.wram, &self.data.prg_ram),
+            DebugTab::Memory => memory_ui(
+                ui,
+                &self.data.wram,
+                &self.data.prg_ram,
+                &mut self.data.memory,
+                &self.annotations.store.ram_labels(),
+            ),
             DebugTab::OamDiff => oam_diff_ui(
                 ui,
                 &self.data.previous_oam,
@@ -705,30 +714,187 @@ fn oam_ui(ui: &mut egui::Ui, oam: &[u8; 256]) {
 /// `PanelData`, non-perturbingly — `EmuStepper::wram_snapshot`/`prg_ram`'s
 /// own docs), which is what keeps this panel "read-only and
 /// non-perturbing" even though it repaints every frame.
-fn memory_ui(ui: &mut egui::Ui, wram: &[u8; 0x0800], prg_ram: &[u8; 0x2000]) {
+/// What the memory panel needs beyond the bytes themselves (ticket
+/// W13-02d): goto, find, the live-edit box, and the annotation lookup that
+/// colours what is already labelled.
+#[derive(Debug, Default)]
+pub struct MemoryPanelData {
+    pub goto: String,
+    pub find: String,
+    /// Address the last goto/find resolved to, highlighted in the dump.
+    pub cursor: Option<u32>,
+    /// The address being edited and the text typed into it, if any.
+    pub editing: Option<(u32, String)>,
+    /// Whether the core is paused. Live edit is gated on it — see
+    /// [`memory_ui`].
+    pub paused: bool,
+    /// A write the app should perform: `(addr, value)`.
+    pub poke: Option<(u32, u8)>,
+    pub status: Option<String>,
+}
+
+/// The memory hex panel (DEBUGGER.md section 3's memory-hex row; ticket
+/// W13-02d).
+///
+/// ## Live edit is gated on pause, and that is a correctness rule
+///
+/// The core runs on its own thread (project law 4: nothing mutates core
+/// state off the core thread). A poke sent while the machine is running
+/// lands at whatever cycle the command queue happens to drain on, so the
+/// same edit produces a different machine every time — and the whole
+/// project rests on runs being reproducible. Paused, the write happens at
+/// a boundary the user can see, and a replay of the session lands it in
+/// the same place.
+fn memory_ui(
+    ui: &mut egui::Ui,
+    wram: &[u8; 0x0800],
+    prg_ram: &[u8; 0x2000],
+    panel: &mut MemoryPanelData,
+    labels: &[rf_debugger::annotation::RamLabel<'_>],
+) {
+    use rf_debugger::memory_view::{build_rows, find_bytes, parse_addr, parse_bytes};
+
+    let wram_rows = build_rows(0x0000, wram);
+    let prg_rows = build_rows(0x6000, prg_ram);
+
+    ui.horizontal(|ui| {
+        ui.label("goto $");
+        let goto = ui.add(egui::TextEdit::singleline(&mut panel.goto).desired_width(64.0));
+        if goto.changed() {
+            panel.cursor = parse_addr(&panel.goto);
+        }
+        ui.separator();
+        ui.label("find");
+        ui.add(egui::TextEdit::singleline(&mut panel.find).desired_width(110.0))
+            .on_hover_text("hex bytes, spaced or run together: 4C 00 80");
+        let needle = parse_bytes(&panel.find);
+        if ui
+            .add_enabled(needle.is_some(), egui::Button::new("next"))
+            .on_disabled_hover_text("an odd number of hex digits is a half-typed byte")
+            .clicked()
+        {
+            if let Some(needle) = needle {
+                // Search from just past the cursor so repeated presses
+                // walk the matches instead of finding the same one.
+                let from = panel.cursor.map_or(0, |c| c.saturating_add(1));
+                let found = find_bytes(&wram_rows, &needle, from)
+                    .or_else(|| find_bytes(&prg_rows, &needle, from))
+                    // Wrap: a search that stops at the end of the range
+                    // and says nothing looks like "not present".
+                    .or_else(|| find_bytes(&wram_rows, &needle, 0))
+                    .or_else(|| find_bytes(&prg_rows, &needle, 0));
+                match found {
+                    Some(addr) => {
+                        panel.cursor = Some(addr);
+                        panel.goto = format!("{addr:04X}");
+                        panel.status = Some(format!("found at ${addr:04X}"));
+                    }
+                    None => panel.status = Some("not found".to_string()),
+                }
+            }
+        }
+    });
+    if let Some(status) = &panel.status {
+        ui.label(egui::RichText::new(status).small().weak());
+    }
+    if !panel.paused {
+        ui.label(
+            egui::RichText::new("Editing is available while paused.")
+                .small()
+                .weak(),
+        );
+    }
+
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.label("WRAM ($0000-$07FF)");
-        memory_rows_ui(ui, "debug-memory-wram", 0x0000, wram);
+        memory_rows_ui(ui, "debug-memory-wram", &wram_rows, panel, labels);
         ui.separator();
         ui.label("PRG-RAM ($6000-$7FFF)");
-        memory_rows_ui(ui, "debug-memory-prgram", 0x6000, prg_ram);
+        memory_rows_ui(ui, "debug-memory-prgram", &prg_rows, panel, labels);
     });
 }
 
-fn memory_rows_ui(ui: &mut egui::Ui, grid_id: &str, base_addr: u32, bytes: &[u8]) {
-    let rows = rf_debugger::memory_view::build_rows(base_addr, bytes);
+/// Colour for a byte covered by an annotation. Deliberately a tint rather
+/// than a background block: the hex has to stay readable, and the question
+/// the colour answers is "is this labelled", not "what is it".
+const ANNOTATED: egui::Color32 = egui::Color32::from_rgb(0x7F, 0xC8, 0xFF);
+/// Colour for the goto/find cursor.
+const CURSOR: egui::Color32 = egui::Color32::from_rgb(0xFF, 0xC8, 0x50);
+
+fn memory_rows_ui(
+    ui: &mut egui::Ui,
+    grid_id: &str,
+    rows: &[rf_debugger::memory_view::MemoryRow],
+    panel: &mut MemoryPanelData,
+    labels: &[rf_debugger::annotation::RamLabel<'_>],
+) {
+    let mut begin_edit: Option<u32> = None;
+    let mut commit: Option<(u32, u8)> = None;
+    let mut cancel = false;
     egui::Grid::new(grid_id).striped(true).show(ui, |ui| {
-        for row in &rows {
+        for row in rows {
             ui.monospace(format!("{:04X}", row.addr));
-            let hex: String = row
-                .bytes
-                .iter()
-                .map(|b| format!("{b:02X} "))
-                .collect::<String>();
-            ui.monospace(hex);
+            ui.horizontal(|ui| {
+                for (i, b) in row.bytes.iter().enumerate() {
+                    let addr = row.addr + i as u32;
+                    if let Some((editing_addr, text)) = panel.editing.as_mut() {
+                        if *editing_addr == addr {
+                            let response = ui.add(
+                                egui::TextEdit::singleline(text)
+                                    .desired_width(22.0)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                            if response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            {
+                                match u8::from_str_radix(text.trim(), 16) {
+                                    Ok(value) => commit = Some((addr, value)),
+                                    // A bad byte cancels rather than
+                                    // writing something the user did not
+                                    // type. Writing "whatever parsed" into
+                                    // live memory is not a recoverable
+                                    // mistake.
+                                    Err(_) => cancel = true,
+                                }
+                            } else if response.lost_focus() {
+                                cancel = true;
+                            }
+                            continue;
+                        }
+                    }
+                    let label = labels
+                        .iter()
+                        .find(|l| addr >= l.addr && addr < l.addr.saturating_add(l.len));
+                    let mut text = egui::RichText::new(format!("{b:02X}")).monospace();
+                    if panel.cursor == Some(addr) {
+                        text = text.color(CURSOR).strong();
+                    } else if label.is_some() {
+                        text = text.color(ANNOTATED);
+                    }
+                    let cell = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+                    let cell = match label {
+                        Some(l) => cell.on_hover_text(l.label),
+                        None => cell,
+                    };
+                    if cell.clicked() && panel.paused {
+                        begin_edit = Some(addr);
+                    }
+                }
+            });
             ui.end_row();
         }
     });
+    if let Some(addr) = begin_edit {
+        panel.editing = Some((addr, String::new()));
+    }
+    if let Some((addr, value)) = commit {
+        panel.poke = Some((addr, value));
+        panel.editing = None;
+        panel.status = Some(format!("wrote ${value:02X} to ${addr:04X}"));
+    }
+    if cancel {
+        panel.editing = None;
+    }
 }
 
 /// Scanline range plotted along the timeline's X axis (NES: 262 total,

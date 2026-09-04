@@ -483,6 +483,16 @@ pub enum CoreCommand {
     /// requested here, so this can never starve the enhanced-camera
     /// pipeline (see that function's own doc).
     SetEventMask(rf_core_api::EventMask),
+    /// Ticket W13-02d: one out-of-band bus write from the memory editor.
+    ///
+    /// A command, like everything else here, because law 4 forbids the UI
+    /// thread touching core state — and the app only sends it while the
+    /// core is PAUSED, so the write lands at a boundary the user can see
+    /// rather than at whatever cycle the queue happened to drain on.
+    PokeBus {
+        addr: u16,
+        value: u8,
+    },
     /// Ticket W13-02e: replace the core's memory watchpoints.
     ///
     /// A command rather than a direct call because the core lives on its
@@ -935,6 +945,9 @@ fn core_thread_main(
                 }
                 CoreCommand::SetEventMask(mask) => {
                     stepper.set_event_mask(mask);
+                }
+                CoreCommand::PokeBus { addr, value } => {
+                    stepper.poke_bus(addr, value);
                 }
                 CoreCommand::SetWatches(watches) => {
                     // The refusal count is dropped here deliberately: the
