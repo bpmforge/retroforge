@@ -5623,7 +5623,7 @@
     "the panels are console-aware rather than duplicated: a NES ROM shows the NES column and a SNES ROM the SNES one, in the same DebugTab"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED BY W13-01, 2026-09-03. DEBUGGER.md §7.1 grades this whole column as GAP: no provider in rf-debugger/src mentions SNES, and DebugTab's nine variants are not console-aware.",
     "Mode 7, HDMA lanes and the DSP voice/BRR view are DELIBERATELY NOT HERE — they are W13-02c. Each is its own decoder with its own oracle, and bundling them into an already-8-point ticket is the shape Brad splits."
