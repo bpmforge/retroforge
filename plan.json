@@ -6006,7 +6006,7 @@
     "a test carries a non-cartridge byte pattern that reached Ok before this ticket, so the regression cannot come back silently"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FOUND 2026-09-15 BY W14-01, MEASURED NOT SUSPECTED. Pointed at a real Game Boy folder, the library scan reported 130 of 681 archives as recognized cartridges. A SNES header has NO leading magic — it is a checksum and a reset vector at $7FC0 or $FFC0 — so arbitrary ROM data hits the pattern often enough to matter. iNES has magic and is not the problem.",
     "WHY IT IS ITS OWN TICKET AND NOT PART OF W14-01: rf-cart is outside that ticket's write scope, and more importantly the fix belongs at the identity function rather than at one caller. W14-01 shipped a filename DENYLIST in the library scan (crates/retroforge/src/library.rs, names_a_foreign_console) which stops an entry that DECLARES a foreign console. Everything else is untouched: a foreign ROM named .bin or .rom, the file-open dialog, core_thread::spawn, and profile matching all still trust the sniff.",
