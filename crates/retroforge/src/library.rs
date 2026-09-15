@@ -70,7 +70,7 @@ pub enum EntryIdentity {
 }
 
 /// Which console an entry is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Console {
     Nes,
     Snes,
@@ -100,6 +100,62 @@ pub enum ScanIssue {
     UnreadableFile { path: PathBuf, reason: String },
     /// The file is larger than [`MAX_ROM_BYTES`].
     TooLarge { path: PathBuf, bytes: u64 },
+}
+
+/// One configured library folder, and optionally which console it holds.
+///
+/// ## Why the hint exists (ticket W14-01)
+///
+/// A real ROM collection is usually one folder per console, and the folder
+/// above them holds every console the owner has. Without a hint, adding
+/// that parent means the scan reads thousands of Game Boy and GBA
+/// archives, finds no NES or SNES cartridge in any of them, and says
+/// nothing about them — correct, but it read them all to find out. A root
+/// that declares its console lets an entry that sniffs as the *other*
+/// console be dropped without being listed.
+///
+/// **What it does NOT do, stated so nobody assumes otherwise:** it does
+/// not avoid the read. A zip's console is only knowable by decompressing
+/// and sniffing it, so the hint filters results, it does not save work.
+/// Making a second scan cheap is `W14-02`'s cache, not this.
+///
+/// `None` means "whatever is in there", which is what every root
+/// configured before this ticket deserializes to.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum LibraryRoot {
+    /// A bare path, the pre-W14-01 form. Kept as a variant rather than
+    /// migrated so an existing `settings.toml` keeps working untouched:
+    /// serde reads `library_folders = ["/roms"]` straight into this.
+    Bare(PathBuf),
+    /// A path that declares its console.
+    Hinted {
+        path: PathBuf,
+        console: Option<Console>,
+    },
+}
+
+impl LibraryRoot {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            LibraryRoot::Bare(p) | LibraryRoot::Hinted { path: p, .. } => p,
+        }
+    }
+
+    #[must_use]
+    pub const fn console(&self) -> Option<Console> {
+        match self {
+            LibraryRoot::Bare(_) => None,
+            LibraryRoot::Hinted { console, .. } => *console,
+        }
+    }
+}
+
+impl From<PathBuf> for LibraryRoot {
+    fn from(path: PathBuf) -> Self {
+        LibraryRoot::Bare(path)
+    }
 }
 
 /// The result of one scan.
@@ -152,13 +208,19 @@ pub enum FirstRunState {
 
 /// Classify a scan for the library screen.
 #[must_use]
-pub fn first_run_state(configured_roots: &[PathBuf], library: &Library) -> FirstRunState {
+pub fn first_run_state(configured_roots: &[LibraryRoot], library: &Library) -> FirstRunState {
     if configured_roots.is_empty() {
         return FirstRunState::NoRootsConfigured;
     }
     if library.entries.is_empty() {
         return FirstRunState::NoRomsFound {
-            roots: configured_roots.to_vec(),
+            // Paths, not roots: this is what the empty-library banner
+            // shows the user, and a console hint is not part of that
+            // sentence.
+            roots: configured_roots
+                .iter()
+                .map(|r| r.path().to_path_buf())
+                .collect(),
         };
     }
     FirstRunState::Populated {
@@ -170,7 +232,14 @@ pub fn first_run_state(configured_roots: &[PathBuf], library: &Library) -> First
 /// actually is (`rf_cart::Cartridge::load` sniffs), but *opening* every
 /// file in a folder that might hold thousands of unrelated ones is a waste;
 /// the extension is a cheap pre-filter, never the identity.
-const ROM_EXTENSIONS: [&str; 4] = ["nes", "sfc", "smc", "fig"];
+/// `zip` is here because a real library is zipped: of 2546 NES and SNES
+/// archives in the collection this ticket was measured against, every
+/// single one is a `.zip`. The archive is opened through
+/// [`crate::rom_open::resolve_rom_bytes`], the same untrusted-input path
+/// the file-open dialog uses — capped on bytes actually READ rather than
+/// on the size an archive declares, cumulative cap across entries, nested
+/// archives refused, nothing written to disk.
+const ROM_EXTENSIONS: [&str; 5] = ["nes", "sfc", "smc", "fig", "zip"];
 
 /// Scan `roots`, returning everything found and everything refused.
 ///
@@ -178,16 +247,16 @@ const ROM_EXTENSIONS: [&str; 4] = ["nes", "sfc", "smc", "fig"];
 /// roots are still scanned, because one mistyped path should not cost the
 /// user their whole library.
 #[must_use]
-pub fn scan(roots: &[PathBuf]) -> Library {
+pub fn scan(roots: &[LibraryRoot]) -> Library {
     let mut library = Library::default();
     let mut visited: HashSet<PathBuf> = HashSet::new();
 
     for root in roots {
-        let canonical_root = match root.canonicalize() {
+        let canonical_root = match root.path().canonicalize() {
             Ok(path) => path,
             Err(e) => {
                 library.issues.push(ScanIssue::UnusableRoot {
-                    root: root.clone(),
+                    root: root.path().to_path_buf(),
                     reason: e.to_string(),
                 });
                 continue;
@@ -198,6 +267,7 @@ pub fn scan(roots: &[PathBuf]) -> Library {
             &canonical_root,
             &canonical_root,
             0,
+            root.console(),
             &mut visited,
             &mut library,
         );
@@ -208,6 +278,16 @@ pub fn scan(roots: &[PathBuf]) -> Library {
     library
         .entries
         .sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.path.cmp(&b.path)));
+
+    // NOT DEDUPED BY HASH, deliberately (ticket W14-01). Two files holding
+    // one cartridge — a bare `.sfc` beside its `.zip`, or one dump under
+    // two folders — produce two entries that share a normalized hash. A
+    // first draft folded them, and that was wrong twice over: it hides a
+    // file the user actually has, and "keep the first" is a pick however
+    // deterministically it is made, which is the thing `rom_open` already
+    // refuses to do when an archive holds two ROMs. Whether the library
+    // GRID should show one card per hash is a UI question with an owner;
+    // the scan reports what is on disk.
     library
 }
 
@@ -215,6 +295,7 @@ fn scan_dir(
     dir: &Path,
     root: &Path,
     depth: usize,
+    hint: Option<Console>,
     visited: &mut HashSet<PathBuf>,
     library: &mut Library,
 ) {
@@ -256,11 +337,20 @@ fn scan_dir(
             continue;
         }
         if resolved.is_dir() {
-            scan_dir(&path, root, depth + 1, visited, library);
+            scan_dir(&path, root, depth + 1, hint, visited, library);
         } else if is_rom_candidate(&path) {
-            ingest_file(&path, library);
+            ingest_file(&path, hint, library);
         }
     }
+}
+
+/// A file's display title: its stem, which for a No-Intro set is the game
+/// name and region. Never the identity — that is the normalized hash.
+fn title_of(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("(unnamed)")
+        .to_string()
 }
 
 fn is_rom_candidate(path: &Path) -> bool {
@@ -270,7 +360,48 @@ fn is_rom_candidate(path: &Path) -> bool {
         .is_some_and(|ext| ROM_EXTENSIONS.contains(&ext.as_str()))
 }
 
-fn ingest_file(path: &Path, library: &mut Library) {
+/// Extensions that name a cartridge for a console this build does not
+/// emulate.
+///
+/// ## Why a denylist and not the obvious allowlist (ticket W14-01)
+///
+/// `rom_open`'s module doc is explicit that an entry inside an archive is
+/// chosen by CONTENT, never by its name — that is what lets an oddly named
+/// entry work. This does not overturn that: an unknown extension is still
+/// sniffed. It excludes only names that positively assert a console we do
+/// not run.
+///
+/// **It exists because the sniff is not sound on foreign data.** Pointed
+/// at a real Game Boy folder, `rf_cart::Cartridge::load` reported **130 of
+/// 681** archives as cartridges: a SNES header is a checksum and a reset
+/// vector at a fixed offset inside the image, with no leading magic, and
+/// arbitrary ROM data hits that pattern often enough to matter. A library
+/// root covering several consoles would otherwise fill with games that do
+/// not exist. **The false-positive itself is `rf-cart`'s and is NOT fixed
+/// here** — that crate is outside this ticket's write scope, and it has a
+/// ticket of its own (W14-05).
+///
+/// **What this does NOT catch**, so nobody reads it as containment: it
+/// keys on a name that DECLARES a console. A foreign ROM called `.bin`,
+/// `.rom`, or nothing at all still reaches the sniffer and can still come
+/// back a false cartridge, and every other caller of
+/// `rf_cart::Cartridge::load` — the file-open dialog, `core_thread::spawn`,
+/// profile matching — is unprotected by this entirely. That residual is
+/// W14-05's, not this list's.
+const FOREIGN_ROM_EXTENSIONS: [&str; 10] = [
+    "gb", "gbc", "gba", "vb", "sms", "gg", "n64", "z64", "v64", "md",
+];
+
+/// Does this name assert a console this build does not emulate?
+pub(crate) fn names_a_foreign_console(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|ext| FOREIGN_ROM_EXTENSIONS.contains(&ext.as_str()))
+}
+
+fn ingest_file(path: &Path, hint: Option<Console>, library: &mut Library) {
     let bytes = match std::fs::metadata(path) {
         Ok(meta) if meta.len() > MAX_ROM_BYTES => {
             library.issues.push(ScanIssue::TooLarge {
@@ -298,6 +429,36 @@ fn ingest_file(path: &Path, library: &mut Library) {
         }
     };
 
+    // Ticket W14-01: a `.zip` becomes the cartridge inside it here, on the
+    // SAME path the file-open dialog uses, so identity stays the
+    // normalized hash of the ROM itself. A bare and a zipped copy of one
+    // cartridge therefore collapse to ONE entry — which matters because
+    // that hash is what per-game settings, save states and profile
+    // matching all key on. A bare file is moved through untouched.
+    let bytes = match crate::rom_open::resolve_rom_bytes(bytes) {
+        Ok(rom) => rom,
+        // An archive holding no cartridge at all is SKIPPED, not listed.
+        // FRONTEND_UI 3.1's "unparseable is listed, not dropped" is about
+        // a ROM this build cannot parse; a Game Boy archive is not that,
+        // and the collection this was measured against holds 2507 of them
+        // next to the NES and SNES folders. Listing them would bury the
+        // library in entries for a console this emulator does not run.
+        Err(crate::rom_open::RomOpenError::NoRomInArchive { .. }) => return,
+        // Everything else IS reported: a cartridge this build refused
+        // (unsupported mapper or chip) is exactly the case W2-16 exists
+        // for, and a corrupt archive is worth saying out loud.
+        Err(e) => {
+            library.entries.push(LibraryEntry {
+                path: path.to_path_buf(),
+                title: title_of(path),
+                identity: EntryIdentity::Unrecognized {
+                    reason: e.to_string(),
+                },
+            });
+            return;
+        }
+    };
+
     let title = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -319,6 +480,16 @@ fn ingest_file(path: &Path, library: &mut Library) {
             reason: e.to_string(),
         },
     };
+
+    // Ticket W14-01: a root that declares its console drops the other
+    // one. Applied HERE, after the sniff, because a zip's console is not
+    // knowable before it is opened — the hint filters the result, it does
+    // not save the read (see `LibraryRoot`).
+    if let (Some(want), EntryIdentity::Recognized { console, .. }) = (hint, &identity) {
+        if *console != want {
+            return;
+        }
+    }
 
     library.entries.push(LibraryEntry {
         path: path.to_path_buf(),
@@ -353,13 +524,211 @@ mod tests {
         rom
     }
 
+    /// A minimal LoROM image, same shape `rf-snes`'s own tests use.
+    fn snes_rom(seed: u8) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x0000] = 0x80;
+        rom[0x0001] = 0xFE;
+        for (i, b) in b"RF LIBRARY TEST      ".iter().enumerate() {
+            rom[0x7FC0 + i] = *b;
+        }
+        rom[0x7FD5] = 0x20;
+        rom[0x7FD6] = 0x00;
+        rom[0x7FD7] = 0x08;
+        rom[0x7FFC] = 0x00;
+        rom[0x7FFD] = 0x80;
+        rom[0x0100] = seed;
+        rom
+    }
+
+    fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = std::fs::File::create(path).expect("create archive");
+        let mut w = zip::ZipWriter::new(file);
+        let opts: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, contents) in entries {
+            w.start_file(*name, opts).expect("start entry");
+            std::io::Write::write_all(&mut w, contents).expect("write entry");
+        }
+        w.finish().expect("finish archive");
+    }
+
+    /// Ticket W14-01 criterion 1, and the thing this change could silently
+    /// break: identity must stay the hash of the CARTRIDGE, never of the
+    /// archive holding it. Per-game settings, save states and profile
+    /// matching all key on that hash, so a zipped copy that hashed
+    /// differently would quietly become a different game.
+    #[test]
+    fn a_bare_and_a_zipped_copy_of_one_cartridge_are_one_entry() {
+        let dir = temp_dir("bare-vs-zipped");
+        std::fs::create_dir_all(&dir).unwrap();
+        let rom = nes_rom(0x42);
+        std::fs::write(dir.join("Game (USA).nes"), &rom).unwrap();
+        write_zip(
+            &dir.join("Game (USA).zip"),
+            &[("Game (USA).nes", rom.as_slice())],
+        );
+
+        let library = scan(&[LibraryRoot::Bare(dir.clone())]);
+        assert_eq!(
+            library.entries.len(),
+            2,
+            "both files are on disk and both are reported, got {:?}",
+            library.entries
+        );
+
+        let hashes: Vec<&str> = library
+            .entries
+            .iter()
+            .map(|e| match &e.identity {
+                EntryIdentity::Recognized {
+                    console,
+                    normalized_sha256,
+                } => {
+                    assert_eq!(*console, Console::Nes);
+                    normalized_sha256.as_str()
+                }
+                EntryIdentity::Unrecognized { reason } => {
+                    panic!("both copies must be recognized, got {reason}")
+                }
+            })
+            .collect();
+        assert_eq!(
+            hashes[0], hashes[1],
+            "the zipped copy must hash the CARTRIDGE, not the archive — that hash \
+             is what per-game settings, save states and profile matching key on"
+        );
+        assert_eq!(hashes[0].len(), 64);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Criterion 3: an archive for a console this build does not run holds
+    /// no NES or SNES cartridge, so it is skipped ENTIRELY — not listed as
+    /// unrecognized. The collection this ticket was measured against keeps
+    /// 2507 Game Boy, GBA, GBC and Virtual Boy archives beside the NES and
+    /// SNES folders; listing them would bury the library.
+    #[test]
+    fn an_archive_holding_no_cartridge_is_skipped_not_listed() {
+        let dir = temp_dir("foreign-console");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_zip(
+            &dir.join("Some Handheld Game (USA).zip"),
+            &[(
+                "Some Handheld Game (USA).gb",
+                b"not a cartridge we run".as_slice(),
+            )],
+        );
+        std::fs::write(dir.join("Real (USA).nes"), nes_rom(7)).unwrap();
+
+        // ...while a BROKEN cartridge of a console this build does run is
+        // still listed, because "we could not parse this ROM" and "this is
+        // not our ROM" are different answers. A bare corrupt file was
+        // always listed; before this the same file zipped vanished.
+        write_zip(
+            &dir.join("Broken Dump (USA).zip"),
+            &[("Broken Dump (USA).sfc", b"junk header".as_slice())],
+        );
+
+        let library = scan(&[LibraryRoot::Bare(dir.clone())]);
+        let titles: Vec<&str> = library.entries.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["Broken Dump (USA)", "Real (USA)"],
+            "the handheld archive is skipped; the broken cartridge is listed"
+        );
+        assert!(matches!(
+            library.entries[0].identity,
+            EntryIdentity::Unrecognized { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Criterion 3, second half: a root that declares its console drops
+    /// the other one.
+    #[test]
+    fn a_console_hint_drops_the_other_console() {
+        let dir = temp_dir("console-hint");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("A Nes Game (USA).nes"), nes_rom(1)).unwrap();
+        write_zip(
+            &dir.join("A Snes Game (USA).zip"),
+            &[("A Snes Game (USA).sfc", snes_rom(1).as_slice())],
+        );
+
+        let both = scan(&[LibraryRoot::Bare(dir.clone())]);
+        assert_eq!(both.entries.len(), 2, "no hint means both, got {both:?}");
+
+        let nes_only = scan(&[LibraryRoot::Hinted {
+            path: dir.clone(),
+            console: Some(Console::Nes),
+        }]);
+        assert_eq!(nes_only.entries.len(), 1);
+        assert_eq!(nes_only.entries[0].title, "A Nes Game (USA)");
+
+        let snes_only = scan(&[LibraryRoot::Hinted {
+            path: dir.clone(),
+            console: Some(Console::Snes),
+        }]);
+        assert_eq!(snes_only.entries.len(), 1);
+        assert_eq!(snes_only.entries[0].title, "A Snes Game (USA)");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A root configured before W14-01 is a bare path string in
+    /// `settings.toml`, and must keep working untouched.
+    #[test]
+    fn a_pre_w14_root_deserializes_as_an_unhinted_root() {
+        let roots: Vec<LibraryRoot> = toml::from_str::<
+            std::collections::BTreeMap<String, Vec<LibraryRoot>>,
+        >("library_folders = [\"/roms/nes\", \"/mnt/nas\"]\n")
+        .expect("the pre-ticket form must still parse")
+        .remove("library_folders")
+        .expect("key");
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0].path(), Path::new("/roms/nes"));
+        assert!(roots.iter().all(|r| r.console().is_none()));
+    }
+
+    /// Criterion 4: the only test that reads a REAL library takes its
+    /// directory from the environment and skips cleanly when it is not
+    /// set, exactly as the 65816 vector suite does. A hardcoded path under
+    /// somebody's home directory is a test that passes on one machine.
+    #[test]
+    fn the_real_library_scans_when_one_is_configured() {
+        let Ok(dir) = std::env::var("RF_ROM_LIBRARY") else {
+            eprintln!("SKIP: set RF_ROM_LIBRARY to a ROM folder to run this");
+            return;
+        };
+        let library = scan(&[LibraryRoot::Bare(PathBuf::from(dir))]);
+        let recognized = library
+            .entries
+            .iter()
+            .filter(|e| matches!(e.identity, EntryIdentity::Recognized { .. }))
+            .count();
+        let nes = library.by_console(Console::Nes).len();
+        let snes = library.by_console(Console::Snes).len();
+        eprintln!(
+            "real library: {} entries, {recognized} recognized ({nes} NES, {snes} SNES), {} issues",
+            library.entries.len(),
+            library.issues.len()
+        );
+        assert!(
+            recognized > 0,
+            "a configured ROM library that yields no recognized cartridge is a \
+             failure, not an empty folder — that is exactly the state this \
+             ticket was filed to end"
+        );
+    }
+
     #[test]
     fn a_scan_identifies_roms_by_normalized_hash_and_console() {
         let root = temp_dir("identify");
         std::fs::write(root.join("Game One.nes"), nes_rom(1)).unwrap();
         std::fs::write(root.join("Game Two.nes"), nes_rom(2)).unwrap();
 
-        let library = scan(std::slice::from_ref(&root));
+        let library = scan(&[LibraryRoot::Bare(root.clone())]);
         assert_eq!(library.entries.len(), 2);
         assert!(library.issues.is_empty(), "{:?}", library.issues);
 
@@ -404,7 +773,7 @@ mod tests {
         let root = temp_dir("unrecognized");
         std::fs::write(root.join("Broken.nes"), b"not a rom at all").unwrap();
 
-        let library = scan(std::slice::from_ref(&root));
+        let library = scan(&[LibraryRoot::Bare(root.clone())]);
         assert_eq!(library.entries.len(), 1, "it must still appear");
         match &library.entries[0].identity {
             EntryIdentity::Unrecognized { reason } => {
@@ -426,7 +795,7 @@ mod tests {
         std::fs::write(root.join("readme.txt"), b"hello").unwrap();
         std::fs::write(root.join("cover.png"), b"\x89PNG").unwrap();
 
-        let library = scan(std::slice::from_ref(&root));
+        let library = scan(&[LibraryRoot::Bare(root.clone())]);
         assert_eq!(library.entries.len(), 1);
         assert_eq!(library.entries[0].title, "Deep");
         let _ = std::fs::remove_dir_all(&root);
@@ -444,7 +813,7 @@ mod tests {
         // sub/back -> the root itself: walking it revisits the root.
         std::os::unix::fs::symlink(&root, root.join("sub/back")).unwrap();
 
-        let library = scan(std::slice::from_ref(&root));
+        let library = scan(&[LibraryRoot::Bare(root.clone())]);
         assert_eq!(
             library.entries.len(),
             1,
@@ -466,7 +835,7 @@ mod tests {
         std::fs::write(root.join("Inside.nes"), nes_rom(6)).unwrap();
         std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
 
-        let library = scan(std::slice::from_ref(&root));
+        let library = scan(&[LibraryRoot::Bare(root.clone())]);
 
         assert_eq!(library.entries.len(), 1, "only the contained ROM is listed");
         assert_eq!(library.entries[0].title, "Inside");
@@ -504,7 +873,7 @@ mod tests {
         std::fs::write(&target, nes_rom(7)).unwrap();
         std::os::unix::fs::symlink(&target, root.join("Link.nes")).unwrap();
 
-        let library = scan(std::slice::from_ref(&root));
+        let library = scan(&[LibraryRoot::Bare(root.clone())]);
         assert!(library.entries.is_empty(), "{:?}", library.entries);
         assert!(library
             .issues
@@ -522,7 +891,10 @@ mod tests {
         std::fs::write(good.join("Fine.nes"), nes_rom(8)).unwrap();
         let missing = good.join("does-not-exist");
 
-        let library = scan(&[missing.clone(), good.clone()]);
+        let library = scan(&[
+            LibraryRoot::Bare(missing.clone()),
+            LibraryRoot::Bare(good.clone()),
+        ]);
         assert_eq!(library.entries.len(), 1);
         assert!(matches!(
             library.issues.as_slice(),
@@ -539,7 +911,7 @@ mod tests {
         file.set_len(MAX_ROM_BYTES + 1).unwrap();
         drop(file);
 
-        let library = scan(std::slice::from_ref(&root));
+        let library = scan(&[LibraryRoot::Bare(root.clone())]);
         assert!(library.entries.is_empty());
         assert!(matches!(
             library.issues.as_slice(),
@@ -560,7 +932,7 @@ mod tests {
 
         let root = PathBuf::from("/roms");
         assert_eq!(
-            first_run_state(std::slice::from_ref(&root), &empty),
+            first_run_state(&[LibraryRoot::Bare(root.clone())], &empty),
             FirstRunState::NoRomsFound {
                 roots: vec![root.clone()]
             },
@@ -576,7 +948,7 @@ mod tests {
             },
         });
         assert_eq!(
-            first_run_state(std::slice::from_ref(&root), &populated),
+            first_run_state(&[LibraryRoot::Bare(root.clone())], &populated),
             FirstRunState::Populated { count: 1 }
         );
     }
@@ -589,7 +961,7 @@ mod tests {
     fn scanning_needs_no_network_by_construction() {
         let root = temp_dir("offline");
         std::fs::write(root.join("Offline.nes"), nes_rom(9)).unwrap();
-        let library = scan(std::slice::from_ref(&root));
+        let library = scan(&[LibraryRoot::Bare(root.clone())]);
         assert_eq!(library.entries.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -367,7 +367,8 @@ impl EmuStepper {
     ///
     /// Until now `core_thread::spawn` called
     /// [`Self::from_ines_bytes`] unconditionally, so a SNES ROM was
-    /// refused with `NotNesImage` — while the library scanner happily
+    /// refused as "only NES ROMs are supported" — while the library
+    /// scanner happily
     /// identified it as `Recognized { console: Snes }`, listed it with a
     /// Play button and offered a SNES filter. The product advertised a
     /// feature it could not perform.

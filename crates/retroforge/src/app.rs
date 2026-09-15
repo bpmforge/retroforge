@@ -406,7 +406,7 @@ pub struct RetroForgeApp {
     show_overlay_menu: bool,
     /// Configured library roots, as the user chose them (resolved at scan
     /// time, never stored canonicalized — see `crate::library_roots`).
-    library_roots: Vec<std::path::PathBuf>,
+    library_roots: Vec<crate::library::LibraryRoot>,
     /// Last scan's result. `None` until the first scan, which is why the
     /// window scans on open rather than at startup: a cold start must not
     /// wait on a folder walk over a network share.
@@ -3355,20 +3355,54 @@ impl RetroForgeApp {
                             SettingsTab::Paths => {
                                 ui.label("Library folders");
                                 let mut remove: Option<usize> = None;
-                                for (index, folder) in self
-                                    .settings
-                                    .paths
-                                    .library_folders
-                                    .clone()
-                                    .iter()
-                                    .enumerate()
-                                {
+                                for index in 0..self.settings.paths.library_folders.len() {
+                                    let path = self.settings.paths.library_folders[index]
+                                        .path()
+                                        .display()
+                                        .to_string();
+                                    let mut console =
+                                        self.settings.paths.library_folders[index].console();
                                     ui.horizontal(|ui| {
-                                        ui.label(folder.display().to_string());
+                                        ui.label(&path);
+                                        // Ticket W14-01: the hint is set HERE or it is a
+                                        // feature nobody can reach — the same trap W2-13
+                                        // named when the ROM picker could not select the
+                                        // archives the loader had just learned to read.
+                                        egui::ComboBox::from_id_salt(("library-root", index))
+                                            .selected_text(match console {
+                                                None => "Any console",
+                                                Some(crate::library::Console::Nes) => "NES only",
+                                                Some(crate::library::Console::Snes) => "SNES only",
+                                            })
+                                            .show_ui(ui, |ui| {
+                                                for (label, value) in [
+                                                    ("Any console", None),
+                                                    (
+                                                        "NES only",
+                                                        Some(crate::library::Console::Nes),
+                                                    ),
+                                                    (
+                                                        "SNES only",
+                                                        Some(crate::library::Console::Snes),
+                                                    ),
+                                                ] {
+                                                    ui.selectable_value(&mut console, value, label);
+                                                }
+                                            });
                                         if ui.small_button("Remove").clicked() {
                                             remove = Some(index);
                                         }
                                     });
+                                    if console
+                                        != self.settings.paths.library_folders[index].console()
+                                    {
+                                        self.settings.paths.library_folders[index] =
+                                            crate::library::LibraryRoot::Hinted {
+                                                path: std::path::PathBuf::from(&path),
+                                                console,
+                                            };
+                                        changed = true;
+                                    }
                                 }
                                 if let Some(index) = remove {
                                     self.settings.paths.library_folders.remove(index);
@@ -3376,8 +3410,17 @@ impl RetroForgeApp {
                                 }
                                 if ui.button("Add folder\u{2026}").clicked() {
                                     if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                        if !self.settings.paths.library_folders.contains(&folder) {
-                                            self.settings.paths.library_folders.push(folder);
+                                        if !self
+                                            .settings
+                                            .paths
+                                            .library_folders
+                                            .iter()
+                                            .any(|root| root.path() == folder)
+                                        {
+                                            self.settings
+                                                .paths
+                                                .library_folders
+                                                .push(crate::library::LibraryRoot::Bare(folder));
                                             changed = true;
                                         }
                                     }
@@ -3769,7 +3812,8 @@ impl RetroForgeApp {
         let Some(folder) = rfd::FileDialog::new().pick_folder() else {
             return false;
         };
-        self.library_roots.push(folder);
+        self.library_roots
+            .push(crate::library::LibraryRoot::Bare(folder));
         self.save_library_roots();
         true
     }
@@ -4084,7 +4128,7 @@ impl RetroForgeApp {
     /// harness can operate.
     #[doc(hidden)]
     pub fn set_library_roots_for_test(&mut self, roots: Vec<std::path::PathBuf>) {
-        self.library_roots = roots;
+        self.library_roots = roots.into_iter().map(Into::into).collect();
         self.rescan_library();
     }
 

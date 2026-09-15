@@ -607,7 +607,8 @@ where
 pub fn spawn(rom: Vec<u8>) -> Result<CoreHandle, crate::stepper::OpenError> {
     // Ticket W11-12: whichever console this image is. This line called
     // `from_ines_bytes` unconditionally until now, which is why a SNES
-    // ROM was refused with `NotNesImage` — while the library scanner
+    // ROM was refused as "only NES ROMs are supported" — while the
+    // library scanner
     // identified it correctly as `Recognized { console: Snes }`, listed
     // it with a Play button, and offered a SNES filter. The product
     // advertised a feature it could not perform.

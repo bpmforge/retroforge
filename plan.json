@@ -5899,7 +5899,7 @@
     "any test that reads a real library takes its directory from an environment variable and SKIPS cleanly when it is absent, on the RF_NESTEST_ROM / RF_65816_VECTORS pattern; no path under a home directory is committed and no ROM bytes are (law 5)"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "MEASURED, NOT ESTIMATED (2026-09-15, throwaway probe over the supplied library, deleted after the run). NES: 1281 archives, 1058 open today, 223 refused and every single refusal is an unsupported mapper. SNES: 1265 archives, ZERO open today, 1119 would open if the zip reader kept SNES entries, 146 refused for real reasons (enhancement chips and junk headers). That 1119 is this ticket's whole point.",
     "THE BUG IS ONE MATCH ARM. crates/retroforge/src/rom_open.rs's rom_from_zip sniffs every entry through rf_cart::Cartridge::load and collects Nes candidates; its Ok(Cartridge::Snes { .. }) arm is EMPTY, so a SNES entry is inspected, recognized, and dropped — and the archive then reports the generic 'contains no recognizable ROM'. Opening a BARE .sfc works (the same file accepts both variants on the non-zip path), which is what makes this a bug rather than a decision. Three mentions of 'snes' in the whole file and no test covers a zipped SNES ROM, which is why it survived since W1-06.",
@@ -5989,6 +5989,31 @@
    ],
    "stories": [
     "E2-S1"
+   ]
+  },
+  {
+   "id": "W14-05",
+   "title": "rf-cart reports Ok for data that is not a cartridge",
+   "phase": 14,
+   "crate": "rf-cart",
+   "write_scope": [
+    "crates/rf-cart/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "Cartridge::load stops returning Ok for a ROM image of a console this build does not emulate; measured against the real library that found the bug, the 681-archive Game Boy folder must yield zero recognized cartridges without relying on any caller's filename denylist",
+    "the tightening is justified against fullsnes/nesdev in doc comments (NFR-011) and does not cost any of the 2177 real NES and SNES cartridges that load today — re-measured, not assumed",
+    "a test carries a non-cartridge byte pattern that reached Ok before this ticket, so the regression cannot come back silently"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FOUND 2026-09-15 BY W14-01, MEASURED NOT SUSPECTED. Pointed at a real Game Boy folder, the library scan reported 130 of 681 archives as recognized cartridges. A SNES header has NO leading magic — it is a checksum and a reset vector at $7FC0 or $FFC0 — so arbitrary ROM data hits the pattern often enough to matter. iNES has magic and is not the problem.",
+    "WHY IT IS ITS OWN TICKET AND NOT PART OF W14-01: rf-cart is outside that ticket's write scope, and more importantly the fix belongs at the identity function rather than at one caller. W14-01 shipped a filename DENYLIST in the library scan (crates/retroforge/src/library.rs, names_a_foreign_console) which stops an entry that DECLARES a foreign console. Everything else is untouched: a foreign ROM named .bin or .rom, the file-open dialog, core_thread::spawn, and profile matching all still trust the sniff.",
+    "THIS IS A SOUNDNESS BUG IN THE THING EVERYTHING KEYS ON. The normalized hash is the identity for per-game settings, save states, profile matching and the library grid; a false Ok mints an identity for a game that does not exist. That is why it is filed at 5 points rather than left as a note."
+   ],
+   "stories": [
+    "E2-S3"
    ]
   }
  ]

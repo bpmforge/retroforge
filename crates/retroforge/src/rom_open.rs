@@ -68,11 +68,6 @@ pub enum RomOpenError {
     Io(std::io::Error),
     /// `rf-cart` couldn't parse it as either an NES or SNES image.
     Cart(CartError),
-    /// Parsed fine, but as an SNES image — this ticket only wires an NES
-    /// core (`rf-snes` doesn't exist yet), so report that plainly rather
-    /// than attempting a load that would fail deeper in the stack with a
-    /// less useful message.
-    NotNesImage,
     /// The file starts with zip magic but could not be read as an archive
     /// (truncated, corrupt, or an unsupported compression method).
     Zip(zip::result::ZipError),
@@ -80,7 +75,7 @@ pub enum RomOpenError {
     /// how many entries were inspected so the message can distinguish
     /// "empty archive" from "archive full of screenshots and a README".
     NoRomInArchive { entries_inspected: usize },
-    /// The archive held exactly one entry that **is** a NES image, but
+    /// The archive held exactly one entry that **is** a cartridge, but
     /// `rf-cart` rejected it — an unsupported mapper being the common
     /// case. Ticket W2-16: without this variant the specific, already
     /// generated diagnostic was discarded and the user saw the generic
@@ -101,12 +96,6 @@ impl fmt::Display for RomOpenError {
         match self {
             RomOpenError::Io(e) => write!(f, "could not read ROM file: {e}"),
             RomOpenError::Cart(e) => write!(f, "not a recognizable ROM image: {e}"),
-            RomOpenError::NotNesImage => {
-                write!(
-                    f,
-                    "this is an SNES image; only NES ROMs are supported so far"
-                )
-            }
             RomOpenError::Zip(e) => write!(f, "could not read the zip archive: {e}"),
             RomOpenError::NoRomInArchive { entries_inspected } => write!(
                 f,
@@ -116,7 +105,7 @@ impl fmt::Display for RomOpenError {
             ),
             RomOpenError::ArchiveEntryRejected { name, source } => write!(
                 f,
-                "the zip archive's only NES image, '{name}', could not be loaded: {source}"
+                "the zip archive's only ROM image, '{name}', could not be loaded: {source}"
             ),
             RomOpenError::MultipleRomsInArchive { names } => write!(
                 f,
@@ -131,11 +120,11 @@ impl fmt::Display for RomOpenError {
 
 impl std::error::Error for RomOpenError {}
 
-/// Read `path` and validate it's a loadable NES image (console-agnostic
-/// sniff via `rf_cart::Cartridge::load`, same entry point a future SNES
-/// core would share) before returning its raw bytes. Does not touch
-/// `rf-nes` directly — `EmuStepper::from_ines_bytes` does its own,
-/// NES-specific validation (mapper support etc.) on top of this.
+/// Read `path` and validate it holds a cartridge this build has a core
+/// for (console-agnostic sniff via `rf_cart::Cartridge::load`) before
+/// returning its raw bytes. Does not touch `rf-nes` or `rf-snes` directly
+/// — `EmuStepper::open` dispatches on the sniffed console and each core
+/// does its own validation (mapper/chip support) on top of this.
 ///
 /// # Errors
 /// See [`RomOpenError`].
@@ -156,12 +145,13 @@ pub fn resolve_rom_bytes(bytes: Vec<u8>) -> Result<Vec<u8>, RomOpenError> {
     if bytes.starts_with(&ZIP_MAGIC) {
         return rom_from_zip(&bytes);
     }
-    validate_nes(bytes)
+    validate_rom(bytes)
 }
 
 /// Shared final check for both paths: a candidate is only a ROM this app
-/// can open if `rf-cart` sniffs it as NES.
-fn validate_nes(bytes: Vec<u8>) -> Result<Vec<u8>, RomOpenError> {
+/// can open if `rf-cart` sniffs it as a cartridge of a console this build
+/// has a core for.
+fn validate_rom(bytes: Vec<u8>) -> Result<Vec<u8>, RomOpenError> {
     match Cartridge::load(&bytes) {
         // Ticket W11-12: BOTH consoles. This arm returned
         // `NotNesImage` from W1-06 until now, which was honest while
@@ -181,9 +171,10 @@ fn validate_nes(bytes: Vec<u8>) -> Result<Vec<u8>, RomOpenError> {
 fn rom_from_zip(bytes: &[u8]) -> Result<Vec<u8>, RomOpenError> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(RomOpenError::Zip)?;
     let mut candidates: Vec<(String, Vec<u8>)> = Vec::new();
-    // Entries that ARE NES images but which rf-cart refused, kept so the
+    // Entries that ARE cartridges but which rf-cart refused, kept so the
     // real reason can be reported instead of the generic no-ROM message
-    // (ticket W2-16).
+    // (ticket W2-16; widened past NES by W14-01 — see
+    // `is_refused_cartridge`).
     let mut rejected: Vec<(String, CartError)> = Vec::new();
     let mut inspected = 0usize;
     let mut total_read = 0u64;
@@ -197,6 +188,15 @@ fn rom_from_zip(bytes: &[u8]) -> Result<Vec<u8>, RomOpenError> {
         // Refuse rather than recurse (module doc): a nested archive is the
         // unbounded-depth case, and nothing about a ROM needs it.
         if name.to_ascii_lowercase().ends_with(".zip") {
+            continue;
+        }
+        // Ticket W14-01: an entry that positively declares a console this
+        // build does not run is not offered to the sniffer at all. This is
+        // a DENYLIST, so the module doc's "chosen by content, never by
+        // extension" still holds for every unknown name — see
+        // `library::names_a_foreign_console` for why it is needed at all
+        // (the SNES sniff false-positives on foreign ROM data).
+        if crate::library::names_a_foreign_console(&name) {
             continue;
         }
         inspected += 1;
@@ -215,15 +215,21 @@ fn rom_from_zip(bytes: &[u8]) -> Result<Vec<u8>, RomOpenError> {
         total_read = total_read.saturating_add(buf.len() as u64);
 
         match Cartridge::load(&buf) {
-            Ok(Cartridge::Nes { .. }) => candidates.push((name, buf)),
-            // Not a ROM at all (a README, a PNG): silently skipped, as
-            // before — those are expected archive contents.
-            Ok(Cartridge::Snes { .. }) => {}
+            // BOTH consoles (ticket W14-01). The SNES arm was empty from
+            // W1-06 until now: an entry that sniffed as a SNES cartridge
+            // was inspected, recognized, and then dropped, after which the
+            // archive reported the generic "contains no recognizable ROM".
+            // The BARE path (`validate_rom` below) has accepted both since
+            // W11-12, which is what made this a bug rather than a
+            // decision — and no test covered a zipped SNES ROM, which is
+            // why it survived. Measured blast radius on a real No-Intro
+            // set: 1119 of 1265 SNES archives unopenable.
+            Ok(Cartridge::Nes { .. } | Cartridge::Snes { .. }) => candidates.push((name, buf)),
             Err(e) => {
-                // Only worth reporting if it really is a NES image;
-                // otherwise every text file in the archive would produce
-                // a confusing "could not be loaded" complaint.
-                if buf.starts_with(&rf_cart::nes::INES_MAGIC) {
+                // Only worth reporting if the entry really was a cartridge;
+                // otherwise every text file in the archive would produce a
+                // confusing "could not be loaded" complaint.
+                if is_refused_cartridge(&e, &buf, &name) {
                     rejected.push((name, e));
                 }
             }
@@ -233,7 +239,7 @@ fn rom_from_zip(bytes: &[u8]) -> Result<Vec<u8>, RomOpenError> {
     match candidates.len() {
         1 => Ok(candidates.remove(0).1),
         // Ticket W2-16: prefer the specific reason over the generic one.
-        // Exactly one rejected NES image means we know precisely why this
+        // Exactly one rejected cartridge means we know precisely why this
         // archive did not load, and saying so beats "no recognizable ROM".
         0 if rejected.len() == 1 => {
             let (name, source) = rejected.remove(0);
@@ -248,6 +254,47 @@ fn rom_from_zip(bytes: &[u8]) -> Result<Vec<u8>, RomOpenError> {
     }
 }
 
+/// Did `rf-cart` refuse something that genuinely IS a cartridge, as
+/// opposed to failing on a README that happened to share an archive with
+/// one?
+///
+/// Ticket W2-16 answered this for NES with an iNES-magic check, which is
+/// kept: an iNES image that fails to load is always worth naming. It does
+/// not generalise, because a SNES cartridge has no leading magic — its
+/// header sits at `$7FC0` or `$FFC0` inside the image. W14-01 widens it
+/// two ways:
+///
+/// - by ERROR KIND. [`CartError::UnsupportedMapper`] and
+///   [`CartError::UnsupportedChip`] are only ever produced once a header
+///   has been located and understood, so the file WAS a cartridge and this
+///   build cannot run it — exactly W2-16's case, and the commonest reason
+///   a real library refuses a SNES title (Super FX, DSP, S-DD1, SA-1).
+/// - by ENTRY NAME. A `.sfc` that fails to parse is a broken dump and the
+///   user should be told; a `.gb` that fails to parse is simply not for
+///   this emulator. Without this, a corrupt BARE `.sfc` was listed as
+///   unrecognized while the same file zipped vanished silently — the same
+///   file, two answers. Measured on a real set: 18 SNES archives with
+///   junk headers (mostly prototypes) fell into that gap.
+///
+/// Anything else stays silent, which is what a README looks like.
+fn is_refused_cartridge(e: &CartError, buf: &[u8], entry_name: &str) -> bool {
+    /// Extensions that assert "this is a cartridge image", matching the
+    /// library scanner's own pre-filter.
+    const ROM_EXTENSIONS: [&str; 4] = ["nes", "sfc", "smc", "fig"];
+
+    let named_as_a_rom = Path::new(entry_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|ext| ROM_EXTENSIONS.contains(&ext.as_str()));
+
+    matches!(
+        e,
+        CartError::UnsupportedMapper { .. } | CartError::UnsupportedChip { .. }
+    ) || buf.starts_with(&rf_cart::nes::INES_MAGIC)
+        || named_as_a_rom
+}
+
 /// Show a native "Open ROM" file dialog and return the picked path, or
 /// `None` if the user cancelled. Cannot run headlessly (opens an OS
 /// dialog) — see the manual checklist in this ticket's commit body for how
@@ -255,13 +302,13 @@ fn rom_from_zip(bytes: &[u8]) -> Result<Vec<u8>, RomOpenError> {
 #[must_use]
 pub fn pick_rom_file() -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .set_title("Open NES ROM")
+        .set_title("Open ROM")
         // `zip` belongs in the FIRST filter, not a separate one: it is the
         // default selection, so a zipped ROM must be pickable without the
         // user knowing to change the dropdown. Teaching the loader to read
         // an archive while leaving it unselectable in the picker would be
         // a feature nobody can reach (ticket W2-13).
-        .add_filter("NES ROM", &["nes", "zip"])
+        .add_filter("ROM", &["nes", "sfc", "smc", "fig", "zip"])
         .add_filter("All files", &["*"])
         .pick_file()
 }
@@ -388,6 +435,91 @@ mod tests {
 
     /// Anti-vacuity: without this, an implementation that simply returned
     /// the raw archive bytes would pass every "a zip loads" test above.
+    /// A minimal LoROM image: enough header for `rf_cart` to accept it.
+    /// Same shape `rf-snes`'s own tests use.
+    fn snes_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x0000] = 0x80;
+        rom[0x0001] = 0xFE;
+        for (i, b) in b"RF ZIP TEST          ".iter().enumerate() {
+            rom[0x7FC0 + i] = *b;
+        }
+        rom[0x7FD5] = 0x20;
+        rom[0x7FD6] = 0x00;
+        rom[0x7FD7] = 0x08;
+        rom[0x7FFC] = 0x00;
+        rom[0x7FFD] = 0x80;
+        rom
+    }
+
+    /// Ticket W14-01, and this is the regression the ticket exists for.
+    ///
+    /// The `Ok(Cartridge::Snes { .. })` arm of `rom_from_zip` was EMPTY
+    /// from W1-06 until now: a SNES entry was read, sniffed, recognized —
+    /// and dropped, after which the archive reported the generic "contains
+    /// no recognizable ROM". A bare `.sfc` opened fine the whole time,
+    /// which is what made it a bug rather than a decision. Measured
+    /// against a real No-Intro set, it cost 1119 of 1265 SNES archives.
+    #[test]
+    fn a_zipped_snes_cartridge_opens_the_same_as_a_bare_one() {
+        let rom = snes_rom();
+        let bare = resolve_rom_bytes(rom.clone()).expect("a bare SNES image opens");
+        let archive = zip_with(
+            &[("Some Game (USA).sfc", rom.as_slice())],
+            zip::CompressionMethod::Deflated,
+        );
+        let zipped = resolve_rom_bytes(archive).expect("a zipped SNES image must open too");
+        assert_eq!(
+            bare, zipped,
+            "the bytes handed to the core must be the cartridge, not the archive"
+        );
+    }
+
+    /// The refusal reason survives for a SNES entry too. Before W14-01
+    /// this could not arise (the entry was dropped before any error was
+    /// considered); the NES half of it is W2-16's and is asserted below.
+    #[test]
+    fn a_zipped_cartridge_this_build_refuses_is_named_not_generic() {
+        let mut rom = snes_rom();
+        // Chipset byte $13 is Super FX, which `rf-cart` refuses by name —
+        // the single most common reason a real SNES library refuses a
+        // title, and an error kind only reachable once a header has been
+        // located and understood.
+        rom[0x7FD6] = 0x13;
+        let archive = zip_with(
+            &[("Star Whatever (USA).sfc", rom.as_slice())],
+            zip::CompressionMethod::Stored,
+        );
+        match resolve_rom_bytes(archive) {
+            Err(RomOpenError::ArchiveEntryRejected { name, source }) => {
+                assert_eq!(name, "Star Whatever (USA).sfc");
+                assert!(
+                    source.to_string().contains("chip"),
+                    "the specific reason must survive, got {source}"
+                );
+            }
+            other => panic!("expected the named refusal, got {other:?}"),
+        }
+    }
+
+    /// And a README next to nothing still stays quiet: `is_refused_cartridge`
+    /// widened the report by ERROR KIND, not by reporting every unparsed
+    /// file, which is what W2-16's iNES-magic guard was protecting against.
+    #[test]
+    fn a_readme_is_not_reported_as_a_refused_cartridge() {
+        let archive = zip_with(
+            &[("readme.txt", b"just notes".as_slice())],
+            zip::CompressionMethod::Stored,
+        );
+        assert!(
+            matches!(
+                resolve_rom_bytes(archive),
+                Err(RomOpenError::NoRomInArchive { .. })
+            ),
+            "a text file must not be named as a refused cartridge"
+        );
+    }
+
     #[test]
     fn zip_with_no_rom_is_refused() {
         let archive = zip_with(

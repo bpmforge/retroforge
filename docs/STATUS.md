@@ -2638,3 +2638,80 @@ is stale from Phase 9 onward.
 Board: **176 tickets · 937 pts · 169 done**. Claimable: W7-17, W11-06, W14-01,
 W14-04. validate-plan OK, validate-traceability OK (101/101 FR/NFR, 33/33
 stories, 10 decisions).
+
+- **W14-01 — the library scan opens zipped ROMs, and a zipped SNES
+  cartridge is not dropped** (2026-09-15). The supplied library went from
+  **zero SNES games to 1119**.
+
+  | root | archives | entries | recognized |
+  |---|---|---|---|
+  | `nes` | 1281 | 1281 | 1058 NES |
+  | `snes` | 1265 | 1265 | 1119 SNES |
+  | both, one root | 5041 | 2546 | **2177** (1058 + 1119) |
+
+  Measured by `library::tests::the_real_library_scans_when_one_is_configured`,
+  which takes its directory from **`RF_ROM_LIBRARY`** and skips cleanly when
+  it is unset, the way the 65816 vector suite does. No path under a home
+  directory is committed and no ROM bytes are (law 5, criterion 4).
+
+  **The bug was one match arm.** `rom_from_zip`'s `Ok(Cartridge::Snes { .. })`
+  arm was **empty** from W1-06: a SNES entry was read, sniffed, recognized,
+  and then dropped, after which the archive reported the generic "contains
+  no recognizable ROM". The **bare** path had accepted both consoles since
+  W11-12, which is what made this a bug rather than a decision, and no test
+  covered a zipped SNES ROM, which is why it survived. There is one now,
+  and it fails against the pre-ticket code.
+
+  **Identity is the cartridge, never the archive** (criterion 1). A bare
+  and a zipped copy of one ROM produce two entries carrying **one**
+  normalized hash — asserted, because that hash is what per-game settings,
+  save states and profile matching all key on, and hashing the zip instead
+  would have quietly minted a second game. **A first draft went further and
+  FOLDED the two entries into one; that was removed.** It hides a file the
+  user has on disk, it fires on any two identical dumps rather than just
+  this case, and "keep the first" is a pick however deterministically it is
+  made — the thing `rom_open` already refuses when an archive holds two
+  ROMs. Whether the grid shows one card per hash is a UI question with an
+  owner; the scan reports what is on disk.
+
+  **Three consistency fixes the census forced.** (1) `is_refused_cartridge`
+  generalises W2-16's iNES-magic check by **error kind** — `UnsupportedMapper`
+  and `UnsupportedChip` are only produced once a header has been located, so
+  the file *was* a cartridge — which is how a zipped Super FX title now names
+  its reason instead of reading as junk. (2) It also reports an entry whose
+  **name** declares a ROM extension, because a corrupt bare `.sfc` was listed
+  as unrecognized while the same file zipped vanished silently: 18 SNES
+  archives sat in that gap (1247 entries became 1265). (3) `RomOpenError::
+  NotNesImage` is **deleted** — unconstructed since W11-12, and its `Display`
+  still said "only NES ROMs are supported so far", which was simply false.
+
+  **A soundness bug in `rf-cart` was found and is NOT fixed here.** Pointed
+  at the real Game Boy folder, `Cartridge::load` reported **130 of 681**
+  archives as recognized cartridges: a SNES header has no leading magic, just
+  a checksum and a reset vector at a fixed offset, and arbitrary ROM data
+  hits that often enough to matter. `rf-cart` is outside this write scope and
+  the fix belongs at the identity function rather than at one caller, so it
+  is filed as **W14-05**. What shipped here is a **denylist** at the scan and
+  zip paths (`names_a_foreign_console`) for names that *declare* a console
+  this build does not run — which is why the whole-folder scan reports 2546
+  entries and not 4250. It is a mitigation at one call site and its doc
+  comment says so: a foreign ROM named `.bin`, the file-open dialog,
+  `core_thread::spawn` and profile matching are all still unprotected.
+
+  **Console hint on a root** (criterion 3): `LibraryRoot` is
+  `#[serde(untagged)]`, so a settings file written before this ticket — a
+  plain array of path strings — still deserializes untouched, and a root that
+  never sets a hint still round-trips as a plain string. It is settable in
+  Settings → Paths, because a hint nobody can reach is the W2-13 trap. It
+  **filters, it does not save the read**: a zip's console is only knowable by
+  opening it, and making the second scan cheap is W14-02's cache.
+
+  **Also stated:** the scan is still synchronous on the UI thread and takes
+  ~17s in release for 2546 archives. That is W14-02 and was split out on
+  purpose. Two edits outside `library.rs`/`rom_open.rs` were comment updates
+  in `core_thread.rs` and `stepper.rs` that cited the deleted error variant;
+  both are inside this ticket's write scope.
+
+  Gate: workspace **1789 passing / 0 failed / 33 ignored**, arch OK, evidence
+  OK, licences OK, validate-plan OK (177 tickets after W14-05 was filed),
+  traceability OK.

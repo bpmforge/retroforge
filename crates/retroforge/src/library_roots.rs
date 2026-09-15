@@ -19,6 +19,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::library::LibraryRoot;
+
 /// The pre-W2-08 file name, still read once so its contents can be
 /// migrated.
 pub const LEGACY_FILE_NAME: &str = "library.rflib";
@@ -35,14 +37,19 @@ pub fn legacy_roots_path(config_root: &Path) -> PathBuf {
 /// The configured library folders, migrating W2-07's file if it is still
 /// there.
 #[must_use]
-pub fn load(config_root: &Path) -> Vec<PathBuf> {
+pub fn load(config_root: &Path) -> Vec<LibraryRoot> {
     let (mut settings, _) = crate::settings::load(config_root);
 
     if let Some(legacy) = read_legacy(config_root) {
         // Union rather than replace: a user who configured folders in both
         // places keeps both, and the order stays theirs.
         for root in legacy {
-            if !settings.paths.library_folders.contains(&root) {
+            if !settings
+                .paths
+                .library_folders
+                .iter()
+                .any(|existing| existing.path() == root.path())
+            {
                 settings.paths.library_folders.push(root);
             }
         }
@@ -59,14 +66,14 @@ pub fn load(config_root: &Path) -> Vec<PathBuf> {
 ///
 /// # Errors
 /// Returns the error message from writing `settings.toml`.
-pub fn save(config_root: &Path, roots: &[PathBuf]) -> Result<PathBuf, String> {
+pub fn save(config_root: &Path, roots: &[LibraryRoot]) -> Result<PathBuf, String> {
     let (mut settings, _) = crate::settings::load(config_root);
     settings.paths.library_folders = roots.to_vec();
     crate::settings::save(config_root, &settings)
 }
 
 /// Read W2-07's file if it exists and is ours.
-fn read_legacy(config_root: &Path) -> Option<Vec<PathBuf>> {
+fn read_legacy(config_root: &Path) -> Option<Vec<LibraryRoot>> {
     let text = std::fs::read_to_string(legacy_roots_path(config_root)).ok()?;
     let mut lines = text.lines();
     if lines.next().map(str::trim) != Some(LEGACY_MAGIC) {
@@ -76,7 +83,7 @@ fn read_legacy(config_root: &Path) -> Option<Vec<PathBuf>> {
         lines
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(PathBuf::from)
+            .map(|line| LibraryRoot::Bare(PathBuf::from(line)))
             .collect(),
     )
 }
@@ -107,7 +114,10 @@ mod tests {
         let config = temp_root("roundtrip");
         assert!(load(&config).is_empty());
 
-        let roots = vec![PathBuf::from("/roms/nes"), PathBuf::from("/mnt/nas")];
+        let roots = vec![
+            LibraryRoot::Bare(PathBuf::from("/roms/nes")),
+            LibraryRoot::Bare(PathBuf::from("/mnt/nas")),
+        ];
         save(&config, &roots).expect("save");
         assert_eq!(load(&config), roots);
 
@@ -127,7 +137,7 @@ mod tests {
         write_legacy(&config, "RFLIB 1\n/roms/old\n");
 
         let roots = load(&config);
-        assert_eq!(roots, vec![PathBuf::from("/roms/old")]);
+        assert_eq!(roots, vec![LibraryRoot::Bare(PathBuf::from("/roms/old"))]);
         assert!(
             !legacy_roots_path(&config).exists(),
             "the legacy file must be removed once its contents are safely in settings.toml"
@@ -144,12 +154,15 @@ mod tests {
     #[test]
     fn migration_unions_with_folders_already_in_settings_rather_than_replacing_them() {
         let config = temp_root("union");
-        save(&config, &[PathBuf::from("/roms/new")]).expect("save");
+        save(&config, &[LibraryRoot::Bare(PathBuf::from("/roms/new"))]).expect("save");
         write_legacy(&config, "RFLIB 1\n/roms/old\n/roms/new\n");
 
         assert_eq!(
             load(&config),
-            vec![PathBuf::from("/roms/new"), PathBuf::from("/roms/old")],
+            vec![
+                LibraryRoot::Bare(PathBuf::from("/roms/new")),
+                LibraryRoot::Bare(PathBuf::from("/roms/old")),
+            ],
             "both survive, in a stable order, with no duplicate"
         );
         let _ = std::fs::remove_dir_all(&config);

@@ -120,7 +120,13 @@ pub struct PathSettings {
     /// canonicalized — containment resolves at scan time, where it must,
     /// since a symlink can appear after a folder was configured
     /// (`crate::library`'s module doc).
-    pub library_folders: Vec<PathBuf>,
+    ///
+    /// Ticket W14-01: each root may declare which console it holds.
+    /// [`crate::library::LibraryRoot`] is `#[serde(untagged)]`, so a
+    /// settings file written before that ticket — a plain array of path
+    /// strings — still deserializes, and one that never sets a hint still
+    /// round-trips as plain strings.
+    pub library_folders: Vec<crate::library::LibraryRoot>,
     /// Cache location; `None` means the default under the config dir.
     pub cache_dir: Option<PathBuf>,
     /// LRU cache cap in megabytes.
@@ -309,7 +315,9 @@ mod tests {
         settings.audio.latency_ms = 25;
         settings.audio.volume = 0.6;
         settings.audio.device = Some("Speakers".to_string());
-        settings.paths.library_folders = vec![PathBuf::from("/roms/nes")];
+        settings.paths.library_folders = vec![crate::library::LibraryRoot::Bare(PathBuf::from(
+            "/roms/nes",
+        ))];
         settings.paths.cache_cap_mb = 512;
 
         save(&root, &settings).expect("save");
@@ -408,8 +416,10 @@ latency_ms = \"not a number\"
     fn library_folders_persist_through_the_settings_file() {
         let root = temp_root("folders");
         let mut settings = AppSettings::default();
-        settings.paths.library_folders =
-            vec![PathBuf::from("/roms/nes"), PathBuf::from("/mnt/nas/snes")];
+        settings.paths.library_folders = vec![
+            crate::library::LibraryRoot::Bare(PathBuf::from("/roms/nes")),
+            crate::library::LibraryRoot::Bare(PathBuf::from("/mnt/nas/snes")),
+        ];
         save(&root, &settings).expect("save");
 
         let (reloaded, _) = load(&root);
