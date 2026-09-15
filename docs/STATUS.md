@@ -2546,3 +2546,95 @@ Phase 13 work, and D-4 blocks only a docs ticket.
   Gate: workspace **1781 passing / 0 failed / 33 ignored** (up from
   1775), arch OK, evidence OK, licences OK, validate-plan and
   traceability OK. **Phase 13's debugger arc is closed: nine of nine.**
+
+## 2026-09-15 — BOARD CHANGE: a real ROM library arrives, ruling D-009, three corrections, wave 14 opened
+
+**Brad supplied `~/Games/Roms`** — 5041 No-Intro archives, outside the repo,
+never committed (law 5 untouched). The project had run its own fixtures and
+test ROMs and nothing else for its entire life. Everything below follows from
+measuring that library rather than reasoning about it: three throwaway probes,
+each deleted before any commit, because a test hardcoding a home directory is
+a test that passes on one machine.
+
+**The census, and the finding it produced.**
+
+| console | archives | open today | would open |
+|---|---|---|---|
+| NES | 1281 | 1058 | 1058 |
+| SNES | 1265 | **0** | **1119** |
+
+The SNES column is a **bug, not a missing feature**, and it is one match arm:
+`rom_open.rs`'s `rom_from_zip` sniffs every entry and collects `Nes`
+candidates, but its `Ok(Cartridge::Snes { .. })` arm is **empty** — a SNES
+entry is inspected, recognized, and dropped, after which the archive reports
+the generic "contains no recognizable ROM". A **bare** `.sfc` opens fine on
+the non-zip path, which is what makes it a bug rather than a decision. No test
+covers a zipped SNES ROM; that is why it survived since W1-06. Separately, the
+library scan never opens archives at all (`ROM_EXTENSIONS` is `[nes, sfc, smc,
+fig]`), so pointing the app at that folder today finds **zero** games — while
+the zip capability it needs already exists, hardened, in the file-open path.
+
+**Coverage, ranked by games, which this board has never had before.** Every
+NES refusal is an unsupported mapper: 11 → 54, 79 → 28, 206 → 17, 71 → 17,
+5 (MMC5) → 10, 64 → 9, 118 → 7, long tail. Those first four are 116 games of
+simple discrete bank-switching and became **W14-04**; MMC5 is 10 games and an
+order of magnitude more work, so it was deliberately left out. SNES refusals
+are 14 Super FX, 13 DSP (Super Mario Kart, Pilotwings), 12 S-DD1, 11 SA-1
+(Super Mario RPG, Kirby Super Star), 8 Cx4-class, 6 ExHiROM — each weeks of
+work, and FR-CORE-035 already defers enhancement chips, so **no SNES chip
+ticket was filed**. The largest SNES bucket (53, "unrecognized map mode") was
+**checked before it could be ranked as a chip**: 41 are betas/protos/unlicensed
+and 9 more are pirate carts or tech demos, leaving exactly **two** released
+titles (HAL's Hole in One Golf, Super Adventure Island). Junk headers on
+unreleased dumps, not a header-parsing gap — the check cost one probe run and
+would otherwise have put the biggest number at the top of a roadmap.
+
+**Ruling D-009 (Brad, 2026-09-15): local-only verification counts as
+evidence**, provided the profile records the normalized hash of the ROM it was
+verified against. That unblocks **W11-06**, blocked since 2026-08-26 on
+"permitted is not verifiable". It relaxes neither law 5, nor FR-PROF-003's
+source citations, nor FR-PROF-006. Same class as D-3.
+
+**Two further decisions Brad made on the report:** a library root carries a
+console hint and an archive holding no NES/SNES image is skipped rather than
+listed (the supplied folder also holds 2507 Game Boy/GBA/GBC/VB archives, and
+"listed, not dropped" was written for a stray file); and the scan gets **both**
+a background thread and a path+size+mtime cache, because threading alone still
+re-reads 1.1 GB every launch and caching alone still blocks on the first scan.
+
+**Three board corrections — the record was wrong, not the work.**
+
+1. **W7-08** said it was blocked behind **W7-18**, which closed on 2026-08-27
+   under ruling D-3. That sentence had been false for two and a half weeks.
+   Corrected, **not cleared**: today's gate shows the four blargg SPC ROMs
+   still not passing (`spc_dsp6` prints "Echo/basics Passed 01" — subtest 1 of
+   many, the exact false-green shape that reopened this ticket — and
+   `spc_timer` prints "Failed 02"). It stays blocked on an open question
+   instead of on a closed ticket: **nobody has diagnosed** whether the
+   remainder is S-DSP work or SPC700 timing work, and that diagnosis is its
+   own session.
+2. **W7-17** carried `depends_on: [W7-08, W7-18]` while its own 2026-09-04
+   amendment says *"Its depends_on W7-18 is now satisfied, so this is
+   claimable"*. The prose was amended and the field was not, so the validator
+   reported **nothing claimable on the entire board**. Field corrected to
+   match the recorded ruling; no new ruling made.
+3. **W11-06** unblocked to `todo` by D-009. Its SNES half is **sequenced
+   behind W14-01** and that is recorded as a note rather than a dependency,
+   because P7 forbids a forward-wave dep and W14-01 is wave 14.
+
+**Wave 14 opened, four tickets, 23 points:** W14-01 (zip on the scan path and
+the SNES-in-zip fix), W14-02 (background scan + cache), W14-03 (a **bounded**
+boot census — child process per ROM, wall-clock cap outside the emulation
+loop, buckets are triage and never a pass, a written unattended decision
+before the first run: law 8 is criterion 1, because finding hangs is close to
+the point of the exercise), W14-04 (the four mappers above).
+
+**Left unfiled, deliberately, and named so it is not lost:** ruling D-2 refers
+to a v1-freeze chain **W13-03/04/05/06** that exists in no ticket anywhere —
+filing four tickets with no spec would be inventing scope, so they are Brad's
+to define. `docs/ROADMAP.md` also has no section for phases 12, 13 or 14 and
+is stale from Phase 9 onward.
+
+Board: **176 tickets · 937 pts · 169 done**. Claimable: W7-17, W11-06, W14-01,
+W14-04. validate-plan OK, validate-traceability OK (101/101 FR/NFR, 33/33
+stories, 10 decisions).

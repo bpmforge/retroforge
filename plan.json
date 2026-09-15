@@ -3981,6 +3981,7 @@
    "audio RMS comparison against a reference for a designated SPC set"
   ],
   "notes": [
+   "BLOCK CORRECTED 2026-09-15, NOT CLEARED. The recorded blocker was \"behind W7-18 (the SPC700 charges time per memory access)\" — and W7-18 CLOSED 2026-08-27 on ruling D-3. That sentence had been false for two and a half weeks and nobody re-read it; it was found by auditing the board, not by working the ticket. WHAT IS ACTUALLY TRUE TODAY, measured by the local gate on 2026-09-15: the four blargg SPC ROMs still do not report a pass. spc_dsp6 prints \"Echo/basics Passed 01\" — subtest 1 of many, which is the exact shape of the false-green that reopened this ticket on 2026-08-27 — spc_timer prints \"Failed 02\", spc_smp prints hashes, and spc_mem_access_times is the D-3 known-red that belongs to W7-17. So this stays BLOCKED, but on an open question rather than on a closed ticket: nobody has diagnosed whether the remaining subtests are S-DSP work (this ticket) or SPC700 timing work (W7-17's half), and that diagnosis is itself a session. Do not claim this expecting implementation work until it has been done.",
    "W6-04b delivered a SKELETON on purpose — BRR decode plus eight-voice mixing — with sample-exactness deferred here. What it did NOT implement is named in its close note and in the dsp module doc, so this ticket's scope is already written down rather than needing rediscovery.",
    "HANDOFF 2026-08-20: criterion 1 COMPLETE; criteria 2 and 3 are blocked, one on a real deadlock and one on material that does not exist. DELIVERED: Gaussian interpolation, ADSR and GAIN envelopes, echo with its ARAM ring buffer and 8-tap FIR, pitch modulation, and the noise LFSR — all wired into the mixer, not merely defined.",
    "THE UNITY-GAIN TEST EARNED ITS KEEP IMMEDIATELY. A resampling kernel whose four taps do not sum to a constant changes VOLUME WITH PITCH, so a sustained note swells or fades as it bends — the subtlest possible audio bug. The first table used a triangular-squared window and summed to 4080; the test caught it on the first run. The kernel is now built from the CUBIC B-SPLINE basis, which is a partition of unity by construction, plus an exact integer correction: fractions f and 255-f read the SAME four indices, so there are 128 independent sums and index f belongs to only one pair — which is why the correction loop runs to 128 and not 256 (running it to 256 double-corrects every pair and leaves the table worse than it started). Every fraction now sums to exactly 2048.",
@@ -4030,7 +4031,6 @@
     "docs/LESSONS.md"
    ],
    "depends_on": [
-    "W7-08",
     "W7-18"
    ],
    "acceptance": [
@@ -4041,6 +4041,7 @@
    "points": 8,
    "status": "todo",
    "notes": [
+    "DEPENDS_ON CORRECTED 2026-09-15. The 2026-09-04 amendment below says in its own words \"Its depends_on W7-18 is now satisfied, so this is claimable\" — but the array still carried W7-08 as well, so validate-plan reported this unclaimable and the whole board showed NOTHING claimable. The prose was amended and the field was not. W7-08 is the S-DSP half; ruling D-3 left this ticket the SPC700-timer half, which depends on W7-18 alone. Correcting the field to match the recorded ruling, not making a new one.",
     "SPLIT OUT OF W7-08 ON BRAD'S RULING, 2026-08-27, taking note 22's path (d) for the remainder only. W7-08 delivered the S-DSP and its own designated oracle passes (spc_dsp6.sfc, and spc_smp.sfc alongside it). These two ROMs remained red, and they are NOT S-DSP work: neither touches dsp.rs. Holding an 8-point DSP ticket open until CPU bus timing was done would have bundled two subsystems, which is the shape Brad splits.",
     "EXACT CURRENT VERDICTS as of 2026-08-27, so the next session does not re-derive them. spc_timer.sfc: 'Running tests: timer read vs write 1111111222'. spc_mem_access_times.sfc: 'E6 -- -- R1 E7 -- -- R0 -- -- -- E9 -- -- R0 -- EA -- -- D0 -- -- EB -- -- R0'. Both RUN and REPORT rather than stalling, which is itself W7-08's doing — before it, all four ROMs hung on their first test.",
     "A FREE HEAD START, already in hand and already cited. anomie's apudsp.txt ($Revision: 1212$, section SOUND GENERATION) places the timer ticks inside the DSP's own 32-cycle loop: cycle 0 'Tick the SPC700 Stage 1 timers, always for T2 and every 4 samples for T0 and T1', and cycle 16 'Tick the SPC700 Stage 1 timer for T2'. The RATES already match this implementation (divisor 128 for T0/T1, 16 for T2); what differs is PHASE — Apu::tick_timers accumulates instruction cycles freely instead of ticking at those cycles of the sample loop. That is a small, spec-backed change and the obvious first move.",
@@ -5229,6 +5230,8 @@
    "law 5 holds absolutely: no ROM bytes in git, and no copyrighted title hardcoded in engine code — a profile is data under /profiles, never a name baked into a crate"
   ],
   "notes": [
+   "UNBLOCKED 2026-09-15 BY RULING D-009 AND BY A REAL ROM LIBRARY. The evidence problem this ticket carried since 2026-08-26 was \"permitted is not verifiable\": law 5 means no ROM is committed, so a commercial profile's offsets could never be checked. Brad supplied a local library (2546 NES+SNES archives, No-Intro named, outside the repo and never committed) and ruled that local-only verification COUNTS as evidence provided the profile records the normalized ROM hash it was verified against — so the claim is checkable by anyone holding the same dump. That is D-009, and it is path (a) of this ticket's own \"what would unblock it\" note.",
+   "SEQUENCED BEHIND W14-01 FOR THE SNES HALF — recorded here rather than as a depends_on, because P7 forbids a forward-wave dependency and W14-01 is wave 14. The gate is real: a zipped SNES cartridge cannot be opened at all today — rom_open's zip reader discards a recognized Snes entry — so 1119 of the 1265 SNES archives in the supplied library are unreachable, and a SNES profile authored now would be unverifiable for exactly the reason this ticket was blocked. The NES half is reachable today: 1058 of 1281 archives load.",
    "FOUND 2026-08-26 by auditing the VISION promises against reachability rather than against tests. The engine for this feature EXISTS and is tested; what is missing is that a user running RetroForge cannot invoke it. (This one is a content gap rather than a wiring gap.)",
    "VISION §5's 18-month criterion is '>=10 curated game profiles'. There are FIVE: nes/rf-rooms, nes/rf-scroller, nes/rf-scroller-demo, snes/example-mode7, snes/rf-rooms-flat — and every one is against our own fixtures.",
    "Brad ruled 2026-08-20 that profiles for real, documented commercial titles ARE permitted, citing published documentation (DataCrystal and similar). THE PERMISSION HAS NEVER BEEN USED. W9-08's handoff records why: verifying real addresses against DataCrystal-class sources was not done, and shipping unverified addresses would be worse than shipping none.",
@@ -5239,7 +5242,7 @@
    "CORRECTION 2026-08-27: the matcher defect recorded in the note above IS FIXED, and was fixed by W11-09 (done) before this note was ever acted on. `find_matching_profile` now calls `rf_profiles::schema::IdentityEntry::matches`, which checks every hash family an entry declares, so a profile identified by a published No-Intro CRC32 matches. That half of this ticket's blocker is gone. WHAT REMAINS IS THE EVIDENCE PROBLEM, unchanged and still Brad's: reaching ten profiles means five commercial titles, his 2026-08-20 ruling permits authoring them from published documentation, and PERMITTED IS NOT VERIFIABLE — law 5 means we hold no ROM to check a decode offset against, so every claim would ship untested. W9-08 refused exactly this and called the result a vacuous artifact. THREE HONEST SHAPES: (a) accept unverified profiles and say so in each file's `sources`; (b) amend VISION §5's ten to the number that can be verified, which today means profiles for our own fixtures — rf-scroller-s now has one (W11-03), so the verifiable count is real and small; (c) leave parked until a verification route exists. My recommendation is (b): a number that means something beats a number that is met. ALSO OPEN, raised by W11-09 and never settled: whether a published RAW hash should match as well as a normalized one. No-Intro publishes hashes of the file as distributed, which for NES is often the headered one, so matching raw would make published hashes directly usable — at the cost of more than one identity per game. That trade should be decided deliberately, not by accident, and it bears directly on (a)."
   ],
   "points": 8,
-  "status": "blocked",
+  "status": "todo",
   "stories": []
  },
  {
@@ -5878,6 +5881,115 @@
     "PRIOR ART IS ALREADY ON THE BOARD: W11-10's close note lists cpu_regs as one of three things the trait could not express, alongside an out-of-band bus write (delivered by W13-02d, deliberately NOT promoted to the trait for the same reason) and APU access for channel capture. Whatever is decided here should say what it means for that third one."
    ],
    "stories": []
+  },
+  {
+   "id": "W14-01",
+   "title": "The library scan opens zipped ROMs, and a zipped SNES cartridge is not dropped",
+   "phase": 14,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/src/**",
+    "crates/retroforge/tests/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "the library scan opens .zip archives through the same resolver the file-open dialog already uses, and a bare and a zipped copy of one cartridge collapse to a SINGLE entry under one normalized hash — asserted by a test, because that hash is the one thing this change can silently break (per-game settings, save states and profile matching all key on it)",
+    "a zipped SNES cartridge opens: the zip reader keeps a recognized Snes entry instead of discarding it, with a regression test that fails against the pre-ticket code",
+    "an archive holding no NES or SNES image is skipped rather than listed as unrecognized, and a library root records which console it holds",
+    "any test that reads a real library takes its directory from an environment variable and SKIPS cleanly when it is absent, on the RF_NESTEST_ROM / RF_65816_VECTORS pattern; no path under a home directory is committed and no ROM bytes are (law 5)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "MEASURED, NOT ESTIMATED (2026-09-15, throwaway probe over the supplied library, deleted after the run). NES: 1281 archives, 1058 open today, 223 refused and every single refusal is an unsupported mapper. SNES: 1265 archives, ZERO open today, 1119 would open if the zip reader kept SNES entries, 146 refused for real reasons (enhancement chips and junk headers). That 1119 is this ticket's whole point.",
+    "THE BUG IS ONE MATCH ARM. crates/retroforge/src/rom_open.rs's rom_from_zip sniffs every entry through rf_cart::Cartridge::load and collects Nes candidates; its Ok(Cartridge::Snes { .. }) arm is EMPTY, so a SNES entry is inspected, recognized, and dropped — and the archive then reports the generic 'contains no recognizable ROM'. Opening a BARE .sfc works (the same file accepts both variants on the non-zip path), which is what makes this a bug rather than a decision. Three mentions of 'snes' in the whole file and no test covers a zipped SNES ROM, which is why it survived since W1-06.",
+    "THE SCAN SIDE IS SMALLER THAN IT LOOKS. crates/retroforge/src/library.rs's ROM_EXTENSIONS is [nes, sfc, smc, fig] and ingest_file does fs::read then Cartridge::load. Adding 'zip' and routing those bytes through rom_open::resolve_rom_bytes first IS the wiring change — the untrusted-archive posture (cap on bytes actually READ not on the declared size, cumulative cap, nested archives refused, nothing written to disk) is already written and already hardened.",
+    "CONSOLE HINT ON THE ROOT, on Brad's 2026-09-15 decision: the supplied library also holds 2507 Game Boy, GBA, GBC and Virtual Boy archives (4.8 GB). A root pointing one level up would decompress and hash every one of them to list it as unrecognized. FRONTEND_UI 3.1's 'unparseable is listed, not dropped' was written for a stray file, not for half a library.",
+    "NOT THIS TICKET: the scan is synchronous on the UI thread and takes 22 seconds in release for NES+SNES alone. That is W14-02, split out deliberately so the correctness fix can land without also owning threading."
+   ],
+   "stories": [
+    "E2-S3"
+   ]
+  },
+  {
+   "id": "W14-02",
+   "title": "The library scan runs off the UI thread and is cached between launches",
+   "phase": 14,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/src/**",
+    "crates/retroforge/tests/**"
+   ],
+   "depends_on": [
+    "W14-01"
+   ],
+   "acceptance": [
+    "the scan runs on a background thread: the window stays responsive and reports progress while a multi-thousand-ROM library is read",
+    "results are cached keyed on path, size and modification time, so a second launch does not re-decompress and re-hash an unchanged library, while a changed, added or removed file is still picked up",
+    "the cache is a cache and never an authority: a corrupt or unreadable cache file is discarded and the scan runs — never a crash, never a silently empty library",
+    "before/after wall-clock is measured and recorded rather than asserted; the pre-ticket number is 22s in release for 2546 archives (W14-01's probe)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "THE CALL SITE is app.rs's single synchronous `crate::library::scan(&self.library_roots)` on the UI thread. Against a real library that is a 22-second freeze in RELEASE for NES+SNES alone.",
+    "BOTH HALVES, on Brad's 2026-09-15 decision, because neither alone is enough: threading stops the freeze but still re-reads 1.1 GB on every launch, and caching alone still blocks for the first scan and after any change."
+   ],
+   "stories": [
+    "E2-S3"
+   ]
+  },
+  {
+   "id": "W14-03",
+   "title": "A bounded boot census over a real commercial library",
+   "phase": 14,
+   "crate": "rf-harness",
+   "write_scope": [
+    "crates/rf-harness/**",
+    "scripts/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [
+    "W14-01"
+   ],
+   "acceptance": [
+    "every ROM runs in a CHILD PROCESS under a wall-clock cap enforced OUTSIDE the emulation loop, so a hang costs one bucket entry and cannot take the harness or the workstation with it (law 8, RF-L-09)",
+    "the buckets are triage and not a verdict — crashed / timed out / rendered nothing / rendered something — and no run is recorded as a pass, because 'it booted' is not 'it is correct'",
+    "a written decision on whether this ever runs unattended, recorded BEFORE the first full run rather than after it (W12-01's precedent)",
+    "results are committed as counts and titles only: no ROM bytes, no captures of commercial content, no path under a home directory (law 5), and the library directory comes from an environment variable with a clean skip when it is absent"
+   ],
+   "points": 8,
+   "status": "todo",
+   "notes": [
+    "WHY THIS IS WORTH MORE THAN ANY NUMBER OF PROFILES: this project has only ever run its own fixtures plus test ROMs. 1058 NES and 1119 SNES commercial titles are now reachable locally, and booting them is the strongest accuracy signal available to it — the same shape of evidence the darwin runner gave CI in W12-01.",
+    "THE HEADLINE IS THE HAZARD. 'N titles boot' would repeat exactly the mistake that reopened W7-08: a substring check called a whole ROM green off its first subtest. The buckets are triage for a human to read, which is why that is in the acceptance and not in a note.",
+    "LAW 8 IS A DESIGN INPUT HERE, not a footnote. Running thousands of unknown commercial ROMs on the developer's workstation is the RF-L-09 shape at scale, and FINDING HANGS IS CLOSE TO THE POINT of the exercise — which is why the bound is criterion 1."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W14-04",
+   "title": "Four discrete NES mappers, chosen by what the real library actually needs",
+   "phase": 14,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "mappers 11 (Color Dreams), 79 (NINA-03/06), 206 and 71 (Camerica) are implemented, each cited to nesdev in its doc comment the way the existing mappers are (NFR-011)",
+    "the number of archives each one recovers is re-measured after implementation rather than assumed: 54, 28, 17 and 17 of the 223 NES archives currently refused",
+    "FR-CORE-013 is untouched for everything still unsupported: an unknown mapper still fails with a diagnostic naming the number, never a crash"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "CHOSEN BY MEASUREMENT, which is new for this board. A census of 1281 real NES archives (2026-09-15) bucketed all 223 refusals by mapper number: 11 -> 54 games, 79 -> 28, 206 -> 17, 71 -> 17, 5 (MMC5) -> 10, 64 -> 9, 118 -> 7, then a long tail. These four are 116 games and are all simple discrete bank-switch parts. MMC5 is 10 games and an order of magnitude more work, so it is deliberately NOT in this ticket.",
+    "THE SNES SIDE IS NOT A TICKET YET, on purpose. Its 146 refusals are 14 Super FX, 13 DSP (Super Mario Kart, Pilotwings), 12 S-DD1, 11 SA-1 (Super Mario RPG, Kirby Super Star), 8 Cx4-class, 6 ExHiROM — each of which is weeks of work, and FR-CORE-035 already defers enhancement chips explicitly. The largest SNES bucket (53, 'unrecognized map mode') was CHECKED before it could be ranked as a chip: 41 are betas, protos or unlicensed dumps and 9 more are pirate carts or tech demos, leaving exactly TWO released titles (HAL's Hole in One Golf, Super Adventure Island). It is junk headers on unreleased dumps, not a header-parsing gap."
+   ],
+   "stories": [
+    "E2-S1"
+   ]
   }
  ]
 }
