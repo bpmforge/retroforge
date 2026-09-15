@@ -1766,6 +1766,7 @@ impl RetroForgeApp {
                 // for the same reason — opening a NES ROM after a SNES one
                 // must not leave the SNES column drawn against it.
                 self.debug_panels.data.snes = None;
+                self.debug_panels.data.cpu_regs = rf_core_api::CpuRegs::None;
                 self.snes_capture_active = false;
                 self.debug_panels.data.wram = [0u8; 0x0800];
                 self.debug_panels.data.prg_ram = [0u8; 0x2000];
@@ -2052,6 +2053,9 @@ impl RetroForgeApp {
             // them. `None` on a NES session and whenever the capture is
             // off, which is what makes the panels console-aware.
             self.debug_panels.data.snes = msg.snes;
+            // Ticket W13-02i: the typed register file, one field for both
+            // consoles.
+            self.debug_panels.data.cpu_regs = *msg.cpu_regs;
             self.debug_panels.data.vram = *msg.vram;
             self.debug_panels.data.palette_ram = *msg.palette_ram;
             // Ticket W13-02e: fold this frame's MemWatch events into the

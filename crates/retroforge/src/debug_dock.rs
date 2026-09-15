@@ -256,6 +256,10 @@ pub struct PanelData {
     pub snes_space: usize,
     /// Which DSP voice the BRR preview is showing (ticket W13-02c).
     pub snes_voice: usize,
+    /// The CPU register file this frame, typed per CPU family (ticket
+    /// W13-02i). Drawn at the top of the Trace tab by [`registers_ui`]
+    /// for both consoles through one match.
+    pub cpu_regs: rf_core_api::CpuRegs,
 }
 
 impl Default for PanelData {
@@ -278,6 +282,7 @@ impl Default for PanelData {
             snes_bg: 0,
             snes_space: 0,
             snes_voice: 0,
+            cpu_regs: rf_core_api::CpuRegs::None,
         }
     }
 }
@@ -636,11 +641,19 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
                 self.data.oam_diff_scanline,
             ),
             DebugTab::LuaConsole => lua_console_ui(ui, self.data.script.as_deref()),
-            DebugTab::Trace => trace_ui(
-                ui,
-                self.data.trace.as_deref_mut(),
-                &self.annotations.store.ram_labels(),
-            ),
+            DebugTab::Trace => {
+                // Ticket W13-02i: the register readout lives with the
+                // trace, where bsnes and Mesen both put it, and it is
+                // the one panel that reads BOTH cores through a single
+                // typed path — no `snes.as_deref()` branch here.
+                registers_ui(ui, &self.data.cpu_regs);
+                ui.separator();
+                trace_ui(
+                    ui,
+                    self.data.trace.as_deref_mut(),
+                    &self.annotations.store.ram_labels(),
+                );
+            }
             DebugTab::Annotations => annotations_ui(ui, self.annotations),
             DebugTab::Audio => {
                 audio_ui(ui, self.data.audio.as_deref_mut());
@@ -1211,6 +1224,43 @@ mod tests {
     /// `load_layout`/`save_layout` share one fixed production path across
     /// the whole test binary (parallel tests would race on it).
     #[test]
+    fn register_rows_render_both_cpus_through_one_match_and_none_as_empty() {
+        use rf_core_api::{CpuRegs, Mos6502Regs, Wdc65816Regs};
+        assert!(register_rows(&CpuRegs::None).is_empty());
+
+        let nes = register_rows(&CpuRegs::Mos6502(Mos6502Regs {
+            a: 0x12,
+            x: 0x34,
+            y: 0x56,
+            s: 0xFD,
+            pc: 0xC000,
+            p: 0x24,
+        }));
+        assert_eq!(nes[0], ("PC", "$C000".to_string()));
+        assert_eq!(nes[5], ("P", "$24 ..-..I..".to_string()));
+        assert_eq!(nes.len(), 6);
+
+        let snes = register_rows(&CpuRegs::Wdc65816(Wdc65816Regs {
+            a: 0x1234,
+            x: 0,
+            y: 0,
+            sp: 0x01FF,
+            d: 0,
+            dbr: 0x7E,
+            pbr: 0x80,
+            pc: 0x8000,
+            p: 0x30,
+            e: true,
+        }));
+        // bsnes convention: bank:offset for the PC, and E shown as its
+        // own row because it is not a bit of P.
+        assert_eq!(snes[0], ("PC", "$80:8000".to_string()));
+        assert_eq!(snes[6], ("DB", "$7E".to_string()));
+        assert_eq!(snes[7], ("P", "$30 ..1B....".to_string()));
+        assert_eq!(snes[8].1, "1 (emulation)");
+    }
+
+    #[test]
     fn from_toml_str_on_garbage_falls_back_to_default_without_panicking() {
         let fallback = layout::from_toml_str("not valid toml {{{")
             .ok()
@@ -1253,6 +1303,59 @@ pub enum TraceRequest {
 
 /// The Trace tab (DEBUGGER.md §2-3's "Trace viewer | scrollback of ring
 /// buffer w/ filters").
+/// One `(name, value)` row per register, in the order the console's own
+/// documentation lists them, for [`registers_ui`]. Separate from the
+/// drawing so it can be asserted without an egui context.
+///
+/// The shell knows each CPU's *register set* — that is the instruction
+/// set architecture, public since 1975 and 1983 respectively — and
+/// nothing about how either core stores it. `CpuRegs::None` yields no
+/// rows, which the panel reports as "no CPU" rather than as zeros.
+fn register_rows(regs: &rf_core_api::CpuRegs) -> Vec<(&'static str, String)> {
+    use rf_core_api::CpuRegs;
+    match regs {
+        CpuRegs::None => Vec::new(),
+        CpuRegs::Mos6502(r) => vec![
+            ("PC", format!("${:04X}", r.pc)),
+            ("A", format!("${:02X}", r.a)),
+            ("X", format!("${:02X}", r.x)),
+            ("Y", format!("${:02X}", r.y)),
+            ("S", format!("${:02X}", r.s)),
+            ("P", format!("${:02X} {}", r.p, r.flags())),
+        ],
+        CpuRegs::Wdc65816(r) => vec![
+            ("PC", format!("${:02X}:{:04X}", r.pbr, r.pc)),
+            ("A", format!("${:04X}", r.a)),
+            ("X", format!("${:04X}", r.x)),
+            ("Y", format!("${:04X}", r.y)),
+            ("S", format!("${:04X}", r.sp)),
+            ("D", format!("${:04X}", r.d)),
+            ("DB", format!("${:02X}", r.dbr)),
+            ("P", format!("${:02X} {}", r.p, r.flags())),
+            (
+                "E",
+                if r.e { "1 (emulation)" } else { "0 (native)" }.to_string(),
+            ),
+        ],
+    }
+}
+
+/// The CPU register readout (ticket W13-02i): one grid, both consoles.
+fn registers_ui(ui: &mut egui::Ui, regs: &rf_core_api::CpuRegs) {
+    let rows = register_rows(regs);
+    if rows.is_empty() {
+        ui.label("Registers: no CPU reported.");
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        for (name, value) in rows {
+            ui.label(egui::RichText::new(name).strong());
+            ui.monospace(value);
+            ui.add_space(8.0);
+        }
+    });
+}
+
 fn trace_ui(
     ui: &mut egui::Ui,
     data: Option<&mut TracePanelData>,

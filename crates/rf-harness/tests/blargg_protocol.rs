@@ -77,7 +77,7 @@ impl EmulatorCore for ScriptedCore {
 
     fn state_view(&self) -> StateView<'_> {
         StateView {
-            cpu_regs: &[],
+            cpu_regs: rf_core_api::CpuRegs::None,
             wram: &[],
             vram: &[],
             cgram: &[],

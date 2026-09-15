@@ -39,6 +39,11 @@ const BOUNDED: &[(&str, &str)] = &[
         "hosts the dock area and draws nothing itself; each pane scrolls on its own",
     ),
     (
+        "registers_ui",
+        "a CPU register file is a fixed set — six rows on a 6502, nine on a 65C816 — drawn as \
+         a wrapping strip at the top of the Trace pane, whose own body scrolls (W13-02i)",
+    ),
+    (
         "enhance_window",
         "hosts the §3.3 dock area and draws nothing itself; each tab scrolls on its own \
          (crate::enhance_dock::scrolled)",

@@ -41,6 +41,7 @@ use rf_core_api::{
     CartImage, CoreConfig, CoreError, CoreSink, EmulatorCore, InputFrame, PpuPixel, ResetKind,
     StateError, StateReader, StateView, StateWriter, Step, StepResult,
 };
+use rf_core_api::{CpuRegs, Mos6502Regs};
 
 use crate::{Cpu, NesBus};
 
@@ -110,13 +111,13 @@ impl NesCore {
         self.cycle_budget = budget;
     }
 
-    /// Borrow the CPU, for the debugger's register readout.
+    /// Borrow the CPU, for the state serializer and the nestest-shaped
+    /// trace formatter, which need the private bookkeeping fields too.
     ///
-    /// Not reachable through `EmulatorCore` today:
-    /// `StateView::cpu_regs` is an untyped `&[u8]` with no stated
-    /// encoding, so a shell wanting `pc` would have to agree a layout
-    /// with every core out of band. Closing that is W11-12's problem,
-    /// and naming it here beats inventing a byte order nobody agreed to.
+    /// The *register readout* no longer comes through here: since
+    /// W13-02i `state_view().cpu_regs` carries a typed
+    /// `rf_core_api::Mos6502Regs`, so a shell wanting `pc` reads it
+    /// through the trait like any other console.
     #[must_use]
     pub fn cpu(&self) -> &Cpu {
         &self.cpu
@@ -267,7 +268,14 @@ impl EmulatorCore for NesCore {
 
     fn state_view(&self) -> StateView<'_> {
         StateView {
-            cpu_regs: &[],
+            cpu_regs: CpuRegs::Mos6502(Mos6502Regs {
+                a: self.cpu.a,
+                x: self.cpu.x,
+                y: self.cpu.y,
+                s: self.cpu.s,
+                pc: self.cpu.pc,
+                p: self.cpu.p,
+            }),
             wram: self.bus.ram(),
             vram: self.bus.vram(),
             cgram: self.bus.palette(),

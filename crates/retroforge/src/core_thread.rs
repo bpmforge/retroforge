@@ -307,6 +307,14 @@ pub struct FrameMsg {
     /// trade `SetLayerExtraction` already makes for its two 240 KB
     /// buffers. `CoreCommand::SetSnesDebugCapture` is the switch.
     pub snes: Option<Box<SnesDebugFrame>>,
+    /// The CPU register file at the end of this frame, typed per CPU
+    /// family, for the register readout (ticket W13-02i). One field for
+    /// both consoles, read through `EmulatorCore::state_view`; the UI
+    /// thread matches on the variant and never reaches into a core.
+    /// Boxed for the same `clippy::large_enum_variant` reason `oam` is:
+    /// the value is a couple of dozen bytes, but this message is already
+    /// at the lint's threshold and every inline field tips it.
+    pub cpu_regs: Box<rf_core_api::CpuRegs>,
     pub palette_ram: Box<[u8; 32]>,
     /// Ticket W4-06b: the same frame's 2 KiB WRAM snapshot
     /// (`EmuStepper::wram_snapshot`, side-effect-free — same "read-only is
@@ -1301,6 +1309,7 @@ fn core_thread_main(
                     None
                 },
                 vram: Box::new(*stepper.vram()),
+                cpu_regs: Box::new(stepper.cpu_regs()),
                 palette_ram: Box::new(*stepper.palette()),
                 wram: Box::new(stepper.wram_snapshot()),
                 prg_ram: Box::new(*stepper.prg_ram()),

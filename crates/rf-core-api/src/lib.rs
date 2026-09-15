@@ -15,6 +15,7 @@
 
 mod cart;
 mod core;
+mod cpu_regs;
 mod error;
 mod event;
 mod frame_bundle;
@@ -26,6 +27,7 @@ mod watch;
 
 pub use cart::CartImage;
 pub use core::{CoreConfig, CoreSink, EmulatorCore, ResetKind, Step, StepResult};
+pub use cpu_regs::{CpuRegs, Mos6502Regs, Wdc65816Regs};
 pub use error::{CoreError, StateError};
 pub use event::{CoreEvent, EventMask};
 pub use frame_bundle::{FrameBundle, FrameBundleBuilder};

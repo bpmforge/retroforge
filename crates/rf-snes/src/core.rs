@@ -34,6 +34,7 @@ use rf_core_api::{
     CartImage, CoreConfig, CoreError, CoreSink, EmulatorCore, InputFrame, ResetKind, StateError,
     StateReader, StateView, StateWriter, Step, StepResult,
 };
+use rf_core_api::{CpuRegs, Wdc65816Regs};
 
 use crate::SnesSystem;
 
@@ -367,15 +368,23 @@ impl EmulatorCore for SnesCore {
 
     fn state_view(&self) -> StateView<'_> {
         StateView {
-            // **Deliberately empty, and this is a filed decision rather
-            // than an omission.** `StateView::cpu_regs` is an untyped
-            // `&[u8]` with a "core-defined field order", so filling it
-            // here would publish a byte layout every consumer must decode
-            // per console — the half-console shape W11-07 was split to
-            // avoid. W13-02i owns choosing a real expression, and depends
-            // on W13-02b so it is designed against a second consumer
-            // rather than against a guess (Brad's ruling 2026-09-04, D-6).
-            cpu_regs: &[],
+            // Typed, per ruling D-6 (ticket W13-02i): the contract names
+            // the 65C816 register file rather than a byte layout every
+            // consumer would decode per console. `e` travels alongside
+            // `p` because it is not a bit of `p` and changes what two of
+            // `p`'s bits mean.
+            cpu_regs: CpuRegs::Wdc65816(Wdc65816Regs {
+                a: self.system.cpu.a,
+                x: self.system.cpu.x,
+                y: self.system.cpu.y,
+                sp: self.system.cpu.sp,
+                d: self.system.cpu.d,
+                dbr: self.system.cpu.dbr,
+                pbr: self.system.cpu.pbr,
+                pc: self.system.cpu.pc,
+                p: self.system.cpu.p,
+                e: self.system.cpu.e,
+            }),
             wram: &self.system.bus.wram,
             vram: &self.system.bus.ppu.vram,
             cgram: &self.cgram_bytes,

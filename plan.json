@@ -5871,7 +5871,7 @@
     "both cores and both test mocks implement whatever is chosen; no core is left with a stub that returns empty"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "SPLIT OUT OF W13-02a ON BRAD'S RULING 2026-09-04 (decision D-6). W13-02a asked for six StateView fields; five are raw byte arrays with no design question, and W13-02b (the SNES viewer column) needs those five and not this one. Only cpu_regs carries the question, so only cpu_regs waits.",
     "WHY IT DEPENDS ON W13-02b RATHER THAN BEING CLAIMABLE NOW: the choice is between typed registers on the trait (the architecture as designed, ruling #1's precedent, touching rf-core-api plus both cores plus two mocks) and a per-core byte layout the shell decodes (smaller, and how one shell ends up knowing two consoles' private formats). Designing that with ONE consumer is designing against a guess. W13-02b builds the real second consumer; this is decided against it.",

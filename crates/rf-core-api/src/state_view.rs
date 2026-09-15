@@ -1,20 +1,25 @@
 //! Read-only machine-state view and the save-state stream traits
 //! (ARCHITECTURE §5; FR-CORE-001).
+use crate::cpu_regs::CpuRegs;
 use crate::error::StateError;
 
 /// Borrowed, read-only snapshot of machine state, valid only between frames
 /// (ARCHITECTURE §5: "Valid only between frames").
 ///
-/// Every field is a shared slice — there is no `&mut` anywhere in this type
-/// and no interior mutability, so "read-only" is enforced by the type
-/// system, not by convention. Layout/encoding of each region (register
-/// order, tile format, etc.) is core-defined; consumers (debugger,
-/// enhancement side) are expected to know the layout of the specific core
-/// they are attached to.
+/// Every memory field is a shared slice — there is no `&mut` anywhere in
+/// this type and no interior mutability, so "read-only" is enforced by the
+/// type system, not by convention. The layout of each *memory* region
+/// (tile format, OAM entry shape) is core-defined and consumers are
+/// expected to know the console they are attached to. The CPU register
+/// file is the exception, and typed on purpose: see [`CpuRegs`].
 #[derive(Debug, Clone, Copy)]
 pub struct StateView<'a> {
-    /// Serialized CPU register file (core-defined field order).
-    pub cpu_regs: &'a [u8],
+    /// The CPU register file, typed per CPU family (ticket W13-02i,
+    /// ruling D-6). Was an untyped `&[u8]` with a "core-defined field
+    /// order" that no core ever filled, because a byte layout every
+    /// consumer must decode per console is the shape this contract
+    /// exists to prevent. [`CpuRegs::None`] only for cores with no CPU.
+    pub cpu_regs: CpuRegs,
     /// Main work RAM.
     pub wram: &'a [u8],
     /// Video RAM (tile/tilemap data).

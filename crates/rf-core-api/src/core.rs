@@ -187,6 +187,12 @@ pub trait EmulatorCore {
 
     /// Read-only, borrowed view of machine state for the enhancement/debug
     /// side. Valid only between frames.
+    ///
+    /// Memories are lent as slices; the CPU register file is a typed
+    /// [`crate::CpuRegs`] value (W13-02i). The rule for growing this
+    /// view — and the trait — is in `cpu_regs.rs`'s module doc: a new
+    /// expression is added when a second core has a consumer for it, and
+    /// it is typed, never a byte layout.
     fn state_view(&self) -> StateView<'_>;
 
     /// Mutable access to this core's accuracy/compatibility switches.

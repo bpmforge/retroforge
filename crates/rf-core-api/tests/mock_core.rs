@@ -10,14 +10,43 @@ use rf_core_api::{
     PixelLayer, PpuPixel, ResetKind, StateError, StateReader, StateView, StateWriter, Step,
     StepResult,
 };
+use rf_core_api::{CpuRegs, Mos6502Regs};
 
 const WRAM_SIZE: usize = 8;
 const VRAM_SIZE: usize = 8;
 const CGRAM_SIZE: usize = 4;
 const OAM_SIZE: usize = 4;
 const PPU_REGS_SIZE: usize = 4;
-const CPU_REGS_SIZE: usize = 6;
+/// The 6502 file serialized: a, x, y, s, pc lo, pc hi, p.
+const CPU_REGS_SIZE: usize = 7;
 const MAPPER_STATE_SIZE: usize = 2;
+
+/// Distinct, non-zero values in every register so a field that is
+/// serialized in the wrong slot or dropped shows up in the round trip.
+const MOCK_REGS: Mos6502Regs = Mos6502Regs {
+    a: 1,
+    x: 2,
+    y: 3,
+    s: 4,
+    pc: 0x0605,
+    p: 7,
+};
+
+fn regs_bytes(r: &Mos6502Regs) -> [u8; CPU_REGS_SIZE] {
+    let [lo, hi] = r.pc.to_le_bytes();
+    [r.a, r.x, r.y, r.s, lo, hi, r.p]
+}
+
+fn regs_from_bytes(b: &[u8; CPU_REGS_SIZE]) -> Mos6502Regs {
+    Mos6502Regs {
+        a: b[0],
+        x: b[1],
+        y: b[2],
+        s: b[3],
+        pc: u16::from_le_bytes([b[4], b[5]]),
+        p: b[6],
+    }
+}
 const SCANLINES: u16 = 4;
 const PIXELS_PER_LINE: usize = 4;
 
@@ -65,7 +94,7 @@ struct MockCore {
     /// immediately before the value is handed to `sink.event`. Proves the
     /// no-cost path independently of what the sink does with it.
     events_constructed: u32,
-    cpu_regs: [u8; CPU_REGS_SIZE],
+    cpu_regs: Mos6502Regs,
     wram: [u8; WRAM_SIZE],
     vram: [u8; VRAM_SIZE],
     cgram: [u8; CGRAM_SIZE],
@@ -82,7 +111,7 @@ impl MockCore {
             config: CoreConfig::default(),
             scanline_cursor: 0,
             events_constructed: 0,
-            cpu_regs: [1, 2, 3, 4, 5, 6],
+            cpu_regs: MOCK_REGS,
             wram: [0xAA; WRAM_SIZE],
             vram: [0xBB; VRAM_SIZE],
             cgram: [0xCC; CGRAM_SIZE],
@@ -173,7 +202,7 @@ impl EmulatorCore for MockCore {
     }
 
     fn save_state(&self, w: &mut dyn StateWriter) -> Result<(), StateError> {
-        w.write_all(&self.cpu_regs)?;
+        w.write_all(&regs_bytes(&self.cpu_regs))?;
         w.write_all(&self.wram)?;
         w.write_all(&self.vram)?;
         w.write_all(&self.cgram)?;
@@ -184,7 +213,9 @@ impl EmulatorCore for MockCore {
     }
 
     fn load_state(&mut self, r: &mut dyn StateReader) -> Result<(), StateError> {
-        r.read_exact(&mut self.cpu_regs)?;
+        let mut regs = [0u8; CPU_REGS_SIZE];
+        r.read_exact(&mut regs)?;
+        self.cpu_regs = regs_from_bytes(&regs);
         r.read_exact(&mut self.wram)?;
         r.read_exact(&mut self.vram)?;
         r.read_exact(&mut self.cgram)?;
@@ -196,7 +227,7 @@ impl EmulatorCore for MockCore {
 
     fn state_view(&self) -> StateView<'_> {
         StateView {
-            cpu_regs: &self.cpu_regs,
+            cpu_regs: CpuRegs::Mos6502(self.cpu_regs),
             wram: &self.wram,
             vram: &self.vram,
             cgram: &self.cgram,
@@ -441,7 +472,7 @@ fn state_view_borrows_live_internal_state_read_only() {
     let mut core = MockCore::new();
     core.wram[0] = 0x42;
     let view = core.state_view();
-    assert_eq!(view.cpu_regs, &[1, 2, 3, 4, 5, 6]);
+    assert_eq!(view.cpu_regs, CpuRegs::Mos6502(MOCK_REGS));
     assert_eq!(view.wram[0], 0x42);
     assert_eq!(view.vram.len(), VRAM_SIZE);
     assert_eq!(view.cgram.len(), CGRAM_SIZE);
@@ -520,7 +551,7 @@ fn emulator_core_is_object_safe_and_drivable_through_dyn() {
     assert!(core.load_state(&mut r).is_ok());
 
     let view: StateView<'_> = core.state_view();
-    assert_eq!(view.cpu_regs.len(), CPU_REGS_SIZE);
+    assert!(matches!(view.cpu_regs, CpuRegs::Mos6502(_)));
 }
 
 // ---- EventMask <-> CoreEvent bit correspondence -------------------------

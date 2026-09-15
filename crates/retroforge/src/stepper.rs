@@ -203,9 +203,10 @@ impl std::error::Error for OpenError {}
 /// method that advances the machine goes through
 /// [`rf_core_api::EmulatorCore`] — one code path, both consoles. What
 /// branches here is the debugger's reach-through: the NES pattern viewer
-/// wants a `NesBus`, the register readout wants a 6502 `pc`, and neither
-/// has a trait expression yet (`StateView::cpu_regs` is an untyped
-/// `&[u8]` with no agreed encoding).
+/// wants a `NesBus`, the breakpoint engine wants a 6502 `pc` and `s`, and
+/// the NES state serializer wants the whole private `Cpu`. (The register
+/// *readout* no longer branches: since W13-02i it reads the typed
+/// `StateView::cpu_regs` for both consoles.)
 ///
 /// **This is not the "second bespoke SNES path" Brad ruled against on
 /// 2026-08-26**, and the difference is worth being exact about. That
@@ -214,10 +215,12 @@ impl std::error::Error for OpenError {}
 /// Emulation is not duplicated here at all — it is one `dyn
 /// EmulatorCore` call. Only inspection branches.
 ///
-/// Closing the three remaining trait gaps — typed CPU registers, an
-/// out-of-band bus write, APU access — is what would let this become a
-/// plain `Box<dyn EmulatorCore>`. Doing it before then would mean
-/// downcasting: bypassing the trait while appearing to use it.
+/// Closing the remaining trait gaps — an out-of-band bus write, APU
+/// access, and the NES-shaped viewers above — is what would let this
+/// become a plain `Box<dyn EmulatorCore>`. Typed CPU registers closed
+/// with W13-02i; `rf_core_api::cpu_regs`'s module doc records the rule
+/// for the other two. Doing it before then would mean downcasting:
+/// bypassing the trait while appearing to use it.
 enum Machine {
     Nes(Box<rf_nes::core::NesCore>),
     Snes(Box<rf_snes::core::SnesCore>),
@@ -313,10 +316,10 @@ pub struct EmuStepper {
     /// the trait.
     ///
     /// Concrete `NesCore` rather than `Box<dyn EmulatorCore>`, and that
-    /// is W11-12's job rather than an oversight: three things the
-    /// debugger needs have no trait expression yet — typed CPU registers
-    /// (`StateView::cpu_regs` is an untyped `&[u8]`), an out-of-band bus
-    /// WRITE for the memory editor, and APU access for channel capture.
+    /// is W11-12's job rather than an oversight: two things the
+    /// debugger needs have no trait expression yet — an out-of-band bus
+    /// WRITE for the memory editor, and APU access for channel capture
+    /// (typed CPU registers were the third, closed by W13-02i).
     /// Boxing before those close would mean bypassing the trait through a
     /// downcast, which is worse than holding the concrete type honestly.
     machine: Machine,
@@ -577,11 +580,17 @@ impl EmuStepper {
     /// that wants to serve both consoles reads instead; W13-02b builds
     /// those viewers on it.
     ///
-    /// `cpu_regs` is empty on SNES by decision, not omission — see
-    /// `rf_snes::core::SnesCore::state_view` and W13-02i.
     #[must_use]
     pub fn state_view(&self) -> rf_core_api::StateView<'_> {
         self.machine.as_core_ref().state_view()
+    }
+
+    /// The running console's CPU register file, typed, through the one
+    /// trait path both cores answer (ticket W13-02i). This is what the
+    /// register readout draws; it never reaches into a core.
+    #[must_use]
+    pub fn cpu_regs(&self) -> rf_core_api::CpuRegs {
+        self.state_view().cpu_regs
     }
 
     /// One bsnes-shaped trace line for a SNES session, or empty on a NES

@@ -213,13 +213,24 @@ fn state_view_reports_every_memory_the_console_physically_has() {
     );
     assert_eq!(view.ppu_regs.len(), rf_snes::core::PPU_REG_COUNT);
 
-    // `cpu_regs` is deliberately empty until W13-02i decides how the
-    // contract expresses registers (Brad's ruling 2026-09-04, D-6). This
-    // asserts the *decision*, so that filling it later is a deliberate
-    // change rather than something that quietly happens.
-    assert!(
-        view.cpu_regs.is_empty(),
-        "cpu_regs is W13-02i's, not this ticket's"
+    // W13-02i (ruling D-6): the register file is typed, and it is the
+    // live one — every field equals the CPU the core is running.
+    let cpu = &core.system().cpu;
+    assert_eq!(
+        view.cpu_regs,
+        rf_core_api::CpuRegs::Wdc65816(rf_core_api::Wdc65816Regs {
+            a: cpu.a,
+            x: cpu.x,
+            y: cpu.y,
+            sp: cpu.sp,
+            d: cpu.d,
+            dbr: cpu.dbr,
+            pbr: cpu.pbr,
+            pc: cpu.pc,
+            p: cpu.p,
+            e: cpu.e,
+        }),
+        "cpu_regs is the live 65C816 register file"
     );
     // Empty is the correct report for a plain LoROM: no bank registers,
     // no IRQ counter, nothing to serialize.

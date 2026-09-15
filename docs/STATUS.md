@@ -2489,3 +2489,60 @@ Phase 13 work, and D-4 blocks only a docs ticket.
   **Two hidden gates are now automated that never were:** the evidence
   file's staleness and the licence graph. Local gate this close:
   workspace 1775 passing / 0 failed / 33 ignored, arch OK.
+
+- **W13-02i — `StateView::cpu_regs` is typed, and the register readout
+  reads both cores through it** (2026-09-15). The D-6 question, decided
+  against the second consumer W13-02b built, as the ruling required.
+
+  **The decision: an enum of typed register files, not a byte layout.**
+  `rf_core_api::CpuRegs` is `None | Mos6502(Mos6502Regs) |
+  Wdc65816(Wdc65816Regs)`, plain `Copy` values filled at `state_view()`
+  time. The argument that settled it is in the module doc: a CPU's
+  *register set* is not private — it is the ISA, on nesdev and in the
+  W65C816S datasheet — and a debugger cannot show `A` without knowing
+  there is an `A`. What IS private is how a core stores it, and that
+  never crosses the trait. `e` travels beside `p` on the 65C816 because
+  it is not a bit of `p` and changes what two of `p`'s bits mean; the
+  `flags()` renderers know that (`NV1BDIZC` in emulation, `NVMXDIZC`
+  native), with tests. `CpuRegs::pc()` is the one register every
+  consumer can read blind (`pbr:pc` flattened on SNES).
+
+  **Both cores fill it, both mocks implement it, nothing returns empty.**
+  `NesCore` copies its six registers; `SnesCore` its ten, and its
+  W13-02a test now asserts field-by-field equality with the live CPU
+  instead of asserting emptiness. The rf-core-api mock serializes a
+  `Mos6502Regs` (seven bytes, distinct non-zero values so a dropped or
+  swapped field fails the round trip); the harness's scripted core
+  answers `None`, which is the truth for a core with no CPU.
+
+  **The panel: one path, no console branch.** `registers_ui` sits at the
+  top of the Trace tab — where bsnes and Mesen both put it — and is the
+  only debugger surface with no `snes.as_deref()` fork: it matches the
+  enum. The value reaches it as a typed field on `FrameMsg`, boxed for
+  the same `large_enum_variant` reason OAM is, through `EmuStepper::
+  cpu_regs()`, which is `state_view().cpu_regs` and nothing else.
+  `register_rows` is separated from drawing and tested for both CPUs
+  and for `None`. W10-04's scroll lint caught the new surface at once
+  and it is listed as bounded with the reason (a register file is a
+  fixed set), which is the lint working as designed.
+
+  **What this decides for the other two trait gaps**, as the ticket
+  asked: the rule is *a trait expression is added when a second core has
+  a consumer for it, and it is typed, never a byte layout.* The
+  out-of-band bus write has one consumer on one console and stays
+  shell-side; APU access has no consumer through the trait at all and
+  stays with `rf_snes::debug` until a viewer wants both APUs through one
+  path. `EmuStepper::Machine` remains a concrete enum for those two plus
+  the NES-shaped viewers — one gap closed, not all.
+
+  **Outside write_scope, stated:** one mechanical line in
+  `rf-harness/tests/blargg_protocol.rs` (the scripted core's literal)
+  and one `BOUNDED` entry in `retroforge/tests/surfaces_can_scroll.rs`,
+  both forced by the contract change. **Not done:** `docs/design/
+  DEBUGGER.md` §"StateView" still says `cpu_regs` stays empty by
+  decision — `docs/design/**` is outside this scope; the Rust doc on
+  `cpu_regs.rs` is the specification until a docs ticket updates it.
+
+  Gate: workspace **1781 passing / 0 failed / 33 ignored** (up from
+  1775), arch OK, evidence OK, licences OK, validate-plan and
+  traceability OK. **Phase 13's debugger arc is closed: nine of nine.**
