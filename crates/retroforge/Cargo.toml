@@ -118,7 +118,14 @@ serde = { version = "1", features = ["derive"] }
 # two of them tofu boxes, one of which shipped as the FIX for the first.
 # See crates/retroforge/tests/renders.rs.
 egui_kittest = { version = "0.35.0", features = ["eframe", "wgpu"] }
-image = "0.25"
+# PNG ONLY, same as the normal dependency above. Cargo unifies features
+# across the graph, so `image = "0.25"` here (W10-03) silently switched the
+# AVIF encoder on for everyone: image -> ravif -> rav1e -> libfuzzer-sys,
+# which is "(MIT OR Apache-2.0) AND NCSA" and fails the NFR-011 licence
+# gate. The darwin runner's first full run caught it (W12-01, 2026-09-15);
+# the tests only ever write PNGs (renders.rs, capture_tour.rs,
+# hdpack_reaches_the_app.rs, level_producer.rs).
+image = { version = "0.25", default-features = false, features = ["png"] }
 criterion = "0.8.2"
 
 [features]
