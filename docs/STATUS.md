@@ -2440,3 +2440,52 @@ Phase 13 work, and D-4 blocks only a docs ticket.
 
   **Phase 13's debugger arc: eight of nine closed.** Only `W13-02i` — the
   `cpu_regs` contract question from ruling D-6 — remains.
+
+- **W12-01 — the local gate runs unattended on a self-hosted darwin
+  runner** (2026-09-15). Runner `rf-darwin` registered from
+  `~/actions-runner` and installed as a LaunchAgent (Brad's commands, per
+  the ticket note: the classifier blocks persistence, correctly). The
+  2026-08-31 registration had written its credentials into a session
+  scratchpad that was later cleaned, which is why every run since showed
+  `cancelled` with nothing to pick it up — the exact silent failure the
+  ticket's runner-location note predicted, arriving by the credentials
+  file instead of the plist.
+
+  **The first three real runs were all red, and all three were right.**
+  Run 1 (re-run of 06406f2): `validate-evidence` rejected
+  `docs/evidence/local-gate.json` as stale — generated 2026-08-23 at
+  892e9ea, and W13-02e touched rf-nes cpu/ppu/apu/system after it.
+  Regenerating it was impossible because `scripts/local-gate.sh` had
+  been un-passable end to end since the same day: the crate-wide
+  `-p rf-snes -- --ignored` sweep died on `blargg_spc`, which is RED by
+  design (W7-08/W7-17's open scope) — and blamed the 65816 vectors for
+  it. **Brad's ruling (option 1 of three):** the sweep skips blargg, and
+  the blargg step reports its verdict every run but no longer exits the
+  gate; W7-08's close criterion is to put the hard fail back
+  (26f2cb5). Evidence regenerated from a clean tree at 26f2cb5, 31/31
+  effective (46f5a2c). Run 2 (46f5a2c): everything green through
+  `cargo test --workspace` — then `cargo deny check licenses` rejected
+  libfuzzer-sys ("(MIT OR Apache-2.0) AND NCSA") via image → ravif →
+  rav1e. Red on main since W10-03 added `image = "0.25"` as a
+  dev-dependency with default features; `cargo deny` is not one of law
+  3's four commands, so nothing local had run it. Feature-trim, not
+  exception: the dev-dependency is PNG-only like the normal one, 474
+  lock lines gone (bb21d05, outside this ticket's write_scope and said
+  so). **Run 3 (bb21d05): run 35012699193, every step successful,
+  4m28s** — fmt, clippy, arch, board validators, evidence, all three
+  cc65 fixture rebuilds, tests, licence gate.
+
+  **Acceptance, against the ticket:** (1) a completed green run was
+  read, not a workflow file; (2) cc65 from brew, all three deterministic
+  fixture rebuilds ran and passed in that job; (3) push-to-main only,
+  60-minute cap, and the heavy suites are `workflow_dispatch`-only by
+  written decision (fd05d3c, now also TESTING.md §0); (4) TESTING.md §0
+  updated only now, and says darwin-only: Linux and the
+  software-rasterizer path remain verified by nothing. The ticket's
+  staleness-check worry (shallow clone silently degrading) is answered
+  by evidence rather than argument: run 1 *detected* staleness in the
+  reused `_work`, so the history is there.
+
+  **Two hidden gates are now automated that never were:** the evidence
+  file's staleness and the licence graph. Local gate this close:
+  workspace 1775 passing / 0 failed / 33 ignored, arch OK.

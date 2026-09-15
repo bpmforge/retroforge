@@ -9,8 +9,24 @@ SRS verification column, `docs/design/SAVE_STATES.md`.
 **There is no CI.** Hosted GitHub Actions has rejected every run since
 ~2026-08-07 on the Actions budget, and Brad ruled 2026-08-22 that the
 budget is not being increased — so this is permanent policy, not a dip
-(`CLAUDE.md` → Build). A self-hosted runner and Gitea Actions are both
-free and both open; neither is set up.
+(`CLAUDE.md` → Build). **What runs instead is a self-hosted runner on
+Brad's darwin workstation** (ticket W12-01, green 2026-09-15): runner
+`rf-darwin`, a launchd LaunchAgent installed from `~/actions-runner`,
+labels `self-hosted, macOS, ARM64`, driving
+`.github/workflows/gate-darwin.yml`. GitHub does not bill self-hosted
+minutes and the Actions budget does not gate scheduling onto it (probed
+2026-08-31, docs/STATUS.md). First green run: run 35012699193 on
+bb21d05, every step successful, 4m28s. Gitea Actions on `origin` remains
+open and not set up.
+
+The darwin gate is bounded against law 8 by design, not by default:
+push-to-main only (never `pull_request`), `cancel-in-progress`
+concurrency, a 60-minute job timeout, and the tools step **verifies and
+never installs**. **The heavy suites do not run unattended.** The 10k
+determinism double-run, the 5k mode-invariant boundary, debugger idle
+cost, the un-profiled replay and the UI smoke flow live in a separate
+`heavy` job that only `workflow_dispatch` starts, with its own 90-minute
+cap: one click, attended, on the machine RF-L-09 happened on.
 
 Read every "every PR", "nightly", "Tier A/B" and "in CI" phrase in this
 document as **which gate a suite belongs to**, not as a claim that
@@ -23,13 +39,18 @@ something ran. What actually executes today is:
   plugin-SDK examples, profile validation, `mdbook build`);
 - `node scripts/validate-plan.mjs` and `node scripts/validate-traceability.mjs`.
 
-All of it runs on **one darwin machine**. Three things CI used to cover
-run nowhere and must be described as unverified wherever they are
-claimed: **Linux**, the **software-rasterizer GPU path**
-(`LIBGL_ALWAYS_SOFTWARE=1` on llvmpipe, versus Metal locally), and the
-**cc65 deterministic fixture rebuild** of RF-Scroller / RF-Scroller-S /
-mirror-maps. A red run on GitHub is not a signal and does not contradict
-a green local gate.
+All of it runs on **one darwin machine**, and the runner is that same
+machine. Of the three things hosted CI used to cover, the darwin runner
+restores exactly one: the **cc65 deterministic fixture rebuild** of
+RF-Scroller / RF-Scroller-S / mirror-maps (brew cc65, every push). The
+other two run nowhere and must be described as unverified wherever they
+are claimed: **Linux**, and the **software-rasterizer GPU path**
+(`LIBGL_ALWAYS_SOFTWARE=1` on llvmpipe, versus Metal on the runner).
+`ci.yml` stays in the tree unedited as the Linux definition. A red
+*hosted* run on GitHub is still not a signal; a red **gate-darwin** run
+is, and it has already been right three times (§4's evidence file stale
+after W13-02e, and an NCSA licence in the dev graph since W10-03, both
+2026-09-15).
 
 `docs/SRS.md`'s `Verification` column still uses `CI` as a *class* of
 verification for 22 requirements. That naming was left alone deliberately

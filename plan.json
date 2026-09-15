@@ -5529,7 +5529,7 @@
     "docs/TESTING.md §0 is updated ONLY after a green run, and says darwin-only: Linux and the software-rasterizer GPU path remain verified by nothing"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "FILED 2026-08-31 after ruling #4's premise was TESTED rather than assumed. The premise was 'GitHub does not bill self-hosted minutes on private repos' — true of MINUTES, but every rejection since ~2026-08-07 reads 'The job was not started because an Actions budget is preventing further use', and whether that gates JOB SCHEDULING or only BILLABLE scheduling decided whether this ticket could exist at all. A ten-line workflow_dispatch probe went to QUEUED (hosted runs are REJECTED in 4-5s with zero steps executed), then an ephemeral runner took it and reported success in 4s on Darwin arm64. The scheduler is not budget-gated. Probe deleted the same day; the finding is in STATUS 2026-08-31.",
     "DO NOT EDIT ci.yml — ADD gate-darwin.yml. ci.yml's `gate` job is the LINUX definition and it is correct as written; it simply cannot run. Editing it in place would destroy the record of what a Linux gate should do, and its comments are load-bearing documentation. Two workflows keep two truths: the Linux gate that would work on a Linux runner, and the darwin gate that actually runs. The substitutions are known up front rather than discovered one failed run at a time: brew cc65 (2.19 already installed) instead of `sudo apt-get install -y cc65`; no libasound2-dev/libudev-dev; Metal instead of the LIBGL_ALWAYS_SOFTWARE=1 llvmpipe path.",
