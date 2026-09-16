@@ -96,7 +96,7 @@
 //! controller reads combine the shift-register bit with whatever the
 //! shared latch currently holds, which is simpler, fully deterministic,
 //! and correct for the one bit every acceptance test actually checks (D0).
-mod cartridge;
+pub(crate) mod cartridge;
 mod controller;
 mod state;
 
@@ -108,7 +108,10 @@ pub use controller::Controller;
 
 use crate::apu::Apu;
 use crate::cpu::CpuBus;
-use crate::mappers::{Action53, AxRom, Cnrom, Mapper, Mmc1, Mmc3, Mmc3Revision, Nrom, UxRom};
+use crate::mappers::{
+    Action53, AxRom, Camerica, Cnrom, ColorDreams, DxRom, Mapper, Mmc1, Mmc3, Mmc3Revision, Nina,
+    Nrom, UxRom,
+};
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
 use rf_core_api::{CoreEvent, CoreSink, EventMask};
@@ -235,7 +238,31 @@ impl NesBus {
                 mmc3_revision,
             )),
             7 => Box::new(AxRom::new(rom.prg_rom().to_vec())),
+            // Ticket W14-04: the four mappers a real library actually
+            // asks for, in mapper-number order like the arms above.
+            11 => Box::new(ColorDreams::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+                rom.header().mirroring,
+            )),
             28 => Box::new(Action53::new(rom.prg_rom().to_vec())),
+            71 => Box::new(Camerica::new(
+                rom.prg_rom().to_vec(),
+                rom.header().mirroring,
+            )),
+            79 => Box::new(Nina::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+                rom.header().mirroring,
+            )),
+            206 => Box::new(DxRom::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+                rom.header().mirroring,
+            )),
             other => unreachable!(
                 "system/cartridge.rs's UnimplementedMapper gate must reject mapper {other} \
                  before NesBus::new is ever reached -- see ticket W2-02's blocked-with-evidence \

@@ -42,7 +42,7 @@ const DEFAULT_CHR_RAM_SIZE: usize = 8 * 1024;
 /// directly. That is the whole argument for this ticket's third criterion
 /// existing: only a real ROM entering through `from_ines_bytes` crosses
 /// this line.
-pub(crate) const EMULATED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7, 28];
+pub(crate) const EMULATED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7, 11, 28, 71, 79, 206];
 
 /// Everything that can go wrong turning a raw ROM image into an
 /// `rf-nes`-usable [`NesRom`]. Wraps [`CartError`] for the parsing/format

@@ -5982,7 +5982,7 @@
     "FR-CORE-013 is untouched for everything still unsupported: an unknown mapper still fails with a diagnostic naming the number, never a crash"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "CHOSEN BY MEASUREMENT, which is new for this board. A census of 1281 real NES archives (2026-09-15) bucketed all 223 refusals by mapper number: 11 -> 54 games, 79 -> 28, 206 -> 17, 71 -> 17, 5 (MMC5) -> 10, 64 -> 9, 118 -> 7, then a long tail. These four are 116 games and are all simple discrete bank-switch parts. MMC5 is 10 games and an order of magnitude more work, so it is deliberately NOT in this ticket.",
     "THE SNES SIDE IS NOT A TICKET YET, on purpose. Its 146 refusals are 14 Super FX, 13 DSP (Super Mario Kart, Pilotwings), 12 S-DD1, 11 SA-1 (Super Mario RPG, Kirby Super Star), 8 Cx4-class, 6 ExHiROM — each of which is weeks of work, and FR-CORE-035 already defers enhancement chips explicitly. The largest SNES bucket (53, 'unrecognized map mode') was CHECKED before it could be ranked as a chip: 41 are betas, protos or unlicensed dumps and 9 more are pirate carts or tech demos, leaving exactly TWO released titles (HAL's Hole in One Golf, Super Adventure Island). It is junk headers on unreleased dumps, not a header-parsing gap."

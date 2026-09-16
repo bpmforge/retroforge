@@ -130,9 +130,13 @@ use rf_cart::Mirroring;
 
 mod action53;
 mod axrom;
+mod camerica;
 mod cnrom;
+mod color_dreams;
+mod dxrom;
 mod mmc1;
 mod mmc3;
+mod nina;
 mod nrom;
 mod uxrom;
 
@@ -141,9 +145,13 @@ mod integration_tests;
 
 pub use action53::Action53;
 pub use axrom::AxRom;
+pub use camerica::Camerica;
 pub use cnrom::Cnrom;
+pub use color_dreams::ColorDreams;
+pub use dxrom::DxRom;
 pub use mmc1::Mmc1;
 pub use mmc3::{Mmc3, Mmc3Revision};
+pub use nina::Nina;
 pub use nrom::Nrom;
 pub use uxrom::UxRom;
 

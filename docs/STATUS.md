@@ -2838,3 +2838,57 @@ stories, 10 decisions).
 
   Gate: workspace **1798 passing / 0 failed / 33 ignored**, arch OK,
   evidence OK, licences OK.
+
+- **W14-04 — four discrete NES mappers, chosen by what the real library
+  actually needs** (2026-09-15). **1058 -> 1174** playable NES games, and
+  the +116 is exactly what the census predicted.
+
+  | mapper | games | example |
+  |---|---|---|
+  | 11 Color Dreams | 54 | Bible Adventures |
+  | 79 NINA-03/06 | 28 | Dudes with Attitude |
+  | 206 DxROM / Namco 118 | 17 | R.B.I. Baseball |
+  | 71 Camerica / Codemasters | 17 | MiG 29 |
+
+  **Chosen by measurement, which is new for this board.** Every one of the
+  223 refusals in a 1281-archive census was bucketed by mapper number and
+  the four largest were taken. MMC5 is next at 10 games and an order of
+  magnitude more work, so it was deliberately left out rather than swept in
+  for tidiness.
+
+  **What each one is, in one line.** 11 is a single register at
+  `$8000-$FFFF` carrying a 32 KiB PRG bank in two bits and an 8 KiB CHR
+  bank in four. 71 is UxROM that listens only at `$C000-$FFFF`, plus Fire
+  Hawk's BF9097 single-screen latch at `$9000`. 79 puts its register in
+  **expansion space** (`$4100-$5FFF`, decoded `addr & $E100 == $4100`),
+  which is why it implements `cpu_write_expansion` and why it has no bus
+  conflicts. 206 is the MMC3 ancestor with none of the parts that make
+  MMC3 delicate: no A12 inversion, no PRG mode bit, no IRQ, no mirroring
+  register. Each is cited to nesdev in its module doc (NFR-011).
+
+  **THE BUG WORTH KEEPING, and unit tests did not catch it.** There are
+  **two** mapper gates in two crates: `rf_cart`'s `SUPPORTED_MAPPERS`
+  decides whether a file is a cartridge at all — which is what the library
+  scanner asks — and `rf_nes`'s `EMULATED_MAPPERS` decides whether a
+  session can start. The first was updated and the second was not, so the
+  library listed 116 newly-playable games and **every one of them refused
+  to run**. All four mappers' own tests passed the whole time: they never
+  went through either gate. Found by running four real commercial ROMs for
+  60 frames each, which is the difference between "the header parses" and
+  "the mapper works". A permanent test now loads a synthetic ROM for every
+  id in `EMULATED_MAPPERS` through `NesRom::from_ines_bytes` — which passes
+  through **both** gates — and builds a `NesBus` from it, so the two lists
+  cannot drift apart again silently.
+
+  **Verified on real hardware images, not only on fixtures:** Bible
+  Adventures (11), MiG 29 (71), Dudes with Attitude (79) and R.B.I.
+  Baseball (206) each completed **60/60 frames**. That run was a throwaway
+  and is not committed — no ROM bytes, no home-directory path (law 5) —
+  and making it permanent is W14-03's bounded census.
+
+  FR-CORE-013 is untouched: an unsupported mapper still fails with a
+  diagnostic naming the number, and mapper 79's name was added to the
+  diagnostic table (71 and 206 were already there).
+
+  Gate: workspace **1824 passing / 0 failed / 33 ignored**, arch OK,
+  evidence OK, licences OK.

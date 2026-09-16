@@ -193,3 +193,49 @@ fn unimplemented_mapper_message_names_the_mapper_and_what_is_emulated() {
         );
     }
 }
+
+/// Every mapper this crate says it emulates must actually load (ticket
+/// W14-04).
+///
+/// **The bug this exists for cost a detour and would have cost a release.**
+/// There are TWO gates, in two crates: `rf_cart`'s `SUPPORTED_MAPPERS`
+/// decides whether a file is a cartridge at all — which is what the library
+/// scanner asks — and `EMULATED_MAPPERS` here decides whether a session can
+/// start. W14-04 added four mappers to the first and not the second, so the
+/// library listed 116 newly-playable games and every one of them refused to
+/// run. Unit tests for the mappers themselves all passed: they never went
+/// through either gate.
+///
+/// This closes the gap from the `rf-nes` side without needing `rf_cart` to
+/// export its list: `NesRom::from_ines_bytes` passes through BOTH, so a
+/// mapper that loads here is agreed on by both crates.
+#[test]
+fn every_emulated_mapper_loads_through_both_gates() {
+    for &mapper in crate::system::cartridge::EMULATED_MAPPERS {
+        // iNES flags 6 and 7 carry the mapper number, low nibble then
+        // high; mapper 206 needs the high nibble, which is why this is
+        // built by hand rather than with `build_nrom_ines`.
+        assert!(
+            mapper <= 0xFF,
+            "this builder writes an 8-bit mapper number; {mapper} needs NES 2.0"
+        );
+        let mut data = Vec::new();
+        data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
+        data.push(2); // 32 KiB PRG: enough for every banked mapper here
+        data.push(1); // 8 KiB CHR
+        data.push(((mapper as u8) & 0x0F) << 4);
+        data.push((mapper as u8) & 0xF0);
+        data.extend_from_slice(&[0u8; 8]);
+        data.extend(vec![0u8; 2 * 16 * 1024]);
+        data.extend(vec![0u8; 8 * 1024]);
+
+        let rom = NesRom::from_ines_bytes(&data)
+            .unwrap_or_else(|e| panic!("mapper {mapper} is listed as emulated but failed: {e}"));
+        assert_eq!(rom.header().mapper, mapper, "header round-trip");
+
+        // ...and a bus can be built from it, which is what catches a
+        // mapper that passed both gates and then hit the dispatch's
+        // `unreachable!`.
+        let _bus = NesBus::new(rom);
+    }
+}

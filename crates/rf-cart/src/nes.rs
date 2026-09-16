@@ -19,7 +19,13 @@ const CHR_BANK: usize = 8 * 1024;
 /// (`docs/design/EMULATION_CORES.md` §3.4). Extend this list in lockstep
 /// with whatever ticket lands the next mapper in rf-nes — this table is
 /// the enforcement point for FR-CORE-013's "unknown mapper" diagnostic.
-const SUPPORTED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7, 28];
+/// Mappers this build can run.
+///
+/// 11, 71, 79 and 206 were added by ticket W14-04, and by measurement
+/// rather than by reputation: a census of 1281 real NES archives
+/// (2026-09-15) bucketed all 223 refusals by mapper number, and these four
+/// were the largest buckets at 54, 17, 28 and 17 games — 116 between them.
+const SUPPORTED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7, 11, 28, 71, 79, 206];
 
 /// A handful of well-known mapper names, used only to make an
 /// unsupported-mapper diagnostic more useful. Not exhaustive — absence
@@ -47,6 +53,7 @@ fn mapper_name(id: u16) -> Option<&'static str> {
         71 => "Camerica / Codemasters",
         73 => "VRC3",
         75 => "VRC1",
+        79 => "NINA-03/06",
         85 => "VRC7",
         206 => "DxROM",
         _ => return None,
