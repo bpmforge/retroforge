@@ -6059,7 +6059,7 @@
     "a regression test pins it at the smallest level that reproduces, so the census is not the only thing that would catch it coming back"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "W14-06 RAISED THE COUNT FROM 6 TO 11, 2026-09-15, and that is progress rather than regression: fixing the APU boot handshake let hundreds of titles get past their sound-driver upload, and five of them then reached a hang that nothing had been able to reach before. The full list is now Batman Forever (USA) and its Rev 1, Elite Soccer, The Flintstones, Judge Dredd, Radical Psycho Machine Racing and its beta, and Super Buster Bros. across its revisions and betas. Still zero crashes in 1265 titles.",
     "FOUND BY W14-03's FIRST CENSUS (2026-09-15). Six of 1265 SNES archives exceeded the 30-second wall-clock cap and were killed: Radical Psycho Machine Racing (USA) and its 1991-08-14 beta, and Super Buster Bros. (USA) with its Rev 1 and both betas. That is TWO distinct games across their revisions, which is what makes it a bug rather than a bad dump — a broken dump does not reproduce across four separate releases of the same title.",
