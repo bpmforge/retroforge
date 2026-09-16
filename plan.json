@@ -6033,7 +6033,7 @@
     "a regression test carries whatever the fix turns on, at the smallest level it can be tested — a unit test on the PPU stage, not only a census number"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FOUND BY W14-03's FIRST CENSUS (2026-09-15) AND MEASURED, NOT SUSPECTED. Of 1265 SNES archives: 303 rendered something, 806 rendered a uniform screen, 150 refused, 0 crashed, 6 timed out. A 60-title sample re-run with a finer bucket says the PPU is NOT silent — 'emitted NO video at all' was ZERO, and 42 of 55 loadable titles emitted scanlines whose every pixel carried the same palette index. So the renderer runs and paints a flat colour.",
     "THE ASYMMETRY IS THE EVIDENCE. The same harness, the same 600 frames, the same sink: NES produced a uniform screen for 7 of 1174 loadable titles (0.6%), SNES for roughly 76%. Whatever this is, it is SNES-side and systemic rather than a scattering of per-game bugs.",
