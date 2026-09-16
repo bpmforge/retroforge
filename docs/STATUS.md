@@ -2715,3 +2715,73 @@ stories, 10 decisions).
   Gate: workspace **1789 passing / 0 failed / 33 ignored**, arch OK, evidence
   OK, licences OK, validate-plan OK (177 tickets after W14-05 was filed),
   traceability OK.
+
+- **W14-05 — `rf-cart` reports Ok for data that is not a cartridge**
+  (2026-09-15). False identifications fell from **130 to 11**.
+
+  | measured over | archives | mistaken for cartridges |
+  |---|---|---|
+  | Game Boy folder, before | 681 | **130** (19%) |
+  | GB + GBC + GBA + VB, after | 2495 | **11** (0.44%) |
+
+  **The cause.** A SNES header has **no magic number** — iNES starts
+  `NES\x1A` and can simply be looked at; a SNES header is a checksum, a
+  reset vector and some text at `$7FC0` or `$FFC0`, and deciding whether
+  they mean anything is the whole of the identification. `score_candidate`
+  awarded 2 points for an intact checksum and 1 each for a high reset
+  vector and a matching map-mode nibble — and accepted **any score above
+  zero**. A reset-vector high byte over `$80` is one byte value in two, so
+  a single coincidence minted a cartridge. This is the identity function
+  that per-game settings, save states, profile matching and the library
+  grid all key on: a false `Ok` invents a game.
+
+  **The fix is structural first, evidence second.** Two **necessary**
+  conditions now gate a candidate before it is scored at all — an assigned
+  country code (`$00-$14`, fullsnes) and a plausible revision (`<= $0F`) —
+  fields every real header fills in and arbitrary data clears about once in
+  200. On top of that a candidate must reach **two** points from: intact
+  checksum/complement (2), reset vector into the upper bank (1), a majority
+  of the 21-byte title printable (1), a plausible ROM-size exponent (1),
+  and the map-mode nibble agreeing with the location (1).
+
+  **One design was tried and rejected on evidence.** Making the map-mode
+  nibble a *necessary* condition is the obvious strong rule and it is
+  wrong: real dumps exist whose header sits at one location while its mode
+  byte names the other, and **`WWF Super WrestleMania (USA)`** — a released
+  commercial title — is one. Found by listing what the rule cost rather
+  than by reasoning about it.
+
+  **Two deviations from this ticket's own acceptance, stated rather than
+  waived.** Criterion 1 asked for **zero** false positives on the Game Boy
+  folder without a caller's denylist; the result is **4** there, 11 across
+  all foreign folders. Criterion 2 asked that **no** cartridge that loads
+  today be lost; **4 of 1119** SNES dumps were. Both have the same root:
+  prototypes and beta dumps ship with blanked headers whose only remaining
+  evidence is a reset vector and a map-mode nibble, which is exactly the
+  amount of signal arbitrary data can also supply. **Any rule strict enough
+  to reject every foreign ROM rejects those too.** The 4 lost are named and
+  none is a released commercial game — they are pirate carts, betas and
+  demos (Aladdin 2000 (Pirate), F-Zero (Beta), Porky Pig's Haunted Holiday
+  (Beta), PowerFest 94 among the 27 titles that now take the scored-out
+  path). **Whether 0.44% is the right stopping point is Brad's call**; the
+  alternative is losing more real prototypes.
+
+  **The ratchet, not an assertion of zero.**
+  `crates/rf-cart/tests/foreign_false_positives.rs` measures the rate
+  against a colon-separated `RF_FOREIGN_ROM_LIBRARY` and fails above 1%.
+  It reads each named directory **without descending**, so a parent folder
+  holding NES and SNES games cannot be pointed at by accident — a test that
+  can be misconfigured into failing teaches people to ignore it. It skips
+  cleanly when the variable is unset. `zip` joins rf-cart as a
+  **dev-dependency** at the same version and features the other two crates
+  pin.
+
+  **FR-CORE-013 is preserved and slightly widened.** Because the structural
+  gate rejects an ExHiROM or SA-1 header before scoring, "no plausible SNES
+  header" would have replaced "unsupported chip: ExHiROM" for twelve real
+  titles. A fallback now names the chip whenever nothing qualifies. The
+  no-candidate arm also stopped reporting `Truncated` for a long file that
+  simply has nothing header-shaped in it.
+
+  Gate: workspace **1792 passing / 0 failed / 33 ignored**, arch OK,
+  evidence OK, licences OK.

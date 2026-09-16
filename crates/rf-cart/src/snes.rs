@@ -22,6 +22,23 @@ const LOROM_HEADER_OFFSET: usize = 0x7FC0;
 const HIROM_HEADER_OFFSET: usize = 0xFFC0;
 /// Header fields ($00-$1F) plus the interrupt vector table ($20-$3F).
 const HEADER_BLOCK_LEN: usize = 0x40;
+
+/// How much evidence `score_candidate` must find, on top of the necessary
+/// conditions it checks first, before a location is accepted as a SNES
+/// header. See the check in [`parse_snes_header`] for why this is not zero.
+const MINIMUM_SCORE: i32 = 2;
+
+/// Highest country/region code fullsnes assigns ($00 Japan .. $14).
+const MAX_COUNTRY_CODE: u8 = 0x14;
+
+/// Highest cartridge revision treated as plausible. Commercial carts ship
+/// $00 and revisions stay in single digits.
+const MAX_ROM_VERSION: u8 = 0x0F;
+
+/// Map-mode nibbles fullsnes names that this build does not run: $2
+/// (S-DD1), $3 (SA-1), $5 (ExHiROM), $A (SPC7110). Used only to give a
+/// cartridge-shaped refusal a chip name instead of "not a SNES image".
+const KNOWN_UNSUPPORTED_MAP_MODES: [u8; 4] = [0x2, 0x3, 0x5, 0xA];
 /// RESET vector lives at file offset $FFFC/$7FFC, i.e. header_base + $3C.
 const RESET_VECTOR_OFFSET: usize = 0x3C;
 
@@ -102,30 +119,103 @@ struct Candidate {
 /// RESET vector sanity, and self-consistency of the declared map mode with
 /// the location being tested. Returns `None` if `data` isn't even long
 /// enough to contain a header block at `base`.
+/// Does either candidate location hold a map mode this build recognizes by
+/// name but cannot run? Reported as [`CartError::UnsupportedChip`] so the
+/// user is told which chip, per FR-CORE-013 (ticket W14-05).
+///
+/// Only consulted once neither location has qualified as a candidate, so a
+/// real LoROM or HiROM cartridge never reaches it.
+fn unsupported_map_mode_at_either_location(data: &[u8]) -> Option<CartError> {
+    for base in [LOROM_HEADER_OFFSET, HIROM_HEADER_OFFSET] {
+        if data.len() < base + HEADER_BLOCK_LEN {
+            continue;
+        }
+        // The same structural gate the candidate scorer applies, so this
+        // fallback cannot re-admit the arbitrary data the ticket is about.
+        if data[base + 0x19] > MAX_COUNTRY_CODE || data[base + 0x1B] > MAX_ROM_VERSION {
+            continue;
+        }
+        let mode_byte = data[base + 0x15];
+        let nibble = mode_byte & 0x0F;
+        if KNOWN_UNSUPPORTED_MAP_MODES.contains(&nibble) {
+            return Some(CartError::UnsupportedChip {
+                name: format!("{} (SNES map mode ${mode_byte:02X})", map_mode_name(nibble)),
+            });
+        }
+    }
+    None
+}
+
 fn score_candidate(data: &[u8], base: usize) -> Option<Candidate> {
     if data.len() < base + HEADER_BLOCK_LEN {
         return None;
     }
-    let mode_nibble = data[base + 0x15] & 0x0F;
+
+    // ---- necessary conditions -------------------------------------------
+    //
+    // A candidate that fails any of these is not scored at all, and the
+    // distinction matters: these are things every SNES header HAS, however
+    // badly the rest of it is filled in, so failing one is evidence the
+    // location is not a header rather than evidence of a poor dump. The
+    // prototypes this had to keep loading — blanked titles, zero checksum,
+    // zero size byte — all satisfy every one of them.
+
+    // Country/region code: fullsnes documents $00-$14. Regions above that
+    // are not assigned.
+    if data[base + 0x19] > MAX_COUNTRY_CODE {
+        return None;
+    }
+    // ROM version. Real cartridges ship $00, and revisions stay in single
+    // digits; a byte above that is noise, not a twentieth revision.
+    if data[base + 0x1B] > MAX_ROM_VERSION {
+        return None;
+    }
+
+    // ---- evidence --------------------------------------------------------
     let checksum = u16::from_le_bytes([data[base + 0x1E], data[base + 0x1F]]);
     let complement = u16::from_le_bytes([data[base + 0x1C], data[base + 0x1D]]);
-    let reset_hi = data[base + RESET_VECTOR_OFFSET + 1];
-
     let mut score = 0;
+    // The one strong signal. fullsnes: the checksum and its complement are
+    // stored so that they XOR to $FFFF — a 1-in-65536 coincidence on data
+    // that is not a SNES header, which is why it is worth two points.
     if checksum ^ complement == 0xFFFF && checksum != 0 {
         score += 2;
     }
-    if reset_hi >= 0x80 {
+    // A reset vector into the upper half of the bank, where mapped ROM
+    // lives. True of every cartridge that boots.
+    if data[base + RESET_VECTOR_OFFSET + 1] >= 0x80 {
         score += 1;
     }
+    // The 21-byte title (fullsnes: "Cartridge Title, 21 bytes, ASCII").
+    // A MAJORITY rather than all of it, because real dumps pad with $00 as
+    // well as with spaces — and this point is never load-bearing for a
+    // cartridge whose checksum is intact, which is what keeps Shift-JIS
+    // titles (high bytes, not ASCII) loading.
+    let printable = data[base..base + 0x15]
+        .iter()
+        .filter(|&&b| (0x20..=0x7E).contains(&b))
+        .count();
+    if printable >= 12 {
+        score += 1;
+    }
+    // The map-mode nibble agreeing with WHERE this candidate is. Evidence
+    // and NOT a requirement, which was tried first and was wrong: real
+    // dumps exist whose header sits at one location while its mode byte
+    // names the other, and `WWF Super WrestleMania (USA)` is one of them.
     let expected_nibble = if base == LOROM_HEADER_OFFSET {
         0x0
     } else {
         0x1
     };
-    if mode_nibble == expected_nibble {
+    if data[base + 0x15] & 0x0F == expected_nibble {
         score += 1;
     }
+    // A plausible ROM size exponent: $08 is 256 KiB and $0D is 8 MiB, which
+    // brackets every commercial SNES cartridge ever made.
+    if (0x08..=0x0D).contains(&data[base + 0x17]) {
+        score += 1;
+    }
+
     Some(Candidate { base, score })
 }
 
@@ -152,19 +242,63 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         (Some(l), _) => l,
         (None, Some(h)) => h,
         (None, None) => {
-            return Err(CartError::Truncated {
-                context: "SNES header (LoROM $7FC0 / HiROM $FFC0)",
-                needed: LOROM_HEADER_OFFSET + HEADER_BLOCK_LEN,
-                got: data.len(),
-            });
+            // Ticket W14-05: before reporting "not a SNES image", check
+            // whether a location holds a map mode this build simply does
+            // not support. `score_candidate` requires the mode nibble to
+            // agree with the location, so ExHiROM, SA-1 and SPC7110
+            // headers are not candidates at all — and saying "no plausible
+            // header" about a perfectly good ExHiROM cartridge would be a
+            // worse answer than the one FR-CORE-013 asks for, which is a
+            // diagnostic naming the chip. Twelve titles in a real library
+            // land here.
+            if let Some(err) = unsupported_map_mode_at_either_location(data) {
+                return Err(err);
+            }
+            // "Too short to hold a header" and "long enough but nothing
+            // there looks like one" are different answers, and this arm
+            // used to give the first for both. It only became reachable
+            // the other way once `score_candidate` gained structural
+            // conditions it can fail on a long file (ticket W14-05).
+            if data.len() < LOROM_HEADER_OFFSET + HEADER_BLOCK_LEN {
+                return Err(CartError::Truncated {
+                    context: "SNES header (LoROM $7FC0 / HiROM $FFC0)",
+                    needed: LOROM_HEADER_OFFSET + HEADER_BLOCK_LEN,
+                    got: data.len(),
+                });
+            }
+            return Err(CartError::InvalidHeader(
+                "no plausible SNES header at $7FC0 or $FFC0: neither location has a \
+                 map mode matching it, an assigned country code and a plausible \
+                 revision"
+                    .to_string(),
+            ));
         }
     };
 
-    if winner.score == 0 {
-        return Err(CartError::InvalidHeader(
-            "no plausible SNES header found at $7FC0 or $FFC0 (checksum/reset-vector heuristic failed)"
-                .to_string(),
-        ));
+    // Ticket W14-05. A SNES header carries NO magic number — unlike iNES,
+    // which is why only this half of the loader had this problem — so
+    // "does this location look like a header?" is the whole defence, and
+    // until 2026-09-15 a single accidental match passed it: pointed at a
+    // real 681-archive Game Boy folder, `Cartridge::load` called **130 of
+    // them** SNES cartridges.
+    //
+    // Two things carry the weight now. `score_candidate` first applies
+    // NECESSARY conditions — an assigned country code and a plausible
+    // revision, fields every real header fills and arbitrary data clears
+    // about once in 200 — and then requires TWO points of positive
+    // evidence on top, which no single accident supplies.
+    if winner.score < MINIMUM_SCORE {
+        // Same courtesy as the no-candidate arm above: if a location holds
+        // a map mode we can name, name it (FR-CORE-013) instead of calling
+        // the file unreadable.
+        if let Some(err) = unsupported_map_mode_at_either_location(data) {
+            return Err(err);
+        }
+        return Err(CartError::InvalidHeader(format!(
+            "no plausible SNES header at $7FC0 or $FFC0: best candidate scored \
+             {} of {} (checksum/complement, reset vector, map mode, title)",
+            winner.score, MINIMUM_SCORE
+        )));
     }
 
     let base = winner.base;
@@ -357,6 +491,41 @@ mod tests {
     }
 
     #[test]
+    /// Ticket W14-05: filler whose nibble happens to name a real map mode
+    /// is still refused — with the chip's name, which is what FR-CORE-013
+    /// asks for, rather than as an unreadable file.
+    fn filler_matching_a_named_map_mode_is_refused_by_name() {
+        let data = vec![0x02u8; 0x10000];
+        match parse_snes_header(&data).unwrap_err() {
+            CartError::UnsupportedChip { name } => {
+                assert!(name.contains("S-DD1"), "got: {name}");
+            }
+            other => panic!("expected UnsupportedChip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    /// Ticket W14-05, the regression this ticket exists for. This byte
+    /// pattern is a Game Boy ROM's opening bytes followed by filler that
+    /// clears the OLD heuristic — a reset vector high byte over $80 was
+    /// worth a point, and one point was the whole bar. 130 of 681 real
+    /// Game Boy archives passed that way.
+    fn data_that_passed_the_old_single_signal_bar_is_refused() {
+        let mut data = vec![0x00u8; 0x10000];
+        // The only signal the old scorer would have found: a high reset
+        // vector at the LoROM location. Country ($FFD9 here) and version
+        // are left at $00, which are legal values — so this is refused by
+        // the map-mode nibble disagreeing with the location, not by luck.
+        data[LOROM_HEADER_OFFSET + RESET_VECTOR_OFFSET + 1] = 0x80;
+        data[LOROM_HEADER_OFFSET + 0x15] = 0x07; // not LoROM, not a named mode
+        let err = parse_snes_header(&data).unwrap_err();
+        assert!(
+            matches!(err, CartError::InvalidHeader(_)),
+            "a lone reset vector must no longer mint a cartridge, got {err:?}"
+        );
+    }
+
+    #[test]
     fn unsupported_exhirom_map_mode_reported_without_panicking() {
         let rom = lorom_image(0x25, 0x00); // ExHiROM map mode
         let err = parse_snes_header(&rom).unwrap_err();
@@ -369,11 +538,16 @@ mod tests {
     #[test]
     fn rejects_when_no_plausible_header_found() {
         // Uniform filler: bad checksum pair, low reset vector, and a
-        // map-mode nibble (0x2) matching neither LoROM's (0x0) nor
-        // HiROM's (0x1) expected value at either candidate location.
-        let data = vec![0x02u8; 0x10000];
+        // map-mode nibble ($E) that is neither a location's expected value
+        // nor any map mode fullsnes names — so it is not a candidate and
+        // not a nameable chip either. ($02 filler is a DIFFERENT case and
+        // has its own test below: $2 is ExLoROM, a real map mode.)
+        let data = vec![0x0Eu8; 0x10000];
         let err = parse_snes_header(&data).unwrap_err();
-        assert!(matches!(err, CartError::InvalidHeader(_)));
+        assert!(
+            matches!(err, CartError::InvalidHeader(_)),
+            "long-but-implausible must not be reported as truncated, got {err:?}"
+        );
     }
 
     #[test]

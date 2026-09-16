@@ -14,3 +14,11 @@ sha2 = "0.11"
 sha1 = "0.11"
 md-5 = "0.11"
 crc32fast = "1.5"
+
+[dev-dependencies]
+# zip: `tests/foreign_false_positives.rs` reads a real ROM collection, and a
+# real collection is zipped. Same version and feature pin as the two crates
+# that already depend on it (`retroforge`, `rf-harness`) so the workspace
+# resolves one copy; `deflate` only, matching their untrusted-archive
+# posture. Dev-only: nothing in the shipped crate reads an archive.
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
