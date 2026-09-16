@@ -2892,3 +2892,58 @@ stories, 10 decisions).
 
   Gate: workspace **1824 passing / 0 failed / 33 ignored**, arch OK,
   evidence OK, licences OK.
+
+- **W14-03 — a bounded boot census over a real commercial library**
+  (2026-09-15). **2546 commercial titles run, and the emulator met them
+  all for the first time.**
+
+  | library | titles | rendered something | uniform screen | refused | crashed | timed out |
+  |---|---|---|---|---|---|---|
+  | NES | 1281 | 1167 | 7 | 107 | **0** | **0** |
+  | SNES | 1265 | 303 | 806 | 150 | **0** | **6** |
+
+  NES took 983s, SNES 891s, release build.
+
+  **Law 8 was criterion 1, not a footnote**, because running thousands of
+  unknown programs on the developer's own workstation is the RF-L-09 shape
+  at scale and *finding hangs is close to the point*. Three bounds, in the
+  design rather than bolted on: **one child process per ROM**, so a hang or
+  an abort costs one row and cannot take the harness with it; a
+  **wall-clock cap enforced by the parent**, outside any emulation loop, so
+  it holds however tightly a child spins; and **`RF_ROM_LIBRARY` required**
+  plus `#[ignore]`, so no gate and no plain `cargo test` can start it. The
+  written decision that it **never runs unattended** is in `docs/TESTING.md`
+  §0, recorded before the first full run and not after.
+
+  The child is **this same test binary re-executed** through
+  `current_exe()`, which is why a census that spawns 2546 processes needed
+  no new binary and no new dependency for the crate.
+
+  **Nothing it reports is a pass**, and the buckets say so in the output
+  itself. "It booted" is not "it is correct"; a headline count of boots
+  would repeat exactly the mistake that reopened W7-08.
+
+  **Two findings, both filed rather than fixed here.** The census is a
+  measurement; folding its results in would have turned it into an
+  open-ended accuracy ticket.
+
+  1. **W14-06 — the SNES paints a flat colour for most commercial
+     titles.** 806 of 1109 loadable SNES titles emitted scanlines whose
+     every pixel carried one palette index. A 60-title re-run with a finer
+     bucket found **zero** cases of "no video at all", which is what
+     separates a dead renderer from one drawing nothing. The same harness,
+     the same 600 frames, the same sink gave NES 7 of 1174 (0.6%) against
+     roughly 76% here — an asymmetry that says systemic and SNES-side, not
+     a scattering of per-game bugs.
+  2. **W14-07 — two SNES titles hang.** Six archives hit the 30-second cap:
+     Radical Psycho Machine Racing and Super Buster Bros., each across
+     their revisions and betas. Reproducing across four separate releases
+     of the same title is what makes it a bug rather than a bad dump. They
+     are the only hangs in 2546 titles.
+
+  **The NES zeros are worth stating plainly**: 1281 real commercial
+  programs, none of which this emulator had ever seen, and not one crash
+  or hang.
+
+  Gate: workspace **1824 passing / 0 failed / 35 ignored**, arch OK,
+  docs-gate OK.

@@ -5959,7 +5959,7 @@
     "results are committed as counts and titles only: no ROM bytes, no captures of commercial content, no path under a home directory (law 5), and the library directory comes from an environment variable with a clean skip when it is absent"
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "WHY THIS IS WORTH MORE THAN ANY NUMBER OF PROFILES: this project has only ever run its own fixtures plus test ROMs. 1058 NES and 1119 SNES commercial titles are now reachable locally, and booting them is the strongest accuracy signal available to it — the same shape of evidence the darwin runner gave CI in W12-01.",
     "THE HEADLINE IS THE HAZARD. 'N titles boot' would repeat exactly the mistake that reopened W7-08: a substring check called a whole ROM green off its first subtest. The buckets are triage for a human to read, which is why that is in the acceptance and not in a note.",
@@ -6015,6 +6015,57 @@
    "stories": [
     "E2-S3"
    ]
+  },
+  {
+   "id": "W14-06",
+   "title": "The SNES renders a uniform screen for most commercial titles",
+   "phase": 14,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W14-03"
+   ],
+   "acceptance": [
+    "the cause is DIAGNOSED before anything is changed: the PPU emits scanlines for these titles, so this is not a dead renderer — name which stage produces a constant pixel (background enable, main-screen designation, CGRAM, tile fetch, or the brightness/forced-blank register) with evidence from a specific title, not a guess",
+    "the boot census's SNES 'rendered a uniform screen' bucket falls substantially, re-measured over the same library with the same harness rather than asserted",
+    "a regression test carries whatever the fix turns on, at the smallest level it can be tested — a unit test on the PPU stage, not only a census number"
+   ],
+   "points": 8,
+   "status": "todo",
+   "notes": [
+    "FOUND BY W14-03's FIRST CENSUS (2026-09-15) AND MEASURED, NOT SUSPECTED. Of 1265 SNES archives: 303 rendered something, 806 rendered a uniform screen, 150 refused, 0 crashed, 6 timed out. A 60-title sample re-run with a finer bucket says the PPU is NOT silent — 'emitted NO video at all' was ZERO, and 42 of 55 loadable titles emitted scanlines whose every pixel carried the same palette index. So the renderer runs and paints a flat colour.",
+    "THE ASYMMETRY IS THE EVIDENCE. The same harness, the same 600 frames, the same sink: NES produced a uniform screen for 7 of 1174 loadable titles (0.6%), SNES for roughly 76%. Whatever this is, it is SNES-side and systemic rather than a scattering of per-game bugs.",
+    "WHY THIS IS NOT W14-03's TO FIX: that ticket built the census and its bound. Acting on what it found is separate work in a different crate, and folding it in would have made a measurement ticket into an open-ended accuracy ticket.",
+    "DO NOT START BY CHANGING THE RENDERER. Criterion 1 asks for a diagnosis first because the plausible causes are several stages apart — INIDISP forced-blank/brightness, TM main-screen designation, CGRAM never being written, a tile fetch that returns zero — and the project's own lesson (RF-L-08, and W7-08's three wrong diagnoses) is that the first plausible theory here has been wrong more often than right."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W14-07",
+   "title": "Two SNES titles hang the core: Radical Psycho Machine Racing and Super Buster Bros.",
+   "phase": 14,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W14-03"
+   ],
+   "acceptance": [
+    "both titles complete 600 frames within the census's per-ROM wall-clock cap, or the reason they cannot is recorded as a known-red with its cause named (the W7-18 precedent), never silently waived",
+    "the hang's cause is found before it is fixed, with the offending PC or wait-state named — law 8's rule that a loop must prove progress applies to the diagnosis as well as to the fix",
+    "a regression test pins it at the smallest level that reproduces, so the census is not the only thing that would catch it coming back"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FOUND BY W14-03's FIRST CENSUS (2026-09-15). Six of 1265 SNES archives exceeded the 30-second wall-clock cap and were killed: Radical Psycho Machine Racing (USA) and its 1991-08-14 beta, and Super Buster Bros. (USA) with its Rev 1 and both betas. That is TWO distinct games across their revisions, which is what makes it a bug rather than a bad dump — a broken dump does not reproduce across four separate releases of the same title.",
+    "ZERO CRASHES AND ZERO HANGS ON NES across 1281 titles in the same run, so this is SNES-side. These six are the only hangs the whole census found.",
+    "THE CENSUS ONLY KILLS; IT DOES NOT DIAGNOSE. Reproducing means running one of these titles under the debugger's trace (W13-02g gives a bsnes-convention SNES line) and finding what the CPU or the APU is waiting for. RF-L-09's rule holds: find the loop before re-running anything, and never re-run a suite that hung without doing so."
+   ],
+   "stories": []
   }
  ]
 }

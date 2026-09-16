@@ -700,3 +700,48 @@ double-run, and **both five-minute replays** (NES and SNES).
 
 **If you add an `#[ignore]`d test that gates behaviour, add it to
 `local-gate.sh` in the same commit.** A gate nothing runs is not a gate.
+
+### The one deliberate exception: the boot census (ticket W14-03)
+
+`crates/rf-harness/tests/boot_census.rs` is `#[ignore]`d and is **NOT** in
+`local-gate.sh`, **NOT** in `gate-darwin.yml`, and never will be. That is a
+written decision, recorded before the first full run rather than after it.
+
+It runs a real, locally-held commercial ROM library — thousands of unknown
+programs — on the developer's own workstation. That is the **RF-L-09 shape
+at scale**, and *finding hangs is close to the point of the exercise*. So
+it is bounded three ways: **one child process per ROM**, so a hang or an
+abort costs one row and cannot take the harness with it; a **wall-clock cap
+enforced by the parent**, outside any emulation loop, so it holds however
+tightly a child is spinning; and **`RF_ROM_LIBRARY` must be set**, so no
+gate and no plain `cargo test` can start it. It is run by hand, attended.
+
+**Nothing it reports is a pass.** The buckets are triage — *rendered
+something*, *rendered nothing*, *refused*, *crashed*, *timed out* — and
+"it booted" is not "it is correct". Treating a count of boots as an
+accuracy claim would repeat the mistake that reopened W7-08.
+
+First run, 2026-09-15, release build:
+
+| library | titles | rendered something | uniform screen | refused | crashed | timed out |
+|---|---|---|---|---|---|---|
+| NES | 1281 | 1167 | 7 | 107 | **0** | **0** |
+| SNES | 1265 | 303 | 806 | 150 | **0** | **6** |
+
+**The NES row's zeros are one finding.** 1281 real commercial programs,
+none of which this emulator had ever seen, and not one crash or hang in
+16 minutes.
+
+**The SNES row is the other, and it is worse news honestly reported.**
+806 titles emitted scanlines whose every pixel carried the same palette
+index — the renderer runs and paints a flat colour. A 60-title re-run
+with a finer bucket found **zero** cases of "no video at all", which is
+what separates a dead renderer from one drawing nothing, and the same
+harness against NES produced a uniform screen for 7 of 1174 (0.6%)
+against roughly 76% here. That asymmetry is the evidence that it is
+systemic and SNES-side. It is ticket **W14-06**; the six hangs, two
+distinct titles across their revisions, are **W14-07**.
+
+Neither was fixed by the ticket that found them, on purpose: the census
+is a measurement, and folding its findings in would have turned it into
+an open-ended accuracy ticket.
