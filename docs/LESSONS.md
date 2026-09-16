@@ -216,3 +216,39 @@ it starts mattering.
 4. **"It stalls" is a conclusion, not an observation.** Check where the
    CPUs actually are first — `BRA -2` at the end of a run is a completed
    program, not a hang.
+
+## RF-L-13 — a staleness check cannot see what you have not committed (2026-09-15)
+
+`scripts/validate-evidence.mjs` decides whether `docs/evidence/local-gate.json`
+is stale by asking git for the **last commit** touching each suite's source
+paths and checking it is an ancestor of the evidence's recorded commit. Run
+it with the change still in the working tree and it answers about the
+*previous* commit, which is an ancestor, so it passes. Commit, push, and the
+darwin runner — looking at the same check against real history — fails.
+
+That happened twice in one session, on **W14-04** and **W14-03**, after a
+full local gate had reported green each time. Two red runs went to `main`
+before anyone looked at the runner, which is exactly the "a red run is not a
+signal" habit that W12-01 spent itself correcting: once the runner is
+trustworthy, a red run **is** the signal.
+
+**The rule.** Whenever a commit touches `crates/rf-nes/**` (or any path a
+suite in `docs/evidence/local-gate.json` names), regenerate the evidence
+**after committing**, not before:
+
+```text
+git commit …            # the code change
+scripts/local-gate.sh   # ~20 min; records the new HEAD
+git commit docs/evidence/local-gate.json
+```
+
+The two-commit shape is not an inconvenience to route around. The evidence
+file records the commit it was measured at, and a file that claimed a commit
+it was generated before would be a worse lie than a stale one.
+
+**The general form**, which is what makes this worth a number: *a validator
+that reads committed history is blind to your working tree, so a clean local
+run of it proves nothing about the commit you are about to make.* The same
+applies to any check keyed on `git log`, `git merge-base` or HEAD. Ask what
+state the check reads, and if it is not the state you are about to create,
+the check has not run yet.
