@@ -5930,7 +5930,7 @@
     "before/after wall-clock is measured and recorded rather than asserted; the pre-ticket number is 22s in release for 2546 archives (W14-01's probe)"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "THE CALL SITE is app.rs's single synchronous `crate::library::scan(&self.library_roots)` on the UI thread. Against a real library that is a 22-second freeze in RELEASE for NES+SNES alone.",
     "BOTH HALVES, on Brad's 2026-09-15 decision, because neither alone is enough: threading stops the freeze but still re-reads 1.1 GB on every launch, and caching alone still blocks for the first scan and after any change."

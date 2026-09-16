@@ -248,7 +248,28 @@ const ROM_EXTENSIONS: [&str; 5] = ["nes", "sfc", "smc", "fig", "zip"];
 /// user their whole library.
 #[must_use]
 pub fn scan(roots: &[LibraryRoot]) -> Library {
+    scan_cached(roots, &mut crate::library_cache::LibraryCache::default()).0
+}
+
+/// Scan, reusing what `cache` already knows and recording what it learns
+/// (ticket W14-02).
+///
+/// Returns the library and whether anything was learned, so a caller can
+/// skip rewriting an unchanged cache file.
+///
+/// The cache is consulted per FILE, not per root, because that is the unit
+/// whose cost it avoids: establishing identity means reading and hashing,
+/// and since W14-01 decompressing too. Everything else the scan does —
+/// walking, containment, symlink-loop detection — is cheap and still
+/// happens every time, so a symlink that starts escaping its root is still
+/// caught on the next scan rather than remembered as safe.
+#[must_use]
+pub fn scan_cached(
+    roots: &[LibraryRoot],
+    cache: &mut crate::library_cache::LibraryCache,
+) -> (Library, bool) {
     let mut library = Library::default();
+    let mut learned = false;
     let mut visited: HashSet<PathBuf> = HashSet::new();
 
     for root in roots {
@@ -270,6 +291,8 @@ pub fn scan(roots: &[LibraryRoot]) -> Library {
             root.console(),
             &mut visited,
             &mut library,
+            cache,
+            &mut learned,
         );
     }
 
@@ -288,9 +311,10 @@ pub fn scan(roots: &[LibraryRoot]) -> Library {
     // refuses to do when an archive holds two ROMs. Whether the library
     // GRID should show one card per hash is a UI question with an owner;
     // the scan reports what is on disk.
-    library
+    (library, learned)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_dir(
     dir: &Path,
     root: &Path,
@@ -298,6 +322,8 @@ fn scan_dir(
     hint: Option<Console>,
     visited: &mut HashSet<PathBuf>,
     library: &mut Library,
+    cache: &mut crate::library_cache::LibraryCache,
+    learned: &mut bool,
 ) {
     if depth > MAX_DEPTH {
         return;
@@ -337,9 +363,18 @@ fn scan_dir(
             continue;
         }
         if resolved.is_dir() {
-            scan_dir(&path, root, depth + 1, hint, visited, library);
+            scan_dir(
+                &path,
+                root,
+                depth + 1,
+                hint,
+                visited,
+                library,
+                cache,
+                learned,
+            );
         } else if is_rom_candidate(&path) {
-            ingest_file(&path, hint, library);
+            ingest_file(&path, hint, library, cache, learned);
         }
     }
 }
@@ -401,7 +436,24 @@ pub(crate) fn names_a_foreign_console(name: &str) -> bool {
         .is_some_and(|ext| FOREIGN_ROM_EXTENSIONS.contains(&ext.as_str()))
 }
 
-fn ingest_file(path: &Path, hint: Option<Console>, library: &mut Library) {
+fn ingest_file(
+    path: &Path,
+    hint: Option<Console>,
+    library: &mut Library,
+    cache: &mut crate::library_cache::LibraryCache,
+    learned: &mut bool,
+) {
+    // Ticket W14-02: if this exact file was read before, do not read it
+    // again. The stamp is length + mtime; anything else is a miss.
+    let stamp = crate::library_cache::stamp(path);
+    if let Some((len, mtime)) = stamp {
+        if let Some(outcome) = cache.get(path, len, mtime) {
+            let identity = outcome.to_identity();
+            push_entry(path, hint, identity, library);
+            return;
+        }
+    }
+
     let bytes = match std::fs::metadata(path) {
         Ok(meta) if meta.len() > MAX_ROM_BYTES => {
             library.issues.push(ScanIssue::TooLarge {
@@ -443,18 +495,39 @@ fn ingest_file(path: &Path, hint: Option<Console>, library: &mut Library) {
         // and the collection this was measured against holds 2507 of them
         // next to the NES and SNES folders. Listing them would bury the
         // library in entries for a console this emulator does not run.
-        Err(crate::rom_open::RomOpenError::NoRomInArchive { .. }) => return,
+        Err(crate::rom_open::RomOpenError::NoRomInArchive { .. }) => {
+            // Remembered, not merely skipped (ticket W14-02): discovering
+            // that an archive holds nothing costs the same decompression
+            // as a success, and in a collection that also holds other
+            // consoles' games this is the majority case.
+            if let Some((len, mtime)) = stamp {
+                cache.insert(
+                    path.to_path_buf(),
+                    len,
+                    mtime,
+                    crate::library_cache::CachedOutcome::NoCartridge,
+                );
+                *learned = true;
+            }
+            return;
+        }
         // Everything else IS reported: a cartridge this build refused
         // (unsupported mapper or chip) is exactly the case W2-16 exists
         // for, and a corrupt archive is worth saying out loud.
         Err(e) => {
-            library.entries.push(LibraryEntry {
-                path: path.to_path_buf(),
-                title: title_of(path),
-                identity: EntryIdentity::Unrecognized {
-                    reason: e.to_string(),
-                },
-            });
+            let identity = EntryIdentity::Unrecognized {
+                reason: e.to_string(),
+            };
+            if let Some((len, mtime)) = stamp {
+                cache.insert(
+                    path.to_path_buf(),
+                    len,
+                    mtime,
+                    crate::library_cache::CachedOutcome::from_identity(Some(&identity)),
+                );
+                *learned = true;
+            }
+            push_entry(path, hint, Some(identity), library);
             return;
         }
     };
@@ -481,6 +554,34 @@ fn ingest_file(path: &Path, hint: Option<Console>, library: &mut Library) {
         },
     };
 
+    if let Some((len, mtime)) = stamp {
+        cache.insert(
+            path.to_path_buf(),
+            len,
+            mtime,
+            crate::library_cache::CachedOutcome::from_identity(Some(&identity)),
+        );
+        *learned = true;
+    }
+
+    push_entry(path, hint, Some(identity), library);
+    let _ = title;
+}
+
+/// Add an entry for a file whose identity is already known, applying the
+/// root's console hint.
+///
+/// `None` means the file holds no cartridge: it is remembered as such by
+/// the cache but never listed (ticket W14-01's skip rule).
+fn push_entry(
+    path: &Path,
+    hint: Option<Console>,
+    identity: Option<EntryIdentity>,
+    library: &mut Library,
+) {
+    let Some(identity) = identity else {
+        return;
+    };
     // Ticket W14-01: a root that declares its console drops the other
     // one. Applied HERE, after the sniff, because a zip's console is not
     // knowable before it is opened — the hint filters the result, it does
@@ -493,7 +594,7 @@ fn ingest_file(path: &Path, hint: Option<Console>, library: &mut Library) {
 
     library.entries.push(LibraryEntry {
         path: path.to_path_buf(),
-        title,
+        title: title_of(path),
         identity,
     });
 }
@@ -689,6 +790,62 @@ mod tests {
         assert_eq!(roots.len(), 2);
         assert_eq!(roots[0].path(), Path::new("/roms/nes"));
         assert!(roots.iter().all(|r| r.console().is_none()));
+    }
+
+    /// Ticket W14-02: the second scan of an unchanged library reads no
+    /// file at all.
+    ///
+    /// `learned` is the proof and it is exact, not a proxy: it is set only
+    /// where a file is actually opened and identified, so `learned ==
+    /// false` means every entry came from the cache. Timing would be the
+    /// obvious thing to assert and would be the wrong thing — a fast
+    /// machine can hide a re-read, and a loaded one can make a cached scan
+    /// look slow.
+    #[test]
+    fn a_second_scan_of_an_unchanged_library_reads_nothing() {
+        let dir = temp_dir("cache-hit");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("One (USA).nes"), nes_rom(1)).unwrap();
+        write_zip(
+            &dir.join("Two (USA).zip"),
+            &[("Two (USA).sfc", snes_rom(2).as_slice())],
+        );
+        // An archive holding nothing this build runs: remembered too, or a
+        // mixed collection pays to rediscover it on every launch.
+        write_zip(
+            &dir.join("Elsewhere (USA).zip"),
+            &[("Elsewhere (USA).gb", b"not ours".as_slice())],
+        );
+        let roots = [LibraryRoot::Bare(dir.clone())];
+
+        let mut cache = crate::library_cache::LibraryCache::default();
+        let (first, learned) = scan_cached(&roots, &mut cache);
+        assert!(learned, "the first scan must read the files");
+        assert_eq!(first.entries.len(), 2);
+        assert_eq!(
+            cache.len(),
+            3,
+            "all three files are remembered, including the one that holds no cartridge"
+        );
+
+        let (second, learned_again) = scan_cached(&roots, &mut cache);
+        assert!(
+            !learned_again,
+            "nothing changed on disk, so nothing should have been opened"
+        );
+        assert_eq!(
+            second.entries, first.entries,
+            "a cached scan must produce exactly the library a fresh one does"
+        );
+
+        // A new file is still picked up: the cache is per-file, so it
+        // cannot mask a change.
+        std::fs::write(dir.join("Three (USA).nes"), nes_rom(3)).unwrap();
+        let (third, learned_third) = scan_cached(&roots, &mut cache);
+        assert!(learned_third, "a new file must be read");
+        assert_eq!(third.entries.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Criterion 4: the only test that reads a REAL library takes its

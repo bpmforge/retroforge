@@ -411,6 +411,13 @@ pub struct RetroForgeApp {
     /// window scans on open rather than at startup: a cold start must not
     /// wait on a folder walk over a network share.
     library: Option<crate::library::Library>,
+    /// A scan running on a worker thread (ticket W14-02).
+    ///
+    /// The scan reads and hashes every file it finds, and since W14-01
+    /// decompresses every archive too — 17 seconds in release for a real
+    /// 2546-archive collection. That ran on the UI thread until now, which
+    /// froze the window for the whole of it.
+    library_scan: Option<std::sync::mpsc::Receiver<crate::library::Library>>,
     /// Normalized hash of the ROM currently loaded (ticket W2-07) — the key
     /// its per-game settings are stored under. `None` for a ROM this build
     /// could not identify, which is deliberate: settings keyed by a hash we
@@ -712,6 +719,7 @@ impl RetroForgeApp {
             show_overlay_menu: false,
             library_roots: library_roots.clone(),
             library: None,
+            library_scan: None,
             current_game_hash: None,
             current_game_hashes: None,
             current_game_settings: crate::game_settings::GameSettings::default(),
@@ -3572,6 +3580,25 @@ impl RetroForgeApp {
         if self.library.is_none() {
             self.rescan_library();
         }
+        // Ticket W14-02: a first scan of a real collection takes seconds,
+        // and an empty grid during it would render as "no games found" —
+        // which is a different fact, and the one G-21 forced this screen
+        // to keep straight.
+        if self.library.is_none() && self.library_scan_in_flight() {
+            ui.ctx().request_repaint();
+            Self::home_empty(ui, "Scanning your ROM folders\u{2026}", |ui| {
+                ui.add(readout(
+                    egui::RichText::new(
+                        "Every file is read once and identified by hashing it. The result is \
+                         remembered, so this is only slow the first time.",
+                    )
+                    .weak(),
+                ));
+                ui.add_space(10.0);
+                ui.spinner();
+            });
+            return;
+        }
         let library = self.library.clone().unwrap_or_default();
         let state = crate::library::first_run_state(&self.library_roots, &library);
         let mut rescan = false;
@@ -4116,10 +4143,95 @@ impl RetroForgeApp {
         self.status = "No ROM loaded".to_string();
     }
 
-    /// Rescan the configured roots.
+    /// Rescan the configured roots, on a worker thread (ticket W14-02).
+    ///
+    /// Returns immediately. [`Self::poll_library_scan`] picks the result
+    /// up; until then the previous library keeps showing, because a grid
+    /// that empties itself while refreshing reads as "your games are
+    /// gone".
+    ///
+    /// A scan already in flight is left alone rather than joined by a
+    /// second one: `library_home` asks for a scan whenever it has no
+    /// library, which is every frame until one arrives, and spawning a
+    /// thread per frame over a 6 GB collection is its own outage.
     fn rescan_library(&mut self) {
+        if self.library_scan.is_some() {
+            return;
+        }
         self.library_scans += 1;
-        self.library = Some(crate::library::scan(&self.library_roots));
+        let roots = self.library_roots.clone();
+        let config_root = crate::bindings_store::config_root();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // Detached deliberately: nothing waits for this thread, and if the
+        // receiver is gone because the app closed, `send` fails and the
+        // thread ends. A scan holds no lock and owns its inputs.
+        std::thread::Builder::new()
+            .name("library-scan".to_string())
+            .spawn(move || {
+                let library = Self::scan_with_cache(&roots, config_root.as_deref());
+                let _ = tx.send(library);
+            })
+            .map_or_else(
+                |_| {
+                    // A machine that cannot spawn a thread still deserves a
+                    // library; do it here rather than show nothing for ever.
+                    self.library = Some(Self::scan_with_cache(
+                        &self.library_roots,
+                        crate::bindings_store::config_root().as_deref(),
+                    ));
+                },
+                |_handle| {
+                    self.library_scan = Some(rx);
+                },
+            );
+    }
+
+    /// Scan, reusing the on-disk cache and writing back anything new
+    /// (ticket W14-02). Pure: no `&self`, so it can run on a worker.
+    fn scan_with_cache(
+        roots: &[crate::library::LibraryRoot],
+        config_root: Option<&std::path::Path>,
+    ) -> crate::library::Library {
+        let mut cache = config_root
+            .map(crate::library_cache::LibraryCache::load)
+            .unwrap_or_default();
+        let (library, learned) = crate::library::scan_cached(roots, &mut cache);
+        // Only rewrite when something was actually read, so an unchanged
+        // library does not rewrite a multi-thousand-entry file on every
+        // launch. Failing to save is cosmetic: it costs the next scan its
+        // speed, never its correctness.
+        if learned {
+            if let Some(root) = config_root {
+                let _ = cache.save(root);
+            }
+        }
+        library
+    }
+
+    /// Adopt a finished background scan, if one has finished.
+    fn poll_library_scan(&mut self) {
+        let Some(rx) = self.library_scan.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(library) => {
+                self.library = Some(library);
+                self.library_scan = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            // The worker died without sending. Drop the receiver so a
+            // later rescan can start; leaving it would wedge the library
+            // for the rest of the session.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.library_scan = None;
+            }
+        }
+    }
+
+    /// Whether a scan is running right now (ticket W14-02).
+    #[must_use]
+    fn library_scan_in_flight(&self) -> bool {
+        self.library_scan.is_some()
     }
 
     /// Point the library at these roots and force a rescan (ticket
@@ -4129,7 +4241,13 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn set_library_roots_for_test(&mut self, roots: Vec<std::path::PathBuf>) {
         self.library_roots = roots.into_iter().map(Into::into).collect();
-        self.rescan_library();
+        // Blocking on purpose (ticket W14-02): a harness that renders one
+        // frame and asserts on the grid cannot wait for a worker, and a
+        // test that slept until a thread finished would be a flake
+        // generator. The production path is `rescan_library`.
+        self.library_scans += 1;
+        self.library_scan = None;
+        self.library = Some(Self::scan_with_cache(&self.library_roots, None));
     }
 
     /// Whether a stitched-canvas texture exists for the Map tab
@@ -4949,6 +5067,9 @@ impl eframe::App for RetroForgeApp {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         self.poll_input(&ctx);
+        // Ticket W14-02: adopt a background library scan the moment it
+        // lands, before anything draws the grid.
+        self.poll_library_scan();
         self.pump_core_events(&ctx);
         self.maybe_request_canvas_snapshot();
         self.sync_event_subscription();

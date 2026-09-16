@@ -2785,3 +2785,56 @@ stories, 10 decisions).
 
   Gate: workspace **1792 passing / 0 failed / 33 ignored**, arch OK,
   evidence OK, licences OK.
+
+- **W14-02 — the library scan runs off the UI thread and is cached between
+  launches** (2026-09-15). A second launch is **490x faster**.
+
+  | scan of the real collection | time | entries |
+  |---|---|---|
+  | cold, nothing remembered | **19.54s** | 2545 |
+  | warm, nothing changed on disk | **0.04s** | 2545 |
+
+  Cache file: 1.1 MB for 5041 remembered files.
+
+  **Off the UI thread.** `rescan_library` returns immediately and a worker
+  does the reading; `poll_library_scan` adopts the result at the top of the
+  frame, before anything draws. The previous library keeps showing while a
+  rescan runs, because a grid that empties itself mid-refresh reads as
+  "your games are gone". A scan already in flight is never joined by a
+  second one — `library_home` asks for a scan whenever it has no library,
+  which is every frame until one arrives, and a thread per frame over a
+  6 GB collection is its own outage. A machine that cannot spawn a thread
+  scans inline rather than showing nothing for ever.
+
+  **The first scan says so.** An empty grid during a 20-second scan would
+  render as "no ROMs found", which is a different fact — the one G-21
+  forced this screen to keep straight — so a scan in flight with no
+  library yet gets its own state with a spinner and a repaint request.
+
+  **The cache is keyed on path, length and modification time**, the triple
+  `make` has used for fifty years, never on path alone: a ROM replaced in
+  place by a different dump of the same size still changes its mtime, and
+  a test asserts each of the three is load-bearing. **It never gets a
+  vote** — a missing, unreadable or malformed cache file reads as *no
+  cache*, so the scan simply does its full job. A library that came back
+  empty because a cache file lost a brace would be far worse than a slow
+  start, and that case has a test too.
+
+  **Refusals are remembered, not just successes.** Discovering that an
+  archive holds no cartridge costs exactly the same decompression as a
+  success, and in a collection holding other consoles' games that is the
+  majority of the work: 5041 files remembered against 2545 listed.
+
+  **The proof that the cache is used is `learned`, not a stopwatch.** It is
+  set only where a file is actually opened, so `learned == false` on the
+  second scan means every entry came from the cache. Asserting on elapsed
+  time would have been the obvious thing and the wrong one: a fast machine
+  hides a re-read and a loaded one makes a cached scan look slow.
+
+  **Tests stay synchronous.** `set_library_roots_for_test` still scans
+  inline, because a harness that renders one frame and asserts on the grid
+  cannot wait for a worker, and a test that slept until a thread finished
+  would be a flake generator.
+
+  Gate: workspace **1798 passing / 0 failed / 33 ignored**, arch OK,
+  evidence OK, licences OK.

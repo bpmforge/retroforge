@@ -48,6 +48,7 @@ pub mod hash;
 pub mod input_map;
 pub mod level_view;
 pub mod library;
+pub mod library_cache;
 pub mod library_roots;
 pub mod mod_chunk;
 pub mod mode_invariant;
