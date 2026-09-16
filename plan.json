@@ -6033,7 +6033,7 @@
     "a regression test carries whatever the fix turns on, at the smallest level it can be tested — a unit test on the PPU stage, not only a census number"
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "FOUND BY W14-03's FIRST CENSUS (2026-09-15) AND MEASURED, NOT SUSPECTED. Of 1265 SNES archives: 303 rendered something, 806 rendered a uniform screen, 150 refused, 0 crashed, 6 timed out. A 60-title sample re-run with a finer bucket says the PPU is NOT silent — 'emitted NO video at all' was ZERO, and 42 of 55 loadable titles emitted scanlines whose every pixel carried the same palette index. So the renderer runs and paints a flat colour.",
     "THE ASYMMETRY IS THE EVIDENCE. The same harness, the same 600 frames, the same sink: NES produced a uniform screen for 7 of 1174 loadable titles (0.6%), SNES for roughly 76%. Whatever this is, it is SNES-side and systemic rather than a scattering of per-game bugs.",
@@ -6061,6 +6061,7 @@
    "points": 5,
    "status": "todo",
    "notes": [
+    "W14-06 RAISED THE COUNT FROM 6 TO 11, 2026-09-15, and that is progress rather than regression: fixing the APU boot handshake let hundreds of titles get past their sound-driver upload, and five of them then reached a hang that nothing had been able to reach before. The full list is now Batman Forever (USA) and its Rev 1, Elite Soccer, The Flintstones, Judge Dredd, Radical Psycho Machine Racing and its beta, and Super Buster Bros. across its revisions and betas. Still zero crashes in 1265 titles.",
     "FOUND BY W14-03's FIRST CENSUS (2026-09-15). Six of 1265 SNES archives exceeded the 30-second wall-clock cap and were killed: Radical Psycho Machine Racing (USA) and its 1991-08-14 beta, and Super Buster Bros. (USA) with its Rev 1 and both betas. That is TWO distinct games across their revisions, which is what makes it a bug rather than a bad dump — a broken dump does not reproduce across four separate releases of the same title.",
     "ZERO CRASHES AND ZERO HANGS ON NES across 1281 titles in the same run, so this is SNES-side. These six are the only hangs the whole census found.",
     "THE CENSUS ONLY KILLS; IT DOES NOT DIAGNOSE. Reproducing means running one of these titles under the debugger's trace (W13-02g gives a bsnes-convention SNES line) and finding what the CPU or the APU is waiting for. RF-L-09's rule holds: find the loop before re-running anything, and never re-run a suite that hung without doing so."

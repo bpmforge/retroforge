@@ -2947,3 +2947,55 @@ stories, 10 decisions).
 
   Gate: workspace **1824 passing / 0 failed / 35 ignored**, arch OK,
   docs-gate OK.
+
+- **W14-06 — the SNES renders a uniform screen for most commercial
+  titles** (2026-09-15). **303 -> 860** titles render. One over-specific
+  comparison.
+
+  | SNES library, 1265 titles | before | after |
+  |---|---|---|
+  | rendered something | 303 | **860** |
+  | rendered a uniform screen | 806 | 244 |
+  | emitted no video at all | 0 | 0 |
+  | refused | 150 | 150 |
+  | crashed | 0 | 0 |
+  | timed out | 6 | 11 |
+
+  **The renderer was never broken, and criterion 1 forced finding that out
+  before changing anything.** A commercial SNES title uploads its sound
+  driver to the audio chip before it enables the screen. The upload is a
+  byte-at-a-time handshake: the CPU writes data and a counter, the boot
+  ROM echoes the counter back. To start a new block the CPU **jumps** the
+  counter. `IplBoot` accepted a jump of exactly one and **ignored anything
+  else**, so a game that jumped further sat in a two-instruction wait loop
+  for ever with the PPU still in forced blank — which is precisely the
+  uniform backdrop the census measured.
+
+  **Traced, not reasoned about.** Super Mario World transferred **3646
+  bytes** across blocks, acknowledged counter `$3D`, wrote the next
+  block's address to ports 2-3 and a non-zero kind to port 1, then wrote
+  **`$41`** — four past the acknowledgement. Neither arm matched, the
+  handler returned `None`, and the game spun on `CMP $2140 / BNE` with
+  `distinct_pc = 2` for the rest of the run.
+
+  **The fix is what the hardware does: a MISMATCH ends a block, not a
+  particular distance.** The boot ROM never checks how far the counter
+  jumped; it checks that the value is not the one it expects.
+
+  **And the half that explains why the narrow rule was written.** `poll`
+  feeds the current port-0 value in on a timer, so the value just consumed
+  arrives again and again until the CPU writes the next one. Treating that
+  re-read as a mismatch ends every block after its first byte — it broke
+  two existing tests within seconds of the first attempt. A re-read of the
+  last acknowledged counter is now explicitly "nothing new", and both
+  halves have their own regression test.
+
+  **Not fixed, and now visible.** Super Mario World gets past the upload
+  entirely — its ports go quiet, meaning the driver is running — and
+  stalls somewhere else. The timeout bucket rose from 6 to 11 because
+  hundreds of titles now reach code nothing had reached before; five new
+  hangs are recorded on **W14-07** rather than swept into this close. A
+  census bucket rising after a fix is the honest shape of progress.
+
+  Gate: workspace **1826 passing / 0 failed / 35 ignored**, arch OK,
+  licences OK.

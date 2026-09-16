@@ -119,6 +119,84 @@ fn the_counter_distinguishes_the_next_byte_from_a_new_block() {
     assert_eq!(boot.address, 0x0800, "the new block's address was taken");
 }
 
+/// Ticket W14-06: the skip is a MISMATCH, not a particular distance, and
+/// this is the test that would have caught the bug that kept most
+/// commercial titles from booting at all.
+///
+/// The old rule accepted only `expected + 1` as a block boundary. Traced
+/// against a real cartridge, Super Mario World acknowledged counter `$3D`,
+/// wrote the next block's address to ports 2-3 and a non-zero kind to
+/// port 1, and then wrote **`$41`** — four past the last acknowledgement.
+/// That matched neither arm, so the handler did nothing and the game spun
+/// on `CMP $2140 / BNE` for ever, screen still in forced blank. The IPL
+/// does not check for a distance; it checks that the value is not the one
+/// it expects.
+#[test]
+fn any_counter_jump_starts_a_new_block_not_only_a_jump_of_one() {
+    for jump in [2u8, 3, 4, 9, 64] {
+        let mut boot = IplBoot::new();
+        let p = [0u8, 0x01, 0x00, 0x03];
+        assert_eq!(boot.cpu_wrote(0, 0xCC, p), BootAction::Echo(0xCC));
+        let p = [0u8, 0xAB, 0x00, 0x03];
+        assert!(matches!(boot.cpu_wrote(0, 0, p), BootAction::Store { .. }));
+        assert_eq!(boot.state, BootState::Transferring(1));
+
+        // Expected is 1; anything else that is not a re-read ends the block.
+        let p = [0u8, 0x01, 0x70, 0x55];
+        assert_eq!(
+            boot.cpu_wrote(0, jump, p),
+            BootAction::Echo(jump),
+            "a jump to {jump} must start a new block"
+        );
+        assert_eq!(boot.state, BootState::AwaitingBlock(jump));
+        assert_eq!(boot.address, 0x5570);
+
+        // ...and the new block's first byte arrives under whatever counter
+        // the uploader is now using, which need not be `jump + 1` either.
+        let p = [0u8, 0xCD, 0x70, 0x55];
+        assert!(matches!(
+            boot.cpu_wrote(0, jump.wrapping_add(7), p),
+            BootAction::Store {
+                address: 0x5570,
+                value: 0xCD,
+                ..
+            }
+        ));
+    }
+}
+
+/// The other half of the same rule, and the reason the old one was written
+/// too narrowly: `poll` feeds the CURRENT port-0 value in on a timer, so
+/// the value just consumed arrives again and again until the CPU writes
+/// the next one. Seeing it is "nothing new" — treating it as a mismatch
+/// would end every block after its first byte.
+#[test]
+fn re_reading_the_last_acknowledged_counter_is_not_a_block_boundary() {
+    let mut boot = IplBoot::new();
+    let p = [0u8, 0x01, 0x00, 0x03];
+    assert_eq!(boot.cpu_wrote(0, 0xCC, p), BootAction::Echo(0xCC));
+    let p = [0u8, 0xAB, 0x00, 0x03];
+    assert!(matches!(boot.cpu_wrote(0, 0, p), BootAction::Store { .. }));
+
+    // The same counter again, as `poll` will deliver it many times over.
+    for _ in 0..5 {
+        assert_eq!(boot.cpu_wrote(0, 0, p), BootAction::None);
+        assert_eq!(
+            boot.state,
+            BootState::Transferring(1),
+            "a re-read must not advance or end anything"
+        );
+    }
+    // And the real next byte still lands.
+    assert!(matches!(
+        boot.cpu_wrote(0, 1, p),
+        BootAction::Store {
+            address: 0x0301,
+            ..
+        }
+    ));
+}
+
 /// A zero "kind" byte with the very first `$CC` means run immediately,
 /// with nothing transferred.
 #[test]

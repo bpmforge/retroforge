@@ -181,25 +181,48 @@ impl IplBoot {
                         echo: value,
                     };
                 }
-                if value == expected.wrapping_add(1) {
-                    // Counter skipped by two from the last acknowledged
-                    // byte: a new block (or the end).
-                    self.address = u16::from(ports_in[2]) | (u16::from(ports_in[3]) << 8);
-                    self.entry = self.address;
-                    if ports_in[1] == 0 {
-                        self.state = BootState::Running;
-                        return BootAction::Run {
-                            entry: self.entry,
-                            echo: value,
-                        };
-                    }
-                    self.state = BootState::AwaitingBlock(value);
-                    return BootAction::Echo(value);
+                // The last counter this handler acknowledged. `poll` feeds
+                // the CURRENT port-0 value in on a timer, so the value
+                // just consumed arrives again and again until the CPU
+                // writes the next one; seeing it is "nothing new", not a
+                // mismatch. Getting this wrong ends every block after its
+                // first byte.
+                if value == expected.wrapping_sub(1) {
+                    return BootAction::None;
                 }
-                BootAction::None
+                // Any OTHER value that is not the expected counter ends the
+                // block. This accepted only `expected + 1` until ticket
+                // W14-06, and that over-specific rule is why most
+                // commercial titles never finished booting: the IPL does
+                // not check for a particular skip, it checks for a
+                // MISMATCH, and different uploaders jump by different
+                // amounts. Super Mario World's jumps by four — traced:
+                // it acknowledged counter $3D, wrote the new block's
+                // address to ports 2-3 and a non-zero kind to port 1,
+                // then wrote $41. Under the old rule that matched
+                // neither arm, the handler did nothing, and the game
+                // spun on `CMP $2140 / BNE` for ever with the screen
+                // still in forced blank.
+                self.address = u16::from(ports_in[2]) | (u16::from(ports_in[3]) << 8);
+                self.entry = self.address;
+                if ports_in[1] == 0 {
+                    self.state = BootState::Running;
+                    return BootAction::Run {
+                        entry: self.entry,
+                        echo: value,
+                    };
+                }
+                self.state = BootState::AwaitingBlock(value);
+                BootAction::Echo(value)
             }
             BootState::AwaitingBlock(ack) => {
-                if index == 0 && value == ack.wrapping_add(1) {
+                // The new block's first byte arrives under whatever
+                // counter the uploader is now using — which is not
+                // necessarily `ack + 1`, for the same reason the mismatch
+                // above is not necessarily `expected + 1`. The one value
+                // that cannot start it is a repeat of the acknowledgement
+                // itself, which is the CPU still waiting for its echo.
+                if index == 0 && value != ack {
                     self.state = BootState::Transferring(value.wrapping_add(1));
                     let address = self.address;
                     self.address = self.address.wrapping_add(1);

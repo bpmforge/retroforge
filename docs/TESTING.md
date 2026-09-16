@@ -726,7 +726,8 @@ First run, 2026-09-15, release build:
 | library | titles | rendered something | uniform screen | refused | crashed | timed out |
 |---|---|---|---|---|---|---|
 | NES | 1281 | 1167 | 7 | 107 | **0** | **0** |
-| SNES | 1265 | 303 | 806 | 150 | **0** | **6** |
+| SNES, first run | 1265 | 303 | 806 | 150 | **0** | 6 |
+| SNES, after W14-06 | 1265 | **860** | 244 | 150 | **0** | 11 |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -739,8 +740,11 @@ with a finer bucket found **zero** cases of "no video at all", which is
 what separates a dead renderer from one drawing nothing, and the same
 harness against NES produced a uniform screen for 7 of 1174 (0.6%)
 against roughly 76% here. That asymmetry is the evidence that it is
-systemic and SNES-side. It is ticket **W14-06**; the six hangs, two
-distinct titles across their revisions, are **W14-07**.
+systemic and SNES-side. That was ticket **W14-06**, and it is **closed**: one
+over-specific comparison in the APU boot handshake, which the third row
+above measures. The hangs are **W14-07**, and they went from 6 to 11 as
+games got further — a census bucket rising after a fix is the honest
+shape of progress, not a regression.
 
 Neither was fixed by the ticket that found them, on purpose: the census
 is a measurement, and folding its findings in would have turned it into
