@@ -2999,3 +2999,49 @@ stories, 10 decisions).
 
   Gate: workspace **1826 passing / 0 failed / 35 ignored**, arch OK,
   licences OK.
+
+- **W14-07 — two SNES titles hang the core** (2026-09-15). **They are not
+  hung.** Closed on its second branch: the cause is named, with a
+  profiler behind it, and the fix is filed as **W14-08**.
+
+  | | frames | wall clock |
+  |---|---|---|
+  | Super Buster Bros. | 20 | **2.00s** |
+  | Zelda: A Link to the Past | 20 | **0.03s** |
+
+  Both cores are executing; neither is stopped, neither is stuck. Super
+  Buster Bros. runs at **100ms per frame against 1.5ms** — 66x slow, so
+  600 frames takes a minute and the census's 30-second cap kills it. "It
+  stalls" was a conclusion, not an observation, which is RF-L-12's fourth
+  rule and it applied again here.
+
+  **Where the time goes, from `sample` and not from reading code.** 4587
+  of 4609 samples are in `render_scanline_masked` ->
+  `render_scanline_hires`, and inside `render_sub_scanline` the largest
+  single leaf is **`<Ppu as Clone>::clone` at 957 samples**, essentially
+  all of it in `memmove`.
+
+  **The line is one line.** `render_sub_scanline` does
+  `self.with_line_state(line).unwrap_or_else(|| self.clone())` — and
+  `with_line_state` clones as well, so either branch is a **full `Ppu`
+  copy per scanline**. A `Ppu` carries 64 KiB of VRAM plus CGRAM, OAM and
+  two ~224-entry `Vec`-of-`Vec` fields, so one frame is roughly **14 MB of
+  memmove and tens of thousands of allocations**.
+
+  **The clone is not gratuitous, which is why this is a separate ticket
+  and not a quick edit.** `render_scanline_live` takes `&mut self` and
+  mutates sprite-limit flags; the forced-blank test exists to assert those
+  do not accumulate. The shadow gives the sub screen its own copy of that
+  mutable state, and any replacement has to keep that isolation. Rushing
+  it into the most golden-protected code in the project at the end of a
+  long session would be the wrong trade.
+
+  **It is also not about two games.** Any title using a hires mode or the
+  sub screen for colour math takes this path; the timed-out bucket is
+  merely where it crosses a 30-second cap. Two earlier false starts are
+  worth recording: the mid-line-write segmentation path was suspected and
+  **measured to be zero** for both titles, and an earlier reading blamed
+  the APU, which the profile shows is not on the path at all.
+
+  Board: W14-08 filed with the profile, the line, and three named shapes
+  the fix could take.

@@ -6059,12 +6059,39 @@
     "a regression test pins it at the smallest level that reproduces, so the census is not the only thing that would catch it coming back"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "W14-06 RAISED THE COUNT FROM 6 TO 11, 2026-09-15, and that is progress rather than regression: fixing the APU boot handshake let hundreds of titles get past their sound-driver upload, and five of them then reached a hang that nothing had been able to reach before. The full list is now Batman Forever (USA) and its Rev 1, Elite Soccer, The Flintstones, Judge Dredd, Radical Psycho Machine Racing and its beta, and Super Buster Bros. across its revisions and betas. Still zero crashes in 1265 titles.",
     "FOUND BY W14-03's FIRST CENSUS (2026-09-15). Six of 1265 SNES archives exceeded the 30-second wall-clock cap and were killed: Radical Psycho Machine Racing (USA) and its 1991-08-14 beta, and Super Buster Bros. (USA) with its Rev 1 and both betas. That is TWO distinct games across their revisions, which is what makes it a bug rather than a bad dump — a broken dump does not reproduce across four separate releases of the same title.",
     "ZERO CRASHES AND ZERO HANGS ON NES across 1281 titles in the same run, so this is SNES-side. These six are the only hangs the whole census found.",
     "THE CENSUS ONLY KILLS; IT DOES NOT DIAGNOSE. Reproducing means running one of these titles under the debugger's trace (W13-02g gives a bsnes-convention SNES line) and finding what the CPU or the APU is waiting for. RF-L-09's rule holds: find the loop before re-running anything, and never re-run a suite that hung without doing so."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W14-08",
+   "title": "The sub-screen path clones the whole PPU once per scanline",
+   "phase": 14,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W14-07"
+   ],
+   "acceptance": [
+    "a hires or colour-math title renders at a frame cost in the same order as a plain one; the measured starting point is 100ms per frame against 1.5ms for Zelda on the same machine, and the close must state the new number rather than assert an improvement",
+    "the seventeen PPU golden frames and every mode-7/window/colour-math test still pass unchanged — this is a performance change and any pixel that moves is a bug, not a trade",
+    "the sub screen keeps the isolation the clone was providing: render_scanline_live mutates sprite-limit flags, and rendering the sub screen must not let those accumulate into the main screen's state (the forced-blank test documents why that matters)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "PROFILED, NOT GUESSED (2026-09-15, W14-07). macOS `sample` over Super Buster Bros: 4587 of 4609 samples are in render_scanline_masked -> render_scanline_hires, and inside render_sub_scanline the single largest leaf is `<rf_snes::ppu::Ppu as Clone>::clone` at 957 samples, essentially all of it in _platform_memmove.",
+    "THE LINE IS crates/rf-snes/src/ppu/mod.rs, render_sub_scanline: `let mut shadow = self.with_line_state(line).unwrap_or_else(|| self.clone());` — and with_line_state clones too, so either branch is one FULL Ppu copy PER SCANLINE. A Ppu carries 64 KiB of VRAM, CGRAM, OAM and two ~224-entry Vec-of-Vec fields, so a frame is ~14 MB of memmove plus tens of thousands of allocations.",
+    "WHY THE CLONE IS THERE, and why the fix is not just deleting it: render_scanline_live takes &mut self and mutates sprite-limit flags — the forced-blank test asserts those do NOT accumulate while the screen is off. The shadow gives the sub screen its own copy of that mutable state. Any replacement has to keep that isolation, which is what criterion 3 is for.",
+    "THE SHAPE OF THE FIX, not a prescription: during emit_frame the PPU is settled, so the big buffers do not change between lines and one clone per FRAME would do where 224 are done now. Alternatives are saving and restoring only the fields the shadow actually alters (bg enables, obj_enabled, the line-state fields, and the sprite-limit flags), or putting the frame-constant buffers behind a refcount so a clone is a pointer bump.",
+    "THIS IS NOT ONLY ABOUT TWO GAMES. The path is taken by any title using a hires mode or the sub screen for colour math, which is a large fraction of the library — the census's timed-out bucket is just where it crosses a 30-second cap."
    ],
    "stories": []
   }
