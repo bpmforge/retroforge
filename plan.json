@@ -5959,7 +5959,7 @@
     "results are committed as counts and titles only: no ROM bytes, no captures of commercial content, no path under a home directory (law 5), and the library directory comes from an environment variable with a clean skip when it is absent"
    ],
    "points": 8,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "WHY THIS IS WORTH MORE THAN ANY NUMBER OF PROFILES: this project has only ever run its own fixtures plus test ROMs. 1058 NES and 1119 SNES commercial titles are now reachable locally, and booting them is the strongest accuracy signal available to it — the same shape of evidence the darwin runner gave CI in W12-01.",
     "THE HEADLINE IS THE HAZARD. 'N titles boot' would repeat exactly the mistake that reopened W7-08: a substring check called a whole ROM green off its first subtest. The buckets are triage for a human to read, which is why that is in the acceptance and not in a note.",
