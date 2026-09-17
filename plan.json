@@ -6314,7 +6314,7 @@
     "Castlevania III's status-bar split and Uncharted Waters' map screens are checked by eye against a reference emulator and recorded"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED 2026-09-17 by W14-16's close. Slice 1 boots every MMC5 title in the library; these three are what makes them render CORRECTLY rather than boot. ExGrafix and the split both change the background fetch itself (a per-tile CHR bank and palette, or a second scroll origin), which is the one thing the push/materialise CHR design cannot express from the mapper side -- the PPU's background fetch needs a per-tile hook or a PPU-owned copy of the extended RAM with the tile-to-bank rule inside it. The PPU already owns the extended RAM since slice 1, so the second is the natural path."
    ],
