@@ -433,11 +433,21 @@ impl Apu {
                 // it never gets another chance to see it once the SPC700
                 // owns the ports.
                 self.ports_out[0] = echo;
-                // Hand over to the real SPC700 core, and bank the IPL out
-                // so the uploaded program owns the whole address space.
+                // Hand over to the real SPC700 core. The IPL stays banked
+                // IN (ticket W14-10): fullsnes `$F1` — "bit 7: IPL ROM
+                // enable (0=Off, 1=On, initial value)" — and nothing but
+                // the program's own `$F1` write clears it. This used to
+                // clear the bit here "so the uploaded program owns the
+                // whole address space", and the cost was every title that
+                // reboots the APU by commanding a jump to `$FFC0` after an
+                // upload: Wild Guns, Bust-A-Move, Pocky & Rocky, Super
+                // Bonk, Uniracers, Yoshi's Cookie. The jump landed on
+                // zero-filled ARAM, the SPC700 slid into the port page,
+                // read the CPU's `$FF` as STOP, and the 65816 waited for
+                // `$AA`/`$BB` for ever. With the window still mapped the
+                // jump lands in it and [`Apu::reenter_ipl`] does its job.
                 self.cpu.pc = entry;
                 self.cpu.stopped = false;
-                self.ipl_enabled = false;
             }
             boot::BootAction::None => {}
         }

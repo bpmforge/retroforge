@@ -232,3 +232,108 @@ impl MathUnit {
         Ok(())
     }
 }
+
+/// The H/V counter latch: `$2137` SLHV, `$213C`/`$213D` OPHCT/OPVCT,
+/// `$213F` STAT78 and the `$4201` WRIO edge (ticket W14-10).
+///
+/// fullsnes, "SNES PPU Interrupts and Timers":
+///
+/// * `2137h - SLHV - Latch H/V-Counter by Software (R)` — reading latches
+///   the current H/V counters, exactly as a 1-to-0 transition of WRIO
+///   bit 7 does. The read itself returns open bus.
+/// * `213Ch - OPHCT` / `213Dh - OPVCT` — each is read in two halves
+///   through its own flip-flop: the first read gives bits 0-7, the second
+///   gives bit 8 in bit 0 with PPU2 open bus above it.
+/// * `213Fh - STAT78` — bit 7 interlace field, bit 6 "H/V-Counter latch
+///   flag (0=No, 1=Latched)", bit 4 "Frame rate (0=NTSC, 1=PAL)", bits
+///   0-3 the PPU2 version. Reading it resets both OPHCT/OPVCT flip-flops
+///   and clears the latch flag.
+/// * `4201h - WRIO` — "bit 7: latch H/V counters on 1-to-0 transition".
+///
+/// Final Fantasy Mystic Quest reads `$2137`, `$213F`, `$213D` in a loop
+/// and spins until the latched line is even; with none of these mapped
+/// it read open bus for ever.
+#[derive(Debug, Clone, Copy)]
+pub struct HvLatch {
+    /// Latched dot (0-339) and line (0-261/311).
+    pub h: u16,
+    pub v: u16,
+    /// STAT78 bit 6.
+    pub latched: bool,
+    /// Which half the next `$213C` / `$213D` read returns.
+    pub h_second: bool,
+    pub v_second: bool,
+    /// Last `$4201` value, for the bit-7 falling edge. `$FF` at reset:
+    /// both I/O port lines idle high.
+    pub wrio: u8,
+}
+
+impl Default for HvLatch {
+    fn default() -> Self {
+        Self {
+            h: 0,
+            v: 0,
+            latched: false,
+            h_second: false,
+            v_second: false,
+            wrio: 0xFF,
+        }
+    }
+}
+
+impl HvLatch {
+    /// Capture the beam position and raise the latch flag.
+    pub fn latch(&mut self, dot: u16, line: u16) {
+        self.h = dot;
+        self.v = line;
+        self.latched = true;
+    }
+
+    /// `$213C` OPHCT: low byte, then bit 8 over PPU2 open bus.
+    pub fn read_ophct(&mut self, open_bus: u8) -> u8 {
+        let v = Self::half(self.h, self.h_second, open_bus);
+        self.h_second = !self.h_second;
+        v
+    }
+
+    /// `$213D` OPVCT: low byte, then bit 8 over PPU2 open bus.
+    pub fn read_opvct(&mut self, open_bus: u8) -> u8 {
+        let v = Self::half(self.v, self.v_second, open_bus);
+        self.v_second = !self.v_second;
+        v
+    }
+
+    fn half(counter: u16, second: bool, open_bus: u8) -> u8 {
+        if second {
+            (open_bus & 0xFE) | ((counter >> 8) as u8 & 1)
+        } else {
+            counter as u8
+        }
+    }
+
+    /// `$213F` STAT78. Reading resets both flip-flops and the latch flag.
+    pub fn read_stat78(&mut self, pal: bool, open_bus: u8) -> u8 {
+        let v = self.peek_stat78(pal, open_bus);
+        self.latched = false;
+        self.h_second = false;
+        self.v_second = false;
+        v
+    }
+
+    /// STAT78 without the read's side effects, for `peek`.
+    #[must_use]
+    pub fn peek_stat78(&self, pal: bool, open_bus: u8) -> u8 {
+        // Bit 7 (interlace field) is not modelled: this core does not
+        // track fields. Bit 5 is PPU2 open bus. PPU2 version 3 — the
+        // value on every retail 5C78 after the earliest revision.
+        (u8::from(self.latched) << 6) | (open_bus & 0x20) | (u8::from(pal) << 4) | 0x03
+    }
+
+    /// `$4201` WRIO write. Returns `true` when bit 7 went 1-to-0, which
+    /// is the caller's cue to latch.
+    pub fn write_wrio(&mut self, value: u8) -> bool {
+        let falling = self.wrio & 0x80 != 0 && value & 0x80 == 0;
+        self.wrio = value;
+        falling
+    }
+}

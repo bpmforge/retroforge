@@ -4,6 +4,7 @@
 use crate::bus::SnesBus;
 use crate::cpu::CpuBus;
 use crate::regs::{IrqMode, IrqTimer, MathUnit, NmiTimen, WramPort, DIV_STEPS, MUL_STEPS};
+use crate::timing::MASTER_PER_DOT;
 use rf_cart::SnesMapMode;
 
 fn bus() -> SnesBus {
@@ -220,4 +221,79 @@ fn the_math_registers_are_reachable_through_the_bus() {
     b.math.settle();
     assert_eq!(b.read(0x00_4214), 142, "quotient low (1000/7)");
     assert_eq!(b.read(0x00_4216), 6, "remainder (1000%7)");
+}
+
+/// **Disabling the H/V IRQ in `$4200` drops a latched flag** (ticket
+/// W14-10; fullsnes `$4211`, bsnes `cpu/io.cpp`).
+///
+/// Final Fantasy Mystic Quest writes `$4200 = 0` inside a routine and
+/// then `PLP`s with I clear. A flag latched by an earlier H/V IRQ used to
+/// survive the disable and fire there, into a handler that is a `BRK`
+/// whose vector is a `STP` trap.
+#[test]
+fn disabling_hv_irq_in_4200_drops_a_latched_irq() {
+    let mut b = bus();
+    b.write(0x00_4200, 0x20); // V-IRQ enabled
+    b.irq.fired = true;
+    b.write(0x00_4200, 0x00); // ...and disabled again, flag still latched
+    assert!(!b.irq.fired, "the disable must deassert the line");
+    assert_eq!(b.read(0x00_4211) & 0x80, 0, "and TIMEUP reads clear");
+
+    // Disabling NMI alone, with the IRQ still enabled, must NOT touch it.
+    b.write(0x00_4200, 0xA0);
+    b.irq.fired = true;
+    b.write(0x00_4200, 0x20);
+    assert!(b.irq.fired, "an IRQ that is still enabled stays pending");
+}
+
+/// **`$2137` latches the beam and `$213C`/`$213D` read it in two halves**
+/// (ticket W14-10; fullsnes SLHV / OPHCT / OPVCT / STAT78).
+#[test]
+fn slhv_latches_the_beam_and_the_counters_read_low_then_high() {
+    let mut b = bus();
+    b.timing.line = 0x101;
+    b.timing.line_cycles = 0x12A * MASTER_PER_DOT;
+    let _ = b.read(0x00_2137);
+    let _ = b.read(0x00_213F); // reset both flip-flops
+    assert_eq!(b.read(0x00_213D), 0x01, "OPVCT low byte first");
+    assert_eq!(b.read(0x00_213D) & 1, 1, "then bit 8");
+    assert_eq!(b.read(0x00_213C), 0x2A, "OPHCT low byte first");
+    assert_eq!(b.read(0x00_213C) & 1, 1, "then bit 8");
+    // A third read wraps back to the low byte.
+    assert_eq!(b.read(0x00_213D), 0x01);
+}
+
+/// STAT78 reports the latch flag once, resets the flip-flops, and says
+/// NTSC. `peek` must do none of that.
+#[test]
+fn stat78_reports_the_latch_once_and_resets_the_flip_flops() {
+    let mut b = bus();
+    assert_eq!(b.read(0x00_213F) & 0x40, 0, "nothing latched yet");
+    b.timing.line = 42;
+    let _ = b.read(0x00_2137);
+    assert_eq!(b.peek(0x00_213F) & 0x40, 0x40, "peek sees the flag");
+    assert_eq!(b.peek(0x00_213F) & 0x40, 0x40, "...and leaves it");
+    let _ = b.read(0x00_213D); // flip-flop now on the high half
+    let stat = b.read(0x00_213F);
+    assert_eq!(stat & 0x40, 0x40, "the read reports the latch");
+    assert_eq!(stat & 0x10, 0, "NTSC");
+    assert_eq!(b.read(0x00_213F) & 0x40, 0, "and clears it");
+    assert_eq!(
+        b.read(0x00_213D),
+        42,
+        "the flip-flop was reset to the low half"
+    );
+}
+
+/// `$4201` WRIO bit 7 going 1-to-0 latches like `$2137`; going 0-to-1
+/// does not.
+#[test]
+fn wrio_falling_edge_latches_the_counters() {
+    let mut b = bus();
+    b.timing.line = 77;
+    b.write(0x00_4201, 0x80);
+    assert_eq!(b.read(0x00_213F) & 0x40, 0, "a rising edge latches nothing");
+    b.write(0x00_4201, 0x00);
+    assert_eq!(b.read(0x00_213F) & 0x40, 0x40, "the falling edge latches");
+    assert_eq!(b.read(0x00_213D), 77);
 }

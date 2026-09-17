@@ -6122,6 +6122,32 @@
     "WHY THE 64 WAS THERE: its comment fears a long DMA or a paused debugger handing the APU millions of cycles inside one bus access. With the debt settled every CPU instruction the per-call amount is one to a few SPC cycles, and the largest single lump is a full-bank DMA (~25k SPC cycles, milliseconds). A bound can stay as a sanity limit but the remainder must CARRY, never drop. EMULATION_CORES.md \u00a71 ('each chip runs catch_up(to_master_cycle) first, Mesen-style') and line 232 ('catch-up sync with main CPU port accesses, never a free-running thread') both permit per-instruction settlement; the latter forbids a thread, not a schedule."
    ],
    "stories": []
+  },
+  {
+   "id": "W14-10",
+   "title": "Disabling H/V IRQs in $4200 must drop a latched IRQ",
+   "phase": 14,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W14-09"
+   ],
+   "acceptance": [
+    "the cause is DIAGNOSED from a trace on a specific title before anything changes: Final Fantasy Mystic Quest's path into its STP trap goes IRQ vector -> $0117 trampoline -> $00:B821 BRK -> $011B trampoline -> $008253 STP, taken immediately after a PLP with $4200 already written to 0",
+    "writing $4200 with bits 4-5 clear drops the latched TIMEUP flag, cited to fullsnes $4211 and cross-checked against bsnes cpu io, and a unit test pins it (flag set, $4200 <- 0, no IRQ taken when I is cleared)",
+    "Final Fantasy Mystic Quest renders something within the census's 600 frames, measured with the same harness rather than asserted",
+    "the full gate plus the ignored SNES suites are re-run and any moved verdict is recorded"
+   ],
+   "points": 2,
+   "status": "in_progress",
+   "notes": [
+    "FOUND 2026-09-16 probing the uniform bucket after W14-09. Mystic Quest (USA) and (Japan) sit with the 65816 halted at $008254, the second of three STP/BRA traps behind a routine at $008247 that does STZ $4200 / LDA #$80 / STA $2100 -- the game's own fatal-error path.",
+    "TRACED, NOT REASONED ABOUT. A ring of the last 120 distinct PCs before the halt reads ... 00B853 000117 00B821 00011B 008253. The native vectors at $00:FFE4-FFEF are COP=$FFFF, BRK=$011B, ABORT=$8000, NMI=$0113, IRQ=$0117. WRAM $0117 is JML $00B821 and $011B is JML $008253. $00:B821 holds $00 (BRK). So: an IRQ was taken right after the PLP at $00:B853, its handler is a BRK, and BRK's vector is the STP trap -- the game's way of saying an IRQ here is impossible. The routine that ran ($00:B82C-B857) had already written $4200 = 0 at $00:B833 (STZ $4200) before that PLP.",
+    "THE MECHANISM: SnesBus writes $4200 as `self.nmitimen = NmiTimen(value)` and nothing else. IrqTimer.fired stays latched from an earlier H/V IRQ; SnesSystem::step takes an IRQ whenever `irq.fired && !I`. The PLP cleared I, the stale flag fired. On hardware disabling the H/V IRQ in $4200 deasserts the IRQ line: fullsnes $4211 ('the flag is reset ... on disabling IRQs via 4200h'), and bsnes cpu/io.cpp clears irqLine when neither hirq nor virq is enabled after a $4200 write."
+   ],
+   "stories": []
   }
  ]
 }

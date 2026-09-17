@@ -76,10 +76,50 @@ fn the_handshake_transfers_a_block_and_runs_it() {
 
     assert!(apu.boot.is_running(), "control handed to the SPC700");
     assert_eq!(apu.cpu.pc, entry, "...at the address the CPU supplied");
+    // The IPL stays banked in: hardware leaves `$F1` bit 7 set until the
+    // program clears it (ticket W14-10 — this used to assert the
+    // opposite, and that is what broke every title that reboots the APU
+    // by jumping to `$FFC0`).
     assert!(
-        !apu.ipl_enabled,
-        "and the IPL banks out so the uploaded program owns the space"
+        apu.ipl_enabled,
+        "the hand-over must not bank the IPL out; only a $F1 write does"
     );
+}
+
+/// **A commanded jump to `$FFC0` reboots into the handshake** (ticket
+/// W14-10). Wild Guns uploads a block and then, instead of running it,
+/// jumps to the boot ROM's entry to start over; the IPL republishes
+/// `$AA`/`$BB` and the 65816 uploads the real driver.
+///
+/// Shaped like the trace: the jump arrives as a block-ending counter
+/// (not a fresh `$CC`), so the re-armed handshake waits rather than
+/// re-running the same command — exactly as the real IPL, which polls
+/// for `$CC`, would.
+#[test]
+fn a_jump_to_ffc0_re_enters_the_boot_handshake() {
+    let mut apu = Apu::new();
+    write_port(&mut apu, 1, 0x01);
+    write_port(&mut apu, 2, 0x00);
+    write_port(&mut apu, 3, 0x02);
+    write_port(&mut apu, 0, 0xCC);
+    write_port(&mut apu, 1, 0x5A);
+    write_port(&mut apu, 0, 0x00); // one byte to $0200
+                                   // Kind 0, entry $FFC0, counter skip: "run" — at the boot ROM.
+    write_port(&mut apu, 1, 0x00);
+    write_port(&mut apu, 2, 0xC0);
+    write_port(&mut apu, 3, 0xFF);
+    write_port(&mut apu, 0, 0x02);
+    assert!(apu.boot.is_running());
+    assert_eq!(apu.cpu.pc, 0xFFC0);
+    assert!(apu.ipl_enabled, "the window is still mapped at the jump");
+    // One SPC700 step lands in the IPL window and re-arms the handshake.
+    let _ = apu.step_counted();
+    assert!(
+        !apu.boot.is_running(),
+        "the handshake owns the machine again"
+    );
+    assert_eq!(apu.cpu_read_port(0), 0xAA);
+    assert_eq!(apu.cpu_read_port(1), 0xBB);
 }
 
 /// The counter SKIP is what distinguishes "new block" from "next byte" —

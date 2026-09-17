@@ -238,6 +238,12 @@ impl crate::system::SnesSystem {
                 o.u8(b.open_bus)?;
                 o.u64(b.apu_debt)?;
                 o.u64(b.apu_overspent)?;
+                o.u16(b.hv.h)?;
+                o.u16(b.hv.v)?;
+                o.bool(b.hv.latched)?;
+                o.bool(b.hv.h_second)?;
+                o.bool(b.hv.v_second)?;
+                o.u8(b.hv.wrio)?;
                 b.timing.save(o)?;
                 b.joypads.save(o)?;
                 o.bool(b.manual_latch)?;
@@ -293,6 +299,12 @@ impl crate::system::SnesSystem {
                 self.bus.open_bus = i.u8()?;
                 self.bus.apu_debt = i.u64()?;
                 self.bus.apu_overspent = i.u64()?;
+                self.bus.hv.h = i.u16()?;
+                self.bus.hv.v = i.u16()?;
+                self.bus.hv.latched = i.bool()?;
+                self.bus.hv.h_second = i.bool()?;
+                self.bus.hv.v_second = i.bool()?;
+                self.bus.hv.wrio = i.u8()?;
                 self.bus.timing.load(i)?;
                 self.bus.joypads.load(i)?;
                 self.bus.manual_latch = i.bool()?;

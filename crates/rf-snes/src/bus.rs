@@ -73,6 +73,8 @@ pub struct SnesBus {
     /// surplus every time and ran the SPC700 at one instruction per owed
     /// cycle, 4.4x too fast (measured by the test that guards this).
     pub apu_overspent: u64,
+    /// `$2137`/`$213C`/`$213D`/`$213F`/`$4201` H/V counter latch (W14-10).
+    pub hv: crate::regs::HvLatch,
     /// True while an HDMA unit is transferring (ticket W7-15).
     ///
     /// **HDMA runs in HBLANK, before the line it configures is drawn**, so
@@ -217,6 +219,7 @@ impl SnesBus {
             apu: Apu::new(),
             apu_debt: 0,
             apu_overspent: 0,
+            hv: crate::regs::HvLatch::default(),
             hdma_in_progress: false,
             timing: Timing::new(),
             joypads: Joypads::default(),
@@ -240,6 +243,14 @@ impl SnesBus {
     /// Register reads WITHOUT side effects, shared by `read` and `peek`.
     fn read_register_pure(&self, offset: u16) -> Option<u8> {
         Some(match offset {
+            // The latch counters and STAT78 without their flip-flop and
+            // flag side effects: a debugger peeking must not toggle them.
+            0x213C => self.hv.h as u8,
+            0x213D => self.hv.v as u8,
+            0x213F => self.hv.peek_stat78(
+                matches!(self.timing.region, crate::timing::Region::Pal),
+                self.open_bus,
+            ),
             0x4214 => self.math.rddiv as u8,
             0x4215 => (self.math.rddiv >> 8) as u8,
             0x4216 => self.math.rdmpy as u8,
@@ -286,6 +297,20 @@ impl SnesBus {
             // $4210 RDNMI: reading CLEARS the vblank flag. gilyon
             // cputest's wait_for_vblank depends on it — see timing.rs.
             0x4210 => self.timing.read_rdnmi(),
+            // $2137 SLHV: latch the beam; the read itself is open bus.
+            0x2137 => {
+                let (dot, line) = (self.timing.dot(), self.timing.line);
+                self.hv.latch(dot, line);
+                self.open_bus
+            }
+            // $213C/$213D: two-half reads through a flip-flop each.
+            0x213C => self.hv.read_ophct(self.open_bus),
+            0x213D => self.hv.read_opvct(self.open_bus),
+            // $213F STAT78: reading resets the flip-flops and latch flag.
+            0x213F => {
+                let pal = matches!(self.timing.region, crate::timing::Region::Pal);
+                self.hv.read_stat78(pal, self.open_bus)
+            }
             // $4016/$4017 manual joypad read: each read shifts out one
             // bit, so this cannot be a pure read either.
             0x4016 | 0x4017 => {
@@ -356,7 +381,28 @@ impl SnesBus {
             0x2181 => self.wram_port.set_low(value),
             0x2182 => self.wram_port.set_mid(value),
             0x2183 => self.wram_port.set_high(value),
-            0x4200 => self.nmitimen = NmiTimen(value),
+            0x4200 => {
+                self.nmitimen = NmiTimen(value);
+                // Disabling the H/V IRQ deasserts the line (ticket
+                // W14-10). fullsnes, $4211 TIMEUP: the flag "is reset
+                // ... on disabling IRQs via 4200h"; bsnes clears its
+                // irqLine on a $4200 write that leaves neither H nor V
+                // enabled. Without this a flag latched by an earlier
+                // H/V IRQ survives the disable and fires the moment I is
+                // cleared -- Final Fantasy Mystic Quest takes exactly
+                // that IRQ into a BRK whose vector is a STP trap.
+                if self.nmitimen.irq_mode() == crate::regs::IrqMode::Off {
+                    self.irq.fired = false;
+                }
+            }
+            // $4201 WRIO: a 1-to-0 transition of bit 7 latches the
+            // counters, the hardware's other route to what $2137 does.
+            0x4201 => {
+                if self.hv.write_wrio(value) {
+                    let (dot, line) = (self.timing.dot(), self.timing.line);
+                    self.hv.latch(dot, line);
+                }
+            }
             0x4202 => self.math.wrmpya = value,
             0x4203 => self.math.start_multiply(value),
             0x4204 => self.math.wrdiv = (self.math.wrdiv & 0xFF00) | u16::from(value),
