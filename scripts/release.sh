@@ -105,7 +105,11 @@ echo "release: archived $archived fixture(s) to fixtures/releases/$version/" >&2
 # ---------------------------------------------------------------------------
 host="$(rustc -vV | awk '/^host:/{print $2}')"
 echo "release: building host artifacts for $host..." >&2
-cargo build --release -p retroforge -p retroforge-tool
+# Ticket W14-20: `audio` and `gamepad` are opt-in features (off by default so
+# `cargo test --workspace` needs no ALSA/udev headers on Linux); a release built
+# without them is silent and pad-less, which is how the 2026-09-17 m4max build
+# shipped with no sound.
+cargo build --release -p retroforge -p retroforge-tool --features retroforge/audio,retroforge/gamepad
 for bin in retroforge retroforge-tool; do
   if [ -f "$repo_root/target/release/$bin" ]; then
     cp "$repo_root/target/release/$bin" "$artifact_dir/$bin-$host"
