@@ -249,7 +249,19 @@ impl crate::system::SnesSystem {
                 o.bool(b.manual_latch)?;
                 o.u16(b.manual_shift[0])?;
                 o.u16(b.manual_shift[1])?;
-                o.u8(b.hdmaen)
+                o.u8(b.hdmaen)?;
+                // DSP-1 (ticket W14-19; D-010): a bus-mapped chip's live
+                // protocol state, the same reasoning that puts the DMA
+                // channels above in `CPU_` rather than a chunk of their
+                // own — appended last so a state written before this
+                // ticket and one written after only disagree in what
+                // trails the byte the older format already ends at.
+                // `None` (every non-DSP-1 cartridge) costs one byte.
+                o.bool(b.dsp1.is_some())?;
+                match &b.dsp1 {
+                    Some(d) => d.save(o),
+                    None => Ok(()),
+                }
             }
             StateRegion::Ppu => self.bus.ppu.save(o),
             StateRegion::Apu => self.bus.apu.save(o),
@@ -311,6 +323,21 @@ impl crate::system::SnesSystem {
                 self.bus.manual_shift[0] = i.u16()?;
                 self.bus.manual_shift[1] = i.u16()?;
                 self.bus.hdmaen = i.u8()?;
+                // DSP-1 — see the matching write above. A state saved
+                // with the chip present but loaded onto a bus with none
+                // (or the reverse) would mean the cartridge changed
+                // underneath the state, which `load_region`'s SRAM-size
+                // check above already treats as this state's problem to
+                // report rather than paper over; DSP-1 presence has no
+                // such check yet, so a mismatch here is silently
+                // resynchronised from the payload's own flag instead.
+                if i.bool()? {
+                    let mut d = self.bus.dsp1.take().unwrap_or_default();
+                    d.load(i)?;
+                    self.bus.dsp1 = Some(d);
+                } else {
+                    self.bus.dsp1 = None;
+                }
                 Ok(())
             }
             StateRegion::Ppu => self.bus.ppu.load(i),
@@ -357,4 +384,105 @@ fn map_mode_from_bits(bits: u8) -> Result<rf_cart::SnesMapMode, StateError> {
             )))
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::CpuBus;
+
+    struct MemStream {
+        buf: Vec<u8>,
+        at: usize,
+    }
+    impl StateWriter for MemStream {
+        fn write_all(&mut self, bytes: &[u8]) -> Result<(), StateError> {
+            self.buf.extend_from_slice(bytes);
+            Ok(())
+        }
+    }
+    impl StateReader for MemStream {
+        fn read_exact(&mut self, out: &mut [u8]) -> Result<(), StateError> {
+            let end = self.at + out.len();
+            out.copy_from_slice(&self.buf[self.at..end]);
+            self.at = end;
+            Ok(())
+        }
+    }
+
+    /// A minimal LoROM image with chipset $03 (DSP, hw=3), mirroring the
+    /// helper `crate::tests::system` uses for the same purpose.
+    fn dsp_lorom_image() -> Vec<u8> {
+        let mut data = vec![0u8; 0x8000];
+        let base = 0x7FC0;
+        data[base + 0x15] = 0x20; // LoROM, SlowROM
+        data[base + 0x16] = 0x03; // chipset: coprocessor nibble 0 ("DSP"), hw=3
+        data[base + 0x17] = 6;
+        data[base + 0x18] = 3;
+        let checksum: u16 = 0xBEEF;
+        data[base + 0x1C..base + 0x1E].copy_from_slice(&(checksum ^ 0xFFFF).to_le_bytes());
+        data[base + 0x1E..base + 0x20].copy_from_slice(&checksum.to_le_bytes());
+        data[base + 0x3C] = 0x00;
+        data[base + 0x3D] = 0x80;
+        data
+    }
+
+    /// Ticket W14-19 acceptance: "DSP state is in the save-state chunk
+    /// and determinism tests pass". A DSP-1 mid-command (a `Collecting`
+    /// with one of two parameter words already received) round-trips
+    /// through `StateRegion::Cpu`, and finishing the command on the
+    /// restored system reaches the same result as finishing it fresh —
+    /// which a state that only saved `unknown_commands` and dropped the
+    /// in-flight command would fail.
+    #[test]
+    fn dsp1_state_survives_a_cpu_region_round_trip() {
+        let rom = dsp_lorom_image();
+        let mut system = crate::SnesSystem::load(&rom).expect("DSP cart loads");
+        system.bus.write(0x30_8000, 0x00); // multiply
+        system.bus.write(0x30_8000, 0x00); // low byte of first param
+        system.bus.write(0x30_8000, 0x40); // high byte -> first param 0x4000
+
+        let mut stream = MemStream {
+            buf: Vec::new(),
+            at: 0,
+        };
+        system
+            .save_region(StateRegion::Cpu, &mut stream)
+            .expect("save");
+
+        let mut restored = crate::SnesSystem::load(&rom).expect("DSP cart loads");
+        restored
+            .load_region(StateRegion::Cpu, &mut stream)
+            .expect("load");
+
+        // Finish the second parameter on both, the same way; a system
+        // that lost the in-flight command would need a fresh opcode byte
+        // here instead and would answer something else entirely.
+        for s in [&mut system, &mut restored] {
+            s.bus.write(0x30_8000, 0x00);
+            s.bus.write(0x30_8000, 0x40); // second param 0x4000
+            assert_eq!(s.bus.read(0x30_8000), 0x00);
+            assert_eq!(s.bus.read(0x30_8000), 0x20); // 0.5*0.5 = 0.25 = 0x2000
+        }
+    }
+
+    /// A cartridge with no DSP-1 round-trips the (now one byte longer)
+    /// `Cpu` region with `dsp1` staying `None` throughout.
+    #[test]
+    fn a_plain_carts_cpu_region_round_trips_without_a_dsp1() {
+        let mut system =
+            crate::SnesSystem::from_rom(vec![0u8; 32 * 1024], rf_cart::SnesMapMode::LoRom, 0);
+        assert!(system.bus.dsp1.is_none());
+        let mut stream = MemStream {
+            buf: Vec::new(),
+            at: 0,
+        };
+        system
+            .save_region(StateRegion::Cpu, &mut stream)
+            .expect("save");
+        system
+            .load_region(StateRegion::Cpu, &mut stream)
+            .expect("load");
+        assert!(system.bus.dsp1.is_none());
+    }
 }

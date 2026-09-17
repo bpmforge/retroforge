@@ -33,7 +33,7 @@
 //! convenience: the mirror-map fixture is 32 KiB and its own reset vector
 //! is fetched through bank `$00`, which only resolves because of it.
 
-use rf_cart::SnesMapMode;
+use rf_cart::{DspWindow, SnesMapMode};
 
 /// Where an access lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,12 +47,41 @@ pub enum Target {
     /// A hardware register; carries the 16-bit offset, since every
     /// register block is identified by its offset alone.
     Register(u16),
+    /// The DSP-1's DR (data/command) register (ticket W14-19). No offset
+    /// is carried: the whole `dr` sub-range of a [`rf_cart::DspWindow`]
+    /// is one mirrored register, and which byte a read/write means is
+    /// decided by the chip's own internal protocol state, not by which
+    /// address in the window was used (snesdev/fullsnes document no
+    /// per-address behaviour inside the window).
+    Dsp1Dr,
+    /// The DSP-1's SR (status) register — see [`Target::Dsp1Dr`].
+    Dsp1Sr,
     /// Nothing is mapped here. Reads see open bus; writes are dropped.
     Open,
 }
 
 /// Total work RAM: 128 KiB, at banks `$7E`-`$7F`.
 pub const WRAM_LEN: usize = 128 * 1024;
+
+/// Resolve `(bank, offset)` against a cartridge's DSP-1 bus window, if it
+/// has one and the address falls inside it. Checked by [`crate::bus`]
+/// BEFORE [`map`], because the window's `dr`/`sr` sub-ranges cover the
+/// same bank/offset space the plain LoROM/HiROM ROM and SRAM windows
+/// would otherwise claim there (D-010, ticket W14-19) — a cart with no
+/// DSP-1 never calls this, so every other cart's mapping is unchanged.
+#[must_use]
+pub fn dsp1_target(window: &DspWindow, bank: u8, offset: u16) -> Option<Target> {
+    if !window.banks[0].contains(&bank) && !window.banks[1].contains(&bank) {
+        return None;
+    }
+    if window.dr.contains(&offset) {
+        Some(Target::Dsp1Dr)
+    } else if window.sr.contains(&offset) {
+        Some(Target::Dsp1Sr)
+    } else {
+        None
+    }
+}
 
 /// Resolve a 24-bit address.
 ///

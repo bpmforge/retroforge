@@ -179,12 +179,16 @@ fn fastrom_from_the_header_changes_the_access_cost() {
 /// low nibble fell below the threshold would load as a plain cartridge
 /// and run as if the coprocessor were not there — silently wrong, and
 /// invisible to a test that only tries one byte.
+///
+/// DSP ($03/$05) is deliberately absent from this table as of ticket
+/// W14-19 (D-010): it is the one coprocessor nibble this build now runs,
+/// via the HLE in [`crate::dsp1`] — see
+/// `dsp_carts_load_with_the_hle_installed_instead_of_being_refused`
+/// below for its positive coverage.
 #[test]
 fn every_named_coprocessor_family_is_refused_and_named() {
     for (chipset, expect) in [
-        (0x03u8, "DSP"),
-        (0x05, "DSP"),
-        (0x13, "Super FX"),
+        (0x13u8, "Super FX"),
         (0x15, "Super FX"),
         (0x1A, "Super FX"),
         (0x25, "OBC1"),
@@ -219,6 +223,64 @@ fn plain_cartridge_types_are_not_refused() {
             "chipset ${chipset:02X} is ROM/ROM+RAM/ROM+RAM+battery and must load"
         );
     }
+}
+
+/// Ticket W14-19: chipset $03/$04/$05 (coprocessor nibble "DSP") now
+/// loads with the DSP-1 HLE installed instead of the FR-CORE-013
+/// refusal `every_named_coprocessor_family_is_refused_and_named` still
+/// checks for every other family.
+#[test]
+fn dsp_carts_load_with_the_hle_installed_instead_of_being_refused() {
+    for chipset in [0x03u8, 0x04, 0x05] {
+        let system = SnesSystem::load(&lorom_image(0x20, chipset))
+            .unwrap_or_else(|e| panic!("chipset ${chipset:02X} (DSP) must load, got {e:?}"));
+        assert!(
+            system.bus.dsp1.is_some(),
+            "chipset ${chipset:02X}: DSP-1 HLE must be installed"
+        );
+    }
+    // A plain ROM (no coprocessor nibble match) never gets one.
+    let plain = SnesSystem::load(&lorom_image(0x20, 0x00)).expect("loads");
+    assert!(plain.bus.dsp1.is_none());
+}
+
+/// Ticket W14-19 acceptance: "the core routes the cart's DSP window
+/// through mapping.rs/bus.rs only when the cart reports the chip". Reads
+/// and writes at an address inside the LoROM-small window (D-010's
+/// snes9x-superset numbers: banks $20-$3F/$A0-$BF, DR $8000-$BFFF, SR
+/// $C000-$FFFF) reach the chip rather than ROM/open bus.
+#[test]
+fn the_dsp_window_reaches_the_chip_through_the_bus() {
+    let mut system = SnesSystem::load(&lorom_image(0x20, 0x03)).expect("DSP loads");
+    // 2Fh (version) needs no parameters: write the command, then read the
+    // two-word result straight back out through the real bus path.
+    system.bus.write(0x30_8000, 0x2F);
+    assert_eq!(system.bus.read(0x30_8000), 0x01);
+    assert_eq!(system.bus.read(0x30_8000), 0x01);
+    // SR reads 0x80 (ready) anywhere in its sub-range, e.g. the far end.
+    assert_eq!(system.bus.read(0x30_FFFF), 0x80);
+    // Peek must not perturb: reading DR through peek twice sees the same
+    // byte, unlike `read` which would advance past the low half.
+    system.bus.write(0x30_8000, 0x0F); // memory test -> one zero word
+    assert_eq!(system.bus.peek(0x30_8000), 0x00);
+    assert_eq!(system.bus.peek(0x30_8000), 0x00);
+}
+
+/// A non-DSP cartridge's mapping at the same addresses is unchanged: the
+/// window only exists when `rf-cart` reports the chip.
+#[test]
+fn a_plain_cart_at_dsp_window_addresses_is_ordinary_rom() {
+    let mut system = SnesSystem::load(&lorom_image(0x20, 0x00)).expect("plain loads");
+    // $30:8000 in a plain LoROM cart is an ordinary ROM byte, not DR: a
+    // write to it must be dropped (ROM is read-only), which a DR write
+    // would never do — DR always accepts a byte and changes DSP1 state.
+    let before = system.bus.read(0x30_8000);
+    system.bus.write(0x30_8000, before ^ 0xFF);
+    assert_eq!(
+        system.bus.read(0x30_8000),
+        before,
+        "a plain cart's ROM at this address must not move just because DSP-1 exists"
+    );
 }
 
 /// **DMA through the wired path.** The unit tests drive `service_dma`

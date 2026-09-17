@@ -3464,3 +3464,27 @@ stories, 10 decisions).
   features are opt-in and no build that day enabled them, including
   `scripts/release.sh`; the script now passes both. Gate: workspace
   **1877 passing / 0 failed / 36 ignored**, clippy clean, arch OK.
+
+- **W14-19 — DSP-1 HLE, slice 1** (2026-09-17). First chip under
+  D-010. Clean-room from the SNES Development Manual Book II's DSP-1
+  section (archive.org OCR), snes.nesdev.org/wiki/DSP-1 and fullsnes —
+  no emulator source (NFR-011). `rf_snes::dsp1` is the command-level
+  state machine: command byte in 8-bit mode, parameters and results as
+  16-bit words low byte first (a recorded judgment call: the manual's
+  timing figures did not survive OCR), DR reads `$80` when idle so a
+  read past the end of output cannot start a command, RQM always ready
+  because an HLE is never busy. Commands: §5.1 general (00h/20h
+  multiply, 10h inverse, 04h triangle), §5.2 vector (08h radius, 18h
+  range, 28h distance with the DSP-1B-correct result), §5.3 coordinate
+  (0Ch rotate, 1Ch polar) and the test commands (0Fh, 1Fh, 2Fh
+  version = `$0101`, DSP-1B), each with a vector test. The bus routes
+  the cart's `DspWindow` (W14-18) to the chip ahead of the generic map,
+  `peek` never advances it, and its state rides in the CPU save region
+  with a mid-command round-trip test. SNES census, same 1265 archives:
+  **refused 150 -> 138, rendered 1001 -> 1012**, uniform 115, crashed
+  **0**, timed out **0**; Super Mario Kart and Pilotwings render their
+  title screens. One DSP-family title did not move; named in
+  TESTING.md as unexplained. W14-21 filed for §5.4-5.6 (projection,
+  raster, attitude), which is what the Mario Kart track needs. Gate:
+  workspace **1898 passing / 0 failed / 36 ignored**, clippy clean,
+  arch OK.
