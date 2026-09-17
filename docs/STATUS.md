@@ -3430,3 +3430,17 @@ stories, 10 decisions).
 
   Gate: workspace **1868 passing / 0 failed / 36 ignored**, clippy
   clean, arch OK.
+
+- **W14-18 — rf-cart accepts DSP-1 carts** (2026-09-17). First ticket
+  under Brad's D-010 ruling. The chipset byte's DSP family (coprocessor
+  nibble 0, hw 3-5) now parses as `Coprocessor::Dsp1` with a `DspWindow`
+  (bank ranges, DR and SR offset ranges) chosen from map mode and ROM
+  size: the snes9x superset ranges, with snesdev's narrower documented
+  ranges inside them, both cited in the doc comment. DSP-2/3/4 share the
+  header signature and are deliberately taken as DSP-1 here (law 5: no
+  title identification in engine code). Every other family still
+  refuses with the unchanged FR-CORE-013 text, one new test per branch.
+  **Handoff into rf-snes:** the crate's own "every coprocessor family is
+  refused" test caught the half-boot this created, so `SnesSystem::load`
+  refuses `Dsp1` until W14-19 lands the HLE. Gate: workspace **1875
+  passing / 0 failed / 36 ignored**, clippy clean, arch OK.
