@@ -31,7 +31,7 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{mpsc, Arc, Once};
 use std::thread::{self, JoinHandle};
@@ -329,6 +329,18 @@ pub struct FrameMsg {
     pub prg_ram: Box<[u8; 0x2000]>,
 }
 
+/// Ticket W14-20 defect 1: the most `CoreEvent::Frame`s the core thread
+/// will let sit unconsumed on `evt_tx` before it starts dropping new ones
+/// instead of sending them. Before this existed the channel was
+/// `mpsc::channel()` — unbounded — and a UI that stopped draining it (the
+/// stall documented in defect 2) let the core keep publishing ~250 KB
+/// `FrameMsg`s at 60 Hz forever: measured 15 MB/s RSS growth, 394 MB ->
+/// 2826 MB in ~3 min on m4max, 2026-09-17. `2` (not `1`) leaves one frame
+/// of slack for the ordinary race between the producer incrementing and
+/// the consumer's next drain, without reopening the unbounded growth this
+/// exists to close.
+pub const MAX_PENDING_FRAMES: usize = 2;
+
 /// What the core thread reports back to the UI thread.
 pub enum CoreEvent {
     /// A new frame is ready to paint.
@@ -605,6 +617,37 @@ where
 /// Returns [`NesLoadError`] if `rom` is not a loadable iNES/NES 2.0 NROM
 /// image.
 pub fn spawn(rom: Vec<u8>) -> Result<CoreHandle, crate::stepper::OpenError> {
+    spawn_with_waker(rom, None)
+}
+
+/// Same as [`spawn`], plus a waker the core thread calls after every
+/// `CoreEvent::Frame` it successfully sends (ticket W14-20 defect 2).
+///
+/// **Why this exists at all**: `pump_core_events` already calls
+/// `ctx.request_repaint()` every UI update while the core is running, and
+/// on 2026-09-17 the main thread still sat in AppKit's
+/// `_DPSBlockUntilNextEventMatchingListInMode` in 100% of samples while
+/// the core kept emulating normally — i.e. something swallowed that
+/// repaint request rather than waking the event loop. The root cause is
+/// still open (plan.json W14-20's notes), so this is a defence that holds
+/// regardless of it: the producer wakes the consumer directly, instead of
+/// relying solely on a request the consumer's own event loop might not
+/// act on. `egui::Context::request_repaint`'s own doc covers exactly this
+/// case: "If called from outside the UI thread, the UI thread will wake
+/// up and run, provided the egui integration has set that up via
+/// `Self::set_request_repaint_callback` (this will work on `eframe`)"
+/// (`egui-0.35.0/crates/egui/src/context.rs`, the doc comment immediately
+/// above `fn request_repaint`) — and `Context` itself is proven `Send +
+/// Sync` by that same file's own `context_impl_send_sync` test, so the
+/// closure the caller hands in may call it straight from this core
+/// thread.
+///
+/// `None` (what [`spawn`] passes) means no waker — used by every existing
+/// test in this module, none of which needs one.
+pub fn spawn_with_waker(
+    rom: Vec<u8>,
+    waker: Option<Arc<dyn Fn() + Send + Sync>>,
+) -> Result<CoreHandle, crate::stepper::OpenError> {
     // Ticket W11-12: whichever console this image is. This line called
     // `from_ines_bytes` unconditionally until now, which is why a SNES
     // ROM was refused as "only NES ROMs are supported" — while the
@@ -634,8 +677,24 @@ pub fn spawn(rom: Vec<u8>) -> Result<CoreHandle, crate::stepper::OpenError> {
     // field) — computed once here (off the hot per-frame path) rather
     // than inside `core_thread_main`.
     let rom_sha256 = crate::hash::sha256_hex(&rom);
+    // Ticket W14-20 defect 1: shared between this handle and the core
+    // thread's send site. The core thread increments it before a send and
+    // the UI thread (`app::pump_core_events`) decrements it for every
+    // `CoreEvent::Frame` it drains — see `MAX_PENDING_FRAMES`'s doc for
+    // why this exists.
+    let pending_frames = Arc::new(AtomicUsize::new(0));
+    let thread_pending_frames = Arc::clone(&pending_frames);
     let handle = thread::spawn(move || {
-        core_thread_main(rom, rom_sha256, cmd_rx, evt_tx, thread_input, bundle_writer);
+        core_thread_main(
+            rom,
+            rom_sha256,
+            cmd_rx,
+            evt_tx,
+            thread_input,
+            bundle_writer,
+            thread_pending_frames,
+            waker,
+        );
     });
     Ok(CoreHandle {
         cmd_tx,
@@ -643,6 +702,7 @@ pub fn spawn(rom: Vec<u8>) -> Result<CoreHandle, crate::stepper::OpenError> {
         join_handle: handle,
         input,
         frame_bundle: bundle_reader,
+        pending_frames,
     })
 }
 
@@ -661,6 +721,16 @@ pub struct CoreHandle {
     /// cheap and each clone sees the same stream without contending with
     /// the others).
     pub frame_bundle: rf_core_api::TripleBufferReader<rf_core_api::FrameBundle>,
+    /// Ticket W14-20 defect 1: how many `CoreEvent::Frame`s are currently
+    /// sitting unconsumed on `evt_rx`. The core thread increments this
+    /// before each send (refusing to send at all once it reaches
+    /// [`MAX_PENDING_FRAMES`]); whoever drains `evt_rx` — normally
+    /// `app::pump_core_events`, or a test reading `evt_rx` directly — must
+    /// `fetch_sub(1, Ordering::AcqRel)` for every `CoreEvent::Frame` it
+    /// receives, or this count only ever grows and every frame after the
+    /// first `MAX_PENDING_FRAMES` gets silently dropped for the rest of
+    /// the session.
+    pub pending_frames: Arc<AtomicUsize>,
 }
 
 /// Ticket W3-03 (renamed from `DualSink` by ticket W4-01, which added the
@@ -808,6 +878,13 @@ fn canvas_cache_root() -> std::path::PathBuf {
 /// considered policy" caveat as [`canvas_cache_root`]).
 const CANVAS_CACHE_CAP_BYTES: u64 = 256 * 1024 * 1024;
 
+// Ticket W14-20 added the trailing `pending_frames`/`waker` pair (defects
+// 1 and 2) to what was already the widest call in this module — same
+// shape as `library.rs`/`hd_render.rs`'s existing allows for the same
+// lint, and splitting a single private, single-call-site function's
+// params into a struct here would be a rename exercise, not a real
+// simplification.
+#[allow(clippy::too_many_arguments)]
 fn core_thread_main(
     rom: Vec<u8>,
     rom_sha256: String,
@@ -815,6 +892,8 @@ fn core_thread_main(
     evt_tx: Sender<CoreEvent>,
     input: Arc<SharedInputFrame>,
     mut bundle_writer: rf_core_api::TripleBufferWriter<rf_core_api::FrameBundle>,
+    pending_frames: Arc<AtomicUsize>,
+    waker: Option<Arc<dyn Fn() + Send + Sync>>,
 ) {
     install_panic_capture_hook();
 
@@ -891,6 +970,14 @@ fn core_thread_main(
     // is exercised, and `crate::pacer` stays in charge of frame timing —
     // see `crate::audio_out`'s module doc.
     let mut audio = crate::audio_out::open_audio_out();
+    // Ticket W14-20 defect 1: how many frames this thread has dropped
+    // (see the `pending_frames` check at the send site below) since the
+    // last time it logged about it, and when that last log happened.
+    // Logged at most once a second — at 60 fps a stalled UI would
+    // otherwise produce a debug line every ~16.6 ms, which is its own
+    // performance problem and defeats the point of fixing one.
+    let mut dropped_frames_since_log: u64 = 0;
+    let mut last_drop_log = Instant::now();
     run_guarded_loop(&evt_tx, move || {
         // Ticket W2-14: a stepped frame must be SENT, not just rendered.
         // Before this flag existed the only `CoreEvent::Frame` send site
@@ -1315,7 +1402,16 @@ fn core_thread_main(
                 wram: Box::new(stepper.wram_snapshot()),
                 prg_ram: Box::new(*stepper.prg_ram()),
             };
-            if frame_tx.send(CoreEvent::Frame(msg)).is_err() {
+            if publish_frame(
+                &frame_tx,
+                &pending_frames,
+                waker.as_deref(),
+                &mut dropped_frames_since_log,
+                &mut last_drop_log,
+                msg,
+            )
+            .is_err()
+            {
                 // UI thread hung up; nothing left to serve.
                 return LoopControl::Stop;
             }
@@ -1326,6 +1422,59 @@ fn core_thread_main(
         }
         LoopControl::Continue
     });
+}
+
+/// Ticket W14-20 defects 1 and 2: try to publish one frame, respecting
+/// [`MAX_PENDING_FRAMES`], and wake `waker` after a successful send.
+///
+/// Extracted out of `core_thread_main`'s closure so the drop cap and the
+/// waker can each be unit-tested directly against a bare channel and
+/// `AtomicUsize` (below), instead of only indirectly through a whole
+/// spawned core thread — the same "test the seam, not just the whole
+/// pipeline" reasoning `step_frame_command_delivers_a_frame_to_the_ui`'s
+/// own doc comment gives.
+///
+/// Returns `Err(())` when the receiver has hung up — `core_thread_main`'s
+/// cue to stop the loop, same as the old inline `frame_tx.send(...)
+/// .is_err()` check this replaces.
+fn publish_frame(
+    frame_tx: &Sender<CoreEvent>,
+    pending_frames: &AtomicUsize,
+    waker: Option<&(dyn Fn() + Send + Sync)>,
+    dropped_frames_since_log: &mut u64,
+    last_drop_log: &mut Instant,
+    msg: FrameMsg,
+) -> Result<(), ()> {
+    // A newer frame is never worth more than an older unconsumed one to a
+    // UI that has fallen behind (`app::pump_core_events` already keeps
+    // only the LATEST `CoreEvent::Frame` of however many it drains in one
+    // pass), so once `MAX_PENDING_FRAMES` are already sitting on the
+    // channel this one is dropped rather than queued behind them —
+    // bounding the channel's memory instead of building it up unbounded
+    // the way the old `mpsc::channel()` did (measured 15 MB/s RSS growth,
+    // 394 MB -> 2826 MB in ~3 min on m4max, 2026-09-17).
+    if pending_frames.load(Ordering::Acquire) >= MAX_PENDING_FRAMES {
+        *dropped_frames_since_log += 1;
+        if last_drop_log.elapsed() >= Duration::from_secs(1) {
+            log::debug!(
+                "core thread: dropped {dropped_frames_since_log} frame(s) in the last \
+                 second — evt_rx has {MAX_PENDING_FRAMES} pending and nobody is draining it"
+            );
+            *dropped_frames_since_log = 0;
+            *last_drop_log = Instant::now();
+        }
+        return Ok(());
+    }
+    pending_frames.fetch_add(1, Ordering::AcqRel);
+    frame_tx.send(CoreEvent::Frame(msg)).map_err(|_| ())?;
+    // Defect 2: wake the UI right after a successful send, rather than
+    // trusting a winit redraw that on 2026-09-17 did not arrive.
+    // `spawn_with_waker`'s doc has the `Context::request_repaint`-from-
+    // any-thread citation.
+    if let Some(wake) = waker {
+        wake();
+    }
+    Ok(())
 }
 
 /// Turn one frame's [`rf_core_api::CoreEvent`]s into trace entries for the
@@ -1373,6 +1522,125 @@ fn push_event_traces(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `FrameMsg` with every field at its cheapest legal value — enough
+    /// to exercise [`publish_frame`]'s bookkeeping without needing a real
+    /// stepped frame's actual pixels, which `publish_frame` never looks
+    /// at.
+    fn empty_frame_msg() -> FrameMsg {
+        FrameMsg {
+            level_probe: None,
+            script_window: None,
+            audio_fill: None,
+            hd: None,
+            rgba: Vec::new(),
+            width: 0,
+            height: 0,
+            frame_count: 0,
+            last_scanline: None,
+            bg_rgba: Vec::new(),
+            sprite_rgba: Vec::new(),
+            oam: Box::new([0u8; 256]),
+            audio_traces: Vec::new(),
+            snes: None,
+            vram: Box::new([0u8; 0x1000]),
+            cpu_regs: Box::new(rf_core_api::CpuRegs::None),
+            palette_ram: Box::new([0u8; 32]),
+            wram: Box::new([0u8; 0x0800]),
+            prg_ram: Box::new([0u8; 0x2000]),
+        }
+    }
+
+    /// Ticket W14-20 defect 1, acceptance criterion 1: stall the receiver
+    /// (never call `recv`/`try_recv`) and push far more frames than
+    /// `MAX_PENDING_FRAMES` through [`publish_frame`] — the exact function
+    /// `core_thread_main`'s send site calls. Before this ticket the
+    /// channel behind this was `mpsc::channel()` (unbounded): this test
+    /// would have piled up all 1000 messages (and their `RGBA`/VRAM/WRAM/
+    /// OAM allocations) with nothing bounding either the count or the
+    /// bytes — the exact shape of the measured 15 MB/s RSS growth.
+    #[test]
+    fn publish_frame_drops_once_max_pending_frames_are_unconsumed() {
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let pending_frames = AtomicUsize::new(0);
+        let mut dropped = 0u64;
+        let mut last_log = Instant::now();
+
+        for _ in 0..1000 {
+            publish_frame(
+                &frame_tx,
+                &pending_frames,
+                None,
+                &mut dropped,
+                &mut last_log,
+                empty_frame_msg(),
+            )
+            .expect("the receiver is never dropped in this test");
+        }
+
+        assert_eq!(
+            pending_frames.load(Ordering::Acquire),
+            MAX_PENDING_FRAMES,
+            "the shared counter must never exceed MAX_PENDING_FRAMES, no matter how many \
+             frames were offered"
+        );
+        let queued = frame_rx.try_iter().count();
+        assert_eq!(
+            queued, MAX_PENDING_FRAMES,
+            "the channel itself must hold at most MAX_PENDING_FRAMES messages — a stalled \
+             receiver must not let it grow to 1000"
+        );
+    }
+
+    /// Ticket W14-20 defect 2, acceptance criterion 2: the waker fires
+    /// exactly once per frame [`publish_frame`] actually delivers — not
+    /// once per call (a dropped frame, per the test above, must not wake
+    /// anyone for a picture the UI will never see) and not more than once
+    /// per delivered frame.
+    #[test]
+    fn publish_frame_calls_the_waker_once_per_delivered_frame() {
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let pending_frames = AtomicUsize::new(0);
+        let mut dropped = 0u64;
+        let mut last_log = Instant::now();
+        let wake_calls = Arc::new(AtomicU64::new(0));
+        let counting_waker = {
+            let wake_calls = Arc::clone(&wake_calls);
+            move || {
+                wake_calls.fetch_add(1, Ordering::AcqRel);
+            }
+        };
+
+        // Drain after every send, so every one of these is a genuine
+        // delivery rather than hitting the drop cap above.
+        for _ in 0..5 {
+            publish_frame(
+                &frame_tx,
+                &pending_frames,
+                Some(&counting_waker),
+                &mut dropped,
+                &mut last_log,
+                empty_frame_msg(),
+            )
+            .expect("the receiver is never dropped in this test");
+            assert!(
+                matches!(frame_rx.try_recv(), Ok(CoreEvent::Frame(_))),
+                "publish_frame must have actually sent a frame this call"
+            );
+            // Mirror `app::pump_core_events`'s own contract: every
+            // delivered `CoreEvent::Frame` a consumer drains must release
+            // its slot back, or `pending_frames` would climb to
+            // `MAX_PENDING_FRAMES` after just two iterations here and
+            // start dropping frames 3 through 5 for the wrong reason.
+            pending_frames.fetch_sub(1, Ordering::AcqRel);
+        }
+
+        assert_eq!(
+            wake_calls.load(Ordering::Acquire),
+            5,
+            "the waker must fire exactly once per delivered frame"
+        );
+    }
 
     #[test]
     fn shared_input_frame_defaults_to_empty() {

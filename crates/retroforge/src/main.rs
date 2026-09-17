@@ -6,6 +6,16 @@
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    // Ticket W14-20: an env-filtered logger, installed before anything
+    // else runs, so `RUST_LOG=eframe=trace,egui_winit=debug` can be
+    // captured on the next UI-freeze stall without a rebuild — this is
+    // exactly the trace that would have shown WHY the main thread sat in
+    // AppKit's `_DPSBlockUntilNextEventMatchingListInMode` on 2026-09-17
+    // (see plan.json W14-20's notes). `env_logger::init()` reads RUST_LOG
+    // and installs the global `log` logger; with no RUST_LOG set it
+    // stays silent (its default filter is `Off` — `env_logger::Builder::
+    // default`'s own doc), so a normal launch prints nothing new.
+    env_logger::init();
     // Ticket W10-01: the size comes from `app::WINDOW_SIZE`, not a literal
     // here. `tests/hud_fits.rs` asserts nothing is clipped at exactly this
     // size, and a test with its own copy of the number would keep passing
