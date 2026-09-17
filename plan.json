@@ -6336,7 +6336,7 @@
     "the DSP register bus window is derived from the header per SRS FR-CORE-038 / D-010 and exposed as data on the parsed cart (not computed in rf-snes): LoROM <=1 MiB, LoROM >1 MiB (DSP-1B), and HiROM each get their own bank-range + offset-range + DR/SR split-offset triple, cited to fullsnes \"SNES Cart DSP1\" and snesdev in a doc comment; verify the three variants independently before committing to exact numbers (see W14-18/19 handoff note on the snes9x memmap.cpp cross-check)"
    ],
    "points": 1,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
     "HANDOFF -- WRITE_SCOPE WIDENED 2026-09-17 to crates/rf-snes/src/system.rs: lifting the rf-cart refusal made rf-snes half-boot DSP-1 carts (every_named_coprocessor_family_is_refused_and_named caught it), so SnesSystem::load now refuses Coprocessor::Dsp1 with the FR-CORE-013 diagnostic until W14-19 wires the HLE; W14-19 removes that block.",
     "FILED 2026-09-17, Brad's ruling lifting DSP-1 out of the NON_GOALS #10 deferral (D-010, SRS FR-CORE-038) now that the LoROM/HiROM gate condition is met (Phase 14 census: 1001/1265 SNES archives render, 0 crashes). Chip ID rule: the coprocessor nibble cannot distinguish DSP-1 from DSP-2/3/4, so rf-cart accepts every nibble-0 DSP cart as DSP-1; the three known DSP-2/3/4 titles (Dungeon Master, SD Gundam GX Rasetsu no Sho, Top Gear 3000) are named only in the profile/rom-manifest layer, never here (law 5).",
