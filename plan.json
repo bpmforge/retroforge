@@ -6365,7 +6365,7 @@
     "the DSP-2/3/4 titles are recorded as known-wrong per the identification rule in W14-18"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "HLE-vs-LLE decision, recorded so a future reader does not re-litigate it (full text in D-010 / DECISIONS.md): HLE of the DSP-1 command set, not LLE of the uPD7725, because (1) the uPD7725's program ROM is copyrighted firmware with no dump in the library (law 5), (2) the ~30-command set is fully documented publicly and HLE is the approach snes9x has shipped for decades, (3) HLE is deterministic and needs no firmware file. An LLE-with-user-firmware path is noted as a possible later ticket, not promised. Accuracy Mode framing: the HLE reproduces the chip's documented outputs; this is an honest limitation recorded in EMULATION_CORES.md section 3.5, not a silent cycle-exact claim.",
     "DR/SR bus window per LoROM/HiROM/LoROM-large variant comes from W14-18's parsed-cart data; see that ticket's note for the exact bank/offset numbers this session could verify (snes9x memmap.cpp) versus the one it could not (a direct fullsnes.htm table read) -- confirm both against fullsnes/snesdev directly before this ticket's doc comment cites them as fact, per law 6."
