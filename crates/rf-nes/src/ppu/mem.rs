@@ -164,7 +164,7 @@ impl Ppu {
                 self.apply_chr_latch_trigger(addr);
                 v
             }
-            0x2000..=0x3EFF => self.vram[self.nametable_offset(addr)],
+            0x2000..=0x3EFF => self.nametable_read(addr),
             0x3F00..=0x3FFF => self.palette_read(addr),
             _ => unreachable!("addr masked to 14 bits above"),
         };
@@ -194,10 +194,7 @@ impl Ppu {
         );
         match addr {
             0x0000..=0x1FFF => self.chr_write(addr, value),
-            0x2000..=0x3EFF => {
-                let offset = self.nametable_offset(addr);
-                self.vram[offset] = value;
-            }
+            0x2000..=0x3EFF => self.nametable_write(addr, value),
             0x3F00..=0x3FFF => self.palette_write(addr, value),
             _ => unreachable!("addr masked to 14 bits above"),
         }
@@ -332,6 +329,126 @@ impl Ppu {
     /// exactly this case). One-screen (ticket W2-02, MMC1 control values
     /// 0/1 — nesdev.org/wiki/MMC1): every logical nametable aliases the
     /// single physical bank 0 (`Lower`) or bank 1 (`Upper`).
+    /// Which backing a nametable address has: `Ok(vram offset)` for
+    /// CIRAM, `Err(kind)` for MMC5's extra RAM (2) or fill mode (3).
+    fn nametable_backing(&self, addr: u16) -> Result<usize, u8> {
+        if let Mirroring::PerTable(pages) = self.mirroring {
+            let logical_bank = ((addr - 0x2000) % 0x1000 / 0x400) as usize;
+            let kind = pages[logical_bank];
+            if kind >= 2 {
+                return Err(kind);
+            }
+        }
+        Ok(self.nametable_offset(addr))
+    }
+
+    fn nametable_read(&self, addr: u16) -> u8 {
+        let within = usize::from((addr - 0x2000) % 0x400);
+        match self.nametable_backing(addr) {
+            Ok(offset) => self.vram[offset],
+            Err(2) => self.ext_nametable.as_ref().map_or(0, |ram| ram[within]),
+            Err(_) => match self.fill {
+                Some((tile, attr)) => {
+                    if within < 0x3C0 {
+                        tile
+                    } else {
+                        attr
+                    }
+                }
+                None => 0,
+            },
+        }
+    }
+
+    fn nametable_write(&mut self, addr: u16, value: u8) {
+        let within = usize::from((addr - 0x2000) % 0x400);
+        match self.nametable_backing(addr) {
+            Ok(offset) => self.vram[offset] = value,
+            Err(2) => {
+                if let Some(ram) = self.ext_nametable.as_mut() {
+                    ram[within] = value;
+                }
+            }
+            Err(_) => {} // fill mode is read-only by construction
+        }
+    }
+
+    /// Ticket W14-16: install or drop the MMC5-side pieces the mapper
+    /// reports. The extra nametable RAM is created once and kept — the
+    /// CPU writes it through [`Ppu::ext_ram_write`].
+    pub(crate) fn set_mmc5_view(
+        &mut self,
+        sprites: Option<&[u8]>,
+        fill: Option<(u8, u8)>,
+        has_ext_ram: bool,
+    ) {
+        match sprites {
+            Some(window) => {
+                let buf = self
+                    .chr_sprites
+                    .get_or_insert_with(|| Box::new([0u8; 8 * 1024]));
+                let n = window.len().min(buf.len());
+                buf[..n].copy_from_slice(&window[..n]);
+            }
+            None => self.chr_sprites = None,
+        }
+        self.fill = fill;
+        if has_ext_ram && self.ext_nametable.is_none() {
+            self.ext_nametable = Some(Box::new([0u8; 1024]));
+        }
+    }
+
+    pub(crate) fn ext_ram_read(&self, offset: usize) -> u8 {
+        self.ext_nametable
+            .as_ref()
+            .map_or(0, |ram| ram[offset % 1024])
+    }
+
+    pub(crate) fn ext_ram_write(&mut self, offset: usize, value: u8) {
+        if let Some(ram) = self.ext_nametable.as_mut() {
+            ram[offset % 1024] = value;
+        }
+    }
+
+    pub(crate) fn ext_ram_bytes(&self) -> Option<&[u8]> {
+        self.ext_nametable.as_deref().map(|r| &r[..])
+    }
+
+    pub(crate) fn ext_ram_load(&mut self, bytes: &[u8]) {
+        let ram = self
+            .ext_nametable
+            .get_or_insert_with(|| Box::new([0u8; 1024]));
+        let n = bytes.len().min(1024);
+        ram[..n].copy_from_slice(&bytes[..n]);
+    }
+
+    /// Drain the per-scanline signal (ticket W14-16): rendered scanline
+    /// starts since the last call, and whether rendering left the frame.
+    pub(crate) fn take_scanline_events(&mut self) -> (u32, bool) {
+        (
+            std::mem::take(&mut self.pending_scanline_starts),
+            std::mem::take(&mut self.pending_frame_end),
+        )
+    }
+
+    /// A pattern read for an 8x16 sprite fetch (ticket W14-16): MMC5
+    /// serves those from its other bank set. Falls back to the ordinary
+    /// read for every other board.
+    pub(super) fn sprite_pattern_read(&mut self, addr: u16) -> u8 {
+        if self.ctrl & 0x20 != 0 {
+            let addr = addr & 0x3FFF;
+            let from_window = self
+                .chr_sprites
+                .as_ref()
+                .map(|window| window[usize::from(addr & 0x1FFF)]);
+            if let Some(value) = from_window {
+                self.observe_ppu_bus_address(addr);
+                return value;
+            }
+        }
+        self.mem_read(addr)
+    }
+
     fn nametable_offset(&self, addr: u16) -> usize {
         let logical_offset = (addr - 0x2000) % 0x1000;
         let logical_bank = (logical_offset / 0x400) as usize;
@@ -342,7 +459,8 @@ impl Ppu {
             Mirroring::FourScreen => logical_bank,
             Mirroring::OneScreenLower => 0,
             Mirroring::OneScreenUpper => 1,
-            // TxSROM (ticket W14-12): each table names its page.
+            // TxSROM (ticket W14-12): each table names its page. Kinds 2
+            // and 3 never reach here — `nametable_backing` routes them.
             Mirroring::PerTable(pages) => usize::from(pages[logical_bank] & 1),
         };
         physical_bank * 0x400 + within_bank
@@ -501,6 +619,51 @@ mod tests {
         let _ = ppu.mem_read(0x0FDF); // left half is exact-address only
         assert_eq!(ppu.mem_read(0x0000), 0xFD);
         assert_eq!(ppu.chr_latch_selected(), Some([false, false]));
+    }
+
+    /// **MMC5's extra nametable RAM and fill tile are served per table**
+    /// (ticket W14-16). Kind 2 reads and writes the PPU-owned 1 KiB; kind
+    /// 3 answers the fill tile below the attribute rows and the fill
+    /// attribute in them, and ignores writes.
+    #[test]
+    fn nametable_kinds_2_and_3_read_ext_ram_and_the_fill_tile() {
+        let mut ppu = Ppu::new(vec![0u8; 8 * 1024], true, Mirroring::Vertical);
+        ppu.set_mmc5_view(None, Some((0xAB, 0xCD)), true);
+        ppu.set_mirroring(Mirroring::PerTable([0, 2, 3, 1]));
+        ppu.mem_write(0x2400 + 0x10, 0x5A); // table 1 -> ext RAM
+        assert_eq!(ppu.ext_ram_read(0x10), 0x5A, "the CPU sees the PPU's write");
+        ppu.ext_ram_write(0x20, 0x77);
+        assert_eq!(ppu.mem_read(0x2420), 0x77, "and the PPU sees the CPU's");
+        assert_eq!(ppu.mem_read(0x2800), 0xAB, "fill tile");
+        assert_eq!(ppu.mem_read(0x2BC0), 0xCD, "fill attribute row");
+        ppu.mem_write(0x2800, 0x01);
+        assert_eq!(ppu.mem_read(0x2800), 0xAB, "fill mode ignores writes");
+        ppu.mem_write(0x2000, 0x11);
+        assert_eq!(ppu.mem_read(0x2000), 0x11, "CIRAM tables are untouched");
+        assert_eq!(ppu.mem_read(0x2C00), 0x00, "kind 1 is CIRAM B");
+    }
+
+    /// **The sprite window is used only for 8x16 sprite fetches** (ticket
+    /// W14-16).
+    #[test]
+    fn the_sprite_chr_window_serves_only_8x16_sprite_fetches() {
+        let mut chr = vec![0x11u8; 8 * 1024];
+        chr[0x0123] = 0xB6;
+        let mut ppu = Ppu::new(chr, false, Mirroring::Vertical);
+        let sprites = vec![0x22u8; 8 * 1024];
+        ppu.set_mmc5_view(Some(&sprites), None, false);
+        assert_eq!(
+            ppu.sprite_pattern_read(0x0123),
+            0xB6,
+            "8x8: the ordinary window"
+        );
+        ppu.ctrl |= 0x20;
+        assert_eq!(
+            ppu.sprite_pattern_read(0x0123),
+            0x22,
+            "8x16: the sprite window"
+        );
+        assert_eq!(ppu.mem_read(0x0123), 0xB6, "background reads are unchanged");
     }
 
     #[test]

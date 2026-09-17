@@ -110,7 +110,7 @@ use crate::apu::Apu;
 use crate::cpu::CpuBus;
 use crate::mappers::{
     Action53, AxRom, Bnrom, Camerica, Cnrom, ColorDreams, DxRom, Fme7, GxRom, JalecoJf, Mapper,
-    Mmc1, Mmc2, Mmc3, Mmc3Revision, Nina, Nrom, Quattro, Rambo1, Sachen, UxRom,
+    Mmc1, Mmc2, Mmc3, Mmc3Revision, Mmc5, Nina, Nrom, Quattro, Rambo1, Sachen, UxRom,
 };
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
@@ -248,6 +248,12 @@ impl NesBus {
             )),
             // Ticket W14-13.
             9 => Box::new(Mmc2::new(rom.prg_rom().to_vec(), rom.chr_rom().to_vec())),
+            // Ticket W14-16.
+            5 => Box::new(Mmc5::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+            )),
             // Ticket W14-15.
             34 => Box::new(Bnrom::new(
                 rom.prg_rom().to_vec(),
@@ -628,7 +634,13 @@ impl NesBus {
             // with.
             0x4015 => return self.apu.read_status() | (self.open_bus & 0x20),
             0x4000..=0x4014 | 0x4018..=0x401F => self.open_bus,
-            0x4020..=0x5FFF => self.open_bus,
+            0x5C00..=0x5FFF if self.mapper.has_ext_nametable_ram() => {
+                self.ppu.ext_ram_read(usize::from(addr - 0x5C00))
+            }
+            0x4020..=0x5FFF => self
+                .mapper
+                .cpu_read_expansion(addr)
+                .unwrap_or(self.open_bus),
             0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000],
             0x8000..=0xFFFF => self.mapper.cpu_read(addr),
         };
@@ -710,6 +722,9 @@ impl NesBus {
             0x4016 => self.controllers[0].peek_bit() | (self.open_bus & !0x01),
             0x4017 => self.controllers[1].peek_bit() | (self.open_bus & !0x01),
             0x4000..=0x4015 | 0x4018..=0x401F => 0xFF,
+            0x5C00..=0x5FFF if self.mapper.has_ext_nametable_ram() => {
+                self.ppu.ext_ram_read(usize::from(addr - 0x5C00))
+            }
             0x4020..=0x5FFF => self.open_bus,
             0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000],
             0x8000..=0xFFFF => self.mapper.cpu_read(addr),
@@ -753,6 +768,11 @@ impl NesBus {
                 // scanline, dot and `mask`, and no read path touches
                 // `mask` (`$2002` moves `status`, `$2007` moves `v`).
                 self.inert_recheck_in = 0;
+                if addr & 0x0007 == 0 {
+                    // Ticket W14-16: MMC5 snoops PPUCTRL for the sprite size.
+                    self.mapper.ppu_ctrl_written(value);
+                    self.push_mapper_view();
+                }
                 self.ppu.write_register((addr & 0x0007) as u8, value);
             }
             0x4016 => {
@@ -772,7 +792,13 @@ impl NesBus {
             // register-select latch lives at $5000-$5FFF. The trait
             // method defaults to a no-op, so this stays a drop for
             // everything else.
-            0x4020..=0x5FFF => self.mapper.cpu_write_expansion(addr, value),
+            0x5C00..=0x5FFF if self.mapper.has_ext_nametable_ram() => {
+                self.ppu.ext_ram_write(usize::from(addr - 0x5C00), value);
+            }
+            0x4020..=0x5FFF => {
+                self.mapper.cpu_write_expansion(addr, value);
+                self.push_mapper_view();
+            }
             0x6000..=0x7FFF => {
                 self.prg_ram[(addr as usize) - 0x6000] = value;
                 // Ticket W14-15: boards with registers in this range.
@@ -908,6 +934,11 @@ impl NesBus {
         if let Some(latch) = self.mapper.chr_latch() {
             self.ppu.set_chr_latch(latch);
         }
+        self.ppu.set_mmc5_view(
+            self.mapper.chr_window_sprites(),
+            self.mapper.fill_tile(),
+            self.mapper.has_ext_nametable_ram(),
+        );
         self.ppu.set_mirroring(self.mapper.mirroring());
     }
 
@@ -1147,6 +1178,23 @@ impl NesBus {
         // mapper where it stands so the save state carries it.
         if let Some(selected) = self.ppu.chr_latch_selected() {
             self.mapper.note_chr_latch(selected);
+        }
+        // Ticket W14-16: MMC5's scanline counter and in-frame flag.
+        let (starts, frame_end) = self.ppu.take_scanline_events();
+        if starts > 0 || frame_end {
+            let was_pending = self.mapper.irq_pending();
+            for _ in 0..starts {
+                self.mapper.scanline_started();
+            }
+            if frame_end {
+                self.mapper.frame_ended();
+            }
+            if !was_pending
+                && self.mapper.irq_pending()
+                && self.ppu.event_mask().is_subscribed(EventMask::MAPPER_IRQ)
+            {
+                self.ppu.queue_event(CoreEvent::MapperIrq);
+            }
         }
         for _ in 0..self.ppu.take_a12_edges() {
             // Ticket W4-00: `MapperIrq` fires on the RISING EDGE of

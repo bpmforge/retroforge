@@ -618,10 +618,13 @@ mod tests {
     /// is out of scope by design rather than merely not-yet-done. rf-cart
     /// still NAMES it ("MMC5 / ExROM"), which is what this test needs —
     /// the point is that a *named* diagnostic reaches the user.
+    ///
+    /// RETARGETED 5 -> 10 by ticket W14-16, which implemented MMC5 after
+    /// all. Mapper 10 (MMC4 / FxROM) is named by rf-cart and unimplemented.
     #[test]
     fn zip_whose_only_rom_has_an_unsupported_mapper_reports_the_real_reason() {
         let archive = zip_with(
-            &[("Some Game (USA).nes", &ines_declaring_mapper(5))],
+            &[("Some Game (USA).nes", &ines_declaring_mapper(10))],
             zip::CompressionMethod::Stored,
         );
         match resolve_rom_bytes(archive) {
@@ -629,7 +632,7 @@ mod tests {
                 assert_eq!(name, "Some Game (USA).nes");
                 let shown = source.to_string();
                 assert!(
-                    shown.contains('5'),
+                    shown.contains("10"),
                     "the diagnostic must name the mapper number, got: {shown}"
                 );
             }

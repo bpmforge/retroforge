@@ -6276,10 +6276,7 @@
    "title": "MMC5 (mapper 5): the last big NES board, in slices the PPU can carry",
    "phase": 14,
    "crate": "rf-nes",
-   "write_scope": [
-    "crates/rf-nes/**",
-    "crates/rf-cart/src/nes.rs"
-   ],
+   "write_scope": ["crates/rf-nes/**", "crates/rf-cart/src/nes.rs", "crates/retroforge/src/rom_open.rs"],
    "depends_on": [
     "W14-15"
    ],
@@ -6292,7 +6289,8 @@
    "points": 8,
    "status": "in_progress",
    "notes": [
-    "FILED 2026-09-17 after W14-15 left MMC5 as the only board with more than four retail titles in the NES refused bucket (11 archives: Castlevania III x2, Gemfire, Uncharted Waters, Nobunaga's Ambition II, Romance of the Three Kingdoms II, L'Empereur, Bandit Kings of Ancient China, Laser Invasion, the SimCity proto, the Demo Vision BIOS).",
+    "HANDOFF -- WRITE_SCOPE WIDENED 2026-09-17 to crates/retroforge/src/rom_open.rs: its zip_whose_only_rom_has_an_unsupported_mapper test used MMC5 as the durable unsupported example (its own doc calls MMC5 the durable choice because it was explicitly deferred); implementing MMC5 expires it, so it is retargeted at mapper 10 (MMC4 / FxROM), still named by rf-cart and still unimplemented. One line of a test, nothing else in that crate.",
+        "FILED 2026-09-17 after W14-15 left MMC5 as the only board with more than four retail titles in the NES refused bucket (11 archives: Castlevania III x2, Gemfire, Uncharted Waters, Nobunaga's Ambition II, Romance of the Three Kingdoms II, L'Empereur, Bandit Kings of Ancient China, Laser Invasion, the SimCity proto, the Demo Vision BIOS).",
     "WHY IT IS NOT ONE MORE MAPPER FILE. The crate's mappers push a materialised CHR window and a Mirroring into the PPU; MMC5 needs the PPU to (a) read two nametables from memory only the cartridge has -- its 1 KiB ExRAM, or a constant fill tile+attribute -- (b) fetch 8x16 sprite patterns from a different CHR bank set than the background, (c) tell the mapper each rendered scanline so $5203 compares and the in-frame flag ($5204 bit 6) tracks rendering, and (d) answer CPU reads in $5000-$5FFF. Each is a small seam: ppu/mem.rs's nametable arm already dispatches on Mirroring (PerTable exists since W14-12; add ExRam and Fill kinds per table, with a PPU-owned 1 KiB buffer the bus writes on $5C00 stores and a fill tile/attr pair); sprites.rs:546 is the one sprite pattern read (route through a sprite CHR view when 8x16 and the mapper provides one); the A12 pull in NesBus::drain_a12_edges is the model for a take_scanline_starts pull; cpu_read_expansion is the read twin of cpu_write_expansion.",
     "WHAT NOT TO DO FIRST: ExGrafix (per-tile CHR bank and palette from ExRAM in $5104 mode 1) changes the background fetch itself and the vertical split rewrites scrolling mid-line; both are slice 2. Castlevania III boots and plays without either. The scanline counter on real MMC5 detects scanlines from three identical consecutive nametable fetches; a PPU-side per-scanline signal is the honest model here and matches what Mesen exposes."
    ],

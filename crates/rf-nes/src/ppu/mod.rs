@@ -515,6 +515,16 @@ pub struct Ppu {
     /// at the triggering pattern fetch. `None` for every other board, in
     /// which case `chr` is the whole story.
     pub(super) chr_latch: Option<Box<mem::ChrLatch>>,
+    /// MMC5 (ticket W14-16): a second CHR window for 8x16 sprite fetches,
+    /// the 1 KiB extra nametable RAM behind nametable kind `2`, the fill
+    /// tile/attribute behind kind `3`, and the per-scanline signal the
+    /// bus pulls for the scanline counter. All `None`/zero for every
+    /// other board, which keeps the fetch paths byte-identical.
+    pub(super) chr_sprites: Option<Box<[u8; 8 * 1024]>>,
+    pub(super) ext_nametable: Option<Box<[u8; 1024]>>,
+    pub(super) fill: Option<(u8, u8)>,
+    pub(super) pending_scanline_starts: u32,
+    pub(super) pending_frame_end: bool,
     chr_is_ram: bool,
     /// Nametable RAM: 4 logical 1 KiB banks addressed via `mirroring`, laid
     /// out physically as documented in `mem.rs`. Sized for the
@@ -835,6 +845,11 @@ impl Ppu {
             read_buffer: 0,
             chr,
             chr_latch: None,
+            chr_sprites: None,
+            ext_nametable: None,
+            fill: None,
+            pending_scanline_starts: 0,
+            pending_frame_end: false,
             tile_capture: false,
             drawn_tiles: Vec::new(),
             completed_tiles: Vec::new(),
@@ -1307,6 +1322,17 @@ impl Ppu {
 
     pub fn tick(&mut self) {
         self.dot_clock += 1;
+        // Ticket W14-16: MMC5's scanline counter runs on rendered
+        // scanlines and its in-frame flag drops when rendering leaves
+        // the visible frame. Counted at dot 0, drained by the bus.
+        if self.dot == 0 {
+            let rendering = self.rendering_enabled();
+            if (0..=239).contains(&self.scanline) && rendering {
+                self.pending_scanline_starts += 1;
+            } else if self.scanline == VBLANK_START_SCANLINE || !rendering {
+                self.pending_frame_end = true;
+            }
+        }
         // Ticket W1-05d: sampled before `process_dot` because nothing in a
         // dot's own processing writes `mask` — this is the value in effect
         // *during* this dot, which is what the odd-frame skip decision two

@@ -141,6 +141,7 @@ mod jaleco_jf;
 mod mmc1;
 mod mmc2;
 mod mmc3;
+mod mmc5;
 mod nina;
 mod nrom;
 mod quattro;
@@ -164,6 +165,7 @@ pub use jaleco_jf::JalecoJf;
 pub use mmc1::Mmc1;
 pub use mmc2::Mmc2;
 pub use mmc3::{Mmc3, Mmc3Revision};
+pub use mmc5::Mmc5;
 pub use nina::Nina;
 pub use nrom::Nrom;
 pub use quattro::Quattro;
@@ -218,6 +220,51 @@ pub trait Mapper {
     fn cpu_write_wram(&mut self, addr: u16, value: u8) {
         let _ = (addr, value);
     }
+
+    /// CPU read from the expansion area `$4020-$5FFF` (ticket W14-16).
+    /// `None` means open bus, the answer for every board but MMC5, which
+    /// keeps its IRQ status, multiplier and register file there. `&mut`
+    /// because reading MMC5's `$5204` acknowledges the IRQ.
+    fn cpu_read_expansion(&mut self, addr: u16) -> Option<u8> {
+        let _ = addr;
+        None
+    }
+
+    /// The CPU wrote PPUCTRL (ticket W14-16). MMC5 snoops it for the
+    /// sprite size, which decides which CHR bank set draws the
+    /// background. Default no-op.
+    fn ppu_ctrl_written(&mut self, value: u8) {
+        let _ = value;
+    }
+
+    /// A second CHR window the PPU uses only for 8x16 sprite pattern
+    /// fetches (ticket W14-16; MMC5's bank set A while set B draws the
+    /// background). `None` means sprites use [`Mapper::chr_window`].
+    fn chr_window_sprites(&self) -> Option<&[u8]> {
+        None
+    }
+
+    /// MMC5's fill-mode nametable: `(tile, attribute byte)` served for
+    /// every entry of a table mapped to kind `3` (ticket W14-16).
+    fn fill_tile(&self) -> Option<(u8, u8)> {
+        None
+    }
+
+    /// Does this board back nametable kind `2` with 1 KiB of its own RAM,
+    /// which the CPU reaches at `$5C00-$5FFF`? The PPU owns that buffer
+    /// (it is what the PPU reads); the bus routes the CPU there.
+    fn has_ext_nametable_ram(&self) -> bool {
+        false
+    }
+
+    /// One scanline with rendering enabled began (ticket W14-16), pulled
+    /// from the PPU once per CPU instruction like the A12 edges. MMC5's
+    /// scanline counter and in-frame flag live on this. Default no-op.
+    fn scanline_started(&mut self) {}
+
+    /// Rendering left the visible frame (vblank began, or rendering was
+    /// turned off). Default no-op.
+    fn frame_ended(&mut self) {}
 
     /// This mapper's current nametable mirroring. Fixed (header-declared,
     /// passed in at construction) for NROM/UxROM/CNROM; live and

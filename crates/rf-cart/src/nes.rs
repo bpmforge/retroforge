@@ -26,7 +26,7 @@ const CHR_BANK: usize = 8 * 1024;
 /// (2026-09-15) bucketed all 223 refusals by mapper number, and these four
 /// were the largest buckets at 54, 17, 28 and 17 games — 116 between them.
 const SUPPORTED_MAPPERS: &[u16] = &[
-    0, 1, 2, 3, 4, 7, 9, 11, 28, 34, 64, 66, 69, 71, 79, 87, 118, 144, 148, 206, 232,
+    0, 1, 2, 3, 4, 5, 7, 9, 11, 28, 34, 64, 66, 69, 71, 79, 87, 118, 144, 148, 206, 232,
 ];
 
 /// A handful of well-known mapper names, used only to make an
@@ -95,11 +95,12 @@ pub enum Mirroring {
     /// All four logical nametables alias the single physical page normally
     /// used by nametable 1 ("screen B").
     OneScreenUpper,
-    /// Each logical nametable names its own physical page, 0 or 1 (ticket
-    /// W14-12). TxSROM (mapper 118) drives CIRAM A10 from CHR bank bit 7,
-    /// so any of the sixteen combinations is reachable, including ones
-    /// the fixed variants above cannot spell (`[1, 1, 0, 0]`,
-    /// `[0, 1, 1, 0]`, ...). Entries are masked to one bit at use.
+    /// Each logical nametable names its own backing (ticket W14-12, widened
+    /// by W14-16): `0`/`1` are CIRAM pages A and B — TxSROM (mapper 118)
+    /// drives CIRAM A10 from CHR bank bit 7, so any of the sixteen
+    /// combinations is reachable — and `2`/`3` are MMC5's extra nametable
+    /// RAM and its fill tile, which only a PPU that carries those can
+    /// serve. The PPU decides what a value it cannot serve falls back to.
     PerTable([u8; 4]),
 }
 
@@ -365,16 +366,16 @@ mod tests {
 
     #[test]
     fn unknown_mapper_fails_with_diagnostic_naming_the_number() {
-        let rom = build_ines(1, 1, 5, false, false, false, false); // MMC5, not implemented
+        let rom = build_ines(1, 1, 10, false, false, false, false); // MMC4 / FxROM, not implemented (was MMC5 until W14-16)
         let err = parse_nes_header(&rom).unwrap_err();
         match &err {
             CartError::UnsupportedMapper { id, name } => {
-                assert_eq!(*id, 5);
-                assert_eq!(*name, Some("MMC5 / ExROM"));
+                assert_eq!(*id, 10);
+                assert_eq!(*name, Some("MMC4 / FxROM"));
             }
             other => panic!("expected UnsupportedMapper, got {other:?}"),
         }
-        assert!(err.to_string().contains('5'));
+        assert!(err.to_string().contains("10"));
     }
 
     #[test]
@@ -424,7 +425,7 @@ mod mapper28_tests {
         assert!(SUPPORTED_MAPPERS.contains(&28), "Action 53");
         assert!(SUPPORTED_MAPPERS.contains(&7), "AxROM");
 
-        for unsupported in [5u16, 119, 210] {
+        for unsupported in [119u16, 210, 13] {
             assert!(
                 !SUPPORTED_MAPPERS.contains(&unsupported),
                 "mapper {unsupported} must still be refused"

@@ -43,7 +43,7 @@ const DEFAULT_CHR_RAM_SIZE: usize = 8 * 1024;
 /// existing: only a real ROM entering through `from_ines_bytes` crosses
 /// this line.
 pub(crate) const EMULATED_MAPPERS: &[u16] = &[
-    0, 1, 2, 3, 4, 7, 9, 11, 28, 34, 64, 66, 69, 71, 79, 87, 118, 144, 148, 206, 232,
+    0, 1, 2, 3, 4, 5, 7, 9, 11, 28, 34, 64, 66, 69, 71, 79, 87, 118, 144, 148, 206, 232,
 ];
 
 /// Everything that can go wrong turning a raw ROM image into an

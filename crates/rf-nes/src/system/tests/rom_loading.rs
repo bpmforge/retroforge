@@ -163,9 +163,9 @@ fn every_emulated_mapper_loads_through_the_production_path() {
 /// below, which is the half a user actually reads.
 #[test]
 fn a_mapper_rf_cart_cannot_identify_is_refused_not_loaded() {
-    // 5 = MMC5: absent from rf-cart's SUPPORTED_MAPPERS entirely. (This
-    // used 66 until W14-12 and 64 until W14-14 emulated them.)
-    let raw = ines_with_mapper(5, 1, 1);
+    // 13 = CPROM: absent from rf-cart's SUPPORTED_MAPPERS entirely. (This
+    // used 66, 64 and 5 until W14-12, W14-14 and W14-16 emulated them.)
+    let raw = ines_with_mapper(13, 1, 1);
     assert!(
         NesRom::from_ines_bytes(&raw).is_err(),
         "an unknown mapper must be refused, never loaded"

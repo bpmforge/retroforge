@@ -127,6 +127,13 @@ impl Ppu {
             // selection, and the bus re-pushes banks and selection into
             // the PPU after the mapper loads.
             chr_latch: _,
+            // Ticket W14-16: pushed from the mapper after a load; the
+            // extra nametable RAM rides in the mapper's own chunk.
+            chr_sprites: _,
+            ext_nametable: _,
+            fill: _,
+            pending_scanline_starts: _,
+            pending_frame_end: _,
             events,
         } = self;
 

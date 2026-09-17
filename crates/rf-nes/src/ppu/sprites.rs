@@ -543,13 +543,13 @@ impl Ppu {
             5 => {
                 let (bank, tile_index, fine_row) = self.sprite_fetch_address_parts(candidate, real);
                 let addr_lo = bank | ((tile_index as u16) << 4) | fine_row;
-                self.sprite_pattern_lo_latch = self.mem_read(addr_lo);
+                self.sprite_pattern_lo_latch = self.sprite_pattern_read(addr_lo);
             }
             7 => {
                 let (bank, tile_index, fine_row) = self.sprite_fetch_address_parts(candidate, real);
                 let addr_lo = bank | ((tile_index as u16) << 4) | fine_row;
                 let addr_hi = addr_lo | 0x08;
-                let pattern_hi = self.mem_read(addr_hi);
+                let pattern_hi = self.sprite_pattern_read(addr_hi);
                 if real && self.tile_capture {
                     self.capture_sprite(candidate);
                 }

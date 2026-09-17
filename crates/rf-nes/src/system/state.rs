@@ -36,7 +36,15 @@ impl NesBus {
             StateRegion::Vram => self.ppu.save_vram(&mut out),
             StateRegion::Oam => self.ppu.save_oam(&mut out),
             StateRegion::Cgram => self.ppu.save_palette(&mut out),
-            StateRegion::Mapper => self.mapper.save_state(&mut out),
+            StateRegion::Mapper => {
+                self.mapper.save_state(&mut out)?;
+                // Ticket W14-16: MMC5's extra nametable RAM lives in the
+                // PPU; it rides in this chunk right after the mapper.
+                if self.mapper.has_ext_nametable_ram() {
+                    out.bytes(self.ppu.ext_ram_bytes().unwrap_or(&[0u8; 1024]))?;
+                }
+                Ok(())
+            }
             StateRegion::Cart => out.bytes(&self.prg_ram),
         }
     }
@@ -67,6 +75,11 @@ impl NesBus {
             StateRegion::Cgram => self.ppu.load_palette(&mut inp),
             StateRegion::Mapper => {
                 self.mapper.load_state(&mut inp)?;
+                if self.mapper.has_ext_nametable_ram() {
+                    let mut ram = [0u8; 1024];
+                    inp.bytes(&mut ram)?;
+                    self.ppu.ext_ram_load(&ram);
+                }
                 // What the mapper now reports must reach the PPU again
                 // (ticket W14-13): the restored bank registers and, for
                 // an MMC2, the restored latch selection.
