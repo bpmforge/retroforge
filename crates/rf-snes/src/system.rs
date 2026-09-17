@@ -162,11 +162,17 @@ impl SnesSystem {
         // show; internal cycles are not modelled yet (W6-02a's note on
         // the cycle-accurate executor).
         self.bus.tick_math(accesses as u32);
-        // The APU accrues debt with every master cycle the CPU spends and
-        // is settled on port access — never free-running (§3.4).
+        // The APU accrues debt with every master cycle the CPU spends —
+        // DMA included, because a transfer stalls the CPU and not the
+        // sound chip — and is settled at the end of every instruction
+        // (ticket W14-09; EMULATION_CORES.md §1, catch-up to the master
+        // cycle). It is never a free-running thread, but it was never
+        // meant to run only while the CPU stares at a port either.
         self.bus.apu_debt += spent;
         let dma_cycles = self.bus.service_dma();
         self.master_cycles += dma_cycles;
+        self.bus.apu_debt += dma_cycles;
+        self.bus.catch_up_apu();
 
         // Advance the frame clock by everything this instruction spent,
         // DMA included — DMA halts the CPU but the raster keeps going,

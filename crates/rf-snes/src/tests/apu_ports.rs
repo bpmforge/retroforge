@@ -309,7 +309,104 @@ fn real_65816_code_completes_the_boot_handshake() {
         "a game-shaped init sequence must complete the handshake"
     );
     assert_eq!(s.bus.apu.aram[0x0200], 0x5A, "the uploaded byte landed");
-    assert_eq!(s.bus.apu.cpu.pc, 0x0200, "and the APU starts there");
+    // The SPC700 was handed `$0200` and has been RUNNING since (ticket
+    // W14-09: the APU advances on the master clock, so by the time the
+    // CPU reaches its STP the SPC has executed a few bytes of what it
+    // was given). Before that ticket this asserted `pc == $0200`, which
+    // only held because a CPU that stopped touching the ports stopped
+    // the APU with it.
+    assert!(
+        (0x0200..0x0210).contains(&s.bus.apu.cpu.pc),
+        "the APU started at $0200 and is executing from there, pc={:04X}",
+        s.bus.apu.cpu.pc
+    );
+}
+
+/// **The APU runs on the master clock, not on port traffic** (ticket
+/// W14-09).
+///
+/// Upload a four-byte SPC program — `INCW $10 : BRA -4` — through the
+/// real handshake, then have the 65816 spin on `NOP : BRA` and never
+/// touch `$2140-$2143` again. The counter at `$0010` must keep climbing,
+/// and at the hardware ratio: 10 SPC cycles per lap (INCW 6, BRA 4) is
+/// 210 master cycles.
+///
+/// Before the fix this counter stayed at zero: the APU was advanced only
+/// from the port arms, so a CPU that stopped talking to it stopped it.
+#[test]
+fn the_apu_keeps_running_while_the_cpu_never_touches_a_port() {
+    let mut rom = vec![0xEAu8; 32 * 1024];
+    let mut program: Vec<u8> = vec![
+        // wait: LDA $2140 : CMP #$AA : BNE wait
+        0xAD, 0x40, 0x21, 0xC9, 0xAA, 0xD0, 0xF9, // kind 1, dest $0200, start
+        0xA9, 0x01, 0x8D, 0x41, 0x21, 0xA9, 0x00, 0x8D, 0x42, 0x21, 0xA9, 0x02, 0x8D, 0x43, 0x21,
+        0xA9, 0xCC, 0x8D, 0x40, 0x21,
+    ];
+    for (counter, byte) in [0x3Au8, 0x10, 0x2F, 0xFC].into_iter().enumerate() {
+        let counter = counter as u8;
+        // LDA #byte : STA $2141 : LDA #counter : STA $2140
+        program.extend([
+            0xA9, byte, 0x8D, 0x41, 0x21, 0xA9, counter, 0x8D, 0x40, 0x21,
+        ]);
+        // wait: LDA $2140 : CMP #counter : BNE wait
+        program.extend([0xAD, 0x40, 0x21, 0xC9, counter, 0xD0, 0xF9]);
+    }
+    program.extend([
+        // kind 0, entry $0200, counter skip to 5 -> run
+        0xA9, 0x00, 0x8D, 0x41, 0x21, 0xA9, 0x00, 0x8D, 0x42, 0x21, 0xA9, 0x02, 0x8D, 0x43, 0x21,
+        0xA9, 0x05, 0x8D, 0x40, 0x21, // loop: NOP : BRA loop   (no port access ever again)
+        0xEA, 0x80, 0xFD,
+    ]);
+    let loop_pc = 0x8000 + program.len() as u16 - 3;
+    rom[..program.len()].copy_from_slice(&program);
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+
+    let mut s = SnesSystem::from_rom(rom, SnesMapMode::LoRom, 0);
+    s.run_until(50_000, Some(loop_pc)).expect("implemented");
+    assert_eq!(
+        s.cpu.pc, loop_pc,
+        "the upload must complete and reach the silent loop"
+    );
+    assert!(s.bus.apu.boot.is_running());
+    assert!(
+        (0x0200..0x0204).contains(&s.bus.apu.cpu.pc),
+        "the SPC runs the uploaded program"
+    );
+
+    let laps =
+        |s: &SnesSystem| u32::from(s.bus.apu.aram[0x10]) | (u32::from(s.bus.apu.aram[0x11]) << 8);
+    // Let the SPC settle into the loop, then measure a span.
+    s.run_until(2_000, None).expect("implemented");
+    let (laps0, master0) = (laps(&s), s.master_cycles);
+    s.run_until(5_000, None).expect("implemented");
+    let (laps1, master1) = (laps(&s), s.master_cycles);
+    let expected = (master1 - master0) / 210;
+    let got = u64::from(laps1 - laps0);
+    assert!(got > 0, "the SPC made no progress without port traffic");
+    assert!(
+        got >= expected * 3 / 4 && got <= expected * 5 / 4,
+        "SPC ran {got} laps over {} master cycles; the hardware ratio predicts {expected}",
+        master1 - master0
+    );
+}
+
+/// **Debt past the per-call bound is carried, never dropped** (ticket
+/// W14-09). The old `min(64)` subtracted the whole debt and then ran 64
+/// cycles of it, which is how a two-vblank wait cost the APU nothing.
+#[test]
+fn apu_debt_past_the_per_call_bound_is_carried_not_dropped() {
+    let mut s = system();
+    let bound: u64 = 1 << 16;
+    s.bus.apu_debt = 21 * (bound + 1000);
+    s.bus.catch_up_apu();
+    assert!(
+        s.bus.apu_debt >= 21 * 1000 - 21 * 16,
+        "the excess must survive the call (within one overspent instruction), got {}",
+        s.bus.apu_debt
+    );
+    s.bus.catch_up_apu();
+    assert!(s.bus.apu_debt < 21, "and be settled by the next one");
 }
 
 // ---------------------------------------------------------------------

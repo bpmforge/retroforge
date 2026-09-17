@@ -64,6 +64,15 @@ pub struct SnesBus {
     /// how port handshakes become timing-dependent and games become
     /// flaky on some runs and not others.
     pub apu_debt: u64,
+    /// SPC cycles the APU has already run AHEAD of its debt (ticket
+    /// W14-09). An SPC700 instruction is atomic here and costs 2-12
+    /// cycles, so a call owed one cycle can spend six; the surplus is
+    /// paid off by the next calls before they run anything. This used to
+    /// be folded back into `apu_debt` with a saturating subtraction —
+    /// which, once the debt was settled every instruction, forgave the
+    /// surplus every time and ran the SPC700 at one instruction per owed
+    /// cycle, 4.4x too fast (measured by the test that guards this).
+    pub apu_overspent: u64,
     /// True while an HDMA unit is transferring (ticket W7-15).
     ///
     /// **HDMA runs in HBLANK, before the line it configures is drawn**, so
@@ -207,6 +216,7 @@ impl SnesBus {
             ppu: Ppu::new(),
             apu: Apu::new(),
             apu_debt: 0,
+            apu_overspent: 0,
             hdma_in_progress: false,
             timing: Timing::new(),
             joypads: Joypads::default(),
@@ -456,15 +466,33 @@ impl SnesBus {
     ///
     /// The SPC700 runs at ~1.024 MHz against a 21.477 MHz master clock,
     /// so one SPC cycle is about 21 master cycles.
+    ///
+    /// **Called after every CPU instruction, not only on a port access**
+    /// (ticket W14-09). Until then this ran ONLY from the `$2140-$2143`
+    /// arms, and it discarded every cycle past 64 — so a game waiting on
+    /// `$4210` or a RAM flag left its sound driver frozen, and one that
+    /// polled a port fed it 64 cycles per read. ActRaiser's stub was
+    /// still inside its first zero-page clear loop two vblanks after
+    /// being started, and the `$FF` the CPU then sent was wiped by the
+    /// stub's own `$F1` init write. The port arms still call this first,
+    /// so what the CPU reads is a state the APU actually reached.
     pub fn catch_up_apu(&mut self) {
         const MASTER_PER_SPC_CYCLE: u64 = 21;
-        let mut spc_cycles = self.apu_debt / MASTER_PER_SPC_CYCLE;
-        self.apu_debt -= spc_cycles * MASTER_PER_SPC_CYCLE;
-        // Bound the work a single catch-up can do. A long DMA or a paused
-        // debugger can otherwise hand the APU millions of cycles at once,
-        // and grinding through them inside one bus access would stall the
-        // whole emulator at exactly the moment a game is polling a port.
-        spc_cycles = spc_cycles.min(64);
+        // A sanity bound on one call, NOT a budget: the remainder is
+        // carried to the next call, never dropped. With the debt settled
+        // every instruction a call owes one to a few cycles; the largest
+        // honest lump is a full-bank DMA at ~25k, well under this.
+        const MAX_CYCLES_PER_CALL: u64 = 1 << 16;
+        let owed = self.apu_debt / MASTER_PER_SPC_CYCLE;
+        let owed = owed.min(MAX_CYCLES_PER_CALL);
+        self.apu_debt -= owed * MASTER_PER_SPC_CYCLE;
+        // Cycles already run ahead come out of this call's budget first.
+        if self.apu_overspent >= owed {
+            self.apu_overspent -= owed;
+            return;
+        }
+        let spc_cycles = owed - self.apu_overspent;
+        self.apu_overspent = 0;
         // SPEND THE BUDGET AS CYCLES, NOT INSTRUCTIONS (ticket W7-08).
         //
         // This loop used to run `spc_cycles` ITERATIONS OF ONE
@@ -498,10 +526,8 @@ impl SnesBus {
             spent += u64::from(cycles.max(1));
         }
         // Anything overspent comes out of the next catch-up, so the APU
-        // cannot drift ahead one rounding error at a time.
-        self.apu_debt = self
-            .apu_debt
-            .saturating_sub(spent.saturating_sub(spc_cycles) * MASTER_PER_SPC_CYCLE);
+        // cannot drift ahead one instruction at a time.
+        self.apu_overspent = spent - spc_cycles;
     }
 
     /// VMAIN bits 0-1 select the address increment: 1, 32, 128, 128

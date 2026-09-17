@@ -237,6 +237,7 @@ impl crate::system::SnesSystem {
                 o.bool(b.fast_rom)?;
                 o.u8(b.open_bus)?;
                 o.u64(b.apu_debt)?;
+                o.u64(b.apu_overspent)?;
                 b.timing.save(o)?;
                 b.joypads.save(o)?;
                 o.bool(b.manual_latch)?;
@@ -291,6 +292,7 @@ impl crate::system::SnesSystem {
                 self.bus.fast_rom = i.bool()?;
                 self.bus.open_bus = i.u8()?;
                 self.bus.apu_debt = i.u64()?;
+                self.bus.apu_overspent = i.u64()?;
                 self.bus.timing.load(i)?;
                 self.bus.joypads.load(i)?;
                 self.bus.manual_latch = i.bool()?;
