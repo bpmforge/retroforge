@@ -3396,3 +3396,37 @@ stories, 10 decisions).
 
   Gate: workspace **1862 passing / 0 failed / 36 ignored**, clippy clean,
   arch OK, local-gate exit 0.
+
+- **W14-17 — MMC5 slice 2: ExGrafix, the vertical split, RAM in the
+  PRG windows** (2026-09-17). NES census, same 1281 archives:
+  **1222 -> 1222** render (unchanged, as a correctness ticket should), uniform 6, refused 53, crashed **0**, timed out **0**. A correctness ticket, not a boot one: slice 1 booted
+  every MMC5 title; this makes them draw what the board draws.
+
+  **Four more `Mapper` seams, all `None`/off for every other board.**
+  `prg_ram_window(addr)` answers a byte offset into the bus's one 8 KiB
+  PRG RAM when a `$5113-$5116` window has bit 7 clear; the bus keeps
+  owning the bytes (it already serves `$6000-$7FFF`), so no second copy
+  of "the" PRG RAM enters the save state and the mapper holds no new
+  state for it. Real boards can address 64 KiB across several chips;
+  every RAM window here aliases the one chip modulo 8 KiB, written down
+  in the module doc. `chr_rom_full`, `ext_attribute_mode` (`$5104` = 1
+  plus `$5130`'s high bits) and `vertical_split` (`$5200-$5202`) are
+  pushed to the PPU with the rest of the mapper view, on load too.
+
+  **The background fetch takes them in place.** In the NT and AT phases
+  the split substitutes the extended RAM (nametable at `$000`, attributes
+  at `$3C0`) at its own row from `$5201`; ExGrafix reads the ext RAM
+  byte at the tile's own offset for palette (bits 6-7) and 4 KiB CHR
+  bank (bits 0-5 with `$5130`); the pattern phase then reads the split's
+  `$5202` bank or the per-tile bank from the full CHR ROM, falling
+  through to the ordinary window on CHR-RAM carts. Register decode is
+  cited to nesdev.org/wiki/MMC5 (verified by fetch 2026-09-17, after the
+  implementer flagged it unverified). Recorded approximation: the split
+  column reads `v`'s coarse X where the MMC5 counts fetches itself, so a
+  horizontal scroll shifts the split by the same amount. Acceptance
+  item 4 (Castlevania III's status-bar split and Uncharted Waters' map
+  screens by eye against a reference emulator) is **not done** — it
+  needs Brad and a reference emulator; left on the ticket.
+
+  Gate: workspace **1868 passing / 0 failed / 36 ignored**, clippy
+  clean, arch OK.
