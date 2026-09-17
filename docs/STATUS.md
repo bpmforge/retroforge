@@ -3280,3 +3280,33 @@ stories, 10 decisions).
 
   Gate: workspace **1840 passing / 0 failed / 36 ignored**, clippy clean,
   arch OK, local-gate exit 0. The six titles still uniform are a proto, two bad dumps, a test program, a Buzz & Waldog proto and a compilation cart: no retail NES title in the library renders a uniform screen.
+
+- **W14-13 — MMC2, a CHR latch the PPU switches at the fetch**
+  (2026-09-17). NES census, same 1281 archives: **1180 -> 1184** render,
+  refused 95 -> 91, uniform 6, crashed **0**, timed out **0**.
+
+  **The mapper cannot be the one that switches.** MMC2's latches flip
+  when the PPU *fetches* tile `$FD` or `$FE` (nesdev MMC2: `$0FD8`/`$0FE8`
+  for the left half, `$1FD8-$1FDF`/`$1FE8-$1FEF` for the right), between
+  two tile fetches mid-scanline. This crate's mappers push a materialised
+  CHR window after CPU writes — instruction granularity, one to two tile
+  fetches late — so the tiles after every `$FD`/`$FE` tile would come from
+  the wrong bank. The PPU owns it instead: `Mapper::chr_latch` hands it
+  four 4 KiB banks plus the selection, `mem_read` flips the selection
+  right after the triggering read, and the bus copies the selection back
+  each instruction (`note_chr_latch`) so a save state carries it. The
+  unit test reads a trigger address and asserts the very next pattern
+  read is from the other bank.
+
+  **A latent gap closed on the way.** A mapper state load never re-pushed
+  the restored bank registers into the PPU; every banked CHR-ROM mapper
+  resumed a state with the window it had before the load. The load arm
+  now re-pushes window, latch and mirroring.
+
+  All three Punch-Out!! archives exit the census child in the rendered
+  bucket. Left in the refused bucket, each its own ticket: MMC5 (11),
+  RAMBO-1 (9), FME-7 (4), TQROM (3, blocked by the CHR push design),
+  multicart and unlicensed long tail.
+
+  Gate: workspace **1844 passing / 0 failed / 36 ignored**, clippy clean,
+  arch OK, local-gate exit 0.
