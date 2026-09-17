@@ -11,11 +11,15 @@
 //! `docs/design/EMULATION_CORES.md` §3.5: "Header detection in `rf-cart`:
 //! score candidate headers at $7FC0/$FFC0 (checksum/complement, mapper
 //! byte, reset vector sanity) — never trust the extension." ExHiROM and
-//! enhancement-chip carts (SA-1, Super FX, DSP-1, ...) are explicitly
-//! deferred; `rf-cart` reports "unsupported chip: <name>" for them rather
-//! than half-booting.
+//! most enhancement-chip carts (SA-1, Super FX, S-DD1, SPC7110, ...) are
+//! explicitly deferred; `rf-cart` reports "unsupported chip: <name>" for
+//! them rather than half-booting. DSP-1 was lifted out of that deferral by
+//! ruling D-010 (`docs/DECISIONS.md`, SRS FR-CORE-038) once the plain
+//! LoROM/HiROM accuracy gate was met — see [`Coprocessor`] and
+//! [`DspWindow`].
 
 use crate::error::CartError;
+use std::ops::RangeInclusive;
 
 const COPIER_HEADER_LEN: usize = 512;
 const LOROM_HEADER_OFFSET: usize = 0x7FC0;
@@ -62,10 +66,98 @@ pub struct SnesHeader {
     /// RAM size in bytes, decoded the same way.
     pub ram_size: usize,
     pub battery: bool,
+    /// Enhancement coprocessor named by the chipset byte, if any this
+    /// build runs. See [`Coprocessor`] (D-010, SRS FR-CORE-038).
+    pub coprocessor: Coprocessor,
+    /// The DSP-1 register bus window, present iff `coprocessor` is
+    /// [`Coprocessor::Dsp1`]. See [`DspWindow`].
+    pub dsp_window: Option<DspWindow>,
     pub checksum: u16,
     pub checksum_complement: u16,
     /// Whether a 512-byte copier header was stripped before parsing.
     pub had_copier_header: bool,
+}
+
+/// Which enhancement coprocessor (if any) the cartridge exposes.
+///
+/// Per D-010 (`docs/DECISIONS.md`, SRS FR-CORE-038), the header's
+/// coprocessor nibble ($0, "DSP") cannot distinguish DSP-1 from DSP-2/3/4
+/// — they share the same header signature. Rather than identify the game
+/// by title to tell them apart (forbidden by law 5), `rf-cart` accepts
+/// every nibble-0 DSP cart as DSP-1 and runs it through the DSP-1 HLE
+/// core; the three known DSP-2/3/4 titles are named only in the
+/// profile/rom-manifest layer (W14-19), recorded there as known-wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coprocessor {
+    /// No coprocessor, or a chipset byte this build doesn't special-case
+    /// (plain ROM / ROM+RAM / ROM+RAM+battery, `hw < 0x3`).
+    None,
+    /// Coprocessor nibble $0 ("DSP") with `hw` in 3..=5 (ROM+DSP,
+    /// +RAM, +RAM+battery). HLE'd at command level, not LLE of the
+    /// uPD7725 (D-010: the chip's program ROM is copyrighted firmware
+    /// this project cannot ship).
+    Dsp1,
+}
+
+/// The DSP-1 memory-mapped register bus window: which cartridge banks the
+/// chip's DR (data/command) and SR (status) registers are visible in, and
+/// the address range within a mapped bank each occupies.
+///
+/// Two sources were checked independently and they disagree on exact bank
+/// counts, so both are cited:
+/// - snes.nesdev.org/wiki/DSP-1 documents the narrower window specified
+///   for the chip: LoROM ("Mode 20") banks $30-$3F/$B0-$BF, DR
+///   $8000-$BFFF, SR $C000-$FFFF; HiROM ("Mode 21") banks $00-$0F/$80-$8F,
+///   DR $6000-$6FFF, SR $7000-$7FFF.
+/// - snes9x's `memmap.cpp` `map_DSP()` (github.com/snes9xgit/snes9x) — the
+///   shipping HLE this ticket follows — decodes a wider superset that real
+///   boards accept: LoROM <=1 MiB banks $20-$3F/$A0-$BF (same offsets);
+///   LoROM >1 MiB ("DSP-1B" boards, selected by the header's declared ROM
+///   size, never by title) banks $60-$6F/$E0-$EF, DR $0000-$3FFF, SR
+///   $4000-$7FFF; HiROM banks $00-$1F/$80-$9F (same offsets as snesdev —
+///   only the upper bank bound, $1F vs $0F, differs between the sources).
+///
+/// This type implements the snes9x superset: the snesdev-documented range
+/// sits entirely inside it, and snes9x's ranges are what has shipped
+/// against every real DSP-1 title for decades. `rf-snes` (W14-19) is the
+/// consumer of this data; nothing here decides chip behavior, only the
+/// address shape of its bus window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DspWindow {
+    /// The two mirrored bank ranges the window is visible in.
+    pub banks: [RangeInclusive<u8>; 2],
+    /// Data/command register address range within a mapped bank.
+    pub dr: RangeInclusive<u16>,
+    /// Status register address range within a mapped bank.
+    pub sr: RangeInclusive<u16>,
+}
+
+/// Highest LoROM size, in bytes, that still uses the plain DSP-1 window;
+/// larger than this selects the DSP-1B board layout (snes9x
+/// `M_DSP1_LOROM_L`), per the header's declared ROM size — never by title
+/// (law 5, D-010).
+const DSP1B_LOROM_THRESHOLD_BYTES: usize = 1024 * 1024;
+
+/// Select the DSP-1 bus window for a parsed cartridge. See [`DspWindow`]
+/// for the cited ranges.
+fn dsp_window_for(map_mode: SnesMapMode, rom_size: usize) -> DspWindow {
+    match map_mode {
+        SnesMapMode::HiRom => DspWindow {
+            banks: [0x00..=0x1F, 0x80..=0x9F],
+            dr: 0x6000..=0x6FFF,
+            sr: 0x7000..=0x7FFF,
+        },
+        SnesMapMode::LoRom if rom_size > DSP1B_LOROM_THRESHOLD_BYTES => DspWindow {
+            banks: [0x60..=0x6F, 0xE0..=0xEF],
+            dr: 0x0000..=0x3FFF,
+            sr: 0x4000..=0x7FFF,
+        },
+        SnesMapMode::LoRom => DspWindow {
+            banks: [0x20..=0x3F, 0xA0..=0xBF],
+            dr: 0x8000..=0xBFFF,
+            sr: 0xC000..=0xFFFF,
+        },
+    }
 }
 
 /// Decode a `1<<N` kilobyte size byte into a byte count, without panicking
@@ -318,20 +410,35 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         }
     };
 
+    let rom_size = kb_pow2(data[base + 0x17])?;
+    let ram_size = kb_pow2(data[base + 0x18])?;
+
     let chipset = data[base + 0x16];
     let hw = chipset & 0x0F;
-    if hw >= 0x3 {
+    let coprocessor_nibble = (chipset & 0xF0) >> 4;
+    // D-010 / FR-CORE-038: coprocessor nibble $0 ("DSP") with hw in 3..=5
+    // (ROM+coprocessor / +RAM / +RAM+battery — fullsnes's three assigned
+    // "DSP" hw values) is lifted out of the refusal below and accepted as
+    // Coprocessor::Dsp1 instead. hw=6..=15 is not an assigned combination
+    // for any chipset and still refuses exactly as before, same as every
+    // other coprocessor nibble at hw>=3.
+    let (coprocessor, battery) = if (0x3..=0x5).contains(&hw) && coprocessor_nibble == 0x0 {
+        (Coprocessor::Dsp1, hw == 0x5)
+    } else if hw >= 0x3 {
         return Err(CartError::UnsupportedChip {
             name: format!(
                 "{} (SNES chipset ${chipset:02X})",
                 coprocessor_name(chipset)
             ),
         });
-    }
-    let battery = hw == 0x2;
+    } else {
+        (Coprocessor::None, hw == 0x2)
+    };
+    let dsp_window = match coprocessor {
+        Coprocessor::Dsp1 => Some(dsp_window_for(map_mode, rom_size)),
+        Coprocessor::None => None,
+    };
 
-    let rom_size = kb_pow2(data[base + 0x17])?;
-    let ram_size = kb_pow2(data[base + 0x18])?;
     let checksum = u16::from_le_bytes([data[base + 0x1E], data[base + 0x1F]]);
     let checksum_complement = u16::from_le_bytes([data[base + 0x1C], data[base + 0x1D]]);
 
@@ -341,6 +448,8 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         rom_size,
         ram_size,
         battery,
+        coprocessor,
+        dsp_window,
         checksum,
         checksum_complement,
         had_copier_header,
@@ -523,6 +632,101 @@ mod tests {
             matches!(err, CartError::InvalidHeader(_)),
             "a lone reset vector must no longer mint a cartridge, got {err:?}"
         );
+    }
+
+    #[test]
+    fn unsupported_chip_obc1_reported_from_chipset_byte() {
+        // hw=3 (ROM+coprocessor), nibble 2 = OBC1: still refused, unaffected
+        // by the DSP carve-out (D-010 only touches nibble 0).
+        let rom = lorom_image(0x20, 0x23);
+        let err = parse_snes_header(&rom).unwrap_err();
+        match &err {
+            CartError::UnsupportedChip { name } => assert!(name.contains("OBC1"), "got: {name}"),
+            other => panic!("expected UnsupportedChip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    /// D-010 / FR-CORE-038: nibble 0 ("DSP") at hw=3 (ROM+coprocessor, no
+    /// RAM/battery) now parses instead of refusing, with the LoROM <=1 MiB
+    /// window (lorom_image's default 64 KB size byte).
+    fn dsp1_lorom_cart_parses_with_bus_window() {
+        let rom = lorom_image(0x20, 0x03);
+        let header = parse_snes_header(&rom).expect("DSP-1 LoROM cart must parse");
+        assert_eq!(header.coprocessor, Coprocessor::Dsp1);
+        assert!(!header.battery, "hw=3 has no battery");
+        assert_eq!(
+            header.dsp_window,
+            Some(DspWindow {
+                banks: [0x20..=0x3F, 0xA0..=0xBF],
+                dr: 0x8000..=0xBFFF,
+                sr: 0xC000..=0xFFFF,
+            })
+        );
+    }
+
+    #[test]
+    /// hw=5 (ROM+DSP+RAM+battery) sets battery, matching the existing
+    /// hw==2 rule for the non-coprocessor case.
+    fn dsp1_cart_with_hw5_sets_battery() {
+        let rom = lorom_image(0x20, 0x05);
+        let header = parse_snes_header(&rom).expect("DSP-1+RAM+battery cart must parse");
+        assert_eq!(header.coprocessor, Coprocessor::Dsp1);
+        assert!(header.battery);
+    }
+
+    #[test]
+    /// DSP-1B boards (LoROM > 1 MiB) get the wider snes9x window, selected
+    /// by the header's declared ROM size, never by title (law 5).
+    fn dsp1_lorom_over_1mib_gets_dsp1b_window() {
+        let mut rom = lorom_image(0x20, 0x03);
+        rom[LOROM_HEADER_OFFSET + 0x17] = 11; // 1<<11 KB = 2048 KB = 2 MiB
+        let header = parse_snes_header(&rom).expect("DSP-1B LoROM cart must parse");
+        assert_eq!(header.rom_size, 2 * 1024 * 1024);
+        assert_eq!(
+            header.dsp_window,
+            Some(DspWindow {
+                banks: [0x60..=0x6F, 0xE0..=0xEF],
+                dr: 0x0000..=0x3FFF,
+                sr: 0x4000..=0x7FFF,
+            })
+        );
+    }
+
+    #[test]
+    fn dsp1_hirom_cart_parses_with_bus_window() {
+        let rom = hirom_image(0x21, 0x03);
+        let header = parse_snes_header(&rom).expect("DSP-1 HiROM cart must parse");
+        assert_eq!(header.coprocessor, Coprocessor::Dsp1);
+        assert_eq!(
+            header.dsp_window,
+            Some(DspWindow {
+                banks: [0x00..=0x1F, 0x80..=0x9F],
+                dr: 0x6000..=0x6FFF,
+                sr: 0x7000..=0x7FFF,
+            })
+        );
+    }
+
+    #[test]
+    /// Nibble 0 ("DSP") but hw=9 is not one of the three assigned DSP hw
+    /// values (3/4/5) — D-010 only lifts those, so this must still refuse
+    /// exactly as before, naming "DSP".
+    fn dsp_nibble_with_unassigned_hw_value_still_refuses() {
+        let rom = lorom_image(0x20, 0x09);
+        let err = parse_snes_header(&rom).unwrap_err();
+        match &err {
+            CartError::UnsupportedChip { name } => assert!(name.contains("DSP"), "got: {name}"),
+            other => panic!("expected UnsupportedChip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_dsp_cart_has_no_coprocessor_or_window() {
+        let rom = lorom_image(0x20, 0x00);
+        let header = parse_snes_header(&rom).expect("valid header");
+        assert_eq!(header.coprocessor, Coprocessor::None);
+        assert_eq!(header.dsp_window, None);
     }
 
     #[test]

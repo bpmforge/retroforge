@@ -41,6 +41,18 @@ impl SnesSystem {
             ));
         };
 
+        // Ticket W14-18 handoff: rf-cart now identifies DSP-1 carts
+        // (D-010, FR-CORE-038) instead of refusing them, and the DSP-1 HLE
+        // core is ticket W14-19. Until it lands, running the cart without
+        // the chip would be the silent half-boot FR-CORE-013 forbids, so
+        // the refusal moves here, one layer up, with the same diagnostic
+        // shape. W14-19 deletes this block when it wires the window.
+        if matches!(header.coprocessor, rf_cart::Coprocessor::Dsp1) {
+            return Err(CartError::UnsupportedChip {
+                name: "DSP-1 (identified by rf-cart; the HLE core is ticket W14-19)".to_string(),
+            });
+        }
+
         // A copier header shifts every offset by 512 bytes. rf-cart
         // reports whether it stripped one; the ROM image the bus maps
         // must be stripped to match, or every address is 512 bytes wrong
