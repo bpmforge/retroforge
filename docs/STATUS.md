@@ -3163,3 +3163,84 @@ stories, 10 decisions).
 
   Gate: workspace **1829 passing / 0 failed / 35 ignored**, clippy clean,
   arch OK, local-gate exit 0 (blargg SPC red by design while W7-08/W7-17 are open, verdicts byte-identical to before).
+
+- **W14-10 — three boot-path defects, and a fourth behind them, found by
+  tracing the uniform-screen bucket** (2026-09-16). **934 -> 1001** SNES
+  titles render, same 1265 archives, same harness.
+
+  | SNES library, 1265 titles | after W14-09 | after W14-10 |
+  |---|---|---|
+  | rendered something | 934 | **1001** |
+  | rendered a uniform screen | 181 | 114 |
+  | refused | 150 | 150 |
+  | crashed | 0 | **0** |
+  | timed out | 0 | **0** |
+
+  **First, a null result worth having.** All 181 uniform-screen titles were
+  re-run for 1800 frames instead of 600; exactly one (Knights of the Round,
+  at frame 909) was merely slow. The bucket is defects, not patience.
+
+  **1. `$4200` with H/V IRQ disabled now drops a latched TIMEUP flag.**
+  Final Fantasy Mystic Quest sat halted at `$008254`, the second of three
+  `STP` traps behind a routine that disables NMI and forces blank. A ring
+  of the last 120 distinct PCs read `... 00B853 000117 00B821 00011B
+  008253`; the native vectors put IRQ at `$0117`, a WRAM `JML $00B821`,
+  and `$00:B821` is a `BRK` whose vector `$011B` is `JML $008253`. So an
+  IRQ was taken right after a `PLP`, into a handler that means "an IRQ here
+  is impossible" — and the routine had written `$4200 = 0` twenty bytes
+  earlier. The bus wrote `nmitimen` and nothing else; `IrqTimer.fired`
+  stayed latched and fired the moment I cleared. fullsnes `$4211`: the flag
+  is reset on disabling IRQs via `$4200`; bsnes clears `irqLine` on the
+  same write.
+
+  **2. The H/V counter latch exists now.** With the IRQ gone, Mystic Quest
+  looped in `$00:B836-B857`: `LDA $2137` / `LDA $213F` / `LDA $213D` /
+  `LSR` / `BCS`, spinning until the latched line is even. None of `$2137`,
+  `$213C`, `$213D`, `$213F` or `$4201` was mapped, so it read open bus for
+  ever. `HvLatch` implements SLHV, the two counters with their read
+  flip-flops, STAT78 (latch flag, PAL bit, PPU2 version, flip-flop reset)
+  and the WRIO bit-7 falling edge, cited to fullsnes; `peek` toggles
+  nothing. Mystic Quest now runs with the screen on, V-IRQ driving a
+  raster chain that rewrites its own vector trampoline per phase — and
+  still shows a uniform frame. That is a further defect, recorded on the
+  ticket rather than smoothed over.
+
+  **3. The boot hand-over no longer banks the IPL out.** Probing a third
+  batch found the largest shape: Bust-A-Move, Pocky & Rocky, Super Bonk,
+  Uniracers, Wild Guns, Yoshi's Cookie and the Rock N' Roll Racing betas
+  all ended with the SPC700 stopped at `$00F5`-`$00F8`. A port-change
+  ring on Wild Guns and Bust-A-Move showed why: the CPU finishes an
+  upload, writes ports 2-3 = `$FFC0`, kind 0, and a counter — a commanded
+  jump to the boot ROM's entry, to reboot the APU and upload the real
+  driver. At that exact hand-over the HLE cleared `ipl_enabled` "so the
+  uploaded program owns the whole address space". fullsnes `$F1` bit 7 is
+  set at reset and only the program's own write clears it; the jump
+  landed on zero-filled ARAM, the SPC700 NOP-slid into the port page,
+  read the CPU's `$FF` as `STOP`, and the 65816 waited for `$AA`/`$BB` for
+  ever. The test that asserted the bank-out now asserts the opposite.
+
+  **4. And the one behind it: the boot ROM clears zero page before it
+  publishes `$AA`/`$BB`.** With the window mapped, Super Bonk got further
+  and stopped again — the CPU spinning on `CMP $2140` for `$E3`, the echo
+  of its jump counter, while the port held `$AA`. Re-entry republished the
+  signature on the very next SPC instruction. The real ROM (fullsnes,
+  "SNES APU Boot ROM") clears `$00-$EF` first: 2404 cycles by the SPC700
+  table, about 2.3 ms, during which the echo stays readable. A new
+  `Initialising(cycles)` boot state counts that down one poll per SPC
+  cycle and only then publishes; save state carries it. Super Bonk and
+  the Rock N' Roll Racing beta render after this.
+
+  **What moved and what did not.** blargg's four SPC verdicts are
+  byte-identical throughout; PeterLemon, undisbeliever, region goldens and
+  the dsp6 phase probe pass. Still in the bucket with a named cause:
+  Blackthorne (its driver polls a voice's ENVX through `$F3` until it
+  decays below 8 — S-DSP envelope work, which is W7-08 and blocked),
+  Soul Blazer (a driver-side upload completes and then jumps into `00 FF`
+  data at `$0306`), NHL 95 and The Flintstones (the 65816 executing WRAM
+  garbage and an RTS loop respectively — CPU-core suspects), Illusion of
+  Gaia and ActRaiser 2 (running a scripted APU sequence with long frame
+  waits; not yet understood), Clay Fighter (the driver's ARAM clear takes
+  seconds and then re-uploads; slow, cause open).
+
+  Gate: workspace **1834 passing / 0 failed / 35 ignored**, clippy clean,
+  arch OK, local-gate exit 0 (blargg SPC red by design while W7-08/W7-17 are open, verdicts byte-identical).

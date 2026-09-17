@@ -728,6 +728,9 @@ First run, 2026-09-15, release build:
 | NES | 1281 | 1167 | 7 | 107 | **0** | **0** |
 | SNES, first run | 1265 | 303 | 806 | 150 | **0** | 6 |
 | SNES, after W14-06 | 1265 | **860** | 244 | 150 | **0** | 11 |
+| SNES, after W14-08 | 1265 | 870 | 245 | 150 | **0** | **0** |
+| SNES, after W14-09 | 1265 | 934 | 181 | 150 | **0** | **0** |
+| SNES, after W14-10 | 1265 | **1001** | 114 | 150 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
