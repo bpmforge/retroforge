@@ -6085,7 +6085,7 @@
     "the sub screen keeps the isolation the clone was providing: render_scanline_live mutates sprite-limit flags, and rendering the sub screen must not let those accumulate into the main screen's state (the forced-blank test documents why that matters)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "PROFILED, NOT GUESSED (2026-09-15, W14-07). macOS `sample` over Super Buster Bros: 4587 of 4609 samples are in render_scanline_masked -> render_scanline_hires, and inside render_sub_scanline the single largest leaf is `<rf_snes::ppu::Ppu as Clone>::clone` at 957 samples, essentially all of it in _platform_memmove.",
     "THE LINE IS crates/rf-snes/src/ppu/mod.rs, render_sub_scanline: `let mut shadow = self.with_line_state(line).unwrap_or_else(|| self.clone());` — and with_line_state clones too, so either branch is one FULL Ppu copy PER SCANLINE. A Ppu carries 64 KiB of VRAM, CGRAM, OAM and two ~224-entry Vec-of-Vec fields, so a frame is ~14 MB of memmove plus tens of thousands of allocations.",
