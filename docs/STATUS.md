@@ -3244,3 +3244,39 @@ stories, 10 decisions).
 
   Gate: workspace **1834 passing / 0 failed / 35 ignored**, clippy clean,
   arch OK, local-gate exit 0 (blargg SPC red by design while W7-08/W7-17 are open, verdicts byte-identical).
+
+- **W14-11 — a per-title diagnostic probe for the census buckets**
+  (2026-09-16). `crates/rf-harness/tests/title_probe.rs`, the tool that
+  found W14-09 and W14-10, committed as an `#[ignore]`d env-driven test
+  and named in TESTING.md §0 as the second step of the triage.
+
+- **W14-12 — MMC1 SUROM, GxROM and TxSROM** (2026-09-16). NES census,
+  same 1281 archives: **1167 -> 1180** render, uniform
+  7 -> 6, refused 107 -> 95, crashed
+  **0**, timed out **0**.
+
+  **Chosen from the per-title census plus an iNES-header tally**, which
+  the board had not had for NES since W14-04: mapper 5 (MMC5) 11 titles,
+  64 (RAMBO-1) 9, 118 (TxSROM) 7, 66 (GxROM) 5, 9 (MMC2) 4, 69 (FME-7)
+  4, 119 (TQROM) 3, long tail. Of the seven uniform-screen titles only
+  two were retail — Dragon Warrior III and IV — and both are 512 KiB
+  MMC1 boards whose upper PRG half comes from CHR bank 0 bit 4 (nesdev
+  MMC1, SUROM), which `mmc1.rs` had documented as unmodelled since
+  W2-02. The other five are a proto, two bad dumps, a test program and
+  a compilation cart.
+
+  **TxSROM needed a mirroring the enum could not spell.** CIRAM A10 is
+  wired to CHR bank bit 7, per the register mapping each table's
+  A10-A12 (nesdev INES Mapper 118), so `[1, 1, 0, 0]` and mixed pages are
+  reachable. `rf_cart::Mirroring::PerTable([u8; 4])` was added, the PPU
+  resolves it per table, and the save state appends discriminant 5 with
+  the page bits in the high nibble rather than renumbering.
+
+  **Left out on purpose, and said so:** TQROM mixes CHR RAM banks into
+  the CHR window, which this crate's push/materialize CHR design cannot
+  round-trip (mappers/mod.rs doc), so it would boot with broken
+  graphics; MMC2 needs a PPU tile-fetch hook the Mapper trait lacks;
+  RAMBO-1 needs its own IRQ model. Each is its own ticket.
+
+  Gate: workspace **1840 passing / 0 failed / 36 ignored**, clippy clean,
+  arch OK, local-gate exit 0. The six titles still uniform are a proto, two bad dumps, a test program, a Buzz & Waldog proto and a compilation cart: no retail NES title in the library renders a uniform screen.
