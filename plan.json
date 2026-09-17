@@ -6366,8 +6366,9 @@
     "the DSP-2/3/4 titles are recorded as known-wrong per the identification rule in W14-18"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-17 AS SLICE 1 (protocol, bus window, save state, manual §5.1-5.3 + test commands); W14-21 filed for §5.4-5.6 (projection, raster, attitude, object/global conversion, inner product, screen point). Clean-room from the SNES Development Manual Book II DSP-1 section + snes.nesdev.org/wiki/DSP-1 + fullsnes; no emulator source. SNES census 1265: refused 150 -> 138, rendered 1001 -> 1012, uniform 114 -> 115, crashed 0, timed out 0; Super Mario Kart and Pilotwings render their title screens (the track needs raster, slice 2). One of the ~13 DSP titles did not move (recorded in TESTING.md, not run down). Judgment calls recorded in dsp1.rs: DR word order low-then-high (figures lost in OCR), Triangle output order, Multiply/Range single-word output. Gate: workspace 1898 passing / 0 failed / 36 ignored.",
     "HLE-vs-LLE decision, recorded so a future reader does not re-litigate it (full text in D-010 / DECISIONS.md): HLE of the DSP-1 command set, not LLE of the uPD7725, because (1) the uPD7725's program ROM is copyrighted firmware with no dump in the library (law 5), (2) the ~30-command set is fully documented publicly and HLE is the approach snes9x has shipped for decades, (3) HLE is deterministic and needs no firmware file. An LLE-with-user-firmware path is noted as a possible later ticket, not promised. Accuracy Mode framing: the HLE reproduces the chip's documented outputs; this is an honest limitation recorded in EMULATION_CORES.md section 3.5, not a silent cycle-exact claim.",
     "DR/SR bus window per LoROM/HiROM/LoROM-large variant comes from W14-18's parsed-cart data; see that ticket's note for the exact bank/offset numbers this session could verify (snes9x memmap.cpp) versus the one it could not (a direct fullsnes.htm table read) -- confirm both against fullsnes/snesdev directly before this ticket's doc comment cites them as fact, per law 6."
    ],
@@ -6394,6 +6395,31 @@
    "notes": [
    "CLOSED 2026-09-17. Brad verified on m4max: the release build plays the Castlevania III title sequence smoothly; the monitor showed RSS flat at 178 MB for the run and zero dropped frames, i.e. the waker kept the UI draining (the stall never recurred, so its winit-side root cause stays unproven; the logger is in place for next time). HANDOFF -- WRITE_SCOPE WIDENED to scripts/release.sh: the second defect Brad found was NO SOUND, and the cause was the build, not the code: `audio` and `gamepad` are opt-in features and neither the day's manual builds nor scripts/release.sh enabled them; release.sh now passes --features retroforge/audio,retroforge/gamepad. Gate: workspace 1877 passing / 0 failed / 36 ignored, clippy clean, arch OK.",
     "FILED 2026-09-17 from Brad's m4max test of the release build: the window froze at various points of the Castlevania III title sequence and the whole machine slowed down. Two defects, one confirmed and one root-cause open. CONFIRMED: `core_thread::spawn` wires `mpsc::channel()` (unbounded) for CoreEvent and the UI drains it only from `update`; when the UI stops repainting the core keeps producing ~250 KB frames at 60/s (measured 15 MB/s RSS growth), which is the machine-wide slowdown. OPEN: why the UI stops repainting -- `pump_core_events` calls `ctx.request_repaint()` every update while running, yet the main thread sat in `_DPSBlockUntilNextEventMatchingListInMode` for every sample; eframe 0.35 / winit 0.30.13 / wgpu 29. The waker from the core thread is the defence regardless of the root cause; the logger is how the root cause gets captured."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W14-21",
+   "title": "DSP-1 HLE slice 2: projection, raster, attitude and the remaining command families",
+   "phase": 14,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [
+    "W14-19"
+   ],
+   "acceptance": [
+    "every remaining DSP-1 command in the SNES Development Manual Book II \u00a75.4-5.6 is implemented clean-room with the fixed-point semantics the manual states: 02h projection parameter setting, 0Ah raster data calculation, 06h object projection, 0Eh screen-point coordinate, 01h/11h/21h set attitude A/B/C, 03h/13h/23h object->global A/B/C, 0Dh/1Dh/2Dh global->object A/B/C, 0Bh/1Bh/2Bh inner product A/B/C, 14h 3D angle rotation, 38h vector size comparison; each has at least one vector test derived from the formula, with tolerances stated where the HLE is not bit-exact",
+    "the unknown-command counter reads zero across the census's 600 frames for Super Mario Kart and Pilotwings (measured with the harness, e.g. a probe print), i.e. no DSP-1 title asks for a command this HLE lacks",
+    "Super Mario Kart's track (Mode 7 with DSP raster) and Pilotwings' flight view are checked by eye against a reference emulator and recorded; the census is re-run and every DSP title's verdict recorded in docs/TESTING.md \u00a70",
+    "the one DSP-family title that stayed refused after W14-19 slice 1 is named and its cause recorded (header variant, DSP-2/3/4, or a bad dump)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-17 by W14-19's close (slice 1). Sources are in W14-19's notes; the manual OCR excerpt lives outside the repo (re-derive from archive.org SNESDevManual book2_djvu.txt lines ~23779-31340). Raster (0Ah) is what Super Mario Kart's track needs: it produces per-scanline Mode 7 matrix rows from the projection parameters set by 02h; expect that to be the bulk of the work and the first thing to verify by eye."
    ],
    "stories": []
   }

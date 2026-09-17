@@ -128,6 +128,15 @@ pub struct SnesBus {
     /// per line, against the ~245 KB frame the same loop already produces.
     /// Gating it would cost more in plumbing than it saves.
     hdma_lanes: Vec<u8>,
+    /// The cartridge's DSP-1 bus window (D-010, ticket W14-19), present
+    /// iff `dsp1` is. Kept separate from `dsp1` itself because the window
+    /// is fixed cartridge shape (from `rf_cart::DspWindow`, never
+    /// serialized — it is recomputed from the mapper on load) while
+    /// `dsp1` is the chip's live, save-stated protocol state.
+    dsp_window: Option<rf_cart::DspWindow>,
+    /// The DSP-1 HLE (`None` for every cartridge that does not report
+    /// [`rf_cart::Coprocessor::Dsp1`]) — see [`Self::install_dsp1`].
+    pub dsp1: Option<crate::dsp1::Dsp1>,
 }
 
 impl SnesBus {
@@ -227,17 +236,35 @@ impl SnesBus {
             manual_shift: [0; 2],
             hdmaen: 0,
             pending_dma: 0,
+            dsp_window: None,
+            dsp1: None,
         }
     }
 
+    /// Wire up the cartridge's DSP-1 (D-010, ticket W14-19). Called by
+    /// [`crate::system::SnesSystem::load`] when the header reports
+    /// [`rf_cart::Coprocessor::Dsp1`]; every other cartridge never calls
+    /// this, so `target` falls straight through to [`map`] for it.
+    pub fn install_dsp1(&mut self, window: rf_cart::DspWindow) {
+        self.dsp_window = Some(window);
+        self.dsp1 = Some(crate::dsp1::Dsp1::new());
+    }
+
     fn target(&self, addr: u32) -> Target {
-        map(
-            self.mode,
-            ((addr >> 16) & 0xFF) as u8,
-            addr as u16,
-            self.rom.len(),
-            self.sram.len(),
-        )
+        let bank = ((addr >> 16) & 0xFF) as u8;
+        let offset = addr as u16;
+        // Checked BEFORE the generic map: a DSP-1 window's `dr`/`sr`
+        // ranges sit inside bank/offset space `map` would otherwise
+        // resolve as ROM, SRAM or WRAM mirror (see `dsp1_target`'s doc).
+        // `dsp_window` is `None` for every non-DSP-1 cartridge, so this
+        // is a no-op there and every existing golden's mapping is
+        // unchanged.
+        if let Some(window) = &self.dsp_window {
+            if let Some(target) = crate::mapping::dsp1_target(window, bank, offset) {
+                return target;
+            }
+        }
+        map(self.mode, bank, offset, self.rom.len(), self.sram.len())
     }
 
     /// Register reads WITHOUT side effects, shared by `read` and `peek`.
@@ -747,6 +774,14 @@ impl CpuBus for SnesBus {
             Target::Wram(i) => self.wram[i],
             Target::Sram(i) => self.sram[i],
             Target::Register(offset) => self.read_register(offset),
+            // DR reads advance the chip's output cursor (ticket W14-19);
+            // `dsp1` is `Some` whenever `target` can return these
+            // variants, since both come from the same `dsp_window`.
+            Target::Dsp1Dr => self
+                .dsp1
+                .as_mut()
+                .map_or(self.open_bus, crate::dsp1::Dsp1::read_dr),
+            Target::Dsp1Sr => self.dsp1.as_ref().map_or(self.open_bus, |d| d.read_sr()),
             Target::Open => self.open_bus,
         };
         self.open_bus = value;
@@ -777,6 +812,16 @@ impl CpuBus for SnesBus {
             Target::Wram(i) => self.wram[i] = value,
             Target::Sram(i) => self.sram[i] = value,
             Target::Register(offset) => self.write_register(offset, value),
+            // DR writes feed the command/parameter protocol (ticket
+            // W14-19). SR is documented read-only (snesdev/fullsnes name
+            // no write behaviour for it), so a write there is dropped —
+            // the same "ignore rather than guess" the ROM arm below uses.
+            Target::Dsp1Dr => {
+                if let Some(d) = self.dsp1.as_mut() {
+                    d.write_dr(value);
+                }
+            }
+            Target::Dsp1Sr => {}
             // ROM is read-only; a write is dropped rather than panicking,
             // because real cartridges ignore it and a game doing it by
             // accident must not take the emulator down (FR-CORE-013's
@@ -794,6 +839,14 @@ impl CpuBus for SnesBus {
             // Only the side-effect-free subset. An address whose read has
             // consequences reports open bus rather than firing them.
             Target::Register(offset) => self.read_register_pure(offset).unwrap_or(self.open_bus),
+            // Non-perturbing by construction: `peek_dr` never advances
+            // the output cursor, and `read_sr` has no side effect either
+            // way (contract this impl block's own doc states).
+            Target::Dsp1Dr => self
+                .dsp1
+                .as_ref()
+                .map_or(self.open_bus, crate::dsp1::Dsp1::peek_dr),
+            Target::Dsp1Sr => self.dsp1.as_ref().map_or(self.open_bus, |d| d.read_sr()),
             Target::Open => self.open_bus,
         }
     }

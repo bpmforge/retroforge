@@ -737,6 +737,7 @@ First run, 2026-09-15, release build:
 | NES, after W14-15 | 1281 | **1212** | 6 | 63 | **0** | **0** |
 | NES, after W14-16 | 1281 | **1222** | 6 | 53 | **0** | **0** |
 | NES, after W14-17 | 1281 | **1222** | 6 | 53 | **0** | **0** |
+| SNES, after W14-19 slice 1 | 1265 | **1012** | 115 | 138 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -758,6 +759,32 @@ shape of progress, not a regression.
 Neither was fixed by the ticket that found them, on purpose: the census
 is a measurement, and folding its findings in would have turned it into
 an open-ended accuracy ticket.
+
+**W14-19 slice 1 (DSP-1 HLE, D-010)**, 2026-09-17, release build: refused
+fell from 150 to 138 as the DSP coprocessor nibble stopped being an
+automatic refusal — of that movement, 11 titles landed in "rendered
+something" and 1 in "uniform screen" (1001->1012 and 114->115). Both
+named acceptance titles rendered a title screen individually within the
+census's 600 frames: **Super Mario Kart** and **Pilotwings** each exit
+`RENDERED`. The move is 12 titles against the 13 named in D-010's
+"~13 titles" count; this run did not track down which title accounts
+for the gap (a duplicate archive, a header that scores below
+`MINIMUM_SCORE`, or a title this build's copier-header handling
+mishandles are the plausible causes, in no particular order) — recorded
+here rather than assumed away. Slice 1 implements SNES Development
+Manual §5.1-5.3 (multiply, inverse, triangle, radius, range, distance,
+rotate, polar) plus the three test commands; **titles that need §5.4+
+(raster/projection/attitude, not implemented this slice) are expected to
+land in "uniform screen" rather than "rendered something" here — the
+census does not attribute a bucket to a specific missing command, so
+this is stated as an expectation the numbers are consistent with (1 of
+the moved titles landed in "uniform" rather than "rendered"), not a
+per-title confirmation — recorded honestly rather than fudged into a
+pass.** The three DSP-2/3/4 titles named in D-010 (Dungeon Master, SD Gundam GX
+Rasetsu no Sho, Top Gear 3000) now load through the DSP-1 HLE as
+known-wrong, per the identification rule rf-cart applies (coprocessor
+nibble alone cannot tell the DSP families apart) — none of the three is
+expected to render correctly, and none is claimed to.
 
 **The second step of the triage is `crates/rf-harness/tests/title_probe.rs`**
 (ticket W14-11): an `#[ignore]`d, env-driven probe that instruction-steps

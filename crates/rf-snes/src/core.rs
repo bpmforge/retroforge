@@ -432,7 +432,15 @@ impl EmulatorCore for SnesCore {
             crate::mapping::Target::Rom(i) => self.system.bus.rom.get(i).copied().unwrap_or(0),
             crate::mapping::Target::Wram(i) => self.system.bus.wram.get(i).copied().unwrap_or(0),
             crate::mapping::Target::Sram(i) => self.system.bus.sram.get(i).copied().unwrap_or(0),
-            crate::mapping::Target::Register(_) | crate::mapping::Target::Open => 0,
+            // This viewer resolves through the plain `map` above, never
+            // `dsp1_target` — a DSP-1 window's DR/SR occupy the same
+            // bank/offset space `map` alone would call ROM/SRAM/open bus
+            // here, so these two arms are unreachable in practice but
+            // must still type-check (ticket W14-19 added the variants).
+            crate::mapping::Target::Register(_)
+            | crate::mapping::Target::Dsp1Dr
+            | crate::mapping::Target::Dsp1Sr
+            | crate::mapping::Target::Open => 0,
         }
     }
 }

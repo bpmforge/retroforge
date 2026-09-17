@@ -162,7 +162,10 @@ fn every_address_maps_within_bounds() {
                     Target::Rom(i) => assert!(i < ROM_32K, "{addr_bank:02X}:{off:04X}"),
                     Target::Wram(i) => assert!(i < WRAM_LEN, "{addr_bank:02X}:{off:04X}"),
                     Target::Sram(i) => assert!(i < 8192, "{addr_bank:02X}:{off:04X}"),
-                    Target::Register(_) | Target::Open => {}
+                    // `map` itself never returns these (ticket W14-19):
+                    // only `dsp1_target`, checked separately by `bus.rs`
+                    // before `map` runs, does.
+                    Target::Register(_) | Target::Dsp1Dr | Target::Dsp1Sr | Target::Open => {}
                 }
             }
         }
