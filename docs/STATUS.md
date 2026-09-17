@@ -3337,3 +3337,27 @@ stories, 10 decisions).
 
   Gate: workspace **1850 passing / 0 failed / 36 ignored**, clippy clean,
   arch OK, local-gate exit 0.
+
+- **W14-15 — five small boards: BNROM/NINA-001, Camerica Quattro,
+  Sachen, Death Race, Jaleco JF** (2026-09-17). NES census, same 1281
+  archives: **1197 -> 1212** render, refused 78 -> 63, uniform 6,
+  crashed **0**, timed out **0**.
+
+  The tail of the refused bucket, taken by what has retail or widely
+  played titles behind it: Deadly Towers and Impossible Mission II (34),
+  the three Quattro carts (232), Tengen Tetris and Panesian's three
+  (148), Death Race (144), the Ninja JaJaMaru retro-collection dumps
+  (87). Two of the boards keep their registers in `$6000-$7FFF`, so the
+  Mapper trait gained `cpu_write_wram`, an observer the bus calls after
+  storing the byte in PRG RAM, and the CHR/latch/mirroring push after a
+  write became one helper shared by the `$6000` and `$8000` arms.
+
+  Mapper 34 is two boards under one number; nesdev's rule without NES 2.0
+  is used: CHR ROM means NINA-001, CHR RAM means BNROM. Death Race is
+  Color Dreams with bit 0 forced from the ROM byte under the write, and
+  its test writes a value the ROM overrides both ways. Left in the NES
+  refused bucket now: MMC5 (11), TQROM (3), and multicarts, Racermate
+  and CPROM that stay out on purpose.
+
+  Gate: workspace **1856 passing / 0 failed / 36 ignored**, clippy clean,
+  arch OK, local-gate exit 0.

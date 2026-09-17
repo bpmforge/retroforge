@@ -6265,9 +6265,9 @@
     "each register map is cited to nesdev; unit tests pin every bank field, the NINA-001-vs-BNROM choice by CHR presence, and Death Race's ROM-driven bit 0"
    ],
    "points": 2,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
-    "FILED 2026-09-17 from the header tally after W14-14 (78 refused: MMC5 11, TQROM 3, then a long tail). These five are the tail's simple discrete parts with retail or widely-played titles: Deadly Towers and Impossible Mission II (34), the three Quattro carts (232), Tengen Tetris and three Panesian titles (148), Death Race (144), the two Ninja JaJaMaru retro-collection dumps (87). Multicarts (Coolboy 268, Action 52 228, 446, Maxi-15 234), Racermate 168 and the CHR-RAM-banked CPROM 13 stay out."
+    "CLOSED 2026-09-17. NES census over the same 1281 archives: rendered 1197 -> 1212, refused 78 -> 63, uniform 6 (all non-retail), crashed 0, timed out 0. Mapper::cpu_write_wram added; push_mapper_view shared by the $6000 and $8000 write arms. Remaining NES refused (63): MMC5 (11, the last big commercial board -- ExRAM, extended attributes, split screen, its own scanline IRQ, a multiplier; several days), TQROM (3, blocked by the CHR push design), and ~49 that stay out on purpose: Coolboy/446/Maxi-15/Action 52 multicarts, Racermate exercise-bike carts, CPROM (CHR-RAM banking), Jaleco SS88006 (4, a real board -- candidate for a later small ticket), and unlicensed oddities.",    "FILED 2026-09-17 from the header tally after W14-14 (78 refused: MMC5 11, TQROM 3, then a long tail). These five are the tail's simple discrete parts with retail or widely-played titles: Deadly Towers and Impossible Mission II (34), the three Quattro carts (232), Tengen Tetris and three Panesian titles (148), Death Race (144), the two Ninja JaJaMaru retro-collection dumps (87). Multicarts (Coolboy 268, Action 52 228, 446, Maxi-15 234), Racermate 168 and the CHR-RAM-banked CPROM 13 stay out."
    ],
    "stories": []
   }
