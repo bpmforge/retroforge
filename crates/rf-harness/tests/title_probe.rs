@@ -1,0 +1,395 @@
+//! A per-title diagnostic probe for the boot census's buckets (ticket
+//! W14-11). Local only: it takes ROM paths from the environment and is
+//! `#[ignore]`d, so no gate and no plain `cargo test` can start it.
+//!
+//! This is the tool that found W14-09 and all four defects of W14-10. It
+//! instruction-steps a title, then samples where the 65816 and the SPC700
+//! spend their time and prints the loops each is stuck in, the PPU/APU
+//! register state, and — on request — disassembly, ARAM dumps, ROM byte
+//! searches, a ring of the last port changes and a ring of the last PCs.
+//!
+//! ```text
+//! PROBE_ROMS=a.zip:b.zip            colon-separated archives or bare ROMs (required)
+//! PROBE_INSTR=6000000               CPU instructions to run first (default 30M)
+//! PROBE_SAMPLE=20000                instructions to sample after that
+//! PROBE_MODE=frames PROBE_FRAMES=N  instead: step N frames, report the first varied frame
+//! PROBE_M7=1                        with frames mode: print Mode 7 state and palette diversity
+//! PROBE_DIS=bb:start:end[,...]      65816 disassembly ranges (hex, end exclusive)
+//! PROBE_ARAM=start:end[,...]        ARAM hex dumps
+//! PROBE_FIND=hex[,hex]              search ARAM for byte patterns
+//! PROBE_FINDROM=hex[,hex]           search the ROM file (LoROM address shown)
+//! PROBE_PORTS=1                     print the last 40 APU port changes with both PCs
+//! PROBE_RING=1 / PROBE_SPCRING=1    print the last distinct CPU / SPC PCs
+//! PROBE_ALLPC=1                     print every sampled CPU PC, sorted
+//! PROBE_STOP_ON_SPC_STOP=1          stop early when the SPC700 halts under a running program
+//! ```
+//!
+//! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
+//! PROBE_ROMS="$HOME/Games/Roms/snes/Wild Guns (USA).zip" cargo test
+//! --release -p rf-harness --test title_probe -- --ignored --nocapture`.
+//!
+//! Nothing it prints is a verdict; it is where to look next.
+use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, PpuPixel, Step};
+use std::collections::HashMap;
+use std::io::Read;
+use std::path::Path;
+
+#[derive(Default)]
+struct Sink {
+    lines: u64,
+    varied: bool,
+    first: Option<u8>,
+}
+impl CoreSink for Sink {
+    fn video_scanline(&mut self, _y: u16, pixels: &[PpuPixel]) {
+        self.lines += 1;
+        for p in pixels {
+            match self.first {
+                None => self.first = Some(p.palette_index),
+                Some(f) if f != p.palette_index => self.varied = true,
+                _ => {}
+            }
+        }
+    }
+    fn audio(&mut self, _s: &[i16]) {}
+    fn event(&mut self, _e: CoreEvent) {}
+}
+
+fn rom_bytes(path: &Path) -> Option<Vec<u8>> {
+    let raw = std::fs::read(path).ok()?;
+    if !raw.starts_with(b"PK\x03\x04") {
+        return Some(raw);
+    }
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(raw)).ok()?;
+    for index in 0..archive.len() {
+        let Ok(mut file) = archive.by_index(index) else {
+            break;
+        };
+        if !file.is_file() {
+            continue;
+        }
+        let mut buf = Vec::new();
+        if (&mut file).take(64 << 20).read_to_end(&mut buf).is_err() {
+            continue;
+        }
+        if rf_cart::Cartridge::load(&buf).is_ok() {
+            return Some(buf);
+        }
+    }
+    None
+}
+
+#[test]
+#[ignore = "local diagnostic: set PROBE_ROMS to real ROM paths"]
+fn probe() {
+    let frames: usize = std::env::var("PROBE_FRAMES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
+    for path in std::env::var("PROBE_ROMS").unwrap().split(':') {
+        let bytes = rom_bytes(Path::new(path)).unwrap();
+        let mut core = rf_snes::core::SnesCore::load(&bytes).unwrap();
+        let mut sink = Sink::default();
+        if std::env::var("PROBE_MODE").as_deref() == Ok("frames") {
+            let mut first_varied: Option<usize> = None;
+            for f in 0..frames {
+                core.step(Step::Frame, &mut sink);
+                if sink.varied && first_varied.is_none() {
+                    first_varied = Some(f);
+                    break;
+                }
+            }
+            println!(
+                "FRAMES varied_at={:?} {}",
+                first_varied,
+                Path::new(path).file_name().unwrap().to_string_lossy()
+            );
+            if std::env::var("PROBE_M7").is_ok() {
+                {
+                    let sys = core.system();
+                    let ppu = &sys.bus.ppu;
+                    println!(
+                        "    mode={} forced_blank={} bright={} tm=[{}] m7={:?} bg1 hofs={} vofs={}",
+                        ppu.bg_mode,
+                        ppu.forced_blank,
+                        ppu.brightness,
+                        (0..4)
+                            .map(|i| if ppu.bgs[i].enabled { '1' } else { '0' })
+                            .collect::<String>(),
+                        ppu.mode7,
+                        ppu.bgs[0].hofs,
+                        ppu.bgs[0].vofs
+                    );
+                }
+                let sys2 = core.system_mut();
+                let mut idx = std::collections::HashSet::new();
+                for y in 0..224u16 {
+                    for px in sys2.bus.ppu.render_scanline(y).pixels {
+                        idx.insert(px.palette_index);
+                    }
+                }
+                println!(
+                    "    distinct_indices_now={} sample={:?}",
+                    idx.len(),
+                    idx.iter().take(8).collect::<Vec<_>>()
+                );
+            }
+            continue;
+        }
+        // instruction-step the whole run, logging port/timer changes in a ring buffer
+        let mut ring: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        let mut last = ([0u8; 4], [0u8; 4], [false; 3]);
+        let mut n: u64 = 0;
+        let mut pcring: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+        let mut ring_last = u32::MAX;
+        let mut spcring: std::collections::VecDeque<u16> = std::collections::VecDeque::new();
+        let mut spc_last = u16::MAX;
+        let cap: u64 = std::env::var("PROBE_INSTR")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30_000_000);
+        while n < cap {
+            core.step(Step::Instruction, &mut sink);
+            n += 1;
+            let sys = core.system();
+            let apu = &sys.bus.apu;
+            let pcv = sys.cpu.pc24();
+            let spcv = apu.cpu.pc;
+            if spcv != spc_last {
+                spcring.push_back(spcv);
+                spc_last = spcv;
+                if spcring.len() > 3000 {
+                    spcring.pop_front();
+                }
+            }
+            if std::env::var("PROBE_STOP_ON_SPC_STOP").is_ok()
+                && apu.cpu.stopped
+                && apu.boot.is_running()
+            {
+                break;
+            }
+            if pcv != ring_last {
+                pcring.push_back(pcv);
+                ring_last = pcv;
+                if pcring.len() > 120 {
+                    pcring.pop_front();
+                }
+            }
+            let now = (
+                apu.ports_in,
+                apu.ports_out,
+                [
+                    apu.timers[0].enabled,
+                    apu.timers[1].enabled,
+                    apu.cpu.stopped,
+                ],
+            );
+            if now != last {
+                let line = format!("n={n} cpu={:06X} A={:04X} spc={:04X} stop={} ipl={} boot={:?} in={:02x?} out={:02x?} ten={:?}", sys.cpu.pc24(), sys.cpu.a, apu.cpu.pc, apu.cpu.stopped, apu.ipl_enabled, apu.boot.state, now.0, now.1, now.2);
+                ring.push_back(line);
+                if ring.len() > 40 {
+                    ring.pop_front();
+                }
+                last = now;
+            }
+        }
+        if std::env::var("PROBE_PORTS").is_ok() {
+            for l in &ring {
+                println!("      {l}");
+            }
+        }
+        if std::env::var("PROBE_SPCRING").is_ok() {
+            println!(
+                "    spcring: {}",
+                spcring
+                    .iter()
+                    .map(|p| format!("{p:04X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+        if std::env::var("PROBE_RING").is_ok() {
+            println!(
+                "    ring: {}",
+                pcring
+                    .iter()
+                    .map(|p| format!("{p:06X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+        let _ = frames;
+        // sample CPU PCs over 20000 instructions
+        let mut pcs: HashMap<u32, u32> = HashMap::new();
+        let mut spc: HashMap<u16, u32> = HashMap::new();
+        let (mut nmi_hits, mut irq_hits) = (0u32, 0u32);
+        let vec = |sys: &rf_snes::system::SnesSystem, at: u32| -> u32 {
+            u32::from(rf_snes::cpu::CpuBus::peek(&sys.bus, at))
+                | (u32::from(rf_snes::cpu::CpuBus::peek(&sys.bus, at + 1)) << 8)
+        };
+        let (nmi_vec, irq_vec) = (vec(core.system(), 0xFFEA), vec(core.system(), 0xFFEE));
+        let sample: usize = std::env::var("PROBE_SAMPLE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20000);
+        for _ in 0..sample {
+            core.step(Step::Instruction, &mut sink);
+            let pcv = core.system().cpu.pc24();
+            if pcv == nmi_vec {
+                nmi_hits += 1;
+            }
+            if pcv == irq_vec {
+                irq_hits += 1;
+            }
+            *pcs.entry(pcv).or_default() += 1;
+            *spc.entry(core.system().bus.apu.cpu.pc).or_default() += 1;
+        }
+        let sys = core.system();
+        let ppu = &sys.bus.ppu;
+        let apu = &sys.bus.apu;
+        let mut top: Vec<_> = pcs.iter().collect();
+        top.sort_by(|a, b| b.1.cmp(a.1));
+        let mut stop: Vec<_> = spc.iter().collect();
+        stop.sort_by(|a, b| b.1.cmp(a.1));
+        println!(
+            "=== {}",
+            Path::new(path).file_name().unwrap().to_string_lossy()
+        );
+        println!("  varied={} lines={} forced_blank={} bright={} mode={} tm=[{}] ts={:#x} cgram_nonzero={} vram_nonzero={} oam_nonzero={}",
+            sink.varied, sink.lines, ppu.forced_blank, ppu.brightness, ppu.bg_mode,
+            (0..4).map(|i| if ppu.bgs[i].enabled {'1'} else {'0'}).collect::<String>() + if ppu.obj_enabled {"+obj"} else {""},
+            ppu.ts,
+            ppu.cgram.iter().filter(|c| **c != 0).count(), ppu.vram.iter().filter(|b| **b != 0).count(), ppu.oam.iter().filter(|b| **b != 0).count());
+        println!(
+            "  nmitimen={:?} apu.boot_running={} spc.stopped={} ports_in={:02x?} ports_out={:02x?}",
+            sys.bus.nmitimen,
+            apu.boot.is_running(),
+            apu.cpu.stopped,
+            apu.ports_in,
+            apu.ports_out
+        );
+        if std::env::var("PROBE_ALLPC").is_ok() {
+            let mut all: Vec<_> = pcs.keys().collect();
+            all.sort();
+            println!(
+                "  allpc: {}",
+                all.iter()
+                    .map(|p| format!("{p:06X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+        println!(
+            "  distinct_pc={} top: {}",
+            pcs.len(),
+            top.iter()
+                .take(6)
+                .map(|(pc, n)| format!("{pc:06X}x{n}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        println!(
+            "  spc distinct_pc={} top: {}",
+            spc.len(),
+            stop.iter()
+                .take(4)
+                .map(|(pc, n)| format!("{pc:04X}x{n}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        struct Pk<'a>(&'a rf_snes::bus::SnesBus);
+        impl rf_snes::trace::TracePeek for Pk<'_> {
+            fn peek(&self, addr: u32) -> u8 {
+                rf_snes::cpu::CpuBus::peek(self.0, addr)
+            }
+        }
+        let pk = Pk(&sys.bus);
+        let cpu = &sys.cpu;
+        for (pc, _) in top.iter().take(3) {
+            let pbr = (**pc >> 16) as u8;
+            let lo = (**pc & 0xFFFF) as u16;
+            let (_, bytes, text) = rf_snes::trace::disassemble(pbr, lo, cpu.p, cpu.e, &pk);
+            println!("    cpu {pc:06X}: {bytes:02x?} {text}");
+        }
+        if let Ok(pat) = std::env::var("PROBE_FINDROM") {
+            for hexpat in pat.split(',') {
+                let needle: Vec<u8> = (0..hexpat.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hexpat[i..i + 2], 16).unwrap())
+                    .collect();
+                let hits: Vec<String> = bytes
+                    .windows(needle.len())
+                    .enumerate()
+                    .filter(|(_, w)| *w == &needle[..])
+                    .map(|(i, _)| {
+                        format!(
+                            "{i:06X}(lo {:02X}:{:04X})",
+                            0x80 + i / 0x8000,
+                            0x8000 + i % 0x8000
+                        )
+                    })
+                    .collect();
+                println!("    findrom {hexpat}: {}", hits.join(" "));
+            }
+        }
+        if let Ok(pat) = std::env::var("PROBE_FIND") {
+            for hexpat in pat.split(',') {
+                let needle: Vec<u8> = (0..hexpat.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hexpat[i..i + 2], 16).unwrap())
+                    .collect();
+                let hits: Vec<String> = apu
+                    .aram
+                    .windows(needle.len())
+                    .enumerate()
+                    .filter(|(_, w)| *w == &needle[..])
+                    .map(|(i, _)| format!("{i:04X}"))
+                    .collect();
+                println!("    find {hexpat}: {}", hits.join(" "));
+            }
+        }
+        for spec in std::env::var("PROBE_DIS")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+        {
+            // "pbr:start:end" forward disassembly
+            let parts: Vec<&str> = spec.split(':').collect();
+            let pbr = u8::from_str_radix(parts[0], 16).unwrap();
+            let mut pc = u16::from_str_radix(parts[1], 16).unwrap();
+            let end = u32::from_str_radix(parts[2], 16).unwrap();
+            while u32::from(pc) < end {
+                let (n, bytes, text) = rf_snes::trace::disassemble(pbr, pc, cpu.p, cpu.e, &pk);
+                println!("    dis {pbr:02X}{pc:04X}: {bytes:02x?} {text}");
+                pc = pc.wrapping_add(n as u16);
+            }
+        }
+        for spec in std::env::var("PROBE_ARAM")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+        {
+            let parts: Vec<&str> = spec.split(':').collect();
+            let a = usize::from_str_radix(parts[0], 16).unwrap();
+            let b = usize::from_str_radix(parts[1], 16).unwrap();
+            for row in (a..b).step_by(16) {
+                println!(
+                    "    aram {row:04X}: {:02x?}",
+                    &apu.aram[row..(row + 16).min(b)]
+                );
+            }
+        }
+        for (pc, _) in stop.iter().take(3) {
+            let a = usize::from(**pc);
+            println!(
+                "    spc {pc:04X}: {:02x?}",
+                &apu.aram[a..(a + 10).min(apu.aram.len())]
+            );
+        }
+        println!("    timers: {:?} test={:#04x}", apu.timers, apu.test);
+        println!("    irq: {:?} mode={:?} nmi_vec={nmi_vec:04X} nmi_entries={nmi_hits} irq_vec={irq_vec:04X} irq_entries={irq_hits} cpu.stopped={}", sys.bus.irq, sys.bus.nmitimen.irq_mode(), sys.cpu.stopped);
+        println!("    spc regs: a={:02x} x={:02x} y={:02x} ; F4-F7 in(spc reads)={:02x?} out(cpu reads)={:02x?} timers en={:?} counters={:?}",
+            apu.cpu.a, apu.cpu.x, apu.cpu.y, apu.ports_in, apu.ports_out,
+            apu.timers.iter().map(|t| t.enabled).collect::<Vec<_>>(), apu.timers.iter().map(|t| t.peek_counter()).collect::<Vec<_>>());
+    }
+}

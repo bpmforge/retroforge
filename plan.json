@@ -6148,6 +6148,30 @@
     "THE MECHANISM: SnesBus writes $4200 as `self.nmitimen = NmiTimen(value)` and nothing else. IrqTimer.fired stays latched from an earlier H/V IRQ; SnesSystem::step takes an IRQ whenever `irq.fired && !I`. The PLP cleared I, the stale flag fired. On hardware disabling the H/V IRQ in $4200 deasserts the IRQ line: fullsnes $4211 ('the flag is reset ... on disabling IRQs via 4200h'), and bsnes cpu/io.cpp clears irqLine when neither hirq nor virq is enabled after a $4200 write."
    ],
    "stories": []
+  },
+  {
+   "id": "W14-11",
+   "title": "A per-title diagnostic probe for the census buckets",
+   "phase": 14,
+   "crate": "rf-harness",
+   "write_scope": [
+    "crates/rf-harness/tests/title_probe.rs",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [
+    "W14-03"
+   ],
+   "acceptance": [
+    "an #[ignore]d, env-driven test in rf-harness instruction-steps one or more titles and reports where the 65816 and SPC700 spend their time, the PPU/APU state, and on request disassembly, ARAM dumps, ROM searches, and rings of port changes and PCs",
+    "no ROM path or ROM byte is committed; it takes everything from the environment and is never in any gate",
+    "docs/TESTING.md \u00a70 names it beside the census as the second step of the triage"
+   ],
+   "points": 1,
+   "status": "done",
+   "notes": [
+    "FILED AND CLOSED 2026-09-16. This is the tool that found W14-09 (the APU scheduler) and all four defects of W14-10 during this session; it had lived as an uncommitted throwaway and would have been lost. Committed as crates/rf-harness/tests/title_probe.rs with its env-var contract in the module doc. It is clippy-invisible (tests/ targets are not in the gate's clippy run) and shows up as one more ignored test in the workspace count."
+   ],
+   "stories": []
   }
  ]
 }

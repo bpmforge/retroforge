@@ -752,3 +752,12 @@ shape of progress, not a regression.
 Neither was fixed by the ticket that found them, on purpose: the census
 is a measurement, and folding its findings in would have turned it into
 an open-ended accuracy ticket.
+
+**The second step of the triage is `crates/rf-harness/tests/title_probe.rs`**
+(ticket W14-11): an `#[ignore]`d, env-driven probe that instruction-steps
+one title, samples where both CPUs spend their time, and prints the loops
+each is stuck in with the register state — plus disassembly, ARAM dumps,
+ROM searches and rings of port changes and PCs on request. The census says
+*which* titles; the probe says *where to look*. Its module doc has the
+env-var contract. Like the census it takes ROM paths from the environment
+and is in no gate.
