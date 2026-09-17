@@ -134,12 +134,14 @@ mod camerica;
 mod cnrom;
 mod color_dreams;
 mod dxrom;
+mod fme7;
 mod gxrom;
 mod mmc1;
 mod mmc2;
 mod mmc3;
 mod nina;
 mod nrom;
+mod rambo1;
 mod uxrom;
 
 #[cfg(test)]
@@ -151,12 +153,14 @@ pub use camerica::Camerica;
 pub use cnrom::Cnrom;
 pub use color_dreams::ColorDreams;
 pub use dxrom::DxRom;
+pub use fme7::Fme7;
 pub use gxrom::GxRom;
 pub use mmc1::Mmc1;
 pub use mmc2::Mmc2;
 pub use mmc3::{Mmc3, Mmc3Revision};
 pub use nina::Nina;
 pub use nrom::Nrom;
+pub use rambo1::Rambo1;
 pub use uxrom::UxRom;
 
 /// One cartridge mapper's CPU-side and CHR-bank-selection behavior. See
@@ -233,6 +237,14 @@ pub trait Mapper {
     /// has an IRQ source.
     fn irq_pending(&self) -> bool {
         false
+    }
+
+    /// `cycles` CPU cycles elapsed (ticket W14-14). Driven from the one
+    /// place the bus advances its master clock, so a mapper that counts
+    /// CPU cycles for its IRQ — FME-7, RAMBO-1's cycle mode — sees every
+    /// one, DMA-stolen cycles included. Default no-op.
+    fn tick_cpu_cycles(&mut self, cycles: u32) {
+        let _ = cycles;
     }
 
     /// Serialize this mapper's *state* into the `MAPR` chunk (ticket

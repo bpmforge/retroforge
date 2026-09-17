@@ -25,7 +25,7 @@ const CHR_BANK: usize = 8 * 1024;
 /// rather than by reputation: a census of 1281 real NES archives
 /// (2026-09-15) bucketed all 223 refusals by mapper number, and these four
 /// were the largest buckets at 54, 17, 28 and 17 games — 116 between them.
-const SUPPORTED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7, 9, 11, 28, 66, 71, 79, 118, 206];
+const SUPPORTED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7, 9, 11, 28, 64, 66, 69, 71, 79, 118, 206];
 
 /// A handful of well-known mapper names, used only to make an
 /// unsupported-mapper diagnostic more useful. Not exhaustive — absence
@@ -422,7 +422,7 @@ mod mapper28_tests {
         assert!(SUPPORTED_MAPPERS.contains(&28), "Action 53");
         assert!(SUPPORTED_MAPPERS.contains(&7), "AxROM");
 
-        for unsupported in [5u16, 64, 69, 210] {
+        for unsupported in [5u16, 119, 210] {
             assert!(
                 !SUPPORTED_MAPPERS.contains(&unsupported),
                 "mapper {unsupported} must still be refused"

@@ -109,8 +109,8 @@ pub use controller::Controller;
 use crate::apu::Apu;
 use crate::cpu::CpuBus;
 use crate::mappers::{
-    Action53, AxRom, Camerica, Cnrom, ColorDreams, DxRom, GxRom, Mapper, Mmc1, Mmc2, Mmc3,
-    Mmc3Revision, Nina, Nrom, UxRom,
+    Action53, AxRom, Camerica, Cnrom, ColorDreams, DxRom, Fme7, GxRom, Mapper, Mmc1, Mmc2, Mmc3,
+    Mmc3Revision, Nina, Nrom, Rambo1, UxRom,
 };
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
@@ -248,6 +248,17 @@ impl NesBus {
             )),
             // Ticket W14-13.
             9 => Box::new(Mmc2::new(rom.prg_rom().to_vec(), rom.chr_rom().to_vec())),
+            // Ticket W14-14.
+            64 => Box::new(Rambo1::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+            )),
+            69 => Box::new(Fme7::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+            )),
             28 => Box::new(Action53::new(rom.prg_rom().to_vec())),
             // Ticket W14-12.
             66 => Box::new(GxRom::new(
@@ -865,6 +876,17 @@ impl NesBus {
     /// later" row needs.
     fn tick_master(&mut self, cycles: u32) {
         self.master_cycle += cycles as u64;
+        // Ticket W14-14: cycle-counting mapper IRQs (FME-7, RAMBO-1's
+        // cycle mode) advance here, and a rising IRQ queues the same
+        // event the A12 path queues in `drain_a12_edges`.
+        let was_pending = self.mapper.irq_pending();
+        self.mapper.tick_cpu_cycles(cycles);
+        if !was_pending
+            && self.mapper.irq_pending()
+            && self.ppu.event_mask().is_subscribed(EventMask::MAPPER_IRQ)
+        {
+            self.ppu.queue_event(CoreEvent::MapperIrq);
+        }
         // Ticket W3-07b: the mode check is hoisted OUT of the per-cycle
         // loop rather than made per call, and that is a measurement, not
         // a preference. Putting it inside cost the accuracy path 3.9%
