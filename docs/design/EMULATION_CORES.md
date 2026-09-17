@@ -252,9 +252,25 @@ majority of games; per-dot upgrade path documented in code).
   extension; 512-byte copier header stripped before hashing (see
   game-identity research).
 - FastROM ($420D) speed switch. ExHiROM + coprocessors (SA-1 ~34 games,
-  SuperFX ~16, DSP-1 ~16, one-offs) **explicitly deferred to Phase 9+**;
-  `rf-cart` detects and reports "unsupported chip: SA-1" rather than
-  half-booting.
+  SuperFX ~16, one-offs) **explicitly deferred to Phase 9+**; `rf-cart`
+  detects and reports "unsupported chip: SA-1" rather than half-booting.
+- **DSP-1 (~13 games incl. Super Mario Kart, Pilotwings) — in scope via HLE
+  since 2026-09-17 (D-010, SRS FR-CORE-038, W14-18/W14-19).** The uPD7725's
+  own program ROM is copyrighted firmware and no dump ships in the
+  library, so this is command-level HLE (snes9x-style), not LLE of the
+  DSP chip — the documented ~30-command set with its fixed-point math, run
+  over the real DR/SR handshake. The coprocessor nibble in the header
+  (`data[base+0x16]`) cannot distinguish DSP-1 from DSP-2/3/4; `rf-cart`
+  accepts every nibble-0 DSP cart as DSP-1, and the DSP-2/3/4 titles
+  (Dungeon Master, SD Gundam GX Rasetsu no Sho, Top Gear 3000) are named
+  only in the profile/rom-manifest layer as known-wrong, never by title in
+  engine code (law 5). DR/SR bus window per cartridge variant (verified
+  against snes9x's `memmap.cpp`, the reference HLE implementation this
+  approach follows — see W14-18/19 notes for the exact bank/offset ranges
+  and the one open cross-check against fullsnes/snesdev prose): LoROM
+  ≤1 MiB, LoROM >1 MiB (DSP-1B), and HiROM each map DR and SR to a
+  different bank/offset window, split at a per-variant boundary offset
+  inside a shared 32 KB (LoROM) or 8 KB (HiROM) window.
 
 ## 4. Cartridge layer boundary (`rf-cart`)
 

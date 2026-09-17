@@ -8,7 +8,7 @@ Phases refer to `docs/ROADMAP.md`; requirement IDs to `docs/SRS.md`.
 | Subsystem | In scope (v1 = Phases 0-9) | Later / conditional | Out (see NON_GOALS) |
 |---|---|---|---|
 | NES core | 2A03 CPU+APU, per-dot PPU, NROM/MMC1/UxROM/CNROM/MMC3 (~91.5% of licensed NA library), then AxROM (~96%) | FDS, MMC5, VRC family | Everything past ~96% coverage as a goal |
-| SNES core | 65C816/5A22, DMA/HDMA, PPU modes 0-7 (Mode 7, windows, mosaic, color math), S-SMP/S-DSP, LoROM/HiROM, battery saves | ExHiROM; SA-1, Super FX, DSP-1 | One-off chips (Cx4, S-DD1, SPC7110...) |
+| SNES core | 65C816/5A22, DMA/HDMA, PPU modes 0-7 (Mode 7, windows, mosaic, color math), S-SMP/S-DSP, LoROM/HiROM, battery saves, DSP-1 (HLE, added 2026-09-17 — see history below) | ExHiROM; SA-1, Super FX | One-off chips (Cx4, S-DD1, SPC7110...) |
 | Modes | Accuracy / Compatibility / Enhanced / Research-Debug / Game-Aware presets + CI mode-invariant | — | — |
 | Renderer | wgpu original + enhanced pipelines, integer/aspect scaling, WGSL shader chain (CRT, xbr-class — MIT xBR basis, RENDERER §4 licensing law), layered scene-graph composition, ultrawide, side-by-side, headless golden-frame mode | HDR output (wgpu 30 supports), custom user shaders | slang/GLSL preset compat in v1 |
 | Enhancement (generic) | Sprite-limit bypass + auto-re-enable heuristic, temporal de-flicker, wideNES-style stitcher (scroll telemetry, IRQ/HDMA split detection, scene hashing, re-entrant canvases), HUD heuristics | MappyLand-style smarter segmentation | Generic full-level or widescreen-gameplay promises |
@@ -48,3 +48,14 @@ Anything moving between columns above requires: an entry in this file's
 history, a ROADMAP.md phase adjustment, and re-validation of the affected
 plan.json tickets. The honesty contract rows in `docs/ARCHITECTURE.md` §2
 may only be relaxed with new research evidence.
+
+## 4. History
+
+- **2026-09-17** — DSP-1 moved from "Later / conditional" to "In scope" on
+  the SNES core row. Brad's ruling (D-010): the LoROM/HiROM gate condition
+  NON_GOALS #10 set was met (Phase 14 census: 1001/1265 SNES archives
+  render, 0 crashes), and DSP-1 is the largest deferred-chip bucket with
+  the smallest surface. Implementation is HLE of the DSP-1 command set
+  (SRS FR-CORE-038), not LLE of the uPD7725. SA-1, Super FX, and the
+  one-off chips are unaffected and stay deferred. ROADMAP.md Phase 7
+  gained a line for W14-18/W14-19; plan.json gained those two tickets.

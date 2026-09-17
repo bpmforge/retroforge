@@ -165,6 +165,14 @@ Exit criteria: PeterLemon CPU/PPU/Mode-7 golden set green; 3 designated
 plain-LoROM commercial titles (user-supplied) playable start-to-credits
 sampled; RF-Scroller-S (in-repo SNES fixture) plays; save states roundtrip.
 
+**2026-09-17 addendum:** DSP-1 lifted out of the NON_GOALS #10 enhancement-
+chip deferral once the plain-LoROM/HiROM gate condition was met (Phase 14
+census, plan.json wave 14: 1001/1265 SNES archives render, 0 crashes).
+W14-18 (`rf-cart` accepts DSP-1 carts and reports the chip) and W14-19
+(DSP-1 HLE: command set, register protocol, bus window) carry this; SA-1,
+Super FX, and the one-off chips are unaffected. See D-010, SRS
+FR-CORE-038, SCOPE.md §4.
+
 ## Phase 8 — Advanced enhancements ✅ tickets closed
 
 Widescreen per-BG-layer policies for SNES (bsnes-hd model) + NES profile

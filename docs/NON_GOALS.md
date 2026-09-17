@@ -38,9 +38,14 @@ requires a design doc, not a ticket.
    scene-graph output, multi-panel debugger, or authoring UX (§5 of
    prior-art). A flattened libretro export (wide geometry + core options) is
    plausible post-Phase 9; the core/frontend seam is designed to allow it.
-10. **SNES enhancement chips deferred.** SA-1 (~34 games), Super FX (~16),
-    DSP-1 (~16) wait until plain LoROM/HiROM accuracy is gated; DSP-2/3/4,
-    Cx4, S-DD1, SPC7110, ST01x (1-3 games each) may never come.
+10. **SNES enhancement chips deferred.** SA-1 (~34 games), Super FX (~16)
+    wait until plain LoROM/HiROM accuracy is gated; DSP-2/3/4, Cx4, S-DD1,
+    SPC7110, ST01x (1-3 games each) may never come. **DSP-1 (~13 games)
+    lifted from this deferral 2026-09-17** (Brad's ruling): the LoROM/HiROM
+    gate condition was met (Phase 14 census: 1001/1265 SNES archives
+    render, 0 crashes) and DSP-1 is the largest chip bucket with the
+    smallest surface (fixed command set, no second CPU on the bus) — see
+    FR-CORE-038, D-010, SCOPE.md history.
 11. **No generic "show the whole level" promise.** Unvisited areas require
     per-game ROM decoding via profiles. Generic tier shows *visited terrain
     only* (wideNES wall: off-screen actors are never simulated). UI language

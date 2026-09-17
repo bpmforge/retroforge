@@ -6319,6 +6319,56 @@
     "FILED 2026-09-17 by W14-16's close. Slice 1 boots every MMC5 title in the library; these three are what makes them render CORRECTLY rather than boot. ExGrafix and the split both change the background fetch itself (a per-tile CHR bank and palette, or a second scroll origin), which is the one thing the push/materialise CHR design cannot express from the mapper side -- the PPU's background fetch needs a per-tile hook or a PPU-owned copy of the extended RAM with the tile-to-bank rule inside it. The PPU already owns the extended RAM since slice 1, so the second is the natural path."
    ],
    "stories": []
+  },
+  {
+   "id": "W14-18",
+   "title": "rf-cart accepts DSP-1 carts and reports the chip",
+   "phase": 14,
+   "crate": "rf-cart",
+   "write_scope": [
+    "crates/rf-cart/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "LoROM and HiROM images with cartridge-type $03/$04/$05 and coprocessor nibble 0 (\"DSP\") no longer return UnsupportedChip; the parsed header exposes a Coprocessor::Dsp1 (or equivalent) variant that rf-snes can read",
+    "every other coprocessor nibble, and hw>=3 without nibble 0, still refuse with the same FR-CORE-013 diagnostic text, pinned by the existing tests plus one new test for each",
+    "the DSP register bus window is derived from the header per SRS FR-CORE-038 / D-010 and exposed as data on the parsed cart (not computed in rf-snes): LoROM <=1 MiB, LoROM >1 MiB (DSP-1B), and HiROM each get their own bank-range + offset-range + DR/SR split-offset triple, cited to fullsnes \"SNES Cart DSP1\" and snesdev in a doc comment; verify the three variants independently before committing to exact numbers (see W14-18/19 handoff note on the snes9x memmap.cpp cross-check)"
+   ],
+   "points": 1,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-17, Brad's ruling lifting DSP-1 out of the NON_GOALS #10 deferral (D-010, SRS FR-CORE-038) now that the LoROM/HiROM gate condition is met (Phase 14 census: 1001/1265 SNES archives render, 0 crashes). Chip ID rule: the coprocessor nibble cannot distinguish DSP-1 from DSP-2/3/4, so rf-cart accepts every nibble-0 DSP cart as DSP-1; the three known DSP-2/3/4 titles (Dungeon Master, SD Gundam GX Rasetsu no Sho, Top Gear 3000) are named only in the profile/rom-manifest layer, never here (law 5).",
+    "DR/SR WINDOW -- VERIFY BEFORE IMPLEMENTING, NOT COPIED FROM A ROM: fullsnes.htm's DSP1 chapter could not be extracted through this session's fetch tooling (page too large / anchor-scoped fetch returned no table). Two secondary sources disagreed with each other (a search-engine snippet citing $30-$3F/$B0-$BF for LoROM, snes.nesdev.org's DSP-1 page paraphrase giving $308000-$3FBFFF-shaped numbers that actually match DSP4's LoROM mapping in snes9x, not DSP1's). The one primary source this session could read directly was snes9x's memmap.cpp (github.com/snes9xgit/snes9x, map_DSP()), which is also the reference HLE implementation this ticket's approach follows: M_DSP1_LOROM_S (<=1 MiB) maps banks $20-$3F/$A0-$BF at offset $8000-$FFFF, DR/SR split at $C000 (DR $8000-$BFFF, SR $C000-$FFFF); M_DSP1_LOROM_L (DSP-1B, >1 MiB) maps banks $60-$6F/$E0-$EF at offset $0000-$7FFF, split at $4000 (DR $0000-$3FFF, SR $4000-$7FFF); M_DSP1_HIROM maps banks $00-$1F/$80-$9F at offset $6000-$7FFF, split at $7000 (DR $6000-$6FFF, SR $7000-$7FFF). Read this against fullsnes.htm and snes.nesdev.org/wiki/DSP-1 directly (not via a fetch summarizer) before writing the doc comment law 6 requires, and note the HiROM bank upper bound ($1F here vs $0F in one secondary source) is the one number that needs a second primary confirmation."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W14-19",
+   "title": "DSP-1 HLE: command set, register protocol, bus window",
+   "phase": 14,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [
+    "W14-18"
+   ],
+   "acceptance": [
+    "the DR/SR handshake ($8000/$8001-style data and status registers, 8-bit halves of 16-bit words, RQM bit, DRC bit) is implemented as documented on fullsnes/snesdev and pinned by unit tests",
+    "every DSP-1 command in the published set (00 multiply, 10 inverse, 04 sin/cos, 08 radius, 18 range, 28 distance, 0C rotate, 1C polar, 02 parameter, 0A raster, 06 project, 0E target, 20 attitude family, 1A gyrate, ...) is implemented with the fixed-point semantics of the documented algorithm, each with at least one vector test; vectors come from the public DSP-1 documentation, not from a ROM",
+    "the core routes the cart's DSP window through mapping.rs/bus.rs only when the cart reports the chip; every non-DSP cart's bus path is unchanged, checked by the existing goldens",
+    "DSP state is in the save-state chunk and determinism tests pass",
+    "census re-run: the DSP bucket moves from refused to render/uniform and every title's verdict is recorded in docs/TESTING.md section 0 and STATUS; Super Mario Kart and Pilotwings render a title screen within the census's 600 frames",
+    "the DSP-2/3/4 titles are recorded as known-wrong per the identification rule in W14-18"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "HLE-vs-LLE decision, recorded so a future reader does not re-litigate it (full text in D-010 / DECISIONS.md): HLE of the DSP-1 command set, not LLE of the uPD7725, because (1) the uPD7725's program ROM is copyrighted firmware with no dump in the library (law 5), (2) the ~30-command set is fully documented publicly and HLE is the approach snes9x has shipped for decades, (3) HLE is deterministic and needs no firmware file. An LLE-with-user-firmware path is noted as a possible later ticket, not promised. Accuracy Mode framing: the HLE reproduces the chip's documented outputs; this is an honest limitation recorded in EMULATION_CORES.md section 3.5, not a silent cycle-exact claim.",
+    "DR/SR bus window per LoROM/HiROM/LoROM-large variant comes from W14-18's parsed-cart data; see that ticket's note for the exact bank/offset numbers this session could verify (snes9x memmap.cpp) versus the one it could not (a direct fullsnes.htm table read) -- confirm both against fullsnes/snesdev directly before this ticket's doc comment cites them as fact, per law 6."
+   ],
+   "stories": []
   }
  ]
 }

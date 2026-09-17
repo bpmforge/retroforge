@@ -85,12 +85,13 @@ DB=design/DEBUGGER.md, SRS/TEST/ROAD/MVP/SCOPE/NG=docs/<name>.md.
 | Windowing / mosaic / color math | EC §3.3 | COVERED |
 | Interrupts (NMI, H/V IRQ) | EC §3.1 | COVERED |
 | LoROM + HiROM | EC §3.5, FR-CORE-035 | COVERED |
+| DSP-1 (HLE) | EC §3.5, FR-CORE-038, D-010, W14-18/W14-19 | PARTIAL |
 | Battery saves | FR-CORE-012, EC §3.5 SRAM maps | COVERED |
 | Save states | FR-STATE-*, TEST §6 | COVERED |
 | Debug visualizers (SNES-specific) | DB §3 (Mode 7 view, CGRAM, HDMA lanes) | COVERED |
 | CPU/APU/PPU tracing | DB §2 (bsnes-convention format) | COVERED |
 | Common games first, then expand | ROAD P7 exit, EC §3 NTSC-first | COVERED |
-| Enhancement chips: honest deferral | FR-CORE-035, NG #10, EC §3.5 refusal diagnostic | COVERED |
+| Enhancement chips: honest deferral (DSP-1 lifted 2026-09-17, HLE) | FR-CORE-035, FR-CORE-038, NG #10, D-010, EC §3.5 refusal diagnostic | COVERED |
 
 ## 5. Rendering — original + enhanced pipelines (16 + honesty)
 
