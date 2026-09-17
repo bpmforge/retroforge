@@ -6270,6 +6270,33 @@
     "CLOSED 2026-09-17. NES census over the same 1281 archives: rendered 1197 -> 1212, refused 78 -> 63, uniform 6 (all non-retail), crashed 0, timed out 0. Mapper::cpu_write_wram added; push_mapper_view shared by the $6000 and $8000 write arms. Remaining NES refused (63): MMC5 (11, the last big commercial board -- ExRAM, extended attributes, split screen, its own scanline IRQ, a multiplier; several days), TQROM (3, blocked by the CHR push design), and ~49 that stay out on purpose: Coolboy/446/Maxi-15/Action 52 multicarts, Racermate exercise-bike carts, CPROM (CHR-RAM banking), Jaleco SS88006 (4, a real board -- candidate for a later small ticket), and unlicensed oddities.",    "FILED 2026-09-17 from the header tally after W14-14 (78 refused: MMC5 11, TQROM 3, then a long tail). These five are the tail's simple discrete parts with retail or widely-played titles: Deadly Towers and Impossible Mission II (34), the three Quattro carts (232), Tengen Tetris and three Panesian titles (148), Death Race (144), the two Ninja JaJaMaru retro-collection dumps (87). Multicarts (Coolboy 268, Action 52 228, 446, Maxi-15 234), Racermate 168 and the CHR-RAM-banked CPROM 13 stay out."
    ],
    "stories": []
+  },
+  {
+   "id": "W14-16",
+   "title": "MMC5 (mapper 5): the last big NES board, in slices the PPU can carry",
+   "phase": 14,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-cart/src/nes.rs"
+   ],
+   "depends_on": [
+    "W14-15"
+   ],
+   "acceptance": [
+    "slice 1 -- boot: PRG modes ($5100, $5113-$5117 incl. RAM/ROM select), CHR banks A/B ($5120-$512B) with the 8x16 sprite split, WRAM banking, ExRAM ($5C00-$5FFF) readable and writable from the CPU, the multiplier ($5205/$5206), nametable mapping ($5105: CIRAM 0/1, ExRAM, fill mode with $5106/$5107), and the scanline IRQ ($5203/$5204 with the in-frame flag) driven by a PPU scanline signal; Castlevania III renders and its status-bar split is at the right line",
+    "the Mapper trait gains what those need and no more: cpu_read_expansion ($5000-$5FFF reads: IRQ status, multiplier, ExRAM), a sprite CHR window the PPU uses only for 8x16 sprite fetches, a PPU-backed extra nametable and fill tile the mapper pushes into, and a per-scanline pull like the A12 edges",
+    "slice 2 -- ExGrafix (extended attributes, $5104 mode 1) and the vertical split ($5200-$5202) are filed as their own follow-up if slice 1 closes without them; the NES refused bucket falls by the MMC5 titles, re-measured",
+    "every register is cited to nesdev MMC5; the PPU changes are byte-inert for every other mapper, which the goldens and the accuracy benchmarks must show"
+   ],
+   "points": 8,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-17 after W14-15 left MMC5 as the only board with more than four retail titles in the NES refused bucket (11 archives: Castlevania III x2, Gemfire, Uncharted Waters, Nobunaga's Ambition II, Romance of the Three Kingdoms II, L'Empereur, Bandit Kings of Ancient China, Laser Invasion, the SimCity proto, the Demo Vision BIOS).",
+    "WHY IT IS NOT ONE MORE MAPPER FILE. The crate's mappers push a materialised CHR window and a Mirroring into the PPU; MMC5 needs the PPU to (a) read two nametables from memory only the cartridge has -- its 1 KiB ExRAM, or a constant fill tile+attribute -- (b) fetch 8x16 sprite patterns from a different CHR bank set than the background, (c) tell the mapper each rendered scanline so $5203 compares and the in-frame flag ($5204 bit 6) tracks rendering, and (d) answer CPU reads in $5000-$5FFF. Each is a small seam: ppu/mem.rs's nametable arm already dispatches on Mirroring (PerTable exists since W14-12; add ExRam and Fill kinds per table, with a PPU-owned 1 KiB buffer the bus writes on $5C00 stores and a fill tile/attr pair); sprites.rs:546 is the one sprite pattern read (route through a sprite CHR view when 8x16 and the mapper provides one); the A12 pull in NesBus::drain_a12_edges is the model for a take_scanline_starts pull; cpu_read_expansion is the read twin of cpu_write_expansion.",
+    "WHAT NOT TO DO FIRST: ExGrafix (per-tile CHR bank and palette from ExRAM in $5104 mode 1) changes the background fetch itself and the vertical split rewrites scrolling mid-line; both are slice 2. Castlevania III boots and plays without either. The scanline counter on real MMC5 detects scanlines from three identical consecutive nametable fetches; a PPU-side per-scanline signal is the honest model here and matches what Mesen exposes."
+   ],
+   "stories": []
   }
  ]
 }
