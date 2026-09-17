@@ -6197,6 +6197,30 @@
     "CLOSED 2026-09-16. NES census over the same 1281 archives: rendered 1167 -> 1180, uniform 7 -> 6, refused 107 -> 95, crashed 0, timed out 0. Dragon Warrior III and IV render (SUROM); the five GxROM and seven TxSROM titles load and render. The six still-uniform titles are a proto, two bad dumps, a test program, a Buzz & Waldog proto (TxSROM, unlicensed proto) and a compilation cart -- no retail NES title in the library renders a uniform screen. rf_cart::Mirroring gained PerTable([u8;4]); the unknown-mapper test now uses RAMBO-1. Left for their own tickets: MMC5 (11), RAMBO-1 (9), MMC2 (4, needs a PPU tile-fetch hook), FME-7 (4), TQROM (3, blocked by the CHR push design).",    "FILED 2026-09-16 from the per-title NES census (1167 render, 7 uniform, 107 refused, 0 crashed, 0 timed out) plus an iNES-header tally of the library: mapper 5 (MMC5) 11 titles, 64 (RAMBO-1) 9, 118 (TxSROM) 7, 268/168 6 each, 66 (GxROM) 5, 9 (MMC2) 4, 69 (FME-7) 4, 119 (TQROM) 3, long tail. Of the 7 uniform titles only Dragon Warrior III and IV are retail: both are 512 KiB MMC1 (SUROM), which mmc1.rs documents as not modelled. TQROM is left out on purpose: it mixes CHR RAM banks into the CHR window, and this crate's push/materialize CHR design cannot round-trip PPU-side writes into a mapper-owned RAM (mappers/mod.rs doc), so it would boot with broken graphics. MMC2 needs a PPU tile-fetch hook the Mapper trait does not have; RAMBO-1 needs its own IRQ model; both are their own tickets."
    ],
    "stories": []
+  },
+  {
+   "id": "W14-13",
+   "title": "MMC2 (mapper 9): a CHR latch the PPU switches at the fetch",
+   "phase": 14,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-cart/src/nes.rs"
+   ],
+   "depends_on": [
+    "W14-12"
+   ],
+   "acceptance": [
+    "mapper 9 loads and the four Punch-Out!! archives leave the NES refused bucket, re-measured with the census",
+    "the latch switches INSIDE the PPU at the pattern fetch that triggers it (nesdev MMC2: $0FD8/$0FE8 for the left half, $1FD8-$1FDF/$1FE8-$1FEF for the right), not at the end of the CPU instruction -- a unit test reads the trigger address and asserts the very next pattern read comes from the other bank",
+    "the selection round-trips through the save state and is re-pushed into the PPU after a mapper load; the register map is cited to nesdev in the module doc"
+   ],
+   "points": 3,
+   "status": "in_progress",
+   "notes": [
+    "FILED 2026-09-17 from the W14-12 header tally: mapper 9 is 4 archives (Punch-Out!! and Mike Tyson's Punch-Out!!, two revisions each). The Mapper trait pushes a materialised CHR window into the PPU after CPU writes and pulls A12 edges back; MMC2's latch is driven by PPU pattern FETCHES, so a pull-and-push at instruction granularity would land up to two tile fetches late and corrupt the tiles after every $FD/$FE tile. The design here keeps the push shape: the mapper supplies four 4 KiB latch banks through a new chr_latch() hook, the PPU holds them and flips the selection itself in mem_read, and the bus copies the selection back to the mapper each instruction (note_chr_latch) so the mapper's save state carries it."
+   ],
+   "stories": []
   }
  ]
 }
