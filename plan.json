@@ -6371,6 +6371,29 @@
     "DR/SR bus window per LoROM/HiROM/LoROM-large variant comes from W14-18's parsed-cart data; see that ticket's note for the exact bank/offset numbers this session could verify (snes9x memmap.cpp) versus the one it could not (a direct fullsnes.htm table read) -- confirm both against fullsnes/snesdev directly before this ticket's doc comment cites them as fact, per law 6."
    ],
    "stories": []
+  },
+  {
+   "id": "W14-20",
+   "title": "UI freeze on m4max: unbounded core->UI frame channel balloons memory when a repaint stalls; core must wake the UI",
+   "phase": 14,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "the core->UI frame path keeps at most one pending frame: a newer frame replaces an unconsumed one instead of queueing behind it; a unit test stalls the receiver, sends 1000 frames, and asserts the pending count and bytes stay bounded",
+    "the core thread wakes the UI after every published frame through a waker the app installs (egui Context::request_repaint from the core thread), so a lost winit redraw cannot leave the picture stalled while the core keeps running; a test proves the waker is called once per frame",
+    "main.rs installs an env-filtered logger (RUST_LOG) so eframe/egui-winit traces can be captured on the next stall without a rebuild",
+    "the evidence is recorded: 2026-09-17 samples on m4max show the main thread idle in the AppKit event wait for 100% of samples while the core thread emulates normally, RSS growing 394 MB -> 2826 MB at ~15 MB/s (~250 KB FrameMsg x 60/s into std::sync::mpsc::channel)",
+    "Castlevania III's title sequence plays through in the release build on m4max without a stall and with flat memory, checked by Brad and recorded in STATUS"
+   ],
+   "points": 2,
+   "status": "in_progress",
+   "notes": [
+    "FILED 2026-09-17 from Brad's m4max test of the release build: the window froze at various points of the Castlevania III title sequence and the whole machine slowed down. Two defects, one confirmed and one root-cause open. CONFIRMED: `core_thread::spawn` wires `mpsc::channel()` (unbounded) for CoreEvent and the UI drains it only from `update`; when the UI stops repainting the core keeps producing ~250 KB frames at 60/s (measured 15 MB/s RSS growth), which is the machine-wide slowdown. OPEN: why the UI stops repainting -- `pump_core_events` calls `ctx.request_repaint()` every update while running, yet the main thread sat in `_DPSBlockUntilNextEventMatchingListInMode` for every sample; eframe 0.35 / winit 0.30.13 / wgpu 29. The waker from the core thread is the defence regardless of the root cause; the logger is how the root cause gets captured."
+   ],
+   "stories": []
   }
  ]
 }
