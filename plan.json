@@ -6241,9 +6241,9 @@
     "what is NOT modelled is written down: FME-7's $6000-$7FFF ROM/RAM banking (no $6000 hook on the trait) and its 5B audio; RAMBO-1's one-clock IRQ delay quirk"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
-    "FILED 2026-09-17 from the W14-12 header tally: mapper 69 is 4 archives (Batman - Return of the Joker x2, Mr. Gimmick proto, Ufouria proto), mapper 64 is 9 (Klax, Shinobi, Rolling Thunder, Road Runner, Skull & Crossbones, Hard Drivin', Xybots -- all Tengen unlicensed). Both count CPU cycles for their IRQ, which nothing on the Mapper trait can see: MMC3 is clocked by PPU A12 edges pulled from the PPU. One hook serves both."
+    "CLOSED 2026-09-17. NES census over the same 1281 archives: rendered 1184 -> 1197, refused 91 -> 78, uniform 6 (all non-retail), crashed 0, timed out 0. Mapper::tick_cpu_cycles driven from tick_master with the MapperIrq event on a rising IRQ; FME-7 and RAMBO-1 as filed, with the $6000 ROM banking, 5B audio and RAMBO-1 IRQ delay quirk documented as not modelled. Remaining NES refused: MMC5 (11, the last big board), TQROM (3, blocked by the CHR push design), and a multicart/unlicensed long tail (~64: Coolboy 268, Racermate 168, Action 52 228, Sachen 148/446, Jaleco 18, ...).",    "FILED 2026-09-17 from the W14-12 header tally: mapper 69 is 4 archives (Batman - Return of the Joker x2, Mr. Gimmick proto, Ufouria proto), mapper 64 is 9 (Klax, Shinobi, Rolling Thunder, Road Runner, Skull & Crossbones, Hard Drivin', Xybots -- all Tengen unlicensed). Both count CPU cycles for their IRQ, which nothing on the Mapper trait can see: MMC3 is clocked by PPU A12 edges pulled from the PPU. One hook serves both."
    ],
    "stories": []
   }

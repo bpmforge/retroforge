@@ -3310,3 +3310,30 @@ stories, 10 decisions).
 
   Gate: workspace **1844 passing / 0 failed / 36 ignored**, clippy clean,
   arch OK, local-gate exit 0.
+
+- **W14-14 — FME-7 and RAMBO-1 on one CPU-cycle tick** (2026-09-17).
+  NES census, same 1281 archives: **1184 -> 1197** render, refused
+  91 -> 78, uniform 6, crashed **0**, timed out **0**.
+
+  **One hook, two boards.** Both count CPU cycles for their IRQ, and
+  nothing on the Mapper trait could see a CPU cycle: MMC3 is clocked by
+  PPU A12 edges the bus pulls from the PPU. `Mapper::tick_cpu_cycles` is
+  driven from `tick_master`, the single place the bus advances its
+  master clock, so DMA-stolen cycles count too, and a rising IRQ queues
+  the same `MapperIrq` event the A12 path does.
+
+  **FME-7** (nesdev): command at `$8000`, parameter at `$A000`; eight
+  1 KiB CHR banks, three 8 KiB PRG windows with `$E000` fixed, four
+  mirroring modes, a 16-bit counter that decrements every CPU cycle and
+  raises the IRQ on the `$0000 -> $FFFF` wrap when enabled. **RAMBO-1**
+  (nesdev): MMC3's register file plus R8/R9 for 1 KiB CHR mode, R15 as a
+  third PRG window, the P bit rotating the three PRG registers, and a
+  second IRQ clock at one per four CPU cycles chosen by `$C001` bit 0.
+
+  **Not modelled, written down:** FME-7's `$6000-$7FFF` ROM banking (no
+  `$6000` hook on the trait) and 5B audio; RAMBO-1's one-clock IRQ delay
+  quirk. All seven retail titles render. Left in the NES refused bucket:
+  MMC5 (11), TQROM (3), and a multicart/unlicensed long tail.
+
+  Gate: workspace **1850 passing / 0 failed / 36 ignored**, clippy clean,
+  arch OK, local-gate exit 0.
