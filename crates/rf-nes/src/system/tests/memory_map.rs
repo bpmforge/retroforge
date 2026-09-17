@@ -91,6 +91,29 @@ fn cartridge_prg_ram_is_readable_and_writable() {
     assert_ne!(bus.read(0x8000), 0xAB);
 }
 
+/// Ticket W14-17, acceptance 3: an MMC5 `$8000-$FFFF` window whose
+/// register selects RAM (bit 7 clear) reaches the bus's own PRG RAM chip,
+/// end to end through `CpuBus::read`/`write` -- not just
+/// `Mapper::prg_ram_window`'s return value in isolation.
+#[test]
+fn mmc5_ram_selected_prg_window_reads_and_writes_the_cartridge_prg_ram() {
+    let raw = super::rom_loading::ines_with_mapper(5, 2, 1);
+    let rom = crate::system::NesRom::from_ines_bytes(&raw).expect("valid MMC5 image");
+    let mut bus = crate::system::NesBus::new(rom);
+    bus.write(0x5100, 0x03); // PRG mode 3: four independent 8 KiB windows
+    bus.write(0x5114, 0x00); // $8000 window: bit 7 clear -> RAM
+    bus.write(0x8000, 0x42);
+    assert_eq!(bus.read(0x8000), 0x42);
+    assert_eq!(
+        bus.read(0x6000),
+        0x42,
+        "this crate's one 8 KiB PRG RAM chip backs both windows (module doc's documented gap)"
+    );
+    // A ROM-selected window is unaffected: $5117 always ROM (mmc5.rs), so
+    // $E000 still reads the cartridge's PRG ROM, not RAM.
+    assert_ne!(bus.read(0xE000), 0x42);
+}
+
 #[test]
 fn prg_rom_writes_are_ignored_nrom_has_no_mapper_registers() {
     let mut bus = bus_with_pattern_rom(1, 1);

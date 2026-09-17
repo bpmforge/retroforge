@@ -16,6 +16,7 @@
 //! $5106  fill tile             $5107  fill attribute (2 bits, replicated)
 //! $5113  $6000 RAM bank        $5114-$5117  PRG banks (bit 7: 1 ROM, 0 RAM)
 //! $5120-$5127  CHR set A       $5128-$512B  CHR set B     $5130  CHR high bits
+//! $5200  split enable/side/tile $5201  split scroll       $5202  split CHR bank
 //! $5203  IRQ scanline          $5204  W: bit 7 IRQ enable
 //!                                     R: bit 7 pending (reading acks), bit 6 in frame
 //! $5205/$5206  multiplier operands; reading gives the 16-bit product
@@ -43,16 +44,59 @@
 //! ```
 //!
 //! `$5117` always selects ROM. A window whose register has bit 7 clear
-//! selects PRG RAM on the board; this crate's bus owns the one 8 KiB PRG
-//! RAM at `$6000` and the trait cannot lend it out, so such a window
-//! reads as open bus here. **Documented gap:** none of the titles above
-//! maps RAM into `$8000-$DFFF` during play.
+//! selects PRG RAM on the board (ticket W14-17; see "PRG RAM windows"
+//! below for how that reaches the bus's own chip).
 //!
-//! # Slice 2, not here
+//! # PRG RAM windows (ticket W14-17)
 //!
-//! Extended attributes (`$5104` mode 1, per-tile CHR bank and palette
-//! from extended RAM) and the vertical split (`$5200-$5202`) change the
-//! background fetch itself; they are their own ticket.
+//! [`Mapper::prg_ram_window`] answers which byte offset into
+//! [`crate::system::NesBus`]'s own 8 KiB PRG RAM (already served at
+//! `$6000-$7FFF`, `NesBus::prg_ram`) a RAM-selected `$8000-$FFFF` window
+//! addresses. **The bus keeps owning the bytes; the mapper never gets a
+//! copy or a borrow of them.** Two reasons, not one:
+//!
+//! - **Aliasing.** Lending the bus's array to `Mmc5` (a `&mut [u8]` held
+//!   alongside the bus's own reference to the same bytes, or a `Box<dyn
+//!   Mapper>` field that borrows from its owner) is the shape Rust's
+//!   aliasing rules exist to forbid; the only way around it without
+//!   `unsafe` is for the *bus* to hold the byte offset and index its own
+//!   array with it, which is exactly what `prg_ram_window`'s `Option<usize>`
+//!   return does.
+//! - **One copy, one save-state chunk.** If the mapper instead owned a
+//!   second PRG RAM buffer, `$6000-$7FFF` and a RAM-selected `$8000+`
+//!   window could read two different values for what a real MMC5 board
+//!   treats as the same chip, and `StateRegion::Cart`
+//!   (`NesBus::prg_ram`) would need a second, mapper-owned copy of the
+//!   same bytes to stay in sync across a save/load — silently doubling
+//!   what "the" PRG RAM chunk means. Keeping the bus as the single owner
+//!   means `prg_ram_window` is pure address arithmetic (see
+//!   [`Mmc5::prg_ram_window`] below): no new state to save at all.
+//!
+//! Real MMC5 boards can address up to 64 KiB of PRG RAM across multiple
+//! chips, selected by `$5113`-`$5117`'s low bits; this crate has exactly
+//! one 8 KiB chip (`NesBus::prg_ram`'s fixed size), so every RAM-selected
+//! window aliases that same chip modulo 8 KiB. **Documented gap**, the
+//! same honest shape as this file's other gaps: no oracle this ticket
+//! runs exercises a second PRG RAM chip.
+//!
+//! # Slice 2 (ticket W14-17): extended attributes and the vertical split
+//!
+//! `$5104` mode 1 (ExGrafix, per-tile CHR bank and palette from extended
+//! RAM) and the vertical split (`$5200-$5202`) both change the
+//! background fetch itself, which this mapper cannot express through
+//! [`Mapper::chr_window`]'s single materialized 8 KiB view — a tile's CHR
+//! bank in either mode can be ANY 4 KiB page of the whole CHR ROM, not
+//! one of the eight 1 KiB slots `chr_window`/`chr_window_sprites`
+//! juggle. Instead [`Mapper::chr_rom_full`] exposes the raw CHR ROM once
+//! (the bytes never change after cart load), and
+//! [`Mapper::ext_attribute_mode`]/[`Mapper::vertical_split`] push the
+//! small per-mode config the PPU needs to pick a 4 KiB bank per tile
+//! itself — the same "materialize the mapper's current view, push it,
+//! let the PPU's existing fetch math do the addressing" convention
+//! `ppu/mem.rs`'s nametable-kind-2/3 routing and this mapper's own fill
+//! tile already use, just extended to the pattern-table half of the
+//! fetch. See `crate::ppu::background` module doc for the fetch-side
+//! implementation and `crate::ppu::mem` for where the pushed views land.
 
 use rf_core_api::StateError;
 
@@ -92,6 +136,12 @@ pub struct Mmc5 {
     mul_b: u8,
     chr_view_bg: [u8; CHR_VIEW_SIZE],
     chr_view_sprites: [u8; CHR_VIEW_SIZE],
+    /// `$5200` as written: bit 7 enable, bit 6 side, bits 0-4 split tile.
+    split_ctrl: u8,
+    /// `$5201`: the split region's vertical scroll.
+    split_scroll: u8,
+    /// `$5202`: the split region's CHR bank (plain 4 KiB index).
+    split_chr_bank: u8,
 }
 
 impl Mmc5 {
@@ -126,6 +176,9 @@ impl Mmc5 {
             mul_b: 0xFF,
             chr_view_bg: [0; CHR_VIEW_SIZE],
             chr_view_sprites: [0; CHR_VIEW_SIZE],
+            split_ctrl: 0,
+            split_scroll: 0,
+            split_chr_bank: 0,
         };
         m.recompute_chr_views();
         m
@@ -231,8 +284,11 @@ impl Mapper for Mmc5 {
             Some(bank) => {
                 self.prg_rom[bank * PRG_BANK_8K + usize::from(addr - 0x8000) % PRG_BANK_8K]
             }
-            // A RAM-selecting register: not reachable through the trait
-            // (module doc). Open-bus-shaped rather than a panic.
+            // A RAM-selecting register: the bus routes these through
+            // `prg_ram_window` before ever calling this method (module
+            // doc, "PRG RAM windows"), so this arm is unreachable via
+            // `NesBus` and only answers direct calls (this file's own
+            // tests). Open-bus-shaped rather than a panic.
             None => 0,
         }
     }
@@ -267,6 +323,9 @@ impl Mapper for Mmc5 {
                 self.chr_high = value & 0x03;
                 self.recompute_chr_views();
             }
+            0x5200 => self.split_ctrl = value,
+            0x5201 => self.split_scroll = value,
+            0x5202 => self.split_chr_bank = value,
             0x5203 => self.irq_scanline = value,
             0x5204 => self.irq_enabled = value & 0x80 != 0,
             0x5205 => self.mul_a = value,
@@ -326,6 +385,48 @@ impl Mapper for Mmc5 {
         true
     }
 
+    /// See this file's module doc, "PRG RAM windows". Pure address
+    /// arithmetic against the same `prg_windows()` this mapper's ROM
+    /// reads already use: whichever window `addr` falls in, `None` from
+    /// `prg_windows()` means that window's register has bit 7 clear (RAM
+    /// selected), and the offset within the bus's 8 KiB chip is just
+    /// `addr`'s position within its own 8 KiB window.
+    fn prg_ram_window(&self, addr: u16) -> Option<usize> {
+        let window = usize::from((addr - 0x8000) / PRG_BANK_8K as u16);
+        match self.prg_windows()[window] {
+            Some(_) => None,
+            None => Some(usize::from(addr - 0x8000) % PRG_BANK_8K),
+        }
+    }
+
+    fn chr_rom_full(&self) -> Option<&[u8]> {
+        if self.chr_is_ram || self.chr_rom.is_empty() {
+            None
+        } else {
+            Some(&self.chr_rom)
+        }
+    }
+
+    fn ext_attribute_mode(&self) -> Option<u8> {
+        if self.ext_ram_mode == 1 {
+            Some(self.chr_high)
+        } else {
+            None
+        }
+    }
+
+    fn vertical_split(&self) -> Option<(bool, u8, u8, u8)> {
+        if self.split_ctrl & 0x80 == 0 {
+            return None;
+        }
+        Some((
+            self.split_ctrl & 0x40 != 0,
+            self.split_ctrl & 0x1F,
+            self.split_scroll,
+            self.split_chr_bank,
+        ))
+    }
+
     fn scanline_started(&mut self) {
         if !self.in_frame {
             self.in_frame = true;
@@ -365,7 +466,10 @@ impl Mapper for Mmc5 {
         out.bool(self.in_frame)?;
         out.u8(self.scanline_counter)?;
         out.u8(self.mul_a)?;
-        out.u8(self.mul_b)
+        out.u8(self.mul_b)?;
+        out.u8(self.split_ctrl)?;
+        out.u8(self.split_scroll)?;
+        out.u8(self.split_chr_bank)
     }
 
     fn load_state(&mut self, inp: &mut StateIn<'_>) -> Result<(), StateError> {
@@ -387,6 +491,9 @@ impl Mapper for Mmc5 {
         self.scanline_counter = inp.u8()?;
         self.mul_a = inp.u8()?;
         self.mul_b = inp.u8()?;
+        self.split_ctrl = inp.u8()?;
+        self.split_scroll = inp.u8()?;
+        self.split_chr_bank = inp.u8()?;
         self.recompute_chr_views();
         Ok(())
     }
@@ -502,6 +609,40 @@ mod tests {
         w(&mut m, 0x5206, 3);
         assert_eq!(m.cpu_read_expansion(0x5205), Some((600u16 & 0xFF) as u8));
         assert_eq!(m.cpu_read_expansion(0x5206), Some((600u16 >> 8) as u8));
+    }
+
+    #[test]
+    fn prg_ram_windows_are_reported_only_when_the_registers_bit_7_is_clear() {
+        let mut m = Mmc5::new(prg(8), chr(8), false);
+        w(&mut m, 0x5100, 3); // mode 3: four independent 8 KiB windows
+        w(&mut m, 0x5114, 0x00); // RAM at $8000 (bit 7 clear)
+        w(&mut m, 0x5115, 0x80); // ROM at $A000
+        assert_eq!(m.prg_ram_window(0x8000), Some(0));
+        assert_eq!(
+            m.prg_ram_window(0x8FFF),
+            Some(0x0FFF),
+            "offset within the window, not the bank number"
+        );
+        assert_eq!(m.prg_ram_window(0xA000), None, "this window selects ROM");
+        assert_eq!(m.prg_ram_window(0xE000), None, "$5117 is always ROM");
+    }
+
+    #[test]
+    fn ext_attribute_mode_and_the_vertical_split_report_from_their_own_registers() {
+        let mut m = Mmc5::new(prg(8), chr(8), false);
+        assert_eq!(m.ext_attribute_mode(), None, "ext RAM mode 0 by default");
+        w(&mut m, 0x5104, 1);
+        w(&mut m, 0x5130, 2);
+        assert_eq!(m.ext_attribute_mode(), Some(2), "mode 1, with $5130's bits");
+        assert_eq!(
+            m.vertical_split(),
+            None,
+            "disabled until $5200 bit 7 is set"
+        );
+        w(&mut m, 0x5200, 0x80 | 0x40 | 5); // enabled, right side, split tile 5
+        w(&mut m, 0x5201, 10);
+        w(&mut m, 0x5202, 7);
+        assert_eq!(m.vertical_split(), Some((true, 5, 10, 7)));
     }
 
     #[test]

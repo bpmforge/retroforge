@@ -523,6 +523,29 @@ pub struct Ppu {
     pub(super) chr_sprites: Option<Box<[u8; 8 * 1024]>>,
     pub(super) ext_nametable: Option<Box<[u8; 1024]>>,
     pub(super) fill: Option<(u8, u8)>,
+    /// MMC5 ExGrafix (`$5104` mode 1) and the vertical split
+    /// (`$5200-$5202`), ticket W14-17: the mapper's whole CHR ROM, since
+    /// both features pick an arbitrary 4 KiB bank per tile that `chr`'s
+    /// ordinary 8 KiB window cannot reach (see `crate::mappers::Mmc5`'s
+    /// module doc, "Slice 2"). `None` for every board without either
+    /// feature. Copied once (the bytes never change after cart load), not
+    /// re-copied on every push, unlike `chr`/`chr_sprites`.
+    pub(super) mmc5_full_chr: Option<Vec<u8>>,
+    /// ExGrafix enabled, and `$5130`'s high bits (see `crate::ppu::background`).
+    pub(super) ext_attr_enabled: bool,
+    pub(super) ext_attr_chr_high: u8,
+    /// This tile's ext-RAM-supplied CHR bank (low 6 bits), latched by the
+    /// attribute-fetch phase for the pattern-fetch phase two dots later
+    /// to consume (`crate::ppu::background`'s `bg_pattern_byte`).
+    pub(super) ext_attr_bank: u8,
+    /// The vertical split's config, pushed from `$5200-$5202` verbatim
+    /// (see `crate::mappers::Mapper::vertical_split`): enabled, side
+    /// (`true` = right), split-tile threshold, scroll, CHR bank.
+    pub(super) split_enabled: bool,
+    pub(super) split_right: bool,
+    pub(super) split_tile: u8,
+    pub(super) split_scroll: u8,
+    pub(super) split_chr_bank: u8,
     pub(super) pending_scanline_starts: u32,
     pub(super) pending_frame_end: bool,
     chr_is_ram: bool,
@@ -848,6 +871,15 @@ impl Ppu {
             chr_sprites: None,
             ext_nametable: None,
             fill: None,
+            mmc5_full_chr: None,
+            ext_attr_enabled: false,
+            ext_attr_chr_high: 0,
+            ext_attr_bank: 0,
+            split_enabled: false,
+            split_right: false,
+            split_tile: 0,
+            split_scroll: 0,
+            split_chr_bank: 0,
             pending_scanline_starts: 0,
             pending_frame_end: false,
             tile_capture: false,
