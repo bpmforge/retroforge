@@ -6221,6 +6221,31 @@
     "CLOSED 2026-09-17. NES census over the same 1281 archives: rendered 1180 -> 1184, refused 95 -> 91, uniform 6 (all non-retail), crashed 0, timed out 0. All four Punch-Out!! archives render. Design as filed: Mapper::chr_latch supplies four 4 KiB banks, the PPU flips the selection in mem_read right after the triggering read, note_chr_latch copies it back each instruction for the save state. Also closed on the way: a mapper state load never re-pushed the restored bank registers into the PPU (every banked CHR-ROM mapper resumed with the pre-load window); the load arm now re-pushes window, latch and mirroring. Remaining NES refused, each its own ticket: MMC5 (11), RAMBO-1 (9), FME-7 (4), TQROM (3), multicart/unlicensed long tail (~64). FME-7 and RAMBO-1 both need a CPU-cycle tick hook on the Mapper trait for their IRQ counters; one hook would serve both.",    "FILED 2026-09-17 from the W14-12 header tally: mapper 9 is 4 archives (Punch-Out!! and Mike Tyson's Punch-Out!!, two revisions each). The Mapper trait pushes a materialised CHR window into the PPU after CPU writes and pulls A12 edges back; MMC2's latch is driven by PPU pattern FETCHES, so a pull-and-push at instruction granularity would land up to two tile fetches late and corrupt the tiles after every $FD/$FE tile. The design here keeps the push shape: the mapper supplies four 4 KiB latch banks through a new chr_latch() hook, the PPU holds them and flips the selection itself in mem_read, and the bus copies the selection back to the mapper each instruction (note_chr_latch) so the mapper's save state carries it."
    ],
    "stories": []
+  },
+  {
+   "id": "W14-14",
+   "title": "FME-7 (69) and RAMBO-1 (64): two IRQ boards on one CPU-cycle tick",
+   "phase": 14,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-cart/src/nes.rs"
+   ],
+   "depends_on": [
+    "W14-13"
+   ],
+   "acceptance": [
+    "the Mapper trait gains a CPU-cycle tick, driven from the one place master cycles advance, and a mapper IRQ that rises inside it queues the same MapperIrq event the A12 path does",
+    "mapper 69 and mapper 64 load; the NES refused bucket falls by their thirteen archives, re-measured with the census",
+    "each board's register map is cited to nesdev in its module doc; unit tests pin PRG/CHR selection, mirroring, and that the FME-7 counter wrapping $0000 -> $FFFF raises the IRQ only when enabled, and RAMBO-1's cycle mode clocks once per four CPU cycles",
+    "what is NOT modelled is written down: FME-7's $6000-$7FFF ROM/RAM banking (no $6000 hook on the trait) and its 5B audio; RAMBO-1's one-clock IRQ delay quirk"
+   ],
+   "points": 3,
+   "status": "in_progress",
+   "notes": [
+    "FILED 2026-09-17 from the W14-12 header tally: mapper 69 is 4 archives (Batman - Return of the Joker x2, Mr. Gimmick proto, Ufouria proto), mapper 64 is 9 (Klax, Shinobi, Rolling Thunder, Road Runner, Skull & Crossbones, Hard Drivin', Xybots -- all Tengen unlicensed). Both count CPU cycles for their IRQ, which nothing on the Mapper trait can see: MMC3 is clocked by PPU A12 edges pulled from the PPU. One hook serves both."
+   ],
+   "stories": []
   }
  ]
 }
