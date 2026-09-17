@@ -136,6 +136,7 @@ mod color_dreams;
 mod dxrom;
 mod gxrom;
 mod mmc1;
+mod mmc2;
 mod mmc3;
 mod nina;
 mod nrom;
@@ -152,6 +153,7 @@ pub use color_dreams::ColorDreams;
 pub use dxrom::DxRom;
 pub use gxrom::GxRom;
 pub use mmc1::Mmc1;
+pub use mmc2::Mmc2;
 pub use mmc3::{Mmc3, Mmc3Revision};
 pub use nina::Nina;
 pub use nrom::Nrom;
@@ -161,6 +163,15 @@ pub use uxrom::UxRom;
 /// this module's doc for exactly which `docs/design/EMULATION_CORES.md`
 /// §2.4 trait members are implemented here and which are deliberately
 /// deferred, and why.
+/// What [`Mapper::chr_latch`] hands the PPU (ticket W14-13).
+#[derive(Debug, Clone, Copy)]
+pub struct ChrLatchView<'a> {
+    /// `[left $FD, left $FE, right $FD, right $FE]`, 4 KiB each.
+    pub banks: [&'a [u8]; 4],
+    /// Per half: `false` = the `$FD` bank, `true` = the `$FE` bank.
+    pub selected: [bool; 2],
+}
+
 pub trait Mapper {
     /// CPU-visible read of `$8000-$FFFF` (PRG ROM, through whatever
     /// banking this mapper does). Side-effect-free — see this module's
@@ -238,6 +249,26 @@ pub trait Mapper {
     ///
     /// # Errors
     /// Returns [`StateError`] if the underlying writer rejects a write.
+    /// An MMC2/MMC4-style CHR latch (ticket W14-13): four 4 KiB banks —
+    /// `[left $FD, left $FE, right $FD, right $FE]` — plus which of each
+    /// pair is selected now. `None` for every mapper without one.
+    ///
+    /// The PPU owns the switching: it flips the selection itself at the
+    /// pattern fetch that triggers it (nesdev MMC2), because a pull at
+    /// instruction granularity would land up to two tile fetches late.
+    /// The mapper only supplies the banks and, via
+    /// [`Mapper::note_chr_latch`], remembers the selection for its save
+    /// state.
+    fn chr_latch(&self) -> Option<ChrLatchView<'_>> {
+        None
+    }
+
+    /// The PPU's current latch selection, copied back once per CPU
+    /// instruction so it survives a save state. Default no-op.
+    fn note_chr_latch(&mut self, selected: [bool; 2]) {
+        let _ = selected;
+    }
+
     fn save_state(&self, out: &mut StateOut<'_>) -> Result<(), StateError> {
         let _ = out;
         Ok(())

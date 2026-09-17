@@ -109,8 +109,8 @@ pub use controller::Controller;
 use crate::apu::Apu;
 use crate::cpu::CpuBus;
 use crate::mappers::{
-    Action53, AxRom, Camerica, Cnrom, ColorDreams, DxRom, GxRom, Mapper, Mmc1, Mmc3, Mmc3Revision,
-    Nina, Nrom, UxRom,
+    Action53, AxRom, Camerica, Cnrom, ColorDreams, DxRom, GxRom, Mapper, Mmc1, Mmc2, Mmc3,
+    Mmc3Revision, Nina, Nrom, UxRom,
 };
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
@@ -246,6 +246,8 @@ impl NesBus {
                 rom.chr_is_ram(),
                 rom.header().mirroring,
             )),
+            // Ticket W14-13.
+            9 => Box::new(Mmc2::new(rom.prg_rom().to_vec(), rom.chr_rom().to_vec())),
             28 => Box::new(Action53::new(rom.prg_rom().to_vec())),
             // Ticket W14-12.
             66 => Box::new(GxRom::new(
@@ -290,7 +292,10 @@ impl NesBus {
             .chr_window()
             .map(<[u8]>::to_vec)
             .unwrap_or_else(|| rom.chr_rom().to_vec());
-        let ppu = Ppu::new(chr, rom.chr_is_ram(), mapper.mirroring());
+        let mut ppu = Ppu::new(chr, rom.chr_is_ram(), mapper.mirroring());
+        if let Some(latch) = mapper.chr_latch() {
+            ppu.set_chr_latch(latch);
+        }
         NesBus {
             master_cycle: 0,
             ram: [0; RAM_SIZE],
@@ -752,6 +757,9 @@ impl NesBus {
                 if let Some(window) = self.mapper.chr_window() {
                     self.ppu.set_chr_window(window);
                 }
+                if let Some(latch) = self.mapper.chr_latch() {
+                    self.ppu.set_chr_latch(latch);
+                }
                 self.ppu.set_mirroring(self.mapper.mirroring());
             }
         }
@@ -1076,6 +1084,11 @@ impl NesBus {
         // call sees exactly the counter state the PREVIOUS call left,
         // the same sequencing real hardware's back-to-back edges would
         // produce.
+        // Ticket W14-13: the PPU flips an MMC2 latch itself; tell the
+        // mapper where it stands so the save state carries it.
+        if let Some(selected) = self.ppu.chr_latch_selected() {
+            self.mapper.note_chr_latch(selected);
+        }
         for _ in 0..self.ppu.take_a12_edges() {
             // Ticket W4-00: `MapperIrq` fires on the RISING EDGE of
             // `irq_pending()` (false -> true), not on every clock while

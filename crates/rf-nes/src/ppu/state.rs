@@ -123,6 +123,10 @@ impl Ppu {
             // would drag a session out of Accuracy, which law 6 ("a fresh
             // install boots in Accuracy Mode") exists to prevent.
             accuracy_mode: _,
+            // Ticket W14-13: the mapper's chunk carries the latch
+            // selection, and the bus re-pushes banks and selection into
+            // the PPU after the mapper loads.
+            chr_latch: _,
             events,
         } = self;
 

@@ -65,7 +65,20 @@ impl NesBus {
             StateRegion::Vram => self.ppu.load_vram(&mut inp),
             StateRegion::Oam => self.ppu.load_oam(&mut inp),
             StateRegion::Cgram => self.ppu.load_palette(&mut inp),
-            StateRegion::Mapper => self.mapper.load_state(&mut inp),
+            StateRegion::Mapper => {
+                self.mapper.load_state(&mut inp)?;
+                // What the mapper now reports must reach the PPU again
+                // (ticket W14-13): the restored bank registers and, for
+                // an MMC2, the restored latch selection.
+                if let Some(window) = self.mapper.chr_window() {
+                    self.ppu.set_chr_window(window);
+                }
+                if let Some(latch) = self.mapper.chr_latch() {
+                    self.ppu.set_chr_latch(latch);
+                }
+                self.ppu.set_mirroring(self.mapper.mirroring());
+                Ok(())
+            }
             StateRegion::Cart => inp.bytes(&mut self.prg_ram),
         }
     }

@@ -510,6 +510,11 @@ pub struct Ppu {
     /// did: `drawn_tiles` returned 2 or 3 every frame.
     pub(super) completed_tiles: Vec<DrawnTile>,
     pub(super) chr: Vec<u8>,
+    /// An MMC2-style CHR latch, when the mapper has one (ticket W14-13):
+    /// four 4 KiB banks and the per-half selection this PPU flips itself
+    /// at the triggering pattern fetch. `None` for every other board, in
+    /// which case `chr` is the whole story.
+    pub(super) chr_latch: Option<Box<mem::ChrLatch>>,
     chr_is_ram: bool,
     /// Nametable RAM: 4 logical 1 KiB banks addressed via `mirroring`, laid
     /// out physically as documented in `mem.rs`. Sized for the
@@ -829,6 +834,7 @@ impl Ppu {
             w: false,
             read_buffer: 0,
             chr,
+            chr_latch: None,
             tile_capture: false,
             drawn_tiles: Vec::new(),
             completed_tiles: Vec::new(),

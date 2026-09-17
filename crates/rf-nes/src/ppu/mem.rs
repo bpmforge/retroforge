@@ -101,7 +101,55 @@ use rf_cart::Mirroring;
 /// for the full derivation and sourcing.
 const A12_FILTER_DOTS: u64 = 9;
 
+/// MMC2/MMC4 CHR latch state held by the PPU (ticket W14-13). See
+/// [`crate::mappers::Mapper::chr_latch`] for why the PPU, not the mapper,
+/// does the switching.
+pub(crate) struct ChrLatch {
+    /// `[left $FD, left $FE, right $FD, right $FE]`, 4 KiB each.
+    pub(crate) banks: [Vec<u8>; 4],
+    /// Per half: `false` = `$FD` bank, `true` = `$FE` bank.
+    pub(crate) selected: [bool; 2],
+}
+
+const LATCH_BANK: usize = 4 * 1024;
+
 impl Ppu {
+    /// Install (or refresh) an MMC2-style latch from the mapper's view.
+    pub(crate) fn set_chr_latch(&mut self, view: crate::mappers::ChrLatchView<'_>) {
+        let banks = std::array::from_fn(|i| {
+            let mut bank = vec![0u8; LATCH_BANK];
+            let n = view.banks[i].len().min(LATCH_BANK);
+            bank[..n].copy_from_slice(&view.banks[i][..n]);
+            bank
+        });
+        self.chr_latch = Some(Box::new(ChrLatch {
+            banks,
+            selected: view.selected,
+        }));
+    }
+
+    /// The latch selection as the PPU has it now, for the mapper's save
+    /// state; `None` when no latch is installed.
+    pub(crate) fn chr_latch_selected(&self) -> Option<[bool; 2]> {
+        self.chr_latch.as_ref().map(|l| l.selected)
+    }
+
+    /// nesdev, "MMC2": "PPU reads $0FD8: latch 0 is set to $FD; $0FE8:
+    /// latch 0 is set to $FE; $1FD8-$1FDF: latch 1 is set to $FD;
+    /// $1FE8-$1FEF: latch 1 is set to $FE" — after the read returns.
+    fn apply_chr_latch_trigger(&mut self, addr: u16) {
+        let Some(latch) = self.chr_latch.as_mut() else {
+            return;
+        };
+        match addr {
+            0x0FD8 => latch.selected[0] = false,
+            0x0FE8 => latch.selected[0] = true,
+            0x1FD8..=0x1FDF => latch.selected[1] = false,
+            0x1FE8..=0x1FEF => latch.selected[1] = true,
+            _ => {}
+        }
+    }
+
     /// One PPU-bus read at `addr & 0x3FFF`: `$0000-$1FFF` pattern tables
     /// (CHR), `$2000-$3EFF` nametables (mirrored per `mirroring`),
     /// `$3F00-$3FFF` palette RAM. `&mut self` (ticket W2-03, widened from
@@ -111,7 +159,11 @@ impl Ppu {
         let addr = addr & 0x3FFF;
         self.observe_ppu_bus_address(addr);
         let value = match addr {
-            0x0000..=0x1FFF => self.chr_read(addr),
+            0x0000..=0x1FFF => {
+                let v = self.chr_read(addr);
+                self.apply_chr_latch_trigger(addr);
+                v
+            }
             0x2000..=0x3EFF => self.vram[self.nametable_offset(addr)],
             0x3F00..=0x3FFF => self.palette_read(addr),
             _ => unreachable!("addr masked to 14 bits above"),
@@ -197,6 +249,11 @@ impl Ppu {
     }
 
     fn chr_read(&self, addr: u16) -> u8 {
+        if let Some(latch) = self.chr_latch.as_ref() {
+            let half = usize::from((addr >> 12) & 1);
+            let bank = &latch.banks[half * 2 + usize::from(latch.selected[half])];
+            return bank[usize::from(addr & 0x0FFF)];
+        }
         if self.chr.is_empty() {
             return 0;
         }
@@ -412,6 +469,38 @@ mod tests {
         let mut ppu = Ppu::new(vec![0u8; 0x2000], true, Mirroring::Horizontal);
         ppu.mem_write(0x0010, 0x99);
         assert_eq!(ppu.mem_read(0x0010), 0x99);
+    }
+
+    /// **The latch flips at the triggering fetch itself** (ticket
+    /// W14-13; nesdev MMC2): the trigger read returns the old bank and
+    /// the very next read comes from the new one.
+    #[test]
+    fn an_mmc2_latch_switches_banks_on_the_read_after_the_trigger() {
+        let mut ppu = Ppu::new(vec![0u8; 8 * 1024], false, Mirroring::Vertical);
+        let bank = |fill: u8| vec![fill; 4 * 1024];
+        let (lfd, lfe, rfd, rfe) = (bank(0xFD), bank(0xFE), bank(0xAD), bank(0xAE));
+        ppu.set_chr_latch(crate::mappers::ChrLatchView {
+            banks: [&lfd, &lfe, &rfd, &rfe],
+            selected: [false, false],
+        });
+        assert_eq!(ppu.mem_read(0x0000), 0xFD, "left starts on $FD");
+        assert_eq!(
+            ppu.mem_read(0x0FE8),
+            0xFD,
+            "the trigger read itself is old-bank"
+        );
+        assert_eq!(ppu.mem_read(0x0000), 0xFE, "the next read is new-bank");
+        assert_eq!(ppu.mem_read(0x0FD8), 0xFE);
+        assert_eq!(ppu.mem_read(0x0000), 0xFD);
+        // Right half: a whole eight-byte range triggers.
+        assert_eq!(ppu.mem_read(0x1000), 0xAD);
+        let _ = ppu.mem_read(0x1FEB);
+        assert_eq!(ppu.mem_read(0x1000), 0xAE);
+        let _ = ppu.mem_read(0x1FDF);
+        assert_eq!(ppu.mem_read(0x1000), 0xAD);
+        let _ = ppu.mem_read(0x0FDF); // left half is exact-address only
+        assert_eq!(ppu.mem_read(0x0000), 0xFD);
+        assert_eq!(ppu.chr_latch_selected(), Some([false, false]));
     }
 
     #[test]
