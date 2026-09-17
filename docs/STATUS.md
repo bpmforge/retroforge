@@ -3098,3 +3098,68 @@ stories, 10 decisions).
 
   Gate: workspace **1827 passing / 0 failed / 35 ignored**, arch OK,
   local-gate exit 0 (blargg SPC red by design while W7-08/W7-17 are open), the six ignored SNES PPU golden tests (PeterLemon, undisbeliever, region) all pass.
+
+- **W14-09 — the APU only ran while the CPU touched a port, and dropped
+  every cycle past 64** (2026-09-16). **870 -> 934** SNES
+  titles render something, re-measured over the same 1265 archives.
+
+  | SNES library, 1265 titles | after W14-08 | after W14-09 |
+  |---|---|---|
+  | rendered something | 870 | **934** |
+  | rendered a uniform screen | 245 | 181 |
+  | refused | 150 | 150 |
+  | crashed | 0 | **0** |
+  | timed out | 0 | **0** |
+
+  **Found by probing the uniform bucket, not by reading the scheduler.**
+  Six titles instruction-stepped with a ring buffer of APU port changes
+  fell into two shapes: ActRaiser, Final Fantasy III and Cool Spot had
+  the 65816 polling `$2140` for `$BBAA` — the boot ROM's ready signature
+  — while the SPC driver ran its N-SPC main loop normally; Cybernator,
+  Illusion of Gaia and The Flintstones had the 65816 running freely and
+  the SPC700 pinned at one address.
+
+  **Traced on ActRaiser.** The CPU uploads a stub to `$0400`, starts it,
+  waits two vblanks, writes `$FF` to port 0 and waits for `$BBAA`. The
+  stub handles `$FF` at `$0601` by calling `$0F0C`, the only `MOVW
+  $F4,YA` in the driver: it republishes `$AA`/`$BB` itself. But its init
+  writes `$F1=$30` at `$042A`, clearing the incoming ports, and in the
+  trace the CPU's `$FF` landed 1558 instructions BEFORE that write: two
+  vblanks after being started the SPC700 was still at `$0407`, inside a
+  240-iteration zero-page clear that costs about 2.3 ms on hardware.
+
+  **The mechanism was `catch_up_apu`.** It was called only from the
+  `$2140-$2143` arms, and it subtracted the whole debt and then ran at
+  most 64 SPC cycles of it — everything past 64 was discarded. A game
+  waiting on `$4210` or a RAM flag left its sound driver frozen; one
+  polling a port fed it 64 cycles per read. The pinned-SPC shape is the
+  same bug seen from the other side. `SnesSystem::step` also never
+  charged DMA cycles to the APU, so every transfer froze it too.
+
+  **The fix is per-instruction settlement with nothing forgiven.** The
+  system step accrues the instruction's master cycles, DMA included, and
+  settles the APU every instruction; the port arms still settle first so
+  a read sees a state the APU reached. The bound is a sanity limit whose
+  remainder carries. And overspend became an explicit balance: an SPC700
+  instruction is atomic and costs 2-12 cycles, and the old saturating
+  fold-back forgave the surplus — harmless in 64-cycle lumps, but once
+  calls owed one cycle each it ran the SPC at one instruction per cycle.
+  **The new ratio test measured that at 4.4x too fast before the balance
+  existed**, which is the test earning its place rather than decorating
+  the fix. `EMULATION_CORES.md` §1 asks for catch-up to the master cycle
+  and forbids a free-running *thread*; it never asked for a schedule that
+  only moved on port traffic.
+
+  **What moved and what did not.** blargg's four SPC verdicts are
+  byte-identical before and after; PeterLemon, undisbeliever and region
+  goldens and the dsp6 phase probe all pass. The old handshake test
+  asserted the SPC700 sat at `$0200` after hand-over — true only because
+  it was starved — and now asserts it is executing from there. After the
+  fix, ActRaiser runs its Mode 7 intro with the screen on, Final Fantasy
+  III and Cool Spot enable every layer with VRAM populated, and
+  Cybernator's SPC executes 627 distinct addresses instead of one.
+  Illusion of Gaia moved to a different port wait and The Flintstones
+  did not move; both are still in the bucket and are the next probe.
+
+  Gate: workspace **1829 passing / 0 failed / 35 ignored**, clippy clean,
+  arch OK, local-gate exit 0 (blargg SPC red by design while W7-08/W7-17 are open, verdicts byte-identical to before).
