@@ -3444,3 +3444,23 @@ stories, 10 decisions).
   refused" test caught the half-boot this created, so `SnesSystem::load`
   refuses `Dsp1` until W14-19 lands the HLE. Gate: workspace **1875
   passing / 0 failed / 36 ignored**, clippy clean, arch OK.
+
+- **W14-20 — UI freeze on m4max** (2026-09-17). Found by Brad's first
+  run of the release build on the new workstation: the window froze at
+  points of Castlevania III's title sequence and the whole machine
+  slowed. Stack samples during a freeze showed the main thread idle in
+  AppKit's event wait in every sample while the core thread emulated
+  normally, and RSS growing 394 MB -> 2826 MB at ~15 MB/s: the core->UI
+  `CoreEvent` channel was unbounded, so a UI that stopped repainting
+  turned every 60 Hz `FrameMsg` into retained memory. **Fix:** the core
+  drops a frame once `MAX_PENDING_FRAMES` (2) are unconsumed, and calls
+  a waker the app installs (`egui::Context::request_repaint` from the
+  core thread) after every delivered frame, so a lost winit redraw
+  cannot stall the picture; `main.rs` installs `env_logger` (silent
+  unless `RUST_LOG`). Verified by Brad: smooth, RSS flat at 178 MB,
+  zero dropped frames, so the winit-side root cause of the lost
+  repaint stays unproven and the logger is there for next time.
+  **Second defect, same session: no sound.** The `audio` and `gamepad`
+  features are opt-in and no build that day enabled them, including
+  `scripts/release.sh`; the script now passes both. Gate: workspace
+  **1877 passing / 0 failed / 36 ignored**, clippy clean, arch OK.

@@ -28,6 +28,8 @@
 //! (`crate::core_thread`'s module doc: one atomic, no mutex in the frame
 //! loop). This module never talks to `rf_nes` directly — the core thread
 //! is the only thing that latches input into a running machine.
+use std::sync::Arc;
+
 use eframe::egui;
 
 use crate::core_thread::{self, CoreCommand, CoreCrashReport, CoreEvent, CoreHandle};
@@ -236,6 +238,15 @@ pub struct RetroForgeApp {
     hd_unsatisfied: Vec<String>,
     /// What the last composite actually replaced.
     hd_report: Option<rf_enhance::hd_render::CompositeReport>,
+    /// Ticket W14-20 defect 2: the handle `eframe::CreationContext` hands
+    /// `new` below, kept so `open_rom_path` can build a waker
+    /// (`core_thread::spawn_with_waker`'s `Option<Arc<dyn Fn() + Send +
+    /// Sync>>`) for each core it spawns. `egui::Context` is cheap to
+    /// clone (an `Arc`-backed handle — `context_impl_send_sync`'s own test
+    /// in `egui::context` proves it is also `Send + Sync`), so storing an
+    /// owned clone here rather than threading `&egui::Context` through
+    /// `open_rom_path`'s call sites is the smaller change.
+    ctx: egui::Context,
     core: Option<CoreHandle>,
     texture: Option<egui::TextureHandle>,
     /// Ticket W3-03: the same frame's BG-only layer as a separate egui
@@ -676,6 +687,7 @@ impl RetroForgeApp {
             hd_summary: None,
             hd_unsatisfied: Vec::new(),
             hd_report: None,
+            ctx: cc.egui_ctx.clone(),
             core: None,
             texture: None,
             bg_layer_texture: None,
@@ -1759,7 +1771,14 @@ impl RetroForgeApp {
         // the moment someone opens the tab.
         self.load_annotations_for_current_game(path);
 
-        match core_thread::spawn(bytes) {
+        // Ticket W14-20 defect 2: wake the UI thread directly after every
+        // frame the new core sends, rather than relying solely on the
+        // winit redraw `pump_core_events`'s `ctx.request_repaint()` asks
+        // for — see `core_thread::spawn_with_waker`'s doc for why the
+        // request alone was not enough on 2026-09-17.
+        let ctx_for_waker = self.ctx.clone();
+        let waker: Arc<dyn Fn() + Send + Sync> = Arc::new(move || ctx_for_waker.request_repaint());
+        match core_thread::spawn_with_waker(bytes, Some(waker)) {
             Ok(handle) => {
                 self.core = Some(handle);
                 // A new ROM is a new debug session too — the previous
@@ -1868,7 +1887,20 @@ impl RetroForgeApp {
         let mut crashed = false;
         while let Ok(evt) = core.evt_rx.try_recv() {
             match evt {
-                CoreEvent::Frame(msg) => latest_frame = Some(msg),
+                CoreEvent::Frame(msg) => {
+                    // Ticket W14-20 defect 1: every `CoreEvent::Frame`
+                    // drained here must release one slot of
+                    // `core_thread::MAX_PENDING_FRAMES` back to the
+                    // producer — the core thread only checks this counter
+                    // before a send, so a drain that forgot to decrement
+                    // it would leave the cap permanently exhausted after
+                    // the first `MAX_PENDING_FRAMES` frames of the whole
+                    // session, silently dropping every frame after that
+                    // even once the UI is repainting normally again.
+                    core.pending_frames
+                        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                    latest_frame = Some(msg);
+                }
                 // Ticket W4-03e: keep only the latest, same "older ones are
                 // stale by the time we'd paint them" reasoning this
                 // function's own doc already gives for `latest_frame`.

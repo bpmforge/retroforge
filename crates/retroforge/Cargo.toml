@@ -76,6 +76,21 @@ rf-profiles = { path = "../rf-profiles" }
 rf-plugin-sdk = { path = "../rf-plugin-sdk" }
 eframe = "0.35.0"
 rfd = "0.17.2"
+# log + env_logger: ticket W14-20's env-filtered logger, so `RUST_LOG=
+# eframe=trace,egui_winit=debug` can be captured on the next UI-freeze
+# stall without a rebuild. Both MIT/Apache-2.0 (NFR-011); `log` was
+# already pulled in transitively by half the dependency graph (see
+# Cargo.lock), this is just naming it directly so `crate::core_thread` and
+# `main.rs` can call it. `env_logger` is new, `default-features = false`:
+# the default `regex` feature only powers message-content filtering
+# (env_filter's `op.rs`), not the `target=level` directives RUST_LOG needs
+# here, and `auto-color`/`color`/`humantime` are terminal-polish this
+# ticket has no use for — dropping them skips anstream/anstyle/jiff
+# entirely. `env_logger::init()` still reads RUST_LOG and stays silent
+# when it is unset, which is this ticket's "silent by default" acceptance
+# note.
+log = "0.4"
+env_logger = { version = "0.11", default-features = false }
 # sha2: reachable-state hash for the determinism/replay suite (ticket
 # W1-07) — already an approved dependency (docs/TECH_STACK.md §2 row
 # exists via rf-cart's use of it).
