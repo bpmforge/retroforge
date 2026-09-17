@@ -58,6 +58,11 @@ pub struct ColorDreams {
     /// The one register, stored raw. Masked to the real bank count on use,
     /// so a cartridge smaller than the register can address still behaves.
     bank_select: u8,
+    /// Mapper 144, Death Race (ticket W14-15): the same register, but the
+    /// board's bus conflict is wired so that bit 0 of what lands is bit 0
+    /// of the ROM byte under the write, whatever the CPU drove (nesdev,
+    /// "INES Mapper 144"). Cygnus Force and Death Race depend on it.
+    death_race: bool,
 }
 
 impl ColorDreams {
@@ -70,7 +75,20 @@ impl ColorDreams {
             chr_is_ram,
             mirroring,
             bank_select: 0,
+            death_race: false,
         }
+    }
+
+    /// Mapper 144: Color Dreams with the ROM-driven bit 0 (see the field).
+    pub fn new_death_race(
+        prg_rom: Vec<u8>,
+        chr_rom: Vec<u8>,
+        chr_is_ram: bool,
+        mirroring: Mirroring,
+    ) -> Self {
+        let mut m = Self::new(prg_rom, chr_rom, chr_is_ram, mirroring);
+        m.death_race = true;
+        m
     }
 
     fn prg_bank_count(&self) -> usize {
@@ -95,8 +113,12 @@ impl Mapper for ColorDreams {
         self.prg_rom[(bank * PRG_BANK_SIZE + offset) % self.prg_rom.len()]
     }
 
-    fn cpu_write(&mut self, _addr: u16, value: u8, _cycle: u64) {
-        self.bank_select = value;
+    fn cpu_write(&mut self, addr: u16, value: u8, _cycle: u64) {
+        self.bank_select = if self.death_race {
+            (value & 0xFE) | (self.cpu_read(addr) & 0x01)
+        } else {
+            value
+        };
     }
 
     fn mirroring(&self) -> Mirroring {
@@ -255,5 +277,22 @@ mod tests {
             restored.chr_window().expect("CHR"),
             m.chr_window().expect("CHR")
         );
+    }
+
+    /// **Death Race's bit 0 comes from the ROM** (ticket W14-15; nesdev
+    /// mapper 144).
+    #[test]
+    fn death_race_takes_bit_0_from_the_rom_byte_under_the_write() {
+        let mut prg = vec![0u8; 4 * 32 * 1024];
+        for n in 0..4u8 {
+            prg[n as usize * 32 * 1024] = 0x40 + n;
+        }
+        prg[0x0100] = 0x01; // ROM bit 0 set at $8100
+        prg[0x0200] = 0x00; // clear at $8200
+        let mut m = ColorDreams::new_death_race(prg, vec![0; 8 * 1024], true, Mirroring::Vertical);
+        m.cpu_write(0x8100, 0x02, 0); // CPU drives bank 2, ROM forces bit 0 -> 3
+        assert_eq!(m.cpu_read(0x8000), 0x43);
+        m.cpu_write(0x8200, 0x03, 0); // CPU drives 3, ROM clears bit 0 -> 2
+        assert_eq!(m.cpu_read(0x8000), 0x42);
     }
 }

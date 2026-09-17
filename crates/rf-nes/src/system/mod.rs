@@ -109,8 +109,8 @@ pub use controller::Controller;
 use crate::apu::Apu;
 use crate::cpu::CpuBus;
 use crate::mappers::{
-    Action53, AxRom, Camerica, Cnrom, ColorDreams, DxRom, Fme7, GxRom, Mapper, Mmc1, Mmc2, Mmc3,
-    Mmc3Revision, Nina, Nrom, Rambo1, UxRom,
+    Action53, AxRom, Bnrom, Camerica, Cnrom, ColorDreams, DxRom, Fme7, GxRom, JalecoJf, Mapper,
+    Mmc1, Mmc2, Mmc3, Mmc3Revision, Nina, Nrom, Quattro, Rambo1, Sachen, UxRom,
 };
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
@@ -248,6 +248,32 @@ impl NesBus {
             )),
             // Ticket W14-13.
             9 => Box::new(Mmc2::new(rom.prg_rom().to_vec(), rom.chr_rom().to_vec())),
+            // Ticket W14-15.
+            34 => Box::new(Bnrom::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+                rom.header().mirroring,
+            )),
+            87 => Box::new(JalecoJf::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+                rom.header().mirroring,
+            )),
+            144 => Box::new(ColorDreams::new_death_race(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+                rom.header().mirroring,
+            )),
+            148 => Box::new(Sachen::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+                rom.header().mirroring,
+            )),
+            232 => Box::new(Quattro::new(rom.prg_rom().to_vec(), rom.header().mirroring)),
             // Ticket W14-14.
             64 => Box::new(Rambo1::new(
                 rom.prg_rom().to_vec(),
@@ -747,7 +773,12 @@ impl NesBus {
             // method defaults to a no-op, so this stays a drop for
             // everything else.
             0x4020..=0x5FFF => self.mapper.cpu_write_expansion(addr, value),
-            0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000] = value,
+            0x6000..=0x7FFF => {
+                self.prg_ram[(addr as usize) - 0x6000] = value;
+                // Ticket W14-15: boards with registers in this range.
+                self.mapper.cpu_write_wram(addr, value);
+                self.push_mapper_view();
+            }
             // Ticket W2-02: dispatched to the cartridge's own mapper (a
             // no-op for NROM, which has no registers) rather than ignored
             // outright. `self.master_cycle` here is still the cycle THIS
@@ -765,13 +796,7 @@ impl NesBus {
             // that never change either.
             0x8000..=0xFFFF => {
                 self.mapper.cpu_write(addr, value, self.master_cycle);
-                if let Some(window) = self.mapper.chr_window() {
-                    self.ppu.set_chr_window(window);
-                }
-                if let Some(latch) = self.mapper.chr_latch() {
-                    self.ppu.set_chr_latch(latch);
-                }
-                self.ppu.set_mirroring(self.mapper.mirroring());
+                self.push_mapper_view();
             }
         }
     }
@@ -874,6 +899,18 @@ impl NesBus {
     /// too wide. The per-dot version is the fix — see `CpuBus::nmi_line`'s
     /// doc for why a 1-dot lag, not 0 or 3, is what nesdev's "one clock
     /// later" row needs.
+    /// Push whatever the mapper now reports for CHR, an MMC2 latch and
+    /// mirroring into the PPU — after any write that can change them.
+    fn push_mapper_view(&mut self) {
+        if let Some(window) = self.mapper.chr_window() {
+            self.ppu.set_chr_window(window);
+        }
+        if let Some(latch) = self.mapper.chr_latch() {
+            self.ppu.set_chr_latch(latch);
+        }
+        self.ppu.set_mirroring(self.mapper.mirroring());
+    }
+
     fn tick_master(&mut self, cycles: u32) {
         self.master_cycle += cycles as u64;
         // Ticket W14-14: cycle-counting mapper IRQs (FME-7, RAMBO-1's

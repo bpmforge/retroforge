@@ -130,18 +130,22 @@ use rf_cart::Mirroring;
 
 mod action53;
 mod axrom;
+mod bnrom;
 mod camerica;
 mod cnrom;
 mod color_dreams;
 mod dxrom;
 mod fme7;
 mod gxrom;
+mod jaleco_jf;
 mod mmc1;
 mod mmc2;
 mod mmc3;
 mod nina;
 mod nrom;
+mod quattro;
 mod rambo1;
+mod sachen;
 mod uxrom;
 
 #[cfg(test)]
@@ -149,18 +153,22 @@ mod integration_tests;
 
 pub use action53::Action53;
 pub use axrom::AxRom;
+pub use bnrom::Bnrom;
 pub use camerica::Camerica;
 pub use cnrom::Cnrom;
 pub use color_dreams::ColorDreams;
 pub use dxrom::DxRom;
 pub use fme7::Fme7;
 pub use gxrom::GxRom;
+pub use jaleco_jf::JalecoJf;
 pub use mmc1::Mmc1;
 pub use mmc2::Mmc2;
 pub use mmc3::{Mmc3, Mmc3Revision};
 pub use nina::Nina;
 pub use nrom::Nrom;
+pub use quattro::Quattro;
 pub use rambo1::Rambo1;
+pub use sachen::Sachen;
 pub use uxrom::UxRom;
 
 /// One cartridge mapper's CPU-side and CHR-bank-selection behavior. See
@@ -200,6 +208,14 @@ pub trait Mapper {
     /// than making every mapper acknowledge a region only one of them
     /// uses.
     fn cpu_write_expansion(&mut self, addr: u16, value: u8) {
+        let _ = (addr, value);
+    }
+
+    /// CPU write to `$6000-$7FFF` (ticket W14-15). The bus stores it in
+    /// its PRG RAM regardless; this is an observer for the boards that
+    /// keep registers there — NINA-001 at `$7FFD-$7FFF`, Jaleco JF at any
+    /// address in the range. Default no-op.
+    fn cpu_write_wram(&mut self, addr: u16, value: u8) {
         let _ = (addr, value);
     }
 
