@@ -25,7 +25,7 @@ const CHR_BANK: usize = 8 * 1024;
 /// rather than by reputation: a census of 1281 real NES archives
 /// (2026-09-15) bucketed all 223 refusals by mapper number, and these four
 /// were the largest buckets at 54, 17, 28 and 17 games — 116 between them.
-const SUPPORTED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7, 11, 28, 71, 79, 206];
+const SUPPORTED_MAPPERS: &[u16] = &[0, 1, 2, 3, 4, 7, 11, 28, 66, 71, 79, 118, 206];
 
 /// A handful of well-known mapper names, used only to make an
 /// unsupported-mapper diagnostic more useful. Not exhaustive — absence
@@ -93,6 +93,12 @@ pub enum Mirroring {
     /// All four logical nametables alias the single physical page normally
     /// used by nametable 1 ("screen B").
     OneScreenUpper,
+    /// Each logical nametable names its own physical page, 0 or 1 (ticket
+    /// W14-12). TxSROM (mapper 118) drives CIRAM A10 from CHR bank bit 7,
+    /// so any of the sixteen combinations is reachable, including ones
+    /// the fixed variants above cannot spell (`[1, 1, 0, 0]`,
+    /// `[0, 1, 1, 0]`, ...). Entries are masked to one bit at use.
+    PerTable([u8; 4]),
 }
 
 /// Parsed iNES/NES 2.0 header fields (FR-CORE-010).

@@ -71,11 +71,16 @@
 //!   MMC1's mirroring control" only;
 //!   [`crate::system::NesBus`]'s PRG RAM stays "always backed, 8 KiB" for
 //!   every mapper, unchanged from ticket W1-02.
-//! - **SOROM/SUROM 512 KiB PRG variants' extra CHR-bank-driven PRG-RAM/
-//!   PRG-ROM banking bits** — `docs/design/EMULATION_CORES.md` §2.4's own
-//!   launch-set table calls these out as "later"; this implementation
-//!   handles any PRG ROM size that's a multiple of 16 KiB generically,
-//!   but has no SOROM/SUROM-specific extra bank bit logic.
+//! - **SOROM/SUROM's CHR-bank-driven PRG-RAM banking** — the PRG-RAM
+//!   half of those boards' extra bits. The PRG-**ROM** half IS modelled
+//!   (ticket W14-12): on a 512 KiB image, CHR Bank 0 bit 4 selects which
+//!   256 KiB half every PRG window — fixed banks included — comes from.
+//!   nesdev, "MMC1", SUROM: "CHR bank 0, bit 4: select 256 KB PRG ROM
+//!   bank". Dragon Warrior III and IV are the library's two such boards
+//!   and rendered a uniform screen without it: their reset code lives in
+//!   the upper half. In 4 KiB CHR mode the board wires bit 4 of BOTH CHR
+//!   registers, one per pattern table, and software keeps them equal;
+//!   this model reads CHR Bank 0's.
 //! - **CHR-RAM bank switching** — see [`Mapper::chr_window`]'s doc and
 //!   this crate's `mappers` module doc.
 use rf_core_api::StateError;
@@ -154,8 +159,22 @@ impl Mmc1 {
         mapper
     }
 
+    /// The PRG ROM this cartridge's PRG windows come from: the whole
+    /// image, or on a 512 KiB SUROM the 256 KiB half CHR Bank 0 bit 4
+    /// selects (module doc).
+    fn prg_half(&self) -> &[u8] {
+        const HALF: usize = 256 * 1024;
+        if self.prg_rom.len() > HALF {
+            let upper = self.chr_bank0 & 0x10 != 0;
+            let base = if upper { HALF } else { 0 };
+            &self.prg_rom[base..(base + HALF).min(self.prg_rom.len())]
+        } else {
+            &self.prg_rom[..]
+        }
+    }
+
     fn prg_bank_count(&self) -> usize {
-        (self.prg_rom.len() / PRG_BANK).max(1)
+        (self.prg_half().len() / PRG_BANK).max(1)
     }
 
     fn prg_mode(&self) -> u8 {
@@ -210,7 +229,7 @@ impl Mapper for Mmc1 {
                 _ => (bank16 % bank_count) * PRG_BANK + (addr as usize - 0x8000),
             },
         };
-        self.prg_rom[idx]
+        self.prg_half()[idx]
     }
 
     /// Serial-port write per this file's module doc: bit 7 set resets the
@@ -335,6 +354,28 @@ mod tests {
             let bit = (value >> i) & 1;
             m.cpu_write(addr, bit, base_cycle + i * 2);
         }
+    }
+
+    /// **SUROM: CHR Bank 0 bit 4 picks the 256 KiB PRG half** (ticket
+    /// W14-12; nesdev MMC1). Fixed banks move with it — the "last bank"
+    /// is the last bank of the selected half.
+    #[test]
+    fn surom_chr_bank_0_bit_4_selects_the_upper_256k_of_prg() {
+        let mut m = Mmc1::new(prg(32), chr4k(2), false);
+        // Reset leaves PRG mode 3: $8000 switchable, $C000 the last bank.
+        assert_eq!(m.cpu_read(0x8000), 0x40, "lower half, bank 0");
+        assert_eq!(m.cpu_read(0xC000), 0x40 + 15, "lower half's last bank");
+        write_register(&mut m, 0xA000, 0x10, 100);
+        assert_eq!(m.cpu_read(0x8000), 0x40 + 16, "upper half, bank 16");
+        assert_eq!(m.cpu_read(0xC000), 0x40 + 31, "upper half's last bank");
+        write_register(&mut m, 0xE000, 3, 200); // PRG bank 3 within the half
+        assert_eq!(m.cpu_read(0x8000), 0x40 + 19);
+        write_register(&mut m, 0xA000, 0x00, 300);
+        assert_eq!(m.cpu_read(0x8000), 0x40 + 3, "and back to the lower half");
+        // A 256 KiB image is untouched by the bit.
+        let mut small = Mmc1::new(prg(16), chr4k(2), false);
+        write_register(&mut small, 0xA000, 0x10, 100);
+        assert_eq!(small.cpu_read(0xC000), 0x40 + 15);
     }
 
     #[test]

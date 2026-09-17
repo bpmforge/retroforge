@@ -285,6 +285,8 @@ impl Ppu {
             Mirroring::FourScreen => logical_bank,
             Mirroring::OneScreenLower => 0,
             Mirroring::OneScreenUpper => 1,
+            // TxSROM (ticket W14-12): each table names its page.
+            Mirroring::PerTable(pages) => usize::from(pages[logical_bank] & 1),
         };
         physical_bank * 0x400 + within_bank
     }

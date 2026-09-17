@@ -179,6 +179,13 @@ pub struct Mmc3 {
     chr_is_ram: bool,
     four_screen: bool,
     revision: Mmc3Revision,
+    /// TxSROM (mapper 118, ticket W14-12): CIRAM A10 is wired to CHR A17,
+    /// bit 7 of the CHR bank registers, so mirroring comes from whichever
+    /// register maps the nametable's PPU A10-A12 and `$A000` is ignored.
+    /// nesdev, "INES Mapper 118": with `$8000` bit 7 clear, R0 selects
+    /// the page for `$2000-$27FF` and R1 for `$2800-$2FFF`; with it set,
+    /// R2-R5 select `$2000`, `$2400`, `$2800`, `$2C00` one each.
+    txsrom: bool,
 
     bank_select: u8,
     /// R0-R7 (nesdev's own register numbering): R0/R1 CHR 2K banks
@@ -219,6 +226,7 @@ impl Mmc3 {
             chr_is_ram,
             four_screen: mirroring == Mirroring::FourScreen,
             revision,
+            txsrom: false,
             bank_select: 0,
             registers: [0; 8],
             mirroring_reg: 0,
@@ -232,6 +240,30 @@ impl Mmc3 {
         };
         mapper.recompute_chr_view();
         mapper
+    }
+
+    /// A TxSROM board (mapper 118): MMC3 with nametable selection wired
+    /// to CHR bank bit 7 — see the `txsrom` field.
+    pub fn new_txsrom(prg_rom: Vec<u8>, chr_rom: Vec<u8>, chr_is_ram: bool) -> Self {
+        let mut mapper = Self::new(
+            prg_rom,
+            chr_rom,
+            chr_is_ram,
+            Mirroring::Vertical,
+            Mmc3Revision::B,
+        );
+        mapper.txsrom = true;
+        mapper
+    }
+
+    /// TxSROM's mirroring, one page per nametable from CHR bank bit 7.
+    fn txsrom_mirroring(&self) -> Mirroring {
+        let page = |r: usize| self.registers[r] >> 7;
+        if self.chr_a12_inverted() {
+            Mirroring::PerTable([page(2), page(3), page(4), page(5)])
+        } else {
+            Mirroring::PerTable([page(0), page(0), page(1), page(1)])
+        }
     }
 
     /// Raw `$A001` byte as last written (bit7 chip-enable, bit6
@@ -370,6 +402,9 @@ impl Mapper for Mmc3 {
     }
 
     fn mirroring(&self) -> Mirroring {
+        if self.txsrom {
+            return self.txsrom_mirroring();
+        }
         // See this module's doc "Mirroring" section for the A10/A11
         // polarity resolution.
         if self.four_screen {
@@ -768,5 +803,29 @@ mod tests {
             m.irq_pending(),
             "revision A: an explicit $C001-requested reload to zero DOES fire"
         );
+    }
+
+    /// **TxSROM: nametable pages come from CHR bank bit 7, per the
+    /// register that maps each table's A10-A12** (ticket W14-12; nesdev
+    /// "INES Mapper 118"). `$A000` is ignored.
+    #[test]
+    fn txsrom_mirroring_follows_chr_bank_bit_7_in_both_a12_modes() {
+        let mut m = Mmc3::new_txsrom(prg(4), chr(64), false);
+        m.cpu_write(0xA000, 0x01, 0); // would be horizontal on plain MMC3
+                                      // A12 not inverted: R0 -> $2000/$2400, R1 -> $2800/$2C00.
+        select(&mut m, 0, 0x80 | 2);
+        select(&mut m, 1, 0x00 | 4);
+        assert_eq!(m.mirroring(), Mirroring::PerTable([1, 1, 0, 0]));
+        select(&mut m, 0, 0x00 | 2);
+        select(&mut m, 1, 0x80 | 4);
+        assert_eq!(m.mirroring(), Mirroring::PerTable([0, 0, 1, 1]));
+        // A12 inverted: R2..R5 -> one table each.
+        select_with_mode(&mut m, 0x80, 2, 0x80);
+        select_with_mode(&mut m, 0x80, 3, 0x00);
+        select_with_mode(&mut m, 0x80, 4, 0x00);
+        select_with_mode(&mut m, 0x80, 5, 0x80);
+        assert_eq!(m.mirroring(), Mirroring::PerTable([1, 0, 0, 1]));
+        // The bank bit itself still banks CHR (masked by the bank count).
+        assert_eq!(m.chr_window().unwrap()[0], 0x80, "R2 = $80 -> bank 0 of 64");
     }
 }

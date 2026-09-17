@@ -306,6 +306,14 @@ fn encode_mirroring(m: Mirroring) -> u8 {
         Mirroring::FourScreen => 2,
         Mirroring::OneScreenLower => 3,
         Mirroring::OneScreenUpper => 4,
+        // Appended (ticket W14-12): discriminant 5 in the low nibble, the
+        // four page bits in the high nibble, table 0 at bit 4.
+        Mirroring::PerTable(pages) => {
+            5 | (pages[0] & 1) << 4
+                | (pages[1] & 1) << 5
+                | (pages[2] & 1) << 6
+                | (pages[3] & 1) << 7
+        }
     }
 }
 
@@ -316,6 +324,9 @@ fn decode_mirroring(v: u8) -> Result<Mirroring, StateError> {
         2 => Mirroring::FourScreen,
         3 => Mirroring::OneScreenLower,
         4 => Mirroring::OneScreenUpper,
+        v if v & 0x0F == 5 => {
+            Mirroring::PerTable([(v >> 4) & 1, (v >> 5) & 1, (v >> 6) & 1, (v >> 7) & 1])
+        }
         other => {
             return Err(StateError::Corrupt(format!(
                 "unknown Mirroring discriminant {other} in PPU_ chunk"

@@ -163,8 +163,9 @@ fn every_emulated_mapper_loads_through_the_production_path() {
 /// below, which is the half a user actually reads.
 #[test]
 fn a_mapper_rf_cart_cannot_identify_is_refused_not_loaded() {
-    // 66 = GxROM: absent from rf-cart's SUPPORTED_MAPPERS entirely.
-    let raw = ines_with_mapper(66, 1, 1);
+    // 64 = Tengen RAMBO-1: absent from rf-cart's SUPPORTED_MAPPERS
+    // entirely. (This used 66, GxROM, until ticket W14-12 emulated it.)
+    let raw = ines_with_mapper(64, 1, 1);
     assert!(
         NesRom::from_ines_bytes(&raw).is_err(),
         "an unknown mapper must be refused, never loaded"

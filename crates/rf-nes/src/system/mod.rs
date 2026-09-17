@@ -109,8 +109,8 @@ pub use controller::Controller;
 use crate::apu::Apu;
 use crate::cpu::CpuBus;
 use crate::mappers::{
-    Action53, AxRom, Camerica, Cnrom, ColorDreams, DxRom, Mapper, Mmc1, Mmc3, Mmc3Revision, Nina,
-    Nrom, UxRom,
+    Action53, AxRom, Camerica, Cnrom, ColorDreams, DxRom, GxRom, Mapper, Mmc1, Mmc3, Mmc3Revision,
+    Nina, Nrom, UxRom,
 };
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
@@ -247,6 +247,13 @@ impl NesBus {
                 rom.header().mirroring,
             )),
             28 => Box::new(Action53::new(rom.prg_rom().to_vec())),
+            // Ticket W14-12.
+            66 => Box::new(GxRom::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
+                rom.header().mirroring,
+            )),
             71 => Box::new(Camerica::new(
                 rom.prg_rom().to_vec(),
                 rom.header().mirroring,
@@ -256,6 +263,11 @@ impl NesBus {
                 rom.chr_rom().to_vec(),
                 rom.chr_is_ram(),
                 rom.header().mirroring,
+            )),
+            118 => Box::new(Mmc3::new_txsrom(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
             )),
             206 => Box::new(DxRom::new(
                 rom.prg_rom().to_vec(),
