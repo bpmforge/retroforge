@@ -3361,3 +3361,38 @@ stories, 10 decisions).
 
   Gate: workspace **1856 passing / 0 failed / 36 ignored**, clippy clean,
   arch OK, local-gate exit 0.
+
+- **W14-16 — MMC5 slice 1** (2026-09-17). NES census, same 1281
+  archives: **1212 -> 1222** render, refused 63 -> 53, uniform 6,
+  crashed **0**, timed out **0**. Castlevania III boots.
+
+  **Four PPU seams instead of one more mapper file.** The crate's mappers
+  push a materialised CHR window and a `Mirroring` into the PPU, and
+  MMC5 needs the PPU to do four things no other board does: read two
+  nametables from memory only the cartridge has — its 1 KiB extended
+  RAM, or a constant fill tile (`PerTable` kinds 2 and 3, routed in
+  `ppu/mem.rs` before the CIRAM offset, CPU-reachable through the bus at
+  `$5C00`); fetch 8x16 sprite patterns from a different bank set than the
+  background (a second window used only at the sprite pattern fetch,
+  with the mapper snooping PPUCTRL for the size); count rendered
+  scanlines for its IRQ (a dot-0 signal drained like the A12 edges); and
+  answer CPU reads in `$5000-$5FFF`. Every seam is `None` or zero for
+  every other board, and the goldens say the fetch paths did not move.
+
+  **Registers as nesdev gives them:** PRG modes 0-3 with `$5117` always
+  ROM, CHR modes 0-3 for both bank sets with `$5130`'s high bits,
+  nametable mapping, fill tile and attribute, the scanline counter with
+  the in-frame flag and `$5204` acknowledging on read, the multiplier.
+  **Not in this slice, written down:** extended attributes (`$5104` mode
+  1) and the vertical split change the background fetch itself and are
+  slice 2; RAM mapped into `$8000-$DFFF` has no trait path to the bus's
+  PRG RAM and reads as open bus (none of the library's titles does it).
+
+  The two "unsupported mapper" tests had chosen MMC5 as their durable
+  example; both now use MMC4, and the one in `rom_open.rs` is the only
+  line touched outside the ticket's crates (handoff noted). Left in the
+  NES refused bucket: TQROM (3), Jaleco SS88006 (4), and the multicart /
+  unlicensed tail that stays out on purpose.
+
+  Gate: workspace **1862 passing / 0 failed / 36 ignored**, clippy clean,
+  arch OK, local-gate exit 0.
