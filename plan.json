@@ -6172,6 +6172,31 @@
     "FILED AND CLOSED 2026-09-16. This is the tool that found W14-09 (the APU scheduler) and all four defects of W14-10 during this session; it had lived as an uncommitted throwaway and would have been lost. Committed as crates/rf-harness/tests/title_probe.rs with its env-var contract in the module doc. It is clippy-invisible (tests/ targets are not in the gate's clippy run) and shows up as one more ignored test in the workspace count."
    ],
    "stories": []
+  },
+  {
+   "id": "W14-12",
+   "title": "Three NES boards the census asks for: MMC1 SUROM, GxROM and TxSROM",
+   "phase": 14,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-cart/src/nes.rs"
+   ],
+   "depends_on": [
+    "W14-04"
+   ],
+   "acceptance": [
+    "MMC1 images over 256 KiB select the upper PRG half from CHR bank register bit 4 (nesdev MMC1, SUROM/SOROM); Dragon Warrior III and IV leave the NES census's uniform bucket, re-measured",
+    "mapper 66 (GxROM) and mapper 118 (TxSROM) load and boot; the NES refused bucket falls by their twelve titles, re-measured with the same harness",
+    "TxSROM's per-nametable mirroring is expressed as a Mirroring variant the PPU resolves, with a save-state encoding that appends a discriminant rather than renumbering",
+    "each board's register map is cited to nesdev in its module doc, and unit tests pin PRG/CHR selection and, for TxSROM, the CHR-bit-7-to-nametable mapping in both A12 modes"
+   ],
+   "points": 3,
+   "status": "in_progress",
+   "notes": [
+    "FILED 2026-09-16 from the per-title NES census (1167 render, 7 uniform, 107 refused, 0 crashed, 0 timed out) plus an iNES-header tally of the library: mapper 5 (MMC5) 11 titles, 64 (RAMBO-1) 9, 118 (TxSROM) 7, 268/168 6 each, 66 (GxROM) 5, 9 (MMC2) 4, 69 (FME-7) 4, 119 (TQROM) 3, long tail. Of the 7 uniform titles only Dragon Warrior III and IV are retail: both are 512 KiB MMC1 (SUROM), which mmc1.rs documents as not modelled. TQROM is left out on purpose: it mixes CHR RAM banks into the CHR window, and this crate's push/materialize CHR design cannot round-trip PPU-side writes into a mapper-owned RAM (mappers/mod.rs doc), so it would boot with broken graphics. MMC2 needs a PPU tile-fetch hook the Mapper trait does not have; RAMBO-1 needs its own IRQ model; both are their own tickets."
+   ],
+   "stories": []
   }
  ]
 }
