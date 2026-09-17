@@ -86,16 +86,24 @@ fn is_reload_dot(dot: u16) -> bool {
     dot >= 9 && dot % 8 == 1 && is_fetch_window(dot - 1)
 }
 
-/// Extract the 2-bit palette-quadrant value for the tile `v` currently
-/// points at, out of one already-fetched attribute byte (see module doc's
-/// "Attribute quadrant selection").
-fn attribute_quadrant_bits(attr_byte: u8, v: u16) -> u8 {
-    let coarse_x = v & 0x1F;
-    let coarse_y = (v >> 5) & 0x1F;
+/// Extract the 2-bit palette-quadrant value for one attribute byte, given
+/// the tile's coarse X/Y (see module doc's "Attribute quadrant
+/// selection"). Shared by the ordinary attribute fetch (`v`'s own coarse
+/// X/Y) and MMC5's vertical split (ticket W14-17), which fetches its
+/// attribute byte from extended RAM using a coarse X/Y pair `v` never
+/// holds (the split region has its own row, from `$5201`, not `v`'s).
+fn quadrant_bits_from_coarse(attr_byte: u8, coarse_x: u16, coarse_y: u16) -> u8 {
     let col_quadrant = (coarse_x >> 1) & 1;
     let row_quadrant = (coarse_y >> 1) & 1;
     let shift = (row_quadrant << 1 | col_quadrant) * 2;
     (attr_byte >> shift) & 0x03
+}
+
+/// Extract the 2-bit palette-quadrant value for the tile `v` currently
+/// points at, out of one already-fetched attribute byte (see module doc's
+/// "Attribute quadrant selection").
+fn attribute_quadrant_bits(attr_byte: u8, v: u16) -> u8 {
+    quadrant_bits_from_coarse(attr_byte, v & 0x1F, (v >> 5) & 0x1F)
 }
 
 impl Ppu {
@@ -172,28 +180,42 @@ impl Ppu {
     fn run_fetch_phase(&mut self, phase: u8) {
         match phase {
             1 => {
-                let addr = 0x2000 | (self.v & 0x0FFF);
-                self.nt_latch = self.mem_read(addr);
+                self.nt_latch = if let Some(col) = self.split_column() {
+                    let row = self.split_row();
+                    self.ext_ram_read(usize::from(row) * 32 + usize::from(col))
+                } else {
+                    let addr = 0x2000 | (self.v & 0x0FFF);
+                    self.mem_read(addr)
+                };
             }
             3 => {
-                let addr =
-                    0x23C0 | (self.v & 0x0C00) | ((self.v >> 4) & 0x38) | ((self.v >> 2) & 0x07);
-                let raw = self.mem_read(addr);
-                self.at_latch = attribute_quadrant_bits(raw, self.v);
+                self.at_latch = if let Some(col) = self.split_column() {
+                    let row = self.split_row();
+                    let attr_addr = 0x3C0 + usize::from(row / 4) * 8 + usize::from(col / 4);
+                    let raw = self.ext_ram_read(attr_addr);
+                    quadrant_bits_from_coarse(raw, col, row)
+                } else if self.ext_attr_enabled {
+                    // MMC5 ExGrafix (ticket W14-17; `crate::mappers::Mmc5`
+                    // module doc's "Slice 2"): the palette AND the CHR
+                    // bank for this tile both come from one ext RAM byte
+                    // at the tile's own nametable offset -- no separate
+                    // attribute-table fetch at all. `ext_attr_bank` is
+                    // consumed by the pattern fetch below (phases 5/7).
+                    let ext_addr = usize::from(self.v & 0x03FF);
+                    let byte = self.ext_ram_read(ext_addr);
+                    self.ext_attr_bank = byte & 0x3F;
+                    (byte >> 6) & 0x03
+                } else {
+                    let addr = 0x23C0
+                        | (self.v & 0x0C00)
+                        | ((self.v >> 4) & 0x38)
+                        | ((self.v >> 2) & 0x07);
+                    let raw = self.mem_read(addr);
+                    attribute_quadrant_bits(raw, self.v)
+                };
             }
-            5 => {
-                let addr = self.bg_pattern_table_base()
-                    | ((self.nt_latch as u16) << 4)
-                    | ((self.v >> 12) & 0x07);
-                self.pt_lo_latch = self.mem_read(addr);
-            }
-            7 => {
-                let addr = self.bg_pattern_table_base()
-                    | ((self.nt_latch as u16) << 4)
-                    | 0x08
-                    | ((self.v >> 12) & 0x07);
-                self.pt_hi_latch = self.mem_read(addr);
-            }
+            5 => self.pt_lo_latch = self.bg_pattern_byte(false),
+            7 => self.pt_hi_latch = self.bg_pattern_byte(true),
             _ => {}
         }
     }
@@ -204,6 +226,108 @@ impl Ppu {
         } else {
             0x0000
         }
+    }
+
+    /// This tile's screen column (`v`'s coarse X, 0-31) if MMC5's
+    /// vertical split (ticket W14-17) covers it -- `None` if the split is
+    /// off or this column is outside its side/threshold. Used by both the
+    /// NT and AT fetch phases above, since the split substitutes its own
+    /// source for both.
+    ///
+    /// Decode verified 2026-09-17 against nesdev.org/wiki/MMC5 "Vertical
+    /// Split Mode": `$5200` is `ESxW WWWW` -- E enables, S picks the side
+    /// (0 left, 1 right), W is the "split threshold tile count". Left:
+    /// tiles `0..T-1` are the split region and the rest render normally;
+    /// right: tiles `0..T-1` render normally and tiles `T` onward are the
+    /// split region. Both sides share the one threshold, which is what
+    /// `< tile` / `>= tile` below encodes.
+    ///
+    /// Approximation, recorded on the ticket: nesdev says the MMC5 counts
+    /// the scanline's fetches itself to decide the tile column; this reads
+    /// `v`'s coarse X instead, so a horizontal `$2005` scroll shifts the
+    /// split column by the same amount where hardware would not.
+    fn split_column(&self) -> Option<u16> {
+        if !self.split_enabled {
+            return None;
+        }
+        let col = self.v & 0x1F;
+        let threshold = u16::from(self.split_tile);
+        let hit = if self.split_right {
+            col >= threshold
+        } else {
+            col < threshold
+        };
+        hit.then_some(col)
+    }
+
+    /// The split region's own tile row, derived from `$5201` as an
+    /// independent vertical position from `v`'s own coarse Y -- the whole
+    /// point of a split region is that it scrolls on its own axis.
+    /// nesdev.org/wiki/MMC5: `$5201` is "the vertical scroll value to use
+    /// in split region", scrolling "like normal vertical scrolling", and
+    /// the split always reads its nametable from the extended RAM. Not
+    /// corrected for this pipeline's 2-tile fetch lookahead or for the
+    /// pre-render-line clamp `bg_pattern_byte` shares with this method
+    /// (see there) -- the same directed-test standard this ticket's split
+    /// test uses, not a pixel-accurate scroll oracle.
+    fn split_row(&self) -> u16 {
+        let scanline = self.scanline.min(super::POSTRENDER_SCANLINE - 1);
+        ((u16::from(self.split_scroll) + scanline) / 8) % 30
+    }
+
+    /// One pattern-table byte (`hi` = the high bit-plane) for the tile
+    /// currently in `nt_latch`, honoring whichever CHR source is active
+    /// this dot (ticket W14-17): the vertical split's own fixed `$5202`
+    /// bank, MMC5 ExGrafix's per-tile ext-RAM bank (`ext_attr_bank`,
+    /// latched by the attribute-fetch phase above), or the ordinary
+    /// `chr`/`ctrl`-selected half every other board and mode uses.
+    fn bg_pattern_byte(&mut self, hi: bool) -> u8 {
+        let split_col = self.split_column();
+        // `mmc5_full_chr` is `None` whenever this board has no CHR ROM to
+        // bank (CHR-RAM MMC5 carts, `Mapper::chr_rom_full`'s doc) -- fall
+        // through to the ordinary fetch rather than reading a blank 0,
+        // the same "degrade to normal fetching" shape `chr_window`'s own
+        // CHR-RAM caveat already documents, not a silent black screen.
+        if (split_col.is_some() || self.ext_attr_enabled) && self.mmc5_full_chr.is_some() {
+            let bank_4k = if split_col.is_some() {
+                usize::from(self.split_chr_bank)
+            } else {
+                (usize::from(self.ext_attr_chr_high) << 6) | usize::from(self.ext_attr_bank)
+            };
+            let len = self.mmc5_full_chr.as_ref().expect("checked above").len();
+            let banks = (len / 4096).max(1);
+            let base = (bank_4k % banks) * 4096 + usize::from(self.nt_latch) * 16;
+            let fine_y = if split_col.is_some() {
+                // Clamped to the last visible scanline (`split_row`'s own
+                // doc names this too): on the pre-render line (261) this
+                // reads row 29/fine-Y 7 for both prefetched tiles rather
+                // than scanline 0's actual row -- an approximation, not a
+                // verified hardware behavior (see `split_row`'s doc).
+                let scanline = self.scanline.min(super::POSTRENDER_SCANLINE - 1);
+                (u16::from(self.split_scroll) + scanline) % 8
+            } else {
+                (self.v >> 12) & 0x07
+            };
+            let offset = base + usize::from(fine_y) + usize::from(hi) * 8;
+            let addr = self.bg_pattern_table_base()
+                | ((self.nt_latch as u16) << 4)
+                | (u16::from(hi) << 3)
+                | ((self.v >> 12) & 0x07);
+            // Ticket W2-03's A12 filter is a PPU-bus-electrical fact, not
+            // a `chr` (the materialized 8 KiB window)-specific one: real
+            // hardware still drives this same $0000-$1FFF address while
+            // MMC5 answers it from its own wider CHR, exactly the
+            // reasoning `Ppu::sprite_pattern_read` already documents for
+            // its own mapper-supplied-window case.
+            self.observe_ppu_bus_address(addr);
+            let chr = self.mmc5_full_chr.as_ref().expect("checked above");
+            return chr[offset % chr.len()];
+        }
+        let addr = self.bg_pattern_table_base()
+            | ((self.nt_latch as u16) << 4)
+            | (u16::from(hi) << 3)
+            | ((self.v >> 12) & 0x07);
+        self.mem_read(addr)
     }
 
     fn shift_left(&mut self) {
@@ -342,6 +466,7 @@ impl Ppu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rf_cart::Mirroring;
 
     #[test]
     fn fetch_phase_matches_the_dot_table() {
@@ -406,5 +531,119 @@ mod tests {
         assert_eq!(attribute_quadrant_bits(byte, COL1), 2, "col1,row0");
         assert_eq!(attribute_quadrant_bits(byte, ROW1), 3, "col0,row1");
         assert_eq!(attribute_quadrant_bits(byte, COL1 | ROW1), 0, "col1,row1");
+    }
+
+    /// **MMC5 ExGrafix (`$5104` mode 1) drives one tile's CHR bank and
+    /// palette from extended RAM** (ticket W14-17, acceptance 1): the tile
+    /// ID still comes from the ordinary nametable fetch, but the
+    /// attribute fetch is replaced entirely by one ext RAM byte at the
+    /// same nametable offset -- bits 6-7 the palette, bits 0-5 (widened by
+    /// `$5130`'s bits as the high bits) the pattern table's 4 KiB bank.
+    #[test]
+    fn ex_grafix_mode_takes_a_tiles_chr_bank_and_palette_from_extended_ram() {
+        // Both banks are pre-populated before the first push, since
+        // `set_mmc5_ext_view` copies the CHR bytes only once (this file's
+        // doc: they never change after cart load) -- a mutation made
+        // AFTER that first push would never reach the PPU's own copy.
+        let mut chr = vec![0u8; 6 * 4096];
+        chr[5 * 4096] = 0xAB; // bank 5, tile 0, row 0: low plane
+        chr[5 * 4096 + 8] = 0xCD; // ...high plane
+        chr[3 * 4096] = 0xEF; // bank 3, tile 0, row 0: low plane
+        chr[3 * 4096 + 8] = 0x12; // ...high plane
+        let mut ppu = Ppu::new(vec![0u8; 0x2000], false, Mirroring::Horizontal);
+        ppu.set_mmc5_view(None, None, true); // has_ext_nametable_ram
+        ppu.set_mmc5_ext_view(Some(&chr), Some(0), None); // $5130 high bits = 0
+                                                          // Tile 0 (v == 0): palette 2, CHR bank 5.
+        ppu.ext_ram_write(0, (2u8 << 6) | 5);
+        ppu.run_fetch_phase(1); // NT: the ordinary (zeroed) nametable -> tile 0
+        assert_eq!(ppu.nt_latch, 0);
+        ppu.run_fetch_phase(3); // AT: overridden by the ext RAM byte
+        assert_eq!(ppu.at_latch, 2, "palette from ext RAM bits 6-7");
+        ppu.run_fetch_phase(5);
+        ppu.run_fetch_phase(7);
+        assert_eq!(ppu.pt_lo_latch, 0xAB, "bank 5's tile 0, low plane");
+        assert_eq!(ppu.pt_hi_latch, 0xCD, "...high plane");
+
+        // `$5130`'s bits must actually widen the 6-bit ext-RAM field, not
+        // just be accepted and ignored: with high bits == 1, the same
+        // low-6-bits value 5 now names bank (1 << 6 | 5) % 6 == 3, not 5.
+        ppu.set_mmc5_ext_view(Some(&chr), Some(1), None);
+        ppu.run_fetch_phase(3);
+        ppu.run_fetch_phase(5);
+        ppu.run_fetch_phase(7);
+        assert_eq!(ppu.pt_lo_latch, 0xEF, "$5130's high bits shifted the bank");
+        assert_eq!(ppu.pt_hi_latch, 0x12);
+    }
+
+    /// **The vertical split pulls its side of the screen from extended
+    /// RAM** (ticket W14-17, acceptance 2), pinned to one column and one
+    /// side: `$5200` selects the left side and a 3-tile-wide split, so
+    /// coarse X 2 (inside) reads tile/attribute/CHR from ext RAM under
+    /// the split's own `$5202` bank, while coarse X 10 (outside) still
+    /// answers from the ordinary, untouched nametable.
+    #[test]
+    fn the_vertical_split_pulls_its_side_of_the_screen_from_extended_ram() {
+        let mut chr = vec![0u8; 3 * 4096];
+        chr[2 * 4096 + 7 * 16] = 0x11; // split bank 2, tile 7, row 0: low
+        chr[2 * 4096 + 7 * 16 + 8] = 0x22; // ...high
+        let mut ppu = Ppu::new(vec![0u8; 0x2000], false, Mirroring::Horizontal);
+        ppu.set_mmc5_view(None, None, true);
+        // Left side, split tile 3 (columns 0-2 are the split), no
+        // vertical scroll, CHR bank 2.
+        ppu.set_mmc5_ext_view(Some(&chr), None, Some((false, 3, 0, 2)));
+        ppu.scanline = 0; // pin: row 0, fine Y 0, so the tile's row-0 bytes above apply
+        let row = ppu.split_row();
+        let col = 2u16;
+        ppu.ext_ram_write(usize::from(row) * 32 + usize::from(col), 7); // tile id
+        let attr_offset = 0x3C0 + usize::from(row / 4) * 8 + usize::from(col / 4);
+        ppu.ext_ram_write(attr_offset, 0b11);
+        let expected_palette = quadrant_bits_from_coarse(0b11, col, row);
+
+        ppu.v = col; // coarse X 2: inside the split (< 3)
+        ppu.run_fetch_phase(1);
+        assert_eq!(ppu.nt_latch, 7, "tile id came from ext RAM");
+        ppu.run_fetch_phase(3);
+        assert_eq!(ppu.at_latch, expected_palette);
+        ppu.run_fetch_phase(5);
+        ppu.run_fetch_phase(7);
+        assert_eq!(ppu.pt_lo_latch, 0x11, "the split's own $5202 bank");
+        assert_eq!(ppu.pt_hi_latch, 0x22);
+
+        ppu.v = 10; // coarse X 10: outside the split (not < 3)
+        ppu.run_fetch_phase(1);
+        assert_eq!(
+            ppu.nt_latch, 0,
+            "outside the split, the ordinary (empty) nametable answers"
+        );
+    }
+
+    /// The same split, on the right side: `$5200`'s tile field is one
+    /// shared delimiter column for both sides (this file's `split_column`
+    /// doc), so the right side is "at or past it," not a mirrored width.
+    #[test]
+    fn the_vertical_split_also_works_pinned_to_the_right_side() {
+        let mut chr = vec![0u8; 3 * 4096];
+        chr[2 * 4096 + 7 * 16] = 0x11;
+        chr[2 * 4096 + 7 * 16 + 8] = 0x22;
+        let mut ppu = Ppu::new(vec![0u8; 0x2000], false, Mirroring::Horizontal);
+        ppu.set_mmc5_view(None, None, true);
+        // Right side, delimiter column 20: columns 20-31 are the split.
+        ppu.set_mmc5_ext_view(Some(&chr), None, Some((true, 20, 0, 2)));
+        ppu.scanline = 0;
+        let row = ppu.split_row();
+        let col = 25u16;
+        ppu.ext_ram_write(usize::from(row) * 32 + usize::from(col), 7);
+
+        ppu.v = col; // coarse X 25: inside the right split (>= 20)
+        ppu.run_fetch_phase(1);
+        assert_eq!(ppu.nt_latch, 7, "tile id came from ext RAM");
+        ppu.run_fetch_phase(5);
+        ppu.run_fetch_phase(7);
+        assert_eq!(ppu.pt_lo_latch, 0x11);
+        assert_eq!(ppu.pt_hi_latch, 0x22);
+
+        ppu.v = 10; // coarse X 10: not >= 20, so outside the right split
+        ppu.run_fetch_phase(1);
+        assert_eq!(ppu.nt_latch, 0, "outside the split on the right side too");
     }
 }

@@ -109,7 +109,7 @@ fn zero_chr_rom_size_means_chr_ram() {
 /// Build a synthetic iNES image declaring `mapper` in flags6/flags7.
 /// iNES puts the low nibble in flags6 bits 4-7 and the high nibble in
 /// flags7 bits 4-7 (nesdev.org/wiki/INES).
-fn ines_with_mapper(mapper: u8, prg_banks: u8, chr_banks: u8) -> Vec<u8> {
+pub(super) fn ines_with_mapper(mapper: u8, prg_banks: u8, chr_banks: u8) -> Vec<u8> {
     let mut data = Vec::new();
     data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
     data.push(prg_banks);

@@ -642,7 +642,14 @@ impl NesBus {
                 .cpu_read_expansion(addr)
                 .unwrap_or(self.open_bus),
             0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000],
-            0x8000..=0xFFFF => self.mapper.cpu_read(addr),
+            // Ticket W14-17: a RAM-selected $8000-$FFFF window (MMC5's
+            // $5114-$5117 bit 7 clear) reads the bus's own PRG RAM chip
+            // instead of the mapper's ROM (see `crate::mappers::Mmc5`
+            // module doc, "PRG RAM windows").
+            0x8000..=0xFFFF => match self.mapper.prg_ram_window(addr) {
+                Some(offset) => self.prg_ram[offset % PRG_RAM_SIZE],
+                None => self.mapper.cpu_read(addr),
+            },
         };
         self.open_bus = value;
         value
@@ -727,7 +734,10 @@ impl NesBus {
             }
             0x4020..=0x5FFF => self.open_bus,
             0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000],
-            0x8000..=0xFFFF => self.mapper.cpu_read(addr),
+            0x8000..=0xFFFF => match self.mapper.prg_ram_window(addr) {
+                Some(offset) => self.prg_ram[offset % PRG_RAM_SIZE],
+                None => self.mapper.cpu_read(addr),
+            },
         }
     }
 
@@ -821,7 +831,13 @@ impl NesBus {
             // cheap and correct to do unconditionally even for mappers
             // that never change either.
             0x8000..=0xFFFF => {
-                self.mapper.cpu_write(addr, value, self.master_cycle);
+                // Ticket W14-17: a RAM-selected window writes the bus's
+                // PRG RAM chip directly rather than reaching the
+                // mapper's own (no-op for MMC5) `cpu_write`.
+                match self.mapper.prg_ram_window(addr) {
+                    Some(offset) => self.prg_ram[offset % PRG_RAM_SIZE] = value,
+                    None => self.mapper.cpu_write(addr, value, self.master_cycle),
+                }
                 self.push_mapper_view();
             }
         }
@@ -938,6 +954,12 @@ impl NesBus {
             self.mapper.chr_window_sprites(),
             self.mapper.fill_tile(),
             self.mapper.has_ext_nametable_ram(),
+        );
+        // Ticket W14-17: ExGrafix / vertical split.
+        self.ppu.set_mmc5_ext_view(
+            self.mapper.chr_rom_full(),
+            self.mapper.ext_attribute_mode(),
+            self.mapper.vertical_split(),
         );
         self.ppu.set_mirroring(self.mapper.mirroring());
     }

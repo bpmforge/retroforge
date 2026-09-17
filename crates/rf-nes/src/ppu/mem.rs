@@ -398,6 +398,41 @@ impl Ppu {
         }
     }
 
+    /// Ticket W14-17: install (or drop) the ExGrafix and vertical-split
+    /// pieces `crate::mappers::Mmc5` reports. `full_chr` is copied only
+    /// the first time it appears (see `Ppu::mmc5_full_chr`'s doc) --
+    /// CHR ROM bytes never change after cart load, so re-copying on
+    /// every register write (this is called from the same
+    /// `push_mapper_view` every `$8000-$FFFF`/`$4020-$5FFF` write does)
+    /// would waste up to `chr_rom_full`'s whole length per write for no
+    /// reason.
+    pub(crate) fn set_mmc5_ext_view(
+        &mut self,
+        full_chr: Option<&[u8]>,
+        ext_attr: Option<u8>,
+        split: Option<(bool, u8, u8, u8)>,
+    ) {
+        match full_chr {
+            Some(bytes) if self.mmc5_full_chr.is_none() => {
+                self.mmc5_full_chr = Some(bytes.to_vec());
+            }
+            None => self.mmc5_full_chr = None,
+            _ => {}
+        }
+        self.ext_attr_enabled = ext_attr.is_some();
+        self.ext_attr_chr_high = ext_attr.unwrap_or(0);
+        match split {
+            Some((right, tile, scroll, bank)) => {
+                self.split_enabled = true;
+                self.split_right = right;
+                self.split_tile = tile;
+                self.split_scroll = scroll;
+                self.split_chr_bank = bank;
+            }
+            None => self.split_enabled = false,
+        }
+    }
+
     pub(crate) fn ext_ram_read(&self, offset: usize) -> u8 {
         self.ext_nametable
             .as_ref()

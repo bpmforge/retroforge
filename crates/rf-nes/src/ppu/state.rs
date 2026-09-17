@@ -132,6 +132,43 @@ impl Ppu {
             chr_sprites: _,
             ext_nametable: _,
             fill: _,
+            // Ticket W14-17: same "pushed from the mapper after a load"
+            // shape as chr_sprites/fill above -- `mmc5_full_chr` is a copy
+            // of ROM data (not machine state) and the rest are config
+            // words `NesBus::push_mapper_view` re-derives from the
+            // mapper's own (saved) registers.
+            mmc5_full_chr: _,
+            ext_attr_enabled: _,
+            ext_attr_chr_high: _,
+            split_enabled: _,
+            split_right: _,
+            split_tile: _,
+            split_scroll: _,
+            split_chr_bank: _,
+            // `ext_attr_bank` is a genuine mid-tile pipeline latch (same
+            // category as `nt_latch`/`at_latch` above), but it is
+            // deliberately NOT added to this chunk's serialized fields
+            // below, unlike those: this `PPU_` payload is shared by every
+            // mapper's save state (`rf_state::tags`'s `PPU_` entry,
+            // `current_version: 2`, out of this ticket's write_scope),
+            // and adding a field to it would silently change that layout
+            // for every non-MMC5 game's save file too -- exactly the
+            // "chunk version bump requires a migration fn" case
+            // `docs/design/SAVE_STATES.md` warns about, and that
+            // migration lives in `rf-state`, not `rf-nes`. Ticket W14-16
+            // hit the identical constraint for `chr_sprites`/`fill` above
+            // and chose the same fix: keep the field config the bus
+            // re-derives from the mapper's own (versioned, MMC5-only)
+            // `MAPR` chunk after a load, never serialized here.
+            // **Honest, narrow gap this creates:** a save taken between
+            // this latch being set (the attribute-fetch phase) and
+            // consumed (the pattern-fetch phase two dots later) restores
+            // it as 0 -- at most one already-in-flight tile's CHR bank
+            // reads bank 0 instead of the correct one for the rest of
+            // that one 8-dot fetch window, self-correcting at the very
+            // next tile's own attribute fetch. No oracle exercises MMC5
+            // save states mid-scanline at all yet.
+            ext_attr_bank: _,
             pending_scanline_starts: _,
             pending_frame_end: _,
             events,

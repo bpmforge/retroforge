@@ -250,6 +250,57 @@ pub trait Mapper {
         None
     }
 
+    /// A `$8000-$FFFF` CPU window backed by cartridge PRG RAM rather than
+    /// PRG ROM (ticket W14-17; MMC5's `$5114-$5117` bit 7 clear).
+    /// `Some(offset)` into the bus's own PRG RAM
+    /// ([`crate::system::NesBus::prg_ram`]) when `addr`'s window selects
+    /// RAM; `None` (default) means "PRG ROM as usual", which is every
+    /// board but MMC5. See [`Mmc5`]'s module doc, "PRG RAM windows", for
+    /// why the bus keeps owning the bytes instead of lending them to the
+    /// mapper.
+    fn prg_ram_window(&self, addr: u16) -> Option<usize> {
+        let _ = addr;
+        None
+    }
+
+    /// MMC5 ExGrafix (`$5104` mode 1) and the vertical split
+    /// (`$5200-$5202`) both pick an arbitrary 4 KiB CHR bank per tile
+    /// (ticket W14-17) -- something [`Mapper::chr_window`]'s single 8 KiB
+    /// materialized view cannot express. This exposes the mapper's whole
+    /// CHR ROM instead, pushed once (the bytes never change after cart
+    /// load) and consulted by the PPU only when
+    /// [`Mapper::ext_attribute_mode`] or [`Mapper::vertical_split`] says
+    /// either feature is active. `None` for every board without either
+    /// (default), and for MMC5 itself when its CHR is RAM (nothing to
+    /// bank).
+    fn chr_rom_full(&self) -> Option<&[u8]> {
+        None
+    }
+
+    /// MMC5 ExGrafix (`$5104` mode 1, ticket W14-17): background tiles
+    /// take their CHR bank and palette from extended RAM instead of the
+    /// ordinary attribute-table fetch. `Some($5130` bits 0-1, the high
+    /// bits that widen ext RAM's 6-bit per-tile bank field to a full 4
+    /// KiB bank index`)` when enabled; `None` (default) otherwise.
+    fn ext_attribute_mode(&self) -> Option<u8> {
+        None
+    }
+
+    /// MMC5's vertical split (`$5200-$5202`, ticket W14-17):
+    /// `Some((right, split_tile, scroll, chr_bank))` when `$5200` bit 7 is
+    /// set. `right` is `$5200` bit 6 (`false` = the split is on the left);
+    /// `split_tile` is `$5200` bits 0-4 (the column threshold, see
+    /// `crate::ppu::background`'s `split_column` for how the two sides
+    /// read it); `scroll` is `$5201`; `chr_bank` is `$5202`, read as a
+    /// plain 4 KiB bank index with no `$5130` involved. **Unverified
+    /// against a local source** -- no MMC5 register-level page exists in
+    /// `docs/research/` and no oracle ROM this ticket runs exercises the
+    /// split (see `crate::mappers::Mmc5`'s module doc, "Slice 2"). `None`
+    /// (default) disables the split for every other board.
+    fn vertical_split(&self) -> Option<(bool, u8, u8, u8)> {
+        None
+    }
+
     /// Does this board back nametable kind `2` with 1 KiB of its own RAM,
     /// which the CPU reaches at `$5C00-$5FFF`? The PPU owns that buffer
     /// (it is what the PPU reads); the bus routes the CPU there.
