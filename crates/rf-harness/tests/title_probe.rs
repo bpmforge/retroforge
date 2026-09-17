@@ -153,7 +153,12 @@ fn probe() {
             n += 1;
             let sys = core.system();
             let apu = &sys.bus.apu;
-            let pcv = sys.cpu.pc24();
+            let pcv = sys.cpu.pc24()
+                | if std::env::var("PROBE_RINGP").is_ok() {
+                    u32::from(sys.cpu.p) << 24
+                } else {
+                    0
+                };
             let spcv = apu.cpu.pc;
             if spcv != spc_last {
                 spcring.push_back(spcv);
@@ -171,7 +176,7 @@ fn probe() {
             if pcv != ring_last {
                 pcring.push_back(pcv);
                 ring_last = pcv;
-                if pcring.len() > 120 {
+                if pcring.len() > 6000 {
                     pcring.pop_front();
                 }
             }
@@ -213,7 +218,11 @@ fn probe() {
                 "    ring: {}",
                 pcring
                     .iter()
-                    .map(|p| format!("{p:06X}"))
+                    .map(|p| if std::env::var("PROBE_RINGP").is_ok() {
+                        format!("{:06X}:{:02X}", p & 0xFF_FFFF, p >> 24)
+                    } else {
+                        format!("{p:06X}")
+                    })
                     .collect::<Vec<_>>()
                     .join(" ")
             );
@@ -387,6 +396,24 @@ fn probe() {
             );
         }
         println!("    timers: {:?} test={:#04x}", apu.timers, apu.test);
+        println!("    dma: {:?}", sys.bus.dma);
+        if let Ok(list) = std::env::var("PROBE_PEEK") {
+            let vals: Vec<String> = list
+                .split(',')
+                .map(|a| {
+                    let addr = u32::from_str_radix(a, 16).unwrap();
+                    format!("{a}={:02X}", rf_snes::cpu::CpuBus::peek(&sys.bus, addr))
+                })
+                .collect();
+            println!("    peek: {}", vals.join(" "));
+        }
+        println!(
+            "    timing: line={} dot={} frame={} hdmaen={:#04x}",
+            sys.bus.timing.line,
+            sys.bus.timing.dot(),
+            sys.bus.timing.frame,
+            sys.bus.hdmaen
+        );
         println!("    irq: {:?} mode={:?} nmi_vec={nmi_vec:04X} nmi_entries={nmi_hits} irq_vec={irq_vec:04X} irq_entries={irq_hits} cpu.stopped={}", sys.bus.irq, sys.bus.nmitimen.irq_mode(), sys.cpu.stopped);
         println!("    spc regs: a={:02x} x={:02x} y={:02x} ; F4-F7 in(spc reads)={:02x?} out(cpu reads)={:02x?} timers en={:?} counters={:?}",
             apu.cpu.a, apu.cpu.x, apu.cpu.y, apu.ports_in, apu.ports_out,
