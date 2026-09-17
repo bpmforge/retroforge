@@ -1,7 +1,7 @@
 //! CPU<->APU ports, the boot handshake, and the S-DSP skeleton
 //! (ticket W6-04b).
 
-use crate::apu::boot::{BootAction, BootState, IplBoot};
+use crate::apu::boot::{BootAction, BootState, IplBoot, IPL_INIT_CYCLES};
 use crate::apu::dsp::{decode_brr, Dsp};
 use crate::apu::Apu;
 // `read`/`write` are ApuBus methods; the trait must be in scope to call them.
@@ -118,6 +118,22 @@ fn a_jump_to_ffc0_re_enters_the_boot_handshake() {
         !apu.boot.is_running(),
         "the handshake owns the machine again"
     );
+    // But the boot ROM is clearing zero page: the jump's echo is still
+    // on port 0 for the CPU to read, and $AA/$BB come only after the
+    // documented init.
+    assert_eq!(apu.cpu_read_port(0), 0x02, "the echo survives re-entry");
+    for _ in 0..100 {
+        apu.poll_boot();
+    }
+    assert_eq!(
+        apu.cpu_read_port(0),
+        0x02,
+        "and is still there 100 cycles in"
+    );
+    for _ in 0..IPL_INIT_CYCLES {
+        apu.poll_boot();
+    }
+    assert_eq!(apu.boot.state, BootState::Ready);
     assert_eq!(apu.cpu_read_port(0), 0xAA);
     assert_eq!(apu.cpu_read_port(1), 0xBB);
 }
@@ -599,7 +615,7 @@ fn a_non_looping_sample_stops_at_its_end() {
 /// this byte exists is visible at the point that produces it.
 #[test]
 fn handing_control_to_the_spc700_still_echoes_the_final_counter() {
-    use crate::apu::boot::{BootAction, BootState, IplBoot};
+    use crate::apu::boot::{BootAction, BootState, IplBoot, IPL_INIT_CYCLES};
 
     // Mid-upload: one block transferred, counter at 2.
     let mut boot = IplBoot::new();

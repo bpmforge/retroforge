@@ -369,8 +369,10 @@ impl Apu {
         if !self.in_ipl_window(self.cpu.pc) {
             return;
         }
-        self.boot = boot::IplBoot::new();
-        self.ports_out = boot::IplBoot::ready_ports();
+        // NOT `Ready` yet, and NOT `$AA`/`$BB` yet: the real ROM clears
+        // zero page first (`IPL_INIT_CYCLES`), and the echo of the jump's
+        // counter stays on port 0 for the 65816 to read meanwhile.
+        self.boot = boot::IplBoot::rebooting();
         // The HLE owns the machine again until it hands back.
         self.cpu.stopped = true;
     }
@@ -419,6 +421,11 @@ impl Apu {
         }
         match self.boot.poll(self.ports_in) {
             boot::BootAction::Echo(v) => self.ports_out[0] = v,
+            boot::BootAction::Publish => {
+                let ready = boot::IplBoot::ready_ports();
+                self.ports_out[0] = ready[0];
+                self.ports_out[1] = ready[1];
+            }
             boot::BootAction::Store {
                 address,
                 value,

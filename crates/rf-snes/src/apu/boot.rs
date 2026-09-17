@@ -42,7 +42,26 @@ pub enum BootState {
     AwaitingBlock(u8),
     /// The handshake handed control to the SPC700 core.
     Running,
+    /// Re-entered at `$FFC0`: the boot ROM is clearing zero page and has
+    /// not yet published `$AA`/`$BB` (ticket W14-10). The value is the
+    /// SPC cycles left before it does.
+    Initialising(u16),
 }
+
+/// SPC cycles the boot ROM spends before it publishes `$AA`/`$BB`.
+///
+/// fullsnes, "SNES APU Boot ROM": the ROM begins `MOV X,#$EF` / `MOV SP,X`
+/// / `MOV A,#$00`, then a loop of `MOV (X),A` / `DEC X` / `BNE` that clears
+/// `$00-$EF`, and only then `MOV $F4,#$AA` / `MOV $F5,#$BB`. With the
+/// SPC700 cycle table (2 + 2 + 2, then 239 laps of 4 + 2 + 4 and a last
+/// lap of 4 + 2 + 2) that is 2404 cycles, about 2.3 ms.
+///
+/// **This delay is load-bearing, not cosmetic.** A game that reboots the
+/// APU by commanding a jump to `$FFC0` is still spinning on `CMP $2140`
+/// for the echo of that jump's counter. Republishing `$AA` on the very
+/// next SPC instruction overwrote the echo before the 65816 could read
+/// it — Super Bonk waited for `$E3` for ever while the port held `$AA`.
+pub const IPL_INIT_CYCLES: u16 = 2404;
 
 /// The HLE boot handshake.
 #[derive(Debug, Clone)]
@@ -73,6 +92,16 @@ impl IplBoot {
         }
     }
 
+    /// A handshake re-entered at `$FFC0`: `Ready` only after the boot
+    /// ROM's zero-page clear has run its documented course.
+    #[must_use]
+    pub fn rebooting() -> Self {
+        Self {
+            state: BootState::Initialising(IPL_INIT_CYCLES),
+            ..Self::new()
+        }
+    }
+
     #[must_use]
     pub fn is_running(&self) -> bool {
         self.state == BootState::Running
@@ -92,6 +121,8 @@ pub enum BootAction {
     Echo(u8),
     /// Store `value` at `address`, then echo.
     Store { address: u16, value: u8, echo: u8 },
+    /// The boot ROM's init finished: publish `$AA`/`$BB` on ports 0/1.
+    Publish,
     /// Hand control to the SPC700 at `entry`, **after echoing `echo` on
     /// port 0**.
     ///
@@ -140,12 +171,22 @@ impl IplBoot {
     /// value this is waiting for, so re-reading an unchanged port 0 never
     /// matches twice.
     pub fn poll(&mut self, ports_in: [u8; 4]) -> BootAction {
+        if let BootState::Initialising(left) = self.state {
+            // One poll per SPC cycle while the HLE owns the machine —
+            // see `SnesBus::catch_up_apu`.
+            if left > 1 {
+                self.state = BootState::Initialising(left - 1);
+                return BootAction::None;
+            }
+            self.state = BootState::Ready;
+            return BootAction::Publish;
+        }
         self.cpu_wrote(0, ports_in[0], ports_in)
     }
 
     pub(crate) fn cpu_wrote(&mut self, index: usize, value: u8, ports_in: [u8; 4]) -> BootAction {
         match self.state {
-            BootState::Running => BootAction::None,
+            BootState::Running | BootState::Initialising(_) => BootAction::None,
             BootState::Ready => {
                 if index == 0 && value == 0xCC {
                     self.address = u16::from(ports_in[2]) | (u16::from(ports_in[3]) << 8);
@@ -251,13 +292,14 @@ impl IplBoot {
         o: &mut crate::state::StateOut,
     ) -> Result<(), rf_core_api::StateError> {
         let (tag, arg) = match self.state {
-            BootState::Ready => (0u8, 0u8),
-            BootState::Transferring(n) => (1, n),
-            BootState::AwaitingBlock(n) => (2, n),
+            BootState::Ready => (0u8, 0u16),
+            BootState::Transferring(n) => (1, u16::from(n)),
+            BootState::AwaitingBlock(n) => (2, u16::from(n)),
             BootState::Running => (3, 0),
+            BootState::Initialising(n) => (4, n),
         };
         o.u8(tag)?;
-        o.u8(arg)?;
+        o.u16(arg)?;
         o.u16(self.address)?;
         o.u16(self.entry)?;
         o.usize(self.transferred)
@@ -268,15 +310,16 @@ impl IplBoot {
         i: &mut crate::state::StateIn,
     ) -> Result<(), rf_core_api::StateError> {
         let tag = i.u8()?;
-        let arg = i.u8()?;
+        let arg = i.u16()?;
         self.state = match tag {
             0 => BootState::Ready,
-            1 => BootState::Transferring(arg),
-            2 => BootState::AwaitingBlock(arg),
+            1 => BootState::Transferring(arg as u8),
+            2 => BootState::AwaitingBlock(arg as u8),
             3 => BootState::Running,
+            4 => BootState::Initialising(arg),
             other => {
                 return Err(rf_core_api::StateError::Corrupt(format!(
-                    "IPL boot state tag {other} is not one of ready/transferring/awaiting/running"
+                    "IPL boot state tag {other} is not one of ready/transferring/awaiting/running/initialising"
                 )))
             }
         };
