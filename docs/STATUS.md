@@ -3045,3 +3045,56 @@ stories, 10 decisions).
 
   Board: W14-08 filed with the profile, the line, and three named shapes
   the fix could take.
+
+- **W14-08 — the sub-screen path clones the whole PPU once per scanline**
+  (2026-09-16). **105 ms per frame -> 1.0 ms**, and no pixel moved.
+
+  | title, release build, 60 frames | before | after |
+  |---|---|---|
+  | Super Buster Bros. | 105.1 ms/frame | **1.01** |
+  | Radical Psycho Machine Racing | 103.4 | **0.94** |
+  | Batman Forever | 226.9 | **2.54** |
+  | Judge Dredd | 166.0 | **1.93** |
+  | Zelda: A Link to the Past (the plain-title reference) | 0.86 | 0.88 |
+
+  **The ticket's diagnosis was right and short by a factor of 256.** The
+  profile named one full `Ppu` clone per sub scanline. Reading the path
+  before touching it found that `render_sub_scanline` also asked
+  `layer_at` for the main screen's layer at each dot — and `layer_at`
+  cloned the PPU and composed the entire line again, **once per pixel**.
+  So a hires or colour-math line was 257 clones and 257 full compositions,
+  which is the ~3600 samples the profile put in `render_scanline_hires`
+  beside the 957 it put in `clone`. Batman Forever and Judge Dredd, two of
+  the five titles W14-06 pushed into the timed-out bucket, take this path
+  too and are in the table for that reason.
+
+  **The fix is save/restore, not a refcount.** Every fetcher takes `&Ppu`,
+  so the memory never changes during a composition and a clone was only
+  ever isolating the register file, two write-twice latches a replayed
+  scroll write toggles, two flags a replayed `$2130`/`$2133` write sets,
+  and the sprite-limit flags. `LineScratch` captures exactly those, the
+  line is composed **in place**, and the scratch is put back. The main
+  screen keeps its limit flags on restore, because `$213E` is sticky
+  until vblank; the sub screen restores them too, because its sprite
+  evaluation must never reach `$213E`. `with_line_state` became
+  `apply_line_state`, and the main-screen layer line is composed once per
+  sub scanline instead of once per dot.
+
+  **Criterion 2 was checked on real games, not only on goldens.** A
+  throwaway probe (deleted, never committed) hashed every emitted palette
+  index over 60 frames of each title above; the hash is identical before
+  and after for all five, including the three that render. The seventeen
+  PPU goldens and every mode-7/window/colour-math test pass unchanged.
+
+  **Criterion 3 has a test that bites.** 33 sprites on the sub screen and
+  none on the main screen must leave `range_over` clear and TS must be
+  swapped back out of TM. Removing the sub screen's flag restore makes it
+  fail; that was run, not assumed.
+
+  **What this does not close.** The Flintstones and Elite Soccer are in
+  the same timed-out bucket and were 0.6 ms/frame before this change,
+  emitting a uniform screen — they are a different thing, and it is on
+  W14-07's list, not this ticket's.
+
+  Gate: workspace **1827 passing / 0 failed / 35 ignored**, arch OK,
+  local-gate exit 0 (blargg SPC red by design while W7-08/W7-17 are open), the six ignored SNES PPU golden tests (PeterLemon, undisbeliever, region) all pass.

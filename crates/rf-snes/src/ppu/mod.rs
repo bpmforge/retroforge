@@ -222,6 +222,72 @@ impl PpuRegs {
     }
 }
 
+/// Everything a line composition can touch on the PPU besides the pixels
+/// it returns (ticket W14-08).
+///
+/// Composing a line in a **shadow** — a full `Ppu` clone — used to be how
+/// the per-line register state and the sub screen were kept from leaking
+/// into the live registers. A `Ppu` carries 64 KiB of VRAM plus CGRAM,
+/// OAM and two per-line `Vec`-of-`Vec` fields, and the sub-screen path
+/// was taking that clone **once per pixel** (it asked the main screen's
+/// layer at `x` by cloning and re-composing the whole line, 256 times a
+/// line). That was 100 ms per frame on any hires or colour-math title
+/// against 1 ms for a plain one.
+///
+/// The memory never changes during a composition — every fetcher takes
+/// `&Ppu` — so what a shadow actually isolated is this: the register
+/// file, the two write-twice latches a replayed scroll write toggles,
+/// two flags a replayed `$2130`/`$2133` write sets, and the sprite-limit
+/// flags the compositor accumulates. Capture these, compose **in place**,
+/// restore. What is restored and what is deliberately kept is decided at
+/// each call site, because the two differ: the main screen's limit flags
+/// accumulate on the real PPU, the sub screen's never do.
+#[derive(Debug, Clone, Copy)]
+struct LineScratch {
+    regs: PpuRegs,
+    direct_color: bool,
+    overscan_changed: bool,
+    bgofs_latch: u8,
+    bghofs_latch: u8,
+    range_over: bool,
+    time_over: bool,
+}
+
+impl LineScratch {
+    fn capture(p: &Ppu) -> Self {
+        Self {
+            regs: PpuRegs::capture(p),
+            direct_color: p.direct_color,
+            overscan_changed: p.overscan_changed,
+            bgofs_latch: p.bgofs_latch,
+            bghofs_latch: p.bghofs_latch,
+            range_over: p.range_over,
+            time_over: p.time_over,
+        }
+    }
+
+    /// Put back everything EXCEPT the sprite-limit flags, which the
+    /// hardware accumulates across the frame (`$213E` is sticky until
+    /// vblank) and which the main screen therefore keeps.
+    fn restore_keeping_limits(&self, p: &mut Ppu) {
+        self.regs.apply(p);
+        p.direct_color = self.direct_color;
+        p.overscan_changed = self.overscan_changed;
+        p.bgofs_latch = self.bgofs_latch;
+        p.bghofs_latch = self.bghofs_latch;
+    }
+
+    /// Put back everything, limit flags included. The sub screen is
+    /// composed for colour math and hires interleaving only; its sprite
+    /// evaluation must not reach `$213E`, exactly as the forced-blank
+    /// test insists the main screen's must not while the screen is off.
+    fn restore(&self, p: &mut Ppu) {
+        self.restore_keeping_limits(p);
+        p.range_over = self.range_over;
+        p.time_over = self.time_over;
+    }
+}
+
 /// `$2133` SETINI, decoded (ticket W7-06).
 ///
 /// Bit meanings are quoted from fullsnes's SETINI table rather than
@@ -813,25 +879,27 @@ impl Ppu {
         out
     }
 
-    /// A copy of this PPU with line `y`'s latched registers applied.
+    /// Apply line `y`'s latched registers to the live register file.
     ///
-    /// Returns `None` when that line was never latched, in which case the
-    /// live registers are already the right answer.
-    #[must_use]
-    fn with_line_state(&self, y: u16) -> Option<Self> {
-        let state = (*self.line_state.get(usize::from(y))?)?;
-        let mut p = self.clone();
-        p.mode7 = state.mode7;
-        p.bg_mode = state.bg_mode;
-        p.bg3_priority = state.bg3_priority;
-        for (i, bg) in p.bgs.iter_mut().enumerate() {
+    /// Returns `false` when that line was never latched, in which case
+    /// the live registers are already the right answer and nothing is
+    /// touched. The caller owns putting the registers back — see
+    /// [`LineScratch`] for why this is no longer a clone.
+    fn apply_line_state(&mut self, y: u16) -> bool {
+        let Some(Some(state)) = self.line_state.get(usize::from(y)).copied() else {
+            return false;
+        };
+        self.mode7 = state.mode7;
+        self.bg_mode = state.bg_mode;
+        self.bg3_priority = state.bg3_priority;
+        for (i, bg) in self.bgs.iter_mut().enumerate() {
             bg.hofs = state.hofs[i];
             bg.vofs = state.vofs[i];
         }
-        p.windows = state.windows;
-        p.color_math = state.color_math;
-        p.mosaic = state.mosaic;
-        Some(p)
+        self.windows = state.windows;
+        self.color_math = state.color_math;
+        self.mosaic = state.mosaic;
+        true
     }
 
     /// `$213E` STAT77 — the hardware's own report of the two OBJ limits.
@@ -866,36 +934,60 @@ impl Ppu {
         use rf_core_api::{ColorMathOp, SubPixel};
 
         let line = y + 1;
-        let mut shadow = self.with_line_state(line).unwrap_or_else(|| self.clone());
+        let saved = LineScratch::capture(self);
+        let _ = self.apply_line_state(line);
+
+        // Which main-screen layer each dot is being blended INTO decides
+        // whether `$2131` enables math there at all — so the main screen
+        // is composed once, here, from the same latched registers, and
+        // only its layer per dot is kept. On a true-hires line the main
+        // screen owns the ODD half-dot while the sub pixel lands on the
+        // EVEN one; asking `Odd` is still right, because the two
+        // half-dots are the same DOT and `$2131`'s per-layer enable is a
+        // per-dot decision. (Nothing in the golden suite can catch a
+        // mistake here: the goldens hash palette indices and this decides
+        // a `ColorMathOp`.)
+        let main_phase = self.hires_phase(bg::HiresPhase::Odd);
+        let main_layers: Vec<rf_core_api::PixelLayer> = self
+            .render_scanline_live(line, main_phase, WIDTH)
+            .pixels
+            .iter()
+            .map(|p| p.layer)
+            .collect();
+
         // Swap TM for TS: same composition, the other screen's layers.
-        let ts = shadow.ts;
-        for (i, bg) in shadow.bgs.iter_mut().enumerate() {
+        let ts = self.ts;
+        for (i, bg) in self.bgs.iter_mut().enumerate() {
             bg.enabled = ts & (1 << i) != 0;
         }
-        shadow.obj_enabled = ts & 0x10 != 0;
+        self.obj_enabled = ts & 0x10 != 0;
         // The SUB screen owns the EVEN half-dot of every pair on a
         // true-hires line, so its backgrounds are fetched from the even
         // 512-columns. On any other line this is `None` and the fetch is
         // the ordinary 256-wide one — including pseudo-hires, which
         // really is two independent screens.
-        let phase = shadow.hires_phase(bg::HiresPhase::Even);
+        let phase = self.hires_phase(bg::HiresPhase::Even);
         // The sub screen feeds colour math, which is a 256-space
         // per-dot operation; widening is a main-screen concern.
-        let composed = shadow.render_scanline_live(line, phase, WIDTH);
+        let composed = self.render_scanline_live(line, phase, WIDTH);
 
-        let math = &shadow.color_math;
-        let fixed = shadow.color_math.fixed_bgr555();
+        let math = self.color_math;
+        let windows = self.windows;
+        let fixed = math.fixed_bgr555();
+        // Everything above was composed against this line's registers
+        // with TS in TM's place, and its sprite evaluation counted
+        // toward the limit flags. None of that is the live PPU's: put
+        // it all back before anything else reads a register.
+        saved.restore(self);
+
         let pixels = composed
             .pixels
             .iter()
             .enumerate()
             .map(|(x, px)| {
-                let inside = shadow.windows.masks(5, x as u8);
-                // Which main-screen layer is being blended INTO decides
-                // whether $2131 enables math here at all. The main screen
-                // is what carries that layer, so it is read from `self`.
-                let main_layer = match self.layer_at(line, x) {
-                    Some(rf_core_api::PixelLayer::Background(n)) => usize::from(n),
+                let inside = windows.masks(5, x as u8);
+                let main_layer = match main_layers.get(x) {
+                    Some(rf_core_api::PixelLayer::Background(n)) => usize::from(*n),
                     Some(rf_core_api::PixelLayer::Sprite) => 4,
                     _ => 5,
                 };
@@ -921,27 +1013,6 @@ impl Ppu {
             })
             .collect();
         (pixels, fixed)
-    }
-
-    /// The main screen's layer at one position, for the colour-math
-    /// enable test. Cheap enough at one line per call and always in step
-    /// with what `render_scanline` produced.
-    fn layer_at(&mut self, line: u16, x: usize) -> Option<rf_core_api::PixelLayer> {
-        let mut shadow = self.with_line_state(line).unwrap_or_else(|| self.clone());
-        // Which main-screen layer is being blended into, for the sub
-        // pixel at dot `x`. On a true-hires line the main screen owns the
-        // ODD half-dot of the pair while this sub pixel will land on the
-        // EVEN one — asking `Odd` is still right, because the two
-        // half-dots are the same DOT and `$2131`'s per-layer enable is a
-        // per-dot decision, not a per-half-dot one. (Nothing in the
-        // golden suite can catch a mistake here: the goldens hash palette
-        // indices and this decides a `ColorMathOp`.)
-        let phase = shadow.hires_phase(bg::HiresPhase::Odd);
-        shadow
-            .render_scanline_live(line, phase, WIDTH)
-            .pixels
-            .get(x)
-            .map(|p| p.layer)
     }
 
     /// Compose one visible scanline.
@@ -1043,29 +1114,33 @@ impl Ppu {
         // line, not from wherever they have since been left. Without
         // this, HDMA's per-line changes all collapse onto the frame's
         // final state.
-        if let Some(latched) = self.with_line_state(line) {
-            let mut shadow = latched;
+        //
+        // Composed IN PLACE against the latched registers and put back
+        // afterwards (ticket W14-08; see `LineScratch`). The limit flags
+        // are the one thing kept: they accumulate on the real PPU.
+        let saved = LineScratch::capture(self);
+        if self.apply_line_state(line) {
             // Segmented: the line is split at every mid-line register
             // write. With no writes this is exactly the old single
             // composition, which is why it is inert on 31 of 32 goldens.
-            let width = if shadow.setini.hires_requested(shadow.bg_mode) {
+            let width = if self.setini.hires_requested(self.bg_mode) {
                 WIDTH
             } else {
                 width
             };
-            let composed = shadow.compose_line_segmented(line, width);
-            // Limit flags accumulate on the real PPU, not the shadow.
-            self.range_over |= shadow.range_over;
-            self.time_over |= shadow.time_over;
+            let composed = self.compose_line_segmented(line, width);
             // Hires is decided from the LATCHED registers, like everything
             // else on this line: a mid-frame BGMODE or SETINI write must
             // change the line it was written on, not retroactively rewrite
-            // earlier ones. That is the same reason `with_line_state`
+            // earlier ones. That is the same reason `apply_line_state`
             // exists at all.
-            if shadow.setini.hires_requested(shadow.bg_mode) {
-                return shadow.render_scanline_hires(line, composed);
-            }
-            return composed;
+            let out = if self.setini.hires_requested(self.bg_mode) {
+                self.render_scanline_hires(line, composed)
+            } else {
+                composed
+            };
+            saved.restore_keeping_limits(self);
+            return out;
         }
         let width = if self.setini.hires_requested(self.bg_mode) {
             WIDTH

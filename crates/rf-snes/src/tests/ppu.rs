@@ -811,7 +811,7 @@ fn window_and_mosaic_registers_are_latched_per_scanline() {
 
     // ---- and the COMPOSITION must use it -------------------------
     //
-    // Asserting on the latch alone would pass even if `with_line_state`
+    // Asserting on the latch alone would pass even if `apply_line_state`
     // never applied the fields — which is exactly half the bug. Draw a
     // real tile across the line and check that the two lines mask
     // DIFFERENT spans of it.
@@ -1583,4 +1583,46 @@ fn an_over_wide_request_is_clamped() {
     assert_eq!(p.render_scanline_at(0, 4096).pixels.len(), MAX_WIDTH);
     // And below the hardware width it cannot shrink the picture.
     assert_eq!(p.render_scanline_at(0, 64).pixels.len(), WIDTH);
+}
+
+/// **The sub screen's sprite evaluation never reaches `$213E`, and its
+/// TS-for-TM swap never reaches the live registers** (ticket W14-08,
+/// criterion 3).
+///
+/// The sub screen used to be composed in a cloned `Ppu`, which made both
+/// properties true by construction — and cost a full 64 KiB copy per
+/// pixel. It is now composed in place and put back, so this is the test
+/// that the put-back is complete: 33 sprites on the sub screen and none
+/// on the main screen must leave `range_over` clear, exactly as forced
+/// blank must (see `forced_blank_renders_backdrop_and_evaluates_nothing`),
+/// and the layer enables must read as they did before the call.
+#[test]
+fn sub_screen_composition_leaves_the_live_ppu_untouched() {
+    let mut p = ppu_with_sprites(MAX_SPRITES_PER_LINE + 1, 0, false);
+    p.write_register(0x212C, 0x01); // TM: BG1 only on the main screen
+    p.write_register(0x212D, 0x10); // TS: OBJ only on the sub screen
+    let before = (p.bgs[0].enabled, p.obj_enabled, p.ts);
+
+    let (sub, _) = p.render_sub_scanline(0);
+    assert!(
+        sub.iter().any(|px| px.layer == PixelLayer::Sprite),
+        "the sub screen really composed sprites — otherwise the flag \
+         assertion below passes vacuously"
+    );
+    assert!(
+        !p.range_over && !p.time_over,
+        "sub-screen sprite evaluation must not accumulate into $213E"
+    );
+    assert_eq!(
+        (p.bgs[0].enabled, p.obj_enabled, p.ts),
+        before,
+        "TS was swapped in for TM during composition and must be swapped \
+         back out"
+    );
+
+    // And the main screen, composed afterwards, still reports its own
+    // limits — the restore must not have disarmed the flags for good.
+    p.write_register(0x212C, 0x10);
+    let _ = p.render_scanline(0);
+    assert!(p.range_over, "the main screen's 33rd sprite still trips it");
 }
