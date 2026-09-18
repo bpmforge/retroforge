@@ -477,6 +477,59 @@ pub fn mode7_registers(m: &crate::ppu::mode7::Mode7) -> rf_core_api::Mode7Regist
     }
 }
 
+/// Per-scanline Mode 7 register capture for one frame (ticket W16-14;
+/// `docs/design/ENHANCEMENT_WAVE_16.md` §9).
+///
+/// **Reads back existing state, adds no new capture mechanism.**
+/// `Ppu::line_state` is already latched once per visible scanline (ticket
+/// W7-07's HDMA fix — `Ppu::latch_line`'s own doc), which is exactly "the
+/// registers a real per-scanline HDMA ramp left in effect at line start"
+/// — precisely what this needs, so this function is a pure projection of
+/// state that already exists rather than a second recorder running
+/// alongside it.
+///
+/// `top`/`bottom` are [`mode7_registers`]'s promotion of whatever was
+/// latched at the FIRST and LAST visible line (falling back to the live,
+/// unlatched `ppu.mode7` for either end when nothing was latched there —
+/// a forced-blank frame, or a frame with zero visible lines). `lines` is
+/// `None` unless some OTHER visible line's latched matrix differs from
+/// `top`'s: the only case worth the allocation
+/// (`rf_core_api::Mode7Frame`'s own doc — "no allocation... when no HDMA
+/// touches the registers"). When `lines` IS built, every entry is the
+/// line's own latched value (or `top` for a line nothing latched, which
+/// only happens past `visible` or before the beam has reached it —
+/// neither occurs for a completed frame).
+#[must_use]
+pub fn mode7_frame(ppu: &crate::ppu::Ppu) -> rf_core_api::Mode7Frame {
+    let visible = ppu.setini.visible_lines();
+    let live = mode7_registers(&ppu.mode7);
+    let latched = |y: u16| -> Option<rf_core_api::Mode7Registers> {
+        ppu.line_state
+            .get(usize::from(y))
+            .copied()
+            .flatten()
+            .map(|s| mode7_registers(&s.mode7))
+    };
+    if visible == 0 {
+        return rf_core_api::Mode7Frame {
+            top: live,
+            bottom: live,
+            lines: None,
+        };
+    }
+    let top = latched(0).unwrap_or(live);
+    let bottom = latched(visible - 1).unwrap_or(live);
+
+    let mut lines: Option<Vec<rf_core_api::Mode7Registers>> = None;
+    for y in 0..visible {
+        if latched(y).unwrap_or(top) != top {
+            lines = Some((0..visible).map(|yy| latched(yy).unwrap_or(top)).collect());
+            break;
+        }
+    }
+    rf_core_api::Mode7Frame { top, bottom, lines }
+}
+
 /// Render `tiles_w`x`tiles_h` tiles of the Mode 7 playfield (starting at
 /// playfield tile `(0, 0)`) to a plain RGBA8 texture, at `density`x the
 /// hardware's native per-tile resolution — ticket W16-09's "ground
@@ -795,7 +848,7 @@ mod w13_02c_tests {
         assert_eq!(&rgba[0..4], &[0, 0, 255, 255], "pixel (0,0) is opaque blue");
 
         // A tile pixel this test never wrote is index 0 -> transparent.
-        let at = (0 * 8 + 4) * 4; // pixel (4, 0)
+        let at = 4 * 4; // pixel (4, 0): row 0, column 4.
         assert_eq!(&rgba[at..at + 4], &[0, 0, 0, 0]);
     }
 
@@ -828,5 +881,80 @@ mod w13_02c_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod w16_14_tests {
+    use super::*;
+
+    /// Acceptance criterion 1: "a synthetic mid-frame write changes the
+    /// bottom value but not the top." Latches line 0 with a unity matrix,
+    /// then a shrunk matrix (the shape a racing game's near-scanline HDMA
+    /// ramp writes) for every line from the midpoint down -- exactly
+    /// `Ppu::latch_line`'s documented per-scanline capture, no new
+    /// mechanism.
+    #[test]
+    fn a_mid_frame_write_changes_the_bottom_value_but_not_the_top() {
+        let mut ppu = crate::ppu::Ppu::new();
+        let visible = ppu.setini.visible_lines();
+
+        ppu.mode7.a = 256;
+        ppu.mode7.d = 256;
+        ppu.latch_line(0);
+
+        ppu.mode7.a = 64;
+        ppu.mode7.d = 64;
+        for y in visible / 2..visible {
+            ppu.latch_line(y);
+        }
+
+        let frame = mode7_frame(&ppu);
+        assert_eq!(frame.top.a, 256, "the top line must keep the unity matrix");
+        assert_eq!(
+            frame.bottom.a, 64,
+            "the bottom line must see the HDMA write"
+        );
+        assert_ne!(frame.top, frame.bottom);
+
+        let lines = frame
+            .lines
+            .expect("a matrix that changes mid-frame must build the per-line table");
+        assert_eq!(lines.len(), usize::from(visible));
+        assert_eq!(lines[0].a, 256);
+        assert_eq!(lines[usize::from(visible) - 1].a, 64);
+    }
+
+    /// The pay-for-use half of criterion 1: a frame nothing wrote mid-way
+    /// through must not allocate the per-line table at all.
+    #[test]
+    fn a_static_matrix_across_the_whole_frame_builds_no_line_table() {
+        let mut ppu = crate::ppu::Ppu::new();
+        let visible = ppu.setini.visible_lines();
+        ppu.mode7.a = 256;
+        ppu.mode7.d = 256;
+        for y in 0..visible {
+            ppu.latch_line(y);
+        }
+        let frame = mode7_frame(&ppu);
+        assert_eq!(frame.top, frame.bottom);
+        assert!(
+            frame.lines.is_none(),
+            "a matrix that never changes must not allocate a per-line table"
+        );
+    }
+
+    /// A frame with nothing latched at all (forced blank the whole way, or
+    /// tests that never called `latch_line`) falls back to the live
+    /// registers for both ends rather than a stale default.
+    #[test]
+    fn with_nothing_latched_top_and_bottom_fall_back_to_the_live_registers() {
+        let mut ppu = crate::ppu::Ppu::new();
+        ppu.mode7.a = 512;
+        ppu.mode7.d = 512;
+        let frame = mode7_frame(&ppu);
+        assert_eq!(frame.top.a, 512);
+        assert_eq!(frame.bottom.a, 512);
+        assert!(frame.lines.is_none());
     }
 }

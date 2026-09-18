@@ -63,7 +63,7 @@ impl FrameSubscriber {
             .events
             .iter()
             .filter(|ev| self.mask.is_subscribed(ev.mask_bit()))
-            .copied()
+            .cloned()
             .collect()
     }
 

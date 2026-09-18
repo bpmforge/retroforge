@@ -159,6 +159,13 @@ pub struct GameSettings {
     /// tier two, "walls pop up" — off by default, same law-6 posture as
     /// every toggle above.
     pub diorama: bool,
+    /// Ticket W16-14 (`docs/design/ENHANCEMENT_WAVE_16.md` §9): "Mode 7 as
+    /// 3D" — off by default, same law-6 posture as `diorama` above. Gated
+    /// on live BG-mode-7 game state rather than a matched profile (see
+    /// `enhance_ui::feature_rows`'s own doc), so it is a separate flag
+    /// from `diorama` even though both composite through the same live
+    /// view slot.
+    pub mode7_ground: bool,
     /// Shader name, `None` for the default pipeline. A string rather than
     /// an enum because W3-02a owns the shader set and this must not have to
     /// change when that lands.
@@ -230,6 +237,7 @@ impl GameSettings {
             ("widescreen_decoded", self.widescreen_decoded),
             ("full_level_view", self.full_level_view),
             ("diorama", self.diorama),
+            ("mode7_ground", self.mode7_ground),
         ] {
             if on {
                 fields.insert(key.to_string(), "true".to_string());
@@ -297,6 +305,7 @@ impl GameSettings {
                 "widescreen_decoded" => settings.widescreen_decoded = value == "true",
                 "full_level_view" => settings.full_level_view = value == "true",
                 "diorama" => settings.diorama = value == "true",
+                "mode7_ground" => settings.mode7_ground = value == "true",
                 "trust" => {
                     settings.trust = rf_enhance::trust::TrustLadder::from_settings_value(value);
                 }
@@ -676,6 +685,7 @@ mod mode_and_feature_persistence_tests {
             "widescreen_decoded",
             "full_level_view",
             "diorama",
+            "mode7_ground",
         ] {
             assert!(
                 !untouched.contains(key),
@@ -687,12 +697,14 @@ mod mode_and_feature_persistence_tests {
             deflicker: true,
             full_level_view: true,
             diorama: true,
+            mode7_ground: true,
             ..GameSettings::default()
         };
         let restored = GameSettings::from_text(&s.to_text()).expect("parses");
         assert!(restored.deflicker);
         assert!(restored.full_level_view);
         assert!(restored.diorama);
+        assert!(restored.mode7_ground);
         assert!(
             !restored.widescreen_decoded,
             "a toggle that was never set must stay off"

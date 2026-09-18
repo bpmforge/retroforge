@@ -615,7 +615,7 @@ fn a_non_looping_sample_stops_at_its_end() {
 /// this byte exists is visible at the point that produces it.
 #[test]
 fn handing_control_to_the_spc700_still_echoes_the_final_counter() {
-    use crate::apu::boot::{BootAction, BootState, IplBoot, IPL_INIT_CYCLES};
+    use crate::apu::boot::{BootAction, BootState, IplBoot};
 
     // Mid-upload: one block transferred, counter at 2.
     let mut boot = IplBoot::new();

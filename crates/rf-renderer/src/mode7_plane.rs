@@ -131,6 +131,151 @@ pub fn camera_view_proj(
     camera_matrices::view_proj(1.0, 1.0, extent, aspect, PITCH_DEG, FOV_Y_DEG, 1.3)
 }
 
+// ---------------------------------------------------------------------
+// Ticket W16-14: derive the camera from the frame's top/bottom matrices
+// instead of reasoning from one static scale (module doc's "What this
+// mapping is not" above was written for W16-09's single-snapshot input;
+// this section supersedes it now that `rf_core_api::Mode7Frame` carries
+// both ends of the frame).
+// ---------------------------------------------------------------------
+
+/// Camera pitch (degrees from horizontal) for a Mode 7 matrix that is
+/// IDENTICAL top-to-bottom — no HDMA perspective ramp at all, so there is
+/// nothing for a pitched camera to justify. Near-vertical rather than
+/// exactly 90 (which degenerates `camera_matrices::view_proj`'s `look_at`
+/// into a singular up-vector) — this is F-Zero/Mario Kart's simple
+/// "spinning disc" mode and a rotate-only Mode 7 demo alike: both read
+/// naturally as looking straight down.
+pub const TOP_DOWN_PITCH_DEG: f32 = 88.0;
+
+/// Camera pitch for the steepest genuine racing-style ramp this mapping
+/// recognises — reuses [`crate::diorama::PITCH_DEG`], the pitch already
+/// tuned for the rest of the diorama's walls, rather than inventing a
+/// second tuned constant.
+pub const RACING_PITCH_DEG: f32 = crate::diorama::PITCH_DEG;
+
+/// Derive the camera's pitch from the frame's top/bottom Mode 7 matrices
+/// (ticket W16-14 acceptance criterion 2).
+///
+/// ## The derivation
+///
+/// A racing/flight game's HDMA ramp writes a LARGER `a`/`d` (bigger
+/// [`matrix_scale`]) at the TOP of the screen — the horizon, sampling a
+/// wide, far-away slice of the playfield — and a SMALLER one at the
+/// BOTTOM — near the camera, sampling a small, zoomed-in slice (module
+/// doc above: "a SMALLER a/d means ... more zoomed in, nearer"). So
+/// `ratio = matrix_scale(top) / matrix_scale(bottom)` is `>= 1` exactly
+/// when the matrix has that genuine near/far shape, and `== 1` when the
+/// matrix is IDENTICAL top to bottom (a flat rotate/zoom with no
+/// perspective ramp at all — F-Zero's simple mode, or any non-racing
+/// Mode 7 use).
+///
+/// `t = 1 - 1/ratio` maps that ratio onto `[0, 1)`: `ratio == 1` (flat)
+/// gives `t == 0`, and `t` climbs toward `1` as the ramp steepens
+/// (`ratio == 2` gives `t == 0.5`; doubling again gives `0.75`), a soft
+/// curve rather than a hard clamp so an ordinary racing ramp (which
+/// rarely exceeds a 4-8x top/bottom scale spread) already sits well past
+/// the curve's midpoint without needing a tuned upper bound. The pitch is
+/// then a straight lerp from [`TOP_DOWN_PITCH_DEG`] (`t = 0`) to
+/// [`RACING_PITCH_DEG`] (`t -> 1`).
+///
+/// An inverted matrix (bottom scale bigger than top — not a real racing
+/// ramp, or a game using Mode 7 for something else entirely) clamps
+/// `ratio` to `1.0` rather than reporting a negative `t`: this mapping
+/// has no evidence which way such a matrix "should" pitch, so it falls
+/// back to the same top-down answer a flat matrix gets, never inventing
+/// a MORE extreme pitch than the steepest case this doc actually reasons
+/// about.
+#[must_use]
+pub fn derive_pitch_deg(top: &Mode7Registers, bottom: &Mode7Registers) -> f32 {
+    let scale_top = matrix_scale(top);
+    let scale_bottom = matrix_scale(bottom);
+    let ratio = (scale_top / scale_bottom).max(1.0);
+    let t = 1.0 - 1.0 / ratio;
+    TOP_DOWN_PITCH_DEG + (RACING_PITCH_DEG - TOP_DOWN_PITCH_DEG) * t
+}
+
+/// [`camera_view_proj`]'s frame-aware counterpart (ticket W16-14): the
+/// same [`camera_matrices::view_proj`] call, but with [`derive_pitch_deg`]
+/// in place of a fixed [`crate::diorama::PITCH_DEG`], and the ground
+/// extent taken from whichever of `top`/`bottom` implies the LARGER
+/// playfield footprint — the far (horizon) end of a real ramp always
+/// samples more of the playfield than the near end, so using the larger
+/// of the two keeps the whole visible ramp inside the ground quad instead
+/// of cropping the horizon to the near scanline's narrower extent.
+#[must_use]
+pub fn camera_view_proj_frame(
+    top: &Mode7Registers,
+    bottom: &Mode7Registers,
+    native_screen_width_px: f32,
+    aspect: f32,
+) -> camera_matrices::Mat4 {
+    let extent = ground_extent_px(top, native_screen_width_px)
+        .max(ground_extent_px(bottom, native_screen_width_px));
+    let pitch = derive_pitch_deg(top, bottom);
+    camera_matrices::view_proj(1.0, 1.0, extent, aspect, pitch, FOV_Y_DEG, 1.3)
+}
+
+/// [`render_mode7_ground`]'s frame-aware counterpart (ticket W16-14): the
+/// live wiring's entry point, using [`camera_view_proj_frame`] instead of
+/// a single static matrix's approximation. `top`/`bottom` are
+/// `rf_core_api::Mode7Frame::top`/`bottom` — the caller (`crate::app`'s
+/// `refresh_diorama_render`) owns unpacking the event; this module still
+/// knows nothing about `CoreEvent` (module doc: "what crosses into this
+/// crate").
+///
+/// # Errors
+/// Same as [`render_mode7_ground`]: `Err` if the GPU readback does not
+/// complete in time.
+#[allow(clippy::too_many_arguments)]
+pub fn render_mode7_ground_frame(
+    pass: &DioramaPass,
+    gpu: &GpuContext,
+    top: &Mode7Registers,
+    bottom: &Mode7Registers,
+    plane_rgba: &[u8],
+    plane_w: u32,
+    plane_h: u32,
+    native_screen_width_px: f32,
+    billboards: &[crate::diorama_mesh::Billboard],
+    sprite_rgba: &[u8],
+    sprite_w: u32,
+    sprite_h: u32,
+    out_width: u32,
+    out_height: u32,
+) -> Result<Vec<u8>, String> {
+    // The larger of the two ends' extents, same reasoning as
+    // `camera_view_proj_frame`'s own doc, so the tile grid and the
+    // camera agree on how much playfield the quad represents.
+    let extent = ground_extent_px(top, native_screen_width_px)
+        .max(ground_extent_px(bottom, native_screen_width_px));
+    let scene = DioramaScene {
+        tiles_w: 1,
+        tiles_h: 1,
+        tile_px: extent,
+        solid: &[0],
+        depth: &[0],
+        billboards,
+    };
+    let vertices = build_vertices(&scene);
+    let aspect = out_width.max(1) as f32 / out_height.max(1) as f32;
+    let vp = camera_view_proj_frame(top, bottom, native_screen_width_px, aspect);
+
+    pass.render_with_vp(
+        gpu,
+        &vertices,
+        plane_rgba,
+        plane_w,
+        plane_h,
+        sprite_rgba,
+        sprite_w,
+        sprite_h,
+        vp,
+        out_width,
+        out_height,
+    )
+}
+
 /// Render the Mode 7 plane as a flat, textured ground quad under the
 /// diorama's pitched camera (acceptance criterion 2). `plane_rgba` is
 /// `plane_w`x`plane_h` (`rf_snes::debug::render_mode7_plane_rgba`'s
@@ -331,6 +476,99 @@ mod tests {
             d_far > d_near,
             "a larger hardware scale must back the camera off farther: d_near={d_near} \
              d_far={d_far}"
+        );
+    }
+
+    /// Ticket W16-14 acceptance criterion 2: "a flat matrix gives a
+    /// top-down view". Identical top/bottom matrices (any Mode 7 use with
+    /// no HDMA perspective ramp) must derive [`TOP_DOWN_PITCH_DEG`]
+    /// exactly, not merely "closer to it than the racing case".
+    #[test]
+    fn a_flat_matrix_gives_a_top_down_view() {
+        let m = identity();
+        let pitch = derive_pitch_deg(&m, &m);
+        assert!(
+            (pitch - TOP_DOWN_PITCH_DEG).abs() < 1e-6,
+            "pitch={pitch}, expected exactly TOP_DOWN_PITCH_DEG for an unchanging matrix"
+        );
+    }
+
+    /// Acceptance criterion 2's other half: "a racing ramp gives a
+    /// pitched one" — a top (far/horizon) matrix scaled well above the
+    /// bottom (near) matrix must derive a pitch strictly BETWEEN the two
+    /// bounds, meaningfully off the top-down end.
+    #[test]
+    fn a_racing_ramp_gives_a_pitched_view() {
+        let top = Mode7Registers {
+            a: 1024,
+            d: 1024,
+            ..identity()
+        }; // scale 4.0 -- the horizon line, zoomed OUT.
+        let bottom = Mode7Registers {
+            a: 64,
+            d: 64,
+            ..identity()
+        }; // scale 0.25 -- the near line, zoomed IN.
+        let pitch = derive_pitch_deg(&top, &bottom);
+        assert!(
+            pitch < TOP_DOWN_PITCH_DEG - 1.0,
+            "a steep ramp must pitch meaningfully below top-down: pitch={pitch}"
+        );
+        assert!(
+            pitch >= RACING_PITCH_DEG,
+            "pitch must never overshoot past the racing bound: pitch={pitch}"
+        );
+    }
+
+    /// A monotonic sanity check: a steeper ramp (bigger top/bottom scale
+    /// spread) must pitch the camera closer to [`RACING_PITCH_DEG`] than a
+    /// shallower one, not just "off top-down by some amount or other".
+    #[test]
+    fn a_steeper_ramp_pitches_closer_to_the_racing_bound() {
+        let bottom = Mode7Registers {
+            a: 64,
+            d: 64,
+            ..identity()
+        };
+        let shallow_top = Mode7Registers {
+            a: 128,
+            d: 128,
+            ..identity()
+        }; // ratio 2.0
+        let steep_top = Mode7Registers {
+            a: 1024,
+            d: 1024,
+            ..identity()
+        }; // ratio 16.0
+        let shallow_pitch = derive_pitch_deg(&shallow_top, &bottom);
+        let steep_pitch = derive_pitch_deg(&steep_top, &bottom);
+        assert!(
+            steep_pitch < shallow_pitch,
+            "steeper ramp must pitch lower (closer to racing): shallow={shallow_pitch} \
+             steep={steep_pitch}"
+        );
+    }
+
+    /// An inverted matrix (bottom scale bigger than top, not a real
+    /// racing ramp) must not report a MORE extreme pitch than the
+    /// steepest case this mapping reasons about — it falls back to
+    /// top-down, module doc's stated fallback.
+    #[test]
+    fn an_inverted_matrix_falls_back_to_top_down() {
+        let top = Mode7Registers {
+            a: 64,
+            d: 64,
+            ..identity()
+        };
+        let bottom = Mode7Registers {
+            a: 1024,
+            d: 1024,
+            ..identity()
+        };
+        let pitch = derive_pitch_deg(&top, &bottom);
+        assert!(
+            (pitch - TOP_DOWN_PITCH_DEG).abs() < 1e-6,
+            "pitch={pitch}, an inverted matrix must fall back to exactly TOP_DOWN_PITCH_DEG"
         );
     }
 }

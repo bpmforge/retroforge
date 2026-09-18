@@ -140,6 +140,33 @@ pub struct Mode7Registers {
     pub flip_y: bool,
 }
 
+/// One frame's Mode 7 register history (ticket W16-14;
+/// `docs/design/ENHANCEMENT_WAVE_16.md` §9).
+///
+/// **The smaller honest shape, picked over `Vec<Mode7Registers>` per
+/// line.** `top`/`bottom` are the registers latched at the first and last
+/// visible scanline — always present, `Copy`-cheap, and enough on their
+/// own to derive a perspective (`rf_renderer::mode7_plane::
+/// derive_pitch_deg`). `lines` is the FULL per-visible-line table, but
+/// only `Some` when at least one visible line's captured matrix differs
+/// from `top` — i.e. only when HDMA actually touched the registers
+/// mid-frame. The overwhelmingly common case (a static matrix, or no
+/// Mode 7 ramp at all) carries `top == bottom` and `lines: None`, costing
+/// nothing beyond two `Mode7Registers` copies — no allocation
+/// (acceptance criterion 1: "the emitted event must not allocate when no
+/// HDMA touches the registers").
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Mode7Frame {
+    /// Registers latched at the first visible scanline.
+    pub top: Mode7Registers,
+    /// Registers latched at the last visible scanline.
+    pub bottom: Mode7Registers,
+    /// One entry per visible scanline, present only when some line's
+    /// registers differ from `top` (a genuine HDMA ramp) — `None`
+    /// otherwise, so a static frame allocates nothing.
+    pub lines: Option<Vec<Mode7Registers>>,
+}
+
 /// One overlay-only pixel: a sprite the hardware's per-scanline sprite limit
 /// dropped, recorded separately from the accuracy-exact [`PpuPixel`] sink so
 /// it can never displace a real pixel (see [`PpuPixel::dropped_by_limit`]'s

@@ -27,7 +27,7 @@ use rf_core_api::CoreEvent;
 /// One point on the frame timeline: the event, and the scanline it
 /// occurred within (`None` only if the event arrived before any
 /// `Scanline` event this frame — e.g. a `FrameStart` at the very top).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TimelineEvent {
     pub scanline: Option<u16>,
     pub event: CoreEvent,
@@ -45,7 +45,8 @@ pub fn build_timeline(events: &[CoreEvent]) -> Vec<TimelineEvent> {
     let mut current_scanline: Option<u16> = None;
     events
         .iter()
-        .map(|&event| {
+        .cloned()
+        .map(|event| {
             if let CoreEvent::Scanline(y) = event {
                 current_scanline = Some(y);
             }
