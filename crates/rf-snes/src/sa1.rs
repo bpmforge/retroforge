@@ -194,6 +194,23 @@ pub struct Sa1Regs {
     charconv2_row: u8,
     /// Type 1's current tile row (0-7), advanced once per converted row.
     charconv1_row_ctr: u8,
+    /// Ticket W17-04: a write into a `$22xx` offset this project has no
+    /// register for — fullsnes's own I/O map table lists the gaps
+    /// explicitly (`$2216-$221F`, `$222B-$222F`, `$223A-$223E`,
+    /// `$2255-$2257`, `$225C` and up) and separately calls out two of
+    /// them as real, observed traffic: "`$2261h` Unknown/Undocumented
+    /// (Jumpin Derby writes 00h)" and "`$2262h`... (Super Bomberman
+    /// writes 00h)". Diagnostic only (see [`Self::is_known_write_offset`]
+    /// and `title_probe`'s `PROBE_SA1REGS`): it does not gate or alter
+    /// any write — an unknown offset still lands in `raw` exactly as
+    /// every other one does, unchanged from before this ticket — and it
+    /// is not part of save state, the same way `Dsp1DrTrace` is a
+    /// diagnostic the debugger reads rather than gameplay state.
+    /// Offset -> times written, so a probe can tell "one write at boot"
+    /// from "every frame" without an unbounded log; bounded by
+    /// construction (at most 256 possible `u16` keys, one per `$22xx`
+    /// byte).
+    pub unknown_write_offsets: std::collections::BTreeMap<u16, u32>,
 }
 
 impl Default for Sa1Regs {
@@ -243,7 +260,25 @@ impl Sa1Regs {
             charconv2_armed: false,
             charconv2_row: 0,
             charconv1_row_ctr: 0,
+            unknown_write_offsets: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Whether fullsnes's I/O map table names a register at `$22xx`
+    /// offset `idx` (`offset - $2200`) — see
+    /// [`Self::unknown_write_offsets`]'s doc for the citation and the
+    /// exact gaps this leaves out.
+    #[must_use]
+    fn is_known_write_offset(idx: usize) -> bool {
+        matches!(idx,
+            0x00..=0x15   // $2200-$2215: control + timer
+            | 0x20..=0x2A // $2220-$222A: bank/BW-RAM/I-RAM mapping and protection
+            | 0x30..=0x39 // $2230-$2239: DMA control/params
+            | 0x3F        // $223F: BBF
+            | 0x40..=0x4F // $2240-$224F: BRF
+            | 0x50..=0x54 // $2250-$2254: arithmetic
+            | 0x58..=0x5B // $2258-$225B: variable-length bit processing
+        )
     }
 
     /// A write into `$2200-$22FF`. Panics if `offset` is outside that
@@ -264,6 +299,9 @@ impl Sa1Regs {
     ///   SNES-side flags.
     pub fn write(&mut self, offset: u16, value: u8) {
         let idx = usize::from(offset - BASE);
+        if !Self::is_known_write_offset(idx) {
+            *self.unknown_write_offsets.entry(offset).or_insert(0) += 1;
+        }
         self.raw[idx] = value;
         match idx {
             CCNT => {
@@ -1292,9 +1330,19 @@ impl Sa1State {
     /// `rom` is borrowed from [`crate::bus::SnesBus`] for the duration of
     /// this call only — see the module doc's ownership section.
     ///
+    /// `rom_contended`/`bwram_contended` are this master-clock step's
+    /// SNES-side bus contention flags (ticket W17-04) — see
+    /// [`crate::bus::SnesBus::sa1_rom_contended`]'s doc for how they are
+    /// derived and [`Sa1Bus::access_cost`] for how they change cost.
+    ///
     /// # Errors
     /// Returns the opcode if the CPU does not implement it.
-    pub fn step(&mut self, rom: &[u8]) -> Result<u64, u8> {
+    pub fn step(
+        &mut self,
+        rom: &[u8],
+        rom_contended: bool,
+        bwram_contended: bool,
+    ) -> Result<u64, u8> {
         if self.regs.sa1_reset_asserted() {
             self.booted = false;
             return Ok(0);
@@ -1315,6 +1363,8 @@ impl Sa1State {
             &mut self.iram,
             &mut self.bwram,
             self.board,
+            rom_contended,
+            bwram_contended,
         );
 
         // Interrupt delivery, before the next opcode fetch — the same
@@ -1361,6 +1411,10 @@ pub struct Sa1Bus<'a> {
     /// directly rather than as a separate wrapper type since `Sa1Bus`
     /// already owns every field a cost function would need.
     cycles: u64,
+    /// This step's SNES-side ROM/BW-RAM contention (ticket W17-04) — see
+    /// [`Self::access_cost`].
+    rom_contended: bool,
+    bwram_contended: bool,
 }
 
 impl<'a> Sa1Bus<'a> {
@@ -1370,6 +1424,8 @@ impl<'a> Sa1Bus<'a> {
         iram: &'a mut [u8],
         bwram: &'a mut [u8],
         board: rf_cart::Sa1Board,
+        rom_contended: bool,
+        bwram_contended: bool,
     ) -> Self {
         Self {
             rom,
@@ -1378,6 +1434,8 @@ impl<'a> Sa1Bus<'a> {
             bwram,
             board,
             cycles: 0,
+            rom_contended,
+            bwram_contended,
         }
     }
 
@@ -1399,26 +1457,50 @@ impl<'a> Sa1Bus<'a> {
         crate::mapping::sa1_side_target(&self.banks(), bank, offset)
     }
 
-    /// Master cycles one SA-1 access at `addr` costs (ticket W17-02's
-    /// clocking rule).
+    /// Master cycles one SA-1 access at `addr` costs (ticket W17-04's
+    /// clocking rule, superseding W17-02's flat approximation).
     ///
-    /// The SA-1 runs its own I-RAM and the register window at its full
-    /// 10.74MHz rate — master clock / 2, i.e. 2 master cycles per access
-    /// (fullsnes "Misc": "The SA-1 CPU can access memory at 10.74MHz rate
-    /// (or less, if the SNES does simultaneously access cartridge
-    /// memory)"). ROM and BW-RAM are shared with the SNES side, which can
-    /// contend for them; fullsnes's own DMA speed table ("SNES Cart SA-1
-    /// DMA Transfers") gives ROM->BW-RAM and BW-RAM->I-RAM transfers half
-    /// the SA-1's own rate (5.37MHz) whenever BW-RAM is involved. This
-    /// slice approximates the "documented wait states... when it touches
-    /// BW-RAM/ROM while the SNES CPU holds the bus" rule the ticket allows
-    /// deferring, with a flat doubled cost (4 master cycles) for every
-    /// ROM/BW-RAM access, rather than modelling the SNES CPU's actual bus
-    /// occupancy cycle by cycle. Stated exactly as implemented, per the
-    /// ticket's own requirement.
+    /// The SA-1's own resources — I-RAM and its register window — are
+    /// always charged its full, uncontended 10.74MHz rate: master clock
+    /// / 2, i.e. 2 master cycles per access (fullsnes "Misc": "The SA-1
+    /// CPU can access memory at 10.74MHz rate (or less, if the SNES does
+    /// simultaneously access cartridge memory)" — nothing on the SNES
+    /// side can reach I-RAM's own window or the SA-1's registers, so
+    /// "simultaneously" can never apply to them).
+    ///
+    /// ROM and BW-RAM are shared with the SNES side, so "or less" above
+    /// is exactly the case this function has to model: an access costs
+    /// the same uncontended 2 UNLESS the SNES side (the main CPU's
+    /// instruction, its MDMA, or its HDMA — anything that ran during
+    /// this same `SnesSystem::step`, before the SA-1 catch-up loop; see
+    /// `crate::bus::SnesBus::sa1_rom_contended`'s doc) also touched that
+    /// same device this step, in which case it costs the doubled 4 —
+    /// consistent with fullsnes's own DMA speed table ("SNES Cart SA-1
+    /// DMA Transfers"), which gives ROM->BW-RAM and BW-RAM->I-RAM
+    /// transfers half the SA-1's own rate (5.37MHz) whenever BW-RAM is
+    /// involved.
+    ///
+    /// This is an explicit, deterministic approximation of "the
+    /// documented wait states... when it touches BW-RAM/ROM while the
+    /// SNES CPU holds the bus" (the rule W17-02's ticket allowed
+    /// deferring): contention is decided once per `SnesSystem::step` —
+    /// for the WHOLE device, not per byte-range or per bus cycle — rather
+    /// than modelling the SNES CPU's actual bus occupancy cycle by cycle.
+    /// A main CPU that runs almost entirely from ROM (the common case)
+    /// will therefore see its SA-1 co-processor pay the doubled ROM rate
+    /// almost every step, which is the expected, hardware-consistent
+    /// outcome, not a modelling artifact — see `docs/design/
+    /// EMULATION_CORES.md` §3.5 for where this is not yet
+    /// cycle-accurate: the SNES CPU's own wait when the SA-1 is mid-DMA
+    /// on BW-RAM is not modelled (DMA execution is charged atomically to
+    /// the SA-1 instruction that triggers it, not spread across master
+    /// cycles the main CPU could contend with), which fullsnes's "BW-RAM
+    /// cannot be used during character conversion DMA" note says exists
+    /// on hardware.
     fn access_cost(&self, target: Target) -> u64 {
         match target {
-            Target::Sa1BwRam(_) | Target::Rom(_) => 4,
+            Target::Rom(_) if self.rom_contended => 4,
+            Target::Sa1BwRam(_) if self.bwram_contended => 4,
             _ => 2,
         }
     }
@@ -1559,6 +1641,95 @@ fn bitmap_pixels_per_byte(regs: &Sa1Regs) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ticket W17-04 acceptance #1: pins `Sa1Bus::access_cost` per access
+    /// class, contended and not. I-RAM/registers never change (the SNES
+    /// side cannot reach them); ROM/BW-RAM double under contention.
+    #[test]
+    fn access_cost_is_uncontended_by_default_and_doubles_when_contended() {
+        let rom = [0u8; 8];
+        let mut regs = Sa1Regs::new();
+        let mut iram = vec![0u8; 8];
+        let mut bwram = vec![0u8; 8];
+        let board = rf_cart::Sa1Board {
+            rom_len: rom.len(),
+            iram_len: iram.len(),
+            bwram_len: bwram.len(),
+        };
+
+        let uncontended = Sa1Bus::new(&rom, &mut regs, &mut iram, &mut bwram, board, false, false);
+        assert_eq!(
+            uncontended.access_cost(Target::Rom(0)),
+            2,
+            "uncontended ROM: full 10.74MHz rate"
+        );
+        assert_eq!(
+            uncontended.access_cost(Target::Sa1BwRam(0)),
+            2,
+            "uncontended BW-RAM: full rate"
+        );
+        assert_eq!(
+            uncontended.access_cost(Target::Sa1IRam(0)),
+            2,
+            "I-RAM: always full rate"
+        );
+        assert_eq!(
+            uncontended.access_cost(Target::Sa1Register(0x2200)),
+            2,
+            "registers: always full rate"
+        );
+
+        let mut regs2 = Sa1Regs::new();
+        let mut iram2 = vec![0u8; 8];
+        let mut bwram2 = vec![0u8; 8];
+        let rom_contended = Sa1Bus::new(
+            &rom,
+            &mut regs2,
+            &mut iram2,
+            &mut bwram2,
+            board,
+            true,
+            false,
+        );
+        assert_eq!(
+            rom_contended.access_cost(Target::Rom(0)),
+            4,
+            "SNES side touched ROM this step: halved (doubled cost)"
+        );
+        assert_eq!(
+            rom_contended.access_cost(Target::Sa1BwRam(0)),
+            2,
+            "BW-RAM contention is independent of ROM contention"
+        );
+        assert_eq!(
+            rom_contended.access_cost(Target::Sa1IRam(0)),
+            2,
+            "I-RAM unaffected"
+        );
+
+        let mut regs3 = Sa1Regs::new();
+        let mut iram3 = vec![0u8; 8];
+        let mut bwram3 = vec![0u8; 8];
+        let bwram_contended = Sa1Bus::new(
+            &rom,
+            &mut regs3,
+            &mut iram3,
+            &mut bwram3,
+            board,
+            false,
+            true,
+        );
+        assert_eq!(
+            bwram_contended.access_cost(Target::Sa1BwRam(0)),
+            4,
+            "SNES side touched BW-RAM this step: halved (doubled cost)"
+        );
+        assert_eq!(
+            bwram_contended.access_cost(Target::Rom(0)),
+            2,
+            "ROM contention is independent"
+        );
+    }
 
     /// `$2200` CCNT edge -> CFR status, and `$220B` CIC acks it (ticket
     /// W17-02 acceptance #3). Message (bits 0-3) passes straight through

@@ -157,6 +157,11 @@ impl SnesSystem {
     /// all 256 are implemented, so this cannot currently happen — see the
     /// note on `ops::execute`'s catch-all arm.
     pub fn step(&mut self) -> Result<(), u8> {
+        // Ticket W17-04: cleared before the main CPU's share of this step
+        // so `sa1.step`'s cost model sees only THIS step's contention —
+        // see `SnesBus::sa1_rom_contended`'s doc.
+        self.bus.sa1_rom_contended = false;
+        self.bus.sa1_bwram_contended = false;
         let fast_rom = self.bus.fast_rom;
         let mut counting = crate::cpu::AccessCost::new(&mut self.bus, fast_rom);
         let result = self.cpu.step(&mut counting);
@@ -338,6 +343,12 @@ impl SnesSystem {
         // clone of a multi-megabyte ROM every instruction.
         let dot = self.bus.timing.dot();
         let line = self.bus.timing.line;
+        // Ticket W17-04: settled after the CPU instruction, its MDMA and
+        // its HDMA line(s) have all had their chance to touch ROM/BW-RAM —
+        // see `SnesBus::sa1_rom_contended`'s doc for why this is read here
+        // rather than passed piecemeal.
+        let rom_contended = self.bus.sa1_rom_contended;
+        let bwram_contended = self.bus.sa1_bwram_contended;
         let bus = &mut self.bus;
         if let Some(sa1) = bus.sa1.as_mut() {
             // Ticket W17-03: the timer runs off the master clock
@@ -353,7 +364,7 @@ impl SnesSystem {
             } else {
                 sa1.credit += master_this_step;
                 while sa1.credit > 0 {
-                    match sa1.step(&bus.rom) {
+                    match sa1.step(&bus.rom, rom_contended, bwram_contended) {
                         Ok(cost) => sa1.credit = sa1.credit.saturating_sub(cost),
                         Err(_opcode) => break,
                     }

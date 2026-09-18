@@ -251,9 +251,11 @@ majority of games; per-dot upgrade path documented in code).
   (checksum/complement, mapper byte, reset vector sanity) — never trust the
   extension; 512-byte copier header stripped before hashing (see
   game-identity research).
-- FastROM ($420D) speed switch. ExHiROM + coprocessors (SA-1 ~34 games,
-  SuperFX ~16, one-offs) **explicitly deferred to Phase 9+**; `rf-cart`
-  detects and reports "unsupported chip: SA-1" rather than half-booting.
+- FastROM ($420D) speed switch. ExHiROM + Super FX (~16 games) and the
+  one-off chips (Cx4, S-DD1, SPC7110, ST01x) stay **explicitly deferred**;
+  `rf-cart` detects and reports "unsupported chip: <name>" rather than
+  half-booting. **SA-1 (~34 games, 11 in the local library) moved into
+  scope 2026-09-18 (D-013, SRS FR-CORE-039)** — see below.
 - **DSP-1 (~13 games incl. Super Mario Kart, Pilotwings) — in scope via HLE
   since 2026-09-17 (D-010, SRS FR-CORE-038, W14-18/W14-19).** The uPD7725's
   own program ROM is copyrighted firmware and no dump ships in the
@@ -271,6 +273,93 @@ majority of games; per-dot upgrade path documented in code).
   ≤1 MiB, LoROM >1 MiB (DSP-1B), and HiROM each map DR and SR to a
   different bank/offset window, split at a per-variant boundary offset
   inside a shared 32 KB (LoROM) or 8 KB (HiROM) window.
+
+- **SA-1 (~34 games, 11 archives in the local library — D-013, SRS
+  FR-CORE-039, Wave 17, `crates/rf-snes/src/sa1.rs`).** A second 65C816 at
+  up to 10.74 MHz with its own 2 KiB I-RAM, an 8 KiB mappable BW-RAM
+  window shared with the SNES side, its own bank registers, and a
+  register-mapped DMA/character-conversion/arithmetic/variable-length-bit
+  unit — clean-room from fullsnes "SNES Cart SA-1" and snes.nesdev.org
+  (NFR-011, no emulator source). Shape (D-013): `rf-snes`'s CPU already
+  takes its bus as a `CpuBus` trait object, so the SA-1 is a second
+  `crate::cpu::Cpu` running over its own `Sa1Bus` (a borrowing wrapper
+  over the shared I-RAM/BW-RAM/ROM/register store, built fresh every
+  `Sa1State::step` call) — not a second CPU implementation, and not a
+  second thread: `SnesSystem::step` runs the main CPU's one instruction,
+  then lets the SA-1 catch up on the master cycles that instruction (plus
+  its DMA/HDMA) just spent, the same catch-up-scheduling principle as
+  every other chip on this machine (§1).
+  - **Cost model (W17-04, superseding W17-02's flat approximation;
+    `Sa1Bus::access_cost`).** The SA-1's own resources — I-RAM and its
+    register window — always cost 2 master cycles per access: its full,
+    uncontended 10.74MHz rate (master clock / 2), since nothing on the
+    SNES side can reach them (fullsnes "Misc": "The SA-1 CPU can access
+    memory at 10.74MHz rate (or less, if the SNES does simultaneously
+    access cartridge memory)"). ROM and BW-RAM are shared with the SNES
+    side, so they cost the same uncontended 2 **unless** the SNES side
+    (the main CPU's instruction, its MDMA, or its HDMA — anything that
+    ran earlier in the same `SnesSystem::step`) also touched that same
+    device this step, in which case the access costs the doubled 4 —
+    consistent with fullsnes's own DMA speed table ("SNES Cart SA-1 DMA
+    Transfers": ROM->I-RAM at the full 10.74MHz, but ROM->BW-RAM,
+    BW-RAM->I-RAM and I-RAM->BW-RAM all at the halved 5.37MHz whenever
+    BW-RAM is involved). Contention is tracked per step, for the whole
+    device, not per byte-range or per bus cycle
+    (`SnesBus::sa1_rom_contended`/`sa1_bwram_contended`, set by `read`/
+    `write` and read once after the main CPU's share of the step) — an
+    explicit, deterministic approximation of "the documented wait
+    states... when it touches BW-RAM/ROM while the SNES CPU holds the
+    bus" that W17-02 deferred. A main CPU that runs from ROM (the common
+    case) sees its SA-1 pay the doubled ROM rate almost every step, which
+    is the expected, hardware-consistent outcome. Normal DMA
+    (`execute_normal_dma`) charges its own per-byte rate straight from
+    that same table (2 for ROM->I-RAM, 4 otherwise) to the SA-1's credit,
+    never to the main CPU's — nothing in fullsnes's DMA section stalls
+    the main CPU for a Normal DMA (the "SNES CPU is paused" sentence is
+    about Character Conversion 1's `$43xx` SNES-side DMA, a different
+    mechanism).
+  - **Approximations, carried from all four slices, stated exactly as
+    implemented rather than left implicit:**
+    - The SNES CPU's own wait while the SA-1 holds BW-RAM mid-DMA is
+      **not modelled** — DMA execution is charged atomically to the SA-1
+      instruction that triggers it rather than spread across master
+      cycles the main CPU could contend with, so fullsnes's "BW-RAM
+      cannot be used during character conversion DMA" has no expression
+      here yet.
+    - DMA/VBR ROM addressing is linear (SDA/DDA treated as a plain index
+      into each device's buffer, mod its length) rather than re-derived
+      through the CXB/DXB/EXB/FXB bank registers — fullsnes's own
+      "Unknown details" note says SDA/DDA increment behaviour isn't
+      documented either.
+    - Arithmetic unit timing is immediate (result available the same
+      step MB's high byte is written); the DMA priority bit (`$2230` bit
+      6) is read but has no scheduling effect (the SA-1 is stalled for
+      the whole transfer either way — interleaving its instruction
+      stream with an in-flight DMA is not modelled); the VBR window
+      (`$230C`/`$230D`) increments only on `$230C`, not `$230D`; timer
+      compare semantics were chosen where fullsnes states the polarity
+      but calls the rounding/edge rule a guess.
+    - BW-RAM/I-RAM write protection is one **shared** gate per side
+      (`$2226`/`$2227` SBWE, `$2229`/`$222A` SIWP/CIWP) — Kirby Super
+      Star and Kirby's Dream Land 3 both corrected an initial per-side
+      model during W17-03 (see `sa1.rs`'s module doc and
+      `docs/TESTING.md`'s named-cause list); `$2228` BWPA's protected-area
+      floor is stored and cited but not enforced on top of the gate.
+    - `Sa1Regs::unknown_write_offsets` (W17-04) counts writes into `$22xx`
+      offsets fullsnes's own I/O map table leaves blank (`$2216-$221F`,
+      `$222B-$222F`, `$223A-$223E`, `$2255-$2257`, `$225C` and up) —
+      diagnostic only, printed by `title_probe`'s `PROBE_SA1REGS=1`, never
+      part of save state and never gating a write.
+  - **Determinism.** `crates/rf-snes/tests/sa1_determinism.rs` runs a
+    hand-assembled SA-1 cart (both CPUs executing real 65816 code, not
+    just register pokes) for a fixed instruction count from two
+    independent `SnesSystem::load` calls and diffs a full
+    `StateRegion::ALL` snapshot — nothing in the cost model above reads
+    wall-clock, thread order, or hash-map iteration, so the two runs are
+    bit-identical. A second test in the same file saves+reloads
+    `StateRegion::Cart`/`Mapper` between arming a Normal DMA's parameters
+    and writing the register that triggers it, and confirms the restored
+    run copies the same bytes a never-interrupted run does.
 
 ## 4. Cartridge layer boundary (`rf-cart`)
 
