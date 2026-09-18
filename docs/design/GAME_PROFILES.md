@@ -247,6 +247,50 @@ Repo policy: profiles for commercial games contain only addresses/rules
 (facts), never ROM-derived assets. Homebrew demo profiles may bundle assets
 when the game's license permits.
 
+### Local-only verification recipe (D-009, ticket W11-06)
+
+Law 5 means no ROM is ever committed, so a commercial profile's addresses
+cannot be checked by CI. D-009 makes local-only verification against a
+developer-held dump count as evidence anyway, **provided the profile
+records the normalized hash it was verified against** (so the claim is
+checkable by anyone holding the same dump). The recipe W11-06 used, in
+case a future author needs to repeat it:
+
+1. Identify the ROM's normalized identity the same way `rf-cart` does:
+   `rf_cart::hash::identity_nes`/`identity_snes` over the unzipped image
+   (NES strips a 16-byte iNES header if present; SNES strips a 512-byte
+   copier header if `len % 8192 == 512`) — never the raw/zipped file's
+   hash, and never a hash typed in from memory.
+2. Build a small out-of-tree harness against this workspace's `rf-cart`/
+   `rf-nes`/`rf-snes` crates (path dependencies; this is *not* a change to
+   `crates/rf-harness`, which is out of this ticket's `write_scope`) that
+   loads the ROM, drives `EmulatorCore::run_frame` with an `InputFrame`
+   (NES) or writes `SnesSystem::bus.joypads.ports` directly before
+   stepping (SNES — `run_frame`'s own `InputFrame` parameter is unwired
+   for this core as of W11-06; see `crates/rf-snes/src/core.rs`'s
+   `run_frame`), and peeks the documented addresses through
+   `NesBus::peek`/`rf_snes::cpu::CpuBus::peek` — the same side-effect-free
+   accessors `crates/rf-harness/tests/title_probe.rs` uses.
+3. Compare what comes back against the *documented meaning* of the
+   address, not an assumed value: Super Mario Bros.'s timer read "400" at
+   the start of World 1-1 because Data Crystal documents that as the
+   level's starting time; Super Metroid's region-index address read 6
+   (Ceres Station) during the game's own opening sequence, matching
+   Kejardon's RAM map's area numbering, before the player ever reaches
+   Crateria (area 0) — a match to the *specific* documented fact is what
+   makes a reading evidence rather than a coincidence.
+4. A row that never reaches a checkable state (stays at an ambiguous
+   default, or the run never gets far enough into the game to exercise
+   it) is dropped from the profile rather than shipped as an assumption —
+   `profiles/nes/metroid`'s header comment records three addresses cut
+   this way (health, current-area, room-index) alongside the three that
+   verified cleanly.
+5. Record the normalized hash bundle in `[[identity]]` and write exactly
+   what was read, at what point in booting the game, and how it matches
+   the cited documentation, in the profile's header comment — the
+   citation is what turns "I ran a debugger once" into a claim a second
+   person holding the same dump can check.
+
 ## 4. Loading and precedence
 
 Match at cart load by normalized hash → load base profile → apply user

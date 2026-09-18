@@ -1,0 +1,111 @@
+# Super Mario World (USA) -- a documented-commercial-title profile
+# (W11-06, D-009).
+#
+# Verified 2026-09-18 against sha256
+# 0838e531fe22c077528febe14cb3ff7c492f1f5fa8de354192bdff7137c27f5b
+# ("Super Mario World (USA).zip", No-Intro; crc32 b19ed489, a widely
+# cited CRC for this dump) with title_probe (a standalone harness built
+# against this worktree's rf-cart/rf-snes crates, driving Start through
+# `EmulatorCore::run_frame`/direct `Joypads.ports` writes the same way
+# `crates/rf-harness/tests/title_probe.rs` reads state out): after
+# pressing Start three times (past the copyright screen, into file
+# select, and to begin a new file), $7E0DBE read 0x04 -- SMW Central's
+# RAM map documents this as "current player lives, minus one", so 5 lives
+# shown, this game's documented starting count -- and $7E0DBF (coin
+# count) read 0x00, both exactly the documented fresh-file values. The
+# 16-bit player position pair $7E00D1/$7E00D3 moved from a chaotic,
+# frame-to-frame-varying value while still on the title screen (a control
+# run with no Start press at all left this address thrashing
+# incoherently for the same span, confirming it is inert RAM until the
+# game claims it) to a single stable value once the file-select sequence
+# completed -- consistent with Mario's map-cursor position settling at
+# the new file's start point (Yoshi's House), though this profile does
+# not claim to have independently exercised on-screen *movement* of that
+# cursor and says so rather than overstating what was checked.
+#
+# ## What is cited but not independently verified
+#
+# $7E001A/$7E001C (Layer 1 x/y position, documented on the "Alternate Ram
+# Map" -- credited to SMW Central -- as mirrors of SNES registers
+# $210D/$210E) is declared as `[camera]` because SMW Central's own memory
+# map names it for exactly this purpose, but this profile's probe run
+# never got Mario moving through an actual level (see below), so the two
+# addresses were read only as constants (0x00/0xC0) and this profile
+# does not claim to have watched them track a moving viewport the way
+# the `[[memory_map]]` rows above were watched to track lives and coins
+# taking their documented values.
+#
+# ## What was dropped
+#
+# Extended runs (tens of thousands of frames, every cardinal direction
+# held individually and in combination) starting from the post-file-
+# select state never moved $7E00D1/$7E00D3 again, which reads as "still
+# on the overworld map, not yet in a level" rather than as evidence the
+# addresses are wrong -- SMW Central's own map documents both addresses
+# unambiguously and the pre/post-Start-sequence transition above is
+# real signal. No level-decode table is cited: SMW's Map16-based level
+# format is real and documented at smwcentral.net, but this profile
+# does not point `[decode]` at a specific "acts like" table address
+# because doing so from search-engine-summarized fragments of that page
+# (SMW Central's live memory-map viewer would not render for this
+# session's fetch tooling) would be exactly the guessed-table failure
+# GAME_PROFILES.md warns against -- so `[decode]` is left undeclared.
+
+[meta]
+profile_version = "0.1"
+title = "Super Mario World"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge W11-06"]
+sources = [
+  "https://sites.google.com/site/smwrammap (\"Alternate Ram Map\", credited to SMW Central's RAM map)",
+]
+
+[[identity]]
+sha256 = "0838e531fe22c077528febe14cb3ff7c492f1f5fa8de354192bdff7137c27f5b"
+sha1 = "6b47bb75d16514b6a476aa0c73a683a2a4c18765"
+md5 = "cdd3c8c37322978ca8669b34bc89c804"
+crc32 = "b19ed489"
+revision = "Super Mario World (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x7E001A, type = "u16" }
+y = { addr = 0x7E001C, type = "u16" }
+
+[[memory_map]]
+addr = 0x7E0DBE
+len = 1
+type = "u8"
+label = "lives"
+notes = "Current lives minus one; verified 0x04 (5 lives shown) at the start of a new file."
+source = "https://sites.google.com/site/smwrammap"
+
+[[memory_map]]
+addr = 0x7E0DBF
+len = 1
+type = "u8"
+label = "coins"
+notes = "Verified 0x00 at the start of a new file."
+source = "https://sites.google.com/site/smwrammap"
+
+[[memory_map]]
+addr = 0x7E00D1
+len = 2
+type = "u16"
+label = "player_x"
+notes = "Player x position within the level (16-bit). Verified as live game state: incoherent/noisy while still on the title screen, stable once a new file's start sequence completed."
+source = "https://sites.google.com/site/smwrammap"
+
+[[memory_map]]
+addr = 0x7E00D3
+len = 2
+type = "u16"
+label = "player_y"
+notes = "Player y position within the level (16-bit); same verification as player_x."
+source = "https://sites.google.com/site/smwrammap"

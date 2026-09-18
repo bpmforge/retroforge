@@ -1,0 +1,122 @@
+# Super Metroid (Japan, USA) -- a documented-commercial-title profile
+# (W11-06, D-009).
+#
+# Verified 2026-09-18 against sha256
+# 12b77c4bc9c1832cee8881244659065ee1d84c70c3d29e6eaf92e6798cc2ca72
+# ("Super Metroid (Japan, USA) (En,Ja).zip", No-Intro -- this is the
+# single-cart dump used in both regions, not a region-hack) with
+# title_probe (a standalone harness built against this worktree's
+# rf-cart/rf-snes crates, driving Start/A/Right through
+# `EmulatorCore::run_frame`/direct `Joypads.ports` writes the same way
+# `crates/rf-harness/tests/title_probe.rs` reads state out). Working
+# through the file-select screen and the opening Ceres Station sequence:
+#
+#   * $7E09C2 (Energy) read 0x63 = 99 as soon as a save file existed --
+#     Super Metroid's documented starting energy, and the value SMW-
+#     Central-style trackers use as their reset baseline.
+#   * $7E079F (Region/area index) read 0x06 once real gameplay state
+#     existed -- Kejardon's RAM map documents area 6 as Ceres Station,
+#     which is exactly where the game's opening sequence places Samus,
+#     before Crateria (area 0) is ever reached. This is a strong,
+#     independently-checkable match: nothing about the profile author
+#     chose 6 to fit a preferred answer, it is what the emulator's own
+#     memory held at that point in that documented opening sequence.
+#   * $7E079B (Room ID) read a non-zero, changing value (0x45) once past
+#     the file-select screen, confirming it is live room-tracking state
+#     rather than a static default.
+#   * $7E0AF6 (Samus X) and $7E0AFA (Samus Y) tracked together: X held
+#     steady at 0x80 while Y climbed steadily (0x48 upward, one unit most
+#     frames) during the opening cutscene's fall/descent -- exactly the
+#     "falling under gravity, not yet in player control" shape the
+#     opening sequence has.
+#
+# All five rows are independently dynamic/plausible-valued, not open-bus
+# noise or an unclaimed default.
+#
+# ## What is cited but not independently verified
+#
+# $7E0911/$7E0912 (Layer 1/screen X) and $7E0915/$7E0916 (Layer 1/screen
+# Y) are documented by Kejardon's classic Super Metroid RAM map
+# (https://jathys.zophar.net/supermetroid/kejardon/RAMMap.txt, one of the
+# oldest and most widely cross-cited Super Metroid RAM references) as the
+# screen's pixel scroll position, and are declared as `[camera]` on that
+# citation -- but this profile's probe run captured them only during the
+# non-scrolling Ceres Station opening cutscene above, not during real
+# player-driven scrolling, so this profile does not claim to have watched
+# them move.
+#
+# ## Why [decode] is absent
+#
+# Super Metroid's room-header/PLM table format is real and documented
+# (metroidconstruction.com, Kejardon's own ROM notes), but every address
+# this session could reach for it came back either paywalled by a
+# fetch-tool refusal (metroidconstruction.com's wiki) or as a general
+# description without the fixed table address `[decode]`'s schema needs
+# to point at. Rather than invent an offset to make the table type-check
+# -- the failure `profiles/nes/legend-of-zelda`'s header comment and
+# GAME_PROFILES.md both name -- `[decode]` is left undeclared.
+
+[meta]
+profile_version = "0.1"
+title = "Super Metroid"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge W11-06"]
+sources = ["https://jathys.zophar.net/supermetroid/kejardon/RAMMap.txt"]
+
+[[identity]]
+sha256 = "12b77c4bc9c1832cee8881244659065ee1d84c70c3d29e6eaf92e6798cc2ca72"
+sha1 = "da957f0d63d14cb441d215462904c4fa8519c613"
+md5 = "21f3e98df4780ee1c667b84e57d88675"
+crc32 = "d63ed5f8"
+revision = "Super Metroid (Japan, USA) (En,Ja), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x7E0911, type = "u16" }
+y = { addr = 0x7E0915, type = "u16" }
+
+[[memory_map]]
+addr = 0x7E09C2
+len = 2
+type = "u16"
+label = "energy"
+notes = "Verified 0x0063 = 99, Super Metroid's documented starting energy."
+source = "https://jathys.zophar.net/supermetroid/kejardon/RAMMap.txt"
+
+[[memory_map]]
+addr = 0x7E079F
+len = 2
+type = "u16"
+label = "area_index"
+notes = "0 Crateria, 1 Brinstar, 2 Norfair, 3 Wrecked Ship, 4 Maridia, 5 Tourian, 6 Ceres Station. Verified 6 (Ceres Station) during the game's opening sequence, matching the documented area numbering."
+source = "https://jathys.zophar.net/supermetroid/kejardon/RAMMap.txt"
+
+[[memory_map]]
+addr = 0x7E079B
+len = 2
+type = "u16"
+label = "room_id"
+notes = "Verified reading a non-zero, populated value (0x0045) once past file select, confirming it is live room-tracking state."
+source = "https://jathys.zophar.net/supermetroid/kejardon/RAMMap.txt"
+
+[[memory_map]]
+addr = 0x7E0AF6
+len = 2
+type = "u16"
+label = "samus_x"
+notes = "Verified steady at 0x0080 during the opening cutscene's vertical-only descent."
+source = "https://jathys.zophar.net/supermetroid/kejardon/RAMMap.txt"
+
+[[memory_map]]
+addr = 0x7E0AFA
+len = 2
+type = "u16"
+label = "samus_y"
+notes = "Verified climbing steadily during the opening cutscene, consistent with Samus falling before player control begins."
+source = "https://jathys.zophar.net/supermetroid/kejardon/RAMMap.txt"
