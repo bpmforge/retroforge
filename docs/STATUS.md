@@ -3538,3 +3538,19 @@ stories, 10 decisions).
   plain scene and a Super Metroid-style palette-cycling scene must not
   trigger, and they don't. Gate: workspace **1922 passing / 0 failed / 36
   ignored**.
+
+- **W16-01 — GPU pass benchmark harness and local AI spike** (2026-09-17,
+  lane C). `bench-passes` times the shader chain and a compute stand-in
+  for a neural pass at 256x240 and 512x448 and writes
+  `docs/evidence/gpu-passes.json`, validated like the local gate. On the
+  M4 Max under Metal the shader chain sits near 1.7 ms p95 and the
+  neural stand-in at 3 to 5 ms; MetalFX spatial measured 25 ms in a
+  synchronous single-buffer run; an ONNX Real-ESRGAN-class model took
+  about 55 s per 256x240 frame on both the CPU and CoreML providers.
+  The frame-budget gate is set at p95 under 16.67 ms (D-012). The ONNX
+  figure is recorded with a caveat: identical CPU and CoreML timings on
+  a static 64x64 fp32 export mean the CoreML provider fell back to CPU,
+  so W16-07 re-measures with a compact, dynamic-shape model before any
+  real-time decision. Model and runtime are fetched by pinned scripts
+  into the ignored cache with a licence ledger; nothing is vendored.
+  Gate: workspace **1909 passing / 0 failed / 36 ignored**.

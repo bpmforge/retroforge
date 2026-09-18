@@ -1,0 +1,39 @@
+# Local-AI fetched-artifact licence ledger (ticket W16-01;
+# docs/design/ENHANCEMENT_WAVE_16.md §7; docs/design/AI_UPSCALING.md).
+#
+# Same vocabulary/rule as tests/rom-manifest.toml's [[artifact]] schema
+# (that file's own module doc explains the fields in full) -- kept as a
+# SEPARATE file rather than an entry in tests/rom-manifest.toml because
+# this ticket's write_scope does not include `tests/**`, and because these
+# are model/runtime artifacts, not test ROMs (rf-harness's fetcher never
+# reads this file; scripts/fetch-onnx-runtime.sh and
+# scripts/fetch-ai-upscale-model.sh do, matching this ledger's hashes).
+#
+#   license_status  "no-license-grant-fetch-only" | "public-domain" |
+#                     "permissive" -- identical rule to
+#                     tests/rom-manifest.toml: a no-license-grant artifact
+#                     is fetch-from-origin only, never vendored/re-hosted;
+#                     the developer's own cache (outside the git tree) is
+#                     the only tolerated copy.
+#   sha256          verified by this ticket via `shasum -a 256` on the
+#                     downloaded file, 2026-09-17.
+
+[[artifact]]
+id = "onnxruntime-osx-arm64"
+license_status = "permissive"
+license_name = "MIT"
+license_note = "Microsoft/onnxruntime upstream LICENSE file, verified in the extracted release tarball."
+version = "1.20.1"
+sha256 = "b678fc3c2354c771fea4fba420edeccfba205140088334df801e7fc40e83a57a"
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-osx-arm64-1.20.1.tgz"
+fetched_by = "scripts/fetch-onnx-runtime.sh"
+note = "The ort crate's OnnxUpscaler dlopen's this dylib (ORT_DYLIB_PATH) -- never linked at build time, never vendored (docs/design/AI_UPSCALING.md §5). Links against CoreML.framework (verified via `otool -L`), i.e. the CoreML EP is compiled into this official build."
+
+[[artifact]]
+id = "realesrgan-x4-onnx-fp32"
+license_status = "no-license-grant-fetch-only"
+license_note = "Upstream weights (xinntao/Real-ESRGAN) are BSD-3-Clause (verified https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE, 2026-09-17), and per docs/design/ENHANCEMENT_WAVE_16.md §7 that is the base model this ticket permits. This specific ONNX export is a THIRD-PARTY re-hosted mechanical conversion of those weights (huggingface.co/imgdesignart/realesrgan-x4-onnx) that carries no LICENSE file of its own -- recorded as no-license-grant-fetch-only, not permissive, until that mirror states its own licence explicitly. NOT OpenRAIL-class (refused outright by this ticket's rule)."
+sha256 = "fa18ce70de3a55f3149d0cc898d335d2d69fca29edc0692cb362c856b2942c3f"
+url = "https://huggingface.co/imgdesignart/realesrgan-x4-onnx/resolve/main/onnx/model.onnx"
+fetched_by = "scripts/fetch-ai-upscale-model.sh"
+note = "fp32 ONNX export, 4x scale (Real-ESRGAN's native scale factor), input NCHW float32 RGB 0..1 -- matches crate::onnx::OnnxUpscaler's expected convention. The sibling model_fp16.onnx in the same repo was tried first and rejected: it requires a tensor(float16) input, which OnnxUpscaler does not produce."

@@ -293,6 +293,74 @@ on the report card; none invents its own threshold. The 3D compositor
 own by-eye/perf check rather than inventing a second timing mechanism
 (CLAUDE.md law 8, `docs/LESSONS.md` RF-L-11).
 
+**Measured (ticket W16-01, 2026-09-17, machine: this M4 Max — "Apple M4
+Max", Metal backend, macOS; full data + reproduction commands in
+`docs/evidence/gpu-passes.json` and `docs/TESTING.md` §4):**
+
+| Pass | 256x240 p50 / p95 | 512x448 p50 / p95 | n |
+|---|---|---|---|
+| `nearest` (shader chain) | 1.600 / 1.623 ms | 1.714 / 1.753 ms | 300 |
+| `xbr` (shader chain) | 1.600 / 1.609 ms | 1.711 / 1.732 ms | 300 |
+| `crt` (shader chain) | 1.601 / 1.626 ms | 1.717 / 1.741 ms | 300 |
+| `neural-stub` (compute, §7's stand-in, NOT a trained model) | 3.072 / 3.085 ms | 3.210 / 4.732 ms | 300 |
+| MetalFX spatial (`objc2-metal-fx`, 2x, sync `waitUntilCompleted`) | 12.301 / 25.267 ms | 13.430 / 24.612 ms | 300 |
+| ONNX CPU EP (Real-ESRGAN-class, tiled 64x64, see below) | 35556 / 55260 ms | not measured (see below) | 3 |
+| ONNX CoreML EP (same model) | 28668 / 58772 ms | not measured (see below) | 10 |
+
+**Threshold: p95 < 16.67 ms (one 60 fps frame), no headroom subtracted for
+the compositor beyond that.** Chosen as the plainest possible real-time
+definition — a pass that already can't fit inside a single frame's budget
+on its own has no business being evaluated for compositor headroom on top.
+W16-07's disclosed "one extra frame of latency" for the real-time AI pass
+is a *pipeline-depth* allowance, orthogonal to this per-pass gate — it
+does not widen this threshold.
+
+**What passes today:** `nearest`, `xbr`, `crt`, and the `neural-stub`
+compute pass all clear the threshold at both sizes with large headroom
+(worst case 4.73 ms p95, well under a third of the budget) — expected,
+since none of these do more than a handful of texture fetches per texel.
+
+**What does not pass today:**
+- **MetalFX spatial** exceeds the threshold at both sizes (p95 ≈ 24.6-25.3
+  ms) under this harness's methodology: one command buffer, `commit()`,
+  then a blocking `waitUntilCompleted()` — no double-buffering or
+  pipelining across frames. W16-08 must record itself disabled under this
+  gate as measured; a non-blocking, pipelined integration (submit frame
+  N's scale while frame N-1 is still in flight) is plausible future work
+  that could bring the *effective* per-frame cost under budget even
+  though a single synchronous call cannot — that is a W16-08 integration
+  question, not asserted here.
+- **ONNX Real-ESRGAN-class inference (both EPs)** is three to four orders
+  of magnitude over budget (tens of *seconds* per frame, not
+  milliseconds) — never a real-time candidate, consistent with FR-AI-001
+  ("zero AI on the frame path") and §7's own framing of Path A as an
+  offline pack-builder job. The two EPs measured within the same order of
+  magnitude on this specific model (~1.8-2.2 s per 64x64 tile) — CoreML
+  did not show a meaningful speedup here. This is most likely an artefact
+  of this specific third-party ONNX re-export
+  (`crates/rf-ai/ai-model-manifest.toml`'s `realesrgan-x4-onnx-fp32` row)
+  being invoked once per tiny 64x64 tile: high fixed per-`Session::run`
+  dispatch overhead dominates when each call does very little actual
+  work. **512x448 (56 tiles) was not fully measured** at the designed
+  sample count — at the observed ~2 s/tile, a 10-frame run on both EPs
+  would cost multiple hours of wall time for no additional insight beyond
+  what the 256x240 numbers already show (both EPs are already 3-4 orders
+  of magnitude over budget there); `crates/rf-ai/tests/onnx_bench.rs`'s
+  own top-of-file comment records this scoping decision and how to
+  regenerate a full run. W16-02's real pipeline should batch tiles into
+  fewer, larger `Session::run` calls rather than one per tile — this
+  harness's per-tile timing is exactly the data that motivates that
+  design choice.
+
+**Blockers hit:** none for MetalFX (the `objc2-metal-fx` binding built and
+ran on this toolchain) and none for ort/CoreML (the CoreML EP loaded and
+ran — see `crates/rf-ai/Cargo.toml`'s `onnx-coreml` feature). The blocker
+that *was* hit and resolved: the first ONNX model tried
+(`imgdesignart/realesrgan-x4-onnx`'s `model_fp16.onnx`) demanded a
+`tensor(float16)` input `OnnxUpscaler` does not produce; switched to that
+repo's `model.onnx` (fp32) instead — recorded in
+`crates/rf-ai/ai-model-manifest.toml` and `scripts/fetch-ai-upscale-model.sh`.
+
 ## 9. Mode 7 as 3D
 
 W16-09 promotes the Mode 7 matrix and offsets from the SNES debug snapshot

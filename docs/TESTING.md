@@ -526,6 +526,49 @@ reads disconnect the external bus entirely, so `open_bus` passthrough was
 never correct there regardless). This is a disassembly-display convention,
 not a change to real emulated open-bus behavior.
 
+**GPU-pass / local-AI benchmark evidence gate (ticket W16-01;
+`docs/design/ENHANCEMENT_WAVE_16.md` §7-8):** a second, unrelated evidence
+file, `docs/evidence/gpu-passes.json` — timing rows (`pass`, `size`,
+`p50_ms`, `p95_ms`, `n`, `source`), never accuracy rows, and validated by a
+sibling script rather than an extension of `validate-evidence.mjs` (that
+script's whole schema is accuracy-gate-specific; see
+`scripts/validate-gpu-evidence.mjs`'s own module doc for why bolting a
+timing schema onto it would make every accuracy check also reason about
+an unrelated concern). Also never run in CI, for a stronger reason than
+the accuracy suites above: it needs a real (or software-fallback) GPU
+adapter, and for the two local-AI rows, a multi-hundred-MB model plus an
+`ORT_DYLIB_PATH` staged on disk.
+
+1. `cargo run --release -p rf-renderer --bin bench-passes` times the
+   existing shader-chain passes (`nearest`, `xbr`, `crt`) plus a stub
+   "neural" compute pass (`crates/rf-renderer/src/bin/bench_passes/
+   neural_stub.wgsl` — a fixed 4x conv-like workload, NOT a trained model)
+   at 256x240 and 512x448, 300 frames each, and writes/merges rows tagged
+   `source: "gpu-bench"`.
+2. `scripts/fetch-ai-upscale-model.sh` / `scripts/fetch-onnx-runtime.sh`
+   stage a Real-ESRGAN-class ONNX model and the ONNX Runtime dylib into a
+   cache OUTSIDE the git tree (`$RF_AI_CACHE`, default
+   `~/.cache/retroforge-ai` — never `roms/`, never committed; see
+   `crates/rf-ai/ai-model-manifest.toml` for the licence ledger, same
+   vocabulary as `tests/rom-manifest.toml` but a separate file since
+   `tests/**` is outside ticket W16-01's write_scope). Then
+   `cargo test --release -p rf-ai --features onnx-coreml --test
+   onnx_bench -- --ignored --nocapture` runs the CPU-EP-control and
+   CoreML-EP `#[ignore]`d specs, tagged `source: "onnx-ort"`.
+3. `cargo test --release -p rf-renderer --features metalfx --test
+   metalfx_bench -- --ignored --nocapture` times MetalFX spatial
+   upscaling via `objc2-metal-fx` (macOS only), tagged `source: "metalfx"`.
+4. `scripts/gpu-gate.sh` runs step 1 then `node
+   scripts/validate-gpu-evidence.mjs` (step 2's spike is opt-in via
+   `RF_ONNX_BENCH=1`, since it needs the multi-hundred-MB fetch above);
+   the validator checks row shape, percentile ordering (`p95_ms >=
+   p50_ms`), no placeholder zeros, and that both required sizes have a
+   `neural-stub` row.
+
+This file's numbers, not a guess, set `docs/design/ENHANCEMENT_WAVE_16.md`
+§8's real-time frame-budget gate threshold — see that section for the
+measured table and which passes clear it today.
+
 ## 5. SNES CI gates
 
 | Suite | Verifies | SRS | Tier | Pass criteria |
