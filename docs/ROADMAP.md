@@ -223,30 +223,24 @@ P6 SNES core ─ P7 SNES compat ────────────────
 P6 may start once P4 is gated (harness + contracts reusable); P8 items gate
 individually on P5/P7 as relevant.
 
-## Waves 15-16 execution order (Brad's go, 2026-09-17)
+## Waves 15-16 execution order (Brad's go, 2026-09-17; lanes 2026-09-17 late)
 
 Player-facing UX (W15, `docs/design/UX_WAVE_15.md`) and enhancements
-(W16, `docs/design/ENHANCEMENT_WAVE_16.md`) run as one loop, one ticket
-at a time, quick visible wins first and foundations early:
+(W16, `docs/design/ENHANCEMENT_WAVE_16.md`) run as three lanes in
+parallel, each in its own worktree and build directory, lanes chosen so
+their write scopes never overlap; tickets that span lanes (they touch
+`crates/retroforge` and `rf-renderer` both) are serialized with lane A.
 
-1. W15-01 launch gestures + selection focus
-2. W15-04 modals + toasts
-3. W16-01 GPU benchmark harness + local AI spike
-4. W16-03 atmosphere-layer detector (shadow)
-5. W14-21 DSP-1 slice 2 (Mario Kart's track)
-6. W15-02 recently played, favourites, sort
-7. W15-03 context menu + one Game Settings window
-8. W15-05 thumbnails, card grid, libretro art (D-011)
-9. W16-02 Upscale Studio
-10. W16-04 fog/steam pass
-11. W15-06 app hotkeys
-12. W16-05 room-grid collision + first profiles
-13. W16-06 geometry layer + 3D compositor (Diorama II)
-14. W15-07 theme + typography
-15. W16-07 real-time AI pass (D-012 gate), W16-08 MetalFX
-16. W15-08 controller-first library
-17. W16-09 Mode 7 plane as 3D
+- **Lane A, the app** (`crates/retroforge/**`): W15-01 → W15-04 → W15-02
+  → W15-03 → W15-05 → W15-06 → W15-07 → W15-08.
+- **Lane B, enhancement runtime** (`rf-enhance`, `rf-profiles`,
+  fixtures): W16-03 → W16-05; then the cross-lane compositor tickets
+  W16-04 → W16-06 → W16-09, run only when lane A is between tickets.
+- **Lane C, engine and AI** (`rf-renderer`, `rf-ai`, `rf-snes`, scripts):
+  W16-01 → W14-21 → W16-02 → W16-07 → W16-08.
 
 Rulings that opened this: D-011 (art fetch opt-in), D-012 (local AI
-real-time on capable hardware). The loop stops on its own rule: a
-ticket that needs a ruling, or a gate that will not go green.
+real-time on capable hardware). Each lane stops on its own rule: a
+ticket that needs a ruling, or a gate that will not go green. The
+census and `local-gate.sh` never run concurrently with another lane's
+build.

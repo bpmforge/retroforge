@@ -194,3 +194,8 @@ pub enum SceneLayer {
 Composer rules keep original priority order within game layers; overlays are
 always topmost; HUD pinning only active when a profile (or verified
 heuristic) defines the HUD region.
+
+**Later**: a `Geometry` layer (depth field + solidity mask, from
+`DecodedLevel.collision`) and the first producers for `ExtractedBg` and
+`DecodedLevel` are Wave 16 work — see
+`docs/design/ENHANCEMENT_WAVE_16.md` §3/§5/§9.
