@@ -6961,7 +6961,7 @@
     "Super Mario Kart's track and Pilotwings' flight view are checked by eye and recorded; the census is re-run and any bucket move recorded"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED 2026-09-18 by W14-21's close: raster is documented as DMA-drained and DMA sourcing from Dsp1Dr is unconfirmed; Brad's by-eye check of SMK is pending and decides whether this is needed."
    ],
