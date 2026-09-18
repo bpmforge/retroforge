@@ -6937,7 +6937,7 @@
     "one fixture profile and one commercial profile (A Link to the Past, once its fog plane is found empirically in shadow mode) use it; the by-eye check is recorded"
    ],
    "points": 2,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED 2026-09-18 by W16-04's close: the pin producer exists, the TOML field does not (rf-profiles was outside W16-04's scope)."
    ],
