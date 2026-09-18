@@ -7128,8 +7128,9 @@
     "Super Mario RPG plays into its first battle and Kirby Super Star into a stage in the census child with scripted input; by-eye check pending for Brad"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18. All units in sa1.rs with fullsnes citations; 12 new unit tests + 3 mapping tests; save-state extended. Two regressions caught on real titles before close: (1) a BWPA floor broke Kirby Super Star (dropped: SBWE bit 7 is the gate, BWPA stored not enforced); (2) per-side BW-RAM gating broke Kirby's Dream Land 3 (12,268 blocked SA-1-side writes) -- $2226/$2227 are now one shared gate per fullsnes's plural wording. Census child: Kirby SS 0, KDL3 0, PGA European Tour 0, PGA Tour 96 0, Power Rangers Zeo 10 (RUNS: NMI/IRQ vectors fire, frame ~2069, VRAM/CGRAM/OAM populated, forced blank still on at the census budget -> W17-04 gives it a longer probe), Super Mario RPG 10 (main CPU at $C4:0541 polling $2140 -- an APU handshake, not SA-1; name it in W17-04's census note as an SPC-side cause like the W14-10 list). Approximations recorded: arithmetic timing immediate; DMA priority bit no-op; DMA/VBR ROM addressing linear not re-derived through the bank regs; VBR increments on $230C only; timer compare semantics chosen where fullsnes says unknown. Gate: workspace 2210 passing / 0 failed / 43 ignored (orchestrator, after the KDL3 fix).",
     "FILED 2026-09-18 on Brad's 'go' (D-013). Sources: fullsnes 'SNES Cart SA-1' sections (I/O map, interrupt/control both sides, timer, memory control, DMA, character conversion, arithmetic, VBR) extracted for briefs; snes.nesdev.org SA-1 pages. Clean-room, no emulator source (NFR-011). Shape per D-013: a second cpu::Cpu over an Sa1Bus, not a second CPU implementation."
    ],
    "stories": []
