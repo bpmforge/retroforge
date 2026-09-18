@@ -3554,3 +3554,21 @@ stories, 10 decisions).
   real-time decision. Model and runtime are fetched by pinned scripts
   into the ignored cache with a licence ledger; nothing is vendored.
   Gate: workspace **1909 passing / 0 failed / 36 ignored**.
+
+- **W14-21 — DSP-1 HLE slice 2** (2026-09-18, lane C). The rest of the
+  command set, clean-room from the SNES Development Manual: attitude
+  A/B/C, object-to-global and global-to-object conversion, inner
+  product, gyrate and the double-precision range follow the manual's
+  equations; projection parameter setting, raster, object projection
+  and screen point have no equations in the OCR and are reconstructed
+  as a pinhole camera, marked as reconstruction throughout. On Super
+  Mario Kart and Pilotwings the unknown-command counter reads zero once
+  an undocumented `$80` no-op the games send before any real command was
+  traced and written down, and a raster stream abandoned without its
+  terminator now closes correctly. Census unchanged at 1012 / 115 / 138,
+  both titles rendered: raster output is documented as DMA-drained and
+  DMA sourcing from the DSP data register is unconfirmed in this build,
+  recorded as the follow-up rather than assumed. The "thirteenth DSP
+  title" never existed: Metal Combat is OBC-1. Brad's by-eye check of
+  the track and the flight view is pending. Gate: workspace **1937
+  passing / 0 failed / 36 ignored**.
