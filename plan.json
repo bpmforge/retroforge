@@ -6707,8 +6707,9 @@
     "a fixture game's tiles round-trip through the studio in a test with a stub upscaler; the real model is an ignored test that runs locally"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 AS A SLICE (lane A). Delivered: studio.rs post-processing (edge mask, palette re-quantisation), attribution in the pack, upscale_studio.rs bridge + window, CoreCommand::SetStudioCapture, MODEL selector (x4-fp32, compact SRVGGNet; both BSD-3 upstream, fetch-only), ORT_DYLIB_PATH/RF_AI_MODEL_PATH/RF_AI_MODEL_SCALE. Stub path fully tested incl. re-import through hdpack::import; two bugs caught in review and fixed (capture not armed when the studio opened before a ROM; pack compatibility unverified). NOT DONE, filed as W16-12: real-model inference -- both ledgered models are static-shape (64x64 / 128x128) and OnnxUpscaler has no tiling, so a configured model fails loudly with a toast rather than writing a pack; CUDA EP not wired (darwin shop). Pre-existing flake seen once under load: memory_editor_writes_the_machine. Gate: workspace 2054 passing / 0 failed / 40 ignored (agent + orchestrator).",
     "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
    ],
    "stories": []
@@ -6968,6 +6969,30 @@
    "notes": [
     "CLOSED 2026-09-18 (lane C). Finding reverses W14-21's assumption: both titles drain 0Ah raster output by CPU polling only (SMK 99,200 DR reads from frame 42; Pilotwings 87,868 from frame 537; 0 MDMA/HDMA reads). DMA/HDMA sourcing from Dsp1Dr already worked (target() resolution shared with the CPU) and is now pinned by dsp1_dma.rs (fixed-address MDMA, indirect HDMA into the Mode 7 registers). Diagnostic Dsp1DrTrace on SnesBus is unsaved. Census unchanged. The by-eye check of SMK's track and Pilotwings' flight view is Brad's and now decides whether the reconstructed projection/raster maths (W14-21) is right. Gate: rf-snes 335 passing; workspace 1986 passing / 0 failed (agent); arch OK.",
     "FILED 2026-09-18 by W14-21's close: raster is documented as DMA-drained and DMA sourcing from Dsp1Dr is unconfirmed; Brad's by-eye check of SMK is pending and decides whether this is needed."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-12",
+   "title": "Tiled ONNX inference so static-shape upscalers run on real sheets",
+   "phase": 16,
+   "crate": "rf-ai",
+   "write_scope": [
+    "crates/rf-ai/**",
+    "scripts/**"
+   ],
+   "depends_on": [
+    "W16-02"
+   ],
+   "acceptance": [
+    "OnnxUpscaler tiles any input into the model's static input size with overlap and blends the seams, so a studio sheet of any size runs through the x4-fp32 and compact models; unit-tested on synthetic sheets against a whole-image reference where the model allows",
+    "the ignored real-model test produces a pack for the fixture game on this machine with CoreML (and CPU as control) and records ms per sheet in docs/evidence/gpu-passes.json",
+    "if a permissively licensed dynamic-shape compact model exists it is added to the ledger; if not, the search is recorded"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-18 by W16-02's close: the studio is wired end to end with the stub upscaler, but real inference needs tiling for the static-shape exports."
    ],
    "stories": []
   }

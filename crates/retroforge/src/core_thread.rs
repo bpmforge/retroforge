@@ -196,6 +196,13 @@ pub struct HdFrame {
     /// is masked out for free, as is a background tile with a sprite
     /// standing in front of it.
     pub layers: Vec<rf_enhance::hd_render::Layer>,
+    /// Ticket W16-02: the same frame's tiles, decoded for the Upscale
+    /// Studio (`crate::stepper::StudioTileCapture`) — empty unless
+    /// `CoreCommand::SetStudioCapture(true)` is in effect, independent of
+    /// `SetTileCapture`'s own reason for existing (a pack loaded and the
+    /// studio open are two different asks; either alone should not pay
+    /// for both).
+    pub studio_tiles: Vec<crate::stepper::StudioTileCapture>,
 }
 
 /// A SNES session's debug memories, snapshotted on the core thread
@@ -447,6 +454,17 @@ pub enum CoreCommand {
     /// shipping that list every frame for a session with no pack loaded
     /// would be pure waste.
     SetTileCapture(bool),
+    /// Ticket W16-02: record this frame's tiles for the Upscale Studio.
+    ///
+    /// Deliberately a SEPARATE command from `SetTileCapture` rather than
+    /// the studio window reusing that one: a pack loaded for playback and
+    /// the studio open to capture new tiles are two independent reasons
+    /// to pay the recording cost, and turning the studio off must not
+    /// silently stop a loaded pack from compositing (or vice versa). Both
+    /// still gate the SAME underlying `stepper.set_tile_capture` — see
+    /// the handler below — so a session with neither active pays nothing,
+    /// exactly as `SetTileCapture`'s own doc promises.
+    SetStudioCapture(bool),
     /// Ticket W11-02: which bytes the full-level view needs each frame.
     ///
     /// A BOUNDED probe, not "send the UI some RAM". The profile declares
@@ -934,6 +952,9 @@ fn core_thread_main(
     // reaches its widening path at all.
     let mut widescreen: Option<WidescreenRequest> = None;
     let mut hd_capture = false;
+    // Ticket W16-02: independent from `hd_capture` — see
+    // `CoreCommand::SetStudioCapture`'s doc.
+    let mut studio_capture = false;
     // Ticket W13-02b: whether to snapshot the SNES debug memories each
     // frame. Off until a panel asks — 128 KiB per frame is not a cost to
     // pay while nobody is looking.
@@ -1068,8 +1089,12 @@ fn core_thread_main(
                     layers_enabled = enabled;
                 }
                 CoreCommand::SetTileCapture(on) => {
-                    stepper.set_tile_capture(on);
                     hd_capture = on;
+                    stepper.set_tile_capture(hd_capture || studio_capture);
+                }
+                CoreCommand::SetStudioCapture(on) => {
+                    studio_capture = on;
+                    stepper.set_tile_capture(hd_capture || studio_capture);
                 }
                 CoreCommand::SetWidescreen(request) => {
                     // **The frame buffer has to grow with the picture.**
@@ -1372,11 +1397,27 @@ fn core_thread_main(
                 audio_fill: audio.as_ref().map(crate::audio_out::AudioOut::fill),
                 level_probe: probe_data,
                 script_window: script_bytes,
-                // Built only when a pack is loaded — see SetTileCapture.
-                hd: hd_capture.then(|| {
+                // Built when a pack is loaded OR the studio is capturing
+                // — see SetTileCapture/SetStudioCapture.
+                hd: (hd_capture || studio_capture).then(|| {
                     Box::new(HdFrame {
-                        placements: stepper.hd_placements(),
+                        // ~1000 `Placement`s a frame: built only when a
+                        // pack is actually loaded (`hd_capture`), not
+                        // merely because the studio also wants THIS
+                        // frame's tiles for a different reason (its own
+                        // `studio_tiles`, right below) — pay-for-use per
+                        // reason, not per union of reasons.
+                        placements: if hd_capture {
+                            stepper.hd_placements()
+                        } else {
+                            Vec::new()
+                        },
                         layers: hd_layers.take().unwrap_or_default(),
+                        studio_tiles: if studio_capture {
+                            stepper.studio_captures()
+                        } else {
+                            Vec::new()
+                        },
                     })
                 }),
                 rgba: display,

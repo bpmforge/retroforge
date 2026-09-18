@@ -3860,6 +3860,7 @@ dependencies = [
  "image",
  "log",
  "lz4_flex",
+ "rf-ai",
  "rf-audio",
  "rf-cache",
  "rf-cart",

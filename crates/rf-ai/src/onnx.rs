@@ -40,6 +40,17 @@ use std::sync::Mutex;
 use ort::session::Session;
 use ort::value::Tensor;
 
+/// Re-exported so a caller that needs `ort` types this module's own API
+/// surface exposes (`load_with_providers`'s `&[ort::ep::ExecutionProviderDispatch]`,
+/// e.g. `ort::ep::CoreML::default().build()`) can name them without
+/// taking a second, potentially version-skewed, direct dependency on
+/// `ort` itself — Rust's extern prelude only resolves a crate a
+/// `Cargo.toml` names directly, and `rf-ai`'s own optional/load-dynamic
+/// pin (see this crate's `Cargo.toml`) is the one copy of `ort` this
+/// workspace's arch gate (`scripts/validate-arch.sh`'s single-`wgpu`
+/// reasoning applies the same logic here, informally) should ever see.
+pub use ort;
+
 use crate::upscale::{Rgba8, UpscaleError, Upscaler};
 
 /// An upscaler backed by a local ONNX model.

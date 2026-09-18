@@ -779,7 +779,187 @@ impl EmuStepper {
             }))
             .collect()
     }
+}
 
+/// One tile the Upscale Studio (ticket W16-02) saw this frame,
+/// decoded to indexed pixels rather than left as CHR bytes — the
+/// studio needs `rf_ai::pipeline::ExtractedAsset`'s exact shape
+/// (indexed pixels + an RGBA palette), and only this thread can peek
+/// CHR/palette RAM without perturbing the machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StudioTileCapture {
+    /// The pack-format identity Mesen and `rf_enhance::hdpack` match
+    /// on — kept alongside the decoded pixels so a caller that wants
+    /// the CHR-based identity later does not have to re-derive it.
+    pub tile: rf_enhance::hdpack::TileData,
+    /// The RAW NES 6-bit colour codes `rf_enhance::hdpack::TileKey::palette`
+    /// matches on — the exact 4 bytes `hd_placements` resolves and Mesen's
+    /// own `hires.txt` writes as 8 hex characters. NOT the same thing as
+    /// `palette_rgba` below: that one is decoded RGB for image processing,
+    /// this one is the raw identity a Mesen pack keys on.
+    pub mesen_palette: [u8; 4],
+    pub layer: rf_enhance::hd_render::Layer,
+    pub x: i32,
+    pub y: i32,
+    /// 8x8, values `0..=3` — the tile's own 2bpp planar indices.
+    pub indexed_pixels: [u8; 64],
+    /// Four RGBA quads, one per index in `indexed_pixels`. Entry 0 is
+    /// the backdrop for a background tile (opaque — hardware always
+    /// draws it) and fully transparent for a sprite tile (index 0 is
+    /// never drawn on a sprite — nesdev.org/wiki/PPU_OAM).
+    pub palette_rgba: [u8; 16],
+}
+
+/// Decode one CHR tile's 16 pattern bytes into 8x8 palette indices.
+///
+/// The NES 2bpp planar layout (nesdev.org/wiki/PPU_pattern_tables):
+/// the first 8 bytes are the low bitplane (one bit per pixel, one
+/// byte per row), the next 8 are the high bitplane for the same
+/// rows; a pixel's index is `(high_bit << 1) | low_bit`.
+fn decode_nes_tile_indices(bytes: &[u8; 16]) -> [u8; 64] {
+    let mut out = [0u8; 64];
+    // Both loops are fixed 0..8 ranges (CLAUDE.md law 8): they
+    // terminate structurally regardless of the tile's contents.
+    for y in 0..8usize {
+        let lo = bytes[y];
+        let hi = bytes[y + 8];
+        for x in 0..8usize {
+            let bit = 7 - x;
+            let index = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
+            out[y * 8 + x] = index;
+        }
+    }
+    out
+}
+
+/// The 4-entry RGBA palette a decoded tile's indices point into.
+///
+/// `codes` are the four NES 6-bit colour codes `hd_placements` already
+/// resolves (`palette[0]` backdrop plus the tile's own three colours).
+/// Index 0's alpha is the one place background and sprite tiles
+/// differ: a sprite's colour 0 is never drawn on real hardware
+/// (nesdev.org/wiki/PPU_OAM, "Sprite palette entry 0 is transparent"),
+/// so a captured sprite tile must carry that as an actual alpha-0
+/// pixel or the studio's post-processing edge mask (`rf_ai::studio`)
+/// has nothing to preserve.
+fn tile_palette_rgba(codes: [u8; 4], layer: rf_enhance::hd_render::Layer) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for (i, code) in codes.iter().enumerate() {
+        let rgb = rf_renderer::palette_index_to_rgb(*code);
+        let alpha = if i == 0 && matches!(layer, rf_enhance::hd_render::Layer::Sprite) {
+            0
+        } else {
+            255
+        };
+        out[i * 4] = rgb[0];
+        out[i * 4 + 1] = rgb[1];
+        out[i * 4 + 2] = rgb[2];
+        out[i * 4 + 3] = alpha;
+    }
+    out
+}
+
+impl EmuStepper {
+    /// This frame's tiles, decoded for the Upscale Studio (ticket
+    /// W16-02) rather than left as [`Self::hd_placements`]'s bare
+    /// identities.
+    ///
+    /// A sibling to [`Self::hd_placements`], not a wrapper around it:
+    /// the two need different information from the same underlying
+    /// `completed_tiles`/`completed_sprites` (this one needs the raw
+    /// 16 CHR bytes, which `hd_placements` intentionally discards down
+    /// to a bare index for the CHR-ROM case). Duplicating the
+    /// base/tile addressing arithmetic here, rather than changing
+    /// `hd_placements`'s return type, keeps that method's existing
+    /// callers and its `rf_enhance::hd_render::Placement` contract
+    /// untouched.
+    ///
+    /// Empty on SNES and whenever tile capture is off, same as
+    /// [`Self::hd_placements`].
+    #[must_use]
+    pub fn studio_captures(&self) -> Vec<StudioTileCapture> {
+        let tiles = self.completed_tiles();
+        let palette = self.palette();
+        let chr = self.chr();
+        let chr_is_ram = self
+            .machine
+            .nes_bus()
+            .is_some_and(rf_nes::NesBus::chr_is_ram);
+        let sprites = self
+            .machine
+            .nes_bus()
+            .map_or(&[][..], rf_nes::NesBus::completed_sprites);
+
+        let chr_bytes_at = |at: usize| -> [u8; 16] {
+            let mut bytes = [0u8; 16];
+            for (i, b) in bytes.iter_mut().enumerate() {
+                *b = chr.get(at + i).copied().unwrap_or(0);
+            }
+            bytes
+        };
+
+        let mut out = Vec::with_capacity(tiles.len() + sprites.len());
+        for t in tiles {
+            let p = usize::from(t.palette & 0x03) * 4;
+            let codes = [
+                palette[0] & 0x3F,
+                palette[p + 1] & 0x3F,
+                palette[p + 2] & 0x3F,
+                palette[p + 3] & 0x3F,
+            ];
+            let (tile, bytes) = if chr_is_ram {
+                let at = usize::from(t.base) + usize::from(t.tile) * 16;
+                let bytes = chr_bytes_at(at);
+                (rf_enhance::hdpack::TileData::ChrRam(bytes), bytes)
+            } else {
+                let index = u32::from(t.base) / 16 + u32::from(t.tile);
+                let bytes = chr_bytes_at(index as usize * 16);
+                (rf_enhance::hdpack::TileData::ChrRom(index), bytes)
+            };
+            let layer = rf_enhance::hd_render::Layer::Background;
+            out.push(StudioTileCapture {
+                tile,
+                mesen_palette: codes,
+                layer,
+                x: i32::from(t.x),
+                y: i32::from(t.y),
+                indexed_pixels: decode_nes_tile_indices(&bytes),
+                palette_rgba: tile_palette_rgba(codes, layer),
+            });
+        }
+        for s in sprites {
+            let p = 0x10 + usize::from(s.palette & 0x03) * 4;
+            let codes = [
+                palette[0] & 0x3F,
+                palette[p + 1] & 0x3F,
+                palette[p + 2] & 0x3F,
+                palette[p + 3] & 0x3F,
+            ];
+            let (tile, bytes) = if chr_is_ram {
+                let at = usize::from(s.base) + usize::from(s.tile) * 16;
+                let bytes = chr_bytes_at(at);
+                (rf_enhance::hdpack::TileData::ChrRam(bytes), bytes)
+            } else {
+                let index = u32::from(s.base) / 16 + u32::from(s.tile);
+                let bytes = chr_bytes_at(index as usize * 16);
+                (rf_enhance::hdpack::TileData::ChrRom(index), bytes)
+            };
+            let layer = rf_enhance::hd_render::Layer::Sprite;
+            out.push(StudioTileCapture {
+                tile,
+                mesen_palette: codes,
+                layer,
+                x: i32::from(s.x),
+                y: i32::from(s.y),
+                indexed_pixels: decode_nes_tile_indices(&bytes),
+                palette_rgba: tile_palette_rgba(codes, layer),
+            });
+        }
+        out
+    }
+}
+
+impl EmuStepper {
     /// Side-effect-free 2 KiB WRAM snapshot (`$0000-$07FF`, the real
     /// backing 2 KiB — not its `$0800`-stepped mirrors, same span
     /// `Self::state_hash`'s own doc already enumerates as "reachable
