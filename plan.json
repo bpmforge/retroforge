@@ -7054,7 +7054,7 @@
     "by-eye on Super Mario Kart and Pilotwings recorded by Brad; a kittest scenario asserts the live view changes on a synthetic mode-7 frame"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED 2026-09-18 by W16-09's close: the renderer path exists and is golden-tested; the app wiring and the per-scanline capture are what make it visible and correct on real titles."
    ],
