@@ -40,19 +40,29 @@ const MAX_COUNTRY_CODE: u8 = 0x14;
 const MAX_ROM_VERSION: u8 = 0x0F;
 
 /// Map-mode nibbles fullsnes names that this build does not run: $2
-/// (S-DD1), $3 (SA-1), $5 (ExHiROM), $A (SPC7110). Used only to give a
-/// cartridge-shaped refusal a chip name instead of "not a SNES image".
-const KNOWN_UNSUPPORTED_MAP_MODES: [u8; 4] = [0x2, 0x3, 0x5, 0xA];
+/// (S-DD1), $5 (ExHiROM), $A (SPC7110). $3 (SA-1) is no longer in this
+/// list — ticket W17-01 lifted it out (D-013); it is now a candidate map
+/// mode like LoROM/HiROM, scored and accepted (or refused by chipset byte,
+/// same as before) through the normal path.
+const KNOWN_UNSUPPORTED_MAP_MODES: [u8; 3] = [0x2, 0x5, 0xA];
 /// RESET vector lives at file offset $FFFC/$7FFC, i.e. header_base + $3C.
 const RESET_VECTOR_OFFSET: usize = 0x3C;
 
-/// Which of the two currently-supported SNES memory maps this cart uses.
-/// ExHiROM and the coprocessor-carrying map modes (SA-1, S-DD1, SPC7110)
-/// are detected but rejected — see module docs.
+/// Which of the SNES memory maps this cart uses. ExHiROM and the
+/// remaining coprocessor-carrying map modes (S-DD1, SPC7110) are still
+/// detected but rejected — see module docs. SA-1 (map mode nibble $3) was
+/// lifted out of that deferral by D-013 (ticket W17-01): its header
+/// always sits at the LoROM location (fullsnes "SNES Cart SA-1": "Default
+/// exception vectors (and cartridge header) are always in LoROM bank
+/// 00h"), but the SNES-side memory map it describes is neither plain
+/// LoROM nor plain HiROM, so it gets its own variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnesMapMode {
     LoRom,
     HiRom,
+    /// Map mode $23 (fullsnes "SNES Cart SA-1"). See [`Coprocessor::Sa1`]
+    /// for the board data rf-snes maps this against.
+    Sa1,
 }
 
 /// Parsed SNES header fields (FR-CORE-010).
@@ -97,7 +107,35 @@ pub enum Coprocessor {
     /// uPD7725 (D-010: the chip's program ROM is copyrighted firmware
     /// this project cannot ship).
     Dsp1,
+    /// Coprocessor nibble $3 ("SA-1") with `hw` in 4..=5 (chipset $34
+    /// ROM+SA-1+RAM, $35 +RAM+battery) under map mode $23. D-013, ticket
+    /// W17-01: a second 65C816 (added in W17-02) with its own I-RAM,
+    /// BW-RAM window, DMA, arithmetic unit and bit reader — never LLE'd
+    /// against copyrighted firmware, because there is none: the SA-1 runs
+    /// from the cartridge's own ROM, so this is ordinary clean-room
+    /// hardware emulation, not HLE.
+    Sa1(Sa1Board),
 }
+
+/// The SA-1 board data a parsed cartridge carries: sizes rf-snes needs to
+/// allocate the SNES-side memory map (fullsnes "SNES Cart SA-1", the
+/// memory-map overview and "Misc" sections).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sa1Board {
+    /// Cartridge ROM length in bytes, from the header's size byte (up to
+    /// 8 MiB — fullsnes: "Addressable ROM up to 8MByte (64MBits)").
+    pub rom_len: usize,
+    /// BW-RAM length in bytes, from the header's RAM size byte (fullsnes:
+    /// "Optional external backup/work BW-RAM up to 2MByte"; boards in the
+    /// local library stay far under that).
+    pub bwram_len: usize,
+    /// I-RAM length in bytes: always 2 KiB, on-chip and fixed (fullsnes
+    /// "Misc": "2Kbytes internal I-RAM (work ram/stack)").
+    pub iram_len: usize,
+}
+
+/// The SA-1's fixed on-chip I-RAM size (fullsnes "SNES Cart SA-1", Misc).
+pub const SA1_IRAM_LEN: usize = 2048;
 
 /// The DSP-1 memory-mapped register bus window: which cartridge banks the
 /// chip's DR (data/command) and SR (status) registers are visible in, and
@@ -157,6 +195,11 @@ fn dsp_window_for(map_mode: SnesMapMode, rom_size: usize) -> DspWindow {
             dr: 0x8000..=0xBFFF,
             sr: 0xC000..=0xFFFF,
         },
+        // Never reached: `parse_snes_header` only calls this for
+        // `Coprocessor::Dsp1`, which its own branching only produces when
+        // `map_mode != Sa1` (ticket W17-01 — DSP-1 and SA-1 are mutually
+        // exclusive map modes).
+        SnesMapMode::Sa1 => unreachable!("DSP-1 window requested for an SA-1 map mode"),
     }
 }
 
@@ -400,6 +443,7 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
     let map_mode = match mode_nibble {
         0x0 => SnesMapMode::LoRom,
         0x1 => SnesMapMode::HiRom,
+        0x3 => SnesMapMode::Sa1,
         _ => {
             return Err(CartError::UnsupportedChip {
                 name: format!(
@@ -422,7 +466,30 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
     // Coprocessor::Dsp1 instead. hw=6..=15 is not an assigned combination
     // for any chipset and still refuses exactly as before, same as every
     // other coprocessor nibble at hw>=3.
-    let (coprocessor, battery) = if (0x3..=0x5).contains(&hw) && coprocessor_nibble == 0x0 {
+    let (coprocessor, battery) = if map_mode == SnesMapMode::Sa1 {
+        // D-013 / ticket W17-01: map mode $23 must ALSO carry the SA-1
+        // chipset byte to be accepted — a header naming this map mode
+        // without the matching coprocessor nibble/hw is not a shape any
+        // real board uses, so it is refused exactly like every other
+        // coprocessor this build does not run, rather than half-accepted.
+        if coprocessor_nibble == 0x3 && (0x4..=0x5).contains(&hw) {
+            (
+                Coprocessor::Sa1(Sa1Board {
+                    rom_len: rom_size,
+                    bwram_len: ram_size,
+                    iram_len: SA1_IRAM_LEN,
+                }),
+                hw == 0x5,
+            )
+        } else {
+            return Err(CartError::UnsupportedChip {
+                name: format!(
+                    "{} (SNES chipset ${chipset:02X})",
+                    coprocessor_name(chipset)
+                ),
+            });
+        }
+    } else if (0x3..=0x5).contains(&hw) && coprocessor_nibble == 0x0 {
         (Coprocessor::Dsp1, hw == 0x5)
     } else if hw >= 0x3 {
         return Err(CartError::UnsupportedChip {
@@ -436,7 +503,7 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
     };
     let dsp_window = match coprocessor {
         Coprocessor::Dsp1 => Some(dsp_window_for(map_mode, rom_size)),
-        Coprocessor::None => None,
+        Coprocessor::None | Coprocessor::Sa1(_) => None,
     };
 
     let checksum = u16::from_le_bytes([data[base + 0x1E], data[base + 0x1F]]);
@@ -717,6 +784,89 @@ mod tests {
         let err = parse_snes_header(&rom).unwrap_err();
         match &err {
             CartError::UnsupportedChip { name } => assert!(name.contains("DSP"), "got: {name}"),
+            other => panic!("expected UnsupportedChip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    /// D-013 / ticket W17-01: chipset $34 (ROM+SA-1+RAM, hw=4) under map
+    /// mode $23 parses instead of refusing, carrying the board data
+    /// rf-snes needs (ROM/BW-RAM sizes from `lorom_image`'s default size
+    /// bytes: 64 KiB ROM, 8 KiB RAM; I-RAM fixed at 2 KiB).
+    fn sa1_cart_chipset_34_parses_with_board_data() {
+        let rom = lorom_image(0x23, 0x34);
+        let header = parse_snes_header(&rom).expect("SA-1 cart must parse");
+        assert_eq!(header.map_mode, SnesMapMode::Sa1);
+        assert_eq!(
+            header.coprocessor,
+            Coprocessor::Sa1(Sa1Board {
+                rom_len: 64 * 1024,
+                bwram_len: 8 * 1024,
+                iram_len: SA1_IRAM_LEN,
+            })
+        );
+        assert!(!header.battery, "hw=4 has no battery");
+        assert_eq!(header.dsp_window, None, "SA-1 is not the DSP-1");
+    }
+
+    #[test]
+    /// Chipset $35 (+battery) sets the battery flag, matching the DSP-1
+    /// hw==5 rule.
+    fn sa1_cart_chipset_35_sets_battery() {
+        let rom = lorom_image(0x23, 0x35);
+        let header = parse_snes_header(&rom).expect("SA-1+battery cart must parse");
+        assert!(header.battery);
+        match header.coprocessor {
+            Coprocessor::Sa1(board) => assert_eq!(board.bwram_len, 8 * 1024),
+            other => panic!("expected Coprocessor::Sa1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    /// SA-1's own I-RAM size is fixed by hardware, not the header — it
+    /// must be 2 KiB regardless of the declared ROM/RAM sizes.
+    fn sa1_cart_iram_is_always_2kib() {
+        let mut rom = lorom_image(0x23, 0x34);
+        rom[LOROM_HEADER_OFFSET + 0x17] = 11; // 2 MiB ROM
+        rom[LOROM_HEADER_OFFSET + 0x18] = 8; // 256 KiB BW-RAM
+        let header = parse_snes_header(&rom).expect("SA-1 cart must parse");
+        match header.coprocessor {
+            Coprocessor::Sa1(board) => {
+                assert_eq!(board.rom_len, 2 * 1024 * 1024);
+                assert_eq!(board.bwram_len, 256 * 1024);
+                assert_eq!(board.iram_len, SA1_IRAM_LEN);
+            }
+            other => panic!("expected Coprocessor::Sa1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    /// Map mode $23 without a matching SA-1 chipset byte is refused, not
+    /// half-accepted — the same "both must agree" rule DSP-1 has for its
+    /// nibble/hw pair.
+    fn sa1_map_mode_without_sa1_chipset_still_refuses() {
+        let rom = lorom_image(0x23, 0x00); // map mode SA-1, chipset plain ROM
+        let err = parse_snes_header(&rom).unwrap_err();
+        match &err {
+            CartError::UnsupportedChip { name } => {
+                // hw=0 names whatever nibble 0 means ("DSP") — the point
+                // is that this refuses, not what it is called.
+                assert!(!name.is_empty(), "got: {name}");
+            }
+            other => panic!("expected UnsupportedChip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    /// An SA-1 chipset byte under a plain LoROM map mode (not $23) still
+    /// refuses exactly as before this ticket — real SA-1 boards always
+    /// declare map mode $23, so this combination is not a shape any real
+    /// cartridge uses.
+    fn sa1_chipset_under_plain_lorom_map_mode_still_refuses() {
+        let rom = lorom_image(0x20, 0x34);
+        let err = parse_snes_header(&rom).unwrap_err();
+        match &err {
+            CartError::UnsupportedChip { name } => assert!(name.contains("SA-1"), "got: {name}"),
             other => panic!("expected UnsupportedChip, got {other:?}"),
         }
     }

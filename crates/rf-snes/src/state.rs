@@ -275,7 +275,24 @@ impl crate::system::SnesSystem {
                 Ok(())
             }
             StateRegion::Mapper => o.u8(map_mode_bits(self.bus.mode)),
-            StateRegion::Cart => o.blob(&self.bus.sram),
+            StateRegion::Cart => {
+                o.blob(&self.bus.sram)?;
+                // SA-1 board state (ticket W17-01), appended the same way
+                // DSP-1's `Cpu`-region chunk is: a presence flag then the
+                // payload, so a state saved before this ticket and one
+                // saved after only disagree in what trails the byte the
+                // older format already ends at. `None` (every non-SA-1
+                // cartridge) costs one byte.
+                o.bool(self.bus.sa1.is_some())?;
+                match &self.bus.sa1 {
+                    Some(s) => {
+                        s.regs.save(o)?;
+                        o.blob(&s.iram)?;
+                        o.blob(&s.bwram)
+                    }
+                    None => Ok(()),
+                }
+            }
         }
     }
 
@@ -356,7 +373,26 @@ impl crate::system::SnesSystem {
                 self.bus.mode = map_mode_from_bits(bits)?;
                 Ok(())
             }
-            StateRegion::Cart => i.blob_into(&mut self.bus.sram, "CART (battery SRAM)"),
+            StateRegion::Cart => {
+                i.blob_into(&mut self.bus.sram, "CART (battery SRAM)")?;
+                let present = i.bool()?;
+                match (self.bus.sa1.as_mut(), present) {
+                    (Some(s), true) => {
+                        s.regs.load(i)?;
+                        i.blob_into(&mut s.iram, "SA-1 I-RAM")?;
+                        i.blob_into(&mut s.bwram, "SA-1 BW-RAM")
+                    }
+                    (None, false) => Ok(()),
+                    // The cartridge mounted now disagrees with the one the
+                    // state was saved against — the same class of problem
+                    // `blob_into`'s size check reports above, just for
+                    // "has an SA-1 board at all" instead of "what size".
+                    (Some(_), false) | (None, true) => Err(StateError::Corrupt(
+                        "SA-1 presence in the saved state disagrees with the mounted cartridge"
+                            .to_string(),
+                    )),
+                }
+            }
         }
     }
 }
@@ -371,6 +407,8 @@ fn map_mode_bits(mode: rf_cart::SnesMapMode) -> u8 {
     match mode {
         rf_cart::SnesMapMode::LoRom => 0,
         rf_cart::SnesMapMode::HiRom => 1,
+        // Ticket W17-01.
+        rf_cart::SnesMapMode::Sa1 => 2,
     }
 }
 
@@ -378,9 +416,10 @@ fn map_mode_from_bits(bits: u8) -> Result<rf_cart::SnesMapMode, StateError> {
     Ok(match bits {
         0 => rf_cart::SnesMapMode::LoRom,
         1 => rf_cart::SnesMapMode::HiRom,
+        2 => rf_cart::SnesMapMode::Sa1,
         other => {
             return Err(StateError::Corrupt(format!(
-                "map mode {other} is not one of LoROM/HiROM"
+                "map mode {other} is not one of LoROM/HiROM/SA-1"
             )))
         }
     })
@@ -484,5 +523,91 @@ mod tests {
             .load_region(StateRegion::Cpu, &mut stream)
             .expect("load");
         assert!(system.bus.dsp1.is_none());
+    }
+
+    /// A minimal SA-1 LoROM image: chipset $35 (ROM+SA-1+RAM+battery)
+    /// under map mode $23, mirroring `dsp_lorom_image` above.
+    fn sa1_lorom_image() -> Vec<u8> {
+        let mut data = vec![0u8; 0x8000];
+        let base = 0x7FC0;
+        data[base + 0x15] = 0x23; // map mode SA-1
+        data[base + 0x16] = 0x35; // chipset: SA-1, hw=5 (+RAM+battery)
+        data[base + 0x17] = 6;
+        data[base + 0x18] = 3;
+        let checksum: u16 = 0xBEEF;
+        data[base + 0x1C..base + 0x1E].copy_from_slice(&(checksum ^ 0xFFFF).to_le_bytes());
+        data[base + 0x1E..base + 0x20].copy_from_slice(&checksum.to_le_bytes());
+        data[base + 0x3C] = 0x00;
+        data[base + 0x3D] = 0x80;
+        data
+    }
+
+    /// Ticket W17-01 acceptance #4: "the mapping registers and BW-RAM/
+    /// I-RAM contents round-trip with a test". Both the `Mapper` region
+    /// (map mode) and the `Cart` region (SA-1 registers + I-RAM + BW-RAM)
+    /// must carry the state, since a restore that got the map mode back
+    /// but not the bank registers would resolve every SA-1 ROM address
+    /// wrong.
+    #[test]
+    fn sa1_board_state_survives_a_mapper_and_cart_region_round_trip() {
+        let rom = sa1_lorom_image();
+        let mut system = crate::SnesSystem::load(&rom).expect("SA-1 cart loads");
+
+        system.bus.write(0x00_2220, 0x85); // CXB: banked, block 5
+        system.bus.write(0x00_2224, 0x03); // BMAPS: BW-RAM block 3
+        system.bus.write(0x00_3000, 0x11); // I-RAM
+        system.bus.write(0x00_6000, 0x22); // BW-RAM window
+
+        let mut mapper_stream = MemStream {
+            buf: Vec::new(),
+            at: 0,
+        };
+        let mut cart_stream = MemStream {
+            buf: Vec::new(),
+            at: 0,
+        };
+        system
+            .save_region(StateRegion::Mapper, &mut mapper_stream)
+            .expect("save mapper");
+        system
+            .save_region(StateRegion::Cart, &mut cart_stream)
+            .expect("save cart");
+
+        let mut restored = crate::SnesSystem::load(&rom).expect("SA-1 cart loads");
+        restored
+            .load_region(StateRegion::Mapper, &mut mapper_stream)
+            .expect("load mapper");
+        restored
+            .load_region(StateRegion::Cart, &mut cart_stream)
+            .expect("load cart");
+
+        assert_eq!(restored.bus.mode, rf_cart::SnesMapMode::Sa1);
+        assert_eq!(restored.bus.read(0x00_3000), 0x11);
+        assert_eq!(restored.bus.read(0x00_6000), 0x22);
+        assert_eq!(
+            restored.bus.sa1.as_ref().unwrap().regs.cxb(),
+            0x85,
+            "the $2220 write must have round-tripped"
+        );
+    }
+
+    /// A plain cartridge's `Cart` region round-trips with `sa1` staying
+    /// `None` throughout (the one-byte-longer flag this ticket added).
+    #[test]
+    fn a_plain_carts_cart_region_round_trips_without_an_sa1() {
+        let mut system =
+            crate::SnesSystem::from_rom(vec![0u8; 32 * 1024], rf_cart::SnesMapMode::LoRom, 0);
+        assert!(system.bus.sa1.is_none());
+        let mut stream = MemStream {
+            buf: Vec::new(),
+            at: 0,
+        };
+        system
+            .save_region(StateRegion::Cart, &mut stream)
+            .expect("save");
+        system
+            .load_region(StateRegion::Cart, &mut stream)
+            .expect("load");
+        assert!(system.bus.sa1.is_none());
     }
 }

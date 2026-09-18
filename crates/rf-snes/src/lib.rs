@@ -13,6 +13,7 @@ pub mod dsp1;
 pub mod mapping;
 pub mod ppu;
 pub mod regs;
+pub mod sa1;
 pub mod state;
 pub mod system;
 pub mod timing;
