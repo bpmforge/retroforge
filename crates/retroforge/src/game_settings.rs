@@ -169,8 +169,42 @@ pub struct GameSettings {
     /// store, already keyed by normalized ROM hash, and already preserves
     /// keys it does not understand.
     pub trust: rf_enhance::trust::TrustLadder,
+    /// Ticket W15-02 (UX_WAVE_15 §3, §11): wall-clock seconds since the
+    /// Unix epoch of this game's most recent launch, `None` for a game
+    /// never opened. `SystemTime` rather than a monotonic clock because
+    /// this is meant to survive a restart and be compared across
+    /// processes — the library toolbar's "Recently played" chip and
+    /// "Last played" sort both read it back cold from disk.
+    pub last_played_epoch_secs: Option<u64>,
+    /// How many times this game has been launched. Never written back
+    /// down on its own — only [`GameSettings::record_launch`] advances
+    /// it, alongside `last_played_epoch_secs`, so the two can never drift
+    /// apart from each other.
+    pub play_count: u32,
+    /// The star toggle next to Play (UX_WAVE_15 §3): persisted here like
+    /// every other per-game setting rather than in a second favourites
+    /// list, so a renamed or re-dumped cartridge keeps its favourite
+    /// status the same way it keeps its mode.
+    pub favourite: bool,
     /// Keys this build does not know, kept verbatim (module doc).
     unknown: BTreeMap<String, String>,
+}
+
+impl GameSettings {
+    /// Record one launch: bump the play count and stamp the launch time.
+    /// A pure mutator — no I/O — so the caller decides when (and whether)
+    /// to persist it, and this is testable without a filesystem.
+    ///
+    /// `when` is a parameter rather than `SystemTime::now()` called inside,
+    /// so a test can assert an exact value instead of merely "some value
+    /// close to now".
+    pub fn record_launch(&mut self, when: std::time::SystemTime) {
+        self.play_count = self.play_count.saturating_add(1);
+        self.last_played_epoch_secs = when
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs());
+    }
 }
 
 impl GameSettings {
@@ -198,6 +232,18 @@ impl GameSettings {
         }
         if let Some(shader) = &self.shader {
             fields.insert("shader".to_string(), shader.clone());
+        }
+        // Ticket W15-02: same "only write it when it says something" rule
+        // as the toggles above — a game nobody has launched yet must not
+        // grow `last_played`/`play_count` keys that only restate zero.
+        if let Some(epoch) = self.last_played_epoch_secs {
+            fields.insert("last_played".to_string(), epoch.to_string());
+        }
+        if self.play_count > 0 {
+            fields.insert("play_count".to_string(), self.play_count.to_string());
+        }
+        if self.favourite {
+            fields.insert("favourite".to_string(), "true".to_string());
         }
         // Ticket W3-05c: omitted entirely when everything is at its
         // default, so an untouched game's file does not grow a key that
@@ -248,6 +294,15 @@ impl GameSettings {
                 "trust" => {
                     settings.trust = rf_enhance::trust::TrustLadder::from_settings_value(value);
                 }
+                "last_played" => {
+                    // An unparseable value falls back to `None` rather than
+                    // refusing the whole file, same rule as `mode` above.
+                    settings.last_played_epoch_secs = value.parse().ok();
+                }
+                "play_count" => {
+                    settings.play_count = value.parse().unwrap_or(0);
+                }
+                "favourite" => settings.favourite = value == "true",
                 other => {
                     settings
                         .unknown
@@ -483,6 +538,99 @@ mod trust_persistence_tests {
 #[cfg(test)]
 mod mode_and_feature_persistence_tests {
     use super::*;
+
+    /// Ticket W15-02, acceptance criterion 4: play-count/last-played/favourite
+    /// persistence round-trips through the per-game file.
+    #[cfg(test)]
+    mod recency_and_favourite_persistence_tests {
+        use super::*;
+
+        fn temp_root(label: &str) -> PathBuf {
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let unique = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "rf-w15-02-set-{label}-{}-{unique}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            dir
+        }
+
+        /// An untouched game must write none of the three new keys — the same
+        /// "default is a property of the code, not a file assertion" rule as
+        /// the trust ladder and the enhancement toggles.
+        #[test]
+        fn an_untouched_game_writes_none_of_the_new_keys() {
+            let text = GameSettings::default().to_text();
+            for key in ["last_played", "play_count", "favourite"] {
+                assert!(!text.contains(key), "untouched game wrote `{key}`:\n{text}");
+            }
+        }
+
+        #[test]
+        fn record_launch_bumps_the_count_and_stamps_the_time_and_both_persist() {
+            let mut settings = GameSettings::default();
+            assert_eq!(settings.play_count, 0);
+            assert_eq!(settings.last_played_epoch_secs, None);
+
+            let first = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+            settings.record_launch(first);
+            assert_eq!(settings.play_count, 1);
+            assert_eq!(settings.last_played_epoch_secs, Some(1_000));
+
+            let second = std::time::UNIX_EPOCH + std::time::Duration::from_secs(2_000);
+            settings.record_launch(second);
+            assert_eq!(
+                settings.play_count, 2,
+                "a second launch must not reset the count"
+            );
+            assert_eq!(
+                settings.last_played_epoch_secs,
+                Some(2_000),
+                "the timestamp must advance to the newer launch"
+            );
+
+            let restored =
+                GameSettings::from_text(&settings.to_text()).expect("self-written file parses");
+            assert_eq!(restored.play_count, 2);
+            assert_eq!(restored.last_played_epoch_secs, Some(2_000));
+        }
+
+        #[test]
+        fn favourite_persists_independently_of_play_history() {
+            let mut settings = GameSettings::default();
+            settings.favourite = true;
+            let restored =
+                GameSettings::from_text(&settings.to_text()).expect("self-written file parses");
+            assert!(restored.favourite);
+            assert_eq!(
+                restored.play_count, 0,
+                "favouriting alone must not fake a play"
+            );
+            assert_eq!(restored.last_played_epoch_secs, None);
+        }
+
+        /// Full load/save round trip through the actual store, keyed by hash,
+        /// like `settings_persist_keyed_by_hash_and_do_not_bleed_between_games`
+        /// above — this is the same guarantee for the three new fields.
+        #[test]
+        fn play_history_round_trips_through_the_store_keyed_by_hash() {
+            let root = temp_root("recency");
+            const HASH: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+            let mut settings = load(&root, HASH);
+            settings.record_launch(std::time::UNIX_EPOCH + std::time::Duration::from_secs(42));
+            settings.favourite = true;
+            save(&root, HASH, &settings).expect("save");
+
+            let reloaded = load(&root, HASH);
+            assert_eq!(reloaded.play_count, 1);
+            assert_eq!(reloaded.last_played_epoch_secs, Some(42));
+            assert!(reloaded.favourite);
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
 
     /// FR-MODE-001: all five ARCHITECTURE §4 modes round-trip by name.
     #[test]

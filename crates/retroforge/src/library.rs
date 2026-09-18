@@ -28,7 +28,7 @@
 //! rather than recursing forever. That is why the visited set holds
 //! canonical paths and not the paths as written.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Largest file the scanner will read. A ROM larger than this is not one
@@ -186,6 +186,158 @@ impl Library {
                 if h == normalized_sha256)
         })
     }
+}
+
+/// Cached facts about a game's play history (ticket W15-02), read from
+/// `game_settings` once per scan/launch rather than once per row per
+/// frame — UX_WAVE_15 §11 acceptance 1 requires this to be cheap enough
+/// to do for every row, and re-reading a per-game file every frame for
+/// every row would not be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecencyMeta {
+    pub last_played_epoch_secs: Option<u64>,
+    pub play_count: u32,
+    pub favourite: bool,
+}
+
+/// The toolbar's Recently played / Favourites chips (§3): radio-like with
+/// each other (selecting one clears the other) and combined with the
+/// console filter by the caller — `Library::filter_and_sort` ANDs this in
+/// alongside `console_filter`, never on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecencyFilter {
+    #[default]
+    All,
+    RecentlyPlayed,
+    Favourites,
+}
+
+/// The sort control's three explicit choices (§3, §11). There is
+/// deliberately no `Default` variant here — "no sort chosen explicitly"
+/// is `None` at the call site in [`filter_and_sort`], not a fourth
+/// variant, so the "empty search defaults to recent-first" rule lives in
+/// one place instead of being smeared across an enum default and a
+/// separate check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    Title,
+    LastPlayed,
+    Console,
+}
+
+/// This entry's recency metadata, or the all-zero default for an entry
+/// this build could not identify (an unrecognized ROM has no hash to key
+/// play history on, so it is never "recently played" or a "favourite").
+fn recency_of(entry: &LibraryEntry, meta: &BTreeMap<String, RecencyMeta>) -> RecencyMeta {
+    match &entry.identity {
+        EntryIdentity::Recognized {
+            normalized_sha256, ..
+        } => meta.get(normalized_sha256).copied().unwrap_or_default(),
+        EntryIdentity::Unrecognized { .. } => RecencyMeta::default(),
+    }
+}
+
+/// Sort key for [`SortMode::Console`]: NES before SNES before an entry
+/// this build could not identify, so "no console" sorts last rather than
+/// wherever an arbitrary string comparison happens to put it.
+fn console_sort_key(entry: &LibraryEntry) -> u8 {
+    match &entry.identity {
+        EntryIdentity::Recognized {
+            console: Console::Nes,
+            ..
+        } => 0,
+        EntryIdentity::Recognized {
+            console: Console::Snes,
+            ..
+        } => 1,
+        EntryIdentity::Unrecognized { .. } => 2,
+    }
+}
+
+/// The toolbar's whole filter+sort pipeline (UX_WAVE_15 §3, §11), factored
+/// out as a pure function of its inputs so it is unit-testable over a
+/// synthetic entry list with no `egui` harness — the app's `library_grid`
+/// calls this with live state; the tests below call it with a hand-built
+/// `Library` and `meta` map.
+///
+/// `sort` is `None` for "the user has not picked an explicit sort yet":
+/// per §11's acceptance, that means recent-first (never-played entries
+/// after, alphabetically) while the search box is empty, and Title order
+/// — the order `Library::scan` already produces — once it is not, since a
+/// search result reads better alphabetical than reshuffled by a history
+/// the query has nothing to do with.
+#[must_use]
+pub fn filter_and_sort<'a>(
+    entries: &'a [LibraryEntry],
+    meta: &BTreeMap<String, RecencyMeta>,
+    console_filter: Option<Console>,
+    recency_filter: RecencyFilter,
+    search: &str,
+    sort: Option<SortMode>,
+) -> Vec<&'a LibraryEntry> {
+    let needle = search.trim().to_lowercase();
+    let mut matches: Vec<&LibraryEntry> = entries
+        .iter()
+        .filter(|e| {
+            let console_ok = match console_filter {
+                None => true,
+                Some(want) => matches!(
+                    &e.identity,
+                    EntryIdentity::Recognized { console, .. } if *console == want
+                ),
+            };
+            let text_ok = needle.is_empty() || e.title.to_lowercase().contains(&needle);
+            let recency_ok = match recency_filter {
+                RecencyFilter::All => true,
+                RecencyFilter::RecentlyPlayed => {
+                    recency_of(e, meta).last_played_epoch_secs.is_some()
+                }
+                RecencyFilter::Favourites => recency_of(e, meta).favourite,
+            };
+            console_ok && text_ok && recency_ok
+        })
+        .collect();
+
+    let effective_sort = sort.unwrap_or(if needle.is_empty() {
+        SortMode::LastPlayed
+    } else {
+        SortMode::Title
+    });
+
+    match effective_sort {
+        SortMode::Title => {
+            matches.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.path.cmp(&b.path)));
+        }
+        SortMode::Console => {
+            matches.sort_by(|a, b| {
+                console_sort_key(a)
+                    .cmp(&console_sort_key(b))
+                    .then_with(|| a.title.cmp(&b.title))
+                    .then_with(|| a.path.cmp(&b.path))
+            });
+        }
+        SortMode::LastPlayed => {
+            matches.sort_by(|a, b| {
+                let (ta, tb) = (
+                    recency_of(a, meta).last_played_epoch_secs,
+                    recency_of(b, meta).last_played_epoch_secs,
+                );
+                match (ta, tb) {
+                    // Most recent first.
+                    (Some(x), Some(y)) => y.cmp(&x),
+                    // Never-played entries sort AFTER any played entry,
+                    // per §11's "never-played titles after".
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+                .then_with(|| a.title.cmp(&b.title))
+                .then_with(|| a.path.cmp(&b.path))
+            });
+        }
+    }
+
+    matches
 }
 
 /// What the library screen should show before anything else (FRONTEND_UI
@@ -1121,5 +1273,251 @@ mod tests {
         let library = scan(&[LibraryRoot::Bare(root.clone())]);
         assert_eq!(library.entries.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Ticket W15-02, acceptance criterion 4: each filter chip's resulting
+/// set and each sort order, as pure-function unit tests over a synthetic
+/// entry list — no scan, no harness.
+#[cfg(test)]
+mod filter_and_sort_tests {
+    use super::*;
+
+    fn entry(title: &str, console: Console, hash: &str) -> LibraryEntry {
+        LibraryEntry {
+            path: PathBuf::from(format!("/roms/{title}.rom")),
+            title: title.to_string(),
+            identity: EntryIdentity::Recognized {
+                console,
+                normalized_sha256: hash.to_string(),
+            },
+        }
+    }
+
+    fn unrecognized(title: &str) -> LibraryEntry {
+        LibraryEntry {
+            path: PathBuf::from(format!("/roms/{title}.rom")),
+            title: title.to_string(),
+            identity: EntryIdentity::Unrecognized {
+                reason: "test".to_string(),
+            },
+        }
+    }
+
+    fn titles<'a>(entries: &[&'a LibraryEntry]) -> Vec<&'a str> {
+        entries.iter().map(|e| e.title.as_str()).collect()
+    }
+
+    /// A four-game synthetic library exercising every axis this pipeline
+    /// has to combine: two consoles, one unrecognized entry, one
+    /// favourite, two with play history at different times, one never
+    /// played.
+    fn sample() -> (Vec<LibraryEntry>, BTreeMap<String, RecencyMeta>) {
+        let entries = vec![
+            entry("Zelda-like", Console::Nes, "h-zelda"),
+            entry("Alpha SNES Game", Console::Snes, "h-alpha"),
+            entry("Beta NES Game", Console::Nes, "h-beta"),
+            unrecognized("Mystery Cart"),
+        ];
+        let mut meta = BTreeMap::new();
+        meta.insert(
+            "h-zelda".to_string(),
+            RecencyMeta {
+                last_played_epoch_secs: Some(200),
+                play_count: 3,
+                favourite: true,
+            },
+        );
+        meta.insert(
+            "h-beta".to_string(),
+            RecencyMeta {
+                last_played_epoch_secs: Some(100),
+                play_count: 1,
+                favourite: false,
+            },
+        );
+        // "h-alpha" and the unrecognized entry are deliberately absent —
+        // never played, never favourited.
+        (entries, meta)
+    }
+
+    #[test]
+    fn console_filter_combines_with_the_console_hint() {
+        let (entries, meta) = sample();
+        let nes = filter_and_sort(
+            &entries,
+            &meta,
+            Some(Console::Nes),
+            RecencyFilter::All,
+            "",
+            Some(SortMode::Title),
+        );
+        assert_eq!(titles(&nes), vec!["Beta NES Game", "Zelda-like"]);
+    }
+
+    #[test]
+    fn recently_played_chip_keeps_only_entries_with_a_last_played_time() {
+        let (entries, meta) = sample();
+        let recent = filter_and_sort(
+            &entries,
+            &meta,
+            None,
+            RecencyFilter::RecentlyPlayed,
+            "",
+            Some(SortMode::Title),
+        );
+        assert_eq!(titles(&recent), vec!["Beta NES Game", "Zelda-like"]);
+    }
+
+    #[test]
+    fn favourites_chip_keeps_only_favourited_entries() {
+        let (entries, meta) = sample();
+        let favs = filter_and_sort(
+            &entries,
+            &meta,
+            None,
+            RecencyFilter::Favourites,
+            "",
+            Some(SortMode::Title),
+        );
+        assert_eq!(titles(&favs), vec!["Zelda-like"]);
+    }
+
+    /// The two new chips are radio-like with each other: this is enforced
+    /// by construction (`RecencyFilter` is one field, not two booleans),
+    /// so the test that matters is that each still combines with the
+    /// console filter (AND), not with each other.
+    #[test]
+    fn recency_filter_combines_with_console_filter_rather_than_replacing_it() {
+        let (entries, meta) = sample();
+        let recent_snes = filter_and_sort(
+            &entries,
+            &meta,
+            Some(Console::Snes),
+            RecencyFilter::RecentlyPlayed,
+            "",
+            Some(SortMode::Title),
+        );
+        assert!(
+            recent_snes.is_empty(),
+            "Alpha SNES Game has never been played, so Recently played + SNES must be empty"
+        );
+    }
+
+    #[test]
+    fn search_text_still_applies_alongside_the_new_filters() {
+        let (entries, meta) = sample();
+        let hits = filter_and_sort(
+            &entries,
+            &meta,
+            None,
+            RecencyFilter::All,
+            "beta",
+            Some(SortMode::Title),
+        );
+        assert_eq!(titles(&hits), vec!["Beta NES Game"]);
+    }
+
+    #[test]
+    fn sort_by_title_is_alphabetical_regardless_of_play_history() {
+        let (entries, meta) = sample();
+        let sorted = filter_and_sort(
+            &entries,
+            &meta,
+            None,
+            RecencyFilter::All,
+            "",
+            Some(SortMode::Title),
+        );
+        assert_eq!(
+            titles(&sorted),
+            vec![
+                "Alpha SNES Game",
+                "Beta NES Game",
+                "Mystery Cart",
+                "Zelda-like"
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_by_last_played_puts_most_recent_first_and_never_played_last() {
+        let (entries, meta) = sample();
+        let sorted = filter_and_sort(
+            &entries,
+            &meta,
+            None,
+            RecencyFilter::All,
+            "",
+            Some(SortMode::LastPlayed),
+        );
+        assert_eq!(
+            titles(&sorted),
+            vec![
+                "Zelda-like",
+                "Beta NES Game",
+                "Alpha SNES Game",
+                "Mystery Cart"
+            ],
+            "200 before 100 before never-played, alphabetical among the never-played"
+        );
+    }
+
+    #[test]
+    fn sort_by_console_groups_nes_then_snes_then_unidentified() {
+        let (entries, meta) = sample();
+        let sorted = filter_and_sort(
+            &entries,
+            &meta,
+            None,
+            RecencyFilter::All,
+            "",
+            Some(SortMode::Console),
+        );
+        assert_eq!(
+            titles(&sorted),
+            vec![
+                "Beta NES Game",
+                "Zelda-like",
+                "Alpha SNES Game",
+                "Mystery Cart"
+            ],
+            "NES titles (alphabetical) before SNES before the unidentified entry"
+        );
+    }
+
+    /// §11's acceptance criterion: an empty search box with no sort chosen
+    /// defaults to recent-first, never-played after.
+    #[test]
+    fn empty_search_with_no_explicit_sort_defaults_to_recent_first() {
+        let (entries, meta) = sample();
+        let default_order = filter_and_sort(&entries, &meta, None, RecencyFilter::All, "", None);
+        let explicit_recent = filter_and_sort(
+            &entries,
+            &meta,
+            None,
+            RecencyFilter::All,
+            "",
+            Some(SortMode::LastPlayed),
+        );
+        assert_eq!(titles(&default_order), titles(&explicit_recent));
+    }
+
+    /// A non-empty search with no explicit sort falls back to Title order
+    /// — a search result reshuffled by play history the query has nothing
+    /// to do with would read as broken, not helpful.
+    #[test]
+    fn non_empty_search_with_no_explicit_sort_falls_back_to_title_order() {
+        let (entries, meta) = sample();
+        let default_order = filter_and_sort(&entries, &meta, None, RecencyFilter::All, "e", None);
+        let explicit_title = filter_and_sort(
+            &entries,
+            &meta,
+            None,
+            RecencyFilter::All,
+            "e",
+            Some(SortMode::Title),
+        );
+        assert_eq!(titles(&default_order), titles(&explicit_title));
     }
 }

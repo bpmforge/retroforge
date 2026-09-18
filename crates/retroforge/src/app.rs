@@ -331,6 +331,20 @@ pub struct RetroForgeApp {
     /// otherwise typing in the search box would steer the selection and
     /// Enter would launch a game instead of just accepting the filter.
     library_search_focused: bool,
+    /// Ticket W15-02: the Recently played / Favourites chips. Radio-like
+    /// with each other by construction (`RecencyFilter` is one field, not
+    /// two booleans) and combined (AND) with `library_console_filter` in
+    /// `library_grid`. Not persisted, same reasoning as `library_search`.
+    library_recency_filter: crate::library::RecencyFilter,
+    /// Ticket W15-02: the sort control's explicit choice, `None` for "not
+    /// chosen yet" — `crate::library::filter_and_sort`'s own doc explains
+    /// why that is a `None` rather than a fourth enum variant.
+    library_sort: Option<crate::library::SortMode>,
+    /// Ticket W15-02: play history per normalized ROM hash, read from
+    /// `game_settings` once per scan (or refreshed for one entry on
+    /// launch) rather than once per row per frame — UX_WAVE_15 §11
+    /// acceptance 1's "cheap enough to do for every row".
+    library_meta: std::collections::BTreeMap<String, crate::library::RecencyMeta>,
     /// Ticket W11-02: the decoded level for the running ROM, when a
     /// profile matched and declared one. `None` otherwise, which is the
     /// ordinary case and never an error.
@@ -755,6 +769,9 @@ impl RetroForgeApp {
             library_scans: 0,
             library_selected: None,
             library_search_focused: false,
+            library_recency_filter: crate::library::RecencyFilter::All,
+            library_sort: None,
+            library_meta: std::collections::BTreeMap::new(),
             level_session: None,
             level_texture: None,
             level_camera: None,
@@ -1941,6 +1958,30 @@ impl RetroForgeApp {
             (Some(root), Some(hash)) => crate::game_settings::load(root, hash),
             _ => crate::game_settings::GameSettings::default(),
         };
+
+        // Ticket W15-02, acceptance 1: every launch records a play. This
+        // is deliberately unconditional on the ROM having been recognized
+        // by `rf_cart` above — `current_game_hash` is `None` for an
+        // unrecognized cartridge, and `record_launch`/`save` both no-op
+        // in that case (`save_current_game_settings`'s own doc states the
+        // same rule) rather than keying play history on a hash we do not
+        // have. Only the ONE launched entry's cache is refreshed here —
+        // `library_meta`'s doc explains why a full re-scan is not needed.
+        if let (Some(root), Some(hash)) = (&self.config_root, &self.current_game_hash) {
+            self.current_game_settings
+                .record_launch(std::time::SystemTime::now());
+            if let Err(e) = crate::game_settings::save(root, hash, &self.current_game_settings) {
+                self.status = format!("Could not save game settings: {e}");
+            }
+            self.library_meta.insert(
+                hash.clone(),
+                crate::library::RecencyMeta {
+                    last_played_epoch_secs: self.current_game_settings.last_played_epoch_secs,
+                    play_count: self.current_game_settings.play_count,
+                    favourite: self.current_game_settings.favourite,
+                },
+            );
+        }
 
         // Ticket W13-02f: this game's annotations, keyed by the same
         // normalized hash the settings above use. Loaded here rather than
@@ -3912,6 +3953,16 @@ impl RetroForgeApp {
 
     /// §3.1's search box and console filters. Returns the filtered titles.
     fn library_toolbar(&mut self, ui: &mut egui::Ui, count: usize, rescan: &mut bool) {
+        // Two rows, matching UX_WAVE_15 §3's wireframe, rather than one —
+        // search, the console filter, and the two new recency chips
+        // already fill `WINDOW_SIZE`'s width on their own; adding the
+        // sort control and the folder/rescan buttons to the SAME
+        // `ui.horizontal` overflowed it, and because the folder/rescan
+        // block is laid out `right_to_left` independently of the
+        // left-to-right cursor, an overflow does not wrap — it OVERLAPS,
+        // silently handing every click in the shared region to whichever
+        // widget was added later. Splitting the row is what fixes the
+        // click, not just the look.
         ui.horizontal(|ui| {
             let search_response = ui.add(
                 egui::TextEdit::singleline(&mut self.library_search)
@@ -3933,6 +3984,48 @@ impl RetroForgeApp {
                 ("SNES", Some(crate::library::Console::Snes)),
             ] {
                 ui.selectable_value(&mut self.library_console_filter, filter, label);
+            }
+            ui.separator();
+            // Ticket W15-02, §3: Recently played / Favourites, radio-like
+            // with each other. `selectable_value` would need a visible
+            // "All" chip to click back to — these two toggle themselves
+            // off instead, since "neither" is the ordinary state, not a
+            // third chip a player has to remember to press.
+            for (label, variant) in [
+                (
+                    "Recently played",
+                    crate::library::RecencyFilter::RecentlyPlayed,
+                ),
+                ("Favourites", crate::library::RecencyFilter::Favourites),
+            ] {
+                let active = self.library_recency_filter == variant;
+                if ui.selectable_label(active, label).clicked() {
+                    self.library_recency_filter = if active {
+                        crate::library::RecencyFilter::All
+                    } else {
+                        variant
+                    };
+                }
+            }
+        });
+
+        ui.horizontal(|ui| {
+            // Ticket W15-02, §3: "Sort: [Title/Last played/Console]".
+            // Three small chips rather than a `ComboBox` — this toolbar
+            // already reads as a row of chips, and a fourth control that
+            // looked different would stand out for no reason. Clicking
+            // the active chip again returns to `None` (the auto default),
+            // same toggle-off behaviour as the recency chips above.
+            ui.add(readout(egui::RichText::new("Sort:").weak()));
+            for (label, variant) in [
+                ("Title", crate::library::SortMode::Title),
+                ("Last played", crate::library::SortMode::LastPlayed),
+                ("Console", crate::library::SortMode::Console),
+            ] {
+                let active = self.library_sort == Some(variant);
+                if ui.selectable_label(active, label).clicked() {
+                    self.library_sort = if active { None } else { Some(variant) };
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Add folder\u{2026}").clicked() {
@@ -3975,23 +4068,18 @@ impl RetroForgeApp {
         ui: &mut egui::Ui,
         library: &crate::library::Library,
     ) -> Option<std::path::PathBuf> {
-        let needle = self.library_search.trim().to_lowercase();
-        let matches: Vec<&crate::library::LibraryEntry> = library
-            .entries
-            .iter()
-            .filter(|e| {
-                let console_ok = match self.library_console_filter {
-                    None => true,
-                    Some(want) => matches!(
-                        &e.identity,
-                        crate::library::EntryIdentity::Recognized { console, .. }
-                            if *console == want
-                    ),
-                };
-                let text_ok = needle.is_empty() || e.title.to_lowercase().contains(&needle);
-                console_ok && text_ok
-            })
-            .collect();
+        // Ticket W15-02: the filter+sort pipeline is now the pure
+        // `crate::library::filter_and_sort`, unit-tested on its own in
+        // `library.rs` — this call site is just wiring live toolbar state
+        // into it.
+        let matches: Vec<&crate::library::LibraryEntry> = crate::library::filter_and_sort(
+            &library.entries,
+            &self.library_meta,
+            self.library_console_filter,
+            self.library_recency_filter,
+            &self.library_search,
+            self.library_sort,
+        );
 
         if matches.is_empty() {
             // A fourth state, and it is NOT one of `first_run_state`'s
@@ -4056,6 +4144,22 @@ impl RetroForgeApp {
             if let Some(selected) = self.library_selected.clone() {
                 if matches.iter().any(|e| e.path == selected) {
                     to_play = Some(selected);
+                }
+            }
+        }
+
+        // Ticket W15-02, §3: Space toggles Favourite on the selected row —
+        // stands down while the search box has focus, same reasoning as
+        // Enter above (typing "space invaders" must not favourite a game).
+        if !search_has_focus && ui.ctx().input(|i| i.key_pressed(egui::Key::Space)) {
+            if let Some(selected) = self.library_selected.clone() {
+                if let Some(entry) = matches.iter().find(|e| e.path == selected) {
+                    if let crate::library::EntryIdentity::Recognized {
+                        normalized_sha256, ..
+                    } = &entry.identity
+                    {
+                        self.toggle_favourite(normalized_sha256);
+                    }
                 }
             }
         }
@@ -4128,6 +4232,28 @@ impl RetroForgeApp {
                                                 console,
                                                 normalized_sha256,
                                             } => {
+                                                // Ticket W15-02, §3: the star
+                                                // toggle next to Play. Only
+                                                // for a Recognized entry — an
+                                                // unrecognized ROM has no
+                                                // hash to favourite by.
+                                                let favourite = self
+                                                    .library_meta
+                                                    .get(normalized_sha256)
+                                                    .is_some_and(|m| m.favourite);
+                                                let star =
+                                                    if favourite { "\u{2b50}" } else { "\u{2606}" };
+                                                if ui
+                                                    .button(star)
+                                                    .on_hover_text(if favourite {
+                                                        "Unfavourite"
+                                                    } else {
+                                                        "Favourite"
+                                                    })
+                                                    .clicked()
+                                                {
+                                                    self.toggle_favourite(normalized_sha256);
+                                                }
                                                 ui.add(readout(
                                                     egui::RichText::new(console.name()).weak(),
                                                 ))
@@ -4213,6 +4339,33 @@ impl RetroForgeApp {
         self.toasts
             .push(crate::toast::ToastKind::Info, "ROM folder added", ctx);
         true
+    }
+
+    /// Flip the favourite star for one game, by hash (ticket W15-02, §3).
+    /// Loads that game's OWN settings file rather than trusting
+    /// `library_meta`'s cache for the write — the cache is a read-side
+    /// convenience (`library_meta`'s own doc), and starting the flip from
+    /// a stale in-memory copy risks clobbering a field this session never
+    /// loaded. Updates the cache afterwards so the star repaints this
+    /// frame without a rescan.
+    fn toggle_favourite(&mut self, normalized_sha256: &str) {
+        let Some(root) = self.config_root.clone() else {
+            return;
+        };
+        let mut settings = crate::game_settings::load(&root, normalized_sha256);
+        settings.favourite = !settings.favourite;
+        if let Err(e) = crate::game_settings::save(&root, normalized_sha256, &settings) {
+            self.status = format!("Could not save game settings: {e}");
+            return;
+        }
+        self.library_meta.insert(
+            normalized_sha256.to_string(),
+            crate::library::RecencyMeta {
+                last_played_epoch_secs: settings.last_played_epoch_secs,
+                play_count: settings.play_count,
+                favourite: settings.favourite,
+            },
+        );
     }
 
     /// Persist the current game's settings (ticket W2-07, FR-FE-002).
@@ -4548,15 +4701,52 @@ impl RetroForgeApp {
                 |_| {
                     // A machine that cannot spawn a thread still deserves a
                     // library; do it here rather than show nothing for ever.
-                    self.library = Some(Self::scan_with_cache(
-                        &self.library_roots,
-                        crate::bindings_store::config_root().as_deref(),
-                    ));
+                    let config_root = crate::bindings_store::config_root();
+                    let library =
+                        Self::scan_with_cache(&self.library_roots, config_root.as_deref());
+                    self.library_meta = Self::load_library_meta(&library, config_root.as_deref());
+                    self.library = Some(library);
                 },
                 |_handle| {
                     self.library_scan = Some(rx);
                 },
             );
+    }
+
+    /// Ticket W15-02: this scan's play history, keyed by normalized hash —
+    /// read once here rather than once per row per frame in `library_grid`
+    /// (UX_WAVE_15 §11 acceptance 1). Two entries that share a hash (a
+    /// bare file beside its `.zip`, `library::scan`'s own doc on why those
+    /// are not deduped) read the same settings file, so the map is keyed
+    /// by hash rather than by entry.
+    fn load_library_meta(
+        library: &crate::library::Library,
+        config_root: Option<&std::path::Path>,
+    ) -> std::collections::BTreeMap<String, crate::library::RecencyMeta> {
+        let Some(root) = config_root else {
+            return std::collections::BTreeMap::new();
+        };
+        let mut meta = std::collections::BTreeMap::new();
+        for entry in &library.entries {
+            if let crate::library::EntryIdentity::Recognized {
+                normalized_sha256, ..
+            } = &entry.identity
+            {
+                if meta.contains_key(normalized_sha256) {
+                    continue;
+                }
+                let settings = crate::game_settings::load(root, normalized_sha256);
+                meta.insert(
+                    normalized_sha256.clone(),
+                    crate::library::RecencyMeta {
+                        last_played_epoch_secs: settings.last_played_epoch_secs,
+                        play_count: settings.play_count,
+                        favourite: settings.favourite,
+                    },
+                );
+            }
+        }
+        meta
     }
 
     /// Scan, reusing the on-disk cache and writing back anything new
@@ -4600,6 +4790,10 @@ impl RetroForgeApp {
                         ctx,
                     );
                 }
+                self.library_meta = Self::load_library_meta(
+                    &library,
+                    crate::bindings_store::config_root().as_deref(),
+                );
                 self.library = Some(library);
                 self.library_scan = None;
             }
@@ -4632,7 +4826,14 @@ impl RetroForgeApp {
         // generator. The production path is `rescan_library`.
         self.library_scans += 1;
         self.library_scan = None;
-        self.library = Some(Self::scan_with_cache(&self.library_roots, None));
+        let library = Self::scan_with_cache(&self.library_roots, None);
+        // Ticket W15-02: meta is read from the REAL config root (the
+        // `RETROFORGE_CONFIG_DIR` a test points at), unlike the scan cache
+        // above which is deliberately skipped here — play history is what
+        // `tests/library_filters.rs` exercises through this path.
+        self.library_meta =
+            Self::load_library_meta(&library, crate::bindings_store::config_root().as_deref());
+        self.library = Some(library);
     }
 
     /// Whether a stitched-canvas texture exists for the Map tab
