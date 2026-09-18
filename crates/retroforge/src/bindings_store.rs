@@ -33,6 +33,12 @@ use rf_input::{BindingWarning, Bindings};
 pub const FILE_NAME: &str = "bindings.rfbind";
 /// Sub-directory under the platform config root.
 pub const APP_DIR: &str = "retroforge";
+/// File name for the App-namespaced hotkeys (ticket W15-06). A separate
+/// file from [`FILE_NAME`], not a section inside it — see
+/// `crate::app_bindings`'s module doc for why: `rf_input::Bindings::
+/// from_text` (crates/rf-input, outside this ticket's write scope) has no
+/// `[App]` header and would report every line under one as malformed.
+pub const APP_FILE_NAME: &str = "app_hotkeys.rfbind";
 
 /// The platform config root, or `None` when the environment says nothing.
 ///
@@ -128,9 +134,73 @@ pub fn save(root: &Path, bindings: &Bindings) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// The App-hotkey file's path under `root` (ticket W15-06).
+#[must_use]
+pub fn app_bindings_path(root: &Path) -> PathBuf {
+    root.join(APP_DIR).join(APP_FILE_NAME)
+}
+
+/// [`LoadOutcome`]'s twin for the App-hotkey file: same three cases, but
+/// `crate::app_bindings::AppBindings::from_text` reports warnings as
+/// plain strings rather than `rf_input::BindingWarning` (its own file
+/// format, not `rf_input`'s), so this cannot just reuse [`LoadOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppLoadOutcome {
+    Defaulted,
+    Loaded(Vec<String>),
+    Rejected(String),
+}
+
+/// Load the App hotkeys from `root`, never failing — same policy as
+/// [`load`]: no file means defaults, a bad file means defaults with the
+/// original left on disk.
+#[must_use]
+pub fn load_app(root: &Path) -> (crate::app_bindings::AppBindings, AppLoadOutcome) {
+    let path = app_bindings_path(root);
+    if !path.is_file() {
+        return (
+            crate::app_bindings::AppBindings::default(),
+            AppLoadOutcome::Defaulted,
+        );
+    }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => {
+            return (
+                crate::app_bindings::AppBindings::default(),
+                AppLoadOutcome::Rejected(e.to_string()),
+            )
+        }
+    };
+    match crate::app_bindings::AppBindings::from_text(&text) {
+        Ok((bindings, warnings)) => (bindings, AppLoadOutcome::Loaded(warnings)),
+        Err(e) => (
+            crate::app_bindings::AppBindings::default(),
+            AppLoadOutcome::Rejected(e),
+        ),
+    }
+}
+
+/// Save the App hotkeys under `root`, creating the directory if needed.
+///
+/// # Errors
+/// Returns the I/O error message.
+pub fn save_app(
+    root: &Path,
+    bindings: &crate::app_bindings::AppBindings,
+) -> Result<PathBuf, String> {
+    let path = app_bindings_path(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, bindings.to_text()).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eframe::egui;
     use rf_input::{Key, NesButton, PadButton};
 
     fn temp_root(label: &str) -> PathBuf {
@@ -236,5 +306,69 @@ mod tests {
     #[test]
     fn an_empty_environment_yields_no_config_root() {
         assert_eq!(config_root_from(None, None, None, None), None);
+    }
+
+    // ---- ticket W15-06: the App-hotkey store, mirroring the game store
+    // above ------------------------------------------------------------
+
+    #[test]
+    fn app_hotkey_defaults_round_trip_across_a_save_and_reload() {
+        let root = temp_root("app-defaults");
+        let (bindings, outcome) = load_app(&root);
+        assert_eq!(outcome, AppLoadOutcome::Defaulted, "first run has no file");
+
+        let path = save_app(&root, &bindings).expect("save");
+        assert!(path.is_file());
+        assert_ne!(
+            path,
+            bindings_path(&root),
+            "the App hotkey file must not be the same file as the game bindings"
+        );
+
+        let (reloaded, outcome) = load_app(&root);
+        assert_eq!(outcome, AppLoadOutcome::Loaded(Vec::new()));
+        for action in crate::app_bindings::AppAction::ALL {
+            assert_eq!(reloaded.key_for(action), bindings.key_for(action));
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_app_hotkey_remap_persists_across_a_save_and_reload() {
+        let root = temp_root("app-remap");
+        let (mut bindings, _) = load_app(&root);
+        bindings.bind_key(egui::Key::F1, crate::app_bindings::AppAction::Screenshot);
+        save_app(&root, &bindings).expect("save");
+
+        let (reloaded, outcome) = load_app(&root);
+        assert_eq!(outcome, AppLoadOutcome::Loaded(Vec::new()));
+        assert_eq!(
+            reloaded.key_for(crate::app_bindings::AppAction::Screenshot),
+            Some(egui::Key::F1)
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_app_hotkey_corrupt_file_falls_back_to_defaults_and_is_left_on_disk() {
+        let root = temp_root("app-corrupt");
+        std::fs::create_dir_all(app_bindings_path(&root).parent().unwrap()).unwrap();
+        std::fs::write(app_bindings_path(&root), "not an app-hotkey file\n").unwrap();
+
+        let (bindings, outcome) = load_app(&root);
+        assert!(matches!(outcome, AppLoadOutcome::Rejected(_)));
+        assert_eq!(
+            bindings.key_for(crate::app_bindings::AppAction::Screenshot),
+            Some(egui::Key::F12),
+            "defaults must be in force"
+        );
+        assert!(
+            app_bindings_path(&root).is_file(),
+            "the user's file must be left alone, not overwritten"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

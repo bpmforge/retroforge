@@ -542,6 +542,13 @@ pub enum CoreCommand {
     /// default, so a session that never opens the scopes pays nothing
     /// (DEBUGGER.md §6).
     SetAudioChannelCapture(bool),
+    /// Ticket W15-06 (FR-ENH-008): disable frame pacing entirely while
+    /// held — the App-hotkey fast-forward. `false` runs the loop flat-out
+    /// (`crate::pacer::FramePacer::set_enabled`'s own doc); `true`
+    /// restores normal pacing. Never touches the machine itself — see
+    /// `crate::pacer`'s module doc on why pacing cannot affect
+    /// determinism.
+    SetPacingEnabled(bool),
     /// Ticket W4-06a: widen/narrow which `CoreEvent`s this session emits
     /// (`EmuStepper::set_event_mask`) — the debugger's event-viewer panel
     /// sends this as it opens/closes (DEBUGGER.md §6: "closed panels
@@ -1157,6 +1164,11 @@ fn core_thread_main(
                     stepper.set_audio_channel_capture(on);
                     audio_capture = on;
                 }
+                // Ticket W15-06 (FR-ENH-008): the fast-forward hotkey,
+                // held. `pacer.set_enabled` alone is not the whole story —
+                // see the branch below, which also has to skip the
+                // audio-clock wait.
+                CoreCommand::SetPacingEnabled(enabled) => pacer.set_enabled(enabled),
                 CoreCommand::Shutdown => return LoopControl::Stop,
             }
         }
@@ -1180,6 +1192,13 @@ fn core_thread_main(
         // sleep below, and `resync` stops that pause from later looking
         // like a backlog to repay (`crate::pacer`).
         if stepper.is_paused() {
+            pacer.resync();
+        } else if !pacer.is_enabled() {
+            // Ticket W15-06 fast-forward: the audio-clock branch below
+            // does not consult `pacer` at all (it waits on the device's
+            // own ring instead), so `SetPacingEnabled(false)` alone would
+            // leave fast-forward capped at the audio ring's drain rate in
+            // an `audio`-feature build. Skip both wait mechanisms here.
             pacer.resync();
         } else if audio
             .as_ref()

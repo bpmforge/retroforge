@@ -648,6 +648,38 @@ pub struct RetroForgeApp {
     /// Set when a key-capture completed inside the input closure, which
     /// cannot call `save_bindings` itself (it holds a borrow of `self`).
     pending_binding_save: bool,
+    /// Ticket W15-06: the App-namespaced hotkeys (`crate::app_bindings`),
+    /// namespaced apart from `bindings` above so the two tables can never
+    /// share a row — collision is instead the runtime check
+    /// `crate::app_bindings::key_conflicts_with_game`/
+    /// `game_key_conflicts_with_app` run on every remap in either
+    /// direction.
+    app_bindings: crate::app_bindings::AppBindings,
+    /// What the App section of the Controls window is waiting to
+    /// capture, if anything — the App remap's own `awaiting_key`.
+    awaiting_app_key: Option<crate::app_bindings::AppAction>,
+    /// The most recent inline conflict message either remap flow (game or
+    /// App) produced, shown next to the row that triggered it. `None`
+    /// once the next successful bind clears it.
+    binding_conflict: Option<String>,
+    /// Ticket W15-06: which save/load slot the App hotkeys act on — set
+    /// whenever the states modal's Save/Load is clicked, so "Save state"
+    /// (F5) always means "the slot I was just looking at", not a fixed
+    /// slot. `None` until the modal has been used once this session, at
+    /// which point `Self::active_slot` degrades to Slot 1 (§6: "or slot 1
+    /// if none chosen").
+    active_slot: Option<crate::state_slots::SlotId>,
+    /// Held state of the App hotkeys' two HOLD actions (fast-forward,
+    /// hold-to-peek), tracked across frames so `poll_app_hotkeys` sends
+    /// the pacing command only on the transition, not every frame the key
+    /// is down.
+    fast_forward_held: bool,
+    /// OR'd into `peeking_original` by `video_panel` — the hotkey's
+    /// contribution to hold-to-peek, alongside the existing badge-hold
+    /// gesture. A separate field because `video_panel` computes the badge
+    /// gesture with a hard assignment each frame; this keeps the hotkey
+    /// from being clobbered by it or vice versa.
+    peek_key_held: bool,
     /// UI-thread mirror of the core thread's overlay setting (ticket
     /// W3-05a) — same "set right after sending a command" pattern
     /// `running` above uses, for the same reason (the checkbox needs
@@ -851,6 +883,26 @@ impl RetroForgeApp {
             ),
         };
 
+        // Ticket W15-06: the App hotkeys load the same way, from their
+        // own file (`crate::app_bindings`'s module doc on why it is not a
+        // section of `bindings.rfbind`). A load problem here folds into
+        // the same status line rather than a second one nobody reads.
+        let (app_bindings, app_bindings_outcome) = match &config_root {
+            Some(root) => crate::bindings_store::load_app(root),
+            None => (
+                crate::app_bindings::AppBindings::default(),
+                crate::bindings_store::AppLoadOutcome::Defaulted,
+            ),
+        };
+        let bindings_status = match app_bindings_outcome {
+            crate::bindings_store::AppLoadOutcome::Defaulted
+            | crate::bindings_store::AppLoadOutcome::Loaded(_) => bindings_status,
+            crate::bindings_store::AppLoadOutcome::Rejected(reason) => format!(
+                "{bindings_status}  App hotkey file could not be read ({reason}); using \
+                 defaults. Your file was left untouched."
+            ),
+        };
+
         // Ticket W2-08: app-wide settings load at startup. A parse
         // problem is reported into the status line rather than swallowed;
         // the defaults are in force and the user's file is untouched.
@@ -957,6 +1009,12 @@ impl RetroForgeApp {
             awaiting_key: None,
             bindings_status,
             pending_binding_save: false,
+            app_bindings,
+            awaiting_app_key: None,
+            binding_conflict: None,
+            active_slot: None,
+            fast_forward_held: false,
+            peek_key_held: false,
             sprite_overlay: false,
             show_layers: false,
             gpu,
@@ -1016,8 +1074,19 @@ impl RetroForgeApp {
                 // feeding it to the game -- otherwise binding Start would
                 // press Start at the same moment.
                 if let Some((port, button)) = self.awaiting_key.take() {
-                    self.bindings.keys.rebind(key, port, button);
-                    self.pending_binding_save = true;
+                    // Ticket W15-06 criterion 2's "vice versa": a game
+                    // binding can never claim a key the App namespace
+                    // already uses, checked here before `rebind` ever
+                    // touches the keymap.
+                    if let Some(conflict) =
+                        crate::app_bindings::game_key_conflicts_with_app(&self.app_bindings, key)
+                    {
+                        self.binding_conflict = Some(conflict);
+                    } else {
+                        self.bindings.keys.rebind(key, port, button);
+                        self.pending_binding_save = true;
+                        self.binding_conflict = None;
+                    }
                     continue;
                 }
                 self.input_latch.key_down(key);
@@ -1078,6 +1147,132 @@ impl RetroForgeApp {
         if std::mem::take(&mut self.pending_binding_save) {
             self.save_bindings();
         }
+    }
+
+    /// Ticket W15-06 (`docs/design/UX_WAVE_15.md` §6): capture an App
+    /// remap in progress, or otherwise fire whichever of the five App
+    /// hotkeys the user is pressing/holding.
+    ///
+    /// A separate poll from [`Self::poll_input`], not folded into it:
+    /// that loop drives `rf_input::Key::ALL` (the game namespace only),
+    /// and an App key like `F5` has no `rf_input::Key` variant to iterate
+    /// over in the first place (`crate::app_bindings`'s module doc).
+    fn poll_app_hotkeys(&mut self, ctx: &egui::Context) {
+        if let Some(action) = self.awaiting_app_key {
+            let pressed = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Key {
+                        key, pressed: true, ..
+                    } => Some(*key),
+                    _ => None,
+                })
+            });
+            if let Some(key) = pressed {
+                if let Some(conflict) =
+                    crate::app_bindings::key_conflicts_with_game(&self.bindings, key)
+                {
+                    self.binding_conflict = Some(conflict);
+                } else {
+                    self.app_bindings.bind_key(key, action);
+                    self.binding_conflict = None;
+                    self.save_app_bindings();
+                }
+                self.awaiting_app_key = None;
+            }
+            // A remap capture swallows the keystroke here too — the same
+            // reason `poll_input`'s own capture does: pressing the new
+            // Screenshot key must not also take a screenshot the instant
+            // it is bound.
+            return;
+        }
+
+        let save_key = self
+            .app_bindings
+            .key_for(crate::app_bindings::AppAction::SaveState);
+        let load_key = self
+            .app_bindings
+            .key_for(crate::app_bindings::AppAction::LoadState);
+        let shot_key = self
+            .app_bindings
+            .key_for(crate::app_bindings::AppAction::Screenshot);
+        let ff_key = self
+            .app_bindings
+            .key_for(crate::app_bindings::AppAction::FastForward);
+        let peek_key = self
+            .app_bindings
+            .key_for(crate::app_bindings::AppAction::HoldToPeek);
+
+        // One-shot actions use `key_pressed` (the edge) — `key_down`
+        // would save/load/screenshot on every frame the key stays down.
+        // The two "(hold)" actions use `key_down`, and their EFFECT is
+        // applied only on a transition below, for the same reason.
+        let (save_pressed, load_pressed, shot_pressed, ff_key_down, peek_key_down) =
+            ctx.input(|i| {
+                (
+                    save_key.is_some_and(|k| i.key_pressed(k)),
+                    load_key.is_some_and(|k| i.key_pressed(k)),
+                    shot_key.is_some_and(|k| i.key_pressed(k)),
+                    ff_key.is_some_and(|k| i.key_down(k)),
+                    peek_key.is_some_and(|k| i.key_down(k)),
+                )
+            });
+
+        let ff_pad = self
+            .app_bindings
+            .pad_for(crate::app_bindings::AppAction::FastForward);
+        let peek_pad = self
+            .app_bindings
+            .pad_for(crate::app_bindings::AppAction::HoldToPeek);
+        let ff_down = ff_key_down || ff_pad.is_some_and(|b| self.pad_button_held(b));
+        let peek_down = peek_key_down || peek_pad.is_some_and(|b| self.pad_button_held(b));
+
+        if save_pressed {
+            let slot = self
+                .active_slot
+                .unwrap_or(crate::state_slots::SlotId::Numbered(1));
+            self.save_to_slot(slot, ctx);
+        }
+        if load_pressed {
+            let slot = self
+                .active_slot
+                .unwrap_or(crate::state_slots::SlotId::Numbered(1));
+            self.load_from_slot(slot);
+            self.toasts.push(
+                crate::toast::ToastKind::Success,
+                format!("Loaded {}", slot.label()),
+                ctx,
+            );
+        }
+        if shot_pressed {
+            // Deferred to the next frame, same as the Enhance workspace's
+            // own Screenshot button (`Self::enhance_window`'s comment):
+            // with compare off, no buffers are kept, so the first frame
+            // that has them is the next one.
+            self.screenshot_pending = true;
+            self.status = "Screenshot: capturing next frame\u{2026}".to_string();
+        }
+
+        if ff_down != self.fast_forward_held {
+            self.fast_forward_held = ff_down;
+            self.send_command(CoreCommand::SetPacingEnabled(!ff_down));
+        }
+        self.peek_key_held = peek_down;
+    }
+
+    /// Whether `button` is currently held on any connected pad.
+    ///
+    /// `rf_input::PadRouter` (crates/rf-input, outside this ticket's write
+    /// scope) keeps its per-pad `held` set private and exposes it only
+    /// through [`rf_input::PadRouter::buttons`], which needs a
+    /// [`rf_input::PadMap`] to translate into NES-button bits. A
+    /// throwaway one-entry map is the public-API way to ask the question
+    /// this needs without reaching into that private state.
+    fn pad_button_held(&self, button: rf_input::PadButton) -> bool {
+        let mut probe = rf_input::PadMap::new();
+        probe.bind(button, rf_input::NesButton::A);
+        let bit = 1u16 << rf_input::NesButton::A.bit();
+        (0..rf_core_api::MAX_INPUT_PORTS)
+            .any(|port| self.pad_router.buttons(port, &probe) & bit != 0)
     }
 
     /// Push navigation actions into egui as real input events.
@@ -1854,6 +2049,7 @@ impl RetroForgeApp {
                                         // nothing to lose, so it saves
                                         // immediately as it always did.
                                         self.pending_overwrite = Some(info.id);
+                                        self.active_slot = Some(info.id);
                                     } else {
                                         action = Some((info.id, true));
                                     }
@@ -1869,6 +2065,11 @@ impl RetroForgeApp {
                     });
             });
         if let Some((slot, is_save)) = action {
+            // Ticket W15-06: whichever slot the modal was just used on
+            // becomes the App hotkeys' "active slot" (§6: save/load act
+            // on the active slot, defaulting to Slot 1 if none was ever
+            // chosen).
+            self.active_slot = Some(slot);
             if is_save {
                 self.save_to_slot(slot, ctx);
             } else {
@@ -2375,7 +2576,7 @@ impl RetroForgeApp {
             });
             if self.screenshot_pending {
                 self.screenshot_pending = false;
-                self.write_screenshots();
+                self.write_screenshots(ctx);
             }
             self.audio_fill = msg.audio_fill;
             // Ticket W11-05: apply the HD pack, if one is loaded and the
@@ -3355,7 +3556,11 @@ impl RetroForgeApp {
                     // Held, not toggled: peeking is a gesture with an obvious
                     // end, and a toggle would leave someone stuck looking at
                     // the original wondering why their enhancements stopped.
-                    self.peeking_original = response.is_pointer_button_down_on();
+                    // Ticket W15-06: OR'd with the App hotkey's own hold
+                    // (`Self::poll_app_hotkeys`, computed earlier this
+                    // frame) — either gesture forces the same view.
+                    self.peeking_original =
+                        response.is_pointer_button_down_on() || self.peek_key_held;
 
                     // §3.2's remaining three, right-aligned so the status
                     // text has the first claim on the space.
@@ -3397,6 +3602,13 @@ impl RetroForgeApp {
                                 }
                             };
                             self.av_sync_indicator(ui);
+                            // Ticket W15-06: "badge/status shows FF" while
+                            // the fast-forward hotkey is held. Shown only
+                            // then — a chip present at rest would read as
+                            // a permanent feature, not a momentary one.
+                            if self.fast_forward_held {
+                                ui.add(readout(egui::RichText::new("FF").strong().monospace()));
+                            }
                             self.profile_chip(ui);
                             if let Some((frame, scanline)) = self.position {
                                 ui.add(readout(
@@ -4152,6 +4364,28 @@ impl RetroForgeApp {
                     self.show_overlay_menu = false;
                     self.game_settings_target = None;
                     self.show_game_settings = true;
+                }
+                ui.separator();
+                // Ticket W15-06 (`docs/design/UX_WAVE_15.md` §6): "the
+                // overlay menu shows each action's current binding next
+                // to it, so bindings are learned by seeing them rather
+                // than by reading a manual".
+                for action in crate::app_bindings::AppAction::ALL {
+                    let key_label = self
+                        .app_bindings
+                        .key_for(action)
+                        .map(|k| k.name().to_string());
+                    let pad_label = self
+                        .app_bindings
+                        .pad_for(action)
+                        .map(|b| b.name().to_string());
+                    let binding = match (key_label, pad_label) {
+                        (Some(k), Some(p)) => format!("{k} / {p}"),
+                        (Some(k), None) => k,
+                        (None, Some(p)) => p,
+                        (None, None) => "\u{2014}".to_string(),
+                    };
+                    ui.label(format!("{}  {binding}", action.label()));
                 }
                 ui.separator();
                 if ui.button("Quit").clicked() {
@@ -6193,6 +6427,17 @@ impl RetroForgeApp {
         !self.toasts.is_empty()
     }
 
+    /// Ticket W15-06: the current key bound to an App hotkey, so a test
+    /// can confirm a default rather than assume it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn app_bindings_key_for_test(
+        &self,
+        action: crate::app_bindings::AppAction,
+    ) -> Option<egui::Key> {
+        self.app_bindings.key_for(action)
+    }
+
     /// The last frame number the core reported, for a test that needs to
     /// wait until a ROM has actually run rather than merely started.
     #[doc(hidden)]
@@ -6324,6 +6569,7 @@ impl RetroForgeApp {
             return;
         }
         let mut changed = false;
+        let mut app_changed = false;
         let mut open = self.show_controls;
         egui::Window::new("Controls")
             .default_pos(egui::pos2(PANEL_WINDOW_ORIGIN[0], PANEL_WINDOW_ORIGIN[1]))
@@ -6345,6 +6591,88 @@ impl RetroForgeApp {
                 ui.label(&self.bindings_status);
                 ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    // Ticket W15-06 (`docs/design/UX_WAVE_15.md` §6): the
+                    // App section, namespaced apart from the per-port game
+                    // bindings below — a separate `AppAction` enum and
+                    // store section (`crate::app_bindings`), so the two
+                    // tables cannot collide by construction. What DOES
+                    // need a runtime check is one App action and one game
+                    // button both claiming the same physical key/pad
+                    // button, which is what `binding_conflict` reports
+                    // inline, the same way a rejected remap is reported
+                    // anywhere else in this window.
+                    ui.heading("App");
+                    if let Some(conflict) = &self.binding_conflict {
+                        ui.colored_label(egui::Color32::from_rgb(0xE0, 0x80, 0x30), conflict);
+                    }
+                    egui::Grid::new("controls-app")
+                        .num_columns(4)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for action in crate::app_bindings::AppAction::ALL {
+                                ui.label(action.label());
+
+                                let bound_key = self.app_bindings.key_for(action);
+                                let label = match self.awaiting_app_key {
+                                    Some(a) if a == action => "press a key\u{2026}".to_string(),
+                                    _ => bound_key.map_or_else(
+                                        || "\u{2014}".to_string(),
+                                        |k| k.name().to_string(),
+                                    ),
+                                };
+                                if ui.button(label).clicked() {
+                                    self.awaiting_app_key = Some(action);
+                                }
+                                if ui.small_button("Clear").clicked() {
+                                    self.app_bindings.unbind_key_for(action);
+                                    app_changed = true;
+                                }
+
+                                let current_pad = self.app_bindings.pad_for(action);
+                                let pad_label =
+                                    current_pad.map_or("\u{2014}", rf_input::PadButton::name);
+                                egui::ComboBox::from_id_salt(("controls-app-pad", action))
+                                    .selected_text(pad_label)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(current_pad.is_none(), "\u{2014}")
+                                            .clicked()
+                                        {
+                                            self.app_bindings.unbind_pad_for(action);
+                                            app_changed = true;
+                                        }
+                                        for button in rf_input::PadButton::ALL {
+                                            if ui
+                                                .selectable_label(
+                                                    current_pad == Some(button),
+                                                    button.name(),
+                                                )
+                                                .clicked()
+                                            {
+                                                if let Some(conflict) =
+                                                    crate::app_bindings::pad_conflicts_with_game(
+                                                        &self.bindings,
+                                                        button,
+                                                    )
+                                                {
+                                                    self.binding_conflict = Some(conflict);
+                                                } else {
+                                                    self.app_bindings.bind_pad(button, action);
+                                                    app_changed = true;
+                                                    self.binding_conflict = None;
+                                                }
+                                            }
+                                        }
+                                    });
+                                ui.end_row();
+                            }
+                        });
+                    if ui.button("Restore App defaults").clicked() {
+                        self.app_bindings = crate::app_bindings::AppBindings::default();
+                        app_changed = true;
+                    }
+                    ui.separator();
+
                     for port in 0..2usize {
                         ui.heading(format!("Player {}", port + 1));
                         egui::Grid::new(format!("controls-port-{port}"))
@@ -6419,8 +6747,21 @@ impl RetroForgeApp {
                                                 .selectable_label(current == Some(nes), nes.name())
                                                 .clicked()
                                             {
-                                                self.bindings.pads.bind(pad_button, nes);
-                                                changed = true;
+                                                // Ticket W15-06 criterion 2's "vice versa" for
+                                                // pads: a game binding can never claim a pad
+                                                // button the App namespace already uses.
+                                                if let Some(conflict) =
+                                                    crate::app_bindings::game_pad_conflicts_with_app(
+                                                        &self.app_bindings,
+                                                        pad_button,
+                                                    )
+                                                {
+                                                    self.binding_conflict = Some(conflict);
+                                                } else {
+                                                    self.bindings.pads.bind(pad_button, nes);
+                                                    changed = true;
+                                                    self.binding_conflict = None;
+                                                }
                                             }
                                         }
                                     });
@@ -6439,6 +6780,23 @@ impl RetroForgeApp {
         if changed {
             self.save_bindings();
         }
+        if app_changed {
+            self.save_app_bindings();
+        }
+    }
+
+    /// Persist the App hotkeys, same shape as [`Self::save_bindings`].
+    fn save_app_bindings(&mut self) {
+        let Some(root) = self.config_root.clone() else {
+            self.bindings_status =
+                "No config directory; this App hotkey change applies to the current session only."
+                    .to_string();
+            return;
+        };
+        self.bindings_status = match crate::bindings_store::save_app(&root, &self.app_bindings) {
+            Ok(path) => format!("App hotkeys saved to {}.", path.display()),
+            Err(e) => format!("Could not save App hotkeys: {e}"),
+        };
     }
 
     /// Persist the current bindings, reporting the result into
@@ -6580,13 +6938,22 @@ impl RetroForgeApp {
     /// requirement says and it is also the more useful artefact: a
     /// composed split is reproducible from the two halves, but neither
     /// half is recoverable from a composed split.
-    fn write_screenshots(&mut self) {
+    fn write_screenshots(&mut self, ctx: &egui::Context) {
         let Some(buffers) = self.compare_buffers.as_ref() else {
             self.status = "Screenshot: no frame captured yet".to_string();
             return;
         };
         let stamp = self.position.map_or(0, |(frame, _)| frame);
-        let dir = std::env::current_dir().unwrap_or_default();
+        let dir = self.screenshots_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.status = format!("Screenshot failed: {e}");
+            self.toasts.push(
+                crate::toast::ToastKind::Error,
+                format!("Screenshot failed: {e}"),
+                ctx,
+            );
+            return;
+        }
         let mut written = Vec::new();
         for (name, png) in screenshot_files(buffers, stamp) {
             let path = dir.join(name);
@@ -6597,11 +6964,36 @@ impl RetroForgeApp {
                     // keep emulating, same stance as every other optional
                     // side-effect in this shell.
                     self.status = format!("Screenshot failed: {e}");
+                    self.toasts.push(
+                        crate::toast::ToastKind::Error,
+                        format!("Screenshot failed: {e}"),
+                        ctx,
+                    );
                     return;
                 }
             }
         }
         self.status = format!("Screenshot: wrote {}", written.join(", "));
+        // Ticket W15-06: the App-hotkey screenshot (and the Enhance
+        // workspace's identical button) both land here, so both get the
+        // same confirmation rather than only the hotkey path having one.
+        self.toasts
+            .push(crate::toast::ToastKind::Success, "Screenshot saved", ctx);
+    }
+
+    /// Where screenshots land (ticket W15-06): `<config-dir>/retroforge/
+    /// screenshots`, mirroring `crate::state_slots::slots_dir`'s "under
+    /// the config root" convention. Falls back to the current directory
+    /// when there is no config root at all — the same degrade
+    /// `Self::save_bindings` uses for a platform with nowhere to put a
+    /// config.
+    fn screenshots_dir(&self) -> std::path::PathBuf {
+        match &self.config_root {
+            Some(root) => root
+                .join(crate::bindings_store::APP_DIR)
+                .join("screenshots"),
+            None => std::env::current_dir().unwrap_or_default(),
+        }
     }
 
     /// The Enhance workspace (ticket W4-05; FRONTEND_UI.md §3.3's
@@ -6792,6 +7184,7 @@ impl eframe::App for RetroForgeApp {
             self.toasts.push(crate::toast::ToastKind::Error, msg, &ctx);
         }
         self.poll_input(&ctx);
+        self.poll_app_hotkeys(&ctx);
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.
         self.poll_library_scan(&ctx);
