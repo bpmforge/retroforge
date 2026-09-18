@@ -572,8 +572,13 @@ mod tests {
 
         system.bus.write(0x00_2220, 0x85); // CXB: banked, block 5
         system.bus.write(0x00_2224, 0x03); // BMAPS: BW-RAM block 3
+                                           // Ticket W17-03: SIWP/SBWE/BWPA reset to protect everything; a
+                                           // real ROM enables writes first, so this test does too.
+        system.bus.write(0x00_2229, 0xFF); // SIWP: enable all I-RAM chunks
+        system.bus.write(0x00_2226, 0x80); // SBWE: enable BW-RAM writes
+        system.bus.write(0x00_2228, 0x00); // BWPA: minimum protected floor
         system.bus.write(0x00_3000, 0x11); // I-RAM
-        system.bus.write(0x00_6000, 0x22); // BW-RAM window
+        system.bus.write(0x00_6100, 0x22); // BW-RAM window, past the 256-byte floor
 
         let mut mapper_stream = MemStream {
             buf: Vec::new(),
@@ -600,7 +605,7 @@ mod tests {
 
         assert_eq!(restored.bus.mode, rf_cart::SnesMapMode::Sa1);
         assert_eq!(restored.bus.read(0x00_3000), 0x11);
-        assert_eq!(restored.bus.read(0x00_6000), 0x22);
+        assert_eq!(restored.bus.read(0x00_6100), 0x22);
         assert_eq!(
             restored.bus.sa1.as_ref().unwrap().regs.cxb(),
             0x85,

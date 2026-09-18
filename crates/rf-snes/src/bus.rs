@@ -853,7 +853,8 @@ impl SnesBus {
 
 impl CpuBus for SnesBus {
     fn read(&mut self, addr: u32) -> u8 {
-        let value = match self.target(addr) {
+        let target = self.target(addr);
+        let value = match target {
             Target::Rom(i) => self.rom[i],
             Target::Wram(i) => self.wram[i],
             Target::Sram(i) => self.sram[i],
@@ -888,11 +889,26 @@ impl CpuBus for SnesBus {
             // `dsp1`/`dsp_window` have above.
             Target::Sa1IRam(i) => self.sa1.as_ref().map_or(self.open_bus, |s| s.iram[i]),
             Target::Sa1BwRam(i) => self.sa1.as_ref().map_or(self.open_bus, |s| s.bwram[i]),
-            Target::Sa1Register(offset) => self
-                .sa1
-                .as_ref()
-                .and_then(|s| s.regs.read(offset))
-                .unwrap_or(self.open_bus),
+            // `$2302` (HCR, latches the H/V snapshot) and `$230C`/`$230D`
+            // (VDP, the variable-length bit reader's sliding window,
+            // auto-increment) are the only reads in this block with a
+            // side effect (ticket W17-03) — `read_mut` needs the ROM for
+            // the bit reader, hence the disjoint-field destructure (the
+            // same trick `SnesSystem::step` uses for `sa1.step(&bus.rom)`).
+            Target::Sa1Register(offset) => {
+                let SnesBus {
+                    sa1, rom, open_bus, ..
+                } = self;
+                sa1.as_mut()
+                    .and_then(|s| s.regs.read_mut(offset, rom))
+                    .unwrap_or(*open_bus)
+            }
+            // Ticket W17-03: the bitmap projection is SA-1-side only
+            // (fullsnes "$223F BBF": "from perspective of the SA-1 CPU")
+            // — `sa1_target` (this bus's own map, the SNES side) never
+            // returns it, so this arm is unreachable in practice but
+            // must still type-check.
+            Target::Sa1Bitmap(_) => self.open_bus,
             Target::Open => self.open_bus,
         };
         self.open_bus = value;
@@ -938,23 +954,52 @@ impl CpuBus for SnesBus {
             // $2200-$22FF is "(W)" per fullsnes's I/O map, so a write to
             // the read-only block, $2300-$23FF, is dropped rather than
             // stored — real hardware has nowhere to put it either).
+            //
+            // Ticket W17-03: gated by `$2229` SIWP (this is the SNES
+            // side's I-RAM write) — "Write enable flags for eight
+            // 256-byte chunks", keyed on the *index*, not the raw
+            // address, because `sa1_side_target` folds both I-RAM windows
+            // onto the same index range and `sa1_target` (this bus) only
+            // ever produces the `$3000-$37FF` one; a chunk is `index >>
+            // 8`. Reset value `$00` protects every chunk until software
+            // enables it.
             Target::Sa1IRam(i) => {
                 if let Some(s) = self.sa1.as_mut() {
-                    s.iram[i] = value;
+                    if s.regs.iram_chunk_writable_snes(i) {
+                        s.iram[i] = value;
+                    }
                 }
             }
+            // Gated by `$2226` SBWE (fullsnes "SNES Cart SA-1 Memory
+            // Control") — see `Sa1Regs::bwram_writable`'s doc for why
+            // BWPA is not layered on top and why the gate is shared with
+            // `$2227`.
             Target::Sa1BwRam(i) => {
                 if let Some(s) = self.sa1.as_mut() {
-                    s.bwram[i] = value;
+                    if s.regs.bwram_writable_snes(i) {
+                        s.bwram[i] = value;
+                    }
                 }
             }
             Target::Sa1Register(offset) => {
                 if offset < 0x2300 {
                     if let Some(s) = self.sa1.as_mut() {
                         s.regs.write(offset, value);
+                        // Ticket W17-03: the SNES side can legally poke
+                        // these "Both" registers directly (fullsnes marks
+                        // `$2232-$2237` "(W)" on both sides); DMA/char-conv
+                        // cycles this triggers are still charged to the
+                        // SA-1's own credit, never to the main CPU's
+                        // instruction cost — see `sa1.rs`'s module doc on
+                        // the DMA cycle-charging rule.
+                        let rom: &[u8] = &self.rom;
+                        crate::sa1::handle_register_side_effect(s, offset, value, rom);
                     }
                 }
             }
+            // Ticket W17-03: SA-1-side only, see [`Target::Sa1Bitmap`]'s
+            // doc — unreachable from this (SNES-side) map.
+            Target::Sa1Bitmap(_) => {}
             // ROM is read-only; a write is dropped rather than panicking,
             // because real cartridges ignore it and a game doing it by
             // accident must not take the emulator down (FR-CORE-013's
@@ -990,6 +1035,7 @@ impl CpuBus for SnesBus {
                 .as_ref()
                 .and_then(|s| s.regs.read(offset))
                 .unwrap_or(self.open_bus),
+            Target::Sa1Bitmap(_) => self.open_bus,
             Target::Open => self.open_bus,
         }
     }
