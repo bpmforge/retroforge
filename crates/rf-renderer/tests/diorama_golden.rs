@@ -99,7 +99,10 @@ fn fingerprint(bytes: &[u8]) -> u64 {
 const OFF_HASH: u64 = 0xab77_bdfa_091c_7125; // ground_rgba's own bytes, no diorama pass involved
 /// Pinned "on" hash (ring room + billboard, rendered), same machine/backend
 /// as [`OFF_HASH`] — regenerate with `--nocapture` if this is intentional.
-const ON_HASH: u64 = 0x4944_1336_000f_b9e9;
+/// Regenerated for ticket W16-13's camera-framing solve
+/// (`crate::diorama::camera_matrices::fit_distance`): an intentional
+/// change to WHERE the camera sits, not a regression.
+const ON_HASH: u64 = 0x4414_3664_2f09_a59d;
 const ON_HASH_PLACEHOLDER_NOTE: &str =
     "regenerate by running with --nocapture and pasting the printed on_hash";
 

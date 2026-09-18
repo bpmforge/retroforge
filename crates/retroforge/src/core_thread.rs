@@ -334,6 +334,14 @@ pub struct FrameMsg {
     /// second live range — see `EmuStepper::prg_ram`'s own doc for why one
     /// range alone (WRAM) isn't enough.
     pub prg_ram: Box<[u8; 0x2000]>,
+    /// Ticket W16-13: PPUCTRL bit 5 for this frame — 8 or 16, the current
+    /// sprite height (`EmuStepper::sprite_height_px`). The smallest
+    /// additive field this message had no other way to carry: the Diorama
+    /// billboard footprint (`enhanced_view::compose_diorama`) must not
+    /// assume every sprite is 8x8 when the game itself is running in 8x16
+    /// mode. `8` on a SNES session or when no core is loaded, the same
+    /// "ordinary-case default" `EmuStepper::sprite_height_px` itself uses.
+    pub sprite_height_px: u8,
 }
 
 /// Ticket W14-20 defect 1: the most `CoreEvent::Frame`s the core thread
@@ -1461,6 +1469,7 @@ fn core_thread_main(
                 palette_ram: Box::new(*stepper.palette()),
                 wram: Box::new(stepper.wram_snapshot()),
                 prg_ram: Box::new(*stepper.prg_ram()),
+                sprite_height_px: stepper.sprite_height_px(),
             };
             if publish_frame(
                 &frame_tx,
@@ -1608,6 +1617,7 @@ mod tests {
             palette_ram: Box::new([0u8; 32]),
             wram: Box::new([0u8; 0x0800]),
             prg_ram: Box::new([0u8; 0x2000]),
+            sprite_height_px: 8,
         }
     }
 

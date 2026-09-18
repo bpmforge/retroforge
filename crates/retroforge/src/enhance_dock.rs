@@ -119,6 +119,13 @@ pub struct EnhanceActions {
     /// Ticket W11-02: the full-level view was toggled; the level probe
     /// must be armed or disarmed.
     pub full_level_set: Option<bool>,
+    /// Ticket W16-13: Diorama was toggled — the level probe and sprite-
+    /// layer extraction must be (re)synced (`RetroForgeApp::
+    /// sync_diorama_subscription`); `ctx.settings.diorama` itself is
+    /// already written directly by `features_body` below (the same
+    /// pattern `widescreen_decoded`/`full_level_view` use), so this only
+    /// needs to be `Some` to trigger the sync, not carry the new value.
+    pub diorama_set: Option<bool>,
     /// The Compare tab asked for a both-buffers screenshot.
     pub screenshot_requested: bool,
 }
@@ -313,6 +320,18 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                     "full_level_view" => {
                         ctx.settings.full_level_view = enabled;
                         actions.full_level_set = Some(enabled);
+                    }
+                    "diorama" => {
+                        // Ticket W16-13: this arm was missing entirely
+                        // (fell into `_ => {}` below) — the checkbox
+                        // toggled its own LOCAL `enabled` copy and
+                        // `ctx.settings.diorama` was never actually
+                        // written, so Diorama could never be turned on
+                        // through this UI at all (the same class of "row
+                        // exists, wiring doesn't" bug W16-06 already found
+                        // once for `profile_matched`).
+                        ctx.settings.diorama = enabled;
+                        actions.diorama_set = Some(enabled);
                     }
                     _ => {}
                 }
