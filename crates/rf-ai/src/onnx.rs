@@ -88,6 +88,30 @@ impl OnnxUpscaler {
         model_id: &str,
         scale: u32,
     ) -> Result<Self, UpscaleError> {
+        Self::load_with_providers(dylib_path, model_path, model_id, scale, &[])
+    }
+
+    /// Same as [`Self::load`], but registers `providers` on the session
+    /// builder first (ticket W16-01's ort/CoreML benchmark spike;
+    /// `docs/design/ENHANCEMENT_WAVE_16.md` §7-8: "CoreML EP, CPU EP as
+    /// control"). An empty slice — [`Self::load`]'s own contract — leaves
+    /// ONNX Runtime's default CPU EP as the only provider, which is why
+    /// this is the one true constructor and `load` a thin wrapper rather
+    /// than two independent code paths that could drift apart.
+    ///
+    /// # Errors
+    /// Same as [`Self::load`], plus [`UpscaleError::Runtime`] if EP
+    /// registration itself fails (a provider dispatch's default
+    /// `fail_silently` behavior means an *unavailable* EP does not error
+    /// here — see `ort::ep::ExecutionProviderDispatch::error_on_failure`
+    /// if a caller wants that promoted to a hard failure instead).
+    pub fn load_with_providers(
+        dylib_path: &Path,
+        model_path: &Path,
+        model_id: &str,
+        scale: u32,
+        providers: &[ort::ep::ExecutionProviderDispatch],
+    ) -> Result<Self, UpscaleError> {
         if scale == 0 {
             return Err(UpscaleError::ZeroScale);
         }
@@ -104,8 +128,25 @@ impl OnnxUpscaler {
         // src/environment.rs:658.
         let _already_initialised = !env.commit();
 
-        let session = Session::builder()
-            .and_then(|mut b| b.commit_from_file(model_path))
+        let mut builder = Session::builder().map_err(|e| UpscaleError::Runtime {
+            detail: format!("creating session builder: {e}"),
+        })?;
+        if !providers.is_empty() {
+            // `with_execution_providers` takes `self` by value and its
+            // `BuilderResult` error type carries a "recover the builder"
+            // typestate different from `Session::builder()`'s own `Result`
+            // — mapped to `UpscaleError` immediately, per step, rather
+            // than chained, so the two mismatched `Error<T>` instantiations
+            // never need to unify.
+            builder =
+                builder
+                    .with_execution_providers(providers)
+                    .map_err(|e| UpscaleError::Runtime {
+                        detail: format!("registering execution providers: {e}"),
+                    })?;
+        }
+        let session = builder
+            .commit_from_file(model_path)
             .map_err(|e| UpscaleError::Runtime {
                 detail: format!("opening model {}: {e}", model_path.display()),
             })?;

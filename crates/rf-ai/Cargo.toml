@@ -19,6 +19,17 @@ repository.workspace = true
 # a hot path.
 default = []
 onnx = ["dep:ort"]
+# CoreML execution-provider dispatch struct (ticket W16-01;
+# docs/design/ENHANCEMENT_WAVE_16.md §7-8's ort/CoreML benchmark spike).
+# `ort-sys`'s own "coreml" feature is an empty cfg switch (verified against
+# ort-sys-2.0.0-rc.13/Cargo.toml: `coreml = []`) -- it only compiles in
+# `ort::ep::coreml`'s Rust-side dispatch type, it does NOT link CoreML at
+# build time (that would contradict `load-dynamic`: the actual
+# `OrtSessionOptionsAppendExecutionProvider_CoreML`-class call happens at
+# runtime, through whatever dylib `ORT_DYLIB_PATH` points at). Depends on
+# `onnx` because the dispatch type is only meaningful with a Session to
+# attach it to.
+onnx-coreml = ["onnx", "ort?/coreml"]
 
 [dependencies]
 # sha2: the (rom, asset, model, settings) cache key of FR-AI-002. Already

@@ -9,6 +9,13 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# MetalFX spatial-upscale timing spike (ticket W16-01;
+# docs/design/ENHANCEMENT_WAVE_16.md §7-8, acceptance criterion 3). OFF BY
+# DEFAULT and macOS-only (see the target-gated dependency below) -- same
+# "external, off-by-default" posture as rf-ai's `onnx` feature.
+metalfx = ["dep:objc2", "dep:objc2-metal", "dep:objc2-metal-fx", "dep:objc2-foundation"]
+
 [dependencies]
 rf-core-api = { path = "../rf-core-api" }
 wgpu = "29.0.4"
@@ -19,6 +26,20 @@ wgpu = "29.0.4"
 # depend on eframe to reach it.
 pollster = "0.4.0"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# MIT (objc2 project) -- verified https://github.com/madsmtm/objc2's
+# LICENSE.txt. `default-features = false`: this crate only needs the raw
+# Metal/MetalFX bindings for the timing spike, not objc2's higher-level
+# app-kit/foundation conveniences.
+objc2 = { version = "0.6", optional = true, default-features = false }
+objc2-metal = { version = "0.3", optional = true, default-features = false, features = ["std"] }
+objc2-metal-fx = { version = "0.3", optional = true, default-features = false, features = ["std", "MTLFXSpatialScaler"] }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std"] }
+
 [[bin]]
 name = "gen-pal"
 path = "src/bin/gen_pal.rs"
+
+[[bin]]
+name = "bench-passes"
+path = "src/bin/bench_passes/main.rs"
