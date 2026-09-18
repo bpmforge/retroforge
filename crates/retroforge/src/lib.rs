@@ -35,6 +35,7 @@ pub mod accessibility;
 pub mod annotation_store;
 pub mod app;
 pub mod app_bindings;
+pub mod art;
 pub mod audio_out;
 pub mod authoring;
 pub mod bindings_store;

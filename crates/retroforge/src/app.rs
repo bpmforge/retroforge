@@ -458,6 +458,33 @@ pub struct RetroForgeApp {
     /// failed — degrades to "no first-frame capture persists this
     /// session", never a reason to fail loading a ROM.
     thumbnail_cache: Option<rf_cache::Cache>,
+    /// Ticket W15-09, ruling D-011: the fetched-art cache, a separate
+    /// `rf-cache::Cache` with its own cap (`art_cache_cap_mb`) — see
+    /// `crate::art`'s module doc for why this is a second store rather
+    /// than a namespace inside `thumbnail_cache`. `None` under the same
+    /// conditions as `thumbnail_cache`.
+    art_cache: Option<rf_cache::Cache>,
+    /// Ticket W15-09: the box-art HTTP client. A trait object so tests
+    /// can swap in `crate::art::test_support::FakeArtClient` (the kittest
+    /// scenario does this via `set_art_client_for_test`) — production
+    /// code always constructs `crate::art::UreqArtClient`.
+    art_client: Arc<dyn crate::art::ArtClient>,
+    /// Ticket W15-09: the background fetch queue. `None` until the first
+    /// frame that finds the toggle on and a config root to cache into —
+    /// created lazily rather than unconditionally at startup so a player
+    /// who never opts in never pays for a spawned thread.
+    art_fetcher: Option<crate::art::ArtFetcher>,
+    /// Ticket W15-09: which hashes' current thumbnail texture came from a
+    /// fetch, so `library_cards` can draw the network indicator
+    /// (`UX_WAVE_15.md` §4: "nothing on screen should imply 'local' when
+    /// it wasn't"). Kept alongside `library_thumbnail_textures` rather
+    /// than folded into it — that map's value type is a rendering
+    /// primitive (`egui::TextureHandle`), this one is provenance.
+    library_thumbnail_is_fetched: std::collections::HashSet<String>,
+    /// Ticket W15-09 acceptance 4: "one toast per session at most" for a
+    /// failed fetch. Set the first time any fetch fails; never reset
+    /// during a session.
+    art_fetch_failure_toast_shown: bool,
     /// Ticket W11-02: the decoded level for the running ROM, when a
     /// profile matched and declared one. `None` otherwise, which is the
     /// ordinary case and never an error.
@@ -1015,6 +1042,12 @@ impl RetroForgeApp {
         // reason.
         let thumbnail_cache =
             crate::thumbnail::open_cache(config_root.as_deref(), &app_settings.paths);
+        // Ticket W15-09: opened unconditionally too (opening a cache that
+        // is never written to is cheap and self-healing, same as
+        // `thumbnail_cache`) — the toggle gates FETCHING, not whether the
+        // cache directory exists, so turning the toggle on mid-session
+        // needs no re-open.
+        let art_cache = crate::art::open_art_cache(config_root.as_deref(), &app_settings.paths);
         let library_view = app_settings.library.view;
 
         RetroForgeApp {
@@ -1059,6 +1092,11 @@ impl RetroForgeApp {
             library_view,
             library_thumbnail_textures: std::collections::HashMap::new(),
             thumbnail_cache,
+            art_cache,
+            art_client: Arc::new(crate::art::UreqArtClient),
+            art_fetcher: None,
+            library_thumbnail_is_fetched: std::collections::HashSet::new(),
+            art_fetch_failure_toast_shown: false,
             level_session: None,
             level_texture: None,
             level_camera: None,
@@ -4712,6 +4750,42 @@ impl RetroForgeApp {
                                     "Empty = no user art folder; the library falls back to \
                                      save-state screenshots and first-frame captures only.",
                                 );
+
+                                ui.separator();
+                                // Ticket W15-09, ruling D-011: opt-in,
+                                // off by default (NON_GOALS #6) — this
+                                // is the ONLY place the toggle lives, and
+                                // `crate::art::should_fetch` is the only
+                                // reader that gates the fetch worker on
+                                // it.
+                                if ui
+                                    .checkbox(
+                                        &mut self.settings.paths.fetch_art,
+                                        "Fetch box art from the internet",
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                ui.small(
+                                    "Off by default. When on, box art missing from all local \
+                                     sources is fetched over HTTPS from libretro-thumbnails by \
+                                     title, cached locally, and never re-requested once cached. \
+                                     No accounts, no ROM data ever sent — only picture requests.",
+                                );
+                                ui.small("Art: libretro-thumbnails");
+                                if ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut self.settings.paths.art_cache_cap_mb,
+                                            16..=8_192,
+                                        )
+                                        .text("Art cache cap (MB)"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
                             }
                         }
                     });
@@ -5720,13 +5794,35 @@ impl RetroForgeApp {
                                     // the card an AccessKit/kittest label
                                     // to query by — a bare painted rect
                                     // carries no accessible name at all.
-                                    let (thumb_rect, _thumb_response) = ui.allocate_exact_size(
+                                    let (thumb_rect, thumb_response) = ui.allocate_exact_size(
                                         egui::vec2(CARD_WIDTH - 12.0, CARD_THUMB_HEIGHT),
                                         egui::Sense::hover(),
                                     );
                                     let ctx = ui.ctx().clone();
+                                    let console = match &entry.identity {
+                                        crate::library::EntryIdentity::Recognized {
+                                            console,
+                                            ..
+                                        } => Some(*console),
+                                        crate::library::EntryIdentity::Unrecognized { .. } => None,
+                                    };
                                     let texture = hash.as_ref().and_then(|h| {
-                                        self.library_thumbnail_texture(&ctx, h, &entry.title)
+                                        self.library_thumbnail_texture(
+                                            &ctx,
+                                            h,
+                                            &entry.title,
+                                            console,
+                                        )
+                                    });
+                                    // Ticket W15-09 acceptance 3: a card
+                                    // whose current thumbnail came from a
+                                    // libretro-thumbnails fetch gets a
+                                    // small network-indicator glyph and an
+                                    // attribution line on hover — never
+                                    // implying "local" when it wasn't
+                                    // (`UX_WAVE_15.md` §4).
+                                    let is_fetched = hash.as_ref().is_some_and(|h| {
+                                        self.library_thumbnail_is_fetched.contains(h)
                                     });
                                     match texture {
                                         Some(tex) => {
@@ -5781,6 +5877,24 @@ impl RetroForgeApp {
                                                 ),
                                             );
                                         }
+                                    }
+                                    if is_fetched {
+                                        // A small glyph in the corner,
+                                        // distinct from the console-tint
+                                        // placeholder and drawn with theme
+                                        // tokens (never a bare literal
+                                        // colour) — acceptance 3's network
+                                        // indicator.
+                                        let dot_center =
+                                            thumb_rect.right_top() + egui::vec2(-8.0, 8.0);
+                                        ui.painter().circle_filled(
+                                            dot_center,
+                                            4.0,
+                                            tokens.accent_strong,
+                                        );
+                                        thumb_response.on_hover_text(
+                                            "Fetched from the internet — Art: libretro-thumbnails",
+                                        );
                                     }
                                     let title_response = ui.add(
                                         egui::Label::new(
@@ -6665,11 +6779,25 @@ impl RetroForgeApp {
         std::fs::read(best.thumbnail.expect("filtered on is_some above")).ok()
     }
 
-    /// Ticket W15-05, §4: resolve the winning thumbnail source's PNG bytes
-    /// for one library entry, per `crate::thumbnail::thumbnail_source`'s
-    /// priority order. `None` means "no thumbnail from any of the three
-    /// local sources" — the caller draws the placeholder card.
-    fn resolve_thumbnail_png(&mut self, rom_sha256: &str, title: &str) -> Option<Vec<u8>> {
+    /// Ticket W15-05/W15-09, §4: resolve the winning thumbnail source's
+    /// PNG bytes for one library entry, per
+    /// `crate::thumbnail::thumbnail_source_with_fetch`'s priority order
+    /// (save-state screenshot, first-frame, user art folder, then
+    /// fetched art). Returns the bytes plus whether they came from a
+    /// fetch — the second half is what lets the caller draw the network
+    /// indicator (acceptance 3). `(None, false)` means no thumbnail from
+    /// any of the four sources — the caller draws the placeholder card.
+    ///
+    /// As a side effect, when nothing local exists and the "Fetch box art
+    /// from the internet" toggle is on, this queues a background fetch
+    /// (`Self::request_art_fetch`) for next frame to pick up — never
+    /// blocking THIS frame on network I/O.
+    fn resolve_thumbnail_png(
+        &mut self,
+        rom_sha256: &str,
+        title: &str,
+        console: Option<crate::library::Console>,
+    ) -> (Option<Vec<u8>>, bool) {
         let save_state_png = self.latest_save_state_screenshot_bytes(rom_sha256);
         let first_frame_png = self.thumbnail_cache.as_mut().and_then(|cache| {
             crate::thumbnail::get_first_frame(cache, rom_sha256)
@@ -6683,15 +6811,102 @@ impl RetroForgeApp {
             .as_ref()
             .and_then(|folder| crate::thumbnail::find_user_art(folder, title))
             .and_then(|path| std::fs::read(path).ok());
+        let fetched_png = self.art_cache.as_mut().and_then(|cache| {
+            crate::art::get_fetched_art(cache, rom_sha256)
+                .ok()
+                .flatten()
+        });
 
-        match crate::thumbnail::thumbnail_source(
+        let has_local =
+            save_state_png.is_some() || first_frame_png.is_some() || user_art_png.is_some();
+        if fetched_png.is_none()
+            && crate::art::should_fetch(self.settings.paths.fetch_art, has_local)
+        {
+            if let Some(console) = console {
+                self.request_art_fetch(rom_sha256, title, console);
+            }
+        }
+
+        match crate::thumbnail::thumbnail_source_with_fetch(
             save_state_png.is_some(),
             first_frame_png.is_some(),
             user_art_png.is_some(),
-        )? {
-            crate::thumbnail::ThumbnailSource::SaveState => save_state_png,
-            crate::thumbnail::ThumbnailSource::FirstFrame => first_frame_png,
-            crate::thumbnail::ThumbnailSource::UserArt => user_art_png,
+            fetched_png.is_some(),
+        ) {
+            Some(crate::thumbnail::ThumbnailSource::SaveState) => (save_state_png, false),
+            Some(crate::thumbnail::ThumbnailSource::FirstFrame) => (first_frame_png, false),
+            Some(crate::thumbnail::ThumbnailSource::UserArt) => (user_art_png, false),
+            Some(crate::thumbnail::ThumbnailSource::Fetched) => (fetched_png, true),
+            None => (None, false),
+        }
+    }
+
+    /// Ticket W15-09: queue a background fetch for `rom_sha256`, spawning
+    /// the fetch worker on first use (module doc on the `art_fetcher`
+    /// field). A no-op with no config root — a fetched image with
+    /// nowhere to cache it would just be re-fetched every frame it is on
+    /// screen, and this is strictly a "nice to have" enhancement over the
+    /// three local sources, never worth that.
+    fn request_art_fetch(
+        &mut self,
+        rom_sha256: &str,
+        title: &str,
+        console: crate::library::Console,
+    ) {
+        if self.config_root.is_none() {
+            return;
+        }
+        if self.art_fetcher.is_none() {
+            // Same waker pattern as `spawn_with_waker`'s call site (ticket
+            // W14-20 defect 2): wake the UI thread directly when a result
+            // lands, rather than relying solely on the ordinary redraw
+            // cadence, since the library screen can sit idle for a while
+            // between input events.
+            let ctx_for_waker = self.ctx.clone();
+            let waker: Arc<dyn Fn() + Send + Sync> =
+                Arc::new(move || ctx_for_waker.request_repaint());
+            self.art_fetcher = Some(crate::art::ArtFetcher::spawn(
+                Arc::clone(&self.art_client),
+                Some(waker),
+            ));
+        }
+        let url = crate::art::thumbnail_url(crate::art::system_name(console), title);
+        if let Some(fetcher) = self.art_fetcher.as_mut() {
+            fetcher.request(rom_sha256, &url);
+        }
+    }
+
+    /// Ticket W15-09: adopt whatever fetch results have arrived since the
+    /// last poll — cache successes, drop the stale "no thumbnail" texture
+    /// entry so the grid re-resolves and picks the new art up, and toast
+    /// at most once per session on any failure (acceptance 4).
+    fn poll_art_fetch(&mut self, ctx: &egui::Context) {
+        let Some(fetcher) = self.art_fetcher.as_mut() else {
+            return;
+        };
+        let results = fetcher.poll();
+        if results.is_empty() {
+            return;
+        }
+        let mut any_failure = false;
+        for result in results {
+            match result.outcome {
+                Ok(bytes) => {
+                    if let Some(cache) = self.art_cache.as_mut() {
+                        let _ = crate::art::put_fetched_art(cache, &result.rom_sha256, &bytes);
+                    }
+                    self.library_thumbnail_textures.remove(&result.rom_sha256);
+                }
+                Err(_) => any_failure = true,
+            }
+        }
+        if any_failure && !self.art_fetch_failure_toast_shown {
+            self.art_fetch_failure_toast_shown = true;
+            self.toasts.push(
+                crate::toast::ToastKind::Error,
+                "Box art fetch failed, will retry next launch",
+                ctx,
+            );
         }
     }
 
@@ -6706,25 +6921,31 @@ impl RetroForgeApp {
         ctx: &egui::Context,
         rom_sha256: &str,
         title: &str,
+        console: Option<crate::library::Console>,
     ) -> Option<egui::TextureHandle> {
         if let Some(cached) = self.library_thumbnail_textures.get(rom_sha256) {
             return cached.clone();
         }
-        let texture = self
-            .resolve_thumbnail_png(rom_sha256, title)
-            .and_then(|png| {
-                let decoded = image::load_from_memory(&png).ok()?.to_rgba8();
-                let (w, h) = (decoded.width() as usize, decoded.height() as usize);
-                if w == 0 || h == 0 {
-                    return None;
-                }
-                let color = egui::ColorImage::from_rgba_unmultiplied([w, h], decoded.as_raw());
-                Some(ctx.load_texture(
-                    format!("library-thumb-{rom_sha256}"),
-                    color,
-                    egui::TextureOptions::LINEAR,
-                ))
-            });
+        let (png, is_fetched) = self.resolve_thumbnail_png(rom_sha256, title, console);
+        let texture = png.and_then(|png| {
+            let decoded = image::load_from_memory(&png).ok()?.to_rgba8();
+            let (w, h) = (decoded.width() as usize, decoded.height() as usize);
+            if w == 0 || h == 0 {
+                return None;
+            }
+            let color = egui::ColorImage::from_rgba_unmultiplied([w, h], decoded.as_raw());
+            Some(ctx.load_texture(
+                format!("library-thumb-{rom_sha256}"),
+                color,
+                egui::TextureOptions::LINEAR,
+            ))
+        });
+        if texture.is_some() && is_fetched {
+            self.library_thumbnail_is_fetched
+                .insert(rom_sha256.to_string());
+        } else {
+            self.library_thumbnail_is_fetched.remove(rom_sha256);
+        }
         self.library_thumbnail_textures
             .insert(rom_sha256.to_string(), texture.clone());
         texture
@@ -6827,6 +7048,52 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn set_library_view_for_test(&mut self, view: crate::library::LibraryView) {
         self.library_view = view;
+    }
+
+    /// Ticket W15-09: swap in a fake `ArtClient` (and reset any fetcher
+    /// already spawned against the real one), so a kittest scenario can
+    /// turn the "Fetch box art from the internet" toggle on and observe
+    /// the network indicator with zero real network access. Also clears
+    /// cached "no thumbnail" texture entries, so a hash resolved before
+    /// the toggle was on re-resolves through the fake client.
+    /// Ticket W15-09: flip the "Fetch box art from the internet" toggle
+    /// directly, so a kittest scenario can turn it on without a mouse
+    /// click on the Settings checkbox.
+    #[doc(hidden)]
+    pub fn set_fetch_art_for_test(&mut self, on: bool) {
+        self.settings.paths.fetch_art = on;
+    }
+
+    #[doc(hidden)]
+    pub fn set_art_client_for_test(&mut self, client: Arc<dyn crate::art::ArtClient>) {
+        self.art_client = client;
+        self.art_fetcher = None;
+        self.library_thumbnail_textures.clear();
+        self.library_thumbnail_is_fetched.clear();
+    }
+
+    /// Ticket W15-09: whether the card grid's CURRENT thumbnail for the
+    /// entry titled `title` came from a fetch (network indicator state)
+    /// — looked up by title rather than hash, since a test fixture's ROM
+    /// hash is an implementation detail the test itself should not need
+    /// to recompute.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn thumbnail_is_fetched_for_test(&self, title: &str) -> bool {
+        let Some(library) = self.library.as_ref() else {
+            return false;
+        };
+        library
+            .entries
+            .iter()
+            .find(|entry| entry.title == title)
+            .and_then(|entry| match &entry.identity {
+                crate::library::EntryIdentity::Recognized {
+                    normalized_sha256, ..
+                } => Some(normalized_sha256.clone()),
+                crate::library::EntryIdentity::Unrecognized { .. } => None,
+            })
+            .is_some_and(|hash| self.library_thumbnail_is_fetched.contains(&hash))
     }
 
     /// Whether a stitched-canvas texture exists for the Map tab
@@ -8523,6 +8790,7 @@ impl eframe::App for RetroForgeApp {
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.
         self.poll_library_scan(&ctx);
+        self.poll_art_fetch(&ctx);
         // Ticket W16-02: adopt a finished Upscale Studio run.
         self.poll_upscale_studio_run(&ctx);
         // Ticket W16-13: re-derive Diorama's effective state and arm/
