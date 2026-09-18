@@ -6843,7 +6843,9 @@
    ],
    "points": 5,
    "status": "todo",
+  "hold": true,
    "notes": [
+    "DEFERRED BY MEASUREMENT 2026-09-18 (orchestrator decision under Brad's 'do what you think'): W16-12 measured the compact ESRGAN-class model at ~335 ms per 256x240 frame on the M4 Max with no CoreML gain (20x the gate); W16-08 measured MetalFX spatial at 0.7-0.8 ms pipelined and shipped it as a Video-settings scaler usable in every mode. So the real-time upscaling role D-012 asked for is filled by MetalFX, and a neural frame-path pass is held until a purpose-trained tiny model measures under the 16.67 ms gate with the W16-01 harness. The gate, badge and hold-to-peek parts of this ticket already exist (W16-04/08). Held, not closed: nothing here is delivered as specified, and it should not be claimed unattended.",
     "MEASUREMENT 2026-09-18 (W16-12): compact Real-ESRGAN-class model = ~335 ms per 256x240 frame on the M4 Max, CPU and CoreML alike; 20x over the 16.67 ms gate. A real-time neural pass with ESRGAN-class models is not viable here. Options when this ticket is picked: (a) MetalFX spatial via W16-08 as the real-time path, (b) a purpose-trained tiny model (e.g. FSRCNN-class, ~10 KB params) measured first with the W16-01 harness, (c) close as measured-not-viable and keep the offline studio. The gate infrastructure and honesty badge parts of this ticket remain valid for whichever pass is chosen.",
     "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
    ],

@@ -280,6 +280,17 @@ today — no aspirational claim ahead of the measurement.
 **Vendor SDKs deferred.** DLSS and FSR 4 have no Rust or wgpu bindings —
 either would be a native-binding project of its own, out of scope here.
 
+**Measured outcome for path B (2026-09-18, W16-12 and W16-08).** The compact
+Real-ESRGAN-class model costs ~335 ms per 256x240 frame on the M4 Max on
+CPU and CoreML alike (ort exposes no placement query; identical timings read
+as a silent CPU fallback), twenty times the gate. MetalFX spatial, pipelined
+and double-buffered, costs 0.7-0.8 ms p95 at both sizes and ships as a
+scaler in Settings > Video (W16-08), usable in Accuracy Mode because it
+upscales the same pixels and never touches the simulation. Path B's neural
+pass (W16-07) is therefore held by measurement until a purpose-trained tiny
+model clears the gate; path A, the offline Upscale Studio, runs real models
+end to end via tiled inference (W16-02, W16-12).
+
 ## 8. Frame-budget gate and benchmark harness
 
 W16-01 builds the one piece of infrastructure §4, §5's compositor and §7's
