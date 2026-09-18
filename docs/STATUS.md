@@ -3729,3 +3729,18 @@ stories, 10 decisions).
   the upscaler does not tile, so a real model run fails with a toast
   instead of a pack; W16-12 adds tiled inference. Gate: workspace
   **2054 passing / 0 failed / 40 ignored**, clippy clean, arch OK.
+
+- **W16-12 — tiled ONNX inference and honest AI numbers** (2026-09-18,
+  lane C). The upscaler now reads a model's declared input size and
+  tiles any sheet into it with reflection padding and feathered
+  overlaps, proven byte-exact against whole-image upscaling on the
+  stub, so both ledgered Real-ESRGAN exports run end to end and the
+  studio produces real packs. The measurement that matters: the compact
+  model costs about 335 ms per 256x240 sheet on this M4 Max, and CoreML
+  changes nothing, which reads as a silent CPU fallback that ort's API
+  cannot confirm or deny. That is twenty times the real-time gate, so
+  the offline studio is the AI path on this hardware and W16-07 now
+  carries the options: MetalFX, a purpose-trained tiny model, or close
+  as measured. No permissively licensed dynamic-shape model exists; the
+  search is in the ledger. Gate: crate tests green with fixtures, arch
+  OK, GPU evidence 18 rows.
