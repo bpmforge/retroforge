@@ -6518,7 +6518,7 @@
    "the Game Settings window opens identically from the context menu and from the overlay menu (same window instance, not two)"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "notes": [
    "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 3). See that doc \u00a73 (context menu contents) and \u00a75 (Game Settings window) and \u00a711.",
