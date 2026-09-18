@@ -1,0 +1,123 @@
+# The Legend of Zelda (NES) — a documented-commercial-layout profile
+# (ticket W16-05, criterion 2b).
+#
+# ## What this is, and what it deliberately is NOT
+#
+# This is a PROFILE ONLY: no ROM bytes are in this repository or referenced
+# by path, no test decodes this profile, and `[[identity]]` is absent
+# because no ROM hash has been independently verified for this ticket.
+# CLAUDE.md law 5 ("no ROM bytes in git; no copyrighted titles hardcoded in
+# engine code") is why: a profile MAY name a commercial game (this file),
+# but no engine code anywhere may, and nothing here needs a byte of the
+# actual cartridge to exist.
+#
+# The Legend of Zelda is the canonical `room_grid`-shaped game — a 2-D grid
+# of fixed-size rooms/screens, the shape `rf_enhance::decode::room_grid`
+# implements (W9-08) and this ticket adds a collision field to (W16-05).
+# Citing it is `docs/design/ENHANCEMENT_WAVE_16.md` §5's own example of a
+# "named commercial source for a room-game collision profile".
+#
+# ## Facts, and exactly how far each one goes (FR-PROF-003)
+#
+# Every fact below is sourced to Data Crystal's RAM map for this game:
+# https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map
+# under CONSTRAINTS §2's facts-only transcription policy (individual
+# addresses/values, fresh prose, never a verbatim table — the page is
+# GFDL 1.2).
+#
+#   * `$049E` — "Link's Current Colliding Tile" (the page notes 0x26 as
+#     the empty/no-collision value). This is a RUNTIME pointer to whichever
+#     tile Link is presently touching, refreshed as he moves — see below
+#     for why this is a different fact from a per-tile solidity TABLE.
+#   * `$00EB` — the overworld map-location value, computed as
+#     `map_x + 0x10 * map_y`; the page states the overworld is a 16x8 grid
+#     of screens. This is the one dimension pair sourced with confidence
+#     for the room GRID itself (`rooms_across`/`rooms_down`, in room_grid
+#     terms) — it is NOT the intra-screen tile-block grid (see below).
+#   * `$6530` (SRAM) — "Tile Mapping Codes for Current Screen", which the
+#     page states as sized `0x2C0` bytes. This is the per-screen column
+#     storage `[decode] kind = "room_grid"` names as the shape this game
+#     uses — one screen's layout, resident in SRAM while it is current —
+#     cited here as the fact that room_grid is the right FAMILY, not as a
+#     `[[rom_map]]` row (there is no PRG ROM offset given for it; SRAM is
+#     runtime, and `rom_map` entries are static-ROM-only per GAME_PROFILES.md
+#     §2's "static knowledge (ROM)" section header).
+#
+# ## Why `[decode.room_grid]` is NOT declared
+#
+# `RoomGridSpec` needs FOUR numbers together: `rooms_across`, `rooms_down`,
+# `room_width`, `room_height`. Only the first two are sourced above (16x8
+# screens). The RAM map page names the per-screen storage's existence and
+# its overall byte count, but not the intra-screen tile-block width/height
+# that byte count decomposes into, and neither does Data Crystal's ROM map
+# page for this game (checked for this ticket: it documents the overworld
+# screen ARRANGEMENT and per-screen column pointer tables, not a stated
+# "N blocks wide x M blocks tall" figure). Declaring `rooms_across`/
+# `rooms_down` alone, with `room_width`/`room_height` invented to make the
+# table type-check, would be exactly the "profile that looks configured and
+# does not work" `rf_enhance::decode::room_grid`'s own module doc names as
+# the failure this family's design retired (`profiles/snes/example-mode7`,
+# W4-02 to W9-08) — so the whole sub-table is left out rather than half
+# filled with a guess. `kind = "room_grid"` alone still correctly names the
+# SHAPE this game uses, which is the fact this profile can stand behind.
+#
+# ## Why `[decode.collision]` is NOT declared
+#
+# This is the case ticket W16-05 asks to be handled exactly this way: the
+# RAM map's `$049E` is a per-FRAME runtime pointer ("which tile is Link
+# touching right now"), not a per-tile-ID lookup TABLE of which tile types
+# are solid/walkable — `CollisionSpec` (`table = ..., bits = ...`) needs
+# the latter: a static table address, indexed by tile id, that this
+# decoder can read once at load time. The public RAM map does not name
+# one (no ROM address for a tile-attribute/solidity table is given
+# anywhere on that page), so `[decode.collision]` is left undeclared here
+# rather than inventing an address to point it at. If a future ticket
+# finds that table independently sourced (e.g. from a disassembly), this
+# is the line to add it on.
+#
+# ## Why there is no `[[rom_map]]` here
+# Every `[[rom_map]]` row needs a static ROM offset (GAME_PROFILES.md §2)
+# and a `source` (FR-PROF-003, enforced by the loader). Nothing sourced
+# above is a ROM offset — `$049E` and `$00EB` are zero-page RAM, `$6530`
+# is SRAM — so there is nothing to put in that table without inventing a
+# PRG bank address, which this profile does not do.
+
+[meta]
+profile_version = "0.1"
+title = "The Legend of Zelda"
+console = "nes"
+region = "ntsc"
+sources = ["https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"]
+
+[capabilities]
+full_level = false
+
+[[memory_map]]
+addr = 0x049E
+len = 1
+type = "u8"
+label = "colliding_tile"
+notes = "Link's current colliding tile; 0x26 is the empty/no-collision value. A per-frame runtime pointer, not a per-tile solidity table — see the [decode.collision] note above."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+[[memory_map]]
+addr = 0x00EB
+len = 1
+type = "u8"
+label = "map_location"
+notes = "map_x + 0x10 * map_y; the page states the overworld is a 16x8 grid of screens, which is the rooms_across/rooms_down pair this profile can source."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+[[memory_map]]
+addr = 0x6530
+len = 0x2C0
+type = "bytes"
+label = "screen_tile_mapping"
+notes = "SRAM: \"Tile Mapping Codes for Current Screen\" — the page's own stated size. Cited as the fact that room_grid is the right decoder family for this game; not a [[rom_map]] row because SRAM is runtime storage, not a static ROM offset."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+# [decode.room_grid] and [decode.collision] are both deliberately absent —
+# see the header comment's two sections on why each stops exactly where
+# the cited public documentation stops.
+[decode]
+kind = "room_grid"

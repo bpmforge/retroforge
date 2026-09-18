@@ -64,6 +64,13 @@ pub struct Spec {
     pub data_offset: u32,
     /// Offset of the room-number table, when the grid is indexed.
     pub index_offset: Option<u32>,
+    /// Offset of the per-tile collision attribute table, when the profile
+    /// declares a `[decode].collision` table (ticket W16-05, mirroring
+    /// `metatile_screens::Spec::collision_table`). Unlike
+    /// `metatile_screens` — which indexes by *metatile id* through its own
+    /// definition table — `room_grid` tiles ARE the raw bytes stored in
+    /// ROM, so this table is indexed directly by tile byte value.
+    pub collision_table: Option<u32>,
 }
 
 impl Spec {
@@ -96,6 +103,14 @@ pub struct DecodedRooms {
     pub grid: Vec<u8>,
     /// Distinct room payloads, each `room_width * room_height` bytes.
     pub rooms: Vec<Vec<u8>>,
+    /// One collision attribute byte per **tile value actually used**
+    /// across every decoded room, indexed by that raw tile byte — sized
+    /// to `max(tile value) + 1`, the same "derive the table's real length
+    /// from what the level uses" discipline
+    /// `metatile_screens::metatile_table_len` applies, since `room_grid`
+    /// has no separate tile-definition table to size against. `None` when
+    /// the profile declared no `[decode].collision` table (ticket W16-05).
+    pub collision: Option<Vec<u8>>,
 }
 
 impl DecodedRooms {
@@ -206,6 +221,7 @@ pub fn spec_from_profile(profile: &Profile) -> Result<Spec, DecodeError> {
         room_height: rg.room_height,
         data_offset,
         index_offset,
+        collision_table: decode.collision.as_ref().map(|c| c.table),
     })
 }
 
@@ -266,6 +282,19 @@ pub fn decode(rom: &[u8], spec: &Spec) -> Result<DecodedRooms, DecodeError> {
         )));
     }
 
+    // Sized from what the level actually uses, not assumed to be 256 —
+    // the same reasoning `metatile_table_len` documents: a room byte the
+    // table does not cover is caught here as an out-of-range read rather
+    // than silently reading whatever follows the table.
+    let collision = match spec.collision_table {
+        Some(table) => {
+            let max_tile = rooms.iter().flatten().copied().max().unwrap_or(0);
+            let len = u32::from(max_tile) + 1;
+            Some(slice_at(rom, table, len, "collision_table")?.to_vec())
+        }
+        None => None,
+    };
+
     Ok(DecodedRooms {
         rooms_across: spec.rooms_across,
         rooms_down: spec.rooms_down,
@@ -273,6 +302,7 @@ pub fn decode(rom: &[u8], spec: &Spec) -> Result<DecodedRooms, DecodeError> {
         room_height: spec.room_height,
         grid,
         rooms,
+        collision,
     })
 }
 
@@ -297,6 +327,7 @@ mod tests {
             room_height: 2,
             data_offset: 16,
             index_offset: Some(24),
+            collision_table: None,
         }
     }
 
@@ -337,6 +368,7 @@ mod tests {
             room_height: 1,
             data_offset: 8,
             index_offset: None,
+            collision_table: None,
         };
         let out = decode(&rom, &spec).unwrap();
         assert_eq!(out.grid, vec![0, 1, 2, 3]);
@@ -390,6 +422,7 @@ mod tests {
             room_height: 1,
             data_offset: 0,
             index_offset: None,
+            collision_table: None,
         };
         let err = decode(&vec![0u8; 4096], &spec).unwrap_err();
         let msg = err.to_string();
@@ -494,5 +527,78 @@ mod tests {
             spec_from_profile(&other).unwrap_err(),
             DecodeError::UnknownFamily("metatile_screens".into())
         );
+    }
+
+    // ---- collision (ticket W16-05) ----
+
+    #[test]
+    fn a_profile_with_a_collision_table_resolves_it_onto_the_spec() {
+        // `[decode].collision` already exists on the schema (it hangs off
+        // `Decode`, not off `RoomGridSpec` — `metatile_screens` reads the
+        // same field), so this is wiring, not a schema change.
+        let p = profile_with(
+            "collision = { table = 40, bits = \"solid,platform,hazard\" }\n\n\
+             [decode.room_grid]\nrooms_across = 2\nrooms_down = 2\n\
+             room_width = 2\nroom_height = 2\nindexed = true\n\n\
+             [[rom_map]]\nlabel = \"room_grid_data\"\noffset = 16\nlen = 16\n\
+             type = \"room_tiles\"\nsource = \"in-repo fixture, this ticket\"\n\
+             [[rom_map]]\nlabel = \"room_grid_index\"\noffset = 32\nlen = 4\n\
+             type = \"room_index\"\nsource = \"in-repo fixture, this ticket\"\n",
+        );
+        let spec = spec_from_profile(&p).unwrap();
+        assert_eq!(spec.collision_table, Some(40));
+    }
+
+    #[test]
+    fn a_profile_without_collision_leaves_the_spec_field_none() {
+        let spec = spec_from_profile(&profile_with(
+            "\n[decode.room_grid]\nrooms_across = 2\nrooms_down = 2\n\
+             room_width = 2\nroom_height = 2\n\n\
+             [[rom_map]]\nlabel = \"room_grid_data\"\noffset = 0\nlen = 16\n\
+             type = \"room_tiles\"\nsource = \"in-repo fixture, this ticket\"\n",
+        ))
+        .unwrap();
+        assert_eq!(spec.collision_table, None);
+    }
+
+    /// A synthetic room grid whose tiles double as their own collision
+    /// index — two rooms of a fully solid floor (`0x01`) and fully open
+    /// space (`0x00`) — proving criterion 1: "the room_grid decoder
+    /// family gains a collision table and bits exactly like
+    /// metatile_screens".
+    #[test]
+    fn decoding_a_synthetic_room_grid_with_a_collision_table_produces_it() {
+        let mut rom = vec![0u8; 16]; // padding
+        rom.extend_from_slice(&[0x01, 0x01, 0x01, 0x01]); // room 0 @ 16: floor
+        rom.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // room 1 @ 20: open
+        rom.extend_from_slice(&[0, 1, 1, 0]); // index @ 24: 2x2 grid
+                                              // collision table @ 28: tile 0x00 -> not solid, tile 0x01 -> solid (bit0)
+        rom.extend_from_slice(&[0b000, 0b001]);
+
+        let spec = Spec {
+            collision_table: Some(28),
+            ..indexed_spec()
+        };
+        let out = decode(&rom, &spec).unwrap();
+        let collision = out.collision.as_ref().expect("collision table declared");
+        assert_eq!(collision.len(), 2, "sized to max tile value (1) + 1");
+        assert_eq!(collision[0x00], 0b000, "open tile: not solid");
+        assert_eq!(collision[0x01], 0b001, "floor tile: solid");
+    }
+
+    #[test]
+    fn a_missing_collision_table_declares_none() {
+        let out = decode(&two_rooms(), &indexed_spec()).unwrap();
+        assert_eq!(out.collision, None);
+    }
+
+    #[test]
+    fn a_collision_table_running_past_the_rom_names_the_table() {
+        let spec = Spec {
+            collision_table: Some(1_000),
+            ..indexed_spec()
+        };
+        let err = decode(&two_rooms(), &spec).unwrap_err();
+        assert!(err.to_string().contains("collision_table"), "{err}");
     }
 }

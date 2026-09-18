@@ -157,6 +157,76 @@ Community-submitted profiles pass license-gated intake (D-005,
 FR-PROF-007): `[meta]` requires `license` (SPDX) alongside `sources`;
 deny-by-default at the Phase-9 submission CI.
 
+### `room_grid`'s collision field (ticket W16-05)
+
+`room_grid` (`rf_enhance::decode::room_grid`, W9-08) is the second decoder
+family — a 2-D grid of fixed-size rooms, with an optional room-number
+indirection table so one room can be reused in many cells. It reads the
+same `[decode].collision = { table, bits }` row `metatile_screens` does
+(`CollisionSpec` hangs off `[decode]` itself, not off either family's own
+sub-table, so no schema change was needed to add this):
+
+```toml
+[decode]
+kind = "room_grid"
+collision = { table = 0x2600, bits = "solid,platform,hazard" }
+
+[decode.room_grid]
+rooms_across = 4
+rooms_down = 3
+room_width = 4
+room_height = 4
+indexed = true
+```
+
+The two families read that same table differently, because they store
+tiles differently:
+
+- `metatile_screens` indexes it by **metatile id**, through its own
+  metatile-definition table — `DecodedLevel.collision` has one byte per
+  *defined metatile*.
+- `room_grid` has no separate tile-definition table: the bytes stored in
+  ROM ARE the tiles. So `collision.table` is indexed directly by **raw
+  tile byte value**, and `DecodedRooms.collision` is sized to
+  `max(tile value used) + 1` — the same "derive the table's real length
+  from what the level actually uses, don't assume 256" discipline
+  `metatile_screens::metatile_table_len` already applies, applied here
+  because `room_grid` has nothing else to size it against.
+
+A profile that omits `[decode].collision` decodes exactly as before —
+`DecodedRooms.collision` is `None`. Two profiles cite it as a sourced
+fact for `room_grid` specifically: `profiles/nes/rf-scroller-demo` (the
+`metatile_screens` fixture used as the fallback demonstration per this
+ticket's own instructions, since neither in-repo `room_grid` fixture
+document — `fixtures/nes/rf-rooms/FORMAT.md`,
+`fixtures/snes/rf-rooms-flat/FORMAT.md` — describes collision bytes, and
+those fixture docs sit outside `rf-enhance`/`rf-profiles`/`profiles`'s
+write_scope) and `profiles/nes/legend-of-zelda` (a documented-commercial
+layout, profile-only, no ROM bytes — see that file's header comment for
+exactly which Data Crystal RAM-map facts it can and cannot responsibly
+turn into `[decode]` rows).
+
+### The solidity mask (ticket W16-05)
+
+`rf_enhance::scene_graph::solidity_mask(tiles, collision_table, bits,
+solid_bit_name)` turns a decoded screen's tiles plus its collision table
+into a per-tile `0`/`1` mask, aligned 1:1 with `tiles` — the "which tiles
+are solid" fact `ENHANCEMENT_WAVE_16.md` §5's Geometry layer (W16-06)
+extrudes into blocks. It works for either family's collision shape (both
+are "one attribute byte per id"; only the id space — metatile id vs. raw
+tile byte — differs, and the caller already resolved that when it built
+`tiles`).
+
+It is a free function in `rf-enhance` rather than a new field on
+`SceneLayer::DecodedLevel` in this ticket: that enum variant already has
+two production call sites (`crates/retroforge/src/enhanced_view.rs`)
+outside W16-05's write_scope, spelling out every field explicitly, so
+adding a field there without editing those call sites does not compile.
+W16-06 depends_on W16-05 and its own write_scope includes
+`crates/retroforge/**`/`crates/rf-renderer/**` — wiring the mask into that
+field, and NON_GOALS #11's "visited/decoded screens only" restriction on
+*which* screens ever get one, belongs there.
+
 <!-- ANCHOR_END: schema -->
 
 ## 3. Authoring pipeline
