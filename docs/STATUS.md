@@ -3585,3 +3585,17 @@ stories, 10 decisions).
   and leaves collision undeclared with the reason written in, rather
   than invent an address. Gate: workspace **1932 passing / 0 failed /
   36 ignored**.
+
+- **W15-02 — recently played, favourites, sort** (2026-09-18, lane A).
+  Every launch records a play count and last-played time in the
+  per-game settings keyed by ROM hash; a star per row or Space on the
+  selection marks a favourite. Recently played and Favourites are
+  radio chips beside All/NES/SNES; sort offers Title, Last played and
+  Console, and with an empty search the default order is recent-first
+  with never-played titles after. Filtering and sorting is one pure
+  function with thirteen unit tests, and a headless scenario launches
+  a game, closes it, and finds it alone under Recently played. The
+  toolbar became two rows: one row overflowed the window and handed
+  clicks in the overlap to the wrong widget, which the scenario caught.
+  Gate: workspace **1941 passing / 0 failed / 36 ignored**, clippy
+  clean, arch OK.
