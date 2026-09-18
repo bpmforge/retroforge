@@ -49,6 +49,7 @@ pub mod fog;
 pub mod frame;
 pub mod gpu;
 pub mod layers;
+pub mod metalfx;
 pub mod original_pipeline;
 pub mod palette;
 pub mod pipeline;
@@ -62,6 +63,7 @@ pub use fallback::{render_with_fallback, RenderOutcome, RenderPath, FALLBACK_BUD
 pub use frame::FrameBuffer;
 pub use gpu::{GpuContext, GpuUnavailable};
 pub use layers::LayeredFrame;
+pub use metalfx::{availability_from, detect as metalfx_detect, MetalFxAvailability};
 pub use original_pipeline::{IndexedFrame, PalettePass};
 pub use palette::{palette_index_to_rgb, NES_PALETTE};
 pub use scale::{render_scaled_reference, FillMode, Overscan, ParRatio, ScaleGeometry, ScalePass};

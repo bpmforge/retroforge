@@ -189,10 +189,7 @@ impl GpuContext {
 /// `crate::composite`) rather than re-derived per pass -- the
 /// map_async/poll/try_recv dance is exactly the kind of thing ticket W3-01
 /// already spent two stalled attempts getting right (module doc).
-pub(crate) fn read_buffer_sync(
-    device: &wgpu::Device,
-    buffer: &wgpu::Buffer,
-) -> Result<Vec<u8>, String> {
+pub fn read_buffer_sync(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<Vec<u8>, String> {
     let slice = buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -228,7 +225,7 @@ pub(crate) fn read_buffer_sync(
 /// (1024 bytes/row) already satisfies it, but neither an arbitrary
 /// enhanced-composite target nor a PAR-scaled output width has that
 /// guarantee.
-pub(crate) fn align_up(value: u32, align: u32) -> u32 {
+pub fn align_up(value: u32, align: u32) -> u32 {
     let align = align.max(1);
     value.div_ceil(align) * align
 }
