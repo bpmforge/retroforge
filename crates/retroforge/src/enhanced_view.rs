@@ -521,6 +521,123 @@ pub fn atmosphere_scroll_drift_per_second(
     (dx_uv / dt_secs, dy_uv / dt_secs)
 }
 
+// ---------------------------------------------------------------------
+// Diorama pass (ticket W16-06; `docs/design/ENHANCEMENT_WAVE_16.md` §5):
+// the SceneGraph::Geometry -> rf_renderer::diorama_mesh resolution step,
+// same mediator role this module already plays for the ultrawide canvas
+// and the fog pass (module doc's opening line).
+// ---------------------------------------------------------------------
+
+/// Approximate on-screen sprite footprint (NES sprites are 8x8 by default,
+/// 8x16 with a PPUCTRL bit this module has no access to) — stated plainly
+/// as an approximation rather than derived per-sprite; the geometry and
+/// solidity data this pass extrudes is exact, this footprint size is not.
+const SPRITE_FOOTPRINT_PX: f32 = 8.0;
+
+/// Build one Diorama frame for `session`'s decoded level (module doc).
+///
+/// `sprite_rgba`/`sprite_w`/`sprite_h` is the already-extracted
+/// sprite-only layer for the CURRENT live frame, screen-space
+/// (`rf_renderer::layers::LayeredFrame::sprite_rgba`, forwarded through
+/// `core_thread::FrameMsg::sprite_rgba` — this crate's own existing layer-
+/// extraction pipeline, ticket W3-03, not new plumbing for this ticket).
+/// Each billboard's UV rect is a sub-rectangle of this SAME texture at the
+/// sprite's own on-screen position — simplest-correct source per this
+/// ticket's brief ("OAM + sprite pixels", picked over building a second,
+/// per-sprite atlas).
+///
+/// # Errors
+/// - `"no diorama geometry for this profile"` when [`crate::level_view::
+///   LevelSession::diorama_geometry`] returns `None` (no collision table,
+///   or a declared `bits` with no `"solid"` entry) — checked by the
+///   caller via `has_collision()` before ever reaching this function, so
+///   in practice this is a caller-consistency assertion, not a runtime
+///   surprise.
+/// - Otherwise propagates [`rf_renderer::diorama::DioramaPass::render`]'s
+///   `Err` (GPU readback timeout).
+#[allow(clippy::too_many_arguments)]
+pub fn compose_diorama(
+    gpu: &GpuContext,
+    pass: &rf_renderer::diorama::DioramaPass,
+    session: &crate::level_view::LevelSession,
+    chr: &[u8],
+    table: rf_debugger::pattern::PatternTable,
+    palette: [[u8; 3]; 4],
+    read: &dyn Fn(u32) -> u8,
+    entity_table: &[u8],
+    sprite_rgba: &[u8],
+    sprite_w: u32,
+    sprite_h: u32,
+    out_width: u32,
+    out_height: u32,
+) -> Result<Vec<u8>, String> {
+    let geometry_layer = session
+        .diorama_geometry()
+        .ok_or_else(|| "no diorama geometry for this profile".to_string())?;
+    let rf_enhance::scene_graph::SceneLayer::Geometry {
+        tiles_w,
+        tiles_h,
+        tile_px,
+        solid,
+        depth,
+        ..
+    } = geometry_layer
+    else {
+        return Err("diorama_geometry did not return SceneLayer::Geometry".to_string());
+    };
+
+    let ground_rgba = render_level_rgba(&session.level, chr, table, palette, session.geometry);
+    let (ground_w, ground_h) = (session.geometry.width_px, session.geometry.height_px);
+
+    let camera = rf_enhance::level_view::live_camera(&session.profile, read);
+    let sprites = rf_enhance::level_view::sprites_in_world(&session.profile, entity_table, camera);
+    let (viewport_w, viewport_h) = rf_enhance::level_view::ORIGINAL_VIEWPORT;
+    let billboards: Vec<rf_renderer::diorama_mesh::Billboard> = sprites
+        .iter()
+        .map(|s| {
+            let screen_x = (s.x - i32::try_from(camera.x).unwrap_or(0)) as f32;
+            let screen_y = (s.y - i32::try_from(camera.y).unwrap_or(0)) as f32;
+            let u0 = screen_x / f32::from(viewport_w);
+            let v0 = screen_y / f32::from(viewport_h);
+            let u1 = (screen_x + SPRITE_FOOTPRINT_PX) / f32::from(viewport_w);
+            let v1 = (screen_y + SPRITE_FOOTPRINT_PX) / f32::from(viewport_h);
+            rf_renderer::diorama_mesh::Billboard {
+                center_x_px: s.x as f32 + SPRITE_FOOTPRINT_PX / 2.0,
+                center_z_px: s.y as f32 + SPRITE_FOOTPRINT_PX / 2.0,
+                width_px: SPRITE_FOOTPRINT_PX,
+                height_px: SPRITE_FOOTPRINT_PX,
+                uv: [u0, v0, u1, v1],
+            }
+        })
+        .collect();
+
+    let scene = rf_renderer::diorama_mesh::DioramaScene {
+        tiles_w,
+        tiles_h,
+        tile_px: tile_px as f32,
+        solid: &solid,
+        depth: &depth,
+        billboards: &billboards,
+    };
+    let vertices = rf_renderer::diorama_mesh::build_vertices(&scene);
+
+    pass.render(
+        gpu,
+        &vertices,
+        &ground_rgba,
+        ground_w,
+        ground_h,
+        sprite_rgba,
+        sprite_w,
+        sprite_h,
+        tiles_w,
+        tiles_h,
+        tile_px,
+        out_width,
+        out_height,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

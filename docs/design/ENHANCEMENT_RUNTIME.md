@@ -188,6 +188,19 @@ pub enum SceneLayer {
     SpriteSet { sprites: Vec<SpriteInstance> },          // de-flickered union
     HudPinned { region: HudRegion, anchor: Anchor },
     OverlayCmds { cmds: Vec<DrawCmd> },                  // plugins/debugger
+    // Ticket W16-06: "walls pop up" -- a per-tile solidity mask and depth
+    // field over a decoded level's tiles, row-major, plus the world-pixel
+    // origin of tile (0,0). Producer: rf_enhance::scene_graph::
+    // geometry_layer / crate::level_view::diorama_geometry_layer.
+    Geometry {
+        level: LevelId,
+        tiles_w: u32,
+        tiles_h: u32,
+        tile_px: u32,
+        solid: Vec<u8>,
+        depth: Vec<u8>,
+        origin_px: (i32, i32),
+    },
 }
 ```
 
@@ -195,7 +208,19 @@ Composer rules keep original priority order within game layers; overlays are
 always topmost; HUD pinning only active when a profile (or verified
 heuristic) defines the HUD region.
 
-**Later**: a `Geometry` layer (depth field + solidity mask, from
-`DecodedLevel.collision`) and the first producers for `ExtractedBg` and
-`DecodedLevel` are Wave 16 work — see
-`docs/design/ENHANCEMENT_WAVE_16.md` §3/§5/§9.
+**`Geometry` (ticket W16-06, shipped).** Producer:
+`rf_enhance::scene_graph::geometry_layer` (a per-screen solidity mask via
+`solidity_mask` plus a fixed extrusion height, `WALL_HEIGHT_EIGHTHS`, on
+every solid tile) and the profile-aware wrapper `crate::level_view::
+diorama_geometry_layer`, which transposes a `metatile_screens`
+`DecodedLevel`'s column-major tiles into this layer's row-major shape and
+returns `None` when the profile declared no collision table. Resolved by
+the app shell (`crates/retroforge/src/enhanced_view.rs::compose_diorama`,
+`ARCHITECTURE.md` §3's shell-mediated split — `rf-renderer` has no
+dependency on `rf-enhance`) into `rf_renderer::diorama_mesh::
+DioramaScene`/`build_vertices` and rendered by `rf_renderer::diorama::
+DioramaPass` (`docs/design/RENDERER.md` §3a). Gated NON_GOALS #11-style:
+only a decode's own tiles are extruded, never a guessed "whole level".
+
+**Later**: the first producers for `ExtractedBg` and `DecodedLevel` are
+Wave 16 work — see `docs/design/ENHANCEMENT_WAVE_16.md` §3/§9.

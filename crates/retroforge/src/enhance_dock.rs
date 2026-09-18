@@ -58,6 +58,10 @@ pub enum EnhanceTab {
 pub struct EnhanceCtx<'a> {
     pub settings: &'a mut crate::game_settings::GameSettings,
     pub profile_matched: bool,
+    /// Ticket W16-06: `crate::level_view::LevelSession::has_collision`'s
+    /// answer for the currently matched profile, `false` with no session —
+    /// the narrower fact the Diorama feature row is gated on.
+    pub diorama_available: bool,
     pub compare_mode: &'a mut rf_renderer::CompareMode,
     pub compare_divider: &'a mut f32,
     /// The stitched-canvas texture, when one has been composited.
@@ -267,7 +271,8 @@ fn scrolled<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
 }
 
 fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut EnhanceActions) {
-    let rows = crate::enhance_ui::feature_rows(ctx.settings, ctx.profile_matched);
+    let rows =
+        crate::enhance_ui::feature_rows(ctx.settings, ctx.profile_matched, ctx.diorama_available);
     for row in &rows {
         // **`horizontal_wrapped`, and the opposite call from the status
         // bar.** W10-01 refused wrapping for the bottom bar because three

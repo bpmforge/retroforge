@@ -39,7 +39,7 @@ use rf_profiles::schema::{FieldSpec, Profile};
 
 use crate::camera::{Camera, CameraMode};
 use crate::decode::metatile_screens::DecodedLevel;
-use crate::scene_graph::{DrawCmd, LevelId, SceneGraph, SceneLayer, SpriteInstance};
+use crate::scene_graph::{self, DrawCmd, LevelId, SceneGraph, SceneLayer, SpriteInstance};
 
 /// NES viewport, in pixels. The outline drawn over an enhanced view
 /// (acceptance criterion 3) is exactly this, positioned at the live
@@ -279,6 +279,61 @@ pub fn full_map_scene(
     }
 }
 
+/// Build the "walls pop up" [`SceneLayer::Geometry`] for a decoded level
+/// (ticket W16-06; `docs/design/ENHANCEMENT_WAVE_16.md` §5), the profile-
+/// aware wrapper over `crate::scene_graph::geometry_layer`.
+///
+/// **Row-major transpose.** `level.metatiles` is column-major (`col *
+/// height + row`, [`DecodedLevel::metatiles`]'s own doc — the source
+/// encoding is per column). [`scene_graph::geometry_layer`]'s
+/// `SceneLayer::Geometry` documents `solid`/`depth` as row-major (`row *
+/// tiles_w + col`), matching how a diorama mesh builder walks rows
+/// front-to-back — so this function transposes once here rather than
+/// pushing a second indexing convention into the scene-graph contract.
+///
+/// **"Decoded", not "visited"**: like [`full_map_scene`] above (whose own
+/// doc calls the decoded level "known in full"), this passes every tile
+/// the decode produced, not a gameplay-traversal subset — the NON_GOALS
+/// #11 "no guessed geometry" obligation is met by `geometry_layer`'s own
+/// structural check (a `tiles` slice that does not match `tiles_w *
+/// tiles_h` fails), not by filtering here; there is nothing in this
+/// family's decode that is *not* known (no fog-of-war concept exists for
+/// a `metatile_screens` level, same as the pixels `render_level_rgba`
+/// already draws for the whole thing).
+///
+/// Returns `None` when the profile declared no collision table (`level.
+/// collision` is `None`) or when `geometry_layer` itself refuses (see its
+/// own doc).
+#[must_use]
+pub fn diorama_geometry_layer(
+    level_id: LevelId,
+    level: &DecodedLevel,
+    geometry: LevelGeometry,
+    collision_bits: &str,
+    solid_bit_name: &str,
+    origin_px: (i32, i32),
+) -> Option<SceneLayer> {
+    let collision = level.collision.as_ref()?;
+    let (w, h) = (level.width as usize, level.height as usize);
+    let mut row_major = vec![0u8; w * h];
+    for row in 0..h {
+        for col in 0..w {
+            row_major[row * w + col] = *level.metatiles.get(col * h + row)?;
+        }
+    }
+    scene_graph::geometry_layer(
+        level_id,
+        &row_major,
+        level.width,
+        level.height,
+        geometry.metatile_px,
+        origin_px,
+        collision,
+        collision_bits,
+        solid_bit_name,
+    )
+}
+
 /// An ultrawide scene over the decoded level: same layers, but the camera
 /// follows the player rather than framing the level.
 ///
@@ -320,5 +375,76 @@ pub fn ultrawide_scene_over_level(
                 cmds: vec![original_viewport_outline(camera, outline_color)],
             },
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene_graph::WALL_HEIGHT_EIGHTHS;
+
+    /// A 2x2 (width x height) level, one tile per metatile (`metatile_size
+    /// = 1`), column-major as `DecodedLevel::metatiles` documents:
+    /// column 0 is `[solid, open]` (top-to-bottom), column 1 is
+    /// `[open, solid]` — chosen asymmetric on purpose so a transpose bug
+    /// (row/col swapped) produces a different, checkable mask.
+    fn level_2x2() -> DecodedLevel {
+        DecodedLevel {
+            width: 2,
+            height: 2,
+            metatiles: vec![0x02, 0x01, 0x01, 0x02], // col0: [2,1], col1: [1,2]
+            metatile_tiles: vec![0, 0, 0, 0],
+            metatile_count: 2,
+            collision: Some(vec![0, 0, 0b1]), // id1 open, id2 solid (bit0)
+        }
+    }
+
+    #[test]
+    fn diorama_geometry_layer_transposes_column_major_into_row_major() {
+        let level = level_2x2();
+        let geometry = LevelGeometry::from_level(&level, 8);
+        let layer = diorama_geometry_layer(
+            LevelId(3),
+            &level,
+            geometry,
+            "solid,hazard",
+            "solid",
+            (10, 20),
+        )
+        .expect("collision declared, well-shaped level");
+
+        let SceneLayer::Geometry {
+            tiles_w,
+            tiles_h,
+            solid,
+            depth,
+            origin_px,
+            ..
+        } = layer
+        else {
+            panic!("expected SceneLayer::Geometry");
+        };
+        assert_eq!((tiles_w, tiles_h), (2, 2));
+        assert_eq!(origin_px, (10, 20));
+        // Row-major (row * tiles_w + col): row0 = [col0=solid, col1=open],
+        // row1 = [col0=open, col1=solid] -- the transpose of the
+        // column-major source above.
+        assert_eq!(
+            solid,
+            vec![1, 0, 0, 1],
+            "row-major transpose of the column-major decode"
+        );
+        assert_eq!(depth, vec![WALL_HEIGHT_EIGHTHS, 0, 0, WALL_HEIGHT_EIGHTHS]);
+    }
+
+    #[test]
+    fn diorama_geometry_layer_is_none_without_a_declared_collision_table() {
+        let mut level = level_2x2();
+        level.collision = None;
+        let geometry = LevelGeometry::from_level(&level, 8);
+        assert_eq!(
+            diorama_geometry_layer(LevelId(1), &level, geometry, "solid", "solid", (0, 0)),
+            None
+        );
     }
 }

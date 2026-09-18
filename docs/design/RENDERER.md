@@ -88,6 +88,42 @@ full-map), then applies the camera transform and shader chain.
   pixels. Fallback is per-asset, per-frame, and free (hash is already
   computed for cache keys).
 
+### 3a. Diorama pass — `SceneLayer::Geometry` (ticket W16-06)
+
+A standalone pass (`rf_renderer::diorama::DioramaPass`), not a shader-chain
+stage — like the fog pass (§4's common interface is one input texture;
+this one needs a ground texture, a sprite-cutout texture, and a real
+vertex buffer). Consumes `SceneLayer::Geometry` (produced in `rf-enhance`
+from `DecodedLevel.collision` via `solidity_mask`/`geometry_layer`) plus
+the sprite layer, resolved by the app shell (`crates/retroforge/src/
+enhanced_view.rs::compose_diorama`) exactly like every other cross-crate
+layer (§3's own "shell-mediated" split).
+
+- **Mesh**: `rf_renderer::diorama_mesh::build_vertices` is a pure CPU
+  function — a textured ground plane, solid tiles extruded into boxes
+  (textured top face, flat-shaded side faces), sprites as upright
+  billboards at their OAM/entity-table footprint with a soft procedural
+  contact shadow underneath. Emitted **already sorted back-to-front**
+  (farthest tile row first) because this pass, like every other one in
+  this crate, has no depth attachment — painter's algorithm, not
+  `DepthStencilState`.
+- **Camera**: fixed pitch (52°) and fixed vertical FOV, framing the whole
+  tile grid; view/projection matrices are a 64-byte UBO
+  (`shaders/diorama.wgsl`'s `Camera`), built by hand-rolled column-major
+  4x4 math (`rf_renderer::diorama::camera_matrices` — this crate has no
+  matrix-library dependency). Only the camera pitches; input and
+  hit-testing stay strictly 2D and are untouched by this pass.
+- **Sprite source**: the already-extracted sprite-only layer
+  (`rf_renderer::layers::LayeredFrame::sprite_rgba`, ticket W3-03's
+  existing pipeline) — the simplest correct source per the ticket brief,
+  over building a second per-sprite atlas.
+- **Budget gate**: reuses `rf_renderer::fog::BudgetGate`/`DISABLE_P95_MS`
+  directly (§8) rather than inventing a second threshold.
+- **Honesty**: Diorama tier two (§2 of `docs/design/
+  ENHANCEMENT_WAVE_16.md`) is Game-Aware-only, gated on a profile whose
+  decode actually produced a collision mask; the badge names it
+  ("Diorama: walls") only when effective.
+
 ## 4. Shader chain
 
 - WGSL passes with a common interface: `tex_in, sampler, params: UBO →

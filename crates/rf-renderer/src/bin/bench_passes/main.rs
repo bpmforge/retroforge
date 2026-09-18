@@ -23,6 +23,8 @@ mod minijson;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rf_renderer::diorama::DioramaPass;
+use rf_renderer::diorama_mesh::{Billboard, DioramaScene};
 use rf_renderer::fog::{FogParams, FogPass};
 use rf_renderer::gpu::GpuContext;
 use rf_renderer::shader_chain::{ChainStage, ShaderChain};
@@ -69,6 +71,10 @@ fn main() {
         let samples = time_fog_pass(&gpu, &src, w, h);
         rows.push(pass_row("fog", &size_label, &samples, &gpu));
         report("fog", &size_label, &samples);
+
+        let samples = time_diorama_pass(&gpu, w, h);
+        rows.push(pass_row("diorama", &size_label, &samples, &gpu));
+        report("diorama", &size_label, &samples);
     }
 
     let evidence_path = evidence_path();
@@ -185,6 +191,70 @@ fn time_fog_pass(gpu: &GpuContext, src: &[u8], w: u32, h: u32) -> Vec<Duration> 
         let t0 = Instant::now();
         fog.render(gpu, src, src, w, h, params)
             .expect("bench-passes: fog pass render failed");
+        samples.push(t0.elapsed());
+    }
+    samples
+}
+
+/// Times [`DioramaPass::render`] end-to-end (ticket W16-06;
+/// `docs/design/ENHANCEMENT_WAVE_16.md` §5/§8) — upload ground+sprite
+/// textures and a real per-tile vertex buffer, render, blocking readback.
+/// The tile grid scales with the requested output size (`w`x`h` /
+/// `tile_px`) so 512x448 exercises a proportionally larger mesh than
+/// 256x240, rather than timing a fixed-size scene twice; a checkerboard
+/// solidity pattern (every other tile a wall) and one billboard per open
+/// tile give this a realistic mix of ground/box/billboard/shadow
+/// primitives rather than an all-open or all-solid best/worst case.
+fn time_diorama_pass(gpu: &GpuContext, w: u32, h: u32) -> Vec<Duration> {
+    const TILE_PX: u32 = 16;
+    let tiles_w = (w / TILE_PX).max(1);
+    let tiles_h = (h / TILE_PX).max(1);
+    let (ground_w, ground_h) = (tiles_w * TILE_PX, tiles_h * TILE_PX);
+    let ground = synthetic_frame(ground_w, ground_h);
+    let sprite = synthetic_frame(TILE_PX, TILE_PX);
+
+    let mut solid = Vec::with_capacity((tiles_w * tiles_h) as usize);
+    let mut depth = Vec::with_capacity((tiles_w * tiles_h) as usize);
+    let mut billboards = Vec::new();
+    for row in 0..tiles_h {
+        for col in 0..tiles_w {
+            let is_solid = (row + col) % 2 == 0;
+            solid.push(u8::from(is_solid));
+            depth.push(if is_solid { 8 } else { 0 });
+            if !is_solid {
+                billboards.push(Billboard {
+                    center_x_px: col as f32 * TILE_PX as f32 + TILE_PX as f32 / 2.0,
+                    center_z_px: row as f32 * TILE_PX as f32 + TILE_PX as f32 / 2.0,
+                    width_px: 8.0,
+                    height_px: 8.0,
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                });
+            }
+        }
+    }
+    let scene = DioramaScene {
+        tiles_w,
+        tiles_h,
+        tile_px: TILE_PX as f32,
+        solid: &solid,
+        depth: &depth,
+        billboards: &billboards,
+    };
+    let vertices = rf_renderer::diorama_mesh::build_vertices(&scene);
+
+    let pass = DioramaPass::new(gpu);
+    let render_once = || {
+        pass.render(
+            gpu, &vertices, &ground, ground_w, ground_h, &sprite, TILE_PX, TILE_PX, tiles_w,
+            tiles_h, TILE_PX, w, h,
+        )
+        .expect("bench-passes: diorama pass render failed")
+    };
+    let _ = render_once(); // warm-up, same reasoning as time_shader_pass
+    let mut samples = Vec::with_capacity(FRAMES);
+    for _ in 0..FRAMES {
+        let t0 = Instant::now();
+        let _ = render_once();
         samples.push(t0.elapsed());
     }
     samples

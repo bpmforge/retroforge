@@ -98,6 +98,72 @@ pub fn solidity_mask(
     )
 }
 
+/// Extrusion height, in eighths of a tile edge, that every solid tile
+/// gets from [`geometry_layer`] today (`docs/design/ENHANCEMENT_WAVE_16.md`
+/// §5: "fixed height") — eighths rather than a bare `bool` so a future
+/// per-collision-bit height (a low ledge vs. a tall wall) can vary this
+/// field without a schema change; `8` eighths is one full tile-edge-tall
+/// cube, the plainest "wall" reading.
+pub const WALL_HEIGHT_EIGHTHS: u8 = 8;
+
+/// Produce a [`SceneLayer::Geometry`] from one decoded screen's tiles
+/// (`docs/design/ENHANCEMENT_WAVE_16.md` §5's missing scene-graph
+/// producer, named in this module's own doc above).
+///
+/// **NON_GOALS #11, structural, not a comment on the caller.** Unlike
+/// [`solidity_mask`] (which places the visited-only obligation on its
+/// caller), this function takes exactly the tiles a decode actually
+/// produced — `tiles.len()` must equal `tiles_w * tiles_h` or this
+/// returns `None` — so there is no way to hand it a synthesized "whole
+/// level" guess without first building a `tiles` slice of the wrong
+/// length, which fails loudly rather than extruding invented geometry.
+///
+/// `collision_table`/`bits`/`solid_bit_name` are `crate::scene_graph::
+/// solidity_mask`'s own parameters (module doc there explains the
+/// `room_grid`/`metatile_screens` shared shape); `tile_px` is the pixel
+/// edge of one tile in `tiles`' own space (a `metatile_screens` caller
+/// passes `LevelGeometry::metatile_px`, a `room_grid` caller passes its
+/// raw tile size); `origin_px` is where tile `(0, 0)`'s top-left corner
+/// sits in world-pixel space (the same space `LiveCamera`/
+/// `SpriteInstance` use), so a caller placing this alongside sprites does
+/// not need a second coordinate system.
+///
+/// Returns `None` when `tiles.len() != tiles_w * tiles_h` (shape
+/// mismatch — see above) or when [`solidity_mask`] itself returns `None`
+/// (the declared `bits` do not name `solid_bit_name`, or name a position
+/// past the eighth bit).
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn geometry_layer(
+    level: LevelId,
+    tiles: &[u8],
+    tiles_w: u32,
+    tiles_h: u32,
+    tile_px: u32,
+    origin_px: (i32, i32),
+    collision_table: &[u8],
+    bits: &str,
+    solid_bit_name: &str,
+) -> Option<SceneLayer> {
+    if tiles.len() != (tiles_w as usize).checked_mul(tiles_h as usize)? {
+        return None;
+    }
+    let solid = solidity_mask(tiles, collision_table, bits, solid_bit_name)?;
+    let depth = solid
+        .iter()
+        .map(|&s| if s == 1 { WALL_HEIGHT_EIGHTHS } else { 0 })
+        .collect();
+    Some(SceneLayer::Geometry {
+        level,
+        tiles_w,
+        tiles_h,
+        tile_px,
+        solid,
+        depth,
+        origin_px,
+    })
+}
+
 /// Opaque handle into a GPU texture the shell owns — resolution happens
 /// outside this crate (module doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -207,6 +273,31 @@ pub enum SceneLayer {
     HudPinned { region: HudRegion, anchor: Anchor },
     /// Plugin/debugger overlay commands.
     OverlayCmds { cmds: Vec<DrawCmd> },
+    /// The "walls pop up" 3D geometry layer (ticket W16-06;
+    /// `docs/design/ENHANCEMENT_WAVE_16.md` §5): a per-tile solidity mask
+    /// and depth field over a decoded level, for the app-side compositor
+    /// (`crates/retroforge`) to extrude into boxes. Producer:
+    /// [`geometry_layer`] below (rf-enhance side) and
+    /// `crate::level_view::diorama_geometry_layer` (the profile-aware
+    /// wrapper). `origin_px` is the top-left of tile `(0, 0)` in the same
+    /// world-pixel space `LiveCamera`/`SpriteInstance` already use, so the
+    /// shell can place billboards on this grid without a second
+    /// coordinate system.
+    Geometry {
+        level: LevelId,
+        tiles_w: u32,
+        tiles_h: u32,
+        tile_px: u32,
+        /// One byte per tile, row-major (`row * tiles_w + col`), `0`/`1` —
+        /// same shape [`solidity_mask`] returns.
+        solid: Vec<u8>,
+        /// Extrusion height per tile, same indexing as `solid`. Today
+        /// every solid tile gets [`WALL_HEIGHT_EIGHTHS`] and every open
+        /// tile gets `0` (§5: "fixed height") — a real per-tile-type
+        /// height is future work the field already has room for.
+        depth: Vec<u8>,
+        origin_px: (i32, i32),
+    },
 }
 
 /// The renderer contract itself (§7): a camera plus back-to-front layers.
@@ -270,6 +361,15 @@ mod tests {
                     color_index: 3,
                 }],
             },
+            SceneLayer::Geometry {
+                level: LevelId(1),
+                tiles_w: 2,
+                tiles_h: 1,
+                tile_px: 8,
+                solid: vec![1, 0],
+                depth: vec![WALL_HEIGHT_EIGHTHS, 0],
+                origin_px: (0, 0),
+            },
         ];
 
         let graph = SceneGraph {
@@ -284,7 +384,7 @@ mod tests {
         };
         assert_eq!(
             graph.layers.len(),
-            7,
+            8,
             "one constructed value per §7 variant"
         );
     }
@@ -358,6 +458,107 @@ mod tests {
             solidity_mask(&[0], &[0], "a,b,c,d,e,f,g,h,solid", "solid"),
             None,
             "bit index 8 cannot exist in a u8 attribute byte"
+        );
+    }
+
+    // --- geometry_layer (ticket W16-06) ---------------------------------
+
+    #[rustfmt::skip]
+    const RING_ROOM: [u8; 9] = [
+        0x02, 0x02, 0x02,
+        0x02, 0x01, 0x02,
+        0x02, 0x02, 0x02,
+    ];
+    const RING_COLLISION: [u8; 3] = [0, 0, 0b1]; // 0 unused, 1 open, 2 solid
+
+    #[test]
+    fn geometry_layer_carries_the_solid_mask_and_a_fixed_wall_height() {
+        let layer = geometry_layer(
+            LevelId(7),
+            &RING_ROOM,
+            3,
+            3,
+            8,
+            (16, 32),
+            &RING_COLLISION,
+            "solid,hazard",
+            "solid",
+        )
+        .expect("a well-shaped room with a declared solid bit must produce a layer");
+
+        let SceneLayer::Geometry {
+            level,
+            tiles_w,
+            tiles_h,
+            tile_px,
+            solid,
+            depth,
+            origin_px,
+        } = layer
+        else {
+            panic!("expected SceneLayer::Geometry");
+        };
+        assert_eq!(level, LevelId(7));
+        assert_eq!((tiles_w, tiles_h, tile_px), (3, 3, 8));
+        assert_eq!(origin_px, (16, 32));
+        assert_eq!(
+            solid,
+            vec![1, 1, 1, 1, 0, 1, 1, 1, 1],
+            "wall ring, open centre"
+        );
+        assert_eq!(
+            depth,
+            vec![
+                WALL_HEIGHT_EIGHTHS,
+                WALL_HEIGHT_EIGHTHS,
+                WALL_HEIGHT_EIGHTHS,
+                WALL_HEIGHT_EIGHTHS,
+                0,
+                WALL_HEIGHT_EIGHTHS,
+                WALL_HEIGHT_EIGHTHS,
+                WALL_HEIGHT_EIGHTHS,
+                WALL_HEIGHT_EIGHTHS,
+            ],
+            "every solid tile gets the same fixed height; the open centre gets none"
+        );
+    }
+
+    #[test]
+    fn geometry_layer_is_none_when_the_tile_count_does_not_match_the_grid() {
+        // 9 tiles handed in but the grid claims 4x4 -- a caller bug (or a
+        // synthesized/guessed slice) must fail loudly, not extrude a
+        // misaligned guess (NON_GOALS #11, structural per this fn's doc).
+        assert_eq!(
+            geometry_layer(
+                LevelId(1),
+                &RING_ROOM,
+                4,
+                4,
+                8,
+                (0, 0),
+                &RING_COLLISION,
+                "solid,hazard",
+                "solid",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn geometry_layer_is_none_when_the_solid_bit_is_not_declared() {
+        assert_eq!(
+            geometry_layer(
+                LevelId(1),
+                &RING_ROOM,
+                3,
+                3,
+                8,
+                (0, 0),
+                &RING_COLLISION,
+                "hazard,platform",
+                "solid",
+            ),
+            None
         );
     }
 }

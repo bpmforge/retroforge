@@ -2341,6 +2341,19 @@ impl RetroForgeApp {
             crate::level_view::find_matching_profile(&Self::profiles_root(), hashes)
                 .map(|(_, path)| path)
         });
+        // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
+        // struct's own doc comment calls "false until a profile loader is
+        // wired") was never actually assigned anywhere once the loader
+        // above WAS wired (W5-06/W11-02) -- `self.matched_profile`
+        // (`Option<PathBuf>`) became the real signal and this bool was
+        // simply left behind, always false. That silently broke every
+        // profile-gated feature row's `Availability` (`crate::enhance_ui::
+        // feature_rows`/`badge_text`/`badge_breakdown` all take this bool)
+        // regardless of whether a profile genuinely matched — found while
+        // wiring the Diorama row, which inherits the same gating. Kept in
+        // sync with the real signal here, the one place `matched_profile`
+        // itself is (re)computed.
+        self.profile_matched = self.matched_profile.is_some();
         // Ticket W11-02: decode the level now, once. `None` when no
         // profile matched or it declares no decodable level — both
         // ordinary, neither an error (`LevelSession::open`'s own doc).
@@ -3588,10 +3601,15 @@ impl RetroForgeApp {
                     // this is where a user finds out what they are looking
                     // at. It stays in the bar for exactly that reason: a
                     // badge behind a menu is a badge nobody reads.
+                    let diorama_available = self
+                        .level_session
+                        .as_ref()
+                        .is_some_and(crate::level_view::LevelSession::has_collision);
                     let badge = crate::enhance_ui::badge_text(
                         self.console_label,
                         &self.current_game_settings,
                         self.profile_matched,
+                        diorama_available,
                     );
                     // A CHIP, not a button. It is a status readout that
                     // happens to carry a hover breakdown and a hold-to-peek
@@ -3611,6 +3629,7 @@ impl RetroForgeApp {
                     let breakdown = crate::enhance_ui::badge_breakdown(
                         &self.current_game_settings,
                         self.profile_matched,
+                        diorama_available,
                     );
                     response.clone().on_hover_ui(|ui| {
                         for line in &breakdown {
@@ -6229,6 +6248,55 @@ impl RetroForgeApp {
         self.level_session.is_some()
     }
 
+    /// Ticket W16-06: switch the current game's mode exactly as the mode
+    /// picker does, without going through egui.
+    #[doc(hidden)]
+    pub fn set_mode_for_test(&mut self, mode: crate::game_settings::Mode) {
+        self.current_game_settings.mode = mode;
+    }
+
+    /// Ticket W16-06: turn Diorama on/off exactly as its Enhance-workspace
+    /// row does (`crate::enhance_ui`'s "diorama" row) — a settings flip,
+    /// no probe of its own (unlike full-level view) since the geometry is
+    /// derived from the already-decoded, already-persistent level.
+    #[doc(hidden)]
+    pub fn set_diorama_for_test(&mut self, on: bool) {
+        self.current_game_settings.diorama = on;
+    }
+
+    /// The status-bar badge text exactly as the toolbar renders it
+    /// (ticket W16-06's kittest scenario needs this without a screenshot).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn badge_text_for_test(&self) -> String {
+        let diorama_available = self
+            .level_session
+            .as_ref()
+            .is_some_and(crate::level_view::LevelSession::has_collision);
+        crate::enhance_ui::badge_text(
+            self.console_label,
+            &self.current_game_settings,
+            self.profile_matched,
+            diorama_available,
+        )
+    }
+
+    /// The badge's hover breakdown exactly as the toolbar renders it
+    /// (ticket W16-06's kittest scenario: "sees the badge text").
+    #[doc(hidden)]
+    #[must_use]
+    pub fn badge_breakdown_for_test(&self) -> Vec<String> {
+        let diorama_available = self
+            .level_session
+            .as_ref()
+            .is_some_and(crate::level_view::LevelSession::has_collision);
+        crate::enhance_ui::badge_breakdown(
+            &self.current_game_settings,
+            self.profile_matched,
+            diorama_available,
+        )
+    }
+
     /// The live camera position the probe reported, in level space.
     #[doc(hidden)]
     #[must_use]
@@ -7598,6 +7666,10 @@ impl RetroForgeApp {
                     }),
                     settings: &mut self.current_game_settings,
                     profile_matched: self.profile_matched,
+                    diorama_available: self
+                        .level_session
+                        .as_ref()
+                        .is_some_and(crate::level_view::LevelSession::has_collision),
                     compare_mode: &mut self.compare_mode,
                     compare_divider: &mut self.compare_divider,
                     map_texture: self.ultrawide_texture.as_ref(),

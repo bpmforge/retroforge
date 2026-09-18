@@ -3757,3 +3757,21 @@ stories, 10 decisions).
   noticed rather than silently absorbed. Lesson RF-L-14 records the
   general rule. Gate: rf-snes 313 passing, blargg 3 of 3 in release,
   the ignored SNES suites exit 0, arch OK.
+
+- **W16-06 — geometry layer and the diorama compositor, first slice**
+  (2026-09-18, lane A). Tier two of the Diorama plan exists as
+  rendering code: a Geometry scene layer carries a solid mask and a
+  depth per tile from a decoded level's own collision table, never a
+  guess; a pure mesh builder turns it into a ground plane, boxes for
+  solid tiles with textured tops and shaded sides, and upright sprite
+  billboards at their footprint with soft contact shadows, drawn back
+  to front; a WGSL pass views it from a fixed 52-degree pitch and costs
+  about 2 ms p95, behind the shared budget gate. The feature row reads
+  "Diorama: walls" and is offered only in Game-Aware mode on a profile
+  with a collision table. Found on the way: the app's profile-matched
+  flag had stopped being assigned, so every profile-gated feature row
+  was dead; fixed at its one site. Not yet done: the live on-screen
+  wiring, filed as W16-13, so the walls are not visible in play yet;
+  billboards assume 8x8 sprites; camera framing is a heuristic. Gate:
+  workspace **2074 passing / 0 failed / 40 ignored**, clippy clean,
+  arch OK, GPU evidence valid.

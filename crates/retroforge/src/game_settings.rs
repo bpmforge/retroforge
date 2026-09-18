@@ -155,6 +155,10 @@ pub struct GameSettings {
     pub deflicker: bool,
     pub widescreen_decoded: bool,
     pub full_level_view: bool,
+    /// Ticket W16-06 (`docs/design/ENHANCEMENT_WAVE_16.md` §5): Diorama
+    /// tier two, "walls pop up" — off by default, same law-6 posture as
+    /// every toggle above.
+    pub diorama: bool,
     /// Shader name, `None` for the default pipeline. A string rather than
     /// an enum because W3-02a owns the shader set and this must not have to
     /// change when that lands.
@@ -225,6 +229,7 @@ impl GameSettings {
             ("deflicker", self.deflicker),
             ("widescreen_decoded", self.widescreen_decoded),
             ("full_level_view", self.full_level_view),
+            ("diorama", self.diorama),
         ] {
             if on {
                 fields.insert(key.to_string(), "true".to_string());
@@ -291,6 +296,7 @@ impl GameSettings {
                 "deflicker" => settings.deflicker = value == "true",
                 "widescreen_decoded" => settings.widescreen_decoded = value == "true",
                 "full_level_view" => settings.full_level_view = value == "true",
+                "diorama" => settings.diorama = value == "true",
                 "trust" => {
                     settings.trust = rf_enhance::trust::TrustLadder::from_settings_value(value);
                 }
@@ -665,7 +671,12 @@ mod mode_and_feature_persistence_tests {
     #[test]
     fn enhancement_toggles_persist_and_an_untouched_game_writes_none() {
         let untouched = GameSettings::default().to_text();
-        for key in ["deflicker", "widescreen_decoded", "full_level_view"] {
+        for key in [
+            "deflicker",
+            "widescreen_decoded",
+            "full_level_view",
+            "diorama",
+        ] {
             assert!(
                 !untouched.contains(key),
                 "an untouched game must not write `{key}`:\n{untouched}"
@@ -675,11 +686,13 @@ mod mode_and_feature_persistence_tests {
         let s = GameSettings {
             deflicker: true,
             full_level_view: true,
+            diorama: true,
             ..GameSettings::default()
         };
         let restored = GameSettings::from_text(&s.to_text()).expect("parses");
         assert!(restored.deflicker);
         assert!(restored.full_level_view);
+        assert!(restored.diorama);
         assert!(
             !restored.widescreen_decoded,
             "a toggle that was never set must stay off"

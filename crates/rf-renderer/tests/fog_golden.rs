@@ -73,7 +73,7 @@ fn synthetic_scene() -> Vec<u8> {
             // A silhouette: pixels inside a centered rectangle are opaque,
             // everything outside is transparent -- this is the "mask"
             // acceptance criterion 1 says must survive unchanged.
-            let inside = x >= 16 && x < 48 && y >= 8 && y < 24;
+            let inside = (16..48).contains(&x) && (8..24).contains(&y);
             out.extend_from_slice(&[base, base / 2, 255 - base, if inside { 255 } else { 0 }]);
         }
     }
@@ -94,7 +94,7 @@ fn synthetic_density() -> Vec<u8> {
             // edges -- deterministic, no host-side unbounded loop (law 8).
             let dx = (tx as i32 - 4).unsigned_abs();
             let dy = (ty as i32 - 4).unsigned_abs();
-            let d = 255u32.saturating_sub((dx + dy) as u32 * 40);
+            let d = 255u32.saturating_sub((dx + dy) * 40);
             let density = d.min(255) as u8;
             out.extend_from_slice(&[density, density, density, 255]);
         }
