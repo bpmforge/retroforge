@@ -189,8 +189,10 @@ mod tests {
         // `begin_pass` is what other egui-internal tests use to advance
         // `Context::time` without a Window or a Painter.
         let advance = |seconds: f64| {
-            let mut input = egui::RawInput::default();
-            input.predicted_dt = seconds as f32;
+            let input = egui::RawInput {
+                predicted_dt: seconds as f32,
+                ..egui::RawInput::default()
+            };
             ctx.begin_pass(input);
             let _ = ctx.end_pass();
         };

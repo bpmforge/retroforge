@@ -131,6 +131,12 @@ pub struct PathSettings {
     pub cache_dir: Option<PathBuf>,
     /// LRU cache cap in megabytes.
     pub cache_cap_mb: u64,
+    /// Ticket W15-05, `UX_WAVE_15.md` §4.3: a folder of user-supplied box
+    /// art, matched by normalized title (`crate::thumbnail::find_user_art`)
+    /// when a game has no save-state screenshot or first-frame capture
+    /// yet. `None` (the default) means that source contributes nothing —
+    /// never an error, since most players will never set this.
+    pub art_folder: Option<PathBuf>,
 }
 
 impl Default for PathSettings {
@@ -142,8 +148,19 @@ impl Default for PathSettings {
             // library, small enough that nobody discovers it by running out
             // of disk.
             cache_cap_mb: 2048,
+            art_folder: None,
         }
     }
+}
+
+/// Ticket W15-05, `UX_WAVE_15.md` §3: the library screen's own settings —
+/// currently just the Grid/List toggle, kept as its own `[library]`
+/// section rather than folded into `paths` since it is a view preference,
+/// not a filesystem location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LibrarySettings {
+    pub view: crate::library::LibraryView,
 }
 
 /// Everything in `settings.toml`.
@@ -158,6 +175,8 @@ pub struct AppSettings {
     /// its WCAG tests measured a palette egui never saw. This is the
     /// home; `crate::app` reads it into `ctx.set_visuals`.
     pub accessibility: crate::accessibility::AccessibilitySettings,
+    /// Ticket W15-05: the Grid/List toggle, persisted (acceptance 2).
+    pub library: LibrarySettings,
     /// Tables and keys this build does not know, kept verbatim so a newer
     /// build's settings survive an older build touching the file (module
     /// doc).
@@ -173,6 +192,7 @@ struct KnownSettings {
     audio: AudioSettings,
     paths: PathSettings,
     accessibility: crate::accessibility::AccessibilitySettings,
+    library: LibrarySettings,
 }
 
 impl AppSettings {
@@ -188,6 +208,7 @@ impl AppSettings {
             video: self.video.clone(),
             audio: self.audio.clone(),
             paths: self.paths.clone(),
+            library: self.library,
         };
         let mut table = toml::Table::try_from(known).map_err(|e| e.to_string())?;
         for (key, value) in &self.unknown {
@@ -208,7 +229,10 @@ impl AppSettings {
 
         let mut unknown = toml::Table::new();
         for (key, value) in &table {
-            if !matches!(key.as_str(), "video" | "audio" | "paths" | "accessibility") {
+            if !matches!(
+                key.as_str(),
+                "video" | "audio" | "paths" | "accessibility" | "library"
+            ) {
                 unknown.insert(key.clone(), value.clone());
             }
         }
@@ -234,6 +258,7 @@ impl AppSettings {
             video: section("video").try_into().unwrap_or_default(),
             audio: section("audio").try_into().unwrap_or_default(),
             paths: section("paths").try_into().unwrap_or_default(),
+            library: section("library").try_into().unwrap_or_default(),
             unknown,
         })
     }

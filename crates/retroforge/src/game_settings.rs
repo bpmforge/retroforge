@@ -598,8 +598,10 @@ mod mode_and_feature_persistence_tests {
 
         #[test]
         fn favourite_persists_independently_of_play_history() {
-            let mut settings = GameSettings::default();
-            settings.favourite = true;
+            let settings = GameSettings {
+                favourite: true,
+                ..GameSettings::default()
+            };
             let restored =
                 GameSettings::from_text(&settings.to_text()).expect("self-written file parses");
             assert!(restored.favourite);

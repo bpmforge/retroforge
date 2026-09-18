@@ -3673,3 +3673,18 @@ stories, 10 decisions).
   names a plane without a public source, so A Link to the Past waits
   for the detector to find its plane empirically. Gate: crate tests
   green, workspace **1995 passing / 0 failed**, arch OK.
+
+- **W15-05 — thumbnails and the card grid** (2026-09-18, lane A). The
+  library the spec drew in §3.1, in its local-only form. Each game's
+  thumbnail is chosen by one pure rule: the newest save-state
+  screenshot, else a first-frame capture taken once on the first boot
+  that draws something non-uniform and stored through the cache under
+  its existing size cap, else a PNG from a user art folder matched by
+  normalized title. A Grid/List toggle in the toolbar persists; cards
+  carry the title, a console badge, and badges for a matched profile,
+  saved states and enhanced settings, and share selection, favourite,
+  context menu and launch code with the rows so the list stays a full
+  view of its own. Games without art get a console-tinted placeholder,
+  never a picture. The libretro fetch under D-011 is W15-09. Gate:
+  workspace **2005 passing / 0 failed / 39 ignored**, clippy clean,
+  arch OK.
