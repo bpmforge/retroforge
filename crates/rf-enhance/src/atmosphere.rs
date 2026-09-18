@@ -83,7 +83,10 @@ use std::collections::VecDeque;
 
 use rf_core_api::{ColorMathOp, CoreEvent, PixelLayer, PpuPixel, SubPixel};
 
+use rf_profiles::schema::{AtmosphereLadder, Profile};
+
 use crate::scene_graph::{BgLayerId, SceneLayer};
+use crate::trust::{TrustLadder, TrustState};
 
 /// This heuristic's `crate::trust::TrustLadder` key (module doc).
 pub const HEURISTIC_ID: &str = "atmosphere-layer";
@@ -362,6 +365,117 @@ pub fn pinned_layer(
     scroll: (i64, i64),
 ) -> SceneLayer {
     extracted_bg_layer(layer, sub, width, height, scroll)
+}
+
+/// The plane a profile's `[atmosphere]` table pins, plus the ladder rung
+/// it asks for (ticket W16-10; `crate::atmosphere`'s own doc on
+/// [`pinned_layer`] names this exact gap: "`crates/rf-profiles/**` is
+/// outside this ticket's `write_scope` ... there is no existing profile ->
+/// ladder-pin wiring in this codebase to mirror yet"). This closes it.
+///
+/// **On "mirroring the anti-flicker path".** `ENHANCEMENT_WAVE_16.md` §4
+/// and `ENHANCEMENT_RUNTIME.md` §2a both describe a profile pinning
+/// `[antiflicker]`'s ladder state as the existing mechanism to mirror.
+/// It is not: a repository-wide search turns up no call site anywhere
+/// that reads `rf_profiles::schema::AntiFlicker` and calls
+/// `TrustLadder::pin` for it — `[antiflicker]`'s own `mode` field has
+/// never been wired to the ladder either. What *does* exist, and is what
+/// this actually mirrors structurally, is `crate::widescreen::
+/// WidescreenPolicies::from_profile(&Profile) -> Result<Self, PolicyError>`:
+/// read one optional profile table, produce a small typed value, do
+/// nothing else. `AtmospherePin::from_profile` follows that same shape;
+/// [`apply_profile_pin`] is the one addition beyond it, since this
+/// heuristic (unlike widescreen) has a `TrustLadder` to pin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtmospherePin {
+    /// `[atmosphere].plane` — the background plane index to pin.
+    pub plane: u8,
+    /// `[atmosphere].tint`, parsed to `(r, g, b)`. `None` when absent or
+    /// (defensively) malformed — `rf-profiles`'s loader already refuses a
+    /// malformed tint at load time, so a `Profile` reaching this function
+    /// is expected to carry only a valid one.
+    pub tint: Option<(u8, u8, u8)>,
+    /// `[atmosphere].strength`, `0.0..=1.0`.
+    pub strength: Option<f32>,
+    /// The ladder rung to pin `HEURISTIC_ID` to. `[atmosphere].ladder`
+    /// absent defaults to [`TrustState::Active`] (`schema::Atmosphere`'s
+    /// own doc: naming a plane at all is a declared fact, not a
+    /// shadow-mode guess) — the opposite default from the heuristic's own
+    /// fresh-install-shadow rule (D-004).
+    pub ladder: TrustState,
+}
+
+impl AtmospherePin {
+    /// Read a profile's `[atmosphere]` table, if present.
+    #[must_use]
+    pub fn from_profile(profile: &Profile) -> Option<Self> {
+        let atm = profile.atmosphere.as_ref()?;
+        let tint = atm.tint.as_deref().and_then(parse_hex_tint);
+        let ladder = match atm.ladder {
+            Some(AtmosphereLadder::Shadow) => TrustState::Shadow,
+            Some(AtmosphereLadder::Advisory) => TrustState::Advisory,
+            Some(AtmosphereLadder::Active) | None => TrustState::Active,
+        };
+        Some(AtmospherePin {
+            plane: atm.plane,
+            tint,
+            strength: atm.strength,
+            ladder,
+        })
+    }
+
+    /// Build this pin's `SceneLayer::ExtractedBg`, the pinned-plane half of
+    /// "drive `atmosphere::pinned_layer`" (acceptance criterion 2) —
+    /// [`from_profile`](Self::from_profile)/[`apply_profile_pin`] decide
+    /// trust state without ever seeing a live frame; this is the other
+    /// half a caller runs once it has one, in place of running
+    /// [`AtmosphereDetector::observe`] at all.
+    #[must_use]
+    pub fn layer(
+        &self,
+        sub: &[SubPixel],
+        width: u16,
+        height: u16,
+        scroll: (i64, i64),
+    ) -> SceneLayer {
+        pinned_layer(self.plane, sub, width, height, scroll)
+    }
+}
+
+/// `"#rrggbb"` -> `(r, g, b)`. Returns `None` on anything else, rather
+/// than panicking — this is a defensive second check, not the primary
+/// validation (`rf-profiles`'s loader is that, and already refused a
+/// malformed tint before a `Profile` could exist at all).
+fn parse_hex_tint(s: &str) -> Option<(u8, u8, u8)> {
+    let hex = s.strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+/// Apply a profile's `[atmosphere]` pin to `ladder`, if the profile has
+/// one. Returns the pin applied, or `None` when the profile has no
+/// `[atmosphere]` table (nothing pinned, `ladder` untouched — a caller
+/// still runs [`AtmosphereDetector`] as normal).
+///
+/// This is the whole of what "a profile may pin the plane directly, skip
+/// detection" (`ENHANCEMENT_WAVE_16.md` §4) means at the ladder level:
+/// [`TrustLadder::pin`] wins over the user's own setting
+/// (`TrustLadder::state`'s own doc), so once this runs,
+/// `ladder.should_act(HEURISTIC_ID, scene)` is `true` (barring a live
+/// suppression) without [`AtmosphereDetector::observe`] ever having run.
+/// A caller still calls [`pinned_layer`] itself with the pin's `plane` to
+/// actually build the `SceneLayer` — that needs the live sub-screen
+/// buffer this function never sees, exactly as [`pinned_layer`]'s own doc
+/// already describes for its caller.
+pub fn apply_profile_pin(profile: &Profile, ladder: &mut TrustLadder) -> Option<AtmospherePin> {
+    let pin = AtmospherePin::from_profile(profile)?;
+    ladder.pin(HEURISTIC_ID, pin.ladder);
+    Some(pin)
 }
 
 /// Shadow-rung atmosphere-layer heuristic (module doc). Construct one per
@@ -881,8 +995,6 @@ mod tests {
 
     // --- Ticket W16-04: the pin mechanism and the ladder gating it ------
 
-    use crate::trust::{TrustLadder, TrustState};
-
     /// `pinned_layer` must build the same shape [`extracted_bg_layer`]
     /// would, WITHOUT running the detector at all -- "skip detection" is
     /// the whole point of a pin.
@@ -947,5 +1059,118 @@ mod tests {
         ladder.set_state(HEURISTIC_ID, TrustState::Shadow);
         ladder.pin(HEURISTIC_ID, TrustState::Active);
         assert!(ladder.should_act(HEURISTIC_ID, "scene-a"));
+    }
+
+    // --- Ticket W16-10: `[atmosphere]` -> `AtmospherePin`/`apply_profile_pin`
+
+    const ATMOSPHERE_VALID: &str = r#"
+        [meta]
+        profile_version = "0.1"
+        title = "Atmosphere Test"
+        console = "snes"
+        region = "ntsc"
+
+        [[identity]]
+        sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd"
+    "#;
+
+    /// `apply_profile_pin` on a profile with no `[atmosphere]` table pins
+    /// nothing and leaves the ladder exactly as a fresh one — this is the
+    /// "absent" half acceptance criterion 2 asks for.
+    #[test]
+    fn a_profile_with_no_atmosphere_table_pins_nothing() {
+        let outcome = rf_profiles::load_str(ATMOSPHERE_VALID).expect("valid profile");
+        assert!(outcome.profile.atmosphere.is_none());
+
+        let mut ladder = TrustLadder::new();
+        let pin = apply_profile_pin(&outcome.profile, &mut ladder);
+        assert!(pin.is_none());
+        assert_eq!(
+            ladder.state(HEURISTIC_ID),
+            TrustState::Shadow,
+            "no [atmosphere] table must leave the ladder untouched"
+        );
+    }
+
+    /// A profile with `[atmosphere]` and no `ladder` field pins Active by
+    /// default (`schema::Atmosphere`'s own doc) — the applied half.
+    #[test]
+    fn a_profile_atmosphere_table_with_no_ladder_field_pins_active_by_default() {
+        let text = format!("{ATMOSPHERE_VALID}\n[atmosphere]\nplane = 2\n");
+        let outcome = rf_profiles::load_str(&text).expect("valid profile");
+
+        let mut ladder = TrustLadder::new();
+        let pin = apply_profile_pin(&outcome.profile, &mut ladder)
+            .expect("a present [atmosphere] table must produce a pin");
+        assert_eq!(pin.plane, 2);
+        assert_eq!(pin.ladder, TrustState::Active);
+        assert!(
+            ladder.should_act(HEURISTIC_ID, "any-scene"),
+            "pinning Active must make should_act true without ever calling observe()"
+        );
+    }
+
+    /// An explicit `ladder = "shadow"` pin is honoured, and it wins over
+    /// whatever the user's own setting was — the same "pin beats user
+    /// setting" rule `crate::trust` already enforces for every heuristic.
+    #[test]
+    fn an_explicit_shadow_ladder_pin_is_honoured_over_the_users_setting() {
+        let text = format!("{ATMOSPHERE_VALID}\n[atmosphere]\nplane = 1\nladder = \"shadow\"\n");
+        let outcome = rf_profiles::load_str(&text).expect("valid profile");
+
+        let mut ladder = TrustLadder::new();
+        ladder.set_state(HEURISTIC_ID, TrustState::Active);
+        let pin = apply_profile_pin(&outcome.profile, &mut ladder).expect("pin present");
+        assert_eq!(pin.ladder, TrustState::Shadow);
+        assert!(
+            !ladder.should_act(HEURISTIC_ID, "any-scene"),
+            "a shadow pin must win over the user's own Active setting"
+        );
+    }
+
+    /// `tint`/`strength` round-trip from the TOML through to the parsed
+    /// pin.
+    #[test]
+    fn atmosphere_tint_and_strength_round_trip_into_the_pin() {
+        let text = format!(
+            "{ATMOSPHERE_VALID}\n[atmosphere]\nplane = 0\ntint = \"#336699\"\nstrength = 0.4\n"
+        );
+        let outcome = rf_profiles::load_str(&text).expect("valid profile");
+        let mut ladder = TrustLadder::new();
+        let pin = apply_profile_pin(&outcome.profile, &mut ladder).expect("pin present");
+        assert_eq!(pin.tint, Some((0x33, 0x66, 0x99)));
+        assert_eq!(pin.strength, Some(0.4));
+    }
+
+    /// `AtmospherePin::layer` is the "drives `atmosphere::pinned_layer`"
+    /// half of acceptance criterion 2: given a live sub-screen buffer, a
+    /// profile-declared pin builds the same `ExtractedBg` shape
+    /// `pinned_layer`/`extracted_bg_layer` would, on the pinned plane,
+    /// WITHOUT constructing or calling an `AtmosphereDetector` anywhere in
+    /// this test -- "skip detection" is the whole point.
+    #[test]
+    fn a_pin_drives_pinned_layer_on_the_declared_plane() {
+        let text = format!("{ATMOSPHERE_VALID}\n[atmosphere]\nplane = 2\n");
+        let outcome = rf_profiles::load_str(&text).expect("valid profile");
+        let pin =
+            AtmospherePin::from_profile(&outcome.profile).expect("[atmosphere] table present");
+
+        let sub = candidate_sub(2, 30, 1, ColorMathOp::AddHalf, 1.0);
+        let layer = pin.layer(&sub, WIDTH, HEIGHT, (5, 7));
+        match layer {
+            SceneLayer::ExtractedBg {
+                layer: BgLayerId(n),
+                width,
+                height,
+                scroll,
+                ..
+            } => {
+                assert_eq!(n, 2, "must build the plane the profile named, not a guess");
+                assert_eq!(width, WIDTH);
+                assert_eq!(height, HEIGHT);
+                assert_eq!(scroll, (5, 7));
+            }
+            other => panic!("expected ExtractedBg, got {other:?}"),
+        }
     }
 }

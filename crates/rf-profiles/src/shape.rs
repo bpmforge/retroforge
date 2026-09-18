@@ -190,6 +190,15 @@ fn known_shape() -> Shape {
             ]),
         ),
         (
+            "atmosphere",
+            Shape::Object(vec![
+                ("plane", Shape::Leaf),
+                ("tint", Shape::Leaf),
+                ("strength", Shape::Leaf),
+                ("ladder", Shape::Leaf),
+            ]),
+        ),
+        (
             "loading",
             Shape::Object(vec![(
                 "wait_loops",

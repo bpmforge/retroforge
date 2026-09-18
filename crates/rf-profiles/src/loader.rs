@@ -19,8 +19,19 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::error::ProfileError;
-use crate::schema::{Profile, SUPPORTED_PROFILE_MAJOR};
+use crate::schema::{Console, Profile, SUPPORTED_PROFILE_MAJOR};
 use crate::shape;
+
+/// Highest legal `[atmosphere].plane` index for a console (ticket W16-10):
+/// NES has one background plane (index 0); SNES has up to four (0-3),
+/// per `rf_core_api::PixelLayer::Background(n)`'s own doc that BG mode
+/// decides which of 0-3 exist.
+fn max_atmosphere_plane(console: Console) -> u8 {
+    match console {
+        Console::Nes => 0,
+        Console::Snes => 3,
+    }
+}
 
 /// A successfully-loaded profile plus any unknown-key warnings collected
 /// along the way (FR-PROF-004: "warns on unknown keys" — this is the type
@@ -90,6 +101,38 @@ pub fn load_str(text: &str) -> Result<LoadOutcome, ProfileError> {
                 index: idx,
                 label: entry.label.clone(),
             });
+        }
+    }
+
+    // `[atmosphere]` (ticket W16-10; GAME_PROFILES.md §2): plane range is
+    // per-console, so it is checked here rather than at the type level —
+    // the same reason `[[identity]]`'s hash check and the `source`
+    // citation checks above live in the loader and not in `schema.rs`.
+    if let Some(atm) = profile.atmosphere.as_ref() {
+        let max = max_atmosphere_plane(profile.meta.console);
+        if atm.plane > max {
+            let console = match profile.meta.console {
+                Console::Nes => "nes",
+                Console::Snes => "snes",
+            };
+            return Err(ProfileError::AtmospherePlaneOutOfRange {
+                console,
+                plane: atm.plane,
+                max,
+            });
+        }
+        if let Some(strength) = atm.strength {
+            if !(0.0..=1.0).contains(&strength) {
+                return Err(ProfileError::AtmosphereStrengthOutOfRange(strength));
+            }
+        }
+        if let Some(tint) = atm.tint.as_ref() {
+            let valid = tint.len() == 7
+                && tint.starts_with('#')
+                && tint[1..].chars().all(|c| c.is_ascii_hexdigit());
+            if !valid {
+                return Err(ProfileError::AtmosphereInvalidTint(tint.clone()));
+            }
         }
     }
 
@@ -303,6 +346,109 @@ mod tests {
         );
         let err = load_str(&text).expect_err("hashless identity entry must be rejected");
         assert!(matches!(err, ProfileError::IdentityMissingHash(0)));
+    }
+
+    // ---------------------------------------------------------------
+    // `[atmosphere]` (ticket W16-10; GAME_PROFILES.md §2).
+    // ---------------------------------------------------------------
+
+    /// A valid `[atmosphere]` table on an NES profile (plane 0 is the
+    /// only legal NES plane) loads clean, with `ladder` present.
+    #[test]
+    fn a_valid_atmosphere_table_loads_clean() {
+        let text = format!(
+            "{VALID}\n[atmosphere]\nplane = 0\ntint = \"#336699\"\nstrength = 0.5\nladder = \"shadow\"\n"
+        );
+        let outcome = load_str(&text).expect("valid [atmosphere] must load");
+        let atm = outcome
+            .profile
+            .atmosphere
+            .expect("atmosphere section must be present");
+        assert_eq!(atm.plane, 0);
+        assert_eq!(atm.tint.as_deref(), Some("#336699"));
+        assert_eq!(atm.strength, Some(0.5));
+        assert_eq!(atm.ladder, Some(crate::schema::AtmosphereLadder::Shadow));
+    }
+
+    /// A minimal `[atmosphere]` table (`plane` only) also loads clean —
+    /// `tint`/`strength`/`ladder` are all optional.
+    #[test]
+    fn a_minimal_atmosphere_table_loads_clean() {
+        let text = format!("{VALID}\n[atmosphere]\nplane = 0\n");
+        let outcome = load_str(&text).expect("a plane-only [atmosphere] must load");
+        let atm = outcome.profile.atmosphere.expect("must be present");
+        assert_eq!(atm.plane, 0);
+        assert!(atm.tint.is_none());
+        assert!(atm.strength.is_none());
+        assert!(atm.ladder.is_none());
+    }
+
+    /// An NES profile naming plane 1 must be rejected — NES has exactly
+    /// one background plane (index 0).
+    #[test]
+    fn an_atmosphere_plane_out_of_range_for_nes_is_rejected() {
+        let text = format!("{VALID}\n[atmosphere]\nplane = 1\n");
+        let err = load_str(&text).expect_err("plane 1 is out of range for NES");
+        assert!(matches!(
+            err,
+            ProfileError::AtmospherePlaneOutOfRange {
+                console: "nes",
+                plane: 1,
+                max: 0,
+            }
+        ));
+    }
+
+    /// A SNES profile allows planes 0-3 but rejects plane 4.
+    #[test]
+    fn an_atmosphere_plane_out_of_range_for_snes_is_rejected() {
+        let snes = VALID.replace("console = \"nes\"", "console = \"snes\"");
+        let text = format!("{snes}\n[atmosphere]\nplane = 4\n");
+        let err = load_str(&text).expect_err("plane 4 is out of range for SNES");
+        assert!(matches!(
+            err,
+            ProfileError::AtmospherePlaneOutOfRange {
+                console: "snes",
+                plane: 4,
+                max: 3,
+            }
+        ));
+        // The boundary itself (plane 3) must load clean.
+        let ok_text = format!("{snes}\n[atmosphere]\nplane = 3\n");
+        load_str(&ok_text).expect("plane 3 is the top of the SNES range");
+    }
+
+    /// `strength` outside `0.0..=1.0` is rejected.
+    #[test]
+    fn an_atmosphere_strength_out_of_range_is_rejected() {
+        let text = format!("{VALID}\n[atmosphere]\nplane = 0\nstrength = 1.5\n");
+        let err = load_str(&text).expect_err("strength 1.5 is out of range");
+        assert!(matches!(
+            err,
+            ProfileError::AtmosphereStrengthOutOfRange(v) if v == 1.5
+        ));
+    }
+
+    /// A `tint` that is not `#rrggbb` is rejected.
+    #[test]
+    fn an_atmosphere_tint_that_is_not_hex_is_rejected() {
+        for bad in ["blue", "#zzzzzz", "336699", "#3366"] {
+            let text = format!("{VALID}\n[atmosphere]\nplane = 0\ntint = \"{bad}\"\n");
+            let err = load_str(&text).expect_err(&format!("`{bad}` must be rejected"));
+            assert!(
+                matches!(err, ProfileError::AtmosphereInvalidTint(ref v) if v == bad),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    /// An unrecognised `ladder` value is a schema error (the enum
+    /// deserialize rejects it), not silently accepted.
+    #[test]
+    fn an_unrecognised_atmosphere_ladder_value_is_rejected() {
+        let text = format!("{VALID}\n[atmosphere]\nplane = 0\nladder = \"bogus\"\n");
+        let err = load_str(&text).expect_err("an unknown ladder rung must be rejected");
+        assert!(matches!(err, ProfileError::Deserialize(_)), "{err}");
     }
 
     #[test]

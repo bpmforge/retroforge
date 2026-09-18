@@ -58,3 +58,19 @@ bg4 = "auto"
 # area. bsnes-hd's default. `unsafe` "causes artifacts in many games" by
 # its own documentation, and this fixture gives no reason to take that.
 obj = "safe"
+
+# [atmosphere] (ticket W16-10) -- NOT because this fixture has a
+# translucent/fog plane. It does not: `fixtures/snes/rf-scroller-s/
+# FORMAT.md` and its `src/main.s` describe one scrolling BG-mode-0
+# playfield with no colour math anywhere, so there is nothing here for
+# `rf_enhance::atmosphere::AtmosphereDetector` to genuinely find. This
+# section exists purely to exercise the `[atmosphere]` schema end to end
+# against a real, loadable profile -- `ladder = "shadow"` is what keeps
+# that from being a false claim: it pins the heuristic to the
+# detect-and-record rung, never Active, so nothing here ever asserts fog
+# that was not built. Plane 0 is chosen because it is the one background
+# plane this fixture's own source (`src/main.s`) actually draws -- it
+# names no real fog/atmosphere effect on that plane.
+[atmosphere]
+plane = 0
+ladder = "shadow"

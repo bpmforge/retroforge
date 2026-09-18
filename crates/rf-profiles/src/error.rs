@@ -55,6 +55,20 @@ pub enum ProfileError {
         index: usize,
         label: String,
     },
+    /// `[atmosphere].plane` named a background plane index this console
+    /// does not have (ticket W16-10). NES has one background plane (0);
+    /// SNES has up to four (0-3) — `max` is the highest legal index for
+    /// the profile's own `[meta].console`.
+    AtmospherePlaneOutOfRange {
+        console: &'static str,
+        plane: u8,
+        max: u8,
+    },
+    /// `[atmosphere].strength` was outside `0.0..=1.0`.
+    AtmosphereStrengthOutOfRange(f32),
+    /// `[atmosphere].tint` was not `"#rrggbb"` (six hex digits after a
+    /// leading `#`).
+    AtmosphereInvalidTint(String),
 }
 
 impl fmt::Display for ProfileError {
@@ -87,6 +101,23 @@ impl fmt::Display for ProfileError {
                 f,
                 "`[[identity]]` entry {idx} specifies no hash (need at least one of \
                  sha256/sha1/md5/crc32)"
+            ),
+            ProfileError::AtmospherePlaneOutOfRange {
+                console,
+                plane,
+                max,
+            } => write!(
+                f,
+                "`[atmosphere].plane` = {plane} is out of range for console `{console}` \
+                 (valid: 0..={max})"
+            ),
+            ProfileError::AtmosphereStrengthOutOfRange(v) => write!(
+                f,
+                "`[atmosphere].strength` = {v} is out of range (valid: 0.0..=1.0)"
+            ),
+            ProfileError::AtmosphereInvalidTint(v) => write!(
+                f,
+                "`[atmosphere].tint` = `{v}` is not a `#rrggbb` hex colour"
             ),
         }
     }
