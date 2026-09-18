@@ -7155,8 +7155,9 @@
     "docs: EMULATION_CORES.md gains the SA-1 section; STATUS carries the arc"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 -- Wave 17 (SA-1) complete. Cost model per fullsnes DMA speed table with per-step contention flags (SNES-side wait while SA-1 holds BW-RAM mid-DMA remains unmodeled, stated). tests/sa1_determinism.rs (2 tests). Zeo: forced blank lifts at ~frame 4842 (PROBE_INSTR=70M) and toggles back later; census budget kept at the uniform 600 frames (no principled per-cart scaling); uniform with a named cause. SMRPG: apu.cpu.stopped=true while boot_running=true so $2140 never changes -- an SPC700 IPL/upload defect class, named in TESTING.md, outside SA-1 (candidate for the next SNES APU ticket). All 8 SA-1 archives: 5 render (Kirby SS, KDL3, PGA European Tour, PGA Tour 96 x2), 3 uniform with named causes (Zeo, SMRPG x2); PROBE_SA1REGS=1 reports no unknown register writes on any. Docs: EMULATION_CORES §3.5 SA-1, TESTING row + narrative + by-eye list for Brad (Kirby Super Star, Kirby's Dream Land 3). Gate: workspace 2213 passing / 0 failed / 43 ignored (agent + orchestrator), traceability OK.",
     "FILED 2026-09-18 on Brad's 'go' (D-013). Sources: fullsnes 'SNES Cart SA-1' sections (I/O map, interrupt/control both sides, timer, memory control, DMA, character conversion, arithmetic, VBR) extracted for briefs; snes.nesdev.org SA-1 pages. Clean-room, no emulator source (NFR-011). Shape per D-013: a second cpu::Cpu over an Sa1Bus, not a second CPU implementation."
    ],
    "stories": []

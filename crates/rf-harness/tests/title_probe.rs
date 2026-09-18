@@ -134,6 +134,7 @@ fn probe() {
                     idx.iter().take(8).collect::<Vec<_>>()
                 );
             }
+            print_sa1_reg_report(&core);
             continue;
         }
         // instruction-step the whole run, logging port/timer changes in a ring buffer
@@ -418,5 +419,28 @@ fn probe() {
         println!("    spc regs: a={:02x} x={:02x} y={:02x} ; F4-F7 in(spc reads)={:02x?} out(cpu reads)={:02x?} timers en={:?} counters={:?}",
             apu.cpu.a, apu.cpu.x, apu.cpu.y, apu.ports_in, apu.ports_out,
             apu.timers.iter().map(|t| t.enabled).collect::<Vec<_>>(), apu.timers.iter().map(|t| t.peek_counter()).collect::<Vec<_>>());
+        print_sa1_reg_report(&core);
+    }
+}
+
+/// Ticket W17-04 acceptance #4: print any `$22xx` write this run made to an
+/// offset `rf-snes` has no register for (see
+/// `rf_snes::sa1::Sa1Regs::unknown_write_offsets`'s doc) — a clean SA-1
+/// title should print nothing here. `PROBE_SA1REGS=1` opts in; silent
+/// (and free) for the 1000+ non-SA-1 titles this probe also runs against.
+fn print_sa1_reg_report(core: &rf_snes::core::SnesCore) {
+    if std::env::var("PROBE_SA1REGS").is_err() {
+        return;
+    }
+    let Some(sa1) = core.system().bus.sa1.as_ref() else {
+        return;
+    };
+    if sa1.regs.unknown_write_offsets.is_empty() {
+        println!("    sa1 unknown register writes: none");
+    } else {
+        println!(
+            "    sa1 unknown register writes: {:?}",
+            sa1.regs.unknown_write_offsets
+        );
     }
 }

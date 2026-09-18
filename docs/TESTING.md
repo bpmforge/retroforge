@@ -608,6 +608,7 @@ judgment call).
 | Golden fixtures | every released `.rfstate`/`.rfreplay` fixture loads on current main | FR-STATE-005 |
 | **Mode invariant** | same ROM + log run in Accuracy and Enhanced (all features on) ⇒ identical core hashes every frame | FR-MODE-002 |
 | Wrong-ROM refusal | state with mismatched normalized hash refused with diagnostic | FR-STATE-003 |
+| SA-1 determinism | two independent `SnesSystem::load` runs of a hand-assembled SA-1 cart, same instruction count ⇒ identical `StateRegion::ALL` snapshot; a save/load round trip taken mid-DMA-setup (armed, not yet triggered) resumes byte-identical to an uninterrupted run (suite: `crates/rf-snes/tests/sa1_determinism.rs`, ticket W17-04 — `rf-snes` has no crate-local suite named "determinism"/"mode-invariant" of its own; those names belong to `crates/retroforge/tests/mode_invariant_*.rs` above, out of W17-04's `write_scope`, so this is the SA-1-specific equivalent) | FR-CORE-039 |
 
 **10k-frame double-run: why `#[ignore]` + release-mode, and why no
 `docs/evidence/local-gate.json` row (ticket W1-08).** `crates/retroforge/tests/determinism.rs`'s
@@ -797,6 +798,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-21 | 1265 | **1012** | 115 | 138 | **0** | **0** |
 | SNES, after W16-11 | 1265 | **1012** | 115 | 138 | **0** | **0** |
 | SNES, after W17-01 | 1265 | **1015** | 120 | 130 | **0** | **0** |
+| SNES, after W17-04 | 1265 | **1017** | 118 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -964,6 +966,92 @@ behaviour).
 **By-eye check of Super Mario Kart's track and Pilotwings' flight view
 against a reference emulator is still pending — Brad's own verification,
 not run in this session** (unchanged from W14-21's note).
+
+**W17-04 (SA-1 slice 4: timing accuracy, determinism, census and docs)**,
+2026-09-18, release build. All eight real SA-1 archives in the library
+(law 5: named here only because this is test evidence, never in engine
+code) — **Kirby Super Star**, **Kirby's Dream Land 3**, **PGA European
+Tour**, both **PGA Tour '96** dumps, **Power Rangers Zeo: Battle
+Racers**, and both **Super Mario RPG** dumps — were probed individually
+with `title_probe`'s new `PROBE_SA1REGS=1` (prints
+`Sa1Regs::unknown_write_offsets`, the counter this ticket added for
+writes into `$22xx` offsets fullsnes's own I/O map table leaves blank)
+for 600 frames each: **all eight report `sa1 unknown register writes:
+none`.** Kirby Super Star, Kirby's Dream Land 3 and both PGA titles
+render (`varied_at` 97, 102, 32 and 32 frames respectively) — the four
+by-eye titles from W17-03's close note.
+
+**Power Rangers Zeo, traced further this ticket**: `PROBE_MODE=frames
+PROBE_FRAMES=1800` still shows `forced_blank=true` at 1800 frames (30 s
+game time), matching W17-03's note. Pushed further with an instruction-
+count probe (`PROBE_INSTR=70000000`, ~1200 emulated frames past that),
+forced blank **does lift** — the sampled snapshot at frame 4842 shows
+`forced_blank=false bright=15 mode=7`, `cgram_nonzero=220`,
+`vram_nonzero=46205`, `tm=[1100+obj]` (BG1/BG2/OBJ enabled), consistent
+with a Mode 7 track view having started drawing. But a `PROBE_MODE=frames
+PROBE_FRAMES=8000` run's `varied_at` is still `None`, and a fresh 8000-
+frame snapshot shows forced blank **back on** (`mode=1`) — the title
+toggles forced blank on and off across a long attract/track-select
+sequence, and the census's per-scanline palette-uniformity check never
+catches a varied frame inside an 8000-frame (133 s) window even though
+real content is being drawn partway through it. This is not chased
+further: it is a slow-boot/rendering-completeness question (is Mode 7 in
+this state actually drawing distinct pixels, or is the 4842-frame
+snapshot itself still uniform under the hood?), not a SA-1 register or
+timing gap, and 8000 frames is more than 13x the census's 600-frame
+budget for every other title in both libraries — scaling the census
+child's per-title budget for SA-1 carts specifically was considered and
+rejected as unprincipled: [`FRAMES`](../crates/rf-harness/tests/boot_census.rs)
+is a fixed wall-clock/frame cap applied uniformly, not derived from
+main-CPU instruction count, so there is no SA-1-specific quantity to
+scale it by — an SA-1 cart's main CPU runs exactly as many frames per
+census run as any other cart's. **Zeo stays in the "uniform screen"
+bucket, named cause: forced-blank toggles on a long boot/attract
+sequence well past any practical census budget; confirmed still
+producing SA-1 traffic with zero unknown register writes.**
+
+**Super Mario RPG, confirmed this ticket**: both dumps sit at the same
+spin `title_probe` found in W17-03 — `C4:0541: CMP $002140` /
+`C4:0545: BNE $0541`, a tight two-instruction loop, 10,000+ hits on each
+PC in a 20,000-instruction sample. This ticket's own trace adds the
+handshake's other half: **`apu.cpu.stopped=true`** — the SPC700 itself
+is halted (a `STOP`/`SLEEP`-shaped instruction, not a crash) while
+`apu.boot_running=true`, so nothing will ever write `$2140`/`$2141`
+again and the main CPU's compare can never succeed. `$2140`'s current
+value (`ports_in[0]`) is `0x5F`, `$2141` is `0x02`, and the main CPU's
+16-bit accumulator holds a different combination of the same two bytes —
+the two sides parted ways mid-handshake with the SPC700 driver going
+idle before writing the exact word the main CPU is waiting for. This is
+the standard SPC700 IPL/upload handshake (the same shape as every
+"waiting on $2140" pattern this project has already named for non-SA-1
+titles), entirely on the APU side of the machine — **named cause,
+explicitly out of SA-1 scope**: the SA-1 register report for both dumps
+reads `none`, so nothing about the coprocessor is implicated, and no
+change was made here.
+
+Census: run after this ticket's cost-model and register-counter changes
+("SNES, after W17-04" row above) — **1017/118/130/0/0**, up from
+1015/120/130/0/0 at W17-01 (before the second CPU existed). Every SA-1
+archive's bucket, confirmed individually via the `title_probe` run above
+(the census's own report only names Crashed/Timed-out titles, not every
+bucket's members): **rendered** — Kirby Super Star, Kirby's Dream Land 3,
+PGA European Tour, both PGA Tour '96 dumps (5 of the 8 SA-1 archives);
+**uniform screen, named cause** — Power Rangers Zeo (forced-blank
+toggles on a long attract sequence past any practical budget, above) and
+both Super Mario RPG dumps (SPC700 handshake stall, above) — 3 of 8. No
+SA-1 archive is refused, crashed, or timed out. Gate at close: see the
+commit trailer.
+
+**By-eye items for Brad (pending — not run in this session, same status
+as the DSP-1 titles above):**
+- **Kirby Super Star** — renders (`varied_at=97`); check the SA-1-
+  accelerated character-conversion/scrolling against a reference
+  emulator.
+- **Kirby's Dream Land 3** — renders (`varied_at=102`); same check.
+- **Super Mario RPG** — does **not** render in this build (see the SPC700
+  handshake finding above, out of SA-1 scope); nothing to by-eye until
+  the APU-side stall is separately investigated, so this item stays
+  conditional on that.
 
 **The second step of the triage is `crates/rf-harness/tests/title_probe.rs`**
 (ticket W14-11): an `#[ignore]`d, env-driven probe that instruction-steps

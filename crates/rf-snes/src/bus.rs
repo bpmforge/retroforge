@@ -181,6 +181,16 @@ pub struct SnesBus {
     /// Ticket W17-01 (D-013): the SA-1 CPU itself does not exist yet, only
     /// the SNES-side memory map and register storage.
     pub sa1: Option<crate::sa1::Sa1State>,
+    /// Set whenever a SNES-side access this `SnesSystem::step` (main CPU
+    /// instruction, its DMA, or its HDMA) has landed on the cartridge ROM
+    /// window (ticket W17-04's cost model — see
+    /// [`crate::sa1::Sa1Bus::access_cost`]'s doc). Cleared at the top of
+    /// every `SnesSystem::step`; read once, after the main CPU's share of
+    /// the step has finished, to decide whether THIS step's SA-1 catch-up
+    /// run contends with the SNES CPU for ROM.
+    pub(crate) sa1_rom_contended: bool,
+    /// Same as `sa1_rom_contended`, for the BW-RAM window.
+    pub(crate) sa1_bwram_contended: bool,
 }
 
 impl SnesBus {
@@ -285,6 +295,8 @@ impl SnesBus {
             dsp_window: None,
             dsp1: None,
             sa1: None,
+            sa1_rom_contended: false,
+            sa1_bwram_contended: false,
         }
     }
 
@@ -854,6 +866,13 @@ impl SnesBus {
 impl CpuBus for SnesBus {
     fn read(&mut self, addr: u32) -> u8 {
         let target = self.target(addr);
+        // Ticket W17-04: note ROM/BW-RAM contention for this step's SA-1
+        // catch-up — see `sa1_rom_contended`'s doc.
+        match target {
+            Target::Rom(_) => self.sa1_rom_contended = true,
+            Target::Sa1BwRam(_) => self.sa1_bwram_contended = true,
+            _ => {}
+        }
         let value = match target {
             Target::Rom(i) => self.rom[i],
             Target::Wram(i) => self.wram[i],
@@ -935,7 +954,14 @@ impl CpuBus for SnesBus {
             value,
         );
         self.open_bus = value;
-        match self.target(addr) {
+        let target = self.target(addr);
+        // Ticket W17-04: same contention note as `read`'s.
+        match target {
+            Target::Rom(_) => self.sa1_rom_contended = true,
+            Target::Sa1BwRam(_) => self.sa1_bwram_contended = true,
+            _ => {}
+        }
+        match target {
             Target::Wram(i) => self.wram[i] = value,
             Target::Sram(i) => self.sram[i] = value,
             Target::Register(offset) => self.write_register(offset, value),
