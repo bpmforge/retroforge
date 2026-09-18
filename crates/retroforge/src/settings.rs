@@ -62,6 +62,38 @@ impl ScaleMode {
     }
 }
 
+/// Which MetalFX mode (if any) Settings > Video should use (ticket W16-08;
+/// `docs/design/ENHANCEMENT_WAVE_16.md` §7 Path B). A **scaler** choice,
+/// not an enhancement-ladder toggle (CLAUDE.md law 6: it upscales the
+/// pixels the core already produced, so Accuracy Mode may use it) — it
+/// lives on `VideoSettings` next to `shader`/`scale_mode`, not in
+/// `rf-enhance`'s trust ladder. `Off` is the only variant a fresh install
+/// can boot with matches [`ScaleMode`]'s own "safest default" precedent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetalFxSetting {
+    /// No MetalFX pass; the plain shader-chain scaler
+    /// (`scale_mode`/`shader`) runs instead. Default — a fresh install
+    /// boots with this off regardless of hardware (CLAUDE.md law 6,
+    /// NON_GOALS #8), and it is also what a build/platform/device that
+    /// fails [`rf_renderer::MetalFxAvailability::is_available`] is pinned
+    /// to (the UI shows the reason from that type rather than letting the
+    /// setting persist to a value the current run cannot honor).
+    #[default]
+    Off,
+    /// `MTLFXSpatialScaler`, macOS + `metalfx` feature + supported device
+    /// only.
+    Spatial,
+    /// Not offered by this build (ticket W16-08's temporal attempt did not
+    /// reach a shippable, under-budget steady-state measurement — see
+    /// `rf_renderer::metalfx`'s module doc and
+    /// `crates/rf-renderer/tests/metalfx_bench.rs`'s
+    /// `metalfx_temporal_upscale_attempt`). Kept as a variant (rather than
+    /// deleted) so a settings file written by a future build that *does*
+    /// ship it round-trips; this build's UI never lets a user select it.
+    Temporal,
+}
+
 /// Video settings (FRONTEND_UI §2: "scaling, shaders, vsync, display mode").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -71,6 +103,9 @@ pub struct VideoSettings {
     /// owns the shader set; this must not need changing when that lands.
     pub shader: Option<String>,
     pub vsync: bool,
+    /// MetalFX scaler choice (ticket W16-08). `Off` by default; see
+    /// [`MetalFxSetting`].
+    pub metalfx: MetalFxSetting,
 }
 
 impl Default for VideoSettings {
@@ -82,6 +117,7 @@ impl Default for VideoSettings {
             // and W2-05's audio clock (not vsync) is what paces the
             // emulator, so leaving it on costs no timing accuracy.
             vsync: true,
+            metalfx: MetalFxSetting::default(),
         }
     }
 }

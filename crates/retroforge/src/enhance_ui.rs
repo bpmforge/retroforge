@@ -218,6 +218,33 @@ pub fn badge_text(
     }
 }
 
+/// Appends a "MetalFX" suffix to an existing badge string (ticket W16-08
+/// acceptance criterion 4) when `metalfx` is actually on and the runtime
+/// says it can run. A separate, additive fn rather than a new parameter on
+/// [`badge_text`]: MetalFX is a **scaler** choice living in Settings >
+/// Video (`crate::settings::VideoSettings::metalfx`), not one of
+/// [`feature_rows`]'s enhancement-ladder entries, so it does not belong in
+/// that fn's "active count" at all (CLAUDE.md law 6 -- Accuracy Mode may
+/// use it, so folding it into the enhancement badge's `\u{26a1}(N)` count
+/// would misreport an unmodified-simulation frame as "enhanced"). Suffixed
+/// after whatever [`badge_text`] already produced (e.g. `"NES · Accuracy"`
+/// -> `"NES · Accuracy · MetalFX"`), so the two facts -- "which mode/how
+/// many enhancements" and "is this scaled by MetalFX" -- stay visibly
+/// distinct rather than merged into one ambiguous count.
+#[must_use]
+pub fn append_metalfx_badge_suffix(
+    badge: String,
+    metalfx: crate::settings::MetalFxSetting,
+    availability: rf_renderer::MetalFxAvailability,
+) -> String {
+    let active = metalfx == crate::settings::MetalFxSetting::Spatial && availability.is_available();
+    if active {
+        format!("{badge} · MetalFX")
+    } else {
+        badge
+    }
+}
+
 /// The badge's hover breakdown (FRONTEND_UI.md §1: "a hover breakdown of
 /// active features").
 ///
@@ -302,6 +329,42 @@ pub fn profile_inspector_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metalfx_suffix_appears_only_when_spatial_and_available() {
+        assert_eq!(
+            append_metalfx_badge_suffix(
+                "NES · Accuracy".to_string(),
+                crate::settings::MetalFxSetting::Spatial,
+                rf_renderer::MetalFxAvailability::Available,
+            ),
+            "NES · Accuracy · MetalFX"
+        );
+    }
+
+    #[test]
+    fn metalfx_suffix_absent_when_off() {
+        assert_eq!(
+            append_metalfx_badge_suffix(
+                "NES · Accuracy".to_string(),
+                crate::settings::MetalFxSetting::Off,
+                rf_renderer::MetalFxAvailability::Available,
+            ),
+            "NES · Accuracy"
+        );
+    }
+
+    #[test]
+    fn metalfx_suffix_absent_when_selected_but_unavailable() {
+        assert_eq!(
+            append_metalfx_badge_suffix(
+                "NES · Accuracy".to_string(),
+                crate::settings::MetalFxSetting::Spatial,
+                rf_renderer::MetalFxAvailability::UnsupportedDevice,
+            ),
+            "NES · Accuracy"
+        );
+    }
 
     // `GameSettings::unknown` is private to `crate::game_settings`, so
     // `..Default::default()` is not reachable from this module — the

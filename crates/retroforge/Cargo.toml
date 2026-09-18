@@ -180,6 +180,14 @@ ai-onnx = ["rf-ai/onnx"]
 # default, see `crates/rf-ai/src/onnx.rs`'s module doc), which is exactly
 # the "CPU otherwise" half.
 ai-onnx-coreml = ["ai-onnx", "rf-ai/onnx-coreml"]
+# `metalfx` forwards to `rf-renderer/metalfx` (ticket W16-08): macOS-only,
+# off by default for the same "cargo test --workspace needs no
+# platform-specific frameworks" reason as `audio`/`gamepad`/`ai-onnx`
+# above. `crate::settings::MetalFxSetting` and
+# `rf_renderer::metalfx::detect` are usable either way; this feature only
+# gates whether `rf_renderer::metalfx::MetalFxScaler` itself exists to
+# back a `Spatial` selection.
+metalfx = ["rf-renderer/metalfx"]
 
 [[bench]]
 name = "debugger_idle"

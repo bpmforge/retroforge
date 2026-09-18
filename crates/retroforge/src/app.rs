@@ -3965,11 +3965,15 @@ impl RetroForgeApp {
                         .level_session
                         .as_ref()
                         .is_some_and(crate::level_view::LevelSession::has_collision);
-                    let badge = crate::enhance_ui::badge_text(
-                        self.console_label,
-                        &self.current_game_settings,
-                        self.profile_matched,
-                        diorama_available,
+                    let badge = crate::enhance_ui::append_metalfx_badge_suffix(
+                        crate::enhance_ui::badge_text(
+                            self.console_label,
+                            &self.current_game_settings,
+                            self.profile_matched,
+                            diorama_available,
+                        ),
+                        self.settings.video.metalfx,
+                        rf_renderer::metalfx_detect(),
                     );
                     // A CHIP, not a button. It is a status readout that
                     // happens to carry a hover breakdown and a hold-to-peek
@@ -4404,6 +4408,52 @@ impl RetroForgeApp {
                                 ui.small(
                             "Takes effect on restart (the window surface is created at startup).",
                         );
+                                ui.separator();
+
+                                // MetalFX (ticket W16-08): a scaler choice,
+                                // not an enhancement -- it lives here next
+                                // to scale_mode/shader/vsync, not on the
+                                // enhancement ladder (module doc on
+                                // rf_renderer::metalfx, CLAUDE.md law 6).
+                                ui.label("MetalFX");
+                                let availability = rf_renderer::metalfx_detect();
+                                if ui
+                                    .add_enabled(
+                                        availability.is_available(),
+                                        egui::RadioButton::new(
+                                            self.settings.video.metalfx
+                                                == crate::settings::MetalFxSetting::Spatial,
+                                            "MetalFX spatial",
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.settings.video.metalfx =
+                                        crate::settings::MetalFxSetting::Spatial;
+                                    changed = true;
+                                }
+                                if ui
+                                    .radio_value(
+                                        &mut self.settings.video.metalfx,
+                                        crate::settings::MetalFxSetting::Off,
+                                        "Off",
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                if let Some(reason) = availability.reason() {
+                                    ui.small(reason);
+                                } else {
+                                    ui.small(
+                                        "A scaler, not a content enhancement -- available in \
+                                         Accuracy Mode too.",
+                                    );
+                                }
+                                // Temporal is not offered: W16-08's attempt
+                                // did not reach a shippable steady-state
+                                // measurement (rf_renderer::metalfx module
+                                // doc + plan.json W16-08 note).
                             }
                             SettingsTab::Audio => {
                                 let mut device =
