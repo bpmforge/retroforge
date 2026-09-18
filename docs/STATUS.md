@@ -3834,3 +3834,15 @@ stories, 10 decisions).
   app's debug dock had to change to keep the build green, recorded as a
   handoff. Gate: crate tests green, workspace **2122 passing / 0
   failed**, arch OK, GPU evidence valid.
+
+- **W15-08 — controller-first library** (2026-09-18, lane A, the last
+  Wave 15 screen ticket). The app now knows which device was used last;
+  with a pad active the focused card or row gets a 4 px ring in a
+  stronger accent and the whole UI steps up a type size, reverting the
+  moment the mouse or keyboard moves. Four-direction navigation and
+  Start for the context menu ride the existing pad bridge, so there is
+  still one input path. Found on the way: egui's own arrow-key focus
+  search had been silently overriding the pad's selection at the end of
+  every pass; with that cancelled, the focused widget is exactly what
+  AccessKit reports, which the test asserts. Gate: workspace **2126
+  passing / 0 failed / 42 ignored**, clippy clean, arch OK.

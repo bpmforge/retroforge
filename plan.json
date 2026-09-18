@@ -6655,8 +6655,9 @@
    "AccessKit labels carry through unchanged, proven by a check that the same focus state egui already tracks is what AccessKit reports"
   ],
   "points": 5,
-  "status": "todo",
+  "status": "done",
   "notes": [
+    "CLOSED 2026-09-18 (lane A). InputDevice::resolve in ui_nav.rs (live state only); theme FOCUS_RING_MOUSE 2 / FOCUS_RING_PAD 4 and Tokens::accent_strong with contrast tests; apply_theme type-scale branch (13/17/13/11/11.5 -> 16/21/16/13/14); request_focus on the selected row/card plus move_focus(None) to cancel egui's own cardinal search, which had been silently overriding pad focus. Start on cards was already wired by W15-03, now tested. tests/library_controller.rs (one scenario: navigate, ring width, type scale, mouse revert, Start menu, focus == kittest is_focused). Gate: workspace 2126 passing / 0 failed / 42 ignored (orchestrator).",
    "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 10). See that doc \u00a79 and \u00a711.",
    "Depends on W15-05: there is nothing to navigate a grid over before the grid exists."
