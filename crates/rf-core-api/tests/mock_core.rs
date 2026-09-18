@@ -573,7 +573,7 @@ fn event_mask_bits_correspond_one_to_one_with_core_event_variants() {
         CoreEvent::MapperIrq,
         CoreEvent::DmaStart { chan: 0 },
         CoreEvent::MemWatch { id: 0 },
-        CoreEvent::Mode7(rf_core_api::Mode7Registers::default()),
+        CoreEvent::Mode7(rf_core_api::Mode7Frame::default()),
     ];
 
     let mut seen = EventMask::NONE;

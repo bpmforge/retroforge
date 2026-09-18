@@ -62,6 +62,11 @@ pub struct EnhanceCtx<'a> {
     /// answer for the currently matched profile, `false` with no session —
     /// the narrower fact the Diorama feature row is gated on.
     pub diorama_available: bool,
+    /// Ticket W16-14: whether this session has seen a live BG-mode-7
+    /// `CoreEvent::Mode7` — `crate::enhance_ui::feature_rows`'s "mode7_ground"
+    /// row's own gating fact, narrower and orthogonal to `diorama_available`
+    /// (no collision profile is involved at all).
+    pub mode7_active: bool,
     pub compare_mode: &'a mut rf_renderer::CompareMode,
     pub compare_divider: &'a mut f32,
     /// The stitched-canvas texture, when one has been composited.
@@ -126,6 +131,11 @@ pub struct EnhanceActions {
     /// pattern `widescreen_decoded`/`full_level_view` use), so this only
     /// needs to be `Some` to trigger the sync, not carry the new value.
     pub diorama_set: Option<bool>,
+    /// Ticket W16-14: "Mode 7 as 3D" was toggled — same "trigger a sync,
+    /// the field itself is already written directly" shape as
+    /// `diorama_set` above (`RetroForgeApp::sync_diorama_subscription`
+    /// picks it up alongside the walls toggle).
+    pub mode7_ground_set: Option<bool>,
     /// The Compare tab asked for a both-buffers screenshot.
     pub screenshot_requested: bool,
 }
@@ -278,8 +288,12 @@ fn scrolled<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
 }
 
 fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut EnhanceActions) {
-    let rows =
-        crate::enhance_ui::feature_rows(ctx.settings, ctx.profile_matched, ctx.diorama_available);
+    let rows = crate::enhance_ui::feature_rows(
+        ctx.settings,
+        ctx.profile_matched,
+        ctx.diorama_available,
+        ctx.mode7_active,
+    );
     for row in &rows {
         // **`horizontal_wrapped`, and the opposite call from the status
         // bar.** W10-01 refused wrapping for the bottom bar because three
@@ -332,6 +346,10 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                         // once for `profile_matched`).
                         ctx.settings.diorama = enabled;
                         actions.diorama_set = Some(enabled);
+                    }
+                    "mode7_ground" => {
+                        ctx.settings.mode7_ground = enabled;
+                        actions.mode7_ground_set = Some(enabled);
                     }
                     _ => {}
                 }

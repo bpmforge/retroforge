@@ -248,6 +248,22 @@ fn pad_backend_or_none() -> Option<rf_input::GilrsBackend> {
     }
 }
 
+/// Ticket W16-14: a cheap FNV-1a fingerprint of two byte slices in
+/// sequence — [`RetroForgeApp::refresh_mode7_ground_render`]'s "has the
+/// live VRAM/CGRAM snapshot's plane region actually changed" cache key.
+/// Not cryptographic and not meant to be: a collision only costs one
+/// stale-looking frame of ground texture, never a correctness bug, the
+/// same trade-off `tests/mode7_plane_golden.rs`'s own `fingerprint` makes
+/// for its golden hashes.
+fn fnv1a_hash(a: &[u8], b: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in a.iter().chain(b.iter()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
 /// Ticket W15-05: per-hash badge facts for the card grid (`UX_WAVE_15.md`
 /// §3.1), read once per library scan alongside `library_meta` rather than
 /// once per card per frame — same "cheap enough to do for every row"
@@ -861,6 +877,27 @@ pub struct RetroForgeApp {
     /// synchronously there (see that method's own doc for why sync is the
     /// right call at the ~2 ms this pass measures).
     diorama_budget: rf_renderer::fog::BudgetGate,
+    /// Ticket W16-14: whether this session has ever seen a live
+    /// `CoreEvent::Mode7` (BG mode 7 actually running) — the fact
+    /// `enhance_ui::feature_rows`'s "mode7_ground" row is gated on
+    /// (`Availability::NeedsGameState`). Sticky for the session rather
+    /// than re-derived every frame: a game that briefly leaves mode 7
+    /// (a menu, a pause screen) must not make the row flicker
+    /// unavailable. Reset on every `open_rom_path` so a NEW game starts
+    /// honest about what it has actually shown.
+    mode7_seen: bool,
+    /// Whether "Mode 7 as 3D" is currently EFFECTIVE, mirroring
+    /// [`Self::diorama_wanted`]'s identical role for the walls tier —
+    /// re-derived every repaint by [`Self::sync_diorama_subscription`],
+    /// this field only exists to detect the change.
+    mode7_ground_wanted: bool,
+    /// The Mode 7 ground texture built from the live VRAM/CGRAM snapshot
+    /// (`rf_snes::debug::render_mode7_plane_rgba`), cached by a cheap hash
+    /// of the plane's own bytes so a VRAM snapshot that has not changed
+    /// (the overwhelmingly common case — playfield tiles rarely change
+    /// every frame) does not re-render 128x128 tiles at density 2 sixty
+    /// times a second. `None` until the first Mode 7 frame arrives.
+    mode7_plane_cache: Option<(u64, std::rc::Rc<Vec<u8>>, u32, u32)>,
     /// Repaints remaining before [`Self::maybe_request_canvas_snapshot`]
     /// sends another `CoreCommand::RequestCanvasSnapshot` — `0` forces an
     /// immediate request on the very next repaint (set whenever the camera
@@ -1172,6 +1209,9 @@ impl RetroForgeApp {
             diorama_wanted: false,
             diorama_ground_rgba: None,
             diorama_budget: rf_renderer::fog::BudgetGate::new(),
+            mode7_seen: false,
+            mode7_ground_wanted: false,
+            mode7_plane_cache: None,
             ultrawide_refresh_countdown: 0,
             awaiting_canvas_snapshot: false,
             debug_panels: crate::debug_dock::DebugPanels::new(),
@@ -2707,6 +2747,12 @@ impl RetroForgeApp {
                 self.diorama_texture = None;
                 self.diorama_ground_rgba = None;
                 self.diorama_wanted = false;
+                // Ticket W16-14: same reset, for Mode 7 -- a new ROM has
+                // shown nothing yet, so the "mode7_ground" row must not
+                // still read Available from the PREVIOUS game's BG mode 7.
+                self.mode7_seen = false;
+                self.mode7_ground_wanted = false;
+                self.mode7_plane_cache = None;
                 self.status = format!("Loaded {}", path.display());
             }
             Err(e) => {
@@ -2918,6 +2964,13 @@ impl RetroForgeApp {
                 };
                 let cam = rf_enhance::level_view::live_camera(&session.profile, &read);
                 self.level_camera = Some((cam.x, cam.y));
+            }
+            // Ticket W16-14: latch "this session has shown BG mode 7 at
+            // least once" — sticky rather than re-derived every frame
+            // (`Self::mode7_seen`'s own doc: a menu/pause screen must not
+            // flicker the feature row unavailable).
+            if msg.mode7.is_some() {
+                self.mode7_seen = true;
             }
             // Ticket W16-13 acceptance 1: refresh the Diorama compositor's
             // output for THIS frame — placed BEFORE the bg/sprite-layer
@@ -3131,9 +3184,32 @@ impl RetroForgeApp {
             &self.current_game_settings,
             self.profile_matched,
             diorama_available,
+            self.mode7_seen,
         )
         .into_iter()
         .find(|r| r.id == "diorama")
+        .is_some_and(|r| r.effective())
+    }
+
+    /// Ticket W16-14: whether "Mode 7 as 3D" is currently EFFECTIVE —
+    /// `enhance_ui::feature_rows`'s "mode7_ground" row, the single place
+    /// this gating is computed (mirrors [`Self::diorama_effective`]'s own
+    /// doc and its reason for existing: re-deriving the gating logic here
+    /// instead of calling it is exactly the drift that once left
+    /// `self.profile_matched` unassigned for a whole ticket).
+    fn mode7_ground_effective(&self) -> bool {
+        let diorama_available = self
+            .level_session
+            .as_ref()
+            .is_some_and(crate::level_view::LevelSession::has_collision);
+        crate::enhance_ui::feature_rows(
+            &self.current_game_settings,
+            self.profile_matched,
+            diorama_available,
+            self.mode7_seen,
+        )
+        .into_iter()
+        .find(|r| r.id == "mode7_ground")
         .is_some_and(|r| r.effective())
     }
 
@@ -3162,25 +3238,51 @@ impl RetroForgeApp {
     /// last).
     fn sync_diorama_subscription(&mut self) {
         let wants = self.diorama_effective();
-        if wants == self.diorama_wanted {
-            return;
+        if wants != self.diorama_wanted {
+            self.diorama_wanted = wants;
+            if wants {
+                self.send_command(CoreCommand::SetLayerExtraction(true));
+                self.set_level_probe(true);
+            } else {
+                // Ticket W16-14: Mode 7 ground needs the SAME sprite-layer
+                // extraction (billboards on its ground, same as walls) —
+                // an OR-safety check, same shape `!self.show_layers`
+                // already is.
+                if !self.show_layers && !self.mode7_ground_wanted {
+                    self.send_command(CoreCommand::SetLayerExtraction(false));
+                }
+                if !self.current_game_settings.full_level_view {
+                    self.set_level_probe(false);
+                }
+                // Acceptance 1: "disabling returns to the flat enhanced
+                // view the same frame" — clear immediately rather than
+                // waiting for a stale render to age out on its own.
+                self.diorama_render = None;
+                self.diorama_texture = None;
+            }
         }
-        self.diorama_wanted = wants;
-        if wants {
-            self.send_command(CoreCommand::SetLayerExtraction(true));
-            self.set_level_probe(true);
-        } else {
-            if !self.show_layers {
-                self.send_command(CoreCommand::SetLayerExtraction(false));
+
+        // Ticket W16-14: "Mode 7 as 3D" — its own independent wanted/
+        // armed transition, same shape as the walls tier above but
+        // needing neither a collision-derived level probe nor
+        // `diorama_ground_rgba` (its ground comes from VRAM/CGRAM every
+        // frame, `Self::refresh_diorama_render`'s own doc for the
+        // caching rule). Shares `CoreCommand::SetLayerExtraction` with
+        // the walls tier (same OR-safety in both directions) and shares
+        // `Self::diorama_render`/`Self::diorama_texture` (the same live-
+        // view slot, composited in place of the flat plane either way).
+        let mode7_wants = self.mode7_ground_effective();
+        if mode7_wants != self.mode7_ground_wanted {
+            self.mode7_ground_wanted = mode7_wants;
+            if mode7_wants {
+                self.send_command(CoreCommand::SetLayerExtraction(true));
+            } else {
+                if !self.show_layers && !self.diorama_wanted {
+                    self.send_command(CoreCommand::SetLayerExtraction(false));
+                }
+                self.diorama_render = None;
+                self.diorama_texture = None;
             }
-            if !self.current_game_settings.full_level_view {
-                self.set_level_probe(false);
-            }
-            // Acceptance 1: "disabling returns to the flat enhanced view
-            // the same frame" — clear immediately rather than waiting for
-            // a stale render to age out on its own.
-            self.diorama_render = None;
-            self.diorama_texture = None;
         }
     }
 
@@ -3244,6 +3346,15 @@ impl RetroForgeApp {
     /// was never involved — `compose_diorama` only ever runs on the UI
     /// thread, reading data the core thread already published.
     fn refresh_diorama_render(&mut self, msg: &core_thread::FrameMsg) {
+        // Ticket W16-14: Mode 7 ground takes priority when both are
+        // somehow wanted at once (a collision-sourced profile matching a
+        // BG-mode-7 title would be unusual, but never ambiguous this way)
+        // — it has its own early-return ladder, entirely separate from
+        // the walls path below.
+        if self.mode7_ground_wanted {
+            self.refresh_mode7_ground_render(msg);
+            return;
+        }
         if !self.diorama_wanted || msg.sprite_rgba.is_empty() {
             return;
         }
@@ -3326,6 +3437,142 @@ impl RetroForgeApp {
                 // select_active_view`'s own doc: Diorama degrades quietly
                 // rather than blocking play or showing an error box over
                 // the game).
+                self.diorama_render = None;
+                self.diorama_texture = None;
+            }
+        }
+    }
+
+    /// Ticket W16-14: [`Self::refresh_diorama_render`]'s Mode 7 ground
+    /// counterpart. Same synchronous-on-this-thread reasoning that
+    /// method's own doc gives (`DioramaPass::render`'s measured cost),
+    /// and it shares the same [`Self::diorama_render`]/[`Self::
+    /// diorama_texture`] live-view slot — "composite in place of the flat
+    /// plane" (acceptance criterion 3) means the SAME slot `video_panel`
+    /// already paints, not a second one `select_active_view` would need
+    /// to learn about.
+    ///
+    /// ## The caching rule
+    ///
+    /// The ground texture (`rf_snes::debug::render_mode7_plane_rgba` at
+    /// density 2) is rebuilt only when a cheap FNV-1a hash of the raw
+    /// VRAM/CGRAM bytes changes (`Self::mode7_plane_cache`) — decoding
+    /// 128x128 tiles at 2x density every frame would cost real CPU time
+    /// for a playfield that, for most of a level, does not change tile
+    /// data frame to frame (only the matrix/scroll registers move).
+    fn refresh_mode7_ground_render(&mut self, msg: &core_thread::FrameMsg) {
+        let Some(frame) = &msg.mode7 else {
+            // This session wants Mode 7 ground, but the game is not IN BG
+            // mode 7 this particular frame (a menu, a pause screen) —
+            // acceptance criterion 3's "off returns to flat the same
+            // frame" applies just as much to "temporarily not in mode 7".
+            self.diorama_render = None;
+            self.diorama_texture = None;
+            return;
+        };
+        if msg.sprite_rgba.is_empty() {
+            return;
+        }
+        if !self.diorama_budget.is_enabled() {
+            self.diorama_render = None;
+            self.diorama_texture = None;
+            return;
+        }
+        let Some(snes) = &msg.snes else {
+            return;
+        };
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        if self.diorama_pass.is_none() {
+            self.diorama_pass = Some(rf_renderer::diorama::DioramaPass::new(gpu));
+        }
+        let pass = self
+            .diorama_pass
+            .as_ref()
+            .expect("just constructed above when absent");
+
+        const MODE7_PLANE_DENSITY: u32 = 2;
+        const MODE7_PLANE_TILES: u16 = 128;
+        let hash = fnv1a_hash(&snes.vram, &snes.cgram);
+        let need_rebuild = self
+            .mode7_plane_cache
+            .as_ref()
+            .is_none_or(|(cached, ..)| *cached != hash);
+        if need_rebuild {
+            let rgba = rf_snes::debug::render_mode7_plane_rgba(
+                &snes.vram,
+                &snes.cgram,
+                MODE7_PLANE_TILES,
+                MODE7_PLANE_TILES,
+                MODE7_PLANE_DENSITY,
+            );
+            let side = u32::from(MODE7_PLANE_TILES) * 8 * MODE7_PLANE_DENSITY;
+            self.mode7_plane_cache = Some((hash, std::rc::Rc::new(rgba), side, side));
+        }
+        let (_, plane_rgba, plane_w, plane_h) = self
+            .mode7_plane_cache
+            .as_ref()
+            .expect("just populated above when absent");
+        let (plane_rgba, plane_w, plane_h) = (plane_rgba.clone(), *plane_w, *plane_h);
+
+        let sprites = rf_snes::debug::decode_oam(&snes.oam);
+        // `$2101` bits 5-7 -- `ppu_regs` is indexed so `[n]` is `$21nn`
+        // (`core_thread::FrameMsg::snes`'s own doc).
+        let obj_size_select = snes.ppu_regs.get(0x01).copied().unwrap_or(0) >> 5;
+        let (width, height) = (
+            u32::try_from(msg.width).unwrap_or(0),
+            u32::try_from(msg.height).unwrap_or(0),
+        );
+
+        let start = std::time::Instant::now();
+        let result = enhanced_view::compose_mode7_ground(
+            gpu,
+            pass,
+            &frame.top,
+            &frame.bottom,
+            &plane_rgba,
+            plane_w,
+            plane_h,
+            &sprites,
+            obj_size_select,
+            // The SNES's own native resolution — `matrix_scale`'s "1.0,
+            // no zoom" is defined relative to THIS, not to whatever
+            // width/height this particular frame happens to be rendered
+            // at (`rf_renderer::mode7_plane::SNES_NATIVE_WIDTH_PX`'s own
+            // doc; `mode7_sprite_billboard`'s own doc for why sprite
+            // placement uses `sprite_w`/`sprite_h` instead, below).
+            rf_renderer::mode7_plane::SNES_NATIVE_WIDTH_PX,
+            &msg.sprite_rgba,
+            width,
+            height,
+            width,
+            height,
+        );
+        self.diorama_budget
+            .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
+
+        match result {
+            Ok(render) => {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [render.width as usize, render.height as usize],
+                    &render.rgba,
+                );
+                match &mut self.diorama_texture {
+                    Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
+                    None => {
+                        self.diorama_texture = Some(self.ctx.load_texture(
+                            "diorama-frame",
+                            image,
+                            egui::TextureOptions::NEAREST,
+                        ));
+                    }
+                }
+                self.diorama_render = Some(render);
+            }
+            Err(_) => {
+                // Same silent-degrade posture `refresh_diorama_render`'s
+                // own doc states.
                 self.diorama_render = None;
                 self.diorama_texture = None;
             }
@@ -4086,6 +4333,7 @@ impl RetroForgeApp {
                             &self.current_game_settings,
                             self.profile_matched,
                             diorama_available,
+                            self.mode7_seen,
                         ),
                         self.settings.video.metalfx,
                         rf_renderer::metalfx_detect(),
@@ -4109,6 +4357,7 @@ impl RetroForgeApp {
                         &self.current_game_settings,
                         self.profile_matched,
                         diorama_available,
+                        self.mode7_seen,
                     );
                     response.clone().on_hover_ui(|ui| {
                         for line in &breakdown {
@@ -7156,6 +7405,71 @@ impl RetroForgeApp {
         self.current_game_settings.diorama = on;
     }
 
+    /// Ticket W16-14: turn "Mode 7 as 3D" on/off exactly as its Enhance-
+    /// workspace row does — same shape as [`Self::set_diorama_for_test`].
+    #[doc(hidden)]
+    pub fn set_mode7_ground_for_test(&mut self, on: bool) {
+        self.current_game_settings.mode7_ground = on;
+    }
+
+    /// Ticket W16-14: feed a synthetic [`rf_core_api::Mode7Frame`] plus a
+    /// VRAM/CGRAM snapshot through the SAME `refresh_diorama_render` path
+    /// a real running SNES core's `FrameMsg` would — the kittest hook this
+    /// ticket's acceptance names ("through the app's test hooks like
+    /// `diorama_live_view.rs`"), needed because no Mode 7 fixture ROM (and
+    /// no cc65 toolchain to build one) exists in this repo, the same
+    /// constraint `tests/mode7_plane_golden.rs`'s own header states for
+    /// `rf-renderer`'s golden.
+    ///
+    /// Marks [`Self::mode7_seen`] the same way a real frame would, then
+    /// calls the identical private render path so this hook cannot drift
+    /// from what a real `CoreEvent::Mode7` frame does.
+    #[doc(hidden)]
+    pub fn inject_mode7_frame_for_test(
+        &mut self,
+        frame: rf_core_api::Mode7Frame,
+        vram: Vec<u8>,
+        cgram: Vec<u8>,
+        sprite_rgba: Vec<u8>,
+        width: usize,
+        height: usize,
+    ) {
+        self.mode7_seen = true;
+        let msg = core_thread::FrameMsg {
+            level_probe: None,
+            script_window: None,
+            audio_fill: None,
+            hd: None,
+            rgba: vec![0u8; width * height * 4],
+            width,
+            height,
+            frame_count: 0,
+            last_scanline: None,
+            bg_rgba: Vec::new(),
+            sprite_rgba,
+            oam: Box::new([0u8; 256]),
+            audio_traces: Vec::new(),
+            snes: Some(Box::new(core_thread::SnesDebugFrame {
+                vram,
+                cgram,
+                oam: vec![0u8; 544],
+                ppu_regs: vec![0u8; 0x40],
+                aram: Vec::new(),
+                mode7: rf_snes::ppu::mode7::Mode7::default(),
+                hdma_lanes: Vec::new(),
+                voices: Vec::new(),
+            })),
+            vram: Box::new([0u8; 0x1000]),
+            cpu_regs: Box::new(rf_core_api::CpuRegs::None),
+            palette_ram: Box::new([0u8; 32]),
+            wram: Box::new([0u8; 0x0800]),
+            prg_ram: Box::new([0u8; 0x2000]),
+            sprite_height_px: 8,
+            mode7: Some(Box::new(frame)),
+        };
+        self.refresh_diorama_render(&msg);
+    }
+
     /// Ticket W16-13: whether this build has a real GPU device
     /// ([`Self::gpu`]) — the same `gpu_or_skip` clean-skip convention
     /// `rf-renderer`'s own GPU tests use, exposed so a kittest scenario
@@ -7204,6 +7518,7 @@ impl RetroForgeApp {
             &self.current_game_settings,
             self.profile_matched,
             diorama_available,
+            self.mode7_seen,
         )
     }
 
@@ -7220,6 +7535,7 @@ impl RetroForgeApp {
             &self.current_game_settings,
             self.profile_matched,
             diorama_available,
+            self.mode7_seen,
         )
     }
 
@@ -8457,7 +8773,10 @@ impl RetroForgeApp {
     /// [`Self::sync_event_subscription`], and for the same reason: 128 KiB
     /// per frame is not a cost to pay while nobody is looking.
     fn sync_snes_capture(&mut self) {
-        let wants = self.debug_panels.wants_snes_capture();
+        // Ticket W16-14: Mode 7 ground needs the live VRAM/CGRAM snapshot
+        // (`FrameMsg::snes`) to build its plane texture, same OR-safety
+        // shape as `sync_event_subscription`'s own `wants` just below.
+        let wants = self.debug_panels.wants_snes_capture() || self.mode7_ground_wanted;
         if wants == self.snes_capture_active {
             return;
         }
@@ -8475,8 +8794,13 @@ impl RetroForgeApp {
         // counting — a watch that quietly stopped would read as "the game
         // never touches this address", the worst answer a debugger can
         // give. Pay-for-use still holds: nothing armed, no subscription.
+        // Ticket W16-14: Mode 7 ground needs `CoreEvent::Mode7`
+        // (`EventMask::MODE7`, part of `EventMask::ALL`) to know the
+        // frame's registers — same OR-safety shape as the two sources
+        // already here.
         let wants = (self.debug_panels.visible && self.debug_panels.wants_event_subscription())
-            || self.debug_panels.annotations.has_watches();
+            || self.debug_panels.annotations.has_watches()
+            || self.mode7_ground_wanted;
         if wants == self.event_subscription_active {
             return;
         }
@@ -8644,6 +8968,7 @@ impl RetroForgeApp {
                         .level_session
                         .as_ref()
                         .is_some_and(crate::level_view::LevelSession::has_collision),
+                    mode7_active: self.mode7_seen,
                     compare_mode: &mut self.compare_mode,
                     compare_divider: &mut self.compare_divider,
                     map_texture: self.ultrawide_texture.as_ref(),
@@ -8667,12 +8992,12 @@ impl RetroForgeApp {
             // (`Self::sync_diorama_subscription`'s own doc).
             self.set_level_probe(on || self.diorama_effective());
         }
-        if actions.diorama_set.is_some() {
-            // Ticket W16-13: react to the toggle within THIS frame rather
-            // than waiting for the next repaint's `sync_diorama_subscription`
-            // call — the enhance_dock checkbox already wrote
-            // `ctx.settings.diorama` directly (`features_body`'s "diorama"
-            // arm).
+        if actions.diorama_set.is_some() || actions.mode7_ground_set.is_some() {
+            // Ticket W16-13/W16-14: react to the toggle within THIS frame
+            // rather than waiting for the next repaint's
+            // `sync_diorama_subscription` call — the enhance_dock checkbox
+            // already wrote `ctx.settings.diorama`/`mode7_ground` directly
+            // (`features_body`'s own arms).
             self.sync_diorama_subscription();
         }
         if let Some(on) = actions.widescreen_set {

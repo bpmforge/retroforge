@@ -1,5 +1,5 @@
 //! Core events and subscription filtering (FR-CORE-006).
-use crate::video::{Mode7Registers, PixelLayer};
+use crate::video::{Mode7Frame, PixelLayer};
 
 /// Events a core pushes through [`crate::CoreSink::event`] during
 /// `run_frame`/`step` (ARCHITECTURE §5).
@@ -11,7 +11,7 @@ use crate::video::{Mode7Registers, PixelLayer};
 /// allocation/construction cost (FR-CORE-006). This enum intentionally has
 /// no default/empty variant to keep that check meaningful — there is
 /// nothing cheaper to construct than "don't construct at all".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CoreEvent {
     /// Emitted once at the start of `run_frame`, before the first scanline.
     FrameStart,
@@ -58,15 +58,14 @@ pub enum CoreEvent {
     /// been assembled (`rf_snes::core::SnesCore::emit_frame`), and only
     /// when BG mode 7 is active — a core in any other mode never
     /// constructs one, matching every other variant's pay-for-use rule.
-    /// `rf-snes`'s settled-frame composition model (`rf_snes::core`'s own
-    /// module doc: "runs the frame, then replays the settled picture")
-    /// reads these registers post-hoc rather than live per scanline, so
-    /// today's value is the registers' state at frame end for the whole
-    /// frame — a real per-scanline HDMA ramp is not yet distinguishable
-    /// from a static matrix at this layer; see that core's own doc for
-    /// why, and `rf_snes::debug::mode7_registers`'s doc for the exact
-    /// promotion.
-    Mode7(Mode7Registers),
+    ///
+    /// Ticket W16-14 promoted this from a single static end-of-frame
+    /// snapshot to [`Mode7Frame`]'s top/bottom-plus-optional-per-line
+    /// shape, read back from `rf_snes::ppu::Ppu::line_state` (already
+    /// latched per visible scanline for HDMA, ticket W7-07) rather than
+    /// from the live registers alone — see `rf_snes::debug::mode7_frame`'s
+    /// doc for exactly how `top`/`bottom`/`lines` are derived.
+    Mode7(Mode7Frame),
 }
 
 impl CoreEvent {

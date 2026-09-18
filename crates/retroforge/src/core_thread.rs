@@ -342,6 +342,18 @@ pub struct FrameMsg {
     /// mode. `8` on a SNES session or when no core is loaded, the same
     /// "ordinary-case default" `EmuStepper::sprite_height_px` itself uses.
     pub sprite_height_px: u8,
+    /// Ticket W16-14: this frame's [`rf_core_api::CoreEvent::Mode7`]
+    /// payload, extracted from the frame's `FrameBundle::events` before
+    /// the bundle is handed to `bundle_writer.publish` (which moves it) —
+    /// `None` on any frame that did not emit one (BG mode not 7, or
+    /// `EventMask::MODE7` not subscribed). Carried as its own field
+    /// rather than a generic `events: Vec<CoreEvent>` on `FrameMsg`
+    /// because Mode 7's per-frame consumer (`crate::app::
+    /// refresh_diorama_render`) needs only this one variant, and forwarding
+    /// the whole event list would ship every debug-viewer event
+    /// (`ScrollWrite`, `MemWatch`, ...) to a consumer that reads none of
+    /// them.
+    pub mode7: Option<Box<rf_core_api::Mode7Frame>>,
 }
 
 /// Ticket W14-20 defect 1: the most `CoreEvent::Frame`s the core thread
@@ -358,8 +370,15 @@ pub const MAX_PENDING_FRAMES: usize = 2;
 
 /// What the core thread reports back to the UI thread.
 pub enum CoreEvent {
-    /// A new frame is ready to paint.
-    Frame(FrameMsg),
+    /// A new frame is ready to paint. Boxed (ticket W16-14): `FrameMsg`
+    /// grew past `clippy::large_enum_variant`'s threshold the moment
+    /// `mode7` (an `Option<Box<Mode7Frame>>`, already boxed on its own
+    /// terms) pushed the struct's inline size over it — the same
+    /// "everything else is already boxed for this reason" pattern
+    /// `FrameMsg::oam`/`cpu_regs`/`wram`/`prg_ram` document, extended one
+    /// level up since a per-FIELD box could not buy back enough this
+    /// time.
+    Frame(Box<FrameMsg>),
     /// FM-01: the core thread panicked, was contained, and has now
     /// halted. No further `CoreEvent`s will ever arrive on this channel
     /// after this one.
@@ -889,7 +908,7 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
     }
 
     fn event(&mut self, ev: rf_core_api::CoreEvent) {
-        self.frame.event(ev);
+        self.frame.event(ev.clone());
         self.bundle.event(ev);
     }
 }
@@ -1400,6 +1419,14 @@ fn core_thread_main(
                     })
                     .collect::<Vec<_>>()
             });
+            // Ticket W16-14: pull the frame's Mode7 event (at most one,
+            // `CoreEvent::Mode7`'s own doc) out BEFORE `bundle` moves into
+            // `publish` below — `FrameMsg::mode7` is this thread's only
+            // other reader of it, alongside the trace producer above.
+            let mode7_event = bundle.events.iter().find_map(|e| match e {
+                rf_core_api::CoreEvent::Mode7(frame) => Some(frame.clone()),
+                _ => None,
+            });
             bundle_writer.publish(bundle);
             let msg = FrameMsg {
                 audio_fill: audio.as_ref().map(crate::audio_out::AudioOut::fill),
@@ -1470,6 +1497,7 @@ fn core_thread_main(
                 wram: Box::new(stepper.wram_snapshot()),
                 prg_ram: Box::new(*stepper.prg_ram()),
                 sprite_height_px: stepper.sprite_height_px(),
+                mode7: mode7_event.map(Box::new),
             };
             if publish_frame(
                 &frame_tx,
@@ -1535,7 +1563,9 @@ fn publish_frame(
         return Ok(());
     }
     pending_frames.fetch_add(1, Ordering::AcqRel);
-    frame_tx.send(CoreEvent::Frame(msg)).map_err(|_| ())?;
+    frame_tx
+        .send(CoreEvent::Frame(Box::new(msg)))
+        .map_err(|_| ())?;
     // Defect 2: wake the UI right after a successful send, rather than
     // trusting a winit redraw that on 2026-09-17 did not arrive.
     // `spawn_with_waker`'s doc has the `Context::request_repaint`-from-
@@ -1618,6 +1648,7 @@ mod tests {
             wram: Box::new([0u8; 0x0800]),
             prg_ram: Box::new([0u8; 0x2000]),
             sprite_height_px: 8,
+            mode7: None,
         }
     }
 

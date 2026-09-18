@@ -170,8 +170,8 @@ impl SnesCore {
         if self.config.event_mask.is_subscribed(EventMask::MODE7)
             && self.system.bus.ppu.bg_mode == 7
         {
-            let regs = crate::debug::mode7_registers(&self.system.bus.ppu.mode7);
-            sink.event(CoreEvent::Mode7(regs));
+            let frame = crate::debug::mode7_frame(&self.system.bus.ppu);
+            sink.event(CoreEvent::Mode7(frame));
         }
         self.drain_events(sink);
     }

@@ -212,14 +212,20 @@ fn a_subscribed_core_reports_mode7_registers_when_bg_mode_is_7() {
     let mut sink = Collector::default();
     core.step(Step::Frame, &mut sink);
 
-    let regs = sink
+    let frame = sink
         .events
         .iter()
         .find_map(|e| match e {
-            CoreEvent::Mode7(r) => Some(*r),
+            CoreEvent::Mode7(f) => Some(f.clone()),
             _ => None,
         })
         .expect("a BG-mode-7 frame subscribed to EventMask::MODE7 must emit CoreEvent::Mode7");
+    // Ticket W16-14: the registers were written before the frame ran and
+    // never changed mid-frame, so top and bottom must agree and no
+    // per-line table is built.
+    assert_eq!(frame.top, frame.bottom);
+    assert!(frame.lines.is_none());
+    let regs = frame.top;
     assert_eq!(regs.a, 0x0140);
     assert_eq!(regs.b, -256);
     assert_eq!(regs.c, 0x000C);

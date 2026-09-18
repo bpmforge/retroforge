@@ -715,6 +715,142 @@ pub fn compose_diorama(
     })
 }
 
+// ---------------------------------------------------------------------
+// Mode 7 ground pass (ticket W16-14; `docs/design/ENHANCEMENT_WAVE_16.md`
+// §9): the app-shell resolution step for `rf_renderer::mode7_plane`'s
+// frame-aware entry point, same mediator role this module already plays
+// for the walls-tier Diorama pass above and the fog/ultrawide passes —
+// `rf-renderer` may not depend on `rf-snes`
+// (`scripts/validate-arch.sh` rule 3), so turning a raw SNES OAM snapshot
+// into billboards happens here, not there.
+// ---------------------------------------------------------------------
+
+/// One SNES sprite's screen-space billboard footprint for the Mode 7
+/// ground (ticket W16-14 acceptance: "sprites stay billboards on that
+/// ground at their OAM footprint").
+///
+/// **Screen space, not world space — deliberately, and unlike
+/// [`sprite_billboard`] above.** A Mode 7 game's OBJs are ordinary 2D
+/// sprites the hardware composites ON TOP of the projected background
+/// (fullsnes: OBJ is never itself affine-transformed); they have no
+/// "world" position of their own to translate a scrolled camera against,
+/// the way a tile-based NES/SNES level's OAM does. So this places each
+/// billboard's centre proportionally within the SAME `extent` the ground
+/// quad already occupies (`rf_renderer::mode7_plane::ground_extent_px`) —
+/// `screen_x / screen_w * extent`, `screen_y / screen_h * extent` — which
+/// keeps every sprite visibly ON the quad, ordered top-to-bottom exactly
+/// as the screen shows them, without claiming a frame-accurate
+/// re-derivation of where Mode 7's own projection would actually put that
+/// pixel in playfield space (`rf_renderer::mode7_plane`'s own module doc
+/// already states that same limitation for the ground quad itself).
+///
+/// `screen_w`/`screen_h` are the sprite layer's OWN pixel dimensions
+/// (`sprite_w`/`sprite_h` below — the buffer the UV rect indexes into),
+/// deliberately NOT [`rf_renderer::mode7_plane::SNES_NATIVE_WIDTH_PX`]:
+/// that constant is the hardware-scale reference `ground_extent_px` uses,
+/// a different unit from "how many pixels wide is this frame's sprite
+/// texture" (they usually agree for an ordinary SNES frame, but a
+/// widescreen-decoded or hi-res frame's `sprite_rgba` is NOT 256 px wide,
+/// and using the wrong denominator here would misalign the UV rect
+/// against the texture it actually samples).
+///
+/// **Sprite size**: [`rf_snes::debug::obj_sizes`]'s SMALL size for every
+/// sprite — the OAM high table's per-sprite "large" bit is not consulted
+/// (a future refinement, not a correctness bug this ticket's acceptance
+/// depends on: the sprite still renders at its own screen position, only
+/// a "large"-selected sprite's footprint may read a touch small).
+#[must_use]
+fn mode7_sprite_billboard(
+    sprite: &rf_snes::debug::SpriteEntry,
+    obj_size_select: u8,
+    screen_w: f32,
+    screen_h: f32,
+    extent: f32,
+) -> rf_renderer::diorama_mesh::Billboard {
+    let (small, _) = rf_snes::debug::obj_sizes(obj_size_select);
+    let (w, h) = (f32::from(small.0), f32::from(small.1));
+    let screen_x = f32::from(sprite.x);
+    let screen_y = f32::from(sprite.y);
+    let u0 = screen_x / screen_w.max(1.0);
+    let v0 = screen_y / screen_h.max(1.0);
+    let u1 = (screen_x + w) / screen_w.max(1.0);
+    let v1 = (screen_y + h) / screen_h.max(1.0);
+    rf_renderer::diorama_mesh::Billboard {
+        center_x_px: u0.clamp(0.0, 1.0) * extent,
+        center_z_px: v0.clamp(0.0, 1.0) * extent,
+        width_px: w,
+        height_px: h,
+        uv: [u0, v0, u1, v1],
+    }
+}
+
+/// Build one Mode 7 ground frame (ticket W16-14; module doc). Unlike
+/// [`compose_diorama`], this needs no [`crate::level_view::LevelSession`]
+/// or collision profile at all: the ground comes straight from the live
+/// VRAM/CGRAM snapshot (`rf_snes::debug::render_mode7_plane_rgba`, the
+/// caller's job per that function's own doc) and the camera from the
+/// frame's own [`rf_core_api::Mode7Registers`] top/bottom pair
+/// (`rf_renderer::mode7_plane::derive_pitch_deg`).
+///
+/// `sprites`/`obj_size_select` are [`rf_snes::debug::decode_oam`]'s output
+/// and `$2101`'s size-select bits — the caller's live snapshot, same
+/// "already-extracted, not re-decoded here" shape [`compose_diorama`]
+/// takes for its own sprite layer.
+///
+/// # Errors
+/// Propagates [`rf_renderer::mode7_plane::render_mode7_ground_frame`]'s
+/// `Err` (GPU readback timeout).
+#[allow(clippy::too_many_arguments)]
+pub fn compose_mode7_ground(
+    gpu: &GpuContext,
+    pass: &rf_renderer::diorama::DioramaPass,
+    top: &rf_core_api::Mode7Registers,
+    bottom: &rf_core_api::Mode7Registers,
+    ground_rgba: &[u8],
+    ground_w: u32,
+    ground_h: u32,
+    sprites: &[rf_snes::debug::SpriteEntry],
+    obj_size_select: u8,
+    native_screen_width_px: f32,
+    sprite_rgba: &[u8],
+    sprite_w: u32,
+    sprite_h: u32,
+    out_width: u32,
+    out_height: u32,
+) -> Result<DioramaRender, String> {
+    let extent = rf_renderer::mode7_plane::ground_extent_px(top, native_screen_width_px).max(
+        rf_renderer::mode7_plane::ground_extent_px(bottom, native_screen_width_px),
+    );
+    let billboards: Vec<rf_renderer::diorama_mesh::Billboard> = sprites
+        .iter()
+        .map(|s| {
+            mode7_sprite_billboard(s, obj_size_select, sprite_w as f32, sprite_h as f32, extent)
+        })
+        .collect();
+
+    let rgba = rf_renderer::mode7_plane::render_mode7_ground_frame(
+        pass,
+        gpu,
+        top,
+        bottom,
+        ground_rgba,
+        ground_w,
+        ground_h,
+        native_screen_width_px,
+        &billboards,
+        sprite_rgba,
+        sprite_w,
+        sprite_h,
+        out_width,
+        out_height,
+    )?;
+    Ok(DioramaRender {
+        rgba,
+        width: out_width,
+        height: out_height,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

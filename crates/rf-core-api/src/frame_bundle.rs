@@ -50,7 +50,13 @@ use crate::video::{PixelLayer, PpuPixel};
 /// Assembled by the app/enhancement side from `CoreSink` calls — see
 /// [`FrameBundleBuilder`] — never emitted by a core directly (a core only
 /// ever sees `&mut dyn CoreSink`, never constructs one of these itself).
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Ticket W16-14: `Eq` dropped here — `CoreEvent::Mode7` now carries
+// `Mode7Frame`, which is only `PartialEq` (its `lines: Option<Vec<..>>`
+// field derives that way too), so `CoreEvent` itself is `PartialEq`-only
+// and `FrameBundle` cannot derive `Eq` through it. Nothing in this crate
+// relied on `FrameBundle: Eq` — every existing comparison already used
+// `PartialEq`/`assert_eq!`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct FrameBundle {
     /// Frames completed since power-on (same counter `EmulatorCore`
     /// implementations track internally), for cross-run/cross-thread frame
