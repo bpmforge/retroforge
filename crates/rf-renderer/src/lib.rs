@@ -49,11 +49,8 @@ pub mod fog;
 pub mod frame;
 pub mod gpu;
 pub mod layers;
-<<<<<<< HEAD
 pub mod metalfx;
-=======
 pub mod mode7_plane;
->>>>>>> w16-09
 pub mod original_pipeline;
 pub mod palette;
 pub mod pipeline;
