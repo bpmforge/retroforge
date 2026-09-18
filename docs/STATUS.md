@@ -3523,3 +3523,19 @@ stories, 10 decisions).
   accent focus ring is asserted at WCAG 2.2 non-text 3:1 against both
   row surfaces in both palettes. Gate: workspace **1911 passing / 0
   failed / 36 ignored**, clippy clean, arch OK.
+
+- **W15-04 — themed modals and toasts** (2026-09-17, lane A). The
+  save-slot overwrite confirmation, a new quit-with-unsaved-state
+  question, and the crash report now use `egui::Modal`: dimmed backdrop,
+  outside click or Escape dismisses. Non-blocking status gets toasts:
+  ROM folder added, an explicit rescan with its count, state saved to a
+  slot, and script errors, which until now were a status string nobody
+  was sure to see (user story E7-S1). The planned `egui-notify` crate has
+  no release for this workspace's egui 0.35, verified in the fetched
+  sources, so the stack is a small in-crate module keyed off egui's own
+  clock so the headless harness can expire toasts deterministically; the
+  choice is written in `toast.rs` for the day the workspace moves to
+  egui 0.36. The test proves a modal blocks the click beneath it and its
+  backdrop dismisses it, and that a toast expires while the core keeps
+  advancing. Gate: workspace **1913 passing / 0 failed / 36 ignored**,
+  clippy clean, arch OK.
