@@ -6463,7 +6463,7 @@
    "unit/UI tests cover: double-click launches, Enter launches selection, click-only selects without launching"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "notes": [
    "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (source: retroforge-ux-review.html recommendation 1). See that doc \u00a73 for the wireframe and \u00a711 for the full acceptance summary this ticket's list is drawn from.",
