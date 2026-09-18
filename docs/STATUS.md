@@ -3509,3 +3509,17 @@ stories, 10 decisions).
   completes W14-17's by-eye item for both titles. NES census, same 1281 archives: **1222** render, 6 uniform, 53 refused, crashed **0**, timed out **0** (unchanged). Gate:
   workspace **1909 passing / 0 failed / 36 ignored**, clippy clean,
   arch OK.
+
+- **W15-01 — library launch gestures and selection focus** (2026-09-17,
+  first Wave 15 ticket, lane A). Double-click on a title, Enter, and
+  gamepad Activate (already an Enter event via `ui_nav.rs`) launch the
+  selection; a single click only selects; ArrowUp/Down/Home/End move it
+  and scroll it into view; all of it is gated off while the search box
+  has focus. Selection is the entry's path, not an index, so a filter
+  change cannot point it at the wrong game. The title label senses the
+  clicks: a whole-row interact registered after the row's children took
+  every click including the Play button's (proved with a kittest probe),
+  so the row keeps Play and the label carries the gesture. The 2 px
+  accent focus ring is asserted at WCAG 2.2 non-text 3:1 against both
+  row surfaces in both palettes. Gate: workspace **1911 passing / 0
+  failed / 36 ignored**, clippy clean, arch OK.
