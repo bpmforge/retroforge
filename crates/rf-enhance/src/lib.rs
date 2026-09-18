@@ -9,6 +9,7 @@
 //! deliberately still a stub (`SpriteHistorian`, `ScrollTracker`, the
 //! actual `EnhancementRuntime`) and why.
 
+pub mod atmosphere;
 pub mod bus;
 pub mod camera;
 pub mod decode;

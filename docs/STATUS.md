@@ -3523,3 +3523,18 @@ stories, 10 decisions).
   accent focus ring is asserted at WCAG 2.2 non-text 3:1 against both
   row surfaces in both palettes. Gate: workspace **1911 passing / 0
   failed / 36 ignored**, clippy clean, arch OK.
+
+- **W16-03 — atmosphere-layer detector, shadow rung** (2026-09-17, first
+  Wave 16 ticket, lane B). The fog-as-steam idea starts with an honest
+  detector: a SNES background plane is an atmosphere candidate when its
+  sub-screen pixels carry Add or AddHalf colour math on at least half the
+  samples over 30 frames (snes.nesdev.org/wiki/Color_math), it scrolls at
+  most 2 px/frame and at most half the dominant plane's speed, and shows
+  at most four distinct 8x8 tiles per frame. Shadow by construction: the
+  detector has `observe` and `report_card` and no way to act.
+  `SceneLayer::ExtractedBg` gets its first producer, the candidate's
+  pixels and scroll, emitted for the report only. The red fixture is a
+  synthetic frame sequence because this workstation has no cc65; the
+  plain scene and a Super Metroid-style palette-cycling scene must not
+  trigger, and they don't. Gate: workspace **1922 passing / 0 failed / 36
+  ignored**.

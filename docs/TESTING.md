@@ -641,6 +641,18 @@ forgeable by the very script meant to check it.)
 - **Red-fixture rule (FR-ENH-013, D-004)**: every shipped heuristic has a
   fixture scene/ROM that MUST trigger it; CI fails when it stops firing.
   The anti-flicker cases above are instances; the rule is general.
+- **Atmosphere-layer detector (ticket W16-03, shadow rung)**:
+  `crates/rf-harness/tests/atmosphere_layer_red_fixture.rs`. No `cc65`
+  toolchain is present on this machine to rebuild an RF-Scroller-S ROM
+  variant with a fog plane, so the red fixture is a synthetic
+  `Vec<PpuPixel>`/`Vec<SubPixel>` frame sequence (a plane with half/additive
+  colour math, slow independent scroll, and low tile variety) driven
+  directly through `rf_enhance::atmosphere::AtmosphereDetector`:
+  `atmosphere_plane_triggers_and_stays_triggered` (must keep firing),
+  `plain_scene_does_not_trigger` and `palette_cycling_scene_does_not_trigger`
+  (paired negative controls — the latter is `ENHANCEMENT_WAVE_16.md` §4's
+  binding Norfair-heat correction). `crates/rf-enhance/src/atmosphere.rs`'s
+  own unit tests cover the individual threshold boundaries.
 - **Path containment (NFR-010)**: symlink-escape attempts on plugin
   cache_dir, profiles.d references, and library scan roots are refused;
   scan survives a symlink loop (unit tests per surface).
