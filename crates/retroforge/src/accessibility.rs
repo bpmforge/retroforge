@@ -414,6 +414,36 @@ mod tests {
         }
     }
 
+    /// Ticket W15-01: the library's selected-row focus ring is drawn in
+    /// `accent`, on top of the row it outlines — which sits on either
+    /// `background` (unstriped rows) or `raised` (zebra-striped rows,
+    /// `faint_bg_color`). WCAG 2.2 SC 1.4.11 (non-text contrast) asks for
+    /// 3:1; `every_pair_in_every_palette_clears_aaa` above already proves
+    /// 7:1, but this test names the 3:1 floor explicitly, against BOTH
+    /// surfaces the ring can actually be drawn over, in both palettes —
+    /// so a future change to the AAA test's scope can't quietly stop
+    /// covering the specific claim this ticket makes.
+    #[test]
+    fn the_library_focus_ring_clears_wcag22_non_text_contrast_in_both_palettes() {
+        const WCAG_NON_TEXT: f32 = 3.0;
+        for (name, palette) in [
+            ("DEFAULT", Palette::DEFAULT),
+            ("HIGH_CONTRAST", Palette::HIGH_CONTRAST),
+        ] {
+            for (surface_name, surface) in [
+                ("background", palette.background),
+                ("raised", palette.raised),
+            ] {
+                let ratio = contrast_ratio(palette.accent, surface);
+                assert!(
+                    ratio >= WCAG_NON_TEXT,
+                    "{name}: the focus ring is {ratio:.2}:1 against {surface_name}, below the \
+                     WCAG 2.2 non-text contrast floor ({WCAG_NON_TEXT}:1)"
+                );
+            }
+        }
+    }
+
     #[test]
     fn enabling_high_contrast_switches_the_palette() {
         let s = AccessibilitySettings {
