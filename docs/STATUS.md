@@ -3907,3 +3907,20 @@ stories, 10 decisions).
   exchanged, which points at the DMA and arithmetic units of slice 3.
   Gate: workspace **2200 passing / 0 failed / 43 ignored**, clippy
   clean, arch OK.
+
+- **W17-03 — SA-1 slice 3: the units** (2026-09-18). DMA bounded by its
+  count register, character conversion in both types one row per
+  handshake, the arithmetic unit, the variable-length bit reader, the
+  timer riding the PPU's own dot clock, write protection on both sides,
+  and the bitmap projection of BW-RAM, every register cited to fullsnes.
+  Two real titles corrected the protection model before close: Kirby
+  Super Star sets the protected-area floor to its whole RAM and then
+  unlocks, so the floor is stored but not enforced; Kirby's Dream Land 3
+  writes BW-RAM from the SA-1 side with only the SNES-side enable set,
+  so the two enables are one shared gate, which is how fullsnes words
+  them. All four Kirby and PGA titles render. Power Rangers Zeo runs
+  with interrupts firing and video memory filling but keeps forced blank
+  on within the census budget; Super Mario RPG's main CPU polls the APU
+  port before it touches the SA-1 again, an audio handshake outside this
+  arc. Gate: workspace **2210 passing / 0 failed / 43 ignored**, clippy
+  clean, arch OK.

@@ -313,6 +313,13 @@ fn sa1_cart_resets_and_steps_through_its_own_rom() {
 fn sa1_memory_map_reaches_iram_bwram_and_registers_through_the_bus() {
     let rom = lorom_image(0x23, 0x35); // +battery, so ram_size (8 KiB) is BW-RAM
     let mut system = SnesSystem::load(&rom).expect("SA-1 cart loads");
+    // Ticket W17-03: $2229/$2226 reset to $00 (every chunk/region
+    // protected) — a real ROM enables writes before using either memory,
+    // so this test does the same rather than exercising the protected
+    // path here (that is `tests::sa1_protection`'s job).
+    system.bus.write(0x00_2229, 0xFF); // SIWP: enable all 8 I-RAM chunks
+    system.bus.write(0x00_2226, 0x80); // SBWE: enable BW-RAM writes
+    system.bus.write(0x00_2228, 0x00); // BWPA: minimum protected floor (256 bytes)
 
     // I-RAM at $3000-$37FF, banks $00-$3F/$80-$BF.
     system.bus.write(0x00_3000, 0xAB);
@@ -323,11 +330,12 @@ fn sa1_memory_map_reaches_iram_bwram_and_registers_through_the_bus() {
         "I-RAM mirrors across banks"
     );
 
-    // BW-RAM window at $6000-$7FFF, block 0 by default ($2224 resets to 0).
-    system.bus.write(0x00_6000, 0xCD);
-    assert_eq!(system.bus.read(0x00_6000), 0xCD);
-    // The same byte is visible through the full BW-RAM window at $40:0000.
-    assert_eq!(system.bus.read(0x40_0000), 0xCD);
+    // BW-RAM window at $6000-$7FFF, block 0 by default ($2224 resets to
+    // 0); offset $100 clears BWPA's 256-byte protected floor.
+    system.bus.write(0x00_6100, 0xCD);
+    assert_eq!(system.bus.read(0x00_6100), 0xCD);
+    // The same byte is visible through the full BW-RAM window at $40:0100.
+    assert_eq!(system.bus.read(0x40_0100), 0xCD);
 
     // The register window: a write to $2220 (CXB) is stored and later
     // affects the ROM mapping (acceptance #2's "writes ... stored").
@@ -538,8 +546,8 @@ fn the_snes_cpu_takes_an_irq_raised_by_the_sa1_through_the_port_vector() {
     let mut rom = lorom_image(0x23, 0x35);
     // Main CPU: CLI (enable IRQs), then spin on NOPs.
     rom[0x0000] = 0x58; // CLI
-    for i in 1..0x20 {
-        rom[i] = 0xEA; // NOP
+    for byte in rom.iter_mut().take(0x20).skip(1) {
+        *byte = 0xEA; // NOP
     }
     rom[0x1000] = 0xEA; // NOP at the IRQ port vector target ($9000)
     let mut system = SnesSystem::load(&rom).expect("SA-1 cart loads");

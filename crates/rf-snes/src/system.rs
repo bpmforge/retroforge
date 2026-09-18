@@ -336,8 +336,18 @@ impl SnesSystem {
         let master_this_step = spent + dma_cycles;
         // Disjoint field borrows (`bus.rom` alongside `bus.sa1`), not a
         // clone of a multi-megabyte ROM every instruction.
+        let dot = self.bus.timing.dot();
+        let line = self.bus.timing.line;
         let bus = &mut self.bus;
         if let Some(sa1) = bus.sa1.as_mut() {
+            // Ticket W17-03: the timer runs off the master clock
+            // regardless of whether the SA-1 core itself is held (Reset
+            // still holds, matching the SA-1 CPU's own held state below —
+            // fullsnes documents no separate gate for the timer, and a
+            // held CPU cannot read `$2302`/`$230x` anyway).
+            if !sa1.regs.sa1_reset_asserted() {
+                sa1.regs.tick_timer(master_this_step, dot, line);
+            }
             if sa1.regs.sa1_reset_asserted() {
                 sa1.credit = 0;
             } else {

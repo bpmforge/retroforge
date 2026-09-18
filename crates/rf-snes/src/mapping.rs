@@ -69,6 +69,20 @@ pub enum Target {
     /// register file (`crate::sa1::Sa1Regs`) sorts out which register it
     /// is.
     Sa1Register(u16),
+    /// The SA-1-side bitmap projection of BW-RAM, banks `$60-$6F`
+    /// (ticket W17-03, fullsnes "SNES Cart SA-1 Memory Control" `$223F`
+    /// BBF: "BW-RAM bitmap logical space format... from perspective of
+    /// the SA-1 CPU"). Carries a flat 0-based pixel index across the
+    /// whole 24-bit `$600000-$6FFFFF` space — `(bank - 0x60) * 0x10000 +
+    /// offset` — so [`crate::sa1::Sa1Bus`] only has to divide by the
+    /// current format's pixels-per-byte to find the underlying BW-RAM
+    /// byte and sub-field; it never needs a second address translation.
+    /// SA-1-side only: fullsnes's own heading names it "from perspective
+    /// of the SA-1 CPU", and [`sa1_target`] (the SNES side) has no arm
+    /// for these banks at all, so an SNES-side access there is open bus,
+    /// per that reading of the ambiguity (see this module's report
+    /// note).
+    Sa1Bitmap(usize),
     /// Nothing is mapped here. Reads see open bus; writes are dropped.
     Open,
 }
@@ -251,6 +265,16 @@ pub fn sa1_target(regs: &Sa1RomBanks, bank: u8, offset: u16) -> Option<Target> {
 ///   behind it: open bus.
 #[must_use]
 pub fn sa1_side_target(regs: &Sa1RomBanks, bank: u8, offset: u16) -> Target {
+    // Bitmap projection, banks $60-$6F — checked before the system-area
+    // split below because it is neither: `$60-$6F` falls between the
+    // system-area ranges (`<$40` / `$80-$BF`) and the plain BW-RAM/HiROM
+    // arms (`$40-$4F` / `$C0-$FF`) that `bwram_full_bank_target`/
+    // `hirom_bank_target` claim, so it would otherwise fall through to
+    // `Open`. Cited to fullsnes "SNES Cart SA-1 Memory Control" `$223F`.
+    if (0x60..=0x6F).contains(&bank) && regs.board.bwram_len > 0 {
+        let k = (usize::from(bank - 0x60) << 16) | usize::from(offset);
+        return Target::Sa1Bitmap(k);
+    }
     let system_area = bank < 0x40 || (0x80..0xC0).contains(&bank);
     if system_area {
         if (0x0000..=0x07FF).contains(&offset) || (0x3000..=0x37FF).contains(&offset) {

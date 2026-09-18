@@ -174,6 +174,7 @@ fn every_address_maps_within_bounds() {
                     | Target::Sa1IRam(_)
                     | Target::Sa1BwRam(_)
                     | Target::Sa1Register(_)
+                    | Target::Sa1Bitmap(_)
                     | Target::Open => {}
                 }
             }
