@@ -37,6 +37,67 @@ use rf_core_api::PpuPixel;
 
 use crate::camera::{Camera, FogStyle};
 
+/// A per-screen solidity mask: one byte (`0` or `1`) per decoded tile, in
+/// the same order as `tiles` — the field `docs/design/ENHANCEMENT_WAVE_16.md`
+/// §5 names as the thing `SceneLayer::DecodedLevel` needs so a later 3D
+/// compositor (W16-06) can extrude solid tiles into blocks.
+///
+/// **Why it is a free function here rather than a new field on
+/// [`SceneLayer::DecodedLevel`] in this ticket.** That variant already has
+/// two production call sites with every field spelled out explicitly —
+/// `crates/retroforge/src/enhanced_view.rs`'s
+/// `ultrawide_scene_over_level_full_map` and `ultrawide_scene_over_level`
+/// — and `crates/retroforge/**` is outside W16-05's write_scope
+/// (`crates/rf-enhance/**`, `crates/rf-profiles/**`, `profiles/**`,
+/// `docs/design/GAME_PROFILES.md`). Adding a field to that struct variant
+/// without also touching those two call sites does not compile, so it
+/// would either break `crates/retroforge` or require editing a crate this
+/// ticket has no write access to. W16-06 depends_on W16-05 and its own
+/// write_scope explicitly includes `crates/retroforge/**` and
+/// `crates/rf-renderer/**` — wiring this mask into the enum field (and
+/// resolving it into extruded geometry) belongs there. This function is
+/// the ready-to-wire producer.
+///
+/// **NON_GOALS #11, visited-only — an obligation on the caller.** This
+/// function has no notion of "unvisited": it builds a mask for whatever
+/// `tiles` it is handed. The caller (the eventual `SceneLayer::DecodedLevel`
+/// producer) must pass only tiles from screens actually visited/decoded,
+/// never a synthesized "whole level" guess — the same rule the stitched
+/// canvas's fog already enforces (FR-ENH-004).
+///
+/// `collision_table` is looked up by raw tile value (as
+/// `rf_enhance::decode::room_grid::DecodedRooms::collision` is shaped) or
+/// by metatile id (as `rf_enhance::decode::metatile_screens::DecodedLevel::
+/// collision` is shaped) — both are "one attribute byte per id", so the
+/// same lookup serves either family. `bits` is the profile's
+/// `[decode].collision.bits` CSV (GAME_PROFILES.md §2, e.g.
+/// `"solid,platform,hazard"`); `solid_bit_name` is the bit to test —
+/// ordinarily `"solid"`. Returns `None` when `solid_bit_name` is not in
+/// `bits`, or when its position cannot exist in an 8-bit attribute byte.
+#[must_use]
+pub fn solidity_mask(
+    tiles: &[u8],
+    collision_table: &[u8],
+    bits: &str,
+    solid_bit_name: &str,
+) -> Option<Vec<u8>> {
+    let bit = bits.split(',').position(|b| b.trim() == solid_bit_name)?;
+    if bit >= 8 {
+        return None; // no attribute byte has an 8th+ bit
+    }
+    let mask = 1u8 << bit;
+    Some(
+        tiles
+            .iter()
+            .map(|&id| {
+                collision_table
+                    .get(id as usize)
+                    .map_or(0, |&attr| u8::from(attr & mask != 0))
+            })
+            .collect(),
+    )
+}
+
 /// Opaque handle into a GPU texture the shell owns — resolution happens
 /// outside this crate (module doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -225,6 +286,78 @@ mod tests {
             graph.layers.len(),
             7,
             "one constructed value per §7 variant"
+        );
+    }
+
+    /// Renders a `solidity_mask` result as ASCII (`#` solid, `.` open) and
+    /// checks the geometry — row/column alignment survives the round trip
+    /// from a decoded `room_grid` room through the mask, which is the
+    /// property that matters for a later 3D compositor walking rows and
+    /// columns of tiles.
+    #[test]
+    fn solidity_mask_renders_a_room_with_the_right_geometry() {
+        use crate::decode::room_grid::{decode, Spec};
+
+        // A 3x3 room: a wall ring (tile 0x02) around one open floor tile
+        // (tile 0x01). One room, unindexed, so `rooms[0]` is exactly this
+        // 9-tile grid in row-major order.
+        #[rustfmt::skip]
+        let room: [u8; 9] = [
+            0x02, 0x02, 0x02,
+            0x02, 0x01, 0x02,
+            0x02, 0x02, 0x02,
+        ];
+        let mut rom = room.to_vec();
+        let collision_offset = rom.len() as u32;
+        // bits = "solid,hazard": bit0 solid. Tile 0x01 (floor) not solid,
+        // tile 0x02 (wall) solid.
+        rom.extend_from_slice(&[0, 0, 0b1]); // index 0 unused, 1 open, 2 solid
+        let spec = Spec {
+            rooms_across: 1,
+            rooms_down: 1,
+            room_width: 3,
+            room_height: 3,
+            data_offset: 0,
+            index_offset: None,
+            collision_table: Some(collision_offset),
+        };
+        let decoded = decode(&rom, &spec).expect("synthetic room decodes");
+        let tiles = decoded.room_tiles_at(0, 0).expect("one room at (0,0)");
+        let collision = decoded.collision.as_ref().expect("collision declared");
+
+        let mask =
+            solidity_mask(tiles, collision, "solid,hazard", "solid").expect("`solid` is in bits");
+        assert_eq!(mask.len(), tiles.len(), "one mask byte per decoded tile");
+
+        // Render 3x3 rows of the mask exactly as the decoded room is laid
+        // out, and check the ring shape survived.
+        let width = spec.room_width as usize;
+        let rendered: String = mask
+            .chunks(width)
+            .map(|row| {
+                row.iter()
+                    .map(|&b| if b == 1 { '#' } else { '.' })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            rendered, "###\n#.#\n###",
+            "wall ring around an open center:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn solidity_mask_is_none_when_the_bit_name_is_not_declared() {
+        assert_eq!(solidity_mask(&[0], &[0], "solid,hazard", "platform"), None);
+    }
+
+    #[test]
+    fn solidity_mask_is_none_past_the_eighth_bit() {
+        assert_eq!(
+            solidity_mask(&[0], &[0], "a,b,c,d,e,f,g,h,solid", "solid"),
+            None,
+            "bit index 8 cannot exist in a u8 attribute byte"
         );
     }
 }
