@@ -51,6 +51,10 @@ may only be relaxed with new research evidence.
 
 ## 4. History
 
+- **2026-09-18** — SA-1 moved from "Later / conditional" to "In scope"
+  (D-013, Brad's "go"): a second 65C816 over its own bus, four slices
+  in Wave 17 (W17-01..04). Super FX and the one-off chips stay deferred.
+
 - **2026-09-17** — Local real-time AI enhancement/upscaling moved from
   "Won't (v1)" to "In scope, hardware-gated" (D-012, Brad). Offline pack
   generation was already in scope (W8-10); the change is the frame-path

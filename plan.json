@@ -7060,6 +7060,103 @@
     "FILED 2026-09-18 by W16-09's close: the renderer path exists and is golden-tested; the app wiring and the per-scanline capture are what make it visible and correct on real titles."
    ],
    "stories": []
+  },
+  {
+   "id": "W17-01",
+   "title": "SA-1 slice 1: cartridge acceptance and the SNES-side memory map",
+   "phase": 17,
+   "crate": "rf-cart",
+   "write_scope": [
+    "crates/rf-cart/**",
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "rf-cart accepts chipset $34/$35 with map mode $23 as Coprocessor::Sa1 (ROM size up to 8 MiB, BW-RAM size from the header, I-RAM 2 KiB), exposing the board data rf-snes needs; every other refused family still refuses with the same FR-CORE-013 text, pinned by tests",
+    "rf-snes maps the SNES side per fullsnes 'SNES Cart SA-1 Memory Control': ROM at $00-$3F/$80-$BF:$8000-$FFFF and $C0-$FF:$0000-$FFFF through the $2220-$2223 bank registers (bit 7 = direct/lo-bank rule), BW-RAM at $40-$4F and the $6000-$7FFF window via $2224, I-RAM at $3000-$37FF, the SA-1 register window $2200-$23FF (writes stored, reads of the read-only block answer per the I/O map), each cited",
+    "the SNES-side CPU can boot an SA-1 cart to its reset vector and run: the census moves the 11 SA-1 archives from refused to uniform or render, recorded in docs/TESTING.md \u00a70; nothing changes for non-SA-1 carts (goldens unchanged)",
+    "save-state coverage for the mapping registers with a round-trip test"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-18 on Brad's 'go' (D-013). Sources: fullsnes 'SNES Cart SA-1' sections (I/O map, interrupt/control both sides, timer, memory control, DMA, character conversion, arithmetic, VBR) extracted for briefs; snes.nesdev.org SA-1 pages. Clean-room, no emulator source (NFR-011). Shape per D-013: a second cpu::Cpu over an Sa1Bus, not a second CPU implementation."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W17-02",
+   "title": "SA-1 slice 2: the second 65C816 over Sa1Bus, clocking, control and messages",
+   "phase": 17,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W17-01"
+   ],
+   "acceptance": [
+    "an Sa1Bus implementing cpu::bus::CpuBus maps the SA-1 side per fullsnes: I-RAM at $0000-$07FF and $3000-$37FF, BW-RAM at $6000-$7FFF (bank via $2225, bitmap projection later) and $40-$4F, ROM through the same $2220-$2223 banks, the SA-1-side register view of $2200-$23FF; a second cpu::Cpu instance runs on it",
+    "clocking: the SA-1 runs at its documented rate (10.74 MHz, with the documented slowdowns for BW-RAM/ROM access when the SNES CPU holds the bus) interleaved with the main CPU on the master clock; the interleave is deterministic and covered by the determinism suite",
+    "control: $2200 (SA-1 reset/wait/NMI/IRQ from the SNES side, message nibble), $2209 (SNES-side IRQ/NMI/message from the SA-1), $2201/$2202/$220A/$220B enable/clear, $2300/$2301 status reads, vectors $2203-$2208 and $220C-$220F, all per the fullsnes interrupt sections both sides, each with a unit test",
+    "Kirby Super Star and Super Mario RPG complete their boot handshake and render past the title screen in the census child (recorded); SA-1 state is in the save state with a round-trip test"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-18 on Brad's 'go' (D-013). Sources: fullsnes 'SNES Cart SA-1' sections (I/O map, interrupt/control both sides, timer, memory control, DMA, character conversion, arithmetic, VBR) extracted for briefs; snes.nesdev.org SA-1 pages. Clean-room, no emulator source (NFR-011). Shape per D-013: a second cpu::Cpu over an Sa1Bus, not a second CPU implementation."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W17-03",
+   "title": "SA-1 slice 3: DMA, character conversion, arithmetic unit, variable-length bit reader, timer, BW-RAM protection",
+   "phase": 17,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**"
+   ],
+   "depends_on": [
+    "W17-02"
+   ],
+   "acceptance": [
+    "normal DMA between ROM/BW-RAM/I-RAM ($2230-$223F, $2231 CC/DD, source/destination regs) and character-conversion DMA types 1 and 2 per fullsnes 'SA-1 DMA Transfers' and 'Character Conversion', unit-tested with synthetic tables",
+    "arithmetic unit ($2250-$2254, $2306-$230A: multiply, divide, cumulative sum) with the documented timing and overflow flags; variable-length bit reader ($2258-$225B, $230C-$230D) with auto-increment; the timer ($2210-$2213, $2308-$2309) in both H/V and linear modes; BW-RAM write protection ($2229, $222A, $2226-$2228) and the bitmap-mode projection (2/4 bpp) of BW-RAM at $60-$6F",
+    "every register block cited; save state extended and round-tripped; the census re-run and every SA-1 title's bucket recorded",
+    "Super Mario RPG plays into its first battle and Kirby Super Star into a stage in the census child with scripted input; by-eye check pending for Brad"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-18 on Brad's 'go' (D-013). Sources: fullsnes 'SNES Cart SA-1' sections (I/O map, interrupt/control both sides, timer, memory control, DMA, character conversion, arithmetic, VBR) extracted for briefs; snes.nesdev.org SA-1 pages. Clean-room, no emulator source (NFR-011). Shape per D-013: a second cpu::Cpu over an Sa1Bus, not a second CPU implementation."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W17-04",
+   "title": "SA-1 slice 4: timing accuracy, determinism, census and by-eye",
+   "phase": 17,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "crates/rf-harness/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [
+    "W17-03"
+   ],
+   "acceptance": [
+    "SA-1 cycle rules per fullsnes (wait states on ROM and BW-RAM, SNES-priority bus stalls) implemented and cited; the mode-invariant and determinism suites pass with an SA-1 cart",
+    "the census: all 11 SA-1 archives render; any that stay uniform get a named cause in TESTING.md",
+    "by-eye on Super Mario RPG, Kirby Super Star and Kirby's Dream Land 3 recorded by Brad; a title_probe run of each with no unknown-register writes",
+    "docs: EMULATION_CORES.md gains the SA-1 section; STATUS carries the arc"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-18 on Brad's 'go' (D-013). Sources: fullsnes 'SNES Cart SA-1' sections (I/O map, interrupt/control both sides, timer, memory control, DMA, character conversion, arithmetic, VBR) extracted for briefs; snes.nesdev.org SA-1 pages. Clean-room, no emulator source (NFR-011). Shape per D-013: a second cpu::Cpu over an Sa1Bus, not a second CPU implementation."
+   ],
+   "stories": []
   }
  ]
 }

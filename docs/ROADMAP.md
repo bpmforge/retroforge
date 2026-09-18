@@ -244,3 +244,16 @@ real-time on capable hardware). Each lane stops on its own rule: a
 ticket that needs a ruling, or a gate that will not go green. The
 census and `local-gate.sh` never run concurrently with another lane's
 build.
+
+## Wave 17 — SA-1 (Brad's go, 2026-09-18; D-013)
+
+Four slices, serial (each depends on the previous): W17-01 cartridge and
+memory map (rf-cart accepts $34/$35, SNES-side mapping of ROM banking,
+BW-RAM, I-RAM, the $2200-$23FF window); W17-02 the second 65C816 over
+`Sa1Bus`, clocking, reset/wait/IRQ/NMI and the message ports both ways,
+bus arbitration; W17-03 DMA incl. character conversion, arithmetic unit,
+variable-length bit reader, timer, BW-RAM protection and bitmap
+projection; W17-04 timing accuracy, save state, determinism, census, and
+by-eye on Super Mario RPG, Kirby Super Star, Kirby's Dream Land 3.
+Sources: fullsnes "SNES Cart SA-1" sections, snes.nesdev.org SA-1 pages;
+clean-room (NFR-011).
