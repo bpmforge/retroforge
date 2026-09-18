@@ -3846,3 +3846,20 @@ stories, 10 decisions).
   every pass; with that cancelled, the focused widget is exactly what
   AccessKit reports, which the test asserts. Gate: workspace **2126
   passing / 0 failed / 42 ignored**, clippy clean, arch OK.
+
+- **W15-09 — opt-in box art fetch** (2026-09-18, lane A, the last Wave
+  15 ticket). Under ruling D-011 the library can now fetch box art from
+  libretro-thumbnails, and only when the Settings › Paths toggle is on,
+  off by default. A worker thread drains a small queue, one attempt per
+  title per session, results come back over a channel with the repaint
+  wake-up, and the art lives in its own size-capped cache. Attribution
+  appears in Settings and on card hover, and a network dot marks any
+  card whose picture was fetched, so nothing implies local when it was
+  not. TLS uses rustls with the OS trust store rather than a vendored CA
+  bundle; a documented per-crate licence exception covers an unreachable
+  fallback, and cargo-deny, now installed here, reports the tree clean.
+  One defect was caught only by the ignored live fetch, which the fake
+  client cannot exercise: the agent had to be told to use the platform
+  verifier or ureq panics inside TLS. It now returns a real PNG. Gate:
+  workspace **2162 passing / 0 failed / 43 ignored**, clippy clean,
+  arch OK.
