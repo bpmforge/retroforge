@@ -47,20 +47,20 @@
 //! selects PRG RAM on the board (ticket W14-17; see "PRG RAM windows"
 //! below for how that reaches the bus's own chip).
 //!
-//! # PRG RAM windows (ticket W14-17)
+//! # PRG RAM windows (tickets W14-17, W14-22)
 //!
 //! [`Mapper::prg_ram_window`] answers which byte offset into
-//! [`crate::system::NesBus`]'s own 8 KiB PRG RAM (already served at
-//! `$6000-$7FFF`, `NesBus::prg_ram`) a RAM-selected `$8000-$FFFF` window
-//! addresses. **The bus keeps owning the bytes; the mapper never gets a
-//! copy or a borrow of them.** Two reasons, not one:
+//! [`crate::system::NesBus`]'s own PRG RAM (its `$6000-$7FFF` window is
+//! [`Mapper::wram_offset`]'s job instead, see below) a RAM-selected
+//! `$8000-$FFFF` window addresses. **The bus keeps owning the bytes; the
+//! mapper never gets a copy or a borrow of them.** Two reasons, not one:
 //!
-//! - **Aliasing.** Lending the bus's array to `Mmc5` (a `&mut [u8]` held
+//! - **Aliasing.** Lending the bus's buffer to `Mmc5` (a `&mut [u8]` held
 //!   alongside the bus's own reference to the same bytes, or a `Box<dyn
 //!   Mapper>` field that borrows from its owner) is the shape Rust's
 //!   aliasing rules exist to forbid; the only way around it without
 //!   `unsafe` is for the *bus* to hold the byte offset and index its own
-//!   array with it, which is exactly what `prg_ram_window`'s `Option<usize>`
+//!   buffer with it, which is exactly what `prg_ram_window`'s `Option<usize>`
 //!   return does.
 //! - **One copy, one save-state chunk.** If the mapper instead owned a
 //!   second PRG RAM buffer, `$6000-$7FFF` and a RAM-selected `$8000+`
@@ -72,12 +72,38 @@
 //!   means `prg_ram_window` is pure address arithmetic (see
 //!   [`Mmc5::prg_ram_window`] below): no new state to save at all.
 //!
+//! **Real chip/page banking (ticket W14-22), replacing W14-17's
+//! documented "everything aliases one 8 KiB chip modulo 8 KiB" gap.**
 //! Real MMC5 boards can address up to 64 KiB of PRG RAM across multiple
-//! chips, selected by `$5113`-`$5117`'s low bits; this crate has exactly
-//! one 8 KiB chip (`NesBus::prg_ram`'s fixed size), so every RAM-selected
-//! window aliases that same chip modulo 8 KiB. **Documented gap**, the
-//! same honest shape as this file's other gaps: no oracle this ticket
-//! runs exercises a second PRG RAM chip.
+//! chips; this crate now sizes [`crate::system::NesBus`]'s PRG RAM from
+//! the cartridge's own NES 2.0/iNES header (see that module's doc) and
+//! pushes the total size into the mapper via
+//! [`Mapper::set_prg_ram_len`]/[`Mmc5::chip_bank_offset`] right after
+//! construction. `$5113` (for `$6000-$7FFF`) and `$5114`-`$5116` (for a
+//! RAM-selected `$8000+` window, via [`Mmc5::window_reg`]) each
+//! contribute a 3-bit bank value; nesdev.org/wiki/MMC5's board table —
+//! "8K and 32K games have a single SRAM chip ... 16K games instead have
+//! two chips, but only the first is battery backed" — is exactly the
+//! rule [`Mmc5::chip_bank_offset`] implements: a 16 KiB board (ETROM;
+//! nesdev's board list names Uncharted Waters and Romance of the Three
+//! Kingdoms II) treats bit 2 of the bank value as a genuine chip select
+//! (values 0-3 land on chip 0's one page, 4-7 on chip 1's), while every
+//! other size this crate builds (8 KiB EKROM, 32 KiB EWROM) has exactly
+//! one chip, so the bank value's low bits pick a page within it and wrap
+//! (mirror) once they run past however many pages that one chip has —
+//! nesdev also notes a single-chip board's SRAM is real hardware only
+//! *active* when bit 2 is clear (an unselected value goes to no chip at
+//! all, not a mirrored one); this crate mirrors instead, matching this
+//! ticket's own EKROM acceptance criterion, an honest simplification
+//! rather than a silent one.
+//!
+//! `$5102`/`$5103` (ticket W14-22, nesdev.org/wiki/MMC5) gate every PRG
+//! RAM write — `$6000-$7FFF` and a RAM-selected `$8000+` window alike —
+//! through [`Mapper::prg_ram_write_enabled`]: writes land only once
+//! `$5102` reads `%10` AND `$5103` reads `%01`. Both registers reset to
+//! a non-enabling value (`xxxx xx01` / `xxxx xx10`), so a cartridge must
+//! explicitly unlock PRG RAM before it can be written, matching real
+//! MMC5 boot behavior.
 //!
 //! # Slice 2 (ticket W14-17): extended attributes and the vertical split
 //!
@@ -142,6 +168,22 @@ pub struct Mmc5 {
     split_scroll: u8,
     /// `$5202`: the split region's CHR bank (plain 4 KiB index).
     split_chr_bank: u8,
+    /// `$5113` as written: which 8 KiB PRG RAM chip/page backs
+    /// `$6000-$7FFF` (ticket W14-22). Bits 3-7 are ignored (nesdev: "bits
+    /// 7, 6, 5, and 4 are always ignored"; this crate's boards never
+    /// exceed 32 KiB of PRG RAM, so bit 3 never matters either).
+    wram_bank: u8,
+    /// `$5102` as written (PRG RAM protect 1). Reset value `xxxx xx01`
+    /// per nesdev.org/wiki/MMC5 -- writes are enabled only once this
+    /// reads `%10` AND [`Self::wram_protect_b`] reads `%01`.
+    wram_protect_a: u8,
+    /// `$5103` as written (PRG RAM protect 2). Reset value `xxxx xx10`.
+    wram_protect_b: u8,
+    /// The cartridge's total PRG RAM size in bytes, pushed by
+    /// [`Mapper::set_prg_ram_len`] right after construction (ticket
+    /// W14-22) -- how many 8 KiB chips/pages `wram_bank`'s low bits
+    /// select among.
+    prg_ram_len: usize,
 }
 
 impl Mmc5 {
@@ -179,9 +221,69 @@ impl Mmc5 {
             split_ctrl: 0,
             split_scroll: 0,
             split_chr_bank: 0,
+            wram_bank: 0,
+            // nesdev.org/wiki/MMC5: reset value `xxxx xx01` for $5102,
+            // `xxxx xx10` for $5103 -- neither equals the enabling
+            // combination ($5102=%10, $5103=%01), so PRG RAM writes are
+            // disabled at power-on.
+            wram_protect_a: 0b01,
+            wram_protect_b: 0b10,
+            prg_ram_len: PRG_BANK_8K,
         };
         m.recompute_chr_views();
         m
+    }
+
+    /// Which 8 KiB unit of the bus's PRG RAM `bank` (a raw register's low
+    /// bits, `$5113`/`$5114`-`$5116`) selects, per nesdev.org/wiki/MMC5's
+    /// board table (ticket W14-22): "8K and 32K games have a single SRAM
+    /// chip ... 16K games instead have two chips". Two chips (ETROM, 16
+    /// KiB total) is the one shape bit 2 genuinely selects a *different*
+    /// chip for -- every other size this crate ever builds (8 KiB EKROM,
+    /// 32 KiB EWROM, or anything in between/beyond from a header this
+    /// crate hasn't seen a real cartridge use) has exactly one chip, so
+    /// `bank`'s low bits pick a page within it and simply wrap (mirror)
+    /// once they run past how many pages actually exist -- the ticket's
+    /// own acceptance criterion for EKROM, not a guess.
+    fn chip_bank_offset(&self, bank: u8) -> usize {
+        let total_banks = (self.prg_ram_len / PRG_BANK_8K).max(1);
+        if total_banks == 2 {
+            usize::from((bank >> 2) & 0x01) * PRG_BANK_8K
+        } else {
+            // `total_banks` is always a power of two here (PRG RAM sizes
+            // are always powers of two times 8 KiB in this crate), so
+            // masking by `total_banks - 1` is exactly "wrap within the
+            // one chip's pages".
+            let mask = (total_banks - 1) as u8;
+            usize::from(bank & mask) * PRG_BANK_8K
+        }
+    }
+
+    /// The raw, unshifted `$5114-$5117` byte governing PRG window
+    /// `window` (0-3) under the current `$5100` PRG mode -- the same
+    /// per-mode routing [`Self::prg_windows`] uses for ROM bank numbers,
+    /// but RAM banking (ticket W14-22) always reads a register's low
+    /// bits directly with no per-mode shift: cartridge RAM comes in flat
+    /// 8 KiB units regardless of how finely ROM is banked in this mode.
+    fn window_reg(&self, window: usize) -> u8 {
+        let [r4, r5, r6, r7] = self.prg_regs;
+        let r7 = r7 | 0x80; // $5117 is always ROM
+        match self.prg_mode & 0x03 {
+            0 => r7,
+            1 => {
+                if window < 2 {
+                    r5
+                } else {
+                    r7
+                }
+            }
+            2 => match window {
+                0 | 1 => r5,
+                2 => r6,
+                _ => r7,
+            },
+            _ => [r4, r5, r6, r7][window],
+        }
     }
 
     fn prg_bank_count(&self) -> usize {
@@ -308,6 +410,12 @@ impl Mapper for Mmc5 {
             0x5105 => self.nametable_map = value,
             0x5106 => self.fill_tile = value,
             0x5107 => self.fill_attr = value & 0x03,
+            // Ticket W14-22: PRG RAM write protect (nesdev.org/wiki/
+            // MMC5). Not a bank register -- just latched for
+            // `Mapper::prg_ram_write_enabled` to consult.
+            0x5102 => self.wram_protect_a = value & 0x03,
+            0x5103 => self.wram_protect_b = value & 0x03,
+            0x5113 => self.wram_bank = value & 0x07,
             0x5114..=0x5117 => self.prg_regs[usize::from(addr - 0x5114)] = value,
             0x5120..=0x5127 => {
                 self.chr_regs[usize::from(addr - 0x5120)] = value;
@@ -385,18 +493,42 @@ impl Mapper for Mmc5 {
         true
     }
 
-    /// See this file's module doc, "PRG RAM windows". Pure address
-    /// arithmetic against the same `prg_windows()` this mapper's ROM
-    /// reads already use: whichever window `addr` falls in, `None` from
-    /// `prg_windows()` means that window's register has bit 7 clear (RAM
-    /// selected), and the offset within the bus's 8 KiB chip is just
-    /// `addr`'s position within its own 8 KiB window.
+    /// See this file's module doc, "PRG RAM windows". Ticket W14-22
+    /// replaces the old modulo-8-KiB alias with the real rule: the
+    /// window's own register (via [`Self::window_reg`], the same
+    /// per-mode routing [`Self::prg_windows`] uses for ROM) selects RAM
+    /// when its bit 7 is clear, and its low 3 bits pick the chip/page
+    /// through [`Self::chip_bank_offset`] exactly like `$5113` does for
+    /// `$6000-$7FFF`.
     fn prg_ram_window(&self, addr: u16) -> Option<usize> {
         let window = usize::from((addr - 0x8000) / PRG_BANK_8K as u16);
-        match self.prg_windows()[window] {
-            Some(_) => None,
-            None => Some(usize::from(addr - 0x8000) % PRG_BANK_8K),
+        let reg = self.window_reg(window);
+        if reg & 0x80 != 0 {
+            return None;
         }
+        let offset_in_bank = usize::from(addr - 0x8000) % PRG_BANK_8K;
+        Some(self.chip_bank_offset(reg & 0x07) + offset_in_bank)
+    }
+
+    /// Ticket W14-22: `set_prg_ram_len`'s doc on [`Mapper`] -- stored so
+    /// [`Self::chip_bank_offset`] can tell an 8/16/32 KiB board apart.
+    fn set_prg_ram_len(&mut self, len: usize) {
+        self.prg_ram_len = len.max(PRG_BANK_8K);
+    }
+
+    /// `$5113`'s low 3 bits select the `$6000-$7FFF` chip/page (ticket
+    /// W14-22), through the same [`Self::chip_bank_offset`] rule as an
+    /// RAM-selected `$8000+` window.
+    fn wram_offset(&self, addr: u16) -> usize {
+        self.chip_bank_offset(self.wram_bank) + usize::from(addr - 0x6000)
+    }
+
+    /// nesdev.org/wiki/MMC5: PRG RAM writes land only once `$5102` reads
+    /// `%10` AND `$5103` reads `%01` (ticket W14-22). Both registers
+    /// reset to a non-enabling value, so writes are disabled at
+    /// power-on.
+    fn prg_ram_write_enabled(&self) -> bool {
+        self.wram_protect_a == 0b10 && self.wram_protect_b == 0b01
     }
 
     fn chr_rom_full(&self) -> Option<&[u8]> {
@@ -469,7 +601,16 @@ impl Mapper for Mmc5 {
         out.u8(self.mul_b)?;
         out.u8(self.split_ctrl)?;
         out.u8(self.split_scroll)?;
-        out.u8(self.split_chr_bank)
+        out.u8(self.split_chr_bank)?;
+        // Ticket W14-22. `prg_ram_len` is NOT saved here, the same
+        // reasoning `Mapper::save_state`'s own doc gives for ROM bytes:
+        // it is re-derived from the loaded cartridge's header every time
+        // (`NesBus::new` -> `set_prg_ram_len`, before any state load),
+        // so saving it would just be a second, redundant copy of a cart
+        // fact a save state must never be allowed to override.
+        out.u8(self.wram_bank)?;
+        out.u8(self.wram_protect_a)?;
+        out.u8(self.wram_protect_b)
     }
 
     fn load_state(&mut self, inp: &mut StateIn<'_>) -> Result<(), StateError> {
@@ -494,6 +635,9 @@ impl Mapper for Mmc5 {
         self.split_ctrl = inp.u8()?;
         self.split_scroll = inp.u8()?;
         self.split_chr_bank = inp.u8()?;
+        self.wram_bank = inp.u8()?;
+        self.wram_protect_a = inp.u8()?;
+        self.wram_protect_b = inp.u8()?;
         self.recompute_chr_views();
         Ok(())
     }
@@ -625,6 +769,90 @@ mod tests {
         );
         assert_eq!(m.prg_ram_window(0xA000), None, "this window selects ROM");
         assert_eq!(m.prg_ram_window(0xE000), None, "$5117 is always ROM");
+    }
+
+    /// Ticket W14-22, acceptance: ETROM (2x8 KiB chips) keeps `$6000`
+    /// distinct between `$5113=0` (chip 0) and `$5113=4` (chip 1).
+    #[test]
+    fn etrom_two_chips_are_distinct_through_5113() {
+        let mut m = Mmc5::new(prg(8), chr(8), false);
+        m.set_prg_ram_len(16 * 1024); // ETROM: 2x8 KiB chips
+        w(&mut m, 0x5113, 0);
+        assert_eq!(m.wram_offset(0x6000), 0, "chip 0");
+        assert_eq!(m.wram_offset(0x7FFF), 0x1FFF, "chip 0, end of window");
+        w(&mut m, 0x5113, 4);
+        assert_eq!(m.wram_offset(0x6000), 0x2000, "chip 1 starts at 8 KiB");
+        assert_eq!(m.wram_offset(0x7FFF), 0x3FFF, "chip 1, end of window");
+        // Bits 0-1 (page within chip) don't matter on ETROM: each chip
+        // has exactly one page.
+        w(&mut m, 0x5113, 1);
+        assert_eq!(m.wram_offset(0x6000), 0, "still chip 0");
+        w(&mut m, 0x5113, 7);
+        assert_eq!(m.wram_offset(0x6000), 0x2000, "still chip 1");
+    }
+
+    /// Ticket W14-22, acceptance: EKROM (a single 8 KiB chip) mirrors
+    /// every `$5113` value onto that one chip -- `$5113=4` lands on the
+    /// same bank as `$5113=0`.
+    #[test]
+    fn ekrom_single_chip_mirrors_every_bank_value() {
+        let mut m = Mmc5::new(prg(8), chr(8), false);
+        m.set_prg_ram_len(8 * 1024); // EKROM: 1x8 KiB chip (the default)
+        for bank in 0..8u8 {
+            w(&mut m, 0x5113, bank);
+            assert_eq!(
+                m.wram_offset(0x6000),
+                0,
+                "bank {bank} must mirror onto the only chip"
+            );
+        }
+    }
+
+    /// Ticket W14-22, acceptance: EWROM (32 KiB, one chip, four 8 KiB
+    /// pages) picks a distinct page per low-2-bit value of `$5113` and
+    /// wraps once every page has been used (bit 2 is part of the same
+    /// chip, not a second one).
+    #[test]
+    fn ewrom_32kib_single_chip_has_four_distinct_pages() {
+        let mut m = Mmc5::new(prg(8), chr(8), false);
+        m.set_prg_ram_len(32 * 1024);
+        for bank in 0..4u8 {
+            w(&mut m, 0x5113, bank);
+            assert_eq!(m.wram_offset(0x6000), usize::from(bank) * 0x2000);
+        }
+        w(&mut m, 0x5113, 4);
+        assert_eq!(m.wram_offset(0x6000), 0, "bank 4 wraps back to page 0");
+    }
+
+    /// Ticket W14-22, acceptance: a RAM-selected `$8000+` window is
+    /// chip-aware exactly like `$6000-$7FFF`, through the same
+    /// `chip_bank_offset` rule (`$5114`-`$5116`, not `$5113`).
+    #[test]
+    fn ram_selected_8000_window_is_chip_aware_on_etrom() {
+        let mut m = Mmc5::new(prg(8), chr(8), false);
+        m.set_prg_ram_len(16 * 1024);
+        w(&mut m, 0x5100, 3); // mode 3: four independent 8 KiB windows
+        w(&mut m, 0x5114, 0x04); // $8000 window: bit 7 clear -> RAM, chip 1
+        assert_eq!(m.prg_ram_window(0x8000), Some(0x2000));
+        assert_eq!(m.prg_ram_window(0x9FFF), Some(0x3FFF));
+    }
+
+    /// Ticket W14-22, acceptance: `$5102`/`$5103` gate PRG RAM writes
+    /// (nesdev.org/wiki/MMC5). Disabled at reset; only the exact
+    /// enabling combination (`$5102=%10`, `$5103=%01`) allows writes.
+    #[test]
+    fn prg_ram_write_protect_requires_the_exact_5102_5103_combination() {
+        let mut m = Mmc5::new(prg(8), chr(8), false);
+        assert!(
+            !m.prg_ram_write_enabled(),
+            "reset values (5102=01, 5103=10) must not enable writes"
+        );
+        w(&mut m, 0x5102, 0b10);
+        assert!(!m.prg_ram_write_enabled(), "5103 still wrong");
+        w(&mut m, 0x5103, 0b01);
+        assert!(m.prg_ram_write_enabled(), "both registers now match");
+        w(&mut m, 0x5102, 0b01);
+        assert!(!m.prg_ram_write_enabled(), "5102 reverted");
     }
 
     #[test]

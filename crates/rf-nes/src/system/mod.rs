@@ -117,7 +117,19 @@ use rf_cart::NesHeader;
 use rf_core_api::{CoreEvent, CoreSink, EventMask};
 
 const RAM_SIZE: usize = 0x0800;
-const PRG_RAM_SIZE: usize = 0x2000;
+/// The `$6000-$7FFF` CPU window's size — always exactly 8 KiB on every
+/// board this crate emulates, regardless of how much *total* PRG RAM
+/// backs it (ticket W14-22: a board can have more than one 8 KiB
+/// chip/page, selected by mapper registers, but only ever exposes one of
+/// them at `$6000-$7FFF` at a time). Also the floor for
+/// [`NesBus::prg_ram_len_for`]'s total-size computation: every board this
+/// crate has ever loaded backs this window with real RAM.
+const PRG_RAM_WINDOW: usize = 0x2000;
+/// Cap on the *total* PRG RAM a cartridge header can declare (ticket
+/// W14-22 acceptance: "up to 64 KiB"). Real MMC5 boards top out at 64
+/// KiB (`$5113`-`$5116`'s bank fields), and nothing this crate loads
+/// declares more.
+const PRG_RAM_MAX: usize = 0x10000;
 
 /// The NES system bus: RAM, PPU/APU register stubs, controllers, and NROM
 /// cartridge space, wired together as one [`CpuBus`] implementor. See the
@@ -129,7 +141,13 @@ pub struct NesBus {
     open_bus: u8,
     ppu: Ppu,
     controllers: [Controller; 2],
-    prg_ram: [u8; PRG_RAM_SIZE],
+    /// Cartridge PRG RAM (ticket W14-22 widened this from a fixed 8 KiB
+    /// array to a cartridge-sized buffer — see [`Self::prg_ram_len_for`]).
+    /// Every board but MMC5 only ever addresses the first
+    /// [`PRG_RAM_WINDOW`] bytes of it; MMC5's `$5113`/`$5114`-`$5116`
+    /// bank a chip/page of it into `$6000-$7FFF` and RAM-selected
+    /// `$8000+` windows (`Mapper::wram_offset`/`Mapper::prg_ram_window`).
+    prg_ram: Vec<u8>,
     rom: NesRom,
     /// The cartridge's mapper (ticket W2-02) — every `$8000-$FFFF` CPU
     /// access and every CHR-bank/mirroring push into `ppu` goes through
@@ -215,8 +233,17 @@ impl NesBus {
         Self::new_with_mmc3_revision(rom, Mmc3Revision::A)
     }
 
+    /// Total PRG RAM to back this cartridge with (ticket W14-22
+    /// acceptance): NES 2.0's declared volatile + non-volatile bytes, or
+    /// 8 KiB for iNES/undeclared, floored at [`PRG_RAM_WINDOW`] (every
+    /// board this crate loads backs `$6000-$7FFF` with real RAM) and
+    /// capped at [`PRG_RAM_MAX`].
+    fn prg_ram_len_for(header: &NesHeader) -> usize {
+        (header.prg_ram_size + header.prg_nvram_size).clamp(PRG_RAM_WINDOW, PRG_RAM_MAX)
+    }
+
     fn new_with_mmc3_revision(rom: NesRom, mmc3_revision: Mmc3Revision) -> Self {
-        let mapper: Box<dyn Mapper> = match rom.header().mapper {
+        let mut mapper: Box<dyn Mapper> = match rom.header().mapper {
             0 => Box::new(Nrom::new(rom.prg_rom().to_vec(), rom.header().mirroring)),
             1 => Box::new(Mmc1::new(
                 rom.prg_rom().to_vec(),
@@ -326,6 +353,13 @@ impl NesBus {
                  note in plan.json"
             ),
         };
+        // Ticket W14-22: push the cartridge's declared PRG RAM size into
+        // the mapper before any register write reaches it -- only MMC5
+        // consults this (`Mapper::set_prg_ram_len`'s default is a no-op),
+        // but it must happen for every mapper so the dispatch above stays
+        // one match, not two.
+        let prg_ram_len = Self::prg_ram_len_for(rom.header());
+        mapper.set_prg_ram_len(prg_ram_len);
         // Seed the PPU's flat CHR buffer from the mapper's initial view:
         // `chr_window()` (bank-0-windowed) for a banked mapper, or the raw
         // cartridge CHR bytes for one with no CHR banking at all (module
@@ -345,7 +379,7 @@ impl NesBus {
             open_bus: 0,
             ppu,
             controllers: [Controller::new(), Controller::new()],
-            prg_ram: [0; PRG_RAM_SIZE],
+            prg_ram: vec![0; prg_ram_len],
             rom,
             mapper,
             last_oam_dma_stall: None,
@@ -569,9 +603,24 @@ impl NesBus {
         &self.ram
     }
 
-    /// full memory map.
-    pub fn prg_ram(&self) -> &[u8; PRG_RAM_SIZE] {
-        &self.prg_ram
+    /// The cartridge PRG RAM currently banked into the CPU's
+    /// `$6000-$7FFF` window (see the module doc's full memory map) —
+    /// always exactly [`PRG_RAM_WINDOW`] (8 KiB), even on a board whose
+    /// *total* PRG RAM is larger (ticket W14-22; MMC5's `$5113`-selected
+    /// chip/page, [`crate::mappers::Mapper::wram_offset`]). A zero-copy
+    /// reinterpretation of the live slice, not a snapshot: every board
+    /// but MMC5 has exactly one chip, so `wram_offset`'s default (`addr -
+    /// 0x6000`) always returns this same window unchanged.
+    #[must_use]
+    pub fn prg_ram(&self) -> &[u8; PRG_RAM_WINDOW] {
+        let len = self.prg_ram.len();
+        let start = self
+            .mapper
+            .wram_offset(0x6000)
+            .min(len.saturating_sub(PRG_RAM_WINDOW));
+        (&self.prg_ram[start..start + PRG_RAM_WINDOW])
+            .try_into()
+            .expect("PRG_RAM_WINDOW-sized slice")
     }
 
     /// Stall length (513 or 514) of the most recently completed OAM DMA,
@@ -641,13 +690,17 @@ impl NesBus {
                 .mapper
                 .cpu_read_expansion(addr)
                 .unwrap_or(self.open_bus),
-            0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000],
+            // Ticket W14-22: `wram_offset` replaces the old bare
+            // `addr - 0x6000` -- MMC5's `$5113` can bank a different
+            // chip/page in here; every other mapper's default is exactly
+            // the old expression.
+            0x6000..=0x7FFF => self.prg_ram[self.mapper.wram_offset(addr) % self.prg_ram.len()],
             // Ticket W14-17: a RAM-selected $8000-$FFFF window (MMC5's
             // $5114-$5117 bit 7 clear) reads the bus's own PRG RAM chip
             // instead of the mapper's ROM (see `crate::mappers::Mmc5`
             // module doc, "PRG RAM windows").
             0x8000..=0xFFFF => match self.mapper.prg_ram_window(addr) {
-                Some(offset) => self.prg_ram[offset % PRG_RAM_SIZE],
+                Some(offset) => self.prg_ram[offset % self.prg_ram.len()],
                 None => self.mapper.cpu_read(addr),
             },
         };
@@ -733,9 +786,9 @@ impl NesBus {
                 self.ppu.ext_ram_read(usize::from(addr - 0x5C00))
             }
             0x4020..=0x5FFF => self.open_bus,
-            0x6000..=0x7FFF => self.prg_ram[(addr as usize) - 0x6000],
+            0x6000..=0x7FFF => self.prg_ram[self.mapper.wram_offset(addr) % self.prg_ram.len()],
             0x8000..=0xFFFF => match self.mapper.prg_ram_window(addr) {
-                Some(offset) => self.prg_ram[offset % PRG_RAM_SIZE],
+                Some(offset) => self.prg_ram[offset % self.prg_ram.len()],
                 None => self.mapper.cpu_read(addr),
             },
         }
@@ -810,7 +863,16 @@ impl NesBus {
                 self.push_mapper_view();
             }
             0x6000..=0x7FFF => {
-                self.prg_ram[(addr as usize) - 0x6000] = value;
+                // Ticket W14-22: MMC5's $5102/$5103 write-protect can
+                // block the RAM store itself; boards with registers in
+                // this range (NINA-001, Jaleco JF) still see the write
+                // via `cpu_write_wram` either way -- that hook observes
+                // the CPU write, not the RAM cell, and no board with
+                // registers here also implements the protect pair.
+                if self.mapper.prg_ram_write_enabled() {
+                    let offset = self.mapper.wram_offset(addr) % self.prg_ram.len();
+                    self.prg_ram[offset] = value;
+                }
                 // Ticket W14-15: boards with registers in this range.
                 self.mapper.cpu_write_wram(addr, value);
                 self.push_mapper_view();
@@ -835,7 +897,12 @@ impl NesBus {
                 // PRG RAM chip directly rather than reaching the
                 // mapper's own (no-op for MMC5) `cpu_write`.
                 match self.mapper.prg_ram_window(addr) {
-                    Some(offset) => self.prg_ram[offset % PRG_RAM_SIZE] = value,
+                    Some(offset) => {
+                        if self.mapper.prg_ram_write_enabled() {
+                            let len = self.prg_ram.len();
+                            self.prg_ram[offset % len] = value;
+                        }
+                    }
                     None => self.mapper.cpu_write(addr, value, self.master_cycle),
                 }
                 self.push_mapper_view();
