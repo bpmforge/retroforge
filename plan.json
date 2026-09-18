@@ -6756,8 +6756,9 @@
     "a golden test of the fixture scene with the pass on and off; a by-eye check on a real fog scene recorded"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 (lane A slot). rf-renderer/src/fog.rs + shaders/fog.wgsl (standalone two-texture pass, not a ChainStage), fog_golden.rs (off/on hashes pinned, alpha preserved), BudgetGate (p95 window 30, off > 16.67 ms, on < 13 ms). Measured on M4 Max: 2.25 / 2.99 ms p95. App shell converts ExtractedBg -> density RGBA and scroll -> drift (enhanced_view.rs). Heuristic id in app::HEURISTICS so the Game Settings ladder radios cover it; feature row 'Atmosphere: fog' enabled only at Active; hold-to-peek already bypasses enhanced compositing. FOLLOW-UP: [atmosphere] plane pin in the rf-profiles schema (atmosphere::pinned_layer producer exists, no TOML field yet); by-eye check on a real fog scene (A Link to the Past Lost Woods) is Brad's; the detector must first reach Active for a game, via Game Settings. Gate: workspace 1984 passing / 0 failed / 39 ignored (agent + orchestrator).",
     "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
    ],
    "stories": []
