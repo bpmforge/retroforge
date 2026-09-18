@@ -317,6 +317,20 @@ pub struct RetroForgeApp {
     /// Counted so a test can prove the play-then-close round trip does
     /// not re-scan — see `library_scan_count_for_test`.
     library_scans: u32,
+    /// Ticket W15-01: the selected library row/card, by PATH rather than
+    /// an index into the filtered list — an index silently points at a
+    /// different game the moment the search box or console filter
+    /// changes what is filtered out from under it. `None` until the user
+    /// clicks a row or moves the selection with an arrow key/gamepad
+    /// direction. Not persisted across launches for the same reason
+    /// `library_search` isn't: a selection is a within-session gesture.
+    library_selected: Option<std::path::PathBuf>,
+    /// Whether the library search box has keyboard focus as of the last
+    /// frame the toolbar ran (ticket W15-01). Enter-to-launch and the
+    /// arrow-key selection walk both stand down while this is true —
+    /// otherwise typing in the search box would steer the selection and
+    /// Enter would launch a game instead of just accepting the filter.
+    library_search_focused: bool,
     /// Ticket W11-02: the decoded level for the running ROM, when a
     /// profile matched and declared one. `None` otherwise, which is the
     /// ordinary case and never an error.
@@ -704,6 +718,8 @@ impl RetroForgeApp {
             library_search: String::new(),
             library_console_filter: None,
             library_scans: 0,
+            library_selected: None,
+            library_search_focused: false,
             level_session: None,
             level_texture: None,
             level_camera: None,
@@ -3716,11 +3732,16 @@ impl RetroForgeApp {
     /// §3.1's search box and console filters. Returns the filtered titles.
     fn library_toolbar(&mut self, ui: &mut egui::Ui, count: usize, rescan: &mut bool) {
         ui.horizontal(|ui| {
-            ui.add(
+            let search_response = ui.add(
                 egui::TextEdit::singleline(&mut self.library_search)
                     .hint_text("Search\u{2026}")
                     .desired_width(180.0),
             );
+            // Ticket W15-01: read every frame the toolbar runs, so
+            // `library_grid`'s Enter/arrow-key handling always sees this
+            // frame's truth rather than a stale one from before the user
+            // clicked into (or tabbed out of) the search box.
+            self.library_search_focused = search_response.has_focus();
             // `None` is "every console", which is why the filter is an
             // Option rather than a Console with an `All` variant: `All`
             // would be a console that does not exist, and every match on
@@ -3757,8 +3778,14 @@ impl RetroForgeApp {
     /// NON_GOALS #5 rules out fetching it.
     ///
     /// Returns the ROM to open, if one was picked.
+    ///
+    /// Ticket W15-01 added the selection/launch layer on top of the row
+    /// list W10-03 built: a selected-row focus ring, double-click and
+    /// Enter both launching, and arrow keys walking the selection. `&mut
+    /// self` (this was `&self`) because that state — `library_selected`
+    /// — lives on `App`, not on the grid.
     fn library_grid(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         library: &crate::library::Library,
     ) -> Option<std::path::PathBuf> {
@@ -3795,6 +3822,63 @@ impl RetroForgeApp {
         }
 
         let mut to_play = None;
+
+        // Ticket W15-01: keyboard (and, via `ui_nav.rs`, gamepad — the
+        // pad bridge turns d-pad/Activate into these exact `egui::Key`
+        // events, so there is no separate branch for it here) selection
+        // over the FILTERED list. Both stand down while the search box
+        // has focus, or ArrowDown while typing "beta" would also walk
+        // the selection and Enter would launch instead of just accepting
+        // the search term.
+        let search_has_focus = self.library_search_focused;
+        let mut moved_by_keyboard = false;
+        if !search_has_focus {
+            let (down, up, home, end) = ui.ctx().input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::Home),
+                    i.key_pressed(egui::Key::End),
+                )
+            });
+            if down || up || home || end {
+                let last = matches.len() - 1;
+                let current = self
+                    .library_selected
+                    .as_ref()
+                    .and_then(|p| matches.iter().position(|e| &e.path == p));
+                let next = if home {
+                    0
+                } else if end {
+                    last
+                } else if down {
+                    current.map_or(0, |i| (i + 1).min(last))
+                } else {
+                    // `up`, the only remaining case in this branch.
+                    current.map_or(last, |i| i.saturating_sub(1))
+                };
+                self.library_selected = Some(matches[next].path.clone());
+                moved_by_keyboard = true;
+            }
+        }
+
+        // Enter launches the current selection — the keyboard/gamepad
+        // half of principle 6 (§2): mouse gets double-click, keyboard and
+        // pad get Enter/Activate, Play stays as the explicit affordance
+        // for anyone who has learned neither gesture.
+        if !search_has_focus && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)) {
+            if let Some(selected) = self.library_selected.clone() {
+                if matches.iter().any(|e| e.path == selected) {
+                    to_play = Some(selected);
+                }
+            }
+        }
+
+        let accent = {
+            let c = self.settings.accessibility.normalized().palette().accent;
+            egui::Color32::from_rgb(c[0], c[1], c[2])
+        };
+
         // Rows, not an `egui::Grid`. A Grid sizes every column to its
         // content, so the whole library huddled into the left third of
         // the window with two thirds of empty space beside it — a list
@@ -3818,12 +3902,35 @@ impl RetroForgeApp {
                     } else {
                         egui::Color32::TRANSPARENT
                     };
-                    egui::Frame::NONE
+                    let is_selected =
+                        self.library_selected.as_deref() == Some(entry.path.as_path());
+                    let mut row_clicked = false;
+                    let mut row_double_clicked = false;
+                    let row = egui::Frame::NONE
                         .fill(fill)
                         .inner_margin(egui::Margin::symmetric(6, 3))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(&entry.title);
+                                // The title is the click/double-click
+                                // target, via `Label::sense` — NOT a
+                                // whole-row `Response::interact` behind
+                                // the content. Measured, not guessed: a
+                                // row-wide interact added (as `Frame`'s
+                                // own response must be) AFTER the Play
+                                // button also wins clicks addressed AT
+                                // the button, because egui resolves
+                                // overlapping widgets by add order for
+                                // the whole pass, not by where each
+                                // `interact()` call sits in this
+                                // function's source. The title and the
+                                // button never overlap, so sensing the
+                                // title directly can never take a click
+                                // the button was supposed to get.
+                                let title_response = ui.add(
+                                    egui::Label::new(&entry.title).sense(egui::Sense::click()),
+                                );
+                                row_double_clicked = title_response.double_clicked();
+                                row_clicked = title_response.clicked();
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
@@ -3860,6 +3967,43 @@ impl RetroForgeApp {
                                 );
                             });
                         });
+
+                    if row_double_clicked {
+                        // Ticket W15-01 acceptance 1: double-click launches
+                        // regardless of what was selected before it.
+                        to_play = Some(entry.path.clone());
+                    } else if row_clicked {
+                        // Acceptance 2: a single click SELECTS ONLY — it
+                        // must not also set `to_play`.
+                        self.library_selected = Some(entry.path.clone());
+                    }
+
+                    if is_selected {
+                        // The ring is drawn around the whole row (`row`,
+                        // the frame's own response) even though only the
+                        // title senses the click — a focus indicator that
+                        // only outlined the title text would look like it
+                        // was highlighting a search match, not marking
+                        // what Enter/Activate will launch.
+                        //
+                        // WCAG 2.2 non-text contrast (SC 1.4.11): the ring
+                        // is `accent`, and `accessibility.rs` already
+                        // proves that colour clears AAA (>=7:1, so also
+                        // the 3:1 floor this criterion asks for) against
+                        // both `background` and `raised` in both the
+                        // default and high-contrast palettes.
+                        ui.painter().rect_stroke(
+                            row.response.rect,
+                            2.0,
+                            egui::Stroke::new(2.0, accent),
+                            egui::StrokeKind::Inside,
+                        );
+                        if moved_by_keyboard {
+                            // Scroll only on a keyboard/pad move — a mouse
+                            // click already means the row is visible.
+                            row.response.scroll_to_me(Some(egui::Align::Center));
+                        }
+                    }
                 }
             });
         to_play
@@ -4588,6 +4732,14 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn set_library_search_for_test(&mut self, needle: &str) {
         self.library_search = needle.to_string();
+    }
+
+    /// Set the library's selected row directly (ticket W15-01), so a test
+    /// can put the selection into a known state — including clearing it —
+    /// without first driving a click or a key press to get there.
+    #[doc(hidden)]
+    pub fn set_library_selected_for_test(&mut self, path: Option<std::path::PathBuf>) {
+        self.library_selected = path;
     }
 
     /// Close the running ROM, as File > Close ROM does (ticket W10-03).
