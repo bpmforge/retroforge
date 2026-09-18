@@ -6937,8 +6937,9 @@
     "one fixture profile and one commercial profile (A Link to the Past, once its fog plane is found empirically in shadow mode) use it; the by-eye check is recorded"
    ],
    "points": 2,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 (lane B). HANDOFF -- WRITE_SCOPE WIDENED to crates/retroforge/src/app.rs for the one apply_profile_pin call after per-game settings load. Note recorded by the implementer: nothing wires [antiflicker] into TrustLadder::pin today, so the mirrored precedent was WidescreenPolicies::from_profile. Super Metroid and the (non-existent) ALttP profile got no [atmosphere]: no public source for a plane index. Gate: rf-profiles/rf-enhance/retroforge 634 passing, workspace 1995 (agent), arch OK, profiles 11/11 ok.",
     "FILED 2026-09-18 by W16-04's close: the pin producer exists, the TOML field does not (rf-profiles was outside W16-04's scope)."
    ],
    "stories": []

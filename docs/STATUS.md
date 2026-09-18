@@ -3662,3 +3662,14 @@ stories, 10 decisions).
   the profile schema, and Brad's by-eye check on a real fog scene once
   the detector is set Active for that game. Gate: workspace **1984
   passing / 0 failed / 39 ignored**, clippy clean, arch OK.
+
+- **W16-10 — profile pin for the fog plane** (2026-09-18, lane B). A
+  profile may now declare `[atmosphere]` with the plane index, an
+  optional tint and strength, and the ladder rung to pin, validated per
+  console. The enhancement crate applies it as a pin that skips
+  detection, and the app calls that at the point where the loaded
+  profile and the per-game ladder meet. The fixture profile carries the
+  table at shadow purely to exercise the schema; no commercial profile
+  names a plane without a public source, so A Link to the Past waits
+  for the detector to find its plane empirically. Gate: crate tests
+  green, workspace **1995 passing / 0 failed**, arch OK.
