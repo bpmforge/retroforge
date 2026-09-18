@@ -6599,8 +6599,9 @@
    "a test confirms App-namespaced and game-namespaced bindings cannot be assigned to collide"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "notes": [
+    "CLOSED 2026-09-18 (lane A). app_bindings.rs (AppAction x5, own text format app_hotkeys.rfbind, four conflict checks), bindings_store load_app/save_app, CoreCommand::SetPacingEnabled, poll_app_hotkeys with edge-triggered holds (fast_forward_held, peek_key_held OR'd into peeking_original), App section in the Controls window, bindings shown in the overlay, screenshots to <config>/retroforge/screenshots with a toast, FF chip. Note: no inline conflict UI existed before; this ticket adds it in both directions. Pad hold state for app actions is queried through a throwaway PadMap via PadRouter::buttons (the held set is private to rf-input). Tests: app_bindings (10), bindings_store app_hotkey_* (4), tests/app_hotkeys.rs F12 screenshot. Gate: workspace 2031 passing / 0 failed / 39 ignored (agent + orchestrator).",
    "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 7). See that doc \u00a76 and \u00a711.",
    "Independent of the other W15 tickets; can be built any time."

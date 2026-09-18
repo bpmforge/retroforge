@@ -3701,3 +3701,15 @@ stories, 10 decisions).
   unchanged. The reconstructed projection and raster maths is exercised
   for real now, so Brad's by-eye check of the track decides it. Gate:
   workspace **1986 passing / 0 failed**, arch OK.
+
+- **W15-06 — app hotkeys** (2026-09-18, lane A). Save state, load
+  state, fast-forward while held, screenshot and hold-to-peek, with the
+  spec's defaults F5, F9, Tab, F12 and backtick, in an App section of the
+  Controls window kept in its own table and file so a key or pad button
+  can never serve both a game action and an app action; both remap
+  flows now refuse the overlap with an inline message, which no flow
+  had before. Fast-forward turns the pacer off for the hold and, as a
+  found bug, also skips the audio-clock wait the pacer branch had never
+  consulted. The overlay menu shows each action's binding, so the keys
+  are learned by seeing them. Gate: workspace **2031 passing / 0 failed
+  / 39 ignored**, clippy clean, arch OK.
