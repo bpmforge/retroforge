@@ -3164,8 +3164,7 @@
     "The capture is downscaled 3x with the reason recorded in docs/demo/README.md: `rf_renderer::png` writes STORED (uncompressed) deflate blocks, so a full-size sheet is 4 MB and would be re-committed at that size on every regeneration. Teaching that encoder to deflate is a real follow-up and would let it go back to full resolution.",
     "docs/evidence/local-gate.json REGENERATED and re-committed: W4-10b's per-channel capture touched `crates/rf-nes/src/apu`, which made the `apu_test` evidence stale and `validate-evidence.mjs` (a CI step) red. Re-run of the full local gate: 2 550 000/2 550 000 vector cases, nestest 8991/8991 lines, ppu_vbl_nmi 10/10, sprite_hit_tests 11/11, accuracy table 31/31. Worth noting for whoever next touches a core: any change under rf-nes's apu/system paths stales this file and the fix is `scripts/local-gate.sh`, not a waiver."
    ],
-   "stories": [],
-   "hold": true
+   "stories": []
   },
   {
    "id": "W5-07",
@@ -3272,8 +3271,7 @@
    ],
    "points": 3,
    "status": "done",
-   "stories": [],
-   "hold": true
+   "stories": []
   },
   {
    "id": "W5-06",
@@ -6466,9 +6464,8 @@
   ],
   "points": 3,
   "status": "todo",
-  "hold": true,
   "notes": [
-   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (source: retroforge-ux-review.html recommendation 1). See that doc \u00a73 for the wireframe and \u00a711 for the full acceptance summary this ticket's list is drawn from.",
    "Where: library row loop in app.rs; ui_nav.rs already emits Enter for the pad path, so gamepad launch should come for free once Enter-to-launch exists."
   ],
@@ -6493,9 +6490,8 @@
   ],
   "points": 3,
   "status": "todo",
-  "hold": true,
   "notes": [
-   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 2). See that doc \u00a73 (toolbar wireframe) and \u00a711.",
    "Where: game_settings.rs for the new fields; the library toolbar for the chips and sort control."
   ],
@@ -6520,9 +6516,8 @@
   ],
   "points": 3,
   "status": "todo",
-  "hold": true,
   "notes": [
-   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 3). See that doc \u00a73 (context menu contents) and \u00a75 (Game Settings window) and \u00a711.",
    "Where: consolidate what the Enhance menu and Enhance workspace scatter today."
   ],
@@ -6545,9 +6540,8 @@
   ],
   "points": 2,
   "status": "todo",
-  "hold": true,
   "notes": [
-   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 4). See that doc \u00a75 for the full before/after dialog table and \u00a711.",
    "Independent of W15-01/02/03; can be built in parallel."
   ],
@@ -6575,9 +6569,8 @@
   ],
   "points": 5,
   "status": "todo",
-  "hold": true,
   "notes": [
-   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 5). See that doc \u00a74 for the full art pipeline including the opt-in network fetch this ticket excludes, and \u00a711.",
    "Where: screenshot capture already exists in app.rs; add an image loader via egui_extras; the empty-state cards from design review G-21 slot into the same grid. rf-cache is in write_scope because the thumbnail cache belongs in the existing content-addressed store per rf-cache's own module doc (W4-08), not a second cache."
   ],
@@ -6600,9 +6593,8 @@
   ],
   "points": 3,
   "status": "todo",
-  "hold": true,
   "notes": [
-   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 7). See that doc \u00a76 and \u00a711.",
    "Independent of the other W15 tickets; can be built any time."
   ],
@@ -6627,9 +6619,8 @@
   ],
   "points": 3,
   "status": "todo",
-  "hold": true,
   "notes": [
-   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 9, and new principle 7 'theme is a token set, not scattered literals'). See that doc \u00a78 and \u00a711.",
    "Depends on W15-05 because there must be real cards to theme before hover elevation and the grid's visual language can be finished."
   ],
@@ -6655,13 +6646,240 @@
   ],
   "points": 5,
   "status": "todo",
-  "hold": true,
   "notes": [
-   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 10). See that doc \u00a79 and \u00a711.",
    "Depends on W15-05: there is nothing to navigate a grid over before the grid exists."
   ],
   "stories": []
- }
+ },
+  {
+   "id": "W16-01",
+   "title": "GPU pass benchmark harness and local AI upscaler spike",
+   "phase": 16,
+   "crate": "rf-renderer",
+   "write_scope": [
+    "crates/rf-renderer/**",
+    "crates/rf-ai/**",
+    "scripts/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "a benchmark harness times any GPU pass (shader chain, compositor, a stub neural pass) per frame at 256x240 and 512x448 inputs on the local machine and writes a JSON evidence row (machine, GPU, pass, p50/p95 ms) the way local-gate does",
+    "a Real-ESRGAN-class model (BSD-3 or a permissively licensed community pixel-art model, licence recorded in the manifest) runs once through ort with the CoreML EP on this Mac and its ms/frame at both sizes is recorded; CPU EP as the control",
+    "MetalFX spatial upscaling is timed through objc2-metal-fx on the same inputs if the binding builds on this toolchain; otherwise the reason is recorded",
+    "the numbers set the frame-budget gate threshold in docs (D-012): a pass is eligible for real time only under X ms p95, X chosen from the measurement; the doc says which models and hardware pass today"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-02",
+   "title": "Upscale Studio: local model, licence ledger, review screen, HD pack output",
+   "phase": 16,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/rf-ai/**",
+    "crates/retroforge/**",
+    "scripts/**"
+   ],
+   "depends_on": [
+    "W16-01"
+   ],
+   "acceptance": [
+    "a chosen upscaler model is fetched by a script with hash and licence status recorded (NFR-011; OpenRAIL-class weights refused), never vendored",
+    "rf-ai's pipeline runs the model through ort (CoreML/CUDA when present, CPU otherwise) once per animation sheet with palette-aware post-processing (indexed palette re-quantisation optional, edge mask) and writes a Mesen-compatible HD pack keyed by tile hash",
+    "an Upscale Studio window lists the captured tiles, previews original vs upscaled, lets the user approve, reject or replace each, and writes the pack with attribution",
+    "a fixture game's tiles round-trip through the studio in a test with a stub upscaler; the real model is an ignored test that runs locally"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-03",
+   "title": "Atmosphere-layer detector in shadow mode",
+   "phase": 16,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "crates/rf-harness/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "a heuristic flags a SNES background plane as an atmosphere candidate when it carries half or additive colour math (ColorMathOp per pixel), scrolls slowly and independently of the main plane, and shows low tile variety; thresholds documented",
+    "it ships at the shadow rung of the trust ladder (D-004): detect and record, never act; the report card shows candidates per scene",
+    "a red fixture scene (RF-Scroller-S variant or a new fixture) triggers it in the test suite and stays red; a plain scene does not trigger it",
+    "the ExtractedBg scene-graph layer gains its first producer, emitting the candidate plane's pixels and scroll as a layer"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-04",
+   "title": "Fog and steam pass driven by the atmosphere layer",
+   "phase": 16,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/rf-renderer/**",
+    "crates/rf-enhance/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W16-03"
+   ],
+   "acceptance": [
+    "a WGSL post pass reads the atmosphere layer's pixels as a density map and renders drifting volumetric-style fog (froxel or screen-space) that follows the layer's scroll telemetry; the original plane's mask is kept underneath so silhouettes are unchanged",
+    "the pass sits behind the frame-budget gate from W16-01 and disables itself when p95 exceeds the threshold, with a report-card entry",
+    "advisory and active rungs of the detector are wired: a profile can pin the plane; the badge names the effect; hold-to-peek shows the original",
+    "a golden test of the fixture scene with the pass on and off; a by-eye check on a real fog scene recorded"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-05",
+   "title": "Room-grid collision field and the first two collision-sourced profiles",
+   "phase": 16,
+   "crate": "rf-enhance",
+   "write_scope": [
+    "crates/rf-enhance/**",
+    "crates/rf-profiles/**",
+    "profiles/**",
+    "docs/design/GAME_PROFILES.md"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "the room_grid decoder family gains a collision table and bits like metatile_screens, producing DecodedLevel.collision for room games",
+    "two profiles cite sourced collision tables (e.g. a top-down NES fixture and one documented commercial layout with the source recorded; no ROM bytes) and validate",
+    "the scene graph carries a solidity mask per decoded screen; a unit test renders it"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-06",
+   "title": "Geometry scene layer and the 3D compositor: extrusion, billboards, shadows, fixed pitch",
+   "phase": 16,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/rf-renderer/**",
+    "crates/rf-enhance/**",
+    "crates/retroforge/**",
+    "docs/design/RENDERER.md",
+    "docs/design/ENHANCEMENT_RUNTIME.md"
+   ],
+   "depends_on": [
+    "W16-05"
+   ],
+   "acceptance": [
+    "a Geometry scene-graph layer with a depth field and solidity mask, produced from DecodedLevel.collision (visited/decoded screens only per NON_GOALS #11)",
+    "the app-side compositor extrudes solid tiles into blocks, stands sprites as billboards at their OAM footprint with contact shadows, and pitches a fixed camera; input and hit-testing stay 2D and the game view is unchanged in Accuracy",
+    "Diorama tier two is selectable only in Game-Aware mode with a matching profile; the badge says so; a headless golden of the fixture room",
+    "a by-eye check on the first commercial profile recorded"
+   ],
+   "points": 8,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-07",
+   "title": "Real-time AI pass, hardware-gated, one-frame latency disclosed",
+   "phase": 16,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/rf-renderer/**",
+    "crates/rf-ai/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W16-01"
+   ],
+   "acceptance": [
+    "a neural upscale pass (burn-wgpu or ort/CoreML per W16-01's numbers) runs after the compositor on the composited frame, strictly downstream of core state (determinism tests unchanged)",
+    "enabled only when start-up detection finds hardware under the gate threshold; otherwise the option is shown disabled with the reason",
+    "the extra frame of latency is stated in the status bar next to the badge; hold-to-peek shows the pre-pass frame",
+    "fresh install boots with the pass off (law 6)"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-08",
+   "title": "MetalFX spatial and temporal path on Apple Silicon",
+   "phase": 16,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/rf-renderer/**",
+    "crates/retroforge/**"
+   ],
+   "depends_on": [
+    "W16-01"
+   ],
+   "acceptance": [
+    "on macOS, MetalFX spatial upscaling is offered as a scaler in the shader chain via objc2-metal-fx, feature-gated, with the wgpu texture handed across correctly",
+    "temporal mode is attempted and either shipped or the blocker recorded",
+    "benchmarked with W16-01's harness and gated the same way"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-09",
+   "title": "Mode 7 plane as pitched 3D geometry",
+   "phase": 16,
+   "crate": "rf-renderer",
+   "write_scope": [
+    "crates/rf-renderer/**",
+    "crates/rf-snes/**",
+    "crates/rf-core-api/**"
+   ],
+   "depends_on": [
+    "W16-06"
+   ],
+   "acceptance": [
+    "the Mode 7 matrix and offsets are promoted from the debug snapshot to the frame bundle as an optional cross-console field",
+    "the 3D compositor renders a Mode 7 plane as a textured ground at the hardware's own transform with a pitched camera, bsnes-hd style at higher internal resolution",
+    "a golden on the example-mode7 fixture and a by-eye check on a racing or flight title recorded"
+   ],
+   "points": 5,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
+   ],
+   "stories": []
+  }
  ]
 }
