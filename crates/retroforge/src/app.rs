@@ -248,6 +248,54 @@ fn pad_backend_or_none() -> Option<rf_input::GilrsBackend> {
     }
 }
 
+/// Ticket W15-05: per-hash badge facts for the card grid (`UX_WAVE_15.md`
+/// §3.1), read once per library scan alongside `library_meta` rather than
+/// once per card per frame — same "cheap enough to do for every row"
+/// reasoning `RecencyMeta`'s own doc gives, extended to the two extra
+/// badges a card shows that a row (pre-W15-05) never did.
+#[derive(Debug, Clone, Default)]
+struct LibraryBadges {
+    /// Normalized hashes with at least one occupied save-state slot.
+    has_states: std::collections::HashSet<String>,
+    /// Normalized hashes whose game settings have enhancement active
+    /// (`crate::game_settings::Mode::enhancement_active`).
+    enhanced: std::collections::HashSet<String>,
+    /// Normalized hashes a profile's identity list names by sha256
+    /// (`crate::level_view::all_profile_sha256s`).
+    profile_matched: std::collections::HashSet<String>,
+}
+
+/// Ticket W15-05, §3: card layout constants, shared between
+/// `RetroForgeApp::library_cards` (drawing) and
+/// `RetroForgeApp::library_grid_columns` (the arrow-key stride) so the
+/// two can never disagree about how many cards fit in a row.
+const CARD_WIDTH: f32 = 150.0;
+const CARD_SPACING: f32 = 10.0;
+/// "16:15-ish console aspect" (§3's Card bullet) — close to the NES's own
+/// 256x240 (16:15) frame, so a save-state/first-frame thumbnail from
+/// either console letterboxes with only a thin margin rather than a
+/// visibly wrong box.
+const CARD_THUMB_HEIGHT: f32 = (CARD_WIDTH - 12.0) * 15.0 / 16.0;
+
+/// Acceptance 4's "generic, console-tinted placeholder" — a flat colour
+/// distinct per console (and for an unrecognized ROM), so a shelf of
+/// placeholder cards still visually separates NES from SNES at a glance,
+/// the way real box art would, without claiming to BE box art.
+fn console_tint(ui: &egui::Ui, identity: &crate::library::EntryIdentity) -> egui::Color32 {
+    let base = ui.visuals().widgets.noninteractive.bg_fill;
+    match identity {
+        crate::library::EntryIdentity::Recognized {
+            console: crate::library::Console::Nes,
+            ..
+        } => egui::Color32::from_rgb(120, 70, 40).lerp_to_gamma(base, 0.35),
+        crate::library::EntryIdentity::Recognized {
+            console: crate::library::Console::Snes,
+            ..
+        } => egui::Color32::from_rgb(90, 60, 130).lerp_to_gamma(base, 0.35),
+        crate::library::EntryIdentity::Unrecognized { .. } => base,
+    }
+}
+
 /// The whole application's UI-thread-owned state.
 pub struct RetroForgeApp {
     /// Ticket W11-03: why each background did or did not widen. `Some` is
@@ -370,6 +418,29 @@ pub struct RetroForgeApp {
     /// launch) rather than once per row per frame — UX_WAVE_15 §11
     /// acceptance 1's "cheap enough to do for every row".
     library_meta: std::collections::BTreeMap<String, crate::library::RecencyMeta>,
+    /// Ticket W15-05: extra per-hash badge facts (has save states, an
+    /// enhanced-mode game setting, a matched profile) — read once per
+    /// scan for the same reason `library_meta` is (`Self::load_badges`).
+    library_badges: LibraryBadges,
+    /// Ticket W15-05, `UX_WAVE_15.md` §3: the toolbar's Grid/List toggle.
+    /// Mirrors `settings.library.view`; kept as its own field (rather than
+    /// read through `self.settings` every frame) so a test can flip it
+    /// directly (`set_library_view_for_test`) without going through a
+    /// settings file.
+    library_view: crate::library::LibraryView,
+    /// Ticket W15-05: decoded card thumbnails, keyed by normalized ROM
+    /// hash. `None` means "resolved, and there is no thumbnail" (the
+    /// placeholder card is drawn instead) — distinct from "not looked up
+    /// yet" (no entry at all), so a hash with no art is not re-resolved
+    /// (state-slot scan, art-folder walk) every single frame it is on
+    /// screen.
+    library_thumbnail_textures: std::collections::HashMap<String, Option<egui::TextureHandle>>,
+    /// Ticket W15-05: the on-disk cache the one-time first-frame capture
+    /// persists through (`crate::thumbnail`, `rf-cache`'s size-capped
+    /// LRU). `None` when there is nowhere to root it or opening it
+    /// failed — degrades to "no first-frame capture persists this
+    /// session", never a reason to fail loading a ROM.
+    thumbnail_cache: Option<rf_cache::Cache>,
     /// Ticket W11-02: the decoded level for the running ROM, when a
     /// profile matched and declared one. `None` otherwise, which is the
     /// ordinary case and never an error.
@@ -801,6 +872,14 @@ impl RetroForgeApp {
             .map(|root| crate::library_roots::load(root))
             .unwrap_or_default();
 
+        // Ticket W15-05: opened once at startup, same lifetime as
+        // `bindings`/`app_settings` above — a per-frame open would
+        // re-read/self-heal `index.bin` sixty times a second for no
+        // reason.
+        let thumbnail_cache =
+            crate::thumbnail::open_cache(config_root.as_deref(), &app_settings.paths);
+        let library_view = app_settings.library.view;
+
         RetroForgeApp {
             widescreen_decisions: [None; 4],
             hd_pack: None,
@@ -829,6 +908,10 @@ impl RetroForgeApp {
             library_recency_filter: crate::library::RecencyFilter::All,
             library_sort: None,
             library_meta: std::collections::BTreeMap::new(),
+            library_badges: LibraryBadges::default(),
+            library_view,
+            library_thumbnail_textures: std::collections::HashMap::new(),
+            thumbnail_cache,
             level_session: None,
             level_texture: None,
             level_camera: None,
@@ -2305,6 +2388,11 @@ impl RetroForgeApp {
                 }
                 _ => (msg.rgba.clone(), (msg.width, msg.height)),
             };
+            // Ticket W15-05: the first-frame capture hook (acceptance 1) —
+            // the first `CoreEvent::Frame` after a successful boot for a
+            // hash with no thumbnail yet. Reads `rgba` before it moves
+            // into `self.last_frame_rgba` below.
+            self.maybe_capture_first_frame(&rgba, size.0, size.1);
             self.last_frame_rgba = Some(rgba);
             self.last_frame_size = Some(size);
             // Ticket W11-02: the probe's bytes become a live camera. The
@@ -3772,6 +3860,40 @@ impl RetroForgeApp {
                                 {
                                     changed = true;
                                 }
+
+                                ui.separator();
+                                // Ticket W15-05, §4.3: the user art
+                                // folder, the last-resort thumbnail
+                                // source — matched by normalized title,
+                                // never a network fetch (module doc on
+                                // `crate::thumbnail`).
+                                ui.label("Art folder");
+                                let mut art_folder = self
+                                    .settings
+                                    .paths
+                                    .art_folder
+                                    .clone()
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_default();
+                                ui.horizontal(|ui| {
+                                    if ui.text_edit_singleline(&mut art_folder).changed() {
+                                        self.settings.paths.art_folder = (!art_folder
+                                            .trim()
+                                            .is_empty())
+                                        .then(|| std::path::PathBuf::from(art_folder.trim()));
+                                        changed = true;
+                                    }
+                                    if ui.button("Browse\u{2026}").clicked() {
+                                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                            self.settings.paths.art_folder = Some(folder);
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                                ui.small(
+                                    "Empty = no user art folder; the library falls back to \
+                                     save-state screenshots and first-frame captures only.",
+                                );
                             }
                         }
                     });
@@ -4240,19 +4362,52 @@ impl RetroForgeApp {
                 ui.add(readout(
                     egui::RichText::new(format!("{count} game(s)")).weak(),
                 ));
+                ui.separator();
+                // Ticket W15-05, §3: "[▦][≡]" — the Grid/List toggle,
+                // persisted immediately (like every other Settings write
+                // in this app) rather than only on the next Settings
+                // save, since a view choice made from the toolbar should
+                // survive a restart without the user ever opening
+                // Settings.
+                let mut view_changed = false;
+                if ui
+                    .selectable_label(
+                        self.library_view == crate::library::LibraryView::List,
+                        "\u{2261}",
+                    )
+                    .on_hover_text("List view")
+                    .clicked()
+                {
+                    self.library_view = crate::library::LibraryView::List;
+                    view_changed = true;
+                }
+                if ui
+                    .selectable_label(
+                        self.library_view == crate::library::LibraryView::Grid,
+                        "\u{25A6}",
+                    )
+                    .on_hover_text("Grid view")
+                    .clicked()
+                {
+                    self.library_view = crate::library::LibraryView::Grid;
+                    view_changed = true;
+                }
+                if view_changed {
+                    self.settings.library.view = self.library_view;
+                    self.save_settings();
+                }
             });
         });
     }
 
-    /// §3.1's grid, filtered by the toolbar.
-    ///
-    /// Rows, not picture cards: §3.1 asks for thumbnails from "last
-    /// save-state screenshot or first-frame capture", and this build has
-    /// neither wired to the library yet. A grid of identical grey
-    /// placeholder rectangles would look more like the spec and tell the
-    /// user strictly less than the title does, so the cards wait until
-    /// there is an image to put in them. **No box art** either way —
-    /// NON_GOALS #5 rules out fetching it.
+    /// §3.1's library screen, filtered by the toolbar, rendered as either
+    /// the row list or the card grid per `self.library_view` (ticket
+    /// W15-05's Grid/List toggle) — the two views share every OTHER piece
+    /// of state on this page (selection, launch, favourite, context menu),
+    /// so a toggle mid-session never loses the user's place. **No box
+    /// art fetch** either way — NON_GOALS #5 rules out a network source;
+    /// only the three LOCAL sources `crate::thumbnail` implements ever
+    /// feed a thumbnail.
     ///
     /// Returns the ROM to open, if one was picked.
     ///
@@ -4260,7 +4415,9 @@ impl RetroForgeApp {
     /// list W10-03 built: a selected-row focus ring, double-click and
     /// Enter both launching, and arrow keys walking the selection. `&mut
     /// self` (this was `&self`) because that state — `library_selected`
-    /// — lives on `App`, not on the grid.
+    /// — lives on `App`, not on the grid. Ticket W15-05 extended the
+    /// arrow-key walk with Left/Right and a column stride for the grid
+    /// view (`library_cards`'s own doc on `columns_per_row`).
     fn library_grid(
         &mut self,
         ui: &mut egui::Ui,
@@ -4303,31 +4460,48 @@ impl RetroForgeApp {
         // the selection and Enter would launch instead of just accepting
         // the search term.
         let search_has_focus = self.library_search_focused;
+        let grid_mode = self.library_view == crate::library::LibraryView::Grid;
+        // Ticket W15-05, §11 acceptance 2: "Left/Right move across a row
+        // of cards, Up/Down by row" — only meaningful in Grid, so
+        // `columns_per_row` is computed even when List is active (cheap)
+        // but only consulted when `grid_mode`. `library_cards` lays cards
+        // out with the SAME width/spacing constants, so a card's actual
+        // per-row count on screen always matches what this arithmetic
+        // predicts.
+        let columns_per_row = Self::library_grid_columns(ui.available_width());
         let mut moved_by_keyboard = false;
         if !search_has_focus {
-            let (down, up, home, end) = ui.ctx().input(|i| {
+            let (down, up, left, right, home, end) = ui.ctx().input(|i| {
                 (
                     i.key_pressed(egui::Key::ArrowDown),
                     i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowLeft),
+                    i.key_pressed(egui::Key::ArrowRight),
                     i.key_pressed(egui::Key::Home),
                     i.key_pressed(egui::Key::End),
                 )
             });
-            if down || up || home || end {
+            let horizontal = grid_mode && (left || right);
+            if down || up || home || end || horizontal {
                 let last = matches.len() - 1;
                 let current = self
                     .library_selected
                     .as_ref()
                     .and_then(|p| matches.iter().position(|e| &e.path == p));
+                let stride = if grid_mode { columns_per_row } else { 1 };
                 let next = if home {
                     0
                 } else if end {
                     last
-                } else if down {
+                } else if grid_mode && right {
                     current.map_or(0, |i| (i + 1).min(last))
+                } else if grid_mode && left {
+                    current.map_or(last, |i| i.saturating_sub(1))
+                } else if down {
+                    current.map_or(0, |i| (i + stride).min(last))
                 } else {
                     // `up`, the only remaining case in this branch.
-                    current.map_or(last, |i| i.saturating_sub(1))
+                    current.map_or(last, |i| i.saturating_sub(stride))
                 };
                 self.library_selected = Some(matches[next].path.clone());
                 moved_by_keyboard = true;
@@ -4377,13 +4551,41 @@ impl RetroForgeApp {
             egui::Color32::from_rgb(c[0], c[1], c[2])
         };
 
-        // Rows, not an `egui::Grid`. A Grid sizes every column to its
-        // content, so the whole library huddled into the left third of
-        // the window with two thirds of empty space beside it — a list
-        // that looked like a rendering accident rather than the app's
-        // home screen. A row that lays its title out left-to-right and
-        // its Play button right-to-left fills the width by construction,
-        // at any window size, with no arithmetic to keep in sync.
+        if grid_mode {
+            self.library_cards(ui, &matches, accent, moved_by_keyboard, &mut to_play);
+        } else {
+            self.library_rows(ui, &matches, accent, moved_by_keyboard, &mut to_play);
+        }
+        to_play
+    }
+
+    /// How many cards fit per row at `available_width` — shared by
+    /// `library_cards`'s own layout and `library_grid`'s Left/Right/Up/
+    /// Down arithmetic, so the two can never disagree about what "one
+    /// row" means. `.max(1)`: a window narrower than one card still
+    /// shows a single column rather than dividing by zero.
+    #[must_use]
+    fn library_grid_columns(available_width: f32) -> usize {
+        let per_card = CARD_WIDTH + CARD_SPACING;
+        ((available_width / per_card).floor() as usize).max(1)
+    }
+
+    /// The row list (pre-W15-05 `library_grid`, unchanged in behaviour):
+    /// rows, not an `egui::Grid`. A `Grid` sizes every column to its
+    /// content, so the whole library huddled into the left third of the
+    /// window with two thirds of empty space beside it — a list that
+    /// looked like a rendering accident rather than the app's home
+    /// screen. A row that lays its title out left-to-right and its Play
+    /// button right-to-left fills the width by construction, at any
+    /// window size, with no arithmetic to keep in sync.
+    fn library_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        matches: &[&crate::library::LibraryEntry],
+        accent: egui::Color32,
+        moved_by_keyboard: bool,
+        to_play: &mut Option<std::path::PathBuf>,
+    ) {
         egui::ScrollArea::vertical()
             // `auto_shrink` off horizontally: otherwise the scroll area
             // shrinks to its content and takes the rows back down to the
@@ -4439,7 +4641,7 @@ impl RetroForgeApp {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui.button("Play").clicked() {
-                                            to_play = Some(entry.path.clone());
+                                            *to_play = Some(entry.path.clone());
                                         }
                                         match &entry.identity {
                                             crate::library::EntryIdentity::Recognized {
@@ -4497,7 +4699,7 @@ impl RetroForgeApp {
                     if row_double_clicked {
                         // Ticket W15-01 acceptance 1: double-click launches
                         // regardless of what was selected before it.
-                        to_play = Some(entry.path.clone());
+                        *to_play = Some(entry.path.clone());
                     } else if row_clicked {
                         // Acceptance 2: a single click SELECTS ONLY — it
                         // must not also set `to_play`.
@@ -4515,7 +4717,7 @@ impl RetroForgeApp {
                     // to agree on today.
                     if let Some(title_response) = &title_response {
                         title_response.context_menu(|ui| {
-                            self.library_context_menu_body(ui, entry, &mut to_play);
+                            self.library_context_menu_body(ui, entry, &mut *to_play);
                         });
                         if is_selected && self.library_context_menu_open {
                             // `open_bool`'s `&mut bool` must not alias
@@ -4529,7 +4731,7 @@ impl RetroForgeApp {
                                 .open_bool(&mut open);
                             if popup.is_open() {
                                 popup.show(|ui| {
-                                    self.library_context_menu_body(ui, entry, &mut to_play);
+                                    self.library_context_menu_body(ui, entry, &mut *to_play);
                                 });
                             }
                             self.library_context_menu_open = open;
@@ -4564,7 +4766,236 @@ impl RetroForgeApp {
                     }
                 }
             });
-        to_play
+    }
+
+    /// Ticket W15-05, §3: the card grid, an alternative rendering of the
+    /// SAME `matches` the row list draws — selection, launch, favourite
+    /// and context-menu state all live on `self` and are read/written
+    /// identically to `library_rows`, so switching Grid/List mid-session
+    /// changes nothing about what is selected or how it behaves.
+    ///
+    /// `ui.horizontal_wrapped` rather than `egui::Grid`: a `Grid` wants a
+    /// fixed column COUNT and this wants a fixed column WIDTH with the
+    /// count following from available space (`library_grid_columns`),
+    /// which is exactly what a wrapping horizontal layout gives for free.
+    fn library_cards(
+        &mut self,
+        ui: &mut egui::Ui,
+        matches: &[&crate::library::LibraryEntry],
+        accent: egui::Color32,
+        moved_by_keyboard: bool,
+        to_play: &mut Option<std::path::PathBuf>,
+    ) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(CARD_SPACING, CARD_SPACING);
+                ui.horizontal_wrapped(|ui| {
+                    for entry in matches {
+                        let is_selected =
+                            self.library_selected.as_deref() == Some(entry.path.as_path());
+                        let mut card_clicked = false;
+                        let mut card_double_clicked = false;
+                        let mut card_response: Option<egui::Response> = None;
+
+                        let hash = match &entry.identity {
+                            crate::library::EntryIdentity::Recognized {
+                                normalized_sha256, ..
+                            } => Some(normalized_sha256.clone()),
+                            crate::library::EntryIdentity::Unrecognized { .. } => None,
+                        };
+
+                        let card = egui::Frame::group(ui.style())
+                            .inner_margin(egui::Margin::same(6))
+                            .show(ui, |ui| {
+                                ui.set_width(CARD_WIDTH);
+                                ui.vertical(|ui| {
+                                    // `Sense::hover()`: the thumbnail box
+                                    // is decoration, not the click
+                                    // target. The title label below is
+                                    // (same as `library_rows`'s title
+                                    // `Label`), which is also what gives
+                                    // the card an AccessKit/kittest label
+                                    // to query by — a bare painted rect
+                                    // carries no accessible name at all.
+                                    let (thumb_rect, _thumb_response) = ui.allocate_exact_size(
+                                        egui::vec2(CARD_WIDTH - 12.0, CARD_THUMB_HEIGHT),
+                                        egui::Sense::hover(),
+                                    );
+                                    let ctx = ui.ctx().clone();
+                                    let texture = hash.as_ref().and_then(|h| {
+                                        self.library_thumbnail_texture(&ctx, h, &entry.title)
+                                    });
+                                    match texture {
+                                        Some(tex) => {
+                                            // Letterboxed (acceptance 2):
+                                            // fit inside `thumb_rect`
+                                            // preserving aspect, never
+                                            // stretched or cropped, on a
+                                            // filled backdrop so a
+                                            // narrower-than-box image
+                                            // still reads as intentional.
+                                            ui.painter().rect_filled(
+                                                thumb_rect,
+                                                2.0,
+                                                ui.visuals().extreme_bg_color,
+                                            );
+                                            let img_size = tex.size_vec2();
+                                            let scale = (thumb_rect.width() / img_size.x)
+                                                .min(thumb_rect.height() / img_size.y);
+                                            let draw_size = img_size * scale;
+                                            let draw_rect = egui::Rect::from_center_size(
+                                                thumb_rect.center(),
+                                                draw_size,
+                                            );
+                                            ui.painter().image(
+                                                tex.id(),
+                                                draw_rect,
+                                                egui::Rect::from_min_max(
+                                                    egui::pos2(0.0, 0.0),
+                                                    egui::pos2(1.0, 1.0),
+                                                ),
+                                                egui::Color32::WHITE,
+                                            );
+                                        }
+                                        None => {
+                                            // Acceptance 4: a generic,
+                                            // console-tinted placeholder —
+                                            // never a picture implying an
+                                            // image exists when it does
+                                            // not. The title is drawn
+                                            // below the box either way, so
+                                            // the placeholder itself
+                                            // carries no text of its own
+                                            // that could be mistaken for
+                                            // box art.
+                                            ui.painter().rect_filled(
+                                                thumb_rect,
+                                                2.0,
+                                                console_tint(ui, &entry.identity),
+                                            );
+                                        }
+                                    }
+                                    let title_response = ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(&entry.title).strong(),
+                                        )
+                                        .sense(egui::Sense::click())
+                                        .truncate(),
+                                    );
+                                    card_clicked = title_response.clicked();
+                                    card_double_clicked = title_response.double_clicked();
+                                    card_response = Some(title_response);
+
+                                    ui.horizontal(|ui| {
+                                        match &entry.identity {
+                                            crate::library::EntryIdentity::Recognized {
+                                                console,
+                                                normalized_sha256,
+                                            } => {
+                                                ui.add(readout(
+                                                    egui::RichText::new(console.name())
+                                                        .small()
+                                                        .weak(),
+                                                ));
+                                                let favourite = self
+                                                    .library_meta
+                                                    .get(normalized_sha256)
+                                                    .is_some_and(|m| m.favourite);
+                                                let star =
+                                                    if favourite { "\u{2b50}" } else { "\u{2606}" };
+                                                if ui
+                                                    .button(star)
+                                                    .on_hover_text(if favourite {
+                                                        "Unfavourite"
+                                                    } else {
+                                                        "Favourite"
+                                                    })
+                                                    .clicked()
+                                                {
+                                                    self.toggle_favourite(normalized_sha256);
+                                                }
+                                                // §3.1's badges: profile
+                                                // matched / has states /
+                                                // enhanced settings on.
+                                                if self
+                                                    .library_badges
+                                                    .profile_matched
+                                                    .contains(normalized_sha256)
+                                                {
+                                                    ui.label("\u{2b51}")
+                                                        .on_hover_text("Profile matched");
+                                                }
+                                                if self
+                                                    .library_badges
+                                                    .has_states
+                                                    .contains(normalized_sha256)
+                                                {
+                                                    ui.label("\u{2713}")
+                                                        .on_hover_text("Has save states");
+                                                }
+                                                if self
+                                                    .library_badges
+                                                    .enhanced
+                                                    .contains(normalized_sha256)
+                                                {
+                                                    ui.label("\u{25c6}")
+                                                        .on_hover_text("Enhanced settings on");
+                                                }
+                                            }
+                                            crate::library::EntryIdentity::Unrecognized {
+                                                reason,
+                                            } => {
+                                                ui.add(readout(
+                                                    egui::RichText::new("unrecognized")
+                                                        .small()
+                                                        .weak(),
+                                                ))
+                                                .on_hover_text(reason);
+                                            }
+                                        }
+                                    });
+                                });
+                            });
+
+                        if card_double_clicked {
+                            *to_play = Some(entry.path.clone());
+                        } else if card_clicked {
+                            self.library_selected = Some(entry.path.clone());
+                        }
+
+                        if let Some(card_response) = &card_response {
+                            card_response.context_menu(|ui| {
+                                self.library_context_menu_body(ui, entry, &mut *to_play);
+                            });
+                            if is_selected && self.library_context_menu_open {
+                                let mut open = true;
+                                let popup = egui::Popup::from_response(card_response)
+                                    .id(card_response.id.with("pad_context_menu"))
+                                    .open_bool(&mut open);
+                                if popup.is_open() {
+                                    popup.show(|ui| {
+                                        self.library_context_menu_body(ui, entry, &mut *to_play);
+                                    });
+                                }
+                                self.library_context_menu_open = open;
+                            }
+                        }
+
+                        if is_selected {
+                            ui.painter().rect_stroke(
+                                card.response.rect,
+                                4.0,
+                                egui::Stroke::new(2.0, accent),
+                                egui::StrokeKind::Inside,
+                            );
+                            if moved_by_keyboard {
+                                card.response.scroll_to_me(Some(egui::Align::Center));
+                            }
+                        }
+                    }
+                });
+            });
     }
 
     /// Ticket W15-03 (`UX_WAVE_15.md` §3): the per-row context menu's
@@ -5146,6 +5577,7 @@ impl RetroForgeApp {
                     let library =
                         Self::scan_with_cache(&self.library_roots, config_root.as_deref());
                     self.library_meta = Self::load_library_meta(&library, config_root.as_deref());
+                    self.library_badges = Self::load_badges(&library, config_root.as_deref());
                     self.library = Some(library);
                 },
                 |_handle| {
@@ -5188,6 +5620,160 @@ impl RetroForgeApp {
             }
         }
         meta
+    }
+
+    /// Ticket W15-05: the card grid's extra badges (`LibraryBadges`),
+    /// computed once per scan for the same "cheap enough per row" reason
+    /// [`Self::load_library_meta`] is. Profile matching is looked up ONCE
+    /// (`crate::level_view::all_profile_sha256s` walks the profiles
+    /// directory) and then checked per-hash in memory, rather than
+    /// re-walking the directory per entry.
+    fn load_badges(
+        library: &crate::library::Library,
+        config_root: Option<&std::path::Path>,
+    ) -> LibraryBadges {
+        let profile_sha256s = crate::level_view::all_profile_sha256s(&Self::profiles_root());
+        let mut badges = LibraryBadges::default();
+        let Some(root) = config_root else {
+            return badges;
+        };
+        for entry in &library.entries {
+            if let crate::library::EntryIdentity::Recognized {
+                normalized_sha256, ..
+            } = &entry.identity
+            {
+                if profile_sha256s.contains(normalized_sha256) {
+                    badges.profile_matched.insert(normalized_sha256.clone());
+                }
+                if badges.has_states.contains(normalized_sha256)
+                    && badges.enhanced.contains(normalized_sha256)
+                {
+                    continue; // already known both ways for this hash
+                }
+                let states_dir = crate::state_slots::slots_dir(root, normalized_sha256);
+                if crate::state_slots::scan(&states_dir)
+                    .iter()
+                    .any(|s| s.saved.is_some())
+                {
+                    badges.has_states.insert(normalized_sha256.clone());
+                }
+                let settings = crate::game_settings::load(root, normalized_sha256);
+                if settings.mode.enhancement_active() {
+                    badges.enhanced.insert(normalized_sha256.clone());
+                }
+            }
+        }
+        badges
+    }
+
+    /// Ticket W15-05 acceptance 1: capture the first rendered frame once
+    /// per ROM hash, on the first frame the CURRENTLY RUNNING game
+    /// produces that is not a flat colour (`crate::thumbnail::
+    /// frame_is_non_uniform` — never frame 0's black). A no-op with no
+    /// loaded ROM, no thumbnail cache, or a hash already captured.
+    fn maybe_capture_first_frame(&mut self, rgba: &[u8], width: usize, height: usize) {
+        let Some(hash) = self.current_game_hash.clone() else {
+            return;
+        };
+        let Some(cache) = self.thumbnail_cache.as_mut() else {
+            return;
+        };
+        if crate::thumbnail::has_first_frame(cache, &hash) {
+            return;
+        }
+        if !crate::thumbnail::frame_is_non_uniform(rgba) {
+            return;
+        }
+        let Ok(w) = u32::try_from(width) else { return };
+        let Ok(h) = u32::try_from(height) else { return };
+        let png = rf_renderer::png::encode_rgba(rgba, w, h);
+        if crate::thumbnail::put_first_frame(cache, &hash, &png).is_ok() {
+            // The grid may already have cached "no thumbnail" for this
+            // hash from before this capture landed — drop it so the next
+            // frame the grid draws re-resolves and picks the new capture
+            // up (§4's priority order still runs; a save-state screenshot
+            // taken since would still win, correctly).
+            self.library_thumbnail_textures.remove(&hash);
+        }
+    }
+
+    /// Ticket W15-05, §4: the most recent OCCUPIED save-state slot's
+    /// screenshot bytes for `rom_sha256`, or `None` if there is no config
+    /// root, no slots directory, or no slot carries a thumbnail yet.
+    fn latest_save_state_screenshot_bytes(&self, rom_sha256: &str) -> Option<Vec<u8>> {
+        let root = self.config_root.as_ref()?;
+        let dir = crate::state_slots::slots_dir(root, rom_sha256);
+        let best = crate::state_slots::scan(&dir)
+            .into_iter()
+            .filter_map(|slot| slot.saved)
+            .filter(|saved| saved.thumbnail.is_some())
+            .max_by_key(|saved| saved.timestamp)?;
+        std::fs::read(best.thumbnail.expect("filtered on is_some above")).ok()
+    }
+
+    /// Ticket W15-05, §4: resolve the winning thumbnail source's PNG bytes
+    /// for one library entry, per `crate::thumbnail::thumbnail_source`'s
+    /// priority order. `None` means "no thumbnail from any of the three
+    /// local sources" — the caller draws the placeholder card.
+    fn resolve_thumbnail_png(&mut self, rom_sha256: &str, title: &str) -> Option<Vec<u8>> {
+        let save_state_png = self.latest_save_state_screenshot_bytes(rom_sha256);
+        let first_frame_png = self.thumbnail_cache.as_mut().and_then(|cache| {
+            crate::thumbnail::get_first_frame(cache, rom_sha256)
+                .ok()
+                .flatten()
+        });
+        let user_art_png = self
+            .settings
+            .paths
+            .art_folder
+            .as_ref()
+            .and_then(|folder| crate::thumbnail::find_user_art(folder, title))
+            .and_then(|path| std::fs::read(path).ok());
+
+        match crate::thumbnail::thumbnail_source(
+            save_state_png.is_some(),
+            first_frame_png.is_some(),
+            user_art_png.is_some(),
+        )? {
+            crate::thumbnail::ThumbnailSource::SaveState => save_state_png,
+            crate::thumbnail::ThumbnailSource::FirstFrame => first_frame_png,
+            crate::thumbnail::ThumbnailSource::UserArt => user_art_png,
+        }
+    }
+
+    /// Ticket W15-05: the card grid's thumbnail texture for one hash,
+    /// resolved and decoded at most once per session per hash
+    /// (`library_thumbnail_textures`'s own doc explains why `None` is
+    /// cached too). Decoding lives HERE rather than in `crate::thumbnail`
+    /// because this is the one place that already owns an `egui::Context`
+    /// to load a texture into (module doc on `crate::thumbnail`).
+    fn library_thumbnail_texture(
+        &mut self,
+        ctx: &egui::Context,
+        rom_sha256: &str,
+        title: &str,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(cached) = self.library_thumbnail_textures.get(rom_sha256) {
+            return cached.clone();
+        }
+        let texture = self
+            .resolve_thumbnail_png(rom_sha256, title)
+            .and_then(|png| {
+                let decoded = image::load_from_memory(&png).ok()?.to_rgba8();
+                let (w, h) = (decoded.width() as usize, decoded.height() as usize);
+                if w == 0 || h == 0 {
+                    return None;
+                }
+                let color = egui::ColorImage::from_rgba_unmultiplied([w, h], decoded.as_raw());
+                Some(ctx.load_texture(
+                    format!("library-thumb-{rom_sha256}"),
+                    color,
+                    egui::TextureOptions::LINEAR,
+                ))
+            });
+        self.library_thumbnail_textures
+            .insert(rom_sha256.to_string(), texture.clone());
+        texture
     }
 
     /// Scan, reusing the on-disk cache and writing back anything new
@@ -5235,6 +5821,8 @@ impl RetroForgeApp {
                     &library,
                     crate::bindings_store::config_root().as_deref(),
                 );
+                self.library_badges =
+                    Self::load_badges(&library, crate::bindings_store::config_root().as_deref());
                 self.library = Some(library);
                 self.library_scan = None;
             }
@@ -5274,7 +5862,17 @@ impl RetroForgeApp {
         // `tests/library_filters.rs` exercises through this path.
         self.library_meta =
             Self::load_library_meta(&library, crate::bindings_store::config_root().as_deref());
+        self.library_badges =
+            Self::load_badges(&library, crate::bindings_store::config_root().as_deref());
         self.library = Some(library);
+    }
+
+    /// Ticket W15-05: flip the Grid/List toggle directly, so
+    /// `tests/library_grid.rs` can drive the card grid without a mouse
+    /// click on the toolbar's toggle button.
+    #[doc(hidden)]
+    pub fn set_library_view_for_test(&mut self, view: crate::library::LibraryView) {
+        self.library_view = view;
     }
 
     /// Whether a stitched-canvas texture exists for the Map tab

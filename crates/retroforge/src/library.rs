@@ -69,6 +69,20 @@ pub enum EntryIdentity {
     Unrecognized { reason: String },
 }
 
+/// The library screen's Grid/List toggle (ticket W15-05, `UX_WAVE_15.md`
+/// §3), persisted in `Settings` (`crate::settings::LibrarySettings`).
+///
+/// `List` is the default: it is the pre-existing, fully-functional
+/// screen (§10's accessible fallback), so a settings file written before
+/// this ticket — or one with a malformed `[library]` section — opens on
+/// the exact screen it always has, never a new one nobody asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum LibraryView {
+    #[default]
+    List,
+    Grid,
+}
+
 /// Which console an entry is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Console {

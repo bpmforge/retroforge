@@ -166,6 +166,38 @@ pub fn find_matching_profile(
     None
 }
 
+/// Every `sha256` any profile under `root` declares in its identity list
+/// (ticket W15-05: the library grid's "profile matched" badge,
+/// `UX_WAVE_15.md` §3.1).
+///
+/// Deliberately a WEAKER match than [`find_matching_profile`]: that
+/// function checks every hash family an `IdentityEntry` declares
+/// (`IdentityEntry::matches`, needing a full `rf_cart::RomHashes`), but a
+/// library entry only ever carries its normalized sha256
+/// (`crate::library::EntryIdentity::Recognized`) — there is no sha1/md5/
+/// crc32 to check here. A profile identified ONLY by, say, a No-Intro
+/// CRC32 will not light this badge even though it would match at load
+/// time; that is a badge being conservative about a hash family it
+/// cannot see, not a bug, and it costs nothing at the point that matters
+/// (the real load-time match still uses every hash family).
+#[must_use]
+pub fn all_profile_sha256s(root: &Path) -> std::collections::HashSet<String> {
+    let mut found = Vec::new();
+    collect_profiles(root, &mut found);
+    let mut out = std::collections::HashSet::new();
+    for path in found {
+        let Ok(outcome) = rf_profiles::load_file(&path) else {
+            continue;
+        };
+        for identity in &outcome.profile.identity {
+            if let Some(sha256) = &identity.sha256 {
+                out.insert(sha256.clone());
+            }
+        }
+    }
+    out
+}
+
 fn collect_profiles(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
