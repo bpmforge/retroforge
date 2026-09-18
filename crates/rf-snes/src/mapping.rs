@@ -113,7 +113,57 @@ pub struct Sa1RomBanks {
     /// `$2224` BMAPS — 8 KiB BW-RAM block (0..31) mapped to the SNES-side
     /// `$6000-$7FFF` window.
     pub bmaps: u8,
+    /// `$2225` BMAP — 8 KiB BW-RAM block (0..127) mapped to the SA-1-side
+    /// `$6000-$7FFF` window (ticket W17-02); bit 7 selects the bitmap
+    /// (2/4bpp pixel-buffer) projection, recorded by [`Self::bitmap_mode`]
+    /// but not yet applied — see [`sa1_side_target`]'s doc.
+    pub bmap: u8,
     pub board: Sa1Board,
+}
+
+impl Sa1RomBanks {
+    /// `$2225` BMAP bit 7 — "Select source (0=Normal/Bank 40h..43h,
+    /// 1=Bitmap/Bank 60h..6Fh)". This slice records the bit but always
+    /// resolves the `$6000-$7FFF` window as plain linear BW-RAM (W17-03
+    /// does the bitmap projection).
+    #[must_use]
+    pub fn bitmap_mode(&self) -> bool {
+        self.bmap & 0x80 != 0
+    }
+}
+
+/// The `$40-$4F` BW-RAM mirror, identical on both sides of the chip
+/// (fullsnes "SNES Cart SA-1" memory-map overview and "Memory Map (SA-1
+/// Side)": "Same as on SNES Side"). Factored out so [`sa1_target`] and
+/// [`sa1_side_target`] cannot drift apart on it.
+fn bwram_full_bank_target(regs: &Sa1RomBanks, bank: u8, offset: u16) -> Option<Target> {
+    if (0x40..=0x4F).contains(&bank) && regs.board.bwram_len > 0 {
+        // "Entire 256Kbyte BW-RAM (mirrors in 44h-4Fh)": four banks of
+        // 64 KiB, repeating every 4 banks across the 16-bank window.
+        let idx = (usize::from(bank - 0x40) & 0x03) << 16 | usize::from(offset);
+        Some(Target::Sa1BwRam(idx % regs.board.bwram_len))
+    } else {
+        None
+    }
+}
+
+/// The `$C0-$FF` HiROM banks, identical on both sides of the chip (same
+/// citation as [`bwram_full_bank_target`]).
+fn hirom_bank_target(regs: &Sa1RomBanks, bank: u8, offset: u16) -> Option<Target> {
+    if (0xC0..=0xFF).contains(&bank) && regs.board.rom_len > 0 {
+        let (reg, hi_base) = match bank {
+            0xC0..=0xCF => (regs.cxb, 0xC0u8),
+            0xD0..=0xDF => (regs.dxb, 0xD0),
+            0xE0..=0xEF => (regs.exb, 0xE0),
+            _ => (regs.fxb, 0xF0),
+        };
+        let bank_select = usize::from(reg & 0x07);
+        let local = usize::from(bank - hi_base); // 0..15, one 64 KiB bank
+        let idx = bank_select * 0x10_0000 + local * 0x10000 + usize::from(offset);
+        Some(Target::Rom(idx % regs.board.rom_len))
+    } else {
+        None
+    }
 }
 
 /// Resolve `(bank, offset)` against an SA-1 cartridge's SNES-side memory
@@ -163,25 +213,70 @@ pub fn sa1_target(regs: &Sa1RomBanks, bank: u8, offset: u16) -> Option<Target> {
         }
         return None;
     }
-    if (0x40..=0x4F).contains(&bank) && regs.board.bwram_len > 0 {
-        // "Entire 256Kbyte BW-RAM (mirrors in 44h-4Fh)": four banks of
-        // 64 KiB, repeating every 4 banks across the 16-bank window.
-        let idx = (usize::from(bank - 0x40) & 0x03) << 16 | usize::from(offset);
-        return Some(Target::Sa1BwRam(idx % regs.board.bwram_len));
+    if let Some(t) = bwram_full_bank_target(regs, bank, offset) {
+        return Some(t);
     }
-    if (0xC0..=0xFF).contains(&bank) && regs.board.rom_len > 0 {
-        let (reg, hi_base) = match bank {
-            0xC0..=0xCF => (regs.cxb, 0xC0u8),
-            0xD0..=0xDF => (regs.dxb, 0xD0),
-            0xE0..=0xEF => (regs.exb, 0xE0),
-            _ => (regs.fxb, 0xF0),
-        };
-        let bank_select = usize::from(reg & 0x07);
-        let local = usize::from(bank - hi_base); // 0..15, one 64 KiB bank
-        let idx = bank_select * 0x10_0000 + local * 0x10000 + usize::from(offset);
-        return Some(Target::Rom(idx % regs.board.rom_len));
+    hirom_bank_target(regs, bank, offset)
+}
+
+/// Resolve `(bank, offset)` against an SA-1 cartridge's SA-1-side memory
+/// map — the second CPU's own view (ticket W17-02, D-013). Checked by
+/// [`crate::sa1::Sa1Bus::target`], the SA-1 CPU's only bus — unlike
+/// [`sa1_target`] (the SNES side) this never falls back to [`map`]:
+/// fullsnes "Memory Map (SA-1 Side)" is explicit that the SA-1 has no
+/// access to SNES-internal WRAM or I/O ports at all, so an address this
+/// function does not name is open bus, never a WRAM/register alias.
+///
+/// Cited to fullsnes "SNES Cart SA-1", "Memory Map (SA-1 Side)" and
+/// "SNES Cart SA-1 Memory Control":
+/// - `$0000-$07FF` **and** `$3000-$37FF` both alias the same 2 KiB I-RAM —
+///   the SA-1 side's one addition over the SNES-side map ("I-RAM (at both
+///   0000h-07FFh and 3000h-37FFh)"). `offset & 0x07FF` collapses both
+///   windows to the same index because `$3000` is a multiple of `$0800`.
+/// - `$2200-$23FF` — the same register window as the SNES side; it is one
+///   shared [`crate::sa1::Sa1Regs`] store, so a value either side writes is
+///   visible to a read from the other (only which offsets each side may
+///   legally *write* differ, and that is `Sa1Regs::write`'s job, not
+///   mapping's).
+/// - `$6000-$7FFF` — one mappable 8 KiB BW-RAM block, selected by `$2225`
+///   BMAP bits 0-6 (0..127 blocks — twice the range of the SNES side's
+///   `$2224` BMAPS, which only uses bits 0-4). See [`Sa1RomBanks::bitmap_mode`]
+///   for what bit 7 does and does not do yet.
+/// - `$8000-$FFFF` and banks `$C0-$FF` — identical to the SNES side (the
+///   same `$2220-$2223` registers; "The registers do affect both SNES and
+///   SA-1 mapping").
+/// - banks `$40-$4F` — identical to the SNES side.
+/// - Everything else in system-area offset space (`$0800-$21FF`,
+///   `$2400-$2FFF`, `$3800-$5FFF`) and any address with no board memory
+///   behind it: open bus.
+#[must_use]
+pub fn sa1_side_target(regs: &Sa1RomBanks, bank: u8, offset: u16) -> Target {
+    let system_area = bank < 0x40 || (0x80..0xC0).contains(&bank);
+    if system_area {
+        if (0x0000..=0x07FF).contains(&offset) || (0x3000..=0x37FF).contains(&offset) {
+            let idx = usize::from(offset & 0x07FF);
+            return if idx < regs.board.iram_len {
+                Target::Sa1IRam(idx)
+            } else {
+                Target::Open
+            };
+        }
+        if (0x2200..=0x23FF).contains(&offset) {
+            return Target::Sa1Register(offset);
+        }
+        if (0x6000..=0x7FFF).contains(&offset) && regs.board.bwram_len > 0 {
+            let block = usize::from(regs.bmap & 0x7F);
+            let idx = block * 0x2000 + usize::from(offset - 0x6000);
+            return Target::Sa1BwRam(idx % regs.board.bwram_len);
+        }
+        if (0x8000..=0xFFFF).contains(&offset) && regs.board.rom_len > 0 {
+            return Target::Rom(lorom_quarter_target(regs, bank, offset) % regs.board.rom_len);
+        }
+        return Target::Open;
     }
-    None
+    bwram_full_bank_target(regs, bank, offset)
+        .or_else(|| hirom_bank_target(regs, bank, offset))
+        .unwrap_or(Target::Open)
 }
 
 /// The LoROM-style `$8000-$FFFF` quarter lookup for `sa1_target`, before

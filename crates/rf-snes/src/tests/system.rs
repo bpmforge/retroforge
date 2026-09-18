@@ -409,3 +409,219 @@ fn real_code_writing_420b_performs_the_transfer_and_is_charged_for_it() {
         system.master_cycles - before
     );
 }
+
+/// Ticket W17-02 acceptance #1/#2: the SA-1 has its own CPU, its own bus,
+/// and its own reset vector, and the interleave loop actually runs it.
+#[test]
+fn sa1_boots_from_its_own_reset_vector_once_reset_clears() {
+    let mut rom = lorom_image(0x23, 0x35);
+    // The SA-1's own program: LDA #$77 at $00:8100 (ROM offset $0100) —
+    // deliberately distinct from the main CPU's own code at $00:8000
+    // (ROM offset 0, all-zero/BRK here since this test never runs it).
+    rom[0x0100] = 0xA9;
+    rom[0x0101] = 0x77;
+    let mut system = SnesSystem::load(&rom).expect("SA-1 cart loads");
+    assert!(
+        !system.bus.sa1.as_ref().unwrap().booted,
+        "must not have run before Reset ever clears"
+    );
+
+    system.bus.write(0x00_2203, 0x00);
+    system.bus.write(0x00_2204, 0x81); // CRV: reset vector $8100
+    system.bus.write(0x00_2200, 0x00); // clears Reset (and Wait, and the message)
+
+    // One SNES CPU instruction produces plenty of master-clock credit for
+    // the SA-1's own two-byte LDA immediate (ticket W17-02's clocking
+    // rule interleaves it inside the very same `SnesSystem::step` call).
+    system.step().expect("main CPU step");
+
+    let sa1 = system.bus.sa1.as_ref().unwrap();
+    assert!(sa1.booted, "the SA-1 must have booted once Reset cleared");
+    assert_eq!(
+        sa1.cpu.a & 0xFF,
+        0x77,
+        "must have run its OWN program from its OWN vector, not the SNES CPU's"
+    );
+}
+
+/// Ticket W17-02 acceptance #2: "the SA-1 is halted at reset until $2200
+/// clears the reset/wait bits". The reset-vector fetch happens the instant
+/// Reset clears (this module's chosen reading — see `Sa1Regs::sa1_wait_asserted`'s
+/// doc), but Wait alone still holds it from executing anything.
+#[test]
+fn sa1_boots_but_does_not_execute_while_wait_is_asserted() {
+    let mut rom = lorom_image(0x23, 0x35);
+    rom[0x0100] = 0xA9;
+    rom[0x0101] = 0x77;
+    let mut system = SnesSystem::load(&rom).expect("SA-1 cart loads");
+    system.bus.write(0x00_2203, 0x00);
+    system.bus.write(0x00_2204, 0x81);
+    // Clear Reset but assert Wait (bit 6) in the same write.
+    system.bus.write(0x00_2200, 0x40);
+    system.step().expect("main CPU step");
+    {
+        let sa1 = system.bus.sa1.as_ref().unwrap();
+        assert!(
+            sa1.booted,
+            "the reset-vector fetch happens even while Wait holds execution"
+        );
+        assert_eq!(
+            sa1.cpu.a & 0xFF,
+            0x00,
+            "must not have executed LDA while Wait is asserted"
+        );
+    }
+    system.bus.write(0x00_2200, 0x00); // release Wait
+    system.step().expect("main CPU step");
+    assert_eq!(system.bus.sa1.as_ref().unwrap().cpu.a & 0xFF, 0x77);
+}
+
+/// Ticket W17-02 acceptance #3: the SA-1 takes an NMI raised from the SNES
+/// side ($2200 bit 4) once CIE (`$220A` bit 4) enables it, and vectors
+/// through its OWN NMI vector ($2205/$2206) rather than any ROM vector —
+/// fullsnes's "these are ALWAYS replacing the normal vectors in ROM".
+#[test]
+fn sa1_takes_an_nmi_from_the_snes_once_enabled_and_uses_its_own_vector() {
+    let mut rom = lorom_image(0x23, 0x35);
+    // Main CPU: two NOPs, one per `system.step()` call below — keeps the
+    // master-clock credit each call hands the SA-1 small and predictable,
+    // rather than whatever a `BRK` (the all-zero default) would cost.
+    rom[0x0000] = 0xEA;
+    rom[0x0001] = 0xEA;
+    // NOP then STP at the boot PC: STP halts the SA-1 right there
+    // regardless of exactly how many SA-1 instructions this slice's
+    // approximate clocking rule lets one SNES instruction's worth of
+    // credit buy, so the test does not have to pin that count down.
+    rom[0x0100] = 0xEA;
+    rom[0x0101] = 0xDB;
+    // Same pattern at the NMI vector target ($9000): NOP then STP.
+    rom[0x1000] = 0xEA;
+    rom[0x1001] = 0xDB;
+    let mut system = SnesSystem::load(&rom).expect("SA-1 cart loads");
+    system.bus.write(0x00_2203, 0x00);
+    system.bus.write(0x00_2204, 0x81); // reset vector $8100
+    system.bus.write(0x00_2205, 0x00);
+    system.bus.write(0x00_2206, 0x90); // NMI vector $9000
+    system.bus.write(0x00_2200, 0x00); // clear Reset: boots and runs the NOP
+    system.step().expect("boot + NOP + STP");
+    assert_eq!(
+        system.bus.sa1.as_ref().unwrap().cpu.pc,
+        0x8102,
+        "NOP then STP: halted one byte past the STP itself"
+    );
+
+    system.bus.write(0x00_220A, 0x10); // CIE bit 4: enable NMI-from-SNES
+    system.bus.write(0x00_2200, 0x10); // CCNT bit 4: raise it
+    system
+        .step()
+        .expect("nmi delivered and its handler's first NOP run");
+
+    let sa1 = system.bus.sa1.as_ref().unwrap();
+    assert_eq!(
+        sa1.cpu.pc, 0x9001,
+        "must have vectored through $2205/$2206, run the NOP there, and advanced past it"
+    );
+    assert_eq!(
+        system.bus.read(0x00_2301) & 0x10,
+        0x10,
+        "CFR must report the NMI status until $220B acks it"
+    );
+    system.bus.write(0x00_220B, 0x10); // CIC ack
+    assert_eq!(system.bus.read(0x00_2301) & 0x10, 0);
+}
+
+/// Ticket W17-02 acceptance #3: "the SNES CPU's IRQ line ORed with the
+/// SA-1-raised IRQ", and the `$2209` bit 6 -> `$220E`/`$220F` vector
+/// override for it.
+#[test]
+fn the_snes_cpu_takes_an_irq_raised_by_the_sa1_through_the_port_vector() {
+    let mut rom = lorom_image(0x23, 0x35);
+    // Main CPU: CLI (enable IRQs), then spin on NOPs.
+    rom[0x0000] = 0x58; // CLI
+    for i in 1..0x20 {
+        rom[i] = 0xEA; // NOP
+    }
+    rom[0x1000] = 0xEA; // NOP at the IRQ port vector target ($9000)
+    let mut system = SnesSystem::load(&rom).expect("SA-1 cart loads");
+    system.bus.write(0x00_2201, 0x80); // SIE bit 7: enable IRQ-from-SA-1
+    system.bus.write(0x00_220E, 0x00);
+    system.bus.write(0x00_220F, 0x90); // SIV: port IRQ vector $9000
+    system.bus.write(0x00_2209, 0x40 | 0x80); // SCNT: select port vector, raise IRQ
+
+    system.step().expect("CLI"); // clears the I flag
+    system
+        .step()
+        .expect("IRQ delivered and its handler's first NOP run");
+
+    assert_eq!(
+        system.cpu.pc, 0x9001,
+        "must have vectored through $220E/$220F, run the NOP there, and advanced past it"
+    );
+    assert_eq!(
+        system.bus.read(0x00_2300) & 0x80,
+        0x80,
+        "SFR must report the IRQ-from-SA-1 status until $2202 acks it"
+    );
+    system.bus.write(0x00_2202, 0x80); // SIC ack
+    assert_eq!(system.bus.read(0x00_2300) & 0x80, 0);
+}
+
+/// Ticket W17-02 acceptance #4: "SA-1 state is in the save state with a
+/// round-trip test" — the second CPU's own register file and its
+/// booted/credit scheduling state, alongside the control/message
+/// registers W17-01 already covered.
+#[test]
+fn sa1_cpu_state_survives_a_cart_region_round_trip() {
+    let mut rom = lorom_image(0x23, 0x35);
+    rom[0x0100] = 0xA9;
+    rom[0x0101] = 0x77; // LDA #$77
+    let mut system = SnesSystem::load(&rom).expect("SA-1 cart loads");
+    system.bus.write(0x00_2203, 0x00);
+    system.bus.write(0x00_2204, 0x81);
+    system.bus.write(0x00_2200, 0x00);
+    system.step().expect("boot + LDA");
+    assert_eq!(system.bus.sa1.as_ref().unwrap().cpu.a & 0xFF, 0x77);
+
+    struct MemStream {
+        buf: Vec<u8>,
+        at: usize,
+    }
+    impl rf_core_api::StateWriter for MemStream {
+        fn write_all(&mut self, bytes: &[u8]) -> Result<(), rf_core_api::StateError> {
+            self.buf.extend_from_slice(bytes);
+            Ok(())
+        }
+    }
+    impl rf_core_api::StateReader for MemStream {
+        fn read_exact(&mut self, out: &mut [u8]) -> Result<(), rf_core_api::StateError> {
+            let end = self.at + out.len();
+            out.copy_from_slice(&self.buf[self.at..end]);
+            self.at = end;
+            Ok(())
+        }
+    }
+
+    let mut stream = MemStream {
+        buf: Vec::new(),
+        at: 0,
+    };
+    system
+        .save_region(crate::state::StateRegion::Cart, &mut stream)
+        .expect("save cart region");
+
+    let mut restored = SnesSystem::load(&rom).expect("SA-1 cart loads");
+    restored
+        .load_region(crate::state::StateRegion::Cart, &mut stream)
+        .expect("load cart region");
+
+    let sa1 = restored.bus.sa1.as_ref().unwrap();
+    assert_eq!(
+        sa1.cpu.a & 0xFF,
+        0x77,
+        "the SA-1's own register file must round-trip"
+    );
+    assert!(
+        sa1.booted,
+        "booted must round-trip, or the next step would re-fetch the reset vector"
+    );
+}

@@ -288,7 +288,20 @@ impl crate::system::SnesSystem {
                     Some(s) => {
                         s.regs.save(o)?;
                         o.blob(&s.iram)?;
-                        o.blob(&s.bwram)
+                        o.blob(&s.bwram)?;
+                        // Ticket W17-02: the second CPU's own register
+                        // file, plus `booted` — without it a restore would
+                        // re-fetch the reset vector on its very next step
+                        // whenever Reset happened to read deasserted,
+                        // silently restarting the SA-1 program. `credit`
+                        // rides along too (clamped to a plain `u64`,
+                        // matching the field's own type): dropping it
+                        // would only cost a few master cycles of
+                        // scheduling drift on the first step after load,
+                        // but there is no reason to when it is one `u64`.
+                        s.cpu.save(o)?;
+                        o.bool(s.booted)?;
+                        o.u64(s.credit)
                     }
                     None => Ok(()),
                 }
@@ -380,7 +393,11 @@ impl crate::system::SnesSystem {
                     (Some(s), true) => {
                         s.regs.load(i)?;
                         i.blob_into(&mut s.iram, "SA-1 I-RAM")?;
-                        i.blob_into(&mut s.bwram, "SA-1 BW-RAM")
+                        i.blob_into(&mut s.bwram, "SA-1 BW-RAM")?;
+                        s.cpu.load(i)?;
+                        s.booted = i.bool()?;
+                        s.credit = i.u64()?;
+                        Ok(())
                     }
                     (None, false) => Ok(()),
                     // The cartridge mounted now disagrees with the one the

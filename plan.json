@@ -7103,8 +7103,9 @@
     "Kirby Super Star and Super Mario RPG complete their boot handshake and render past the title screen in the census child (recorded); SA-1 state is in the save state with a round-trip test"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18. Design: Sa1State{cpu, regs, iram, bwram, board, booted, credit} in SnesBus; Sa1Bus<'a> borrow-only per step; cpu::interrupt_to_vector added so SA-1 vectors never come from ROM. Interleave: credit = spent + dma_cycles per main instruction, run while credit > 0, break on Reset/Wait/unimplemented opcode (law 8 provable). Clock: 2 master cycles per I-RAM/register access, 4 per ROM/BW-RAM (flat approximation; no bus-occupancy model, slice 4). Registers $2200-$220F, $2300/$2301 with unit + system tests (boot, wait-hold, NMI delivery, SNES IRQ via SA-1, save-state). Census child: Kirby Super Star 0, Kirby's Dream Land 3 0, PGA European Tour 0, PGA Tour 96 0, Power Rangers Zeo 10, Super Mario RPG 10. SMRPG trace: main CPU at $C4:0541 polling the APU port, SA-1 in a BEQ loop at $C0:816F-8171, SFR/CFR $00 throughout -- no message path active; slice 3 (DMA-complete flag / arithmetic) is the plausible dependency. Readings chosen: Wait = execution-only; write protection unenforced until slice 3. Gate: workspace 2200 passing / 0 failed / 43 ignored (orchestrator).",
     "FILED 2026-09-18 on Brad's 'go' (D-013). Sources: fullsnes 'SNES Cart SA-1' sections (I/O map, interrupt/control both sides, timer, memory control, DMA, character conversion, arithmetic, VBR) extracted for briefs; snes.nesdev.org SA-1 pages. Clean-room, no emulator source (NFR-011). Shape per D-013: a second cpu::Cpu over an Sa1Bus, not a second CPU implementation."
    ],
    "stories": []

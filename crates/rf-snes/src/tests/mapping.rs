@@ -193,6 +193,7 @@ mod sa1 {
             exb: 0x02,
             fxb: 0x03,
             bmaps: 0,
+            bmap: 0,
             board: Sa1Board {
                 rom_len,
                 bwram_len,
