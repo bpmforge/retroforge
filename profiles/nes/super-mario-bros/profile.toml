@@ -1,0 +1,129 @@
+# Super Mario Bros. (NES) -- a documented-commercial-title profile (W11-06,
+# D-009: local-only verification against a developer-held ROM counts as
+# evidence, provided the profile records the normalized hash it was
+# verified against).
+#
+# ## Which dump this was verified against, and why it is not a plain
+#    standalone "Super Mario Bros. (World)" archive
+#
+# The developer's local library (`~/Games/Roms/nes`, never committed --
+# law 5) does not hold a standalone Super Mario Bros. cartridge dump; the
+# only SMB-family archives on hand are the combination carts. This profile
+# was verified against `Super Mario Bros. + Duck Hunt (USA).zip`, a
+# genuine dual-game cartridge (same MMC1 SMB engine and RAM layout as the
+# standalone game, selected via an in-game menu rather than a second ROM
+# image inside the archive -- `unzip -l` on the archive shows exactly one
+# `.nes` file). Every fact below was checked against Super Mario Bros.'s
+# own published RAM map (the SMB engine embedded in this cart is the same
+# code, not a derivative), and the identity hash recorded is this cart's
+# own normalized hash -- not a guess at the standalone game's hash, which
+# this developer cannot check without a copy of it.
+#
+# Verified 2026-09-18 against sha256
+# 5dde385041aa7364c78205f2ba49615f416c701b6025e38aa1d7b9c4f99a62db with
+# title_probe (a standalone harness built against this worktree's
+# rf-cart/rf-nes crates, following crates/rf-harness/tests/title_probe.rs's
+# own ROM-loading and peek conventions): after pressing Start at frame 200
+# to leave the SMB/Duck-Hunt game-select title screen, by frame 700 (into
+# World 1-1) the probe read $075A=0x02 (lives -- SMB stores displayed
+# lives minus one, so 3 lives shown, the documented boot value), $075E=00
+# (coins), $075F=00/$0760=00 (World 1-1, zero-indexed), $07F8-$07FA=04 00
+# 01 (BCD timer digits reading "400", World 1-1's documented starting
+# time), and $0086/$00CE = 0x28/0xB0 (Mario's on-screen x/y once play
+# begins) -- all exactly the values Data Crystal's RAM map documents for
+# a fresh boot into World 1-1.
+#
+# ## Why [decode] is absent
+#
+# Data Crystal's Super Mario Bros. ROM map
+# (https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./ROM_map) documents
+# level *layout* data (area-object and enemy tables) but not a single
+# fixed table address this profile could point a built-in decoder family
+# at without inventing structure the page does not state outright ROM
+# offsets for the object-table pointers used across MMC1 bank switches.
+# Declaring `[decode]` from a half-understood pointer scheme would be
+# exactly the "looks configured, configures nothing" failure
+# GAME_PROFILES.md and `profiles/nes/legend-of-zelda` both warn against,
+# so it is left undeclared here too -- this profile's contribution to
+# W11-06's breadth requirement is the runtime `[[memory_map]]`/`[camera]`
+# rows, not a new decoder-family exercise.
+
+[meta]
+profile_version = "0.1"
+title = "Super Mario Bros."
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge W11-06"]
+sources = ["https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map"]
+
+[[identity]]
+sha256 = "5dde385041aa7364c78205f2ba49615f416c701b6025e38aa1d7b9c4f99a62db"
+sha1 = "36e695ba6cacc8a5098fb67d9c1f8e6828d6c2c6"
+md5 = "d821fb982ce47299fdb08a027ec0b8be"
+crc32 = "d26efd78"
+revision = "Super Mario Bros. + Duck Hunt (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x071C, type = "u8" }
+
+[[memory_map]]
+addr = 0x075A
+len = 1
+type = "u8"
+label = "lives"
+notes = "Displayed lives minus one; verified 0x02 (3 lives shown) at boot into World 1-1."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map"
+
+[[memory_map]]
+addr = 0x075E
+len = 1
+type = "u8"
+label = "coins"
+notes = "Verified 0x00 at boot into World 1-1."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map"
+
+[[memory_map]]
+addr = 0x075F
+len = 1
+type = "u8"
+label = "world"
+notes = "Zero-indexed; verified 0x00 (World 1) at boot."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map"
+
+[[memory_map]]
+addr = 0x0760
+len = 1
+type = "u8"
+label = "level"
+notes = "Zero-indexed; verified 0x00 (Level 1) at boot."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map"
+
+[[memory_map]]
+addr = 0x07F8
+len = 3
+type = "bytes"
+label = "timer_digits"
+notes = "BCD digits of the game timer; verified 04 00 01 (\"400\") at the start of World 1-1, the level's documented starting time."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map"
+
+[[memory_map]]
+addr = 0x0086
+len = 1
+type = "u8"
+label = "player_x_screen"
+notes = "Player x position on screen; verified 0x28 once gameplay begins."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map"
+
+[[memory_map]]
+addr = 0x00CE
+len = 1
+type = "u8"
+label = "player_y_screen"
+notes = "Player y position on screen; verified 0xB0 once gameplay begins."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map"

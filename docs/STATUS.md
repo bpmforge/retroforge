@@ -3599,3 +3599,18 @@ stories, 10 decisions).
   clicks in the overlap to the wrong widget, which the scenario caught.
   Gate: workspace **1941 passing / 0 failed / 36 ignored**, clippy
   clean, arch OK.
+
+- **W11-06 — ten curated profiles, reached eleven** (2026-09-18, lane
+  B). Blocked since August on "permitted is not verifiable"; D-009 and
+  the local No-Intro library made it checkable. Four commercial titles
+  join the five fixtures and the Zelda profile: Super Mario Bros.,
+  Metroid, Super Mario World and Super Metroid, each clean-room from
+  published RAM maps and each verified live against the local dump
+  whose sha256 the profile records, with the rows read and the values
+  seen written in the profile header (energy 99 and area 6 Ceres for
+  Super Metroid, timer 400 for SMB). Rows that never settled were
+  dropped rather than guessed, and no profile declares a decoder
+  because no public document gives a citable table address; that is
+  the honest state, and it is what the Diorama tier-two work will
+  need to extend. `profiles/README.md` indexes all eleven; the D-009
+  recipe is in GAME_PROFILES.md §3. Validators all green.

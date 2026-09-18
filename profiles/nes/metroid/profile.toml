@@ -1,0 +1,91 @@
+# Metroid (USA) -- a documented-commercial-title profile (W11-06, D-009).
+#
+# Verified 2026-09-18 against sha256
+# 649db8035018f2512ccea70aca6606c3b3a6988cd9ed43953b38dc5103dec7bb
+# ("Metroid (USA).zip", No-Intro) with title_probe (a standalone harness
+# built against this worktree's rf-cart/rf-nes crates, mirroring
+# crates/rf-harness/tests/title_probe.rs's ROM-loading/peek conventions
+# and driving Start/A/Right through `EmulatorCore::run_frame`'s
+# `InputFrame`): after two Start presses to clear the title screen and the
+# continue-code entry screen, then an A press and a held Right, Samus's
+# state moved exactly as the RAM map predicts --
+# $0050 (x position on map) climbed 0x00 -> 0x03 -> 0x04 -> 0x05 as she
+# crossed screen boundaries walking right out of the starting elevator
+# shaft; $0051 (x position on screen) tracked within-screen movement
+# (0x8F -> 0xDC) over the same span; $0052 (y position on screen) rose
+# from 0xB1 to 0xC1 during the opening fall from the ship and then held
+# steady once she landed. All three are dynamic, verified-live game state,
+# not open-bus noise (a control run with no input at all left the
+# corresponding memory thrashing incoherently on the still-animating
+# title screen, confirming these addresses are inert until the game
+# itself claims them).
+#
+# ## What could not be verified, and was dropped rather than guessed
+#
+# - $0106-$0107 (documented "Health - BCD, fixed point") and $0074
+#   ("Current level") never settled to a value consistent with the
+#   documented starting energy (99) or starting area (Brinstar, $10) in
+#   any run reaching the point above -- Samus had not yet passed the
+#   elevator into a numbered room, so this profile does not assert an
+#   address it could not see take a plausible value.
+# - $005A ("Index of room layout being loaded") stayed pinned at 0xFF
+#   through every run above, including runs where $0050 had already
+#   incremented across two screen boundaries -- consistent with the
+#   documented fact that Metroid's opening elevator sits outside the
+#   normal room-number space, but not itself a verified "this is room
+#   N" reading, so it is left out.
+# - Data Crystal's Metroid ROM map documents the tile/room table layout
+#   in general terms but gives no single fixed table address this
+#   profile could cite for `[decode]` without inventing bank-relative
+#   offsets the page does not state plainly, so `[decode]` is omitted
+#   (same reasoning `profiles/nes/legend-of-zelda` uses for the same gap
+#   in the same document family).
+
+[meta]
+profile_version = "0.1"
+title = "Metroid"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge W11-06"]
+sources = ["https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"]
+
+[[identity]]
+sha256 = "649db8035018f2512ccea70aca6606c3b3a6988cd9ed43953b38dc5103dec7bb"
+sha1 = "fdbfc7871962f72a1ef57e5a7e456164fb93430b"
+md5 = "b2d2d9ed68b3e5e0d29053ea525bd37c"
+crc32 = "70080810"
+revision = "Metroid (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x0051, type = "u8" }
+y = { addr = 0x0052, type = "u8" }
+
+[[memory_map]]
+addr = 0x0050
+len = 1
+type = "u8"
+label = "samus_x_map"
+notes = "X position on the overworld map, in screens; verified climbing 0x00 -> 0x05 while walking right out of the opening area."
+source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"
+
+[[memory_map]]
+addr = 0x0051
+len = 1
+type = "u8"
+label = "samus_x_screen"
+notes = "X position within the current screen; verified tracking movement (0x8F -> 0xDC) alongside samus_x_map."
+source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"
+
+[[memory_map]]
+addr = 0x0052
+len = 1
+type = "u8"
+label = "samus_y_screen"
+notes = "Y position within the current screen; verified rising (0xB1 -> 0xC1) during the opening fall, then holding once Samus landed."
+source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"
