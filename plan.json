@@ -6316,7 +6316,7 @@
    "points": 5,
    "status": "done",
    "notes": [
-    "ADDENDUM 2026-09-17, Brad's by-eye check on m4max against Mesen 2.1.1 (acceptance item 4): Castlevania III's status-bar split MATCHES. Uncharted Waters does NOT: after character creation the next screens (walking the character around) are gibberish and input does nothing. Cart is EKROM-class (512 KB PRG, 128 KB CHR, 8 KB battery RAM per the NES 2.0 header, so the 8 KB PRG RAM aliasing is not it); the ExGrafix fetch reads ext RAM at v & 0x3FF with bits 0-5 + $5130 as the 4 KB bank and bits 6-7 as palette, which is the nesdev rule. OPEN: bisect first (a build at 0af9310, before W14-17, tells whether slice 1 already showed this), then trace; ticket to be filed once the bisect names the slice.",
+    "ADDENDUM 2026-09-17, Brad's by-eye check on m4max against Mesen 2.1.1 (acceptance item 4): Castlevania III's status-bar split MATCHES. Uncharted Waters did NOT at first: after character creation the screens were gibberish -- fixed by W14-22 (ETROM two-chip PRG RAM) and re-verified by Brad the same day, so item 4 is complete for both titles. Cart is ETROM (512 KB PRG, 128 KB CHR; NES 2.0 byte 10 = $77: 8 KB PRG-RAM + 8 KB PRG-NVRAM = 16 KB on two chips -- an earlier reading of this addendum said 8 KB and ruled aliasing out; that was wrong); the ExGrafix fetch reads ext RAM at v & 0x3FF with bits 0-5 + $5130 as the 4 KB bank and bits 6-7 as palette, which is the nesdev rule. OPEN: bisect first (a build at 0af9310, before W14-17, tells whether slice 1 already showed this), then trace; Bisect done: the 0af9310 build is gibberish from the start, so this is a separate defect -- filed as W14-22 (ETROM two-chip PRG RAM).",
     "CLOSED 2026-09-17. Four Mapper seams (prg_ram_window, chr_rom_full, ext_attribute_mode, vertical_split), the background fetch takes the split/ExGrafix sources in the NT/AT/pattern phases; decode cited to nesdev.org/wiki/MMC5. NES census unchanged at 1222/1281 render, 0 crashed, 0 timed out. NOT DONE, left for Brad: acceptance item 4, the by-eye check of Castlevania III and Uncharted Waters against a reference emulator. Known approximations in the code docs: split column from v coarse X (hardware counts fetches), PRG RAM windows alias the one 8 KiB chip modulo 8 KiB. Gate: workspace 1868 passing / 0 failed / 36 ignored.",
     "FILED 2026-09-17 by W14-16's close. Slice 1 boots every MMC5 title in the library; these three are what makes them render CORRECTLY rather than boot. ExGrafix and the split both change the background fetch itself (a per-tile CHR bank and palette, or a second scroll origin), which is the one thing the push/materialise CHR design cannot express from the mapper side -- the PPU's background fetch needs a per-tile hook or a PPU-owned copy of the extended RAM with the tile-to-bank rule inside it. The PPU already owns the extended RAM since slice 1, so the second is the natural path."
    ],
@@ -6420,6 +6420,32 @@
    "status": "todo",
    "notes": [
     "FILED 2026-09-17 by W14-19's close (slice 1). Sources are in W14-19's notes; the manual OCR excerpt lives outside the repo (re-derive from archive.org SNESDevManual book2_djvu.txt lines ~23779-31340). Raster (0Ah) is what Super Mario Kart's track needs: it produces per-scanline Mode 7 matrix rows from the projection parameters set by 02h; expect that to be the bulk of the work and the first thing to verify by eye."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W14-22",
+   "title": "MMC5 PRG RAM banking: two-chip boards (ETROM), $5113 bank select, RAM protect \u2014 Uncharted Waters gibberish",
+   "phase": 14,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**"
+   ],
+   "depends_on": [
+    "W14-17"
+   ],
+   "acceptance": [
+    "NesBus sizes PRG RAM from the cartridge (NES 2.0 byte 10 volatile + non-volatile, iNES fallback 8 KiB) up to 64 KiB instead of a fixed 8 KiB array; every existing board's behaviour is unchanged for 8 KiB carts (goldens and the ignored replay goldens do not move)",
+    "MMC5 $5113 selects the 8 KiB RAM bank at $6000-$7FFF: bits 0-1 page within a chip, bit 2 the chip (nesdev MMC5: values 0-3 chip 0, 4-7 chip 1 on ETROM's 2x8 KiB; single-chip boards mirror); $5114-$5116 windows with bit 7 clear map RAM banks the same way (prg_ram_window returns a chip-aware offset, replacing W14-17's modulo-8 KiB alias); unit tests pin ETROM (two chips distinct), EKROM (mirrors) and EWROM (32 KiB, one chip)",
+    "$5102/$5103 PRG RAM write protect per nesdev (writes enabled only when $5102 = %10 and $5103 = %01; reset values disable), pinned by a test",
+    "the PRG RAM save-state chunk and the battery save carry the real size; a round-trip test covers a 16 KiB cart; rf-state/retroforge callers that borrowed a fixed [u8; 8192] are adjusted (widen write_scope with a HANDOFF note if needed)",
+    "Uncharted Waters plays past character creation without gibberish, checked by Brad against Mesen and recorded; NES census re-run: 1222 render unchanged, 0 crashed, 0 timed out"
+   ],
+   "points": 3,
+   "status": "done",
+   "notes": [
+   "CLOSED 2026-09-17. Evidence first: a probe on the $5113 write arm showed Uncharted Waters writing $05 (chip 1) twice in frame 0. Fix: PRG RAM sized from NES 2.0 byte 10 (volatile + NVRAM, 8 KiB floor, 64 KiB cap), Mapper::set_prg_ram_len / wram_offset / prg_ram_write_enabled with defaults leaving every other board unchanged, MMC5 $5113 chip/page decode (two-chip boards split on bit 2, single-chip mirror), RAM-mapped PRG windows chip-aware, $5102/$5103 protect with nesdev reset values. HANDOFF: rf-cart NesHeader::prg_nvram_size added (additive). Brad verified on m4max: Uncharted Waters plays past character creation correctly, which also completes W14-17 acceptance item 4 for that title. NES census: same 1281 archives, 1222 render / 6 uniform / 53 refused / 0 crashed / 0 timed out, unchanged as a correctness fix should be. Gate: workspace 1909 passing / 0 failed / 36 ignored, clippy clean, arch OK.",
+    "FILED 2026-09-17 from Brad's by-eye check of W14-17 (see its ADDENDUM). Bisect: a build at 0af9310 (before W14-17) shows Uncharted Waters as gibberish from the start, so W14-17's ExGrafix fixed the early screens and the remaining break after character creation is separate. Diagnosis: the cart is ETROM (nesdev board list: Koei's Uncharted Waters and Romance of the Three Kingdoms II, 2x8 KiB RAM, chip 1 volatile, chip 0 battery); its NES 2.0 header says 8 KiB PRG-RAM + 8 KiB PRG-NVRAM = 16 KiB. rf-nes has one fixed 8 KiB PRG RAM (system/mod.rs PRG_RAM_SIZE) and mmc5.rs never handles $5113 at all, so both chips alias onto one and the game's second-chip data overwrites its first once it starts using both. Not verified by trace yet -- the first step of the ticket is a title_probe-style confirmation (watch $5113 writes with bit 2 set before the corruption) so the fix follows evidence, per RF-L-08."
    ],
    "stories": []
   }

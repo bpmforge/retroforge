@@ -116,8 +116,16 @@ pub struct NesHeader {
     pub prg_rom_size: usize,
     /// CHR ROM size in bytes; 0 means the cartridge uses CHR RAM instead.
     pub chr_rom_size: usize,
-    /// Best-effort PRG RAM size in bytes (iNES byte 8 / NES 2.0 byte 10).
+    /// Best-effort **volatile** PRG RAM size in bytes (iNES byte 8, or
+    /// NES 2.0 byte 10's low nibble). iNES has no separate non-volatile
+    /// field, so this already covers the whole 8 KiB fallback there.
     pub prg_ram_size: usize,
+    /// NES 2.0 byte 10's high nibble: battery-backed PRG **NVRAM** size
+    /// in bytes, on top of [`Self::prg_ram_size`] (ticket W14-22, e.g.
+    /// MMC5's ETROM board: 8 KiB volatile + 8 KiB NVRAM = 16 KiB total
+    /// across its two chips). Always `0` for iNES 1.0, which has no
+    /// field to carry it.
+    pub prg_nvram_size: usize,
     pub mirroring: Mirroring,
     pub battery: bool,
     /// Whether a 512-byte trainer follows the header, before PRG data.
@@ -153,7 +161,7 @@ pub fn parse_nes_header(data: &[u8]) -> Result<NesHeader, CartError> {
     // Mapper D0-D3 from flags6 high nibble, D4-D7 from flags7 high nibble.
     let mut mapper = ((flags7 & 0xF0) as u16) | ((flags6 >> 4) as u16);
 
-    let (format, submapper, prg_banks, chr_banks, prg_ram_size) = if is_nes2 {
+    let (format, submapper, prg_banks, chr_banks, prg_ram_size, prg_nvram_size) = if is_nes2 {
         let byte8 = data[8];
         let byte9 = data[9];
         mapper |= ((byte8 & 0x0F) as u16) << 8;
@@ -177,6 +185,12 @@ pub fn parse_nes_header(data: &[u8]) -> Result<NesHeader, CartError> {
         } else {
             64usize << u32::from(prg_ram_nibble)
         };
+        let prg_nvram_nibble = (data[10] >> 4) & 0x0F;
+        let prg_nvram_size = if prg_nvram_nibble == 0 {
+            0
+        } else {
+            64usize << u32::from(prg_nvram_nibble)
+        };
 
         (
             NesFormat::Nes2,
@@ -184,6 +198,7 @@ pub fn parse_nes_header(data: &[u8]) -> Result<NesHeader, CartError> {
             prg_banks,
             chr_banks,
             prg_ram_size,
+            prg_nvram_size,
         )
     } else {
         let prg_banks = data[4] as usize;
@@ -196,7 +211,7 @@ pub fn parse_nes_header(data: &[u8]) -> Result<NesHeader, CartError> {
         } else {
             prg_ram_byte as usize * 8 * 1024
         };
-        (NesFormat::INes, None, prg_banks, chr_banks, prg_ram_size)
+        (NesFormat::INes, None, prg_banks, chr_banks, prg_ram_size, 0)
     };
 
     let prg_rom_size = prg_banks * PRG_BANK;
@@ -225,6 +240,7 @@ pub fn parse_nes_header(data: &[u8]) -> Result<NesHeader, CartError> {
         prg_rom_size,
         chr_rom_size,
         prg_ram_size,
+        prg_nvram_size,
         mirroring,
         battery,
         trainer,
@@ -283,6 +299,18 @@ mod tests {
     /// submapper, small enough PRG/CHR bank counts to avoid the exponent
     /// notation edge case.
     fn build_nes2(mapper: u16, submapper: u8, prg_banks: u16, chr_banks: u16) -> Vec<u8> {
+        build_nes2_with_prg_ram(mapper, submapper, prg_banks, chr_banks, 0)
+    }
+
+    /// [`build_nes2`], plus an explicit NES 2.0 byte 10 (PRG-RAM/PRG-NVRAM
+    /// shift-count nibbles) for ticket W14-22's PRG-RAM-sizing tests.
+    fn build_nes2_with_prg_ram(
+        mapper: u16,
+        submapper: u8,
+        prg_banks: u16,
+        chr_banks: u16,
+        byte10: u8,
+    ) -> Vec<u8> {
         let mapper_lo = (mapper & 0x0F) as u8;
         let mapper_mid = ((mapper >> 4) & 0x0F) as u8;
         let mapper_hi = ((mapper >> 8) & 0x0F) as u8;
@@ -299,7 +327,8 @@ mod tests {
         data.push(flags7);
         data.push(byte8);
         data.push(byte9);
-        data.extend_from_slice(&[0u8; 6]); // bytes 10-15
+        data.push(byte10);
+        data.extend_from_slice(&[0u8; 5]); // bytes 11-15
         data.extend(vec![0u8; prg_banks as usize * PRG_BANK]);
         data.extend(vec![0u8; chr_banks as usize * CHR_BANK]);
         data
@@ -405,6 +434,42 @@ mod tests {
         rom[9] = 0x0F; // prg_msb == 0xF => exponent notation, unsupported
         let err = parse_nes_header(&rom).unwrap_err();
         assert!(matches!(err, CartError::InvalidHeader(_)));
+    }
+
+    /// Ticket W14-22 (HANDOFF from `rf-nes`): NES 2.0 byte 10's two
+    /// nibbles are independent -- an ETROM-class board (Uncharted
+    /// Waters' real header: `0x77`) declares 8 KiB volatile PRG-RAM
+    /// (low nibble 7 -> `64 << 7`) AND 8 KiB non-volatile PRG-NVRAM
+    /// (high nibble 7), 16 KiB total across its two chips.
+    #[test]
+    fn nes2_byte10_splits_volatile_ram_from_nvram() {
+        let rom = build_nes2_with_prg_ram(5, 0, 32, 16, 0x77);
+        let header = parse_nes_header(&rom).expect("valid MMC5 ETROM-shaped header");
+        assert_eq!(
+            header.prg_ram_size,
+            8 * 1024,
+            "low nibble: volatile PRG-RAM"
+        );
+        assert_eq!(
+            header.prg_nvram_size,
+            8 * 1024,
+            "high nibble: battery-backed PRG-NVRAM"
+        );
+    }
+
+    #[test]
+    fn nes2_byte10_zero_means_no_ram_of_either_kind() {
+        let rom = build_nes2(0, 0, 1, 1);
+        let header = parse_nes_header(&rom).expect("valid header");
+        assert_eq!(header.prg_ram_size, 0);
+        assert_eq!(header.prg_nvram_size, 0);
+    }
+
+    #[test]
+    fn ines_1_0_never_reports_nvram_separately() {
+        let rom = build_ines(2, 1, 0, false, true, false, false);
+        let header = parse_nes_header(&rom).expect("valid iNES header");
+        assert_eq!(header.prg_nvram_size, 0, "no byte 10 in iNES 1.0");
     }
 }
 

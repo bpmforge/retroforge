@@ -252,15 +252,45 @@ pub trait Mapper {
 
     /// A `$8000-$FFFF` CPU window backed by cartridge PRG RAM rather than
     /// PRG ROM (ticket W14-17; MMC5's `$5114-$5117` bit 7 clear).
-    /// `Some(offset)` into the bus's own PRG RAM
-    /// ([`crate::system::NesBus::prg_ram`]) when `addr`'s window selects
-    /// RAM; `None` (default) means "PRG ROM as usual", which is every
-    /// board but MMC5. See [`Mmc5`]'s module doc, "PRG RAM windows", for
-    /// why the bus keeps owning the bytes instead of lending them to the
-    /// mapper.
+    /// `Some(offset)` into the bus's own PRG RAM backing store (ticket
+    /// W14-22 widened this from a fixed 8 KiB array to a cartridge-sized
+    /// buffer; see [`crate::system::NesBus`]'s module doc) when `addr`'s
+    /// window selects RAM; `None` (default) means "PRG ROM as usual",
+    /// which is every board but MMC5. See [`Mmc5`]'s module doc, "PRG RAM
+    /// windows", for why the bus keeps owning the bytes instead of
+    /// lending them to the mapper.
     fn prg_ram_window(&self, addr: u16) -> Option<usize> {
         let _ = addr;
         None
+    }
+
+    /// The cartridge's total declared PRG RAM size in bytes, pushed once
+    /// right after construction (ticket W14-22, before any register
+    /// write reaches the mapper) so a multi-chip board can do its own
+    /// chip/page arithmetic. Default no-op: every board but MMC5 has
+    /// exactly one chip and never needs to know how big it is (the bus
+    /// itself owns the bounds check).
+    fn set_prg_ram_len(&mut self, len: usize) {
+        let _ = len;
+    }
+
+    /// Byte offset into the bus's own PRG RAM that a `$6000-$7FFF` CPU
+    /// access lands at (ticket W14-22). Default: `addr - 0x6000` (bank 0
+    /// of a single chip) -- correct for every board except MMC5, whose
+    /// `$5113` selects among multiple 8 KiB chips/pages there (see
+    /// [`Mmc5`]'s module doc).
+    fn wram_offset(&self, addr: u16) -> usize {
+        usize::from(addr - 0x6000)
+    }
+
+    /// Whether a CPU write to cartridge PRG RAM -- `$6000-$7FFF` or a
+    /// RAM-selected `$8000-$FFFF` window -- should actually store (ticket
+    /// W14-22; MMC5's `$5102`/`$5103` write-protect pair, nesdev.org/wiki/
+    /// MMC5). Default `true`: every board but MMC5 always allows PRG RAM
+    /// writes (the same "not modeled, nothing depends on it" shape this
+    /// module's doc already documents for MMC3's `$A001`).
+    fn prg_ram_write_enabled(&self) -> bool {
+        true
     }
 
     /// MMC5 ExGrafix (`$5104` mode 1) and the vertical split

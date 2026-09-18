@@ -263,3 +263,84 @@ fn saving_mid_frame_with_undrained_output_is_refused() {
         "the refusal must explain itself, got: {message}"
     );
 }
+
+/// Builds a synthetic NES 2.0 MMC5 image declaring `byte10` for
+/// PRG-RAM/PRG-NVRAM (ticket W14-22) -- e.g. `0x77` for an ETROM-shaped
+/// 8 KiB volatile + 8 KiB NVRAM = 16 KiB cartridge, matching Uncharted
+/// Waters' real header.
+fn nes2_mmc5_with_prg_ram(byte10: u8) -> crate::system::NesRom {
+    let prg_banks: u16 = 2; // 2 x 16 KiB = 32 KiB, enough for MMC5's own asserts
+    let chr_banks: u16 = 1; // 1 x 8 KiB
+    let flags6 = 0x50u8; // mapper low nibble 5
+    let flags7 = 0x08u8; // NES 2.0 identifier bits, mapper high nibble 0
+    let byte8 = 0u8;
+    let byte9 = 0u8;
+
+    let mut data = Vec::new();
+    data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
+    data.push(prg_banks as u8);
+    data.push(chr_banks as u8);
+    data.push(flags6);
+    data.push(flags7);
+    data.push(byte8);
+    data.push(byte9);
+    data.push(byte10);
+    data.extend_from_slice(&[0u8; 5]); // bytes 11-15
+    data.extend(vec![0xEAu8; prg_banks as usize * 16 * 1024]);
+    data.extend(vec![0u8; chr_banks as usize * 8 * 1024]);
+    crate::system::NesRom::from_ines_bytes(&data).expect("valid NES 2.0 MMC5 image")
+}
+
+/// Ticket W14-22, acceptance: "the PRG RAM save-state chunk ... carr[ies]
+/// the real size; a round-trip test covers a 16 KiB cart."
+#[test]
+fn cart_chunk_round_trips_a_16_kib_etrom_shaped_cartridge() {
+    let mut bus = NesBus::new(nes2_mmc5_with_prg_ram(0x77));
+    let cpu = Cpu::power_on(&mut bus);
+    assert_eq!(
+        bus.rom().prg_ram_size + bus.rom().prg_nvram_size,
+        16 * 1024,
+        "header sizing: 8 KiB volatile + 8 KiB NVRAM"
+    );
+
+    // Unlock PRG RAM writes and put distinct bytes on each of the two
+    // chips ($5113=0 -> chip 0, $5113=4 -> chip 1).
+    bus.write(0x5102, 0x02);
+    bus.write(0x5103, 0x01);
+    bus.write(0x5113, 0);
+    bus.write(0x6000, 0x11);
+    bus.write(0x5113, 4);
+    bus.write(0x6000, 0x22);
+
+    let mut stream = MemStream::default();
+    bus.save_region(&cpu, StateRegion::Cart, &mut stream)
+        .expect("CART chunk must save a 16 KiB cartridge");
+    assert_eq!(
+        stream.bytes.len(),
+        16 * 1024,
+        "the chunk carries the real size"
+    );
+
+    let mut restored = NesBus::new(nes2_mmc5_with_prg_ram(0x77));
+    let mut restored_cpu = Cpu::power_on(&mut restored);
+    let mut replay = MemStream {
+        bytes: stream.bytes.clone(),
+        read_pos: 0,
+    };
+    restored
+        .load_region(&mut restored_cpu, StateRegion::Cart, &mut replay)
+        .expect("CART chunk must load back into a matching 16 KiB cartridge");
+
+    restored.write(0x5113, 0);
+    assert_eq!(
+        restored.read(0x6000),
+        0x11,
+        "chip 0 survived the round trip"
+    );
+    restored.write(0x5113, 4);
+    assert_eq!(
+        restored.read(0x6000),
+        0x22,
+        "chip 1 survived the round trip"
+    );
+}

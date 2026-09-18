@@ -91,15 +91,22 @@ fn cartridge_prg_ram_is_readable_and_writable() {
     assert_ne!(bus.read(0x8000), 0xAB);
 }
 
-/// Ticket W14-17, acceptance 3: an MMC5 `$8000-$FFFF` window whose
-/// register selects RAM (bit 7 clear) reaches the bus's own PRG RAM chip,
-/// end to end through `CpuBus::read`/`write` -- not just
-/// `Mapper::prg_ram_window`'s return value in isolation.
+/// Ticket W14-17, acceptance 3 (offset rule updated by ticket W14-22): an
+/// MMC5 `$8000-$FFFF` window whose register selects RAM (bit 7 clear)
+/// reaches the bus's own PRG RAM chip, end to end through
+/// `CpuBus::read`/`write` -- not just `Mapper::prg_ram_window`'s return
+/// value in isolation. This cartridge declares no NES 2.0 PRG-RAM size
+/// (`ines_with_mapper` builds an iNES 1.0 image), so `NesBus` falls back
+/// to a single 8 KiB chip and `$5113`'s default bank (0) backs both
+/// windows -- real single-chip mirroring (`Mmc5::chip_bank_offset`), not
+/// W14-17's old "aliases modulo 8 KiB" gap.
 #[test]
 fn mmc5_ram_selected_prg_window_reads_and_writes_the_cartridge_prg_ram() {
     let raw = super::rom_loading::ines_with_mapper(5, 2, 1);
     let rom = crate::system::NesRom::from_ines_bytes(&raw).expect("valid MMC5 image");
     let mut bus = crate::system::NesBus::new(rom);
+    bus.write(0x5102, 0x02); // W14-22: unlock PRG RAM writes ($5102=%10,
+    bus.write(0x5103, 0x01); // $5103=%01 -- reset values disable them)
     bus.write(0x5100, 0x03); // PRG mode 3: four independent 8 KiB windows
     bus.write(0x5114, 0x00); // $8000 window: bit 7 clear -> RAM
     bus.write(0x8000, 0x42);
@@ -107,11 +114,89 @@ fn mmc5_ram_selected_prg_window_reads_and_writes_the_cartridge_prg_ram() {
     assert_eq!(
         bus.read(0x6000),
         0x42,
-        "this crate's one 8 KiB PRG RAM chip backs both windows (module doc's documented gap)"
+        "single 8 KiB chip: both windows land on the same bytes"
     );
     // A ROM-selected window is unaffected: $5117 always ROM (mmc5.rs), so
     // $E000 still reads the cartridge's PRG ROM, not RAM.
     assert_ne!(bus.read(0xE000), 0x42);
+}
+
+/// Ticket W14-22, acceptance: `$5102`/`$5103` reset to a non-enabling
+/// combination, so PRG RAM writes are dropped until explicitly unlocked
+/// -- proven end to end through `CpuBus::write`, not just
+/// `Mapper::prg_ram_write_enabled` in isolation.
+#[test]
+fn mmc5_prg_ram_write_protect_blocks_6000_writes_until_unlocked() {
+    let raw = super::rom_loading::ines_with_mapper(5, 2, 1);
+    let rom = crate::system::NesRom::from_ines_bytes(&raw).expect("valid MMC5 image");
+    let mut bus = crate::system::NesBus::new(rom);
+    bus.write(0x6000, 0x42);
+    assert_ne!(bus.read(0x6000), 0x42, "reset: writes must be blocked");
+    bus.write(0x5102, 0x02);
+    bus.write(0x5103, 0x01);
+    bus.write(0x6000, 0x42);
+    assert_eq!(bus.read(0x6000), 0x42, "unlocked: writes must land");
+}
+
+/// Ticket W14-22, acceptance: "NesBus sizes PRG RAM from the cartridge
+/// ... up to 64 KiB instead of a fixed 8 KiB array". A NES 2.0 header
+/// that declares neither volatile nor non-volatile PRG-RAM (byte 10 =
+/// `0x00`) must still floor at 8 KiB -- `$6000-$7FFF` is "always backed"
+/// on every board this crate loads (module doc) -- and one that declares
+/// far more than any real board (a large NES 2.0 shift count) must cap
+/// at 64 KiB rather than allocating unboundedly or panicking.
+#[test]
+fn prg_ram_size_floors_at_8kib_and_caps_at_64kib() {
+    fn mmc5_with_byte10(byte10: u8) -> crate::system::NesRom {
+        let mut data = Vec::new();
+        data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
+        data.push(2); // 32 KiB PRG
+        data.push(1); // 8 KiB CHR
+        data.push(0x50); // flags6: mapper low nibble 5
+        data.push(0x08); // flags7: NES 2.0 identifier, mapper high nibble 0
+        data.push(0); // byte8
+        data.push(0); // byte9
+        data.push(byte10);
+        data.extend_from_slice(&[0u8; 5]); // bytes 11-15
+        data.extend(vec![0xEAu8; 2 * 16 * 1024]);
+        data.extend(vec![0u8; 8 * 1024]);
+        crate::system::NesRom::from_ines_bytes(&data).expect("valid NES 2.0 MMC5 image")
+    }
+
+    // Floor: byte 10 = 0x00 -> both nibbles declare 0.
+    let mut bus = crate::system::NesBus::new(mmc5_with_byte10(0x00));
+    bus.write(0x5102, 0x02);
+    bus.write(0x5103, 0x01);
+    bus.write(0x6000, 0x99);
+    assert_eq!(
+        bus.read(0x6000),
+        0x99,
+        "an undeclared cart still gets 8 KiB"
+    );
+
+    // Cap: byte 10 = 0xEE -> both nibbles at 14 (64 << 14 = 1 MiB each,
+    // 2 MiB total) must be clamped down to 64 KiB, not allocated as-is.
+    let mut bus = crate::system::NesBus::new(mmc5_with_byte10(0xEE));
+    bus.write(0x5102, 0x02);
+    bus.write(0x5103, 0x01);
+    // 64 KiB / 8 KiB = 8 banks; bank 7 is the last one that must exist,
+    // and it must be distinct from bank 0.
+    bus.write(0x5113, 0);
+    bus.write(0x6000, 0x11);
+    bus.write(0x5113, 7);
+    bus.write(0x6000, 0x77);
+    bus.write(0x5113, 0);
+    assert_eq!(
+        bus.read(0x6000),
+        0x11,
+        "bank 0 unaffected by the write above"
+    );
+    bus.write(0x5113, 7);
+    assert_eq!(
+        bus.read(0x6000),
+        0x77,
+        "bank 7 (the last of a capped 64 KiB) exists"
+    );
 }
 
 #[test]

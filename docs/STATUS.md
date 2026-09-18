@@ -3488,3 +3488,24 @@ stories, 10 decisions).
   raster, attitude), which is what the Mario Kart track needs. Gate:
   workspace **1898 passing / 0 failed / 36 ignored**, clippy clean,
   arch OK.
+
+- **W14-22 — MMC5 PRG RAM banking, two-chip boards** (2026-09-17).
+  Found by Brad's by-eye check of W14-17: Uncharted Waters went to
+  gibberish right after character creation. A bisect build at 0af9310
+  was gibberish from the start, so W14-17's ExGrafix had fixed the early
+  screens and this was a second defect. The cart is ETROM (nesdev board
+  list; NES 2.0 byte 10 = `$77`, 8 KiB PRG-RAM + 8 KiB PRG-NVRAM on two
+  chips); rf-nes had one fixed 8 KiB array and the mapper never handled
+  `$5113`, so both chips aliased. **Evidence before code:** a probe on
+  the `$5113` write showed the game selecting chip 1 in frame 0.
+  **Fix:** PRG RAM sized from the header (8 KiB floor, 64 KiB cap);
+  `Mapper::set_prg_ram_len` / `wram_offset` / `prg_ram_write_enabled`
+  with defaults that leave every other board untouched; MMC5 decodes
+  `$5113` chip and page (two-chip boards split on bit 2, single-chip
+  boards mirror), the RAM-mapped PRG windows follow the same rule, and
+  `$5102`/`$5103` write protect is modelled with nesdev's reset values.
+  Handoff: rf-cart's `NesHeader` gains `prg_nvram_size`. Verified by
+  Brad on m4max: Uncharted Waters plays past character creation, which
+  completes W14-17's by-eye item for both titles. NES census, same 1281 archives: **1222** render, 6 uniform, 53 refused, crashed **0**, timed out **0** (unchanged). Gate:
+  workspace **1909 passing / 0 failed / 36 ignored**, clippy clean,
+  arch OK.
