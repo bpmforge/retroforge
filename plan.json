@@ -7019,7 +7019,7 @@
     "a kittest scenario toggles Diorama on the fixture game and asserts the live view texture changes; a by-eye check on the fixture room is recorded; the first commercial by-eye waits for a collision-sourced profile"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED 2026-09-18 by W16-06's close: the pass and mediator exist and are golden-tested; the on-screen wiring is what makes the walls visible."
    ],
