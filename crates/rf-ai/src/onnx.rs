@@ -25,6 +25,23 @@
 //! process (`ort-2.0.0-rc.13/src/lib.rs:234`), turning a missing optional
 //! dependency into a crash.
 //!
+//! ## Static-shape models are tiled automatically (ticket W16-12)
+//!
+//! Every model this crate has ledgered so far (`ai-model-manifest.toml`)
+//! declares a fixed input size (64x64, 128x128) — feeding it anything
+//! else fails outright. [`Upscaler::upscale`] reads the session's own
+//! declared input shape ([`OnnxUpscaler::declared_input_shape`]) and, when
+//! it is static, hands the work to [`crate::tiling::tile_and_blend`]
+//! instead of calling the model directly: the source image is split into
+//! overlapping tiles at the model's own size, reflection-padded at the
+//! image edges, each tile run through [`OnnxUpscaler::run_batch`]
+//! (batched together when the model's batch dimension is dynamic, one at
+//! a time when it is fixed — every ledgered model today), and the results
+//! blended back with a linear feather across the overlaps. A model whose
+//! input IS dynamic skips all of this and just runs the whole image, as
+//! before. Alpha never goes through the model either way — see
+//! [`reattach_alpha_nearest`].
+//!
 //! ## Reproducibility is bounded, and says so
 //!
 //! Float inference is not bit-reproducible across runtime versions or
@@ -65,7 +82,20 @@ pub struct OnnxUpscaler {
     runtime_id: String,
     model_path: PathBuf,
     scale: u32,
+    /// Overlap, in source pixels, between adjacent tiles when the model's
+    /// input is a static size (ticket W16-12; see [`crate::tiling`]).
+    /// Meaningless for a dynamic-shape model, which is never tiled.
+    pad: u32,
 }
+
+/// Batches of at most this many tiles are sent to the model in one
+/// `Session::run` call when its batch dimension is dynamic. A fixed cap
+/// rather than "all tiles at once": a 512x448 frame at a 64px tile can
+/// produce 50+ tiles, and there is no dynamic-shape ledgered model today
+/// to measure a better number against (see `ai-model-manifest.toml`'s
+/// criterion-3 note) — 8 is a conservative starting point, not a measured
+/// one, and is easy to change in one place if a future model calls for it.
+const MAX_DYNAMIC_BATCH: usize = 8;
 
 impl std::fmt::Debug for OnnxUpscaler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -74,6 +104,7 @@ impl std::fmt::Debug for OnnxUpscaler {
             .field("runtime_id", &self.runtime_id)
             .field("model_path", &self.model_path)
             .field("scale", &self.scale)
+            .field("pad", &self.pad)
             .finish()
     }
 }
@@ -170,7 +201,191 @@ impl OnnxUpscaler {
             runtime_id: dylib_path.display().to_string(),
             model_path: model_path.to_path_buf(),
             scale,
+            pad: crate::tiling::DEFAULT_PAD,
         })
+    }
+
+    /// Override the tile overlap (default [`crate::tiling::DEFAULT_PAD`])
+    /// used when the model's input is a static size. No effect on a
+    /// dynamic-shape model, which runs whole with no tiling at all.
+    #[must_use]
+    pub fn with_pad(mut self, pad: u32) -> Self {
+        self.pad = pad;
+        self
+    }
+
+    /// The model's declared input `(batch, height, width)`, `-1` meaning
+    /// "dynamic" for any of the three (ONNX Runtime's own convention —
+    /// see `ort::value::Shape`'s doc).
+    ///
+    /// # Errors
+    /// [`UpscaleError::Runtime`] if the session has no inputs, the first
+    /// input is not a 4-D NCHW tensor, or the channel dimension is not 3
+    /// (this crate's RGB convention — see the module doc).
+    fn declared_input_shape(&self) -> Result<(i64, i64, i64), UpscaleError> {
+        let session = self.session.lock().map_err(|_| UpscaleError::Runtime {
+            detail: "ONNX session mutex was poisoned by an earlier panic".to_string(),
+        })?;
+        let input = session
+            .inputs()
+            .first()
+            .ok_or_else(|| UpscaleError::Runtime {
+                detail: format!("model {} declares no inputs", self.model_path.display()),
+            })?;
+        match input.dtype() {
+            ort::value::ValueType::Tensor { shape, .. } => match &shape[..] {
+                [n, c, h, w] if *c == 3 => Ok((*n, *h, *w)),
+                other => Err(UpscaleError::Runtime {
+                    detail: format!(
+                        "model {} input is {other:?}, expected a 4-D NCHW tensor with 3 channels",
+                        self.model_path.display()
+                    ),
+                }),
+            },
+            other => Err(UpscaleError::Runtime {
+                detail: format!(
+                    "model {} input is {other:?}, not a tensor",
+                    self.model_path.display()
+                ),
+            }),
+        }
+    }
+
+    /// Run one batch of same-sized RGB tiles (already NCHW-float-ready)
+    /// through the session in a single `Session::run` call, returning one
+    /// RGB [`Rgba8`] (alpha forced to 255 — the caller reattaches the real
+    /// alpha; see the module doc's "alpha is carried around the model"
+    /// note) per input tile, in order.
+    ///
+    /// This is the ONE place that actually touches `ort` on the inference
+    /// path — [`crate::tiling::tile_and_blend`]'s `run` closure and the
+    /// dynamic-shape whole-image path both call through here, so there is
+    /// exactly one tensor-building/extracting implementation rather than
+    /// two that could drift apart.
+    fn run_batch(&self, tiles: &[Rgba8]) -> Result<Vec<Rgba8>, UpscaleError> {
+        let Some(first) = tiles.first() else {
+            return Ok(Vec::new());
+        };
+        let (w, h) = (first.width as usize, first.height as usize);
+        let n = tiles.len();
+
+        // NCHW float RGB in 0..=1, the ESRGAN-class convention. Alpha is
+        // carried around the model rather than through it: these models
+        // are trained on opaque RGB, and feeding alpha through a network
+        // that never saw it produces halos on every sprite edge.
+        let mut chw = vec![0f32; n * 3 * w * h];
+        for (b, tile) in tiles.iter().enumerate() {
+            if tile.width as usize != w || tile.height as usize != h {
+                return Err(UpscaleError::Runtime {
+                    detail: format!(
+                        "batched tiles must share one size: tile 0 is {w}x{h}, tile {b} is {}x{}",
+                        tile.width, tile.height
+                    ),
+                });
+            }
+            let base = b * 3 * w * h;
+            for (i, px) in tile.pixels.chunks_exact(4).enumerate() {
+                chw[base + i] = f32::from(px[0]) / 255.0;
+                chw[base + w * h + i] = f32::from(px[1]) / 255.0;
+                chw[base + 2 * w * h + i] = f32::from(px[2]) / 255.0;
+            }
+        }
+
+        let input =
+            Tensor::from_array((vec![n as i64, 3, h as i64, w as i64], chw)).map_err(|e| {
+                UpscaleError::Runtime {
+                    detail: format!("building input tensor: {e}"),
+                }
+            })?;
+
+        let mut session = self.session.lock().map_err(|_| UpscaleError::Runtime {
+            detail: "ONNX session mutex was poisoned by an earlier panic".to_string(),
+        })?;
+        let outputs = session
+            .run(ort::inputs![input])
+            .map_err(|e| UpscaleError::Runtime {
+                detail: format!("running model {}: {e}", self.model_path.display()),
+            })?;
+
+        let (shape, data) =
+            outputs[0]
+                .try_extract_tensor::<f32>()
+                .map_err(|e| UpscaleError::Runtime {
+                    detail: format!("reading output tensor: {e}"),
+                })?;
+
+        let dims: Vec<i64> = shape.iter().copied().collect();
+        let (out_n, out_h, out_w) = match dims.as_slice() {
+            [on, _, oh, ow] => (*on as usize, *oh as u32, *ow as u32),
+            other => {
+                return Err(UpscaleError::Runtime {
+                    detail: format!("expected a 4-D NCHW output, got shape {other:?}"),
+                })
+            }
+        };
+        if out_n != n {
+            return Err(UpscaleError::Runtime {
+                detail: format!("sent a batch of {n} tiles, model returned {out_n}"),
+            });
+        }
+        // Trust the DECLARED scale only after checking it against what the
+        // model actually returned — split_sheet's geometry depends on it,
+        // and a silent mismatch would slice every frame at the wrong
+        // offset rather than failing.
+        if out_w != first.width * self.scale || out_h != first.height * self.scale {
+            return Err(UpscaleError::Runtime {
+                detail: format!(
+                    "model declared scale {} ({}x{} -> {}x{}) but returned {out_w}x{out_h}",
+                    self.scale,
+                    first.width,
+                    first.height,
+                    first.width * self.scale,
+                    first.height * self.scale
+                ),
+            });
+        }
+
+        let plane = out_w as usize * out_h as usize;
+        if data.len() < out_n * 3 * plane {
+            return Err(UpscaleError::Runtime {
+                detail: format!(
+                    "output tensor has {} values, need {} for {out_n}x3x{out_w}x{out_h}",
+                    data.len(),
+                    out_n * 3 * plane
+                ),
+            });
+        }
+
+        let mut results = Vec::with_capacity(out_n);
+        for b in 0..out_n {
+            let base = b * 3 * plane;
+            let mut pixels = Vec::with_capacity(plane * 4);
+            for i in 0..plane {
+                pixels.push(to_u8(data[base + i]));
+                pixels.push(to_u8(data[base + plane + i]));
+                pixels.push(to_u8(data[base + 2 * plane + i]));
+                pixels.push(255);
+            }
+            results.push(Rgba8::new(out_w, out_h, pixels)?);
+        }
+        Ok(results)
+    }
+}
+
+/// Nearest-neighbour upscale of just the alpha channel, run AFTER the RGB
+/// path (whole-image or tiled) so a model that never saw alpha cannot
+/// paint over a sprite's cutout — see the module doc's "alpha is carried
+/// around the model" note and `crate::studio`'s edge mask, which handles
+/// the halo this still leaves at a scaled-up hard edge.
+fn reattach_alpha_nearest(rgb: &mut Rgba8, src: &Rgba8, scale: u32) {
+    for y in 0..rgb.height {
+        let sy = (y / scale).min(src.height - 1);
+        for x in 0..rgb.width {
+            let sx = (x / scale).min(src.width - 1);
+            let a = src.pixel(sx, sy).expect("in bounds by construction")[3];
+            let i = (y as usize * rgb.width as usize + x as usize) * 4 + 3;
+            rgb.pixels[i] = a;
+        }
     }
 }
 
@@ -191,85 +406,35 @@ impl Upscaler for OnnxUpscaler {
     }
 
     fn upscale(&self, src: &Rgba8) -> Result<Rgba8, UpscaleError> {
-        // NCHW float RGB in 0..=1, the ESRGAN-class convention. Alpha is
-        // carried around the model rather than through it: these models
-        // are trained on opaque RGB, and feeding alpha through a network
-        // that never saw it produces halos on every sprite edge.
-        let (w, h) = (src.width as usize, src.height as usize);
-        let mut chw = vec![0f32; 3 * w * h];
-        for (i, px) in src.pixels.chunks_exact(4).enumerate() {
-            chw[i] = f32::from(px[0]) / 255.0;
-            chw[w * h + i] = f32::from(px[1]) / 255.0;
-            chw[2 * w * h + i] = f32::from(px[2]) / 255.0;
-        }
+        let (batch_dim, in_h, in_w) = self.declared_input_shape()?;
 
-        let input = Tensor::from_array((vec![1_i64, 3, h as i64, w as i64], chw)).map_err(|e| {
-            UpscaleError::Runtime {
-                detail: format!("building input tensor: {e}"),
-            }
-        })?;
-
-        let mut session = self.session.lock().map_err(|_| UpscaleError::Runtime {
-            detail: "ONNX session mutex was poisoned by an earlier panic".to_string(),
-        })?;
-        let outputs = session
-            .run(ort::inputs![input])
-            .map_err(|e| UpscaleError::Runtime {
-                detail: format!("running model {}: {e}", self.model_path.display()),
-            })?;
-
-        let (shape, data) =
-            outputs[0]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| UpscaleError::Runtime {
-                    detail: format!("reading output tensor: {e}"),
-                })?;
-
-        // Trust the DECLARED scale only after checking it against what the
-        // model actually returned — split_sheet's geometry depends on it,
-        // and a silent mismatch would slice every frame at the wrong
-        // offset rather than failing.
-        let dims: Vec<i64> = shape.iter().copied().collect();
-        let (out_h, out_w) = match dims.as_slice() {
-            [_, _, oh, ow] => (*oh as u32, *ow as u32),
-            other => {
-                return Err(UpscaleError::Runtime {
-                    detail: format!("expected a 4-D NCHW output, got shape {other:?}"),
-                })
-            }
+        let mut out = if in_h > 0 && in_w > 0 {
+            // STATIC input size (both of this ticket's ledgered models:
+            // `ai-model-manifest.toml`'s 64x64 and 128x128 rows) — tile.
+            // The model's own batch dim decides whether tiles are sent one
+            // at a time (a fixed batch, universally 1 today) or several
+            // per call (a dynamic batch, `-1`): see `MAX_DYNAMIC_BATCH`.
+            let batch = if batch_dim < 0 { MAX_DYNAMIC_BATCH } else { 1 };
+            crate::tiling::tile_and_blend(
+                src,
+                in_w as u32,
+                in_h as u32,
+                self.pad,
+                self.scale,
+                batch,
+                |tiles: &[Rgba8]| self.run_batch(tiles),
+            )?
+        } else {
+            // DYNAMIC input size: no tile-size to tile TO, so run the
+            // whole image through in one call.
+            self.run_batch(std::slice::from_ref(src))?
+                .into_iter()
+                .next()
+                .expect("run_batch returns exactly one output for one input")
         };
-        if out_w != src.width * self.scale || out_h != src.height * self.scale {
-            return Err(UpscaleError::Runtime {
-                detail: format!(
-                    "model declared scale {} ({}x{} -> {}x{}) but returned {out_w}x{out_h}",
-                    self.scale,
-                    src.width,
-                    src.height,
-                    src.width * self.scale,
-                    src.height * self.scale
-                ),
-            });
-        }
 
-        let plane = out_w as usize * out_h as usize;
-        if data.len() < 3 * plane {
-            return Err(UpscaleError::Runtime {
-                detail: format!(
-                    "output tensor has {} values, need {} for {out_w}x{out_h} RGB",
-                    data.len(),
-                    3 * plane
-                ),
-            });
-        }
-
-        let mut pixels = Vec::with_capacity(plane * 4);
-        for i in 0..plane {
-            pixels.push(to_u8(data[i]));
-            pixels.push(to_u8(data[plane + i]));
-            pixels.push(to_u8(data[2 * plane + i]));
-            pixels.push(255);
-        }
-        Rgba8::new(out_w, out_h, pixels)
+        reattach_alpha_nearest(&mut out, src, self.scale);
+        Ok(out)
     }
 }
 
