@@ -49,6 +49,7 @@ pub mod fog;
 pub mod frame;
 pub mod gpu;
 pub mod layers;
+pub mod mode7_plane;
 pub mod original_pipeline;
 pub mod palette;
 pub mod pipeline;

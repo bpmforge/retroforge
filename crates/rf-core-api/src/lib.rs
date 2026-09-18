@@ -34,7 +34,7 @@ pub use frame_bundle::{FrameBundle, FrameBundleBuilder};
 pub use input::{InputFrame, MAX_INPUT_PORTS};
 pub use state_view::{StateReader, StateView, StateWriter};
 pub use triple_buffer::{triple_buffer, TripleBufferReader, TripleBufferWriter};
-pub use video::{ColorMathOp, OverlayPixel, PixelLayer, PpuPixel, SubPixel};
+pub use video::{ColorMathOp, Mode7Registers, OverlayPixel, PixelLayer, PpuPixel, SubPixel};
 pub use watch::{MemWatch, WatchAccess, WatchSpace, WatchTable, MAX_WATCHES};
 
 /// Crate marker used by the test harness to confirm workspace wiring.

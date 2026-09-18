@@ -31,8 +31,8 @@
 //! then, so a 256x224 frame had nowhere to live.
 
 use rf_core_api::{
-    CartImage, CoreConfig, CoreError, CoreSink, EmulatorCore, InputFrame, ResetKind, StateError,
-    StateReader, StateView, StateWriter, Step, StepResult,
+    CartImage, CoreConfig, CoreError, CoreEvent, CoreSink, EmulatorCore, EventMask, InputFrame,
+    ResetKind, StateError, StateReader, StateView, StateWriter, Step, StepResult,
 };
 use rf_core_api::{CpuRegs, Wdc65816Regs};
 
@@ -160,6 +160,18 @@ impl SnesCore {
             };
             sink.video_scanline(y, &line.pixels);
             sink.overlay_scanline(y, &line.overlay);
+        }
+        // Ticket W16-09: promote the Mode 7 matrix to the generic
+        // CoreEvent path, pay-for-use like every other variant here --
+        // constructed only when a subscriber asked AND the frame is
+        // actually in BG mode 7 (a core in any other mode has nothing
+        // meaningful to report, and must not manufacture a stale matrix
+        // left over from a previous mode-7 frame).
+        if self.config.event_mask.is_subscribed(EventMask::MODE7)
+            && self.system.bus.ppu.bg_mode == 7
+        {
+            let regs = crate::debug::mode7_registers(&self.system.bus.ppu.mode7);
+            sink.event(CoreEvent::Mode7(regs));
         }
         self.drain_events(sink);
     }

@@ -184,6 +184,77 @@ fn subscribing_does_not_change_what_the_machine_does() {
 }
 
 // -----------------------------------------------------------------------
+// Ticket W16-09: the Mode 7 matrix promoted to CoreEvent.
+// -----------------------------------------------------------------------
+
+/// Write one Mode-7 write-twice register (`$211B`-`$2120`), low byte then
+/// high byte, through the shared latch -- the same order
+/// `Mode7::write_register`'s own doc documents.
+fn write_m7(core: &mut SnesCore, offset: u32, value: u16) {
+    core.system_mut().bus.write(offset, value as u8);
+    core.system_mut().bus.write(offset, (value >> 8) as u8);
+}
+
+#[test]
+fn a_subscribed_core_reports_mode7_registers_when_bg_mode_is_7() {
+    let mut core = core();
+    core.config().event_mask = EventMask::MODE7;
+
+    // $2105 BGMODE: mode 7 in bits 0-2.
+    core.system_mut().bus.write(0x002105, 0x07);
+    write_m7(&mut core, 0x00211B, 0x0140); // A
+    write_m7(&mut core, 0x00211C, 0xFF00); // B = -256
+    write_m7(&mut core, 0x00211D, 0x000C); // C
+    write_m7(&mut core, 0x00211E, 0x00F0); // D
+    write_m7(&mut core, 0x00211F, 100); // X0
+    write_m7(&mut core, 0x002120, 200); // Y0
+
+    let mut sink = Collector::default();
+    core.step(Step::Frame, &mut sink);
+
+    let regs = sink
+        .events
+        .iter()
+        .find_map(|e| match e {
+            CoreEvent::Mode7(r) => Some(*r),
+            _ => None,
+        })
+        .expect("a BG-mode-7 frame subscribed to EventMask::MODE7 must emit CoreEvent::Mode7");
+    assert_eq!(regs.a, 0x0140);
+    assert_eq!(regs.b, -256);
+    assert_eq!(regs.c, 0x000C);
+    assert_eq!(regs.d, 0x00F0);
+    assert_eq!(regs.x0, 100);
+    assert_eq!(regs.y0, 200);
+}
+
+#[test]
+fn no_mode7_event_when_bg_mode_is_not_7_even_if_subscribed() {
+    let mut core = core();
+    core.config().event_mask = EventMask::ALL;
+    // Default BG mode is 0, not 7.
+    let mut sink = Collector::default();
+    core.step(Step::Frame, &mut sink);
+    assert!(
+        !sink.events.iter().any(|e| matches!(e, CoreEvent::Mode7(_))),
+        "BG mode 0 must never emit CoreEvent::Mode7, even fully subscribed"
+    );
+}
+
+#[test]
+fn no_mode7_event_when_unsubscribed_even_in_bg_mode_7() {
+    let mut core = core();
+    core.system_mut().bus.write(0x002105, 0x07);
+    // event_mask defaults to EventMask::NONE.
+    let mut sink = Collector::default();
+    core.step(Step::Frame, &mut sink);
+    assert!(
+        sink.events.is_empty(),
+        "an unsubscribed core must build no CoreEvent at all, mode 7 included"
+    );
+}
+
+// -----------------------------------------------------------------------
 // Ticket W13-02a: StateView stops returning empty slices.
 // -----------------------------------------------------------------------
 

@@ -558,6 +558,55 @@ impl DioramaPass {
         out_width: u32,
         out_height: u32,
     ) -> Result<Vec<u8>, String> {
+        let aspect = out_width.max(1) as f32 / out_height.max(1) as f32;
+        let vp = camera_matrices::view_proj(
+            tiles_w.max(1) as f32,
+            tiles_h.max(1) as f32,
+            tile_px.max(1) as f32,
+            aspect,
+            PITCH_DEG,
+            FOV_Y_DEG,
+            1.3,
+        );
+        self.render_with_vp(
+            gpu,
+            vertices,
+            ground_rgba,
+            ground_w,
+            ground_h,
+            sprite_rgba,
+            sprite_w,
+            sprite_h,
+            vp,
+            out_width,
+            out_height,
+        )
+    }
+
+    /// Same GPU pass as [`Self::render`], but with the camera's
+    /// `view * proj` matrix supplied directly rather than derived from a
+    /// tile grid + [`PITCH_DEG`]/[`FOV_Y_DEG`] — ticket W16-09's hook for
+    /// [`crate::mode7_plane`], which needs a camera whose height/distance
+    /// track the SNES's own Mode 7 matrix rather than the fixed-pitch
+    /// diorama camera. "Deliberately the same compositor... with a
+    /// different input" (`docs/design/ENHANCEMENT_WAVE_16.md` §9) — this
+    /// method IS that shared input seam: identical pipeline/bind-group/
+    /// vertex handling, only the camera differs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_vp(
+        &self,
+        gpu: &GpuContext,
+        vertices: &[Vertex],
+        ground_rgba: &[u8],
+        ground_w: u32,
+        ground_h: u32,
+        sprite_rgba: &[u8],
+        sprite_w: u32,
+        sprite_h: u32,
+        vp: camera_matrices::Mat4,
+        out_width: u32,
+        out_height: u32,
+    ) -> Result<Vec<u8>, String> {
         assert_eq!(
             ground_rgba.len(),
             (ground_w as usize) * (ground_h as usize) * 4,
@@ -635,16 +684,6 @@ impl DioramaPass {
         });
         let output_view = output_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let aspect = out_width.max(1) as f32 / out_height.max(1) as f32;
-        let vp = camera_matrices::view_proj(
-            tiles_w.max(1) as f32,
-            tiles_h.max(1) as f32,
-            tile_px.max(1) as f32,
-            aspect,
-            PITCH_DEG,
-            FOV_Y_DEG,
-            1.3,
-        );
         let camera_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rf-renderer::diorama::camera"),
             size: 64,

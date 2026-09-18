@@ -1022,6 +1022,10 @@ fn timeline_row(event: &rf_core_api::CoreEvent) -> usize {
         // is wrong, so give it its own off-chart marker instead: row 8,
         // one past the last labeled row, drawn without a label.
         rf_core_api::CoreEvent::MemWatch { .. } => 8,
+        // Same off-chart treatment as MemWatch (ticket W16-09 added this
+        // variant after TIMELINE_ROWS was written; a full Mode 7 timeline
+        // row is future work, not this mechanical exhaustiveness fix).
+        rf_core_api::CoreEvent::Mode7(_) => 9,
     }
 }
 

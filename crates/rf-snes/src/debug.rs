@@ -455,6 +455,80 @@ pub fn mode7_camera_corners(
     ]
 }
 
+/// Promote a live Mode 7 register file to the generic, cross-console
+/// frame-bundle shape (ticket W16-09; `rf_core_api::Mode7Registers`'s own
+/// doc explains why the type carries no SNES-specific name). A pure field
+/// copy — [`crate::ppu::mode7::Mode7`] stays the only place these values
+/// are interpreted from hardware writes; this never becomes a second
+/// source of truth for what they mean, only a shape conversion.
+#[must_use]
+pub fn mode7_registers(m: &crate::ppu::mode7::Mode7) -> rf_core_api::Mode7Registers {
+    rf_core_api::Mode7Registers {
+        a: m.a,
+        b: m.b,
+        c: m.c,
+        d: m.d,
+        x0: m.x0,
+        y0: m.y0,
+        hofs: m.hofs,
+        vofs: m.vofs,
+        flip_x: m.flip_x,
+        flip_y: m.flip_y,
+    }
+}
+
+/// Render `tiles_w`x`tiles_h` tiles of the Mode 7 playfield (starting at
+/// playfield tile `(0, 0)`) to a plain RGBA8 texture, at `density`x the
+/// hardware's native per-tile resolution — ticket W16-09's "ground
+/// texture" input to `rf_renderer`'s diorama pass.
+///
+/// **bsnes-hd's documented approach, applied to the playfield instead of
+/// the screen**: re-run the hardware's own sampling ([`mode7_pixel`] /
+/// [`cgram_rgb`], unchanged) at a finer step rather than filtering or
+/// inventing detail between real samples — the same stance
+/// `crate::ppu::mode7::render_scanline`'s own doc takes for the
+/// SCREEN-space HD path ("no smoothing, interpolation or invented
+/// detail"). `density` repeats each native pixel as a `density`x`density`
+/// block of identical colour: there is no more information in an 8x8,
+/// 8bpp-indexed character than that, so "HD" here can only mean
+/// supersampling the existing data.
+///
+/// Output is `tiles_w * 8 * density` by `tiles_h * 8 * density` pixels,
+/// row-major, straight-alpha RGBA8 — transparent (`[0, 0, 0, 0]`)
+/// wherever [`mode7_pixel`] reads palette index 0, the same "index 0 is
+/// nothing drawn here" rule every other layer in this codebase follows
+/// (Mode 7 has no backdrop colour of its own).
+#[must_use]
+pub fn render_mode7_plane_rgba(
+    vram: &[u8],
+    cgram: &[u8],
+    tiles_w: u16,
+    tiles_h: u16,
+    density: u32,
+) -> Vec<u8> {
+    let density = density.max(1) as usize;
+    let out_w = usize::from(tiles_w) * 8 * density;
+    let out_h = usize::from(tiles_h) * 8 * density;
+    let mut out = vec![0u8; out_w * out_h * 4];
+    for oy in 0..out_h {
+        let py = (oy / density) as u16;
+        for ox in 0..out_w {
+            let px = (ox / density) as u16;
+            let index = mode7_pixel(vram, px, py);
+            if index == 0 {
+                continue; // Already zeroed -- transparent, no tile pixel here.
+            }
+            let [r, g, b] = cgram_rgb(cgram, index);
+            let at = (oy * out_w + ox) * 4;
+            out[at] = r;
+            out[at + 1] = g;
+            out[at + 2] = b;
+            out[at + 3] = 255;
+        }
+    }
+    out
+}
+
 /// Which HDMA channels transferred on each scanline of the last frame.
 ///
 /// One byte per hardware line, bit `n` set when channel `n` ran a transfer
@@ -666,5 +740,93 @@ mod w13_02c_tests {
         aram[8] = 0x70;
         let block = decode_brr_block(&aram, 0, (0, 0));
         assert_ne!(block.samples[14], 0, "byte 8 supplies samples 14 and 15");
+    }
+
+    /// Ticket W16-09: a pure field copy, nothing decided twice.
+    #[test]
+    fn mode7_registers_is_a_plain_promotion_of_every_field() {
+        let m = Mode7 {
+            a: 0x0140,
+            b: -256,
+            c: 12,
+            d: 0x00F0,
+            x0: 100,
+            y0: -50,
+            hofs: 7,
+            vofs: -7,
+            flip_x: true,
+            flip_y: false,
+            ..Mode7::default()
+        };
+        let r = mode7_registers(&m);
+        assert_eq!(
+            r,
+            rf_core_api::Mode7Registers {
+                a: 0x0140,
+                b: -256,
+                c: 12,
+                d: 0x00F0,
+                x0: 100,
+                y0: -50,
+                hofs: 7,
+                vofs: -7,
+                flip_x: true,
+                flip_y: false,
+            }
+        );
+    }
+
+    /// Ticket W16-09: density 1 must reproduce `mode7_pixel`/`cgram_rgb`
+    /// exactly, pixel for pixel — the "hardware path is bit-identical"
+    /// stance `render_scanline`'s own doc takes for the screen-space HD
+    /// path, restated here for the playfield-space texture.
+    #[test]
+    fn render_mode7_plane_rgba_at_density_one_matches_mode7_pixel_and_cgram_rgb() {
+        let mut vram = vec![0u8; 0x10000];
+        vram[0] = 2; // tilemap (0,0) -> tile 2
+        vram[(2 * 64) * 2 + 1] = 0x55; // tile 2, pixel (0,0) -> index 0x55
+        let mut cgram = vec![0u8; 512];
+        let word: u16 = 0x1F << 10; // pure blue, per cgram_rgb's own test
+        cgram[0x55 * 2] = word as u8;
+        cgram[0x55 * 2 + 1] = (word >> 8) as u8;
+
+        let rgba = render_mode7_plane_rgba(&vram, &cgram, 1, 1, 1);
+        assert_eq!(rgba.len(), 8 * 8 * 4);
+        assert_eq!(&rgba[0..4], &[0, 0, 255, 255], "pixel (0,0) is opaque blue");
+
+        // A tile pixel this test never wrote is index 0 -> transparent.
+        let at = (0 * 8 + 4) * 4; // pixel (4, 0)
+        assert_eq!(&rgba[at..at + 4], &[0, 0, 0, 0]);
+    }
+
+    /// Ticket W16-09: "HD" is supersampling, never invented detail — each
+    /// source pixel becomes an NxN block of the SAME colour.
+    #[test]
+    fn render_mode7_plane_rgba_density_n_repeats_blocks_not_new_detail() {
+        let mut vram = vec![0u8; 0x10000];
+        vram[0] = 1;
+        vram[64 * 2 + 1] = 0x03;
+        let mut cgram = vec![0u8; 512];
+        cgram[0x03 * 2] = 0xFF;
+        cgram[0x03 * 2 + 1] = 0x7F; // full-scale in every channel
+
+        let density = 3;
+        let rgba = render_mode7_plane_rgba(&vram, &cgram, 1, 1, density);
+        let side = 8 * density as usize;
+        assert_eq!(rgba.len(), side * side * 4);
+        // Every pixel in the top-left density x density block must be the
+        // identical opaque colour -- a block, not a gradient.
+        let first = &rgba[0..4];
+        assert_ne!(first[3], 0, "must be opaque");
+        for oy in 0..density as usize {
+            for ox in 0..density as usize {
+                let at = (oy * side + ox) * 4;
+                assert_eq!(
+                    &rgba[at..at + 4],
+                    first,
+                    "({ox},{oy}) must match the block colour"
+                );
+            }
+        }
     }
 }
