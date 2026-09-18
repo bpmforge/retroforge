@@ -6774,8 +6774,9 @@
     "the scene graph carries a solidity mask per decoded screen; a unit test renders it"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 (lane B). room_grid collision plumbing mirrors metatile_screens; solidity_mask is a tested free function in scene_graph.rs, NOT yet a SceneLayer::DecodedLevel field because that variant is constructed in crates/retroforge (out of scope) -- W16-06 wires it. Profiles: rf-scroller-demo (metatile, fixture-sourced collision) and a new profiles/nes/legend-of-zelda that declares only what Data Crystal publishes ($049E colliding tile, $00EB 16x8 grid, $6530 per-screen storage) with decode.room_grid and collision left undeclared and explained in comments: no public per-tile solidity table address exists for it. The two in-repo room_grid fixtures document no collision bytes (fixtures/** out of scope); adding one to rf-rooms is a follow-up when cc65 is installed. Gate: workspace 1932 passing / 0 failed / 36 ignored.",
     "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
    ],
    "stories": []

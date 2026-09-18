@@ -3538,3 +3538,18 @@ stories, 10 decisions).
   plain scene and a Super Metroid-style palette-cycling scene must not
   trigger, and they don't. Gate: workspace **1922 passing / 0 failed / 36
   ignored**.
+
+- **W16-05 — room-grid collision and the solidity mask** (2026-09-18,
+  lane B). The room-grid decoder family now reads a `collision` table
+  and bit names the way metatile screens already did, producing a
+  per-tile attribute byte per decoded room, and `solidity_mask` turns
+  tiles plus table plus the name of the solid bit into the mask the 3D
+  compositor will extrude, for visited and decoded screens only
+  (non-goal #11); a test renders a 3x3 room to ASCII. The mask is not
+  yet a field on the decoded-level scene layer because that layer is
+  constructed in the app crate, which W16-06 owns. Profiles: the
+  fixture-sourced metatile profile carries a real table; a new Legend
+  of Zelda profile declares only what Data Crystal's RAM map publishes
+  and leaves collision undeclared with the reason written in, rather
+  than invent an address. Gate: workspace **1932 passing / 0 failed /
+  36 ignored**.
