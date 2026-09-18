@@ -7078,7 +7078,7 @@
     "save-state coverage for the mapping registers with a round-trip test"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED 2026-09-18 on Brad's 'go' (D-013). Sources: fullsnes 'SNES Cart SA-1' sections (I/O map, interrupt/control both sides, timer, memory control, DMA, character conversion, arithmetic, VBR) extracted for briefs; snes.nesdev.org SA-1 pages. Clean-room, no emulator source (NFR-011). Shape per D-013: a second cpu::Cpu over an Sa1Bus, not a second CPU implementation."
    ],
