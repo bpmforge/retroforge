@@ -91,6 +91,24 @@ pub const SPACE: [f32; 5] = [2.0, 4.0, 6.0, 8.0, 10.0];
 /// animation" accessibility escape hatch egui itself already offers.
 pub const MODAL_FADE_SECS: f32 = 0.12;
 
+/// The library selection ring's stroke width for a mouse/keyboard focus
+/// (ticket W15-08, `docs/design/UX_WAVE_15.md` §9) — unchanged from the
+/// literal `2.0` `library_rows`/`library_cards` drew before this ticket.
+pub const FOCUS_RING_MOUSE: f32 = 2.0;
+/// The same ring's width when the pad drove the selection there —
+/// acceptance 2's "thicker... e.g. 4px vs 2px", chosen at exactly double
+/// so the difference reads at a glance without needing a legend.
+pub const FOCUS_RING_PAD: f32 = 4.0;
+/// How far the pad ring's colour sits toward `ink` (the primary-text
+/// token, the highest-contrast colour any palette defines) from `accent`
+/// — acceptance 2's "stronger accent". Mixing TOWARD `ink` rather than
+/// inventing a new hue keeps this derived (module doc: "derived, not
+/// invented") and can only raise contrast against `bg`/`surface`, never
+/// lower it below `accent`'s own — `ink` is chosen precisely because
+/// every palette already measures it as the most-contrasting token there
+/// is (`accessibility::tests::every_pair_in_every_palette_clears_aaa`).
+const ACCENT_STRONG_MIX: f32 = 0.3;
+
 /// The three semantic base hues a token set derives its `ok`/`warn`/
 /// `error` (and their `_soft` variants) from. See the module doc for why
 /// these three specifically are hand-chosen rather than derived.
@@ -164,6 +182,10 @@ pub struct Tokens {
     pub line: egui::Color32,
     pub accent: egui::Color32,
     pub accent_soft: egui::Color32,
+    /// The pad focus ring's colour (ticket W15-08 acceptance 2): `accent`
+    /// mixed toward `ink` by [`ACCENT_STRONG_MIX`] — see that constant's
+    /// doc for why `ink` is the mix target.
+    pub accent_strong: egui::Color32,
     pub ok: egui::Color32,
     pub ok_soft: egui::Color32,
     pub warn: egui::Color32,
@@ -204,6 +226,7 @@ fn derive(palette: &Palette, semantics: &Semantics) -> Tokens {
         line: mix(muted, bg, LINE_MIX),
         accent,
         accent_soft: mix(accent, bg, SOFT_MIX),
+        accent_strong: mix(accent, ink, ACCENT_STRONG_MIX),
         ok,
         ok_soft: mix(ok, bg, SOFT_MIX),
         warn,
@@ -518,6 +541,66 @@ mod tests {
                     "{name}: accent on {surface_name} is {ratio:.2}:1, below 3:1"
                 );
             }
+        }
+    }
+
+    /// The pad focus ring's colour (ticket W15-08 acceptance 2) clears the
+    /// same WCAG 2.2 SC 1.4.11 floor the mouse ring's `accent` does — "the
+    /// same 3:1 contrast tests as the mouse ring" is the ticket's own
+    /// wording, so this is that test, re-run against `accent_strong`.
+    #[test]
+    fn accent_strong_clears_non_text_contrast_on_both_surfaces_in_all_sets() {
+        const WCAG_NON_TEXT: f32 = 3.0;
+        for (name, tokens) in [
+            ("LIGHT", Tokens::light()),
+            ("DARK", Tokens::dark()),
+            ("HIGH_CONTRAST", Tokens::high_contrast()),
+        ] {
+            for (surface_name, surface) in [("bg", tokens.bg), ("surface", tokens.surface)] {
+                let ratio = contrast_ratio(
+                    [
+                        tokens.accent_strong.r(),
+                        tokens.accent_strong.g(),
+                        tokens.accent_strong.b(),
+                    ],
+                    [surface.r(), surface.g(), surface.b()],
+                );
+                assert!(
+                    ratio >= WCAG_NON_TEXT,
+                    "{name}: accent_strong on {surface_name} is {ratio:.2}:1, below 3:1"
+                );
+            }
+        }
+    }
+
+    /// `accent_strong` is actually a mix TOWARD `ink`, not `accent` itself
+    /// relabelled — a "stronger accent" that happened to equal the
+    /// ordinary one would make acceptance 2's visual distinction a no-op.
+    #[test]
+    fn accent_strong_differs_from_accent_and_sits_toward_ink() {
+        use crate::accessibility::relative_luminance;
+        for tokens in [Tokens::light(), Tokens::dark(), Tokens::high_contrast()] {
+            assert_ne!(
+                tokens.accent, tokens.accent_strong,
+                "accent_strong must be visually distinct from accent"
+            );
+            let l_accent =
+                relative_luminance([tokens.accent.r(), tokens.accent.g(), tokens.accent.b()]);
+            let l_ink = relative_luminance([tokens.ink.r(), tokens.ink.g(), tokens.ink.b()]);
+            let l_strong = relative_luminance([
+                tokens.accent_strong.r(),
+                tokens.accent_strong.g(),
+                tokens.accent_strong.b(),
+            ]);
+            let (lo, hi) = if l_accent <= l_ink {
+                (l_accent, l_ink)
+            } else {
+                (l_ink, l_accent)
+            };
+            assert!(
+                l_strong >= lo - f32::EPSILON && l_strong <= hi + f32::EPSILON,
+                "accent_strong luminance {l_strong} not between accent {l_accent} and ink {l_ink}"
+            );
         }
     }
 

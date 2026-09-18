@@ -577,6 +577,15 @@ pub struct RetroForgeApp {
     /// reason `pad_router` is: the model is what the frontend reads, and
     /// with no backend it simply never sees an event.
     ui_nav: crate::ui_nav::GamepadNav,
+    /// Ticket W15-08 (`docs/design/UX_WAVE_15.md` §9): the most-recently-
+    /// active input device, updated in `poll_input` from real hardware
+    /// signals only (never from the pad's own synthesized `egui::Event`s
+    /// — `Self::track_input_device`'s doc explains why that distinction
+    /// matters). Consulted by `apply_theme` (larger type while a gamepad
+    /// drives) and by `library_cards`/`library_rows` (the pad focus
+    /// ring). Live state, never persisted: `AppSettings` has no field for
+    /// it, by design.
+    last_active_input: crate::ui_nav::InputDevice,
     /// When the last `poll_input` ran, so `GamepadNav::tick` gets a real
     /// delta rather than an assumed frame time. Auto-repeat measured in
     /// frames would speed up on a fast display and crawl on a slow one —
@@ -1074,6 +1083,7 @@ impl RetroForgeApp {
             config_root,
             pad_router: rf_input::PadRouter::new(),
             ui_nav: crate::ui_nav::GamepadNav::new(),
+            last_active_input: crate::ui_nav::InputDevice::default(),
             last_nav_tick: None,
             #[cfg(feature = "gamepad")]
             pad_backend: pad_backend_or_none(),
@@ -1151,6 +1161,20 @@ impl RetroForgeApp {
     /// the core thread (module doc). A no-op if no core is loaded — there
     /// is nothing to publish to.
     fn poll_input(&mut self, ctx: &egui::Context) {
+        // Ticket W15-08: capture real keyboard/pointer activity BEFORE
+        // anything below (the gamepad block's `push_nav_events`) adds
+        // this frame's pad-synthesized `egui::Event::Key`s to the same
+        // queue — `Self::track_input_device`'s doc explains why the
+        // ordering is load-bearing.
+        let (keyboard_active, mouse_active) = ctx.input(|i| {
+            let keyboard = i
+                .events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
+            let mouse = i.pointer.is_moving() || i.pointer.any_click() || i.pointer.any_pressed();
+            (keyboard, mouse)
+        });
+
         // Ticket W2-06: poll every key a binding could name, not W1-07's
         // fixed eight — a user who binds Start to `Q` must have `Q` reach
         // the keymap, and before this the translation dropped it first.
@@ -1196,6 +1220,13 @@ impl RetroForgeApp {
         // others. So the events are taken once here and fanned out:
         // `PadRouter::apply` for the ports (what `poll` does internally),
         // and `GamepadNav` for the UI.
+        //
+        // `mut` even in a build without the `gamepad` feature: the block
+        // that would set it true is compiled out entirely there, and the
+        // variable still has to exist for the `InputDevice::resolve` call
+        // below to compile in that configuration too.
+        #[allow(unused_mut)]
+        let mut pad_active_this_frame = false;
         #[cfg(feature = "gamepad")]
         if let Some(backend) = self.pad_backend.as_mut() {
             // Fully-qualified: `PadBackend` is not imported in this file,
@@ -1204,6 +1235,7 @@ impl RetroForgeApp {
             // "gamepad")]`, so a DEFAULT `cargo build` never type-checks
             // it — verify with `--features gamepad`.
             let events = rf_input::PadBackend::poll(backend);
+            pad_active_this_frame = !events.is_empty();
             self.pad_router.apply(&events);
             let actions = self.ui_nav.on_events(&events);
             // Ticket W15-03: `Start` (`NavAction::Menu`) opens the library's
@@ -1219,6 +1251,19 @@ impl RetroForgeApp {
             }
             self.push_nav_events(ctx, &actions);
         }
+
+        // Ticket W15-08: fold this frame's three signals into the
+        // most-recently-active device. Deliberately AFTER the gamepad
+        // block (so `pad_active_this_frame` is known) but built from
+        // `keyboard_active`/`mouse_active` captured at the very top of
+        // this function (before `push_nav_events` added anything) — see
+        // that capture's own comment.
+        self.last_active_input = crate::ui_nav::InputDevice::resolve(
+            self.last_active_input,
+            keyboard_active,
+            mouse_active,
+            pad_active_this_frame,
+        );
 
         // Auto-repeat is wall-clock, not per-frame — see `last_nav_tick`.
         let now = std::time::Instant::now();
@@ -3524,32 +3569,64 @@ impl RetroForgeApp {
             // labels you read, and rendering them at body size gave
             // them the same claim on the eye as the transport buttons.
             use egui::{FontFamily, FontId, TextStyle};
-            style.text_styles = [
+            // Ticket W15-08 acceptance 3: a larger type scale while a
+            // gamepad is the most-recently-active device — a couch/TV
+            // distance the mouse-tuned sizes above were never chosen for.
+            // Cards and rows reflow automatically: neither names an
+            // explicit `FontId` for its title (`library_rows`'/
+            // `library_cards`' `Label`s use whatever `TextStyle::Body`
+            // resolves to), so changing the style here is the whole fix —
+            // there is no second size to update at either call site.
+            let pad_active = self.last_active_input == crate::ui_nav::InputDevice::Gamepad;
+            style.text_styles = if pad_active {
+                [
+                    (
+                        TextStyle::Heading,
+                        FontId::new(21.0, FontFamily::Name("display".into())),
+                    ),
+                    (TextStyle::Body, FontId::new(16.0, FontFamily::Proportional)),
+                    (
+                        TextStyle::Button,
+                        FontId::new(16.0, FontFamily::Proportional),
+                    ),
+                    (
+                        TextStyle::Small,
+                        FontId::new(13.0, FontFamily::Proportional),
+                    ),
+                    (
+                        TextStyle::Monospace,
+                        FontId::new(14.0, FontFamily::Monospace),
+                    ),
+                ]
+                .into()
+            } else {
                 // Ticket W15-07: the display face (IBM Plex Sans SemiBold,
                 // `theme::install_fonts`) for headings — the one text
                 // style §8's "headings and badges" names explicitly. Body/
                 // Button/Small stay `Proportional`, which `install_fonts`
                 // itself points at the body face, so nothing else needs a
                 // family override.
-                (
-                    TextStyle::Heading,
-                    FontId::new(17.0, FontFamily::Name("display".into())),
-                ),
-                (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
-                (
-                    TextStyle::Button,
-                    FontId::new(13.0, FontFamily::Proportional),
-                ),
-                (
-                    TextStyle::Small,
-                    FontId::new(11.0, FontFamily::Proportional),
-                ),
-                (
-                    TextStyle::Monospace,
-                    FontId::new(11.5, FontFamily::Monospace),
-                ),
-            ]
-            .into();
+                [
+                    (
+                        TextStyle::Heading,
+                        FontId::new(17.0, FontFamily::Name("display".into())),
+                    ),
+                    (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
+                    (
+                        TextStyle::Button,
+                        FontId::new(13.0, FontFamily::Proportional),
+                    ),
+                    (
+                        TextStyle::Small,
+                        FontId::new(11.0, FontFamily::Proportional),
+                    ),
+                    (
+                        TextStyle::Monospace,
+                        FontId::new(11.5, FontFamily::Monospace),
+                    ),
+                ]
+                .into()
+            };
             // **Scrollbars you can see without hovering.** egui's default
             // is `ScrollStyle::floating` — a thin bar that fades in only
             // when the pointer is over the area — and the effect is that
@@ -5268,6 +5345,27 @@ impl RetroForgeApp {
                 };
                 self.library_selected = Some(matches[next].path.clone());
                 moved_by_keyboard = true;
+
+                // Ticket W15-08 acceptance 5: an ArrowUp/Down/Left/Right
+                // key ALSO arms egui's own built-in spatial focus
+                // navigation (`Memory::Focus::begin_pass` reads the very
+                // same key from `RawInput` and records a cardinal
+                // `FocusDirection`, independent of anything this
+                // function does with it) — and, unless cancelled,
+                // `Focus::end_pass` uses it to redirect keyboard focus to
+                // whatever OTHER focusable widget sits spatially in that
+                // direction from wherever focus was BEFORE this key
+                // (typically the star/Play button beside the card this
+                // very key just selected). That redirect would run AFTER
+                // `library_cards`/`library_rows` calls `request_focus()`
+                // on the entry this key selected, silently overriding it
+                // and breaking the exact equivalence acceptance 5 asks
+                // for. Cancelling the direction here — before either
+                // renders — means egui's own spatial search never runs,
+                // and `request_focus()` is the only thing left deciding
+                // where focus goes.
+                ui.ctx()
+                    .memory_mut(|m| m.move_focus(egui::FocusDirection::None));
             }
         }
 
@@ -5312,15 +5410,35 @@ impl RetroForgeApp {
         // Ticket W15-07: `tokens.accent` is exactly what the old
         // `Palette::accent` conversion here produced — same colour, now
         // read through the token set every other W15 surface uses.
+        // Ticket W15-08: `library_rows` now takes the whole token set
+        // (not a bare `accent` `Color32`) so it can pick the pad ring's
+        // stroke via `Self::focus_ring_stroke`, same as `library_cards`
+        // already does.
         let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
-        let accent = tokens.accent;
 
         if grid_mode {
             self.library_cards(ui, &matches, &tokens, moved_by_keyboard, &mut to_play);
         } else {
-            self.library_rows(ui, &matches, accent, moved_by_keyboard, &mut to_play);
+            self.library_rows(ui, &matches, &tokens, moved_by_keyboard, &mut to_play);
         }
         to_play
+    }
+
+    /// Ticket W15-08 (`docs/design/UX_WAVE_15.md` §9): the stroke the
+    /// library's selection ring draws with — thicker and in a stronger
+    /// accent when the pad was the most-recently-active device, exactly
+    /// acceptance 2's "the selection ring on the focused card/row is
+    /// thicker... and uses a stronger accent". Shared by `library_rows`
+    /// and `library_cards` so neither can silently drift from the other's
+    /// idea of what the pad ring looks like — the same reasoning
+    /// `library_grid_columns` already gives for being one function both
+    /// layouts call.
+    fn focus_ring_stroke(&self, tokens: &crate::theme::Tokens) -> egui::Stroke {
+        if self.last_active_input == crate::ui_nav::InputDevice::Gamepad {
+            egui::Stroke::new(crate::theme::FOCUS_RING_PAD, tokens.accent_strong)
+        } else {
+            egui::Stroke::new(crate::theme::FOCUS_RING_MOUSE, tokens.accent)
+        }
     }
 
     /// How many cards fit per row at `available_width` — shared by
@@ -5346,7 +5464,7 @@ impl RetroForgeApp {
         &mut self,
         ui: &mut egui::Ui,
         matches: &[&crate::library::LibraryEntry],
-        accent: egui::Color32,
+        tokens: &crate::theme::Tokens,
         moved_by_keyboard: bool,
         to_play: &mut Option<std::path::PathBuf>,
     ) {
@@ -5468,6 +5586,16 @@ impl RetroForgeApp {
                         // Acceptance 2: a single click SELECTS ONLY — it
                         // must not also set `to_play`.
                         self.library_selected = Some(entry.path.clone());
+                        // Ticket W15-08 acceptance 5: a mouse-driven
+                        // selection change also becomes egui's real
+                        // keyboard focus, same as the keyboard/pad path
+                        // below — so AccessKit (which reports THAT focus,
+                        // not `library_selected`) never disagrees with
+                        // what is actually selected, regardless of which
+                        // device did the selecting.
+                        if let Some(title_response) = &title_response {
+                            title_response.request_focus();
+                        }
                     }
 
                     // Ticket W15-03: the context menu. Mouse right-click is
@@ -5511,21 +5639,29 @@ impl RetroForgeApp {
                         // what Enter/Activate will launch.
                         //
                         // WCAG 2.2 non-text contrast (SC 1.4.11): the ring
-                        // is `accent`, and `accessibility.rs` already
-                        // proves that colour clears AAA (>=7:1, so also
-                        // the 3:1 floor this criterion asks for) against
-                        // both `background` and `raised` in both the
-                        // default and high-contrast palettes.
+                        // is `accent` (or, on a pad, `accent_strong`), and
+                        // `theme::tests`/`accessibility::tests` already
+                        // prove both clear the 3:1 floor against both
+                        // `background` and `raised` in every palette.
                         ui.painter().rect_stroke(
                             row.response.rect,
                             2.0,
-                            egui::Stroke::new(2.0, accent),
+                            self.focus_ring_stroke(tokens),
                             egui::StrokeKind::Inside,
                         );
                         if moved_by_keyboard {
                             // Scroll only on a keyboard/pad move — a mouse
                             // click already means the row is visible.
                             row.response.scroll_to_me(Some(egui::Align::Center));
+                            // Ticket W15-08 acceptance 5: mirror the
+                            // keyboard/pad move into egui's own focus, the
+                            // same call the mouse-click branch above makes
+                            // — so `ctx.memory(|m| m.focused())` equals
+                            // this row's id regardless of which device
+                            // moved the selection here.
+                            if let Some(title_response) = &title_response {
+                                title_response.request_focus();
+                            }
                         }
                     }
                 }
@@ -5732,6 +5868,13 @@ impl RetroForgeApp {
                             *to_play = Some(entry.path.clone());
                         } else if card_clicked {
                             self.library_selected = Some(entry.path.clone());
+                            // Ticket W15-08 acceptance 5: see the matching
+                            // comment in `library_rows` — the click
+                            // becomes egui's real focus too, so AccessKit
+                            // never disagrees with `library_selected`.
+                            if let Some(card_response) = &card_response {
+                                card_response.request_focus();
+                            }
                         }
 
                         if let Some(card_response) = &card_response {
@@ -5785,11 +5928,18 @@ impl RetroForgeApp {
                             ui.painter().rect_stroke(
                                 card.response.rect,
                                 tokens.radius_sm,
-                                egui::Stroke::new(2.0, accent),
+                                self.focus_ring_stroke(tokens),
                                 egui::StrokeKind::Inside,
                             );
                             if moved_by_keyboard {
                                 card.response.scroll_to_me(Some(egui::Align::Center));
+                                // Ticket W15-08 acceptance 5: mirror a
+                                // keyboard/pad selection move into egui's
+                                // real focus — same reasoning as
+                                // `library_rows`'s matching branch.
+                                if let Some(card_response) = &card_response {
+                                    card_response.request_focus();
+                                }
                             }
                         }
                     }
@@ -7627,6 +7777,54 @@ impl RetroForgeApp {
     ) {
         self.library_selected = Some(path);
         self.library_context_menu_open = true;
+    }
+
+    /// Ticket W15-08: the two things `poll_input`'s real gamepad branch
+    /// does that a hand-synthesized `egui::Event` alone cannot reproduce
+    /// — mark the pad as the most-recently-active device, and (matching
+    /// `Start`'s real handling) latch `pad_menu_requested` when `actions`
+    /// contains `Menu`. A test has no `GilrsBackend` to poll (the
+    /// `gamepad` feature needs real hardware), so it pushes the actions'
+    /// own `egui::Event`s into the harness's `RawInput` itself — exactly
+    /// as `tests/gamepad_nav.rs` already does via `GamepadNav::events_for`
+    /// — and calls this alongside for the two effects that live on `self`
+    /// rather than in an `egui::Event`.
+    ///
+    /// Call this AFTER the frame that actually processes a direction's
+    /// `egui::Event` (the one `library_grid`'s own `key_pressed` check
+    /// reads), not before: `poll_input`'s own device tracker runs every
+    /// frame and, in a test build with no real `PadEvent` source, would
+    /// otherwise see that same injected key as ordinary keyboard input
+    /// and reclassify the device right back — see `tests/
+    /// library_controller.rs`'s `press_pad` helper for the exact
+    /// two-frame sequencing this implies.
+    #[doc(hidden)]
+    pub fn mark_pad_active_for_test(&mut self, actions: &[crate::ui_nav::NavAction]) {
+        self.last_active_input = crate::ui_nav::InputDevice::Gamepad;
+        if actions.contains(&crate::ui_nav::NavAction::Menu) {
+            self.pad_menu_requested = true;
+        }
+    }
+
+    /// Ticket W15-08: which device the app currently believes is driving
+    /// the UI — the same field `apply_theme`'s type scale and the
+    /// library's focus ring read.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn last_active_input_for_test(&self) -> crate::ui_nav::InputDevice {
+        self.last_active_input
+    }
+
+    /// Ticket W15-08: the width the library's selection ring is CURRENTLY
+    /// drawing at, reading the exact same `Self::focus_ring_stroke` the
+    /// real drawing code calls — so a test can assert "thick ring" without
+    /// duplicating the mouse-vs-pad decision and risking it drifting from
+    /// what actually renders.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn library_focus_ring_width_for_test(&self) -> f32 {
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        self.focus_ring_stroke(&tokens).width
     }
 
     /// How many times the library has been scanned this session.

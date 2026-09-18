@@ -128,6 +128,53 @@ impl NavAction {
     }
 }
 
+/// Which input device most recently produced UI activity (ticket W15-08,
+/// `docs/design/UX_WAVE_15.md` §9). `app.rs` consults this in two places:
+/// `apply_theme`'s larger type scale, and the thicker, stronger-accent
+/// focus ring `library_cards`/`library_rows` draw on the selected item.
+///
+/// Live state only — never persisted (`plan.json` W15-08 acceptance 3
+/// says so explicitly): this is "what is the player's hand on right
+/// now", not a preference, so there is nothing here for a settings file
+/// to remember across launches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputDevice {
+    #[default]
+    Mouse,
+    Keyboard,
+    Gamepad,
+}
+
+impl InputDevice {
+    /// Resolve one frame's active device from three independent
+    /// booleans: did the keyboard, the pointer, or a pad produce
+    /// activity this frame.
+    ///
+    /// **Precedence when more than one fires the same frame: Gamepad >
+    /// Keyboard > Mouse.** The pointer is the noisiest of the three
+    /// signals (any pixel of movement counts) so it must never be able to
+    /// mask a real key or pad press that landed the same frame; a pad
+    /// button pressed while a hand still rests on the mouse is a
+    /// deliberate device switch, not a coincidence to average away.
+    ///
+    /// When none of the three fired, `previous` stands — this is a
+    /// *tracker*, not a per-frame snapshot that decays to some default
+    /// the instant nothing happens. A quiet frame between two key
+    /// presses must not flicker the type scale back down and up again.
+    #[must_use]
+    pub fn resolve(previous: Self, keyboard: bool, mouse: bool, gamepad: bool) -> Self {
+        if gamepad {
+            Self::Gamepad
+        } else if keyboard {
+            Self::Keyboard
+        } else if mouse {
+            Self::Mouse
+        } else {
+            previous
+        }
+    }
+}
+
 /// Tracks held directions and produces repeat events.
 #[derive(Debug, Default)]
 pub struct GamepadNav {
@@ -408,5 +455,65 @@ mod tests {
         assert!(!nav.active);
         nav.on_events(&[down(PadButton::DpadUp)]);
         assert!(nav.active);
+    }
+
+    /// The device tracker defaults to Mouse — a fresh app has never seen
+    /// input from anything, and Mouse is the least surprising rest state
+    /// (the ordinary type scale, the thin ring).
+    #[test]
+    fn input_device_defaults_to_mouse() {
+        assert_eq!(InputDevice::default(), InputDevice::Mouse);
+    }
+
+    /// Each signal alone moves the tracker to its own device.
+    #[test]
+    fn each_signal_alone_selects_its_own_device() {
+        assert_eq!(
+            InputDevice::resolve(InputDevice::Mouse, true, false, false),
+            InputDevice::Keyboard
+        );
+        assert_eq!(
+            InputDevice::resolve(InputDevice::Keyboard, false, true, false),
+            InputDevice::Mouse
+        );
+        assert_eq!(
+            InputDevice::resolve(InputDevice::Mouse, false, false, true),
+            InputDevice::Gamepad
+        );
+    }
+
+    /// **Gamepad beats keyboard and mouse when more than one fires the
+    /// same frame** — a deliberate device switch must never be masked by
+    /// ambient pointer movement or a stray key.
+    #[test]
+    fn gamepad_wins_when_everything_fires_at_once() {
+        assert_eq!(
+            InputDevice::resolve(InputDevice::Mouse, true, true, true),
+            InputDevice::Gamepad
+        );
+    }
+
+    /// Keyboard beats mouse when both fire without a pad.
+    #[test]
+    fn keyboard_wins_over_mouse() {
+        assert_eq!(
+            InputDevice::resolve(InputDevice::Mouse, true, true, false),
+            InputDevice::Keyboard
+        );
+    }
+
+    /// **A quiet frame keeps the previous device** — the tracker must not
+    /// decay to some default the instant nothing happens, or the type
+    /// scale/ring would flicker between every pair of key presses.
+    #[test]
+    fn no_activity_keeps_the_previous_device() {
+        assert_eq!(
+            InputDevice::resolve(InputDevice::Gamepad, false, false, false),
+            InputDevice::Gamepad
+        );
+        assert_eq!(
+            InputDevice::resolve(InputDevice::Keyboard, false, false, false),
+            InputDevice::Keyboard
+        );
     }
 }
