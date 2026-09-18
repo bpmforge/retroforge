@@ -184,7 +184,10 @@ fn fastrom_from_the_header_changes_the_access_cost() {
 /// W14-19 (D-010): it is the one coprocessor nibble this build now runs,
 /// via the HLE in [`crate::dsp1`] — see
 /// `dsp_carts_load_with_the_hle_installed_instead_of_being_refused`
-/// below for its positive coverage.
+/// below for its positive coverage. SA-1 ($34/$35) is likewise absent as
+/// of ticket W17-01 (D-013) — moved to
+/// `sa1_carts_load_with_the_board_wired_up` below, since (under map mode
+/// $23) it now loads instead of refusing.
 #[test]
 fn every_named_coprocessor_family_is_refused_and_named() {
     for (chipset, expect) in [
@@ -192,8 +195,6 @@ fn every_named_coprocessor_family_is_refused_and_named() {
         (0x15, "Super FX"),
         (0x1A, "Super FX"),
         (0x25, "OBC1"),
-        (0x34, "SA-1"),
-        (0x35, "SA-1"),
         (0x43, "S-DD1"),
         (0x55, "S-RTC"),
         (0xE3, "Super Game Boy"),
@@ -264,6 +265,83 @@ fn the_dsp_window_reaches_the_chip_through_the_bus() {
     system.bus.write(0x30_8000, 0x0F); // memory test -> one zero word
     assert_eq!(system.bus.peek(0x30_8000), 0x00);
     assert_eq!(system.bus.peek(0x30_8000), 0x00);
+}
+
+/// Ticket W17-01 (D-013): chipset $34/$35 under map mode $23 now loads
+/// with the SA-1 board wired up instead of the FR-CORE-013 refusal.
+/// Everything else that carried "SA-1" in the diagnostic before this
+/// ticket used a DIFFERENT map mode (plain LoROM/HiROM), which still
+/// refuses — see the note on `every_named_coprocessor_family_is_refused_and_named`.
+#[test]
+fn sa1_carts_load_with_the_board_wired_up() {
+    for chipset in [0x34u8, 0x35] {
+        let system = SnesSystem::load(&lorom_image(0x23, chipset))
+            .unwrap_or_else(|e| panic!("chipset ${chipset:02X} (SA-1) must load, got {e:?}"));
+        assert!(
+            system.bus.sa1.is_some(),
+            "chipset ${chipset:02X}: SA-1 board must be installed"
+        );
+        assert_eq!(system.bus.mode, SnesMapMode::Sa1);
+    }
+    // A plain LoROM cart never gets one.
+    let plain = SnesSystem::load(&lorom_image(0x20, 0x00)).expect("loads");
+    assert!(plain.bus.sa1.is_none());
+}
+
+/// Ticket W17-01 acceptance #3: "the SNES-side CPU can boot an SA-1 cart
+/// to its reset vector and run" — with the SA-1 CPU itself absent (W17-02
+/// adds it), which is the "uniform" bucket the ticket's census criterion
+/// names.
+#[test]
+fn sa1_cart_resets_and_steps_through_its_own_rom() {
+    let mut rom = lorom_image(0x23, 0x34);
+    // LDA #$42 at the reset target, bank $00 (an SA-1 cart's default
+    // vectors and header always sit in LoROM bank $00, fullsnes "SNES
+    // Cart SA-1").
+    rom[0x0000] = 0xA9;
+    rom[0x0001] = 0x42;
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("SA-1 cart loads");
+    system.step().expect("implemented");
+    assert_eq!(system.cpu.a & 0xFF, 0x42);
+}
+
+/// Ticket W17-01 acceptance #2: the SNES-side memory map — ROM bank
+/// registers, BW-RAM window, I-RAM, and the register window round-trip.
+#[test]
+fn sa1_memory_map_reaches_iram_bwram_and_registers_through_the_bus() {
+    let rom = lorom_image(0x23, 0x35); // +battery, so ram_size (8 KiB) is BW-RAM
+    let mut system = SnesSystem::load(&rom).expect("SA-1 cart loads");
+
+    // I-RAM at $3000-$37FF, banks $00-$3F/$80-$BF.
+    system.bus.write(0x00_3000, 0xAB);
+    assert_eq!(system.bus.read(0x00_3000), 0xAB);
+    assert_eq!(
+        system.bus.read(0x80_3000),
+        0xAB,
+        "I-RAM mirrors across banks"
+    );
+
+    // BW-RAM window at $6000-$7FFF, block 0 by default ($2224 resets to 0).
+    system.bus.write(0x00_6000, 0xCD);
+    assert_eq!(system.bus.read(0x00_6000), 0xCD);
+    // The same byte is visible through the full BW-RAM window at $40:0000.
+    assert_eq!(system.bus.read(0x40_0000), 0xCD);
+
+    // The register window: a write to $2220 (CXB) is stored and later
+    // affects the ROM mapping (acceptance #2's "writes ... stored").
+    system.bus.write(0x00_2220, 0x81); // bank 1, LoROM-mapped
+    let mapped = system.bus.read(0x00_8000);
+    assert_eq!(
+        mapped,
+        system.bus.rom[0x10_0000 % system.bus.rom.len()],
+        "CXB=$81 must bank-select 1 MiB block 1 into $00:8000"
+    );
+
+    // The read-only block answers its documented reset value (no SA-1 CPU
+    // yet to move it) rather than open bus.
+    assert_eq!(system.bus.read(0x00_2300), 0x00);
 }
 
 /// A non-DSP cartridge's mapping at the same addresses is unchanged: the

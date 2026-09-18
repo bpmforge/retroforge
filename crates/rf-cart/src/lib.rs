@@ -17,7 +17,7 @@ pub mod snes;
 pub use error::CartError;
 pub use hash::{RomHashes, RomIdentity};
 pub use nes::{Mirroring, NesFormat, NesHeader};
-pub use snes::{Coprocessor, DspWindow, SnesHeader, SnesMapMode};
+pub use snes::{Coprocessor, DspWindow, Sa1Board, SnesHeader, SnesMapMode, SA1_IRAM_LEN};
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-cart";

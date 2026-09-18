@@ -51,9 +51,20 @@ impl SnesSystem {
             raw.to_vec()
         };
 
+        // An SA-1 cart's `ram_size` is BW-RAM, which `install_sa1` below
+        // gives its own buffer (`Sa1State::bwram`) sized from the same
+        // header field — the bus's generic `sram` is unreachable for such
+        // a cart (`SnesBus::target` routes through `sa1_target` first,
+        // and `map`'s own `SnesMapMode::Sa1` arm never returns `Sram`), so
+        // it is left empty rather than duplicating the allocation.
+        let sram_len = if matches!(header.coprocessor, rf_cart::Coprocessor::Sa1(_)) {
+            0
+        } else {
+            header.ram_size
+        };
         let mut system = Self {
             cpu: Cpu::new(),
-            bus: SnesBus::new(rom, header.ram_size, header.map_mode),
+            bus: SnesBus::new(rom, sram_len, header.map_mode),
             master_cycles: 0,
             pending_nmi: false,
         };
@@ -67,6 +78,16 @@ impl SnesSystem {
         if let (rf_cart::Coprocessor::Dsp1, Some(window)) = (header.coprocessor, header.dsp_window)
         {
             system.bus.install_dsp1(window);
+        }
+        // SA-1 slice 1 (ticket W17-01; D-013): `rf-cart` already parsed
+        // the board's sizes from the header; this wires them into a live
+        // I-RAM/BW-RAM/register-window state. The SA-1 CPU itself does
+        // not exist yet (W17-02) — the SNES CPU runs the cart's SNES-side
+        // code alone, which is what makes the census's SA-1 titles move
+        // from refused to "uniform" rather than to "renders": nothing
+        // drives the second CPU that owns the interesting work yet.
+        if let rf_cart::Coprocessor::Sa1(board) = header.coprocessor {
+            system.bus.install_sa1(board);
         }
         system.reset();
         Ok(system)

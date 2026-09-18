@@ -1,8 +1,11 @@
 //! Address-mapping tests (FR-CORE-035).
 
-use rf_cart::SnesMapMode::{HiRom, LoRom};
+use rf_cart::{
+    Sa1Board,
+    SnesMapMode::{HiRom, LoRom},
+};
 
-use crate::mapping::{map, Target, WRAM_LEN};
+use crate::mapping::{map, sa1_target, Sa1RomBanks, Target, WRAM_LEN};
 
 const ROM_32K: usize = 32 * 1024;
 const ROM_1M: usize = 1024 * 1024;
@@ -162,12 +165,132 @@ fn every_address_maps_within_bounds() {
                     Target::Rom(i) => assert!(i < ROM_32K, "{addr_bank:02X}:{off:04X}"),
                     Target::Wram(i) => assert!(i < WRAM_LEN, "{addr_bank:02X}:{off:04X}"),
                     Target::Sram(i) => assert!(i < 8192, "{addr_bank:02X}:{off:04X}"),
-                    // `map` itself never returns these (ticket W14-19):
-                    // only `dsp1_target`, checked separately by `bus.rs`
-                    // before `map` runs, does.
-                    Target::Register(_) | Target::Dsp1Dr | Target::Dsp1Sr | Target::Open => {}
+                    // `map` itself never returns these (tickets W14-19,
+                    // W17-01): only `dsp1_target`/`sa1_target`, checked
+                    // separately by `bus.rs` before `map` runs, do.
+                    Target::Register(_)
+                    | Target::Dsp1Dr
+                    | Target::Dsp1Sr
+                    | Target::Sa1IRam(_)
+                    | Target::Sa1BwRam(_)
+                    | Target::Sa1Register(_)
+                    | Target::Open => {}
                 }
             }
         }
+    }
+}
+
+/// Ticket W17-01: `sa1_target` (fullsnes "SNES Cart SA-1", memory-map +
+/// "Memory Control" sections).
+mod sa1 {
+    use super::*;
+
+    fn regs(rom_len: usize, bwram_len: usize) -> Sa1RomBanks {
+        Sa1RomBanks {
+            cxb: 0x00,
+            dxb: 0x01,
+            exb: 0x02,
+            fxb: 0x03,
+            bmaps: 0,
+            board: Sa1Board {
+                rom_len,
+                bwram_len,
+                iram_len: 2048,
+            },
+        }
+    }
+
+    #[test]
+    fn register_window_is_2200_to_23ff() {
+        let r = regs(ROM_1M, 8192);
+        assert_eq!(
+            sa1_target(&r, 0x00, 0x2200),
+            Some(Target::Sa1Register(0x2200))
+        );
+        assert_eq!(
+            sa1_target(&r, 0x80, 0x23FF),
+            Some(Target::Sa1Register(0x23FF))
+        );
+        assert_eq!(sa1_target(&r, 0x00, 0x21FF), None, "PPU/APU regs, not SA-1");
+    }
+
+    #[test]
+    fn iram_is_3000_to_37ff_direct() {
+        let r = regs(ROM_1M, 8192);
+        assert_eq!(sa1_target(&r, 0x00, 0x3000), Some(Target::Sa1IRam(0)));
+        assert_eq!(sa1_target(&r, 0x3F, 0x37FF), Some(Target::Sa1IRam(0x7FF)));
+        assert_eq!(sa1_target(&r, 0x00, 0x3800), None, "past I-RAM's 2 KiB");
+    }
+
+    #[test]
+    fn bwram_window_is_6000_to_7fff_selected_by_bmaps() {
+        let mut r = regs(ROM_1M, 256 * 1024);
+        r.bmaps = 2; // block 2 -> byte offset 0x4000
+        assert_eq!(sa1_target(&r, 0x00, 0x6000), Some(Target::Sa1BwRam(0x4000)));
+        assert_eq!(sa1_target(&r, 0x00, 0x7FFF), Some(Target::Sa1BwRam(0x5FFF)));
+        // With no BW-RAM at all, the window is not claimed here (falls
+        // through to open bus via `map`).
+        let none = regs(ROM_1M, 0);
+        assert_eq!(sa1_target(&none, 0x00, 0x6000), None);
+    }
+
+    #[test]
+    fn full_bwram_is_40_to_4f_and_mirrors_every_4_banks() {
+        let r = regs(ROM_1M, 256 * 1024);
+        assert_eq!(sa1_target(&r, 0x40, 0x0000), Some(Target::Sa1BwRam(0)));
+        assert_eq!(
+            sa1_target(&r, 0x43, 0xFFFF),
+            Some(Target::Sa1BwRam(256 * 1024 - 1))
+        );
+        // $44 mirrors $40.
+        assert_eq!(
+            sa1_target(&r, 0x44, 0x1234),
+            sa1_target(&r, 0x40, 0x1234),
+            "fullsnes: BW-RAM mirrors in 44h-4Fh"
+        );
+    }
+
+    #[test]
+    fn hirom_style_c0_to_ff_uses_the_same_four_registers() {
+        let r = regs(8 * 1024 * 1024, 0);
+        // CXB=0 selects 1 MiB bank 0 at $C0-$CF.
+        assert_eq!(sa1_target(&r, 0xC0, 0x0000), Some(Target::Rom(0)));
+        assert_eq!(sa1_target(&r, 0xC1, 0x0000), Some(Target::Rom(0x1_0000)));
+        // DXB=1 selects bank 1 (1 MiB in) at $D0-$DF.
+        assert_eq!(sa1_target(&r, 0xD0, 0x0000), Some(Target::Rom(0x10_0000)));
+        // FXB=3 selects bank 3 (3 MiB in) at $F0-$FF.
+        assert_eq!(sa1_target(&r, 0xF0, 0x0000), Some(Target::Rom(0x30_0000)));
+    }
+
+    #[test]
+    fn lorom_style_direct_mode_splits_first_and_second_2mib() {
+        // bit7=0 on every register: direct mode everywhere.
+        let mut r = regs(4 * 1024 * 1024, 0);
+        r.cxb = 0x00;
+        r.dxb = 0x00;
+        r.exb = 0x00;
+        r.fxb = 0x00;
+        assert_eq!(sa1_target(&r, 0x00, 0x8000), Some(Target::Rom(0)));
+        assert_eq!(sa1_target(&r, 0x3F, 0x8000), Some(Target::Rom(0x1F_8000)));
+        // Second 2 MiB starts at bank $80.
+        assert_eq!(sa1_target(&r, 0x80, 0x8000), Some(Target::Rom(0x20_0000)));
+        assert_eq!(sa1_target(&r, 0xBF, 0x8000), Some(Target::Rom(0x3F_8000)));
+    }
+
+    #[test]
+    fn lorom_style_banked_mode_shows_the_selected_1mib_bank() {
+        // bit7=1: CXB selects 1 MiB bank 5 for the $00-$1F quarter.
+        let mut r = regs(8 * 1024 * 1024, 0);
+        r.cxb = 0x80 | 0x05;
+        assert_eq!(sa1_target(&r, 0x00, 0x8000), Some(Target::Rom(0x50_0000)));
+        assert_eq!(sa1_target(&r, 0x1F, 0x8000), Some(Target::Rom(0x5F_8000)));
+    }
+
+    #[test]
+    fn non_sa1_addresses_are_untouched_when_bwram_and_rom_are_absent() {
+        let r = regs(0, 0);
+        assert_eq!(sa1_target(&r, 0x00, 0x8000), None);
+        assert_eq!(sa1_target(&r, 0xC0, 0x0000), None);
     }
 }

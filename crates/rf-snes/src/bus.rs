@@ -176,6 +176,11 @@ pub struct SnesBus {
     /// The DSP-1 HLE (`None` for every cartridge that does not report
     /// [`rf_cart::Coprocessor::Dsp1`]) — see [`Self::install_dsp1`].
     pub dsp1: Option<crate::dsp1::Dsp1>,
+    /// The SA-1 board state (`None` for every cartridge that does not
+    /// report [`rf_cart::Coprocessor::Sa1`]) — see [`Self::install_sa1`].
+    /// Ticket W17-01 (D-013): the SA-1 CPU itself does not exist yet, only
+    /// the SNES-side memory map and register storage.
+    pub sa1: Option<crate::sa1::Sa1State>,
 }
 
 impl SnesBus {
@@ -279,6 +284,7 @@ impl SnesBus {
             pending_dma: 0,
             dsp_window: None,
             dsp1: None,
+            sa1: None,
         }
     }
 
@@ -291,9 +297,28 @@ impl SnesBus {
         self.dsp1 = Some(crate::dsp1::Dsp1::new());
     }
 
+    /// Wire up the cartridge's SA-1 board (D-013, ticket W17-01). Called
+    /// by [`crate::system::SnesSystem::load`] when the header reports
+    /// [`rf_cart::Coprocessor::Sa1`]; every other cartridge's `sa1` stays
+    /// `None`, so `target` never routes through the SA-1 arm for it and
+    /// every existing golden's mapping is unchanged.
+    pub fn install_sa1(&mut self, board: rf_cart::Sa1Board) {
+        self.sa1 = Some(crate::sa1::Sa1State::new(board));
+    }
+
     fn target(&self, addr: u32) -> Target {
         let bank = ((addr >> 16) & 0xFF) as u8;
         let offset = addr as u16;
+        // Checked BEFORE the generic map, same reasoning as the DSP-1
+        // window below: an SA-1 cart's I-RAM, BW-RAM and register windows
+        // sit inside bank/offset space `map` would otherwise resolve as
+        // ROM, SRAM, WRAM mirror or a plain register (see `sa1_target`'s
+        // doc). `sa1` is `None` for every non-SA-1 cartridge.
+        if let Some(sa1) = &self.sa1 {
+            if let Some(target) = crate::mapping::sa1_target(&sa1.banks(), bank, offset) {
+                return target;
+            }
+        }
         // Checked BEFORE the generic map: a DSP-1 window's `dr`/`sr`
         // ranges sit inside bank/offset space `map` would otherwise
         // resolve as ROM, SRAM or WRAM mirror (see `dsp1_target`'s doc).
@@ -858,6 +883,16 @@ impl CpuBus for SnesBus {
                     .map_or(self.open_bus, crate::dsp1::Dsp1::read_dr)
             }
             Target::Dsp1Sr => self.dsp1.as_ref().map_or(self.open_bus, |d| d.read_sr()),
+            // Ticket W17-01: `sa1`/`sa1_target` are `Some`/return these
+            // variants together, the same "one owner decides" pairing
+            // `dsp1`/`dsp_window` have above.
+            Target::Sa1IRam(i) => self.sa1.as_ref().map_or(self.open_bus, |s| s.iram[i]),
+            Target::Sa1BwRam(i) => self.sa1.as_ref().map_or(self.open_bus, |s| s.bwram[i]),
+            Target::Sa1Register(offset) => self
+                .sa1
+                .as_ref()
+                .and_then(|s| s.regs.read(offset))
+                .unwrap_or(self.open_bus),
             Target::Open => self.open_bus,
         };
         self.open_bus = value;
@@ -898,6 +933,28 @@ impl CpuBus for SnesBus {
                 }
             }
             Target::Dsp1Sr => {}
+            // Ticket W17-01: writes into I-RAM/BW-RAM land in the board's
+            // own buffers; register writes land in `Sa1Regs` (all of
+            // $2200-$22FF is "(W)" per fullsnes's I/O map, so a write to
+            // the read-only block, $2300-$23FF, is dropped rather than
+            // stored — real hardware has nowhere to put it either).
+            Target::Sa1IRam(i) => {
+                if let Some(s) = self.sa1.as_mut() {
+                    s.iram[i] = value;
+                }
+            }
+            Target::Sa1BwRam(i) => {
+                if let Some(s) = self.sa1.as_mut() {
+                    s.bwram[i] = value;
+                }
+            }
+            Target::Sa1Register(offset) => {
+                if offset < 0x2300 {
+                    if let Some(s) = self.sa1.as_mut() {
+                        s.regs.write(offset, value);
+                    }
+                }
+            }
             // ROM is read-only; a write is dropped rather than panicking,
             // because real cartridges ignore it and a game doing it by
             // accident must not take the emulator down (FR-CORE-013's
@@ -923,6 +980,16 @@ impl CpuBus for SnesBus {
                 .as_ref()
                 .map_or(self.open_bus, crate::dsp1::Dsp1::peek_dr),
             Target::Dsp1Sr => self.dsp1.as_ref().map_or(self.open_bus, |d| d.read_sr()),
+            // Non-perturbing by construction: I-RAM/BW-RAM reads are
+            // plain memory, and `Sa1Regs::read` has no side effect either
+            // way (ticket W17-01).
+            Target::Sa1IRam(i) => self.sa1.as_ref().map_or(self.open_bus, |s| s.iram[i]),
+            Target::Sa1BwRam(i) => self.sa1.as_ref().map_or(self.open_bus, |s| s.bwram[i]),
+            Target::Sa1Register(offset) => self
+                .sa1
+                .as_ref()
+                .and_then(|s| s.regs.read(offset))
+                .unwrap_or(self.open_bus),
             Target::Open => self.open_bus,
         }
     }
