@@ -4029,6 +4029,7 @@ dependencies = [
  "rf-cart",
  "rf-core-api",
  "sha2 0.11.0",
+ "zip",
 ]
 
 [[package]]
