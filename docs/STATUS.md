@@ -3713,3 +3713,19 @@ stories, 10 decisions).
   consulted. The overlay menu shows each action's binding, so the keys
   are learned by seeing them. Gate: workspace **2031 passing / 0 failed
   / 39 ignored**, clippy clean, arch OK.
+
+- **W16-02 — Upscale Studio, first slice** (2026-09-18, lane A). The
+  offline AI path from D-012 is wired end to end: captured tiles are
+  grouped into animation sheets, each sheet goes through the upscaler
+  once, an edge mask keeps transparent pixels transparent and an
+  optional re-quantisation blends only between a tile's own colours,
+  and the result is written as a Mesen-compatible pack with the model's
+  name and licence in its manifest. A studio window shows original and
+  upscaled tiles side by side with approve, reject and replace, runs on
+  a background thread, and re-imports the written pack through the
+  app's own loader to prove it. The fetch script offers two Real-ESRGAN
+  ONNX exports, BSD-3 upstream, fetched into the cache with their
+  hashes. The gap is stated plainly: both exports are static-shape and
+  the upscaler does not tile, so a real model run fails with a toast
+  instead of a pack; W16-12 adds tiled inference. Gate: workspace
+  **2054 passing / 0 failed / 40 ignored**, clippy clean, arch OK.
