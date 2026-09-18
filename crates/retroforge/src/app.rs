@@ -209,6 +209,31 @@ enum SettingsTab {
     Accessibility,
 }
 
+/// Ticket W15-03: which game the one Game Settings window is editing when
+/// it is not the game currently running (`RetroForgeApp::game_settings_target`
+/// is `None` for that case). Carries a working copy of the settings loaded
+/// when the context menu's "Game settings" item was clicked; every change
+/// is saved back through `game_settings::save` immediately, the same
+/// no-Apply-button rule as every other setting in this app.
+struct GameSettingsTarget {
+    hash: String,
+    title: String,
+    settings: crate::game_settings::GameSettings,
+}
+
+/// Ticket W15-03: the "Hash info" context-menu item's popup content — the
+/// normalized hash family `rf-cart` computes for one library entry, plus
+/// the profile that claims it, if any.
+struct HashInfoPopup {
+    title: String,
+    /// `None` when the file no longer parses as a cartridge this build
+    /// recognizes (e.g. it changed on disk since the scan).
+    hashes: Option<rf_cart::RomHashes>,
+    profile: Option<std::path::PathBuf>,
+    /// Set instead of `hashes` when the file could not even be read.
+    error: Option<String>,
+}
+
 /// Open the gamepad backend, or carry on without one (ticket W2-06).
 /// A missing or unopenable gamepad subsystem is not an error: the keyboard
 /// still works, and refusing to start over it would be absurd.
@@ -478,6 +503,38 @@ pub struct RetroForgeApp {
     settings: crate::settings::AppSettings,
     /// Whether the Esc overlay menu is showing (FRONTEND_UI §2).
     show_overlay_menu: bool,
+    /// Ticket W15-03 (`UX_WAVE_15.md` §5, §11): whether the one Game
+    /// Settings window is open. Opened identically from the context menu,
+    /// the Enhance menu, and the overlay menu — the SAME instance, which is
+    /// what `game_settings_target` (below) exists to make true even though
+    /// those three routes can name three different games.
+    show_game_settings: bool,
+    /// `None` means "the game currently running" — the window then reads
+    /// and writes `current_game_hash`/`current_game_settings` directly,
+    /// exactly as the Enhance menu's Mode/De-flicker/Heuristics controls
+    /// did before this ticket moved them into this window. `Some` names a
+    /// library row picked from its context menu, which the window instead
+    /// loads and saves through its own settings file — deliberately never
+    /// touching `current_game_settings`, so picking "Game settings…" on one
+    /// game from the library can never clobber another game's (or the
+    /// running game's) settings.
+    game_settings_target: Option<GameSettingsTarget>,
+    /// Ticket W15-03: a gamepad `Start` press this frame, latched here by
+    /// `poll_input` and consumed by `library_grid` on the very same frame
+    /// — `NavAction::Menu` deliberately produces no `egui::Event`
+    /// (`ui_nav.rs`'s own doc), since it is a shell decision rather than
+    /// focus movement, so this flag is that decision's wire.
+    pad_menu_requested: bool,
+    /// Ticket W15-03: whether the pad-opened context menu (as opposed to
+    /// the mouse's right-click one) is showing for the currently selected
+    /// library row. A plain bool rather than `library_selected` itself,
+    /// because the row a `Start` press opened a menu for must stay open
+    /// even if a later frame moves keyboard/pad focus elsewhere before the
+    /// player dismisses it.
+    library_context_menu_open: bool,
+    /// Ticket W15-03: the small "Hash info" popup content, or `None` when
+    /// closed.
+    hash_info: Option<HashInfoPopup>,
     /// Configured library roots, as the user chose them (resolved at scan
     /// time, never stored canonicalized — see `crate::library_roots`).
     library_roots: Vec<crate::library::LibraryRoot>,
@@ -803,6 +860,11 @@ impl RetroForgeApp {
             settings_tab: SettingsTab::Video,
             settings: app_settings,
             show_overlay_menu: false,
+            show_game_settings: false,
+            game_settings_target: None,
+            pad_menu_requested: false,
+            library_context_menu_open: false,
+            hash_info: None,
             library_roots: library_roots.clone(),
             library: None,
             library_scan: None,
@@ -899,6 +961,17 @@ impl RetroForgeApp {
             let events = rf_input::PadBackend::poll(backend);
             self.pad_router.apply(&events);
             let actions = self.ui_nav.on_events(&events);
+            // Ticket W15-03: `Start` (`NavAction::Menu`) opens the library's
+            // context menu on the focused row — chosen over a South
+            // long-press because W15-08 (`plan.json`, "Controller-first
+            // library") already commits to Start for exactly this, and
+            // `Start` produces no `egui::Event` of its own
+            // (`ui_nav.rs`'s doc), so it was otherwise dead on arrival in
+            // this shell. `library_grid` consumes and clears the flag the
+            // same frame.
+            if actions.contains(&crate::ui_nav::NavAction::Menu) {
+                self.pad_menu_requested = true;
+            }
             self.push_nav_events(ctx, &actions);
         }
 
@@ -2985,115 +3058,81 @@ impl RetroForgeApp {
                     });
 
                     ui.menu_button("Enhance", |ui| {
-                        // Ticket W4-05 (FR-MODE-001): ARCHITECTURE §4's five
-                        // modes as presets. Persisted per game immediately,
-                        // same no-Apply-button stance as every other setting.
-                        //
-                        // `from_id_salt`, not `from_label`: `ComboBox::
-                        // from_label` renders its label to the RIGHT of the
-                        // control, so the old bottom bar read
-                        // "[Accuracy v] Mode" — backwards — and nobody
-                        // noticed because it sat next to a badge saying the
-                        // same word.
-                        let mut mode = self.current_game_settings.mode;
-                        ui.horizontal(|ui| {
-                            ui.label("Mode");
-                            egui::ComboBox::from_id_salt("mode_preset")
-                                .selected_text(mode.display_name())
-                                .show_ui(ui, |ui| {
-                                    for option in crate::game_settings::Mode::all() {
-                                        ui.selectable_value(
-                                            &mut mode,
-                                            option,
-                                            option.display_name(),
-                                        );
-                                    }
-                                });
-                        });
-                        if mode != self.current_game_settings.mode {
-                            self.current_game_settings.mode = mode;
-                            self.save_current_game_settings();
+                        // Ticket W15-03 (`UX_WAVE_15.md` §5, §11): Mode, the
+                        // De-flicker checkbox and the Heuristics submenu all
+                        // moved OUT of this menu and into the one Game
+                        // Settings window — reachable identically from
+                        // here, from the library's per-game context menu,
+                        // and from the overlay menu, rather than being one
+                        // of three different control surfaces for the same
+                        // three settings. `_ = has_core` is not needed: the
+                        // window itself checks `self.core.is_some()` for
+                        // the De-flicker checkbox's enabled state, the same
+                        // guard this menu used to apply here.
+                        if ui.button("Game settings\u{2026}").clicked() {
+                            self.game_settings_target = None;
+                            self.show_game_settings = true;
+                            ui.close();
                         }
                         ui.separator();
                         if ui.button("Enhance\u{2026}").clicked() {
                             self.show_enhance = !self.show_enhance;
                             ui.close();
                         }
-                        // Ticket W3-05a, FR-ENH-001: opt-in only, off by
-                        // default (law 6) — checking this does not touch the
-                        // accuracy simulation, only whether the dropped-
-                        // sprite overlay gets composited on top of it
-                        // (`Ppu`'s "Sprite-limit-bypass overlay" section).
-                        if ui
-                            .add_enabled(
-                                has_core,
-                                egui::Checkbox::new(&mut self.sprite_overlay, "De-flicker overlay"),
-                            )
-                            .changed()
-                        {
-                            self.send_command(CoreCommand::SetSpriteOverlay(self.sprite_overlay));
-                            // Ticket W2-07: persist immediately, keyed by
-                            // hash. No Apply button anywhere in this app's
-                            // settings — an unsaved change a crash discards
-                            // is the kind of small betrayal that makes people
-                            // stop trusting a settings screen.
-                            self.current_game_settings.sprite_overlay = self.sprite_overlay;
-                            self.save_current_game_settings();
-                        }
-                        ui.separator();
-                        self.heuristics_menu(ui);
                     });
                 });
             });
     }
 
-    /// Ticket W3-05c (FR-ENH-012): the per-game report card, surfaced
-    /// locally and only locally — NFR-005 forbids telemetry, and
-    /// `rf_enhance::trust` has no I/O of any kind, so there is nowhere
-    /// for this to leak to even by accident.
-    fn heuristics_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("Heuristics\u{2026}", |ui| {
-            ui.label("Trust ladder (D-004) — fresh install is all-shadow");
-            ui.separator();
-            let mut changed = false;
-            for heuristic in HEURISTICS {
-                let before = self.current_game_settings.trust.state(heuristic);
-                let mut state = before;
-                ui.horizontal(|ui| {
-                    ui.label(*heuristic);
-                    ui.radio_value(&mut state, TrustState::Shadow, "Shadow");
-                    ui.radio_value(&mut state, TrustState::Advisory, "Advisory");
-                    ui.radio_value(&mut state, TrustState::Active, "Active");
-                });
-                if state != before {
-                    self.current_game_settings.trust.set_state(heuristic, state);
-                    changed = true;
-                }
-                if let Some(s) = self.current_game_settings.trust.suppression(heuristic) {
-                    ui.label(format!(
-                        "    suppressed in {}: {}",
-                        s.granted_in_scene, s.justification
-                    ));
-                }
+    /// Ticket W3-05c (FR-ENH-012): the per-game heuristics report card,
+    /// surfaced locally and only locally — NFR-005 forbids telemetry, and
+    /// `rf_enhance::trust` has no I/O of any kind, so there is nowhere for
+    /// this to leak to even by accident.
+    ///
+    /// Ticket W15-03 moved this out of the Enhance menu's `Heuristics…`
+    /// submenu and into a section of the one Game Settings window — a free
+    /// function now, taking whichever `GameSettings` the window is
+    /// currently editing (the running game's, or a library entry's picked
+    /// from its context menu) rather than reaching for
+    /// `self.current_game_settings` itself, since it must work for both.
+    fn heuristics_panel(
+        ui: &mut egui::Ui,
+        settings: &mut crate::game_settings::GameSettings,
+    ) -> bool {
+        ui.label("Trust ladder (D-004) — fresh install is all-shadow");
+        ui.separator();
+        let mut changed = false;
+        for heuristic in HEURISTICS {
+            let before = settings.trust.state(heuristic);
+            let mut state = before;
+            ui.horizontal(|ui| {
+                ui.label(*heuristic);
+                ui.radio_value(&mut state, TrustState::Shadow, "Shadow");
+                ui.radio_value(&mut state, TrustState::Advisory, "Advisory");
+                ui.radio_value(&mut state, TrustState::Active, "Active");
+            });
+            if state != before {
+                settings.trust.set_state(heuristic, state);
+                changed = true;
             }
-            if changed {
-                // Persist immediately, same stance as every other
-                // per-game setting: a toggle that survives only until the
-                // next crash is the small betrayal that makes people stop
-                // trusting a settings screen.
-                self.save_current_game_settings();
+            if let Some(s) = settings.trust.suppression(heuristic) {
+                ui.label(format!(
+                    "    suppressed in {}: {}",
+                    s.granted_in_scene, s.justification
+                ));
             }
-            ui.separator();
-            let card = self.current_game_settings.trust.report_card();
-            if card.is_empty() {
-                ui.label("Report card: no contradictions recorded this session");
-            } else {
-                ui.label(format!("Report card ({} contradiction(s)):", card.len()));
-                for c in card {
-                    ui.label(format!("  [{}] {} — {}", c.scene, c.heuristic, c.detail));
-                }
+        }
+        ui.separator();
+        let card = settings.trust.report_card();
+        if card.is_empty() {
+            ui.label("Report card: no contradictions recorded this session");
+        } else {
+            ui.label(format!("Report card ({} contradiction(s)):", card.len()));
+            for c in card {
+                ui.label(format!("  [{}] {} — {}", c.scene, c.heuristic, c.detail));
             }
-        });
+        }
+        changed
     }
 
     // `compare_menu` is gone (ticket W10-02). Compare is a TAB of the
@@ -3762,6 +3801,158 @@ impl RetroForgeApp {
         }
     }
 
+    /// Ticket W15-03 (`UX_WAVE_15.md` §5, §11): the one Game Settings
+    /// window — Mode, De-flicker, Heuristics — opened identically from the
+    /// context menu, the Enhance menu, and the overlay menu.
+    ///
+    /// `game_settings_target` decides which game's settings this frame
+    /// edits: `None` reads/writes `current_game_hash`/
+    /// `current_game_settings` directly (the running game — the same
+    /// fields the Enhance menu's controls wrote before this ticket moved
+    /// them here); `Some` reads/writes a library entry's OWN settings file,
+    /// independent of whatever is currently running. Both branches share
+    /// [`Self::heuristics_panel`] for the trust-ladder section, so there is
+    /// exactly one place that renders it.
+    fn game_settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_game_settings {
+            return;
+        }
+        let mut open = true;
+        let title = match &self.game_settings_target {
+            Some(target) => format!("Game settings \u{2014} {}", target.title),
+            None => "Game settings".to_string(),
+        };
+        egui::Window::new(title)
+            .id(egui::Id::new("game_settings_window"))
+            .collapsible(true)
+            .resizable(true)
+            .default_width(420.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                // Ticket W15-03: the Heuristics report card
+                // (`heuristics_panel`) can grow without bound over a
+                // session (`tests/surfaces_can_scroll.rs`'s own rule: a
+                // surface earns a place in `BOUNDED` only when its content
+                // CANNOT exceed its container, and a growing report card
+                // fails that outright).
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if let Some(target) = &mut self.game_settings_target {
+                            let mut mode_changed = false;
+                            ui.horizontal(|ui| {
+                                ui.label("Mode");
+                                egui::ComboBox::from_id_salt("game_settings_mode")
+                                    .selected_text(target.settings.mode.display_name())
+                                    .show_ui(ui, |ui| {
+                                        for option in crate::game_settings::Mode::all() {
+                                            if ui
+                                                .selectable_value(
+                                                    &mut target.settings.mode,
+                                                    option,
+                                                    option.display_name(),
+                                                )
+                                                .changed()
+                                            {
+                                                mode_changed = true;
+                                            }
+                                        }
+                                    });
+                            });
+                            ui.separator();
+                            // Ticket W15-03: this checkbox binds to `sprite_overlay`
+                            // — the SAME field the Enhance menu's "De-flicker
+                            // overlay" checkbox always wrote, per that setting's own
+                            // doc (`GameSettings::sprite_overlay`, "the W3-05a
+                            // sprite-limit-bypass overlay"). There is no live core
+                            // to send `SetSpriteOverlay` to here: this branch edits
+                            // a library entry that may not even be running.
+                            let deflicker_changed = ui
+                                .checkbox(&mut target.settings.sprite_overlay, "De-flicker overlay")
+                                .changed();
+                            ui.separator();
+                            let heuristics_changed =
+                                Self::heuristics_panel(ui, &mut target.settings);
+
+                            if mode_changed || deflicker_changed || heuristics_changed {
+                                if let Some(root) = self.config_root.clone() {
+                                    if let Err(e) = crate::game_settings::save(
+                                        &root,
+                                        &target.hash,
+                                        &target.settings,
+                                    ) {
+                                        self.status = format!("Could not save game settings: {e}");
+                                    } else {
+                                        self.library_meta.insert(
+                                            target.hash.clone(),
+                                            crate::library::RecencyMeta {
+                                                last_played_epoch_secs: target
+                                                    .settings
+                                                    .last_played_epoch_secs,
+                                                play_count: target.settings.play_count,
+                                                favourite: target.settings.favourite,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            let mut mode = self.current_game_settings.mode;
+                            ui.horizontal(|ui| {
+                                ui.label("Mode");
+                                egui::ComboBox::from_id_salt("game_settings_mode")
+                                    .selected_text(mode.display_name())
+                                    .show_ui(ui, |ui| {
+                                        for option in crate::game_settings::Mode::all() {
+                                            ui.selectable_value(
+                                                &mut mode,
+                                                option,
+                                                option.display_name(),
+                                            );
+                                        }
+                                    });
+                            });
+                            let mut changed = false;
+                            if mode != self.current_game_settings.mode {
+                                self.current_game_settings.mode = mode;
+                                changed = true;
+                            }
+                            ui.separator();
+                            let has_core = self.core.is_some();
+                            if ui
+                                .add_enabled(
+                                    has_core,
+                                    egui::Checkbox::new(
+                                        &mut self.sprite_overlay,
+                                        "De-flicker overlay",
+                                    ),
+                                )
+                                .changed()
+                            {
+                                self.send_command(CoreCommand::SetSpriteOverlay(
+                                    self.sprite_overlay,
+                                ));
+                                self.current_game_settings.sprite_overlay = self.sprite_overlay;
+                                changed = true;
+                            }
+                            ui.separator();
+                            if Self::heuristics_panel(ui, &mut self.current_game_settings) {
+                                changed = true;
+                            }
+                            if changed {
+                                // No Apply button anywhere in this app's settings —
+                                // see `save_current_game_settings`'s own doc.
+                                self.save_current_game_settings();
+                            }
+                        }
+                    });
+            });
+        self.show_game_settings = open;
+        if !open {
+            self.game_settings_target = None;
+        }
+    }
+
     /// The Esc overlay menu (ticket W2-08; FRONTEND_UI §2: "resume · states
     /// · settings · switch mode · quit").
     ///
@@ -3817,9 +4008,16 @@ impl RetroForgeApp {
                 // dead control advertising a ticket that had already
                 // closed, which is worse than an absent one: it tells the
                 // user the feature does not exist.
-                if ui.button("Mode\u{2026}").clicked() {
+                //
+                // Ticket W15-03: "Mode…" becomes "Game settings…" and opens
+                // the one Game Settings window (Mode, De-flicker,
+                // Heuristics) for the running game — `None` names the
+                // running game, same as the Enhance menu's identically
+                // named command.
+                if ui.button("Game settings\u{2026}").clicked() {
                     self.show_overlay_menu = false;
-                    self.show_enhance = true;
+                    self.game_settings_target = None;
+                    self.show_game_settings = true;
                 }
                 ui.separator();
                 if ui.button("Quit").clicked() {
@@ -4164,6 +4362,16 @@ impl RetroForgeApp {
             }
         }
 
+        // Ticket W15-03: `Start` opens the context menu for the currently
+        // selected row — consumed (and cleared) exactly once per press so
+        // holding the button does not reopen the menu every frame it stays
+        // down. Stands down while the search box has focus, same reasoning
+        // as Enter/Space above.
+        let pad_menu_requested = !search_has_focus && std::mem::take(&mut self.pad_menu_requested);
+        if pad_menu_requested && self.library_selected.is_some() {
+            self.library_context_menu_open = true;
+        }
+
         let accent = {
             let c = self.settings.accessibility.normalized().palette().accent;
             egui::Color32::from_rgb(c[0], c[1], c[2])
@@ -4196,6 +4404,11 @@ impl RetroForgeApp {
                         self.library_selected.as_deref() == Some(entry.path.as_path());
                     let mut row_clicked = false;
                     let mut row_double_clicked = false;
+                    // Ticket W15-03: hoisted out of the `ui.horizontal`
+                    // closure below so the context menu (mouse right-click
+                    // AND the pad's Start path) can be attached to it after
+                    // the row finishes drawing.
+                    let mut title_response: Option<egui::Response> = None;
                     let row = egui::Frame::NONE
                         .fill(fill)
                         .inner_margin(egui::Margin::symmetric(6, 3))
@@ -4216,11 +4429,12 @@ impl RetroForgeApp {
                                 // button never overlap, so sensing the
                                 // title directly can never take a click
                                 // the button was supposed to get.
-                                let title_response = ui.add(
+                                let response = ui.add(
                                     egui::Label::new(&entry.title).sense(egui::Sense::click()),
                                 );
-                                row_double_clicked = title_response.double_clicked();
-                                row_clicked = title_response.clicked();
+                                row_double_clicked = response.double_clicked();
+                                row_clicked = response.clicked();
+                                title_response = Some(response);
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
@@ -4290,6 +4504,38 @@ impl RetroForgeApp {
                         self.library_selected = Some(entry.path.clone());
                     }
 
+                    // Ticket W15-03: the context menu. Mouse right-click is
+                    // handled by `Response::context_menu` itself (it reads
+                    // `secondary_clicked()` internally, so nothing here
+                    // needs to test for the button); the pad path is a
+                    // second, explicitly-opened `Popup` on the SAME
+                    // response, sharing the SAME `library_context_menu_body`
+                    // so "the same menu" is a fact about which method
+                    // renders the items, not a claim two call sites happen
+                    // to agree on today.
+                    if let Some(title_response) = &title_response {
+                        title_response.context_menu(|ui| {
+                            self.library_context_menu_body(ui, entry, &mut to_play);
+                        });
+                        if is_selected && self.library_context_menu_open {
+                            // `open_bool`'s `&mut bool` must not alias
+                            // `self` while `.show`'s closure below also
+                            // borrows `self` — a local copy, written back
+                            // after, sidesteps that without any unsafe
+                            // code.
+                            let mut open = true;
+                            let popup = egui::Popup::from_response(title_response)
+                                .id(title_response.id.with("pad_context_menu"))
+                                .open_bool(&mut open);
+                            if popup.is_open() {
+                                popup.show(|ui| {
+                                    self.library_context_menu_body(ui, entry, &mut to_play);
+                                });
+                            }
+                            self.library_context_menu_open = open;
+                        }
+                    }
+
                     if is_selected {
                         // The ring is drawn around the whole row (`row`,
                         // the frame's own response) even though only the
@@ -4319,6 +4565,201 @@ impl RetroForgeApp {
                 }
             });
         to_play
+    }
+
+    /// Ticket W15-03 (`UX_WAVE_15.md` §3): the per-row context menu's
+    /// contents, shared verbatim by the mouse (`Response::context_menu`,
+    /// right-click) and pad (`Start` on the focused row) call sites in
+    /// `library_grid`.
+    fn library_context_menu_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        entry: &crate::library::LibraryEntry,
+        to_play: &mut Option<std::path::PathBuf>,
+    ) {
+        if ui.button("Play").clicked() {
+            *to_play = Some(entry.path.clone());
+            ui.close();
+        }
+        ui.menu_button("Play in mode", |ui| {
+            for option in crate::game_settings::Mode::all() {
+                if ui.button(option.display_name()).clicked() {
+                    // Only a Recognized entry has a hash to persist the
+                    // mode against — an unrecognized ROM still launches,
+                    // it just cannot remember which mode it launched in.
+                    if let crate::library::EntryIdentity::Recognized {
+                        normalized_sha256, ..
+                    } = &entry.identity
+                    {
+                        if let Some(root) = self.config_root.clone() {
+                            let mut settings = crate::game_settings::load(&root, normalized_sha256);
+                            settings.mode = option;
+                            match crate::game_settings::save(&root, normalized_sha256, &settings) {
+                                Ok(_) => {
+                                    self.library_meta.insert(
+                                        normalized_sha256.clone(),
+                                        crate::library::RecencyMeta {
+                                            last_played_epoch_secs: settings.last_played_epoch_secs,
+                                            play_count: settings.play_count,
+                                            favourite: settings.favourite,
+                                        },
+                                    );
+                                }
+                                Err(e) => {
+                                    self.status = format!("Could not save game settings: {e}");
+                                }
+                            }
+                        }
+                    }
+                    *to_play = Some(entry.path.clone());
+                    ui.close();
+                }
+            }
+        });
+        match &entry.identity {
+            crate::library::EntryIdentity::Recognized {
+                normalized_sha256, ..
+            } => {
+                let favourite = self
+                    .library_meta
+                    .get(normalized_sha256)
+                    .is_some_and(|m| m.favourite);
+                if ui
+                    .button(if favourite {
+                        "Unfavourite"
+                    } else {
+                        "Favourite"
+                    })
+                    .clicked()
+                {
+                    self.toggle_favourite(normalized_sha256);
+                    ui.close();
+                }
+                if ui.button("Game settings").clicked() {
+                    let settings = self
+                        .config_root
+                        .clone()
+                        .map(|root| crate::game_settings::load(&root, normalized_sha256))
+                        .unwrap_or_default();
+                    self.game_settings_target = Some(GameSettingsTarget {
+                        hash: normalized_sha256.clone(),
+                        title: entry.title.clone(),
+                        settings,
+                    });
+                    self.show_game_settings = true;
+                    ui.close();
+                }
+            }
+            crate::library::EntryIdentity::Unrecognized { .. } => {
+                // Neither control has a hash to key by — disabled rather
+                // than absent, so the menu shape stays the same for every
+                // row and the reason is a tooltip away.
+                ui.add_enabled(false, egui::Button::new("Favourite"))
+                    .on_disabled_hover_text("Unrecognized ROM: no hash to key a favourite by");
+                ui.add_enabled(false, egui::Button::new("Game settings"))
+                    .on_disabled_hover_text("Unrecognized ROM: no hash to key settings by");
+            }
+        }
+        if ui.button(Self::reveal_menu_label()).clicked() {
+            crate::reveal::reveal_in_file_manager(&entry.path);
+            ui.close();
+        }
+        if ui.button("Hash info").clicked() {
+            self.open_hash_info(entry);
+            ui.close();
+        }
+    }
+
+    /// Platform-appropriate label for the "reveal in file manager" item
+    /// (`UX_WAVE_15.md` §3's "Show in Finder/Explorer").
+    const fn reveal_menu_label() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "Show in Finder"
+        } else if cfg!(target_os = "windows") {
+            "Show in Explorer"
+        } else {
+            "Show in file manager"
+        }
+    }
+
+    /// Ticket W15-03: compute the "Hash info" popup content for one library
+    /// entry. Re-reads and re-hashes the file rather than trusting
+    /// `entry.identity`'s single normalized sha256 — the popup's whole
+    /// point is to show the FULL family (crc32/md5/sha1/sha256) `rf-cart`
+    /// computes, which `LibraryEntry` does not carry (`library.rs`'s
+    /// `EntryIdentity::Recognized` keeps only the one hash profiles key on).
+    fn open_hash_info(&mut self, entry: &crate::library::LibraryEntry) {
+        let bytes = match rom_open::load_rom_bytes(&entry.path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.hash_info = Some(HashInfoPopup {
+                    title: entry.title.clone(),
+                    hashes: None,
+                    profile: None,
+                    error: Some(format!("Could not read ROM: {e}")),
+                });
+                return;
+            }
+        };
+        let (hashes, profile) = match rf_cart::Cartridge::load(&bytes) {
+            Ok(
+                rf_cart::Cartridge::Nes { identity, .. }
+                | rf_cart::Cartridge::Snes { identity, .. },
+            ) => {
+                let profile = crate::level_view::find_matching_profile(
+                    &Self::profiles_root(),
+                    &identity.normalized,
+                )
+                .map(|(_, path)| path);
+                (Some(identity.normalized), profile)
+            }
+            Err(_) => (None, None),
+        };
+        self.hash_info = Some(HashInfoPopup {
+            title: entry.title.clone(),
+            hashes,
+            profile,
+            error: None,
+        });
+    }
+
+    /// The "Hash info" popup window (ticket W15-03).
+    fn hash_info_window(&mut self, ctx: &egui::Context) {
+        let Some(info) = &self.hash_info else {
+            return;
+        };
+        let mut open = true;
+        egui::Window::new(format!("Hash info \u{2014} {}", info.title))
+            .id(egui::Id::new("hash_info_window"))
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                if let Some(e) = &info.error {
+                    ui.label(e);
+                } else if let Some(h) = &info.hashes {
+                    ui.monospace(format!("sha256: {}", h.sha256));
+                    ui.monospace(format!("sha1:   {}", h.sha1));
+                    ui.monospace(format!("md5:    {}", h.md5));
+                    ui.monospace(format!("crc32:  {}", h.crc32));
+                    ui.separator();
+                    match &info.profile {
+                        Some(p) => {
+                            ui.label(format!("Profile match: {}", p.display()));
+                        }
+                        None => {
+                            ui.label("Profile match: none");
+                        }
+                    }
+                } else {
+                    ui.label(
+                        "Not a recognized cartridge \u{2014} no normalized hash family available.",
+                    );
+                }
+            });
+        if !open {
+            self.hash_info = None;
+        }
     }
 
     /// Open a folder picker and add what it returns to the roots.
@@ -5190,6 +5631,47 @@ impl RetroForgeApp {
         self.close_rom();
     }
 
+    /// Whether the one Game Settings window (ticket W15-03) is open — the
+    /// accessor the test suite asserts through, since the context menu,
+    /// the Enhance menu, and the overlay menu all set the same
+    /// `show_game_settings` field, and a test proving "the same window
+    /// instance" needs to see that shared field directly rather than
+    /// inferring it from what is drawn on screen.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn show_game_settings_for_test(&self) -> bool {
+        self.show_game_settings
+    }
+
+    /// Close the Game Settings window and clear its target, without
+    /// clicking the window's own close button (ticket W15-03).
+    #[doc(hidden)]
+    pub fn close_game_settings_for_test(&mut self) {
+        self.show_game_settings = false;
+        self.game_settings_target = None;
+    }
+
+    /// Which game the Game Settings window is currently targeting:
+    /// `None` for "the running game", `Some(hash)` for a library entry
+    /// picked from its context menu (ticket W15-03).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn game_settings_target_hash_for_test(&self) -> Option<String> {
+        self.game_settings_target.as_ref().map(|t| t.hash.clone())
+    }
+
+    /// Open the context menu for `path`'s row directly, as if it had been
+    /// right-clicked (ticket W15-03) — used by tests that need the menu
+    /// open without first computing the row's on-screen rect.
+    #[doc(hidden)]
+    pub fn set_library_selected_and_open_context_menu_for_test(
+        &mut self,
+        path: std::path::PathBuf,
+    ) {
+        self.library_selected = Some(path);
+        self.library_context_menu_open = true;
+    }
+
     /// How many times the library has been scanned this session.
     ///
     /// Exists so a test can assert the round trip is FREE. "No rescan on
@@ -5723,6 +6205,8 @@ impl eframe::App for RetroForgeApp {
         self.enhance_window(&ctx);
         self.controls_window(&ctx);
         self.settings_window(&ctx);
+        self.game_settings_window(&ctx);
+        self.hash_info_window(&ctx);
         self.overlay_menu(&ctx);
         self.states_modal(&ctx);
         self.pump_authoring();

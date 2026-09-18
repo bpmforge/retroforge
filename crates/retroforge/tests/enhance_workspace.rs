@@ -86,10 +86,15 @@ fn compare_is_not_also_a_menu_entry() {
         "Compare is still reachable from the Enhance menu as well as from its §3.3 tab \u{2014} \
          two controls editing one piece of state. Tree: {labels:?}"
     );
-    // The Heuristics menu is untouched by W10-02 and proves this test is
-    // reading a populated menu rather than an empty one.
+    // "Game settings…" proves this test is reading a populated menu
+    // rather than an empty one. It used to be "Heuristics…", which W10-02
+    // could rely on being untouched — but ticket W15-03
+    // (`docs/design/UX_WAVE_15.md` §5) moved Heuristics (along with Mode
+    // and De-flicker) OUT of this menu and into the one Game Settings
+    // window, so a menu with no `Heuristics…` entry is now correct, not a
+    // sign of an empty menu.
     assert!(
-        labels.iter().any(|l| l.starts_with("Heuristics")),
+        labels.iter().any(|l| l.starts_with("Game settings")),
         "the Enhance menu looks empty, so the assertion above proves nothing. Tree: {labels:?}"
     );
     assert!(

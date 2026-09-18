@@ -55,6 +55,7 @@ pub mod mode_invariant;
 pub mod pacer;
 pub mod profile_editor;
 pub mod recording;
+pub mod reveal;
 pub mod rom_open;
 pub mod save_state;
 pub mod script_panel;

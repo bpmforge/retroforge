@@ -120,6 +120,12 @@ const BOUNDED: &[(&str, &str)] = &[
         "images drawn with shrink_to_fit; a scroll area would make available_size unbounded \
          and grow them without limit instead of fitting them",
     ),
+    (
+        "hash_info_window",
+        "exactly four hash lines (crc32/md5/sha1/sha256) plus one profile-match line, or one \
+         error line — a fixed shape ticket W15-03's rf_cart::RomHashes bundle guarantees, never \
+         a list that grows",
+    ),
 ];
 
 /// Extract `fn <name>(...) { .. }` bodies by brace matching.
