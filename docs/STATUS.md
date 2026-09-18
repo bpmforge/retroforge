@@ -3878,3 +3878,17 @@ stories, 10 decisions).
   Pilotwings is the check that decides whether the horizon lands where
   the game puts it. Gate: workspace **2171 passing / 0 failed / 43
   ignored**, clippy clean, arch OK.
+
+- **W17-01 — SA-1 slice 1: the cart and the SNES-side map** (2026-09-18,
+  Wave 17 under D-013). The loader now accepts the SA-1 board when the
+  chipset byte and map mode $23 agree, and the SNES side of the memory
+  map is in: the four ROM bank registers with their per-register direct
+  bit, BW-RAM in its own banks and through the $6000 window, I-RAM at
+  $3000, and the register window stored raw so the next slice finds
+  every byte, all cited to fullsnes's SA-1 chapter. Census: refused 138
+  to 130, rendered 1012 to 1015, uniform 115 to 120. The library has
+  eight real SA-1 carts, not eleven: the other three were junk-header
+  dumps that only looked like SA-1 and stay refused. All eight now boot
+  the SNES-side code and sit at a blank screen, which is the honest
+  state before the second CPU exists. Gate: workspace **2189 passing /
+  0 failed / 43 ignored**, clippy clean, arch OK.

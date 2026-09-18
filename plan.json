@@ -7078,8 +7078,9 @@
     "save-state coverage for the mapping registers with a round-trip test"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18. rf-cart: SnesMapMode::Sa1 + Coprocessor::Sa1(Sa1Board{rom_len,bwram_len,iram_len 2048}), accepted only when chipset $34/$35 AND map mode $23 agree. rf-snes: sa1.rs (Sa1Regs raw $2200-$22FF store with reset reads, Sa1State), mapping sa1_target (I-RAM $3000-$37FF, $6000 window via $2224, BW-RAM $40-$4F mirrored per 4 banks, ROM via $2220-$2223 with per-register bit-7 direct/banked -- fullsnes states the rule once; reduces to the literal 2 MiB + 2 MiB split), bus routing, StateRegion::Cart extended. Census: refused 138 -> 130, rendered 1012 -> 1015, uniform 115 -> 120; the library holds EIGHT real SA-1 carts (map $23 / chipset $35: Kirby Super Star, Kirby's Dream Land 3, PGA European Tour, PGA Tour 96 x2, Power Rangers Zeo, Super Mario RPG x2), all now load and exit BLANK (exit 10) as expected with no SA-1 CPU yet; the other three of the old '11' are junk-header dumps with chipset nibble 3 and non-$23 map modes (ActRaiser 2, Street Racer, Super Strike Eagle ...) that stay refused correctly. Gate: workspace 2189 passing / 0 failed / 43 ignored (orchestrator).",
     "FILED 2026-09-18 on Brad's 'go' (D-013). Sources: fullsnes 'SNES Cart SA-1' sections (I/O map, interrupt/control both sides, timer, memory control, DMA, character conversion, arithmetic, VBR) extracted for briefs; snes.nesdev.org SA-1 pages. Clean-room, no emulator source (NFR-011). Shape per D-013: a second cpu::Cpu over an Sa1Bus, not a second CPU implementation."
    ],
    "stories": []
