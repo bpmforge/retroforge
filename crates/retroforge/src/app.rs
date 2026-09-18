@@ -364,6 +364,41 @@ pub struct RetroForgeApp {
     /// that refuses to load must SAY so — a silently absent overlay is
     /// indistinguishable from one that drew nothing.
     script_status: Option<String>,
+    /// Ticket W15-04: a script load/manifest failure queued for the next
+    /// frame's toast. A separate field rather than reading
+    /// `script_status` directly at toast time, because `load_script`
+    /// (and its `#[doc(hidden)] load_script_for_test` twin, called by
+    /// `tests/script_reaches_the_app.rs` with no `egui::Context` in
+    /// scope) has no `Context` to push a toast with — this queues the
+    /// TEXT instead, and `impl eframe::App::ui` drains it into a toast
+    /// once a frame, when a `Context` is always available.
+    script_error_toast_pending: Option<String>,
+    /// Ticket W15-04: non-blocking toasts (`docs/design/UX_WAVE_15.md`
+    /// §5) — ROM folder added, library rescanned, state saved, script
+    /// error. Drawn once per frame from `impl eframe::App::ui`.
+    toasts: crate::toast::ToastStack,
+    /// Set by the toolbar's "Rescan" button so `poll_library_scan` knows
+    /// the scan it is about to adopt was USER-requested and should toast
+    /// with a count — the automatic first scan on boot
+    /// (`library_home`'s own `self.rescan_library()` when
+    /// `self.library.is_none()`) must not toast, since nobody asked for
+    /// it and a toast on every launch would just be noise.
+    library_rescan_toast_pending: bool,
+    /// Ticket W15-04: which occupied slot the user tried to Save over,
+    /// awaiting the overwrite-confirmation `egui::Modal`. `None` slots
+    /// (`state_slots::SlotInfo::saved.is_none()`) never populate this —
+    /// there is nothing to overwrite, so nothing to confirm.
+    pending_overwrite: Option<crate::state_slots::SlotId>,
+    /// Ticket W15-04: true while the quit-with-unsaved-state confirmation
+    /// is up. Set by `request_quit`, cleared by the modal's own Quit/
+    /// Cancel buttons or an outside click.
+    pending_quit: bool,
+    /// The core's frame number ([`Self::position`]'s first field) as of
+    /// the last successful save, so `request_quit` can tell "a state was
+    /// saved for this exact frame" from "the core has moved on since".
+    /// `None` before any save this session, which `request_quit` treats
+    /// as "unsaved" whenever the core has run at all.
+    last_save_frame: Option<u64>,
     /// Ticket W10-02: the Enhance workspace (FRONTEND_UI §3.3's
     /// [Compare][Features][Map]). Its own dock, with its own tab type in
     /// `crate::enhance_dock` — deliberately NOT `rf_debugger`'s
@@ -727,6 +762,12 @@ impl RetroForgeApp {
             script_host: None,
             script_overlay: Vec::new(),
             script_status: None,
+            script_error_toast_pending: None,
+            toasts: crate::toast::ToastStack::default(),
+            library_rescan_toast_pending: false,
+            pending_overwrite: None,
+            pending_quit: false,
+            last_save_frame: None,
             enhance: crate::enhance_dock::EnhanceWorkspace::new(),
             status_readouts: None,
             fps: None,
@@ -1632,7 +1673,17 @@ impl RetroForgeApp {
                                     }
                                 }
                                 if ui.button(format!("Save {}", info.id.label())).clicked() {
-                                    action = Some((info.id, true));
+                                    if info.saved.is_some() {
+                                        // Ticket W15-04: an occupied slot
+                                        // asks first — `overwrite_confirm_modal`
+                                        // does the actual save once
+                                        // confirmed. An empty slot has
+                                        // nothing to lose, so it saves
+                                        // immediately as it always did.
+                                        self.pending_overwrite = Some(info.id);
+                                    } else {
+                                        action = Some((info.id, true));
+                                    }
                                 }
                             });
                         }
@@ -1646,15 +1697,111 @@ impl RetroForgeApp {
             });
         if let Some((slot, is_save)) = action {
             if is_save {
-                self.save_to_slot(slot);
+                self.save_to_slot(slot, ctx);
             } else {
                 self.load_from_slot(slot);
             }
         }
         self.show_states = open;
+        self.overwrite_confirm_modal(ctx);
     }
 
-    fn save_to_slot(&mut self, slot: crate::state_slots::SlotId) {
+    /// Ticket W15-04: the overwrite-confirmation `egui::Modal` for a Save
+    /// click on a slot that already holds a state. `states_modal`
+    /// defers into `self.pending_overwrite` rather than saving directly
+    /// so a mis-click cannot silently discard a state — the whole point
+    /// of the acceptance criterion.
+    fn overwrite_confirm_modal(&mut self, ctx: &egui::Context) {
+        let Some(slot) = self.pending_overwrite else {
+            return;
+        };
+        let mut overwrite = false;
+        let mut cancel = false;
+        let modal = egui::Modal::new(egui::Id::new("rf_overwrite_modal")).show(ctx, |ui| {
+            ui.set_width(320.0);
+            ui.heading("Overwrite save?");
+            ui.label(format!(
+                "{} already holds a save. Saving now replaces it — this cannot be undone.",
+                slot.label()
+            ));
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Overwrite").clicked() {
+                    overwrite = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if overwrite {
+            self.save_to_slot(slot, ctx);
+            self.pending_overwrite = None;
+        } else if cancel || modal.should_close() {
+            self.pending_overwrite = None;
+        }
+    }
+
+    /// Ticket W15-04: the minimal quit-with-unsaved-state flow the ticket
+    /// asked for — "quitting with a running core whose last save-state is
+    /// older than the current frame asks once". Both Quit buttons (File
+    /// menu and the overlay menu) route through this instead of sending
+    /// `ViewportCommand::Close` directly.
+    fn request_quit(&mut self, ctx: &egui::Context) {
+        if self.has_unsaved_progress() {
+            self.pending_quit = true;
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// A core is running and has advanced past the frame its last save
+    /// (if any) was taken at. No core open, or no frame reported yet,
+    /// means nothing to lose — the empty-library home screen and a ROM
+    /// that has not rendered its first frame both quit without asking.
+    fn has_unsaved_progress(&self) -> bool {
+        let Some((frame, _)) = self.position else {
+            return false;
+        };
+        self.core.is_some() && frame > self.last_save_frame.unwrap_or(0)
+    }
+
+    /// The quit-confirmation `egui::Modal`, shown once `request_quit`
+    /// sets `pending_quit`. Cancel and an outside click both just close
+    /// the modal — "asks once" (the acceptance wording) means one modal
+    /// per quit attempt, not zero on a second try.
+    fn quit_confirm_modal(&mut self, ctx: &egui::Context) {
+        if !self.pending_quit {
+            return;
+        }
+        let mut quit = false;
+        let mut cancel = false;
+        let modal = egui::Modal::new(egui::Id::new("rf_quit_modal")).show(ctx, |ui| {
+            ui.set_width(320.0);
+            ui.heading("Quit with unsaved progress?");
+            ui.label(
+                "The running game has advanced since its last save state. Quitting now loses \
+                 that progress.",
+            );
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Quit").clicked() {
+                    quit = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if quit {
+            self.pending_quit = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if cancel || modal.should_close() {
+            self.pending_quit = false;
+        }
+    }
+
+    fn save_to_slot(&mut self, slot: crate::state_slots::SlotId, ctx: &egui::Context) {
         let Some(dir) = self.states_dir() else {
             self.status = "No ROM open".to_string();
             return;
@@ -1667,6 +1814,20 @@ impl RetroForgeApp {
         // The core thread writes the file; re-scan on the next open so
         // the listing reflects it rather than guessing it succeeded.
         self.state_warnings.clear();
+        // Ticket W15-04: the toast fires here, on the request, same as
+        // `self.status` above — there is no confirmation message back
+        // from the core thread to hang it off instead (the file write is
+        // fire-and-forget; the next modal open re-scans and shows the
+        // truth either way).
+        self.toasts.push(
+            crate::toast::ToastKind::Success,
+            format!("Saved {}", slot.label()),
+            ctx,
+        );
+        // Ticket W15-04's quit-confirmation reads this: a save just
+        // requested for the CURRENT frame means nothing has changed
+        // since, so quitting the instant after a Save must not ask.
+        self.last_save_frame = self.position.map(|(f, _)| f);
     }
 
     fn load_from_slot(&mut self, slot: crate::state_slots::SlotId) {
@@ -2672,7 +2833,8 @@ impl RetroForgeApp {
                         }
                         ui.separator();
                         if ui.button("Quit").clicked() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            let ctx = ui.ctx().clone();
+                            self.request_quit(&ctx);
                         }
                     });
 
@@ -3195,29 +3357,48 @@ impl RetroForgeApp {
             .on_hover_text(format!("{tip}\nbuffer fill: {:.0}%", fill * 100.0));
     }
 
+    /// Ticket W15-04: an `egui::Modal` (built into egui since 0.31,
+    /// verified against `egui-0.35.0/src/containers/modal.rs`) instead of
+    /// a plain `egui::Window` — `docs/design/UX_WAVE_15.md` §5's table.
+    /// A crash is the one dialog this app can put up uninvited, so it is
+    /// also the one where "the UI never blocks emulation" (FRONTEND_UI §1
+    /// principle 3) is moot: the core thread has already halted (FM-01)
+    /// by the time this shows, so blocking input to the rest of the shell
+    /// costs nothing that was still running.
     fn crash_dialog(&mut self, ctx: &egui::Context) {
         let Some(report) = self.crash.clone() else {
             return;
         };
-        egui::Window::new("Core crashed")
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label("The emulator core panicked and was contained (FM-01); the core thread has halted.");
-                ui.label(format!("Message: {}", report.message));
-                if let Some(loc) = &report.location {
-                    ui.label(format!("Location: {loc}"));
-                }
-                ui.separator();
-                ui.label("Trace tail:");
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+        let mut dismiss = false;
+        let modal = egui::Modal::new(egui::Id::new("rf_crash_modal")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.heading("Core crashed");
+            ui.label(
+                "The emulator core panicked and was contained (FM-01); the core thread has halted.",
+            );
+            ui.label(format!("Message: {}", report.message));
+            if let Some(loc) = &report.location {
+                ui.label(format!("Location: {loc}"));
+            }
+            ui.separator();
+            ui.label("Trace tail:");
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .show(ui, |ui| {
                     ui.monospace(&report.trace_tail);
                 });
-                ui.separator();
-                if ui.button("Dismiss").clicked() {
-                    self.crash = None;
-                }
-            });
+            ui.separator();
+            if ui.button("Dismiss").clicked() {
+                dismiss = true;
+            }
+        });
+        // "outside-click dismisses like its Dismiss button" (ticket
+        // W15-04 acceptance 1): `should_close` covers the backdrop click
+        // AND Escape, which is the modal's own idiomatic close gesture —
+        // both are the same "never mind" as pressing Dismiss.
+        if dismiss || modal.should_close() {
+            self.crash = None;
+        }
     }
 
     /// Ticket W3-03 acceptance criterion 2: shows the BG-only and
@@ -3601,7 +3782,7 @@ impl RetroForgeApp {
                 }
                 ui.separator();
                 if ui.button("Quit").clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    self.request_quit(ctx);
                 }
             });
         self.show_overlay_menu = open;
@@ -3661,7 +3842,7 @@ impl RetroForgeApp {
                     ).weak()));
                     ui.add_space(10.0);
                     if ui.button("Add a ROM folder\u{2026}").clicked() {
-                        rescan = self.pick_library_folder();
+                        rescan = self.pick_library_folder(ui.ctx());
                     }
                 });
             }
@@ -3677,7 +3858,7 @@ impl RetroForgeApp {
                     }
                     ui.add_space(10.0);
                     if ui.button("Add another folder\u{2026}").clicked() {
-                        rescan = self.pick_library_folder();
+                        rescan = self.pick_library_folder(ui.ctx());
                     }
                 });
             }
@@ -3755,10 +3936,15 @@ impl RetroForgeApp {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Add folder\u{2026}").clicked() {
-                    *rescan = self.pick_library_folder();
+                    *rescan = self.pick_library_folder(ui.ctx());
                 }
                 if ui.button("Rescan").clicked() {
                     *rescan = true;
+                    // Ticket W15-04: only the EXPLICIT Rescan button
+                    // arms the "library rescanned" toast —
+                    // `poll_library_scan` reads this flag once the
+                    // background scan it triggers lands.
+                    self.library_rescan_toast_pending = true;
                 }
                 ui.add(readout(
                     egui::RichText::new(format!("{count} game(s)")).weak(),
@@ -4011,13 +4197,21 @@ impl RetroForgeApp {
 
     /// Open a folder picker and add what it returns to the roots.
     /// `true` if a rescan is now owed.
-    fn pick_library_folder(&mut self) -> bool {
+    fn pick_library_folder(&mut self, ctx: &egui::Context) -> bool {
         let Some(folder) = rfd::FileDialog::new().pick_folder() else {
             return false;
         };
         self.library_roots
             .push(crate::library::LibraryRoot::Bare(folder));
         self.save_library_roots();
+        // Ticket W15-04: "ROM folder added" toast. The rescan this
+        // triggers (the caller sets `rescan = true` and `library_home`
+        // calls `self.rescan_library()`) gets its OWN toast only when the
+        // user pressed Rescan directly — see
+        // `library_rescan_toast_pending`'s doc comment for why adding a
+        // folder does not also fire "library rescanned".
+        self.toasts
+            .push(crate::toast::ToastKind::Info, "ROM folder added", ctx);
         true
     }
 
@@ -4118,17 +4312,18 @@ impl RetroForgeApp {
         ) {
             (Ok(m), Ok(s)) => (m, s),
             _ => {
-                self.script_status = Some(format!(
-                    "{} needs both plugin.toml and main.lua",
-                    dir.display()
-                ));
+                let msg = format!("{} needs both plugin.toml and main.lua", dir.display());
+                self.script_error_toast_pending = Some(msg.clone());
+                self.script_status = Some(msg);
                 return;
             }
         };
         let manifest = match rf_plugin_sdk::Manifest::parse(&manifest_src) {
             Ok(m) => m,
             Err(e) => {
-                self.script_status = Some(format!("manifest: {e}"));
+                let msg = format!("manifest: {e}");
+                self.script_error_toast_pending = Some(msg.clone());
+                self.script_status = Some(msg);
                 return;
             }
         };
@@ -4159,7 +4354,9 @@ impl RetroForgeApp {
             Err(e) => {
                 // Named, never swallowed: a script that failed to load
                 // and one that drew nothing look identical on screen.
-                self.script_status = Some(format!("script refused to load: {e}"));
+                let msg = format!("script refused to load: {e}");
+                self.script_error_toast_pending = Some(msg.clone());
+                self.script_status = Some(msg);
             }
         }
     }
@@ -4385,12 +4582,24 @@ impl RetroForgeApp {
     }
 
     /// Adopt a finished background scan, if one has finished.
-    fn poll_library_scan(&mut self) {
+    fn poll_library_scan(&mut self, ctx: &egui::Context) {
         let Some(rx) = self.library_scan.as_ref() else {
             return;
         };
         match rx.try_recv() {
             Ok(library) => {
+                // Ticket W15-04: "library rescanned (with count)" —
+                // only for a scan the Rescan button asked for; the
+                // initial automatic scan on boot (`library_home`) never
+                // sets this flag, so it stays silent as it always was.
+                if self.library_rescan_toast_pending {
+                    self.library_rescan_toast_pending = false;
+                    self.toasts.push(
+                        crate::toast::ToastKind::Info,
+                        format!("Library rescanned ({} game(s))", library.entries.len()),
+                        ctx,
+                    );
+                }
                 self.library = Some(library);
                 self.library_scan = None;
             }
@@ -4698,6 +4907,38 @@ impl RetroForgeApp {
     #[must_use]
     pub fn crash_message_for_test(&self) -> Option<String> {
         self.crash.as_ref().map(|c| c.message.clone())
+    }
+
+    /// Ticket W15-04: whether the overwrite-confirmation modal is up.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn pending_overwrite_for_test(&self) -> bool {
+        self.pending_overwrite.is_some()
+    }
+
+    /// Ticket W15-04: whether the quit-confirmation modal is up.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn pending_quit_for_test(&self) -> bool {
+        self.pending_quit
+    }
+
+    /// Drive the same Quit path the menu buttons use
+    /// (`RetroForgeApp::request_quit`), for a headless test — neither
+    /// Quit button is reachable from `egui_kittest` without first opening
+    /// the menu it lives in, and this ticket's acceptance is about the
+    /// confirmation gate, not menu navigation `ui_smoke.rs` already
+    /// covers.
+    #[doc(hidden)]
+    pub fn request_quit_for_test(&mut self, ctx: &egui::Context) {
+        self.request_quit(ctx);
+    }
+
+    /// Ticket W15-04: whether any toast is currently visible.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn has_visible_toast_for_test(&self) -> bool {
+        !self.toasts.is_empty()
     }
 
     /// The last frame number the core reported, for a test that needs to
@@ -5250,10 +5491,17 @@ impl eframe::App for RetroForgeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
+        // Ticket W15-04: drain any script load/manifest failure queued
+        // since the last frame into a toast — see
+        // `script_error_toast_pending`'s doc for why this can't happen
+        // at the point the error is discovered.
+        if let Some(msg) = self.script_error_toast_pending.take() {
+            self.toasts.push(crate::toast::ToastKind::Error, msg, &ctx);
+        }
         self.poll_input(&ctx);
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.
-        self.poll_library_scan();
+        self.poll_library_scan(&ctx);
         self.pump_core_events(&ctx);
         self.maybe_request_canvas_snapshot();
         self.sync_event_subscription();
@@ -5279,6 +5527,17 @@ impl eframe::App for RetroForgeApp {
         self.pump_authoring();
         self.author_window(&ctx);
         self.debug_panels_window(&ctx);
+        // Ticket W15-04: quit confirmation, drawn wherever a Quit click
+        // set `pending_quit` this frame or a prior one.
+        self.quit_confirm_modal(&ctx);
+        // Ticket W15-04: toasts render LAST, after every window/modal —
+        // they are non-interactable (`ToastStack::show`'s own
+        // `Area::interactable(false)`) and anchored independently of any
+        // panel, so draw order only affects which layer paints over
+        // which, never input. Painting them last is what keeps a toast
+        // visible over a maximized window instead of tucked behind it.
+        let palette = self.settings.accessibility.normalized().palette();
+        self.toasts.show(&ctx, &palette);
     }
 
     // Ticket W4-06a criterion 3: `eframe::App::save`/`auto_save_interval`
