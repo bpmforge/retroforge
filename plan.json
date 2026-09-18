@@ -6990,7 +6990,7 @@
     "if a permissively licensed dynamic-shape compact model exists it is added to the ledger; if not, the search is recorded"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED 2026-09-18 by W16-02's close: the studio is wired end to end with the stub upscaler, but real inference needs tiling for the static-shape exports."
    ],
