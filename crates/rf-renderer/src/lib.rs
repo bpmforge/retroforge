@@ -42,6 +42,8 @@
 
 pub mod compare;
 pub mod composite;
+pub mod diorama;
+pub mod diorama_mesh;
 pub mod fallback;
 pub mod fog;
 pub mod frame;

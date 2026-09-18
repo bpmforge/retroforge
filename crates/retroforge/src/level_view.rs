@@ -115,6 +115,47 @@ impl LevelSession {
         }
     }
 
+    /// Ticket W16-06: the Diorama "walls pop up" geometry layer for this
+    /// session's decoded level, or `None` for exactly the same reasons
+    /// [`Self::has_collision`] would say `false` — the two are kept in
+    /// sync deliberately (this calls the same underlying `rf_enhance`
+    /// function [`Self::has_collision`] checks the preconditions of), so
+    /// a caller that already checked `has_collision()` cannot get `None`
+    /// here for a different reason than that check already reported.
+    #[must_use]
+    pub fn diorama_geometry(&self) -> Option<rf_enhance::scene_graph::SceneLayer> {
+        let bits = &self.profile.decode.as_ref()?.collision.as_ref()?.bits;
+        level_view::diorama_geometry_layer(
+            LevelId(0),
+            &self.level,
+            self.geometry,
+            bits,
+            "solid",
+            (0, 0),
+        )
+    }
+
+    /// Ticket W16-06: whether this session's decode actually produced a
+    /// solidity mask — the narrower fact `crate::enhance_ui::feature_rows`
+    /// needs for the Diorama row (that module's own doc: a matched profile
+    /// with no collision table must still read as `NeedsProfile`, not
+    /// `Available`). Checks both that a `[decode.collision]` table was
+    /// declared AND that its `bits` names a `"solid"` bit — the same two
+    /// preconditions `rf_enhance::scene_graph::geometry_layer` itself
+    /// requires, checked here so the UI can know the answer before
+    /// attempting the (identical) decode `diorama_geometry_layer` would
+    /// do.
+    #[must_use]
+    pub fn has_collision(&self) -> bool {
+        self.level.collision.is_some()
+            && self
+                .profile
+                .decode
+                .as_ref()
+                .and_then(|d| d.collision.as_ref())
+                .is_some_and(|c| c.bits.split(',').any(|b| b.trim() == "solid"))
+    }
+
     /// Where in RAM the entity table starts, so the caller knows what to
     /// slice. `None` when the profile declares no entities.
     #[must_use]
