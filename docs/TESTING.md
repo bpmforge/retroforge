@@ -794,6 +794,7 @@ First run, 2026-09-15, release build:
 | NES, after W14-17 | 1281 | **1222** | 6 | 53 | **0** | **0** |
 | SNES, after W14-19 slice 1 | 1265 | **1012** | 115 | 138 | **0** | **0** |
 | NES, after W14-22 | 1281 | **1222** | 6 | 53 | **0** | **0** |
+| SNES, after W14-21 | 1265 | **1012** | 115 | 138 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -841,6 +842,65 @@ Rasetsu no Sho, Top Gear 3000) now load through the DSP-1 HLE as
 known-wrong, per the identification rule rf-cart applies (coprocessor
 nibble alone cannot tell the DSP families apart) — none of the three is
 expected to render correctly, and none is claimed to.
+
+**W14-21 (DSP-1 HLE slice 2)**, 2026-09-17/18, release build: implements
+Manual §5.4-5.6 (projection parameter setting, raster, object
+projection, screen point, set/convert attitude A/B/C, inner product,
+3D angle rotation) plus the 38h double-precision range variant, per the
+dsp1.rs module doc's Tier-1/Tier-2 split (equation-stated commands
+transcribed; projection/raster reconstructed from parameter
+descriptions, no stated formula exists in the source set). The unknown-
+command counter (a new per-opcode histogram, `Dsp1::unknown_opcodes`)
+reads **0** for both **Super Mario Kart** and **Pilotwings** across 600
+frames, down from 264 and 128 respectively on this slice's first pass —
+both nonzero counts were entirely one opcode, `$80`, written by both
+titles repeatedly before their first real command with no parameters
+and no output read; documented in dsp1.rs as an empirically-discovered
+no-op (not in the Manual/snesdev/fullsnes command lists), most likely a
+chip-presence check that expects to read back its own idle sentinel.
+Both titles still exit `RENDERED` in the census child individually.
+
+**The census bucket counts did not move**: 1012/115/138/0/0, identical
+to slice 1's row. The raster/projection math is unit-tested directly
+(`raster_scale_shrinks_toward_the_viewer`,
+`projection_straight_down_centers_on_base_point`, and the attitude/
+gyrate equation tests) and confirmed exercised by both named titles (the
+`$0A` raster command appears in their DR traffic), but neither title's
+own bucket needed raster to already read as `RENDERED` — both were
+rendering their title screen (menus, HUD, sprites) before this slice,
+and the census's 600-frame pixel-variance check does not attribute
+variance to a specific command. A plausible reason the *track* itself
+may not visibly use this slice's raster output: Manual §5.4.2 names `0Ah`
+as "to output result of calculation via DMA", and both titles' DR
+traffic (traced during this ticket) writes the raster terminator
+immediately after starting the stream rather than reading scanlines
+through the CPU — consistent with expecting the real hardware's DSP-1-
+to-PPU DMA path to drain DR, which this build's DMA engine was not
+confirmed (nor is it in this ticket's write scope to confirm) to source
+from `Dsp1Dr`. **Recorded rather than assumed away, per the same rule
+slice 1 used for its own gap.** The by-eye check of Super Mario Kart's
+track against a reference emulator, and of Pilotwings' flight view, is
+**pending** — the user's own verification, not run in this session.
+
+**The "13th DSP title" gap slice 1 left open is resolved, not by a
+missing DSP-1 title but by an incorrect premise**: this ticket's
+`crates/rf-snes/tests/dsp1_probe.rs::scan_dsp_coprocessor_titles` found
+exactly **12** archives in `~/Games/Roms/snes` whose header reports the
+DSP coprocessor nibble (both `Ballz 3D` dumps, `Dungeon Master`,
+`Lock On`, both `Michael Andretti's Indy Car Challenge` dumps,
+`Pilotwings`, `Super Bases Loaded 2`, both `Super Mario Kart` dumps,
+`Suzuka 8 Hours`, `Top Gear 3000`), all twelve of which load and render
+(none refused). `Metal Combat - Falcon's Revenge` — a title sometimes
+mentally grouped with the DSP-1 racing/flight titles for its similar
+sprite-scaling pseudo-3D effect — is **not** DSP-family at all:
+`rf_cart::Cartridge::load` on its raw ROM bytes returns
+`UnsupportedChip { name: "OBC1 (SNES chipset $25)" }`, a distinct,
+already-deferred SNES coprocessor (NON_GOALS #10 / D-010's deferral
+list). It stays correctly refused for an unrelated, already-recorded
+reason. Brad's "~13 titles" in D-010 most likely counted Metal Combat
+alongside the real DSP-1 titles by genre/effect resemblance rather than
+by chip; the actual DSP-coprocessor-nibble count in this library is 12,
+and this run accounts for all of them.
 
 **The second step of the triage is `crates/rf-harness/tests/title_probe.rs`**
 (ticket W14-11): an `#[ignore]`d, env-driven probe that instruction-steps

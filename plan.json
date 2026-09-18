@@ -6416,8 +6416,9 @@
     "the one DSP-family title that stayed refused after W14-19 slice 1 is named and its cause recorded (header variant, DSP-2/3/4, or a bad dump)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 (lane C). All remaining commands implemented clean-room (31 dsp1 unit tests incl. save-state round trips). Unknown-command counter 0 for SMK and Pilotwings after documenting an undocumented $80 no-op (chip-presence check, found by trace). Raster streams without the 8000H terminator are closed. SNES census unchanged at 1012/115/138/0/0; both titles RENDERED. OPEN FOLLOW-UP (file if the by-eye check shows no track): 0Ah raster output is documented as DMA-drained; whether this build's DMA engine can source from Dsp1Dr is unconfirmed. By-eye check of Mario Kart's track and Pilotwings' flight view is Brad's. Metal Combat is OBC-1 ($25), not DSP: exactly 12 DSP archives exist, all render. Pre-existing nit outside scope: clippy --all-targets flags an unused IPL_INIT_CYCLES import in rf-snes/src/tests/apu_ports.rs (the law-3 gate does not use --all-targets).",
     "FILED 2026-09-17 by W14-19's close (slice 1). Sources are in W14-19's notes; the manual OCR excerpt lives outside the repo (re-derive from archive.org SNESDevManual book2_djvu.txt lines ~23779-31340). Raster (0Ah) is what Super Mario Kart's track needs: it produces per-scanline Mode 7 matrix rows from the projection parameters set by 02h; expect that to be the bulk of the work and the first thing to verify by eye."
    ],
    "stories": []
