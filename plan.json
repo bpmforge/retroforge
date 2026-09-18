@@ -6890,6 +6890,82 @@
     "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
    ],
    "stories": []
+  },
+  {
+   "id": "W15-09",
+   "title": "Opt-in box art fetch from libretro-thumbnails (D-011)",
+   "phase": 15,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-cache/**"
+   ],
+   "depends_on": [
+    "W15-05"
+   ],
+   "acceptance": [
+    "a Settings toggle 'Fetch box art from the internet' (off by default) gates any network use; when off nothing is fetched and no request is made (test with a stub client)",
+    "art is fetched from libretro-thumbnails by No-Intro name (title normalization from W15-05) over HTTPS, stored through rf-cache under the existing size cap, with a separate art cache cap in Settings > Paths",
+    "an attribution line 'Art: libretro-thumbnails' appears in Settings and on card hover, and a network indicator marks fetched thumbnails so nothing implies 'local' when it was not",
+    "failures are quiet (toast once per session at most), never block the UI or the core thread; the fetch runs on a background thread with the frame-drop/waker pattern from W14-20",
+    "priority stays: save-state screenshot, first-frame, user art folder, then fetched art (UX_WAVE_15.md \u00a74); no ROM data is ever requested (NON_GOALS #5)"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-18 at W16-04's close as the follow-up W15-05's acceptance names. Ruling D-011 (Brad 2026-09-17). Client crate must be permissive (ureq/reqwest with rustls; check deny.toml)."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-10",
+   "title": "Profile pin for the atmosphere plane ([atmosphere] in the profile schema)",
+   "phase": 16,
+   "crate": "rf-profiles",
+   "write_scope": [
+    "crates/rf-profiles/**",
+    "crates/rf-enhance/**",
+    "profiles/**",
+    "docs/design/GAME_PROFILES.md"
+   ],
+   "depends_on": [
+    "W16-04"
+   ],
+   "acceptance": [
+    "profiles gain an [atmosphere] table with plane = n (and optional tint/strength), validated by the schema",
+    "rf-enhance's atmosphere::pinned_layer is driven from it so a pinned profile skips detection and the ladder can be pinned Active, mirroring how a profile pins anti-flicker",
+    "one fixture profile and one commercial profile (A Link to the Past, once its fog plane is found empirically in shadow mode) use it; the by-eye check is recorded"
+   ],
+   "points": 2,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-18 by W16-04's close: the pin producer exists, the TOML field does not (rf-profiles was outside W16-04's scope)."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-11",
+   "title": "DSP-1 raster output via DMA: confirm and wire Dsp1Dr as a DMA source",
+   "phase": 16,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [
+    "W14-21"
+   ],
+   "acceptance": [
+    "a trace on Super Mario Kart shows whether the game drains 0Ah raster output by DMA from the DSP data register or by CPU reads, recorded on the ticket",
+    "if by DMA: the DMA/HDMA engine can source from the DSP window (A-bus address inside the DspWindow) with the DR advancing per byte, unit-tested against the manual's raster protocol",
+    "Super Mario Kart's track and Pilotwings' flight view are checked by eye and recorded; the census is re-run and any bucket move recorded"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-18 by W14-21's close: raster is documented as DMA-drained and DMA sourcing from Dsp1Dr is unconfirmed; Brad's by-eye check of SMK is pending and decides whether this is needed."
+   ],
+   "stories": []
   }
  ]
 }
