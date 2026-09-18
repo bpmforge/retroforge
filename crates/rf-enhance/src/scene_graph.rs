@@ -17,12 +17,23 @@
 //! variant is defined here so W4-03c's renderer (and any later ticket) has
 //! a stable contract to target, per §7's literal shape, but is
 //! **shape-only**: nothing in this crate produces an `OriginalFrame`,
-//! `DecodedLevel`, `ExtractedBg`, `SpriteSet`, `HudPinned`, or
-//! `OverlayCmds` value, because no producer for any of them exists yet
-//! (`bus.rs`'s own module doc: `SpriteHistorian`/`ProfileDecoders`/
-//! `PluginHost` are all still stubs). Building fake data for them here
-//! would be exactly the "unvalidated scaffolding" `bus.rs` already
-//! declined to add.
+//! `DecodedLevel`, `SpriteSet`, `HudPinned`, or `OverlayCmds` value,
+//! because no producer for any of them exists yet (`bus.rs`'s own module
+//! doc: `SpriteHistorian`/`ProfileDecoders`/`PluginHost` are all still
+//! stubs). Building fake data for them here would be exactly the
+//! "unvalidated scaffolding" `bus.rs` already declined to add.
+//!
+//! **Update, ticket W16-03**: [`SceneLayer::ExtractedBg`] gained its first
+//! producer, `crate::atmosphere::AtmosphereDetector::observe` — the
+//! shadow-rung atmosphere-layer heuristic
+//! (`docs/design/ENHANCEMENT_WAVE_16.md` §4). It is still shadow-only:
+//! the layer is produced for the per-game report card / a future Enhance
+//! workspace preview, and nothing in this crate or its dependents
+//! composites it into a rendered frame. `ExtractedBg` therefore moved from
+//! "shape-only" to "shape plus real content" while every other variant
+//! above stays shape-only.
+
+use rf_core_api::PpuPixel;
 
 use crate::camera::{Camera, FogStyle};
 
@@ -115,8 +126,20 @@ pub enum SceneLayer {
     StitchedCanvas { canvas: CanvasId, fog: FogStyle },
     /// Profile-decoded full level (W5-02).
     DecodedLevel { level: LevelId, dirty: Vec<ChunkId> },
-    /// A single extracted background plane.
-    ExtractedBg { layer: BgLayerId },
+    /// A single extracted background plane (first producer: ticket
+    /// W16-03's `crate::atmosphere::AtmosphereDetector`, shadow-only —
+    /// module doc's "Update, ticket W16-03" note). `pixels` carries
+    /// exactly this plane's own [`PpuPixel`]s at `width`x`height` (every
+    /// other on-screen pixel replaced with the backdrop default); `scroll`
+    /// is the plane's raw hardware scroll value as of the frame it was
+    /// captured, for a future preview/report-card display only.
+    ExtractedBg {
+        layer: BgLayerId,
+        pixels: Vec<PpuPixel>,
+        width: u16,
+        height: u16,
+        scroll: (i64, i64),
+    },
     /// De-flickered sprite union.
     SpriteSet { sprites: Vec<SpriteInstance> },
     /// A pinned HUD region.
@@ -154,6 +177,10 @@ mod tests {
             },
             SceneLayer::ExtractedBg {
                 layer: BgLayerId(0),
+                pixels: Vec::new(),
+                width: 0,
+                height: 0,
+                scroll: (0, 0),
             },
             SceneLayer::SpriteSet {
                 sprites: vec![SpriteInstance {
