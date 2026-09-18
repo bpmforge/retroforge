@@ -108,6 +108,38 @@ pub struct SubPixel {
     pub fixed: bool,
 }
 
+/// One console's Mode 7 affine-transform register file for one frame
+/// (ticket W16-09; `docs/design/ENHANCEMENT_WAVE_16.md` §9; snesdev wiki
+/// "Mode 7" for the matrix/offset semantics; `rf_snes::ppu::mode7::Mode7`
+/// for the hardware write-twice-latch behaviour these values are read
+/// back from).
+///
+/// **A cross-console field, not an SNES-only one bolted onto a generic
+/// type by name alone.** This struct carries no reference to SNES at all
+/// — just the eight signed values and two flip bits a Mode 7-shaped
+/// affine ground transform needs — so a future console with an analogous
+/// per-scanline affine background (there is none today) could populate it
+/// too. A core that never has Mode 7 (NES, and SNES whenever BG mode is
+/// not 7) never constructs one — see [`crate::CoreEvent::Mode7`]'s own
+/// doc for the zero-cost-when-unsubscribed mechanism this rides on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Mode7Registers {
+    /// `$211B`/`$211C`/`$211D`/`$211E` — signed 8.8 fixed point matrix.
+    pub a: i16,
+    pub b: i16,
+    pub c: i16,
+    pub d: i16,
+    /// `$211F`/`$2120` — signed 13-bit centre of rotation.
+    pub x0: i16,
+    pub y0: i16,
+    /// `$210D`/`$210E`'s Mode-7 half — signed 13-bit scroll.
+    pub hofs: i16,
+    pub vofs: i16,
+    /// `$211A` bits 0/1.
+    pub flip_x: bool,
+    pub flip_y: bool,
+}
+
 /// One overlay-only pixel: a sprite the hardware's per-scanline sprite limit
 /// dropped, recorded separately from the accuracy-exact [`PpuPixel`] sink so
 /// it can never displace a real pixel (see [`PpuPixel::dropped_by_limit`]'s

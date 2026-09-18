@@ -3820,3 +3820,17 @@ stories, 10 decisions).
   until the next submit, and the double buffer flips after each scale.
   Gate: workspace **2118 passing / 0 failed / 42 ignored**, clippy
   clean with and without the feature, arch OK.
+
+- **W16-09 — Mode 7 as pitched 3D, first slice** (2026-09-18, lane C).
+  The SNES core now emits its Mode 7 registers on the event stream when
+  a subscriber asks and the PPU is in mode 7, one settled value per
+  frame for now; the plane texture is rebuilt from VRAM and CGRAM at a
+  higher density in the bsnes-hd manner; and the renderer draws it as a
+  ground under the diorama camera, mapping the matrix scale to a ground
+  extent, at about 3 ms per frame with a synthetic golden pinned. The
+  mapping is a stated approximation, and the live play-view wiring plus
+  per-scanline capture are W16-14, so nothing changes on screen yet and
+  the Mario Kart check waits for that. One exhaustive-match line in the
+  app's debug dock had to change to keep the build green, recorded as a
+  handoff. Gate: crate tests green, workspace **2122 passing / 0
+  failed**, arch OK, GPU evidence valid.

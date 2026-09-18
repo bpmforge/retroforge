@@ -272,6 +272,7 @@ fn bit_for(ev: &CoreEvent) -> EventMask {
         CoreEvent::MapperIrq => EventMask::MAPPER_IRQ,
         CoreEvent::DmaStart { .. } => EventMask::DMA_START,
         CoreEvent::MemWatch { .. } => EventMask::MEM_WATCH,
+        CoreEvent::Mode7(_) => EventMask::MODE7,
     }
 }
 
@@ -572,6 +573,7 @@ fn event_mask_bits_correspond_one_to_one_with_core_event_variants() {
         CoreEvent::MapperIrq,
         CoreEvent::DmaStart { chan: 0 },
         CoreEvent::MemWatch { id: 0 },
+        CoreEvent::Mode7(rf_core_api::Mode7Registers::default()),
     ];
 
     let mut seen = EventMask::NONE;

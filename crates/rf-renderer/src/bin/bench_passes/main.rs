@@ -27,12 +27,18 @@ use rf_renderer::diorama::DioramaPass;
 use rf_renderer::diorama_mesh::{Billboard, DioramaScene};
 use rf_renderer::fog::{FogParams, FogPass};
 use rf_renderer::gpu::GpuContext;
+use rf_renderer::mode7_plane::{render_mode7_ground, SNES_NATIVE_WIDTH_PX};
 use rf_renderer::shader_chain::{ChainStage, ShaderChain};
 
 use minijson::{row_num, row_str, RowFields};
 
 const FRAMES: usize = 300;
 const SIZES: [(u32, u32); 2] = [(256, 240), (512, 448)];
+/// Ticket W16-09's own bench rows use the SNES's native 256x224 (not
+/// 256x240 -- `crate::rf_snes::core`'s own module doc: 224 or 239 visible
+/// lines, never a flat 240) alongside the same 512x448 the other passes
+/// already use.
+const MODE7_SIZES: [(u32, u32); 2] = [(256, 224), (512, 448)];
 
 fn main() {
     let gpu = match GpuContext::request_headless() {
@@ -75,6 +81,13 @@ fn main() {
         let samples = time_diorama_pass(&gpu, w, h);
         rows.push(pass_row("diorama", &size_label, &samples, &gpu));
         report("diorama", &size_label, &samples);
+    }
+
+    for &(w, h) in &MODE7_SIZES {
+        let size_label = format!("{w}x{h}");
+        let samples = time_mode7_pass(&gpu, w, h);
+        rows.push(pass_row("mode7-3d", &size_label, &samples, &gpu));
+        report("mode7-3d", &size_label, &samples);
     }
 
     let evidence_path = evidence_path();
@@ -249,6 +262,55 @@ fn time_diorama_pass(gpu: &GpuContext, w: u32, h: u32) -> Vec<Duration> {
             tiles_h, TILE_PX, w, h,
         )
         .expect("bench-passes: diorama pass render failed")
+    };
+    let _ = render_once(); // warm-up, same reasoning as time_shader_pass
+    let mut samples = Vec::with_capacity(FRAMES);
+    for _ in 0..FRAMES {
+        let t0 = Instant::now();
+        let _ = render_once();
+        samples.push(t0.elapsed());
+    }
+    samples
+}
+
+/// Times [`render_mode7_ground`] end-to-end (ticket W16-09; `docs/design/
+/// ENHANCEMENT_WAVE_16.md` §9) -- upload a 128x128-tile-equivalent plane
+/// texture at 2x density (the same `rf_snes::debug::
+/// render_mode7_plane_rgba` shape the app shell would hand this pass in
+/// production) and a "plausible racing-game" matrix (scale ~1/4, the same
+/// fixture `tests/mode7_plane_golden.rs` uses), render, blocking readback.
+fn time_mode7_pass(gpu: &GpuContext, w: u32, h: u32) -> Vec<Duration> {
+    const DENSITY: u32 = 2;
+    const TILES_SIDE: u32 = 128;
+    let plane_side = TILES_SIDE * 8 * DENSITY;
+    let plane = synthetic_frame(plane_side, plane_side);
+    let m = rf_core_api::Mode7Registers {
+        a: 64, // $0040, scale 0.25 -- same "racing-game near matrix" as the golden fixture.
+        b: 0,
+        c: 0,
+        d: 64,
+        x0: 0,
+        y0: 0,
+        hofs: 0,
+        vofs: 0,
+        flip_x: false,
+        flip_y: false,
+    };
+
+    let pass = DioramaPass::new(gpu);
+    let render_once = || {
+        render_mode7_ground(
+            &pass,
+            gpu,
+            &m,
+            &plane,
+            plane_side,
+            plane_side,
+            SNES_NATIVE_WIDTH_PX,
+            w,
+            h,
+        )
+        .expect("bench-passes: mode7 ground pass render failed")
     };
     let _ = render_once(); // warm-up, same reasoning as time_shader_pass
     let mut samples = Vec::with_capacity(FRAMES);

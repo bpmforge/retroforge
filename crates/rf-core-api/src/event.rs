@@ -1,5 +1,5 @@
 //! Core events and subscription filtering (FR-CORE-006).
-use crate::video::PixelLayer;
+use crate::video::{Mode7Registers, PixelLayer};
 
 /// Events a core pushes through [`crate::CoreSink::event`] during
 /// `run_frame`/`step` (ARCHITECTURE §5).
@@ -47,6 +47,26 @@ pub enum CoreEvent {
         /// Core-defined watchpoint id (assigned when the watch was set).
         id: u32,
     },
+    /// The Mode 7 affine transform for this frame (ticket W16-09;
+    /// `docs/design/ENHANCEMENT_WAVE_16.md` §9) — promoted from the SNES
+    /// debug snapshot (`rf_snes::debug`) to this generic, cross-console
+    /// path so `FrameBundle::events` (`rf-core-api::frame_bundle`) is the
+    /// one place a renderer looks for it, rather than reaching past
+    /// `CoreSink` into a console-specific debug API.
+    ///
+    /// Emitted **at most once per frame**, after the frame's video has
+    /// been assembled (`rf_snes::core::SnesCore::emit_frame`), and only
+    /// when BG mode 7 is active — a core in any other mode never
+    /// constructs one, matching every other variant's pay-for-use rule.
+    /// `rf-snes`'s settled-frame composition model (`rf_snes::core`'s own
+    /// module doc: "runs the frame, then replays the settled picture")
+    /// reads these registers post-hoc rather than live per scanline, so
+    /// today's value is the registers' state at frame end for the whole
+    /// frame — a real per-scanline HDMA ramp is not yet distinguishable
+    /// from a static matrix at this layer; see that core's own doc for
+    /// why, and `rf_snes::debug::mode7_registers`'s doc for the exact
+    /// promotion.
+    Mode7(Mode7Registers),
 }
 
 impl CoreEvent {
@@ -69,6 +89,7 @@ impl CoreEvent {
             CoreEvent::MapperIrq => EventMask::MAPPER_IRQ,
             CoreEvent::DmaStart { .. } => EventMask::DMA_START,
             CoreEvent::MemWatch { .. } => EventMask::MEM_WATCH,
+            CoreEvent::Mode7(_) => EventMask::MODE7,
         }
     }
 }
@@ -103,6 +124,8 @@ impl EventMask {
     pub const DMA_START: EventMask = EventMask(1 << 7);
     /// Bit for [`CoreEvent::MemWatch`].
     pub const MEM_WATCH: EventMask = EventMask(1 << 8);
+    /// Bit for [`CoreEvent::Mode7`].
+    pub const MODE7: EventMask = EventMask(1 << 9);
 
     /// No events subscribed (Accuracy mode default: zero per-event cost).
     pub const NONE: EventMask = EventMask(0);
@@ -116,7 +139,8 @@ impl EventMask {
             | Self::SCROLL_WRITE.0
             | Self::MAPPER_IRQ.0
             | Self::DMA_START.0
-            | Self::MEM_WATCH.0,
+            | Self::MEM_WATCH.0
+            | Self::MODE7.0,
     );
 
     /// The empty mask. Same as [`EventMask::NONE`]; provided for
