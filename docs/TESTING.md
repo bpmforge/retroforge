@@ -795,6 +795,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-19 slice 1 | 1265 | **1012** | 115 | 138 | **0** | **0** |
 | NES, after W14-22 | 1281 | **1222** | 6 | 53 | **0** | **0** |
 | SNES, after W14-21 | 1265 | **1012** | 115 | 138 | **0** | **0** |
+| SNES, after W16-11 | 1265 | **1012** | 115 | 138 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -901,6 +902,67 @@ reason. Brad's "~13 titles" in D-010 most likely counted Metal Combat
 alongside the real DSP-1 titles by genre/effect resemblance rather than
 by chip; the actual DSP-coprocessor-nibble count in this library is 12,
 and this run accounts for all of them.
+
+**W16-11 (DSP-1 raster output via DMA: confirm and wire `Dsp1Dr` as a DMA
+source)**, 2026-09-18: resolves the open follow-up W14-21 left ("this
+build's DMA engine was not confirmed to source from `Dsp1Dr`"), and the
+answer is not what that note guessed. W14-21's trace ran with an empty
+`InputFrame` for all 600 frames — the SNES core's `run_frame` does not
+wire the `InputFrame` argument to the joypads at all yet (`SnesCore::
+run_frame`'s own comment: "Controller wiring is W11-12's"), so that trace
+never left the title screen, and what it saw — the raster terminator
+written immediately after starting a session — was a boot-time
+chip-presence check, not real raster use. This ticket's extended probe
+(`crates/rf-snes/tests/dsp1_probe.rs::dsp1_raster_drain_trace`) drives the
+pad directly through `system_mut().bus.joypads.ports[0]` (the same route
+`peterlemon_golden.rs`/`gilyon_cputest.rs` use, since `run_frame`'s input
+argument still goes nowhere), mashing Start with A held, for 600 frames on
+each title. With that, both titles reach real gameplay and the DR-drain
+trace (`SnesBus::dsp1_trace`, ticket-only diagnostic counters, not part of
+save state) is unambiguous:
+
+| title | first raster session | CPU DR reads (raster) | general-DMA reads | HDMA reads |
+|---|---|---|---|---|
+| Super Mario Kart | frame 42 | 99,200 | 0 | 0 |
+| Pilotwings | frame 537 | 87,868 | 0 | 0 |
+
+**Neither title drains Raster (`0Ah`) output by DMA or HDMA at all — both
+poll the DR directly from the CPU**, for the whole session, at real
+gameplay volume. So the acceptance's conditional ("if by DMA: wire the
+engine...") does not apply to either named title, and the census cannot
+move: it did not move (1012/115/138/0/0, unchanged from W14-21).
+
+The DMA/HDMA engine's ability to source from `Dsp1Dr` was checked anyway,
+because the Manual and fullsnes still document raster as DMA-drained
+hardware behaviour and a different DSP-1 title could rely on it. It did
+not need fixing: `SnesBus::read`/`write`'s `Target::Dsp1Dr` arm is reached
+through the identical `target()` resolution for a CPU access, a
+general-DMA byte (`run_channel`), and an HDMA unit (`hdma_transfer_unit`)
+— none of the three touches `rom`/`wram` directly — so a DMA/HDMA byte
+already advances the DR exactly as a CPU read does, general DMA's
+fixed-address mode (`$43x0` bit 3, `Channel::a_step`) already returns 0
+and already works (the DSP-1 window matches on being inside a wide
+`RangeInclusive<u16>`, not on the literal offset, so a fixed or advancing
+address both resolve to the same chip), and `Dsp1Sr` resolves the same
+way. Two new bus-level tests confirm this by construction rather than by
+assertion — `crates/rf-snes/src/tests/dsp1_dma.rs`'s
+`fixed_address_mdma_drains_a_raster_session_byte_for_byte` (general DMA,
+fixed A-bus, per fullsnes' documented hardware technique) and
+`indirect_hdma_drains_a_raster_session_into_mode7_registers` (HDMA
+indirect mode, two channels writing the write-twice `$211B`-`$211E` Mode 7
+matrix ports low-byte-then-high) — both compare the DMA/HDMA-drained
+result against a CPU-driven reference `Dsp1` instance byte for byte, and
+both pass unmodified against the existing `dma.rs`/`bus.rs` machinery; no
+code in `dma.rs` changed. No new save-state field was added: the trace
+counters are diagnostic-only and intentionally not serialized, the same
+"diagnostic, unsaved" contract `Dsp1::unknown_opcode_hist` already
+documents, so a save/load round trip is unaffected (existing
+`Channel::save`/`Dsp1::save` cover everything that changes emulated
+behaviour).
+
+**By-eye check of Super Mario Kart's track and Pilotwings' flight view
+against a reference emulator is still pending — Brad's own verification,
+not run in this session** (unchanged from W14-21's note).
 
 **The second step of the triage is `crates/rf-harness/tests/title_probe.rs`**
 (ticket W14-11): an `#[ignore]`d, env-driven probe that instruction-steps

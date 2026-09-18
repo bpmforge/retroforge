@@ -25,6 +25,37 @@ use crate::ppu::Ppu;
 use crate::regs::{IrqTimer, MathUnit, NmiTimen, WramPort};
 use crate::timing::{Joypads, Timing};
 
+/// Diagnostic-only DSP-1 DR-drain trace (ticket W16-11).
+///
+/// Counts DR (data register) accesses by how they were driven, so a probe
+/// can report whether a title drains Raster (`0Ah`/`1Ah`) output by CPU
+/// polling, general-purpose DMA, or HDMA — the question W16-11's
+/// acceptance #1 asks. **Not part of save state**, the same "diagnostic,
+/// unsaved" contract [`crate::dsp1::Dsp1`]'s `unknown_opcode_hist` field
+/// documents: a save/load round trip losing these counts changes nothing
+/// about emulated behaviour, only what a probe run across it would
+/// report.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Dsp1DrTrace {
+    /// DR reads made by the CPU (neither MDMA nor HDMA in progress) while
+    /// a Raster stream was live.
+    pub cpu_raster_reads: u32,
+    /// DR reads made by general-purpose DMA (`$420B`-triggered).
+    pub mdma_reads: u32,
+    /// DR reads made by HDMA.
+    pub hdma_reads: u32,
+    /// General-DMA channel runs whose A-bus address fell inside the
+    /// DSP-1 window at the moment `$420B` triggered them.
+    pub mdma_channel_starts: u32,
+    /// Of those, how many used fixed-address mode (`$43x0` bit 3) — the
+    /// A-bus does not advance, so every byte re-reads the same nominal
+    /// address (the DSP-1's own state machine still advances the DR).
+    pub mdma_channel_starts_fixed: u32,
+    /// HDMA transfer units (one per active channel per active line)
+    /// whose source address fell inside the DSP-1 window.
+    pub hdma_units: u32,
+}
+
 /// The machine's memory, cartridge and registers.
 pub struct SnesBus {
     pub rom: Vec<u8>,
@@ -89,6 +120,14 @@ pub struct SnesBus {
     /// because `hdma_run_line` is driven from the frame loop at whatever
     /// dot the CPU happened to reach, not at a real hblank dot.
     hdma_in_progress: bool,
+    /// True while general-purpose DMA (`run_channel`) is transferring
+    /// (ticket W16-11). Diagnostic classification only — unlike
+    /// `hdma_in_progress` it feeds nothing but [`Dsp1DrTrace`], so it must
+    /// never be read anywhere near `write_register`'s mid-line
+    /// attribution.
+    mdma_in_progress: bool,
+    /// See [`Dsp1DrTrace`].
+    pub dsp1_trace: Dsp1DrTrace,
     pub timing: Timing,
     pub joypads: Joypads,
     /// `$4016` strobe latch, and the serial shift position per port.
@@ -230,6 +269,8 @@ impl SnesBus {
             apu_overspent: 0,
             hv: crate::regs::HvLatch::default(),
             hdma_in_progress: false,
+            mdma_in_progress: false,
+            dsp1_trace: Dsp1DrTrace::default(),
             timing: Timing::new(),
             joypads: Joypads::default(),
             manual_latch: false,
@@ -511,6 +552,18 @@ impl SnesBus {
         let mut a = c.a_address;
         let mut moved = 0u64;
 
+        // Ticket W16-11: classify this channel's A-bus start for the
+        // probe, BEFORE any byte moves (a channel with `count == 0` still
+        // "starts" for this purpose even though it moves 65536 bytes, not
+        // zero — see the comment above).
+        if matches!(self.target(a), Target::Dsp1Dr | Target::Dsp1Sr) {
+            self.dsp1_trace.mdma_channel_starts += 1;
+            if step == 0 {
+                self.dsp1_trace.mdma_channel_starts_fixed += 1;
+            }
+        }
+        self.mdma_in_progress = true;
+
         for i in 0..total {
             let b = 0x2100u32
                 + u32::from(
@@ -530,6 +583,7 @@ impl SnesBus {
             moved += 1;
         }
 
+        self.mdma_in_progress = false;
         self.dma.channels[ch].a_address = a;
         self.dma.channels[ch].count = 0;
         moved
@@ -741,6 +795,11 @@ impl SnesBus {
                 let bank = c.a_address & 0x00FF_0000;
                 bank | u32::from(c.table_addr.wrapping_add(i as u16))
             };
+            // Ticket W16-11: count units sourced from the DSP-1 window,
+            // BEFORE the read (which is what advances the DR).
+            if matches!(self.target(source), Target::Dsp1Dr | Target::Dsp1Sr) {
+                self.dsp1_trace.hdma_units += 1;
+            }
             let v = self.read(source);
             self.write(b, v);
             moved += 1;
@@ -777,10 +836,27 @@ impl CpuBus for SnesBus {
             // DR reads advance the chip's output cursor (ticket W14-19);
             // `dsp1` is `Some` whenever `target` can return these
             // variants, since both come from the same `dsp_window`.
-            Target::Dsp1Dr => self
-                .dsp1
-                .as_mut()
-                .map_or(self.open_bus, crate::dsp1::Dsp1::read_dr),
+            //
+            // Ticket W16-11: classify the read BEFORE it mutates
+            // `dsp1` — `hdma_in_progress`/`mdma_in_progress` say who is
+            // asking, which is exactly what a probe wants to know about a
+            // Raster stream's drain.
+            Target::Dsp1Dr => {
+                let in_raster = self
+                    .dsp1
+                    .as_ref()
+                    .is_some_and(crate::dsp1::Dsp1::raster_active);
+                if self.hdma_in_progress {
+                    self.dsp1_trace.hdma_reads += 1;
+                } else if self.mdma_in_progress {
+                    self.dsp1_trace.mdma_reads += 1;
+                } else if in_raster {
+                    self.dsp1_trace.cpu_raster_reads += 1;
+                }
+                self.dsp1
+                    .as_mut()
+                    .map_or(self.open_bus, crate::dsp1::Dsp1::read_dr)
+            }
             Target::Dsp1Sr => self.dsp1.as_ref().map_or(self.open_bus, |d| d.read_sr()),
             Target::Open => self.open_bus,
         };
