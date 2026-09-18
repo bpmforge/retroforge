@@ -6574,8 +6574,9 @@
    "unit tests cover the thumbnail priority order and the cache round-trip; this ticket does NOT implement the opt-in libretro-thumbnails network fetch from UX_WAVE_15.md \u00a74 \u2014 that is out of scope here and tracked as a future ticket once W15-05 lands the local pipeline"
   ],
   "points": 5,
-  "status": "in_progress",
+  "status": "done",
   "notes": [
+    "CLOSED 2026-09-18 (lane A). thumbnail.rs holds the pure priority, title normalization, uniformity check and cache round-trip (20 unit tests); rf-cache reused as-is (CacheKey rom_sha256 + asset_hash 'thumbnail' + producer). First-frame capture hooks pump_core_events after the HD-pack composite and skips uniform frames. LibraryView persisted in settings.library.view; library_rows / library_cards share library_context_menu_body; badges (has_states, enhanced, profile_matched) computed per scan like RecencyMeta. Art folder: Settings > Paths, PNG only (image crate png feature already present). tests/library_grid.rs: toggle, placeholder cards, arrows, Enter. Two unrelated pre-existing clippy nits fixed in game_settings.rs/toast.rs. Network fetch is W15-09. Gate: workspace 2005 passing / 0 failed / 39 ignored (agent + orchestrator).",
    "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 5). See that doc \u00a74 for the full art pipeline including the opt-in network fetch this ticket excludes, and \u00a711.",
    "Where: screenshot capture already exists in app.rs; add an image loader via egui_extras; the empty-state cards from design review G-21 slot into the same grid. rf-cache is in write_scope because the thumbnail cache belongs in the existing content-addressed store per rf-cache's own module doc (W4-08), not a second cache."
