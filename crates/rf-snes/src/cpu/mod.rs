@@ -310,6 +310,37 @@ impl Cpu {
     /// Also clears `stopped`: an interrupt is precisely what `WAI` waits
     /// for.
     pub fn interrupt(&mut self, bus: &mut dyn CpuBus, nmi: bool) {
+        let vector: u16 = match (nmi, self.e) {
+            (true, true) => 0xFFFA,
+            (true, false) => 0xFFEA,
+            (false, true) => 0xFFFE,
+            (false, false) => 0xFFEE,
+        };
+        let lo = bus.read(u32::from(vector));
+        let hi = bus.read(u32::from(vector) + 1);
+        let target = u16::from(lo) | (u16::from(hi) << 8);
+        self.dispatch_interrupt(bus, target);
+    }
+
+    /// Dispatch a hardware interrupt whose target address is already known
+    /// — the same push sequence [`Self::interrupt`] uses, but for a CPU
+    /// whose vectors are not fetched from the bus at all (ticket W17-02,
+    /// D-013).
+    ///
+    /// The SA-1's own exception vectors are never read from ROM: fullsnes
+    /// "SNES Cart SA-1 Interrupt/Control on SA-1 Side" states its reset/
+    /// NMI/IRQ vectors ($2203-$2208) "are ALWAYS replacing the normal
+    /// vectors in ROM" — an unconditional override, unlike the SNES side's
+    /// optional one ($220C-$220F, gated by bits in $2209). Reading through
+    /// `bus.read(vector)` for the SA-1 would therefore be wrong even if the
+    /// caller pointed it at the right address; the caller resolves the
+    /// vector itself (from the SA-1 register file) and hands the final PC
+    /// straight in.
+    pub fn interrupt_to_vector(&mut self, bus: &mut dyn CpuBus, target: u16) {
+        self.dispatch_interrupt(bus, target);
+    }
+
+    fn dispatch_interrupt(&mut self, bus: &mut dyn CpuBus, target: u16) {
         self.stopped = false;
         if self.e {
             self.sp = 0x0100 | (self.sp & 0x00FF);
@@ -322,15 +353,7 @@ impl Cpu {
         self.set_flag(flags::I, true);
         self.set_flag(flags::D, false);
         self.pbr = 0;
-        let vector: u16 = match (nmi, self.e) {
-            (true, true) => 0xFFFA,
-            (true, false) => 0xFFEA,
-            (false, true) => 0xFFFE,
-            (false, false) => 0xFFEE,
-        };
-        let lo = bus.read(u32::from(vector));
-        let hi = bus.read(u32::from(vector) + 1);
-        self.pc = u16::from(lo) | (u16::from(hi) << 8);
+        self.pc = target;
     }
 
     /// Execute one instruction.

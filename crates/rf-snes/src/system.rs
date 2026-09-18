@@ -280,11 +280,84 @@ impl SnesSystem {
         if events.vblank_started && self.bus.nmitimen.nmi_enabled() {
             self.pending_nmi = true;
         }
+        // Ticket W17-02 acceptance #3: "the SNES CPU's IRQ line ORed with
+        // the SA-1-raised IRQ". `$2209` bit 7 (SCNT) is a second, level
+        // IRQ source gated by `$2201` bit 7 (SIE); it is otherwise
+        // delivered exactly like the timer IRQ already was. `None` for
+        // every non-SA-1 cartridge, so this changes nothing for them.
+        let sa1_irq_to_snes = self
+            .bus
+            .sa1
+            .as_ref()
+            .is_some_and(|s| s.regs.snes_irq_pending());
         if self.pending_nmi {
             self.pending_nmi = false;
-            self.cpu.interrupt(&mut self.bus, true);
-        } else if self.bus.irq.fired && !self.cpu.flag(crate::cpu::flags::I) {
-            self.cpu.interrupt(&mut self.bus, false);
+            // `$2209` bit 4 optionally redirects the SNES's own NMI vector
+            // to `$220C`/`$220D` (fullsnes "...on SA-1 Side": this is a
+            // vector override, not a second NMI source — the SNES's own
+            // vblank NMI is still what fires).
+            match self
+                .bus
+                .sa1
+                .as_ref()
+                .and_then(|s| s.regs.snes_nmi_vector_override())
+            {
+                Some(vector) => self.cpu.interrupt_to_vector(&mut self.bus, vector),
+                None => self.cpu.interrupt(&mut self.bus, true),
+            }
+        } else if (self.bus.irq.fired || sa1_irq_to_snes) && !self.cpu.flag(crate::cpu::flags::I) {
+            // Same override rule as NMI above, for `$2209` bit 6 / `$220E`-`$220F`.
+            match self
+                .bus
+                .sa1
+                .as_ref()
+                .and_then(|s| s.regs.snes_irq_vector_override())
+            {
+                Some(vector) => self.cpu.interrupt_to_vector(&mut self.bus, vector),
+                None => self.cpu.interrupt(&mut self.bus, false),
+            }
+        }
+
+        // Ticket W17-02 acceptance #2: interleave the SA-1 on the master
+        // clock this instruction (DMA included, the same "spent" total the
+        // raster above advances by) rather than running it on its own,
+        // unsynchronised loop. Credit never accumulates while Reset is
+        // held — see `Sa1State::credit`'s doc — so this loop's iteration
+        // count is bounded by `(spent + dma_cycles) / 2` (the cheapest
+        // possible SA-1 access cost), which proves it terminates without
+        // an artificial cap (law 8): `cost` is always at least 2 UNLESS
+        // Wait holds the core (`Sa1State::step` then returns 0 having done
+        // nothing but the one-time reset-vector fetch), and that case is
+        // handled by the explicit `break` below rather than relying on
+        // `cost` alone — a `while credit > 0` loop whose body can return 0
+        // is exactly the memory-bomb shape law 8 warns about, so the Wait
+        // check runs every pass, before the loop would ever see a second
+        // zero-cost iteration.
+        let master_this_step = spent + dma_cycles;
+        // Disjoint field borrows (`bus.rom` alongside `bus.sa1`), not a
+        // clone of a multi-megabyte ROM every instruction.
+        let bus = &mut self.bus;
+        if let Some(sa1) = bus.sa1.as_mut() {
+            if sa1.regs.sa1_reset_asserted() {
+                sa1.credit = 0;
+            } else {
+                sa1.credit += master_this_step;
+                while sa1.credit > 0 {
+                    match sa1.step(&bus.rom) {
+                        Ok(cost) => sa1.credit = sa1.credit.saturating_sub(cost),
+                        Err(_opcode) => break,
+                    }
+                    // Checked AFTER every step, not just once before the
+                    // loop: `step` itself may be what just asserted a
+                    // reset-to-running transition (booting), and Wait can
+                    // be asserted mid-run by the very code the SA-1 is
+                    // executing.
+                    if sa1.regs.sa1_reset_asserted() || sa1.regs.sa1_wait_asserted() {
+                        sa1.credit = 0;
+                        break;
+                    }
+                }
+            }
         }
 
         result
