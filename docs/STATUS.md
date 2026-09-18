@@ -3892,3 +3892,18 @@ stories, 10 decisions).
   the SNES-side code and sit at a blank screen, which is the honest
   state before the second CPU exists. Gate: workspace **2189 passing /
   0 failed / 43 ignored**, clippy clean, arch OK.
+
+- **W17-02 — SA-1 slice 2: the second CPU** (2026-09-18). The SA-1 is
+  now a second instance of the SNES CPU core over its own bus, owned
+  next to the shared I-RAM, BW-RAM and ROM so nothing is copied, and
+  run to catch up with the main CPU on the master clock after every
+  instruction, with a flat cost model for contended memory that slice 4
+  will refine. Reset, wait, both directions of IRQ and NMI, the message
+  nibbles, the vectors and the status registers follow fullsnes's two
+  control sections, each with tests, and the SA-1's vectors always come
+  from its ports rather than ROM. Kirby Super Star, Kirby's Dream Land
+  3 and both PGA Tour games render; Power Rangers Zeo and Super Mario
+  RPG stay blank, the latter with its SA-1 spinning and no message ever
+  exchanged, which points at the DMA and arithmetic units of slice 3.
+  Gate: workspace **2200 passing / 0 failed / 43 ignored**, clippy
+  clean, arch OK.
