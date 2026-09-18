@@ -6961,8 +6961,9 @@
     "Super Mario Kart's track and Pilotwings' flight view are checked by eye and recorded; the census is re-run and any bucket move recorded"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 (lane C). Finding reverses W14-21's assumption: both titles drain 0Ah raster output by CPU polling only (SMK 99,200 DR reads from frame 42; Pilotwings 87,868 from frame 537; 0 MDMA/HDMA reads). DMA/HDMA sourcing from Dsp1Dr already worked (target() resolution shared with the CPU) and is now pinned by dsp1_dma.rs (fixed-address MDMA, indirect HDMA into the Mode 7 registers). Diagnostic Dsp1DrTrace on SnesBus is unsaved. Census unchanged. The by-eye check of SMK's track and Pilotwings' flight view is Brad's and now decides whether the reconstructed projection/raster maths (W14-21) is right. Gate: rf-snes 335 passing; workspace 1986 passing / 0 failed (agent); arch OK.",
     "FILED 2026-09-18 by W14-21's close: raster is documented as DMA-drained and DMA sourcing from Dsp1Dr is unconfirmed; Brad's by-eye check of SMK is pending and decides whether this is needed."
    ],
    "stories": []
