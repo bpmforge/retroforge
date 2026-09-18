@@ -6867,8 +6867,9 @@
     "benchmarked with W16-01's harness and gated the same way"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 (lane A). rf-renderer/src/metalfx.rs: availability (feature/macOS/supportsDevice) + MetalFxScaler (double-buffered, shared MTLCommandQueue via wgpu-hal, no waitUntilCompleted; produced-slot field fixes an index-flip bug; wgpu pending-writes flush documented). Steady-state p95 0.71 / 0.82 ms (rows metalfx-spatial-2x; synchronous spike now 0.34 / 0.39 ms, so W16-01's 25 ms was cold). Temporal: API accepts zero MVs + constant depth in a one-shot probe; MetalFxSetting::Temporal round-trips but the UI never offers it -- ship only after a steady-state measurement. Settings > Video radio, Off by default (law 6); badge suffix; not on the enhancement ladder. HANDOFF for release builds: scripts/release.sh should add retroforge/metalfx on darwin (scripts/** out of scope; do with the next release-script touch). Gate: workspace 2118 passing / 0 failed / 42 ignored; ignored metalfx bench 4/4; evidence 22 rows.",
     "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
    ],
    "stories": []

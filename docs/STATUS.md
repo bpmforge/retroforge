@@ -3803,3 +3803,20 @@ stories, 10 decisions).
   console tint read tokens instead of literals. Motion stays at the
   ceiling: card hover elevation and a short modal fade. Gate: workspace
   **2108 passing / 0 failed / 42 ignored**, clippy clean, arch OK.
+
+- **W16-08 — MetalFX spatial scaler** (2026-09-18, lane A). Apple's
+  first-party upscaler now sits in Settings › Video as "MetalFX
+  spatial" on Macs that support it, disabled with the reason elsewhere.
+  The scaler shares wgpu's own Metal command queue through the hal
+  layer, double-buffers its textures and never waits; pipelined it costs
+  0.7 to 0.8 ms per frame at both sizes, so the 25 ms recorded by the
+  W16-01 spike was a cold synchronous run, not the cost of the pass.
+  Because it upscales the same pixels and never touches the simulation
+  it is a scaler, not an enhancement: usable in Accuracy Mode, off by
+  default on a fresh install, shown as a badge suffix rather than a
+  ladder entry. Temporal mode accepted zero motion vectors in a probe
+  and stays unshipped until measured. Two integration traps are written
+  into the module for the next person: wgpu batches texture writes
+  until the next submit, and the double buffer flips after each scale.
+  Gate: workspace **2118 passing / 0 failed / 42 ignored**, clippy
+  clean with and without the feature, arch OK.
