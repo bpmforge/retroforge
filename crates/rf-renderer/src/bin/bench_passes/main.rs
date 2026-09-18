@@ -23,6 +23,7 @@ mod minijson;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rf_renderer::fog::{FogParams, FogPass};
 use rf_renderer::gpu::GpuContext;
 use rf_renderer::shader_chain::{ChainStage, ShaderChain};
 
@@ -64,6 +65,10 @@ fn main() {
         let samples = time_neural_stub(&gpu, &src, w, h);
         rows.push(pass_row("neural-stub", &size_label, &samples, &gpu));
         report("neural-stub", &size_label, &samples);
+
+        let samples = time_fog_pass(&gpu, &src, w, h);
+        rows.push(pass_row("fog", &size_label, &samples, &gpu));
+        report("fog", &size_label, &samples);
     }
 
     let evidence_path = evidence_path();
@@ -154,6 +159,32 @@ fn time_shader_pass(
         chain
             .render(gpu, src, w, h, &stages)
             .expect("bench-passes: shader chain render failed");
+        samples.push(t0.elapsed());
+    }
+    samples
+}
+
+/// Times [`FogPass::render`] (ticket W16-04) end-to-end: upload scene +
+/// density textures, render, blocking readback -- same wall-clock-per-call
+/// contract as [`time_shader_pass`], so this row is comparable to
+/// `nearest`/`xbr`/`crt` in the same table (`docs/design/
+/// ENHANCEMENT_WAVE_16.md` §8's frame-budget gate applies identically).
+/// The density texture reuses `src` (the same synthetic pattern) since
+/// this harness only cares about wall time, not a realistic density
+/// shape -- the golden test (`tests/fog_golden.rs`) is where the actual
+/// visual fixture lives.
+fn time_fog_pass(gpu: &GpuContext, src: &[u8], w: u32, h: u32) -> Vec<Duration> {
+    let fog = FogPass::new(gpu);
+    let params = FogParams::new(1.0, 0.05, 0.02, 0.8);
+    // One untimed warm-up, same reasoning as `time_shader_pass`.
+    let _ = fog
+        .render(gpu, src, src, w, h, params)
+        .expect("bench-passes: fog pass render failed");
+    let mut samples = Vec::with_capacity(FRAMES);
+    for _ in 0..FRAMES {
+        let t0 = Instant::now();
+        fog.render(gpu, src, src, w, h, params)
+            .expect("bench-passes: fog pass render failed");
         samples.push(t0.elapsed());
     }
     samples

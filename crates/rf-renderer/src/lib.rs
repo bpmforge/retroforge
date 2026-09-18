@@ -43,6 +43,7 @@
 pub mod compare;
 pub mod composite;
 pub mod fallback;
+pub mod fog;
 pub mod frame;
 pub mod gpu;
 pub mod layers;

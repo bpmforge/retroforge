@@ -41,6 +41,7 @@
 //! treats any other variant as unreachable — building a fake resolver for
 //! the other six would be exactly the scaffolding the brief forbids.
 
+use rf_core_api::{PixelLayer, PpuPixel};
 use rf_enhance::camera::{
     fm13_apply_divisor, fm13_zoom_divisor, ultrawide_scene_over_canvas, FogMask, FogStyle,
 };
@@ -450,6 +451,76 @@ pub fn render_level_rgba(
     rgba
 }
 
+// ---------------------------------------------------------------------
+// Fog/steam pass (ticket W16-04; `docs/design/ENHANCEMENT_WAVE_16.md` §4):
+// the two pure conversions from `rf_enhance::atmosphere`'s own output into
+// `rf_renderer::fog::FogPass`'s plain-data inputs. This is the app-shell
+// resolution step ARCHITECTURE.md §3 assigns here (module doc's own
+// opening line) — `rf-renderer` cannot know about `SceneLayer::ExtractedBg`
+// and `rf-enhance` cannot know about an RGBA texture buffer.
+// ---------------------------------------------------------------------
+
+/// Build a density-map RGBA buffer from an `ExtractedBg` layer's own
+/// pixels (`rf_enhance::scene_graph::SceneLayer::ExtractedBg`) —
+/// `rf_renderer::fog`'s WGSL pass only reads the red channel, so this
+/// writes the same value into every channel and full alpha.
+///
+/// **Approximation, stated plainly.** `PpuPixel::palette_index` is a raw
+/// palette-table index, not a resolved colour — this crate has no CGRAM
+/// snapshot threaded through `SceneLayer::ExtractedBg` (it carries none;
+/// see that variant's own fields), so the index itself is used as a
+/// brightness proxy, scaled into the full `u8` range. This is enough
+/// structure for the fog shader's multi-octave sampling to read real
+/// density variation rather than a flat plane, but it is not the plane's
+/// true rendered colour — resolving through the actual palette is future
+/// work for whichever ticket threads a palette snapshot through the scene
+/// graph. A pixel that never belonged to this layer (backdrop-filled by
+/// `rf_enhance::atmosphere::extracted_bg_layer`) reads as zero density.
+#[must_use]
+pub fn atmosphere_density_rgba(pixels: &[PpuPixel], layer: u8) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pixels.len() * 4);
+    for px in pixels {
+        let density = if px.layer == PixelLayer::Background(layer) {
+            px.palette_index
+        } else {
+            0
+        };
+        out.extend_from_slice(&[density, density, density, 255]);
+    }
+    out
+}
+
+/// Convert an atmosphere layer's raw hardware scroll delta between two
+/// captures into `rf_renderer::fog::FogParams`'s UV-space drift-per-second
+/// — the "follows the layer's scroll telemetry" half of acceptance
+/// criterion 1.
+///
+/// `width`/`height` are the layer's own pixel dimensions (`SceneLayer::
+/// ExtractedBg::width`/`height`): a scroll register moves in *pixels*, a
+/// UV coordinate is `[0, 1]` over that same buffer, so dividing the pixel
+/// delta by the buffer size is the direct unit conversion, not a tuned
+/// constant. `dt_secs <= 0.0` returns zero drift rather than dividing by
+/// zero or a negative time — a caller passing a bad timestamp gets a
+/// stationary fog frame, not a crash or a wraparound value that would
+/// send the fog spinning.
+#[must_use]
+pub fn atmosphere_scroll_drift_per_second(
+    prev_scroll: (i64, i64),
+    cur_scroll: (i64, i64),
+    width: u16,
+    height: u16,
+    dt_secs: f32,
+) -> (f32, f32) {
+    if dt_secs <= 0.0 || width == 0 || height == 0 {
+        return (0.0, 0.0);
+    }
+    let dx_px = (cur_scroll.0 - prev_scroll.0) as f32;
+    let dy_px = (cur_scroll.1 - prev_scroll.1) as f32;
+    let dx_uv = dx_px / f32::from(width);
+    let dy_uv = dy_px / f32::from(height);
+    (dx_uv / dt_secs, dy_uv / dt_secs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,5 +761,67 @@ mod tests {
         assert!(message.contains("8192"));
         assert!(message.contains("4096"));
         assert!(message.contains("view too large for GPU, reduced"));
+    }
+
+    // --- Fog/steam pass conversions (ticket W16-04) ---------------------
+
+    fn bg_px(layer: u8, palette_index: u8) -> PpuPixel {
+        PpuPixel {
+            palette_index,
+            layer: PixelLayer::Background(layer),
+            sprite_id: None,
+            priority: 0,
+        }
+    }
+
+    fn backdrop_px() -> PpuPixel {
+        PpuPixel {
+            palette_index: 0,
+            layer: PixelLayer::Backdrop,
+            sprite_id: None,
+            priority: 0,
+        }
+    }
+
+    #[test]
+    fn density_rgba_carries_only_the_named_layers_own_pixels() {
+        let pixels = vec![bg_px(1, 42), backdrop_px(), bg_px(0, 200), bg_px(1, 9)];
+        let rgba = atmosphere_density_rgba(&pixels, 1);
+        assert_eq!(rgba.len(), pixels.len() * 4);
+        assert_eq!(&rgba[0..4], &[42, 42, 42, 255], "layer 1's own pixel");
+        assert_eq!(
+            &rgba[4..8],
+            &[0, 0, 0, 255],
+            "backdrop reads as zero density"
+        );
+        assert_eq!(
+            &rgba[8..12],
+            &[0, 0, 0, 255],
+            "another layer's pixel must not leak into this layer's density"
+        );
+        assert_eq!(&rgba[12..16], &[9, 9, 9, 255]);
+    }
+
+    #[test]
+    fn scroll_drift_converts_pixel_delta_to_uv_per_second() {
+        // 8px/frame horizontal scroll, 64-wide layer, 1/60s frame -> UV
+        // delta is 8/64 = 0.125 per frame, so 7.5 UV units/sec.
+        let (dx, dy) = atmosphere_scroll_drift_per_second((0, 0), (8, 0), 64, 32, 1.0 / 60.0);
+        assert!((dx - 7.5).abs() < 1e-4, "dx = {dx}");
+        assert_eq!(dy, 0.0);
+    }
+
+    #[test]
+    fn scroll_drift_is_zero_for_a_non_positive_or_zero_sized_input() {
+        assert_eq!(
+            atmosphere_scroll_drift_per_second((0, 0), (8, 8), 64, 32, 0.0),
+            (0.0, 0.0),
+            "dt <= 0 must not divide by zero or go negative-time"
+        );
+        assert_eq!(
+            atmosphere_scroll_drift_per_second((0, 0), (8, 8), 0, 32, 1.0 / 60.0),
+            (0.0, 0.0),
+            "a zero-width layer must not divide by zero"
+        );
     }
 }
