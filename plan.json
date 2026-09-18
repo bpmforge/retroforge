@@ -7054,8 +7054,9 @@
     "by-eye on Super Mario Kart and Pilotwings recorded by Brad; a kittest scenario asserts the live view changes on a synthetic mode-7 frame"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 (lane A, last ticket of the W15/W16 loop). HANDOFF -- WRITE_SCOPE WIDENED to crates/rf-core-api (Mode7Frame, CoreEvent payload, Copy/Eq dropped), crates/rf-debugger/src/event_timeline.rs and crates/rf-enhance/src/bus.rs (one-line cloned() follow-ups). Capture: debug::mode7_frame over Ppu::line_state; lines None unless a visible line differs from top. Camera: derive_pitch_deg (ratio clamped >= 1, t = 1 - 1/ratio, lerp 88 -> 52 degrees). Cache: mode7_plane_cache keyed by FNV-1a over VRAM+CGRAM, density 2. Row mode7_ground (Availability::NeedsGameState), shares the diorama render slot; billboards small-size OAM only (documented). Tests: rf-snes w16_14_tests (3), mode7_plane pitch tests (4), enhance_ui gating test, tests/mode7_ground_live_view.rs via inject_mode7_frame_for_test. Pre-existing rf-nes mmc3.rs clippy --all-targets nits noted by the agent are outside scope and outside the law-3 gate (which passed). By-eye on Super Mario Kart / Pilotwings is Brad's: Enhanced mode + 'Diorama: Mode 7' in Game Settings once the track is on screen. Gate: workspace 2171 passing / 0 failed / 43 ignored (orchestrator), arch OK, evidence 24 rows.",
     "FILED 2026-09-18 by W16-09's close: the renderer path exists and is golden-tested; the app wiring and the per-scanline capture are what make it visible and correct on real titles."
    ],
    "stories": []

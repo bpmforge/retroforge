@@ -3863,3 +3863,18 @@ stories, 10 decisions).
   verifier or ureq panics inside TLS. It now returns a real PNG. Gate:
   workspace **2162 passing / 0 failed / 43 ignored**, clippy clean,
   arch OK.
+
+- **W16-14 — Mode 7 ground in the live view** (2026-09-18, lane A, the
+  last ticket of the Waves 15-16 loop). The SNES core now reports the
+  Mode 7 matrix at the top and bottom visible lines, and the whole
+  per-line table only when HDMA changed it mid-frame, all read from the
+  per-line state the PPU already keeps, so nothing new is captured and
+  nothing allocates in the common case. The renderer turns the ratio of
+  top to bottom scale into a camera pitch between top-down and a racing
+  view, and the app rebuilds the plane texture only when VRAM or CGRAM
+  change. A new per-game row, "Diorama: Mode 7", needs Enhanced mode and
+  a live mode-7 screen and no profile at all, since the geometry comes
+  from the hardware's own transform. Brad's by-eye on Mario Kart and
+  Pilotwings is the check that decides whether the horizon lands where
+  the game puts it. Gate: workspace **2171 passing / 0 failed / 43
+  ignored**, clippy clean, arch OK.
