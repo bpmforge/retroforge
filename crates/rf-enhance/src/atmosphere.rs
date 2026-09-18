@@ -332,6 +332,38 @@ fn extracted_bg_layer(
     }
 }
 
+/// Build the `SceneLayer::ExtractedBg` layer directly for a profile-pinned
+/// plane (ticket W16-04, `docs/design/ENHANCEMENT_WAVE_16.md` §4:
+/// "a profile may pin the plane directly, skip detection, the same
+/// mechanism anti-flicker uses today").
+///
+/// **Scope note on "the same mechanism anti-flicker uses today".**
+/// `crate::trust::TrustLadder::pin` is that mechanism (FR-ENH-011: "profiles
+/// may pin states") and is exactly what a caller should combine this
+/// function with — `ladder.pin(HEURISTIC_ID, TrustState::Active)` alongside
+/// calling this function instead of running [`AtmosphereDetector::observe`].
+/// What this function does NOT do is parse a `[atmosphere] plane = n`
+/// profile TOML section — `crates/rf-profiles/**` is outside this ticket's
+/// `write_scope` (`crates/rf-renderer/**`, `crates/rf-enhance/**`,
+/// `crates/retroforge/**`), and `[antiflicker]`
+/// (`crates/rf-profiles/src/schema.rs`) itself has no call site that wires
+/// it into `TrustLadder::pin` today either — there is no existing profile
+/// -> ladder-pin wiring in this codebase to mirror yet. Adding the TOML
+/// section and its loader wiring is a follow-up ticket with write access
+/// to `rf-profiles`; this function is the ready-to-call producer for it,
+/// the same "ready-to-wire" posture `crate::scene_graph::solidity_mask`'s
+/// own doc takes for the identical write_scope reason.
+#[must_use]
+pub fn pinned_layer(
+    layer: u8,
+    sub: &[SubPixel],
+    width: u16,
+    height: u16,
+    scroll: (i64, i64),
+) -> SceneLayer {
+    extracted_bg_layer(layer, sub, width, height, scroll)
+}
+
 /// Shadow-rung atmosphere-layer heuristic (module doc). Construct one per
 /// play session and call [`observe`](AtmosphereDetector::observe) once per
 /// frame, in order — same lifetime shape as `crate::sprite_historian::SpriteHistorian`
@@ -845,5 +877,75 @@ mod tests {
             d.report_card().is_empty(),
             "colour math on only a fifth of the plane's own pixels is not \"a large share\""
         );
+    }
+
+    // --- Ticket W16-04: the pin mechanism and the ladder gating it ------
+
+    use crate::trust::{TrustLadder, TrustState};
+
+    /// `pinned_layer` must build the same shape [`extracted_bg_layer`]
+    /// would, WITHOUT running the detector at all -- "skip detection" is
+    /// the whole point of a pin.
+    #[test]
+    fn pinned_layer_builds_an_extracted_bg_without_running_the_detector() {
+        let sub = candidate_sub(2, 30, 1, ColorMathOp::AddHalf, 1.0);
+        let layer = pinned_layer(2, &sub, WIDTH, HEIGHT, (5, 7));
+        match layer {
+            SceneLayer::ExtractedBg {
+                layer: BgLayerId(n),
+                width,
+                height,
+                scroll,
+                pixels,
+            } => {
+                assert_eq!(n, 2);
+                assert_eq!(width, WIDTH);
+                assert_eq!(height, HEIGHT);
+                assert_eq!(scroll, (5, 7));
+                assert!(pixels.iter().any(|p| p.layer == PixelLayer::Background(2)));
+            }
+            other => panic!("expected ExtractedBg, got {other:?}"),
+        }
+    }
+
+    /// The ladder test the ticket names explicitly: shadow does not
+    /// render, active does. This module has no renderer to call, so
+    /// "render" here is `TrustLadder::should_act` -- the one question
+    /// every real call site (the app shell's fog-pass invocation) must
+    /// ask before it may call `pinned_layer`/`FogPass::render` at all.
+    #[test]
+    fn the_trust_ladder_gates_whether_the_fog_pass_may_act() {
+        let mut ladder = TrustLadder::new();
+        let scene = "scene-a";
+
+        assert!(
+            !ladder.should_act(HEURISTIC_ID, scene),
+            "fresh install: shadow, must not act"
+        );
+
+        ladder.set_state(HEURISTIC_ID, TrustState::Advisory);
+        assert!(
+            !ladder.should_act(HEURISTIC_ID, scene),
+            "advisory is a suggestion, not an action -- must still not act"
+        );
+
+        ladder.set_state(HEURISTIC_ID, TrustState::Active);
+        assert!(
+            ladder.should_act(HEURISTIC_ID, scene),
+            "active must act -- this is the state a real caller checks before \
+             calling `pinned_layer`/rendering the fog pass"
+        );
+    }
+
+    /// A profile pin overrides the ladder the same way it does for any
+    /// other heuristic (`crate::trust`'s own test of this exact
+    /// mechanism) -- checked again here under this heuristic's own name,
+    /// since acceptance criterion 3 names it specifically.
+    #[test]
+    fn a_profile_pin_forces_the_plane_active_regardless_of_the_users_setting() {
+        let mut ladder = TrustLadder::new();
+        ladder.set_state(HEURISTIC_ID, TrustState::Shadow);
+        ladder.pin(HEURISTIC_ID, TrustState::Active);
+        assert!(ladder.should_act(HEURISTIC_ID, "scene-a"));
     }
 }

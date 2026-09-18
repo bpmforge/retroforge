@@ -106,6 +106,18 @@ pub fn feature_rows(settings: &GameSettings, profile_matched: bool) -> Vec<Featu
     let (flicker_av, flicker_on) = generic(settings.deflicker);
     let (wide_av, wide_on) = profiled(settings.widescreen_decoded);
     let (level_av, level_on) = profiled(settings.full_level_view);
+    // Ticket W16-04: unlike the toggles above, this row's "on" state IS
+    // the trust ladder's own rung (D-004/ENHANCEMENT_RUNTIME.md §2a) — the
+    // fog pass renders exactly when the heuristic is `Active`
+    // (`TrustLadder::should_act`'s own "the one question every call site
+    // must ask"), not a second, independent settings bool that could
+    // drift from it. `Advisory` shows as OFF here (not `Available`'s
+    // effective-count) because a badge is a suggestion, never an action —
+    // the same distinction `TrustLadder::should_act`'s own doc calls out
+    // as "most likely to be got wrong later".
+    let atmosphere_active =
+        settings.trust.state(rf_enhance::atmosphere::HEURISTIC_ID) == TrustState::Active;
+    let (fog_av, fog_on) = generic(atmosphere_active);
 
     vec![
         FeatureRow {
@@ -139,6 +151,14 @@ pub fn feature_rows(settings: &GameSettings, profile_matched: bool) -> Vec<Featu
             enabled: level_on,
             availability: level_av,
             heuristic: None,
+        },
+        FeatureRow {
+            id: "atmosphere_fog",
+            label: "Atmosphere: fog",
+            scope: "generic, heuristic-gated",
+            enabled: fog_on,
+            availability: fog_av,
+            heuristic: Some(rf_enhance::atmosphere::HEURISTIC_ID),
         },
     ]
 }
@@ -346,7 +366,7 @@ mod tests {
     #[test]
     fn unavailable_rows_are_still_listed() {
         let rows = feature_rows(&GameSettings::default(), false);
-        assert_eq!(rows.len(), 4, "every feature is listed in every mode");
+        assert_eq!(rows.len(), 5, "every feature is listed in every mode");
         assert!(rows.iter().all(|r| r.availability.explanation().is_some()));
     }
 
@@ -362,6 +382,55 @@ mod tests {
             !active.iter().any(|l| l.contains("Full-level view")),
             "the breakdown lists what is ON, not what exists"
         );
+    }
+
+    /// Ticket W16-04, acceptance criterion 3: the badge names the effect
+    /// specifically ("Atmosphere: fog") when the heuristic is `Active`,
+    /// and `Advisory`/`Shadow` must NOT count it as effective — the same
+    /// "advisory does not act" law `TrustLadder::should_act`'s own tests
+    /// assert, checked here at the UI layer too.
+    #[test]
+    fn the_badge_names_atmosphere_fog_only_when_the_ladder_is_active() {
+        let mut s = settings(Mode::Enhanced);
+        s.sprite_overlay = false;
+        s.deflicker = false;
+        s.widescreen_decoded = false;
+        s.full_level_view = false;
+
+        // Shadow (default): not effective, not named.
+        assert!(!feature_rows(&s, false)
+            .iter()
+            .find(|r| r.id == "atmosphere_fog")
+            .unwrap()
+            .effective());
+        assert!(!badge_breakdown(&s, false)
+            .iter()
+            .any(|l| l.contains("Atmosphere: fog")));
+
+        // Advisory: still not effective, still not named -- a suggestion
+        // is not an action.
+        s.trust
+            .set_state(rf_enhance::atmosphere::HEURISTIC_ID, TrustState::Advisory);
+        assert!(!feature_rows(&s, false)
+            .iter()
+            .find(|r| r.id == "atmosphere_fog")
+            .unwrap()
+            .effective());
+        assert!(!badge_breakdown(&s, false)
+            .iter()
+            .any(|l| l.contains("Atmosphere: fog")));
+
+        // Active: effective, and the breakdown names it specifically.
+        s.trust
+            .set_state(rf_enhance::atmosphere::HEURISTIC_ID, TrustState::Active);
+        assert!(feature_rows(&s, false)
+            .iter()
+            .find(|r| r.id == "atmosphere_fog")
+            .unwrap()
+            .effective());
+        assert!(badge_breakdown(&s, false)
+            .iter()
+            .any(|l| l.contains("Atmosphere: fog")));
     }
 
     /// A "suppressed" heuristic is not acting, so the chip must say so —

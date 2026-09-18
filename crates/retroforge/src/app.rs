@@ -6255,7 +6255,12 @@ impl eframe::App for RetroForgeApp {
 /// it as a general mechanism"), so the set of names that actually exist
 /// is the shell's knowledge, not the mechanism's. New heuristics —
 /// stitcher scene-cut, profile decoders — join by appearing here.
-pub(crate) const HEURISTICS: &[&str] = &["anti-flicker"];
+/// Ticket W16-04 adds `rf_enhance::atmosphere::HEURISTIC_ID` — this is the
+/// Game Settings window's own toggle for promoting the fog pass from
+/// shadow to advisory to active (acceptance criterion 3), the same
+/// mechanism anti-flicker already uses; no separate fog-specific control
+/// is needed because [`Self::heuristics_panel`] is generic over the name.
+pub(crate) const HEURISTICS: &[&str] = &["anti-flicker", rf_enhance::atmosphere::HEURISTIC_ID];
 
 /// The two same-geometry renderings of one frame the compare view and the
 /// screenshot both work from (ticket W3-04).

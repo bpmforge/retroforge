@@ -3645,3 +3645,20 @@ stories, 10 decisions).
   value, so the Finder, Explorer and xdg-open shapes are all tested on
   this machine. Gate: workspace **1955 passing / 0 failed / 36
   ignored**, clippy clean, arch OK.
+
+- **W16-04 — fog and steam pass** (2026-09-18). The first Diorama
+  effect that draws. A WGSL pass takes the atmosphere plane the W16-03
+  detector found and uses the plane's own pixels as a density map:
+  three scrolled octaves with time-driven drift, colour blended toward
+  a fog tint, alpha left alone so the accurate silhouette is never
+  hidden, which the golden asserts. The renderer stays independent of
+  the enhancement crate; the app shell converts the layer to a density
+  texture and its scroll to drift. On the M4 Max the pass costs about
+  2.3 ms p95 at 256x240 and 3 ms at 512x448, recorded in the GPU
+  evidence, and a rolling-p95 budget gate switches it off above 16.67
+  ms and back on below 13. The heuristic joins the Game Settings
+  ladder, the badge says "Atmosphere: fog" only when active, and
+  hold-to-peek shows the original. Left open: a profile-pin field in
+  the profile schema, and Brad's by-eye check on a real fog scene once
+  the detector is set Active for that game. Gate: workspace **1984
+  passing / 0 failed / 39 ignored**, clippy clean, arch OK.
