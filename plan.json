@@ -6540,7 +6540,7 @@
    "a test or manual check confirms each converted dialog still blocks/dismisses correctly and each toast auto-dismisses without blocking emulation (per FRONTEND_UI \u00a71 principle 3)"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "notes": [
    "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 4). See that doc \u00a75 for the full before/after dialog table and \u00a711.",
