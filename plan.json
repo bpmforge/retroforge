@@ -6672,8 +6672,9 @@
     "the numbers set the frame-budget gate threshold in docs (D-012): a pass is eligible for real time only under X ms p95, X chosen from the measurement; the doc says which models and hardware pass today"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-17 (lane C). Numbers on M4 Max/Metal in docs/evidence/gpu-passes.json and ENHANCEMENT_WAVE_16.md §8; threshold p95 < 16.67 ms. CAVEAT recorded by the orchestrator: the ONNX figure (~55 s/frame, identical on CPU and CoreML EPs, fp32 export with a static 64x64 input tiled ~2 s/tile) is not a credible GPU number -- it indicates the CoreML EP fell back to CPU on that model graph and the model is a heavy variant; before W16-07 decides anything, re-measure with a compact model (RealESRGAN-x4 compact/SRVGGNet class), a dynamic-shape export, batched tiles, and confirm CoreML op coverage; MetalFX 25 ms is a synchronous single-buffer measurement, pipelining is W16-08. What IS settled: the harness, the evidence file + validator, the fetch scripts with licence ledger, the gate threshold, and that the shader chain and the neural stand-in pass comfortably.",
     "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
    ],
    "stories": []
