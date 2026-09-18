@@ -115,7 +115,12 @@ impl ToastStack {
     /// finished. Called every frame regardless of whether any toast is
     /// queued — the common case is an empty `Vec` and this is a cheap
     /// no-op then.
-    pub fn show(&mut self, ctx: &egui::Context, palette: &crate::accessibility::Palette) {
+    ///
+    /// Ticket W15-07: takes `&Tokens` rather than `&Palette` — `bg`/`ink`/
+    /// `accent` are the same colours `Palette::raised`/`text`/`accent`
+    /// were, now read through the token set every other W15 surface uses,
+    /// so this is a signature change with no visual change.
+    pub fn show(&mut self, ctx: &egui::Context, tokens: &crate::theme::Tokens) {
         let now = ctx.time();
         self.toasts
             .retain(|t| now - t.created_at < DEFAULT_DURATION + FADE_SECS);
@@ -127,11 +132,9 @@ impl ToastStack {
         // egui only repaints on demand otherwise.
         ctx.request_repaint();
 
-        let bg = egui::Color32::from_rgb(palette.raised[0], palette.raised[1], palette.raised[2]);
-        let text_colour =
-            egui::Color32::from_rgb(palette.text[0], palette.text[1], palette.text[2]);
-        let accent =
-            egui::Color32::from_rgb(palette.accent[0], palette.accent[1], palette.accent[2]);
+        let bg = tokens.surface;
+        let text_colour = tokens.ink;
+        let accent = tokens.accent;
 
         egui::Area::new(egui::Id::new("rf_toast_stack"))
             .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0))
@@ -201,16 +204,16 @@ mod tests {
         // Not yet expired: `show` draws (needs a pass in progress) and
         // prunes in the same call, so drive it inside a pass like the
         // real `impl eframe::App::ui` does.
-        let default_palette = crate::accessibility::Palette::DEFAULT;
+        let tokens = crate::theme::Tokens::dark();
         ctx.begin_pass(egui::RawInput::default());
-        stack.show(&ctx, &default_palette);
+        stack.show(&ctx, &tokens);
         let _ = ctx.end_pass();
         assert!(!stack.is_empty());
 
         // Push it past DEFAULT_DURATION + FADE_SECS.
         advance(DEFAULT_DURATION + FADE_SECS + 1.0);
         ctx.begin_pass(egui::RawInput::default());
-        stack.show(&ctx, &default_palette);
+        stack.show(&ctx, &tokens);
         let _ = ctx.end_pass();
         assert!(
             stack.is_empty(),

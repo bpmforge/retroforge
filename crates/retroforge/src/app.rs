@@ -277,25 +277,6 @@ const CARD_SPACING: f32 = 10.0;
 /// visibly wrong box.
 const CARD_THUMB_HEIGHT: f32 = (CARD_WIDTH - 12.0) * 15.0 / 16.0;
 
-/// Acceptance 4's "generic, console-tinted placeholder" — a flat colour
-/// distinct per console (and for an unrecognized ROM), so a shelf of
-/// placeholder cards still visually separates NES from SNES at a glance,
-/// the way real box art would, without claiming to BE box art.
-fn console_tint(ui: &egui::Ui, identity: &crate::library::EntryIdentity) -> egui::Color32 {
-    let base = ui.visuals().widgets.noninteractive.bg_fill;
-    match identity {
-        crate::library::EntryIdentity::Recognized {
-            console: crate::library::Console::Nes,
-            ..
-        } => egui::Color32::from_rgb(120, 70, 40).lerp_to_gamma(base, 0.35),
-        crate::library::EntryIdentity::Recognized {
-            console: crate::library::Console::Snes,
-            ..
-        } => egui::Color32::from_rgb(90, 60, 130).lerp_to_gamma(base, 0.35),
-        crate::library::EntryIdentity::Unrecognized { .. } => base,
-    }
-}
-
 /// The whole application's UI-thread-owned state.
 pub struct RetroForgeApp {
     /// Ticket W11-03: why each background did or did not widen. `Some` is
@@ -362,6 +343,12 @@ pub struct RetroForgeApp {
     sprite_layer_texture: Option<egui::TextureHandle>,
     status: String,
     crash: Option<CoreCrashReport>,
+    /// Ticket W15-07: the last-shown crash report, kept alive purely for
+    /// rendering while `crash_dialog`'s fade-out plays after `crash` has
+    /// already been cleared. Never read for anything but that render —
+    /// `crash.is_some()` (via `crash`, not this field) is still what
+    /// actually gates the dialog's presence.
+    crash_fade_cache: Option<CoreCrashReport>,
     /// Mirrors the core thread's run state for button labels/enablement;
     /// the core thread itself (`EmuStepper::state`) is the source of
     /// truth — this is only ever set right after sending a command, so it
@@ -529,6 +516,11 @@ pub struct RetroForgeApp {
     /// (`state_slots::SlotInfo::saved.is_none()`) never populate this —
     /// there is nothing to overwrite, so nothing to confirm.
     pending_overwrite: Option<crate::state_slots::SlotId>,
+    /// Ticket W15-07: `pending_overwrite`'s last value, kept for
+    /// `overwrite_confirm_modal`'s fade-out render only — see
+    /// `crash_fade_cache`'s doc for why this is a separate field rather
+    /// than delaying when `pending_overwrite` itself clears.
+    pending_overwrite_fade_cache: Option<crate::state_slots::SlotId>,
     /// Ticket W15-04: true while the quit-with-unsaved-state confirmation
     /// is up. Set by `request_quit`, cleared by the modal's own Quit/
     /// Cancel buttons or an outside click.
@@ -901,6 +893,12 @@ pub struct RetroForgeApp {
 impl RetroForgeApp {
     #[must_use]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Ticket W15-07: embed IBM Plex Sans before the first frame paints,
+        // so nothing ever flashes egui's bundled `Ubuntu-Light` (whose
+        // Ubuntu Font Licence is not OFL/Apache, NFR-011) even for one
+        // repaint.
+        crate::theme::install_fonts(&cc.egui_ctx);
+
         // Ticket W4-03e: build the ultrawide compositor's `GpuContext` from
         // the SAME device/queue egui itself renders with
         // (`rf_renderer::GpuContext::from_shared`'s own doc) — never a
@@ -1032,6 +1030,7 @@ impl RetroForgeApp {
             sprite_layer_texture: None,
             status: "No ROM loaded \u{2014} File > Open ROM...".to_string(),
             crash: None,
+            crash_fade_cache: None,
             running: false,
             awaiting_stepped_frame: false,
             position: None,
@@ -1062,6 +1061,7 @@ impl RetroForgeApp {
             toasts: crate::toast::ToastStack::default(),
             library_rescan_toast_pending: false,
             pending_overwrite: None,
+            pending_overwrite_fade_cache: None,
             pending_quit: false,
             last_save_frame: None,
             enhance: crate::enhance_dock::EnhanceWorkspace::new(),
@@ -2179,28 +2179,58 @@ impl RetroForgeApp {
     /// so a mis-click cannot silently discard a state — the whole point
     /// of the acceptance criterion.
     fn overwrite_confirm_modal(&mut self, ctx: &egui::Context) {
-        let Some(slot) = self.pending_overwrite else {
+        // Ticket W15-07: the modal's own open/close fade. `open_now` gates
+        // the REAL state (`pending_overwrite`, what `pending_overwrite_for_test`
+        // reads) exactly as before this ticket — cleared the same frame a
+        // click closes it, never delayed by the fade. `alpha` only decides
+        // whether this function still has anything to PAINT this frame;
+        // `pending_overwrite_fade_cache` is what it paints from once
+        // `pending_overwrite` itself has already gone back to `None`.
+        let open_now = self.pending_overwrite.is_some();
+        if let Some(slot) = self.pending_overwrite {
+            self.pending_overwrite_fade_cache = Some(slot);
+        }
+        let alpha =
+            crate::theme::modal_fade_alpha(ctx, egui::Id::new("rf_overwrite_modal_fade"), open_now);
+        if alpha <= 0.0 {
+            return;
+        }
+        let Some(slot) = self.pending_overwrite.or(self.pending_overwrite_fade_cache) else {
             return;
         };
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
         let mut overwrite = false;
         let mut cancel = false;
-        let modal = egui::Modal::new(egui::Id::new("rf_overwrite_modal")).show(ctx, |ui| {
-            ui.set_width(320.0);
-            ui.heading("Overwrite save?");
-            ui.label(format!(
-                "{} already holds a save. Saving now replaces it — this cannot be undone.",
-                slot.label()
-            ));
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("Overwrite").clicked() {
-                    overwrite = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
-                }
+        let modal = egui::Modal::new(egui::Id::new("rf_overwrite_modal"))
+            .backdrop_color(tokens.modal_backdrop().gamma_multiply(alpha))
+            .frame(
+                egui::Frame::popup(&ctx.global_style())
+                    .fill(tokens.surface.gamma_multiply(alpha))
+                    .stroke(egui::Stroke::new(1.0, tokens.line)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.heading("Overwrite save?");
+                ui.label(format!(
+                    "{} already holds a save. Saving now replaces it — this cannot be undone.",
+                    slot.label()
+                ));
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Overwrite").clicked() {
+                        overwrite = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
             });
-        });
+        if !open_now {
+            // Fading out on cached data — the real decision already
+            // happened the frame `pending_overwrite` cleared; a click
+            // landing on the disappearing dialog now is not acted on.
+            return;
+        }
         if overwrite {
             self.save_to_slot(slot, ctx);
             self.pending_overwrite = None;
@@ -2238,28 +2268,46 @@ impl RetroForgeApp {
     /// the modal — "asks once" (the acceptance wording) means one modal
     /// per quit attempt, not zero on a second try.
     fn quit_confirm_modal(&mut self, ctx: &egui::Context) {
-        if !self.pending_quit {
+        // Ticket W15-07: no payload to cache (unlike the overwrite modal) —
+        // "quit with unsaved progress?" needs nothing from the moment it
+        // opened, so the fade-out can keep rendering its own fixed text
+        // straight off `alpha` alone.
+        let open_now = self.pending_quit;
+        let alpha =
+            crate::theme::modal_fade_alpha(ctx, egui::Id::new("rf_quit_modal_fade"), open_now);
+        if alpha <= 0.0 {
             return;
         }
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
         let mut quit = false;
         let mut cancel = false;
-        let modal = egui::Modal::new(egui::Id::new("rf_quit_modal")).show(ctx, |ui| {
-            ui.set_width(320.0);
-            ui.heading("Quit with unsaved progress?");
-            ui.label(
-                "The running game has advanced since its last save state. Quitting now loses \
-                 that progress.",
-            );
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("Quit").clicked() {
-                    quit = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
-                }
+        let modal = egui::Modal::new(egui::Id::new("rf_quit_modal"))
+            .backdrop_color(tokens.modal_backdrop().gamma_multiply(alpha))
+            .frame(
+                egui::Frame::popup(&ctx.global_style())
+                    .fill(tokens.surface.gamma_multiply(alpha))
+                    .stroke(egui::Stroke::new(1.0, tokens.line)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.heading("Quit with unsaved progress?");
+                ui.label(
+                    "The running game has advanced since its last save state. Quitting now \
+                     loses that progress.",
+                );
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Quit").clicked() {
+                        quit = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
             });
-        });
+        if !open_now {
+            return;
+        }
         if quit {
             self.pending_quit = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -3393,15 +3441,18 @@ impl RetroForgeApp {
     /// and a *non-clickable status badge* were visually identical — so
     /// the accent is spent on giving the active thing a visible edge.
     fn apply_theme(&self, ctx: &egui::Context) {
+        // Ticket W15-07: every colour below reads from `Tokens`, not the
+        // raw `Palette` — `Tokens::from_accessibility` makes the exact
+        // same DEFAULT/HIGH_CONTRAST choice `AccessibilitySettings::palette`
+        // always made, just expressed as the derived token set.
         let a = self.settings.accessibility.normalized();
-        let p = a.palette();
-        let col = |c: [u8; 3]| egui::Color32::from_rgb(c[0], c[1], c[2]);
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
         let (bg, raised, text, muted, accent) = (
-            col(p.background),
-            col(p.raised),
-            col(p.text),
-            col(p.text_muted),
-            col(p.accent),
+            tokens.bg,
+            tokens.surface,
+            tokens.ink,
+            tokens.muted,
+            tokens.accent,
         );
 
         let mut v = egui::Visuals::dark();
@@ -3474,9 +3525,15 @@ impl RetroForgeApp {
             // them the same claim on the eye as the transport buttons.
             use egui::{FontFamily, FontId, TextStyle};
             style.text_styles = [
+                // Ticket W15-07: the display face (IBM Plex Sans SemiBold,
+                // `theme::install_fonts`) for headings — the one text
+                // style §8's "headings and badges" names explicitly. Body/
+                // Button/Small stay `Proportional`, which `install_fonts`
+                // itself points at the body face, so nothing else needs a
+                // family override.
                 (
                     TextStyle::Heading,
-                    FontId::new(17.0, FontFamily::Proportional),
+                    FontId::new(17.0, FontFamily::Name("display".into())),
                 ),
                 (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
                 (
@@ -3505,8 +3562,14 @@ impl RetroForgeApp {
             // point of a scrollbar — it is a readout of how much you are
             // not looking at, not just a control.
             style.spacing.scroll = egui::style::ScrollStyle::solid();
-            style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-            style.spacing.button_padding = egui::vec2(8.0, 3.0);
+            // Ticket W15-07: `space_4`/`space_3` are `theme::SPACE`'s exact
+            // pre-existing values (8.0/6.0) — the token names this number,
+            // it does not change it. `button_padding.y` stays a literal:
+            // 3.0 is not one of the five scale steps and forcing it onto
+            // the scale would move a pixel value `tests/hud_fits.rs`
+            // indirectly depends on for no reason but tidiness.
+            style.spacing.item_spacing = egui::vec2(tokens.space_4, tokens.space_3);
+            style.spacing.button_padding = egui::vec2(tokens.space_4, 3.0);
             for w in [
                 &mut style.visuals.widgets.noninteractive,
                 &mut style.visuals.widgets.inactive,
@@ -3514,7 +3577,7 @@ impl RetroForgeApp {
                 &mut style.visuals.widgets.active,
                 &mut style.visuals.widgets.open,
             ] {
-                w.corner_radius = egui::CornerRadius::same(4);
+                w.corner_radius = egui::CornerRadius::same(tokens.radius_sm as u8);
             }
         });
         // Safe to call every frame: `Context::set_zoom_factor` compares
@@ -3548,15 +3611,16 @@ impl RetroForgeApp {
     /// body and a boundary, which is the difference between "a bar" and
     /// "some widgets that happen to be near the edge".
     ///
-    /// **No border line.** The obvious move is a hairline along the edge
-    /// facing the play area, and it is wrong here for a specific reason:
-    /// there is no colour in the palette to draw it with. Every colour
-    /// this app renders is one of five whose contrast is asserted
-    /// (`accessibility::Palette::pairs`), a hairline wants a mid-tone
-    /// between `raised` and `background`, and inventing one would put an
-    /// unverified colour on screen to save a step. Two surfaces meeting
-    /// is already a boundary; the line would be decoration on top of a
-    /// boundary that exists.
+    /// **Still no border line, though the reason changed under this
+    /// paragraph (ticket W15-07).** `theme::Tokens::line` now exists —
+    /// derived, measured-enough (`theme::tests::line_is_between_muted_and_bg_and_visible_against_bg`)
+    /// mid-tone between `muted` and `bg` — so "there is no colour to draw
+    /// it with" is no longer true. The frame still omits it: two surfaces
+    /// meeting is already a boundary, and adding a hairline on top is a
+    /// separate visual decision this ticket (token plumbing, not new
+    /// chrome) does not make. A future ticket can spend `line` here if a
+    /// reviewer wants the edge; this comment no longer blocks it on a
+    /// missing colour.
     fn chrome_frame(ui: &egui::Ui) -> egui::Frame {
         egui::Frame::NONE
             .fill(ui.visuals().widgets.inactive.bg_fill)
@@ -4137,32 +4201,56 @@ impl RetroForgeApp {
     /// by the time this shows, so blocking input to the rest of the shell
     /// costs nothing that was still running.
     fn crash_dialog(&mut self, ctx: &egui::Context) {
-        let Some(report) = self.crash.clone() else {
+        // Ticket W15-07: same open/close-fade shape as `overwrite_confirm_modal`
+        // — `crash` itself still clears the instant Dismiss/outside-click
+        // fires, `crash_fade_cache` is only what the fade-out paints.
+        let open_now = self.crash.is_some();
+        if let Some(report) = self.crash.clone() {
+            self.crash_fade_cache = Some(report);
+        }
+        let alpha =
+            crate::theme::modal_fade_alpha(ctx, egui::Id::new("rf_crash_modal_fade"), open_now);
+        if alpha <= 0.0 {
+            return;
+        }
+        let Some(report) = self.crash.clone().or_else(|| self.crash_fade_cache.clone()) else {
             return;
         };
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
         let mut dismiss = false;
-        let modal = egui::Modal::new(egui::Id::new("rf_crash_modal")).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.heading("Core crashed");
-            ui.label(
-                "The emulator core panicked and was contained (FM-01); the core thread has halted.",
-            );
-            ui.label(format!("Message: {}", report.message));
-            if let Some(loc) = &report.location {
-                ui.label(format!("Location: {loc}"));
-            }
-            ui.separator();
-            ui.label("Trace tail:");
-            egui::ScrollArea::vertical()
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    ui.monospace(&report.trace_tail);
-                });
-            ui.separator();
-            if ui.button("Dismiss").clicked() {
-                dismiss = true;
-            }
-        });
+        let modal = egui::Modal::new(egui::Id::new("rf_crash_modal"))
+            .backdrop_color(tokens.modal_backdrop().gamma_multiply(alpha))
+            .frame(
+                egui::Frame::popup(&ctx.global_style())
+                    .fill(tokens.surface.gamma_multiply(alpha))
+                    .stroke(egui::Stroke::new(1.0, tokens.error)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.heading("Core crashed");
+                ui.label(
+                    "The emulator core panicked and was contained (FM-01); the core thread has \
+                     halted.",
+                );
+                ui.label(format!("Message: {}", report.message));
+                if let Some(loc) = &report.location {
+                    ui.label(format!("Location: {loc}"));
+                }
+                ui.separator();
+                ui.label("Trace tail:");
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        ui.monospace(&report.trace_tail);
+                    });
+                ui.separator();
+                if ui.button("Dismiss").clicked() {
+                    dismiss = true;
+                }
+            });
+        if !open_now {
+            return;
+        }
         // "outside-click dismisses like its Dismiss button" (ticket
         // W15-04 acceptance 1): `should_close` covers the backdrop click
         // AND Escape, which is the modal's own idiomatic close gesture —
@@ -5171,13 +5259,14 @@ impl RetroForgeApp {
             self.library_context_menu_open = true;
         }
 
-        let accent = {
-            let c = self.settings.accessibility.normalized().palette().accent;
-            egui::Color32::from_rgb(c[0], c[1], c[2])
-        };
+        // Ticket W15-07: `tokens.accent` is exactly what the old
+        // `Palette::accent` conversion here produced — same colour, now
+        // read through the token set every other W15 surface uses.
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let accent = tokens.accent;
 
         if grid_mode {
-            self.library_cards(ui, &matches, accent, moved_by_keyboard, &mut to_play);
+            self.library_cards(ui, &matches, &tokens, moved_by_keyboard, &mut to_play);
         } else {
             self.library_rows(ui, &matches, accent, moved_by_keyboard, &mut to_play);
         }
@@ -5407,10 +5496,12 @@ impl RetroForgeApp {
         &mut self,
         ui: &mut egui::Ui,
         matches: &[&crate::library::LibraryEntry],
-        accent: egui::Color32,
+        tokens: &crate::theme::Tokens,
         moved_by_keyboard: bool,
         to_play: &mut Option<std::path::PathBuf>,
     ) {
+        let accent = tokens.accent;
+        let high_contrast = self.settings.accessibility.normalized().high_contrast;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -5497,7 +5588,11 @@ impl RetroForgeApp {
                                             ui.painter().rect_filled(
                                                 thumb_rect,
                                                 2.0,
-                                                console_tint(ui, &entry.identity),
+                                                crate::theme::console_tint(
+                                                    tokens,
+                                                    high_contrast,
+                                                    &entry.identity,
+                                                ),
                                             );
                                         }
                                     }
@@ -5607,10 +5702,39 @@ impl RetroForgeApp {
                             }
                         }
 
+                        // Ticket W15-07 acceptance 4: hover elevation on
+                        // library cards, the grid's version of the Run
+                        // button's `animate_bool_responsive` hover — the
+                        // ONLY other place this crate hand-animates
+                        // anything. Keyed on the entry's own path (not a
+                        // shared id) so hovering one card does not also
+                        // animate every other card sharing the id. The
+                        // card's `Frame::show` allocates the rect with
+                        // hover sense already (`egui::Ui::allocate_rect`'s
+                        // default), so `ui.interact` here reads that same
+                        // interaction rather than creating a second,
+                        // competing sense.
+                        let hover_id = egui::Id::new("rf_card_hover").with(&entry.path);
+                        let hovered = ui
+                            .interact(card.response.rect, hover_id, egui::Sense::hover())
+                            .hovered();
+                        let warmth = ui.ctx().animate_bool_responsive(hover_id, hovered);
+                        if warmth > 0.0 {
+                            ui.painter().rect_stroke(
+                                card.response.rect,
+                                tokens.radius_md,
+                                egui::Stroke::new(
+                                    1.0 + warmth,
+                                    crate::theme::mix(tokens.line, accent, 0.6 * warmth),
+                                ),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+
                         if is_selected {
                             ui.painter().rect_stroke(
                                 card.response.rect,
-                                4.0,
+                                tokens.radius_sm,
                                 egui::Stroke::new(2.0, accent),
                                 egui::StrokeKind::Inside,
                             );
@@ -8197,8 +8321,8 @@ impl eframe::App for RetroForgeApp {
         // panel, so draw order only affects which layer paints over
         // which, never input. Painting them last is what keeps a toast
         // visible over a maximized window instead of tucked behind it.
-        let palette = self.settings.accessibility.normalized().palette();
-        self.toasts.show(&ctx, &palette);
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        self.toasts.show(&ctx, &tokens);
     }
 
     // Ticket W4-06a criterion 3: `eframe::App::save`/`auto_save_interval`

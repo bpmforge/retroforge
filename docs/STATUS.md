@@ -3789,3 +3789,17 @@ stories, 10 decisions).
   Enhance dock's Diorama checkbox never wrote its setting. The by-eye
   check on the fixture room is Brad's. Gate: workspace **2098 passing /
   0 failed / 42 ignored**, clippy clean, arch OK.
+
+- **W15-07 — theme tokens and typography** (2026-09-18, lane A). One
+  token set now feeds the UI: background, surface, ink, muted, line,
+  accent and its soft form, the three semantic colours with soft forms,
+  radii and a spacing scale, derived by pure mixing from the palettes
+  the accessibility module already measured, with a new light palette
+  cleared at AAA and high contrast re-derived rather than hand-tuned.
+  IBM Plex Sans in two weights is embedded under its OFL licence with
+  the notice beside it, replacing egui's bundled face whose licence the
+  project's rule does not admit; a second face was not available
+  offline, which the ticket note records. Toasts, modals, cards and the
+  console tint read tokens instead of literals. Motion stays at the
+  ceiling: card hover elevation and a short modal fade. Gate: workspace
+  **2108 passing / 0 failed / 42 ignored**, clippy clean, arch OK.

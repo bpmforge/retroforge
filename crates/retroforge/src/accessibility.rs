@@ -170,6 +170,26 @@ impl Palette {
         accent: [0xFF, 0xD7, 0x00],
     };
 
+    /// The light theme (ticket W15-07). Added for `docs/design/UX_WAVE_15.md`
+    /// §8's token table, which has a Light column regardless of whether
+    /// anything in this app selects it yet — nothing does, as of this
+    /// ticket; see `crate::theme`'s module doc. Every pair clears AAA, the
+    /// same bar `DEFAULT` and `HIGH_CONTRAST` are held to, checked in
+    /// `tests::every_pair_in_every_palette_clears_aaa` below rather than
+    /// asserted only in `crate::theme`'s own suite.
+    pub const LIGHT: Palette = Palette {
+        background: [0xF4, 0xF5, 0xF7],
+        raised: [0xE4, 0xE7, 0xEC],
+        text: [0x14, 0x16, 0x1A],
+        text_muted: [0x44, 0x4A, 0x54],
+        // #073A73: darker than a typical UI blue on purpose — it must
+        // clear AAA (7:1) against BOTH `background` and `raised`, and a
+        // lighter blue that reads fine on white fails well before 7:1 on
+        // `raised`. Measured, not eyeballed (module doc, same discipline
+        // as `DEFAULT.accent`'s own comment above).
+        accent: [0x07, 0x3A, 0x73],
+    };
+
     /// Every (foreground, surface) pair this palette will ever render,
     /// named, so a test can assert over the whole set instead of over a
     /// hand-copied list that silently stops covering new fields.
@@ -295,6 +315,7 @@ mod tests {
         for (name, palette) in [
             ("DEFAULT", Palette::DEFAULT),
             ("HIGH_CONTRAST", Palette::HIGH_CONTRAST),
+            ("LIGHT", Palette::LIGHT),
         ] {
             for (pair, ratio) in palette.pairs() {
                 assert!(
@@ -321,6 +342,7 @@ mod tests {
         for (name, palette) in [
             ("DEFAULT", Palette::DEFAULT),
             ("HIGH_CONTRAST", Palette::HIGH_CONTRAST),
+            ("LIGHT", Palette::LIGHT),
         ] {
             let ratio = contrast_ratio(palette.accent, palette.raised);
             assert!(
@@ -343,6 +365,7 @@ mod tests {
         for (name, palette) in [
             ("DEFAULT", Palette::DEFAULT),
             ("HIGH_CONTRAST", Palette::HIGH_CONTRAST),
+            ("LIGHT", Palette::LIGHT),
         ] {
             assert_ne!(
                 palette.raised, palette.background,
@@ -429,6 +452,7 @@ mod tests {
         for (name, palette) in [
             ("DEFAULT", Palette::DEFAULT),
             ("HIGH_CONTRAST", Palette::HIGH_CONTRAST),
+            ("LIGHT", Palette::LIGHT),
         ] {
             for (surface_name, surface) in [
                 ("background", palette.background),
