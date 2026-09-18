@@ -3744,3 +3744,16 @@ stories, 10 decisions).
   as measured. No permissively licensed dynamic-shape model exists; the
   search is in the ledger. Gate: crate tests green with fixtures, arch
   OK, GPU evidence 18 rows.
+
+- **W7-17 — SPC700 timer reads** (2026-09-18, lane C). Parked since
+  August on a ruling that came on 2026-09-04. blargg's spc_timer ROM
+  now prints PASSED TESTS: the shared-clock tick for a `$FD-$FF` read
+  was charged before the read sampled and cleared the 4-bit counter, so
+  a timer edge on that very cycle could erase an increment, which
+  blargg's hardware note says never happens. Reads of the register page
+  now sample first and tick after; writes keep the old order, since
+  swapping them too regresses the ROM. spc_mem_access_times stays red
+  by ruling D-3, and its test now asserts the red so a future pass is
+  noticed rather than silently absorbed. Lesson RF-L-14 records the
+  general rule. Gate: rf-snes 313 passing, blargg 3 of 3 in release,
+  the ignored SNES suites exit 0, arch OK.
