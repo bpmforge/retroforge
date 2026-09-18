@@ -57,6 +57,9 @@ pub struct Profile {
     pub rom_map: Vec<RomMapEntry>,
     pub decode: Option<Decode>,
     pub antiflicker: Option<AntiFlicker>,
+    /// `[atmosphere]` — pins the atmosphere-layer heuristic's plane
+    /// directly (ticket W16-10).
+    pub atmosphere: Option<Atmosphere>,
     pub loading: Option<Loading>,
     pub plugins: Option<Plugins>,
     pub mods: Option<Mods>,
@@ -383,6 +386,51 @@ pub struct AntiFlicker {
     pub blink_periods: Vec<u32>,
 }
 
+/// The trust-ladder rung `[atmosphere].ladder` pins the heuristic to
+/// (ticket W16-10; `ENHANCEMENT_RUNTIME.md` §2a: "Profile `[capabilities]`/
+/// `[antiflicker]` entries may pin ladder states"). Mirrors
+/// `rf_enhance::trust::TrustState`'s three rungs exactly, as its own
+/// spelling (`shadow`/`advisory`/`active`) — this crate cannot depend on
+/// `rf-enhance` (ARCHITECTURE.md §3/§6: cores/lower layers never import
+/// upward), so the rung is re-declared here and mapped onto
+/// `TrustState` by whichever `rf-enhance` function reads it
+/// (`rf_enhance::atmosphere::apply_profile_pin`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AtmosphereLadder {
+    Shadow,
+    Advisory,
+    Active,
+}
+
+/// `[atmosphere]` (§2, ticket W16-10; `ENHANCEMENT_WAVE_16.md` §4): pins a
+/// background plane directly as the atmosphere-layer heuristic's plane,
+/// skipping `rf_enhance::atmosphere::AtmosphereDetector` the same way
+/// `[antiflicker]` is documented (`ENHANCEMENT_RUNTIME.md` §2a) as able to
+/// pin ladder state for its own heuristic.
+///
+/// `plane`'s valid range is per-console (checked in `crate::loader`, not
+/// here, since it needs `[meta].console` to decide it): NES has one
+/// background plane (0); SNES has up to four (0-3), per `PixelLayer::
+/// Background(n)`'s own doc that BG mode decides which of 0-3 exist.
+/// `tint`/`strength` are optional cosmetic hints for the fog pass (W16-04);
+/// `ladder` defaults to [`AtmosphereLadder::Active`] when absent, since a
+/// profile author who bothers to name a plane at all is declaring it a
+/// known fact, not a shadow-mode guess -- the opposite default from the
+/// heuristic's own fresh-install-shadow rule (D-004), which is why a
+/// profile author who instead wants to merely *exercise the schema*
+/// without asserting anything must say `ladder = "shadow"` explicitly
+/// (see `profiles/snes/rf-scroller-s`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Atmosphere {
+    pub plane: u8,
+    /// `"#rrggbb"`, validated in `crate::loader`.
+    pub tint: Option<String>,
+    /// `0.0..=1.0`, validated in `crate::loader`.
+    pub strength: Option<f32>,
+    pub ladder: Option<AtmosphereLadder>,
+}
+
 /// `[loading]` (§2).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Loading {
@@ -684,6 +732,7 @@ mod tests {
             rom_map: vec![],
             decode: None,
             antiflicker: None,
+            atmosphere: None,
             loading: None,
             plugins: None,
             mods: None,

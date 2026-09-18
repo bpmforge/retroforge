@@ -2032,6 +2032,18 @@ impl RetroForgeApp {
             _ => crate::game_settings::GameSettings::default(),
         };
 
+        // Ticket W16-10: a profile that declares `[atmosphere]` pins the
+        // fog plane and the heuristic's ladder rung before the per-game
+        // settings are consulted, the one point where the loaded profile
+        // and the per-game trust ladder are both in scope. Absent table,
+        // absent pin: `apply_profile_pin` is a no-op then.
+        if let Some(session) = &self.level_session {
+            rf_enhance::atmosphere::apply_profile_pin(
+                &session.profile,
+                &mut self.current_game_settings.trust,
+            );
+        }
+
         // Ticket W15-02, acceptance 1: every launch records a play. This
         // is deliberately unconditional on the ROM having been recognized
         // by `rf_cart` above — `current_game_hash` is `None` for an

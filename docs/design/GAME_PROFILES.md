@@ -92,6 +92,14 @@ mode = "default"                     # default | off | aggressive
 exclude_oam = []                     # sprite indices never reconstructed
 blink_periods = [2]                  # known intentional blink cadences to respect
 
+[atmosphere]                         # ticket W16-10: pin the atmosphere-layer
+plane = 0                            # heuristic's plane directly, skip detection
+                                      # (this example's console = "nes", so 0 is
+                                      # the only legal plane; SNES allows 0-3)
+tint = "#336699"                     # optional, "#rrggbb"
+strength = 0.6                       # optional, 0.0..=1.0
+ladder = "active"                    # optional: shadow | advisory | active (default active)
+
 [loading]
 [[loading.wait_loops]]
 pc = 0xC12A
@@ -156,6 +164,54 @@ silently re-decode differently under an upgraded emulator.
 Community-submitted profiles pass license-gated intake (D-005,
 FR-PROF-007): `[meta]` requires `license` (SPDX) alongside `sources`;
 deny-by-default at the Phase-9 submission CI.
+
+### `[atmosphere]` (ticket W16-10)
+
+`[atmosphere]` (`rf_profiles::schema::Atmosphere`) pins a background plane
+directly as the atmosphere-layer heuristic's plane
+(`rf_enhance::atmosphere`, `HEURISTIC_ID = "atmosphere-layer"`), the same
+"a profile may pin the plane directly, skip detection" mechanism
+`ENHANCEMENT_WAVE_16.md` §4 and `ENHANCEMENT_RUNTIME.md` §2a describe:
+
+- `plane` (required, `u8`) — the background plane index. Range is
+  per-console and checked at load time against `[meta].console`: NES has
+  one background plane (`0`); SNES has up to four (`0..=3`), per
+  `rf_core_api::PixelLayer::Background(n)`'s own doc that BG mode decides
+  which of 0-3 exist. Out of range fails to load
+  (`ProfileError::AtmospherePlaneOutOfRange`).
+- `tint` (optional, `"#rrggbb"`) — a cosmetic hint for the fog pass
+  (W16-04). Anything else fails to load
+  (`ProfileError::AtmosphereInvalidTint`).
+- `strength` (optional, `0.0..=1.0`) — out of range fails to load
+  (`ProfileError::AtmosphereStrengthOutOfRange`).
+- `ladder` (optional, `"shadow" | "advisory" | "active"`) — which
+  `crate::trust::TrustState` rung to pin `HEURISTIC_ID` to. Absent
+  defaults to `active`: a profile author who names a plane at all is
+  declaring a known fact, not a shadow-mode guess — the opposite default
+  from the heuristic's own fresh-install-shadow rule (D-004). An
+  unrecognised value fails to load as a schema error.
+
+`rf_enhance::atmosphere::apply_profile_pin(&Profile, &mut TrustLadder) ->
+Option<AtmospherePin>` reads the table and calls `TrustLadder::pin`
+(returning `None`/leaving the ladder untouched when the table is absent).
+A caller (the app shell) still calls `rf_enhance::atmosphere::pinned_layer`
+itself with the pin's `plane` and the frame's live sub-screen buffer to
+build the actual `SceneLayer` — `apply_profile_pin` only decides trust
+state, since it never sees a live frame.
+
+Two profiles carry this table today, and only two: `profiles/snes/
+rf-scroller-s` uses `ladder = "shadow"` purely to exercise the schema
+against a real, loadable profile — its own fixture (`fixtures/snes/
+rf-scroller-s/FORMAT.md`) has no colour-math/translucent plane at all, so
+`shadow` is what keeps the entry from asserting an effect that was not
+built. No commercial profile carries it: `ENHANCEMENT_WAVE_16.md` §4 is
+explicit that Super Metroid's Norfair heat is palette cycling, not a
+translucent colour-math plane, so `profiles/snes/super-metroid` is not a
+candidate without a separate, later palette-cycle detector or profile
+flag; there is no ALttP profile in this repository to add one to either.
+A future commercial profile earns this table the same way `[antiflicker]`
+or a `[decode]` row does — a cited, checkable source naming the plane, not
+an assumption.
 
 ### `room_grid`'s collision field (ticket W16-05)
 
