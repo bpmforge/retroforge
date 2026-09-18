@@ -6627,8 +6627,9 @@
    "hover elevation is added on library cards and a short fade on modal open/close; no other new animation is added, preserving the existing one-moving-element rule"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "notes": [
+    "CLOSED 2026-09-18 (lane A). theme.rs: Tokens per §8, derivation pure (line = mix(muted,bg,.72), soft = mix(semantic,bg,.82)), Semantics per set measured AA on bg and surface, Palette::LIGHT added (AAA) but no settings toggle yet. Fonts: IBM Plex Sans Regular (body) + SemiBold (display), OFL 1.1 with licence + NOTICE in assets/fonts -- one family in two weights because no second OFL/Apache face was available offline; egui's Ubuntu face (Ubuntu Font Licence) is no longer used. Literals replaced in toast.rs, modals, library_cards, console_tint (now theme::console_tint, flattens under high contrast); profile editor and A/V status colours left (pre-wave). Motion: card hover via animate_bool_responsive per card, modal_fade_alpha 120 ms with fade-out caches. Tests: 9 theme unit tests, tests/theme_fonts.rs, accessibility arrays extended to LIGHT. Gate: workspace 2108 passing / 0 failed / 42 ignored (orchestrator).",
    "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 9, and new principle 7 'theme is a token set, not scattered literals'). See that doc \u00a78 and \u00a711.",
    "Depends on W15-05 because there must be real cards to theme before hover elevation and the grid's visual language can be finished."
