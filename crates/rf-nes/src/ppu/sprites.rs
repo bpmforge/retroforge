@@ -233,7 +233,13 @@ impl Ppu {
     /// PPUCTRL ($2000) bit 5: sprite height, 8 or 16 pixels
     /// (nesdev.org/wiki/PPU_registers: "Sprite size (0: 8x8 pixels; 1: 8x16
     /// pixels)").
-    fn sprite_height(&self) -> u8 {
+    ///
+    /// `pub(crate)` (ticket W16-13): `NesBus::sprite_height` forwards this
+    /// out to the app shell, the same "smallest additive field" shape
+    /// `oam`/`vram`/`palette` already use, so the Diorama billboard
+    /// footprint (`crates/retroforge/src/enhanced_view.rs::compose_diorama`)
+    /// can size itself from the real hardware mode instead of assuming 8x8.
+    pub(crate) fn sprite_height(&self) -> u8 {
         if self.ctrl & 0x20 != 0 {
             16
         } else {

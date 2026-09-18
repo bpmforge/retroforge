@@ -132,18 +132,54 @@ pub mod camera_matrices {
         out
     }
 
-    /// Fixed-pitch, fixed-FOV camera framing a `tiles_w * tile_px` by
-    /// `tiles_h * tile_px` ground plane (module doc). `distance_factor`
-    /// (`>= 1.0`) trades framing tightness for headroom; [`super::
-    /// DioramaPass`] always calls this with its own documented constant —
-    /// exposed here only so the approximation is a named, testable
-    /// number rather than a magic literal buried in a render call.
+    /// Solve the camera distance that fits a `ground_w`x`ground_h`
+    /// (world-pixel) rectangle inside a `fovy_deg`-tall frustum at the
+    /// given viewport `aspect` (ticket W16-13 — replaces the old fixed
+    /// `distance * 1.3`-style heuristic, which "backed off until the grid
+    /// probably fit" without regard for the grid's own aspect ratio or
+    /// the viewport's).
     ///
-    /// **Approximate framing, stated plainly**: this is "back off until
-    /// the grid probably fits", not an exact fit-to-viewport solve (which
-    /// would need the grid's aspect ratio reconciled against the
-    /// viewport's) — good enough for a diorama overlay, not a claim of
-    /// precise composition.
+    /// **The fit target is the rectangle's bounding sphere** (radius =
+    /// half its diagonal), the same "frame selection" solve a 3D editor's
+    /// camera uses: a sphere looks identical from every direction, so —
+    /// unlike a derivation tied to this pass's specific pitch — if the
+    /// whole sphere is inside the frustum at this distance, the flat
+    /// ground rectangle it encloses is too, regardless of pitch. Checked
+    /// against BOTH axes (`dist_v` for the vertical half-angle, `dist_h`
+    /// for the horizontal one derived from `aspect`) and the larger wins,
+    /// so a wide-and-shallow grid framed by a narrow-and-tall viewport (or
+    /// vice versa) is still fully inside frame — the fixed heuristic had
+    /// no such per-axis check at all (`tests::a_wide_grid_in_a_narrow_
+    /// viewport_needs_more_than_the_old_fixed_heuristic_gave_it` below
+    /// demonstrates a case the old formula clips and this one does not).
+    /// `margin` (`>= 1.0`) backs the camera off further for headroom; a
+    /// bare `1.0` has the rectangle's corners exactly touching the
+    /// frustum's edges.
+    #[must_use]
+    pub fn fit_distance(
+        ground_w: f32,
+        ground_h: f32,
+        aspect: f32,
+        fovy_deg: f32,
+        margin: f32,
+    ) -> f32 {
+        let radius = ((ground_w / 2.0).powi(2) + (ground_h / 2.0).powi(2))
+            .sqrt()
+            .max(1e-3);
+        let fovy_half = (fovy_deg.to_radians() / 2.0).max(1e-4);
+        let dist_v = radius / fovy_half.sin();
+        let fovx_half = (fovy_half.tan() * aspect.max(1e-3)).atan().max(1e-4);
+        let dist_h = radius / fovx_half.sin();
+        dist_v.max(dist_h) * margin.max(1.0)
+    }
+
+    /// Fixed-pitch, fixed-FOV camera framing a `tiles_w * tile_px` by
+    /// `tiles_h * tile_px` ground plane (module doc), at the exact
+    /// distance [`fit_distance`] solves for that grid/aspect pair.
+    /// `distance_factor` (`>= 1.0`) is [`fit_distance`]'s `margin` —
+    /// [`super::DioramaPass`] always calls this with its own documented
+    /// constant, exposed here only so the number is named and testable
+    /// rather than a magic literal buried in a render call.
     #[must_use]
     pub fn view_proj(
         tiles_w: f32,
@@ -158,14 +194,19 @@ pub mod camera_matrices {
         let ground_h = tiles_h * tile_px;
         let target = [ground_w / 2.0, 0.0, ground_h / 2.0];
         let extent = ground_w.max(ground_h).max(tile_px);
-        let distance = extent * distance_factor.max(1.0);
+        let distance = fit_distance(ground_w, ground_h, aspect, fovy_deg, distance_factor);
         let pitch = pitch_deg.to_radians();
         let eye = [
             target[0],
             pitch.sin() * distance,
             target[2] - pitch.cos() * distance,
         ];
-        let proj = perspective(fovy_deg.to_radians(), aspect.max(1e-3), 1.0, extent * 8.0);
+        let proj = perspective(
+            fovy_deg.to_radians(),
+            aspect.max(1e-3),
+            1.0,
+            extent.max(distance) * 8.0,
+        );
         let view = look_at(eye, target, [0.0, 1.0, 0.0]);
         mul(proj, view)
     }
@@ -173,6 +214,7 @@ pub mod camera_matrices {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::diorama::{FOV_Y_DEG, PITCH_DEG};
 
         #[test]
         fn the_grids_own_centre_projects_inside_the_view_frustum() {
@@ -207,6 +249,101 @@ pub mod camera_matrices {
                 out[row] = sum;
             }
             out
+        }
+
+        /// The corner check the centre-only test above cannot make: all
+        /// FOUR corners of the ground rectangle, not just its centre, must
+        /// land inside the NDC frustum for the SOLVED distance
+        /// ([`fit_distance`]) — the actual "does the whole grid fit"
+        /// question ticket W16-13's acceptance criterion asks.
+        #[test]
+        fn all_four_ground_corners_fit_within_the_frustum_for_the_solved_distance() {
+            let (tiles_w, tiles_h, tile_px, aspect): (f32, f32, f32, f32) =
+                (5.0, 3.0, 16.0, 16.0 / 9.0);
+            let vp = view_proj(
+                tiles_w, tiles_h, tile_px, aspect, PITCH_DEG, FOV_Y_DEG, 1.05,
+            );
+            let (ground_w, ground_h) = (tiles_w * tile_px, tiles_h * tile_px);
+            for &(x, z) in &[
+                (0.0, 0.0),
+                (ground_w, 0.0),
+                (0.0, ground_h),
+                (ground_w, ground_h),
+            ] {
+                let clip = mul_vec4(vp, [x, 0.0, z, 1.0]);
+                assert!(
+                    clip[3] > 0.0,
+                    "corner ({x}, {z}) must be in front of the camera"
+                );
+                let ndc = [clip[0] / clip[3], clip[1] / clip[3]];
+                assert!(
+                    ndc[0].abs() <= 1.02 && ndc[1].abs() <= 1.02,
+                    "corner ({x}, {z}) must land inside the NDC frustum at the solved \
+                     distance: {ndc:?}"
+                );
+            }
+        }
+
+        /// Proof the fixed `extent * distance_factor` heuristic this
+        /// ticket replaced was genuinely insufficient, not just
+        /// differently-approximate: a wide-and-shallow grid viewed through
+        /// a TALL, narrow-aspect viewport needs a distance driven by the
+        /// grid's horizontal extent AND the viewport's own aspect, which
+        /// the old heuristic (an isotropic `extent * 1.3` with no per-axis
+        /// or aspect reasoning at all) badly under-shoots.
+        #[test]
+        fn a_wide_grid_in_a_narrow_viewport_needs_more_than_the_old_fixed_heuristic_gave_it() {
+            let (tiles_w, tiles_h, tile_px, aspect): (f32, f32, f32, f32) = (20.0, 2.0, 16.0, 0.2);
+            let (ground_w, ground_h) = (tiles_w * tile_px, tiles_h * tile_px);
+
+            // The OLD formula, reproduced here exactly (module history):
+            // `extent * distance_factor.max(1.0)`, feeding the same
+            // `perspective`/`look_at` this module has always used —
+            // duplicated rather than kept as a callable function, since
+            // the whole point is that this formula is gone from the real
+            // code path now.
+            let old_extent = ground_w.max(ground_h).max(tile_px);
+            let old_distance = old_extent * 1.3;
+            let target = [ground_w / 2.0, 0.0, ground_h / 2.0];
+            let pitch = PITCH_DEG.to_radians();
+            let old_eye = [
+                target[0],
+                pitch.sin() * old_distance,
+                target[2] - pitch.cos() * old_distance,
+            ];
+            let old_proj = perspective(
+                FOV_Y_DEG.to_radians(),
+                aspect.max(1e-3),
+                1.0,
+                old_extent.max(old_distance) * 8.0,
+            );
+            let old_view = look_at(old_eye, target, [0.0, 1.0, 0.0]);
+            let old_vp = mul(old_proj, old_view);
+            let far_corner_old = mul_vec4(old_vp, [ground_w, 0.0, ground_h, 1.0]);
+            let ndc_old = [
+                far_corner_old[0] / far_corner_old[3],
+                far_corner_old[1] / far_corner_old[3],
+            ];
+            assert!(
+                ndc_old[0].abs() > 1.02,
+                "fixture invalid: the old fixed heuristic must actually clip this grid's far \
+                 corner horizontally for this test to demonstrate anything, got ndc {ndc_old:?}"
+            );
+
+            // The NEW solve: the same corner must now fit.
+            let new_vp = view_proj(
+                tiles_w, tiles_h, tile_px, aspect, PITCH_DEG, FOV_Y_DEG, 1.05,
+            );
+            let far_corner_new = mul_vec4(new_vp, [ground_w, 0.0, ground_h, 1.0]);
+            let ndc_new = [
+                far_corner_new[0] / far_corner_new[3],
+                far_corner_new[1] / far_corner_new[3],
+            ];
+            assert!(
+                ndc_new[0].abs() <= 1.02 && ndc_new[1].abs() <= 1.02,
+                "the solved distance must fit the same corner the old heuristic clipped: \
+                 {ndc_new:?}"
+            );
         }
     }
 }

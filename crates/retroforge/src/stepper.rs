@@ -656,6 +656,18 @@ impl EmuStepper {
             .map_or(&EMPTY_PALETTE, rf_nes::NesBus::palette)
     }
 
+    /// PPUCTRL bit 5 (ticket W16-13): 8 or 16, the current sprite height —
+    /// forwards `NesBus::sprite_height()`. Defaults to 8 on a SNES session
+    /// (no NES PPUCTRL exists there) and whenever no core is loaded, the
+    /// same "answer with the ordinary case" degrade `oam`/`vram`/`palette`
+    /// above already use.
+    #[must_use]
+    pub fn sprite_height_px(&self) -> u8 {
+        self.machine
+            .nes_bus()
+            .map_or(8, rf_nes::NesBus::sprite_height)
+    }
+
     /// Ticket W11-05: record the tiles the NES PPU draws. No-op on SNES —
     /// Mesen HD packs are an NES format.
     pub fn set_tile_capture(&mut self, on: bool) {

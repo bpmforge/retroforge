@@ -785,6 +785,54 @@ pub struct RetroForgeApp {
     /// reduced — `None` swallows nothing; it means the latest render
     /// genuinely needed no reduction.
     fm13_message: Option<String>,
+    /// Ticket W16-13: the Diorama pass, built lazily on [`Self::gpu`] the
+    /// first frame Diorama is actually wanted — never built eagerly at
+    /// startup, so a session that never touches Diorama never pays for a
+    /// pipeline/bind-group-layout/sampler it will never use (`DioramaPass::
+    /// new`'s own cost, same "build once, reuse" shape [`Self::compositor`]
+    /// already uses for the Ultrawide camera, just deferred one step
+    /// further).
+    diorama_pass: Option<rf_renderer::diorama::DioramaPass>,
+    /// The most recent [`enhanced_view::compose_diorama`] result, or
+    /// `None` when Diorama is not currently wanted (`Self::diorama_wanted`)
+    /// — cleared the same frame Diorama turns off, unlike
+    /// [`Self::ultrawide_render`] (which keeps its last `Err` around as a
+    /// user-visible reason). Diorama has no such message: an unavailable
+    /// Diorama degrades silently to the flat view (`enhanced_view::
+    /// select_active_view`'s own doc explains why).
+    diorama_render: Option<enhanced_view::DioramaRender>,
+    /// The egui texture built from [`Self::diorama_render`]'s `rgba`, same
+    /// "persistent `TextureHandle`, `.set()` on later frames" shape
+    /// [`Self::ultrawide_texture`] already uses.
+    diorama_texture: Option<egui::TextureHandle>,
+    /// Whether Diorama is currently EFFECTIVE (ticket W16-13:
+    /// `crate::enhance_ui::feature_rows`'s "diorama" row, `FeatureRow::
+    /// effective`) as of the last [`Self::sync_diorama_subscription`]
+    /// call — the single source of truth this struct keeps for "should
+    /// the level probe/layer extraction be armed for Diorama's sake, and
+    /// should `Self::refresh_diorama_render` do any work this frame".
+    /// Re-derived every repaint (`sync_diorama_subscription`'s own doc);
+    /// this field only exists to detect the CHANGE (mirrors
+    /// `Self::event_subscription_active`'s identical "wants vs currently
+    /// armed" shape).
+    diorama_wanted: bool,
+    /// The decoded level's ground texture for the Diorama pass, computed
+    /// once per ROM and cached (`Self::diorama_ground_rgba`'s own doc) —
+    /// `Rc` so a cache hit is a refcount bump, not a ~200 KB clone, on
+    /// every one of 60 frames/second Diorama is active.
+    diorama_ground_rgba: Option<(std::rc::Rc<Vec<u8>>, u32, u32)>,
+    /// Ticket W16-13 acceptance 1: the SAME budget-gate mechanism
+    /// `rf_renderer::fog`'s own pass uses (`tests/diorama_golden.rs`'s own
+    /// "reuses the fog pass's budget gate, not a second one" test proves
+    /// this is the genuine shared type), fed this session's own measured
+    /// `DioramaPass::render` wall-clock time. If Diorama's own p95 ever
+    /// creeps past the gate's threshold on THIS machine, `Self::
+    /// refresh_diorama_render` stops calling `DioramaPass::render` and the
+    /// view falls back to flat — the "drop rather than block" half of
+    /// acceptance 1, enforced on the UI thread since the pass runs
+    /// synchronously there (see that method's own doc for why sync is the
+    /// right call at the ~2 ms this pass measures).
+    diorama_budget: rf_renderer::fog::BudgetGate,
     /// Repaints remaining before [`Self::maybe_request_canvas_snapshot`]
     /// sends another `CoreCommand::RequestCanvasSnapshot` — `0` forces an
     /// immediate request on the very next repaint (set whenever the camera
@@ -1070,6 +1118,12 @@ impl RetroForgeApp {
             ultrawide_render: None,
             ultrawide_texture: None,
             fm13_message: None,
+            diorama_pass: None,
+            diorama_render: None,
+            diorama_texture: None,
+            diorama_wanted: false,
+            diorama_ground_rgba: None,
+            diorama_budget: rf_renderer::fog::BudgetGate::new(),
             ultrawide_refresh_countdown: 0,
             awaiting_canvas_snapshot: false,
             debug_panels: crate::debug_dock::DebugPanels::new(),
@@ -2510,6 +2564,18 @@ impl RetroForgeApp {
                 self.fm13_message = None;
                 self.ultrawide_refresh_countdown = 0;
                 self.awaiting_canvas_snapshot = false;
+                // Ticket W16-13: same "a new ROM is a new session" reset,
+                // for Diorama — the previous ROM's ground texture/render
+                // must not linger against a completely different level.
+                // `diorama_wanted` resets to `false` so the very next
+                // `sync_diorama_subscription` call (every repaint) treats
+                // this as a fresh transition and re-arms the probe/layer
+                // extraction if the new ROM's settings/profile want it —
+                // it does not need to happen here directly.
+                self.diorama_render = None;
+                self.diorama_texture = None;
+                self.diorama_ground_rgba = None;
+                self.diorama_wanted = false;
                 self.status = format!("Loaded {}", path.display());
             }
             Err(e) => {
@@ -2722,6 +2788,14 @@ impl RetroForgeApp {
                 let cam = rf_enhance::level_view::live_camera(&session.profile, &read);
                 self.level_camera = Some((cam.x, cam.y));
             }
+            // Ticket W16-13 acceptance 1: refresh the Diorama compositor's
+            // output for THIS frame — placed BEFORE the bg/sprite-layer
+            // early return a little further down, which tests exactly
+            // `msg.sprite_rgba` (empty means layer extraction is off);
+            // Diorama needs that same buffer even when the Layers debug
+            // window itself is closed (`Self::sync_diorama_subscription`
+            // arms extraction for Diorama's own sake).
+            self.refresh_diorama_render(&msg);
             self.note_frame();
             // Ticket W2-15: position travels with the frame.
             self.position = Some((msg.frame_count, msg.last_scanline));
@@ -2908,6 +2982,223 @@ impl RetroForgeApp {
             }
         }
         self.ultrawide_render = Some(result);
+    }
+
+    /// Ticket W16-13: whether Diorama is currently EFFECTIVE — Game-Aware
+    /// mode, a profile with collision, and the toggle on
+    /// (`crate::enhance_ui::feature_rows`'s "diorama" row, the single
+    /// place this gating is computed; re-deriving mode+profile+settings
+    /// logic here instead of calling it is exactly the drift that left
+    /// `self.profile_matched` unassigned for a whole ticket, see the bug
+    /// fix noted where `self.profile_matched` is set above).
+    fn diorama_effective(&self) -> bool {
+        let diorama_available = self
+            .level_session
+            .as_ref()
+            .is_some_and(crate::level_view::LevelSession::has_collision);
+        crate::enhance_ui::feature_rows(
+            &self.current_game_settings,
+            self.profile_matched,
+            diorama_available,
+        )
+        .into_iter()
+        .find(|r| r.id == "diorama")
+        .is_some_and(|r| r.effective())
+    }
+
+    /// Ticket W16-13 acceptance 1: keep [`Self::diorama_wanted`] in sync
+    /// with [`Self::diorama_effective`], and arm/disarm exactly the two
+    /// core commands `enhanced_view::compose_diorama` needs data from —
+    /// `CoreCommand::SetLayerExtraction` (for `FrameMsg::sprite_rgba`) and
+    /// the level probe (`Self::set_level_probe`, for `FrameMsg::
+    /// level_probe`'s camera/entity bytes) — the moment Diorama's own
+    /// effective state changes.
+    ///
+    /// Called every repaint (`eframe::App::ui`), so a mode switch, a
+    /// settings toggle from the Enhance workspace, or a test harness
+    /// flipping `GameSettings.diorama` directly (`Self::
+    /// set_diorama_for_test`) are all picked up uniformly within one
+    /// frame — no separate call needed at every place `full_level_view`/
+    /// `show_layers`/the mode combo could change.
+    ///
+    /// **Never clobbers what something else still wants.** Turning
+    /// Diorama OFF only actually disarms a command when nothing else is
+    /// still asking for it (the Layers debug window for extraction, Full-
+    /// level view for the probe) — the OR-safety `full_level_set`'s own
+    /// handler and the "Layers (debug)" checkbox handler mirror on their
+    /// own turning-off path (both now OR in `Self::diorama_effective`
+    /// too, so the disarm direction is symmetric whichever toggle moves
+    /// last).
+    fn sync_diorama_subscription(&mut self) {
+        let wants = self.diorama_effective();
+        if wants == self.diorama_wanted {
+            return;
+        }
+        self.diorama_wanted = wants;
+        if wants {
+            self.send_command(CoreCommand::SetLayerExtraction(true));
+            self.set_level_probe(true);
+        } else {
+            if !self.show_layers {
+                self.send_command(CoreCommand::SetLayerExtraction(false));
+            }
+            if !self.current_game_settings.full_level_view {
+                self.set_level_probe(false);
+            }
+            // Acceptance 1: "disabling returns to the flat enhanced view
+            // the same frame" — clear immediately rather than waiting for
+            // a stale render to age out on its own.
+            self.diorama_render = None;
+            self.diorama_texture = None;
+        }
+    }
+
+    /// The decoded level's Diorama ground texture, computed once per ROM
+    /// and cached in [`Self::diorama_ground_rgba`] (ticket W16-13).
+    ///
+    /// **Why cached, not rebuilt every frame.** `enhanced_view::
+    /// render_level_rgba` decodes every metatile's tiles through
+    /// `rf_debugger::pattern::decode_tile` — real CPU work, proportional
+    /// to the level's size, and `level_view.rs`'s own module doc already
+    /// establishes the reason it must not repeat: "ROM bytes do not
+    /// change, so re-deriving \[it\] every frame would produce the same
+    /// answer at 60 Hz forever." `Self::level_texture` already caches the
+    /// egui-texture rendering of this exact same data for the Enhance
+    /// workspace's Map tab; this is the same rendering, kept as raw bytes
+    /// instead of a GPU texture because `DioramaPass::render` needs to
+    /// upload it as its OWN texture, not read an egui one.
+    fn diorama_ground_rgba(&mut self) -> Option<(std::rc::Rc<Vec<u8>>, u32, u32)> {
+        if self.diorama_ground_rgba.is_none() {
+            let session = self.level_session.as_ref()?;
+            let chr = self.debug_panels.data.chr_rom.as_deref()?;
+            let rgba = enhanced_view::render_level_rgba(
+                &session.level,
+                chr,
+                rf_debugger::pattern::PatternTable::Left,
+                LEVEL_PALETTE,
+                session.geometry,
+            );
+            let (w, h) = (session.geometry.width_px, session.geometry.height_px);
+            self.diorama_ground_rgba = Some((std::rc::Rc::new(rgba), w, h));
+        }
+        self.diorama_ground_rgba.clone()
+    }
+
+    /// Ticket W16-13 acceptance 1: recompute the Diorama pass's output for
+    /// THIS frame and upload it as [`Self::diorama_texture`] — the
+    /// per-live-frame counterpart to [`Self::refresh_ultrawide_render`]
+    /// (which only fires on a `CanvasSnapshot` reply; Diorama needs no
+    /// such round trip, since the sprite layer and level probe already
+    /// ride on every `FrameMsg`, tickets W3-03/W11-02).
+    ///
+    /// ## Why synchronous on this thread, not off-thread (acceptance 1)
+    ///
+    /// W16-06's own bench rows measured `DioramaPass::render` at
+    /// 1.82/2.19 ms p95 for the fixture room — comfortably under this
+    /// ticket's 3 ms bar, and the same order of magnitude
+    /// `EnhancedCompositor`'s own per-frame work already costs on THIS
+    /// thread every time the Ultrawide/Map view refreshes. Standing up a
+    /// second worker thread, a result channel, and an "is the previous
+    /// refresh still running" latch for ~2 ms of work would add a new
+    /// thread-safety surface `ARCHITECTURE.md` §3 does not otherwise need,
+    /// to buy nothing this budget does not already have.
+    ///
+    /// [`Self::diorama_budget`] (the same `rf_renderer::fog::BudgetGate`
+    /// `tests/diorama_golden.rs`'s own reuse test proves is the real one)
+    /// watches the ACTUAL measured time on THIS machine and stops calling
+    /// `DioramaPass::render` if its own p95 ever crosses the shared
+    /// disable threshold — the "drop a refresh that would blow the
+    /// budget" half of acceptance 1, applied here instead of across a
+    /// channel: the core thread is never blocked either way, because it
+    /// was never involved — `compose_diorama` only ever runs on the UI
+    /// thread, reading data the core thread already published.
+    fn refresh_diorama_render(&mut self, msg: &core_thread::FrameMsg) {
+        if !self.diorama_wanted || msg.sprite_rgba.is_empty() {
+            return;
+        }
+        let Some(probe) = &msg.level_probe else {
+            return;
+        };
+        if !self.diorama_budget.is_enabled() {
+            self.diorama_render = None;
+            self.diorama_texture = None;
+            return;
+        }
+        let Some((ground_rgba, ground_w, ground_h)) = self.diorama_ground_rgba() else {
+            return;
+        };
+        let (Some(gpu), Some(session)) = (&self.gpu, &self.level_session) else {
+            return;
+        };
+        if self.diorama_pass.is_none() {
+            self.diorama_pass = Some(rf_renderer::diorama::DioramaPass::new(gpu));
+        }
+        let pass = self
+            .diorama_pass
+            .as_ref()
+            .expect("just constructed above when absent");
+
+        let addrs = Self::probe_addrs(session);
+        let values = probe.values.clone();
+        let read = move |addr: u32| -> u8 {
+            addrs
+                .iter()
+                .position(|a| *a == addr)
+                .and_then(|i| values.get(i).copied())
+                .unwrap_or(0)
+        };
+        let (width, height) = (
+            u32::try_from(msg.width).unwrap_or(0),
+            u32::try_from(msg.height).unwrap_or(0),
+        );
+
+        let start = std::time::Instant::now();
+        let result = enhanced_view::compose_diorama(
+            gpu,
+            pass,
+            session,
+            &ground_rgba,
+            ground_w,
+            ground_h,
+            &read,
+            &probe.table,
+            &msg.sprite_rgba,
+            width,
+            height,
+            msg.sprite_height_px,
+            width,
+            height,
+        );
+        self.diorama_budget
+            .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
+
+        match result {
+            Ok(render) => {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [render.width as usize, render.height as usize],
+                    &render.rgba,
+                );
+                match &mut self.diorama_texture {
+                    Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
+                    None => {
+                        self.diorama_texture = Some(self.ctx.load_texture(
+                            "diorama-frame",
+                            image,
+                            egui::TextureOptions::NEAREST,
+                        ));
+                    }
+                }
+                self.diorama_render = Some(render);
+            }
+            Err(_) => {
+                // Silent fallback to the flat view (`enhanced_view::
+                // select_active_view`'s own doc: Diorama degrades quietly
+                // rather than blocking play or showing an error box over
+                // the game).
+                self.diorama_render = None;
+                self.diorama_texture = None;
+            }
+        }
     }
 
     /// Ticket W4-03e: keep the Ultrawide view live while it's the active
@@ -3408,8 +3699,13 @@ impl RetroForgeApp {
                             .checkbox(&mut self.show_layers, "Layers (debug)")
                             .changed()
                         {
+                            // Ticket W16-13: OR'd with Diorama's own want
+                            // — unchecking this must not disarm sprite-
+                            // layer extraction out from under a still-
+                            // effective Diorama, which reads the identical
+                            // `FrameMsg::sprite_rgba`.
                             self.send_command(core_thread::CoreCommand::SetLayerExtraction(
-                                self.show_layers,
+                                self.show_layers || self.diorama_effective(),
                             ));
                             ui.close();
                         }
@@ -5861,6 +6157,11 @@ impl RetroForgeApp {
         self.sprite_layer_texture = None;
         self.ultrawide_texture = None;
         self.ultrawide_render = None;
+        // Ticket W16-13: same reasoning as the ROM-load reset above.
+        self.diorama_render = None;
+        self.diorama_texture = None;
+        self.diorama_ground_rgba = None;
+        self.diorama_wanted = false;
         self.running = false;
         self.position = None;
         self.fps = None;
@@ -6262,6 +6563,40 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn set_diorama_for_test(&mut self, on: bool) {
         self.current_game_settings.diorama = on;
+    }
+
+    /// Ticket W16-13: whether this build has a real GPU device
+    /// ([`Self::gpu`]) — the same `gpu_or_skip` clean-skip convention
+    /// `rf-renderer`'s own GPU tests use, exposed so a kittest scenario
+    /// that needs the Diorama pass to actually run (not just its settings
+    /// bit to flip) can skip cleanly on an environment with no wgpu
+    /// adapter instead of asserting on a texture that was never built.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn gpu_available_for_test(&self) -> bool {
+        self.gpu.is_some()
+    }
+
+    /// A cheap content fingerprint of [`Self::diorama_texture`]'s current
+    /// bytes, or `None` when no Diorama render exists yet (ticket W16-13).
+    ///
+    /// `TextureHandle`s are reused across `.set()` calls
+    /// (`Self::refresh_diorama_render`'s own doc), so comparing handle
+    /// identity across frames proves nothing about whether the CONTENT
+    /// changed — this hashes [`Self::diorama_render`]'s own `rgba` bytes
+    /// instead, the same "assert content, not handle identity" discipline
+    /// `enhanced_view`'s own pure-function tests already apply to
+    /// `select_active_view`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diorama_rgba_hash_for_test(&self) -> Option<u64> {
+        let render = self.diorama_render.as_ref()?;
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for &b in &render.rgba {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        Some(hash)
     }
 
     /// The status-bar badge text exactly as the toolbar renders it
@@ -7687,7 +8022,19 @@ impl RetroForgeApp {
             self.send_command(CoreCommand::SetDeflicker(on));
         }
         if let Some(on) = actions.full_level_set {
-            self.set_level_probe(on);
+            // Ticket W16-13: OR'd with Diorama's own want — turning "Full-
+            // level view" off must not disarm the probe out from under a
+            // still-effective Diorama, which needs the identical data
+            // (`Self::sync_diorama_subscription`'s own doc).
+            self.set_level_probe(on || self.diorama_effective());
+        }
+        if actions.diorama_set.is_some() {
+            // Ticket W16-13: react to the toggle within THIS frame rather
+            // than waiting for the next repaint's `sync_diorama_subscription`
+            // call — the enhance_dock checkbox already wrote
+            // `ctx.settings.diorama` directly (`features_body`'s "diorama"
+            // arm).
+            self.sync_diorama_subscription();
         }
         if let Some(on) = actions.widescreen_set {
             self.set_widescreen(on);
@@ -7717,7 +8064,12 @@ impl RetroForgeApp {
             } else {
                 self.camera
             };
-            match enhanced_view::select_active_view(camera, self.ultrawide_render.as_ref()) {
+            match enhanced_view::select_active_view(
+                camera,
+                self.ultrawide_render.as_ref(),
+                self.diorama_render.as_ref(),
+                self.peeking_original,
+            ) {
                 enhanced_view::ActiveView::Original => {
                     // Ticket W10-03. Which surface this is depends on
                     // whether a CORE exists, not on whether a texture
@@ -7764,6 +8116,20 @@ impl RetroForgeApp {
                         ui.label(format!("Ultrawide view unavailable: {reason}"));
                     });
                 }
+                // Ticket W16-13: input/hit-testing stay 2D even here
+                // (acceptance criterion 2) — this paints the composited
+                // RGBA the exact same way `Image::from_texture` paints
+                // Original/Ultrawide above; nothing below hooks pointer
+                // events into the 3D scene at all.
+                enhanced_view::ActiveView::Diorama { .. } => {
+                    if let Some(texture) = &self.diorama_texture {
+                        ui.add(egui::Image::from_texture(texture).shrink_to_fit());
+                    } else {
+                        ui.centered_and_justified(|ui| {
+                            ui.label("Diorama view: preparing texture\u{2026}");
+                        });
+                    }
+                }
             }
         });
     }
@@ -7787,6 +8153,13 @@ impl eframe::App for RetroForgeApp {
         self.poll_library_scan(&ctx);
         // Ticket W16-02: adopt a finished Upscale Studio run.
         self.poll_upscale_studio_run(&ctx);
+        // Ticket W16-13: re-derive Diorama's effective state and arm/
+        // disarm its data sources BEFORE draining this frame's core
+        // events — so a toggle-off is already reflected by the time
+        // `pump_core_events` below decides whether to refresh/clear the
+        // Diorama texture, and `video_panel` paints the flat view this
+        // SAME repaint (acceptance 1).
+        self.sync_diorama_subscription();
         self.pump_core_events(&ctx);
         self.maybe_request_canvas_snapshot();
         self.sync_event_subscription();

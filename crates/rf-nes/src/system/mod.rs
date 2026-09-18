@@ -440,6 +440,14 @@ impl NesBus {
         self.ppu.palette()
     }
 
+    /// PPUCTRL bit 5, forwarded (ticket W16-13): 8 or 16, the current
+    /// sprite height. Forwards [`Ppu::sprite_height`] — see that method's
+    /// doc for why the app shell needs it (the Diorama billboard
+    /// footprint must not assume 8x8 for a game running in 8x16 mode).
+    pub fn sprite_height(&self) -> u8 {
+        self.ppu.sprite_height()
+    }
+
     /// Ticket W11-05: start or stop recording the tiles the PPU draws —
     /// forwards [`Ppu::set_tile_capture`].
     pub fn set_tile_capture(&mut self, on: bool) {

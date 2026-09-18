@@ -7019,8 +7019,9 @@
     "a kittest scenario toggles Diorama on the fixture game and asserts the live view texture changes; a by-eye check on the fixture room is recorded; the first commercial by-eye waits for a collision-sourced profile"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 (lane A). HANDOFF -- WRITE_SCOPE WIDENED to crates/rf-nes (Ppu::sprite_height made pub(crate), NesBus::sprite_height added) because StateView::ppu_regs is empty for NES; additive only. Lifecycle: synchronous render in pump_core_events under BudgetGate; select_active_view gained diorama + peeking with peek first. sprite_billboard sizes 8 or 16 high from FrameMsg::sprite_height_px. camera_matrices::fit_distance solves the bounding sphere against both half-angles (test proves the old heuristic clipped a wide grid). Bug fixed: enhance_dock's diorama checkbox fell into the catch-all and never set the flag. Tests: diorama_live_view.rs (real GPU: Accuracy no render, Game-Aware+Diorama render hash, off clears), six enhanced_view unit tests, two rf-renderer framing tests; diorama_golden ON hash regenerated (camera moved intentionally). By-eye on the fixture room is Brad's: open rf-scroller-demo's fixture, set Game-Aware, enable Diorama in Game Settings / Enhance. Gate: workspace 2098 passing / 0 failed / 42 ignored (orchestrator).",
     "FILED 2026-09-18 by W16-06's close: the pass and mediator exist and are golden-tested; the on-screen wiring is what makes the walls visible."
    ],
    "stories": []

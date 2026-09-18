@@ -321,6 +321,16 @@ pub enum ActiveView<'a> {
     /// stitched, or the last `compose_ultrawide` call failed) — carries
     /// the reason so the shell can show it rather than a blank pane.
     UltrawideUnavailable(&'a str),
+    /// Show the composited Diorama view (ticket W16-13) — only ever
+    /// returned for `CameraToggle::Original` (Diorama is not a camera
+    /// mode of its own; it replaces the flat play view the same way
+    /// `atmosphere_fog`/`full_level_view` are settings-driven overlays,
+    /// not entries in [`CameraToggle`]) and only when not peeking.
+    Diorama {
+        rgba: &'a [u8],
+        width: u32,
+        height: u32,
+    },
 }
 
 /// Pure decision function for which view to paint (mutation-verify target
@@ -329,13 +339,45 @@ pub enum ActiveView<'a> {
 /// headlessly testable — see `tests::toggling_to_ultrawide_actually_shows
 /// _different_content_than_original` below, which is exactly the "assert
 /// the rendered output differs" proof the brief's vacuity trap (a) demands.
+///
+/// `diorama` is `Some` exactly when the caller considers Diorama
+/// currently effective (Game-Aware, a profile with collision, the toggle
+/// on — `crate::enhance_ui::feature_rows`'s own gating) AND a render has
+/// actually been produced this session; `None` covers every "not
+/// effective right now" case, including "never composed" and "the last
+/// compose failed" alike, folded together deliberately — unlike Ultrawide
+/// (a deliberate camera CHOICE the user made, worth a distinct "why not"
+/// message), a Diorama that cannot render for any reason degrades
+/// silently to the flat view it would otherwise replace, never blocking
+/// play (acceptance criterion 1's "disabling returns to the flat enhanced
+/// view the same frame" applies just as much to "temporarily unavailable"
+/// as to "turned off").
+///
+/// `peeking` is hold-to-peek (acceptance criterion 2): checked FIRST and
+/// unconditionally forces [`ActiveView::Original`], ahead of both camera
+/// state and Diorama, so a mutation that let Diorama or Ultrawide leak
+/// through a held peek fails a test here rather than shipping (see
+/// `tests::holding_peek_forces_original_even_with_both_ultrawide_and_
+/// diorama_ready` below).
 #[must_use]
 pub fn select_active_view<'a>(
     toggle: CameraToggle,
     ultrawide: Option<&'a Result<UltrawideRender, String>>,
+    diorama: Option<&'a DioramaRender>,
+    peeking: bool,
 ) -> ActiveView<'a> {
+    if peeking {
+        return ActiveView::Original;
+    }
     match toggle {
-        CameraToggle::Original => ActiveView::Original,
+        CameraToggle::Original => match diorama {
+            Some(render) => ActiveView::Diorama {
+                rgba: &render.rgba,
+                width: render.width,
+                height: render.height,
+            },
+            None => ActiveView::Original,
+        },
         CameraToggle::Ultrawide => match ultrawide {
             Some(Ok(render)) => ActiveView::Ultrawide {
                 rgba: &render.rgba,
@@ -528,13 +570,58 @@ pub fn atmosphere_scroll_drift_per_second(
 // and the fog pass (module doc's opening line).
 // ---------------------------------------------------------------------
 
-/// Approximate on-screen sprite footprint (NES sprites are 8x8 by default,
-/// 8x16 with a PPUCTRL bit this module has no access to) — stated plainly
-/// as an approximation rather than derived per-sprite; the geometry and
-/// solidity data this pass extrudes is exact, this footprint size is not.
-const SPRITE_FOOTPRINT_PX: f32 = 8.0;
+/// NES sprites are always 8px wide regardless of PPUCTRL bit 5
+/// (nesdev.org/wiki/PPU_OAM) — only the height varies, 8 or 16.
+const SPRITE_WIDTH_PX: f32 = 8.0;
+
+/// The result of [`compose_diorama`]: straight-alpha RGBA plus the size it
+/// was rendered at — same shape [`UltrawideRender`] already uses for the
+/// other GPU-composited view this module mediates.
+pub struct DioramaRender {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// One sprite's world-space billboard footprint (ticket W16-13: honours
+/// PPUCTRL bit 5 via `sprite_height_px`, replacing W16-06's fixed 8x8 —
+/// [`SPRITE_WIDTH_PX`]'s own doc explains why only the height varies). A
+/// pure function so the 8x16 behaviour is unit-testable with no GPU and no
+/// `LevelSession` at all (`tests::` below).
+#[must_use]
+fn sprite_billboard(
+    world_x: i32,
+    world_y: i32,
+    camera_x: i64,
+    camera_y: i64,
+    viewport: (u16, u16),
+    sprite_height_px: u8,
+) -> rf_renderer::diorama_mesh::Billboard {
+    let height = f32::from(sprite_height_px.max(1));
+    let screen_x = (world_x - i32::try_from(camera_x).unwrap_or(0)) as f32;
+    let screen_y = (world_y - i32::try_from(camera_y).unwrap_or(0)) as f32;
+    let u0 = screen_x / f32::from(viewport.0);
+    let v0 = screen_y / f32::from(viewport.1);
+    let u1 = (screen_x + SPRITE_WIDTH_PX) / f32::from(viewport.0);
+    let v1 = (screen_y + height) / f32::from(viewport.1);
+    rf_renderer::diorama_mesh::Billboard {
+        center_x_px: world_x as f32 + SPRITE_WIDTH_PX / 2.0,
+        center_z_px: world_y as f32 + height / 2.0,
+        width_px: SPRITE_WIDTH_PX,
+        height_px: height,
+        uv: [u0, v0, u1, v1],
+    }
+}
 
 /// Build one Diorama frame for `session`'s decoded level (module doc).
+///
+/// `ground_rgba`/`ground_w`/`ground_h` is the decoded level's rendered
+/// ground texture (`render_level_rgba`) — taken as an already-rendered
+/// buffer, not `chr`/`table`/`palette` to re-decode every call, because
+/// `level_view.rs`'s own "decoded once, not per frame" rule applies just
+/// as much to this CPU rasterization as it does to the level decode
+/// itself: the caller (`crate::app`) renders it once per ROM and passes
+/// the same buffer every frame (ticket W16-13).
 ///
 /// `sprite_rgba`/`sprite_w`/`sprite_h` is the already-extracted
 /// sprite-only layer for the CURRENT live frame, screen-space
@@ -544,7 +631,8 @@ const SPRITE_FOOTPRINT_PX: f32 = 8.0;
 /// Each billboard's UV rect is a sub-rectangle of this SAME texture at the
 /// sprite's own on-screen position — simplest-correct source per this
 /// ticket's brief ("OAM + sprite pixels", picked over building a second,
-/// per-sprite atlas).
+/// per-sprite atlas). `sprite_height_px` is `FrameMsg::sprite_height_px`
+/// (PPUCTRL bit 5) — see [`sprite_billboard`].
 ///
 /// # Errors
 /// - `"no diorama geometry for this profile"` when [`crate::level_view::
@@ -560,17 +648,18 @@ pub fn compose_diorama(
     gpu: &GpuContext,
     pass: &rf_renderer::diorama::DioramaPass,
     session: &crate::level_view::LevelSession,
-    chr: &[u8],
-    table: rf_debugger::pattern::PatternTable,
-    palette: [[u8; 3]; 4],
+    ground_rgba: &[u8],
+    ground_w: u32,
+    ground_h: u32,
     read: &dyn Fn(u32) -> u8,
     entity_table: &[u8],
     sprite_rgba: &[u8],
     sprite_w: u32,
     sprite_h: u32,
+    sprite_height_px: u8,
     out_width: u32,
     out_height: u32,
-) -> Result<Vec<u8>, String> {
+) -> Result<DioramaRender, String> {
     let geometry_layer = session
         .diorama_geometry()
         .ok_or_else(|| "no diorama geometry for this profile".to_string())?;
@@ -586,29 +675,12 @@ pub fn compose_diorama(
         return Err("diorama_geometry did not return SceneLayer::Geometry".to_string());
     };
 
-    let ground_rgba = render_level_rgba(&session.level, chr, table, palette, session.geometry);
-    let (ground_w, ground_h) = (session.geometry.width_px, session.geometry.height_px);
-
     let camera = rf_enhance::level_view::live_camera(&session.profile, read);
     let sprites = rf_enhance::level_view::sprites_in_world(&session.profile, entity_table, camera);
-    let (viewport_w, viewport_h) = rf_enhance::level_view::ORIGINAL_VIEWPORT;
+    let viewport = rf_enhance::level_view::ORIGINAL_VIEWPORT;
     let billboards: Vec<rf_renderer::diorama_mesh::Billboard> = sprites
         .iter()
-        .map(|s| {
-            let screen_x = (s.x - i32::try_from(camera.x).unwrap_or(0)) as f32;
-            let screen_y = (s.y - i32::try_from(camera.y).unwrap_or(0)) as f32;
-            let u0 = screen_x / f32::from(viewport_w);
-            let v0 = screen_y / f32::from(viewport_h);
-            let u1 = (screen_x + SPRITE_FOOTPRINT_PX) / f32::from(viewport_w);
-            let v1 = (screen_y + SPRITE_FOOTPRINT_PX) / f32::from(viewport_h);
-            rf_renderer::diorama_mesh::Billboard {
-                center_x_px: s.x as f32 + SPRITE_FOOTPRINT_PX / 2.0,
-                center_z_px: s.y as f32 + SPRITE_FOOTPRINT_PX / 2.0,
-                width_px: SPRITE_FOOTPRINT_PX,
-                height_px: SPRITE_FOOTPRINT_PX,
-                uv: [u0, v0, u1, v1],
-            }
-        })
+        .map(|s| sprite_billboard(s.x, s.y, camera.x, camera.y, viewport, sprite_height_px))
         .collect();
 
     let scene = rf_renderer::diorama_mesh::DioramaScene {
@@ -621,10 +693,10 @@ pub fn compose_diorama(
     };
     let vertices = rf_renderer::diorama_mesh::build_vertices(&scene);
 
-    pass.render(
+    let rgba = pass.render(
         gpu,
         &vertices,
-        &ground_rgba,
+        ground_rgba,
         ground_w,
         ground_h,
         sprite_rgba,
@@ -635,7 +707,12 @@ pub fn compose_diorama(
         tile_px,
         out_width,
         out_height,
-    )
+    )?;
+    Ok(DioramaRender {
+        rgba,
+        width: out_width,
+        height: out_height,
+    })
 }
 
 #[cfg(test)]
@@ -674,13 +751,13 @@ mod tests {
             height: 1,
             reduction: None,
         });
-        let view = select_active_view(CameraToggle::Original, Some(&render));
+        let view = select_active_view(CameraToggle::Original, Some(&render), None, false);
         assert!(matches!(view, ActiveView::Original));
     }
 
     #[test]
     fn ultrawide_toggle_with_no_snapshot_yet_reports_unavailable_not_a_panic() {
-        let view = select_active_view(CameraToggle::Ultrawide, None);
+        let view = select_active_view(CameraToggle::Ultrawide, None, None, false);
         assert!(matches!(view, ActiveView::UltrawideUnavailable(_)));
     }
 
@@ -698,7 +775,7 @@ mod tests {
             height: 1,
             reduction: None,
         });
-        let view = select_active_view(CameraToggle::Ultrawide, Some(&render));
+        let view = select_active_view(CameraToggle::Ultrawide, Some(&render), None, false);
         match view {
             ActiveView::Ultrawide {
                 rgba,
@@ -710,6 +787,139 @@ mod tests {
             }
             _ => panic!("expected ActiveView::Ultrawide"),
         }
+    }
+
+    // --- select_active_view: Diorama (ticket W16-13) ---------------------
+
+    #[test]
+    fn original_toggle_with_no_diorama_render_shows_original() {
+        let view = select_active_view(CameraToggle::Original, None, None, false);
+        assert!(matches!(view, ActiveView::Original));
+    }
+
+    /// Same vacuity-trap shape as the Ultrawide test above: Diorama's
+    /// content must provably differ from Original, not merely be "some
+    /// other variant".
+    #[test]
+    fn original_toggle_with_a_ready_diorama_render_shows_diorama_content_not_original() {
+        let render = DioramaRender {
+            rgba: vec![7, 8, 9, 255],
+            width: 1,
+            height: 1,
+        };
+        let view = select_active_view(CameraToggle::Original, None, Some(&render), false);
+        match view {
+            ActiveView::Diorama {
+                rgba,
+                width,
+                height,
+            } => {
+                assert_eq!(rgba, &[7, 8, 9, 255]);
+                assert_eq!((width, height), (1, 1));
+            }
+            _ => panic!("expected ActiveView::Diorama"),
+        }
+    }
+
+    /// Acceptance criterion 2: hold-to-peek shows the original frame —
+    /// forced ahead of BOTH Ultrawide and Diorama, whichever is nominally
+    /// selected/ready. A mutation that checked `peeking` only inside the
+    /// `Original` arm (letting a peeked Ultrawide toggle through) fails
+    /// here.
+    #[test]
+    fn holding_peek_forces_original_even_with_both_ultrawide_and_diorama_ready() {
+        let ultrawide: Result<UltrawideRender, String> = Ok(UltrawideRender {
+            rgba: vec![1, 1, 1, 255],
+            width: 1,
+            height: 1,
+            reduction: None,
+        });
+        let diorama = DioramaRender {
+            rgba: vec![2, 2, 2, 255],
+            width: 1,
+            height: 1,
+        };
+        for toggle in [CameraToggle::Original, CameraToggle::Ultrawide] {
+            let view = select_active_view(toggle, Some(&ultrawide), Some(&diorama), true);
+            assert!(
+                matches!(view, ActiveView::Original),
+                "peeking must force Original regardless of toggle {toggle:?}"
+            );
+        }
+    }
+
+    /// Toggling to Ultrawide takes precedence over an also-ready Diorama
+    /// render — Diorama only ever shows for `CameraToggle::Original`
+    /// (`ActiveView::Diorama`'s own doc).
+    #[test]
+    fn ultrawide_toggle_wins_over_a_ready_diorama_render() {
+        let ultrawide: Result<UltrawideRender, String> = Ok(UltrawideRender {
+            rgba: vec![1, 1, 1, 255],
+            width: 1,
+            height: 1,
+            reduction: None,
+        });
+        let diorama = DioramaRender {
+            rgba: vec![2, 2, 2, 255],
+            width: 1,
+            height: 1,
+        };
+        let view = select_active_view(
+            CameraToggle::Ultrawide,
+            Some(&ultrawide),
+            Some(&diorama),
+            false,
+        );
+        assert!(matches!(view, ActiveView::Ultrawide { .. }));
+    }
+
+    // --- sprite_billboard: 8x16 footprint (ticket W16-13) ----------------
+
+    #[test]
+    fn sprite_billboard_is_8x8_by_default() {
+        let b = sprite_billboard(10, 20, 0, 0, (256, 240), 8);
+        assert_eq!(b.width_px, 8.0);
+        assert_eq!(b.height_px, 8.0);
+        assert_eq!(b.center_x_px, 14.0);
+        assert_eq!(b.center_z_px, 24.0);
+        assert_eq!(
+            b.uv,
+            [10.0 / 256.0, 20.0 / 240.0, 18.0 / 256.0, 28.0 / 240.0]
+        );
+    }
+
+    /// The actual acceptance criterion: an 8x16-mode sprite (PPUCTRL bit 5
+    /// set) gets a footprint TWICE as tall, width unchanged — a mutation
+    /// that ignored `sprite_height_px` entirely (always emitting 8x8)
+    /// would still pass every other test in this module but fails here.
+    #[test]
+    fn sprite_billboard_honours_8x16_mode() {
+        let b8 = sprite_billboard(10, 20, 0, 0, (256, 240), 8);
+        let b16 = sprite_billboard(10, 20, 0, 0, (256, 240), 16);
+        assert_eq!(
+            b16.width_px, b8.width_px,
+            "width never depends on sprite height mode"
+        );
+        assert_eq!(b16.height_px, 16.0);
+        assert_ne!(b16.height_px, b8.height_px);
+        assert_ne!(
+            b16.center_z_px, b8.center_z_px,
+            "a taller footprint anchors its centre differently on the Z (screen-Y) axis"
+        );
+        assert_ne!(
+            b16.uv, b8.uv,
+            "the taller footprint's UV rect must cover more of the texture"
+        );
+    }
+
+    #[test]
+    fn sprite_billboard_subtracts_the_camera_before_building_the_uv_rect() {
+        let at_origin = sprite_billboard(100, 100, 0, 0, (256, 240), 8);
+        let with_camera = sprite_billboard(100, 100, 50, 50, (256, 240), 8);
+        assert_ne!(
+            at_origin.uv, with_camera.uv,
+            "the camera offset must actually reach the UV rect, not just the world-space centre"
+        );
     }
 
     // --- compose_ultrawide: empty canvas is an error, not a panic -------
