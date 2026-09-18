@@ -6894,8 +6894,9 @@
     "a golden on the example-mode7 fixture and a by-eye check on a racing or flight title recorded"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 AS A SLICE (lane C). Delivered: Mode7Registers + CoreEvent::Mode7 (pay-for-use, one static end-of-frame value -- rf-snes composes post-hoc, so per-scanline HDMA capture is not there yet, documented), render_mode7_plane_rgba, rf-renderer mode7_plane (matrix_scale, ground_extent_px, camera_view_proj, render_mode7_ground), diorama::render_with_vp, mode7_plane_golden on/off + gate reuse, bench rows mode7-3d 3.14 / 2.97 ms p95. HANDOFF -- WRITE_SCOPE WIDENED to crates/retroforge/src/debug_dock.rs for the exhaustive-match line. The horizon mapping is an approximation (one static scale -> one camera distance). NOT DONE, filed as W16-14: live wiring in refresh_diorama_render (plane texture from VRAM/CGRAM, render_mode7_ground, composite), per-scanline capture, by-eye on Super Mario Kart / Pilotwings (Brad, after W16-14). Gate: four crates 910 passing (orchestrator), workspace 2122 (agent), arch OK, evidence 22 rows.",
     "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
    ],
    "stories": []
@@ -7026,6 +7027,33 @@
    "notes": [
     "CLOSED 2026-09-18 (lane A). HANDOFF -- WRITE_SCOPE WIDENED to crates/rf-nes (Ppu::sprite_height made pub(crate), NesBus::sprite_height added) because StateView::ppu_regs is empty for NES; additive only. Lifecycle: synchronous render in pump_core_events under BudgetGate; select_active_view gained diorama + peeking with peek first. sprite_billboard sizes 8 or 16 high from FrameMsg::sprite_height_px. camera_matrices::fit_distance solves the bounding sphere against both half-angles (test proves the old heuristic clipped a wide grid). Bug fixed: enhance_dock's diorama checkbox fell into the catch-all and never set the flag. Tests: diorama_live_view.rs (real GPU: Accuracy no render, Game-Aware+Diorama render hash, off clears), six enhanced_view unit tests, two rf-renderer framing tests; diorama_golden ON hash regenerated (camera moved intentionally). By-eye on the fixture room is Brad's: open rf-scroller-demo's fixture, set Game-Aware, enable Diorama in Game Settings / Enhance. Gate: workspace 2098 passing / 0 failed / 42 ignored (orchestrator).",
     "FILED 2026-09-18 by W16-06's close: the pass and mediator exist and are golden-tested; the on-screen wiring is what makes the walls visible."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-14",
+   "title": "Mode 7 ground in the live play view",
+   "phase": 16,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-snes/**",
+    "crates/rf-renderer/**"
+   ],
+   "depends_on": [
+    "W16-09",
+    "W16-13"
+   ],
+   "acceptance": [
+    "when a SNES game is in BG mode 7 and Diorama is enabled in Game-Aware mode (or a new per-game 'Mode 7 as 3D' row that needs no collision profile -- decide and document), refresh_diorama_render builds the plane texture from VRAM/CGRAM at the chosen density, calls render_mode7_ground with the frame's Mode7Registers, and composites it in place of the flat plane, within the budget gate",
+    "sprites stay billboards on that ground at their OAM footprint; hold-to-peek shows the original; input stays 2D",
+    "per-scanline register capture: the core records the Mode 7 registers at the top and bottom visible lines (or per HDMA change) so the horizon matches where the game's perspective puts it; the mapping from matrix to camera height is derived, not a single static scale",
+    "by-eye on Super Mario Kart and Pilotwings recorded by Brad; a kittest scenario asserts the live view changes on a synthetic mode-7 frame"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-18 by W16-09's close: the renderer path exists and is golden-tested; the app wiring and the per-scanline capture are what make it visible and correct on real titles."
    ],
    "stories": []
   }
