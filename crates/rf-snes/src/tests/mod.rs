@@ -19,6 +19,7 @@ mod apu;
 mod apu_ports;
 mod dma;
 mod dsp;
+mod dsp1_dma;
 mod hdma;
 mod mapping;
 mod ppu;

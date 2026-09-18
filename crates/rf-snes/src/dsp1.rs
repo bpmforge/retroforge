@@ -1246,6 +1246,14 @@ impl Dsp1 {
         0x80
     }
 
+    /// Whether a Raster (`0Ah`/`1Ah`) stream is currently live (ticket
+    /// W16-11): a DR-drain trace uses this to tell a CPU poll of a raster
+    /// stream apart from an ordinary command's output drain.
+    #[must_use]
+    pub fn raster_active(&self) -> bool {
+        self.raster.is_some()
+    }
+
     /// The status byte the CPU sees at any SR address in the window.
     /// Always `0x80`: RQM (bit 7) is "ready", and this HLE is never busy
     /// (module doc).

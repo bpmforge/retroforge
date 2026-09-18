@@ -3688,3 +3688,16 @@ stories, 10 decisions).
   never a picture. The libretro fetch under D-011 is W15-09. Gate:
   workspace **2005 passing / 0 failed / 39 ignored**, clippy clean,
   arch OK.
+
+- **W16-11 — how the DSP-1 raster is drained** (2026-09-18, lane C).
+  Traced with a pad-driven run instead of an idle one: Super Mario Kart
+  and Pilotwings both read the raster output by CPU polling, tens of
+  thousands of data-register reads per 600 frames, and never by DMA or
+  HDMA, which reverses the assumption W14-21 recorded from an idle
+  trace. No transfer logic changed: DMA and HDMA already resolve A-bus
+  bytes the way the CPU does, so the data register advances per byte
+  either way, and two new tests pin fixed-address DMA and indirect HDMA
+  into the Mode 7 registers against a CPU-driven reference. Census
+  unchanged. The reconstructed projection and raster maths is exercised
+  for real now, so Brad's by-eye check of the track decides it. Gate:
+  workspace **1986 passing / 0 failed**, arch OK.
