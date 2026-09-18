@@ -6415,7 +6415,7 @@
     "the one DSP-family title that stayed refused after W14-19 slice 1 is named and its cause recorded (header variant, DSP-2/3/4, or a bad dump)"
    ],
    "points": 5,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED 2026-09-17 by W14-19's close (slice 1). Sources are in W14-19's notes; the manual OCR excerpt lives outside the repo (re-derive from archive.org SNESDevManual book2_djvu.txt lines ~23779-31340). Raster (0Ah) is what Super Mario Kart's track needs: it produces per-scanline Mode 7 matrix rows from the projection parameters set by 02h; expect that to be the bulk of the work and the first thing to verify by eye."
    ],
