@@ -6923,8 +6923,9 @@
     "priority stays: save-state screenshot, first-frame, user art folder, then fetched art (UX_WAVE_15.md \u00a74); no ROM data is ever requested (NON_GOALS #5)"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 (lane A, last Wave 15 ticket). art.rs: ArtClient trait (UreqArtClient + FakeArtClient), ArtFetcher worker + mpsc + waker, dedup per session, second rf-cache under <cache>/art with art_cache_cap_mb (256 MB default), map_game_name per the libretro-thumbnails README, thumbnail_url. thumbnail_source gains Fetched as the fourth source. Settings > Paths: fetch_art toggle (off), attribution, cap slider; card network dot + hover attribution. Dependency: ureq 3.4.2 (MIT OR Apache-2.0) rustls-no-provider + _ring + platform-verifier; deny.toml per-crate exception for webpki-root-certs (CDLA-Permissive-2.0, unreachable fallback); cargo-deny 0.20.2 installed here and reports licenses ok. Orchestrator fix before close: ureq::get() panicked in TLS ('WebPki is disabled') because the agent was not told to use RootCerts::PlatformVerifier -- caught by running the ignored real-fetch test, which now passes. Gate: workspace 2162 passing / 0 failed / 43 ignored; app+cache crates re-run after the fix; arch OK.",
     "FILED 2026-09-18 at W16-04's close as the follow-up W15-05's acceptance names. Ruling D-011 (Brad 2026-09-17). Client crate must be permissive (ureq/reqwest with rustls; check deny.toml)."
    ],
    "stories": []

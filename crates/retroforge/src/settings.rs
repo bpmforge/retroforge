@@ -173,6 +173,18 @@ pub struct PathSettings {
     /// yet. `None` (the default) means that source contributes nothing —
     /// never an error, since most players will never set this.
     pub art_folder: Option<PathBuf>,
+    /// Ticket W15-09, ruling D-011: "Fetch box art from the internet",
+    /// off by default. Gates ALL network use in the art pipeline — with
+    /// this `false` (a fresh install's state, NON_GOALS #6), `crate::art`
+    /// never builds a request, never spawns the fetch worker, and the
+    /// fourth thumbnail source (`ThumbnailSource::Fetched`) never wins.
+    pub fetch_art: bool,
+    /// Ticket W15-09: the fetched-art cache's own size cap in megabytes,
+    /// independent of `cache_cap_mb` (`UX_WAVE_15.md` §4: "a cache cap...
+    /// alongside the existing `rf-cache` size cap") — a user who fills
+    /// their stitched-canvas cache should not thereby evict cover art, and
+    /// vice versa.
+    pub art_cache_cap_mb: u64,
 }
 
 impl Default for PathSettings {
@@ -185,6 +197,13 @@ impl Default for PathSettings {
             // of disk.
             cache_cap_mb: 2048,
             art_folder: None,
+            // Off by default (D-011, NON_GOALS #6): a fresh install makes
+            // zero network requests until a player opts in explicitly.
+            fetch_art: false,
+            // 256 MB (plan.json W15-09 acceptance's stated default):
+            // enough for a few thousand small boxart PNGs, small enough
+            // that opting in is not itself a disk-space surprise.
+            art_cache_cap_mb: 256,
         }
     }
 }

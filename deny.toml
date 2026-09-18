@@ -173,6 +173,29 @@ allow = ["Unicode-3.0"]
 crate = "epaint_default_fonts"
 allow = ["OFL-1.1", "Ubuntu-font-1.0"]
 
+# ---------------------------------------------------------------------------
+# W15-09 (opt-in box art fetch, D-011) — `ureq` (MIT OR Apache-2.0, both
+# already allow-listed) added with `default-features = false` and the
+# `rustls-no-provider,_ring,platform-verifier` features: rustls for TLS,
+# the OS-native certificate store (macOS Keychain / Windows cert store /
+# Android) via `rustls-platform-verifier` rather than `rustls-webpki-roots`,
+# specifically to avoid vendoring Mozilla's CA bundle under
+# `webpki-roots`'s CDLA-Permissive-2.0 licence. `rustls-native-certs`
+# (pulled in by `rustls-platform-verifier` as its cross-platform trust-anchor
+# loader) still carries an unconditional fallback dependency on
+# `webpki-root-certs` for platforms with no usable native store — same
+# CDLA-Permissive-2.0 licence, one hop further down. It is not reached on
+# this build's target (native-cert lookup wins on macOS/Windows/Linux), but
+# `cargo deny` evaluates the whole resolved graph regardless of target, so
+# it needs the same per-crate exception `unicode-ident` established above
+# rather than a widened allow-list. CDLA-Permissive-2.0 is itself a
+# permissive, OSI-recognized-style data licence (attribution-only, no
+# reciprocal/copyleft clause) — not GPL/LGPL/AGPL/MPL/SSPL and not NC/ND, so
+# NFR-011's copyleft ban is untouched.
+[[licenses.exceptions]]
+crate = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
 [licenses.private]
 ignore = false
 

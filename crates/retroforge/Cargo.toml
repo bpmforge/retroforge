@@ -128,6 +128,7 @@ rtrb = "0.3.4"
 lz4_flex = "0.14.0"
 toml = "1"
 serde = { version = "1", features = ["derive"] }
+ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "_ring", "platform-verifier"] }
 
 [dev-dependencies]
 

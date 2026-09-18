@@ -51,6 +51,12 @@ pub enum ThumbnailSource {
     /// A file in the user's configured art folder, matched by normalized
     /// title.
     UserArt,
+    /// Ticket W15-09, ruling D-011: fetched from libretro-thumbnails, the
+    /// last resort — only reachable when Settings' "Fetch box art from
+    /// the internet" toggle is on (`crate::art`). Distinct from the other
+    /// three so callers can draw the network indicator (`UX_WAVE_15.md`
+    /// §4: "nothing on screen should imply 'local' when it wasn't").
+    Fetched,
 }
 
 /// Priority order, as a pure function of what is AVAILABLE (acceptance
@@ -63,12 +69,38 @@ pub fn thumbnail_source(
     has_first_frame_capture: bool,
     has_user_art: bool,
 ) -> Option<ThumbnailSource> {
+    thumbnail_source_with_fetch(
+        has_save_state_screenshot,
+        has_first_frame_capture,
+        has_user_art,
+        false,
+    )
+}
+
+/// The same priority order as [`thumbnail_source`], with the fourth
+/// source (ticket W15-09, `ThumbnailSource::Fetched`) appended at the
+/// bottom of the ladder — save-state screenshot, first-frame, user art
+/// folder, then fetched art (`UX_WAVE_15.md` §4, plan.json W15-09
+/// acceptance 5). Kept as a separate function rather than adding a
+/// parameter to [`thumbnail_source`] would: every existing call site
+/// (and every existing test) that only knows about the first three
+/// sources stays correct with no `has_fetched_art: false` boilerplate to
+/// thread through.
+#[must_use]
+pub fn thumbnail_source_with_fetch(
+    has_save_state_screenshot: bool,
+    has_first_frame_capture: bool,
+    has_user_art: bool,
+    has_fetched_art: bool,
+) -> Option<ThumbnailSource> {
     if has_save_state_screenshot {
         Some(ThumbnailSource::SaveState)
     } else if has_first_frame_capture {
         Some(ThumbnailSource::FirstFrame)
     } else if has_user_art {
         Some(ThumbnailSource::UserArt)
+    } else if has_fetched_art {
+        Some(ThumbnailSource::Fetched)
     } else {
         None
     }
@@ -268,6 +300,40 @@ mod tests {
     #[test]
     fn none_available_is_none() {
         assert_eq!(thumbnail_source(false, false, false), None);
+    }
+
+    // ---- thumbnail_source_with_fetch: acceptance 5's fourth source ----
+
+    #[test]
+    fn fetched_art_is_the_last_resort_of_all_four() {
+        assert_eq!(
+            thumbnail_source_with_fetch(false, false, false, true),
+            Some(ThumbnailSource::Fetched)
+        );
+    }
+
+    #[test]
+    fn fetched_art_never_beats_any_local_source() {
+        assert_eq!(
+            thumbnail_source_with_fetch(true, false, false, true),
+            Some(ThumbnailSource::SaveState)
+        );
+        assert_eq!(
+            thumbnail_source_with_fetch(false, true, false, true),
+            Some(ThumbnailSource::FirstFrame)
+        );
+        assert_eq!(
+            thumbnail_source_with_fetch(false, false, true, true),
+            Some(ThumbnailSource::UserArt)
+        );
+    }
+
+    #[test]
+    fn no_source_at_all_including_fetch_is_none() {
+        assert_eq!(
+            thumbnail_source_with_fetch(false, false, false, false),
+            None
+        );
     }
 
     // ---- normalize_title -----------------------------------------------
