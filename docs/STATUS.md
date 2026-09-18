@@ -3775,3 +3775,17 @@ stories, 10 decisions).
   billboards assume 8x8 sprites; camera framing is a heuristic. Gate:
   workspace **2074 passing / 0 failed / 40 ignored**, clippy clean,
   arch OK, GPU evidence valid.
+
+- **W16-13 — the diorama in the live view** (2026-09-18, lane A). The
+  walls now stand up on screen. The pass renders synchronously each
+  frame under the shared budget gate, at about 2 ms, and its output
+  becomes the active view; hold-to-peek takes precedence over both the
+  ultrawide and the diorama views; switching it off clears it the same
+  repaint. Sprite billboards honour 8x16 mode by carrying the PPU's
+  sprite height on the frame message, which needed a two-line additive
+  accessor in the NES core, recorded as a handoff. The camera now fits
+  the decoded screen's bounding sphere to the viewport, and a test shows
+  the old fixed distance clipped a wide grid. Found and fixed: the
+  Enhance dock's Diorama checkbox never wrote its setting. The by-eye
+  check on the fixture room is Brad's. Gate: workspace **2098 passing /
+  0 failed / 42 ignored**, clippy clean, arch OK.
