@@ -6923,7 +6923,7 @@
     "priority stays: save-state screenshot, first-frame, user art folder, then fetched art (UX_WAVE_15.md \u00a74); no ROM data is ever requested (NON_GOALS #5)"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "in_progress",
    "notes": [
     "FILED 2026-09-18 at W16-04's close as the follow-up W15-05's acceptance names. Ruling D-011 (Brad 2026-09-17). Client crate must be permissive (ureq/reqwest with rustls; check deny.toml)."
    ],
