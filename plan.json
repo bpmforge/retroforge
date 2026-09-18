@@ -6813,8 +6813,9 @@
     "a by-eye check on the first commercial profile recorded"
    ],
    "points": 8,
-   "status": "in_progress",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 AS A SLICE (lane A). Delivered: Geometry layer + producers (rf-enhance scene_graph.rs, level_view.rs), diorama_mesh.rs (pure), diorama.rs + diorama.wgsl (DioramaPass, camera_matrices), goldens on/off + gate reuse, bench rows (1.82 / 2.19 ms p95), enhanced_view::compose_diorama mediator, GameSettings.diorama, feature row gated on Game-Aware + LevelSession::has_collision, badge 'Diorama: walls', kittest diorama_reaches_the_app.rs. Bug fixed en route: RetroForgeApp::profile_matched never assigned (all profile-gated rows were dead). NOT DONE, filed as W16-13: compose_diorama is not wired to the live view (needs a GPU-compositor probe/lifecycle like full_level_view), so the walls are not visible on screen yet; billboards are fixed 8x8 (no 8x16); camera framing distance is a heuristic; by-eye on a commercial profile waits for one with collision (W16-05 has none). Gate: workspace 2074 passing / 0 failed / 40 ignored (agent + orchestrator).",
     "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
    ],
    "stories": []
@@ -6993,6 +6994,31 @@
    "status": "todo",
    "notes": [
     "FILED 2026-09-18 by W16-02's close: the studio is wired end to end with the stub upscaler, but real inference needs tiling for the static-shape exports."
+   ],
+   "stories": []
+  },
+  {
+   "id": "W16-13",
+   "title": "Wire the diorama compositor into the live play view",
+   "phase": 16,
+   "crate": "retroforge",
+   "write_scope": [
+    "crates/retroforge/**",
+    "crates/rf-renderer/**"
+   ],
+   "depends_on": [
+    "W16-06"
+   ],
+   "acceptance": [
+    "with Diorama enabled in Game Aware mode on a profile with collision, the play view shows compose_diorama's output live (a GPU-compositor probe/lifecycle in the app in the same shape as full_level_view), updating every frame within the budget gate; disabling returns to the flat enhanced view the same frame",
+    "hold-to-peek shows the original frame; input and hit-testing stay 2D; Accuracy mode unchanged (mode-invariant tests pass)",
+    "8x16 sprite footprints are honoured for billboards (PPUCTRL bit 5 / OAM size), and the camera framing fits the decoded screen to the viewport rather than a fixed distance",
+    "a kittest scenario toggles Diorama on the fixture game and asserts the live view texture changes; a by-eye check on the fixture room is recorded; the first commercial by-eye waits for a collision-sourced profile"
+   ],
+   "points": 3,
+   "status": "todo",
+   "notes": [
+    "FILED 2026-09-18 by W16-06's close: the pass and mediator exist and are golden-tested; the on-screen wiring is what makes the walls visible."
    ],
    "stories": []
   }
