@@ -6519,8 +6519,9 @@
    "the Game Settings window opens identically from the context menu and from the overlay menu (same window instance, not two)"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "notes": [
+    "CLOSED 2026-09-18 (lane A). Row context menu via Response::context_menu plus a mirrored egui::Popup for the pad path; Start (NavAction::Menu, previously a dead end) opens it, chosen over a South long-press because W15-08 already commits to Start. Game Settings window is one instance keyed by game_settings_target; the Enhance menu keeps only 'Game settings…' and the overlay's 'Mode…' became 'Game settings…'. heuristics_menu refactored into heuristics_panel shared by both. reveal.rs builds the Finder/Explorer/xdg-open command with the platform as a parameter. Tests: context_menu_and_game_settings.rs (right-click favourite, same window from menu and overlay, row-targeted settings, Mode persists), reveal unit tests; enhance_workspace.rs and surfaces_can_scroll.rs updated for the new menu shape. Gate: workspace 1955 passing / 0 failed / 36 ignored (agent + orchestrator).",
    "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 3). See that doc \u00a73 (context menu contents) and \u00a75 (Game Settings window) and \u00a711.",
    "Where: consolidate what the Enhance menu and Enhance workspace scatter today."

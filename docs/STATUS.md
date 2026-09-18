@@ -3632,3 +3632,16 @@ stories, 10 decisions).
   title" never existed: Metal Combat is OBC-1. Brad's by-eye check of
   the track and the flight view is pending. Gate: workspace **1937
   passing / 0 failed / 36 ignored**.
+
+- **W15-03 — context menu and one Game Settings window** (2026-09-18,
+  lane A). Right-click on a library row, or Start on the focused row
+  with a pad, opens Play, Play in mode, Favourite, Game settings, Show
+  in Finder and Hash info. Mode, De-flicker and the Heuristics ladder
+  leave the Enhance menu for a single Game Settings window that opens
+  identically from the row menu, the Enhance menu and the overlay, so
+  there is one place to change how a game runs. Start had been a dead
+  end in the pad bridge; it now does the thing the controller-first
+  ticket already promised. The reveal command takes its platform as a
+  value, so the Finder, Explorer and xdg-open shapes are all tested on
+  this machine. Gate: workspace **1955 passing / 0 failed / 36
+  ignored**, clippy clean, arch OK.
