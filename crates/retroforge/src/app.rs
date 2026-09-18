@@ -311,6 +311,36 @@ pub struct RetroForgeApp {
     hd_unsatisfied: Vec<String>,
     /// What the last composite actually replaced.
     hd_report: Option<rf_enhance::hd_render::CompositeReport>,
+    /// Ticket W16-02: whether the Upscale Studio window is open. Also
+    /// what gates `CoreCommand::SetStudioCapture` — see
+    /// `Self::set_upscale_studio_open`.
+    show_upscale_studio: bool,
+    /// Tiles captured while the studio was open, deduplicated, with the
+    /// position history animation grouping needs.
+    upscale_studio_session: crate::upscale_studio::CaptureSession,
+    /// Per-tile review decisions, by asset hash. A tile with no entry is
+    /// `Decision::Approved` — see that variant's own doc.
+    upscale_studio_decisions: std::collections::BTreeMap<String, crate::upscale_studio::Decision>,
+    /// The last completed Run's pack, if one has finished.
+    upscale_studio_pack: Option<rf_ai::studio::StudioPack>,
+    /// A Run in flight on a worker thread — polled every frame
+    /// (`Self::poll_upscale_studio_run`), never blocked on.
+    upscale_studio_run: Option<std::sync::mpsc::Receiver<crate::upscale_studio::RunOutcome>>,
+    /// The model/provider/licence line criterion 3 asks for, plus write
+    /// results and errors — one line, always current, never silently
+    /// stale (same "state is in the word" principle `crate::toast`'s
+    /// module doc cites).
+    upscale_studio_status: String,
+    /// Preview textures, nearest-scaled ORIGINAL tiles — decoded once per
+    /// asset hash and cached, same pattern as
+    /// `Self::library_thumbnail_texture`.
+    upscale_studio_original_textures: std::collections::HashMap<String, egui::TextureHandle>,
+    /// Preview textures for the UPSCALED result, invalidated (cleared)
+    /// every time a new Run completes.
+    upscale_studio_upscaled_textures: std::collections::HashMap<String, egui::TextureHandle>,
+    /// Where the last "Write pack" wrote to, shown next to the button per
+    /// criterion 3 ("the destination shown").
+    upscale_studio_write_dir: Option<std::path::PathBuf>,
     /// Ticket W14-20 defect 2: the handle `eframe::CreationContext` hands
     /// `new` below, kept so `open_rom_path` can build a waker
     /// (`core_thread::spawn_with_waker`'s `Option<Arc<dyn Fn() + Send +
@@ -938,6 +968,15 @@ impl RetroForgeApp {
             hd_summary: None,
             hd_unsatisfied: Vec::new(),
             hd_report: None,
+            show_upscale_studio: false,
+            upscale_studio_session: crate::upscale_studio::CaptureSession::default(),
+            upscale_studio_decisions: std::collections::BTreeMap::new(),
+            upscale_studio_pack: None,
+            upscale_studio_run: None,
+            upscale_studio_status: String::new(),
+            upscale_studio_original_textures: std::collections::HashMap::new(),
+            upscale_studio_upscaled_textures: std::collections::HashMap::new(),
+            upscale_studio_write_dir: None,
             ctx: cc.egui_ctx.clone(),
             core: None,
             texture: None,
@@ -2435,6 +2474,17 @@ impl RetroForgeApp {
                 if self.show_layers {
                     self.send_command(CoreCommand::SetLayerExtraction(true));
                 }
+                // Ticket W16-02, same stale-state-across-a-reload hazard:
+                // a fresh core thread starts with `SetStudioCapture` off.
+                // If the Upscale Studio was already open (perhaps before
+                // any ROM was loaded at all — `set_upscale_studio_open`
+                // only ever reaches a core through `send_command`, which
+                // silently no-ops with none running), re-assert it here or
+                // the window would sit at "0 tile(s) captured" for the
+                // rest of the session with no core ever told to record.
+                if self.show_upscale_studio {
+                    self.send_command(CoreCommand::SetStudioCapture(true));
+                }
                 // Ticket W4-03e: a new ROM is a new session for the
                 // enhanced camera too — the previous ROM's stitched canvas
                 // must not linger onscreen (or get composited into) against
@@ -2601,6 +2651,14 @@ impl RetroForgeApp {
                 }
                 _ => (msg.rgba.clone(), (msg.width, msg.height)),
             };
+            // Ticket W16-02: feed the Upscale Studio's accumulator
+            // whenever it asked for tiles this frame (`msg.hd.studio_tiles`
+            // is empty otherwise — see `CoreCommand::SetStudioCapture`).
+            if self.show_upscale_studio {
+                if let Some(hd) = &msg.hd {
+                    self.upscale_studio_session.observe(&hd.studio_tiles);
+                }
+            }
             // Ticket W15-05: the first-frame capture hook (acceptance 1) —
             // the first `CoreEvent::Frame` after a successful boot for a
             // hash with no thumbnail yet. Reads `rgba` before it moves
@@ -3373,6 +3431,12 @@ impl RetroForgeApp {
                         if ui.button("Game settings\u{2026}").clicked() {
                             self.game_settings_target = None;
                             self.show_game_settings = true;
+                            ui.close();
+                        }
+                        // Ticket W16-02: next to "Game settings…" per this
+                        // ticket's own brief.
+                        if ui.button("Upscale Studio\u{2026}").clicked() {
+                            self.set_upscale_studio_open(true);
                             ui.close();
                         }
                         ui.separator();
@@ -6317,6 +6381,405 @@ impl RetroForgeApp {
         self.send_command(CoreCommand::SetTileCapture(false));
     }
 
+    /// Ticket W16-02: open or close the Upscale Studio, toggling capture
+    /// with it (`CoreCommand::SetStudioCapture`'s own doc: independent of
+    /// `SetTileCapture`, pay-for-use the same way). Captured tiles
+    /// survive a close/reopen — only the "Clear" button in the window
+    /// itself drops them — so closing the window to check something else
+    /// mid-session does not lose the recording.
+    fn set_upscale_studio_open(&mut self, open: bool) {
+        self.show_upscale_studio = open;
+        self.send_command(CoreCommand::SetStudioCapture(open));
+    }
+
+    /// Nearest-scaled preview texture for one captured tile's ORIGINAL
+    /// pixels, cached by asset hash — same pattern as
+    /// `Self::library_thumbnail_texture`.
+    fn upscale_studio_original_texture(
+        &mut self,
+        ctx: &egui::Context,
+        tile: &crate::upscale_studio::CapturedTile,
+    ) -> egui::TextureHandle {
+        if let Some(t) = self
+            .upscale_studio_original_textures
+            .get(&tile.asset.asset_hash)
+        {
+            return t.clone();
+        }
+        // Nearest-neighbour x8 so an 8x8 tile is visible at all in a list
+        // row — a raw 8x8 texture would be an unreadable speck.
+        const PREVIEW_SCALE: u32 = 8;
+        use rf_ai::upscale::Upscaler as _;
+        let up = rf_ai::upscale::NearestUpscaler::new(PREVIEW_SCALE)
+            .expect("a fixed non-zero literal cannot be ZeroScale");
+        let src = rf_ai::upscale::Rgba8::from_indexed(
+            &tile.asset.indexed_pixels,
+            &tile.asset.palette,
+            tile.asset.width,
+            tile.asset.height,
+        );
+        let handle = match src.and_then(|s| up.upscale(&s)) {
+            Ok(img) => {
+                let color = egui::ColorImage::from_rgba_unmultiplied(
+                    [img.width as usize, img.height as usize],
+                    &img.pixels,
+                );
+                ctx.load_texture(
+                    format!("upscale-studio-orig-{}", tile.asset.asset_hash),
+                    color,
+                    egui::TextureOptions::NEAREST,
+                )
+            }
+            Err(_) => {
+                // A malformed capture is not fatal to the whole window —
+                // show a 1x1 placeholder rather than panicking or hiding
+                // the row entirely.
+                ctx.load_texture(
+                    format!("upscale-studio-orig-{}", tile.asset.asset_hash),
+                    egui::ColorImage::from_rgba_unmultiplied([1, 1], &[128, 128, 128, 255]),
+                    egui::TextureOptions::NEAREST,
+                )
+            }
+        };
+        self.upscale_studio_original_textures
+            .insert(tile.asset.asset_hash.clone(), handle.clone());
+        handle
+    }
+
+    /// The upscaled preview texture for one asset, from the last
+    /// completed Run — decoded once and cached, cleared whenever a new
+    /// Run starts (`Self::upscale_studio_window`).
+    fn upscale_studio_upscaled_texture(
+        &mut self,
+        ctx: &egui::Context,
+        asset_hash: &str,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(t) = self.upscale_studio_upscaled_textures.get(asset_hash) {
+            return Some(t.clone());
+        }
+        let pack = self.upscale_studio_pack.as_ref()?;
+        let img = pack.built.images.get(asset_hash)?;
+        let color = egui::ColorImage::from_rgba_unmultiplied(
+            [img.width as usize, img.height as usize],
+            &img.pixels,
+        );
+        let handle = ctx.load_texture(
+            format!("upscale-studio-up-{asset_hash}"),
+            color,
+            egui::TextureOptions::NEAREST,
+        );
+        self.upscale_studio_upscaled_textures
+            .insert(asset_hash.to_string(), handle.clone());
+        Some(handle)
+    }
+
+    /// Which upscaler a Run uses (ticket W16-02 criterion 2: "through
+    /// `OnnxUpscaler` when a model is configured").
+    ///
+    /// Configured through environment variables rather than a settings
+    /// UI field, for now: `ORT_DYLIB_PATH` and `RF_AI_MODEL_PATH` are
+    /// already the exact variables `scripts/fetch-onnx-runtime.sh` and
+    /// `scripts/fetch-ai-upscale-model.sh --print-path` hand back, and
+    /// `crates/rf-ai/tests/onnx_bench.rs`/`studio_onnx.rs` already read
+    /// them the same way — one vocabulary for "where the model/runtime
+    /// live" across the fetch scripts, the ignored rf-ai tests, and this
+    /// window, rather than a fourth. Falls back to the stub whenever
+    /// either is unset, or the `ai-onnx` feature is not compiled in.
+    fn upscale_studio_model_choice() -> crate::upscale_studio::ModelChoice {
+        #[cfg(feature = "ai-onnx")]
+        {
+            if let (Ok(dylib), Ok(model)) = (
+                std::env::var("ORT_DYLIB_PATH"),
+                std::env::var("RF_AI_MODEL_PATH"),
+            ) {
+                let scale = std::env::var("RF_AI_MODEL_SCALE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(4);
+                let model_path = std::path::PathBuf::from(model);
+                let model_id = model_path.file_stem().map_or_else(
+                    || "onnx-model".to_string(),
+                    |s| s.to_string_lossy().to_string(),
+                );
+                return crate::upscale_studio::ModelChoice::Onnx {
+                    dylib_path: std::path::PathBuf::from(dylib),
+                    model_path,
+                    model_id,
+                    license: "see crates/rf-ai/ai-model-manifest.toml".to_string(),
+                    version: "n/a".to_string(),
+                    scale,
+                };
+            }
+        }
+        crate::upscale_studio::ModelChoice::Stub { scale: 4 }
+    }
+
+    /// Start a Run on a worker thread. The UI thread never blocks on
+    /// inference — same "the UI never blocks" principle
+    /// `Self::rescan_library`'s worker follows, and the same
+    /// spawn-detached-with-a-channel shape.
+    fn start_upscale_studio_run(&mut self) {
+        if self.upscale_studio_run.is_some() {
+            return; // one Run at a time, same guard `rescan_library` uses.
+        }
+        let assets: Vec<rf_ai::pipeline::ExtractedAsset> = self
+            .upscale_studio_session
+            .tiles()
+            .values()
+            .map(|t| t.asset.clone())
+            .collect();
+        if assets.is_empty() {
+            self.upscale_studio_status =
+                "Nothing captured yet — play with the studio open, or start capture first."
+                    .to_string();
+            return;
+        }
+        // Grouping (`rf_ai::animation::group`) is O(sprites-per-frame²)
+        // per consecutive frame pair, so it happens INSIDE
+        // `crate::upscale_studio::run`, on the spawned thread below, not
+        // here — see `CaptureSession::observations`'s own doc.
+        let observations = self.upscale_studio_session.observations();
+        let rom_hash = self.current_game_hash.clone().unwrap_or_default();
+        let choice = Self::upscale_studio_model_choice();
+        let post_process = rf_ai::studio::PostProcessOptions::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = self.ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("upscale-studio-run".to_string())
+            .spawn(move || {
+                let outcome = crate::upscale_studio::run(
+                    "upscale-studio-pack",
+                    &rom_hash,
+                    &assets,
+                    &observations,
+                    &choice,
+                    post_process,
+                );
+                let _ = tx.send(outcome);
+                ctx.request_repaint();
+            });
+        match spawned {
+            Ok(_handle) => {
+                self.upscale_studio_run = Some(rx);
+                self.upscale_studio_status = "Running\u{2026}".to_string();
+            }
+            Err(e) => {
+                self.upscale_studio_status = format!("Could not start Run: {e}");
+            }
+        }
+    }
+
+    /// Adopt a finished Run the moment it lands (ticket W16-02, mirroring
+    /// `Self::poll_library_scan`'s "adopt before anything draws" shape).
+    fn poll_upscale_studio_run(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.upscale_studio_run.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.upscale_studio_run = None;
+                self.upscale_studio_status = outcome.status_line;
+                match outcome.pack {
+                    Ok(pack) => {
+                        self.upscale_studio_upscaled_textures.clear();
+                        self.upscale_studio_pack = Some(pack);
+                        self.toasts.push(
+                            crate::toast::ToastKind::Success,
+                            "Upscale Studio: run complete",
+                            ctx,
+                        );
+                    }
+                    Err(e) => {
+                        self.upscale_studio_status = format!("{}: {e}", self.upscale_studio_status);
+                        self.toasts.push(
+                            crate::toast::ToastKind::Error,
+                            format!("Upscale Studio run failed: {e}"),
+                            ctx,
+                        );
+                    }
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.upscale_studio_run = None;
+                self.upscale_studio_status = "Run thread ended without a result".to_string();
+            }
+        }
+    }
+
+    /// Write the last completed Run's pack to `dir`, honouring
+    /// `upscale_studio_decisions`. Shared by the window's "Write pack…"
+    /// button (which picks `dir` via `rfd::FileDialog`) and
+    /// `Self::write_upscale_studio_pack_for_test` (which cannot go
+    /// through a native file dialog in a headless test) — same split
+    /// `Self::load_script_for_test` already uses for the same reason.
+    fn write_upscale_studio_pack(&mut self, ctx: &egui::Context, dir: std::path::PathBuf) {
+        let Some(pack) = self.upscale_studio_pack.clone() else {
+            return;
+        };
+        match crate::upscale_studio::write_pack(
+            &dir,
+            &pack,
+            self.upscale_studio_session.tiles(),
+            &self.upscale_studio_decisions,
+        ) {
+            Ok(n) => {
+                self.upscale_studio_write_dir = Some(dir.clone());
+                self.upscale_studio_status = format!("Wrote {n} tile(s) to {}", dir.display());
+                self.toasts.push(
+                    crate::toast::ToastKind::Success,
+                    format!("Upscale Studio: wrote pack to {}", dir.display()),
+                    ctx,
+                );
+            }
+            Err(e) => {
+                self.upscale_studio_status = format!("Write pack failed: {e}");
+                self.toasts.push(
+                    crate::toast::ToastKind::Error,
+                    format!("Upscale Studio write failed: {e}"),
+                    ctx,
+                );
+            }
+        }
+    }
+
+    /// Ticket W16-02: the Upscale Studio window — lists captured tiles,
+    /// original-vs-upscaled previews, per-tile Approve/Reject/Replace,
+    /// Run, and Write pack.
+    fn upscale_studio_window(&mut self, ctx: &egui::Context) {
+        if !self.show_upscale_studio {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Upscale Studio")
+            .id(egui::Id::new("upscale_studio_window"))
+            .collapsible(true)
+            .resizable(true)
+            .default_width(520.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "{} tile(s) captured",
+                        self.upscale_studio_session.len()
+                    ));
+                    if ui.button("Clear captures").clicked() {
+                        self.upscale_studio_session.clear();
+                        self.upscale_studio_decisions.clear();
+                        self.upscale_studio_pack = None;
+                        self.upscale_studio_original_textures.clear();
+                        self.upscale_studio_upscaled_textures.clear();
+                    }
+                    if ui.button("Run upscaler").clicked() {
+                        self.start_upscale_studio_run();
+                    }
+                    if self.upscale_studio_run.is_some() {
+                        ui.spinner();
+                    }
+                });
+                if !self.upscale_studio_status.is_empty() {
+                    ui.label(&self.upscale_studio_status);
+                }
+                ui.separator();
+
+                let hashes: Vec<String> = self
+                    .upscale_studio_session
+                    .tiles()
+                    .keys()
+                    .cloned()
+                    .collect();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for hash in &hashes {
+                            let Some(tile) = self.upscale_studio_session.tiles().get(hash).cloned()
+                            else {
+                                continue;
+                            };
+                            ui.horizontal(|ui| {
+                                let orig = self.upscale_studio_original_texture(ctx, &tile);
+                                ui.image((orig.id(), egui::vec2(64.0, 64.0)));
+                                if let Some(up) = self.upscale_studio_upscaled_texture(ctx, hash) {
+                                    ui.image((up.id(), egui::vec2(64.0, 64.0)));
+                                } else {
+                                    ui.label("(run to preview)");
+                                }
+                                ui.label(&hash[..8.min(hash.len())]);
+
+                                let decision = self
+                                    .upscale_studio_decisions
+                                    .entry(hash.clone())
+                                    .or_default();
+                                let mut approved =
+                                    matches!(decision, crate::upscale_studio::Decision::Approved);
+                                if ui.checkbox(&mut approved, "Approve").changed() {
+                                    *decision = if approved {
+                                        crate::upscale_studio::Decision::Approved
+                                    } else {
+                                        crate::upscale_studio::Decision::Rejected
+                                    };
+                                }
+                                // `write_pack` refuses (aborting the WHOLE
+                                // write) a replacement that is not exactly
+                                // `8 * scale` square — naming the size here
+                                // is cheaper than a failed write after
+                                // picking the wrong file.
+                                let replace_label = self
+                                    .upscale_studio_pack
+                                    .as_ref()
+                                    .and_then(|p| p.built.images.values().next())
+                                    .map_or_else(
+                                        || "Replace with PNG\u{2026}".to_string(),
+                                        |img| {
+                                            format!(
+                                                "Replace with PNG ({}x{})\u{2026}",
+                                                img.width, img.height
+                                            )
+                                        },
+                                    );
+                                if ui.button(replace_label).clicked() {
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .add_filter("PNG", &["png"])
+                                        .pick_file()
+                                    {
+                                        *decision = crate::upscale_studio::Decision::Replaced(path);
+                                    }
+                                }
+                                if let crate::upscale_studio::Decision::Replaced(path) = decision {
+                                    ui.label(format!(
+                                        "\u{2192} {}",
+                                        path.file_name().map_or_else(
+                                            || path.display().to_string(),
+                                            |n| n.to_string_lossy().to_string()
+                                        )
+                                    ));
+                                }
+                            });
+                        }
+                    });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let can_write = self.upscale_studio_pack.is_some();
+                    if ui
+                        .add_enabled(can_write, egui::Button::new("Write pack\u{2026}"))
+                        .clicked()
+                    {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            self.write_upscale_studio_pack(ctx, dir);
+                        }
+                    }
+                    if let Some(dir) = &self.upscale_studio_write_dir {
+                        ui.label(format!("\u{2192} {}", dir.display()));
+                    }
+                });
+            });
+        if !open {
+            self.set_upscale_studio_open(false);
+        }
+    }
+
     /// What the last import said, for the UI.
     #[doc(hidden)]
     pub fn hd_summary_for_test(&self) -> Option<&str> {
@@ -6496,6 +6959,68 @@ impl RetroForgeApp {
     #[must_use]
     pub fn show_game_settings_for_test(&self) -> bool {
         self.show_game_settings
+    }
+
+    /// Ticket W16-02: seed the Upscale Studio's capture session directly,
+    /// bypassing a running core thread — a kittest scenario has no PPU to
+    /// draw real tiles, and this is the same "test-only accessor" pattern
+    /// as `show_game_settings_for_test`.
+    #[doc(hidden)]
+    pub fn upscale_studio_seed_for_test(&mut self, captures: &[crate::stepper::StudioTileCapture]) {
+        self.upscale_studio_session.observe(captures);
+    }
+
+    /// How many distinct tiles the capture session actually recorded —
+    /// the assertion that catches "the window opened before a ROM did,
+    /// so the newly spawned core was never told to capture at all"
+    /// (ticket W16-02's `open_rom_path` re-assertion, next to
+    /// `SetLayerExtraction`'s identical stale-state-across-a-reload
+    /// fix).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn upscale_studio_capture_len_for_test(&self) -> usize {
+        self.upscale_studio_session.len()
+    }
+
+    /// Whether the Upscale Studio window is open.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn show_upscale_studio_for_test(&self) -> bool {
+        self.show_upscale_studio
+    }
+
+    /// Where the last "Write pack" wrote to, for a test to check files
+    /// against without re-deriving the path from a click.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn upscale_studio_write_dir_for_test(&self) -> Option<std::path::PathBuf> {
+        self.upscale_studio_write_dir.clone()
+    }
+
+    /// Write the last completed Run's pack to `dir`, bypassing the
+    /// "Write pack…" button's `rfd::FileDialog` — a headless kittest
+    /// harness has no OS file picker to drive, same reasoning as
+    /// `Self::load_script_for_test`.
+    #[doc(hidden)]
+    pub fn write_upscale_studio_pack_for_test(
+        &mut self,
+        ctx: &egui::Context,
+        dir: std::path::PathBuf,
+    ) {
+        self.write_upscale_studio_pack(ctx, dir);
+    }
+
+    /// Set one captured tile's review decision directly, for a test that
+    /// wants to exercise Reject/Replace without clicking the checkbox
+    /// pixel-for-pixel.
+    #[doc(hidden)]
+    pub fn upscale_studio_set_decision_for_test(
+        &mut self,
+        asset_hash: &str,
+        decision: crate::upscale_studio::Decision,
+    ) {
+        self.upscale_studio_decisions
+            .insert(asset_hash.to_string(), decision);
     }
 
     /// Close the Game Settings window and clear its target, without
@@ -7188,6 +7713,8 @@ impl eframe::App for RetroForgeApp {
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.
         self.poll_library_scan(&ctx);
+        // Ticket W16-02: adopt a finished Upscale Studio run.
+        self.poll_upscale_studio_run(&ctx);
         self.pump_core_events(&ctx);
         self.maybe_request_canvas_snapshot();
         self.sync_event_subscription();
@@ -7209,6 +7736,7 @@ impl eframe::App for RetroForgeApp {
         self.controls_window(&ctx);
         self.settings_window(&ctx);
         self.game_settings_window(&ctx);
+        self.upscale_studio_window(&ctx);
         self.hash_info_window(&ctx);
         self.overlay_menu(&ctx);
         self.states_modal(&ctx);

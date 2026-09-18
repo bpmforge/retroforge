@@ -74,6 +74,14 @@ rf-profiles = { path = "../rf-profiles" }
 # rf-plugin-sdk: the Lua script host (ticket W4-04). The shell owns the
 # REPL panel and the capability/ledger surfaces; the SDK owns the sandbox.
 rf-plugin-sdk = { path = "../rf-plugin-sdk" }
+# rf-ai: the Upscale Studio pipeline (ticket W16-02) — grouping
+# (`rf_ai::animation`), the pipeline/cache-key seam (`rf_ai::pipeline`,
+# `rf_ai::pack`) and the post-processing/attribution glue
+# (`rf_ai::studio`). `default-features = false`: the shell only ever
+# constructs `rf_ai::upscale::NearestUpscaler` unless the `ai-onnx`
+# feature below is also on, so a default build pulls no `ort` and needs
+# no ONNX Runtime dylib to compile or test.
+rf-ai = { path = "../rf-ai", default-features = false }
 eframe = "0.35.0"
 rfd = "0.17.2"
 # log + env_logger: ticket W14-20's env-filtered logger, so `RUST_LOG=
@@ -153,6 +161,25 @@ audio = ["rf-audio/device"]
 # `gamepad` turns on the real gilrs backend (ticket W2-06), for the same
 # CI reason `audio` is opt-in: gilrs reaches for evdev/udev on Linux.
 gamepad = ["rf-input/gilrs"]
+# `ai-onnx` turns on the Upscale Studio's real ONNX model path (ticket
+# W16-02), i.e. `rf-ai/onnx`. OFF by default for the same reason `audio`
+# and `gamepad` are: it pulls `ort` (an RC dependency behind
+# `load-dynamic`, see rf-ai/Cargo.toml) that `cargo test --workspace`
+# must not need. With it off, the studio window still runs end to end
+# against `rf_ai::upscale::NearestUpscaler` (the stub every rf-ai test
+# already runs against).
+ai-onnx = ["rf-ai/onnx"]
+# `ai-onnx-coreml` additionally turns on `rf-ai/onnx-coreml`, which is
+# what compiles in `ort::ep::CoreML` at all (verified against
+# ort-2.0.0-rc.13/src/ep/mod.rs: the `coreml` module and its `CoreML`
+# re-export are behind `#[cfg(feature = "coreml")]`) — the dispatch type
+# `crate::upscale_studio::run` registers so the studio's ONNX path tries
+# CoreML before falling back to CPU (`docs/design/ENHANCEMENT_WAVE_16.md`
+# §7: "CoreML/CUDA EP when available, CPU otherwise"). An unavailable EP
+# does not hard-fail session creation (`ort`'s own `fail_silently`
+# default, see `crates/rf-ai/src/onnx.rs`'s module doc), which is exactly
+# the "CPU otherwise" half.
+ai-onnx-coreml = ["ai-onnx", "rf-ai/onnx-coreml"]
 
 [[bench]]
 name = "debugger_idle"

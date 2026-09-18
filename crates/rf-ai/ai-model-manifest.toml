@@ -1,4 +1,4 @@
-# Local-AI fetched-artifact licence ledger (ticket W16-01;
+# Local-AI fetched-artifact licence ledger (tickets W16-01, W16-02;
 # docs/design/ENHANCEMENT_WAVE_16.md §7; docs/design/AI_UPSCALING.md).
 #
 # Same vocabulary/rule as tests/rom-manifest.toml's [[artifact]] schema
@@ -36,4 +36,14 @@ license_note = "Upstream weights (xinntao/Real-ESRGAN) are BSD-3-Clause (verifie
 sha256 = "fa18ce70de3a55f3149d0cc898d335d2d69fca29edc0692cb362c856b2942c3f"
 url = "https://huggingface.co/imgdesignart/realesrgan-x4-onnx/resolve/main/onnx/model.onnx"
 fetched_by = "scripts/fetch-ai-upscale-model.sh"
-note = "fp32 ONNX export, 4x scale (Real-ESRGAN's native scale factor), input NCHW float32 RGB 0..1 -- matches crate::onnx::OnnxUpscaler's expected convention. The sibling model_fp16.onnx in the same repo was tried first and rejected: it requires a tensor(float16) input, which OnnxUpscaler does not produce."
+note = "fp32 ONNX export, 4x scale (Real-ESRGAN's native scale factor), input NCHW float32 RGB 0..1 -- matches crate::onnx::OnnxUpscaler's expected convention. The sibling model_fp16.onnx in the same repo was tried first and rejected: it requires a tensor(float16) input, which OnnxUpscaler does not produce. STATIC 64x64 input (verified empirically, ticket W16-01) -- not dynamic; onnx_bench.rs's TILE constant is the workaround. MODEL=x4-fp32 (the default) in scripts/fetch-ai-upscale-model.sh."
+
+[[artifact]]
+id = "realesrgan-general-x4v3-onnx-compact"
+license_status = "no-license-grant-fetch-only"
+license_note = "Upstream weights (xinntao/Real-ESRGAN's realesr-general-x4v3 checkpoint, SRVGGNetCompact architecture) are BSD-3-Clause (same upstream LICENSE as realesrgan-x4-onnx-fp32 above). This ONNX export is Qualcomm AI Hub's own conversion (huggingface.co/qualcomm/Real-ESRGAN-General-x4v3); its repo's LICENSE file states only 'The license of the original trained model can be found at https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE' -- pointing at upstream rather than granting rights to Qualcomm's own converted artifact -- so this is recorded as no-license-grant-fetch-only, not permissive, matching the same caution applied to realesrgan-x4-onnx-fp32's mirror. The Hugging Face model-card METADATA tag reads 'bsd-3-clause', but that is repository metadata, not a licence file covering the binary Qualcomm redistributes, so it is not treated as a first-party grant. NOT OpenRAIL-class (refused outright by this ticket's rule)."
+version = "0.62.2"
+sha256 = "19e208e88e906097a9df3fc5ca2318cb745c26a556348dc48fce562f36c49d38"
+url = "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/real_esrgan_general_x4v3/releases/v0.62.2/real_esrgan_general_x4v3-onnx-float.zip"
+fetched_by = "scripts/fetch-ai-upscale-model.sh"
+note = "The COMPACT model criterion 1 asks for: SRVGGNetCompact is a much smaller architecture than full ESRGAN (~5 MB of weights vs. the x4-fp32 export's larger body), suited to the offline per-sheet path. fp32 ONNX, 4x scale, input NCHW float32 RGB 0..1 -- matches crate::onnx::OnnxUpscaler's expected convention (verified against the zip's metadata.json: input 'image' shape [1,3,128,128], output 'upscaled_image' shape [1,3,512,512]). STATIC 128x128 input, NOT dynamic -- no dynamic-shape compact model with a clear licence trail was found in this ticket's research; recorded here rather than silently worked around. sha256 above is of the DOWNLOADED ZIP (it bundles the .onnx graph plus an external-data .data weights file that must stay alongside it); the extracted real_esrgan_general_x4v3.onnx file itself hashes to cfa8edb48eab19aa29f6fab258640f081b44512f30c28a4b16a62ab1095d31f3 and its .data sibling to 512d0ec9940c2e9d85d27f2952f12a0b77b7841dc22df4ce9f3ea458bc98f37f, recorded here for auditability though the fetch script only checks the zip. MODEL=compact in scripts/fetch-ai-upscale-model.sh."
