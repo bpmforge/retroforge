@@ -263,3 +263,14 @@ NON_GOALS #5 rules out fetching it. Rows rather than picture cards until
 there is an image to put in a card: a grid of identical grey
 placeholders would look more like the wireframe and tell the user
 strictly less than a title does.
+
+**Wave 15 plan (2026-09-17).** The gaps above, plus launch gestures,
+recency/favourites, per-game context menu, modals/toasts, hotkeys, theme
+tokens and controller-first navigation, are documented as a plan in
+`docs/design/UX_WAVE_15.md` and filed as plan.json tickets
+W15-01..W15-08 (status `todo`, on hold pending Brad's go-ahead). Also per
+D-011 (2026-09-17): the "No box art" line above is now superseded for
+*fetched* art specifically — box art/metadata fetch from
+libretro-thumbnails or similar sources is permitted as an opt-in,
+off-by-default network feature under NON_GOALS #6; it does not relax
+NON_GOALS #5 (still no ROM distribution). See UX_WAVE_15.md §4.

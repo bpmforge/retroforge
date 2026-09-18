@@ -184,6 +184,24 @@ rewind; room-stitching for top-down profiles; smooth-camera experiments
 Exit criteria: each feature ships with its own golden/A-B tests + per-game
 override knobs + honesty-contract UI labels.
 
+**Wave 15 — player-facing UX (planned, on hold), 2026-09-17 addendum.**
+Placed under Phase 8 rather than Phase 7 because this is the player-facing
+shell polish (gamepad nav, accessibility) §8's own phasing table already
+assigns to Phase 8, not SNES-core work. Documented in
+`docs/design/UX_WAVE_15.md`, filed as plan.json W15-01..W15-08, all
+`status: "todo"` and held — Brad ruled 2026-09-17 this is plan-only; no
+ticket claims until he says go.
+- W15-01 Launch gestures and selection focus (double-click, Enter,
+  gamepad A; Play stays visible).
+- W15-02 Recently played, favourites, sort.
+- W15-03 Context menu and a single Game Settings window.
+- W15-04 Modals (`egui::Modal`) and toasts (`egui-notify`).
+- W15-05 Thumbnails and the card grid, with a list-view toggle.
+- W15-06 App hotkeys (save/load state, fast-forward, screenshot,
+  hold-to-peek), shown in the overlay.
+- W15-07 Theme and typography tokens.
+- W15-08 Controller-first library navigation.
+
 ## Phase 9 — Ecosystem ⏳ W9 closed; W10/W11 reachability arc closed except **W11-06** (ten curated profiles, blocked on ROMs)
 
 Profile editor UI; plugin SDK stabilization (wasmtime component tier, WIT

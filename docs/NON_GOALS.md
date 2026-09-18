@@ -23,6 +23,10 @@ requires a design doc, not a ticket.
 6. **No cloud dependency, no accounts, no telemetry-by-default.** AI
    features are local-first; optional external providers are opt-in
    configuration, never a requirement (spec: "should not require cloud").
+   Clarified 2026-09-17 (D-011): this permits fetching box art/metadata
+   from libretro-thumbnails or similar community sources as an opt-in,
+   off-by-default Settings toggle, no accounts — the same posture as any
+   other external provider under this item.
 
 ## Technical non-goals
 

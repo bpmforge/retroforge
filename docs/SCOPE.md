@@ -59,3 +59,13 @@ may only be relaxed with new research evidence.
   (SRS FR-CORE-038), not LLE of the uPD7725. SA-1, Super FX, and the
   one-off chips are unaffected and stay deferred. ROADMAP.md Phase 7
   gained a line for W14-18/W14-19; plan.json gained those two tickets.
+- **2026-09-17** — Frontend row's "Later / conditional" gained box-art
+  clarity: box art / metadata fetch is now explicitly an opt-in,
+  off-by-default network feature under NON_GOALS #6 (D-011), not a
+  fetch NON_GOALS #5 forbids. UX Wave 15 (player-facing library polish:
+  launch gestures, recency/favourites, context menu, modals/toasts,
+  thumbnails + card grid, hotkeys, theme tokens, controller-first
+  library) is documented in `docs/design/UX_WAVE_15.md` and filed as
+  plan.json tickets W15-01..W15-08, **status `todo`, on hold** — Brad
+  ruled this is plan-only for now; no ticket claims until he says go.
+  ROADMAP.md gained a Phase 8 addendum listing the eight tickets.

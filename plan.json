@@ -6448,6 +6448,220 @@
     "FILED 2026-09-17 from Brad's by-eye check of W14-17 (see its ADDENDUM). Bisect: a build at 0af9310 (before W14-17) shows Uncharted Waters as gibberish from the start, so W14-17's ExGrafix fixed the early screens and the remaining break after character creation is separate. Diagnosis: the cart is ETROM (nesdev board list: Koei's Uncharted Waters and Romance of the Three Kingdoms II, 2x8 KiB RAM, chip 1 volatile, chip 0 battery); its NES 2.0 header says 8 KiB PRG-RAM + 8 KiB PRG-NVRAM = 16 KiB. rf-nes has one fixed 8 KiB PRG RAM (system/mod.rs PRG_RAM_SIZE) and mmc5.rs never handles $5113 at all, so both chips alias onto one and the game's second-chip data overwrites its first once it starts using both. Not verified by trace yet -- the first step of the ticket is a title_probe-style confirmation (watch $5113 writes with bit 2 set before the corruption) so the fix follows evidence, per RF-L-08."
    ],
    "stories": []
-  }
+  },
+ {
+  "id": "W15-01",
+  "title": "Launch gestures and selection focus: double-click, Enter, gamepad A, visible focus ring",
+  "phase": 15,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "double-click on a library row/card launches that game; Enter launches the current selection; gamepad Activate (already routed through ui_nav.rs) launches the selection \u2014 Play stays visible on the row/card as today",
+   "a selected-row/card state exists with a visible focus ring meeting WCAG 2.2 non-text contrast (3:1) in both the default and high-contrast palettes, and a single row/card click sets selection without launching",
+   "keyboard arrow keys move the selection; the existing gamepad-to-focus bridge (ui_nav.rs) drives the same selection state, so no separate input path is added",
+   "unit/UI tests cover: double-click launches, Enter launches selection, click-only selects without launching"
+  ],
+  "points": 3,
+  "status": "todo",
+  "hold": true,
+  "notes": [
+   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (source: retroforge-ux-review.html recommendation 1). See that doc \u00a73 for the wireframe and \u00a711 for the full acceptance summary this ticket's list is drawn from.",
+   "Where: library row loop in app.rs; ui_nav.rs already emits Enter for the pad path, so gamepad launch should come for free once Enter-to-launch exists."
+  ],
+  "stories": []
+ },
+ {
+  "id": "W15-02",
+  "title": "Recently played, favourites, and sort for the library toolbar",
+  "phase": 15,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W15-01"
+  ],
+  "acceptance": [
+   "last-played timestamp and play count are recorded per ROM hash in the existing per-game settings file (game_settings.rs) on every launch",
+   "Recently played and Favourites filter chips sit beside the existing All/NES/SNES chips; selecting Recently played or Favourites is mutually exclusive with the other (radio-like), and both combine with the console filter",
+   "a sort control offers Title, Last played, and Console; when the search box is empty the list defaults to recent-first",
+   "unit tests cover: play-count/last-played persistence round-trip, each filter chip's resulting set, and each sort order"
+  ],
+  "points": 3,
+  "status": "todo",
+  "hold": true,
+  "notes": [
+   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 2). See that doc \u00a73 (toolbar wireframe) and \u00a711.",
+   "Where: game_settings.rs for the new fields; the library toolbar for the chips and sort control."
+  ],
+  "stories": []
+ },
+ {
+  "id": "W15-03",
+  "title": "Per-game context menu and a single Game Settings window",
+  "phase": 15,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W15-01"
+  ],
+  "acceptance": [
+   "right-click on a library row/card opens a context menu (egui Response::context_menu) with: Play, Play in mode, Favourite/Unfavourite, Game settings, Show in Finder/Explorer, Hash info",
+   "a gamepad long-press on the focused row/card opens the same context menu",
+   "a single Game Settings window exists with Mode, De-flicker, and Heuristics on it, replacing the scattered Enhance-menu/Enhance-workspace entry points for those three settings",
+   "the Game Settings window opens identically from the context menu and from the overlay menu (same window instance, not two)"
+  ],
+  "points": 3,
+  "status": "todo",
+  "hold": true,
+  "notes": [
+   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 3). See that doc \u00a73 (context menu contents) and \u00a75 (Game Settings window) and \u00a711.",
+   "Where: consolidate what the Enhance menu and Enhance workspace scatter today."
+  ],
+  "stories": []
+ },
+ {
+  "id": "W15-04",
+  "title": "Themed modals (egui::Modal) and toasts (egui-notify) replacing plain windows and the status string",
+  "phase": 15,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "save-state overwrite confirmation, quit-with-unsaved-state, and the crash report each use egui::Modal (built into egui 0.31+) instead of a plain egui::Window, with dimmed backdrop and outside-click dismissal",
+   "egui-notify (MIT-licensed) is added as a dependency and used for non-blocking status: ROM folder added/rescanned, state saved, and script error \u2014 the last of these replacing the plain status string called out against user story E7-S1",
+   "no other existing window (Settings, Controls, Save states manager, Author, Enhance workspace, Layers debug, Debug viewers) is changed by this ticket \u2014 they stay windows/docks per docs/design/UX_WAVE_15.md \u00a75's table",
+   "a test or manual check confirms each converted dialog still blocks/dismisses correctly and each toast auto-dismisses without blocking emulation (per FRONTEND_UI \u00a71 principle 3)"
+  ],
+  "points": 2,
+  "status": "todo",
+  "hold": true,
+  "notes": [
+   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 4). See that doc \u00a75 for the full before/after dialog table and \u00a711.",
+   "Independent of W15-01/02/03; can be built in parallel."
+  ],
+  "stories": []
+ },
+ {
+  "id": "W15-05",
+  "title": "Thumbnails (save-state screenshot / first-frame capture / user art folder) and the card grid with a list-view toggle",
+  "phase": 15,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**",
+   "crates/rf-cache/**"
+  ],
+  "depends_on": [
+   "W15-01",
+   "W15-04"
+  ],
+  "acceptance": [
+   "a thumbnail is produced per ROM hash in this priority order: most recent save-state screenshot, else a one-time first-frame capture on first successful boot, else a match from a user-configured art folder (Settings \u203a Paths) by normalized title; thumbnails are stored via rf-cache, keyed by ROM hash, respecting the existing size-capped LRU",
+   "the library renders a card grid (thumbnail, title, console badge, profile/states/enhanced badges per FRONTEND_UI \u00a73.1) as an alternative to the existing row list, toggled by a Grid/List control in the toolbar",
+   "the list view remains fully functional on its own (search, filter, sort, launch, context menu) \u2014 it is not merely a lesser view of the grid, per docs/design/UX_WAVE_15.md \u00a710",
+   "a game with no thumbnail yet shows a generic, console-tinted placeholder card, never a picture implying an image exists when it does not",
+   "unit tests cover the thumbnail priority order and the cache round-trip; this ticket does NOT implement the opt-in libretro-thumbnails network fetch from UX_WAVE_15.md \u00a74 \u2014 that is out of scope here and tracked as a future ticket once W15-05 lands the local pipeline"
+  ],
+  "points": 5,
+  "status": "todo",
+  "hold": true,
+  "notes": [
+   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 5). See that doc \u00a74 for the full art pipeline including the opt-in network fetch this ticket excludes, and \u00a711.",
+   "Where: screenshot capture already exists in app.rs; add an image loader via egui_extras; the empty-state cards from design review G-21 slot into the same grid. rf-cache is in write_scope because the thumbnail cache belongs in the existing content-addressed store per rf-cache's own module doc (W4-08), not a second cache."
+  ],
+  "stories": []
+ },
+ {
+  "id": "W15-06",
+  "title": "App hotkeys (save/load state, fast-forward, screenshot, hold-to-peek) shown in the overlay",
+  "phase": 15,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "a new App section in the Controls (remap) window holds five bindings, namespaced apart from game bindings so the two cannot collide: save state, load state, fast-forward (hold), screenshot, hold-to-peek \u2014 with the defaults listed in docs/design/UX_WAVE_15.md \u00a76",
+   "all five are remappable through the existing remap flow (click-a-button, press-a-key/pad), and conflicts are surfaced inline the same way game-button conflicts are today",
+   "the overlay menu (Esc) shows each action's current binding next to it",
+   "a test confirms App-namespaced and game-namespaced bindings cannot be assigned to collide"
+  ],
+  "points": 3,
+  "status": "todo",
+  "hold": true,
+  "notes": [
+   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 7). See that doc \u00a76 and \u00a711.",
+   "Independent of the other W15 tickets; can be built any time."
+  ],
+  "stories": []
+ },
+ {
+  "id": "W15-07",
+  "title": "Theme and typography tokens: token table wired into apply_theme, embedded fonts, high-contrast re-derived from the same tokens",
+  "phase": 15,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W15-05"
+  ],
+  "acceptance": [
+   "the token table in docs/design/UX_WAVE_15.md \u00a78 (bg, surface, ink, muted, line, accent, accent-soft, ok/warn/error + soft variants, radii, spacing scale) is wired into apply_theme in app.rs; new UI code added by this wave references tokens, not literal colors",
+   "one embedded display face and one embedded body face are added, licensed OFL or Apache per the project's licence policy, with no network fetch",
+   "the high-contrast palette is re-derived from the same token set (not a hand-tuned second palette) and keeps its previously measured WCAG ratios",
+   "hover elevation is added on library cards and a short fade on modal open/close; no other new animation is added, preserving the existing one-moving-element rule"
+  ],
+  "points": 3,
+  "status": "todo",
+  "hold": true,
+  "notes": [
+   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 9, and new principle 7 'theme is a token set, not scattered literals'). See that doc \u00a78 and \u00a711.",
+   "Depends on W15-05 because there must be real cards to theme before hover elevation and the grid's visual language can be finished."
+  ],
+  "stories": []
+ },
+ {
+  "id": "W15-08",
+  "title": "Controller-first library: four-direction grid navigation, large focus ring, larger type on pad-active, Start opens context menu",
+  "phase": 15,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W15-05"
+  ],
+  "acceptance": [
+   "four-direction navigation between cards/rows works via the existing pad-to-focus bridge (ui_nav.rs)",
+   "a focus ring larger and more visible than the mouse-hover ring appears on the pad-focused card/row",
+   "UI type size increases when a gamepad is the most-recently-active input device, and reverts when keyboard/mouse resumes activity",
+   "Start opens the context menu (from W15-03) on the currently focused card/row",
+   "AccessKit labels carry through unchanged, proven by a check that the same focus state egui already tracks is what AccessKit reports"
+  ],
+  "points": 5,
+  "status": "todo",
+  "hold": true,
+  "notes": [
+   "HOLD: Brad ruled 2026-09-17 plan-only; do not claim until he says go.",
+   "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 10). See that doc \u00a79 and \u00a711.",
+   "Depends on W15-05: there is nothing to navigate a grid over before the grid exists."
+  ],
+  "stories": []
+ }
  ]
 }
