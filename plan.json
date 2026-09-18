@@ -6490,8 +6490,9 @@
    "unit tests cover: play-count/last-played persistence round-trip, each filter chip's resulting set, and each sort order"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "notes": [
+    "CLOSED 2026-09-18 (lane A). game_settings gains last_played_epoch_secs / play_count / favourite (omitted when default) and record_launch; library::filter_and_sort is the pure filter+sort (13 unit tests); app caches RecencyMeta per hash on scan and refreshes one entry on launch/favourite; star button per row + Space on the selected row; toolbar is two rows (one row overflowed 768 px and misrouted clicks). tests/library_filters.rs launches, closes, and finds the title alone under Recently played, and proves the radio chips. Gate: workspace 1941 passing / 0 failed / 36 ignored (agent and orchestrator runs).",
    "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 2). See that doc \u00a73 (toolbar wireframe) and \u00a711.",
    "Where: game_settings.rs for the new fields; the library toolbar for the chips and sort control."
