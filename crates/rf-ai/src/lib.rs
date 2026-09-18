@@ -7,6 +7,7 @@ pub mod animation;
 pub mod pack;
 pub mod pipeline;
 pub mod studio;
+pub mod tiling;
 pub mod upscale;
 
 #[cfg(feature = "onnx")]

@@ -1,5 +1,5 @@
-//! ONNX Runtime / CoreML EP local-AI upscale benchmark spike (ticket
-//! W16-01; `docs/design/ENHANCEMENT_WAVE_16.md` §7-8;
+//! ONNX Runtime / CoreML EP local-AI upscale benchmark spike (tickets
+//! W16-01, W16-12; `docs/design/ENHANCEMENT_WAVE_16.md` §7-8;
 //! `docs/design/AI_UPSCALING.md`; `crates/rf-ai/ai-model-manifest.toml`).
 //!
 //! `#![cfg(feature = "onnx")]` at the top of this FILE (not a per-test
@@ -10,14 +10,27 @@
 //!
 //! Every test in here is `#[ignore]`d on top of that: it needs a real
 //! model file and a real ONNX Runtime dylib staged on disk first (see
-//! `scripts/fetch-ai-upscale-model.sh` / `scripts/fetch-onnx-runtime.sh`,
-//! or `scripts/gpu-gate.sh RF_ONNX_BENCH=1`), and it writes timing rows
-//! into `docs/evidence/gpu-passes.json`. Run explicitly:
+//! `scripts/fetch-ai-upscale-model.sh` / `scripts/fetch-onnx-runtime.sh`),
+//! and it writes timing rows into `docs/evidence/gpu-passes.json`. Run
+//! explicitly:
 //!
 //! ```text
-//! RF_AI_CACHE=$HOME/.cache/retroforge-ai \
+//! ORT_DYLIB_PATH="$(scripts/fetch-onnx-runtime.sh --print-path)" \
+//! RF_AI_MODEL_PATH="$(MODEL=x4-fp32 scripts/fetch-ai-upscale-model.sh --print-path)" \
 //!   cargo test --release -p rf-ai --features onnx-coreml --test onnx_bench -- --ignored --nocapture
 //! ```
+//!
+//! ## No tiler in this file (ticket W16-12)
+//!
+//! W16-01's version of this file hand-rolled its own fixed-64px tiling
+//! loop (`TILE`/`upscale_tiled`) because `OnnxUpscaler` couldn't tile
+//! itself yet. It can now (`crate::tiling`, driven internally by
+//! `OnnxUpscaler::upscale` from the model's OWN declared input size — see
+//! `crates/rf-ai/src/onnx.rs`), so this file just calls
+//! `upscaler.upscale(&frame)` like any other caller. Keeping a second,
+//! parallel tiling implementation here — even one only used for timing —
+//! would mean a tiling bug fixed in one place could silently persist in
+//! the other's numbers.
 #![cfg(feature = "onnx")]
 
 mod support;
@@ -30,33 +43,20 @@ use rf_ai::upscale::{Rgba8, Upscaler};
 
 use support::minijson::{self, row_num, row_str, RowFields};
 
-const FRAMES: usize = 10; // real inference (tiled, see TILE) is far slower than a GPU shader pass.
-const SIZES: [(u32, u32); 2] = [(256, 240), (512, 448)];
-
 // Measurement note (ticket W16-01, 2026-09-17, this M4 Max): per-tile
-// inference on this model measured at roughly 1.8-2.2 SECONDS/tile on
-// BOTH CoreML and CPU EP (see docs/design/ENHANCEMENT_WAVE_16.md §8's
-// table) -- at that rate, 512x448's 56 tiles x 10 frames x 2 EPs is
-// several hours of wall time for one evidence refresh, which is not a
-// reasonable cost for this ticket's spike. The committed
-// docs/evidence/gpu-passes.json therefore carries 256x240 rows only for
-// `source: "onnx-ort"` (recorded with a smaller `n` for the same reason --
-// 3 samples, not 10), each row's own `n` field says exactly how many
-// samples it is. Re-running this file with the constants above regenerates
-// full rows at the designed sample count; nothing about the harness itself
-// is reduced, only the evidence snapshot this ticket committed.
-
-/// The fetched model (`crates/rf-ai/ai-model-manifest.toml`'s
-/// `realesrgan-x4-onnx-fp32` row) was exported with a STATIC 64x64 input
-/// shape -- verified empirically (ticket W16-01): feeding it a whole
-/// 256x240 frame fails with ONNX Runtime's own "Got invalid dimensions...
-/// Expected: 64" error. This is a property of that specific third-party
-/// re-export, not of Real-ESRGAN or of `OnnxUpscaler` (which imposes no
-/// tile-size assumption itself). Tiling here is also how Real-ESRGAN is
-/// actually run in practice on images larger than its training crop, so
-/// "ms/frame" for this model honestly means "sum of per-tile inference
-/// calls covering the frame", not one single forward pass.
-const TILE: u32 = 64;
+// inference on the x4-fp32 model measured at roughly 1.8-2.2
+// SECONDS/tile on BOTH CoreML and CPU EP (see
+// docs/design/ENHANCEMENT_WAVE_16.md §8's table). At that rate 256x240
+// (25 tiles at 64px/pad-8) is ~50s/frame and 512x448 (56 tiles) is
+// several times that -- ticket W16-01 already declined to sample
+// 512x448 at the full FRAMES count for exactly this reason, and W16-12
+// inherits the same constraint: it is not a reasonable cost for a spike
+// re-run on a developer's own machine. This file therefore samples ONE
+// size (256x240) at a REDUCED sample count (3, not 10) -- `n` in each
+// written row says exactly how many samples it is, so nothing is
+// silently understated.
+const FRAMES: usize = 3;
+const SIZE: (u32, u32) = (256, 240);
 
 fn cache_dir() -> PathBuf {
     match std::env::var("RF_AI_CACHE") {
@@ -72,6 +72,25 @@ fn model_path() -> PathBuf {
     std::env::var("RF_AI_MODEL_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| cache_dir().join("realesrgan-x4-fp32.onnx"))
+}
+
+/// Short label for the evidence row's pass name
+/// (`onnx-tiled-<model>-<ep>`) — NOT the model's `model_id`, which stays a
+/// full technical identifier. Defaults from the model file's own name so
+/// a caller pointing `RF_AI_MODEL_PATH` at either ledgered model gets a
+/// sensible label with no extra env var, but `RF_AI_MODEL_LABEL`
+/// overrides it for anything else.
+fn model_label() -> String {
+    if let Ok(v) = std::env::var("RF_AI_MODEL_LABEL") {
+        return v;
+    }
+    let path = model_path();
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+    if stem.contains("compact") || stem.contains("x4v3") {
+        "compact".to_string()
+    } else {
+        "x4-fp32".to_string()
+    }
 }
 
 fn dylib_path() -> PathBuf {
@@ -94,39 +113,6 @@ fn synthetic_rgba(w: u32, h: u32) -> Rgba8 {
         }
     }
     Rgba8::new(w, h, pixels).expect("synthetic frame has the declared buffer length")
-}
-
-/// Splits `frame` into `TILE`x`TILE` tiles (edge tiles clamped-extended,
-/// not padded with black, so the model never sees an artificial hard edge
-/// it wasn't trained on) and runs `upscaler.upscale` on each in turn,
-/// returning the wall-clock time for the whole sweep -- see `TILE`'s doc
-/// for why this model needs tiling at all. `n_tiles` lets the caller
-/// report both the total frame time and a derived per-tile figure.
-fn upscale_tiled(upscaler: &OnnxUpscaler, frame: &Rgba8) -> (Duration, usize) {
-    let tiles_x = frame.width.div_ceil(TILE);
-    let tiles_y = frame.height.div_ceil(TILE);
-    let mut tiles = Vec::with_capacity((tiles_x * tiles_y) as usize);
-    for ty in 0..tiles_y {
-        for tx in 0..tiles_x {
-            let mut pixels = vec![0u8; (TILE * TILE * 4) as usize];
-            for y in 0..TILE {
-                let src_y = (ty * TILE + y).min(frame.height - 1);
-                for x in 0..TILE {
-                    let src_x = (tx * TILE + x).min(frame.width - 1);
-                    let src_i = ((src_y * frame.width + src_x) * 4) as usize;
-                    let dst_i = ((y * TILE + x) * 4) as usize;
-                    pixels[dst_i..dst_i + 4].copy_from_slice(&frame.pixels[src_i..src_i + 4]);
-                }
-            }
-            tiles
-                .push(Rgba8::new(TILE, TILE, pixels).expect("tile has the declared buffer length"));
-        }
-    }
-    let t0 = Instant::now();
-    for tile in &tiles {
-        upscaler.upscale(tile).expect("tile inference failed");
-    }
-    (t0.elapsed(), tiles.len())
 }
 
 fn percentiles(samples: &[Duration]) -> (Duration, Duration) {
@@ -196,6 +182,30 @@ fn existing_meta(path: &std::path::Path) -> (String, String) {
     (machine, generated_at)
 }
 
+fn require_staged_artifacts(dylib: &std::path::Path, model: &std::path::Path) {
+    assert!(
+        dylib.exists(),
+        "ORT dylib not found at {}; run scripts/fetch-onnx-runtime.sh",
+        dylib.display()
+    );
+    assert!(
+        model.exists(),
+        "model not found at {}; run scripts/fetch-ai-upscale-model.sh",
+        model.display()
+    );
+}
+
+fn time_frame(upscaler: &OnnxUpscaler, src: &Rgba8) -> Vec<Duration> {
+    upscaler.upscale(src).expect("warm-up inference failed"); // warm-up, not sampled
+    (0..FRAMES)
+        .map(|_| {
+            let t0 = Instant::now();
+            upscaler.upscale(src).expect("inference failed");
+            t0.elapsed()
+        })
+        .collect()
+}
+
 /// CPU EP control: no execution providers registered, ONNX Runtime's
 /// default. Run first so a CoreML failure (next test) still leaves a
 /// control number in the evidence file.
@@ -204,72 +214,86 @@ fn existing_meta(path: &std::path::Path) -> (String, String) {
 fn onnx_cpu_ep_inference_timing() {
     let dylib = dylib_path();
     let model = model_path();
-    assert!(
-        dylib.exists(),
-        "ORT dylib not found at {}; run scripts/fetch-onnx-runtime.sh",
-        dylib.display()
-    );
-    assert!(
-        model.exists(),
-        "model not found at {}; run scripts/fetch-ai-upscale-model.sh",
-        model.display()
-    );
+    require_staged_artifacts(&dylib, &model);
 
-    let upscaler = OnnxUpscaler::load(&dylib, &model, "realesrgan-x4-fp32", 4)
+    let upscaler = OnnxUpscaler::load(&dylib, &model, "realesrgan-onnx-bench", 4)
         .expect("loading the model on CPU EP must succeed -- it's the runtime's baseline provider");
 
-    for &(w, h) in &SIZES {
-        let src = synthetic_rgba(w, h);
-        let (_, n_tiles) = upscale_tiled(&upscaler, &src); // warm-up
-        let mut samples = Vec::with_capacity(FRAMES);
-        for _ in 0..FRAMES {
-            let (elapsed, _) = upscale_tiled(&upscaler, &src);
-            samples.push(elapsed);
-        }
-        write_row("onnx-cpu", &format!("{w}x{h}"), &samples, "onnx-ort");
-        println!("    ({n_tiles} tiles of {TILE}x{TILE} per frame)");
-    }
+    let (w, h) = SIZE;
+    let src = synthetic_rgba(w, h);
+    let samples = time_frame(&upscaler, &src);
+    write_row(
+        &format!("onnx-tiled-{}-cpu", model_label()),
+        &format!("{w}x{h}"),
+        &samples,
+        "onnx-ort",
+    );
 }
 
 /// CoreML EP: the actual acceleration path this ticket exists to measure.
 /// Feature-gated separately (`onnx-coreml`) because it needs `ort`'s
 /// `coreml` cargo feature (a compile-time-only cfg switch, see
 /// `crates/rf-ai/Cargo.toml`'s comment on `onnx-coreml`).
+///
+/// ## Whether CoreML actually ran
+///
+/// `ExecutionProviderDispatch`'s default `error_on_failure: false`
+/// (`ort-2.0.0-rc.13/src/ep/mod.rs:99,243`) means an EP that could not
+/// take the graph falls back to CPU SILENTLY — `load_with_providers`
+/// succeeding is not proof CoreML executed a single node. `ort`'s Rust
+/// API exposes no per-node provider-placement query, so this test uses
+/// the two signals that ARE available and prints both rather than
+/// asserting either:
+///
+/// 1. [`ort::ep::coreml::CoreML::is_available`] — confirms the BUILD
+///    supports CoreML (it's linked into the official dylib per
+///    `ai-model-manifest.toml`'s note), but says nothing about whether
+///    THIS graph's ops were accepted.
+/// 2. Timing vs. the CPU-EP control row: identical numbers across EPs is
+///    the signature W16-01 already recorded for the x4-fp32 model on
+///    this machine (see that ticket's CAVEAT) — genuine CoreML
+///    acceleration on Apple's Neural Engine/GPU for a small conv net
+///    should differ measurably from CPU, so "no difference" is treated
+///    as evidence of a silent fallback, not proof of a working EP with
+///    poor speedup.
 #[cfg(feature = "onnx-coreml")]
 #[test]
 #[ignore = "needs a fetched model + ORT_DYLIB_PATH; see scripts/fetch-ai-upscale-model.sh / scripts/fetch-onnx-runtime.sh"]
 fn onnx_coreml_ep_inference_timing() {
+    use ort::ep::ExecutionProvider;
+
     let dylib = dylib_path();
     let model = model_path();
-    assert!(
-        dylib.exists(),
-        "ORT dylib not found at {}; run scripts/fetch-onnx-runtime.sh",
-        dylib.display()
-    );
-    assert!(
-        model.exists(),
-        "model not found at {}; run scripts/fetch-ai-upscale-model.sh",
-        model.display()
+    require_staged_artifacts(&dylib, &model);
+
+    let coreml = ort::ep::coreml::CoreML::default();
+    let build_supports_coreml = coreml.is_available().unwrap_or(false);
+    println!("  CoreML::is_available() (build support, not per-graph placement) = {build_supports_coreml}");
+
+    let providers = [coreml.build()];
+    let upscaler =
+        OnnxUpscaler::load_with_providers(&dylib, &model, "realesrgan-onnx-bench", 4, &providers)
+            .expect(
+                "CoreML EP registration is fail-silent by default (ort::ep::ExecutionProviderDispatch's \
+                 own doc) -- a load-time error here means session creation itself failed, not just EP \
+                 fallback; if this fails, the exact ort error message IS the blocker to record honestly \
+                 per this ticket's acceptance criteria",
+            );
+
+    let (w, h) = SIZE;
+    let src = synthetic_rgba(w, h);
+    let samples = time_frame(&upscaler, &src);
+    write_row(
+        &format!("onnx-tiled-{}-coreml", model_label()),
+        &format!("{w}x{h}"),
+        &samples,
+        "onnx-ort",
     );
 
-    let providers = [ort::ep::coreml::CoreML::default().build()];
-    let upscaler = OnnxUpscaler::load_with_providers(&dylib, &model, "realesrgan-x4-fp32", 4, &providers)
-        .expect(
-            "CoreML EP registration is fail-silent by default (ort::ep::ExecutionProviderDispatch's \
-             own doc) -- a load-time error here means session creation itself failed, not just EP \
-             fallback; if this fails, the exact ort error message IS the blocker to record honestly \
-             per this ticket's acceptance criteria",
-        );
-
-    for &(w, h) in &SIZES {
-        let src = synthetic_rgba(w, h);
-        let (_, n_tiles) = upscale_tiled(&upscaler, &src); // warm-up
-        let mut samples = Vec::with_capacity(FRAMES);
-        for _ in 0..FRAMES {
-            let (elapsed, _) = upscale_tiled(&upscaler, &src);
-            samples.push(elapsed);
-        }
-        write_row("onnx-coreml", &format!("{w}x{h}"), &samples, "onnx-ort");
-        println!("    ({n_tiles} tiles of {TILE}x{TILE} per frame)");
-    }
+    println!(
+        "  NOTE: compare this row's p50_ms to onnx-tiled-{}-cpu's -- W16-01 found IDENTICAL \
+         numbers across EPs for the x4-fp32 model on this machine, which it recorded as the \
+         signature of a silent CoreML->CPU fallback rather than proof CoreML ran.",
+        model_label()
+    );
 }

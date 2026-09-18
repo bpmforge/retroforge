@@ -23,10 +23,13 @@
 # Neither export has a DYNAMIC input shape (verified empirically for
 # x4-fp32 in ticket W16-01; verified against `compactmodel/.../
 # metadata.json`'s declared `"shape": [1, 3, 128, 128]` for `compact` in
-# W16-02) -- both need the same fixed-size-tile approach
-# `onnx_bench.rs`'s `TILE` constant already documents. This is disclosed
-# rather than silently worked around: see the HANDOFF note this ticket
-# leaves in its own commit for what remains unverified.
+# W16-02) -- both need tiling. `OnnxUpscaler` (ticket W16-12,
+# `crates/rf-ai/src/tiling.rs`) reads each model's own declared input
+# size from the session and tiles automatically; there is no longer a
+# hardcoded tile-size constant anywhere in this crate. A W16-12 search
+# for a permissively licensed DYNAMIC-shape alternative found none that
+# clears this ledger's own licence bar -- see this file's own header
+# comment above.
 #
 # Both models trace to xinntao/Real-ESRGAN's upstream weights, which ARE
 # BSD-3-Clause (verified https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE).

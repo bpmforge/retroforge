@@ -1,5 +1,39 @@
-# Local-AI fetched-artifact licence ledger (tickets W16-01, W16-02;
+# Local-AI fetched-artifact licence ledger (tickets W16-01, W16-02, W16-12;
 # docs/design/ENHANCEMENT_WAVE_16.md §7; docs/design/AI_UPSCALING.md).
+#
+# ---------------------------------------------------------------------
+# W16-12 criterion 3: dynamic-shape model search (2026-09-18)
+# ---------------------------------------------------------------------
+# Both models below are STATIC-shape (64x64, 128x128) -- the reason
+# `crate::tiling` exists at all. This ticket's acceptance criterion 3
+# asked for a search for a permissively licensed DYNAMIC-shape compact
+# upscaler that would need no tiling. Candidates checked:
+#
+#   - xinntao/Real-ESRGAN's own `pytorch2onnx.py` supports dynamic axes,
+#     but upstream ships no pre-converted dynamic-shape .onnx file --
+#     would require doing the conversion ourselves, which is a different
+#     (and out of scope) kind of artifact than "fetch and pin".
+#   - PINTO0309/PINTO_model_zoo's `133_Real-ESRGAN`: a genuine first-party
+#     BSD-3-Clause LICENSE file (not just a pointer at upstream), but
+#     every export is STATIC (`realesrgan_16x16.onnx`, `_32x32`, `_64x64`,
+#     ... -- confirmed against that repo's own conversion script, no
+#     `dynamic_axes` used). Fails the dynamic-shape requirement.
+#   - huggingface.co/SceneWorks/real-esrgan-onnx: input IS confirmed
+#     dynamic ([1,3,h,w], opset 17, README states dynamic height/width)
+#     -- the only dynamic-shape candidate found. But its repo carries no
+#     LICENSE file of its own, only a README sentence and an HF metadata
+#     tag pointing at "the upstream Real-ESRGAN weights' BSD-3-Clause"
+#     -- exactly the "licence pointer, not a first-party grant for the
+#     conversion" pattern already used to reject
+#     realesrgan-general-x4v3-onnx-compact below. Rejected on the same
+#     ground, for consistency with that precedent.
+#   - No dynamic-shape waifu2x or Anime4K ONNX export with a first-party
+#     licence was found.
+#
+# VERDICT: no candidate clears this ledger's own bar. Nothing added.
+# `crate::tiling` (ticket W16-12) is therefore not a stopgap for a
+# problem this search expected to retire -- it is how every static-shape
+# model found to date, including any future one, will actually run.
 #
 # Same vocabulary/rule as tests/rom-manifest.toml's [[artifact]] schema
 # (that file's own module doc explains the fields in full) -- kept as a

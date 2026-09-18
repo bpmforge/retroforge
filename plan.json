@@ -6841,6 +6841,7 @@
    "points": 5,
    "status": "todo",
    "notes": [
+    "MEASUREMENT 2026-09-18 (W16-12): compact Real-ESRGAN-class model = ~335 ms per 256x240 frame on the M4 Max, CPU and CoreML alike; 20x over the 16.67 ms gate. A real-time neural pass with ESRGAN-class models is not viable here. Options when this ticket is picked: (a) MetalFX spatial via W16-08 as the real-time path, (b) a purpose-trained tiny model (e.g. FSRCNN-class, ~10 KB params) measured first with the W16-01 harness, (c) close as measured-not-viable and keep the offline studio. The gate infrastructure and honesty badge parts of this ticket remain valid for whichever pass is chosen.",
     "FILED 2026-09-17 by Brad's go (\"file all of these ... lets get to doing the work\"). Design: the studio-ideas review (https://claude.ai/artifact/AhpCqvZv5UHsZvDXnZctQn) and docs/design/ENHANCEMENT_WAVE_16.md; rulings D-011/D-012. Execution order in ROADMAP 'Waves 15-16 execution order'."
    ],
    "stories": []
@@ -6990,8 +6991,9 @@
     "if a permissively licensed dynamic-shape compact model exists it is added to the ledger; if not, the search is recorded"
    ],
    "points": 3,
-   "status": "todo",
+   "status": "done",
    "notes": [
+    "CLOSED 2026-09-18 (lane C). Real inference now completes end to end for both ledgered models via tiling. Numbers that decide D-012 path B: compact model 335 ms per 256x240 sheet (CPU) / 332 ms (CoreML); x4-fp32 9.4 s; CoreML did not accelerate either (silent CPU fallback signature; ort has no placement query). Consequence for W16-07: an ESRGAN-class real-time pass is 20x over the 16.67 ms gate on this hardware -- W16-07 should target MetalFX (W16-08) or a tiny purpose-trained model, or close as measured-not-viable. No permissive dynamic-shape model exists; recorded. Gate: rf-ai 64 (+3 with onnx-coreml), rf-ai+retroforge 459 passing with fixtures, arch OK, evidence 18 rows.",
     "FILED 2026-09-18 by W16-02's close: the studio is wired end to end with the stub upscaler, but real inference needs tiling for the static-shape exports."
    ],
    "stories": []

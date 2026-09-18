@@ -1,5 +1,6 @@
 //! Upscale Studio against a REAL ONNX model (ticket W16-02, criterion 4's
-//! "the real model is an ignored test that runs locally").
+//! "the real model is an ignored test that runs locally"; ticket W16-12
+//! adds the second test, which exercises real tiled inference).
 //!
 //! `#![cfg(feature = "onnx")]` at the top of this FILE, same reasoning as
 //! `onnx_bench.rs`: the whole binary does not exist in a default build,
@@ -16,11 +17,16 @@
 //!   cargo test -p rf-ai --features onnx --test studio_onnx -- --ignored --nocapture
 //! ```
 //!
-//! Unlike `onnx_bench.rs` this does not tile a full frame or time
-//! anything — it exercises exactly the path the Upscale Studio window
-//! calls (`rf_ai::studio::build_studio_pack`) against one real tile-sized
-//! input, and its whole assertion is the one criterion 4 names: the
-//! output dimensions are the input's times the model's declared scale.
+//! Unlike `onnx_bench.rs` neither test here times anything — both
+//! exercise exactly the path the Upscale Studio window calls
+//! (`rf_ai::studio::build_studio_pack`). The first test's input is one
+//! exact tile size (criterion 4's original assertion: the output
+//! dimensions are the input's times the model's declared scale). The
+//! second (`a_real_model_tiles_a_sheet_larger_than_its_input_size`,
+//! ticket W16-12) deliberately builds a sheet BIGGER than the model's
+//! tile and not an exact multiple of it, so it is the one that actually
+//! proves `crate::tiling` ran against this real model rather than just
+//! passing because the input happened to already be tile-sized.
 #![cfg(feature = "onnx")]
 
 use std::collections::BTreeMap;
@@ -129,5 +135,75 @@ fn a_real_model_produces_the_declared_output_dimensions_through_the_studio() {
         image.height,
         side * scale,
         "declared scale was not honoured"
+    );
+}
+
+/// The fixture above is exactly the model's tile size, so it would pass
+/// even with NO tiler at all (`OnnxUpscaler` would just run it whole).
+/// This test proves tiling actually happens (ticket W16-12): two
+/// differently-sized assets in one animation set make `sheet_of` lay out
+/// a sheet bigger than a single tile and NOT an exact multiple of it, so
+/// `crate::tiling` must reflect-pad, run more than one tile, and blend
+/// the seam back together — the only way the output could come back at
+/// exactly `sheet * scale` with no misaligned or missing region.
+#[test]
+#[ignore = "needs a fetched model + ORT_DYLIB_PATH; see scripts/fetch-ai-upscale-model.sh / scripts/fetch-onnx-runtime.sh"]
+fn a_real_model_tiles_a_sheet_larger_than_its_input_size() {
+    use rf_ai::animation::AnimationSet;
+
+    let side = model_input_side();
+    let scale = model_scale();
+
+    let upscaler = OnnxUpscaler::load(
+        &dylib_path(),
+        &model_path(),
+        "studio-onnx-tiling-test",
+        scale,
+    )
+    .expect("model + runtime must load — see this file's module doc for how to stage them");
+
+    // Two members side by side: sheet_of lays them out left-to-right, so
+    // the sheet is `side + side/2` wide by `side` tall — wider than one
+    // tile and not a clean multiple of it either.
+    let a = fixture_asset(side);
+    let b = fixture_asset(side / 2);
+    let set = AnimationSet {
+        id: "tiling-check".to_string(),
+        assets: [a.asset_hash.clone(), b.asset_hash.clone()]
+            .into_iter()
+            .collect(),
+    };
+
+    let options = StudioOptions {
+        post_process: PostProcessOptions {
+            requantize: false,
+            intermediate_shades: 0,
+            edge_mask: false,
+        },
+        attribution: ModelAttribution {
+            model_name: "studio-onnx-tiling-test".to_string(),
+            license: "see ai-model-manifest.toml".to_string(),
+            version: "n/a".to_string(),
+        },
+    };
+
+    let pack = studio::build_studio_pack(
+        "studio-onnx-tiling-test-pack",
+        "rom-fixture",
+        &[a.clone(), b.clone()],
+        &[set],
+        &upscaler,
+        &BTreeMap::new(),
+        &options,
+    )
+    .expect("the studio pipeline must build a pack from a real tiled inference call");
+
+    let ia = &pack.built.images[&a.asset_hash];
+    let ib = &pack.built.images[&b.asset_hash];
+    assert_eq!((ia.width, ia.height), (side * scale, side * scale));
+    assert_eq!(
+        (ib.width, ib.height),
+        (side / 2 * scale, side / 2 * scale),
+        "split_sheet must recover each member's own scaled size from a tiled sheet"
     );
 }
