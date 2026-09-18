@@ -34,10 +34,17 @@ requires a design doc, not a ticket.
    non-goal. Accuracy is defined by the test gates in `docs/TESTING.md`
    (SingleStepTests vectors, blargg/gilyon suites, golden frames) — when
    those pass, we stop. ares remains our oracle, not our bar.
-8. **No real-time neural upscaling.** ESRGAN-class models cost tens of
-   ms/frame in 2026 (`docs/research/prior-art.md` §7). AI generates packs
-   *offline*; runtime gets cheap shaders (xBRZ/ScaleFx/CRT) and
-   cached replaced assets. Frame path stays AI-free.
+8. **No cloud AI, and no AI in the frame path by default.** *Amended
+   2026-09-17 (D-012, Brad):* local AI is in scope for both offline pack
+   generation and real-time enhancement and upscaling, but only on
+   hardware that can hold the frame budget (Apple Neural Engine / Metal,
+   discrete GPUs), detected at start and gated; every other machine gets
+   the cheap shaders (xBRZ/ScaleFx/CRT) and cached replaced assets, and a
+   fresh install still boots with the frame path AI-free (law 6). The
+   original reason stands as the engineering bar, not the policy:
+   ESRGAN-class models cost tens of ms/frame (`docs/research/prior-art.md`
+   §7), so a real-time pass ships only behind a measured budget gate, a
+   one-frame latency disclosure, and the honesty badge.
 9. **No libretro core in v1.** The single-framebuffer API cannot carry the
    scene-graph output, multi-panel debugger, or authoring UX (§5 of
    prior-art). A flattened libretro export (wide geometry + core options) is

@@ -51,6 +51,12 @@ may only be relaxed with new research evidence.
 
 ## 4. History
 
+- **2026-09-17** — Local real-time AI enhancement/upscaling moved from
+  "Won't (v1)" to "In scope, hardware-gated" (D-012, Brad). Offline pack
+  generation was already in scope (W8-10); the change is the frame-path
+  pass on capable hardware, behind a measured budget gate and the honesty
+  badge. Cloud AI stays out.
+
 - **2026-09-17** — DSP-1 moved from "Later / conditional" to "In scope" on
   the SNES core row. Brad's ruling (D-010): the LoROM/HiROM gate condition
   NON_GOALS #10 set was met (Phase 14 census: 1001/1265 SNES archives
