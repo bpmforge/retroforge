@@ -62,6 +62,7 @@ pub mod settings;
 pub mod snes_save_state;
 pub mod state_slots;
 pub mod stepper;
+pub mod toast;
 pub mod trace_capture;
 pub mod ui_nav;
 

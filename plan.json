@@ -6540,8 +6540,9 @@
    "a test or manual check confirms each converted dialog still blocks/dismisses correctly and each toast auto-dismisses without blocking emulation (per FRONTEND_UI \u00a71 principle 3)"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "notes": [
+    "CLOSED 2026-09-17 (lane A). Three dialogs on egui::Modal (backdrop + should_close for outside click/Escape); toasts are an in-crate stack (toast.rs) because egui-notify has no egui 0.35 release -- revisit when the workspace moves to egui 0.36. Toasts: folder added, explicit rescan (count), state saved (slot), script error (three branches, one-frame deferred). New minimal quit-with-unsaved-state flow. Test: toasts_and_modals.rs proves the modal blocks a click beneath it and the backdrop click dismisses it, and a toast expires on the harness clock while the core keeps advancing. Gate: workspace 1913 passing / 0 failed / 36 ignored (agent) and my own run, see STATUS.",
    "GO: Brad lifted the hold 2026-09-17 (\"file all of these and lets get to a full plan on doing all of these. But lets get to doing the work\"). Execution order in ROADMAP.",
    "FILED 2026-09-17 from docs/design/UX_WAVE_15.md (review recommendation 4). See that doc \u00a75 for the full before/after dialog table and \u00a711.",
    "Independent of W15-01/02/03; can be built in parallel."
