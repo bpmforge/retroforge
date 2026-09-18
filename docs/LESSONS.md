@@ -252,3 +252,50 @@ run of it proves nothing about the commit you are about to make.* The same
 applies to any check keyed on `git log`, `git merge-base` or HEAD. Ask what
 state the check reads, and if it is not the state you are about to create,
 the check has not run yet.
+
+## RF-L-14 — a read that clears state must sample before it charges the tick it stands on (2026-09-18)
+
+W7-18 charged the APU's shared clock one cycle per memory access, uniformly
+BEFORE performing the access, so that accesses inside one instruction would
+land at their own point in time instead of all seeing the DSP and timers as
+of the instruction's start. That is the right rule for a write and for a
+plain RAM read. It is backwards for a register read with a get-then-clear
+side effect: `Apu::read_register`'s `$FD`-`$FF` arm (`Timer::read_counter`)
+returns the timer's 4-bit output counter and zeroes it in the same call.
+Ticking the shared clock — and so possibly firing this exact access's own
+timer edge — BEFORE that call let a coincident increment land, then get
+immediately erased by the read that was supposed to observe it. blargg
+documented the opposite priority from hardware traces (nesdev forum t=16140
+kin, t=10881): "Reading T0OUT is an atomic get-then-clear operation. The
+increment is never lost" — an edge already in flight when the read happens
+must survive it, which requires the read to sample the counter as it stood
+going INTO its own cycle, with this access's own tick applied only after,
+visible to the *next* access.
+
+`spc_timer.sfc`'s "timer read vs write" subtest is exactly this scenario,
+run for real on hardware and shipped as an oracle. The fix was one
+three-line reorder in `Apu::read` (perform `read_register` before
+`access_tick`, for the `$00F0`-`$00FF` branch only) and turned its output
+from `Failed 02` into `PASSED TESTS`.
+
+**How it was found**, because the ROM gives no source and no disassembly
+was done: a differential experiment, not a guess. A throwaway `#[ignore]`
+probe dumped the ROM's VRAM text tilemap every 1,000 instructions instead
+of only at the end, showing the failing digit string
+(`1111112222` — six identical results, then four different ones) being
+built one character per subtest rather than all at once. Flipping the
+order of `access_tick`/`read_register` for register reads moved the ROM
+straight to `PASSED TESTS`; trying the same reorder on the write side
+regressed it back to `Failed 02` — confirming the asymmetry empirically
+instead of assuming reads and writes needed the same treatment.
+
+**The general form.** Any access whose read (or write) has an observable
+side effect — clear-on-read, latch-on-write, an enable transition that
+resets internal state — needs the shared clock's tick for *that access's
+own cycle* charged strictly after the side effect is applied, never
+before, or a coincident edge from the surrounding clock gets to race the
+access instead of losing to it. An access with no side effect (plain RAM)
+is insensitive to the ordering and does not need auditing. Whenever a new
+memory-mapped register grows a read-clears-value or write-resets-state
+behavior, check which side of its own access's tick that behavior needs to
+sit on — do not assume the existing per-access ordering already covers it.

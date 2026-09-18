@@ -508,7 +508,9 @@ impl Apu {
     }
 
     /// Advance the shared clock by the one cycle this memory access
-    /// occupies, BEFORE performing it (ticket W7-18).
+    /// occupies, BEFORE performing it — **except register READS**, which
+    /// call this only after `read_register` has sampled the register
+    /// (ticket W7-18; the read-side exception is W7-17's fix, see below).
     ///
     /// **This is what "charges time per memory access" actually means**,
     /// and it is not about waitstates. The SPC700 used to execute a whole
@@ -520,6 +522,28 @@ impl Apu {
     /// MEASURED, not assumed: `spc_mem_access_times.sfc` reports an
     /// unknown-classification marker for accesses whose timing it cannot
     /// place. Without this it printed EIGHT of them; with it, none.
+    ///
+    /// **W7-17 fix: `Apu::read`'s `$00F0`-`$00FF` branch calls
+    /// `read_register` BEFORE `access_tick`, not after.** `$FD`-`$FF`
+    /// (`Timer::read_counter`) sample-and-clear the 4-bit output counter,
+    /// and a stage-1 edge landing on this exact access's own cycle must
+    /// not be folded into the value the CPU sees: the read has to observe
+    /// the counter as it stood going INTO this cycle, with this access's
+    /// own tick visible only to the NEXT one. The original W7-18 code
+    /// ticked before every access uniformly, including reads, which let
+    /// this access's own edge land before the read sampled it — backwards
+    /// from blargg's hardware-verified priority rule (nesdev forum
+    /// t=10881, blargg: "Reading T0OUT is an atomic get-then-clear
+    /// operation. The increment is never lost" — an increment already in
+    /// flight before this access must survive the read, not be granted by
+    /// it). Confirmed empirically: reordering only this one call turns
+    /// `spc_timer.sfc`'s "timer read vs write" subtest from `Failed 02`
+    /// into `PASSED TESTS`. Trying the same reorder on the WRITE side
+    /// (`write_register` before `access_tick`) regressed it back to
+    /// `Failed 02` — writes have no read-and-clear to protect, and the
+    /// original before-the-access ordering is the one that agrees with
+    /// the ROM, so only the read path changed. Plain RAM accesses have no
+    /// register side effect and are unaffected by ordering either way.
     ///
     /// The model is one cycle per access, with an instruction's remaining
     /// internal cycles charged at the end. That places accesses in the
@@ -674,11 +698,13 @@ impl ApuBus for Apu {
     }
 
     fn read(&mut self, addr: u16) -> u8 {
-        self.access_tick();
         if (0x00F0..=0x00FF).contains(&addr) {
             self.io_accesses += 1;
-            return self.read_register(addr);
+            let v = self.read_register(addr);
+            self.access_tick();
+            return v;
         }
+        self.access_tick();
         if self.in_ipl_window(addr) {
             // ROM shares I/O's wait field.
             self.io_accesses += 1;

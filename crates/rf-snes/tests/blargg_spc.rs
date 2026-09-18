@@ -1,31 +1,71 @@
 //! blargg's recovered SPC test ROMs — the designated SPC set for ticket
-//! W7-08 criterion 3.
+//! W7-08 criterion 3, split by W7-17/W7-18.
 //!
 //! Provenance and byuu's caveat about what passing these proves live in
 //! `tests/rom-manifest.toml`'s `blargg-spc-*` block. The short version:
 //! this verifies against blargg's DSP core, the reference implementation,
 //! not against silicon.
 //!
-//! # THIS TEST IS RED, AND WHAT IT NOW REPORTS IS THE VALUE
+//! # Three of four ROMs are still open work; one is a real gate now
 //!
-//! It does not pass. It is also no longer a hang: these ROMs execute
-//! their real test content and report their own verdicts, which is the
-//! first external oracle this project's S-DSP and SPC timing have ever
-//! had. What they say (2026-08-23):
+//! | ROM | status (2026-09-18) | reports |
+//! |---|---|---|
+//! | `spc_timer` | **GATING** (W7-17, closed) | `PASSED TESTS` |
+//! | `spc_mem_access_times` | **KNOWN-RED** (W7-17, Brad's ruling D-3) | `Failed 02`, checksum only |
+//! | `spc_dsp6` | reporting-only (W7-08, open) | `Echo/basics ... Failed 03` |
+//! | `spc_smp` | reporting-only (W7-08, open) | opcode hashes, `Failed 02` |
 //!
-//! | ROM | reports |
-//! |---|---|
-//! | `spc_dsp6` | `Running tests: Echo/basics  Failed 03` |
-//! | `spc_smp` | `E0 AB34EA3A  E4 05599DAA  ED 442B1C4D  Passed 01` |
-//! | `spc_timer` | `timer read vs write 1111111222` |
-//! | `spc_mem_access_times` | `E6 -- -- R1  E7 -- -- R0 ... EB -- -- R0` |
+//! `spc_timer.sfc` is the one ROM this module asserts against: its "timer
+//! read vs write" subtest is, per Brad's 2026-09-04 ruling, an undisputed
+//! oracle (unlike `spc_mem_access_times`, see below), so
+//! [`spc_timer_reports_pass`] is a real `#[test]` failure, not a printed
+//! diagnostic — a regression here fails `cargo test -p rf-snes --test
+//! blargg_spc -- --ignored`, which is the command `scripts/local-gate.sh`
+//! already runs for this file. **`scripts/local-gate.sh` itself is
+//! unchanged and stays out of `write_scope`**: its own step still wraps
+//! that command in `if ! ...; then echo ...; fi` without `exit 1`, calling
+//! the whole file "reporting only until W7-08/W7-17" — that comment is now
+//! half true. `spc_dsp6`/`spc_smp` are still W7-08's open accuracy gaps
+//! and reporting-only; `spc_timer` gates from inside this binary even
+//! though the shell wrapper around it does not yet propagate the failure.
+//! Restoring the shell-level `exit 1` for the whole file is W7-08's close
+//! criterion, unchanged from the note already on that ticket, once
+//! `spc_dsp6`/`spc_smp` also pass.
 //!
-//! Those are accuracy results, not infrastructure failures. `spc_dsp6`
-//! ran the echo test and judged it wrong; `spc_smp` passed one group and
-//! printed hashes for three more. Making them green is DSP and timing
-//! accuracy work, and the ticket stays open for it.
+//! `spc_mem_access_times.sfc` is a **recorded KNOWN-RED**, not silently
+//! waived: [`spc_mem_access_times_is_a_known_red`] asserts it still
+//! reports the documented failure shape. Brad's ruling 2026-09-04 (D-3,
+//! `docs/DECISIONS.md`): the nesdev thread that names Overload's
+//! `spc700_inst_op.pdf` (the source W7-18 verified against, opcode by
+//! opcode) also records higan and Overload DISAGREEING on `(dp),Y` and the
+//! CALL/RET/RTI stack orders, with no arbiter as of 2017 — and this ROM
+//! compares an internal checksum it never prints an expected value for.
+//! Passing it might mean matching higan's own disputed order rather than
+//! silicon. If this ROM ever prints `PASSED TESTS`, that is a genuine
+//! change worth investigating (something moved enough to satisfy an
+//! oracle nobody today can explain), so the test FAILS loudly on that
+//! outcome rather than treating a pass as free good news.
 //!
-//! # Three causes stood between "hangs" and "reports", all fixed
+//! # The fix that closed spc_timer (ticket W7-17)
+//!
+//! `spc_timer.sfc`'s "timer read vs write" subtest is blargg's own
+//! hardware-verified test of `Timer::read_counter` (`$FD`-`$FF`): reading
+//! a timer's 4-bit output counter is a "get-then-clear" operation, and an
+//! increment already in flight when the read happens must never be lost
+//! (nesdev forum t=10881, blargg, quoted in full on `Apu::access_tick`'s
+//! doc comment). Ticket W7-18 charged every memory access's one shared-
+//! clock cycle BEFORE performing the access, uniformly for reads and
+//! writes. That is right for writes, but backwards for a register read
+//! with a clear-on-read side effect: it let this access's own coincident
+//! timer edge apply before the read sampled the counter, instead of
+//! after. `Apu::read`'s `$00F0`-`$00FF` branch now calls
+//! `Apu::read_register` before `Apu::access_tick`; every other access
+//! (writes, and plain RAM/IPL reads, which have no such side effect) is
+//! unchanged. See `crates/rf-snes/src/apu/mod.rs`'s `access_tick` doc for
+//! the full citation and the write-side experiment that ruled out
+//! reordering writes too.
+//!
+//! # Three causes stood between "hangs" and "reports", all fixed (W7-08)
 //!
 //! **Cause 1 — the S-DSP was not connected to the bus.**
 //! `Apu::write_register` had no `0xF3` arm and its read arm was a literal
@@ -96,13 +136,6 @@ const MAX_INSTRUCTIONS: u64 = 60_000_000;
 const STATUS_WORD: u16 = 0x0800;
 const STATUS_LEN: usize = 32 * 32;
 
-const ROMS: &[&str] = &[
-    "spc_dsp6.sfc",
-    "spc_smp.sfc",
-    "spc_timer.sfc",
-    "spc_mem_access_times.sfc",
-];
-
 /// The banner blargg's ROMs print once, after ALL their subtests pass.
 ///
 /// Per-subtest lines read `Passed NN` / `Failed NN` with a running count,
@@ -148,8 +181,21 @@ fn user_ipl() -> Option<[u8; rf_snes::apu::IPL_LEN]> {
 }
 
 /// Run one ROM to the instruction budget and return what it printed.
-fn run(path: &std::path::Path, ipl: Option<[u8; rf_snes::apu::IPL_LEN]>) -> String {
-    let bytes = std::fs::read(path).expect("rom readable");
+///
+/// Returns `None` if the ROM was never fetched — a missing local artifact
+/// is not a defect (NFR-006), and the caller decides whether that means
+/// "skip" or "no comment".
+fn run(
+    dir: &std::path::Path,
+    name: &str,
+    ipl: Option<[u8; rf_snes::apu::IPL_LEN]>,
+) -> Option<String> {
+    let path = dir.join(name);
+    if !path.exists() {
+        eprintln!("SKIP {name}: not fetched");
+        return None;
+    }
+    let bytes = std::fs::read(&path).expect("rom readable");
     let mut s = SnesSystem::load(&bytes).expect("blargg's SPC ROMs are plain LoROM carts");
     if let Some(rom) = ipl {
         s.bus.apu.set_ipl_rom(rom);
@@ -164,64 +210,90 @@ fn run(path: &std::path::Path, ipl: Option<[u8; rf_snes::apu::IPL_LEN]>) -> Stri
         }
         ran += 1;
     }
-    screen(&s)
+    let text = screen(&s);
+    eprintln!("{name}: {text:?}");
+    Some(text)
 }
 
+/// **THE GATE.** `spc_timer.sfc` is this ticket's one undisputed oracle
+/// (Brad's ruling 2026-09-04, D-3): unlike `spc_mem_access_times`, nothing
+/// disputes what a pass here means. A regression fails this `#[test]`,
+/// which fails `cargo test -p rf-snes --test blargg_spc -- --ignored` —
+/// the exact command `scripts/local-gate.sh` runs for this file (see the
+/// module doc for why the shell wrapper around that command still does
+/// not itself `exit 1`, and why that is W7-08's close criterion, not
+/// this one's).
 #[test]
-#[ignore = "local: needs the fetched ROMs; RED on real accuracy gaps, see module doc"]
-fn blargg_spc_tests_report_success() {
+#[ignore = "local: needs the fetched ROM (see module doc); GATES on a real oracle"]
+fn spc_timer_reports_pass() {
+    let Some(dir) = rom_dir() else {
+        eprintln!("SKIP: cargo run -p rf-harness --bin fetch-test-roms -- blargg-spc-timer");
+        return;
+    };
+    let Some(text) = run(&dir, "spc_timer.sfc", user_ipl()) else {
+        return;
+    };
+    assert!(
+        text.contains(FINAL_BANNER),
+        "spc_timer.sfc regressed off its one undisputed oracle: {text:?}"
+    );
+}
+
+/// **KNOWN-RED, RECORDED RATHER THAN WAIVED.** Brad's ruling 2026-09-04
+/// (D-3, `docs/DECISIONS.md`): `spc_mem_access_times.sfc` compares an
+/// internal checksum it never prints an expected value for, and the
+/// nesdev thread behind Overload's `spc700_inst_op.pdf` — the document
+/// W7-18 verified every access against — records higan and Overload
+/// themselves disagreeing on `(dp),Y` and the CALL/RET/RTI stack orders
+/// with no arbiter. This ROM may be encoding one side of that disputed
+/// order rather than hardware truth, so it is not this ticket's oracle.
+///
+/// The test still runs it every time (a regression to "hangs" is still a
+/// hard failure via `MAX_INSTRUCTIONS`/the harness's own budget, per
+/// RF-L-12) and asserts it stays in the KNOWN-RED shape: a `Failed`
+/// verdict, not `PASSED TESTS`. **If this ever starts passing, that is
+/// news, not a quiet win** — something would have to move enough to
+/// satisfy a disputed oracle, which is exactly the kind of accident D-3
+/// warned against tuning toward, so the test fails and asks for the
+/// change to be looked at rather than accepted silently.
+#[test]
+#[ignore = "local: needs the fetched ROM (see module doc); KNOWN-RED per D-3"]
+fn spc_mem_access_times_is_a_known_red() {
     let Some(dir) = rom_dir() else {
         eprintln!(
-            "SKIP: cargo run -p rf-harness --bin fetch-test-roms -- \
-             blargg-spc-dsp6 blargg-spc-smp blargg-spc-timer blargg-spc-mem-access-times"
+            "SKIP: cargo run -p rf-harness --bin fetch-test-roms -- blargg-spc-mem-access-times"
         );
         return;
     };
-
-    // No boot ROM required any more. The built-in stub carries the one
-    // byte these ROMs read as data ($CD), and `Apu::reenter_ipl` HLEs the
-    // jump-back-to-$FFC0 that they use to request another upload. A real
-    // dump can still be supplied to override it.
-    let ipl = user_ipl();
-
-    let mut failures = Vec::new();
-    for name in ROMS {
-        let path = dir.join(name);
-        if !path.exists() {
-            eprintln!("SKIP {name}: not fetched");
-            continue;
-        }
-        let text = run(&path, ipl);
-        eprintln!("{name}: {text:?}");
-        // blargg's convention, and the manifest's `screen_text` protocol:
-        // the ROM's own printed output is the verdict. A run that never
-        // reaches a verdict is a FAILURE, not an inconclusive — that
-        // distinction is the whole reason this test is red rather than
-        // quietly skipping.
-        //
-        // **THE VERDICT IS THE FINAL BANNER, NOT ANY "Passed".** This
-        // check used to be `contains("passed")` case-insensitively, and
-        // that was wrong in a way that reported success: these ROMs run
-        // MANY subtests and print `Passed NN` after each one, where NN is
-        // a running count. `spc_dsp6.sfc` alone carries Echo/basics,
-        // Echo/esa_changes, Echo/edl_changes, Echo/wrap_around,
-        // Echo/zero_length, Echo/echo calc, Echo/edl 0 quirk,
-        // Echo/edl lengths and Envelope/envelope rates. A run that
-        // finished the FIRST of those and then stalled printed
-        // "Echo/basics Passed 01" — and the old check called that a pass
-        // for the whole ROM.
-        //
-        // The ROM prints `PASSED TESTS` once, at the end, when every
-        // subtest has passed. That is the only string that means what
-        // this test claims.
-        if !text.contains(FINAL_BANNER) {
-            failures.push(format!("{name}: {text:?}"));
-        }
-    }
-
+    let Some(text) = run(&dir, "spc_mem_access_times.sfc", user_ipl()) else {
+        return;
+    };
     assert!(
-        failures.is_empty(),
-        "blargg's SPC ROMs did not report a pass.\n  {}",
-        failures.join("\n  ")
+        !text.contains(FINAL_BANNER),
+        "spc_mem_access_times.sfc PASSED, which D-3 did not expect: {text:?}\n\
+         This is not silently a win — the ROM's oracle status is disputed \
+         (higan vs Overload, no arbiter). Investigate what changed before \
+         updating this ticket's recorded known-red."
     );
+}
+
+/// **REPORTING ONLY.** `spc_dsp6.sfc` and `spc_smp.sfc` are W7-08's open
+/// S-DSP/opcode accuracy gaps, not this ticket's. Printed every run so
+/// the verdict stays visible (RF-L-12: an oracle nobody looks at is not
+/// an oracle), never asserted, so this file's real gate (`spc_timer`)
+/// does not get blocked on someone else's open ticket.
+#[test]
+#[ignore = "local: needs the fetched ROMs; reporting only, see module doc (W7-08 owns these)"]
+fn spc_dsp6_and_spc_smp_report_status() {
+    let Some(dir) = rom_dir() else {
+        eprintln!(
+            "SKIP: cargo run -p rf-harness --bin fetch-test-roms -- \
+             blargg-spc-dsp6 blargg-spc-smp"
+        );
+        return;
+    };
+    let ipl = user_ipl();
+    for name in ["spc_dsp6.sfc", "spc_smp.sfc"] {
+        run(&dir, name, ipl);
+    }
 }
