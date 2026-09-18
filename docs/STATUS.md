@@ -3924,3 +3924,19 @@ stories, 10 decisions).
   port before it touches the SA-1 again, an audio handshake outside this
   arc. Gate: workspace **2210 passing / 0 failed / 43 ignored**, clippy
   clean, arch OK.
+
+- **W17-04 — SA-1 slice 4, and the arc closes** (2026-09-18). The flat
+  penalty from slice 2 becomes the documented model: the SA-1 runs at
+  full rate on its own memory and at half rate on ROM or BW-RAM in any
+  step where the SNES side touched the same device, per fullsnes's DMA
+  speed table, with the one unmodeled case stated. A hand-assembled
+  cart running real code on both CPUs proves determinism and a mid-DMA
+  save-state round trip. Power Rangers Zeo's forced blank lifts around
+  frame 4,800 and returns in its attract loop, so it stays uniform with
+  a named cause rather than a stretched budget. Super Mario RPG is not
+  an SA-1 problem at all: its SPC700 halts during the boot upload so
+  the port it polls never changes, a named APU cause for the next audio
+  ticket. Five of the eight SA-1 archives render, none writes an
+  unknown register, and the census holds at 1017 render, 118 uniform,
+  130 refused, 0 crashed, 0 timed out. Gate: workspace **2213 passing /
+  0 failed / 43 ignored**, clippy clean, arch OK.
