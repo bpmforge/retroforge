@@ -7669,7 +7669,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-43",
   "title": "Register-read family from the W14-34 re-triage: Shien's Revenge x2 read write-only $4200; Top Gear 3000 ROM-mirror mismatch",
