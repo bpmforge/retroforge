@@ -4021,3 +4021,23 @@ stories, 10 decisions).
   `manual_is_multiple_of` lint that only `clippy --tests` sees was
   cleared. Gate: workspace **2222 passing / 0 failed / 43 ignored**,
   clippy clean, arch OK.
+
+- **W14-34..W14-38: the re-triage and its three families** (2026-09-20).
+  W14-34 re-probed all 74 remaining uniform titles: four are slow boots
+  (Knights of the Round, Jungle Strike, Justice League Task Force beta,
+  Undercover Cops), the rest fall into raster/IRQ (25), APU handshake
+  (23), DMA/mapping (11) and a short tail. W14-36 fixed the DMA family's
+  real cause in the cartridge loader: a LoROM cart whose map-mode nibble
+  says HiROM was addressed as HiROM, so reset read a zero vector; the
+  header's winning location now decides. Census 1061/74/130 ->
+  **1066/69/130** (WWF Super WrestleMania and four betas). W14-35 found
+  the raster/IRQ family healthy and fixed one fidelity gap (RDNMI bit 7
+  also clears at vblank end, per fullsnes; no census change), which
+  reclassified those titles as forced-blank waits; W14-38 then traced the
+  Quintet trio into the same APU handshake deadlock class as W14-33's
+  Rival Turf!, Super Turrican and Wario's Woods. W14-37 charged the IPL
+  boot handoff's cycles from the published listing but its census was a
+  +7/-7 trade, so it is held. The evidence points at one root: the
+  65C816 never charges internal cycles, so the CPU outruns the SPC and
+  the raster (W14-24/W14-28 were local patches over it) — W14-39 is
+  charging them for real, pinned by the singlestep vectors' cycle lists.
