@@ -7318,7 +7318,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-29",
   "title": "Final Fantasy Mystic Quest: Mode 7 raster IRQ chain rewrites its vector trampoline — IRQ event trace",
