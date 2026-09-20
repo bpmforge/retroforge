@@ -7645,7 +7645,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "id": "W14-42",
   "title": "Quintet driver deadlock on the corrected timing base: ActRaiser 2, Illusion of Gaia, Robotrek (and Soul Blazer) after W14-39/W14-41",
@@ -7661,6 +7661,7 @@
    "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — which port, which value, which side"
   ],
   "notes": [
+   "W14-42 CLOSED 2026-09-21: re-traced ActRaiser 2/Illusion of Gaia/Robotrek on the corrected timing base -- the W14-38 $F0 ack-wait deadlock does not reproduce (W14-39/W14-41 already fixed it as a side effect, confirmed via PROBE_PORTS/PROBE_APUPORTLOG showing the CPU reach the handshake routine's final RTS). The census-visible blank had a DIFFERENT cause found via PROBE_M7's colour-math dump: CGWSEL ($2130) clip_mode/prevent_mode had modes 1 and 2 swapped against fullsnes (1=NotMathWin, 2=MathWindow, not the reverse), so a disabled colour window with clip_mode=2 forced the ENTIRE main screen to black regardless of what BG/OBJ drew. Fixed in crates/rf-snes/src/ppu/window.rs (ColorMath::clip_to_black/prevented), pinned by a new unit test. This single fix moves all four W14-38 titles (ActRaiser 2, Illusion of Gaia, Robotrek, and -- unexpectedly -- Soul Blazer, W14-27/30's own separately-traced defect) to rendering; all named canaries unmoved. See docs/TESTING.md W14-42.",
    "W14-42 FILED 2026-09-21 by the orchestrator: the four Quintet/Enix titles are the last of the W14-33/38 deadlock class still blank after the timing fixes; three of the original six moved with W14-39, so the class was real."
   ]
  },

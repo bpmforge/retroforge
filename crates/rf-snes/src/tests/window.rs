@@ -200,23 +200,61 @@ fn colour_math_adds_subtracts_and_halves_with_clamping() {
     assert_eq!(c.blend((10, 10, 10), (10, 10, 10)), (10, 10, 10));
 }
 
-/// The four clip/prevent modes: never, inside, outside, always.
+/// The four `clip_mode` values, named the way fullsnes's "Color Math
+/// Control Register A" ($2130 bits 6-7, "Force Main Screen Black") names
+/// them: `0=Never, 1=NotMathWin, 2=MathWindow, 3=Always` — mode 1 forces
+/// black OUTSIDE the colour window, mode 2 forces it INSIDE (W14-42: this
+/// project's `clip_mode`/`prevent_mode` previously had 1 and 2 swapped,
+/// which forced ActRaiser 2/Illusion of Gaia/Robotrek's entire main
+/// screen to black — see `ColorMath::clip_to_black`'s doc for the
+/// citation).
 #[test]
 fn the_colour_window_modes_select_where_they_apply() {
     let mut c = ColorMath::default();
     for (mode, inside, outside) in [
         (0u8, false, false),
-        (1, true, false),
-        (2, false, true),
+        (1, false, true),
+        (2, true, false),
         (3, true, true),
     ] {
         c.write_register(0x2130, mode << 6);
         assert_eq!(c.clip_to_black(true), inside, "mode {mode} inside");
         assert_eq!(c.clip_to_black(false), outside, "mode {mode} outside");
     }
+    // prevent_mode=1 is "MathWindow": math ENABLED (not prevented) INSIDE
+    // the window, so it IS prevented outside.
     c.write_register(0x2130, 1 << 4);
-    assert!(c.prevented(true));
-    assert!(!c.prevented(false));
+    assert!(!c.prevented(true), "enabled inside the math window");
+    assert!(c.prevented(false), "prevented outside the math window");
+}
+
+/// W14-42's exact ActRaiser 2/Illusion of Gaia/Robotrek shape: `clip_mode
+/// = 2` (MathWindow) with the colour window itself left disabled (both
+/// window-enable bits for layer 5 clear), so `Windows::masks` reports
+/// "not inside" everywhere. Per fullsnes, mode 2 forces black only
+/// INSIDE the window, so with nowhere inside it, nothing should be
+/// forced black — the swapped implementation instead forced black
+/// EVERYWHERE (mode 2 read as "outside"), which is the whole-screen-flat
+/// symptom the census recorded as forced_blank-lifted-but-blank.
+#[test]
+fn a_disabled_colour_window_with_math_window_clip_forces_nothing_black() {
+    let mut p = Ppu::new();
+    p.forced_blank = false;
+    p.bg_mode = 0;
+    p.bgs[0].enabled = true;
+    p.bgs[0].char_base = 0x1000;
+    for row in 0..8 {
+        p.vram[(0x1000 + 8 + row) * 2] = 0xFF;
+    }
+    p.vram[0] = 1;
+    // clip_mode=2 (MathWindow); the colour window (layer 5) is left at
+    // its all-disabled default, so `masks(5, x)` is false for every x.
+    p.write_register(0x2130, 2 << 6);
+    assert_eq!(
+        p.render_scanline(0).pixels[0].layer,
+        PixelLayer::Background(0),
+        "mode 2 with the colour window disabled must not clip anything to black"
+    );
 }
 
 /// **Clip-to-black reaches the indexed pixel stream**, because black is

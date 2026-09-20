@@ -5424,3 +5424,154 @@ one) is the orchestrator's, per this ticket's brief.
 already part of the bus's deterministic, saved state (updated
 synchronously on every bus transfer); the DSP-4 checksum check is a
 pure function of header bytes evaluated once at cartridge load.
+
+## W14-42 — the $F0 handshake deadlock is gone on the corrected timing
+## base; the real defect was `CGWSEL`'s clip/prevent modes swapped, forcing
+## the whole main screen to black. Fixes all four W14-38 titles, including
+## Soul Blazer
+
+**Re-trace, ActRaiser 2 first.** `PROBE_ROMS=<ActRaiser 2.zip>
+PROBE_INSTR=12000000 PROBE_PORTS=1 PROBE_SPCRING=1
+PROBE_DIS=80:cd50:cdc0` — the same instruction count W14-38 sampled the
+stall at — no longer shows the CPU parked at `$80CD7C` (`LDA
+$2140`/`BNE $CD7C`, the driver's `$F0` ack wait). The dominant CPU PCs
+are `$80BDE4`/`$80BDE8` (`LDA $004210`/`BPL`, the ordinary vblank idiom),
+and `ports_in=ports_out=[01,00,00,00]` — balanced, not stuck.
+`PROBE_APUPORTLOG=1` over the same window (`crates/rf-harness/tests/
+title_probe.rs`'s per-`ports_in[0..1]`-change trace) shows the CPU
+reaching `$80CDAF` (the routine's final `RTS`, past `$F0`'s send at
+`$CD77`/`$CD79`, its ack wait at `$CD7C`/`$CD7F`, the `$FF` ack at
+`$CD87`/`$CD89`, and the `$CD92`-`$CDA5` tail) at `n=8317852` — positive
+proof the handshake completed, not an absence-of-stall inference. A
+`PROBE_INSTR` sweep to 20M/30M/40M/60M instructions (frames 1357-4151)
+confirms `forced_blank` stays **false** and `bright=15` throughout — the
+title is not re-entering the wait either. Illusion of Gaia and Robotrek,
+re-traced the same way at `PROBE_INSTR=30000000`, show the identical
+picture: `forced_blank=false bright=15`, no CPU PC anywhere near their
+own `$F0` dispatch routines. **The W14-38 deadlock does not reproduce on
+the current timing base** — W14-39's internal-cycle charge and W14-41's
+`catch_up_apu` deferral, both landed after W14-38's trace, already fixed
+it as a side effect, the same way three of W14-33's six titles moved
+under W14-39 alone.
+
+**But the census still shows all four titles blank, and it is not a
+window-length artifact.** `PROBE_MODE=frames PROBE_FRAMES=600` still
+shows `forced_blank=true` at the census's own sample point, so a first
+pass suspected these titles simply have a longer boot than 600 frames
+(the same category W14-38 already named for Lagoon/Phalanx/Goal!).
+Sweeping PROBE_FRAMES to 1500/2000/2500/3000 (added `color_math`/
+`windows`/`bg1` fields to `PROBE_M7`'s print for this ticket) refutes
+that: by frame 1500 `forced_blank=false`, `bright=15`, `tm=[1110+obj]`
+(three BGs plus OBJ on the main screen), BG1 is actively scrolling
+(`hofs`/`vofs` climbing frame over frame), `cgram_nonzero=211`,
+`vram_nonzero≈32700`, and `PROBE_OAM=1` decodes on-screen sprites with
+non-transparent composed colour (`top_left_colour=14`/`2`) — every input
+a healthy title needs to show *something*. Yet `distinct_indices_now`
+(the same `render_scanline`-based composite check W14-38 already trusted
+for exactly this question) reports **1**, `sample=[0]`, at every one of
+those checkpoints: the whole visible picture is flat palette index 0,
+5+ real seconds after boot, with real backing data on every layer.
+Added `PROBE_RENDERNOW=1` to `title_probe.rs` to ask the identical
+question from the `PROBE_INSTR` path (documented caveat: without a prior
+`Step::Frame` boundary, `Ppu::apply_line_state`'s per-line HDMA replay
+has nothing recorded to replay, so this is corroborating, not
+authoritative, evidence) — it agrees: flat index 0 at `n=29000000`.
+
+**Root cause, found from the `PROBE_M7` colour-math dump: `$2130`
+CGWSEL's `clip_mode`/`prevent_mode` had modes 1 and 2 swapped against
+fullsnes.** ActRaiser 2's dump at frame 2000: `color_math=ColorMath {
+clip_mode: 2, prevent_mode: 0, ... }`, `windows=Windows { ...
+enable: [(false,false); 6], ... }` — the colour window (layer index 5)
+has neither W1 nor W2 enabled, so `Windows::masks(5, x)` is `false`
+(never "inside") for every `x`, by its own doc ("a layer with neither
+window enabled is never masked"). fullsnes ("2130h - CGWSEL - Color Math
+Control Register A", `docs`-cited copy at `fullsnes.txt` line 1278):
+
+```
+7-6  Force Main Screen Black (3=Always, 2=MathWindow, 1=NotMathWin, 0=Never)
+5-4  Color Math Enable       (0=Always, 1=MathWindow, 2=NotMathWin, 3=Never)
+```
+
+Mode **1** is `NotMathWin` (forces black OUTSIDE the colour window), mode
+**2** is `MathWindow` (forces black INSIDE it) — but
+`crates/rf-snes/src/ppu/window.rs`'s `ColorMath::clip_to_black` had them
+backwards: `1 => inside_color_window, 2 => !inside_color_window`.
+`clip_mode=2` (`MathWindow`, "black inside") with the colour window
+disabled (nothing ever "inside") should force black **nowhere** — but
+the swapped `2 => !inside_color_window` arm evaluates `!false = true`
+for every pixel, forcing the **entire main screen** to black regardless
+of what BG/OBJ actually drew. `ColorMath::prevented` (bits 4-5, "Color
+Math Enable") had the identical 1/2 swap, inverted for its own "prevent"
+framing (`1=MathWindow` means math is enabled — not prevented — inside
+the window, so prevented outside; the code had this backwards too). This
+single register-decode bug reads as a fresh discovery via `PROBE_M7`,
+not a chase of the ticket's own hypothesis list — none of items (a)-(f)
+in the ticket's acceptance (16-bit port ordering, the `catch_up_apu`
+race, `$F1` port clears, timer reads, SPC700 opcode semantics, or the
+CPU-side register-read family) turned out to be it; the actual defect
+was on the PPU side, downstream of a handshake that had already
+completed.
+
+**Fix**, `crates/rf-snes/src/ppu/window.rs`: swapped both match arms —
+`clip_to_black`: `1 => !inside_color_window, 2 => inside_color_window`;
+`prevented`: same swap. Doc comments on `clip_mode`/`prevent_mode` and
+both methods now quote the fullsnes bit table directly rather than a
+paraphrase, so the next reader cannot reverse it again by "obvious"
+reading of 1-then-2.
+
+**Unit tests**, `crates/rf-snes/src/tests/window.rs`:
+`the_colour_window_modes_select_where_they_apply` (pre-existing, whose
+table previously encoded the swapped/wrong semantics — now asserts mode
+1 forces black outside, mode 2 inside, and the `prevented` half asserts
+math is enabled inside/prevented outside for mode 1) and a new
+`a_disabled_colour_window_with_math_window_clip_forces_nothing_black`,
+which reproduces this ticket's exact shape directly on a bare `Ppu`
+(`clip_mode=2`, colour window left at its all-disabled default) and
+asserts the main screen still shows its BG1 pixel rather than the
+backdrop. Verified to fail against the pre-fix arms (`left: Backdrop,
+right: Background(0)`) and pass after.
+
+### Census: all four W14-38 titles render; the named canaries unmoved
+
+`title_probe`'s `PROBE_MODE=frames` (no frame cap) now finds `varied_at`
+well inside the census's 600-frame window for every title this ticket
+named:
+
+| Title | `varied_at` (frames) | `boot_census_child` exit |
+|---|---|---|
+| ActRaiser 2 (USA) | 135 | **0 (was 10)** |
+| Illusion of Gaia (USA) | 79 | **0 (was 10)** |
+| Robotrek (USA) | 150 | **0 (was 10)** |
+| Soul Blazer (USA) | 53 | **0 (was 10)** |
+
+Soul Blazer moving is a surprise the ticket did not ask to chase (it was
+W14-27/30's own separately-traced "dispatcher RETs to $0102" defect) —
+but the same `CGWSEL` bug was masking its actual composited output the
+same way, and fixing the register decode was enough; nothing in
+W14-27/30's own dispatch trace needed touching.
+
+Built `boot_census` fresh (`cargo test --release -p rf-harness --test
+boot_census --no-run`) and ran `RF_CENSUS_ROM=<zip> boot_census-*
+--ignored --exact boot_census_child` for the four titles above (all
+**exit 0**) plus every canary this ticket's acceptance names — Rival
+Turf!, Super Turrican, Wario's Woods, Tommy Moe's Winter Extreme, Super
+Mario RPG, Super Mario World, Wild Guns, Kirby Super Star, NHL 95, Clay
+Fighter, Full Throttle - All-American Racing (Beta): **all exit 0,
+unmoved** — the fix does not touch any title that was already rendering.
+
+### Gate
+
+`cargo fmt --check` clean. `cargo clippy --workspace -- -D warnings`
+clean. `cargo test -p rf-snes --release`: **367 passed** (one net new
+test — the pre-existing colour-window-modes test was corrected in place,
+one new regression test added), 0 failed, 1 ignored. Ignored oracle
+suites, all re-run and green on this tree: `singlestep_spc700_vectors`
+(256,000/256,000), `spc700_cycle_table_matches_the_vectors`,
+`spc_timer_reports_pass` ("PASSED TESTS"),
+`cputest_full_reports_success_and_every_test_passes` (gilyon,
+`test_num=0x0649/0x0649, "Success"`, 6,100,000 instructions),
+`peterlemon_golden`'s three tests (`peterlemon_bg_map_goldens_match`
+included — the same suite that would show a colour-math/window
+regression first), `singlestep_65816_vectors` (5,080,000/5,080,000, same
+pre-existing MVN/MVP exclusion as every prior ticket).
+`scripts/validate-arch.sh`: `arch OK`.
