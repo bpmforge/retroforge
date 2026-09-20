@@ -852,14 +852,13 @@ impl SnesBus {
         moved * CYCLES_PER_BYTE
     }
 
-    /// Advance the math unit by `cycles` CPU cycles.
-    pub fn tick_math(&mut self, cycles: u32) {
-        for _ in 0..cycles {
-            if !self.math.busy() {
-                break;
-            }
-            self.math.step();
-        }
+    /// Advance the math unit by `master_cycles` of this instruction's
+    /// charged bus-access cost (ticket W14-24 — was a raw *access count*;
+    /// see [`crate::regs::MathUnit::tick`] for what changed and, just as
+    /// importantly, what did not: this is still access-derived, not a
+    /// real internal-cycle count).
+    pub fn tick_math(&mut self, master_cycles: u32) {
+        self.math.tick(master_cycles);
     }
 }
 

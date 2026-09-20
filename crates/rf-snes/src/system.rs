@@ -24,6 +24,14 @@ pub struct SnesSystem {
     pub master_cycles: u64,
     /// An NMI edge seen but not yet dispatched.
     pub(crate) pending_nmi: bool,
+    /// Diagnostic only, not part of save state (ticket W14-24): the most
+    /// recently executed instruction's bus-access count and the master
+    /// cycles charged for it. Exists so a probe can measure exactly what
+    /// [`Self::step`] feeds `SnesBus::tick_math`, rather than guessing —
+    /// see `MathUnit::tick`'s doc for why that distinction matters.
+    pub last_instr_accesses: u64,
+    /// See [`Self::last_instr_accesses`].
+    pub last_instr_master_cycles: u64,
 }
 
 impl SnesSystem {
@@ -67,6 +75,8 @@ impl SnesSystem {
             bus: SnesBus::new(rom, sram_len, header.map_mode),
             master_cycles: 0,
             pending_nmi: false,
+            last_instr_accesses: 0,
+            last_instr_master_cycles: 0,
         };
         system.bus.fast_rom = header.fast_rom;
         // DSP-1 HLE (ticket W14-19; D-010, FR-CORE-038): `rf-cart`
@@ -127,6 +137,8 @@ impl SnesSystem {
             bus: SnesBus::new(rom, sram_len, mode),
             master_cycles: 0,
             pending_nmi: false,
+            last_instr_accesses: 0,
+            last_instr_master_cycles: 0,
         };
         system.reset();
         system
@@ -165,7 +177,6 @@ impl SnesSystem {
         let fast_rom = self.bus.fast_rom;
         let mut counting = crate::cpu::AccessCost::new(&mut self.bus, fast_rom);
         let result = self.cpu.step(&mut counting);
-        let accesses = counting.accesses;
         // **A HALTED CPU STILL BURNS TIME** (ticket W7-15).
         //
         // `Cpu::step` returns immediately while `stopped` (WAI or STP)
@@ -192,12 +203,25 @@ impl SnesSystem {
             counting.master_cycles
         };
         self.master_cycles += spent;
+        self.last_instr_accesses = counting.accesses;
+        self.last_instr_master_cycles = spent;
 
-        // The math unit advances in CPU cycles, not master cycles. One
-        // bus access is one CPU cycle, which is what the vector traces
-        // show; internal cycles are not modelled yet (W6-02a's note on
-        // the cycle-accurate executor).
-        self.bus.tick_math(accesses as u32);
+        // The math unit now advances off `spent` (this instruction's
+        // charged master cycles) instead of `counting.accesses` (ticket
+        // W14-24) — but read `MathUnit::tick`'s doc before assuming that
+        // means "internal cycles are now counted". They are not: `spent`
+        // comes from `AccessCost`, which — correctly, per `speed.rs`'s
+        // own doc — charges bus accesses ONLY, so an instruction with
+        // more real cycles than bus accesses (`INY`, `NOP`, `XBA`'s
+        // second cycle) still contributes nothing extra here. What this
+        // change actually does is re-bucket the SAME access-based
+        // credit into `speed::FAST`-sized (6-master-cycle) steps instead
+        // of one step per access, which over-credits every access
+        // costing more than 6 (the `SLOW`/`XSLOW` regions this crate's
+        // own `access_cycles` table prices at 8 or 12) — see
+        // `MathUnit::tick`'s doc for the arithmetic and why that
+        // direction is safe.
+        self.bus.tick_math(spent as u32);
         // The APU accrues debt with every master cycle the CPU spends —
         // DMA included, because a transfer stalls the CPU and not the
         // sound chip — and is settled at the end of every instruction

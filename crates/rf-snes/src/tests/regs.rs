@@ -74,6 +74,95 @@ fn results_are_not_ready_before_the_operation_completes() {
     assert!(!d.busy(), "exactly {DIV_STEPS} steps");
 }
 
+/// Ticket W14-24: `MathUnit::tick` must clock the divider off real
+/// elapsed master cycles, not off how many times the caller happens to
+/// invoke it. `DIV_STEPS` (16) internal cycles at `speed::FAST` (6)
+/// master cycles each is the divide's whole latency; one cycle short
+/// must still be busy, and the exact latency must complete it with the
+/// right quotient/remainder — this is the SMRPG bug (`101 / 3`) as an
+/// in-repo test rather than only a ROM trace.
+#[test]
+fn tick_completes_a_divide_after_its_real_master_cycle_latency() {
+    let cycle = u32::from(crate::cpu::speed::FAST);
+    let mut d = MathUnit::default();
+    d.wrdiv = 0x0065; // 101, the SMRPG boot-upload dividend that exposed this.
+    d.start_divide(3);
+    d.tick(u32::from(DIV_STEPS - 1) * cycle);
+    assert!(
+        d.busy(),
+        "one internal cycle short of 16 must still be busy"
+    );
+    d.tick(cycle);
+    assert!(
+        !d.busy(),
+        "exactly 16 internal cycles' worth of master time"
+    );
+    assert_eq!(d.rddiv, 0x0021, "101 / 3 quotient");
+    assert_eq!(d.rdmpy, 2, "101 / 3 remainder");
+}
+
+/// The `carry` field exists so that spreading the same total master
+/// cycles across many small `tick` calls (one per instruction, as
+/// `SnesSystem::step_one` actually does) produces the same result as one
+/// large call — sub-`speed::FAST` remainders must accumulate rather than
+/// being discarded each call.
+#[test]
+fn tick_accumulates_partial_master_cycles_across_calls() {
+    let cycle = u32::from(crate::cpu::speed::FAST);
+    let total = u32::from(DIV_STEPS) * cycle;
+
+    let mut one_shot = MathUnit::default();
+    one_shot.wrdiv = 1000;
+    one_shot.start_divide(7);
+    one_shot.tick(total);
+
+    let mut drip_fed = MathUnit::default();
+    drip_fed.wrdiv = 1000;
+    drip_fed.start_divide(7);
+    // Feed it back in small, cycle-count-sized pieces that do not each
+    // divide evenly by `cycle` — e.g. instruction costs of 2 and 4
+    // master cycles, which never land on a `cycle` boundary alone.
+    let mut fed = 0u32;
+    while fed < total {
+        let piece = if fed % 3 == 0 { 2 } else { 4 };
+        drip_fed.tick(piece);
+        fed += piece;
+    }
+    // `fed` may overshoot `total` slightly (the pieces don't divide it
+    // evenly); that only means the divide finished a little early, which
+    // the assertions below cover either way.
+    assert!(!one_shot.busy());
+    assert!(!drip_fed.busy(), "many small ticks must still finish");
+    assert_eq!(one_shot.rddiv, drip_fed.rddiv);
+    assert_eq!(one_shot.rdmpy, drip_fed.rdmpy);
+}
+
+/// The `$4204`-`$4217` window through `SnesBus`, driven the way
+/// `tick_math` actually is (ticket W14-24): a read that lands before the
+/// real 16-cycle latency has elapsed must NOT see the final high byte,
+/// and one that lands after must.
+#[test]
+fn bus_tick_math_gates_the_divide_quotient_by_real_master_cycles() {
+    let mut b = bus();
+    b.write(0x4204, 0x65); // WRDIV low: dividend 0x0065 = 101.
+    b.write(0x4205, 0x00); // WRDIV high.
+    b.write(0x4206, 3); // start a divide by 3: 101 / 3 = 33 (0x0021) r 2.
+
+    let cycle = u32::from(crate::cpu::speed::FAST);
+    b.tick_math(u32::from(DIV_STEPS - 1) * cycle);
+    assert_ne!(
+        b.read(0x4215),
+        0x00,
+        "a read one internal cycle short of the real latency must not \
+         already show the finished high byte — if it does, this test \
+         stopped detecting the W14-24 regression"
+    );
+
+    b.tick_math(cycle);
+    assert_eq!(b.read(0x4214), 0x21, "101 / 3 quotient low byte");
+    assert_eq!(b.read(0x4215), 0x00, "101 / 3 quotient high byte");
+}
+
 /// An intermediate read must return the shift register's ACTUAL state,
 /// which is generally neither zero nor the final answer.
 ///
