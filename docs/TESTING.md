@@ -801,6 +801,7 @@ First run, 2026-09-15, release build:
 | SNES, after W17-04 | 1265 | **1017** | 118 | 130 | **0** | **0** |
 | SNES, after W14-24 | 1265 | **1019** | 116 | 130 | **0** | **0** |
 | SNES, after W14-26 | 1265 | **1037** | 98 | 130 | **0** | **0** |
+| SNES, after W14-31 | 1265 | **1054** | 81 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -2306,3 +2307,21 @@ completed-then-live chain); `crates/rf-snes/src/system.rs`
 `clear_line_state`); `crates/rf-snes/src/tests/system.rs` (the two new
 regression tests plus their shared `window_test_system`/`masked_at`/
 `step_to_mid_line` helpers).
+
+**Full SNES census (orchestrator, 2026-09-20, release build, per-title
+`RF_CENSUS_OUT` diff against the W14-26 run):** **1037/98/130/0/0 ->
+1054/81/130/0/0** ("SNES, after W14-31" row above). Seventeen rows
+changed, every one from *uniform screen* to *rendered something*, none
+the other way: **Final Fantasy Mystic Quest** (USA, Rev 1, and the
+Japanese "Final Fantasy USA"), **Cybernator** (USA and the 1992-11
+beta), **The Pagemaster** (USA, Beta 2, Beta 3), **The Peace Keepers**
+(USA and beta), **Power Rangers Zeo: Battle Racers**, **Ranma 1/2: Hard
+Battle**, **Super Ninja Boy**, and **Taz-Mania** (USA, Rev 1, Beta 1,
+Beta 2). Two of those carry earlier verdicts that this result
+supersedes in part: Power Rangers Zeo was recorded in W17-04 as "forced
+blank lifts around frame 4,800 in the attract loop" and Super Ninja Boy
+in W14-25 as a game-side DMA/NMI race — both titles now render within
+the census budget, so whatever those traces described, the uniform
+screen the census saw was the wiped per-line record, not the game. The
+W14-25 race trace stands as a description of the emulator's behaviour
+at that time and should be re-checked before it is cited again.
