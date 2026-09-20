@@ -7469,7 +7469,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "id": "W14-35",
   "title": "Raster/IRQ family (25 titles): the CPU polls $4210 RDNMI / $4212 HVBJOY with NMI entered once or twice — trace ActRaiser 2, Illusion of Gaia, Lagoon, Phalanx",
@@ -7485,6 +7485,7 @@
    "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — 'game's own data' without that chain is not accepted"
   ],
   "notes": [
+   "W14-35 BLOCKED 2026-09-20: traced ActRaiser 2, Illusion of Gaia, Lagoon, Phalanx with new PROBE_IRQLOG additions (RDNMILOG/HVBJOYLOG/NMILOG, module doc in title_probe.rs) across the full 3,000,000-instruction run, not just the post-run 20000-instruction sample W14-34 used. Result: the raster/IRQ family's premise is refuted for all four -- RDNMI set/clear is 1:1 every vblank, HVBJOY enter/exit tracks line 225/0 exactly, and NMI dispatches whenever NMITIMEN bit7 is on at the vblank edge (35-175 dispatches per title, frame counters reaching 159-194 within the probe window) -- these are live, correctly-paced games idling in the standard wait_for_vblank idiom, not hangs. Checked all five named fullsnes hypotheses (a)-(e): (a) RDNMI also clears at vblank end per fullsnes, which rf-snes did not model -- FIXED (Timing::advance clears nmi_flag at the line==0 frame-wrap instant; new test the_nmi_flag_also_clears_at_end_of_vblank_even_if_never_read); (b) the AND-edge immediate-dispatch-on-enable path is also a real deviation but does not reproduce any of the four titles' symptom (re-enable always happens after that frame's own read already cleared the flag) -- named as a follow-up, not fixed, per one-ticket-at-a-time scope; (c)/(d)/(e) all check out against fullsnes. Neither fix moves any census child: ActRaiser 2/Illusion of Gaia/Lagoon/Phalanx/Goal!/Robotrek stay exit 10, all seven named canaries stay exit 0. Real cause of the uniform screen is INIDISP ($2100, forced_blank/bright never edges for Lagoon/Phalanx across 190+ frames, cgram_nonzero=0) or TM ($212C, BG layers off, OBJ only, for ActRaiser 2/Illusion of Gaia) -- outside this ticket's write_scope and hypothesis set; named as the next ticket. Gate: cargo fmt --check clean, cargo clippy --workspace -D warnings clean, cargo test -p rf-snes 364 passed/0 failed (+1 new test), ignored suites all green (singlestep_spc700_vectors, spc_timer_reports_pass, gilyon cputest_full_reports_success_and_every_test_passes, peterlemon_golden x3, singlestep_65816_vectors 5,080,000/5,080,000). Full write-up in docs/TESTING.md under the dated W14-35 heading.",
    "W14-35 FILED 2026-09-20 by the orchestrator from W14-34's re-triage: 25 titles share the $4210/$4212 poll shape with NMI entered once or twice (ActRaiser 2, Goal!, Illusion of Gaia x3, Lagoon, Phalanx x2, Pinocchio betas, ...). Timing::read_rdnmi and Timing::advance (nmi_flag at vblank_start) and SnesSystem::step's dispatch (`events.vblank_started && nmi_enabled`) are the code under test."
   ]
  },

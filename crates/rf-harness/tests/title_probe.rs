@@ -98,7 +98,26 @@
 //!                                    INIDISPLOG line on every `$2100`
 //!                                    forced_blank/brightness edge, since
 //!                                    that register is what the trace is
-//!                                    ultimately trying to explain (W14-29)
+//!                                    ultimately trying to explain (W14-29);
+//!                                    a RDNMILOG line on every edge of
+//!                                    `Timing::nmi_flag` — SET at a vblank
+//!                                    edge, CLEARED (with the CPU PC) when
+//!                                    a `$4210` read consumes a pending
+//!                                    bit7=1 — which is the complete RDNMI
+//!                                    read/return story with no new
+//!                                    `rf-snes` field, since that flag only
+//!                                    ever changes for those two reasons;
+//!                                    an HVBJOYLOG line on every ENTER/EXIT
+//!                                    edge of `Timing::in_vblank()`, the
+//!                                    level `$4212` bit 7 reports; and an
+//!                                    NMILOG line whenever the CPU PC lands
+//!                                    on the NMI vector (native `$FFEA` or
+//!                                    emulation `$FFFA`), the same
+//!                                    dispatch detection the post-run
+//!                                    `nmi_entries` sample already uses,
+//!                                    but live across the whole
+//!                                    `PROBE_IRQLOG` window instead of only
+//!                                    the last 20000 instructions (W14-35)
 //! PROBE_SPCMEMWATCH=hex[,hex]       print the SPC700 PC and old/new byte value
 //!                                    whenever one of these absolute 16-bit ARAM
 //!                                    addresses changes value — used to find who
@@ -456,6 +475,37 @@ fn probe() {
                     .collect()
             })
             .unwrap_or_default();
+        // W14-35: RDNMI ($4210 bit7)/HVBJOY ($4212 bit7) and NMI-dispatch
+        // tracing for the raster/IRQ family (25 titles polling one of
+        // these two registers with NMI entered 0-2 times). Both register
+        // bits are edge-equivalent to existing public state, so — same
+        // "no new core field for a diagnostic" discipline as the rest of
+        // PROBE_IRQLOG — no `rf-snes` field was added:
+        // `Timing::nmi_flag` changes for exactly two reasons (set true at
+        // `vblank_start` in `Timing::advance`, cleared by
+        // `Timing::read_rdnmi`), so watching it post-instruction reports
+        // every RDNMI set/clear with no separate read hook; HVBJOY bit 7
+        // is `Timing::in_vblank()`, a pure level with no read side effect
+        // at all, so its transitions are the whole story. NMI dispatch
+        // itself is detected the same way the PROBE_SAMPLE phase already
+        // detects it below (PC landing on the CPU's own NMI vector) but
+        // continuously across the whole PROBE_IRQLOG window instead of
+        // only the post-run 20000-instruction sample.
+        let mut nmiflag_last: bool = core.system().bus.timing.nmi_flag;
+        let mut hvbjoy_last: bool = core.system().bus.timing.in_vblank();
+        let nmi_vec_native: u32 = {
+            let b = &core.system().bus;
+            u32::from(rf_snes::cpu::CpuBus::peek(b, 0xFFEA))
+                | (u32::from(rf_snes::cpu::CpuBus::peek(b, 0xFFEB)) << 8)
+        };
+        let nmi_vec_emu: u32 = {
+            let b = &core.system().bus;
+            u32::from(rf_snes::cpu::CpuBus::peek(b, 0xFFFA))
+                | (u32::from(rf_snes::cpu::CpuBus::peek(b, 0xFFFB)) << 8)
+        };
+        let (mut rdnmi_set_events, mut rdnmi_clear_events) = (0u64, 0u64);
+        let (mut hvbjoy_enter_events, mut hvbjoy_exit_events) = (0u64, 0u64);
+        let mut nmi_dispatch_events: u64 = 0;
         let mut prev_pc: u32 = 0;
         let cap: u64 = std::env::var("PROBE_INSTR")
             .ok()
@@ -601,6 +651,50 @@ fn probe() {
                             irqlog_printed += 1;
                         }
                         tramp_last = cur;
+                    }
+                }
+                let nmiflag_now = sys.bus.timing.nmi_flag;
+                if nmiflag_now && !nmiflag_last {
+                    rdnmi_set_events += 1;
+                    if irqlog_printed < irqlog_max {
+                        println!("      RDNMILOG n={n} line={line} dot={dot} SET (vblank edge)");
+                        irqlog_printed += 1;
+                    }
+                } else if !nmiflag_now && nmiflag_last {
+                    rdnmi_clear_events += 1;
+                    if irqlog_printed < irqlog_max {
+                        println!(
+                            "      RDNMILOG n={n} line={line} dot={dot} pc={:06X} CLEARED (a $4210 read saw bit7=1)",
+                            pcv & 0x00FF_FFFF
+                        );
+                        irqlog_printed += 1;
+                    }
+                }
+                nmiflag_last = nmiflag_now;
+                let hvbjoy_now = sys.bus.timing.in_vblank();
+                if hvbjoy_now && !hvbjoy_last {
+                    hvbjoy_enter_events += 1;
+                    if irqlog_printed < irqlog_max {
+                        println!("      HVBJOYLOG n={n} line={line} dot={dot} ENTER vblank");
+                        irqlog_printed += 1;
+                    }
+                } else if !hvbjoy_now && hvbjoy_last {
+                    hvbjoy_exit_events += 1;
+                    if irqlog_printed < irqlog_max {
+                        println!("      HVBJOYLOG n={n} line={line} dot={dot} EXIT vblank");
+                        irqlog_printed += 1;
+                    }
+                }
+                hvbjoy_last = hvbjoy_now;
+                if pcv & 0x00FF_FFFF == nmi_vec_native || pcv & 0x00FF_FFFF == nmi_vec_emu {
+                    nmi_dispatch_events += 1;
+                    if irqlog_printed < irqlog_max {
+                        println!(
+                            "      NMILOG n={n} line={line} dot={dot} DISPATCH pc={:06X} p={:02X}",
+                            pcv & 0x00FF_FFFF,
+                            sys.cpu.p
+                        );
+                        irqlog_printed += 1;
                     }
                 }
             }
@@ -864,6 +958,11 @@ fn probe() {
                 "      IRQLOG totals (whole run): arm_events={arm_events} assert_events={assert_events} \
                  ack_events={ack_events} tramp_events={tramp_events} inidisp_events={inidisp_events} \
                  (printed first {irqlog_printed})"
+            );
+            println!(
+                "      IRQLOG totals (whole run): rdnmi_set_events={rdnmi_set_events} \
+                 rdnmi_clear_events={rdnmi_clear_events} hvbjoy_enter_events={hvbjoy_enter_events} \
+                 hvbjoy_exit_events={hvbjoy_exit_events} nmi_dispatch_events={nmi_dispatch_events}"
             );
         }
         if !spcpc_counts.is_empty() {

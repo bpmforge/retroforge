@@ -71,6 +71,29 @@ fn the_nmi_flag_persists_until_something_reads_it() {
     assert!(t.nmi_flag, "still set ten scanlines later");
 }
 
+/// **The other half of the `$4210` race (W14-35).** fullsnes: "The flag
+/// gets reset automatically at end of Vblank, and gets also reset after
+/// reading from this register." A title that never polls `$4210` during
+/// one vblank must not see a stale set flag once the new frame's active
+/// display begins.
+#[test]
+fn the_nmi_flag_also_clears_at_end_of_vblank_even_if_never_read() {
+    let mut t = Timing::new();
+    advance(&mut t, MASTER_PER_LINE * u64::from(VBLANK_START_LINE) + 1);
+    assert!(t.nmi_flag, "set at vblank start");
+
+    // Cross the frame wrap (line 261 -> 0) without ever reading $4210.
+    advance(
+        &mut t,
+        MASTER_PER_LINE * u64::from(LINES_PER_FRAME - VBLANK_START_LINE),
+    );
+    assert_eq!(t.line, 0, "landed exactly on the frame wrap");
+    assert!(
+        !t.nmi_flag,
+        "cleared at end of vblank, per fullsnes, even though nothing read it"
+    );
+}
+
 /// `$4210` must go through `read`, never `peek` — a debugger that peeked
 /// it would acknowledge a vblank the program had not seen.
 #[test]
