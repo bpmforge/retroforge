@@ -802,6 +802,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-24 | 1265 | **1019** | 116 | 130 | **0** | **0** |
 | SNES, after W14-26 | 1265 | **1037** | 98 | 130 | **0** | **0** |
 | SNES, after W14-31 | 1265 | **1054** | 81 | 130 | **0** | **0** |
+| SNES, after W14-28 | 1265 | **1061** | 74 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -2808,3 +2809,19 @@ state (`I`, `irq.fired`, the opcode that set `stopped`); no RNG, wall-clock
 or thread dependency introduced. `Cpu::wai` is now part of save state
 (`Cpu::save`/`Cpu::load` both append it) — a save taken mid-`WAI` restores
 which kind of halt it was, so a load does not risk waking a restored `STP`.
+
+**Full SNES census (orchestrator, 2026-09-20, release build, per-title
+`RF_CENSUS_OUT` diff against the W14-31 run), on the final W14-28 tree
+(math-unit credit + WAI masked-IRQ wake):** **1054/81/130/0/0 ->
+1061/74/130/0/0** ("SNES, after W14-28" row above). Seven rows changed,
+every one from *uniform screen* to *rendered something*, none the other
+way: **The Flintstones** (USA, En/Fr/De/Es/It), **Samurai Shodown** (USA
+and beta), **Clay Fighter** (USA, Tournament Edition, and Beta 2 — the
+2026-09-17 triage had named it "driver clears ARAM for seconds then
+re-uploads"; the WAI wake is what it was waiting on), and **Kawasaki
+Superbike Challenge**. An intermediate run with the credit alone had
+moved Jungle Strike up and Full Throttle (Beta) down; with the WAI wake
+in place Full Throttle renders again (both dumps) and Jungle Strike is
+back exactly where main has it (uniform, first varied frame 991 under
+the fixed tree, i.e. outside the 600-frame budget — a named follow-up,
+not a regression against main).
