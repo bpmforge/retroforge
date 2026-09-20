@@ -7513,6 +7513,29 @@
   "notes": [
    "W14-36 FILED 2026-09-20 by the orchestrator from W14-34's re-triage: 11 titles crash into the $0000 vector with the same stack-wander shape NHL 95 had before W14-26 (Final Fight 2 x2, Final Fight 3 Beta, Brawl Brothers, Knights of the Round is a slow boot not this, ...). See the W14-34 table in docs/TESTING.md for the full list."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-37",
+  "title": "IPL boot HLE: charge the real 64-byte boot ROM's cycles on the go->jump handoff and the per-byte handshake, from the published IPL listing",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-37: W14-33 found Super Turrican's uploaded driver consuming the stale IPL 'go' trigger byte because IplBoot's HLE hands control to the uploaded code instantly, where the real boot ROM executes a documented instruction sequence (with SPC700 cycle costs from the crate's own vector-verified CYCLES table) between seeing the final port write and jumping; the HLE now charges those cycles (and the per-byte handshake's cycles, if it does not already) using the instruction listing on snes.nesdev.org's 'SPC700 IPL' / fullsnes 'SNES APU IPL' pages as the citation — a clean-room timing model derived from documentation, never the ROM bytes themselves (NFR-011, law 5)",
+   "W14-37: a unit test pins the handoff latency in SPC cycles against the listing's count, and the existing IplBoot tests, spc700_vectors, spc_timer_reports_pass and gilyon stay green; determinism unaffected",
+   "W14-37: census children on Super Turrican (USA and VC), Rival Turf!, Wario's Woods, Soul Blazer, Super Mario RPG (USA), Super Mario World, Wild Guns, Kirby Super Star, ActRaiser 2, Robotrek, Clay Fighter (USA); then the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and every title that moved in either direction is named in docs/TESTING.md"
+  ],
+  "notes": [
+   "W14-37 FILED 2026-09-20 by the orchestrator from W14-33's Super Turrican finding. IplBoot (crates/rf-snes/src/apu/boot.rs) is a high-level model of the boot ROM's protocol; its timing between protocol steps is the suspect. The listing is documentation; the 64 bytes are Sony's and stay out of the tree."
+  ]
  }
 ]
 }
