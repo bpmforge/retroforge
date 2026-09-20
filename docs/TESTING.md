@@ -2853,16 +2853,15 @@ or whether the emulator still differs from hardware somewhere in the
 IRQ-line/`$4211` contract. Traced with `title_probe` (`PROBE_ROMS`, `--test
 title_probe -- --ignored --nocapture`) against the real ROM
 (`~/Games/Roms/snes/Jungle Strike (USA).zip`); no code changed until the
-verdict was reached, per project law.
+verdict below was reached — every probe named here was a temporary
+addition, reverted before this commit (`git diff` clean throughout).
 
-**The loop, characterised.** `PROBE_IRQLOG=40` over the first 4,000,000
-instructions shows `nmitimen=0xB1` (NMI enabled, H/V-both IRQ mode,
-auto-joypad on) from very early in boot (`ARMLOG n=503433 $4200: 00->B1`),
+**The raster-split loop, characterised.** `PROBE_IRQLOG=40` over the first
+4,000,000 instructions shows `nmitimen=0xB1` (NMI enabled, H/V-both IRQ
+mode, auto-joypad on) set early in boot (`ARMLOG n=503433 $4200: 00->B1`),
 and 1014 IRQ assertions over the run, every one acknowledged
 (`assert_events=1014 ack_events=1014` — no unacknowledged, stuck-line
-case). A temporary probe (`PROBE_WAILOG`/`PROBE_WAIWAKE`, added to
-`Cpu::execute`'s `0xCB` arm and `SnesSystem::step`'s masked-wake branch,
-reverted before this commit — no diff survives it) shows the game
+case). A temporary probe (`PROBE_WAILOG`/`PROBE_WAIWAKE`) shows the game
 executing `WAI` **611 times** in this window, always with `I` set
 (`p=04`/`p=05`), cycling through exactly three sites: `$A0:D3DD` (wakes at
 line 220, dot 257) -> `$A0:D744` (wakes at line 4, dot 257) ->
@@ -2874,59 +2873,108 @@ genuine, not spurious, in the W14-28 continuation above via
 `PROBE_IRQLATCH`) that the game runs with `I` permanently set, using the
 masked `WAI` wake instead of a vectored dispatch for every one of its
 three splits, every frame. This pattern is present from the very first
-frame — it is steady-state per-frame overhead, not a one-time boot stall,
-and it does not itself explain *when* the title screen appears; it only
-explains how the CPU spends its time waiting between splits.
+frame — steady-state per-frame overhead, not a one-time boot stall — and
+it does not by itself explain *when* the title screen appears.
+
+**How the game paces itself, measured, not assumed.** `PROBE_SDUMP=a08155`
+shows the dominant polling loop (`$A0:8155: LDA $0CAF; $A0:8158: BEQ
+$8155`, `dbr=A0`) is a wait on WRAM cell `A0:0CAF` (bank `$A0` mirrors
+work RAM in its low addresses, same cell as `$00:0CAF`/`$7E:0CAF`).
+`PROBE_WATCH=000CAF` over the same 4,000,000-instruction window shows the
+flag is set to `$FF` at `$A0:D77B` — inside the raster-split chain, between
+the `$A0:D744` and `$A0:D78C` `WAI` sites, i.e. once per pass through the
+per-frame split — and cleared to `$00` at `$A0:8152` (three bytes before
+the poll loop, its natural "consumed" site). Of 145 set/clear pairs
+sampled, 144 turn around in 508-1138 instructions (well under one frame,
+so this loop is *not* what paces the boot in general — most callers reach
+it almost immediately after the flag is raised). Exactly one turnaround
+took 1,138,333 instructions (roughly 65-70 frames at this ROM's measured
+average of ~17,391 instructions/frame, from `frame=230` at
+`n=4,000,000`) — a single stretch where foreground code was elsewhere
+(consistent with a one-off decompression/upload stage that does not poll
+this particular flag) and only later came back and consumed the
+already-stale-but-still-true flag without waiting further. This is one
+example, not the sole cause of the 991-frame total: it shows the boot is
+built from several additive stages of different lengths rather than one
+runaway loop, which is exactly the shape a real multi-stage intro
+(logos, decompression, audio-driver upload) takes.
+
+**NMI dispatch rate, measured directly, not inferred from `title_probe`'s
+vector-peek heuristic.** `title_probe`'s own `nmi_entries` counter only
+compares `PC` against the literal `$FFEA` vector bytes over the trailing
+`PROBE_SAMPLE` instructions (default 20,000) — a window worth a spot
+check, not a whole-run rate, and unreliable here regardless since this
+ROM's NMI vector is a WRAM trampoline (`nmi_vec=0000`, per the TRAMPLOG
+convention already documented in W14-28's continuation). A temporary
+counter at `SnesSystem::step`'s `self.pending_nmi` dispatch arm
+(`PROBE_NMICOUNT`, reverted) run across `PROBE_MODE=frames
+PROBE_FRAMES=991` (frame indices `0..=990`, i.e. 991 real `Step::Frame`
+calls) counted **971 real NMI dispatches** — essentially one per frame
+(98%) for the entire boot, not a stalled or degenerate rate. NMI is
+edge-triggered on the vblank transition and ignores `I` (fullsnes "SNES
+Interrupts"), so this confirms the vblank clock the game's own timing
+ultimately rests on keeps ticking normally throughout the 991 frames;
+nothing here is parked or skipping vblanks.
 
 `PROBE_MODE=frames PROBE_FRAME_INDICES=1 PROBE_FRAMES=1000` on the fixed
 tree shows `forced_blank=true` continuously for all 992 sampled frames,
-flipping only once `distinct_this_frame` moves from 1 to 2 (frame 991) —
+flipping only once `distinct_this_frame` moves from 1 to 2 at frame 991 —
 i.e. the screen is genuinely held blanked (`$2100` bit 7, INIDISP) for
 ~991 frames (~16.5s at 60Hz) while `bg_mode` is already configured (mode
 1 from frame 99) and the CPU is already running its steady-state raster
-loop. The composed frame buffer starts differing from uniform at frame
-991 while `forced_blank` is *still* true — real work in VRAM/CGRAM the
-display does not yet show, consistent with an extended logo/decompression
-intro that keeps the screen off until it is ready, not a freeze.
+loop and dispatching NMI at the normal rate the whole time. The composed
+frame buffer starts differing from uniform at frame 991 while
+`forced_blank` is *still* true — real work landing in VRAM/CGRAM the
+display does not yet show — consistent with an extended, blanked intro
+that keeps the screen off until it is ready, not a freeze.
 
 **Verdict, cited.** Per fullsnes ("SNES Interrupts"), the H/V-IRQ line is
 level, staying asserted until `$4211` is read or H/V IRQ is disabled at
 `$4200`; per the WDC W65C816S datasheet, `WAI` resumes on any assertion of
 that line regardless of `I` (`I` gates only vector dispatch), and `STP`
-never does. `IrqTimer::fired` (`crates/rf-snes/src/regs.rs`) is set only
-by a genuine H/V match and cleared only by `read_timeup` (`$4211`) — no
-other site clears it (`bus.rs:503` is itself a `$4211` read path; grepped
-for every write to `.fired`) — so the line-hold semantics already match
-hardware exactly, and this trace's 1:1 assert/ack pairing and
-on-target-only wakes (both already established independently in the
-W14-28 continuation above) confirm it empirically for this title too.
+never does; NMI is edge-triggered on vblank and ignores `I` entirely.
+`IrqTimer::fired` (`crates/rf-snes/src/regs.rs`) is set only by a genuine
+H/V match, and grepping every write to `.fired` finds exactly the two
+clears fullsnes documents: `IrqTimer::read_timeup` (`$4211`) and
+`SnesBus`'s `$4200` write handler, which clears it only when the write
+leaves H/V IRQ mode `Off` (`crates/rf-snes/src/bus.rs:503`, comment cites
+fullsnes: "the flag is reset ... on disabling IRQs via 4200h") — no other
+site clears it. So the line-hold semantics already match hardware
+exactly, and this trace's 1:1 assert/ack pairing,
+on-target-only wakes, ~1-per-frame NMI dispatch rate (971/991), and a
+boot built from measurably additive, variable-length polling stages
+(rather than one loop that never terminates) together show a title doing
+real, paced work for an unusually long but bounded and steadily
+progressing interval — not an emulator defect withholding progress.
 Nothing in this trace shows the emulator resuming `WAI` early, late, or on
-a stale/spurious assertion, and nothing shows the IRQ line failing to
-re-arm. The credit-only (no-WAI-fix) tree's earlier "colorful" frame 205
-is therefore not a competing correct timeline to reconcile against — it
-is the emulator running the CPU faster/wrong through this exact
-three-site `WAI` dance (parking forever the first time, pre-W14-28, or
-returning from `WAI` at whatever cycle it happened to poll `stopped` next
-if some other path masked it) before this fix existed, which is expected
-to diverge from a build that now honors the WAI/IRQ-line contract WDC and
-fullsnes both specify.
+a stale/spurious assertion; nothing shows the IRQ line failing to re-arm;
+nothing shows NMI stalling. The credit-only (no-WAI-fix) tree's earlier
+"colorful" frame 205 is not a competing correct timeline to reconcile
+against: that tree lacks the datasheet-mandated masked-WAI wake verified
+correct here, so its CPU necessarily executes a different, unverified
+instruction sequence through the same code — it is not evidence of a
+faster-but-also-valid boot.
 
 **No fix lands.** `IrqTimer`, `Cpu::wai`, and `SnesSystem::step`'s
 masked-wake branch (`crates/rf-snes/src/system.rs`) are unchanged from
-the W14-28 tree; only a temporary diagnostic (reverted, `git diff` clean)
-was added and removed during this trace. Ticket closed BLOCKED with a
-named, non-actionable cause: **Jungle Strike's first-varied-frame is 991
-under an already-correct WAI/IRQ implementation, which the census's fixed
-600-frame budget does not reach** — the same category as any other
-title whose real boot legitimately exceeds the budget, not a defect in
-this crate. Per this ticket's brief, the census budget is not touched.
+the W14-28 tree; only temporary diagnostics (`PROBE_WAILOG`,
+`PROBE_WAIWAKE`, `PROBE_NMICOUNT`, each reverted, `git diff` clean) were
+added and removed during this trace. Ticket closed BLOCKED with a named,
+non-actionable cause: **Jungle Strike's first-varied-frame is 991 under
+an already-correct WAI/IRQ/NMI implementation, which the census's fixed
+600-frame budget does not reach** — the same category as any other title
+whose real boot legitimately exceeds the budget, not a defect in this
+crate. Per this ticket's brief, the census budget is not touched.
 
-**Gate:** no functional diff, so the existing W14-28 numbers stand:
-`cargo fmt --check` clean; `cargo clippy --workspace -- -D warnings`
-clean; `cargo test -p rf-snes` — **363 passed**, 0 failed, re-run to
-confirm; ignored SNES suites re-run and green:
-`singlestep_65816_vectors` (in `crates/rf-snes/src/cpu/tests/vectors.rs`,
-covered by the 363) — unchanged; `spc700_vectors`'s
+**Gate:** no functional diff, so the existing W14-28 numbers stand and
+were re-run to confirm: `cargo fmt --check` clean; `cargo clippy
+--workspace -- -D warnings` clean; `cargo test -p rf-snes` — **363
+passed**, 0 failed, 1 ignored (`singlestep_65816_vectors`, run separately
+under `--ignored` below — the previous write-up's "covered by the 363"
+was wrong and is corrected here); ignored SNES suites re-run and green:
+`singlestep_65816_vectors` (`crates/rf-snes/src/cpu/tests/vectors.rs`) —
+**5,080,000 passed, 0 failed** (254/256 opcodes;
+$44/$54 excluded as already documented in-suite); `spc700_vectors`'s
 `singlestep_spc700_vectors` — **256,000 passed, 0 failed**;
 `gilyon_cputest` — `test_num=0x0649/0x0649, ROM says "Success"`;
 `blargg_spc`'s `spc_timer_reports_pass` — `"PASSED TESTS"`.
