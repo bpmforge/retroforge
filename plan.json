@@ -7562,6 +7562,32 @@
    "W14-38 FILED 2026-09-20 by the orchestrator from W14-35's reclassification of the raster/IRQ family. ActRaiser 2, Illusion of Gaia and Robotrek are Quintet titles that share a sound driver; if the wait is on the APU, one trace may cover all three.",
    "W14-38 CLOSED 2026-09-20, BLOCKED. Confirmed the Quintet-shared-driver hypothesis: ActRaiser 2/Illusion of Gaia/Robotrek all send APU command $F0 on port 0 and hang waiting for the driver's ack (ports_out[0] stuck non-zero) -- the same call/response deadlock class W14-33 found for Rival Turf!/Super Turrican/Wario's Woods, opcode-decoded and re-checked against the W14-33 register/timing list with no divergence found. Lagoon/Phalanx/Goal! are still in ordinary, healthy $4210 per-frame idling at the census's 600-frame window (Phalanx: IplBoot::BootState::Ready, correctly not yet asked to run) -- named, not chased further. No fix shipped (law 5: game/driver bytes). New title_probe.rs diagnostic PROBE_OAM; PROBE_WATCH documented as unsafe on write-only PPU registers. See docs/TESTING.md."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-39",
+  "title": "65C816 internal cycles are never charged: charge them per instruction, pinned by the singlestep vectors' cycle lists (5.08M cases)",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W14-39: `AccessCost` charges bus accesses only (cpu/speed.rs doc); every instruction's internal (no-bus) cycles cost nothing, so the main CPU runs faster than hardware relative to the raster and the APU. W14-24 and W14-28 compensated locally for the math unit; W14-33/W14-38's six APU handshake deadlocks (Rival Turf!, Super Turrican, Wario's Woods, ActRaiser 2, Illusion of Gaia, Robotrek) show a CPU pacing loop ~47% too fast for the SPC's documented receive cost. This ticket charges internal cycles for real: `Cpu::step` reports the instruction's internal-cycle count (from a per-opcode/addressing-mode table per the WDC W65C816S datasheet's cycle counts and penalty rules: DP low byte nonzero +1, indexed page cross +1 for reads, 16-bit M/X +1 per extra byte, emulation-mode and branch-taken penalties, RMW extra cycle, interrupt sequence), and the system charges `speed::FAST` (6 master cycles) per internal cycle in `SnesSystem::step` — cited in doc comments",
+   "W14-39: the oracle is the SingleStepTests 65816 vectors' `cycles` arrays, which the runner in crates/rf-snes/src/cpu/tests/vectors.rs currently skips: for every case (minus the documented MVN/MVP truncation exclusions) `bus accesses + internal cycles == cycles.len()`; the runner gains that assertion and it passes for all 5,080,000 cases, with any residual mismatch class named and excluded with a reason, not silently tolerated",
+   "W14-39: the W14-28 single-access math credit is removed (superseded — internal cycles are now real) and `MathUnit::tick`'s doc rewritten: master-cycles/6 is now a faithful CPU-cycle count for slow accesses too? No — a SLOW access is still one CPU cycle of 8 master cycles; decide whether the math unit should count CPU cycles (accesses + internal) directly instead of master/6, cite fullsnes ('clocked by the CPU clock'), and pin it with the W14-24/W14-28 tests updated to the truthful model; W7-15's halted-step credit stays; SA-1 contention (W17) and DMA charging are untouched",
+   "W14-39: gate + ignored suites (65816 vectors with the new cycle assertion, spc700_vectors, spc_timer_reports_pass, gilyon, peterlemon_golden, undisbeliever_golden, the 18,000-frame replay determinism test) all green; census children on the six APU deadlock titles, Soul Blazer, Super Mario RPG (USA), Super Mario World, Wild Guns, NHL 95, Kirby Super Star, Full Throttle (Beta), Flintstones, Jungle Strike, WWF Super WrestleMania; the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and every title that moved in either direction is named — a regression is a finding to trace, not something to tune around",
+   "W14-39: docs/design/EMULATION_CORES.md's CPU timing section states the new model and what is still not modelled (per-cycle bus timing inside an instruction; W6-02a's cycle-accurate executor remains future work)"
+  ],
+  "notes": [
+   "W14-39 FILED 2026-09-20 by the orchestrator. The vector files show internal cycles (cpu/tests/vectors.rs module doc lines ~25-48 explain they are skipped today). This is the systemic root behind the divider hacks and, most likely, the APU handshake deadlock class."
+  ]
  }
 ]
 }
