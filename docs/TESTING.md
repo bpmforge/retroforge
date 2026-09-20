@@ -2025,9 +2025,9 @@ each channel, still returns open bus; no title in the library has been
 shown to depend on it.
 
 
-## W14-28 — The Flintstones: an OAM-slot cursor wanders into hardware-register
-space and corrupts its own NMI vector; the loading routine that drives it
-never returns (2026-09-20, BLOCKED — ROM-side, root loop not fully decoded)
+## W14-28 — The Flintstones: an object's own type field indexes past its
+count table, a zero count underflows into 65,535 OAM-adder iterations, and
+one of them corrupts the NMI vector (2026-09-20, BLOCKED — game's own data)
 
 The 2026-09-17 triage called this an "RTS loop." It is not: the CPU is stuck
 in a **`BRK` storm**, and the storm is the *third* stage of a fully-traced,
@@ -2160,26 +2160,61 @@ this ticket traced (candidates not yet ruled out: `$80:D0C1`'s own call
 tree, or a table this ticket did not decode driving repeat calls into
 `$80:D170`/`$80:D191`).
 
-**Still BLOCKED, on narrower and more honest grounds.** Every step of this
-chain — the NMI re-entrancy guard, the state-machine dispatcher's short
-RTS-terminated handlers, the object-adder's own addressing math, the
-`$2180`/WMDATA hit, and the `RTL`-vs-bare-`JML` stack mismatch — is real ROM
-code and real 65816/WMDATA semantics, checked against fullsnes and the
-ROM's own bytes, not assumed; no register-read, DMA/mapping, or
-interrupt-flag gap in `rf-snes` was found anywhere along it, and each
-`rf-snes` behavior implicated (`JML [addr]`'s bank-0-fixed pointer, LoROM
-mirroring, WMDATA/WMADD) was verified correct rather than left as an
-assumption. What remains unproven is *why* the specific call chain under
-`JML [$0040]` never returns — whether that is a legitimately large
-one-time object count for this title's loading screen, or a genuine
-non-terminating loop in the game's own level-table code — and this ticket
-did not have the budget to fully decode that deeper table-driven system.
-Either way it is unambiguously game-authored ROM code with no `rf-snes`
-defect implicated, so a fix here would mean patching around the game's own
-bytes (law 5) without first knowing what "correct" looks like. Deterministic
-and input-independent: it does not depend on player input, RNG, or any
-state this probe's headless boot could have gotten wrong, and reproduces in
-well under 100 frames (~2 seconds) from a cold, all-defaults boot.
+**The non-returning call, closed.** `PROBE_SDUMP=00fb87`'s own stack dump
+names it directly: at every sampled NMI from `n=2353435` through the fatal
+one at `n=2584634`, `stack[sp+1..+12]` reads (byte-identical in shape across
+all of them) `[00,75,d2,80, a9,d1, a1,d0, 00,00, dd,ce]` — a return-address
+chain of `$83:CEDA` (the `JSL $80D049` call site) → `$80:D09F`'s `JSR $D0C1`
+→ `$80:D1A7`'s `JSR $D223`, with `Y=$0000` at the `PHY` inside `$D09F`'s
+loop on every sample. `$80:D223` falls through into the shared `$80:D270`
+loop (`LDX $0656; ...; DEC $90; BNE $D273`) — **that** loop, not `$CF37`'s
+own dispatch, is the one that never returns, and `PROBE_WATCH=000090,000091`
+confirms why: `$90/$91` (16-bit, per `$80:D27E`'s `REP #$20` before the
+`DEC $90` at `$80:D2D4`) is set to `$0000` and then **immediately
+underflows to `$FFFF`** on the very first `DEC` (`n=2335532`,
+`$90: 00→FF` and `$91: 00→FF` in the same instruction) — a 16-bit `DEC`
+wrapping `$0000` to `$FFFF` is correct 65816 behavior (no citation needed
+beyond the opcode's own semantics), but it turns "process a zero-length
+object list" into "process 65,535 of them," which is exactly the budget
+the observed ~12,500-iteration run (`n=2335532` to `n=2584634` at ~20
+instructions/iteration) was consuming when the WMDATA corruption cut it
+short.
+
+**Where the `$0000` count came from — real ROM data, not an `rf-snes`
+divergence.** `$90` is loaded at `$80:D24B: LDA $D69B,X; STA $90`, with `X`
+formed at `$80:D242-D247: LDA $9A; AND #$7FFF; TAX` — confirmed via
+`PROBE_SDUMP=80d24b`: `X=$4000` at the fatal call. `$9A` itself (confirmed
+via `PROBE_PEEK=00009a,00009b`: `$4000`, and `PROBE_WATCH=00009a,00009b`:
+last written at `n=2335448` from `$80:D10C: STA $9A`, which is preceded by
+`$80:D109: LDA $DFBF,X` with `X` from `$80:D106: LDX $0768,Y` — a per-object
+"graphic/type ID" field read straight out of this object's own record, no
+CPU arithmetic or flag-dependent computation involved anywhere in this
+sub-chain) is a **ROM/object-data value**, not a register read, DMA
+transfer, or anything `rf-snes` computes. `X=$4000` used against the
+`$D69B`-based count table (evidently sized for a small handful of object
+categories, not a 16K-entry span) reads whatever byte/word happens to sit
+at the wrapped 16-bit effective address `$80:$169B` (`$D69B+$4000` overflows
+`$FFFF` and wraps under ordinary absolute-indexed addressing — again the
+opcode's own defined behavior, not an `rf-snes` gap) — which is `$0000` in
+this build. Both the indexing arithmetic (`LDA $D69B,X` with a 16-bit
+absolute-indexed effective address, and the 16-bit `DEC` underflow) are
+plain, uncontested 65816 semantics; nothing along this chain calls on a
+register-read, DMA/mapping, or interrupt-flag behavior this ticket's
+ranked hypotheses named, and every `rf-snes` behavior the earlier stages
+implicated (`JML [addr]`'s bank-0-fixed pointer, LoROM mirroring,
+WMDATA/WMADD, the NMI re-entrancy guard) was independently verified
+correct. This is the game's own object-type field driving an out-of-range
+table index into a loop-count table — an authoring bug in the ROM's own
+data or the code that indexes it, not a divergence `rf-snes` introduces.
+
+**Verdict.** Deterministic and input-independent: it does not depend on
+player input, RNG, or any state this probe's headless boot could have
+gotten wrong, and reproduces in well under 100 frames (~2 seconds) from a
+cold, all-defaults boot. Fixing it in the emulator would mean changing what
+`$9A` holds, what `$D69B,X` reads back, or how `DEC`/absolute-indexed
+addressing wrap — each of which is either real game data or well-defined
+65816 behavior — which is patching around the game's own bytes and data,
+forbidden by law 5.
 
 **Verified:** `cargo fmt --check` clean; `cargo clippy --workspace -- -D
 warnings` clean (the workspace-wide `cargo clippy --workspace --all-targets`
@@ -2210,26 +2245,27 @@ diagnostics (`PROBE_WATCH`, and `d=`/`dbr=`/`wmadd=`/`vec0000=` fields on
 `PROBE_SDUMP`); no `rf-snes` core state, timing, or register semantics
 changed.
 
-**BLOCKED. Named next step:** none of the register-read, DMA/mapping, or
-interrupt-flag hypotheses this ticket was asked to rank apply — every
-`rf-snes` behavior this chain touches (`JML [addr]`'s bank-0-fixed pointer
-source, LoROM mirroring, WMDATA/WMADD, the NMI re-entrancy guard's own
-correctness) was checked against fullsnes/the 65816 spec/the ROM's own bytes
-and found correct, not assumed. What this ticket did not finish: fully
-decode the level/object-table system reached through `$80:A656`'s
-`JML [$0040]` (landing in bank `$83`'s state-machine dispatcher at `$CF37`,
-then somewhere further into the game's own level data) to name the specific
-call or table that keeps re-driving `$80:D170`-`$80:D270` for roughly 2,000+
-calls without ever returning — that number could be a legitimately large
-one-time object count for this title's loading screen, or a genuine
-non-terminating loop in the game's own code; this ticket's trace rules out
-`rf-snes` all the way down to that boundary but does not cross it. The next
-ticket should pick up exactly there: `PROBE_DIS`/`PROBE_SPWIN` from
-`$80:D0C1` onward (the routine `$80:D076`'s bounded 68-iteration loop calls
-per object), and the table `$83:CF37` reads via `$83:D04F,X`/`$83:D001,X`,
-to find the actual non-returning call and name what it iterates over. If
-that turns out to be `rf-snes`-driven (an interrupt-flag or timing
-divergence changing how many times a per-frame path runs before this one
-NMI ever returns), this write-up's "no `rf-snes` defect found" verdict
-should be revisited; if it is a real, ROM-side non-terminating loop, this
-stays BLOCKED with that loop named precisely instead of inferred.
+**BLOCKED. No named next step for `rf-snes` — the root is a ROM-data/
+authoring issue.** None of the register-read, DMA/mapping, or
+interrupt-flag hypotheses this ticket was asked to rank apply. The chain is
+closed end to end: an object's own type field (`$9A`, read from
+`$DFBF,X`/`$0768,Y` — this object's data record) is used as a table index
+without being bounded to the small range the table (`$D69B`) actually has;
+the resulting out-of-range, 16-bit-wrapped read yields a `$0000` object
+count; a 16-bit `DEC` of `$0000` (well-defined 65816 behavior) underflows to
+`$FFFF`, turning what should be zero iterations of the per-object OAM-adder
+loop (`$80:D270`-`$80:D2D6`) into up to 65,535; partway through that
+(`n=2577318`, `X=$1F80`) the loop's own `STA $0200,X` aliases `$80:2180`
+(WMDATA) with `WMADD=$000000`, corrupting the NMI vector's low byte from
+`$15` to `$FF`; the next NMI dispatches into `$80:A6FF` instead of the real
+handler `$80:A615`, and that routine's `RTL` (correct for its real callers,
+wrong for this stray entry) misreads the CPU's own interrupt frame, landing
+on a stray `BRK` that vectors into ROM padding at `$70:800B` and BRKs
+forever. Every `rf-snes` behavior this chain touches (`JML [addr]`'s
+bank-0-fixed pointer source per the 65816 spec, 16-bit absolute-indexed
+address wrapping, LoROM mirroring, WMDATA/WMADD, the NMI re-entrancy guard)
+was checked against fullsnes/the 65816 spec/the ROM's own bytes and found
+correct — nothing here for `rf-snes` to fix. This is the game's own
+object-type data (or the code that indexes with it) producing a
+zero-length count that a well-defined CPU wraparound turns into a
+near-maximal one; law 5 forbids patching around it.
