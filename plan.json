@@ -7544,7 +7544,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-38",
   "title": "Forced-blank-never-lifted family: ActRaiser 2, Illusion of Gaia, Lagoon, Phalanx, Goal!, Robotrek run their main loops but never write a non-blank $2100 — trace what each is waiting for",
