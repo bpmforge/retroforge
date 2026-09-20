@@ -2023,3 +2023,164 @@ worth eighteen titles and not one. Residual, not modelled: `$43xB`
 (and its `$43xF` mirror), the unused read/write byte fullsnes lists for
 each channel, still returns open bus; no title in the library has been
 shown to depend on it.
+
+## W14-29 — Final Fantasy Mystic Quest: the raster IRQ chain is fine; a
+general `clear_line_state()`-before-render ordering bug is why the
+Mode 7 intro reads as uniform (2026-09-20, BLOCKED — not this ticket's
+to fix)
+
+The 2026-09-16/17 triage guessed a Mode 7 raster chain rewriting its own
+IRQ vector trampoline was the reason this title never renders. This
+ticket's job was to build an IRQ event trace and rank the three named
+hypotheses against it. The trace clears hypothesis 1 outright, and along
+the way finds the real defect — but it is a general one, in the
+render-time consumption of per-scanline register history, not anything
+specific to IRQs, Mode 7, or this title. Law 5 applies either way: no
+fix ships here.
+
+**New diagnostic**: `title_probe.rs` gained `PROBE_IRQLOG=N`, documented
+in the module doc. It edge-detects (no new `rf-snes` field — everything
+is reconstructed post-instruction from existing `SnesSystem` state, so
+no save-state/determinism surface was touched): `ARMLOG` on every
+`$4200`/`$4207`-`$420A` change with the raster it happened at; `IRQLOG`
+on every rising edge of `bus.irq.fired` (an assertion) with the raster
+and CPU `PC`/`P`; `ACKLOG` on a falling edge not explained by `$4200`
+disabling IRQs the same instant (i.e. a real `$4211` read); and
+`TRAMPLOG`, which decodes the opcode at `$00:[$FFEE]` once at start —
+`$6C`/`$7C`/`$DC` follow the indirect pointer, anything else (the common
+case here) watches the vector's own target address, since Mystic Quest's
+native IRQ vector points straight into low WRAM (`$000117`) that the
+game writes dispatch code into directly rather than an indirect jump
+through a separate pointer. An `INIDISPLOG` line (folded into the same
+env var rather than a new one, since explaining why the screen stays
+blank is the whole point of this ticket) logs every `$2100`
+forced-blank/brightness edge.
+
+**Hypothesis 1 (IRQ timing/acknowledge semantics) is REFUTED by the
+trace, not merely unproven.** `PROBE_IRQLOG=200 PROBE_INSTR=6000000` on
+the unpatched tree (USA dump) shows a completely regular, two-IRQ-per-
+frame H+V chain: a V-IRQ fires at `dot=0`/`line=vtime` (`vtime` starts at
+`0xD8`=216, matching fullsnes "V-IRQ at V=VTIME, H=0"), the handler
+disables IRQs via `$4200` (`21->00`, not a `$4211` read —
+**`ack_events=0` for the entire run**, confirmed independently by
+counting), re-arms in H-mode (`$4200: 00->11`), a second IRQ fires at
+`dot=232`=`htime` (`0xE8`) on the SAME line (matching fullsnes H-mode:
+fires every scanline at H=HTIME), disables again, then re-arms V-mode
+with a NEW `vtime` for the next band (`ARMLOG ... vtime: 0D8->007`) —
+and the whole two-IRQ cycle repeats at the new line every frame,
+byte-identical in cadence over the full 6,000,000-instruction run
+(`arm_events=2913 assert_events=1164 ack_events=0 tramp_events=2044`).
+Disabling via `$4200` rather than reading `$4211` is hardware-legal per
+fullsnes ("$4211 TIMEUP: ... reset ... on disabling IRQs via 4200h") and
+is the exact path `bus.rs:502` already documents and cites for this same
+title (a *different*, already-fixed Mystic Quest bug, W14-10's STP-trap
+fix) — this game simply never reads `$4211` at all, using `$4200` as its
+sole acknowledge for both IRQ sources. No re-fired, missed, or
+out-of-order IRQ was found at any line the chain did not expect.
+
+**The "vector trampoline" is real and was traced end to end: it also
+works correctly.** `TRAMPLOG` shows `$000117` cycling through six
+handler addresses (`$00B82A`, `$00B8D8`, `$00B86C`, `$00B898`, `$00B807`,
+`$00B803`, `$00B8DA`, repeating) written as a 4-byte `JML $00Bxxx`
+(`5C xx xx 00`), one rewrite per H-IRQ entry — exactly "a per-scanline
+raster chain rewrites a vector trampoline", and it rotates in lock-step
+with the IRQ cadence above with no dropped or duplicated rewrite across
+the run.
+
+**The `$2100` fade the intro drives through this chain also completes
+correctly.** `INIDISPLOG` shows brightness climbing by exactly 1 per
+cycle (`0->15` the first time, since the initial approach differs, then
+`0->2,0->3,...,0->15` once the steady V/H pattern above starts), each
+step blanking at `line=216` (`bright:N->0`) and restoring at `line=7`
+(`bright:0->(N+1)`), until it settles into a permanent steady state at
+full brightness (`bright:15->0` then immediately `0->15` every frame)
+well before frame 10 — the fade is not stuck, not skipping steps, and
+not corrupted by the IRQ chain.
+
+**So why does the census see a uniform screen?** Because `emit_frame`
+(`rf-snes/src/core.rs`, used by both `Step::Frame` and the structurally
+identical `SnesSystem::render_frame`) reconstructs a rendered frame's
+mid-scanline register history through `Ppu::compose_line_segmented`,
+which reads `Ppu::line_regs`/`line_writes` — and those are wiped by
+`Ppu::clear_line_state()` at `system.rs:270`, called synchronously
+inside `SnesSystem::step()` on the SAME instruction that crosses the
+frame boundary, which is BEFORE the `Step::Frame`/`render_frame` loop
+in `core.rs` ever regains control to call `emit_frame` for the frame
+that just ended. Proven directly, not inferred: a new ad hoc probe,
+`PROBE_LINEWRITES=<line>` (kept, documented in the module doc — cheap
+and generically useful for this class of bug), logs every change to
+`Ppu::line_writes_for_test(line)`. For line 216: `len: 0->1
+contents=[(244, 8448, 128)]` at `n=401401` (the real `$2100` write this
+write-up traces above, dot 244, addr `8448`=`$2100`, value `128`=`$80`
+blank-on) — then, six instructions after the frame wraps to line 0,
+**`len: 1->0`** at `n=404280` (`line=0 dot=1`), with `contents=[]`. That
+write is destroyed before `emit_frame`/`render_scanline(216)` for the
+frame it belongs to ever runs, so the composed picture for that line
+(and every other line with a mid-frame register write near the tail of
+a frame) falls back to whatever the LIVE registers are at the instant
+`emit_frame` happens to be called — which, at a frame boundary, is
+always mid-blank. Confirmed this has zero interaction with the IRQ
+chain or Mode 7 specifically: a temporary, fully-reverted probe build
+(`W1429_NORENDER=1`, an env-gated early return in `emit_frame` before
+any `render_scanline`/sink call — never committed; `git diff` against
+`crates/rf-snes/src/core.rs` was empty before this write-up) produced
+**byte-identical** PPU/timing state at frames 250/360/403 with and
+without rendering, proving `emit_frame` has no feedback into
+simulation — the bug is purely in what the render path reads, not in
+anything the render path (or the IRQ chain) writes back.
+
+**This is a general defect, not scoped to this title, IRQs, or Mode
+7 — named next step (not this ticket, per the scope discipline law 3's
+gate and this ticket's `write_scope` both imply): file a new ticket to
+fix the `clear_line_state()` ordering.** Every title that changes a
+segmentable register (`Ppu::is_segmentable`: everything except the OAM/
+VRAM/CGRAM data ports) in roughly the last ~15-20 lines before vblank
+starts (line ~205-224 given `MASTER_PER_LINE`'s dot budget and where
+`mid_line_position` still returns `Some`) has that write's attribution
+silently discarded before any `Step::Frame`/`render_frame` consumer can
+see it — this reads as "flat/uniform near the bottom of the screen" or,
+as here, as a per-frame effect whose "screen on" phase is written
+early enough in the NEXT frame's own tail-end write pattern that the
+composed frame never reflects it. The correct fix (design sketch, not
+implemented here — it touches `Ppu`'s field layout and every
+`compose_line_segmented`/`apply_line_state` caller, which is a
+cross-cutting change this 3-point ticket's `write_scope` should not
+absorb unreviewed): stop clearing `line_state`/`line_writes`/`line_regs`
+in place at `frame_started`; instead swap them into a
+`completed_line_*` snapshot at that instant (before any of the same
+instruction's own new-frame HDMA can write into the live arrays) and
+have `apply_line_state`/`compose_line_segmented` read from the
+snapshot, resetting only the live arrays for the new frame's own
+capture. `render_frame` (`system.rs:443`) has the identical structure
+and needs the identical fix.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — **358 passed**, 0 failed
+(unchanged — no `rf-snes` source file was touched, only
+`crates/rf-harness/tests/title_probe.rs`); the four named ignored
+suites all still pass unchanged: `singlestep_spc700_vectors`
+(256,000/256,000), `spc_timer_reports_pass` ("PASSED TESTS"),
+`gilyon_cputest`'s `cputest_full_reports_success_and_every_test_passes`
+(`test_num=0x0649/0x0649, ROM says "Success"`), and
+`singlestep_65816_vectors`.
+
+**Census children** (`boot_census_child`, not the full orchestrator
+run, per this ticket's brief): all three Mystic Quest dumps (USA, USA
+Rev 1, Japan) exit **10** (uniform/blank bucket), unmoved, as expected
+since no fix ships. The Mode 7 canaries and NHL 95 all exit **0**
+unmoved: **Super Mario World**, **Wild Guns**, **Super Mario Kart**,
+**F-Zero**, **NHL 95**. No orchestrator census re-run — nothing moved.
+
+**Determinism**: unaffected. No `rf-snes` source changed; the new
+`title_probe.rs` diagnostics read existing public/test-only accessors
+and add no state to any core.
+
+**Ticket disposition**: BLOCKED, not WONTFIX — this is a real `rf-snes`
+defect, just one outside this ticket's hypothesis set and `write_scope`
+discipline for a one-ticket-at-a-time change of this size. Named next
+step: file a new ticket for the `Ppu` line-history snapshot-before-clear
+fix described above, covering both `Step::Frame` and `render_frame`,
+with Mystic Quest (all three dumps) as its reproduction case and a
+regression test built on the `PROBE_LINEWRITES=216`-style observation
+above (a mid-frame write in the last ~20 lines of a frame must survive
+into that frame's own `render_scanline` call).

@@ -7311,14 +7311,15 @@
   ],
   "notes": [
    "FILED 2026-09-20 by the orchestrator from the 2026-09-17 triage list (untraced RTS loop). W14-24 (divider timing) and W14-26 ($43xx readback) both came from untraced titles and moved 20 titles between them; check register-read semantics first (every $21xx/$42xx/$43xx read the boot path makes vs fullsnes R/W columns). Two dumps: 'Flintstones, The (USA) (En,Fr,De,Es,It).zip' and the Treasure of Sierra Madrock title — probe both, they may differ."
-  ]
+  ,
+   "BLOCKED 2026-09-20: traced end to end with a new PROBE_IRQLOG diagnostic (title_probe.rs) -- hypothesis 1 (IRQ timing/ack semantics) is REFUTED, not merely unproven: the H+V raster chain fires on schedule every frame (fullsnes-correct H-IRQ every line at HTIME, V-IRQ at VTIME/H=0), acknowledges via $4200 disable (ack_events=0 the whole run -- this title never reads $4211, which is hardware-legal and the same path bus.rs:502/W14-10 already documents for this game), and the $000117 vector-trampoline rewrite (a self-modifying JML into low WRAM, not an indirect-pointer jump) rotates in lock-step with no dropped or duplicated write. The $2100 fade the chain drives also completes correctly, reaching steady full brightness by frame 10. The actual defect is real but GENERAL, not IRQ- or Mode-7-specific: Ppu::clear_line_state() (system.rs:270) wipes line_regs/line_writes synchronously inside the SAME instruction that crosses the frame boundary, before Step::Frame/render_frame's caller (core.rs) ever gets to call emit_frame for the frame that just ended -- proven directly with a new PROBE_LINEWRITES=<line> probe (kept): line_writes[216] holds the real $2100 write (len 0->1) then is wiped (len 1->0, contents=[]) six instructions later at the very next frame's line 0, before that line is ever rendered. A temporary, fully-reverted NORENDER probe build confirmed rendering has zero feedback into simulation (byte-identical state with/without it), isolating the bug to what the render path reads. No fix ships here (law 5 does not even apply -- this is a real emulator defect, but fixing it means swapping Ppu's line-history arrays into a completed-frame snapshot before the new frame's own HDMA can touch them, and rerouting every compose_line_segmented/apply_line_state caller -- a cross-cutting Ppu change well outside this 3-point ticket's write_scope). Named next step: file a new ticket for the clear-timing fix (Mystic Quest, all three dumps, as the reproduction case; both Step::Frame and SnesSystem::render_frame need it; a regression test should assert a mid-frame write in a frame's last ~20 lines survives into that frame's own render_scanline call). Gate: fmt/clippy clean, cargo test -p rf-snes 358 passed unchanged (only title_probe.rs touched), all four named ignored suites still green. Census children: all three Mystic Quest dumps still exit 10 (unmoved, as expected -- no fix landed); SMW/Wild Guns/Super Mario Kart/F-Zero/NHL 95 all still exit 0. See docs/TESTING.md's W14-29 write-up."]
  },
  {
   "phase": 14,
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "in_progress",
+  "status": "blocked",
   "stories": [],
   "id": "W14-29",
   "title": "Final Fantasy Mystic Quest: Mode 7 raster IRQ chain rewrites its vector trampoline — IRQ event trace",
