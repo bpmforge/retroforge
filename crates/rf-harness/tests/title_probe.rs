@@ -41,13 +41,20 @@
 //!                                    PROBE_SPCRING's ring, this is never evicted —
 //!                                    use it to ask "how many times total", not just
 //!                                    "what does recent history look like") (W14-27)
-//! PROBE_SDUMP=hex[,hex]             print e/p/sp/a/x/y and the 12 bytes above the
-//!                                    stack pointer whenever the CPU is about to
-//!                                    execute an instruction at one of these 24-bit
-//!                                    PCs — checks whether an about-to-run RTI/RTS/
-//!                                    RTL is about to pop a real return address, or
-//!                                    static ROM/open-bus content because SP has
-//!                                    wandered into non-WRAM space (W14-26)
+//! PROBE_SDUMP=hex[,hex]             print e/p/sp/d/a/x/y, the 12 bytes above
+//!                                    the stack pointer, and the 6 bytes at
+//!                                    bank-$00 $0000-$0005 whenever the CPU is
+//!                                    about to execute an instruction at one of
+//!                                    these 24-bit PCs — checks whether an
+//!                                    about-to-run RTI/RTS/RTL is about to pop a
+//!                                    real return address, or static ROM/open-bus
+//!                                    content because SP has wandered into
+//!                                    non-WRAM space (W14-26); `d` (direct page)
+//!                                    and the $0000-$0005 dump added in W14-28 to
+//!                                    catch a `JML [$0000]`/`JML [$0003]` vector
+//!                                    trampoline (bank-$00-fixed per the 65816
+//!                                    spec, independent of D/DBR/PBR) pointing
+//!                                    somewhere other than what the game intended
 //! PROBE_SDUMP_TABLE=1               with PROBE_SDUMP, additionally decode the
 //!                                    matched PC as a `JSR`/`JMP ($nnnn,X)` table
 //!                                    dispatch and print the table address/entry —
@@ -58,6 +65,14 @@
 //!                                    decimal instruction-count window (`n`, end
 //!                                    exclusive) — attributes an SP drift to the
 //!                                    exact opcode that moved it (W14-26)
+//! PROBE_WATCH=hex[,hex]              print `n`, the PC that just ran, and
+//!                                    old/new bytes whenever one of these 24-bit
+//!                                    addresses' value changes from one
+//!                                    instruction boundary to the next — finds
+//!                                    the exact writer of an unexpected memory
+//!                                    change (e.g. a corrupted vector-table
+//!                                    pointer byte) without knowing its PC in
+//!                                    advance (W14-28)
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -229,6 +244,18 @@ fn probe() {
             let (a, b) = s.split_once(':').unwrap();
             (a.parse().unwrap(), b.parse().unwrap())
         });
+        // W14-28: watch a handful of 24-bit addresses for any change in
+        // value between one instruction boundary and the next, printing
+        // the PC that just ran and the old/new bytes — finds the writer
+        // of an unexpected memory change (a corrupted vector-table byte,
+        // here) without having to guess its PC first.
+        let watch: Vec<u32> = std::env::var("PROBE_WATCH")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| u32::from_str_radix(s, 16).unwrap())
+            .collect();
+        let mut watch_prev: HashMap<u32, u8> = HashMap::new();
         // W14-24 (coordinator review): measure, rather than assert, what
         // `SnesSystem::step`'s `spent` actually contains between two
         // 24-bit PCs — "PROBE_ACCESSWIN=start:end". Accumulates every
@@ -275,6 +302,17 @@ fn probe() {
                         sys.cpu.sp
                     );
                 }
+            }
+            for &addr in &watch {
+                let now = rf_snes::cpu::CpuBus::peek(&sys.bus, addr);
+                if let Some(&old) = watch_prev.get(&addr) {
+                    if old != now {
+                        println!(
+                            "      WATCH n={n} addr={addr:06X} old={old:02X} new={now:02X} prev_pc={prev_pc:06X}"
+                        );
+                    }
+                }
+                watch_prev.insert(addr, now);
             }
             if let Some((start, end)) = accesswin {
                 // `prev_pc` is the address the instruction that JUST ran
@@ -424,15 +462,21 @@ fn probe() {
                         rf_snes::cpu::CpuBus::peek(&sys.bus, u32::from(sp.wrapping_add(1 + i)))
                     })
                     .collect();
+                let vec0: Vec<u8> = (0..6)
+                    .map(|i| rf_snes::cpu::CpuBus::peek(&sys.bus, i))
+                    .collect();
                 println!(
-                    "      SDUMP n={n} pc={:06X} e={} p={:02X} sp={:04X} a={:04X} x={:04X} y={:04X} stack[sp+1..+12]={bytes:02x?}",
+                    "      SDUMP n={n} pc={:06X} e={} p={:02X} sp={:04X} d={:04X} dbr={:02X} a={:04X} x={:04X} y={:04X} wmadd={:06X} vec0000={vec0:02x?} stack[sp+1..+12]={bytes:02x?}",
                     pcv & 0x00FF_FFFF,
                     sys.cpu.e,
                     sys.cpu.p,
                     sp,
+                    sys.cpu.d,
+                    sys.cpu.dbr,
                     sys.cpu.a,
                     sys.cpu.x,
-                    sys.cpu.y
+                    sys.cpu.y,
+                    sys.bus.wram_port.address
                 );
                 // Optional: decode this PC as if it were a `JSR ($nnnn,X)`/
                 // `JMP ($nnnn,X)` table dispatch — `base` is the next two
