@@ -198,12 +198,24 @@ const EXCLUDED: &[(&str, &str)] = &[
 /// under `survey_the_whole_set`), so what changed is timing, not which
 /// register this instrumentation sees:
 const WRITE_GOLDENS: &[(&str, &str)] = &[
-    // Still exactly ONE write on one line — only the write's exact dot
-    // moved, because everything before it now takes a few more real
-    // cycles to execute.
+    // Re-pinned 2026-09-20 (ticket W14-47): still exactly ONE write on
+    // one line (line 89), but the dot moved from 31 to 30 (n=97819 ->
+    // 97822 instructions to reach the settle point) -- traced with
+    // `PROBE_IRQLOG` on this exact ROM: it writes `$4200: 00->81`
+    // (enabling NMI) at line 244 dot 332, mid-vblank, while `$4210` bit 7
+    // is STILL SET from the vblank edge at line 239 (never read in
+    // between). Per fullsnes "SNES Interrupts" ("The CPU includes
+    // another internal NMI flag, which gets set when '[4200h].7 AND
+    // [4210h].7' changes from 0-to-1"), that enable is itself a 0-to-1
+    // edge on the AND expression and must dispatch immediately --
+    // W14-47's fix does exactly that, one step earlier than the old
+    // vblank-edge-only check, which shifts every following instruction's
+    // timing by a few cycles and lands this ROM's own (unrelated) $2100
+    // write one dot earlier. Confirmed a pure timing shift, not a new
+    // register: `regs=[2100]` under `survey_the_whole_set`, unchanged.
     (
         "inidisp_enable_display_mid_frame.sfc",
-        "b344422632b66c199157f96fbd32908caee491b18ea2b451940296436e8e4d4d",
+        "ec428d365cbc5603c529a1aed56e5397250e8b82bb5237a02c2d10efa14ee9d5",
     ),
     // 5,460 writes across all 224 lines (was 1,988 over 70) — now
     // identical to the record `inidisp_hammer_0f00.sfc` used to have,

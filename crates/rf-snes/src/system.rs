@@ -24,6 +24,18 @@ pub struct SnesSystem {
     pub master_cycles: u64,
     /// An NMI edge seen but not yet dispatched.
     pub(crate) pending_nmi: bool,
+    /// The CPU's internal NMI-pending line, "\[4200h\].7 AND \[4210h\].7"
+    /// (fullsnes "SNES Interrupts": "The CPU includes another internal
+    /// NMI flag, which gets set when '\[4200h\].7 AND \[4210h\].7' changes
+    /// from 0-to-1"), sampled once per [`Self::step`] so the NEXT step can
+    /// tell whether that expression just rose (ticket W14-47). Neither
+    /// operand alone is enough: `NmiTimen::nmi_enabled` and
+    /// `Timing::nmi_flag` can each change independently (a `$4200` write
+    /// or a vblank edge/`$4210` read respectively), and fullsnes's own
+    /// worked case — "If one does disable and re-enable NMIs, then an old
+    /// NMI may be executed again" — is exactly a 1-0-1 transition of THIS
+    /// combined line, not of either input by itself.
+    pub(crate) nmi_and_line: bool,
     /// Diagnostic only, not part of save state (ticket W14-24): the most
     /// recently executed instruction's bus-access count and the master
     /// cycles charged for it. Exists so a probe can measure exactly what
@@ -75,6 +87,7 @@ impl SnesSystem {
             bus: SnesBus::new(rom, sram_len, header.map_mode),
             master_cycles: 0,
             pending_nmi: false,
+            nmi_and_line: false,
             last_instr_accesses: 0,
             last_instr_master_cycles: 0,
         };
@@ -137,6 +150,7 @@ impl SnesSystem {
             bus: SnesBus::new(rom, sram_len, mode),
             master_cycles: 0,
             pending_nmi: false,
+            nmi_and_line: false,
             last_instr_accesses: 0,
             last_instr_master_cycles: 0,
         };
@@ -158,6 +172,7 @@ impl SnesSystem {
         self.cpu.pbr = 0;
         self.master_cycles = 0;
         self.pending_nmi = false;
+        self.nmi_and_line = false;
         self.bus.timing = crate::timing::Timing::new();
     }
 
@@ -342,9 +357,36 @@ impl SnesSystem {
         if events.vblank_started && self.bus.wants(rf_core_api::EventMask::VBLANK_START) {
             self.bus.queue_event(rf_core_api::CoreEvent::VblankStart);
         }
-        if events.vblank_started && self.bus.nmitimen.nmi_enabled() {
+        // W14-47: the CPU's internal NMI-pending line is the AND of
+        // `$4200` bit 7 (`nmi_enabled`) and `$4210` bit 7 (`nmi_flag`),
+        // and fires on EITHER operand's 0-to-1 edge, not only the flag's
+        // (fullsnes "SNES Interrupts": "The CPU includes another internal
+        // NMI flag, which gets set when '[4200h].7 AND [4210h].7' changes
+        // from 0-to-1"). The old `events.vblank_started &&
+        // nmi_enabled()` check above only covered the case where the AND
+        // expression rises BECAUSE the flag just set (the ordinary vblank
+        // edge with NMI already enabled) — W14-35 found and named, but
+        // did not fix, the other direction: a `$4200` write that enables
+        // NMI while `nmi_flag` is already 1 (mid-vblank, not yet read)
+        // must dispatch immediately too. Recomputing the whole expression
+        // here and comparing it against `nmi_and_line`'s value as of the
+        // end of the PREVIOUS step catches both directions uniformly,
+        // including fullsnes's own worked case: "If one does disable and
+        // re-enable NMIs, then an old NMI may be executed again" —
+        // disabling drops this line low even though `nmi_flag` (the
+        // separate, read-cleared `$4210` register bit) stays 1, so a
+        // later re-enable while that flag is still unread is itself a
+        // fresh 0-to-1 edge and correctly redispatches the "same" pending
+        // NMI, exactly as fullsnes documents (see the
+        // `redispatches_on_disable_then_reenable_while_the_flag_is_still_set`
+        // test, which pins this against the naive reading of the
+        // acceptance brief — "does not double-dispatch" is not what the
+        // source says).
+        let nmi_and_now = self.bus.nmitimen.nmi_enabled() && self.bus.timing.nmi_flag;
+        if nmi_and_now && !self.nmi_and_line {
             self.pending_nmi = true;
         }
+        self.nmi_and_line = nmi_and_now;
         // Ticket W17-02 acceptance #3: "the SNES CPU's IRQ line ORed with
         // the SA-1-raised IRQ". `$2209` bit 7 (SCNT) is a second, level
         // IRQ source gated by `$2201` bit 7 (SIE); it is otherwise

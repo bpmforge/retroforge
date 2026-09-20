@@ -258,10 +258,15 @@ impl crate::system::SnesSystem {
                 // trails the byte the older format already ends at.
                 // `None` (every non-DSP-1 cartridge) costs one byte.
                 o.bool(b.dsp1.is_some())?;
-                match &b.dsp1 {
-                    Some(d) => d.save(o),
-                    None => Ok(()),
+                if let Some(d) = &b.dsp1 {
+                    d.save(o)?;
                 }
+                // W14-47: the enable-edge NMI latch — see
+                // `SnesSystem::nmi_and_line`'s doc. Appended last, same
+                // reasoning as DSP-1/SA-1 above: a state saved before this
+                // ticket and one saved after only disagree in what
+                // trails the byte the older format already ends at.
+                o.bool(self.nmi_and_line)
             }
             StateRegion::Ppu => self.bus.ppu.save(o),
             StateRegion::Apu => self.bus.apu.save(o),
@@ -368,6 +373,7 @@ impl crate::system::SnesSystem {
                 } else {
                     self.bus.dsp1 = None;
                 }
+                self.nmi_and_line = i.bool()?;
                 Ok(())
             }
             StateRegion::Ppu => self.bus.ppu.load(i),

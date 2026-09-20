@@ -945,3 +945,127 @@ fn stp_does_not_wake_on_a_masked_irq() {
         "STP must stay halted -- it wakes only on reset, never an IRQ"
     );
 }
+
+/// Ticket W14-47 (Final Fight 2 / Battletoads in Battlemaniacs's
+/// raster/IRQ family, tracing W14-35's named-but-unfixed hypothesis (b)).
+///
+/// fullsnes "SNES Interrupts": "The CPU includes another internal NMI
+/// flag, which gets set when '\[4200h\].7 AND \[4210h\].7' changes from
+/// 0-to-1" -- an edge on EITHER operand, not only `$4210` bit 7
+/// (`Timing::nmi_flag`). `SnesSystem::step`'s old dispatch (`events.
+/// vblank_started && nmitimen.nmi_enabled()`) only covered the edge
+/// coming from the flag; a `$4200` write that enables NMI while the flag
+/// is ALREADY 1 (mid-vblank, not yet read via `$4210`) must dispatch at
+/// once too.
+#[test]
+fn nmi_enable_edge_dispatches_at_once_when_the_flag_is_already_set() {
+    let mut rom = lorom_image(0x20, 0x00);
+    rom[0x0000] = 0xEA; // NOP, ×2 -- something harmless to execute
+    rom[0x0001] = 0xEA;
+    rom[0x7FFA] = 0x50; // emulation-mode NMI vector ($00:FFFA/FFFB)
+    rom[0x7FFB] = 0x80; // -> $80:8050
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("loads");
+    assert!(system.cpu.e, "reset leaves the CPU in emulation mode");
+
+    // The vblank flag is already set (a prior vblank whose $4210 read
+    // never happened), but NMI is not yet enabled -- no dispatch may
+    // occur from this alone.
+    system.bus.timing.nmi_flag = true;
+    system.step().expect("NOP is implemented");
+    assert_ne!(
+        system.cpu.pc, 0x8050,
+        "NMI is still disabled -- an already-set flag alone must not dispatch"
+    );
+
+    // Now the ROM enables NMI while that same flag is still set --
+    // fullsnes's 0-to-1 edge on the AND expression, driven by the ENABLE
+    // operand this time rather than the flag.
+    system.bus.write(0x4200, 0x80);
+    assert!(
+        system.bus.timing.nmi_flag,
+        "the write must not itself have touched the flag"
+    );
+    system.step().expect("NOP is implemented");
+    assert_eq!(
+        system.cpu.pc, 0x8050,
+        "enabling NMI while $4210 bit 7 is already set must dispatch immediately, \
+         not wait for the next vblank edge"
+    );
+}
+
+/// The other half of the same edge: enabling NMI while the flag is NOT
+/// set must wait for a real vblank edge, not dispatch from the enable
+/// write alone.
+#[test]
+fn nmi_enable_outside_vblank_waits_for_the_next_edge() {
+    let mut rom = lorom_image(0x20, 0x00);
+    rom[0x0000] = 0xEA;
+    rom[0x0001] = 0xEA;
+    rom[0x7FFA] = 0x50;
+    rom[0x7FFB] = 0x80;
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("loads");
+    assert!(
+        !system.bus.timing.nmi_flag,
+        "starts clear, well outside vblank"
+    );
+
+    system.bus.write(0x4200, 0x80); // enable NMI; flag is still 0
+    system.step().expect("NOP is implemented");
+    assert_ne!(
+        system.cpu.pc, 0x8050,
+        "enabling NMI while the flag is 0 must not dispatch by itself"
+    );
+}
+
+/// fullsnes "SNES Interrupts": "If one does disable and re-enable NMIs,
+/// then an old NMI may be executed again; acknowledging avoids that
+/// effect." -- disabling drops the internal AND-line low even though the
+/// separate `$4210` register bit (`Timing::nmi_flag`) stays 1 until read,
+/// so re-enabling while that flag is still unread is itself a fresh
+/// 0-to-1 edge and correctly REDISPATCHES the still-pending NMI. This is
+/// the source's own documented answer, not the intuitive "no double
+/// dispatch" one -- W14-47's acceptance brief names the latter, but this
+/// pins what fullsnes actually says.
+#[test]
+fn redispatches_on_disable_then_reenable_while_the_flag_is_still_set() {
+    let mut rom = lorom_image(0x20, 0x00);
+    for i in 0..4 {
+        rom[i] = 0xEA; // four NOPs: one per step below
+    }
+    rom[0x7FFA] = 0x50;
+    rom[0x7FFB] = 0x80;
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("loads");
+
+    system.bus.timing.nmi_flag = true;
+    system.bus.write(0x4200, 0x80); // enable while the flag is set: first dispatch
+    system.step().expect("NOP is implemented");
+    assert_eq!(system.cpu.pc, 0x8050, "first enable-edge dispatch");
+
+    // Undo the dispatch's own PC change so the next dispatch is
+    // unambiguous, and leave the flag untouched -- exactly "acknowledging
+    // avoids that effect" NOT happening here (no $4210 read).
+    system.cpu.pc = 0x8002;
+    assert!(
+        system.bus.timing.nmi_flag,
+        "the flag is only cleared by a $4210 read or vblank end -- neither happened"
+    );
+
+    system.bus.write(0x4200, 0x00); // disable: the AND-line drops low
+    system.step().expect("NOP is implemented");
+    assert_ne!(system.cpu.pc, 0x8050, "disabling must not itself dispatch");
+
+    system.cpu.pc = 0x8003;
+    system.bus.write(0x4200, 0x80); // re-enable while the flag is STILL set
+    system.step().expect("NOP is implemented");
+    assert_eq!(
+        system.cpu.pc, 0x8050,
+        "fullsnes: re-enabling while the old flag is still unread \
+         re-executes the old NMI -- this must dispatch a second time"
+    );
+}

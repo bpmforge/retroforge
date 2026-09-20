@@ -6228,3 +6228,181 @@ cartridge with its own boot ROM, not an ordinary game cart.
 used for every probe in this ticket (`cargo test --release -p rf-harness
 --test title_probe --no-run`) compiled clean with zero warnings on this
 tree.
+
+## W14-47 — Final Fight 2 / Battletoads: the raster/IRQ family's premise
+is refuted again; the enable-edge NMI dispatch W14-35 named IS missing
+and IS fixed, but it explains neither title's census result (2026-09-20,
+BLOCKED)
+
+**Final Fight 2 (retail), traced end to end with `PROBE_IRQLOG`,
+`PROBE_RING`/`PROBE_RINGP`, and `PROBE_SDUMP=808C0A` over
+`PROBE_INSTR=3000000`.** `nmitimen=NmiTimen(0xA1)` — bit 7 (NMI) and bits
+5-4 (`Vertical` H/V-IRQ mode) both set, unchanged for the whole run
+(`arm_events` for `$4200` = 0 after the single boot-time set). The CPU
+sits in a genuine `WAI` at `$808C0A` (native mode, `e=false`; `PROBE_SDUMP`
+at that PC repeatedly shows `p=31` — bit 2, `I`, clear), cycling through a
+per-frame two-target raster split (`$4207-$420A` alternate between
+`vtime=0x0D8`/`0x104`, i.e. lines 216 and 260) plus one NMI per frame at
+line 225. Over the full 3,000,000-instruction window: **158 real NMI
+vectored dispatches** (`NMILOG ... DISPATCH pc=008008`, the native `$FFEA`
+word) and **315 IRQ line assert/acknowledge pairs**
+(`assert_events=315 ack_events=315`, every one matched, no stuck line),
+running right up to instruction ~2,993,020 — a healthy, correctly-paced
+game the entire time, not a title parked forever. `cargo test --release -p
+rf-harness --test boot_census -- --ignored --exact boot_census_child`
+still exits **10** (uniform) both before and after this ticket's fix
+(confirmed by stashing the fix and rebuilding), because the flat, uniform
+picture traces to a *different* mechanism: `tm=[0010]` (BG2 only) with
+`cgram_nonzero=245 vram_nonzero=3296 oam_nonzero=160` — real graphics data
+loaded, but never landing in a way the compositor renders as varied,
+`INIDISPLOG` shows genuine `bright:0<->15` fades and `forced_blank`
+toggling (an active flash effect, not a stuck forced-blank) — the same
+`$2100`/`$212C`-consumption family W14-35 named and left BLOCKED for
+ActRaiser 2/Illusion of Gaia/Lagoon/Phalanx, outside this ticket's
+raster/IRQ charter.
+
+**Why W14-45's own diagnostic read `nmi_entries=0 AND irq_entries=0`
+when the trace above shows 158/315 real events: a measurement artifact
+of `title_probe`'s trailing-`PROBE_SAMPLE` window, not an emulator
+defect.** `title_probe`'s `nmi_entries`/`irq_entries` sample 20,000
+MORE instructions after `PROBE_INSTR` and count how many land on the
+vector target. A halted `WAI` step burns exactly `speed::FAST` = 6 master
+cycles per attempted step (ticket W7-15); a real scanline is
+`MASTER_PER_LINE` = `DOTS_PER_LINE * MASTER_PER_DOT` = 1,364 master
+cycles (`crates/rf-snes/src/timing.rs`). 20,000 parked steps therefore
+advance the raster by only `20000*6/1364 ≈ 88` lines — under half a
+262-line frame — while the same 20,000 steps would cover far more ground
+running. Final Fight 2's last-observed activity in this run lands right
+after an ACK, at line 0 (`HVBJOYLOG ... EXIT vblank`, n=2,993,020), with
+the next scheduled H/V target 216 lines away (`≈216*1364/6 ≈ 49,100`
+required steps) — more than double the 20,000-instruction sample budget.
+The sample simply cannot span to the next real interrupt once it starts
+mid-park; it is not evidence the machine stopped delivering them.
+Battletoads shows the same shape with its own numbers accounted for
+exactly: `rdnmi_set_events=57`, `nmi_dispatch_events=48` — the missing 9
+are the vblanks that legitimately preceded the ROM's own `$4200: 00->81`
+enable write at n=154244 (9 `RDNMILOG SET`s at n=13680..148496, all
+before that write; every set after it has a matching dispatch) — boot
+sequencing, not a dropped interrupt.
+
+**Acceptance's enable-edge check, against fullsnes "SNES Interrupts"
+(fetched 2026-09-20).** Quoted verbatim: *"The CPU includes another
+internal NMI flag, which gets set when '\[4200h\].7 AND \[4210h\].7'
+changes from 0-to-1, and gets cleared when the NMI gets executed."* —
+confirming W14-35's hypothesis (b): the edge can come from EITHER
+operand, not only the flag. `SnesSystem::step`'s dispatch (`events.
+vblank_started && nmitimen.nmi_enabled()`) only ever checked the flag's
+own edge; a `$4200` write that enables NMI while `$4210` bit 7 is already
+1 (mid-vblank, unread) had no path to dispatch at all. **This is a real,
+confirmed-missing rule — fixed in this ticket** (see below), even though
+it does not reproduce either traced title's own symptom (neither title's
+trace shows a `$4200` write landing while the flag is genuinely still
+set). The acceptance brief also asks about "disabling and re-enabling
+within one vblank does not double-dispatch" — fullsnes says the opposite:
+*"If one does disable and re-enable NMIs, then an old NMI may be executed
+again; acknowledging avoids that effect."* Pinned to the source's actual
+answer, not the brief's phrasing (see the redispatch test below). The H/V
+IRQ side needed no change: fullsnes only documents `$4211` TIMEUP as
+level, cleared by a `$4211` read or (per `bus.rs:503`'s existing
+citation, W14-10) by a `$4200` write that leaves H/V IRQ mode `Off` —
+already exactly what `IrqTimer`/the `$4200` write handler do; no
+enable-while-pending edge case is documented for the IRQ side, and none
+of Final Fight 2's or Battletoads' `$4200` writes exercise it anyway
+(Battletoads never enables H/V IRQ; Final Fight 2's mode is set once at
+boot and never rewritten). The WAI-wake path (W14-28) and the vector/`E`-
+flag selection (acceptance item (e)) were both re-checked, not changed:
+`Cpu::interrupt` (`crates/rf-snes/src/cpu/mod.rs`) already selects
+`$FFEA`/`$FFEE` for native and `$FFFA`/`$FFFE` for emulation, and
+`dispatch_interrupt` already pushes 2 bytes (PC) + 1 (P) in emulation
+(no PBR) vs 3 (PBR+PC)+1 in native — matches Final Fight 2's own
+observed `e=false` dispatch to `$008008` (the native NMI vector's
+target) exactly.
+
+**Fix shipped** (`crates/rf-snes/src/system.rs`): a new
+`SnesSystem::nmi_and_line: bool` tracks the previous value of the
+combined `nmitimen.nmi_enabled() && timing.nmi_flag` expression across
+steps; `SnesSystem::step` now dispatches on ANY 0-to-1 edge of that
+expression, replacing the old vblank-only check (which the new one
+subsumes: the vblank edge is still exactly a 0-to-1 transition of this
+same expression, arriving via the flag operand). Persisted in
+`crates/rf-snes/src/state.rs`'s `Cpu` state region, appended last per
+the DSP-1/SA-1 precedent so old and new save formats only disagree in
+what trails the byte the old format already ends at.
+
+**Three new unit tests** (`crates/rf-snes/src/tests/system.rs`):
+`nmi_enable_edge_dispatches_at_once_when_the_flag_is_already_set` (a
+`$4200` write enabling NMI while `nmi_flag` is already 1 dispatches on
+the SAME step, no vblank needed); `nmi_enable_outside_vblank_waits_for_
+the_next_edge` (the same write with the flag still 0 does not dispatch);
+`redispatches_on_disable_then_reenable_while_the_flag_is_still_set` (pins
+fullsnes's actual documented answer — disable then re-enable while the
+flag is still unread DOES fire a second time). All three fail against a
+reverted `system.rs` (checked via `git stash` of that file alone) and
+pass with the fix.
+
+**One real regression found and fixed: an undisbeliever hardware-test
+ROM exercises exactly this edge, and its golden needed re-pinning, not
+its behaviour.** `cargo test -p rf-snes --test undisbeliever_golden
+undisbeliever_goldens_match -- --ignored` failed on
+`inidisp_enable_display_mid_frame.sfc`'s write-record hash. Traced with
+`PROBE_IRQLOG` on the ROM directly (`PROBE_ROMS=<path to the .sfc>`): it
+writes `$4200: 00->81` at line 244 dot 332 — inside vblank, with `$4210`
+bit 7 still 1 from the vblank edge at line 239 (never read in between).
+This is the exact scenario the fix targets: real hardware fires NMI at
+that instant, and so does the fixed emulator (`NMILOG ... DISPATCH
+pc=0080E3` on the same step as the ARM write). The earlier dispatch
+shifts every following instruction's timing by a few cycles, moving the
+ROM's own (unrelated) single `$2100` write from line 89 dot 31 to line 89
+dot 30 (n=97819 -> 97822 instructions to the settle point) — still
+exactly one write on one line, `regs=[2100]` unchanged under
+`survey_the_whole_set` (confirmed before re-pinning). Re-pinned with the
+mechanism cited in `undisbeliever_golden.rs`, matching the precedent
+W14-39 already set for this exact goldens list ("SHOULD fail and be
+re-examined" when timing legitimately changes).
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — **375 passed**, 0 failed, 1
+ignored (372 before this ticket + 3 new tests). Ignored SNES suites:
+`singlestep_65816_vectors` — **5,080,000 passed, 0 failed** (254/256
+opcodes, the same pre-existing MVN/MVP exclusion); `spc700_vectors`'s
+`singlestep_spc700_vectors` — **256,000 passed, 0 failed**;
+`gilyon_cputest` — `test_num=0x0649/0x0649, ROM says "Success"`;
+`blargg_spc`'s `spc_timer_reports_pass` — `"PASSED TESTS"`;
+`peterlemon_golden` — all 3 tests pass; `undisbeliever_golden` — both
+gating tests pass post-re-pin (`undisbeliever_goldens_match` and
+`a_halted_cpu_still_advances_the_master_clock`, the latter already
+covered under `cargo test -p rf-snes`). `cargo test --workspace` is the
+orchestrator's gate per this session's ruling, not re-run here.
+
+**Census children**, built fresh both before (`git stash` of the two
+code files) and after this ticket's fix, RELEASE, exit 0 = rendered, 10 =
+uniform: **unmoved in both directions** for every title checked. Traced
+titles: Final Fight 2 (USA) and (Virtual Console) — **10 -> 10**;
+Battletoads in Battlemaniacs (USA) and (Beta) — **10 -> 10**. W14-35's
+four (must stay rendering): ActRaiser 2, Illusion of Gaia — **0 -> 0**;
+Lagoon, Phalanx (must stay blank, unrelated `$2100`/`$212C` cause) — **10
+-> 10**. Canaries: Super Mario World, Wild Guns, Super Mario RPG, NHL 95,
+Kirby Super Star, Final Fantasy Mystic Quest, Super Mario Kart, F-Zero,
+Full Throttle - All-American Racing (Beta) — **0 -> 0**, all unmoved.
+
+**Determinism**: `nmi_and_line` is a pure function of two already-
+deterministic bus fields (`nmitimen.0`, `timing.nmi_flag`), no RNG,
+wall-clock, or thread dependency; it is now part of save state (see the
+fix above), so a save taken between a `$4200` enable-while-pending write
+and its dispatch restores correctly rather than losing or duplicating
+the edge.
+
+**Ticket disposition**: BLOCKED, not WONTFIX, for the same reason as
+W14-35: the chain traces to specific, fullsnes-checked register state
+(`$4200` NMITIMEN, `$4210` RDNMI, `$4211` TIMEUP) with quantitative
+full-run evidence that BOTH interrupt sources fire correctly and
+regularly for both traced titles — the uniform census result is a
+`$2100`/`$212C`-consumption symptom (Final Fight 2) and Battletoads'
+own render pipeline (not traced further here — no register-read chain
+in Battletoads' case pointed at a raster/IRQ cause once the interrupt
+trace came back healthy), not a raster/IRQ defect. One real, cited spec
+deviation (the enable-edge dispatch) was found and fixed regardless,
+with unit tests, per the acceptance's "if missing, implement it"
+instruction — independently of whether it explains either title's
+symptom, exactly as W14-35's RDNMI vblank-end fix was independently
+correct despite explaining none of its four titles' symptoms either.
