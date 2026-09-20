@@ -58,6 +58,12 @@
 //!                                    decimal instruction-count window (`n`, end
 //!                                    exclusive) — attributes an SP drift to the
 //!                                    exact opcode that moved it (W14-26)
+//! PROBE_SPCMEMWATCH=hex[,hex]       print the SPC700 PC and old/new byte value
+//!                                    whenever one of these absolute 16-bit ARAM
+//!                                    addresses changes value — used to find who
+//!                                    wrote a suspect direct-page cell (e.g. a
+//!                                    track-pointer low/high byte pair) rather
+//!                                    than only observing its final value (W14-30)
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -191,6 +197,19 @@ fn probe() {
         let timerlog = std::env::var("PROBE_TIMERLOG").is_ok();
         let mut timer_last = [false, false, false];
         let packetlog = std::env::var("PROBE_PACKETLOG").is_ok();
+        // W14-30: watch a set of absolute 16-bit ARAM addresses and print
+        // whenever one of them changes value, with the SPC PC that ran the
+        // instruction which produced the change. Built to find who writes
+        // a suspect direct-page cell (a track-pointer low/high byte pair)
+        // rather than only ever seeing its value after the fact via
+        // PROBE_ARAM/PROBE_SPCREGPC.
+        let spcmemwatch: Vec<u16> = std::env::var("PROBE_SPCMEMWATCH")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| u16::from_str_radix(s, 16).unwrap())
+            .collect();
+        let mut spcmemwatch_last: HashMap<u16, u8> = HashMap::new();
         let mut x_last = u8::MAX;
         let mut port0_last = u8::MAX;
         let mut dp1_last = u8::MAX;
@@ -261,6 +280,22 @@ fn probe() {
             n += 1;
             let sys = core.system();
             let apu = &sys.bus.apu;
+            for &addr in &spcmemwatch {
+                let cur = apu.aram[addr as usize];
+                match spcmemwatch_last.get(&addr) {
+                    Some(&prev) if prev != cur => {
+                        println!(
+                            "      SPCMEMWATCH n={n} addr={addr:04X} spcpc={:04X} {prev:02X}->{cur:02X}",
+                            apu.cpu.pc
+                        );
+                        spcmemwatch_last.insert(addr, cur);
+                    }
+                    Some(_) => {}
+                    None => {
+                        spcmemwatch_last.insert(addr, cur);
+                    }
+                }
+            }
             let pcv = sys.cpu.pc24()
                 | if std::env::var("PROBE_RINGP").is_ok() {
                     u32::from(sys.cpu.p) << 24
@@ -402,12 +437,15 @@ fn probe() {
                         if apu.cpu.pc == target {
                             println!(
                                 "      SPCPCLOG n={n} pc={:04X} a={:02X} x={:02X} y={:02X} sp={:02X} \
+                                 psw={:02X} p={} \
                                  stack01={:02X} stack02={:02X} stack03={:02X} stack04={:02X}",
                                 apu.cpu.pc,
                                 apu.cpu.a,
                                 apu.cpu.x,
                                 apu.cpu.y,
                                 apu.cpu.sp,
+                                apu.cpu.psw,
+                                apu.cpu.psw & 0x20 != 0,
                                 apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(1)) as usize)],
                                 apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(2)) as usize)],
                                 apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(3)) as usize)],
