@@ -7639,6 +7639,55 @@
    "W14-41 DONE 2026-09-20 by the executor. Fixed the residual Tommy Moe's clobber W14-39's follow-up left open: catch_up_apu now peeks the next SPC700 opcode (ApuBus::peek, side-effect-free) and its base cost from timing::CYCLES before starting it, deferring (carrying the shortfall into apu_debt, same bookkeeping as the existing hand-over guard) whenever even that lower-bound cost would overshoot the call's remaining budget -- generalising the hand-over-only just_handed_over guard to every instruction boundary. Unit test a_port_read_immediately_after_hand_over_does_not_see_the_next_instruction_early reproduces Tommy Moe's exact SPC700 shape, fails without the fix (left: 241 i.e. 0xF1, right: 11 i.e. the Run echo) and passes with it; a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo (W14-39) stays green. Census: Tommy Moe's boot_census_child moves 10 -> 0 (confirmed with a stash/pop A-B build in this worktree); Rival Turf!, Super Turrican, Wario's Woods, Super Mario RPG, Super Mario World, Wild Guns unmoved at 0; Soul Blazer and ActRaiser 2 unmoved at 10, confirmed pre-existing and unrelated (same on unmodified main) -- the W14-33/38 BLOCKED family, out of this ticket's scope. Gate: cargo fmt --check clean, cargo clippy --workspace -D warnings clean, cargo test -p rf-snes --release 366 passed/0 failed/1 ignored, singlestep_spc700_vectors/spc_timer_reports_pass/gilyon cputest_full_reports_success_and_every_test_passes/peterlemon_golden (3)/undisbeliever_golden (2)/rf_scroller_s_five_minute_replay_is_deterministic/singlestep_65816_vectors (5,080,000/5,080,000) all green, scripts/validate-arch.sh arch OK. Not the W6-02a cycle-accurate executor -- a call-granularity ordering fix (never start an instruction the current call's debt has not earned), not cycle-by-cycle core interleaving.",
    "W14-41 FILED 2026-09-21 by the orchestrator from W14-39's Tommy Moe's finding. Main rendered it by accident (smaller per-instruction cost rounded the owed budget to zero)."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-42",
+  "title": "Quintet driver deadlock on the corrected timing base: ActRaiser 2, Illusion of Gaia, Robotrek (and Soul Blazer) after W14-39/W14-41",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-42: W14-38 traced these to the CPU sending APU command $F0 on $2140 and waiting for an ack that never returns to 0; that trace predates W14-39 (internal cycles), W14-41 (catch-up deferral) and the W14-37 listing. Re-trace on main now: PROBE_PORTS/PROBE_APUPORTLOG/PROBE_SPCRING/PROBE_SPCREGPC/PROBE_SPCMEMWATCH plus an ARAM dump and a disassembly (W14-33's scratch decoder approach, verified against ops.rs) of the driver's command loop — state what the driver does with $F0, which port/value it waits on, and the first divergence from hardware (port visibility order at the CPU's write, $F1 port clears, timer $FD-$FF reads, the deferred-instruction path W14-41 added, an SPC700 opcode/flag edge vs the singlestep semantics, or the 65C816 feeding it wrong data)",
+   "the fix, if any, is cited (fullsnes / snes.nesdev.org / WDC) and pinned by a unit test; ignored SNES suites (65816 vectors with the cycle assertion, spc700_vectors, spc_timer, gilyon, peterlemon) stay green; determinism unaffected; census children on the traced titles and the usual canaries; the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and names every moved title",
+   "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — which port, which value, which side"
+  ],
+  "notes": [
+   "W14-42 FILED 2026-09-21 by the orchestrator: the four Quintet/Enix titles are the last of the W14-33/38 deadlock class still blank after the timing fixes; three of the original six moved with W14-39, so the class was real."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-43",
+  "title": "Register-read family from the W14-34 re-triage: Shien's Revenge x2 read write-only $4200; Top Gear 3000 ROM-mirror mismatch",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-43: Shien's Revenge (USA) and its second dump poll a read of $4200 NMITIMEN (write-only per fullsnes: reads return open bus — the last value on the data bus, which for `LDA $4200` is the operand's high byte $42 unless the bus model says otherwise); the trace shows what the game does with the value and what hardware's open-bus value would be at that instruction, and the emulator's `read_register_pure` fallthrough is checked against fullsnes 'Open Bus' semantics; fix with citation + unit test if it differs",
+   "W14-43: Top Gear 3000 (USA) — the W14-34 table names a ROM-mirror mismatch; verify the cart header (it is an ExHiROM/large LoROM? check the size and map-mode byte) against rf-cart's mapping and mapping.rs's target for the banks the boot reads (compare the bytes read with the unzipped ROM at the mapped offset); fix in rf-cart/mapping.rs with citation (fullsnes 'SNES Cart Memory Map' / snes.nesdev.org memory map) + unit test",
+   "the fix, if any, is cited (fullsnes / snes.nesdev.org / WDC) and pinned by a unit test; ignored SNES suites (65816 vectors with the cycle assertion, spc700_vectors, spc_timer, gilyon, peterlemon) stay green; determinism unaffected; census children on the traced titles and the usual canaries; the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and names every moved title",
+   "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — which port, which value, which side"
+  ],
+  "notes": [
+   "W14-43 FILED 2026-09-21 by the orchestrator from the W14-34 register-read family (3 titles). Small, self-contained; both shapes recur in the library."
+  ]
  }
 ]
 }
