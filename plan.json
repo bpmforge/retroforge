@@ -7647,7 +7647,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "id": "W14-42",
   "title": "Quintet driver deadlock on the corrected timing base: ActRaiser 2, Illusion of Gaia, Robotrek (and Soul Blazer) after W14-39/W14-41",
@@ -7663,6 +7663,7 @@
    "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — which port, which value, which side"
   ],
   "notes": [
+   "W14-42 CLOSED 2026-09-21: re-traced ActRaiser 2/Illusion of Gaia/Robotrek on the corrected timing base -- the W14-38 $F0 ack-wait deadlock does not reproduce (W14-39/W14-41 already fixed it as a side effect, confirmed via PROBE_PORTS/PROBE_APUPORTLOG showing the CPU reach the handshake routine's final RTS). The census-visible blank had a DIFFERENT cause found via PROBE_M7's colour-math dump: CGWSEL ($2130) clip_mode/prevent_mode had modes 1 and 2 swapped against fullsnes (1=NotMathWin, 2=MathWindow, not the reverse), so a disabled colour window with clip_mode=2 forced the ENTIRE main screen to black regardless of what BG/OBJ drew. Fixed in crates/rf-snes/src/ppu/window.rs (ColorMath::clip_to_black/prevented), pinned by a new unit test. This single fix moves all four W14-38 titles (ActRaiser 2, Illusion of Gaia, Robotrek, and -- unexpectedly -- Soul Blazer, W14-27/30's own separately-traced defect) to rendering; all named canaries unmoved. See docs/TESTING.md W14-42.",
    "W14-42 FILED 2026-09-21 by the orchestrator: the four Quintet/Enix titles are the last of the W14-33/38 deadlock class still blank after the timing fixes; three of the original six moved with W14-39, so the class was real."
   ]
  },
@@ -7671,7 +7672,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "id": "W14-43",
   "title": "Register-read family from the W14-34 re-triage: Shien's Revenge x2 read write-only $4200; Top Gear 3000 ROM-mirror mismatch",
@@ -7688,7 +7689,8 @@
    "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — which port, which value, which side"
   ],
   "notes": [
-   "W14-43 FILED 2026-09-21 by the orchestrator from the W14-34 register-read family (3 titles). Small, self-contained; both shapes recur in the library."
+   "W14-43 FILED 2026-09-21 by the orchestrator from the W14-34 register-read family (3 titles). Small, self-contained; both shapes recur in the library.",
+   "W14-43 DONE 2026-09-20: Shien's Revenge x2 fixed (bus.rs $4200 read was echoing nmitimen's written bits instead of open bus; removed the arm so it falls through to the bus's existing MDR model, per fullsnes '4200h-437Fh' + snes.nesdev.org open-bus). Top Gear 3000 traced to a misidentification, not a mirror bug: header chipset $03 is generic DSP (fullsnes/nesdev: the byte cannot distinguish DSP-1/2/3/4), so it was accepted as Coprocessor::Dsp1 and routed through the DSP-1 HLE, whose idle sentinel $80 the boot poll never saw change; added a checksum-keyed (not title-keyed, law 5) refusal in rf-cart/src/snes.rs naming DSP-4 for checksum $5327. Two new unit tests (one exercises Cpu::step end to end per the ticket's contract). Also verified: no regression on DSP-1 titles sharing the same chipset byte (Pilotwings/Super Mario Kart/Suzuka 8 Hours/Dungeon Master all still render), plus Flintstones (En,Fr,De,Es,It) and Full Throttle (Beta) census children. Gate green: fmt/clippy clean, rf-cart 53 passed, rf-snes lib 368 passed/1 ignored, gilyon/blargg_spc/spc700_vectors/peterlemon_golden all green; singlestep_65816_vectors 5,080,000 passed/0 failed (933s). Census: both Shien's Revenge dumps now exit 0 (rendered); Top Gear 3000 now exits 12/refused (was hanging in the uniform bucket); all named canaries unmoved. See docs/TESTING.md W14-43 section for the full trace."
   ]
  }
 ]
