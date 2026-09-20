@@ -805,6 +805,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-28 | 1265 | **1061** | 74 | 130 | **0** | **0** |
 | SNES, after W14-36 | 1265 | **1066** | 69 | 130 | **0** | **0** |
 | SNES, after W14-39 | 1265 | **1076** | 59 | 130 | **0** | **0** |
+| SNES, after W14-41 | 1265 | **1079** | 56 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -5018,3 +5019,209 @@ bounded, not tuned around, for a future ticket that can commit to
 decompiling that block specifically. No emulator defect is demonstrated
 here, so none is invented, and no fix is applied to
 `crates/rf-snes/**`.
+
+## W14-41 — Tommy Moe's residual closed: `catch_up_apu` now defers ANY
+## instruction it cannot afford, not just the hand-over's first one
+
+W14-39's follow-up traced Tommy Moe's deadlock to two distinct clobbers
+of the same `Run` echo and fixed only the first. Recap of the shape
+(`docs/TESTING.md` above): the 65816 driver spins on
+
+```
+80B8C5: CMP $2140   ; APU port 0
+80B8C9: BNE $B8C5
+```
+
+waiting for the SPC700's `Run` echo, while the just-uploaded SPC700
+program at `$0200` is
+
+```
+0200: 8F F1 F4   MOV $F4, #$F1     ; announce $F1 on port 0
+0203: 8F F1 F5   MOV $F5, #$F1     ; and port 1
+0206: E4 F4      MOV A, $F4        ; read port 0 back
+0208: 68 FF      CMP A, #$FF       ; wait for the CPU's $FF ack
+020A: D0 F4      BNE $0200
+```
+
+fullsnes ("SNES APU Memory and I/O Map") is unambiguous about which side
+owns which direction here: `$F4`-`$F7` on the SPC700 side and
+`$2140`-`$2143` on the 65816 side are the SAME four bytes, and each side
+reads back the OTHER side's last write — an SPC `MOV $F4,#$F1` sets
+`ports_out[0]` (what a `$2140` read returns), a CPU write to `$2140` sets
+`ports_in[0]` (what an SPC `MOV A,$F4` returns). Nothing in `$F1`'s
+bits 4-5 (which clear the INCOMING pairs, `ports_in`) is involved in this
+race — the clobber is a plain `ports_out[0]` write racing a `ports_out[0]`
+read, both on the emulator's own single call-granularity clock, never a
+register-semantics bug.
+
+**The first clobber (W14-39 follow-up, already fixed): the SAME
+`catch_up_apu` call that performs the hand-over must not also run the
+SPC700's own first instructions.** Confirmed still fixed by this
+ticket's own `title_probe`/`PROBE_APUPORTLOG` run against the FIXED
+build (`PROBE_ROMS=<Tommy Moe's zip> PROBE_INSTR=425500
+PROBE_APUPORTLOG=1`), which independently reproduces the exact
+hand-over instant W14-39's follow-up already isolated —
+`n=425363 spcpc=0200 ports_in=[C8,00,00,02] ports_out=[C8,BB,00,00]`,
+byte-for-byte the same as `docs/TESTING.md`'s own earlier section —
+confirming this is the same real event, not a coincidence of similar
+values. The very next port-changing line this run logs is
+`n=425374 spcpc=020A ports_in=[FF,FF,00,02]
+ports_out=[F1,F1,00,00]`: eleven CPU instructions later, both `MOV
+$F4,#$F1`/`MOV $F5,#$F1` have run, the 65816 has seen `$F1` and written
+its own `$FF` acknowledgement back on both port pairs, and the SPC's
+`MOV A,$F4`/`CMP A,#$FF`/`BNE $0200` loop has exited (PC past `$020A`)
+— the whole handshake completes normally on the fixed build, in the
+handful of real CPU instructions this specific protocol's polling
+margin allows. This is the outcome, not the mechanism; W14-39's own
+already-published internal accounting (`spc_cycles=2, spent=1` after the
+hand-over call) is cited above for that mechanism and was not
+independently re-instrumented in this session.
+
+**The second clobber (this ticket, fixed): the CPU's very next
+instruction is the READ that triggers the SAME function again, with only
+the tiny remainder W14-39's fix carried forward as debt — and, because
+an SPC700 instruction cannot run partially, ANY nonzero owed budget once
+`boot.is_running()` used to commit the loop to running one whole
+instruction regardless of whether the debt actually covered its real
+cost.** Per W14-39's own trace, that remainder is one SPC cycle (21
+master cycles) — `owed = 21/21 = 1`, `apu_overspent = 0` — so the
+pre-fix loop ran one full instruction no matter its real cost: opcode
+`$8F` (`MOV dp,#imm`) at `$0200`, base cost 5 SPC cycles from
+`timing::CYCLES[0x8F]` — five times more real time than the one cycle
+actually owed. That instruction IS the driver's own `MOV $F4,#$F1`, so
+the very read this ticket's predecessor protected the echo for was the
+read that triggered its clobber, one call later, via the read path
+instead of the write path. This unit's own test below reproduces this
+exact clobber directly (`left: 241` i.e. `$F1`, the same failure shape),
+independent of the internal-accounting numbers.
+
+**Fix.** `SnesBus::catch_up_apu` (`crates/rf-snes/src/bus.rs`) now peeks
+the next opcode (`ApuBus::peek`, side-effect-free — the SAME method
+`peeking_a_port_does_not_advance_the_apu` already pins as non-mutating)
+before starting ANY real SPC700 instruction, and looks up its BASE cost
+from `apu::spc700::timing::CYCLES` — the not-taken cost, a genuine lower
+bound since a taken branch only ever ADDS `BRANCH_TAKEN_EXTRA` (2
+cycles) on top, per the vector-derived table's own doc. If even that
+lower bound would exceed the call's remaining budget, the instruction is
+deferred rather than started: the untouched remainder is carried into
+`apu_debt` for the next call, using the exact same "shortfall, not
+overrun" bookkeeping the hand-over edge's `just_handed_over` guard
+already established (renamed `deferred` and now shared by both paths).
+This generalises the hand-over-specific guard to every instruction
+boundary: an SPC700 instruction only runs once real elapsed CPU time has
+genuinely earned its full cost, not merely a nonzero fraction of it. A
+branch's up-to-2-cycle taken/not-taken uncertainty can still produce a
+small residual overshoot, absorbed by the pre-existing `apu_overspent`
+mechanism exactly as before. `DBNZ dp`/`CBNE dp`/`BBS`/`BBC dp.bit` are
+direct-page read-modify-write branches and CAN touch `$F4`-`$F7` if a
+program's direct page happens to land there, so this residual is not
+categorically port-free — it is bounded (2 SPC cycles versus a whole
+extra instruction's worth, 5+ here), which is why it has not reproduced
+this bug's failure mode in practice.
+
+Not the deferred W6-02a cycle-accurate executor: no cycle-by-cycle
+interleaving of the two cores was added, and none of the surrounding
+per-call, per-instruction accounting changed shape. The fix is narrower
+and cheaper than that — it only refuses to let an instruction's
+side effects become visible before the debt that would fund it has
+actually accrued, which is exactly the gap between "atomic instruction
+execution" and "the two cores share one clock" that made the old
+overshoot-then-borrow model occasionally show a read the wrong side of a
+write it hadn't earned yet.
+
+**Unit test**, `crates/rf-snes/src/tests/apu_ports.rs::
+a_port_read_immediately_after_hand_over_does_not_see_the_next_instruction_early`:
+uploads the exact Tommy Moe's SPC700 shape above through the real
+handshake, drives the hand-over call with a debt sized to leave the same
+small carried remainder W14-39's follow-up traced, then makes a SEPARATE
+`catch_up_apu()` call with no additional debt (standing in for the CPU's
+own next-instruction read) and asserts the echo is still intact and the
+SPC's PC has not moved. A final assertion adds enough further debt and
+confirms the deferred instruction DOES eventually run — this is a
+reordering fix, not a stall. Verified to fail without the fix and pass
+with it: `git stash` on `bus.rs` alone reproduces
+`left: 241, right: 11` (`$F1` vs the expected echo) at both this test and
+at the `boot_census` level (see below); restoring the fix turns both
+green. `a_large_catch_up_burst_does_not_let_the_freshly_run_program_
+clobber_its_echo` (W14-39's own regression test) stays green unmodified.
+
+### Census: Tommy Moe's now renders; nothing else moved
+
+Built `boot_census` fresh in this worktree (with, and separately without,
+the `bus.rs` fix — `git stash`/`pop`, same commit otherwise) and ran the
+nine titles this ticket's acceptance names plus six more from its census
+child list (Illusion of Gaia, Robotrek, Kirby Super Star, NHL 95, Clay
+Fighter, Full Throttle — checked because this fix can make the SPC LAG
+by up to one instruction where the old model let it run ahead, so a
+title whose CPU side needed an SPC write promptly is the shape a
+regression would take), `RF_CENSUS_ROM=<zip> boot_census-* --ignored
+--exact boot_census_child`:
+
+| Title | Without fix | With fix |
+|---|---|---|
+| Tommy Moe's Winter Extreme | 10 (blank — the deadlock) | **0 (rendered)** |
+| Rival Turf! (USA) | 0 | 0 — unmoved |
+| Super Turrican (USA) | 0 | 0 — unmoved |
+| Wario's Woods (USA) | 0 | 0 — unmoved |
+| Super Mario RPG (USA) | 0 | 0 — unmoved |
+| Soul Blazer (USA) | 10 | 10 — unmoved, pre-existing W14-33/38 BLOCKED family (unrelated cause), confirmed unchanged on unmodified `main` too |
+| ActRaiser 2 (USA) | 10 | 10 — unmoved, same pre-existing family, confirmed unchanged on unmodified `main` too |
+| Super Mario World (USA) | 0 | 0 — unmoved |
+| Wild Guns (USA) | 0 | 0 — unmoved |
+| Illusion of Gaia (USA) | 10 | 10 — unmoved, same pre-existing family |
+| Robotrek (USA) | 10 | 10 — unmoved, same pre-existing family |
+| Kirby Super Star (USA) | 0 | 0 — unmoved |
+| NHL 95 (USA) | 0 | 0 — unmoved |
+| Clay Fighter (USA) | 0 | 0 — unmoved |
+| Full Throttle - All-American Racing (USA) (Beta) | 0 | 0 — unmoved |
+
+Tommy Moe's is the only title this fix moves, and it moves the direction
+the ticket asked for; the six extra titles checked for the
+lag-not-race-ahead direction (Kirby Super Star, NHL 95, Full Throttle
+were all already at `0` under W14-39 and are exactly the shape a
+regression in the new, more conservative direction would show first)
+found none. Soul Blazer, ActRaiser 2, Illusion of Gaia and Robotrek all
+show `10` in BOTH columns above — the same same-commit `git stash`/`pop`
+A/B this section's table is built from already confirms their blank
+census is pre-existing and unrelated to this change, the W14-33/38 "APU
+handshake deadlock" family these four were already named BLOCKED under,
+for reasons this ticket's scope does not touch.
+
+### Gate
+
+`cargo fmt --check` clean. `cargo clippy --workspace -- -D warnings`
+clean. `cargo test -p rf-snes --release`: 366 passed (one new test above),
+0 failed, 1 ignored. Ignored oracle suites, all re-run and green on this
+tree: `singlestep_spc700_vectors` (256,000/256,000), `spc_timer_reports_
+pass` ("PASSED TESTS"), `cputest_full_reports_success_and_every_test_
+passes` (gilyon, `test_num=0x0649/0x0649, "Success"`), `peterlemon_golden`
+(all three), `undisbeliever_golden` (both live tests),
+`rf_scroller_s_five_minute_replay_is_deterministic` (~60s release,
+deterministic), `singlestep_65816_vectors` (5,080,000/5,080,000).
+`scripts/validate-arch.sh`: `arch OK`.
+
+`cargo test --workspace` (debug, law 3's exact command): first run showed
+one failure, `retroforge::deflicker_reaches_the_app::
+toggling_deflicker_changes_the_pixels_the_app_receives` ("only 71 frames
+ran"), while another worktree on this machine was concurrently running
+its own full `cargo test --workspace` — that test drives an NES fixture
+(`fixtures/nes/rf-scroller`) through the real app UI thread against a
+20-second wall-clock frame budget and has no path through `rf-snes` or
+the APU at all, so CPU contention from a sibling process is the
+textbook failure mode for it, not this ticket's change. Re-run alone,
+it passed (19.04s, under budget). Re-ran the full `cargo test
+--workspace` clean afterwards: all crates pass, 0 failures.
+
+This closes W14-41: the residual W14-39 left open is fixed, not left
+BLOCKED under W6-02a — the fix needed was a call-granularity ordering
+correction (never start an instruction the current call's debt cannot
+afford), not the cycle-by-cycle interleaving W6-02a defers.
+
+**Full SNES census (orchestrator, 2026-09-21, W14-41 tree, per-title
+`RF_CENSUS_OUT` diff against the W14-39 run):** **1076/59/130/0/0 ->
+1079/56/130/0/0** ("SNES, after W14-41" row above). Three rows moved to
+*rendered something*, none the other way: **Tommy Moe's Winter Extreme**
+(the W14-39 regression this ticket was filed for), **International
+Tennis Tour** and **Rendering Ranger R2** (both had been in the
+forced-blank/NMI-off tail of the W14-34 table — the same handoff-edge
+clobber, never separately traced).

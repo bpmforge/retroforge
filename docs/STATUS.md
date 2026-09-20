@@ -4060,3 +4060,19 @@ stories, 10 decisions).
   stays held for a re-census on this base. Gate: workspace **2224
   passing / 0 failed / 43 ignored** (one wall-clock budget test flaked
   under the parallel run and passes 3/3 alone), clippy clean, arch OK.
+
+- **W14-41 done, W14-40 blocked** (2026-09-21). The APU catch-up used
+  to commit a whole SPC700 instruction whenever the CPU touched a port
+  with any debt outstanding, so an instruction hardware would not have
+  reached yet could clobber a handshake echo one call after the
+  handoff. `catch_up_apu` now peeks the next opcode's minimum cost from
+  the vector-verified table and defers it, carrying the debt, when the
+  call cannot afford it. Census 1076/59/130 -> **1079/56/130** (Tommy
+  Moe's Winter Extreme, International Tennis Tour, Rendering Ranger R2),
+  none regressed. W14-40 re-decoded Pagemaster's loader by hand and
+  corrected two earlier readings (a raster-IRQ trampoline on `$4211`
+  keeps the WaitVBlank counter, and there is no BRK dispatcher); the
+  ~1660-frame idle's trip count lives in a bank-`$A9` state machine and
+  stays named. W14-37 is parked behind this ticket: its IPL cycle
+  counts must be re-applied on the new handoff model. Gate: workspace
+  **2226 passing / 0 failed / 43 ignored**, clippy clean, arch OK.
