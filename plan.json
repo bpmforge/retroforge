@@ -7238,6 +7238,54 @@
   ,
    "CLOSED-AS-BLOCKED 2026-09-19: the M-clear/STZ $4305 hypothesis does NOT reproduce. Every store to $4305/$4306 in this ROM (three STA sites at 80:8F9A, 80:9394, 80:94AD, plus the one STZ at 80:99F5) executes with M forced to 1 by a SEP #$30/#$20 on the same code path, immediately before the store; STA/STZ absolute is 3 bytes regardless of M so this is exact, not an artifact of the disassembler. The 2026-09-17 reading most likely came from trace::disassemble being handed one snapshot cpu.p for a whole linear PROBE_DIS range, which desyncs at every immediate-operand width change once a REP/SEP is crossed (seen directly: 80:9334 prints as LDY #$B100 under a stale 16-bit-X snapshot, but decodes as the correct LDY #$00 / LDA ($AA),Y once the snapshot lines up with SEP #$30 at 80:9324 -- a tool artifact, not a CPU bug). ACTUAL MECHANISM, confirmed with a temporary W1425_DAS/DMA/A/TIMING eprintln trace (not committed; reproduce by instrumenting SnesSystem::step and SnesBus::service_dma the same way): the shared DMA-arm helper at 80:8D2A (called by both a direct-fire caller at 80:92DC/92E0/92E3 and, unconditionally, via its own TSB $78) arms WRAM $78 bit 0 as a queue latch for channel 0, and the NMI handler (80:8E69) unconditionally drains that same latch and re-fires MDMAEN with whatever channel-0 registers currently hold, then does STZ $78 to clear it. Sequence observed at the actual crash (n=1619670-1619743 in the instruction trace): 8D2A arms $78=1 and programs channel 0 for a legitimate 16384-byte VRAM fill (control=$08 fixed-source, B=$18, count=16384); the direct caller has not yet reached its own STA $420B/TRB $78 cleanup when this transfer runs long enough (131080 master cycles = 8 cyc/byte + overhead per fullsnes DMA timing, ~96 scanlines) to cross the next vblank edge (trace: entry line 181/frame 102, exit line 15/frame 103, vblank_start=240 with overscan) before the CPU can execute the cleanup. The NMI fires first, drains $78 (still 1) and re-triggers channel 0 with the now-completed transfer's post-run register state -- count=0, which is DASxL/H=0 meaning 65536 bytes per fullsnes \"SNES DMA/HDMA Registers\", not a clobbered write. That 65536-byte transfer is itself long enough (524296 cycles, ~384 lines, over one full 262-line frame) to guarantee crossing another vblank edge before ITS OWN STZ $78 cleanup runs, so the NMI handler re-enters before ever reaching STZ $78 -- $78 is never cleared, and the storm is self-sustaining forever. A second, non-storming instance of the identical 16384-byte transfer was captured for comparison (armed at line 85/frame 138, fires line 86->182, well clear of the vblank_start=240 boundary) -- proving Timing::advance itself is arithmetically correct (verified line-by-line: entry+96 lines matches exit exactly, including the frame wrap, in both cases) and the only variable is WHICH SCANLINE the game's own code reaches this DMA-arm sequence at, which is fixed by how many cycles everything since the previous vblank actually cost. This is a bona fide race in the GAME's own shared DMA-queue routine (it unconditionally arms a queue-latch even for its own synchronous, direct-fire use, with no margin against an NMI landing between arm and cleanup) that would degrade the same way on real hardware IF real hardware reaches this code at the same late scanline (observed: line 181 of 262, only 59 lines before the overscan vblank_start=240) -- but whether real hardware ever lands there, or always arrives earlier with more margin (as the safe instance at line 85 does), depends on cycle-exact timing of everything since the prior vblank that this investigation cannot certify without a real-hardware or known-good-emulator (bsnes/higan) reference trace of this exact ROM, which is out of this ticket's tooling. NAMED NEXT STEP: capture a cycle-exact trace of Super Ninja Boy's boot from a reference emulator (bsnes performance-accurate core preferred) up to this same DMA-arm call and compare the scanline/cycle count reached against rf-snes's own -- a divergence there would point at a specific CPU/PPU/APU timing defect upstream; an exact match would mean the game genuinely ships this race and RetroForge is reproducing real hardware behaviour, in which case W14-25 should close as WONTFIX (law 5: no patching around a game's own code) rather than reopen as a timing-fix ticket. No code changed in rf-snes or rf-harness this pass; PROBE_DIS/title_probe env-var contract already covers everything needed to redo this trace (PROBE_ROMS, PROBE_INSTR, PROBE_DIS, PROBE_RINGP/PROBE_RING, PROBE_PEEK)."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-26",
+  "title": "NHL 95: CPU walks WRAM with NMI off before 1.2M instructions — trace the divergence from reset",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "the cause is DIAGNOSED from a trace before anything changes: title_probe (PROBE_RINGP/PROBE_PEEK/PROBE_INSTR bisect) names the first instruction where control leaves the game's intended path (a wrong vector, a mis-sized DMA, a math-unit or joypad/auto-read register read that returned a value hardware would not, a bank/mirror mapping miss) and why",
+   "the fix, if any, is cited to published documentation (fullsnes / snes.nesdev.org / WDC) and pinned by a unit test that reproduces the exact shape; ignored SNES suites (65816 and SPC700 vectors, gilyon, spc_timer) stay green; determinism unaffected",
+   "if a fix lands: the title renders in the census child (exit 0); the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and every title that moved is named in docs/TESTING.md",
+   "if the trace shows the game's own code produces the stall and hardware would behave the same, that is stated with the trace and the ticket goes BLOCKED with a named next step (no patching around game bytes, law 5)"
+  ],
+  "notes": [
+   "FILED 2026-09-20 by the orchestrator from the 2026-09-17 triage list (untraced: walks WRAM before 1.2M instructions, NMI off). Same method as W14-24; check the $4204-$4217 divider/multiplier sites and $4218-$421F auto-joypad reads early, since W14-24 proved register-timing reads are a live class."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-27",
+  "title": "Soul Blazer: driver dispatch RETs to $0102 after a driver-side APU upload — corrupted upload or 65816 defect",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "the cause is DIAGNOSED from a trace before anything changes: title_probe (PROBE_PORTS/PROBE_RINGP/PROBE_ARAM/PROBE_PACKETLOG) shows whether the SPC-side upload that precedes the bad RET is byte-correct against what the 65C816 sent, and whether the 65C816 sent what the ROM holds (compare with the unzipped ROM in the scratchpad; the SA-1-style producer trace from W14-24 is the template)",
+   "the fix, if any, is cited to published documentation (fullsnes / snes.nesdev.org / WDC) and pinned by a unit test that reproduces the exact shape; ignored SNES suites (65816 and SPC700 vectors, gilyon, spc_timer) stay green; determinism unaffected",
+   "if a fix lands: the title renders in the census child (exit 0); the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and every title that moved is named in docs/TESTING.md",
+   "if the trace shows the game's own code produces the stall and hardware would behave the same, that is stated with the trace and the ticket goes BLOCKED with a named next step (no patching around game bytes, law 5)"
+  ],
+  "notes": [
+   "FILED 2026-09-20 by the orchestrator from the 2026-09-17 triage list. W14-24 found the $4204-$4217 divider was clocked per bus access; Soul Blazer's driver-side upload is the next APU-upload stall and may share the class (packet count or length computed via the math unit) — check that first."
+  ]
  }
 ]
 }
