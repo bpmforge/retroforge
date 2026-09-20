@@ -6228,3 +6228,220 @@ cartridge with its own boot ROM, not an ordinary game cart.
 used for every probe in this ticket (`cargo test --release -p rf-harness
 --test title_probe --no-run`) compiled clean with zero warnings on this
 tree.
+
+## W14-46 — APU handshake family, one title traced per sub-shape
+(2026-09-20, docs-only; ticket left `blocked`)
+
+Baseline first: all five required ignored suites pass unmodified on this
+tree before any investigation — `spc700_cycle_table_matches_the_vectors`,
+`singlestep_spc700_vectors`, `spc_timer_reports_pass`,
+`cputest_full_reports_success_and_every_test_passes` (gilyon),
+`singlestep_65816_vectors` (621s, `cpu::tests::vectors` — this one is not
+an integration test file, it lives in `crates/rf-snes/src/cpu/tests/
+vectors.rs` and is invoked with `cargo test --release -p rf-snes --lib
+cpu::tests::vectors -- --ignored`), and the three `peterlemon_golden`
+cases. A `PROBE_MODE=frames PROBE_FRAMES=1800` sweep across all 11 titles
+first (the W14-42 CGWSEL lesson: confirm the picture is really blank
+before tracing) shows `varied_at=None` for every one — none of the 11 are
+late-rendering slow boots hiding past the 1800-frame window used for the
+rest of this family.
+
+### Sub-shape 1 (halted driver) — Urban Strike (USA), traced
+
+`PROBE_STOP_ON_SPC_STOP=1 PROBE_SPCRING=1` shows the SPC700 parked at
+`$FFC0` (`apu.boot_running=false`, `spc.stopped=true`,
+`ports_out=[aa,bb,00,00]` — the IPL's own idle sentinel) for the entire
+3,000,000-instruction window, having reached it via ~3000 consecutive,
+never-repeated ARAM addresses (`$F409`-`$FFC0`, confirmed via the
+spcring). `PROBE_ARAM=0460:0500,f380:f420,ffb0:ffc0` shows why: ARAM
+`$0460`-`$04FF` holds real, structured driver code (the destination of
+the boot upload's first block, address `$0460` confirmed via
+`PROBE_PORTS`), but `$F380`-`$FFB0` is entirely zero. Opcode `$00` is
+`NOP` (`crates/rf-snes/src/apu/spc700/ops.rs:333`), so a program counter
+that reaches unwritten ARAM free-wheels forward one byte at a time —
+exactly the ~3000-address unbroken run the ring shows, terminating only
+because it reached the IPL window boundary.
+
+`PROBE_PORTS=1` gives the causal chain in full:
+
+1. The first upload block (131 bytes to `$0460`) completes normally and
+   hands off (`boot=Running`, entry `$0486`) — this part matches
+   `boot.rs`'s documented protocol exactly.
+2. The uploaded code runs only briefly (by `n=157776` the SPC PC is
+   already at `$EFF2`, ~60KB past the 131 bytes actually transferred) and
+   its own control flow reaches the unwritten region traced above,
+   NOP-sliding up to `$FFC0`.
+3. `Apu::reenter_ipl` (`crates/rf-snes/src/apu/mod.rs`) — correctly, per
+   its own documented job of catching "a program that wants another
+   upload jumps back to `$FFC0`" — treats this arrival as a reboot
+   request: `self.boot = boot::IplBoot::rebooting()`,
+   `self.cpu.stopped = true`. This is hardware-accurate: real silicon
+   would read the same 64 real IPL bytes sitting at `$FFC0` and restart
+   the same handshake, deliberately or not. **This is not itself a bug.**
+4. The HLE reboot runs its documented `IPL_INIT_CYCLES` (2404, `boot.rs`)
+   and republishes `$AA`/`$BB` (`Ready`) at `n=170016`.
+5. From there, `boot.state` stays `Ready` for the remaining ~2.83M
+   instructions. The only port-0 write the 65816 makes in that whole
+   window is `$FE` (`n=223375`, from `$9280BB: LDA #$FE / STA $2140` —
+   the game's ordinary "queue a driver command" idiom, not an upload
+   request). `IplBoot::cpu_wrote`'s `Ready` arm
+   (`crates/rf-snes/src/apu/boot.rs:309-326`) accepts only a literal
+   `$CC`; any other port-0 value returns `BootAction::None` and is
+   dropped silently. The 65816 then parks forever in its own
+   `$9280E2: DEC $56` / `$9280FA: CMP $2140` / `$9280FD: BNE $80E2`
+   timeout loop, confirmed live via `PROBE_WATCH=000056,000057`: the
+   16-bit direct-page counter decrements every pass without ever
+   escaping (it free-wheels through the full 16-bit range rather than
+   ever reaching a terminal branch), because the value it is really
+   waiting for — a 16-bit port read of `$DDCC` (`$9280DF: LDA #$DDCC`,
+   16-bit `CMP $2140` reading ports 0/1 together) — can never arrive
+   while the port pair is frozen at the boot machine's own `$AA`/`$BB`.
+
+**Verdict: BLOCKED, not fixed.** The chain traces to a specific port
+value (`$2140`'s `$FE` write) checked against a specific required byte
+(`$CC`, `boot.rs:310`) on a specific side (the SPC-side HLE state
+machine), and separately to a specific ARAM range (`$F380`-`$FFB0`)
+confirmed empty against what the driver's own control flow expects
+resident there. `reenter_ipl`'s behaviour is correct per fullsnes (a jump
+into `$FFC0` always re-triggers the IPL on real hardware); the open
+question is upstream — why the uploaded 131-byte stub's control flow
+reaches `$EFF2` (well outside anything ever transferred) within ~60
+instructions of starting. The two live hypotheses: (a) a second,
+larger upload was supposed to follow the 131-byte stub over the same
+`$2140`-`$2143` protocol and something in `IplBoot`'s multi-block
+transition logic (`BootState::Transferring`/`AwaitingBlock` in
+`boot.rs`) drops it before it happens; (b) the real driver relies on a
+transfer mechanism this HLE does not model at all (a bulk/DMA-style
+ARAM fill bypassing the byte-echo protocol). Distinguishing them needs a
+`PROBE_PORTS` trace of the *entire* `n=157717`-`157776` window (the stub's
+own brief run) with the scratch SPC700 decoder extended past the ~20
+opcodes it currently covers (`$SCRATCH/spc_disasm.py`, verified against
+`ops.rs` for what it does implement) — not completed in this pass.
+**Siblings, not separately traced, same shape:** NBA Live 96 (USA)
+(`apu.boot_running=false`, `spc.stopped=true`, ports show data already
+written at index 2/3 before the halt — same class); Tekken 2 (USA)
+(Pirate) — lowest priority per the ticket brief, named only.
+
+### Sub-shape 2 (never-acking driver) — Battle Grand Prix (USA), traced
+
+`PROBE_APUPORTLOG=1` shows the SPC700 genuinely running its own driver
+(`distinct_pc=9`, timers enabled and counting, echo/DSP config set —
+`base_page=C8 delay=01 dir=14`, not idle IPL state). The driver code at
+`$0E1F`-`$0E31` (decoded with `$SCRATCH/spc_disasm.py`, verified against
+`ops.rs`) is:
+
+```
+0E1F: CMP Y,!$00F4      ; compare Y (SPC's own running counter) to port 0
+0E22: BNE $0E33         ; not yet — go check the other branch
+0E24: MOV A,!$00F5      ; load the data byte from port 1
+0E27: MOV !$00F4,Y      ; echo Y back on port 0 (same value the CPU wrote)
+0E2A: MOV [$14]+Y,A     ; store the byte into the ARAM buffer at [$14]+Y
+0E2C: INC Y             ; advance the counter
+0E2D: BNE $0E1F         ; loop unless Y wrapped
+```
+
+The 65816 side (`$0182A6: CMP $2140` / `$0182A9: BNE $82A6`, `$0182AB:
+INC A`) is the standard "write next counter, wait for its echo" idiom.
+`PROBE_APUPORTLOG`'s ring shows this genuinely progressing — `ports_in[0]`
+advances by one every few dozen CPU instructions and `ports_out[0]`
+follows one step behind, matching the driver code above exactly (echo
+happens after the SPC's own poll catches up) — 836 successful
+byte-transfers counted in just the last 20,000-instruction sample. **This
+is a real, live, correctly-shaped per-byte handshake, not a deadlock.**
+The `docs/TESTING.md` (W14-45) table's "port 1 mismatched (`3f` vs `bb`)"
+observation is inert by the decoded driver code above: `$F5`/port 1 is
+SPC-read-only in this loop (never written back), so the CPU-visible
+`ports_out[1]` staying at its `$BB` boot sentinel forever is expected and
+not part of what the CPU's own wait condition (`CMP $2140`, port 0 only)
+checks.
+
+**Verdict: BLOCKED, not fixed.** The transfer has not completed after
+3,000,000 CPU instructions (1800 frames) despite visibly making forward
+progress. The chain traces to the exact port (`$2140`/APU port 0) and the
+exact echo-value comparison the CPU spins on; what is NOT resolved in
+this pass is whether the per-byte rate the trace shows (roughly one byte
+per 24-40 CPU-loop iterations) matches what `SnesBus::catch_up_apu`'s
+21-master-cycles-per-SPC-cycle budget (`crates/rf-snes/src/bus.rs:710`)
+should be delivering, or is throttled well below real hardware's
+cycle-interleaved rate by some remaining accounting gap in that function
+(W14-37/39/41 already fixed several such gaps at the boot-handoff edge
+specifically; this is steady-state transfer, a different code path).
+Confirming needs a much longer `PROBE_INSTR` budget (this family's
+`PROBE_FRAMES=9000` check, run for Phalanx below, was not repeated for
+this title) to see whether it eventually finishes given enough simulated
+time. **Sibling, not separately traced, same shape:** Blackthorne (USA)
+— see below, already routed to W7-08 rather than duplicated here.
+
+### Sub-shape 2, routed not re-derived — Blackthorne (USA) / (Beta) / (Beta) (CES)
+
+Per the ticket's own pre-routing: `PROBE_ARAM=19d0:1a20` decodes
+(`$SCRATCH/spc_disasm.py`, verified against `ops.rs`) the driver's stuck
+loop at `$19D3`-`$19EF` as
+
+```
+19D6: MOV A,$5E+X
+19D8: AND A,#$01
+19DA: BEQ $19F4
+...
+19DE: OR A,#$08
+19E0: MOV $F2,A        ; DSP address latch <- (voice register | 8) = ENVX
+19E2: MOV A,$F3        ; DSP data port -> A
+19E4: CMP A,#$01
+19E6: BCS $19F4
+19E8: MOV A,#$FF
+19EA: MOV $1E+X,A
+```
+
+This is the S-DSP ENVX poller: `$F2`/`$F3` are the DSP address-latch and
+data-port registers, and register `(voice<<4)|8` is `ENVX` (fullsnes
+"S-DSP Registers", `$x8` per voice). The loop reads a voice's `ENVX` and
+waits for it to fall below `#$01`. **Per the ticket brief, this is W7-08
+territory (the S-DSP ENVX poller already named there) and is not
+re-derived here** — confirmed only that Blackthorne's stall is this
+exact register/value pair, not a new mechanism. All three Blackthorne
+dumps (retail, Beta, Beta (CES)) show the identical driver PC and ARAM
+bytes at `$19D3`, so the fix (if any) is one fix for all three.
+
+### Sub-shape 3 (boot never started) — Phalanx (USA), traced
+
+`PROBE_ALLPC=1` (3,000,000 instructions) plus an extended
+`PROBE_MODE=frames PROBE_FRAMES=9000` check (150 real seconds of game
+time, well past the 1800-frame sweep used for the rest of this family)
+both confirm this is a genuine stall, not a slow boot: `varied_at=None`
+at 9000 frames too. The CPU runs ordinary code the whole time — 87
+distinct PCs sampled, one real `NMI` and one real `IRQ` already
+dispatched (`nmi_entries=1 irq_entries=1`), `vram_nonzero=10240` (tile
+data already DMA'd in) but `cgram_nonzero=0` (no palette yet) — dominated
+by its own `$00811A: LDA $4210` / `$00811D: BPL $811A` vblank-wait idiom.
+`apu.boot_running=false`, `ports_in=[00,00,00,00]`: the APU has never
+been written to even once. The title's own NMI handler
+(`$008416`-`$008844`, disassembled via `PROBE_DIS=00:8410:8430,
+00:8800:8850`) gates almost all of its per-vblank work on a WRAM flag —
+`$008427: LDA $7E2C00` / `$00842B: BEQ $843C` (skip ahead when zero) —
+and the trace shows this flag never becomes nonzero across the whole
+run.
+
+**Verdict: BLOCKED, not fixed.** The chain traces to a specific WRAM
+cell (`$7E2C00`) the title's own NMI handler branches on, confirmed
+never set across 9000 frames; what sets it (or fails to) lives in the
+main-thread code this pass did not fully map (the `$811A` wait loop
+itself is only two instructions — `LDA $4210`/`BPL` — so whatever decides
+not to leave it runs elsewhere, between NMI returns, and was not
+isolated in this pass). Since the APU is never written to at all, this
+is upstream of anything W14-46's own scope (the APU handshake) can fix.
+**Siblings, not separately traced, same shape, same 9000-frame
+reconfirmation:** Phalanx (USA) (Beta), Sonic Blast Man II (USA), Batman
+- Revenge of the Joker (USA) (Proto) — all four remain `varied_at=None`
+at 9000 frames.
+
+### Gate (W14-46)
+
+No `crates/**` changes — no fix identified with enough confidence to
+ship in this pass, per the Bug Fix Discipline (verify before fixing) and
+CLAUDE.md law 4 (determinism/layer-boundary changes need to be sure).
+Baseline suites (listed above) all pass unmodified. `cargo fmt --check`
+exit 0, `cargo clippy --workspace -- -D warnings` exit 0, `cargo test -p
+rf-snes` exit 0 (all passing, 2 pre-existing `#[ignore]`d locals
+unaffected). `boot_census_child` exit codes: all 11 W14-46 titles still
+10 (blank, unchanged); canaries Super Mario World (USA), Wild Guns (USA),
+Kirby Super Star (USA), NHL 95 (USA) all 0 (rendered, unaffected).

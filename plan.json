@@ -7744,7 +7744,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "blocked",
   "stories": [],
   "id": "W14-46",
   "title": "APU handshake family after W14-45 (11 titles, three sub-shapes): halted drivers (Tekken 2, Urban Strike, NBA Live 96), never-acking drivers (Blackthorne x3, Battle Grand Prix), boot never started (Batman proto, Phalanx x2, Sonic Blast Man II)",
@@ -7759,6 +7759,7 @@
    "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — which port, which value, which side"
   ],
   "notes": [
+   "W14-46 BLOCKED 2026-09-20: one title traced end to end per sub-shape. Halted (Urban Strike): SPC NOP-slides through unwritten ARAM ($F380-$FFB0, confirmed empty) into the IPL window, correctly re-arming IplBoot::Ready (reenter_ipl is hardware-accurate here); the CPU's next $2140 write is an ordinary command byte ($FE), silently dropped by boot.rs's Ready-state gate (needs literal $CC), stranding both sides. Root cause is upstream (why the 131-byte stub's control flow reaches $EFF2, outside anything transferred) - not isolated. Never-acking (Battle Grand Prix): genuine, progressing per-byte handshake ($0E1F driver loop decoded and verified against ops.rs), not completed in 3M instructions/1800 frames; rate-vs-catch_up_apu question open. Blackthorne x3 confirmed and routed to W7-08 (S-DSP ENVX poller at $19D3, $F2/$F3), not re-derived. Boot-never-started (Phalanx): confirmed genuine stall via PROBE_MODE=frames to 9000 frames (150s), not a slow boot; traces to WRAM flag $7E2C00 the NMI handler gates on, never set; APU never touched, upstream of this ticket's scope. Siblings named, same shape: NBA Live 96, Tekken 2 (lowest priority, named only), Phalanx (Beta), Sonic Blast Man II, Batman - Revenge of the Joker (Proto). No crates/** change (no fix confident enough to ship); baseline ignored suites (spc700_vectors, spc_timer, gilyon, singlestep_65816_vectors, peterlemon_golden) all green unmodified; fmt/clippy/test -p rf-snes all exit 0; boot_census_child exit codes: 11/11 traced titles still 10 (blank), 4/4 canaries still 0 (rendered). docs/TESTING.md W14-46 section has full per-sub-shape chains.",
    "W14-46 FILED 2026-09-21 by the orchestrator from W14-45's family table (11 titles). The three sub-shapes may be three causes; one traced title per sub-shape is the minimum."
   ]
  },
