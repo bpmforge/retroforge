@@ -153,10 +153,24 @@ impl Windows {
 /// `$2130`-`$2132`: colour math configuration.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ColorMath {
-    /// `$2130` bits 6-7: when the colour window forces the main screen to
-    /// black. 0 = never, 1 = inside, 2 = outside, 3 = always.
+    /// `$2130` bits 6-7, "Force Main Screen Black": when the colour
+    /// window forces the main screen to black. Per fullsnes ("Color Math
+    /// Control Register A"): `0=Never, 1=NotMathWin (outside the
+    /// window), 2=MathWindow (inside the window), 3=Always` — note the
+    /// register's own value 1 means OUTSIDE and 2 means INSIDE, the
+    /// opposite of the naive "1, 2, 3 ascend in coverage" reading
+    /// (W14-42: this was inverted here for both `clip_mode` and
+    /// `prevent_mode`, forcing ActRaiser 2/Illusion of Gaia/Robotrek's
+    /// whole main screen to black whenever they left the colour window
+    /// disabled with `clip_mode=2`, since "nowhere is inside a disabled
+    /// window" then hit the swapped `2 => !inside_color_window` arm).
     pub clip_mode: u8,
-    /// `$2130` bits 4-5: when colour math is prevented.
+    /// `$2130` bits 4-5, "Color Math Enable": when colour math is
+    /// prevented (the logical negation of fullsnes's own "Enable"
+    /// framing). Per fullsnes: `0=Always (enabled), 1=MathWindow
+    /// (enabled only inside), 2=NotMathWin (enabled only outside),
+    /// 3=Never (disabled)` — same inside/outside assignment to 1/2 as
+    /// `clip_mode` above, and previously inverted the same way.
     pub prevent_mode: u8,
     /// `$2130` bit 1: use the sub-screen rather than the fixed colour.
     pub use_subscreen: bool,
@@ -208,23 +222,33 @@ impl ColorMath {
     ///
     /// This is the one part of colour math expressible on an indexed
     /// path, because black IS palette index 0.
+    ///
+    /// fullsnes ("Color Math Control Register A", `$2130` bits 6-7):
+    /// `1=NotMathWin` forces black OUTSIDE the window, `2=MathWindow`
+    /// forces black INSIDE it (W14-42 citation — see `clip_mode`'s doc).
     #[must_use]
     pub fn clip_to_black(&self, inside_color_window: bool) -> bool {
         match self.clip_mode {
             0 => false,
-            1 => inside_color_window,
-            2 => !inside_color_window,
+            1 => !inside_color_window,
+            2 => inside_color_window,
             _ => true,
         }
     }
 
     /// Is colour math prevented at this position?
+    ///
+    /// fullsnes ("Color Math Control Register A", `$2130` bits 4-5):
+    /// `1=MathWindow` means math is ENABLED (not prevented) INSIDE the
+    /// window, so it is prevented outside; `2=NotMathWin` is enabled
+    /// outside, prevented inside (W14-42 citation — see `prevent_mode`'s
+    /// doc).
     #[must_use]
     pub fn prevented(&self, inside_color_window: bool) -> bool {
         match self.prevent_mode {
             0 => false,
-            1 => inside_color_window,
-            2 => !inside_color_window,
+            1 => !inside_color_window,
+            2 => inside_color_window,
             _ => true,
         }
     }

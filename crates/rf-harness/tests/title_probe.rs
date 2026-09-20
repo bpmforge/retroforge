@@ -183,6 +183,22 @@
 //!                                    trusting `oam_nonzero`/`cgram_nonzero`
 //!                                    byte counts, which say nothing about
 //!                                    position or transparency (W14-38)
+//! PROBE_RENDERNOW=1                  after the instruction-step sample,
+//!                                    call `Ppu::render_scanline` for lines
+//!                                    0..224 (the same call PROBE_M7's
+//!                                    FRAMES-mode `distinct_indices_now`
+//!                                    uses) and print how many distinct
+//!                                    palette indices the compositor
+//!                                    actually produces right now —
+//!                                    answers "does the renderer draw more
+//!                                    than a flat frame" at an arbitrary
+//!                                    PROBE_INSTR sample point, not only at
+//!                                    a FRAMES-mode frame boundary; pair
+//!                                    with PROBE_OAM to ask whether
+//!                                    on-screen non-transparent OAM/CGRAM
+//!                                    content the decode finds is actually
+//!                                    reaching the composited picture
+//!                                    (W14-42)
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -302,7 +318,7 @@ fn probe() {
                     let sys = core.system();
                     let ppu = &sys.bus.ppu;
                     println!(
-                        "    frame={} mode={} forced_blank={} bright={} tm=[{}] m7={:?} bg1 hofs={} vofs={}",
+                        "    frame={} mode={} forced_blank={} bright={} tm=[{}{}] m7={:?} bg1 hofs={} vofs={}",
                         sys.bus.timing.frame,
                         ppu.bg_mode,
                         ppu.forced_blank,
@@ -310,9 +326,19 @@ fn probe() {
                         (0..4)
                             .map(|i| if ppu.bgs[i].enabled { '1' } else { '0' })
                             .collect::<String>(),
+                        if ppu.obj_enabled { "+obj" } else { "" },
                         ppu.mode7,
                         ppu.bgs[0].hofs,
                         ppu.bgs[0].vofs
+                    );
+                    // W14-42: is the flat composited frame explained by
+                    // colour math/window forcing every pixel to the same
+                    // fixed colour (a real hardware effect), or does the
+                    // compositor drop real BG/OBJ content for no register
+                    // reason? Cheap to rule the first out directly.
+                    println!(
+                        "    color_math={:?} windows={:?} bg1={:?}",
+                        ppu.color_math, ppu.windows, ppu.bgs[0]
                     );
                 }
                 let sys2 = core.system_mut();
@@ -1068,6 +1094,29 @@ fn probe() {
             }
             *pcs.entry(pcv).or_default() += 1;
             *spc.entry(core.system().bus.apu.cpu.pc).or_default() += 1;
+        }
+        // W14-42: same "compose the actual picture right now" check
+        // PROBE_M7 already does in FRAMES mode (render_scanline for every
+        // visible line, dedupe palette_index), but usable from the
+        // instruction-step path too — answers "with the OAM/CGRAM/TM
+        // state PROBE_OAM already decoded above, does the compositor
+        // actually PRODUCE more than a flat frame" at an arbitrary
+        // PROBE_INSTR sample point, not only at a FRAMES-mode frame
+        // boundary. Must run before `sys`/`ppu` below borrow `core`
+        // immutably for the rest of this function.
+        if std::env::var("PROBE_RENDERNOW").is_ok() {
+            let sys_mut = core.system_mut();
+            let mut idx = std::collections::HashSet::new();
+            for y in 0..224u16 {
+                for px in sys_mut.bus.ppu.render_scanline(y).pixels {
+                    idx.insert(px.palette_index);
+                }
+            }
+            let sample: Vec<u8> = idx.iter().take(8).copied().collect();
+            println!(
+                "  RENDERNOW distinct_indices={} sample={sample:?}",
+                idx.len()
+            );
         }
         let sys = core.system();
         let ppu = &sys.bus.ppu;
