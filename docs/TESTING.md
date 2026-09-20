@@ -4036,3 +4036,218 @@ separately, since the two sub-shapes look mechanically different.
 clear of RDNMI bit 7 is a hardware-fidelity fix with no effect on the
 library's boot census; the four traced titles stay uniform for the reason
 above (forced blank never lifted), which is the named next ticket.
+
+## W14-38 — forced-blank-never-lifted family: ActRaiser 2/Illusion of
+Gaia/Robotrek trace to the same Quintet driver deadlock W14-33 already
+found for other titles; Lagoon/Phalanx/Goal! are still in ordinary
+per-frame idling at the census's own 600-frame window. All six BLOCKED,
+2026-09-20.
+
+**Method correction before anything else: `PROBE_INSTR` and the
+census's actual window are not the same thing, and conflating them
+produced a false lead.** `boot_census_child` runs `FRAMES = 600`
+(`crates/rf-harness/tests/boot_census.rs:68`) via `Step::Frame`, i.e. 600
+full video frames, however many CPU instructions that costs. This
+ticket's first pass ran `PROBE_INSTR=3000000` and read the state at
+whatever frame that instruction budget happened to reach (**159** frames
+for ActRaiser 2, per the trace below) — a much SHORTER window than the
+600 frames the census itself uses. Re-running with `PROBE_MODE=frames
+PROBE_FRAMES=600` (the census's own granularity) confirmed the symptom is
+real at the census's actual window (`FRAMES varied_at=None`, `frame=600
+forced_blank=true tm=[1110+obj]` via `PROBE_M7`), but a large-`PROBE_INSTR`
+sweep was still needed to see what these titles do PAST 600 frames, since
+several of them are still inside a completely ordinary, healthy
+`wait_for_vblank` idiom at that exact point — the same idiom W14-35 named
+"normal, not a symptom" for its own four titles.
+
+**New diagnostic, `PROBE_OAM=1` (module doc in `title_probe.rs`
+updated)**: decodes all 128 OAM entries the way `obj::decode_sprite` does
+and, for the first 20 sprites whose Y span overlaps the visible 0..224
+lines, additionally computes the top-left texel's composed colour index
+via `bg::fetch_pixel` — the same base/character arithmetic
+`obj::draw_sprite` uses. Built to answer, without trusting the existing
+`oam_nonzero`/`cgram_nonzero` byte counts (which say nothing about
+position or transparency): are ActRaiser 2's OBJ-only-main-screen sprites
+genuinely off-screen, or on-screen with real non-transparent tile data
+while the renderer still shows nothing? Answer: **on-screen, with real
+data** — 24 sprites at plausible logo-picture coordinates (x=96-144,
+y=63-143, 16x16 tiles), several with non-zero composed colour (15, 4, 12).
+This ruled out a compositor defect (see below) but is a real find worth
+keeping as a probe.
+
+**The `PROBE_OAM` finding that mattered was negative, and finding out why
+took a second diagnostic.** `varied=false lines=0` in every `PROBE_INSTR`
+run is not evidence of a uniform picture — `lines=0` means
+`Sink::video_scanline` was **never called**, because the raw
+instruction-stepping path (`core.step(Step::Instruction, ...)`) never
+calls `emit_frame` (`crates/rf-snes/src/core.rs:314-320`; only the
+`Step::Frame`/`Step::Scanline` arm does, at line 341-343). So the render
+path is simply not exercised in `PROBE_INSTR` mode — the composer was
+never actually the thing being tested by that number. Confirmed correct
+separately via `PROBE_MODE=frames PROBE_M7=1`: `distinct_indices_now=1`
+at frame 600, a real "the composed picture is one flat index" result from
+the code path that does call the renderer. The OBJ pixels found by
+`PROBE_OAM` are real ROM/VRAM/OAM content, but frame 600 is a moment when
+the whole screen is legitimately forced-blanked (`forced_blank=true`), so
+the composer correctly emits nothing at that instant. **No renderer
+defect.**
+
+**ActRaiser 2, Illusion of Gaia, Robotrek — the shared-driver trio
+(confirmed shared, per the ticket's own hypothesis).** `PROBE_INSTR` swept
+from 3M to 30M instructions on ActRaiser 2 shows a real, in-game sequence,
+not a single unchanging hang:
+
+| n (instructions) | frame | forced_blank | bright | tm | top CPU spin |
+|---|---|---|---|---|---|
+| 3,000,000 | 159 | false | 15 | `0000+obj` | `80BDE4 LDA $4210`/`BPL` (healthy vblank wait) |
+| 12,000,000 | 644 | true | 0 | `1110+obj` | `80CD7C LDA $2140`/`BNE` (APU port wait) |
+| 30,000,000 | 1551 | true | 0 | `1110+obj` (unchanged) | same APU port wait, still spinning |
+
+So ActRaiser 2 genuinely renders an OBJ-only logo with a real fade
+(`INIDISPLOG n=2410413 pc=80BE19 forced_blank:true->false`, `n=2427833
+pc=80B962 bright:0->15`, matching fullsnes's ordinary INIDISP semantics —
+no divergence there), then re-blanks and, somewhere between frame 159 and
+644 (squarely inside the census's 600-frame window), transitions into an
+APU command-port wait that never resolves across 30,000,000 instructions
+(1551 frames, ~26 seconds) — `IRQLOG` totals show only 4 total `$2100`
+edges across the whole run and `nmi_dispatch_events` frozen at 246 while
+`rdnmi_set/clear`/`hvbjoy` keep climbing with the frame counter, i.e. the
+CPU stopped taking NMIs partway through but its raw `$4210`/`$2140`
+polling loops keep running correctly — consistent with a driver-level
+deadlock, not a frozen core.
+
+`PROBE_DIS=80:cd50:cdc0` on ActRaiser 2 at the stall:
+
+```
+80CD77: LDA #$F0
+80CD79: STA $2140      ; send command $F0 to the SPC driver
+80CD7C: LDA $2140      ; wait for the driver's own reset-to-zero ack
+80CD7F: BNE $CD7C       ; <- stuck here; ports_out[0] stays $01, never 0
+80CD81: LDA #$02
+80CD83: JSL $80BE29     ; unreached
+```
+
+`ports_in=[F0,00,00,00] ports_out=[01,00,00,00]` (Illusion of Gaia:
+identical; Robotrek: `ports_out=[01,02,00,00]`, same shape, extra byte in
+port 1 — not chased separately, per this ticket's scope). This is
+**exactly** W14-33's Super Turrican shape: the CPU sends a command and
+waits for the driver to echo the port back to zero as an ack, and the
+port is stuck non-zero. The SPC PC that dominates the sample (`046D`/
+`046F`, 79-81 distinct SPC PCs, identical across all three titles —
+confirming the ticket's "one trace may cover all three" hypothesis) is
+**not** itself the deadlock: opcode-table-decoded against
+`crates/rf-snes/src/apu/spc700/ops.rs` (`0xEB` at `ops.rs:432`, `0xF0` at
+`ops.rs:643`), the bytes at `$046D`-`$0470`
+(`aram 0460: […,eb,fd,f0]`) are:
+
+```
+046D: MOV Y,$FD    ; read+clear Timer 0's counter (dp$FD)
+046F: BEQ $046D    ; loop while the counter is still 0
+```
+
+— the driver's own **per-tick idle loop** (`timers en=[true,true,false]`
+confirms Timer 0/1 are actively enabled and running), the SPC-side
+equivalent of the CPU's `$4210` vblank wait. A healthy driver idles here
+between ticks; seeing it dominate the sample is not itself evidence of a
+hang, exactly as W14-35 found for the CPU-side `$4210` idiom. The actual
+deadlock is purely CPU-side: `ports_out[0]` (what the driver reports back)
+never returns to 0 after the `$F0` command, and — as in W14-33 — the exact
+call sequence inside the driver that leaves it there is not resolved
+within this ticket's budget.
+
+**Register/timing semantics re-checked against the W14-33 acceptance
+list** (unchanged code since that ticket, re-verified directly rather
+than assumed): `$F1` bit 4/5/7 clears (`apu/mod.rs:611-623`), `$F4-$F7`
+routing keyed on resolved address not addressing mode (`apu/mod.rs:700`),
+timer `$FD-$FF` clear-on-read, `catch_up_apu()` ordering before every
+`$2140-$2143` access (`bus.rs:438-465`), and the IPL `Run`/`Echo` handoff
+— all unchanged in this ticket's diff (no `crates/rf-snes/src/apu/**` or
+`bus.rs` edits) and all previously found correct. No divergence found in
+any of them for this trio.
+
+**Lagoon, Phalanx, Goal! — a different, earlier stall: still doing
+ordinary per-frame idling at the census's window, not yet talking to the
+APU driver.** Same `PROBE_INSTR=15,000,000` sweep (frame ~965-966 for
+Lagoon/Phalanx, ~964 for Goal!):
+
+- **Lagoon**: `ports_in=ports_out=[00,00,00,00]` — the CPU has never
+  written anything to the APU ports at all. Top spin `008148 LDA
+  $4210`/`00814B BPL` — plain vblank wait (`PROBE_DIS=00:8140:8160`),
+  identical idiom to ActRaiser 2's own frame-159 state. `cgram_nonzero=0`:
+  no palette has ever been loaded.
+- **Phalanx**: `apu.boot_running=false`, `ports_out=[AA,BB,00,00]` —
+  `IplBoot`'s `BootState::Ready` (`apu/boot.rs:36-49`), i.e. the APU has
+  published the ready pair and the CPU has not yet written `$CC` to start
+  an upload. This is the HLE's documented behaviour while ready
+  (`apu/boot.rs`'s own module doc: "while the boot handshake is running,
+  the SPC700 core does not execute") — not a hung SPC core, an SPC that
+  has correctly not been asked to run anything yet. Top spin `00811A LDA
+  $4210`/`00811D BPL`, again the plain vblank idiom
+  (`PROBE_DIS=00:80f0:8160`); `cgram_nonzero=0`, `oam_nonzero=0` — nothing
+  has been loaded yet on the graphics or sound side.
+- **Goal!**: `apu.boot_running=true`, `ports_out=[80,00,00,00]`, SPC
+  `distinct_pc=260` (clearly executing a real driver, not parked). Top
+  spin `1C8DEC`/`1C8DF1 LDA $4210` (`BMI`/`BPL` pair, two consecutive
+  vblank waits — `PROBE_DIS=1c:8de0:8e00`), preceded by `STA $4200,#$81`
+  (NMI enable) — an ordinary per-frame idiom, not an APU wait.
+
+None of these three shows an APU command sent and stuck; all three are
+still in the same category W14-35 already named "healthy, not a
+symptom" for its own four titles, just observed later in a longer boot
+sequence than that ticket sampled. Not chased past this characterization,
+per this ticket's scope discipline (the acceptance asks that they be
+named, not each fully chained).
+
+**BLOCKED verdict, all six.** ActRaiser 2/Illusion of Gaia/Robotrek trace
+to a specific port (`$2140`, port 0), a specific stuck value
+(`ports_out[0]` staying `$01`/`$02` instead of `0`), and a specific side
+(the SPC driver's own ack, not this crate's port routing, timer, IPL
+handoff or 16-bit-access handling — all re-checked clean) — the same
+class of driver-authored call/response deadlock W14-33 already found and
+left BLOCKED for Rival Turf!/Super Turrican/Wario's Woods, and per law 5
+these are the game's own uploaded driver bytes, not something
+`crates/rf-snes` can patch around. Lagoon/Phalanx/Goal! are traced to a
+specific register (`$4210` RDNMI, the same healthy idiom W14-35 verified)
+and, for Phalanx, a specific state (`IplBoot::BootState::Ready`, correctly
+not yet asked to run) — no register or timing divergence found, and no
+further chain was pursued past that characterization within this
+ticket's scope. No fix shipped: nothing found diverges from fullsnes/
+snes.nesdev in any of the areas this ticket's acceptance names.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes --release` — **364 passed**, 0
+failed, 1 ignored (no `rf-snes` library code changed this ticket, only
+`crates/rf-harness/tests/title_probe.rs` diagnostics); ignored SNES oracle
+suites: `singlestep_spc700_vectors` (256,000/256,000),
+`spc_timer_reports_pass` ("PASSED TESTS"),
+`gilyon_cputest::cputest_full_reports_success_and_every_test_passes`
+(`test_num=0x0649/0x0649, "Success"`), `peterlemon_golden`'s three tests,
+and `singlestep_65816_vectors` (5,080,000/5,080,000, same pre-existing
+MVN/MVP exclusion as every prior ticket) all still pass.
+
+**Census children** (`boot_census_child`): all six unmoved at exit **10**
+(ActRaiser 2, Illusion of Gaia, Robotrek, Lagoon, Phalanx, Goal!). Named
+canaries checked unmoved: Super Mario RPG, Super Mario World, Wild Guns,
+NHL 95, Kirby Super Star, Full Throttle - All-American Racing (Beta), WWF
+Super WrestleMania all exit **0** (rendered); Soul Blazer and Super
+Turrican both exit **10**, consistent with their own pre-existing BLOCKED
+status (W14-33 for Super Turrican) and not a regression, since no
+`rf-snes` behavior changed this ticket.
+
+**Determinism**: unaffected — no `rf-snes` field, save-state surface, or
+core behavior changed; the only diff is diagnostic-only test-harness code
+in `crates/rf-harness/tests/title_probe.rs` (`PROBE_OAM`, plus a
+documentation caveat on `PROBE_WATCH`'s open-bus behavior for write-only
+PPU registers, discovered while chasing this ticket and worth recording
+so the next ticket does not repeat it).
+
+**Named next step**: the ActRaiser 2/Illusion of Gaia/Robotrek driver
+deadlock needs the same full call-sequence trace across the whole run
+(every command value sent to port 0, in order, from every caller) that
+W14-33 left as Super Turrican's own open question — the two may turn out
+to share not just a driver but the same unresolved defect. Lagoon,
+Phalanx and Goal! need a much longer `PROBE_INSTR` budget (tens of
+millions more instructions) to find out whether they eventually reach
+the same APU-command stage the trio does, or something else entirely;
+not pursued here since none of the three showed anything past the
+already-characterized healthy idle.

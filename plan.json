@@ -7544,7 +7544,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "blocked",
   "stories": [],
   "id": "W14-38",
   "title": "Forced-blank-never-lifted family: ActRaiser 2, Illusion of Gaia, Lagoon, Phalanx, Goal!, Robotrek run their main loops but never write a non-blank $2100 — trace what each is waiting for",
@@ -7559,7 +7559,8 @@
    "W14-38: a BLOCKED verdict must trace the chain back to ROM bytes or a checked register read; 'waiting on the APU' alone is not a verdict — which port, which value, which side"
   ],
   "notes": [
-   "W14-38 FILED 2026-09-20 by the orchestrator from W14-35's reclassification of the raster/IRQ family. ActRaiser 2, Illusion of Gaia and Robotrek are Quintet titles that share a sound driver; if the wait is on the APU, one trace may cover all three."
+   "W14-38 FILED 2026-09-20 by the orchestrator from W14-35's reclassification of the raster/IRQ family. ActRaiser 2, Illusion of Gaia and Robotrek are Quintet titles that share a sound driver; if the wait is on the APU, one trace may cover all three.",
+   "W14-38 CLOSED 2026-09-20, BLOCKED. Confirmed the Quintet-shared-driver hypothesis: ActRaiser 2/Illusion of Gaia/Robotrek all send APU command $F0 on port 0 and hang waiting for the driver's ack (ports_out[0] stuck non-zero) -- the same call/response deadlock class W14-33 found for Rival Turf!/Super Turrican/Wario's Woods, opcode-decoded and re-checked against the W14-33 register/timing list with no divergence found. Lagoon/Phalanx/Goal! are still in ordinary, healthy $4210 per-frame idling at the census's 600-frame window (Phalanx: IplBoot::BootState::Ready, correctly not yet asked to run) -- named, not chased further. No fix shipped (law 5: game/driver bytes). New title_probe.rs diagnostic PROBE_OAM; PROBE_WATCH documented as unsafe on write-only PPU registers. See docs/TESTING.md."
   ]
  }
 ]
