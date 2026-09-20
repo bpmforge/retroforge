@@ -1655,11 +1655,28 @@ stack02=01` (about to `RET`, top of stack holds the just-pushed
 `$02,$01` — target `$0102` byte for byte). This is the well-known
 SPC700 "push address, `RET`-to-jump" computed-dispatch idiom, correctly
 executed: `ASL`/`MOV`/`PUSH`/`RET` all behave exactly per the SPC700
-opcode definitions (snes.nesdev.org/wiki/SPC700_instruction_set), with
-the ordinary 8-bit wraparound of the `Y` register that real hardware
-has no way to avoid either — `cmd*2` for an 8-bit `Y` aliases every
-`cmd` 128 apart onto the same table slot, so command `$FE` reads the
-same table entry as command `$7E`.
+opcode definitions (snes.nesdev.org/wiki/SPC700_instruction_set).
+
+**Correction made during review, before this was accepted as a
+verdict: the entry into `$07C3` is bounds-checked, so there is no `Y`
+wraparound/aliasing here.** `$0745-$0749` (`68 E0 90 05 3F C3 07`) is
+`CMP A,#$E0` / `BCC +5` / `CALL !$07C3` — `$07C3` is reached **only**
+when `A>=$E0`, so `A` entering the dispatcher is always in `$E0-$FF`
+and `ASL A` (`cmd*2`, 8-bit) is **injective** over that range (`$E0`
+through `$FF` map to `$C0` through `$FE` one-to-one, no collisions).
+The real mechanism, decoded from the full table
+(`$0994+cmd*2`/`$0995+cmd*2` for every `cmd` in `$E0-$FF`, verified
+against every dumped byte): commands `$E0-$FA` (27 slots) all decode
+to plausible driver-code addresses (`$07DF` through `$0A05`, all
+inside the code range this same dump covers); commands `$FB-$FF` (the
+next 5 slots) decode to `$0101`, `$0302`, `$0100`, `$0102`, `$0102` —
+all inside the same cleared/dead region. The table's last real entry
+is `$FA`; bytes for `$FB` onward (`01 01 02 03 00 01 02 01 02 01 01`
+at `$0A8A-$0A94`) read far more like a **parallel per-command
+operand-length array** for the 27 valid commands (small values,
+0-3) than like address-table entries — i.e. `$07C3` has no bounds
+check of its own beyond the caller's `A>=$E0`, and command `$FE` reads
+four slots past the table's real end into that adjacent array.
 
 **Every byte on this path matches the ROM exactly — checked, not
 assumed.** `PROBE_FINDROM` located the dispatcher routine itself
@@ -1676,33 +1693,67 @@ access anywhere in it** — hypothesis 1 from the ticket brief is
 exonerated by this disassembly, not by argument) reads straight from
 ROM and sends what it reads. `PROBE_FINDROM` confirms the exact
 transmitted run (`B5 2F EF 20 1F 0F F3 91 ... 3D F4 FE 30 D3`) exists
-unbroken in the ROM at `88:B2D9-88:B2E8` — the `$FE` is the game's own
-data, not a corrupted or short transfer (hypothesis 2 exonerated).
+unbroken in the ROM at `88:B2D9-88:B2E8` — the `$FE` byte genuinely
+exists in the ROM at the exact position that was transmitted; the
+upload itself is not short, corrupted, or reordered (hypothesis 2
+exonerated for the transfer mechanics).
 
-**Conclusion: this is the game's own code and data producing the
-outcome; real hardware would do the same.** Given an unmodified copy
-of the dispatcher, an unmodified copy of its table, an unmodified copy
-of the uploaded command byte, and SPC700 opcodes (`ASL`, `PUSH`,
-`RET`) executing exactly as documented — including the 8-bit `Y`
-wraparound that is architectural, not an emulation choice — landing on
-`$0102` and running off into cleared RAM until a stray `$FF` stops the
-chip is not something this emulator invented. Per acceptance criterion
-4 and law 5, no fix ships and no game bytes are patched around.
+**What is proven and what is not.** Proven, byte-for-byte: the
+dispatcher, its table, and the transmitted command byte are all
+unmodified ROM/upload content, and the specific instructions executed
+on the `$07C3-$07DE` path (`ASL`, `MOV`, `PUSH`, `RET`) match SPC700
+opcode semantics exactly, with no wraparound or collision involved —
+given `A=$FE` at `$07C3`, any correct SPC700 (real or emulated) reads
+the same four bytes and lands on `$0102`. **Not proven**: whether
+`A=$FE` is what the sequencer's own byte-walking logic is *supposed*
+to hand the dispatcher at this point in the score, versus a symptom of
+that logic (upstream of `$0704`, not yet disassembled) consuming one
+byte too few or too many from an earlier command's operand and landing
+on a data byte instead of a command byte. `PROBE_PACKETLOG` (named in
+acceptance criterion 1) was run over the whole instruction window and
+shows `x_register_changes=13145` against `ports_in0_changes=42530` —
+but the port ring shows **no `$2140` traffic at all** in the ~18,400
+instructions immediately before the fault (the last port change is
+around instruction 4,716,723; the fault is at 4,735,165), so this
+diagnostic — built for a live upload's consumption count — does not
+apply to a driver reading an already-resident, static data buffer and
+cannot discriminate here. The comprehensive singlestep vector suites
+(`singlestep_spc700_vectors`, 256,000/256,000; `singlestep_65816_vectors`,
+5,080,000/5,080,000) passing is evidence against a *generic* SPC700
+opcode/flag defect (hypothesis 3) that would corrupt a pointer-walk,
+but those vectors test isolated opcode+state combinations, not this
+specific driver's full instruction sequence, so they do not close the
+question either.
 
-**Named next step**, left for whoever picks this back up: this
-investigation stops at "command byte `$FE` reaches this dispatcher and
-aliases onto table slot `$7E`'s entry"; it does not explain *why* the
-data stream hands the sequencer `$FE` at this position, i.e. whether
-`$FE` is a legitimate extended-command byte whose real target is
-supposed to be a genuine no-op/halt (plausible — SPC700 "wait for
-reset" idioms exist), or whether an earlier byte in the same stream
-was mis-consumed (one byte short or long) by this driver's *own*
-sequencer logic, desyncing which bytes are read as commands versus
-data. Both are the game's own code either way (no bound-check to add
-under this ticket's write scope without patching ROM-sourced control
-flow), but the second would be a more interesting finding for a future
-audio-driver deep-dive; it needs disassembling the full sequencer this
-loop is called from, out of this session's budget.
+**Conclusion: BLOCKED, with the residual question named rather than
+resolved.** Every byte and every opcode actually exercised on the path
+from `$07C3` to the halt is verified, unmodified ROM/upload content
+executed per documented SPC700 semantics — this half of the ticket's
+acceptance criterion is met. Whether real hardware would ever present
+`A=$FE` to this exact dispatch point depends on code this session did
+not reach (the sequencer's command-fetch-and-skip loop feeding
+`$0704`/`$0723`/`$0745`, executed only once in the traced run per
+`PROBE_SPCRING`, so it is not the steady-state per-tick loop). Per law
+5, nothing in `crates/rf-snes` is patched around a ROM-sourced dispatch
+table on the strength of a partial trace, so no fix ships. This
+follows the W14-25 precedent of closing BLOCKED on a verified-as-far-as-
+traced mechanism plus a named, unresolved question, rather than
+overclaiming full hardware-equivalence.
+
+**Named next step**, left for whoever picks this back up: disassemble
+the command-fetch/operand-skip loop that leads into `$0704` (it uses
+the `$0A8A-$0A94` byte array identified above as per-command operand
+lengths — confirm that reading and its length-driven pointer advance
+against the ROM the same way `$07C3-$07DE` was confirmed here). If
+that loop's own read pointer, at the specific dispatch that reaches
+`$0745` with `A=$FE`, is consuming a ROM-sourced length correctly, this
+closes WONTFIX outright (the game's own table has no bounds check past
+`$FA`, and real hardware would take the identical four-slot overrun).
+If the pointer has drifted by even one byte from an earlier
+mis-skipped operand, that is a real emulator defect in this driver's
+byte-consumption, not a wraparound curiosity, and it belongs in the
+class of desync bugs this ticket's brief anticipated as hypothesis 2 —
+just one step further upstream than the `$2140` upload itself.
 
 **New diagnostic, kept**: `title_probe.rs` gained `PROBE_SPCREGPC=hex[,hex]`
 (module doc updated) — prints the SPC700's `A`/`X`/`Y`/`SP` and the
