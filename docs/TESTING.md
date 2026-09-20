@@ -3018,7 +3018,15 @@ table for the six ALU groups, and every individual `match` arm quoted
 below by line number) and run over each dumped byte range, so every
 mnemonic quoted here is opcode-table-verified, not inferred. Getting this
 wrong was the exact trap this ticket's acceptance guards against — see
-the earlier BLOCKED-verdict cautionary tale under W14-24 above.
+the earlier BLOCKED-verdict cautionary tale under W14-24 above. The
+script lived in this session's scratchpad and is gone; every ticket in
+the W14-23..33 chain has hand- or script-decoded SPC700 bytes ad hoc,
+which is worth a shipped decoder in `title_probe.rs` alongside the
+existing 65816 `PROBE_DIS` — flagged here rather than built, since it is
+new code needing the full gate and this ticket's write scope is the
+diagnosis. Until then, re-derive it the same way: walk `ops.rs`'s
+`alu_operand` table and `match opcode` arms for exactly the bytes in
+question, one opcode at a time.
 
 **Register/timing semantics checked and found correct for all three (not
 the divergence):**
