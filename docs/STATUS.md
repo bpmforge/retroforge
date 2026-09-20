@@ -4021,3 +4021,42 @@ stories, 10 decisions).
   `manual_is_multiple_of` lint that only `clippy --tests` sees was
   cleared. Gate: workspace **2222 passing / 0 failed / 43 ignored**,
   clippy clean, arch OK.
+
+- **W14-34..W14-38: the re-triage and its three families** (2026-09-20).
+  W14-34 re-probed all 74 remaining uniform titles: four are slow boots
+  (Knights of the Round, Jungle Strike, Justice League Task Force beta,
+  Undercover Cops), the rest fall into raster/IRQ (25), APU handshake
+  (23), DMA/mapping (11) and a short tail. W14-36 fixed the DMA family's
+  real cause in the cartridge loader: a LoROM cart whose map-mode nibble
+  says HiROM was addressed as HiROM, so reset read a zero vector; the
+  header's winning location now decides. Census 1061/74/130 ->
+  **1066/69/130** (WWF Super WrestleMania and four betas). W14-35 found
+  the raster/IRQ family healthy and fixed one fidelity gap (RDNMI bit 7
+  also clears at vblank end, per fullsnes; no census change), which
+  reclassified those titles as forced-blank waits; W14-38 then traced the
+  Quintet trio into the same APU handshake deadlock class as W14-33's
+  Rival Turf!, Super Turrican and Wario's Woods. W14-37 charged the IPL
+  boot handoff's cycles from the published listing but its census was a
+  +7/-7 trade, so it is held. The evidence points at one root: the
+  65C816 never charges internal cycles, so the CPU outruns the SPC and
+  the raster (W14-24/W14-28 were local patches over it) — W14-39 is
+  charging them for real, pinned by the singlestep vectors' cycle lists.
+
+- **W14-39 done — the 65C816 finally pays for its internal cycles**
+  (2026-09-21). `AccessCost` had only ever charged bus accesses, so every
+  implied, RMW, branch-taken, DP and indexed penalty cycle was free and
+  the CPU outran both the raster and the SPC; W14-24 and W14-28 were
+  local patches over that. A per-opcode model (`cpu/cycles.rs`), rebuilt
+  from a histogram of the SingleStepTests cycle lists the runner used to
+  skip, now charges them, and the vector suite asserts
+  `accesses + internal == cycles.len()` for all 5,080,000 cases. The
+  math unit counts real CPU cycles (fullsnes: "clocked by the CPU
+  Clock"), superseding both earlier credits. Census 1066/69/130 ->
+  **1076/59/130**: fifteen up including three of the "deadlocked on its
+  own driver" titles, five down and named (Zeo's budget edge, the three
+  Pagemaster dumps' 49-second loader idle, Tommy Moe's residual
+  handoff race). Two peterlemon and six undisbeliever goldens re-pinned
+  after the capture instant shifted; frames dumped and looked at. W14-37
+  stays held for a re-census on this base. Gate: workspace **2224
+  passing / 0 failed / 43 ignored** (one wall-clock budget test flaked
+  under the parallel run and passes 3/3 alone), clippy clean, arch OK.

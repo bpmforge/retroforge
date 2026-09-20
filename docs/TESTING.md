@@ -803,6 +803,8 @@ First run, 2026-09-15, release build:
 | SNES, after W14-26 | 1265 | **1037** | 98 | 130 | **0** | **0** |
 | SNES, after W14-31 | 1265 | **1054** | 81 | 130 | **0** | **0** |
 | SNES, after W14-28 | 1265 | **1061** | 74 | 130 | **0** | **0** |
+| SNES, after W14-36 | 1265 | **1066** | 69 | 130 | **0** | **0** |
+| SNES, after W14-39 | 1265 | **1076** | 59 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -4036,6 +4038,858 @@ separately, since the two sub-shapes look mechanically different.
 clear of RDNMI bit 7 is a hardware-fidelity fix with no effect on the
 library's boot census; the four traced titles stay uniform for the reason
 above (forced blank never lifted), which is the named next ticket.
+
+## W14-38 — forced-blank-never-lifted family: ActRaiser 2/Illusion of
+Gaia/Robotrek trace to the same Quintet driver deadlock W14-33 already
+found for other titles; Lagoon/Phalanx/Goal! are still in ordinary
+per-frame idling at the census's own 600-frame window. All six BLOCKED,
+2026-09-20.
+
+**Method correction before anything else: `PROBE_INSTR` and the
+census's actual window are not the same thing, and conflating them
+produced a false lead.** `boot_census_child` runs `FRAMES = 600`
+(`crates/rf-harness/tests/boot_census.rs:68`) via `Step::Frame`, i.e. 600
+full video frames, however many CPU instructions that costs. This
+ticket's first pass ran `PROBE_INSTR=3000000` and read the state at
+whatever frame that instruction budget happened to reach (**159** frames
+for ActRaiser 2, per the trace below) — a much SHORTER window than the
+600 frames the census itself uses. Re-running with `PROBE_MODE=frames
+PROBE_FRAMES=600` (the census's own granularity) confirmed the symptom is
+real at the census's actual window (`FRAMES varied_at=None`, `frame=600
+forced_blank=true tm=[1110+obj]` via `PROBE_M7`), but a large-`PROBE_INSTR`
+sweep was still needed to see what these titles do PAST 600 frames, since
+several of them are still inside a completely ordinary, healthy
+`wait_for_vblank` idiom at that exact point — the same idiom W14-35 named
+"normal, not a symptom" for its own four titles.
+
+**New diagnostic, `PROBE_OAM=1` (module doc in `title_probe.rs`
+updated)**: decodes all 128 OAM entries the way `obj::decode_sprite` does
+and, for the first 20 sprites whose Y span overlaps the visible 0..224
+lines, additionally computes the top-left texel's composed colour index
+via `bg::fetch_pixel` — the same base/character arithmetic
+`obj::draw_sprite` uses. Built to answer, without trusting the existing
+`oam_nonzero`/`cgram_nonzero` byte counts (which say nothing about
+position or transparency): are ActRaiser 2's OBJ-only-main-screen sprites
+genuinely off-screen, or on-screen with real non-transparent tile data
+while the renderer still shows nothing? Answer: **on-screen, with real
+data** — 24 sprites at plausible logo-picture coordinates (x=96-144,
+y=63-143, 16x16 tiles), several with non-zero composed colour (15, 4, 12).
+This ruled out a compositor defect (see below) but is a real find worth
+keeping as a probe.
+
+**The `PROBE_OAM` finding that mattered was negative, and finding out why
+took a second diagnostic.** `varied=false lines=0` in every `PROBE_INSTR`
+run is not evidence of a uniform picture — `lines=0` means
+`Sink::video_scanline` was **never called**, because the raw
+instruction-stepping path (`core.step(Step::Instruction, ...)`) never
+calls `emit_frame` (`crates/rf-snes/src/core.rs:314-320`; only the
+`Step::Frame`/`Step::Scanline` arm does, at line 341-343). So the render
+path is simply not exercised in `PROBE_INSTR` mode — the composer was
+never actually the thing being tested by that number. Confirmed correct
+separately via `PROBE_MODE=frames PROBE_M7=1`: `distinct_indices_now=1`
+at frame 600, a real "the composed picture is one flat index" result from
+the code path that does call the renderer. The OBJ pixels found by
+`PROBE_OAM` are real ROM/VRAM/OAM content, but frame 600 is a moment when
+the whole screen is legitimately forced-blanked (`forced_blank=true`), so
+the composer correctly emits nothing at that instant. **No renderer
+defect.**
+
+**ActRaiser 2, Illusion of Gaia, Robotrek — the shared-driver trio
+(confirmed shared, per the ticket's own hypothesis).** `PROBE_INSTR` swept
+from 3M to 30M instructions on ActRaiser 2 shows a real, in-game sequence,
+not a single unchanging hang:
+
+| n (instructions) | frame | forced_blank | bright | tm | top CPU spin |
+|---|---|---|---|---|---|
+| 3,000,000 | 159 | false | 15 | `0000+obj` | `80BDE4 LDA $4210`/`BPL` (healthy vblank wait) |
+| 12,000,000 | 644 | true | 0 | `1110+obj` | `80CD7C LDA $2140`/`BNE` (APU port wait) |
+| 30,000,000 | 1551 | true | 0 | `1110+obj` (unchanged) | same APU port wait, still spinning |
+
+So ActRaiser 2 genuinely renders an OBJ-only logo with a real fade
+(`INIDISPLOG n=2410413 pc=80BE19 forced_blank:true->false`, `n=2427833
+pc=80B962 bright:0->15`, matching fullsnes's ordinary INIDISP semantics —
+no divergence there), then re-blanks and, somewhere between frame 159 and
+644 (squarely inside the census's 600-frame window), transitions into an
+APU command-port wait that never resolves across 30,000,000 instructions
+(1551 frames, ~26 seconds) — `IRQLOG` totals show only 4 total `$2100`
+edges across the whole run and `nmi_dispatch_events` frozen at 246 while
+`rdnmi_set/clear`/`hvbjoy` keep climbing with the frame counter, i.e. the
+CPU stopped taking NMIs partway through but its raw `$4210`/`$2140`
+polling loops keep running correctly — consistent with a driver-level
+deadlock, not a frozen core.
+
+`PROBE_DIS=80:cd50:cdc0` on ActRaiser 2 at the stall:
+
+```
+80CD77: LDA #$F0
+80CD79: STA $2140      ; send command $F0 to the SPC driver
+80CD7C: LDA $2140      ; wait for the driver's own reset-to-zero ack
+80CD7F: BNE $CD7C       ; <- stuck here; ports_out[0] stays $01, never 0
+80CD81: LDA #$02
+80CD83: JSL $80BE29     ; unreached
+```
+
+`ports_in=[F0,00,00,00] ports_out=[01,00,00,00]` (Illusion of Gaia:
+identical; Robotrek: `ports_out=[01,02,00,00]`, same shape, extra byte in
+port 1 — not chased separately, per this ticket's scope). This is
+**exactly** W14-33's Super Turrican shape: the CPU sends a command and
+waits for the driver to echo the port back to zero as an ack, and the
+port is stuck non-zero. The SPC PC that dominates the sample (`046D`/
+`046F`, 79-81 distinct SPC PCs, identical across all three titles —
+confirming the ticket's "one trace may cover all three" hypothesis) is
+**not** itself the deadlock: opcode-table-decoded against
+`crates/rf-snes/src/apu/spc700/ops.rs` (`0xEB` at `ops.rs:432`, `0xF0` at
+`ops.rs:643`), the bytes at `$046D`-`$0470`
+(`aram 0460: […,eb,fd,f0]`) are:
+
+```
+046D: MOV Y,$FD    ; read+clear Timer 0's counter (dp$FD)
+046F: BEQ $046D    ; loop while the counter is still 0
+```
+
+— the driver's own **per-tick idle loop** (`timers en=[true,true,false]`
+confirms Timer 0/1 are actively enabled and running), the SPC-side
+equivalent of the CPU's `$4210` vblank wait. A healthy driver idles here
+between ticks; seeing it dominate the sample is not itself evidence of a
+hang, exactly as W14-35 found for the CPU-side `$4210` idiom. The actual
+deadlock is purely CPU-side: `ports_out[0]` (what the driver reports back)
+never returns to 0 after the `$F0` command, and — as in W14-33 — the exact
+call sequence inside the driver that leaves it there is not resolved
+within this ticket's budget.
+
+**Register/timing semantics re-checked against the W14-33 acceptance
+list** (unchanged code since that ticket, re-verified directly rather
+than assumed): `$F1` bit 4/5/7 clears (`apu/mod.rs:611-623`), `$F4-$F7`
+routing keyed on resolved address not addressing mode (`apu/mod.rs:700`),
+timer `$FD-$FF` clear-on-read, `catch_up_apu()` ordering before every
+`$2140-$2143` access (`bus.rs:438-465`), and the IPL `Run`/`Echo` handoff
+— all unchanged in this ticket's diff (no `crates/rf-snes/src/apu/**` or
+`bus.rs` edits) and all previously found correct. No divergence found in
+any of them for this trio.
+
+**Lagoon, Phalanx, Goal! — a different, earlier stall: still doing
+ordinary per-frame idling at the census's window, not yet talking to the
+APU driver.** Same `PROBE_INSTR=15,000,000` sweep (frame ~965-966 for
+Lagoon/Phalanx, ~964 for Goal!):
+
+- **Lagoon**: `ports_in=ports_out=[00,00,00,00]` — the CPU has never
+  written anything to the APU ports at all. Top spin `008148 LDA
+  $4210`/`00814B BPL` — plain vblank wait (`PROBE_DIS=00:8140:8160`),
+  identical idiom to ActRaiser 2's own frame-159 state. `cgram_nonzero=0`:
+  no palette has ever been loaded.
+- **Phalanx**: `apu.boot_running=false`, `ports_out=[AA,BB,00,00]` —
+  `IplBoot`'s `BootState::Ready` (`apu/boot.rs:36-49`), i.e. the APU has
+  published the ready pair and the CPU has not yet written `$CC` to start
+  an upload. This is the HLE's documented behaviour while ready
+  (`apu/boot.rs`'s own module doc: "while the boot handshake is running,
+  the SPC700 core does not execute") — not a hung SPC core, an SPC that
+  has correctly not been asked to run anything yet. Top spin `00811A LDA
+  $4210`/`00811D BPL`, again the plain vblank idiom
+  (`PROBE_DIS=00:80f0:8160`); `cgram_nonzero=0`, `oam_nonzero=0` — nothing
+  has been loaded yet on the graphics or sound side.
+- **Goal!**: `apu.boot_running=true`, `ports_out=[80,00,00,00]`, SPC
+  `distinct_pc=260` (clearly executing a real driver, not parked). Top
+  spin `1C8DEC`/`1C8DF1 LDA $4210` (`BMI`/`BPL` pair, two consecutive
+  vblank waits — `PROBE_DIS=1c:8de0:8e00`), preceded by `STA $4200,#$81`
+  (NMI enable) — an ordinary per-frame idiom, not an APU wait.
+
+None of these three shows an APU command sent and stuck; all three are
+still in the same category W14-35 already named "healthy, not a
+symptom" for its own four titles, just observed later in a longer boot
+sequence than that ticket sampled. Not chased past this characterization,
+per this ticket's scope discipline (the acceptance asks that they be
+named, not each fully chained).
+
+**BLOCKED verdict, all six.** ActRaiser 2/Illusion of Gaia/Robotrek trace
+to a specific port (`$2140`, port 0), a specific stuck value
+(`ports_out[0]` staying `$01`/`$02` instead of `0`), and a specific side
+(the SPC driver's own ack, not this crate's port routing, timer, IPL
+handoff or 16-bit-access handling — all re-checked clean) — the same
+class of driver-authored call/response deadlock W14-33 already found and
+left BLOCKED for Rival Turf!/Super Turrican/Wario's Woods, and per law 5
+these are the game's own uploaded driver bytes, not something
+`crates/rf-snes` can patch around. Lagoon/Phalanx/Goal! are traced to a
+specific register (`$4210` RDNMI, the same healthy idiom W14-35 verified)
+and, for Phalanx, a specific state (`IplBoot::BootState::Ready`, correctly
+not yet asked to run) — no register or timing divergence found, and no
+further chain was pursued past that characterization within this
+ticket's scope. No fix shipped: nothing found diverges from fullsnes/
+snes.nesdev in any of the areas this ticket's acceptance names.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes --release` — **364 passed**, 0
+failed, 1 ignored (no `rf-snes` library code changed this ticket, only
+`crates/rf-harness/tests/title_probe.rs` diagnostics); ignored SNES oracle
+suites: `singlestep_spc700_vectors` (256,000/256,000),
+`spc_timer_reports_pass` ("PASSED TESTS"),
+`gilyon_cputest::cputest_full_reports_success_and_every_test_passes`
+(`test_num=0x0649/0x0649, "Success"`), `peterlemon_golden`'s three tests,
+and `singlestep_65816_vectors` (5,080,000/5,080,000, same pre-existing
+MVN/MVP exclusion as every prior ticket) all still pass.
+
+**Census children** (`boot_census_child`): all six unmoved at exit **10**
+(ActRaiser 2, Illusion of Gaia, Robotrek, Lagoon, Phalanx, Goal!). Named
+canaries checked unmoved: Super Mario RPG, Super Mario World, Wild Guns,
+NHL 95, Kirby Super Star, Full Throttle - All-American Racing (Beta), WWF
+Super WrestleMania all exit **0** (rendered); Soul Blazer and Super
+Turrican both exit **10**, consistent with their own pre-existing BLOCKED
+status (W14-33 for Super Turrican) and not a regression, since no
+`rf-snes` behavior changed this ticket.
+
+**Determinism**: unaffected — no `rf-snes` field, save-state surface, or
+core behavior changed; the only diff is diagnostic-only test-harness code
+in `crates/rf-harness/tests/title_probe.rs` (`PROBE_OAM`, plus a
+documentation caveat on `PROBE_WATCH`'s open-bus behavior for write-only
+PPU registers, discovered while chasing this ticket and worth recording
+so the next ticket does not repeat it).
+
+**Named next step**: the ActRaiser 2/Illusion of Gaia/Robotrek driver
+deadlock needs the same full call-sequence trace across the whole run
+(every command value sent to port 0, in order, from every caller) that
+W14-33 left as Super Turrican's own open question — the two may turn out
+to share not just a driver but the same unresolved defect. Lagoon,
+Phalanx and Goal! need a much longer `PROBE_INSTR` budget (tens of
+millions more instructions) to find out whether they eventually reach
+the same APU-command stage the trio does, or something else entirely;
+not pursued here since none of the three showed anything past the
+already-characterized healthy idle.
+
+**Full SNES census (orchestrator, 2026-09-20, main at the W14-36 merge,
+per-title `RF_CENSUS_OUT` diff against the W14-35 run):**
+**1061/74/130/0/0 -> 1066/69/130/0/0** ("SNES, after W14-36" row above).
+Five rows changed, all from *uniform screen* to *rendered something*:
+**WWF Super WrestleMania** (retail) and four betas that share its
+LoROM-with-HiROM-nibble header, **Dennis the Menace (Beta)**, **Final
+Fight 3 (Beta)**, **Killer Instinct (Beta)**, **TMNT IV: Turtles in Time
+(Beta 2)**. None regressed. W14-37 (IPL handoff cycles) was censused on a
+tree that also carried this fix and came out a +7/-7 trade against main
+(the seven regressions verified rendering here), so it is held unmerged
+until W14-39 lands and it can be re-censused on top of that.
+
+## W14-39 — 65C816 internal cycles: charge them for real, pinned by the vectors' cycle lists
+
+**Root cause, confirmed.** `speed::AccessCost` (W6-01b) deliberately
+prices bus accesses only — its own doc names the gap. `SnesSystem::step`
+had two local patches over that gap: W14-24 re-bucketed the access-only
+master-cycle total into `speed::FAST`-sized steps for the math unit
+specifically, and W14-28 added a flat one-cycle credit for single-access
+instructions. Neither touched `self.master_cycles`, the clock every
+instruction's pacing against the raster and the APU is measured in — so
+the CPU ran the same number of *instructions* per real frame that
+hardware does, but each instruction was missing its internal cycles,
+making the whole machine run roughly 47% too fast relative to the
+raster and the S-SMP. That is the root cause both W14-24 and W14-28
+independently rediscovered in miniature (a divide finishing late, a
+`WAI` racing an IRQ), and it is very likely the root of the W14-33/W14-38
+APU handshake deadlock family — confirmed below for three of the six.
+
+### The histogram
+
+Built by wrapping the vector runner's `Cpu::step` calls in
+`speed::AccessCost` and recording `cycles.len() - accesses` per
+opcode/mode file across all 5,080,000 SingleStepTests cases (both `.e`
+and `.n` for every opcode). The full per-opcode-file breakdown is not
+reproduced here (256 lines); the shape that emerged, and which
+`cpu/cycles.rs` implements, resolves into distinct classes:
+
+| Class | Delta | Opcodes (approx. count) |
+|---|---|---|
+| No penalty | 0 | Immediate, absolute (non-indexed), absolute long (indexed or not), `JMP`/`JML` family, `PEA`, `WDM`, `BRK`/`COP` (52) |
+| DP low byte only | 0 or 1 | `dp`, `(dp)`, `[dp]`, `[dp],Y`, `PEI` (41) |
+| DP indexed, fixed | 1 or 2 | `dp,X`/`dp,Y`, `(dp,X)` (22) |
+| Stack-relative | 1 (fixed) | `sr,S` reads/stores (8) |
+| `(sr,S),Y` | 2 (fixed) | reads/stores (8) |
+| Indexed-abs / `(dp),Y`, READ | 0-2, conditional on crossing for an 8-bit index, **unconditionally +1 for a 16-bit index** | `abs,X`/`abs,Y`/`(dp),Y` load/ALU forms (24) |
+| Indexed-abs / `(dp),Y`, STORE | fixed +1 (+DP for the latter) | `STA`/`STZ abs,X/Y`, `STA (dp),Y` (4) |
+| RMW | base + 1 (the modify cycle) | shift/rotate/`INC`/`DEC`/`TRB`/`TSB` through memory (28); accumulator form priced as implied (+1, 6) |
+| One-byte implied | 1 (minimum: never fewer than 2 real cycles) | flags, transfers, `INX`-family, `NOP`, pushes, `XCE`, `REP`/`SEP`, `JSR`/`JSL`/`JMP (a,X)`, `PER` (40) |
+| Pulls | 2 (fixed — a throwaway read a push never needs) | `PLA`/`PLX`/`PLY`/`PLP`/`PLB`/`PLD`, `XBA`, `RTI`, `RTL` (9) |
+| Fixed +3 | 3 | `RTS`, `WAI`, `STP` (3) |
+| Branches | 0/1/2 (taken, +crossed in emulation mode only) | 8 conditional + `BRA`; `BRL` always 1 |
+| Block moves | not vector-pinned | `MVN`/`MVP` — documented 2/iteration, see below |
+
+Nine distinct mechanisms compose the whole table; the compiler's
+exhaustiveness check on `cpu::cycles::internal_cycles`'s 256-arm match
+(no `_` catch-all needed once the excluded `MVN`/`MVP` pair is included)
+is the proof every opcode has exactly one classification.
+
+**One correction the histogram forced.** The first pass assumed indexed-
+absolute/`(dp),Y` reads pay the page-cross cycle only when the add
+actually carries, for any index width. That failed ~0.2% of every such
+opcode's cases, always in NATIVE mode, always by exactly one cycle short.
+Tracing one (`ADC $....,Y`, `79 n 1479`, offset `$240B + Y=$0073` — no
+carry) against its raw cycle trace showed a null-value phantom read at
+the *correct* (non-crossed) effective address, followed by a second real
+read at the same address: the SingleStepTests vectors show this pair
+whenever the index register is 16-bit (`X` flag clear), regardless of
+whether the add crosses. The rule is therefore per-width, not
+per-crossing, for a 16-bit index: **always** pay the extra cycle; only an
+8-bit index (emulation mode, or native with `X` set) makes it
+conditional. Fixed in `cpu::cycles::abs_indexed_read`/`dp_indirect_y_read`
+and cited there.
+
+### Vector oracle: exact, not `<=`
+
+`cpu/tests/vectors.rs`'s `Vector` now carries `cycles_len` (parsed
+eagerly, not skipped), and `run_one` wraps the test bus in `AccessCost`
+to get `accesses`, checking `accesses + cpu.internal_cycles ==
+cycles_len` alongside every register and RAM byte. **5,080,000 / 5,080,000
+pass** with the same pre-existing `MVN`/`MVP` (`$54`/`$44`) exclusion as
+every prior ticket (cycle-truncated mid-instruction — unrelated to cycle
+*counting*, about the cases themselves being captured mid-iteration).
+No new exclusion was needed.
+
+### The math unit: CPU cycles, not master cycles
+
+Per fullsnes ("SNES Maths Multiply/Divide"): the `$42xx` ports are
+"clocked by the CPU Clock" — a real CPU-cycle latency, not a master-cycle
+one. `MathUnit::tick` used to step once per `speed::FAST` (6) master
+cycles of the *access-only* total (W14-24), a coarse over-crediting
+stand-in for the missing internal cycles. Now that `Cpu::internal_cycles`
+gives the real count, `tick` takes the instruction's true CPU-cycle total
+(`AccessCost::accesses + Cpu::internal_cycles`) directly, one unit step
+per cycle, no re-bucketing and no `carry` remainder field. The W14-24 and
+W14-28 tests were rewritten to the truthful model (same scenarios: a
+divide finishes after its real 16-CPU-cycle latency, not a re-bucketed
+master-cycle count; results are unchanged since the new accounting is
+more precise, not looser).
+
+### Downstream timing shifts, traced
+
+The ticket's own warning held: correcting the CPU's pacing shifted three
+kinds of pinned test.
+
+1. **`sa1_takes_an_nmi_from_the_snes_once_enabled_and_uses_its_own_vector`**
+   (rf-snes unit test): the main CPU's two `NOP`s now each charge their
+   real internal cycle, handing the interleaved SA-1 more master-cycle
+   credit per step than before — enough to run its target's `NOP` *and*
+   `STP`, not just the `NOP`. Re-pinned to the new (correct, and
+   consistent with the test's own boot-case assertion two lines above)
+   halted PC.
+2. **Two PeterLemon goldens** (`8x8BGMap8BPP32x32.sfc`, `WaveHDMA.sfc`):
+   both use a fixed instruction-count settle loop before rendering; the
+   corrected pacing lands that settle a few master cycles later,
+   capturing a different instant of an animated effect (water-ripple
+   phase; nothing else differs). Dumped with `RF_GOLDEN_DUMP` and looked
+   at: both frames are complete and correct — the castle is intact, the
+   ripple pattern is present and correctly formed — a different frame of
+   the same correct output, not a broken one. Re-pinned with the dump
+   evidence recorded in `peterlemon_golden.rs`.
+3. **Six undisbeliever write-record goldens** (the `inidisp_hammer_*`
+   family plus `inidisp_enable_display_mid_frame`): these ROMs hammer
+   `$2100` in a tight loop bounded by *instruction count*, not by frame
+   or master-cycle count, so the same instruction budget now represents
+   more real elapsed raster time and the write record legitimately covers
+   more lines — one ROM's record even converged with another's. Every
+   re-pinned record still targets register `$2100` only
+   (`survey_the_whole_set` confirms `regs=[2100]` throughout), so what
+   changed is timing, not what is being measured — exactly the "SHOULD
+   fail and be re-examined" case the module doc for `WRITE_GOLDENS`
+   pre-authorizes.
+
+None of the three are silent — each is cited at its assertion with the
+mechanism traced, per law 8's spirit applied to timing-sensitive tests.
+
+### Census children
+
+Run individually (per the setup rules, never the full unattended census)
+via `RF_CENSUS_ROM=<zip> boot_census-*  --ignored --exact
+boot_census_child`, exit codes: **0 = rendered something, 10 = rendered a
+uniform/blank screen**.
+
+| Title | Exit | Note |
+|---|---|---|
+| Rival Turf! (USA) | **0** | was BLOCKED (W14-33) — now renders |
+| Super Turrican (USA) | **0** | was BLOCKED (W14-33) — now renders |
+| Wario's Woods (USA) | **0** | was BLOCKED (W14-33) — now renders |
+| ActRaiser 2 (USA) | 10 | still BLOCKED — distinct driver-side deadlock (W14-38), unaffected |
+| Illusion of Gaia (USA) | 10 | still BLOCKED (W14-38) |
+| Robotrek (USA) | 10 | still BLOCKED (W14-38) |
+| Soul Blazer (USA) | 10 | still BLOCKED, pre-existing and unrelated (W14-33) |
+| Super Mario RPG (USA) | 0 | unmoved |
+| Super Mario World (USA) | 0 | unmoved |
+| Wild Guns (USA) | 0 | unmoved |
+| NHL 95 (USA) | 0 | unmoved |
+| Kirby Super Star (USA) | 0 | unmoved |
+| Full Throttle - All-American Racing (USA) (Beta) | 0 | unmoved |
+| Flintstones, The (USA) (En,Fr,De,Es,It) | 0 | unmoved |
+| Jungle Strike (USA) | **10** | **regressed at the census's fixed 600-frame window** — traced below |
+| WWF Super WrestleMania (USA) | 0 | unmoved |
+| Final Fantasy - Mystic Quest (USA) | 0 | unmoved |
+| Super Mario Kart (USA) | 0 | unmoved |
+| F-Zero (USA) | 0 | unmoved |
+
+Three of the six W14-33/W14-38 APU handshake deadlock titles — the ones
+whose acceptance criteria named this ticket as the likely root cause —
+are fixed outright. ActRaiser 2/Illusion of Gaia/Robotrek's deadlock is
+confirmed to be a **separate** defect (the game/driver's own APU
+call/response sequence, per W14-33/38's tracing — law 5 territory, not
+this crate's to patch), unaffected by correct CPU pacing.
+
+**Jungle Strike, traced, not tuned around.** `title_probe`'s
+`PROBE_MODE=frames PROBE_FRAMES=1200` shows the frame that first differs
+from the initial one: `varied_at=Some(1041)`. Before this ticket the CPU
+ran ~47% too fast, so the same boot sequence completed within the
+census's fixed 600-frame sampling window; at correct pacing it needs
+~1041 frames — the census's window is simply tighter than a boot that
+takes over 600 real frames, which is not this ticket's regression to fix
+(the window is `boot_census.rs`'s own constant, orthogonal to CPU
+correctness). Named, not chased further, per this ticket's scope.
+
+### Gate
+
+`cargo fmt --check` clean. `cargo clippy --workspace -- -D warnings`
+clean. `cargo test --workspace` all green (rf-snes: 364 passed, 0 failed,
+1 ignored). Ignored oracle suites: `singlestep_65816_vectors`
+(5,080,000/5,080,000, new exact cycle assertion), `spc700_vectors`
+(256,000/256,000, unaffected — SPC700 timing is untouched by this
+ticket), `spc_timer_reports_pass` ("PASSED TESTS"), `gilyon_cputest`
+(`test_num=0x0649/0x0649, "Success"`, 6,100,000 instructions),
+`peterlemon_golden` (all three tests, two goldens re-pinned with
+`RF_GOLDEN_DUMP` evidence above), `undisbeliever_golden` (all pixel and
+write-record goldens, six write-records re-pinned), and
+`rf_scroller_s_five_minute_replay_is_deterministic` (26s release,
+deterministic). `scripts/validate-arch.sh`: `arch OK`.
+
+## W14-39 follow-up — full-census regressions traced: Pagemaster (budget edge, not a stall), Tommy Moe's (a new APU-handshake deadlock)
+
+The orchestrator's full SNES census on `w14-39` merged with `main` moved
+1066 -> 1076 rendering (fifteen up, five down). Traced the two the
+orchestrator flagged as blocking (not budget-edge like Power Rangers Zeo,
+591 -> 604 frames): **Pagemaster, The (USA)** (main varies at frame 203,
+branch not within 2400) and **Tommy Moe's Winter Extreme** (main frame
+31, branch not within 2400), using `title_probe` (`PROBE_MODE=frames`,
+`PROBE_RING`/`PROBE_RINGP`/`PROBE_DIS`/`PROBE_ARAM`/`PROBE_PORTS`)
+against both this worktree's release build and `/Users/bmatthews/Code/
+retroforge`'s existing release `title_probe` binary (read-only, main's
+HEAD).
+
+### Pagemaster: not a stall — the fixed 2400-frame probe window is too tight
+
+Raising `PROBE_FRAMES` past the orchestrator's 2400-frame check finds it
+varies at **frame 2955**: `PROBE_M7=1` shows `bg_mode` switching from 3
+to 1 and `forced_blank` clearing exactly there, with `distinct_indices`
+going from 1 (flat) to 4. Not a permanent hang. At `n=100000`-`2000000`
+instructions the CPU is in a real, advancing intro sequence (a brightness
+fade climbing steadily via `INIDISP` writes each vblank, matching main's
+own fade cadence almost exactly) — the divergence is a large gap
+*between* the fade completing (~frame 130-215 on both) and the first
+content draw after it (frame 203 on main, 2955 on branch), which
+`PROBE_RING`/`PROBE_RINGP` shows is CPU-bound work (no `$21xx`/`$42xx`
+port polling, no APU interaction) — the same class of finding as
+Jungle Strike above: a delay this project's old ~47%-too-fast CPU
+pacing artificially shortened in FRAME terms, now taking the frame count
+real hardware pacing implies. **Named, not tuned around**: the fixed
+frame budgets in both `boot_census.rs` (600) and the orchestrator's own
+2400-frame probe are the tight constant, not a CPU-timing defect.
+
+### Tommy Moe's: a genuine, reproducible APU-handshake deadlock — the same class W14-33/38 already catalogued, not fixable in this ticket's scope
+
+Confirmed a PERMANENT stall (unmoved through 20,000 frames, `PROBE_M7`
+showing `forced_blank=true bright=0 tm=[0000]` — completely flat —
+the entire time). `PROBE_RING`/`PROBE_RINGP` at `n=500000` onward pin
+the CPU to exactly two program-bank addresses, capping the 10,000-entry
+ring:
+
+```
+cpu 80B8C5: [cf, 40, 21, 00]  CMP $002140   ; APU port 0
+cpu 80B8C9: [d0, fa]          BNE $B8C5
+```
+
+`PROBE_ARAM=1f0:220` at the same instant shows `apu.boot_running=true`
+and the SPC pinned in its own tiny loop, disassembling to (SPC700, ARAM
+`$0200`):
+
+```
+0200: 8F F1 F4   MOV $F4, #$F1     ; announce $F1 on port 0
+0203: 8F F1 F5   MOV $F5, #$F1     ; and port 1
+0206: E4 F4      MOV A, $F4        ; read port 0 back
+0208: 68 FF      CMP A, #$FF       ; wait for the CPU's $FF ack
+020A: D0 F4      BNE $0200
+```
+
+This is a **mutual wait**: the CPU polls port 0 for a value the SPC will
+only produce after seeing a `$FF` acknowledgement on the SAME port pair
+— which, per this disassembly, only the CPU can supply, and the CPU's
+own code (traced no further within this ticket's scope) is not shown
+supplying it before entering the `CMP $002140` spin. This is the
+identical shape to the W14-33/W14-38 "APU handshake deadlock" family
+this ticket's own acceptance criteria named and partially fixed (Rival
+Turf!, Super Turrican, Wario's Woods — confirmed still rendering, see
+above). **Not reproducible on main within a comparable instruction
+budget** — at `n=500000`/`1000000`/`3000000`/`8000000` main's `PROBE_RING`
+shows continuously DIFFERENT program regions (real forward progress,
+reaching frame 430 with `forced_blank=false`, `bg_mode=7` — active
+gameplay), never dwelling on `$80B8C5`.
+
+**Root cause, and why it is not patched here.** The corrected CPU pacing
+(this ticket's whole point) genuinely shifted the real-time relationship
+between the CPU's polling and the SPC's port writes for this title's
+particular handshake margin — the same sensitivity class W14-33/38's own
+BLOCKED verdicts for ActRaiser 2/Illusion of Gaia/Robotrek already
+established for this general defect family. The mechanism is
+architectural, not a line-level bug this ticket's cycle model owns:
+`SnesBus::catch_up_apu` drives the SPC700 forward in bursts sized by
+whatever `spent` (real master cycles) the CPU's LAST INSTRUCTION cost —
+correctly *more* per instruction now, and per fullsnes-documented ratios
+— but still only at CPU-instruction granularity, not truly interleaved
+cycle-by-cycle. A protocol this tight needs the two cores' individual
+cycles interleaved to land a port write and a port poll on the correct
+relative side of each other, which is exactly the cycle-accurate
+executor this project's own docs (`speed.rs`'s closing section,
+`EMULATION_CORES.md`'s "what is still not modelled") defer to a future
+ticket (W6-02a), not something W14-39's per-instruction cycle *count*
+model can close. No interrupt is involved here (`nmitimen=0`, `irq
+mode=Off`) — the CPU-side interrupt-dispatch charging gap
+(`Cpu::interrupt`/`interrupt_to_vector`, called directly by
+`SnesSystem::step` outside `AccessCost`, so its own real cost is
+uncharged) was checked and ruled out as a factor for this specific
+stall, though it remains a real, separate, pre-existing gap worth its
+own ticket regardless of this one. No DMA is armed in this window
+either. Forcing an unverified change to the CPU/SPC catch-up granularity
+without a hardware trace to check it against risks re-breaking Rival
+Turf!/Super Turrican/Wario's Woods (all now correctly rendering) for an
+unverified guess at Tommy Moe's exact margin — the same discipline this
+project already applied to ActRaiser 2/Illusion of Gaia/Robotrek. Named
+here as **BLOCKED**, same as those three, for the next ticket that owns
+CPU/SPC interleaving.
+
+### Gate and full requested census re-check
+
+No `crates/rf-snes` source changed in this follow-up (diagnosis only):
+`cargo fmt --check` clean, `cargo clippy --workspace -- -D warnings`
+clean, `cargo test -p rf-snes --release` 364 passed / 0 failed / 2
+ignored — identical to the HEAD this session already validated the full
+ignored-oracle gate against (`singlestep_65816_vectors` 5,080,000/
+5,080,000, `spc700_vectors`, `spc_timer_reports_pass`, `gilyon_cputest`,
+`peterlemon_golden`, `undisbeliever_golden`,
+`rf_scroller_s_five_minute_replay_is_deterministic` — all green, per the
+W14-39 section above).
+
+Census children (exit 0 = rendered, 10 = blank at the 600-frame window):
+
+| Title | Exit |
+|---|---|
+| Pagemaster, The (USA) | 10 (not a stall — see above, varies at 2955) |
+| Tommy Moe's Winter Extreme | 10 (genuine BLOCKED deadlock — see above) |
+| Power Rangers Zeo - Battle Racers (USA) | 10 (budget edge, 604 > 600) |
+| Rival Turf! (USA) | 0 |
+| Super Turrican (USA) | 0 |
+| Wario's Woods (USA) | 0 |
+| Brawl Brothers (USA) | 0 |
+| Legend (USA) | 0 |
+| Super Valis IV (USA) | 0 |
+| Super Mario World (USA) | 0 |
+| Wild Guns (USA) | 0 |
+| Super Mario RPG (USA) | 0 |
+| NHL 95 (USA) | 0 |
+| Kirby Super Star (USA) | 0 |
+| Full Throttle - All-American Racing (USA) (Beta) | 0 |
+| Flintstones, The (USA) (En,Fr,De,Es,It) | 0 |
+| WWF Super WrestleMania (USA) | 0 |
+
+All fourteen non-blocked titles from the orchestrator's request are
+unmoved at exit 0, confirming nothing else regressed.
+
+## W14-39 second follow-up — Pagemaster quantified (poll loop, not a
+## per-opcode overcharge); a real APU hand-off defect found and fixed for
+## Tommy Moe's, deadlock still BLOCKED for a second, deeper reason
+
+The orchestrator's own math forced a re-check of the "budget edge, not a
+stall" verdict above: a corrected CPU that is at most ~50% slower per
+instruction cannot produce a 14x *frame* increase (Pagemaster: main frame
+203, branch frame 2955) by simple straight-line slowdown alone. `title_probe`
+(`crates/rf-harness/tests/title_probe.rs`) gained a small, permanent
+enhancement to answer this precisely: `PROBE_MODE=frames` now also reports
+`total_instr_at_varied`, the cumulative CPU instruction count at the frame
+`sink.varied` first fires, taken from `StepResult::cycles` (which
+`SnesCore::step`'s own doc already documents as an instruction count, not
+master cycles — see the module doc's new lines under `PROBE_FRAMES`). No
+new env var; existing output gained a field.
+
+### Pagemaster: an 11x instruction-count increase, not a per-opcode bug
+
+Rebuilt `title_probe` identically in a throwaway clone of this session's
+`main` HEAD (`a0f9b69`, pre-W14-39) with the same instrumentation, so both
+trees report the same number:
+
+| Tree | Frame varied | Instructions to reach it |
+|---|---|---|
+| main (`a0f9b69`) | 203 | 4,169,311 |
+| `w14-39` (this branch) | 2955 | 45,708,683 |
+
+**~11.0x more CPU instructions**, not the same instruction count taking
+~14.6x longer in frame terms. This is the decisive measurement the
+ticket asked for: `cpu::cycles::internal_cycles` is pinned exactly against
+5,080,000 SingleStepTests cases (`accesses + internal == cycles.len()`,
+no `<=`), so a per-instruction overcharge would have failed that oracle
+outright — it did not, and 11x more *instructions* cannot be explained by
+any per-instruction cycle miscount (which changes cycles per instruction,
+never how many instructions run). The residual gap between the 11.0x
+instruction increase and the 14.6x frame increase (roughly consistent
+with correcting a ~47%-too-fast CPU: `45708683/2955 = 15468`
+instructions/frame on the branch versus `4169311/203 = 20537` on main,
+`15468/20537 ≈ 0.75`) is exactly the ordinary per-instruction pacing
+fix this ticket makes; it is the extra 11x that needed explaining.
+
+`PROBE_RING` at `n=20,000,000` (frame 1297, well before the reported
+"varied" event) already shows `bg_mode=3`, `forced_blank=false`,
+`bright=15`, `oam_nonzero=196` — real content is on screen; the CPU
+sits in a four-instruction idle loop the whole time:
+
+```
+cpu 9DFE35: [c5, 12] CMP $12
+cpu 9DFE37: [08]     PHP
+cpu 9DFE38: [28]     PLP
+cpu 9DFE39: [f0, fa] BEQ $FE35
+```
+
+This is a software wait-for-flag idle loop (not `WAI`/`STP`), spinning on
+a direct-page byte an interrupt handler sets; `PROBE_RING`/`PROBE_M7` at
+the reported divergence (`n≈45,700,000`-`45,712,000`, frame 2958-2959)
+shows the CPU's `distinct_pc` sample flip cleanly from this loop to
+`$BBF8C1`-range code the instant the flag changes — i.e. this is the
+loop *exiting*, once, not a hang. **This confirms — with hard numbers
+instead of the earlier verdict's prose — the second of the ticket's two
+named possibilities: the game is spinning in a poll loop whose exit
+condition the corrected pacing changed, not a per-opcode overcharge.**
+What sets the flag is outside this ticket's traced scope (no `$21xx`/
+`$42xx` port activity in the loop itself, confirmed by the prior
+follow-up's `PROBE_RING`/`PROBE_RINGP`); it is real APU/driver-side
+state, consistent with a delay whose real-hardware length the old
+~47%-too-fast CPU pacing artificially shortened in frame terms. Named,
+quantified, not tuned around — the fixed frame budgets in
+`boot_census.rs` (600) and the orchestrator's own 2400-frame probe are
+the tight constant here, not a CPU-timing defect.
+
+### Tommy Moe's: a real defect found and fixed in `catch_up_apu` — the
+### deadlock nonetheless remains BLOCKED for a second, distinct reason
+
+`PROBE_APUPORTLOG`/`PROBE_DIS` traced the exact instant the two trees
+diverge, at the same instruction count (`n=425363`) on both — the SNES
+CPU's own APU-upload driver (`$80B890`-`$80B8CF`) finishing its transfer
+and handing the just-uploaded program control at `$0200`:
+
+```
+main:   n=425363 spcpc=0200 ports_in=[C8,00,00,02] ports_out=[C8,BB,00,00]
+branch: n=425363 spcpc=0200 ports_in=[C8,00,00,02] ports_out=[F1,BB,00,00]
+```
+
+`ports_out[0]` is the "Run" echo `apu/boot.rs`'s `BootAction::Run` doc
+calls "not optional and not cosmetic" — the 65816 is spinning on
+`CMP $2140`/`BNE` waiting to see it. On main it is still `$C8` (intact);
+on the branch it is already `$F1` — the SPC700's own uploaded program
+(entry `$0200`: `MOV $F4,#$F1` / `MOV $F5,#$F1` / wait for `$FF`) has
+**already run its first instruction and overwritten the echo before the
+65816's own next instruction ever reads it.**
+
+**Root cause, confirmed and fixed.** `SnesBus::catch_up_apu`
+(`bus.rs`) settles one CPU instruction's worth of `apu_debt` per call in
+a single `while` loop. Before this fix, if that loop's own leftover
+budget crossed the "not running" -> "running" edge (`poll_boot` firing
+`BootAction::Run`) partway through, the SAME call kept spending the rest
+of its budget on the now-real SPC700 core — running the uploaded
+program's own first instructions inside the identical call that performed
+the hand-off, before the 65816 could possibly have read anything yet.
+`apu/boot.rs` already names and fixes the SAME class of clobber for a
+*re-entry* at `$FFC0` (`IPL_INIT_CYCLES`, added after Super Bonk hung the
+same way); that guard never covered the FIRST hand-off to an arbitrary
+uploaded entry point, because before W14-39 a single call's budget came
+from access-only master cycles and essentially never had leftover room to
+run a whole SPC700 instruction on top of `poll_boot`'s own one-cycle
+charge. W14-39's larger (correct) per-instruction charge makes that
+leftover room routine.
+
+Fixed by stopping `catch_up_apu`'s loop the instant it crosses that edge,
+carrying the unspent portion of the budget into `apu_debt` for the next
+call rather than spending it in the same one (`bus.rs`, `catch_up_apu`,
+the `just_handed_over` guard). Unit test added and verified to fail
+without the fix and pass with it:
+`crates/rf-snes/src/tests/apu_ports.rs::a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo`
+— it reproduces the exact clobber (`MOV $F4,#$F1` at the uploaded entry
+point) with a synthetic large debt and asserts the 65816's next read
+still sees the `Run` echo. Confirmed against `git stash` on `bus.rs`:
+`panicked ... left: 241, right: 5` (0xF1 vs the expected 0x05 echo)
+without the fix, green with it.
+
+**This is a genuine emulator defect, independently correct regardless of
+Tommy Moe's outcome, and it does not regress anything**: Rival Turf!,
+Super Turrican and Wario's Woods (this ticket's three confirmed fixes)
+still render at census-child exit 0 after this change; Pagemaster's
+`total_instr_at_varied`/`varied_at` are byte-for-byte unchanged (the fix
+is APU-only and this delay has no port traffic in it, per above); the
+fourteen unrelated census children are unmoved (see the re-run table
+below).
+
+**Tommy Moe's itself remains BLOCKED, for a second, deeper reason the
+fix does not reach.** Re-tracing with `DEBUG_CATCHUP`-style
+instrumentation (removed before commit; the finding is reproducible from
+the trace above) shows the fix defers the hand-off's own leftover budget
+(`spc_cycles=2, spent=1` at the real hand-off instant) into `apu_debt` as
+designed — but the 65816's *very next* instruction is `CMP $2140`, whose
+own bus **read** calls `catch_up_apu` again before returning a value
+(`bus.rs`'s `$2140-$2143` read arm, "catch the APU up FIRST"). By then
+`apu_debt` holds that tiny deferred remainder (one CPU instruction's
+worth, now routinely >= 21 master cycles — one whole SPC cycle — because
+of this ticket's corrected, larger per-instruction charge). Because an
+SPC700 instruction cannot run partially, **any nonzero owed budget once
+`boot.is_running()` is true commits `catch_up_apu` to running one whole
+SPC700 instruction**, unconditionally overspending the rest
+(`apu_overspent`, an existing, correct mechanism for cost `>` budget).
+That whole instruction is the driver's own `MOV $F4,#$F1` — so the very
+read this fix was protecting the echo for is the read that triggers its
+clobber, one call later than before, via the read path rather than the
+write path.
+
+On **main**, the identical CMP's own pre-read `catch_up_apu` call sees an
+`apu_debt` so small (built from the OLD, access-only per-instruction
+cost) that `owed = apu_debt / 21` truncates to **0** — the loop body
+never runs at all, and the SPC700 stays exactly where the hand-off left
+it. Main was never cycle-accurate here either; it wins this race only
+because its smaller per-instruction cost happens to round `owed` down to
+zero often enough. W14-39's correct, larger charge crosses the
+`owed >= 1` threshold routinely, which — because an SPC700 instruction
+is atomic and `catch_up_apu` only settles debt at CPU-instruction
+granularity — removes that accidental protection.
+
+**This is the exact gap `docs/TESTING.md`'s prior follow-up and
+`speed.rs`'s closing section already name**: closing it for real needs
+the two cores' cycles genuinely interleaved (the deferred W6-02a
+cycle-accurate executor), not a per-call ordering fix, because the
+failure mode is not "the wrong call runs the clobbering instruction" (the
+fix above closes exactly that) but "no call-granularity model can avoid
+running a whole SPC700 instruction on top of however small a nonzero
+debt is, and this specific race's outcome depends on winning by less
+than one SPC700 instruction's worth of real time." Re-confirmed
+BLOCKED, now with the real (fixed) defect separated out from the
+remaining, correctly-scoped-out architectural one. Named here for the
+ticket that owns CPU/SPC interleaving (W6-02a), same as the prior
+follow-up already recommended.
+
+### Gate
+
+`cargo fmt --check` clean. `cargo clippy --workspace -- -D warnings`
+clean. `cargo test --workspace` all green (rf-snes: 365 passed — the one
+new unit test above — 0 failed, 2 ignored). Ignored oracle suites, all
+re-run clean after the `bus.rs` change: `singlestep_65816_vectors`
+(5,080,000/5,080,000), `spc700_vectors` (256,000/256,000),
+`spc_timer_reports_pass` ("PASSED TESTS"), `gilyon_cputest`
+(`test_num=0x0649/0x0649, "Success"`, 6,100,000 instructions),
+`peterlemon_golden` (all three tests), `undisbeliever_golden` (both live
+tests), `rf_scroller_s_five_minute_replay_is_deterministic` (~60s
+release, deterministic). `scripts/validate-arch.sh`: `arch OK`.
+
+Census children re-run (exit 0 = rendered, 10 = blank at the 600-frame
+window):
+
+| Title | Exit | Note |
+|---|---|---|
+| Pagemaster, The (USA) | 10 | unchanged — quantified above, not a stall |
+| Tommy Moe's Winter Extreme | 10 | unchanged — real defect fixed, BLOCKED for the deeper reason above |
+| Power Rangers Zeo - Battle Racers (USA) | 10 | unchanged — budget edge |
+| Rival Turf! (USA) | 0 | unmoved — the `catch_up_apu` fix does not regress it |
+| Super Turrican (USA) | 0 | unmoved |
+| Wario's Woods (USA) | 0 | unmoved |
+| Brawl Brothers (USA) | 0 | unmoved |
+| Legend (USA) | 0 | unmoved |
+| Super Valis IV (USA) | 0 | unmoved |
+| Spanky's Quest (USA) | 0 | unmoved |
+| Super Mario World (USA) | 0 | unmoved |
+| Wild Guns (USA) | 0 | unmoved |
+| Super Mario RPG (USA) | 0 | unmoved |
+| NHL 95 (USA) | 0 | unmoved |
+| Kirby Super Star (USA) | 0 | unmoved |
+| Full Throttle - All-American Racing (USA) (Beta) | 0 | unmoved |
+| Flintstones, The (USA) (En,Fr,De,Es,It) | 0 | unmoved |
+| WWF Super WrestleMania (USA) | 0 | unmoved |
+| Final Fantasy - Mystic Quest (USA) | 0 | unmoved |
+| Super Mario Kart (USA) | 0 | unmoved |
+
+All twenty requested titles accounted for; nothing regressed, one real
+defect fixed and unit-tested, both original findings quantified or
+sharpened with hard numbers rather than restated.
+
+## W14-39 third follow-up — Pagemaster's writer traced to source: a
+## generic library primitive, not an emulator defect
+
+The coordinator's objection stands on its own math (a <=50%-slower CPU
+cannot produce a 14x frame increase by simple slowdown) and asked for the
+writer of direct-page `$12`, its enclosing routine's per-frame rate, and
+an APU-race check against the `catch_up_apu` edge case fixed above.
+
+**The writer.** `D=0`, so `$12` is absolute `$000012`. `PROBE_WATCH=000012`
+across the whole run finds exactly one writer, `$9DFEDB` (inside the
+NMI handler), incrementing it by exactly **one every real vblank**, with
+no gaps and no retries, from `n=75201` (frame ~5) straight through the
+divergence at `n=45,707,454` (frame 2958) — an unbroken, hardware-paced
+tick. `PROBE_DIS=9D:FE00:FF00` shows the reader: a generic
+`WaitVBlank`-style library routine at `$9DFE2B`-`$9DFE3C`
+(`LDA $12` snapshot, `CMP $12`/`PHP`/`PLP`/`BEQ` spin until the snapshot
+no longer matches, gated by a `$14` flag test). This is a stock
+"wait for the next frame" primitive, not the site of anything — it is
+called correctly, once, and returns within one vblank on both trees.
+**It is not itself gated on the APU, a timer, or a raster position; it
+is gated on the NMI, which fires once per real frame regardless of CPU
+speed.** This rules out the writer/reader pair itself as a defect.
+
+**Where the frames actually go.** `PROBE_RING` bracketing the run shows
+three phases on the branch: real per-frame work (a byte-copy loop at
+`$BCFA3D`/`$BCFA40`, then a table-scan loop at `$B9FBEF`-`$B9FBF3`)
+continuing to about `n=17.8M` (frame ~1154); several APU communication
+sessions in the SAME window (`PROBE_APUPORTLOG`, `n=1`-`17,762,275`,
+34,965 ports_in/out changes in bursts separated by multi-second silent
+gaps — a normal streamed music/cue sequence, every echo intact, no
+clobber of the shape the `catch_up_apu` fix above targets: every
+`ports_out[0]` change matches its `ports_in[0]` cause); then **total
+silence** — zero `$2140`-`$2143` traffic — from `n=17,762,275` to
+`n=45,707,622` (frame ~1150 to ~2958, ~1660 frames, ~28M instructions),
+during which `PROBE_RING` shows nothing but the `WaitVBlank` loop
+running essentially every sampled instruction.
+
+**Answering the bounded ask directly: no, this is not the APU-race
+shape.** There is no port traffic at all during the stretch that
+actually costs the frames, so the `catch_up_apu` edge case fixed above
+for Tommy Moe's cannot be the mechanism here — there is nothing for it
+to race against. The APU sessions that DO exist complete with intact
+echoes throughout. No raster/HDMA/`$4212` dependency was found either
+(`irq: mode=Off` throughout this whole span, per the original
+follow-up's `PROBE_RING`/`PROBE_RINGP`).
+
+**Verdict.** The writer and its enclosing routine are both innocent,
+generic library code, run at the hardware-correct rate on both trees.
+The 11x instruction-count gap is real but was not produced by anything
+this ticket's model owns: no per-opcode miscount (oracle-exact), no APU
+hand-off race (no traffic in the costly window), no raster/timer
+dependency (`irq mode=Off`). What decides the ~1660-frame idle's length
+is a value this session did not trace to its source without reverse-
+engineering the title's own `BRK`-dispatched driver calls
+(`$9DFE49`/`$9DFE9B`, an OS-call convention this ROM uses for
+DMA/audio service) beyond this ticket's scope. No emulator defect is
+demonstrated here, so none is invented: named, quantified, bounded, and
+left for a ticket that can commit to decompiling this title's loader,
+not tuned around.
+
+**Full SNES census (orchestrator, 2026-09-21, W14-39 tree merged with
+main, per-title `RF_CENSUS_OUT` diff against the W14-36 run):**
+**1066/69/130/0/0 -> 1076/59/130/0/0** ("SNES, after W14-39" row above).
+Fifteen rows moved to *rendered something*: **Rival Turf!**, **Super
+Turrican** (USA and Virtual Console), **Wario's Woods** (three of the
+W14-33 APU deadlocks — the CPU was outrunning the SPC), **Brawl
+Brothers**, **Legend** (USA and beta), **Super Valis IV**, **Spanky's
+Quest**, **Rocky Rodent**, **Family Dog**, **The Adventures of Rocky and
+Bullwinkle**, **J.R.R. Tolkien's The Lord of the Rings Vol. 1**, **Spot
+Goes to Hollywood (Proto)**, **Super Turrican 2 (Beta 1)**. Five rows
+moved the other way and are recorded, not tuned around: **Power Rangers
+Zeo** (first varied frame 591 -> 604, a budget edge); **The Pagemaster**
+(USA, Beta 2, Beta 3: first varied frame 203 -> 2955, an 11x instruction
+count to leave a stock WaitVBlank whose NMI-side counter is healthy —
+the ~1660 idle frames sit in the title's own BRK-dispatched loader with
+no port, raster or timer traffic; follow-up W14-40); **Tommy Moe's Winter
+Extreme** (a catch-up burst let the SPC's first post-handoff instructions
+clobber its handshake echo — fixed for the first edge, but the residual
+needs cycle-level CPU/SPC interleaving; follow-up W14-41 under W6-02a).
+Net +10, and the per-instruction cycle model is pinned exactly by
+5,080,000 vector cases.
 
 ## W14-37 — the IPL boot ROM's own instruction cost on the go->jump
 handoff and the per-byte handshake, from fullsnes' published

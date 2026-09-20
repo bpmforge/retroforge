@@ -564,12 +564,23 @@ fn sa1_takes_an_nmi_from_the_snes_once_enabled_and_uses_its_own_vector() {
     system.bus.write(0x00_2200, 0x10); // CCNT bit 4: raise it
     system
         .step()
-        .expect("nmi delivered and its handler's first NOP run");
+        .expect("nmi delivered and its handler's first NOP (and now STP) run");
 
     let sa1 = system.bus.sa1.as_ref().unwrap();
+    // Ticket W14-39: the main CPU's own two NOPs now each charge their
+    // real internal cycle too (previously dropped — see `speed.rs`'s
+    // doc), so this step hands the SA-1 more master-cycle credit than
+    // before and it now has enough to run the NOP AND the STP at the
+    // vector target, not just the NOP — same as the boot case above,
+    // which already asserts "NOP then STP: halted one byte past the STP
+    // itself". This is the ticket's own documented effect ("charging
+    // more master cycles per instruction shifts every IRQ/HDMA/NMI
+    // timing"), not a regression: the SA-1 is genuinely interleaved on
+    // the same master clock, and that clock now moves at its real rate.
     assert_eq!(
-        sa1.cpu.pc, 0x9001,
-        "must have vectored through $2205/$2206, run the NOP there, and advanced past it"
+        sa1.cpu.pc, 0x9002,
+        "must have vectored through $2205/$2206, run the NOP there, run the STP, and halted \
+         one byte past it"
     );
     assert_eq!(
         system.bus.read(0x00_2301) & 0x10,

@@ -13,6 +13,16 @@
 //! PROBE_INSTR=6000000               CPU instructions to run first (default 30M)
 //! PROBE_SAMPLE=20000                instructions to sample after that
 //! PROBE_MODE=frames PROBE_FRAMES=N  instead: step N frames, report the first varied frame
+//!                                    (and, since W14-39's follow-up, the cumulative CPU
+//!                                    instruction count at that frame — `StepResult::cycles`
+//!                                    is this core's instruction count, not master cycles,
+//!                                    per `SnesCore::step`'s own doc — so an A/B run against
+//!                                    another tree's `title_probe` answers "did the SAME
+//!                                    frame-visible event take about the same number of
+//!                                    CPU instructions" (a per-instruction cycle-cost bug,
+//!                                    if not) or "did it take many more instructions" (a
+//!                                    poll loop whose exit condition the corrected pacing
+//!                                    changed, not a cycle-costing bug))
 //! PROBE_M7=1                        with frames mode: print Mode 7 state and palette diversity
 //! PROBE_DIS=bb:start:end[,...]      65816 disassembly ranges (hex, end exclusive)
 //! PROBE_ARAM=start:end[,...]        ARAM hex dumps
@@ -149,7 +159,30 @@
 //!                                    the exact writer of an unexpected memory
 //!                                    change (e.g. a corrupted vector-table
 //!                                    pointer byte) without knowing its PC in
-//!                                    advance (W14-28)
+//!                                    advance (W14-28). CAVEAT (W14-38): this
+//!                                    reads via `SnesBus::peek`, which for a
+//!                                    write-only PPU register (`$2100`-
+//!                                    `$213F`, e.g. `$212C` TM) falls through
+//!                                    to `open_bus` (`bus.rs`'s
+//!                                    `read_register_pure` returns `None` for
+//!                                    those offsets) — so watching one of
+//!                                    those addresses tracks whatever value
+//!                                    last crossed the bus for ANY reason,
+//!                                    not that register's actual latched
+//!                                    content. Never watch a write-only PPU
+//!                                    register this way; use PROBE_OAM or add
+//!                                    a write-side probe instead.
+//! PROBE_OAM=1                        decode all 128 OAM entries the way
+//!                                    `obj::decode_sprite` does and print the
+//!                                    ones whose Y span overlaps the visible
+//!                                    0..224 lines, plus (for the first 20)
+//!                                    the top-left texel's composed colour
+//!                                    index via `bg::fetch_pixel` — answers
+//!                                    "are there genuinely on-screen sprites
+//!                                    with non-transparent tile data" without
+//!                                    trusting `oam_nonzero`/`cgram_nonzero`
+//!                                    byte counts, which say nothing about
+//!                                    position or transparency (W14-38)
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -230,10 +263,13 @@ fn probe() {
         let mut sink = Sink::default();
         if std::env::var("PROBE_MODE").as_deref() == Ok("frames") {
             let mut first_varied: Option<usize> = None;
+            let mut first_varied_instr: Option<u64> = None;
+            let mut total_instr: u64 = 0;
             let frame_indices_log = std::env::var("PROBE_FRAME_INDICES").is_ok();
             for f in 0..frames {
                 sink.frame_indices.clear();
-                core.step(Step::Frame, &mut sink);
+                let step_result = core.step(Step::Frame, &mut sink);
+                total_instr += step_result.cycles;
                 if frame_indices_log {
                     let sys = core.system();
                     println!(
@@ -251,12 +287,14 @@ fn probe() {
                 }
                 if sink.varied && first_varied.is_none() {
                     first_varied = Some(f);
+                    first_varied_instr = Some(total_instr);
                     break;
                 }
             }
             println!(
-                "FRAMES varied_at={:?} {}",
+                "FRAMES varied_at={:?} total_instr_at_varied={:?} {}",
                 first_varied,
+                first_varied_instr,
                 Path::new(path).file_name().unwrap().to_string_lossy()
             );
             if std::env::var("PROBE_M7").is_ok() {
@@ -1055,6 +1093,58 @@ fn probe() {
             apu.ports_in,
             apu.ports_out
         );
+        // W14-38: is $212C's OBJ-only main screen (all BGs off) genuinely
+        // empty because every sprite sits off the visible 224-line
+        // picture (a legitimate "not shown yet" state), or does a sprite
+        // sit on-screen while the composer still produces nothing (a
+        // renderer defect this ticket's write_scope covers)? Decodes all
+        // 128 OAM entries the same way `obj::decode_sprite` does. The
+        // on-screen test below is a coarse approximation, NOT
+        // `obj::intersects`'s own (private, per-scanline, OAMADDR-
+        // rotation-aware) test: it treats Y as unsigned 0..255 (no
+        // hardware wraparound-onto-top-of-screen case) and only asks
+        // whether the sprite's Y span overlaps 0..224 for ANY row, which
+        // is enough to answer "would this sprite ever be visible on some
+        // line", the question this diagnostic exists for.
+        if std::env::var("PROBE_OAM").is_ok() {
+            let mut onscreen = 0usize;
+            for i in 0..128u8 {
+                let s = rf_snes::ppu::obj::decode_sprite(ppu, i);
+                let y_end = u16::from(s.y) + s.height;
+                let on = (u16::from(s.y)..y_end).any(|y| y < 224);
+                if on && (s.x > -(s.width as i16) && s.x < 256) {
+                    onscreen += 1;
+                    if onscreen <= 20 {
+                        // Same base/character math `obj::draw_sprite` uses
+                        // for this sprite's top-left texel, so a wrong
+                        // name-base or genuinely-blank VRAM shows up as
+                        // colour=0 (transparent) here, not just eventually
+                        // as a uniform frame.
+                        let base = ppu.obj_name_base << 13
+                            | if s.second_page {
+                                (ppu.obj_name_select + 1) << 12
+                            } else {
+                                0
+                            };
+                        let colour = rf_snes::ppu::bg::fetch_pixel(ppu, base, s.tile, 0, 0, 4);
+                        println!(
+                            "    OAM[{i}] x={} y={} w={} h={} tile={:03X} pal={} pri={} \
+                             name_base={:#x} top_left_colour={}",
+                            s.x,
+                            s.y,
+                            s.width,
+                            s.height,
+                            s.tile,
+                            s.palette,
+                            s.priority,
+                            base,
+                            colour
+                        );
+                    }
+                }
+            }
+            println!("  OAM on-screen sprites (x in -width..256, y wraps onto 0..224): {onscreen}");
+        }
         if std::env::var("PROBE_ALLPC").is_ok() {
             let mut all: Vec<_> = pcs.keys().collect();
             all.sort();
