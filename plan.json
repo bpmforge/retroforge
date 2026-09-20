@@ -7161,6 +7161,30 @@
     "FILED 2026-09-18 on Brad's 'go' (D-013). Sources: fullsnes 'SNES Cart SA-1' sections (I/O map, interrupt/control both sides, timer, memory control, DMA, character conversion, arithmetic, VBR) extracted for briefs; snes.nesdev.org SA-1 pages. Clean-room, no emulator source (NFR-011). Shape per D-013: a second cpu::Cpu over an Sa1Bus, not a second CPU implementation."
    ],
    "stories": []
+  },
+  {
+   "id": "W14-23",
+   "title": "SPC700 halts during the boot upload: Super Mario RPG's $2140 poll never completes",
+   "phase": 14,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "crates/rf-harness/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "the cause is DIAGNOSED from a trace before anything changes: W17-04 found apu.cpu.stopped=true while apu.boot_running=true on Super Mario RPG, the main CPU parked at $C4:0541 CMP $2140 / BNE; the trace names which SPC700 instruction or IPL-boot transition set stopped (an unimplemented opcode, a STOP/SLEEP, or a boot state-machine exit) and at what point of the upload",
+    "the fix is cited to published SPC700/IPL documentation (snes.nesdev.org S-SMP pages, fullsnes 'SNES APU') and pinned by a unit test that reproduces the exact handshake shape",
+    "Super Mario RPG renders in the census child (exit 0); the SNES census is re-run and every title that moved is named in docs/TESTING.md, since a boot-upload defect is systemic, not per-title",
+    "the ignored SNES suites (SPC700 vectors, blargg spc_timer gate, gilyon) stay green; determinism unaffected"
+   ],
+   "points": 3,
+   "status": "in_progress",
+   "notes": [
+    "FILED 2026-09-19 on Brad's 'continue with next fixes' after Wave 17 closed. Evidence from W17-04: SMRPG's main CPU spins on $2140 with the SPC700 halted mid-boot. Same census/probe method as the W14-10 drive (title_probe PROBE_PORTS=1, PROBE_RINGP=1)."
+   ],
+   "stories": []
   }
  ]
 }
