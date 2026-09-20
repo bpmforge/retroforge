@@ -149,7 +149,30 @@
 //!                                    the exact writer of an unexpected memory
 //!                                    change (e.g. a corrupted vector-table
 //!                                    pointer byte) without knowing its PC in
-//!                                    advance (W14-28)
+//!                                    advance (W14-28). CAVEAT (W14-38): this
+//!                                    reads via `SnesBus::peek`, which for a
+//!                                    write-only PPU register (`$2100`-
+//!                                    `$213F`, e.g. `$212C` TM) falls through
+//!                                    to `open_bus` (`bus.rs`'s
+//!                                    `read_register_pure` returns `None` for
+//!                                    those offsets) — so watching one of
+//!                                    those addresses tracks whatever value
+//!                                    last crossed the bus for ANY reason,
+//!                                    not that register's actual latched
+//!                                    content. Never watch a write-only PPU
+//!                                    register this way; use PROBE_OAM or add
+//!                                    a write-side probe instead.
+//! PROBE_OAM=1                        decode all 128 OAM entries the way
+//!                                    `obj::decode_sprite` does and print the
+//!                                    ones whose Y span overlaps the visible
+//!                                    0..224 lines, plus (for the first 20)
+//!                                    the top-left texel's composed colour
+//!                                    index via `bg::fetch_pixel` — answers
+//!                                    "are there genuinely on-screen sprites
+//!                                    with non-transparent tile data" without
+//!                                    trusting `oam_nonzero`/`cgram_nonzero`
+//!                                    byte counts, which say nothing about
+//!                                    position or transparency (W14-38)
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -1055,6 +1078,58 @@ fn probe() {
             apu.ports_in,
             apu.ports_out
         );
+        // W14-38: is $212C's OBJ-only main screen (all BGs off) genuinely
+        // empty because every sprite sits off the visible 224-line
+        // picture (a legitimate "not shown yet" state), or does a sprite
+        // sit on-screen while the composer still produces nothing (a
+        // renderer defect this ticket's write_scope covers)? Decodes all
+        // 128 OAM entries the same way `obj::decode_sprite` does. The
+        // on-screen test below is a coarse approximation, NOT
+        // `obj::intersects`'s own (private, per-scanline, OAMADDR-
+        // rotation-aware) test: it treats Y as unsigned 0..255 (no
+        // hardware wraparound-onto-top-of-screen case) and only asks
+        // whether the sprite's Y span overlaps 0..224 for ANY row, which
+        // is enough to answer "would this sprite ever be visible on some
+        // line", the question this diagnostic exists for.
+        if std::env::var("PROBE_OAM").is_ok() {
+            let mut onscreen = 0usize;
+            for i in 0..128u8 {
+                let s = rf_snes::ppu::obj::decode_sprite(ppu, i);
+                let y_end = u16::from(s.y) + s.height;
+                let on = (u16::from(s.y)..y_end).any(|y| y < 224);
+                if on && (s.x > -(s.width as i16) && s.x < 256) {
+                    onscreen += 1;
+                    if onscreen <= 20 {
+                        // Same base/character math `obj::draw_sprite` uses
+                        // for this sprite's top-left texel, so a wrong
+                        // name-base or genuinely-blank VRAM shows up as
+                        // colour=0 (transparent) here, not just eventually
+                        // as a uniform frame.
+                        let base = ppu.obj_name_base << 13
+                            | if s.second_page {
+                                (ppu.obj_name_select + 1) << 12
+                            } else {
+                                0
+                            };
+                        let colour = rf_snes::ppu::bg::fetch_pixel(ppu, base, s.tile, 0, 0, 4);
+                        println!(
+                            "    OAM[{i}] x={} y={} w={} h={} tile={:03X} pal={} pri={} \
+                             name_base={:#x} top_left_colour={}",
+                            s.x,
+                            s.y,
+                            s.width,
+                            s.height,
+                            s.tile,
+                            s.palette,
+                            s.priority,
+                            base,
+                            colour
+                        );
+                    }
+                }
+            }
+            println!("  OAM on-screen sprites (x in -width..256, y wraps onto 0..224): {onscreen}");
+        }
         if std::env::var("PROBE_ALLPC").is_ok() {
             let mut all: Vec<_> = pcs.keys().collect();
             all.sort();
