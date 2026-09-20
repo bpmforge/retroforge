@@ -7294,7 +7294,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-28",
   "title": "The Flintstones: RTS loop on boot — trace the divergence from reset",
