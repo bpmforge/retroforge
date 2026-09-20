@@ -90,6 +90,17 @@ pub struct Cpu {
     pub e: bool,
     /// Set when the CPU has stopped (`STP`) or is waiting (`WAI`).
     pub stopped: bool,
+    /// Set alongside `stopped` specifically by `WAI` (`0xCB`), clear for
+    /// `STP` (`0xDB`) — ticket W14-28. Per the WDC W65C816S datasheet,
+    /// `WAI` and `STP` wake on different things: `STP` resumes only on a
+    /// hardware reset, but `WAI` resumes "upon the occurrence of a
+    /// hardware interrupt (NMI or IRQ, unless masked by the interrupt
+    /// disable bit)" — an IRQ wakes `WAI` even with `I` set, it is only
+    /// the *dispatch* (vector fetch and handler entry) that `I` blocks.
+    /// `stopped` alone cannot express that distinction because
+    /// `system.rs`'s scheduler needs to clear it on a masked IRQ for
+    /// `WAI` but never for `STP`.
+    pub wai: bool,
 }
 
 impl Default for Cpu {
@@ -119,6 +130,7 @@ impl Cpu {
             p: flags::I,
             e: true,
             stopped: false,
+            wai: false,
         };
         cpu.apply_emulation_constraints();
         cpu
@@ -342,6 +354,7 @@ impl Cpu {
 
     fn dispatch_interrupt(&mut self, bus: &mut dyn CpuBus, target: u16) {
         self.stopped = false;
+        self.wai = false;
         if self.e {
             self.sp = 0x0100 | (self.sp & 0x00FF);
         } else {
@@ -415,7 +428,8 @@ impl Cpu {
         o.u16(self.pc)?;
         o.u8(self.p)?;
         o.bool(self.e)?;
-        o.bool(self.stopped)
+        o.bool(self.stopped)?;
+        o.bool(self.wai)
     }
 
     pub(crate) fn load(
@@ -433,6 +447,7 @@ impl Cpu {
         self.p = i.u8()?;
         self.e = i.bool()?;
         self.stopped = i.bool()?;
+        self.wai = i.bool()?;
         Ok(())
     }
 }

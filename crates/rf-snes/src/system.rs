@@ -221,7 +221,40 @@ impl SnesSystem {
         // own `access_cycles` table prices at 8 or 12) — see
         // `MathUnit::tick`'s doc for the arithmetic and why that
         // direction is safe.
-        self.bus.tick_math(spent as u32);
+        // W14-28: a single-access instruction (an implied-mode, single-byte
+        // opcode -- `NOP`, `INX`, `TAX`, `SEP`/`REP`'s operand fetch makes
+        // those two-access, but plain register-to-register moves and `NOP`
+        // itself land here) has, per the WDC 65816 datasheet, no fewer
+        // than 2 real CPU cycles: the opcode fetch (the one access
+        // `AccessCost` already charged) plus at least one internal cycle
+        // that touches no address. `spent` alone under-counts that
+        // internal cycle for the SAME reason `MathUnit::tick`'s doc
+        // describes -- `AccessCost` charges bus accesses only -- and it is
+        // exactly this gap that let a divide finish two steps late in The
+        // Flintstones' boot (docs/TESTING.md, W14-28): eight `NOP`s meant
+        // to wait out a divide's 16-cycle latency (fullsnes "SNES Maths
+        // Multiply/Divide") credited only 8 access-based steps instead of
+        // the 16 real CPU cycles they take, leaving `$4216` (RDMPY) still
+        // mid-shift when the game read it, and a stray table index
+        // downstream of that stale value corrupted a WRAM slot the CPU
+        // depends on to stay in sync with the interrupt vector table.
+        //
+        // This credit is scoped to the math unit alone, not to
+        // `self.master_cycles` (which drives PPU/APU catch-up and the
+        // raster for all 1265 titles this core runs) -- see W7-15's
+        // identical one-`FAST`-cycle precedent a few lines up for a
+        // zero-access (halted) step. It cannot make the unit finish
+        // *earlier* than hardware in any case that previously passed:
+        // every multi-access instruction is unaffected, and a real
+        // single-access instruction always has this cycle on hardware too,
+        // so this only closes part of the documented undercount, in the
+        // same safe direction `MathUnit::tick`'s doc already relies on.
+        let math_spent = if counting.accesses == 1 {
+            spent + u64::from(crate::cpu::speed::FAST)
+        } else {
+            spent
+        };
+        self.bus.tick_math(math_spent as u32);
         // The APU accrues debt with every master cycle the CPU spends —
         // DMA included, because a transfer stalls the CPU and not the
         // sound chip — and is settled at the end of every instruction
@@ -351,6 +384,28 @@ impl SnesSystem {
                 Some(vector) => self.cpu.interrupt_to_vector(&mut self.bus, vector),
                 None => self.cpu.interrupt(&mut self.bus, false),
             }
+        } else if (self.bus.irq.fired || sa1_irq_to_snes)
+            && self.cpu.flag(crate::cpu::flags::I)
+            && self.cpu.wai
+        {
+            // W14-28: an IRQ that is masked by `I` is never dispatched
+            // (the branch above), but per the WDC W65C816S datasheet
+            // `WAI` does not wait for a *dispatched* interrupt -- it
+            // waits for the interrupt LINE, and resumes "with the next
+            // instruction" (not the handler) when that line asserts
+            // while `I` is set. Without this, a title that legitimately
+            // executes `WAI` with `I` set (common for the H/V-IRQ-only
+            // wait idiom, since NMI needs no unmasking) parks forever the
+            // first time only the masked IRQ -- never NMI -- fires:
+            // `self.cpu.stopped` is the CPU's only "am I running" bit,
+            // and nothing upstream of this `else if` ever clears it for
+            // that case. Traced in Full Throttle - All-American Racing
+            // (USA) (Beta): `$81:CB94` `WAI` with `NMITIMEN`'s H/V mode
+            // enabled and `I` set, parked at frame 108 (docs/TESTING.md,
+            // W14-28). `STP` (`cpu.wai == false`) is deliberately excluded
+            // -- it wakes only on reset, never on an interrupt line.
+            self.cpu.stopped = false;
+            self.cpu.wai = false;
         }
 
         // Ticket W17-02 acceptance #2: interleave the SA-1 on the master

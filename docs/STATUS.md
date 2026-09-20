@@ -4000,3 +4000,24 @@ stories, 10 decisions).
   and its init table are byte-exact to ROM, and the `$FE` command byte
   is runtime-written by a writer not yet identified. Gate: workspace
   **2219 passing / 0 failed / 43 ignored**, clippy clean, arch OK.
+
+- **W14-28 done — a second divider-timing gap, and WAI now wakes on a
+  masked IRQ** (2026-09-20). The Flintstones' BRK storm traced back, past
+  two wrong "game-side" verdicts, to a `$4216` remainder read after eight
+  `NOP`s that returned a stale value: single-access instructions carry an
+  internal cycle the access-cost model never charged, so the divider was
+  two steps short of its sixteen. The math unit now gets one extra
+  internal-cycle credit per single-access instruction (WDC: no
+  instruction runs in fewer than two cycles). That alone regressed Full
+  Throttle (Beta), which the trace showed parked in `WAI` with a masked
+  IRQ asserted — a pre-existing defect: per the WDC datasheet WAI resumes
+  on IRQ regardless of the I flag, and this CPU never did. Both fixed
+  with unit tests. Census 1054/81/130 -> **1061/74/130**: seven titles
+  moved to rendering (Flintstones, Samurai Shodown x2, Clay Fighter x3,
+  Kawasaki Superbike Challenge), none regressed against main; Jungle
+  Strike now first varies at frame 991 and stays a named follow-up.
+  Also today: the peterlemon goldens were re-pinned after W14-31 changed
+  composition (six frames re-dumped and inspected), and a
+  `manual_is_multiple_of` lint that only `clippy --tests` sees was
+  cleared. Gate: workspace **2222 passing / 0 failed / 43 ignored**,
+  clippy clean, arch OK.

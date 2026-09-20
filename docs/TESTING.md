@@ -802,6 +802,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-24 | 1265 | **1019** | 116 | 130 | **0** | **0** |
 | SNES, after W14-26 | 1265 | **1037** | 98 | 130 | **0** | **0** |
 | SNES, after W14-31 | 1265 | **1054** | 81 | 130 | **0** | **0** |
+| SNES, after W14-28 | 1265 | **1061** | 74 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -2534,3 +2535,309 @@ the per-line record now hides, so it drops the record first
 (`clear_line_state`). Six hashes re-pinned in
 `crates/rf-snes/tests/peterlemon_golden.rs` with the reason recorded
 beside the table.
+
+## W14-28 — The Flintstones: a single-access instruction's internal cycle
+was missing from the math unit's clock, so a divide the game waits out with
+`NOP`s stayed one step short of done (2026-09-20, FIXED)
+
+The 2026-09-17 triage called this an "RTS loop." It is a `BRK` storm, and
+the storm's root is a register read — `$4216` (RDMPY) — returning a stale,
+still-shifting value where fullsnes gives a defined, timed one, in exactly
+the family W14-24 (divider timing) and W14-26 ($43xx readback) both hid in.
+The coordinator's review caught that an earlier draft of this write-up
+stopped one register short of the actual defect, having chased the crash's
+mechanics down to a piece of the game's own object data (`$9A=$4000`) without
+checking whether *that* value was itself downstream of a register read. It
+was.
+
+**The full, closed chain, each link measured:**
+
+1. **`$83:9AD6`-`$83:9AE8`, the shared 8-bit divide helper**
+   (`STA $4204; SEP #$10; STX $4206; REP #$10; NOP×8; LDA $4216; RTL`), is
+   called from `$83:CFB5` with dividend `A=$003F` (63) and divisor `X=$0B`
+   (11) — confirmed via `PROBE_SDUMP=839ad6`. Per fullsnes ("SNES Maths
+   Multiply/Divide"), the divide's 16-cycle latency "is a CPU-cycle count,
+   independent of whether any given cycle is fast or slow on the bus, or
+   internal" — the 8 `NOP`s are the ordinary, documented idiom for waiting
+   it out (8 × 2 CPU cycles = 16). On real hardware, `STX` (4 cycles) +
+   `REP` (3) + 8 `NOP` (16) = 23 CPU cycles elapse before the `LDA $4216` —
+   comfortably past the latency, so hardware reads the completed remainder,
+   `$0008` (63 mod 11).
+2. **`rf-snes`, before this fix, read it two steps early.** `PROBE_MATHPC`
+   at `$83:9AE8` showed `busy=true rdmpy=0013` at the read — a *stale*
+   value left over from an earlier division, not this one's partial state.
+   `PROBE_ACCESSWIN=839adb:839ae8` (from the `$4206` write, where the divide
+   actually starts, to the read) measured **14** access-based steps against
+   `DIV_STEPS=16` — two short. The reason: `crate::cpu::speed`'s
+   `AccessCost` correctly charges bus accesses only (its own module doc is
+   explicit about this), so `NOP` — a single-byte, implied-mode opcode that
+   makes exactly one bus access (its own fetch) but, per the WDC 65C816
+   datasheet, no instruction executes in fewer than 2 CPU cycles — was
+   contributing only its access cost to `MathUnit::tick`, silently dropping
+   the internal cycle every such instruction also spends. `MathUnit::tick`'s
+   own doc (added by W14-24, which fixed a related but distinct manifestation
+   of the same undercount in Super Mario RPG's boot upload) named this
+   exact residual: "a title timed exactly against the 16-step boundary
+   could still see a read complete a step or two early" — this ROM's own
+   boot sequence is that title.
+3. **The wrong value propagates through two more real ROM instructions,
+   both re-verified after the fix.** `$83:CFBB-CFC2`
+   (`LDA #$0B; SEC; SBC $20; ASL; TAX`) computed `X=$FFF0` from the stale
+   `$0013` instead of the correct `X=$0006` from `$0008`. `$83:CFC3: LDA
+   $839C24,X` then read whatever ROM byte happens to sit at the
+   wrapped-16-bit effective address `$839C24+$FFF0` (`=$839C14`) instead of
+   the table's real entry-6 slot, landing on `$0001` — confirmed via
+   `PROBE_SDUMP=83cfc3,83cfc7` both before and after the fix (after the
+   fix, `X=$0006` and the read lands in-table).
+4. **Everything downstream was already fully traced and is unchanged by
+   this correction:** that `$0001` is stored to `$0A98`, copied via
+   `$80:D0F4` into `$0768` (an object-slot field), used to index
+   `$80:DFBF,X` (confirmed byte-exact against the unzipped `.sfc` at the
+   mapped LoROM offset — real ROM data, not a register read), producing
+   `$9A=$4000`; `$9A` is then used unbounded as an index into a
+   count table at `$80:D69B,X`, whose 16-bit-wrapped read yields `$0000`;
+   a 16-bit `DEC $90` (well-defined 65816 behavior) underflows `$0000` to
+   `$FFFF`, turning zero intended iterations of the per-object OAM-adder
+   loop (`$80:D270`-`D2D6`) into up to 65,535; at instruction 2,577,318 one
+   of those iterations (`X=$1F80`) makes the game's own `STA $0200,X`
+   alias `$80:2180` = WMDATA with `WMADD=$000000`, corrupting the NMI
+   vector's low byte at WRAM `$0000` from `$15` to `$FF`; the next NMI
+   dispatches into `$80:A6FF` instead of the real handler `$80:A615`, and
+   that routine's `RTL` (correct for its real `JSL` callers, wrong for this
+   stray entry) misreads the CPU's own interrupt frame, lands on a stray
+   `BRK`, and vectors into ROM padding at `$70:800B` — `BRK` forever. `JML
+   [addr]`'s bank-0-fixed pointer source, LoROM mirroring, WMDATA/WMADD,
+   and the NMI re-entrancy guard (`$44`) were all independently checked
+   against fullsnes/the ROM's own bytes during this trace and are correct;
+   none of them needed a change.
+
+**The fix** (`crates/rf-snes/src/system.rs`, `SnesSystem::step`): credit one
+extra `speed::FAST` (6 master cycles) to the math unit specifically —
+routed through a new `math_spent` local passed to `bus.tick_math`, **not**
+added to `self.master_cycles` (which drives PPU/APU catch-up and the raster
+for all 1,265 titles this core runs) — whenever an instruction made exactly
+one bus access. This can only ever add a cycle real hardware also has: every
+multi-access instruction is untouched, and a genuine single-access
+instruction (an implied-mode, single-byte opcode) always has this internal
+cycle on hardware too, per WDC's own minimum-2-cycle rule — the same
+one-`speed::FAST`-cycle precedent `SnesSystem::step` already uses for a
+halted (zero-access) CPU step (ticket W7-15), generalized to the
+one-access case. It does not attempt the general cycle-accurate accounting
+`MathUnit::tick`'s doc says needs a future cycle-accurate executor (W6-01b);
+it closes exactly the gap this ROM's own idiom exposed, in the same safe
+direction the existing model already relies on.
+
+**New test**
+(`eight_nops_are_enough_to_finish_a_divide_the_way_hardware_would`,
+`crates/rf-snes/src/tests/system.rs`): a minimal ROM (`LDA #$3F; STA $4204;
+LDA #$0B; STA $4206;` then 8 `NOP`s) run through a real `SnesSystem`,
+asserting the divide is done and `63 / 11 = 5 r8` after exactly that
+sequence. Confirmed it fails without the fix (`system.rs` reverted: panics
+"must still be busy") and passes with it.
+
+**Verified:** `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — **359 passed** (358 + this
+ticket's new test), 0 failed. Ignored SNES suites, all green and unmoved by
+this change: `singlestep_65816_vectors` — **5,080,000 passed, 0 failed**
+(254/256 opcodes; `$44`/`$54` excluded as already documented in-suite);
+`gilyon_cputest`'s `cputest_full_reports_success_and_every_test_passes` —
+`test_num=0x0649/0x0649, ROM says "Success"` — this is the project's own
+named oracle for math-unit intermediate-read correctness, and it is the
+discriminator that matters most here: an over-broad fix to the same
+undercount would show up as a regression in it, and none appeared;
+`blargg_spc`'s `spc_timer_reports_pass` — `"PASSED TESTS"`; `spc700_vectors`'s
+`singlestep_spc700_vectors` — **256,000 passed, 0 failed**.
+
+**Census children** (`boot_census_child`, per-title, not the full
+orchestrator run): **The Flintstones (USA, En/Fr/De/Es/It) now exits 0**
+(rendered) — the regression this fix was for. **Treasure of Sierra Madrock**
+was unaffected throughout (renders, exit 0, never hit this bug — a
+different, unrelated boot path). The four canaries are unmoved at exit 0:
+**Super Mario World (USA)**, **Wild Guns (USA)**, **NHL 95 (USA)**, **Super
+Mario RPG - Legend of the Seven Stars (USA)**. The full SNES census re-run
+(to move the bucket counts and name every other title this internal-cycle
+undercount touches — any ROM whose own code waits out a divide or multiply
+with single-access filler instructions, not just this one) is the
+orchestrator's, per this ticket's brief.
+
+**Determinism:** the fix changes only how many master cycles the math unit
+is credited per instruction; it introduces no RNG, wall-clock, or thread
+dependency, and `MathUnit`'s own state (`rddiv`/`rdmpy`/`div_steps`/etc.) is
+unchanged in shape and already part of save state.
+
+**History, for whoever reads this next:** this write-up went through three
+corrections in one session before landing here — the first two commits
+misdiagnosed a re-entrancy guard and an unresolved call chain as "the
+game's own bug" and closed the ticket BLOCKED; the coordinator's review
+correctly refused that verdict on the grounds that a shipped title does not
+crash from its own static data on every boot on real hardware, and asked
+for the register-read chain to be walked all the way back. It led here. The
+lesson, stated so the next investigator does not have to re-learn it: when
+a crash bottoms out in "the game's own data was garbage," the very next
+question is always "read from where, by what index, and was every register
+on that path checked against fullsnes" — not assumed clean because nothing
+upstream looked like a register at first glance.
+
+### 2026-09-20 continuation — the credit is correct; the real regression was
+an unrelated, independent `WAI` defect it exposed (Full Throttle - All-
+American Racing (USA) (Beta))
+
+The W14-28 fix above moved Flintstones, Jungle Strike and Samurai Shodown
+(x2) to rendering. It also moved **Full Throttle - All-American Racing
+(USA) (Beta)** OFF rendering: on main (pre-fix) it varies at frame 179;
+on this branch (fix applied) it parked forever (`varied_at=None`).
+
+**The divergence, measured, not assumed.** The only `$4204-$4206` write
+site the ROM contains (`PROBE_FINDROM` over the whole image found exactly
+one) is at `$96:834B` (`STX $4204` — X is 16-bit here, dividend `$003F`
+= 63) / `$96:8350` (`STA $4206`, divisor `$03` — starts the divide). The
+only two `$4214-$4217` reads before the freeze are at `$96:835C`
+(`LDX $4214`, 16-bit) and `$96:8370` (`CMP $4216`). `PROBE_ACCESSWIN=
+968350:96835c` measured the window between the trigger and the first
+read: **13 accesses, 78 master cycles = 13 base steps** (pre-credit) — 3
+short of `DIV_STEPS=16`. The intervening code is `REP #$20; NOP×7;
+LDA #$01; LDX $4214` — seven single-access `NOP`s, each carrying exactly
+the internal cycle this ticket's credit restores, for **+7 steps = 20 ≥
+16**. Real elapsed CPU cycles from the `$4206` write to the `LDX $4214`
+read's own data cycle: `NOP×7` (14) + `LDA #$01` (2) + `LDX abs`'s
+opcode+2 operand fetches (3) = **19-20 cycles**, comfortably past
+fullsnes's "wait 16 clk cycles" ("SNES Maths Multiply/Divide") — hardware
+finishes this divide well before the read.
+
+**Branch (with the credit) reads `$4214=0x0015 $4215=0x0000` (quotient 21,
+`busy=false`) — the correct, final `63 / 3 = 21 r0`.** Main (without the
+credit, reproduced by temporarily reverting just the `math_spent` line and
+rebuilding) reads `$4214=0x0002 $4215=0xE0` (`busy=true`) — a genuine
+intermediate shift-register value, per fullsnes's documented pattern,
+caught two-plus steps early. **The branch is hardware-correct here; main is
+wrong.** Neither of this ticket's remedy branches applies: the credit is
+not over-crediting (verified by the cycle count above), and
+`MathUnit::step`'s intermediate-value model is never exercised by this
+title's read (it lands after completion either way — main's staleness is
+purely an undercount of the credit, not a wrong intermediate pattern).
+Restoring the credit and re-running `PROBE_MODE=frames PROBE_FRAMES=2400`
+confirms both Full Throttle images render: Beta and retail both vary at
+frame 181 (main's 179, offset by the two extra correctly-credited steps —
+immaterial to the census's rendered/blank bucket).
+
+**The freeze itself was a second, independent defect: `WAI` never woke on
+a masked IRQ.** At the parked state (`PROBE_INSTR=4000000`), the CPU sits
+at `$81:CB95` (the byte after a `WAI` at `$81:CB94`), `cpu.stopped=true`,
+`irq: htime=0 vtime=240 fired=true mode=Both`, `nmitimen=0xB1` (NMI and
+H/V-both both enabled), `nmi_entries=0 irq_entries=0` in the trailing
+20,000-instruction sample — the H/V IRQ had already latched a match, but
+because `I` was set, `SnesSystem::step`'s IRQ-dispatch branch (gated on
+`!flag(I)`) never ran, and nothing else in this crate ever cleared
+`cpu.stopped`. Per the WDC W65C816S datasheet, `WAI` resumes on NMI, on
+ABORT, or on an IRQ line assertion **regardless of `I`** — `I` decides only
+whether the interrupt is *dispatched* (vector fetch, handler entry); a
+masked IRQ still wakes `WAI`, which then simply "resumes with the next
+instruction." `main` at the same instruction count (checked with main's own
+prebuilt `title_probe`, no rebuild) reaches the **identical** parked state
+(`$81:CB95`, `cpu.stopped=true`, `nmi_entries=0`, `irq_entries=0`) — this
+WAI-wake gap is not new; the credit fix just makes this title's boot reach
+it on a timeline the census's window can no longer route around by
+accident.
+
+**The fix:** a new `Cpu::wai: bool`, set alongside `stopped` by `WAI`
+(`0xCB`) and left clear by `STP` (`0xDB`) — the two shared one bit before
+this and `system.rs`'s masked-IRQ branch needs to tell them apart, since
+`STP` must never wake on an interrupt (WDC: only a hardware reset wakes
+it). `SnesSystem::step` gained an `else if` after the existing NMI and
+unmasked-IRQ dispatch arms: when `(irq.fired || sa1_irq_to_snes) &&
+flag(I) && cpu.wai`, clear `stopped`/`wai` without touching `PC`, `P`, or
+the stack — no dispatch, exactly per the datasheet. `dispatch_interrupt`
+also now clears `wai` (a real dispatch ends any halt regardless of which
+opcode caused it). Two new tests in `crates/rf-snes/src/tests/system.rs`:
+`wai_wakes_on_a_masked_irq_without_dispatching` (asserts `stopped`/`wai`
+clear, `PC` unchanged, `I` untouched) and `stp_does_not_wake_on_a_masked_irq`
+(asserts `STP` stays halted under the identical stimulus).
+
+**Open finding, not fixed here — census-bucket regression on Jungle
+Strike (USA), scoped to the census's fixed 600-frame budget.** With both
+fixes applied, `boot_census_child` for Jungle Strike moved from exit 0
+(rendered) to exit 10 (blank) — the only title in this ticket's checklist
+that did.
+
+*What is confirmed, not inferred:*
+
+- **The WAI-wake logic itself, not the math credit, causes the move.**
+  With the credit kept and only the new masked-IRQ `else if` branch
+  disabled (`&& false`, a temporary one-line isolation, reverted), the
+  census child renders again (exit 0). The math credit alone is not the
+  cause.
+- **The H/V matches the WAI-wake branch fires on are genuine**, not a
+  spurious latch: `dot` lands within a few cycles of `htime`, `line`
+  equals `vtime` exactly, and the write sites that set each new target
+  (`$A0:D3D6-D3D9` etc., under `REP #$30`, 16-bit `LDA #$0100; STA
+  $4207`) are a real per-scanline HUD raster-split sequence (targets
+  `128/220`, `256/220`, `128/4`, `256/4`, `256/6` cycling every real
+  frame) — confirmed with `PROBE_IRQLATCH` (temporary, reverted).
+- **An earlier draft of this note claimed the pre-fix build's `exit=0`
+  came from freezing on an already-colorful frame. That claim is FALSE
+  and is retracted here** — this is exactly the kind of unverified
+  inference this file's own history (three corrections above, same
+  ticket) warns against shipping. Measured directly with
+  `PROBE_MODE=frames PROBE_FRAMES=250 PROBE_FRAME_INDICES=1` on a
+  freshly rebuilt pre-fix (credit-only, no WAI-wake) binary: frame 205 is
+  genuinely non-uniform (`distinct_this_frame=16`, `forced_blank=false`,
+  `bright` sample `[227,238,230,225,233,239]`) — real, populated content,
+  not a frozen leftover. The build with the WAI-wake fix is still
+  `forced_blank=true`, `distinct_this_frame=1` at the identical frame
+  205. So the WAI-wake fix does not merely "stop an accidental freeze
+  that happened to look colorful" — it changes what actually renders by
+  frame 205, and the fixed build is *behind* the buggy one at that point
+  (it catches up later: `PROBE_FRAMES=2400` shows the fixed build's
+  first genuinely non-uniform frame at 991).
+
+*What is not yet characterized*: why the masked-IRQ wake — which is
+correct per the WDC datasheet and fires on real, on-target raster
+matches — changes what the pre-fix build was doing by frame 205 enough
+to delay real content by ~800 frames. The credit-only build reaching
+colorful content at 205 does not, by itself, prove that content is
+*correct* (it could be a different, also-wrong path the old undercount
+happened to take), and confirming or refuting that needs more trace
+budget than this session has left. **Needs Brad's ruling**: file a
+follow-up ticket to finish this trace, raise `boot_census.rs`'s `FRAMES`
+constant, special-case this title, or accept the bucket move as a known,
+unresolved side effect of the WAI correctness fix.
+
+**Gate:** `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — **363 passed** (361 + the two
+new WAI tests), 0 failed; `cargo test --workspace` — every crate green, 0
+failed. Ignored SNES suites: `singlestep_65816_vectors` — **5,080,000
+passed, 0 failed**; `spc700_vectors`'s `singlestep_spc700_vectors` —
+**256,000 passed, 0 failed**; `gilyon_cputest` —
+`test_num=0x0649/0x0649, ROM says "Success"`, unchanged; `blargg_spc`'s
+`spc_timer_reports_pass` — `"PASSED TESTS"`.
+
+**Census children, this session's full checklist:** exit 0 (rendered) —
+Full Throttle - All-American Racing (USA) (Beta), Full Throttle -
+All-American Racing (USA) [retail], The Flintstones (USA, En/Fr/De/Es/It),
+Samurai Shodown (USA), Samurai Shodown (USA) (Beta), Super Mario World
+(USA), Wild Guns (USA), NHL 95 (USA), Super Mario RPG - Legend of the Seven
+Stars (USA), Final Fantasy - Mystic Quest (USA), Kirby Super Star (USA),
+F-Zero (USA). Exit 10 (blank, within the 600-frame budget only) — Jungle
+Strike (USA), open finding above.
+
+**Determinism:** both changes are pure function of already-deterministic
+state (`I`, `irq.fired`, the opcode that set `stopped`); no RNG, wall-clock
+or thread dependency introduced. `Cpu::wai` is now part of save state
+(`Cpu::save`/`Cpu::load` both append it) — a save taken mid-`WAI` restores
+which kind of halt it was, so a load does not risk waking a restored `STP`.
+
+**Full SNES census (orchestrator, 2026-09-20, release build, per-title
+`RF_CENSUS_OUT` diff against the W14-31 run), on the final W14-28 tree
+(math-unit credit + WAI masked-IRQ wake):** **1054/81/130/0/0 ->
+1061/74/130/0/0** ("SNES, after W14-28" row above). Seven rows changed,
+every one from *uniform screen* to *rendered something*, none the other
+way: **The Flintstones** (USA, En/Fr/De/Es/It), **Samurai Shodown** (USA
+and beta), **Clay Fighter** (USA, Tournament Edition, and Beta 2 — the
+2026-09-17 triage had named it "driver clears ARAM for seconds then
+re-uploads"; the WAI wake is what it was waiting on), and **Kawasaki
+Superbike Challenge**. An intermediate run with the credit alone had
+moved Jungle Strike up and Full Throttle (Beta) down; with the WAI wake
+in place Full Throttle renders again (both dumps) and Jungle Strike is
+back exactly where main has it (uniform, first varied frame 991 under
+the fixed tree, i.e. outside the 600-frame budget — a named follow-up,
+not a regression against main).

@@ -932,8 +932,19 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) -> Result<(), u8
         // WAI waits for an interrupt, STP halts until reset. Both are one
         // byte and both leave PC after themselves; what distinguishes them
         // is what wakes them, which is the scheduler's business rather
-        // than the CPU's. `stopped` is the CPU's half of that contract.
-        0xCB | 0xDB => cpu.stopped = true,
+        // than the CPU's. `stopped` is the CPU's half of that contract;
+        // `wai` (ticket W14-28) marks which of the two this is, because
+        // the scheduler wakes `WAI` on a masked IRQ (datasheet: the
+        // interrupt merely is not dispatched) but must never wake `STP`
+        // that way.
+        0xCB => {
+            cpu.stopped = true;
+            cpu.wai = true;
+        }
+        0xDB => {
+            cpu.stopped = true;
+            cpu.wai = false;
+        }
         // UNREACHABLE AS OF W6-01b, and deliberately kept.
         //
         // All 256 opcodes are implemented, so clippy is right that no

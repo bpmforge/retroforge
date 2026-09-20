@@ -105,6 +105,48 @@ fn stepping_accumulates_master_cycles_by_region() {
     assert_eq!(system.cpu.a & 0xFF, 0x42);
 }
 
+/// Ticket W14-28: eight `NOP`s -- the ordinary, documented idiom for
+/// waiting out the hardware divider's 16-cycle latency (fullsnes "SNES
+/// Maths Multiply/Divide": the latency "is a CPU-cycle count, independent
+/// of whether any given cycle is fast or slow on the bus, or internal")
+/// -- must be enough real CPU time for a divide to finish, the same as on
+/// hardware. `NOP` is a single-byte, implied-mode opcode: it makes exactly
+/// one bus access (the opcode fetch) but no 65816 instruction executes in
+/// fewer than 2 cycles (WDC 65C816 datasheet, instruction timing), so it
+/// always has one internal cycle beyond that access. Before this ticket,
+/// `SnesSystem::step` fed `MathUnit::tick` the access-charged master
+/// cycles only, so `NOP`'s internal cycle was silently dropped — eight of
+/// them left a divide one step short, and the game reading the result
+/// (here, and in the real ROM this reproduces, The Flintstones' boot; see
+/// `docs/TESTING.md`) saw a stale, still-shifting remainder instead of the
+/// finished one.
+#[test]
+fn eight_nops_are_enough_to_finish_a_divide_the_way_hardware_would() {
+    let mut rom = lorom_image(0x20, 0x00);
+    let mut code: Vec<u8> = vec![
+        0xA9, 0x3F, // LDA #$3F        (dividend 63)
+        0x8D, 0x04, 0x42, // STA $4204 (WRDIVL)
+        0xA9, 0x0B, // LDA #$0B        (divisor 11)
+        0x8D, 0x06, 0x42, // STA $4206 (WRDIVB -- starts the divide)
+    ];
+    code.extend(std::iter::repeat(0xEA).take(8)); // eight NOPs
+    rom[..code.len()].copy_from_slice(&code);
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+
+    let mut system = SnesSystem::load(&rom).expect("loads");
+    for _ in 0..(4 + 8) {
+        system.step().expect("implemented");
+    }
+    assert!(
+        !system.bus.math.busy(),
+        "63 / 11's divide must be finished after the write plus 8 NOPs, \
+         the same as on hardware"
+    );
+    assert_eq!(system.bus.math.rddiv, 5, "63 / 11 quotient");
+    assert_eq!(system.bus.math.rdmpy, 8, "63 / 11 remainder");
+}
+
 /// A bounded runner: a ROM that never finishes must fail a test, not hang
 /// it.
 #[test]
@@ -809,5 +851,86 @@ fn a_write_during_vblank_is_not_applied_to_the_just_completed_frame() {
     assert!(
         !masked(0, 150),
         "and must not show the NEW span anywhere in this frame"
+    );
+}
+
+/// Ticket W14-28 (second, independent defect found investigating Full
+/// Throttle - All-American Racing (USA) (Beta)'s regression): per the WDC
+/// W65C816S datasheet, `WAI` resumes "upon the occurrence of a hardware
+/// interrupt (NMI, IRQ if the interrupt disable flag is clear, or ABORT)"
+/// -- an IRQ line assertion wakes `WAI` even with the interrupt disable
+/// flag (`I`) SET; `I` only decides whether the interrupt is *dispatched*
+/// (vector fetch, push PC/P, jump to handler) or whether `WAI` merely
+/// "resumes with the next instruction". Before this fix, `SnesSystem::step`
+/// only ever cleared `Cpu::stopped` by calling `Cpu::interrupt` -- which
+/// this crate's IRQ branch gates on `!flag(I)` -- so a title that executed
+/// `WAI` with `I` set (the ordinary idiom for waiting on the H/V IRQ alone,
+/// since NMI needs no unmasking) parked forever the moment only a masked
+/// IRQ fired: nothing ever cleared `stopped`. Traced to `$81:CB94`'s `WAI`
+/// in the ROM above (`docs/TESTING.md`'s W14-28 write-up), parked at frame
+/// 108 with `NmiTimen` bit 7 set but the H/V comparison's `I`-masked fire
+/// never dispatched.
+#[test]
+fn wai_wakes_on_a_masked_irq_without_dispatching() {
+    let mut rom = lorom_image(0x20, 0x00);
+    rom[0x0000] = 0xCB; // WAI
+    rom[0x0001] = 0xEA; // NOP -- where a masked wake must resume
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("loads");
+    // The 65816 resets with I set (interrupts disabled) -- the masked
+    // case this test targets, with no SEI needed to reach it.
+    assert!(system.cpu.flag(crate::cpu::flags::I));
+
+    system.step().expect("WAI is implemented");
+    assert!(system.cpu.stopped, "WAI must halt instruction execution");
+    assert!(
+        system.cpu.wai,
+        "and must be recorded as a WAI halt, not STP"
+    );
+    let pc_after_wai = system.cpu.pc;
+
+    // The H/V IRQ comparison latching a match while I is still set --
+    // exactly what a per-frame "wait for the IRQ line" idiom produces.
+    system.bus.irq.fired = true;
+    system.step().expect("still implemented while stopped");
+
+    assert!(
+        !system.cpu.stopped,
+        "a masked IRQ must still wake WAI (WDC 65C816S datasheet)"
+    );
+    assert!(!system.cpu.wai);
+    assert_eq!(
+        system.cpu.pc, pc_after_wai,
+        "a masked IRQ resumes at the next instruction -- it must not \
+         dispatch to the interrupt handler"
+    );
+    assert!(
+        system.cpu.flag(crate::cpu::flags::I),
+        "no dispatch occurred, so I must be untouched"
+    );
+}
+
+/// The same masked-IRQ line assertion must NOT wake `STP`: per the
+/// datasheet, `STP` "can only be restarted... by...a hardware RESET" --
+/// unlike `WAI`, no interrupt of any kind wakes it. `Cpu::wai` is what
+/// lets `SnesSystem::step` tell the two halts apart (ticket W14-28).
+#[test]
+fn stp_does_not_wake_on_a_masked_irq() {
+    let mut rom = lorom_image(0x20, 0x00);
+    rom[0x0000] = 0xDB; // STP
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("loads");
+
+    system.step().expect("STP is implemented");
+    assert!(system.cpu.stopped);
+    assert!(!system.cpu.wai, "STP is not a WAI halt");
+
+    system.bus.irq.fired = true;
+    system.step().expect("still implemented while stopped");
+    assert!(
+        system.cpu.stopped,
+        "STP must stay halted -- it wakes only on reset, never an IRQ"
     );
 }
