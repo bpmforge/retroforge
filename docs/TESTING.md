@@ -1611,13 +1611,17 @@ behavior changed); Super Ninja Boy (both the retail and Beta dumps)
 stays wherever the last census left it.
 
 ## W14-27 — Soul Blazer: driver dispatch RETs to $0102 after a
-byte-exact-to-ROM extended-command table read; BLOCKED, the game's own
-data (2026-09-20)
+byte-exact-to-ROM extended-command table overrun; BLOCKED on the
+sequencer's fetch loop, not confirmed as the game's own behavior
+(2026-09-20)
 
 The 2026-09-17 triage guessed this was the same class as W14-24 (a
-`$4204-$4217` math-unit count feeding a corrupted upload). It is not.
-Traced end to end, every byte involved matches the ROM exactly; no
-emulator defect was found anywhere on the path.
+`$4204-$4217` math-unit count feeding a corrupted upload). It is not:
+that specific mechanism is exonerated by disassembly. What replaces it
+is traced only as far as the dispatcher itself — every byte on the
+`$07C3-$07DE` path matches the ROM exactly, but the loop that decides
+*which* byte reaches that dispatcher was not reached this session, and
+a fact found late in this trace (below) argues it should have been.
 
 **The halt, pinned with `PROBE_STOP_ON_SPC_STOP`/`PROBE_SPCRING`/
 `PROBE_ARAM`.** `spc.stopped=true` with `apu.boot.is_running()=true`;
@@ -1671,12 +1675,38 @@ to plausible driver-code addresses (`$07DF` through `$0A05`, all
 inside the code range this same dump covers); commands `$FB-$FF` (the
 next 5 slots) decode to `$0101`, `$0302`, `$0100`, `$0102`, `$0102` —
 all inside the same cleared/dead region. The table's last real entry
-is `$FA`; bytes for `$FB` onward (`01 01 02 03 00 01 02 01 02 01 01`
-at `$0A8A-$0A94`) read far more like a **parallel per-command
-operand-length array** for the 27 valid commands (small values,
-0-3) than like address-table entries — i.e. `$07C3` has no bounds
-check of its own beyond the caller's `A>=$E0`, and command `$FE` reads
-four slots past the table's real end into that adjacent array.
+is `$FA` (`Y=$F4`); bytes for `$FB` onward (`01 01 02 03 00 01 02 01
+02 01 01` at `$0A8A-$0A94`) read far more like a **parallel per-command
+operand-length array** for the 27 valid commands (small values, 0-3)
+than like address-table entries — i.e. `$07C3` has no bounds check of
+its own beyond the caller's `A>=$E0`, and command `$FE` (`Y=$FC`) reads
+one slot past the table's real end (`$FB`, `Y=$F6`) into that adjacent
+array — 1 to 5 slots past `$FA` for commands `$FB`-`$FF` respectively,
+not "4-8" as an earlier draft of this note said.
+
+**A material fact that argues against calling this settled, found on
+review of the exhaustive PC census below: this table-dispatch path
+(`$07C3`) fires exactly once in the entire ~6,000,000-instruction
+traced run, and that one invocation is the fatal one.** `PROBE_SPCRING`'s
+ring never wrapped (2,999 of its 3,000 slots used for a run this long
+— an exhaustive count of every distinct SPC PC transition, not a
+sample), so counting tokens in it is authoritative: `07C3` appears
+once; all 27 valid handler targets (`$07DF`, `$0849`, `$0857`, ...,
+`$0A05`) appear zero times **via this dispatcher**. `$07DF` (the
+`cmd=$E0` handler) is reached 7 times in the run, but by a *different*,
+direct `CALL !$07DF` at ARAM `$06DB` that bypasses the table entirely
+— so the 27 handlers are exercised by the driver, just never once
+through the computed-jump path this ticket is tracing. A driver
+carrying a 27-entry command table that fires zero times successfully
+in six million instructions of gameplay, then fires once with a value
+that overruns it, is not strong evidence that this dispatch is a
+routine, well-worn part of the game's design — it is exactly the
+signature a fetch/skip-loop pointer desync earlier in the score parse
+would leave. `PROBE_FIND` located the data blob containing this exact
+byte run in ARAM at `$B51E` (upper ARAM, well away from the
+`$0600-$0A94` driver-code region this trace otherwise covers) — a
+plausible song/pattern data bank, but this session did not trace the
+read-pointer that walks it.
 
 **Every byte on this path matches the ROM exactly — checked, not
 assumed.** `PROBE_FINDROM` located the dispatcher routine itself
@@ -1725,35 +1755,46 @@ but those vectors test isolated opcode+state combinations, not this
 specific driver's full instruction sequence, so they do not close the
 question either.
 
-**Conclusion: BLOCKED, with the residual question named rather than
-resolved.** Every byte and every opcode actually exercised on the path
+**Conclusion: BLOCKED on an unfinished trace, not confirmed as the
+game's own behavior — do not read this as "hardware would do the
+same."** Every byte and every opcode actually exercised on the path
 from `$07C3` to the halt is verified, unmodified ROM/upload content
-executed per documented SPC700 semantics — this half of the ticket's
-acceptance criterion is met. Whether real hardware would ever present
-`A=$FE` to this exact dispatch point depends on code this session did
-not reach (the sequencer's command-fetch-and-skip loop feeding
-`$0704`/`$0723`/`$0745`, executed only once in the traced run per
-`PROBE_SPCRING`, so it is not the steady-state per-tick loop). Per law
-5, nothing in `crates/rf-snes` is patched around a ROM-sourced dispatch
-table on the strength of a partial trace, so no fix ships. This
-follows the W14-25 precedent of closing BLOCKED on a verified-as-far-as-
-traced mechanism plus a named, unresolved question, rather than
-overclaiming full hardware-equivalence.
+executed per documented SPC700 semantics, which rules out an emulator
+defect *in that specific segment*. But the "fires exactly once, and
+that's the fatal one" fact above means this session cannot honestly
+certify that `A=$FE` reaching `$07C3` is intended game behavior rather
+than the visible symptom of an upstream defect (in this driver's own
+fetch/skip loop, which could be either the ROM's own bug or an
+`rf-snes` bug in executing it — undetermined). Per law 5, nothing in
+`crates/rf-snes` is patched on the strength of a partial trace either
+way, so no fix ships this pass, and the ticket goes BLOCKED — but on
+"the upstream loop is unexamined," not on a confirmed hardware match.
+This is a narrower use of the W14-25 precedent (verify what was traced,
+name what wasn't) than the earlier draft of this note claimed.
 
-**Named next step**, left for whoever picks this back up: disassemble
-the command-fetch/operand-skip loop that leads into `$0704` (it uses
-the `$0A8A-$0A94` byte array identified above as per-command operand
-lengths — confirm that reading and its length-driven pointer advance
-against the ROM the same way `$07C3-$07DE` was confirmed here). If
-that loop's own read pointer, at the specific dispatch that reaches
-`$0745` with `A=$FE`, is consuming a ROM-sourced length correctly, this
-closes WONTFIX outright (the game's own table has no bounds check past
-`$FA`, and real hardware would take the identical four-slot overrun).
-If the pointer has drifted by even one byte from an earlier
-mis-skipped operand, that is a real emulator defect in this driver's
-byte-consumption, not a wraparound curiosity, and it belongs in the
-class of desync bugs this ticket's brief anticipated as hypothesis 2 —
-just one step further upstream than the `$2140` upload itself.
+**Named next step, and it should be the first thing the follow-up
+ticket does, not an optional deepening**: disassemble the
+command-fetch/operand-skip loop that leads into `$0704`/`$0723`/`$0745`
+and walks the song data this session located at ARAM `$B51E` (it
+almost certainly uses the `$0A8A-$0A94` byte array identified above as
+per-command operand lengths — confirm that reading and its
+length-driven pointer advance against the ROM the same way
+`$07C3-$07DE` was confirmed here). Two outcomes, and the "fires exactly
+once" fact above means the second is not a remote possibility:
+
+- If that loop's read pointer, across a full pass through the score up
+  to the dispatch that reaches `$0745` with `A=$FE`, consumes every
+  ROM-sourced operand length correctly, this closes WONTFIX (the
+  game's own table has no bounds check past `$FA`, real hardware would
+  take the identical overrun, and "fires once" would just mean this
+  extended command is genuinely rare in this song).
+- If the pointer has drifted by even one byte from an earlier
+  mis-skipped operand — plausible precisely because the table-dispatch
+  path is otherwise unexercised in this run — that is a real emulator
+  defect in this driver's byte-consumption, in the same desync class
+  the ticket brief's hypothesis 2 anticipated, just one step further
+  upstream than the `$2140` upload itself, and it should be fixed
+  under a new ticket in `crates/rf-snes` rather than left BLOCKED.
 
 **New diagnostic, kept**: `title_probe.rs` gained `PROBE_SPCREGPC=hex[,hex]`
 (module doc updated) — prints the SPC700's `A`/`X`/`Y`/`SP` and the
