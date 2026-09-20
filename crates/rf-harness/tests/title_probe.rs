@@ -65,6 +65,64 @@
 //!                                    decimal instruction-count window (`n`, end
 //!                                    exclusive) — attributes an SP drift to the
 //!                                    exact opcode that moved it (W14-26)
+//! PROBE_IRQLOG=N                    log the first N H/V-IRQ events (edge-
+//!                                    detected post-instruction, not a new
+//!                                    core field — see below), then totals
+//!                                    only: an ARMLOG line whenever $4200
+//!                                    (NMITIMEN) or $4207-$420A (HTIME/
+//!                                    VTIME) changes, with the old/new value
+//!                                    and the raster (line, dot) it changed
+//!                                    at; an IRQLOG line on every rising
+//!                                    edge of the IRQ-pending flag (an
+//!                                    assertion) with the raster and the
+//!                                    CPU PC/P at that instant; an ACKLOG
+//!                                    line on every falling edge that is
+//!                                    NOT explained by an ARMLOG disabling
+//!                                    IRQs the same instant (i.e. a $4211
+//!                                    read, the only other way the flag
+//!                                    clears) with the raster; and a
+//!                                    TRAMPLOG line whenever the bytes at
+//!                                    the native IRQ vector's indirect-jump
+//!                                    target change (the "vector
+//!                                    trampoline" a raster chain rewrites
+//!                                    to redirect the next IRQ without
+//!                                    touching $FFEE itself), decoded once
+//!                                    at start from whatever opcode sits at
+//!                                    $00:[$FFEE] (`$6C`/`$7C` JMP (abs[,X])
+//!                                    or `$DC` JML [abs] follow the pointer
+//!                                    they encode; anything else — a
+//!                                    vector pointing straight into WRAM
+//!                                    dispatch code being the common case —
+//!                                    watches the vector's own target
+//!                                    address instead); also an
+//!                                    INIDISPLOG line on every `$2100`
+//!                                    forced_blank/brightness edge, since
+//!                                    that register is what the trace is
+//!                                    ultimately trying to explain (W14-29)
+//! PROBE_SPCMEMWATCH=hex[,hex]       print the SPC700 PC and old/new byte value
+//!                                    whenever one of these absolute 16-bit ARAM
+//!                                    addresses changes value — used to find who
+//!                                    wrote a suspect direct-page cell (e.g. a
+//!                                    track-pointer low/high byte pair) rather
+//!                                    than only observing its final value. CAVEAT:
+//!                                    it (like PROBE_SPCREGPC) samples once per
+//!                                    65816 instruction, AFTER `core.step` — the
+//!                                    printed `spcpc` is wherever the SPC700 has
+//!                                    reached by then, not necessarily the PC of
+//!                                    the instruction that produced the change,
+//!                                    since several SPC700 instructions can run
+//!                                    inside one 65816 step (W14-30). It also
+//!                                    reads raw ARAM bytes, so it is blind to
+//!                                    $00F4-$00F7 (the port registers) — those
+//!                                    are backed by `ports_in`/`ports_out`, not
+//!                                    the `aram` array; use PROBE_APUPORTLOG.
+//! PROBE_APUPORTLOG=1                print n, SPC pc, and all four
+//!                                    ports_in/ports_out bytes whenever either
+//!                                    ports_in[0] (CPU-sent index) or
+//!                                    ports_in[1] (CPU-sent data) changes — the
+//!                                    accepted-transfer trace for an APU upload
+//!                                    protocol built on $F4 (index)/$F5 (data)
+//!                                    (W14-30)
 //! PROBE_WATCH=hex[,hex]              print `n`, the PC that just ran, and
 //!                                    old/new bytes whenever one of these 24-bit
 //!                                    addresses' value changes from one
@@ -90,6 +148,15 @@ struct Sink {
     lines: u64,
     varied: bool,
     first: Option<u8>,
+    // W14-29: independent of `first`/`varied` above (which compare against
+    // the very first pixel ever seen, across the whole run) — this is
+    // reset every frame by the FRAMES-mode loop and answers "did THIS
+    // frame's own rendered picture, as `emit_frame` reconstructed it
+    // (mid-frame register replay included), contain more than one
+    // palette index" — used to tell "the game is genuinely still drawing
+    // a flat colour" apart from "varied output exists but never differs
+    // from pixel zero specifically".
+    frame_indices: std::collections::HashSet<u8>,
 }
 impl CoreSink for Sink {
     fn video_scanline(&mut self, _y: u16, pixels: &[PpuPixel]) {
@@ -100,6 +167,7 @@ impl CoreSink for Sink {
                 Some(f) if f != p.palette_index => self.varied = true,
                 _ => {}
             }
+            self.frame_indices.insert(p.palette_index);
         }
     }
     fn audio(&mut self, _s: &[i16]) {}
@@ -143,8 +211,25 @@ fn probe() {
         let mut sink = Sink::default();
         if std::env::var("PROBE_MODE").as_deref() == Ok("frames") {
             let mut first_varied: Option<usize> = None;
+            let frame_indices_log = std::env::var("PROBE_FRAME_INDICES").is_ok();
             for f in 0..frames {
+                sink.frame_indices.clear();
                 core.step(Step::Frame, &mut sink);
+                if frame_indices_log {
+                    let sys = core.system();
+                    println!(
+                        "      FRAMEIDX f={f} distinct_this_frame={} sample={:?} \
+                         forced_blank={} bg_mode={} line_writes[216]={:?} \
+                         line_writes[7]={:?} line_writes[100]={:?}",
+                        sink.frame_indices.len(),
+                        sink.frame_indices.iter().take(6).collect::<Vec<_>>(),
+                        sys.bus.ppu.forced_blank,
+                        sys.bus.ppu.bg_mode,
+                        sys.bus.ppu.line_writes_for_test(216),
+                        sys.bus.ppu.line_writes_for_test(7),
+                        sys.bus.ppu.line_writes_for_test(100),
+                    );
+                }
                 if sink.varied && first_varied.is_none() {
                     first_varied = Some(f);
                     break;
@@ -160,7 +245,8 @@ fn probe() {
                     let sys = core.system();
                     let ppu = &sys.bus.ppu;
                     println!(
-                        "    mode={} forced_blank={} bright={} tm=[{}] m7={:?} bg1 hofs={} vofs={}",
+                        "    frame={} mode={} forced_blank={} bright={} tm=[{}] m7={:?} bg1 hofs={} vofs={}",
+                        sys.bus.timing.frame,
                         ppu.bg_mode,
                         ppu.forced_blank,
                         ppu.brightness,
@@ -206,6 +292,28 @@ fn probe() {
         let timerlog = std::env::var("PROBE_TIMERLOG").is_ok();
         let mut timer_last = [false, false, false];
         let packetlog = std::env::var("PROBE_PACKETLOG").is_ok();
+        // W14-30: watch a set of absolute 16-bit ARAM addresses and print
+        // whenever one of them changes value, with the SPC PC that ran the
+        // instruction which produced the change. Built to find who writes
+        // a suspect direct-page cell (a track-pointer low/high byte pair)
+        // rather than only ever seeing its value after the fact via
+        // PROBE_ARAM/PROBE_SPCREGPC.
+        let spcmemwatch: Vec<u16> = std::env::var("PROBE_SPCMEMWATCH")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| u16::from_str_radix(s, 16).unwrap())
+            .collect();
+        let mut spcmemwatch_last: HashMap<u16, u8> = HashMap::new();
+        // W14-30: trace the accepted-transfer sequence of an APU upload
+        // protocol built on $F4 (CPU-sent index)/$F5 (CPU-sent data) —
+        // ports_in/ports_out are separate arrays from `aram`, so
+        // PROBE_SPCMEMWATCH cannot see them. Prints on every change to
+        // either ports_in[0] or ports_in[1] (whichever moved), plus the
+        // other three port bytes, so the (index, data) pairs the CPU
+        // wrote can be diffed against the ROM's own byte-run.
+        let apuportlog = std::env::var("PROBE_APUPORTLOG").is_ok();
+        let mut apuportlog_last = [u8::MAX; 4];
         let mut x_last = u8::MAX;
         let mut port0_last = u8::MAX;
         let mut dp1_last = u8::MAX;
@@ -278,6 +386,76 @@ fn probe() {
         let mut accesswin_active = false;
         let mut accesswin_accesses: u64 = 0;
         let mut accesswin_master_cycles: u64 = 0;
+        // W14-29: IRQ event trace for a per-scanline raster chain that
+        // rewrites its own vector trampoline. Everything here is
+        // reconstructed post-instruction from existing `SnesSystem` state
+        // (edge detection) — no new field is added to `rf-snes` for a
+        // diagnostic (that would drag save-state/determinism review in for
+        // nothing).
+        let irqlog_max: u64 = std::env::var("PROBE_IRQLOG")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let mut irqlog_printed: u64 = 0;
+        let (mut arm_events, mut assert_events, mut ack_events, mut tramp_events) =
+            (0u64, 0u64, 0u64, 0u64);
+        let mut nmitimen_last: u8 = core.system().bus.nmitimen.0;
+        let mut htime_last: u16 = core.system().bus.irq.htime;
+        let mut vtime_last: u16 = core.system().bus.irq.vtime;
+        let mut irq_fired_last: bool = core.system().bus.irq.fired;
+        // Ad hoc, folded into PROBE_IRQLOG rather than a new env var: the
+        // whole point of this ticket is explaining why the screen stays
+        // blank, so a `$2100` INIDISP (forced_blank/brightness) edge log
+        // is exactly as relevant as the IRQ trace itself.
+        let mut inidisp_last: (bool, u8) = {
+            let p = &core.system().bus.ppu;
+            (p.forced_blank, p.brightness)
+        };
+        let mut inidisp_events: u64 = 0;
+        // Find the trampoline bytes to watch. `$00:[$FFEE]` is the native
+        // IRQ vector; if the opcode sitting there is a JMP (abs)/(abs,X)
+        // or JML [abs], the actual jump target is read through the
+        // pointer that instruction encodes, and THAT address (not the
+        // fixed vector target) is what a raster chain rewrites without
+        // ever touching $FFEE. If the vector instead points straight into
+        // WRAM (as here — Mystic Quest's `$FFEE` targets $000117, a low-
+        // WRAM address, not ROM), the vector's own target IS the
+        // trampoline: the game writes its dispatch code there directly
+        // and can rewrite it in place. Either way we end up watching a
+        // fixed address for byte changes; which address depends on what
+        // decodes at the vector at watch-setup time. Uninitialised WRAM
+        // reads as `$00` (`BRK`) before the game's own boot code has
+        // written real bytes there, which is not one of the three
+        // opcodes above and is handled the same as "no indirection": we
+        // fall back to watching the vector target itself.
+        let tramp_watch: Option<(u32, u8)> = if irqlog_max > 0 {
+            let sys0 = core.system();
+            let irq_vec = u32::from(rf_snes::cpu::CpuBus::peek(&sys0.bus, 0xFFEE))
+                | (u32::from(rf_snes::cpu::CpuBus::peek(&sys0.bus, 0xFFEF)) << 8);
+            let op = rf_snes::cpu::CpuBus::peek(&sys0.bus, irq_vec);
+            let (watch_addr, width) = match op {
+                0x6C | 0x7C | 0xDC => {
+                    let lo = rf_snes::cpu::CpuBus::peek(&sys0.bus, irq_vec + 1);
+                    let hi = rf_snes::cpu::CpuBus::peek(&sys0.bus, irq_vec + 2);
+                    let ptr = u32::from(lo) | (u32::from(hi) << 8);
+                    (ptr, if op == 0xDC { 3 } else { 2 })
+                }
+                _ => (irq_vec, 8),
+            };
+            println!(
+                "      TRAMPLOG watching: irq_vec={irq_vec:06X} op_at_vec={op:02X} watch={watch_addr:06X}..+{width}"
+            );
+            Some((watch_addr, width))
+        } else {
+            None
+        };
+        let mut tramp_last: Vec<u8> = tramp_watch
+            .map(|(ptr, width)| {
+                (0..width)
+                    .map(|i| rf_snes::cpu::CpuBus::peek(&core.system().bus, ptr + u32::from(i)))
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut prev_pc: u32 = 0;
         let cap: u64 = std::env::var("PROBE_INSTR")
             .ok()
@@ -288,12 +466,144 @@ fn probe() {
             n += 1;
             let sys = core.system();
             let apu = &sys.bus.apu;
+            for &addr in &spcmemwatch {
+                let cur = apu.aram[addr as usize];
+                match spcmemwatch_last.get(&addr) {
+                    Some(&prev) if prev != cur => {
+                        println!(
+                            "      SPCMEMWATCH n={n} addr={addr:04X} spcpc={:04X} {prev:02X}->{cur:02X}",
+                            apu.cpu.pc
+                        );
+                        spcmemwatch_last.insert(addr, cur);
+                    }
+                    Some(_) => {}
+                    None => {
+                        spcmemwatch_last.insert(addr, cur);
+                    }
+                }
+            }
+            if apuportlog
+                && (apu.ports_in[0] != apuportlog_last[0] || apu.ports_in[1] != apuportlog_last[1])
+            {
+                println!(
+                    "      APUPORTLOG n={n} spcpc={:04X} ports_in={:02X?} ports_out={:02X?}",
+                    apu.cpu.pc, apu.ports_in, apu.ports_out
+                );
+                apuportlog_last = apu.ports_in;
+            }
             let pcv = sys.cpu.pc24()
                 | if std::env::var("PROBE_RINGP").is_ok() {
                     u32::from(sys.cpu.p) << 24
                 } else {
                     0
                 };
+            if irqlog_max > 0 {
+                let line = sys.bus.timing.line;
+                let dot = sys.bus.timing.dot();
+                let nmitimen_now = sys.bus.nmitimen.0;
+                let htime_now = sys.bus.irq.htime;
+                let vtime_now = sys.bus.irq.vtime;
+                let disabling_now = sys.bus.nmitimen.irq_mode() == rf_snes::regs::IrqMode::Off
+                    && rf_snes::regs::NmiTimen(nmitimen_last).irq_mode()
+                        != rf_snes::regs::IrqMode::Off;
+                if nmitimen_now != nmitimen_last {
+                    arm_events += 1;
+                    if irqlog_printed < irqlog_max {
+                        println!(
+                            "      ARMLOG n={n} line={line} dot={dot} $4200: {nmitimen_last:02X}->{nmitimen_now:02X}"
+                        );
+                        irqlog_printed += 1;
+                    }
+                    nmitimen_last = nmitimen_now;
+                }
+                if htime_now != htime_last || vtime_now != vtime_last {
+                    arm_events += 1;
+                    if irqlog_printed < irqlog_max {
+                        println!(
+                            "      ARMLOG n={n} line={line} dot={dot} htime: {htime_last:03X}->{htime_now:03X} vtime: {vtime_last:03X}->{vtime_now:03X}"
+                        );
+                        irqlog_printed += 1;
+                    }
+                    htime_last = htime_now;
+                    vtime_last = vtime_now;
+                }
+                let fired_now = sys.bus.irq.fired;
+                if fired_now && !irq_fired_last {
+                    assert_events += 1;
+                    if irqlog_printed < irqlog_max {
+                        println!(
+                            "      IRQLOG n={n} line={line} dot={dot} ASSERT pc={:06X} p={:02X}",
+                            pcv & 0x00FF_FFFF,
+                            sys.cpu.p
+                        );
+                        irqlog_printed += 1;
+                    }
+                } else if !fired_now && irq_fired_last && !disabling_now {
+                    // A falling edge not explained by $4200 disabling IRQs
+                    // this same instant is the only other way `fired`
+                    // clears: a `$4211` read (`IrqTimer::read_timeup`).
+                    ack_events += 1;
+                    if irqlog_printed < irqlog_max {
+                        println!(
+                            "      ACKLOG n={n} line={line} dot={dot} pc={:06X}",
+                            pcv & 0x00FF_FFFF
+                        );
+                        irqlog_printed += 1;
+                    }
+                }
+                irq_fired_last = fired_now;
+                let inidisp_now = (sys.bus.ppu.forced_blank, sys.bus.ppu.brightness);
+                if inidisp_now != inidisp_last {
+                    inidisp_events += 1;
+                    if irqlog_printed < irqlog_max {
+                        println!(
+                            "      INIDISPLOG n={n} line={line} dot={dot} pc={:06X} \
+                             forced_blank:{}->{} bright:{}->{}",
+                            pcv & 0x00FF_FFFF,
+                            inidisp_last.0,
+                            inidisp_now.0,
+                            inidisp_last.1,
+                            inidisp_now.1
+                        );
+                        irqlog_printed += 1;
+                    }
+                    inidisp_last = inidisp_now;
+                }
+                if let Ok(target_line) = std::env::var("PROBE_LINEWRITES") {
+                    if let Ok(target_line) = target_line.parse::<u16>() {
+                        let len = sys.bus.ppu.line_writes_for_test(target_line).len();
+                        thread_local! {
+                            static LAST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+                        }
+                        let last = LAST.with(std::cell::Cell::get);
+                        if len != last {
+                            println!(
+                                "      LINEWRITES n={n} line={line} dot={dot} target_line={target_line} \
+                                 len: {last}->{len} contents={:?}",
+                                sys.bus.ppu.line_writes_for_test(target_line)
+                            );
+                            LAST.with(|c| c.set(len));
+                        }
+                    }
+                }
+                if let Some((ptr, width)) = tramp_watch {
+                    let cur: Vec<u8> = (0..width)
+                        .map(|i| rf_snes::cpu::CpuBus::peek(&sys.bus, ptr + u32::from(i)))
+                        .collect();
+                    if cur != tramp_last {
+                        tramp_events += 1;
+                        if irqlog_printed < irqlog_max {
+                            println!(
+                                "      TRAMPLOG n={n} line={line} dot={dot} pc={:06X} \
+                                 [{ptr:06X}..+{width}]: {tramp_last:02x?}->{cur:02x?}",
+                                pcv & 0x00FF_FFFF
+                            );
+                            irqlog_printed += 1;
+                        }
+                        tramp_last = cur;
+                    }
+                }
+            }
             if let Some((start, end)) = spwin {
                 if n > start && n <= end {
                     let op = rf_snes::cpu::CpuBus::peek(&sys.bus, prev_pc);
@@ -440,12 +750,15 @@ fn probe() {
                         if apu.cpu.pc == target {
                             println!(
                                 "      SPCPCLOG n={n} pc={:04X} a={:02X} x={:02X} y={:02X} sp={:02X} \
+                                 psw={:02X} p={} \
                                  stack01={:02X} stack02={:02X} stack03={:02X} stack04={:02X}",
                                 apu.cpu.pc,
                                 apu.cpu.a,
                                 apu.cpu.x,
                                 apu.cpu.y,
                                 apu.cpu.sp,
+                                apu.cpu.psw,
+                                apu.cpu.psw & 0x20 != 0,
                                 apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(1)) as usize)],
                                 apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(2)) as usize)],
                                 apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(3)) as usize)],
@@ -544,6 +857,13 @@ fn probe() {
         if packetlog {
             println!(
                 "      PACKETLOG totals: x_register_changes={x_changes} ports_in0_changes={port0_changes}"
+            );
+        }
+        if irqlog_max > 0 {
+            println!(
+                "      IRQLOG totals (whole run): arm_events={arm_events} assert_events={assert_events} \
+                 ack_events={ack_events} tramp_events={tramp_events} inidisp_events={inidisp_events} \
+                 (printed first {irqlog_printed})"
             );
         }
         if !spcpc_counts.is_empty() {
@@ -777,6 +1097,14 @@ fn probe() {
         println!("    spc regs: a={:02x} x={:02x} y={:02x} ; F4-F7 in(spc reads)={:02x?} out(cpu reads)={:02x?} timers en={:?} counters={:?}",
             apu.cpu.a, apu.cpu.x, apu.cpu.y, apu.ports_in, apu.ports_out,
             apu.timers.iter().map(|t| t.enabled).collect::<Vec<_>>(), apu.timers.iter().map(|t| t.peek_counter()).collect::<Vec<_>>());
+        println!(
+            "    echo: write_disabled={} base_page={:02X} (base={:04X}) delay={:02X} dir={:02X}",
+            apu.dsp.echo.write_disabled,
+            apu.dsp.echo.base_page,
+            u16::from(apu.dsp.echo.base_page) << 8,
+            apu.dsp.echo.delay,
+            apu.dsp.dir,
+        );
         print_sa1_reg_report(&core);
     }
 }

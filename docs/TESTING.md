@@ -801,6 +801,7 @@ First run, 2026-09-15, release build:
 | SNES, after W17-04 | 1265 | **1017** | 118 | 130 | **0** | **0** |
 | SNES, after W14-24 | 1265 | **1019** | 116 | 130 | **0** | **0** |
 | SNES, after W14-26 | 1265 | **1037** | 98 | 130 | **0** | **0** |
+| SNES, after W14-31 | 1265 | **1054** | 81 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -1611,6 +1612,199 @@ the commit trailer for counts. The SNES census was not re-run (no
 behavior changed); Super Ninja Boy (both the retail and Beta dumps)
 stays wherever the last census left it.
 
+## W14-30 — Soul Blazer follow-up: the fetch/operand-skip loop is
+exonerated in full, but the fatal byte is runtime-written and not found
+in the ROM; BLOCKED on an unidentified writer, not WONTFIX (2026-09-20)
+
+W14-27 named this the first-priority next step: disassemble the
+command-fetch/operand-skip loop that hands the extended-command
+dispatcher its command byte, and confirm its length-table reads against
+ROM the same way the dispatcher itself was confirmed. That loop is now
+fully disassembled and it settles the ticket-brief question cleanly, but
+what it found next reopens a different one.
+
+**The fetch loop has no length table at all.** Hand-disassembled from
+the ARAM dump (byte-length arithmetic checked against two independent
+anchors — the known-good `$0745` `CMP A,#$E0` and the running byte-count
+from `$0723`, both landing exactly on `$0745`):
+
+```
+0701: 3F D5 07    CALL !$07D5      ; fetch+advance: read [$D4+X], INC the
+                                   ; 16-bit pointer at DP $D4/$D5,X, Y=byte
+0704: D0 1D       BNE $0723        ; nonzero byte -> classify it
+0706..0721:                       ; byte==0: "sustain" -- decrement a
+                                   ; per-channel duration counter ($03B8+X)
+                                   ; and loop, or reload the pointer from a
+                                   ; secondary table and restart -- no
+                                   ; length table here either
+0723: 30 20       BMI $0745       ; byte>=$80 (bit7 set): treat directly
+                                   ; as an extended-command value
+0725: D5 00 02    MOV !$0200+X,A  ; byte<$80: it's a pitch -- store it
+0728: 3F D5 07    CALL !$07D5     ; fetch byte 2 (gate/velocity, encoded)
+072B: 30 18       BMI $0745       ; byte2>=$80: also falls into $0745
+072D..0741:                       ; byte2<$80: split its nibbles into two
+                                   ; small table lookups ($2F00+Y, $2F08+Y)
+0742: 3F D5 07    CALL !$07D5     ; fetch byte 3 (checked at $0745 too)
+0745: 68 E0       CMP A,#$E0      ; the dispatcher gate W14-27 found
+```
+
+Every branch consumes a **fixed, hardcoded** number of bytes decided by
+inline `BMI`/bit-7 tests on the byte just fetched — never a
+table-indexed skip. This supersedes W14-27's "$0A8A parallel
+operand-length array" hypothesis: that region is not a second table the
+fetch loop reads at all, it is simply what lies *after* the $0994/$0995
+jump table's real 27 entries, encountered only as an artifact of the
+dispatcher's own missing bounds check (confirmed already, W14-27). There
+is no operand-length mechanism in this driver for a wrong length to
+corrupt.
+
+**This channel's loop runs exactly once, so there is no prior note to
+have desynced.** `PROBE_SPCPCCOUNT=0701,0723,0745,07c3,07d5` over the
+whole run: `0701`, `0723`, `0745`, and `07C3` each fire **exactly once**
+— the fatal firing is the loop's first and only iteration for this
+channel. The very first byte it ever reads is `$FE`.
+
+**That byte's value is genuine ARAM content, and its channel-init
+pointer is byte-exact to ROM.** `$FE` sits at ARAM `$90F1` (dumped
+directly: `90F0: cf FE 03 32 ...`). The pointer arrives there via a
+copy-loop at `$06C0-$06CA` (`MOV A,[$16]+Y` / `MOV !$00D4+Y,A` / `DEC Y`
+/ `BPL`) that copies a per-channel init block from a table at
+`$0C1C`/`$0C1D` (literal bytes `F1`, `90`) into DP `$D4`/`$D5`.
+`PROBE_FINDROM` on a 32-byte window spanning both the copy-loop code and
+its source table (`c4121c1c900248fffdf4ad68f19005280fcf2f04cfdd8d003fab0c5f2d05bbac`)
+hits **once**, at LoROM `9F:F962` — byte-for-byte identical. The starting
+pointer `$90F1` is exactly what the ROM's own per-channel table
+specifies; this is not an emulator computation defect.
+
+**But the byte the pointer lands on is written at runtime, not
+uploaded, and is not found in the ROM file at all.** `PROBE_ARAM=90e0:9110`
+is **all-zero** through CPU instruction 4,000,000 and **fully populated**
+by 4,700,000 — this region is a runtime-built buffer, not boot-uploaded
+static data. `PROBE_FINDROM` on several windows drawn directly from it
+(7, 9, 18, and 32 bytes, including the fatal `FE` and its neighbors)
+finds **zero matches anywhere in the 1MB ROM file**, in sharp contrast to
+the copy-loop/table check two paragraphs up, which matched on the first
+try a few hundred bytes away. New diagnostic `PROBE_SPCMEMWATCH=90f1`
+pins the single write: ARAM `$90F1` goes `00->FE` at CPU instruction
+**4,114,366**.
+
+**Two specific mechanisms were checked and both come back negative —
+this is a real dead end, not an unexamined one.**
+
+1. *A driver-side `$F4`/`$F5` APU-upload race (duplicate or dropped
+   byte).* New diagnostic `PROBE_APUPORTLOG=1` traces the CPU's
+   accepted `(index, data)` pairs on the upload-protocol ports directly
+   (closing a gap in W14-27's own method, which checked the
+   *transmitted* bytes against ROM via the port ring, but never checked
+   ARAM's *resting* content against ROM for a data blob). For the
+   transfer segment that sends this exact ROM byte-run elsewhere in
+   ARAM, the trace is clean and monotonic — indices `223, 224, 225`
+   carrying data `FE, 30, D3` in order, no duplicate, no skip. That
+   transfer's own destination arithmetic (`MOV !$9336+Y,A`, base
+   `$9336`) also proves it cannot physically reach `$90F1`: the base is
+   already above `$90F1` and `Y` is an unsigned 0-255 index, so no `Y`
+   makes `$9336+Y = $90F1`. Whatever writes `$90F1` is a different
+   piece of code than the one carrying this ROM byte-run to its other
+   ARAM location.
+2. *The S-DSP echo buffer sweeping over `$90xx`.* Refuted directly by
+   reading the DSP state at CPU instruction 4,114,360 (new unconditional
+   `echo:` line in the probe's summary): `write_disabled=true` for the
+   entire run (the real hardware `FLG` reset value, matching this
+   emulator's default), and `base_page=$F7` throughout (echo buffer at
+   `$F700-$FEFF`, `EDL=1`), nowhere near `$90xx`.
+3. *The IPL boot HLE writing ARAM directly from Rust (`Apu::poll_boot`'s
+   `BootAction::Store` arm, `self.aram[address] = value` — no SPC700
+   instruction executes for this write at all, which would explain why
+   no store instruction's PC ever lined up).* Checked directly:
+   `poll_boot` only acts while `self.boot.is_running()` is false
+   (`boot::BootState::Running` means the HLE has already handed off to
+   real SPC700 execution — `crates/rf-snes/src/apu/boot.rs`'s
+   `cpu_wrote`/`poll`). At CPU instruction 4,114,370, `apu.boot_running`
+   (`self.boot.is_running()`) is **already true** and `spc.stopped` is
+   **false** — the HLE handed off long before this write and the SPC700
+   is actively running its own code, matching the `$0F20`
+   (`MOV !$9336+Y,A`) activity the port trace shows at this exact point.
+   The HLE cannot be the writer here.
+
+**Conclusion: BLOCKED, but narrowly — not WONTFIX.** Every byte and
+opcode on the path this ticket's brief asked about (`$0701`-`$0745`,
+the shared fetch/advance tail at `$07D5`-`$07DE`, and the channel-init
+copy at `$06C0`-`$06CA` plus its ROM table) is proven, byte-for-byte,
+either identical to ROM or executed correctly per SPC700 semantics —
+that fully answers and closes the ticket-brief question. But
+"hardware would read the same byte" is **unproven** for the byte
+itself: `$90F1`'s content is written at runtime by a still-unidentified
+piece of code, not uploaded from ROM, so it cannot be certified as
+authored game content the way the dispatcher, its table, and the
+channel-init pointer were. Per law 5, nothing in `crates/rf-snes` is
+patched on a partial trace, so no fix ships either way, and the ticket
+goes BLOCKED on "the writer of `$90F1` is unidentified" — a materially
+different, narrower claim than either outcome the acceptance criteria
+anticipated.
+
+**Named next step**: find the SPC700 instruction (or subsystem) that
+executes at CPU instruction ~4,114,366 and writes ARAM `$90F1`. Three
+mechanisms are ruled out (the traced `$0F18` receive loop, by
+destination arithmetic; the DSP echo sweep, by `write_disabled`; the IPL
+boot HLE's direct-from-Rust `BootAction::Store`, by `boot_running=true`
+at exactly this instruction). Candidates still open: a *different* upload chunk, since the CPU
+sender's outer loop (`DEC $0C` / `BRL $F02A`) restarts with a fresh
+`$2142`/`$2143` destination per chunk and this session did not enumerate
+every chunk's destination page; or a driver routine that computes or
+expands table data into scratch RAM at runtime (a per-voice
+envelope/pitch buffer construction, a common technique in SNES sound
+drivers to save ROM space) that happens to alias this channel's
+track-pointer target. Either finding would let a future session settle
+whether `$90F1`'s value is itself correct (closing WONTFIX after all) or
+corrupted (a real, fixable `rf-snes` defect, in whichever subsystem
+turns out to own that write).
+
+**A correction, recorded because it cost real time this session and
+will mislead the next reader too.** `PROBE_SPCMEMWATCH` and
+`PROBE_SPCREGPC` both sample once per 65816 instruction, *after*
+`core.step` — several SPC700 instructions can run inside that one step,
+so the printed `spcpc` is wherever the SPC700 had reached by the time of
+the sample, not necessarily the program counter of the instruction that
+produced the observed change. This misattributed `$90F1`'s write to an
+unrelated instruction (`$0F23`, then a `MOV !$B241+Y,A` at a completely
+different point in the run) twice before the destination-arithmetic
+check above ruled both out. The caveat is now in `title_probe.rs`'s
+module doc.
+
+**New diagnostics, kept** (module doc updated in `title_probe.rs`):
+`PROBE_SPCMEMWATCH=hex[,hex]` prints the SPC700 PC and old/new byte
+value whenever one of the given absolute 16-bit ARAM addresses changes
+— blind to `$00F4`-`$00F7`, which are backed by `ports_in`/`ports_out`,
+not the raw `aram` array. `PROBE_APUPORTLOG=1` prints the accepted
+`(index, data)` sequence on the `$F4`/`$F5` upload-protocol ports
+whenever either changes. `PROBE_SPCREGPC` gained `psw`/`p` (the SPC700's
+direct-page flag) to confirm DP base is `$0000` for this driver (it is,
+throughout). The dump summary gained an unconditional `echo:` line
+(`write_disabled`/`base_page`/`delay`/`dir`). No `rf-snes` source
+changed.
+
+**Gate — measured this session**: `cargo fmt --check` clean; `cargo
+clippy --workspace -- -D warnings` clean; `cargo test -p rf-snes` — 358
+passed, 0 failed (unchanged by this ticket; `rf-snes` source was not
+touched — only `rf-harness`'s `title_probe.rs` gained diagnostics). All
+four suites this ticket's brief named as oracles finished green, the
+last two arriving after this write-up's first draft (the 65816 vector
+suite alone runs ~7 minutes): `singlestep_spc700_vectors` — 256,000
+passed, 0 failed, 256/256 opcodes covered; `singlestep_65816_vectors` —
+ok (`finished in 426.58s`); `spc_timer_reports_pass` — `"PASSED TESTS
+Running tests: timer read vs write"`; `gilyon_cputest`'s
+`cputest_full_reports_success_and_every_test_passes` —
+`test_num=0x0649/0x0649, ROM says "Success", 6700000 instructions`. All
+unchanged from W14-27, consistent with `rf-snes` source not being
+touched. The seven-title census-child run was not executed this
+session — per the coordinator, the orchestrator runs the census
+separately, and no `rf-snes` code changed here, so none of the seven
+titles have any mechanism by which this ticket could have moved them
+from W14-27's own reported bucket.
+
+`plan.json`'s W14-30 entry is left `status: "blocked"` with this same
+finding, matching the W14-23/W14-25/W14-27 handoff convention.
+
 ## W14-27 — Soul Blazer: driver dispatch RETs to $0102 after a
 byte-exact-to-ROM extended-command table overrun; BLOCKED on the
 sequencer's fetch loop, not confirmed as the game's own behavior
@@ -2024,6 +2218,306 @@ worth eighteen titles and not one. Residual, not modelled: `$43xB`
 each channel, still returns open bus; no title in the library has been
 shown to depend on it.
 
+## W14-29 — Final Fantasy Mystic Quest: the raster IRQ chain is fine; a
+general `clear_line_state()`-before-render ordering bug is why the
+Mode 7 intro reads as uniform (2026-09-20, BLOCKED — not this ticket's
+to fix)
+
+The 2026-09-16/17 triage guessed a Mode 7 raster chain rewriting its own
+IRQ vector trampoline was the reason this title never renders. This
+ticket's job was to build an IRQ event trace and rank the three named
+hypotheses against it. The trace clears hypothesis 1 outright, and along
+the way finds the real defect — but it is a general one, in the
+render-time consumption of per-scanline register history, not anything
+specific to IRQs, Mode 7, or this title. Law 5 applies either way: no
+fix ships here.
+
+**New diagnostic**: `title_probe.rs` gained `PROBE_IRQLOG=N`, documented
+in the module doc. It edge-detects (no new `rf-snes` field — everything
+is reconstructed post-instruction from existing `SnesSystem` state, so
+no save-state/determinism surface was touched): `ARMLOG` on every
+`$4200`/`$4207`-`$420A` change with the raster it happened at; `IRQLOG`
+on every rising edge of `bus.irq.fired` (an assertion) with the raster
+and CPU `PC`/`P`; `ACKLOG` on a falling edge not explained by `$4200`
+disabling IRQs the same instant (i.e. a real `$4211` read); and
+`TRAMPLOG`, which decodes the opcode at `$00:[$FFEE]` once at start —
+`$6C`/`$7C`/`$DC` follow the indirect pointer, anything else (the common
+case here) watches the vector's own target address, since Mystic Quest's
+native IRQ vector points straight into low WRAM (`$000117`) that the
+game writes dispatch code into directly rather than an indirect jump
+through a separate pointer. An `INIDISPLOG` line (folded into the same
+env var rather than a new one, since explaining why the screen stays
+blank is the whole point of this ticket) logs every `$2100`
+forced-blank/brightness edge.
+
+**Hypothesis 1 (IRQ timing/acknowledge semantics) is REFUTED by the
+trace, not merely unproven.** `PROBE_IRQLOG=200 PROBE_INSTR=6000000` on
+the unpatched tree (USA dump) shows a completely regular, two-IRQ-per-
+frame H+V chain: a V-IRQ fires at `dot=0`/`line=vtime` (`vtime` starts at
+`0xD8`=216, matching fullsnes "V-IRQ at V=VTIME, H=0"), the handler
+disables IRQs via `$4200` (`21->00`, not a `$4211` read —
+**`ack_events=0` for the entire run**, confirmed independently by
+counting), re-arms in H-mode (`$4200: 00->11`), a second IRQ fires at
+`dot=232`=`htime` (`0xE8`) on the SAME line (matching fullsnes H-mode:
+fires every scanline at H=HTIME), disables again, then re-arms V-mode
+with a NEW `vtime` for the next band (`ARMLOG ... vtime: 0D8->007`) —
+and the whole two-IRQ cycle repeats at the new line every frame,
+byte-identical in cadence over the full 6,000,000-instruction run
+(`arm_events=2913 assert_events=1164 ack_events=0 tramp_events=2044`).
+Disabling via `$4200` rather than reading `$4211` is hardware-legal per
+fullsnes ("$4211 TIMEUP: ... reset ... on disabling IRQs via 4200h") and
+is the exact path `bus.rs:502` already documents and cites for this same
+title (a *different*, already-fixed Mystic Quest bug, W14-10's STP-trap
+fix) — this game simply never reads `$4211` at all, using `$4200` as its
+sole acknowledge for both IRQ sources. No re-fired, missed, or
+out-of-order IRQ was found at any line the chain did not expect.
+
+**The "vector trampoline" is real and was traced end to end: it also
+works correctly.** `TRAMPLOG` shows `$000117` cycling through six
+handler addresses (`$00B82A`, `$00B8D8`, `$00B86C`, `$00B898`, `$00B807`,
+`$00B803`, `$00B8DA`, repeating) written as a 4-byte `JML $00Bxxx`
+(`5C xx xx 00`), one rewrite per H-IRQ entry — exactly "a per-scanline
+raster chain rewrites a vector trampoline", and it rotates in lock-step
+with the IRQ cadence above with no dropped or duplicated rewrite across
+the run.
+
+**The `$2100` fade the intro drives through this chain also completes
+correctly.** `INIDISPLOG` shows brightness climbing by exactly 1 per
+cycle (`0->15` the first time, since the initial approach differs, then
+`0->2,0->3,...,0->15` once the steady V/H pattern above starts), each
+step blanking at `line=216` (`bright:N->0`) and restoring at `line=7`
+(`bright:0->(N+1)`), until it settles into a permanent steady state at
+full brightness (`bright:15->0` then immediately `0->15` every frame)
+well before frame 10 — the fade is not stuck, not skipping steps, and
+not corrupted by the IRQ chain.
+
+**So why does the census see a uniform screen?** Because `emit_frame`
+(`rf-snes/src/core.rs`, used by both `Step::Frame` and the structurally
+identical `SnesSystem::render_frame`) reconstructs a rendered frame's
+mid-scanline register history through `Ppu::compose_line_segmented`,
+which reads `Ppu::line_regs`/`line_writes` — and those are wiped by
+`Ppu::clear_line_state()` at `system.rs:270`, called synchronously
+inside `SnesSystem::step()` on the SAME instruction that crosses the
+frame boundary, which is BEFORE the `Step::Frame`/`render_frame` loop
+in `core.rs` ever regains control to call `emit_frame` for the frame
+that just ended. Proven directly, not inferred: a new ad hoc probe,
+`PROBE_LINEWRITES=<line>` (kept, documented in the module doc — cheap
+and generically useful for this class of bug), logs every change to
+`Ppu::line_writes_for_test(line)`. For line 216: `len: 0->1
+contents=[(244, 8448, 128)]` at `n=401401` (the real `$2100` write this
+write-up traces above, dot 244, addr `8448`=`$2100`, value `128`=`$80`
+blank-on) — then, six instructions after the frame wraps to line 0,
+**`len: 1->0`** at `n=404280` (`line=0 dot=1`), with `contents=[]`. That
+write is destroyed before `emit_frame`/`render_scanline(216)` for the
+frame it belongs to ever runs, so the composed picture for that line
+(and every other line with a mid-frame register write near the tail of
+a frame) falls back to whatever the LIVE registers are at the instant
+`emit_frame` happens to be called — which, at a frame boundary, is
+always mid-blank. Confirmed this has zero interaction with the IRQ
+chain or Mode 7 specifically: a temporary, fully-reverted probe build
+(`W1429_NORENDER=1`, an env-gated early return in `emit_frame` before
+any `render_scanline`/sink call — never committed; `git diff` against
+`crates/rf-snes/src/core.rs` was empty before this write-up) produced
+**byte-identical** PPU/timing state at frames 250/360/403 with and
+without rendering, proving `emit_frame` has no feedback into
+simulation — the bug is purely in what the render path reads, not in
+anything the render path (or the IRQ chain) writes back.
+
+**This is a general defect, not scoped to this title, IRQs, or Mode
+7 — named next step (not this ticket, per the scope discipline law 3's
+gate and this ticket's `write_scope` both imply): file a new ticket to
+fix the `clear_line_state()` ordering.** Every title that changes a
+segmentable register (`Ppu::is_segmentable`: everything except the OAM/
+VRAM/CGRAM data ports) in roughly the last ~15-20 lines before vblank
+starts (line ~205-224 given `MASTER_PER_LINE`'s dot budget and where
+`mid_line_position` still returns `Some`) has that write's attribution
+silently discarded before any `Step::Frame`/`render_frame` consumer can
+see it — this reads as "flat/uniform near the bottom of the screen" or,
+as here, as a per-frame effect whose "screen on" phase is written
+early enough in the NEXT frame's own tail-end write pattern that the
+composed frame never reflects it. The correct fix (design sketch, not
+implemented here — it touches `Ppu`'s field layout and every
+`compose_line_segmented`/`apply_line_state` caller, which is a
+cross-cutting change this 3-point ticket's `write_scope` should not
+absorb unreviewed): stop clearing `line_state`/`line_writes`/`line_regs`
+in place at `frame_started`; instead swap them into a
+`completed_line_*` snapshot at that instant (before any of the same
+instruction's own new-frame HDMA can write into the live arrays) and
+have `apply_line_state`/`compose_line_segmented` read from the
+snapshot, resetting only the live arrays for the new frame's own
+capture. `render_frame` (`system.rs:443`) has the identical structure
+and needs the identical fix.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — **358 passed**, 0 failed
+(unchanged — no `rf-snes` source file was touched, only
+`crates/rf-harness/tests/title_probe.rs`); the four named ignored
+suites all still pass unchanged: `singlestep_spc700_vectors`
+(256,000/256,000), `spc_timer_reports_pass` ("PASSED TESTS"),
+`gilyon_cputest`'s `cputest_full_reports_success_and_every_test_passes`
+(`test_num=0x0649/0x0649, ROM says "Success"`), and
+`singlestep_65816_vectors`.
+
+**Census children** (`boot_census_child`, not the full orchestrator
+run, per this ticket's brief): all three Mystic Quest dumps (USA, USA
+Rev 1, Japan) exit **10** (uniform/blank bucket), unmoved, as expected
+since no fix ships. The Mode 7 canaries and NHL 95 all exit **0**
+unmoved: **Super Mario World**, **Wild Guns**, **Super Mario Kart**,
+**F-Zero**, **NHL 95**. No orchestrator census re-run — nothing moved.
+
+**Determinism**: unaffected. No `rf-snes` source changed; the new
+`title_probe.rs` diagnostics read existing public/test-only accessors
+and add no state to any core.
+
+**Ticket disposition**: BLOCKED, not WONTFIX — this is a real `rf-snes`
+defect, just one outside this ticket's hypothesis set and `write_scope`
+discipline for a one-ticket-at-a-time change of this size. Named next
+step: file a new ticket for the `Ppu` line-history snapshot-before-clear
+fix described above, covering both `Step::Frame` and `render_frame`,
+with Mystic Quest (all three dumps) as its reproduction case and a
+regression test built on the `PROBE_LINEWRITES=216`-style observation
+above (a mid-frame write in the last ~20 lines of a frame must survive
+into that frame's own `render_scanline` call).
+
+## W14-31 — the per-line record now survives to composition: swap into
+a `completed` snapshot at `frame_started` instead of wiping in place
+(2026-09-20, CLOSED)
+
+W14-29's named next step, fixed as sketched. `Ppu` gained three
+`completed_line_*` fields mirroring `line_state`/`line_writes`/
+`line_regs`. `Ppu::advance_line_state` (called from `SnesSystem::step`'s
+`frame_started` arm, replacing the old `clear_line_state()` call there)
+`std::mem::swap`s the three live buffers into the three completed ones,
+then clears what is now `line_*` — an allocation-free rotation, not a
+realloc, since both sets are always `VISIBLE_LINES_OVERSCAN`-sized `Vec`s
+built once at `Ppu::new()`. `clear_line_state()` itself now clears BOTH
+sets and is reserved for a full reset (`Ppu::load` — a restored save
+state must not serve either set's prior contents).
+
+`Ppu::apply_line_state` and `Ppu::compose_line_segmented` — the two
+composition entry points W14-29 named — now read `completed_line_state`/
+`completed_line_writes`/`completed_line_regs` FIRST, via one shared test
+(`Ppu::line_uses_completed`, keyed on `completed_line_state[line]` being
+`Some`, since every line a fully-elapsed frame reaches gets latched, so
+its presence means the other two completed buffers are the right source
+for that line too). This is exactly what `Step::Frame`'s `emit_frame` and
+`SnesSystem::render_frame` need: by the time either calls
+`render_scanline`, the frame they are composing has already had
+`advance_line_state` run for it, so its own per-line records are sitting
+in `completed_*` rather than gone.
+
+**Deviation from the design sketch, and why the code proved it
+necessary**: the sketch (and this ticket's acceptance text) described a
+two-tier fallback — completed, else the live registers with no per-line
+override at all. Read literally, that breaks
+`window_and_mosaic_registers_are_latched_per_scanline` and its
+neighbours in `crates/rf-snes/src/tests/ppu.rs` (the W13-02 latching
+suite this ticket was told to keep passing unchanged): those tests call
+`Ppu::latch_line` and then `Ppu::render_scanline` directly against a bare
+`Ppu`, with no frame boundary ever crossed — `completed_line_state` is
+`None` for every line in that scenario, and a two-tier fallback would
+compose from the plain live registers, losing exactly the manually-set
+latch the test asserts on. The actual implementation is three-tier:
+completed, then the LIVE `line_state`/`line_writes`/`line_regs` (this is
+what a bare-`Ppu` test's own latch lands in), and only past that the
+plain live registers (`apply_line_state` returning `false`, unchanged
+from before this ticket). This also matters for real
+`Step::Frame`/`render_frame` calls, not just tests: the very first
+visible line of the NEW frame can already have its own live latch by the
+time `emit_frame` runs (crossing out of vblank latches line 1 in the same
+`SnesSystem::step` call that fires `frame_started`) — completed-first
+priority is what stops that fresh, barely-populated live entry from
+shadowing the just-finished frame's own real record for that line.
+
+Two unit tests added, `crates/rf-snes/src/tests/system.rs`: a `BRA *`
+cartridge with a full-line BG1 tile and a window mask (window registers,
+not `$2100`, are the "is_segmentable register" used — `$2100`'s
+forced-blank flag is deliberately absent from `LineState`, so a
+cross-line assertion built on it would fail regardless of this fix, for
+reasons outside this ticket's `write_scope`; window span IS latched into
+`LineState` for every line, which is exactly the record this fix stops
+discarding).
+`a_mid_frame_write_on_a_late_visible_line_survives_into_that_frames_own_composition`
+drives `system.bus.write(0x00_2126/0x2127, ...)` (via `CpuBus::write`,
+the same entry point real 65816 code uses) while the beam is inside
+hardware line 216's active display, then calls `SnesSystem::render_frame`
+to finish and compose that same frame: row 214 (line 215, before the
+write) keeps the old span, rows 217 and 223 (after) show the new one.
+`a_write_during_vblank_is_not_applied_to_the_just_completed_frame` moves
+the span during vblank instead and asserts the frame `render_frame`
+returns — the one that had already fully latched before vblank started —
+shows the OLD span everywhere, at row 0 and row 223 alike. Both tests
+were run against the pre-fix code (`git stash` of `ppu/mod.rs` and
+`system.rs` only) and fail there with exactly the predicted symptom —
+the first frame shows the NEW span throughout (uniform, matching "reads
+as flat/uniform" from W14-29), the second shows it at row 0 too (the
+vblank write reaching a frame it has no business touching) — confirming
+these are real regression tests, not vacuously true ones.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — **360 passed**, 0 failed (358
+before this ticket plus the 2 new tests above; every pre-existing test,
+including the full W13-02 per-line latching suite, is unchanged and
+still green); `cargo test -p rf-renderer -p rf-enhance -p rf-harness` —
+221 + 0 + 119 passed (plus assorted `0 passed / N ignored` runs for
+suites gated on fetched fixtures), 0 failed. Ignored suites: the four
+W14-29 named ones — `singlestep_spc700_vectors` (256,000/256,000),
+`singlestep_65816_vectors`, `spc_timer_reports_pass` ("PASSED TESTS"),
+`gilyon_cputest`'s `cputest_full_reports_success_and_every_test_passes`
+(`test_num=0x0649/0x0649, ROM says "Success"`) — all still pass unchanged
+(none of them touch `rf-snes`'s PPU at all, so this is confirmation, not
+new coverage). The in-repo SNES fixture's own ignored suite,
+`rf_scroller_s_five_minute_replay_is_deterministic` (18,000 frames, the
+Tier-A regression for FR-CORE-037), also passes unchanged — the
+determinism law and this ticket's own "determinism unaffected" claim are
+not just asserted, they are exercised by 5 simulated minutes of a real
+cartridge composing every one of its frames through the exact
+`render_frame`/`Step::Frame` path this ticket changed.
+
+**Census children** (`boot_census_child`, per this ticket's acceptance —
+the orchestrator owns the full `RF_CENSUS_OUT` re-run): all three Mystic
+Quest dumps now exit **0** (rendered) — **USA**, **USA (Rev 1)**, and
+**Japan ("Final Fantasy USA - Mystic Quest")** — moved from **10**
+(uniform/blank) before this fix, confirmed by re-running the same
+harness build against a `git stash` of the two source files above (all
+three reproduce exit 10 pre-fix, exit 0 post-fix). The seven named
+canaries all still exit **0**, unmoved: **Super Mario World**, **Wild
+Guns**, **Super Mario Kart**, **F-Zero**, **Kirby Super Star**, **NHL
+95**, **Super Mario RPG**.
+
+**Determinism**: unaffected. The fix is a buffer-lifetime change only —
+what gets latched, when, and by what still-existing code path is
+untouched; `advance_line_state` swaps and clears `Vec`s already sized at
+construction, allocating nothing per frame. `rf_scroller_s_five_minute_replay_is_deterministic`
+(above) is a direct empirical check of this claim across 18,000 composed
+frames, not just an inference from the diff's shape.
+
+**Files changed**: `crates/rf-snes/src/ppu/mod.rs` (three new fields,
+`advance_line_state`, `line_uses_completed`, `clear_line_state` clearing
+both sets, `apply_line_state`/`compose_line_segmented` reading the
+completed-then-live chain); `crates/rf-snes/src/system.rs`
+(`frame_started` calls `advance_line_state` instead of
+`clear_line_state`); `crates/rf-snes/src/tests/system.rs` (the two new
+regression tests plus their shared `window_test_system`/`masked_at`/
+`step_to_mid_line` helpers).
+
+**Full SNES census (orchestrator, 2026-09-20, release build, per-title
+`RF_CENSUS_OUT` diff against the W14-26 run):** **1037/98/130/0/0 ->
+1054/81/130/0/0** ("SNES, after W14-31" row above). Seventeen rows
+changed, every one from *uniform screen* to *rendered something*, none
+the other way: **Final Fantasy Mystic Quest** (USA, Rev 1, and the
+Japanese "Final Fantasy USA"), **Cybernator** (USA and the 1992-11
+beta), **The Pagemaster** (USA, Beta 2, Beta 3), **The Peace Keepers**
+(USA and beta), **Power Rangers Zeo: Battle Racers**, **Ranma 1/2: Hard
+Battle**, **Super Ninja Boy**, and **Taz-Mania** (USA, Rev 1, Beta 1,
+Beta 2). Two of those carry earlier verdicts that this result
+supersedes in part: Power Rangers Zeo was recorded in W17-04 as "forced
+blank lifts around frame 4,800 in the attract loop" and Super Ninja Boy
+in W14-25 as a game-side DMA/NMI race — both titles now render within
+the census budget, so whatever those traces described, the uniform
+screen the census saw was the wiped per-line record, not the game. The
+W14-25 race trace stands as a description of the emulator's behaviour
+at that time and should be re-checked before it is cited again.
 
 ## W14-28 — The Flintstones: a single-access instruction's internal cycle
 was missing from the math unit's clock, so a divide the game waits out with

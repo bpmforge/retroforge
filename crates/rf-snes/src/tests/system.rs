@@ -675,3 +675,181 @@ fn sa1_cpu_state_survives_a_cart_region_round_trip() {
         "booted must round-trip, or the next step would re-fetch the reset vector"
     );
 }
+
+/// A `BRA *` cartridge with a full-line BG1 tile and a window mask on it —
+/// enough graphics for a window-register write's effect to show up in
+/// composed pixels, and a CPU that does nothing so the test controls
+/// every register write itself (ticket W14-31).
+///
+/// Window registers, not `$2100`, are the chosen "is_segmentable register"
+/// (the acceptance's own text allows either): `$2100`'s forced-blank flag
+/// is deliberately NOT part of `LineState` (see `LineState`'s field list),
+/// so a batch composer only ever reconstructs it correctly for the exact
+/// line that captured a `line_regs` snapshot — every OTHER line composes
+/// forced-blank from whatever is live at the end of the frame regardless
+/// of this fix, which would make a cross-line assertion fail for reasons
+/// this ticket's `write_scope` (buffer lifetime only, not what is latched)
+/// does not cover. `$2126`/`$2127` (W1 left/right) are `Windows`, which
+/// [`Ppu::latch_line`] captures into `LineState` for EVERY visible line in
+/// real time — exactly the record this ticket's fix stops discarding
+/// before a batch composer can read it.
+fn window_test_system() -> SnesSystem {
+    let mut rom = lorom_image(0x20, 0x00);
+    rom[0x0000] = 0x80; // BRA -2: spin forever, so only the test's own
+    rom[0x0001] = 0xFE; // `system.bus.write` calls change any register.
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("loads");
+
+    let ppu = &mut system.bus.ppu;
+    ppu.forced_blank = false;
+    ppu.bg_mode = 0;
+    ppu.bgs[0].enabled = true;
+    ppu.bgs[0].tilemap_base = 0;
+    ppu.bgs[0].char_base = 0x1000;
+    // Character 1, 2bpp: plane 0 all ones -> colour 1 everywhere.
+    for row in 0..8u16 {
+        let at = usize::from(0x1000 + 8 + row) * 2;
+        ppu.vram[at] = 0xFF;
+        ppu.vram[at + 1] = 0x00;
+    }
+    // Tilemap: every entry of the whole 32x32 map is tile 1, so every
+    // visible row draws BG1 rather than transparent backdrop — one
+    // tilemap ROW (32 entries) only covers the tile's own 8 pixels of
+    // height, and this test checks rows well past line 8.
+    for i in 0..(32u16 * 32) {
+        let at = usize::from(i) * 2;
+        ppu.vram[at] = 1;
+        ppu.vram[at + 1] = 0;
+    }
+    ppu.write_register(0x212E, 0x01); // WOBJSEL/main-mask: window applies to BG1
+    ppu.write_register(0x2123, 0x02); // W12SEL: window 1 masks BG1
+    ppu.write_register(0x2126, 10); // W1 left
+    ppu.write_register(0x2127, 20); // W1 right
+    system
+}
+
+/// Is BG1 masked out (window-excluded backdrop) at column `x` of visible
+/// row `y`?
+fn masked_at(system: &mut SnesSystem, y: u16, x: usize) -> bool {
+    system.bus.ppu.render_scanline(y).pixels[x].layer == rf_core_api::PixelLayer::Backdrop
+}
+
+/// Step until the beam is inside hardware line `line`'s active display —
+/// i.e. [`crate::timing::Timing::mid_line_position`] would attribute a
+/// register write here as a mid-line one. Bounded, per law 8: a `BRA *`
+/// spin never halts on its own, so an unreachable `line` must fail the
+/// test rather than loop forever.
+fn step_to_mid_line(system: &mut SnesSystem, line: u16) {
+    for _ in 0..2_000_000u64 {
+        if system.bus.timing.line == line && system.bus.timing.mid_line_position().is_some() {
+            return;
+        }
+        system.step().expect("BRA is implemented");
+    }
+    panic!("never reached hardware line {line}'s active display in 2,000,000 steps");
+}
+
+/// Ticket W14-31 acceptance #3 (first case): a mid-frame register write on
+/// a late visible line must reach that SAME frame's own composition, not
+/// fall back to whatever the live registers happen to be once
+/// `Step::Frame`/`render_frame` regains control after the boundary.
+///
+/// Reproduces the shape `PROBE_LINEWRITES=216` traced for Final Fantasy
+/// Mystic Quest in the W14-29 write-up (docs/TESTING.md): a write on
+/// hardware line 216, composed only after the frame that contains it has
+/// already fully elapsed.
+#[test]
+fn a_mid_frame_write_on_a_late_visible_line_survives_into_that_frames_own_composition() {
+    let mut system = window_test_system();
+
+    // Baseline: the whole frame masks columns 10-20, everywhere, before
+    // any write moves the window — asserted on rows spanning the frame
+    // so the "later lines changed, earlier ones didn't" comparison below
+    // is against a real baseline rather than an assumed one.
+    for y in [0u16, 100, 214, 217, 223] {
+        assert!(
+            masked_at(&mut system, y, 15),
+            "row {y}: baseline masks x=15"
+        );
+        assert!(
+            !masked_at(&mut system, y, 50),
+            "row {y}: baseline does not mask x=50"
+        );
+    }
+
+    // Hardware line 216 = visible row 215 (ticket W7-13's off-by-one).
+    step_to_mid_line(&mut system, 216);
+    system.bus.write(0x00_2126, 100); // W1 left
+    system.bus.write(0x00_2127, 200); // W1 right
+
+    // Run this same frame to completion and into the next one, so
+    // `render_frame` composes the frame the write landed in — the exact
+    // call shape `SnesCore::step(Step::Frame)`'s `emit_frame` also uses.
+    let frame = system.render_frame(2_000_000).expect("BRA is implemented");
+
+    // Re-derive from the SAME picture `render_frame` returned, not a
+    // fresh `render_scanline` call, so the assertion is on what a real
+    // caller (the frame sink) actually received.
+    let masked = |y: usize, x: usize| frame[y][x] == 0;
+    assert!(masked(0, 15), "row 0: kept the old span (10-20)");
+    assert!(!masked(0, 50), "row 0: x=50 is outside the old span");
+    assert!(
+        masked(214, 15),
+        "row 214 (line 215, just before the write): kept the old span"
+    );
+    assert!(
+        masked(217, 100),
+        "row 217 (line 218, after the write): reflects the new span (100-200)"
+    );
+    assert!(
+        !masked(217, 15),
+        "row 217: x=15 is outside the new span, no longer masked"
+    );
+    assert!(
+        masked(223, 150),
+        "the last visible row also reflects the new span"
+    );
+}
+
+/// Ticket W14-31 acceptance #3 (second case): a register write during
+/// vblank must NOT be applied to the frame that just finished — it can
+/// only ever be seen by the frame that has not started its active
+/// display yet.
+#[test]
+fn a_write_during_vblank_is_not_applied_to_the_just_completed_frame() {
+    let mut system = window_test_system();
+
+    // Run to vblank of the frame the test will compose. `in_vblank` is
+    // coarse (any line past the boundary), which is exactly what is
+    // wanted here — the write must land somewhere in the stretch between
+    // this frame's last active line and the next frame's first one.
+    let mut n = 0u64;
+    while !system.bus.timing.in_vblank() && n < 2_000_000 {
+        system.step().expect("BRA is implemented");
+        n += 1;
+    }
+    assert!(system.bus.timing.in_vblank(), "must have reached vblank");
+
+    // This write happens strictly AFTER the frame being composed latched
+    // every one of its own visible lines — moving the span here must be
+    // invisible to that frame's picture.
+    system.bus.write(0x00_2126, 100);
+    system.bus.write(0x00_2127, 200);
+
+    let frame = system.render_frame(2_000_000).expect("BRA is implemented");
+    let masked = |y: usize, x: usize| frame[y][x] == 0;
+    assert!(
+        masked(0, 15),
+        "the just-completed frame must still show the OLD span at row 0"
+    );
+    assert!(
+        masked(223, 15),
+        "...and at the last visible row too — the vblank write reached \
+         no line of this frame"
+    );
+    assert!(
+        !masked(0, 150),
+        "and must not show the NEW span anywhere in this frame"
+    );
+}
