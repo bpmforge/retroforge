@@ -7568,7 +7568,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 5,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "id": "W14-39",
   "title": "65C816 internal cycles are never charged: charge them per instruction, pinned by the singlestep vectors' cycle lists (5.08M cases)",
@@ -7586,6 +7586,7 @@
    "W14-39: docs/design/EMULATION_CORES.md's CPU timing section states the new model and what is still not modelled (per-cycle bus timing inside an instruction; W6-02a's cycle-accurate executor remains future work)"
   ],
   "notes": [
+   "W14-39 DONE 2026-09-20. Internal cycles charged for real via cpu/cycles.rs, built from a 5.08M-case vector histogram and pinned exactly (accesses+internal==cycles.len(), 5,080,000/5,080,000, same pre-existing MVN/MVP exclusion). MathUnit::tick now takes real CPU cycles per fullsnes (\"clocked by the CPU Clock\"), superseding W14-24/W14-28. Fixed 3 of 6 W14-33/38 APU deadlock titles outright (Rival Turf!, Super Turrican, Wario's Woods now render); ActRaiser 2/Illusion of Gaia/Robotrek confirmed a separate driver-side defect, unaffected. Jungle Strike named as a census canary that now needs ~1041 frames to boot (was within the fixed 600-frame window when the CPU ran ~47% too fast) -- traced via title_probe, not tuned around. Re-pinned: one SA-1 timing test, two PeterLemon goldens (visually verified via RF_GOLDEN_DUMP), six undisbeliever write-record goldens. See docs/TESTING.md.",
    "W14-39 FILED 2026-09-20 by the orchestrator. The vector files show internal cycles (cpu/tests/vectors.rs module doc lines ~25-48 explain they are skipped today). This is the systemic root behind the divider hacks and, most likely, the APU handshake deadlock class."
   ]
  }

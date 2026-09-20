@@ -4251,3 +4251,188 @@ millions more instructions) to find out whether they eventually reach
 the same APU-command stage the trio does, or something else entirely;
 not pursued here since none of the three showed anything past the
 already-characterized healthy idle.
+
+## W14-39 — 65C816 internal cycles: charge them for real, pinned by the vectors' cycle lists
+
+**Root cause, confirmed.** `speed::AccessCost` (W6-01b) deliberately
+prices bus accesses only — its own doc names the gap. `SnesSystem::step`
+had two local patches over that gap: W14-24 re-bucketed the access-only
+master-cycle total into `speed::FAST`-sized steps for the math unit
+specifically, and W14-28 added a flat one-cycle credit for single-access
+instructions. Neither touched `self.master_cycles`, the clock every
+instruction's pacing against the raster and the APU is measured in — so
+the CPU ran the same number of *instructions* per real frame that
+hardware does, but each instruction was missing its internal cycles,
+making the whole machine run roughly 47% too fast relative to the
+raster and the S-SMP. That is the root cause both W14-24 and W14-28
+independently rediscovered in miniature (a divide finishing late, a
+`WAI` racing an IRQ), and it is very likely the root of the W14-33/W14-38
+APU handshake deadlock family — confirmed below for three of the six.
+
+### The histogram
+
+Built by wrapping the vector runner's `Cpu::step` calls in
+`speed::AccessCost` and recording `cycles.len() - accesses` per
+opcode/mode file across all 5,080,000 SingleStepTests cases (both `.e`
+and `.n` for every opcode). The full per-opcode-file breakdown is not
+reproduced here (256 lines); the shape that emerged, and which
+`cpu/cycles.rs` implements, resolves into distinct classes:
+
+| Class | Delta | Opcodes (approx. count) |
+|---|---|---|
+| No penalty | 0 | Immediate, absolute (non-indexed), absolute long (indexed or not), `JMP`/`JML` family, `PEA`, `WDM`, `BRK`/`COP` (52) |
+| DP low byte only | 0 or 1 | `dp`, `(dp)`, `[dp]`, `[dp],Y`, `PEI` (41) |
+| DP indexed, fixed | 1 or 2 | `dp,X`/`dp,Y`, `(dp,X)` (22) |
+| Stack-relative | 1 (fixed) | `sr,S` reads/stores (8) |
+| `(sr,S),Y` | 2 (fixed) | reads/stores (8) |
+| Indexed-abs / `(dp),Y`, READ | 0-2, conditional on crossing for an 8-bit index, **unconditionally +1 for a 16-bit index** | `abs,X`/`abs,Y`/`(dp),Y` load/ALU forms (24) |
+| Indexed-abs / `(dp),Y`, STORE | fixed +1 (+DP for the latter) | `STA`/`STZ abs,X/Y`, `STA (dp),Y` (4) |
+| RMW | base + 1 (the modify cycle) | shift/rotate/`INC`/`DEC`/`TRB`/`TSB` through memory (28); accumulator form priced as implied (+1, 6) |
+| One-byte implied | 1 (minimum: never fewer than 2 real cycles) | flags, transfers, `INX`-family, `NOP`, pushes, `XCE`, `REP`/`SEP`, `JSR`/`JSL`/`JMP (a,X)`, `PER` (40) |
+| Pulls | 2 (fixed — a throwaway read a push never needs) | `PLA`/`PLX`/`PLY`/`PLP`/`PLB`/`PLD`, `XBA`, `RTI`, `RTL` (9) |
+| Fixed +3 | 3 | `RTS`, `WAI`, `STP` (3) |
+| Branches | 0/1/2 (taken, +crossed in emulation mode only) | 8 conditional + `BRA`; `BRL` always 1 |
+| Block moves | not vector-pinned | `MVN`/`MVP` — documented 2/iteration, see below |
+
+Nine distinct mechanisms compose the whole table; the compiler's
+exhaustiveness check on `cpu::cycles::internal_cycles`'s 256-arm match
+(no `_` catch-all needed once the excluded `MVN`/`MVP` pair is included)
+is the proof every opcode has exactly one classification.
+
+**One correction the histogram forced.** The first pass assumed indexed-
+absolute/`(dp),Y` reads pay the page-cross cycle only when the add
+actually carries, for any index width. That failed ~0.2% of every such
+opcode's cases, always in NATIVE mode, always by exactly one cycle short.
+Tracing one (`ADC $....,Y`, `79 n 1479`, offset `$240B + Y=$0073` — no
+carry) against its raw cycle trace showed a null-value phantom read at
+the *correct* (non-crossed) effective address, followed by a second real
+read at the same address: the SingleStepTests vectors show this pair
+whenever the index register is 16-bit (`X` flag clear), regardless of
+whether the add crosses. The rule is therefore per-width, not
+per-crossing, for a 16-bit index: **always** pay the extra cycle; only an
+8-bit index (emulation mode, or native with `X` set) makes it
+conditional. Fixed in `cpu::cycles::abs_indexed_read`/`dp_indirect_y_read`
+and cited there.
+
+### Vector oracle: exact, not `<=`
+
+`cpu/tests/vectors.rs`'s `Vector` now carries `cycles_len` (parsed
+eagerly, not skipped), and `run_one` wraps the test bus in `AccessCost`
+to get `accesses`, checking `accesses + cpu.internal_cycles ==
+cycles_len` alongside every register and RAM byte. **5,080,000 / 5,080,000
+pass** with the same pre-existing `MVN`/`MVP` (`$54`/`$44`) exclusion as
+every prior ticket (cycle-truncated mid-instruction — unrelated to cycle
+*counting*, about the cases themselves being captured mid-iteration).
+No new exclusion was needed.
+
+### The math unit: CPU cycles, not master cycles
+
+Per fullsnes ("SNES Maths Multiply/Divide"): the `$42xx` ports are
+"clocked by the CPU Clock" — a real CPU-cycle latency, not a master-cycle
+one. `MathUnit::tick` used to step once per `speed::FAST` (6) master
+cycles of the *access-only* total (W14-24), a coarse over-crediting
+stand-in for the missing internal cycles. Now that `Cpu::internal_cycles`
+gives the real count, `tick` takes the instruction's true CPU-cycle total
+(`AccessCost::accesses + Cpu::internal_cycles`) directly, one unit step
+per cycle, no re-bucketing and no `carry` remainder field. The W14-24 and
+W14-28 tests were rewritten to the truthful model (same scenarios: a
+divide finishes after its real 16-CPU-cycle latency, not a re-bucketed
+master-cycle count; results are unchanged since the new accounting is
+more precise, not looser).
+
+### Downstream timing shifts, traced
+
+The ticket's own warning held: correcting the CPU's pacing shifted three
+kinds of pinned test.
+
+1. **`sa1_takes_an_nmi_from_the_snes_once_enabled_and_uses_its_own_vector`**
+   (rf-snes unit test): the main CPU's two `NOP`s now each charge their
+   real internal cycle, handing the interleaved SA-1 more master-cycle
+   credit per step than before — enough to run its target's `NOP` *and*
+   `STP`, not just the `NOP`. Re-pinned to the new (correct, and
+   consistent with the test's own boot-case assertion two lines above)
+   halted PC.
+2. **Two PeterLemon goldens** (`8x8BGMap8BPP32x32.sfc`, `WaveHDMA.sfc`):
+   both use a fixed instruction-count settle loop before rendering; the
+   corrected pacing lands that settle a few master cycles later,
+   capturing a different instant of an animated effect (water-ripple
+   phase; nothing else differs). Dumped with `RF_GOLDEN_DUMP` and looked
+   at: both frames are complete and correct — the castle is intact, the
+   ripple pattern is present and correctly formed — a different frame of
+   the same correct output, not a broken one. Re-pinned with the dump
+   evidence recorded in `peterlemon_golden.rs`.
+3. **Six undisbeliever write-record goldens** (the `inidisp_hammer_*`
+   family plus `inidisp_enable_display_mid_frame`): these ROMs hammer
+   `$2100` in a tight loop bounded by *instruction count*, not by frame
+   or master-cycle count, so the same instruction budget now represents
+   more real elapsed raster time and the write record legitimately covers
+   more lines — one ROM's record even converged with another's. Every
+   re-pinned record still targets register `$2100` only
+   (`survey_the_whole_set` confirms `regs=[2100]` throughout), so what
+   changed is timing, not what is being measured — exactly the "SHOULD
+   fail and be re-examined" case the module doc for `WRITE_GOLDENS`
+   pre-authorizes.
+
+None of the three are silent — each is cited at its assertion with the
+mechanism traced, per law 8's spirit applied to timing-sensitive tests.
+
+### Census children
+
+Run individually (per the setup rules, never the full unattended census)
+via `RF_CENSUS_ROM=<zip> boot_census-*  --ignored --exact
+boot_census_child`, exit codes: **0 = rendered something, 10 = rendered a
+uniform/blank screen**.
+
+| Title | Exit | Note |
+|---|---|---|
+| Rival Turf! (USA) | **0** | was BLOCKED (W14-33) — now renders |
+| Super Turrican (USA) | **0** | was BLOCKED (W14-33) — now renders |
+| Wario's Woods (USA) | **0** | was BLOCKED (W14-33) — now renders |
+| ActRaiser 2 (USA) | 10 | still BLOCKED — distinct driver-side deadlock (W14-38), unaffected |
+| Illusion of Gaia (USA) | 10 | still BLOCKED (W14-38) |
+| Robotrek (USA) | 10 | still BLOCKED (W14-38) |
+| Soul Blazer (USA) | 10 | still BLOCKED, pre-existing and unrelated (W14-33) |
+| Super Mario RPG (USA) | 0 | unmoved |
+| Super Mario World (USA) | 0 | unmoved |
+| Wild Guns (USA) | 0 | unmoved |
+| NHL 95 (USA) | 0 | unmoved |
+| Kirby Super Star (USA) | 0 | unmoved |
+| Full Throttle - All-American Racing (USA) (Beta) | 0 | unmoved |
+| Flintstones, The (USA) (En,Fr,De,Es,It) | 0 | unmoved |
+| Jungle Strike (USA) | **10** | **regressed at the census's fixed 600-frame window** — traced below |
+| WWF Super WrestleMania (USA) | 0 | unmoved |
+| Final Fantasy - Mystic Quest (USA) | 0 | unmoved |
+| Super Mario Kart (USA) | 0 | unmoved |
+| F-Zero (USA) | 0 | unmoved |
+
+Three of the six W14-33/W14-38 APU handshake deadlock titles — the ones
+whose acceptance criteria named this ticket as the likely root cause —
+are fixed outright. ActRaiser 2/Illusion of Gaia/Robotrek's deadlock is
+confirmed to be a **separate** defect (the game/driver's own APU
+call/response sequence, per W14-33/38's tracing — law 5 territory, not
+this crate's to patch), unaffected by correct CPU pacing.
+
+**Jungle Strike, traced, not tuned around.** `title_probe`'s
+`PROBE_MODE=frames PROBE_FRAMES=1200` shows the frame that first differs
+from the initial one: `varied_at=Some(1041)`. Before this ticket the CPU
+ran ~47% too fast, so the same boot sequence completed within the
+census's fixed 600-frame sampling window; at correct pacing it needs
+~1041 frames — the census's window is simply tighter than a boot that
+takes over 600 real frames, which is not this ticket's regression to fix
+(the window is `boot_census.rs`'s own constant, orthogonal to CPU
+correctness). Named, not chased further, per this ticket's scope.
+
+### Gate
+
+`cargo fmt --check` clean. `cargo clippy --workspace -- -D warnings`
+clean. `cargo test --workspace` all green (rf-snes: 364 passed, 0 failed,
+1 ignored). Ignored oracle suites: `singlestep_65816_vectors`
+(5,080,000/5,080,000, new exact cycle assertion), `spc700_vectors`
+(256,000/256,000, unaffected — SPC700 timing is untouched by this
+ticket), `spc_timer_reports_pass` ("PASSED TESTS"), `gilyon_cputest`
+(`test_num=0x0649/0x0649, "Success"`, 6,100,000 instructions),
+`peterlemon_golden` (all three tests, two goldens re-pinned with
+`RF_GOLDEN_DUMP` evidence above), `undisbeliever_golden` (all pixel and
+write-record goldens, six write-records re-pinned), and
+`rf_scroller_s_five_minute_replay_is_deterministic` (26s release,
+deterministic). `scripts/validate-arch.sh`: `arch OK`.
