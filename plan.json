@@ -7368,7 +7368,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-31",
   "title": "PPU per-line register records are wiped at frame start before the frame is composed — compose from the completed frame's records",
