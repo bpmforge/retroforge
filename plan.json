@@ -7362,6 +7362,31 @@
   "notes": [
    "FILED 2026-09-20 by the orchestrator as W14-27's named next step. PROBE_SPCREGPC / PROBE_SPCPCCOUNT / PROBE_ARAM / PROBE_PACKETLOG exist for this."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-31",
+  "title": "PPU per-line register records are wiped at frame start before the frame is composed — compose from the completed frame's records",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "diagnosed in W14-29 (docs/TESTING.md): SnesSystem::step calls Ppu::clear_line_state at events.frame_started, and both SnesSystem::render_frame and SnesCore::step(Step::Frame) compose only after the frame counter has advanced past that instant, so line_state/line_regs/line_writes for the frame being composed are already None and every mid-frame register write (raster IRQ chains, INIDISP fades, HDMA-adjacent writes) is composed from the live registers instead of the per-line record",
+   "fix: the completed frame's records survive until it is composed — e.g. swap the live per-line buffers into a 'completed' set at frame_started (clear the live set), and have render_scanline read the completed set, falling back to the live registers only for lines the completed frame never latched (the existing behaviour); save/load clears both; the W13-02 per-line latching tests keep passing unchanged",
+   "a unit test drives a mid-frame write on a late visible line (e.g. $2100 on line 216) through Step::Frame / render_frame and asserts the composed frame reflects it, and a second test asserts a write during vblank is NOT applied to the just-completed frame",
+   "the full SNES census is re-run by the orchestrator with RF_CENSUS_OUT; every title that moved in either direction is named in docs/TESTING.md (Final Fantasy Mystic Quest x3 are the expected movers); the replay/golden suites and rf-renderer/rf-enhance tests stay green; determinism unaffected",
+   "cited: fullsnes 'SNES PPU' on which registers take effect mid-scanline; the existing PpuRegs::capture / is_segmentable contract is reused, not redesigned"
+  ],
+  "notes": [
+   "FILED 2026-09-20 by the orchestrator as W14-29's named follow-up. The line-state machinery (W13-02) is dead in the frame path today: composition sees a cleared buffer. Keep the fix to the buffer lifetime; do not touch what is latched or when."
+  ]
  }
 ]
 }
