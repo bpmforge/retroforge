@@ -7193,7 +7193,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "id": "W14-24",
   "title": "Super Mario RPG boot upload overflows ARAM: trace the CPU-side producer (SA-1 ROM mapping / upload length) behind the ~200-page carry walk",
@@ -7209,7 +7209,8 @@
    "if a fix lands: SMRPG census child exit 0, full SNES census re-run by the orchestrator, moved titles named in docs/TESTING.md; ignored SNES suites green; determinism unaffected"
   ],
   "notes": [
-   "FILED 2026-09-19 by the orchestrator after W14-23 stage 2 (blocked). Stage 2 proved the SPC side consumes exactly what the CPU sends; the overflow therefore comes from the producer. Prime lead: SMRPG is SA-1 and the sample/driver data lives in SA-1 super-banked ROM."
+   "FILED 2026-09-19 by the orchestrator after W14-23 stage 2 (blocked). Stage 2 proved the SPC side consumes exactly what the CPU sends; the overflow therefore comes from the producer. Prime lead: SMRPG is SA-1 and the sample/driver data lives in SA-1 super-banked ROM.",
+   "CLOSED 2026-09-19: not one of the three ranked hypotheses. SA-1 register report is clean (\"sa1 unknown register writes: none\") and the producer never reads sample data/length through SA-1-mapped ROM on this path. Root cause: SnesBus::tick_math stepped the $4204-$4217 hardware divider once per CPU bus access, not once per elapsed CPU cycle, so internal-only filler (INY/NOP/XBA) between a $4206 divide-start and the game's $4214/$4215 quotient read did not advance the divide; one boot-time block's read landed mid-shift, handing the driver a packet count of 0x8021 (32801) instead of 33, and the SPC halts partway through that single block, exactly matching W14-23's overshoot. Fixed by clocking MathUnit::tick off real master cycles (regs.rs/bus.rs/system.rs), not accesses; gilyon_cputest (0x0649/0x0649 Success), singlestep_65816_vectors (5,080,000/5,080,000), singlestep_spc700_vectors (256,000/256,000) and spc_timer_reports_pass all green; cargo test --workspace 2213 passed, 0 failed. Both SMRPG census children now exit 0; Kirby Super Star, Kirby's Dream Land 3, Wild Guns and Super Mario World unmoved. Full census re-run left to the orchestrator. See docs/TESTING.md for the full trace."
   ]
  },
  {

@@ -26,6 +26,9 @@
 //! PROBE_PACKETLOG=1                 print every SPC X-register (command index) and ARAM
 //!                                    dp$01 change, plus totals of X-register vs. $2140
 //!                                    (port 0) changes over the whole run
+//! PROBE_MATHPC=hex[,hex]            print the $4204-$4217 hardware multiply/divide
+//!                                    unit's state whenever the CPU is about to execute
+//!                                    an instruction at one of these 24-bit PCs (W14-24)
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -157,6 +160,18 @@ fn probe() {
         let mut dp1_last = u8::MAX;
         let mut x_changes: u64 = 0;
         let mut port0_changes: u64 = 0;
+        // W14-24: log the $4204-$4217 hardware divider's state whenever the
+        // CPU is about to execute an instruction at one of these 24-bit
+        // PCs (comma-separated hex, e.g. "c404fd,c40505") — used to check
+        // whether a game's read of $4214/$4215 lands while the divider is
+        // still stepping (`busy()==true`), which would hand it a partial
+        // shift-register value instead of the finished quotient.
+        let mathpcs: Vec<u32> = std::env::var("PROBE_MATHPC")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| u32::from_str_radix(s, 16).unwrap())
+            .collect();
         let cap: u64 = std::env::var("PROBE_INSTR")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -229,6 +244,20 @@ fn probe() {
                     );
                     timer_last = t;
                 }
+            }
+            if !mathpcs.is_empty() && mathpcs.contains(&(pcv & 0x00FF_FFFF)) {
+                let m = &sys.bus.math;
+                println!(
+                    "      MATHLOG n={n} pc={:06X} busy={} wrdiv={:04X} rddiv={:04X} rdmpy={:04X} a={:04X} x={:04X} y={:04X}",
+                    pcv & 0x00FF_FFFF,
+                    m.busy(),
+                    m.wrdiv,
+                    m.rddiv,
+                    m.rdmpy,
+                    sys.cpu.a,
+                    sys.cpu.x,
+                    sys.cpu.y
+                );
             }
             if pcv != ring_last {
                 pcring.push_back(pcv);

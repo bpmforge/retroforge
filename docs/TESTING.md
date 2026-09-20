@@ -1290,3 +1290,166 @@ bucket; census not re-run (no code changed — `crates/rf-harness/tests/
 title_probe.rs` gained two diagnostic env vars, `PROBE_TIMERLOG` and
 `PROBE_PACKETLOG`, and nothing in `crates/rf-snes` changed). Gate at
 close: see the commit trailer.
+
+**W14-24 (Super Mario RPG boot upload overflows ARAM: the CPU-side
+producer), 2026-09-19, release build — root cause found and FIXED. Not
+one of the ticket's three ranked hypotheses: a fourth mechanism, found by
+tracing the producer per the ticket's own method.**
+
+Started from W14-23 stage 2's disassembly of the SPC700 receive loop
+(ARAM `$09B4-$09E2`) and the standing question: why does the 65816 send
+~17,036 packets when the buffer (`$4B12-$FFFF`) holds room for only
+~15,439? `title_probe`'s `PROBE_PORTS`/`PROBE_RINGP` traced the producer
+to a two-instruction spin at `C4:0541`/`C4:0545` (`CMP $2140` / `BNE`),
+and `PROBE_DIS=c4:0400:0900` disassembled the surrounding routine.
+
+**Hypothesis 1 (SA-1 ROM mapping) is exonerated by the disassembly, not
+just by the register report.** The block-header setup at `C4:04E0-
+C4:0539` reads its per-block length through `[$3A],Y` — an ordinary
+direct-page-indirect-long read, not a super-banked `$2220`-`$2223` CXB-
+FXB access — and `PROBE_SA1REGS=1` reports `sa1 unknown register writes:
+none` for the whole run, matching W17-04's and W17-03's prior findings.
+The producer never reads sample data or its length through SA-1-mapped
+ROM on this path, so there is no mapping to check bank/offset against
+fullsnes for. Hypotheses 2 (duplicate/non-atomic port writes) and 3 (SPC
+echo semantics) were also not needed: the actual defect is upstream of
+any of the three, in a piece of hardware none of them named.
+
+**The producer's packet count comes from the SNES's own $4204-$4217
+hardware divider, and this emulator's divider was finishing too late.**
+`C4:04E6-C4:0501`: `REP #$20; LDA [$3A],Y` reads a 16-bit length from the
+sample-header blob, `+2`, stores it to `$4204/$4205` (`WRDIV`), then
+`SEP #$20; LDA #$03; STA $4206` starts a divide-by-3 (`$4206` = 16-step
+divide start, `rf-snes`'s `MathUnit::start_divide`, `regs.rs`). The game
+then spaces the divide's known 16-cycle latency with `INY; INY; STY $3D;
+NOP; NOP; LDX #$FFFF` — the ordinary "do filler work while the divider
+runs" idiom fullsnes documents — before reading the quotient: `LDA
+$4215` (`C4:04FD`, high byte) then `LDA $4214` (`C4:0505`, low byte,
+after `XBA`/`TAX` combine them into `X`, the packet countdown for the
+`$0541` send loop).
+
+New diagnostic (kept, matching the `PROBE_TIMERLOG`/`PROBE_PACKETLOG`
+precedent): `title_probe.rs`'s `PROBE_MATHPC=hex[,hex]` prints the
+`$4204-$4217` unit's `busy()`/`wrdiv`/`rddiv`/`rdmpy` state whenever the
+CPU is about to execute an instruction at one of the given 24-bit PCs.
+`PROBE_MATHPC=c404fd,c40539` on the unpatched tree caught it directly —
+two blocks logged before the run:
+
+```
+MATHLOG n=79919 pc=C404FD busy=true  wrdiv=0014 rddiv=0003 rdmpy=0002 a=0003 x=FFFF y=0002
+MATHLOG n=80890 pc=C404FD busy=true  wrdiv=0065 rddiv=8010 rdmpy=0005 a=0003 x=FFFF y=0002
+MATHLOG n=80961 pc=C40539            wrdiv=0065 rddiv=0021 rdmpy=0002 a=8021 x=0001 y=0002
+```
+
+Both `$4215` reads land while `busy()==true` — the divide has not
+finished. The first happens to be harmless (partial high byte `00`
+matches the eventual correct high byte `00`). The second is not: dividend
+`0x65`=101 by 3 is 33 remainder 2 (`0x0021`, correct high byte `00`), but
+the shift register mid-divide reads `0x8010`, handing the high byte
+`0x80` to `A`. Combined with the (correctly-settled-by-then) low byte
+`0x21`, `X` becomes `0x8021` = **32,801** instead of **33** — a single
+corrupted block asking the `$0541` loop to send 32,801 packets. The SPC
+halts at 17,036 partway through that one block, consistent with W14-23's
+numbers to the byte: this block alone dwarfs the entire 15,439-packet
+buffer capacity, so nothing about the outer dispatcher or a second block
+is needed to explain the overshoot.
+
+**Root cause: `SnesBus::tick_math` stepped the divide/multiply unit once
+per CPU *bus access*, not once per elapsed CPU cycle** (`system.rs`'s own
+prior comment: "internal cycles are not modelled yet"). `INY`, `NOP` and
+`XBA` cost real 65816 cycles but touch no address in this core (`ops.rs`
+`0xEA => {}` for `NOP` is representative), so `AccessCost` — correctly
+scoped to what it can actually charge, per `speed.rs`'s own doc — counted
+zero for them, and the 16-step divide fell behind wall-clock time. Any
+game that reads a math-unit result after this kind of filler is exposed;
+most census titles either don't do this or land on a divisor/dividend
+combination where the stale shift-register bits happen to match the
+final answer (as the first logged block above did) — Super Mario RPG's
+second boot-time block did not.
+
+**Fix (crates/rf-snes/src/regs.rs, bus.rs, system.rs — narrowly scoped,
+not the full cycle-accurate 65816 executor `W6-02a` still defers):**
+`MathUnit` gained `tick(&mut self, master_cycles: u32)`, which accrues
+master cycles and calls the existing `step()` once per
+[`crate::cpu::speed::FAST`] (6) master cycles — the fixed cost of one
+internal CPU cycle on this hardware, regardless of FastROM, since
+internal cycles never touch the bus — the same established cost
+`speed.rs`'s own doc encodes, and the same constant
+`SnesSystem::step_one`'s pre-existing WAI/STP credit already uses for the
+identical reason, not a new hardware claim. `SnesBus::tick_math` now just
+forwards to `MathUnit::tick`, and `system.rs` feeds it `spent` (the
+instruction's real master-cycle cost, already computed for the master
+clock and the APU catch-up) instead of `counting.accesses`. A `carry: u32`
+field (sub-6-master-cycle remainder) was added to `MathUnit` and to its
+save/load state so a mid-divide save/load round-trip stays exact. This
+does **not** add per-opcode internal-cycle accounting to the rest of the
+timing model — `master_cycles`/scanline/frame timing are unchanged and
+still have the same internal-cycle gap W6-02a's deferred cycle-accurate
+executor is for; only the math unit's own clocking moved off the wrong
+unit (bus accesses) onto the right one (real elapsed time).
+
+**Known residual, not fixed here** (documented on `MathUnit::tick`): the
+`$4206` write happens mid-instruction, but `tick_math` is only called
+with that whole instruction's cost after the instruction finishes, so
+the handful of cycles the triggering instruction spent *before* reaching
+the write (its own opcode/operand fetches) are also credited toward the
+divide's latency — over-crediting the first `tick` by a few cycles out
+of sixteen. Harmless for every case checked here (`gilyon_cputest` and
+the SMRPG fix both have comfortable margin), but a title timed exactly
+against the 16-cycle boundary could still see a read complete one or two
+cycles early. Fixing that needs sub-instruction timing, which is what
+W6-02a's deferred cycle-accurate executor is for, not a change to this
+method.
+
+Three new unit tests cover `tick` directly (`crates/rf-snes/src/tests/
+regs.rs`): `tick_completes_a_divide_after_its_real_master_cycle_latency`
+reproduces the exact `101 / 3` case above as a `MathUnit`-level assertion
+(busy one cycle short of the 16-cycle latency, settled and correct at
+exactly 16); `tick_accumulates_partial_master_cycles_across_calls` checks
+the `carry` field actually does its job — feeding the same total master
+cycles through many small, non-`speed::FAST`-aligned `tick` calls (the
+way `step_one` really drives it, once per instruction) must match one
+large call; and `bus_tick_math_gates_the_divide_quotient_by_real_master_
+cycles` drives the same `101 / 3` case through `SnesBus`'s `$4204`-
+`$4217` window the way the CPU actually would, asserting a `$4215` read
+one cycle short of the latency is not yet the final high byte and a read
+at the latency is.
+
+**Verified fixed**, same `PROBE_MATHPC` trace on the patched tree: both
+blocks now show `busy=false` at `C4:04FD` and the correct small counts at
+`C4:0539` (`a=0006`, `a=0021`, `a=000F`, `a=001B`, `a=0042`, `a=006C`,
+`a=00A8`, `a=0066`, `a=00A5`, `a=0096`, ...). `PROBE_STOP_ON_SPC_STOP=1`
+with `PROBE_INSTR=1050000` no longer halts at all — the SPC reaches real
+driver code (`spc distinct_pc=61`, addresses in the `$02xx-$03xx` driver
+range, not stuck at `$09B6`) and the PPU shows real state
+(`forced_blank=false cgram_nonzero=29 vram_nonzero=1561`).
+`PROBE_MODE=frames PROBE_FRAMES=600` reports `varied_at=Some(27)` — the
+title renders by frame 27.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — 357 passed (three new, above),
+0 failed (plus the
+existing ignored/gated suites); `cargo test --workspace` — **2213
+passed, 0 failed**. The four suites this ticket's brief named as the
+oracles for exactly this class of change all pass on the patched tree:
+`singlestep_spc700_vectors` (256,000/256,000), `singlestep_65816_vectors`
+(5,080,000/5,080,000, same "254 of 256 opcodes, `$44`/`$54` excluded"
+report as before this ticket — unrelated MVN/MVP cycle-truncation gap,
+not touched here), `spc_timer_reports_pass` ("PASSED TESTS"), and —
+the discriminating one for a math-unit timing change —
+`gilyon_cputest`'s `cputest_full_reports_success_and_every_test_passes`:
+`test_num=0x0649/0x0649, ROM says "Success"`.
+
+**Census children** (`boot_census_child`, per-title, not the full
+orchestrator run — law of this ticket's brief): **both Super Mario RPG
+dumps now exit 0** (USA and USA/Europe Virtual Console), and the four
+regression canaries all still exit 0 unmoved: **Kirby Super Star**,
+**Kirby's Dream Land 3**, **Wild Guns**, **Super Mario World**. The full
+SNES census re-run (to move the bucket counts and name every title this
+touches) is the orchestrator's — not run here, per this session's
+instructions.
+
+**Determinism**: no core state field was made non-deterministic; `carry`
+is included in `MathUnit`'s save/load so a save/load round trip mid-divide
+reproduces the same completion timing. No RNG, wall-clock, or thread
+dependency was introduced.

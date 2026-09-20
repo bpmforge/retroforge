@@ -852,14 +852,11 @@ impl SnesBus {
         moved * CYCLES_PER_BYTE
     }
 
-    /// Advance the math unit by `cycles` CPU cycles.
-    pub fn tick_math(&mut self, cycles: u32) {
-        for _ in 0..cycles {
-            if !self.math.busy() {
-                break;
-            }
-            self.math.step();
-        }
+    /// Advance the math unit by `master_cycles` of real elapsed time
+    /// (ticket W14-24 — was CPU *bus accesses*, which undercounts any
+    /// internal-only cycle; see [`crate::regs::MathUnit::tick`]).
+    pub fn tick_math(&mut self, master_cycles: u32) {
+        self.math.tick(master_cycles);
     }
 }
 

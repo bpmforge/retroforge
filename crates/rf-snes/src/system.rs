@@ -165,7 +165,6 @@ impl SnesSystem {
         let fast_rom = self.bus.fast_rom;
         let mut counting = crate::cpu::AccessCost::new(&mut self.bus, fast_rom);
         let result = self.cpu.step(&mut counting);
-        let accesses = counting.accesses;
         // **A HALTED CPU STILL BURNS TIME** (ticket W7-15).
         //
         // `Cpu::step` returns immediately while `stopped` (WAI or STP)
@@ -193,11 +192,20 @@ impl SnesSystem {
         };
         self.master_cycles += spent;
 
-        // The math unit advances in CPU cycles, not master cycles. One
-        // bus access is one CPU cycle, which is what the vector traces
-        // show; internal cycles are not modelled yet (W6-02a's note on
-        // the cycle-accurate executor).
-        self.bus.tick_math(accesses as u32);
+        // The math unit advances off real elapsed time (`spent`, master
+        // cycles), not the bus-access count (ticket W14-24). Every
+        // internal 65816 cycle costs exactly `speed::FAST` master cycles
+        // regardless of FastROM (it never touches the bus), the same
+        // constant the WAI/STP credit above uses, and `MathUnit::tick`
+        // converts on that basis. The previous access-counted model
+        // undercounted any internal-only filler between a `$4206` divide
+        // write and a `$4214`/`$4215` read — see `MathUnit::tick`'s doc
+        // for the Super Mario RPG boot-upload trace this was found from.
+        // This still does not model per-opcode internal cycles for
+        // general system timing (W6-02a's cycle-accurate executor is
+        // still future work); it only fixes what the math unit itself
+        // is clocked from.
+        self.bus.tick_math(spent as u32);
         // The APU accrues debt with every master cycle the CPU spends —
         // DMA included, because a transfer stalls the CPU and not the
         // sound chip — and is settled at the end of every instruction
