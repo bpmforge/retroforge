@@ -7792,7 +7792,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-48",
   "title": "APU upload rate and premature handoff: Battle Grand Prix's per-byte handshake never finishes; Urban Strike's first-stage stub runs into unwritten ARAM",
