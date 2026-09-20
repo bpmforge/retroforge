@@ -540,9 +540,22 @@ fn a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo(
     // harmless to spend the rest of its cycles.
     let program: [u8; 4] = [0x8F, 0xF1, 0xF4, 0x00];
 
+    // Since W14-37, a `Store`/`Run` the protocol decides on on one
+    // `poll_boot` call is not delivered until its own pending countdown
+    // elapses (`IplBoot::poll`'s `pending`), and while it is pending the
+    // next call does not even look at the ports again. A setup helper
+    // that polled only once per write (as this closure used to) would
+    // leave most of this block's byte-accepts sitting in `pending`
+    // indefinitely, mangling the transfer instead of merely delaying it.
+    // Match the crate's own `write_port` free function above: drain
+    // `RUN_HANDOFF_AFTER_TRANSFER_CYCLES`, the largest delay any write
+    // can ever queue, after every write.
     let write = |s: &mut SnesSystem, index: usize, value: u8| {
         s.bus.apu.cpu_write_port(index, value);
         s.bus.apu.poll_boot();
+        for _ in 0..RUN_HANDOFF_AFTER_TRANSFER_CYCLES {
+            s.bus.apu.poll_boot();
+        }
     };
     write(&mut s, 1, 0x01);
     write(&mut s, 2, dest as u8);
@@ -566,8 +579,15 @@ fn a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo(
 
     // A large debt: what W14-39's corrected per-instruction charge hands
     // `catch_up_apu` after a heavier CPU instruction, not the handful of
-    // access-only cycles a plain `STA` used to leave it.
-    s.bus.apu_debt = 21 * 40;
+    // access-only cycles a plain `STA` used to leave it. Since W14-37,
+    // `Run` is not delivered the instant `poll_boot` decides it: the
+    // pending countdown IS the boot ROM's own listed instruction tail
+    // (`RUN_HANDOFF_AFTER_TRANSFER_CYCLES` = 45, `boot.rs`), paid out of
+    // this exact call's SPC-cycle budget one poll per cycle — so the
+    // budget must cover the full 45 cycles before the hand-over can
+    // complete in a single call at all, with plenty left over to prove
+    // the freshly-woken SPC700 still does not get to spend it.
+    s.bus.apu_debt = 21 * 80;
     s.bus.catch_up_apu();
 
     assert!(
@@ -633,9 +653,14 @@ fn a_port_read_immediately_after_hand_over_does_not_see_the_next_instruction_ear
               // this test only needs the FIRST instruction to stay unexecuted.
     ];
 
+    // See the drain rationale on the test above: a single poll per write
+    // leaves most of this block's byte-accepts stuck in `pending`.
     let write = |s: &mut SnesSystem, index: usize, value: u8| {
         s.bus.apu.cpu_write_port(index, value);
         s.bus.apu.poll_boot();
+        for _ in 0..RUN_HANDOFF_AFTER_TRANSFER_CYCLES {
+            s.bus.apu.poll_boot();
+        }
     };
     write(&mut s, 1, 0x01);
     write(&mut s, 2, dest as u8);
@@ -651,11 +676,21 @@ fn a_port_read_immediately_after_hand_over_does_not_see_the_next_instruction_ear
     let run_echo = program.len() as u8 + 1;
     s.bus.apu.cpu_write_port(0, run_echo);
 
-    // A modest debt, sized so the hand-over itself happens but leaves a
-    // real, small carried remainder afterwards — the shape W14-39's
-    // follow-up already established happens routinely under its
-    // corrected per-instruction charge.
-    s.bus.apu_debt = 21 * 3;
+    // A debt sized so the hand-over itself happens but leaves a real,
+    // small carried remainder afterwards. Since W14-37 the `Run` action
+    // is not delivered the instant `catch_up_apu`'s first iteration
+    // decides it: that iteration itself spends one SPC cycle of the
+    // budget (it still ticks the shared clock and polls), and the
+    // decided action then sits in `IplBoot::poll`'s `pending` for
+    // `RUN_HANDOFF_AFTER_TRANSFER_CYCLES` (45) MORE polls before it is
+    // delivered — 46 SPC cycles total from this call's budget, confirmed
+    // against `the_immediate_run_handoff_is_not_observable_before_its_
+    // listed_cycles_elapse`'s own call-counting convention. One more
+    // (47) leaves the 1-cycle remainder this test's whole point depends
+    // on — too small to fund the driver's own first instruction (`MOV
+    // $F4,#$F1`, base cost 5 per `timing::CYCLES[0x8F]`), the shape
+    // W14-41's fix defers.
+    s.bus.apu_debt = 21 * 47;
     s.bus.catch_up_apu();
     assert!(s.bus.apu.boot.is_running(), "the hand-over must happen");
     assert_eq!(

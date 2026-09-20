@@ -5076,6 +5076,161 @@ advances on (`Apu::tick_clock`), not wall time, not per-instruction
 special-casing, and not randomised; a save-state taken mid-delay resumes
 the same countdown on load (`IplBoot::save`/`load`, new fields for
 `pending`).
+
+### Re-applied on the W14-39/W14-41 base: one unified handoff-instant model (2026-09-20)
+
+W14-37 was parked (see the note above and the plan.json HELD entry) because
+merged onto the W14-39/W14-41 base it failed
+`a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo`
+and `a_port_read_immediately_after_hand_over_does_not_see_the_next_
+instruction_early`: two models of the same handoff instant, never
+reconciled. This re-applies W14-37 unchanged in mechanism and shows the two
+models were never actually in conflict — only two of the newer tests were.
+
+**The unified model.** `IplBoot::poll`'s `pending` countdown (`boot.rs`,
+unchanged by this session) already pays the boot ROM's listed instruction
+cost — 45/42/25 SPC cycles for the after-transfer/immediate/per-byte cases
+— out of the SAME clock `SnesBus::catch_up_apu`'s loop spends on every
+ordinary SPC700 instruction: each call to `poll_boot` while `pending` is
+`Some` happens inside that loop's "boot still owns the machine" branch
+(`!self.apu.boot.is_running()`), which ticks the shared APU clock by
+exactly one SPC cycle and charges it against the call's own `spc_cycles`
+budget before returning. `pending` is not a second clock bolted on
+alongside `apu_debt`/`apu_overspent` — it is a sequence of instructions
+this same budget has to fund, one cycle at a time, exactly like any real
+SPC700 opcode. This is why `boot.rs`, `bus.rs` and `apu/mod.rs` needed
+**zero logic changes** to compose with W14-39/W14-41: `IplBoot::is_running()`
+already reports `false` for the whole pending window (`state == Running &&
+pending.is_none()`), so `catch_up_apu`'s loop never leaves the "not
+running" branch until the delayed action is actually delivered — the exact
+same invariant W14-39's hand-over-edge stop and W14-41's per-instruction
+peek-and-defer both rely on. The `Run` edge lands at a well-defined point
+in that same budget (see below), and W14-41's deferral rule for ordinary
+instructions applies unchanged the instant control passes to the freshly
+woken SPC700, because nothing about it inspects how the hand-over got
+decided.
+
+**Where the edge actually lands.** The iteration that decides `Run`/`Store`
+(the one where `cpu_wrote` fires) is itself one budget cycle, and the
+listed constant is exactly how many MORE cycles the pending countdown
+needs before it delivers the action — confirmed against the pre-existing,
+already-passing `the_immediate_run_handoff_is_not_observable_before_its_
+listed_cycles_elapse`/`the_byte_handshake_is_not_observable_before_its_
+listed_cycles_elapse` (`crates/rf-snes/src/tests/apu_ports.rs`), which
+poll directly and pin this exact convention: 1 (decision) + N (the
+constant) total polls from the triggering write to delivery. So a
+`catch_up_apu` call needs **46** SPC cycles of budget to complete an
+after-transfer `Run` hand-over in one call (1 + 45), **43** for an
+immediate one (1 + 42), **26** per accepted byte (1 + 25).
+
+**Test changes and why.** Two tests, both added under W14-39/W14-41 on a
+base that had no post-decision delay at all, encoded that assumption two
+ways — not a defect in the unified model, per this ticket's own
+instruction to fix the test's expectation rather than the model when the
+listing is the arbiter here:
+- `a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_
+  echo` and `a_port_read_immediately_after_hand_over_does_not_see_the_next_
+  instruction_early` (`crates/rf-snes/src/tests/apu_ports.rs`) each defined
+  a local `write` closure that called `poll_boot()` exactly once per port
+  write. That is correct against a model where `Store`/`Run` complete
+  instantly, but under W14-37 a `Store` decided mid-closure sits in
+  `pending` for 25 more cycles, and while `pending` is `Some`, `poll`
+  does not even look at `ports_in` — so the very next write in the same
+  closure was silently dropped rather than delayed, only surviving by
+  accident when a later out-of-range counter value forced the "end of
+  block" mismatch branch regardless of the mangled per-byte history. Fixed
+  by draining `RUN_HANDOFF_AFTER_TRANSFER_CYCLES` extra polls after every
+  write, exactly the pattern the crate's own top-of-file `write_port` free
+  function already established for this reason.
+- Both tests' `apu_debt` values were sized for the old zero-delay model
+  (40 and 3 SPC cycles) and are now too small to let the `Run` hand-over
+  complete in a single `catch_up_apu` call at all (needs 46, per the
+  accounting above). Raised to `21 * 80` (comfortably over 46, to also
+  prove a large leftover budget still does not let the freshly-run program
+  execute) and `21 * 47` (46 to complete the hand-over plus a genuine
+  1-cycle remainder, too small to fund the driver's own first instruction,
+  `MOV $F4,#$F1` at base cost 5 per `timing::CYCLES[0x8F]` — the exact
+  shape W14-41's fix defers) respectively.
+
+No other test changed, and none of the existing `IplBoot`/`apu_ports`
+tests, `spc700_vectors`, `spc_timer_reports_pass`, `gilyon_cputest`,
+`singlestep_65816_vectors`, `peterlemon_golden`, `undisbeliever_golden`, or
+the `rf_scroller_s` five-minute determinism replay needed any change —
+all pass unmodified. Determinism is unaffected for the same reason W14-37's
+original write-up gave: the pending countdown is fixed SPC-cycle counts on
+the same shared, deterministic clock, not wall time.
+
+**Gate.** `cargo fmt --check` clean. `cargo clippy --workspace -- -D
+warnings` clean (exit 0). `cargo test -p rf-snes` (debug, and separately
+`--release`): **369 passed, 0 failed, 1 ignored** both ways. Ignored
+oracle suites, all re-run green: `singlestep_spc700_vectors` and
+`spc700_cycle_table_matches_the_vectors` (`spc700_vectors`, exit 0),
+`spc_timer_reports_pass` (`blargg_spc`, "PASSED TESTS", exit 0),
+`cputest_full_reports_success_and_every_test_passes` (gilyon, exit 0),
+`singlestep_65816_vectors` (5,080,000/5,080,000, exit 0, ~961s release),
+`peterlemon_golden`'s three tests (exit 0), `undisbeliever_goldens_match`
+(exit 0), `rf_scroller_s_five_minute_replay_is_deterministic` (exit 0,
+57s release).
+
+**Census children**, `RF_CENSUS_ROM=<zip> boot_census-* --ignored --exact
+boot_census_child` against the real library (`~/Games/Roms/snes`), this
+ticket's fifteen plus the seven titles W14-37's first census (on the old
+base) had regressed, each cross-checked against an unmodified `main` tip
+(894bd05) built the same way to isolate what THIS re-application moves,
+not what W14-39/W14-41 already changed:
+
+| Title | main | this branch | moved? |
+|---|---|---|---|
+| Super Turrican (USA) | 0 | 0 | no |
+| Rival Turf! (USA) | 0 | 0 | no |
+| Wario's Woods (USA) | 0 | 0 | no |
+| Tommy Moe's Winter Extreme | 0 | 0 | no |
+| International Tennis Tour (USA) | 0 | 0 | no |
+| Rendering Ranger R2 (USA) | 0 | 0 | no |
+| Soul Blazer (USA) | 10 | 10 | no (pre-existing W14-33/38 family) |
+| ActRaiser 2 (USA) | 10 | 10 | no (same family) |
+| Super Mario RPG (USA) | 0 | 0 | no |
+| Super Mario World (USA) | 0 | 0 | no |
+| Wild Guns (USA) | 0 | 0 | no |
+| Kirby Super Star (USA) | 0 | 0 | no |
+| NHL 95 (USA) | 0 | 0 | no |
+| Clay Fighter (USA) | 0 | 0 | no |
+| Full Throttle (USA) (Beta) | 0 | 0 | no |
+| Best of the Best (USA) | 0 | 0 | no |
+| Men in Black (USA) (Pirate) | 0 | 0 | no |
+| Power Rangers Zeo (USA) | 10 | 10 | no — already blank on `main` alone (a pre-existing W14-39 "budget edge", not this ticket's doing) |
+| Super Aquatic Games (USA) | 0 | 0 | no |
+| Troddlers (USA) | 0 | 0 | no |
+| Xardion (USA) | **0** | **10** | **yes — regressed** |
+
+Six of the seven titles the OLD (pre-W14-39/41) W14-37 branch traded away
+now match `main` exactly — the base this ticket re-applies onto already
+absorbed most of that shifted race. **Only Xardion regresses, and it is
+named, not tuned around:** `title_probe` (`PROBE_ROMS=<Xardion zip>
+PROBE_INSTR=45700000`) shows the title is not deadlocked — by 45.7M CPU
+instructions `apu.boot_running=true`, `forced_blank=false`, `bright=15`,
+`vram_nonzero=40416`, `cgram_nonzero=113`, i.e. it boots and draws real
+content — but `sys.bus.timing.frame=3443` at that point, an order of
+magnitude past `boot_census`'s 600-frame/10-second cutoff. This is the
+same "budget edge" shape already documented for Power Rangers Zeo in
+W14-39's own notes (`first varied frame 591 -> 604`): the newly-charged
+45/25-cycle handoff and per-byte costs shift Xardion's own boot sequence
+just enough that its first visible frame moves from inside the census
+window to outside it. Not investigated further in this ticket's scope —
+`boot_census`'s 600-frame cutoff is a triage budget, not a correctness
+oracle, and confirming the exact instruction where the shift accumulates
+would need the same per-title trace discipline as W14-33's — but it is a
+real, reproducible, single-title timing shift this specific re-application
+causes, so **status stays BLOCKED**, not DONE, per this ticket's own gate:
+one canary regressed. All other movement in this table (International
+Tennis Tour, Rendering Ranger R2, and the recovery of the other six of the
+original seven) is W14-39/W14-41's, already recorded under those tickets'
+own sections above; this table exists only to isolate what re-applying
+W14-37 changes on top of them, which is exactly one title.
+
+**Determinism**: unaffected — same shared APU clock, no wall time, no
+per-instruction special-casing added or changed by this session.
+
 ## W14-40 — the "BRK-dispatched OS calls" do not exist; corrected
 ## disassembly of $9D:FE44-FF09; idle length not isolated, BLOCKED
 
