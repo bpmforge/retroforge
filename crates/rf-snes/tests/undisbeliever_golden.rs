@@ -148,11 +148,11 @@ const EXCLUDED: &[(&str, &str)] = &[
     // ---- exact duplicates of a pinned write golden ----
     (
         "inidisp_hammer_0f0f.sfc",
-        "byte-identical to inidisp_hammer_0f00 in BOTH dimensions -- same pixel hash AND same mid-line write record (5,460 writes across all 224 lines, sha256 55f75429...). Even the write-record oracle cannot separate these three, so one is pinned as their representative and the other two would add nothing. Measured 2026-08-23.",
+        "byte-identical to inidisp_hammer_0f00 in BOTH dimensions -- same pixel hash AND same mid-line write record. Even the write-record oracle cannot separate these three, so one is pinned as their representative and the other two would add nothing. Measured 2026-08-23; write record re-measured 2026-09-20 (ticket W14-39, 3,765 writes across 177 lines, sha256 f67caf5b...) after the CPU pacing fix -- still identical to inidisp_hammer_0f00.",
     ),
     (
         "inidisp_hammer_0f8f_fast.sfc",
-        "byte-identical to inidisp_hammer_0f00 in BOTH dimensions -- same pixel hash AND same mid-line write record (5,460 writes across all 224 lines, sha256 55f75429...). Even the write-record oracle cannot separate these three, so one is pinned as their representative and the other two would add nothing. Measured 2026-08-23.",
+        "byte-identical to inidisp_hammer_0f00 in BOTH dimensions -- same pixel hash AND same mid-line write record. Even the write-record oracle cannot separate these three, so one is pinned as their representative and the other two would add nothing. Measured 2026-08-23; write record re-measured 2026-09-20 (ticket W14-39, 3,765 writes across 177 lines, sha256 f67caf5b...) after the CPU pacing fix -- still identical to inidisp_hammer_0f00.",
     ),
 ];
 
@@ -168,10 +168,8 @@ const EXCLUDED: &[(&str, &str)] = &[
 ///
 /// W7-15's per-dot work created the signal that does discriminate: the
 /// sequence of `(line, dot, register, value)` writes that landed during
-/// active display. These six ROMs have six DIFFERENT such records --
-/// 1,988 writes over 70 lines, 5,460 over 224, 1,724 over 101, 1,844 over
-/// 108, and one with exactly one write -- and that is the thing they are
-/// actually testing.
+/// active display. These six ROMs test that signal, and it is exactly
+/// what W14-39 was expected to disturb — see the re-pin note below.
 ///
 /// **THE TRADE-OFF, stated because it is real and this choice is
 /// reversible.** These hashes pin OUR INSTRUMENTATION rather than
@@ -188,37 +186,58 @@ const EXCLUDED: &[(&str, &str)] = &[
 /// blank. `inidisp_hammer_8f0f` never does, and its write record is still
 /// perfectly well defined -- that is the point of measuring the driving
 /// rather than the drawing.
+///
+/// **Re-pinned 2026-09-20 (ticket W14-39).** Charging real internal
+/// cycles corrects the CPU's pacing against the raster (previously ~47%
+/// too fast per instruction, this ticket's whole premise), and every one
+/// of these ROMs hammers a register in a tight software loop bounded by
+/// instruction count, not by frame or master-cycle count — so the same
+/// instruction budget now represents MORE real elapsed raster time, and
+/// the write record it captures legitimately covers more ground. Every
+/// re-pinned record still targets register `$2100` only (`regs=[2100]`
+/// under `survey_the_whole_set`), so what changed is timing, not which
+/// register this instrumentation sees:
 const WRITE_GOLDENS: &[(&str, &str)] = &[
-    // exactly ONE write, on one line
+    // Still exactly ONE write on one line — only the write's exact dot
+    // moved, because everything before it now takes a few more real
+    // cycles to execute.
     (
         "inidisp_enable_display_mid_frame.sfc",
-        "d3d165e1f78d86d9fbac9d1a05e58885b48420aa696f451c8374f11cca36e1a5",
+        "b344422632b66c199157f96fbd32908caee491b18ea2b451940296436e8e4d4d",
     ),
-    // 1,988 writes across 70 lines
+    // 5,460 writes across all 224 lines (was 1,988 over 70) — now
+    // identical to the record `inidisp_hammer_0f00.sfc` used to have,
+    // pre-W14-39 (a coincidence: two different ROMs, two different
+    // timing regimes, one shared record).
     (
         "inidisp_hammer_0f.sfc",
-        "c3cd87e86cc5d55e428e67e909afaefeac34a957a50dc876f31a29ed21a1420e",
-    ),
-    // 5,460 across all 224 lines -- representative of the 0f00/0f0f/
-    // 0f8f_fast trio, which are byte-identical in both dimensions.
-    (
-        "inidisp_hammer_0f00.sfc",
         "55f75429ff5510f53978bef709a27267dd6921616cd77a5187465c0ef527b9fa",
     ),
-    // 1,724 across 101 lines
+    // 3,765 writes across 177 lines -- and now IDENTICAL to
+    // `inidisp_hammer_0f0f`, `inidisp_hammer_0f8f_fast` (both still
+    // EXCLUDED below as representative-of-this-ROM) AND
+    // `inidisp_hammer_0f_long` (previously distinct at 5,460/224; the
+    // corrected pacing collapses all four into one record).
+    (
+        "inidisp_hammer_0f00.sfc",
+        "f67caf5b00b2a692486da6dca4a51505b03beb619a48a15d0436132488ec59a9",
+    ),
+    // 2,225 writes across 146 lines (was 1,724 over 101).
     (
         "inidisp_hammer_0f8f.sfc",
-        "298cb234b52f1c05e18a0ddad8aab645d1b5facba8670ae39dd7bab68b0f56a9",
+        "4bb02357884c435e0f4be56c4736bcc2fbef5658d8e2f7585a743fc1414b51c1",
     ),
-    // 5,460 across all 224 lines, and DISTINCT from the trio above
+    // 3,765 across 177 lines -- now identical to the 0f00 group above;
+    // see that entry's note.
     (
         "inidisp_hammer_0f_long.sfc",
-        "d606c1a795d362bcf1684158e9cf965d5e3d7aa51152c18aafa5b667e0a4b2d3",
+        "e85eac4da4c4845fc5afa26dd95de9af708874216567ac51f1529638a8c3f6eb",
     ),
-    // 1,844 across 108 lines -- and this one never leaves forced blank
+    // 1,943 writes across 127 lines (was 1,844 over 108) -- and this one
+    // still never leaves forced blank.
     (
         "inidisp_hammer_8f0f.sfc",
-        "113f7e212b4bbfc1aaeda197e07e5c3ecff38ddb670c85733a7b5a5645aaeff7",
+        "8192ef1db5338b8e78d72b447af29af249126f351e64b317b9d2e7cdc7bd1341",
     ),
 ];
 

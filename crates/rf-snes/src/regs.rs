@@ -45,9 +45,6 @@ pub struct MathUnit {
     shift: u32,
     mpy_steps: u8,
     div_steps: u8,
-    /// Master cycles accrued toward the next internal-cycle step (ticket
-    /// W14-24). See [`MathUnit::tick`].
-    carry: u32,
 }
 
 impl MathUnit {
@@ -109,94 +106,63 @@ impl MathUnit {
         }
     }
 
-    /// Advance by `master_cycles` — this instruction's bus-access cost,
-    /// in master cycles, as charged by `AccessCost` (ticket W14-24).
-    ///
-    /// ## What the real hardware does, and what this does NOT model
+    /// Advance by `cpu_cycles` real CPU cycles — bus accesses and
+    /// internal (no-access) cycles alike (ticket W14-39).
     ///
     /// Per fullsnes ("SNES Maths Multiply/Divide"): "set WRDIVB, wait 16
     /// clk cycles, then read the ... result" (8 for multiply), and "the
     /// 42xxh Ports are clocked by the CPU Clock, meaning that one needs
     /// the same amount of 'wait' opcodes no matter if the CPU Clock is
-    /// 3.5MHz or 2.6MHz" — i.e. the latency is a CPU-cycle count,
-    /// independent of whether any given cycle is fast or slow on the
-    /// bus, or internal. Modelling that correctly needs a per-
-    /// instruction real CPU-cycle count, internal cycles included — the
-    /// cycle-accurate executor `speed.rs`'s own doc and W6-02a's close
-    /// note both defer.
+    /// 3.5MHz or 2.6MHz" — the latency is a CPU-CYCLE count, independent
+    /// of whether any given cycle is fast or slow on the bus, or
+    /// internal. This method now takes exactly that: one call to
+    /// [`step`](Self::step) per CPU cycle, no re-bucketing.
     ///
-    /// This crate does not have that yet. `AccessCost` (correctly, per
-    /// its own doc) charges **bus accesses only**: an instruction with
-    /// more real CPU cycles than bus accesses — `INX`, `INY`, `NOP`,
-    /// `TAX`, `XBA`'s second cycle, any register-only op — contributes
-    /// nothing extra to `master_cycles` for its unmodelled internal
-    /// cycles. So `master_cycles` is never a CPU-cycle count; it is
-    /// always an *undercount* of one, by exactly the internal cycles an
-    /// instruction spent.
+    /// ## What changed from the W14-24/W14-28 model
     ///
-    /// ## What this method actually does about that
-    ///
-    /// It steps [`step`](Self::step) once per [`crate::cpu::speed::FAST`]
-    /// (6) master cycles of `master_cycles` accrued, rather than once per
-    /// call (`SnesBus::tick_math`'s previous contract, one step per bus
-    /// access regardless of that access's cost). Since real accesses on
-    /// this machine cost 6, 8 or 12 master cycles (`speed.rs`'s table),
-    /// re-bucketing at 6 makes a `SLOW` (8) access worth 8/6 ≈ 1.33 steps
-    /// and an `XSLOW` (12) access worth 2 — an over-credit on every
-    /// access slower than `FAST`, not a measurement of internal cycles at
-    /// all. That over-credit is a deliberate, coarse compensation for the
-    /// undercount described above, not a fix for it: it cannot make the
-    /// unit finish *later* than hardware (it only ever adds steps
-    /// hardware would also eventually deliver, sooner), so software that
-    /// waits out the documented latency before reading is unaffected,
-    /// while software that reads a partial result — as the bug below
-    /// did — can end up seeing a completed one instead.
+    /// Both of those tickets compensated for a gap that no longer
+    /// exists: `AccessCost` (correctly, per its own doc) charges bus
+    /// accesses only, so an instruction with more real CPU cycles than
+    /// bus accesses — `INX`, `NOP`, `XBA`'s extra cycles, any
+    /// register-only op — used to contribute nothing toward this unit's
+    /// latency for its unmodelled internal cycles. W14-24 re-bucketed
+    /// the access-only master-cycle total into `speed::FAST`-sized
+    /// steps as a coarse, deliberately-over-crediting stand-in; W14-28
+    /// added a further flat one-cycle credit for single-access
+    /// instructions specifically. Both were documented as compensating
+    /// for an undercount, not fixing it — see their write-ups in
+    /// `docs/TESTING.md`. Now that `cpu::cycles::internal_cycles` (W14-39)
+    /// gives a real per-instruction internal-cycle count, `SnesSystem::
+    /// step` passes this method the CPU's true cycle count for the
+    /// instruction — `AccessCost::accesses` plus `Cpu::internal_cycles`
+    /// — and both prior credits are gone: there is nothing left for them
+    /// to compensate.
     ///
     /// Traced to Super Mario RPG's boot-upload packet-count computation
     /// (`docs/TESTING.md`, W14-24): a `$4206` divide-start followed by
     /// `INY; INY; STY $3D; NOP; NOP; LDX #$FFFF` — the ordinary,
     /// documented idiom for waiting out the divider's 16-cycle latency —
-    /// then `LDA $4215`/`LDA $4214`. Under the *old* per-access model,
-    /// that filler (all internal-only, contributing zero access-based
-    /// steps) left the divide still running at the `$4215` read
-    /// ([`Self::busy`] true), so the game got a partial shift-register
-    /// high byte (`0x80` instead of the correct `0x00`) and computed a
-    /// packet count of `0x8021` instead of `33` — the ARAM overflow this
-    /// ticket traced (`title_probe`'s `PROBE_MATHPC` on PCs
-    /// `$C4:04FD`/`$C4:0505`). Under the access-cost-in-6-cycle-buckets
-    /// model here, the same window's `SLOW`/`XSLOW` accesses (`STY`,
-    /// `LDX`'s operand fetch, the opcode fetches themselves) total enough
-    /// re-bucketed steps to finish the divide before that read.
+    /// then `LDA $4215`/`LDA $4214`. That filler's real CPU-cycle total
+    /// (each `INY`/`NOP` is 2, `STY $3D` is 3-4 depending on `D`, `LDX
+    /// #$FFFF` is 2-3) reaches 16 well before the reads, so the divide
+    /// is genuinely finished — no re-bucketing needed to get there.
     ///
     /// **Known residual, not fixed here:** the `$4206` write that calls
     /// [`Self::start_divide`] happens mid-instruction (inside
     /// `SnesBus::write`), but `SnesSystem::step` calls this method with
-    /// that whole instruction's `master_cycles` only *after* `Cpu::step`
-    /// returns — so the accesses the triggering instruction made
-    /// *before* reaching the `$4206` write (its own opcode/operand
-    /// fetches) are also credited toward the divide's latency, over-
-    /// crediting the first `tick` call by a few steps. Harmless for
-    /// every case checked here (`gilyon_cputest` and the SMRPG fix both
-    /// have comfortable margin), but a title timed exactly against the
-    /// 16-step boundary could still see a read complete a step or two
-    /// early. A true fix needs sub-instruction timing (the cycle-
-    /// accurate executor W6-02a defers), not a change to this method.
-    pub fn tick(&mut self, master_cycles: u32) {
-        if !self.busy() {
-            self.carry = 0;
-            return;
-        }
-        const CYCLE: u32 = crate::cpu::speed::FAST as u32;
-        self.carry += master_cycles;
-        while self.carry >= CYCLE {
+    /// the WHOLE instruction's cycle count only *after* `Cpu::step`
+    /// returns — so the cycles the triggering instruction spent *before*
+    /// reaching the `$4206` write (its own opcode/operand fetches) are
+    /// also credited toward the divide's latency, over-crediting the
+    /// first `tick` call by a cycle or two. A true fix needs
+    /// sub-instruction timing (the cycle-accurate executor W6-02a
+    /// defers), not a change to this method.
+    pub fn tick(&mut self, cpu_cycles: u32) {
+        for _ in 0..cpu_cycles {
             if !self.busy() {
                 break;
             }
-            self.carry -= CYCLE;
             self.step();
-        }
-        if !self.busy() {
-            self.carry = 0;
         }
     }
 }
@@ -309,8 +275,7 @@ impl MathUnit {
         o.u16(self.rdmpy)?;
         o.u32(self.shift)?;
         o.u8(self.mpy_steps)?;
-        o.u8(self.div_steps)?;
-        o.u32(self.carry)
+        o.u8(self.div_steps)
     }
 
     pub(crate) fn load(
@@ -324,7 +289,6 @@ impl MathUnit {
         self.shift = i.u32()?;
         self.mpy_steps = i.u8()?;
         self.div_steps = i.u8()?;
-        self.carry = i.u32()?;
         Ok(())
     }
 }

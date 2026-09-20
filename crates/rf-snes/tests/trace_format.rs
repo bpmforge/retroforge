@@ -154,6 +154,7 @@ fn the_trace_line_format_is_pinned() {
         e: false,
         stopped: false,
         wai: false,
+        internal_cycles: 0,
     };
     assert_eq!(
         format_trace_line(&cpu, &m),

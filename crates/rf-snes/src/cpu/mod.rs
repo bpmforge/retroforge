@@ -34,6 +34,7 @@
 
 pub mod addressing;
 pub mod bus;
+mod cycles;
 pub mod ops;
 pub mod speed;
 
@@ -101,6 +102,15 @@ pub struct Cpu {
     /// `system.rs`'s scheduler needs to clear it on a masked IRQ for
     /// `WAI` but never for `STP`.
     pub wai: bool,
+    /// The instruction [`Self::step`] just ran spent this many CPU
+    /// cycles touching no address at all (ticket W14-39; see
+    /// [`cycles::internal_cycles`]'s doc for the model and its
+    /// citations). Recomputed at the top of every `step` call from state
+    /// already present beforehand — not part of the architectural
+    /// register file, so it is not saved or restored (`Self::save`/
+    /// `Self::load`'s doc doesn't need to say so, but this does: a
+    /// restored CPU simply has no "just-ran" instruction yet).
+    pub internal_cycles: u8,
 }
 
 impl Default for Cpu {
@@ -131,6 +141,7 @@ impl Cpu {
             e: true,
             stopped: false,
             wai: false,
+            internal_cycles: 0,
         };
         cpu.apply_emulation_constraints();
         cpu
@@ -393,6 +404,11 @@ impl Cpu {
             self.sp = 0x0100 | (self.sp & 0x00FF);
         }
         let opcode = self.fetch8(bus);
+        // Computed from state as of right now (PC past the opcode byte,
+        // D/X/Y/E/flags not yet touched by this instruction) via
+        // side-effect-free peeks — see `cycles::internal_cycles`'s doc
+        // for why this has to run before, not after, `ops::execute`.
+        self.internal_cycles = cycles::internal_cycles(self, bus, opcode);
         let result = ops::execute(self, bus, opcode);
         // ...and again on the way out, because the flat-stack ops above
         // are allowed to leave SP outside page 1 mid-instruction but must

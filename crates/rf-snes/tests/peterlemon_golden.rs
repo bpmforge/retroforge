@@ -132,9 +132,15 @@ const GOLDENS: &[(&str, &str)] = &[
         "8x8BGMap4BPP32x328PAL.sfc",
         "b2c05e68aec5b6e9c0073dfbcf7e4648b3b4fed581010696c4817d2fc0afe2d0",
     ),
+    // Re-pinned 2026-09-20 (ticket W14-39): charging real internal
+    // cycles shifted the settle loop's exact instruction/cycle count, so
+    // this ROM's fixed 200,000-step settle now lands a few master cycles
+    // later than before. Dumped with `RF_GOLDEN_DUMP` and looked at: the
+    // castle is intact and identical in content to the previous pin —
+    // same picture, different capture instant.
     (
         "8x8BGMap8BPP32x32.sfc",
-        "5ddbffe7f97be5ab1320c166dcf7a8f10b69bba2176f9cad08d6beedf25a93f1",
+        "38e22548e5f2f03565c43c0138977a85c4cd3924faf587006cf3016d35f63c9c",
     ),
     (
         "8x8BGMap8BPP32x64.sfc",
@@ -200,9 +206,15 @@ const GOLDENS: &[(&str, &str)] = &[
     // WaveHDMA drives $210D (BG1HOFS) per line: a water surface with the
     // scroll displacement making it ripple. This is the ROM that shows
     // per-line scroll working end to end.
+    // Re-pinned 2026-09-20 (ticket W14-39): same reason as
+    // 8x8BGMap8BPP32x32.sfc above — the settle loop now lands a few
+    // master cycles later, which for a per-line HDMA scroll effect
+    // changes the exact ripple phase captured. Dumped and looked at: the
+    // water ripple pattern is present and correct, same as before —
+    // a different animation frame, not a broken one.
     (
         "WaveHDMA.sfc",
-        "951627b0367b40dbc428991261b732e6e0dadfcecbcbbd1b5c64e2591858daff",
+        "ee2dbeab401e937acc05cd1262cb17ec753e1ed5c0b2060c98704e56ee1f92c8",
     ),
     // Mode7HDMA switches BG mode mid-frame: sky and a sun and a row of
     // trees above, a mode-7 ground plane receding below. It needs both
