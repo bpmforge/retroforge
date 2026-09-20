@@ -2660,3 +2660,151 @@ a crash bottoms out in "the game's own data was garbage," the very next
 question is always "read from where, by what index, and was every register
 on that path checked against fullsnes" — not assumed clean because nothing
 upstream looked like a register at first glance.
+
+### 2026-09-20 continuation — the credit is correct; the real regression was
+an unrelated, independent `WAI` defect it exposed (Full Throttle - All-
+American Racing (USA) (Beta))
+
+The W14-28 fix above moved Flintstones, Jungle Strike and Samurai Shodown
+(x2) to rendering. It also moved **Full Throttle - All-American Racing
+(USA) (Beta)** OFF rendering: on main (pre-fix) it varies at frame 179;
+on this branch (fix applied) it parked forever (`varied_at=None`).
+
+**The divergence, measured, not assumed.** The only `$4204-$4206` write
+site the ROM contains (`PROBE_FINDROM` over the whole image found exactly
+one) is at `$96:834B` (`STX $4204` — X is 16-bit here, dividend `$003F`
+= 63) / `$96:8350` (`STA $4206`, divisor `$03` — starts the divide). The
+only two `$4214-$4217` reads before the freeze are at `$96:835C`
+(`LDX $4214`, 16-bit) and `$96:8370` (`CMP $4216`). `PROBE_ACCESSWIN=
+968350:96835c` measured the window between the trigger and the first
+read: **13 accesses, 78 master cycles = 13 base steps** (pre-credit) — 3
+short of `DIV_STEPS=16`. The intervening code is `REP #$20; NOP×7;
+LDA #$01; LDX $4214` — seven single-access `NOP`s, each carrying exactly
+the internal cycle this ticket's credit restores, for **+7 steps = 20 ≥
+16**. Real elapsed CPU cycles from the `$4206` write to the `LDX $4214`
+read's own data cycle: `NOP×7` (14) + `LDA #$01` (2) + `LDX abs`'s
+opcode+2 operand fetches (3) = **19-20 cycles**, comfortably past
+fullsnes's "wait 16 clk cycles" ("SNES Maths Multiply/Divide") — hardware
+finishes this divide well before the read.
+
+**Branch (with the credit) reads `$4214=0x0015 $4215=0x0000` (quotient 21,
+`busy=false`) — the correct, final `63 / 3 = 21 r0`.** Main (without the
+credit, reproduced by temporarily reverting just the `math_spent` line and
+rebuilding) reads `$4214=0x0002 $4215=0xE0` (`busy=true`) — a genuine
+intermediate shift-register value, per fullsnes's documented pattern,
+caught two-plus steps early. **The branch is hardware-correct here; main is
+wrong.** Neither of this ticket's remedy branches applies: the credit is
+not over-crediting (verified by the cycle count above), and
+`MathUnit::step`'s intermediate-value model is never exercised by this
+title's read (it lands after completion either way — main's staleness is
+purely an undercount of the credit, not a wrong intermediate pattern).
+Restoring the credit and re-running `PROBE_MODE=frames PROBE_FRAMES=2400`
+confirms both Full Throttle images render: Beta and retail both vary at
+frame 181 (main's 179, offset by the two extra correctly-credited steps —
+immaterial to the census's rendered/blank bucket).
+
+**The freeze itself was a second, independent defect: `WAI` never woke on
+a masked IRQ.** At the parked state (`PROBE_INSTR=4000000`), the CPU sits
+at `$81:CB95` (the byte after a `WAI` at `$81:CB94`), `cpu.stopped=true`,
+`irq: htime=0 vtime=240 fired=true mode=Both`, `nmitimen=0xB1` (NMI and
+H/V-both both enabled), `nmi_entries=0 irq_entries=0` in the trailing
+20,000-instruction sample — the H/V IRQ had already latched a match, but
+because `I` was set, `SnesSystem::step`'s IRQ-dispatch branch (gated on
+`!flag(I)`) never ran, and nothing else in this crate ever cleared
+`cpu.stopped`. Per the WDC W65C816S datasheet, `WAI` resumes on NMI, on
+ABORT, or on an IRQ line assertion **regardless of `I`** — `I` decides only
+whether the interrupt is *dispatched* (vector fetch, handler entry); a
+masked IRQ still wakes `WAI`, which then simply "resumes with the next
+instruction." `main` at the same instruction count (checked with main's own
+prebuilt `title_probe`, no rebuild) reaches the **identical** parked state
+(`$81:CB95`, `cpu.stopped=true`, `nmi_entries=0`, `irq_entries=0`) — this
+WAI-wake gap is not new; the credit fix just makes this title's boot reach
+it on a timeline the census's window can no longer route around by
+accident.
+
+**The fix:** a new `Cpu::wai: bool`, set alongside `stopped` by `WAI`
+(`0xCB`) and left clear by `STP` (`0xDB`) — the two shared one bit before
+this and `system.rs`'s masked-IRQ branch needs to tell them apart, since
+`STP` must never wake on an interrupt (WDC: only a hardware reset wakes
+it). `SnesSystem::step` gained an `else if` after the existing NMI and
+unmasked-IRQ dispatch arms: when `(irq.fired || sa1_irq_to_snes) &&
+flag(I) && cpu.wai`, clear `stopped`/`wai` without touching `PC`, `P`, or
+the stack — no dispatch, exactly per the datasheet. `dispatch_interrupt`
+also now clears `wai` (a real dispatch ends any halt regardless of which
+opcode caused it). Two new tests in `crates/rf-snes/src/tests/system.rs`:
+`wai_wakes_on_a_masked_irq_without_dispatching` (asserts `stopped`/`wai`
+clear, `PC` unchanged, `I` untouched) and `stp_does_not_wake_on_a_masked_irq`
+(asserts `STP` stays halted under the identical stimulus).
+
+**Open finding, not fixed here — census-bucket regression on Jungle
+Strike (USA), scoped to the census's fixed 600-frame budget.** With both
+fixes applied, `boot_census_child` for Jungle Strike moved from exit 0
+(rendered) to exit 10 (blank) — the only title in this ticket's checklist
+that did.
+
+*What is confirmed, not inferred:*
+
+- **The WAI-wake logic itself, not the math credit, causes the move.**
+  With the credit kept and only the new masked-IRQ `else if` branch
+  disabled (`&& false`, a temporary one-line isolation, reverted), the
+  census child renders again (exit 0). The math credit alone is not the
+  cause.
+- **The H/V matches the WAI-wake branch fires on are genuine**, not a
+  spurious latch: `dot` lands within a few cycles of `htime`, `line`
+  equals `vtime` exactly, and the write sites that set each new target
+  (`$A0:D3D6-D3D9` etc., under `REP #$30`, 16-bit `LDA #$0100; STA
+  $4207`) are a real per-scanline HUD raster-split sequence (targets
+  `128/220`, `256/220`, `128/4`, `256/4`, `256/6` cycling every real
+  frame) — confirmed with `PROBE_IRQLATCH` (temporary, reverted).
+- **An earlier draft of this note claimed the pre-fix build's `exit=0`
+  came from freezing on an already-colorful frame. That claim is FALSE
+  and is retracted here** — this is exactly the kind of unverified
+  inference this file's own history (three corrections above, same
+  ticket) warns against shipping. Measured directly with
+  `PROBE_MODE=frames PROBE_FRAMES=250 PROBE_FRAME_INDICES=1` on a
+  freshly rebuilt pre-fix (credit-only, no WAI-wake) binary: frame 205 is
+  genuinely non-uniform (`distinct_this_frame=16`, `forced_blank=false`,
+  `bright` sample `[227,238,230,225,233,239]`) — real, populated content,
+  not a frozen leftover. The build with the WAI-wake fix is still
+  `forced_blank=true`, `distinct_this_frame=1` at the identical frame
+  205. So the WAI-wake fix does not merely "stop an accidental freeze
+  that happened to look colorful" — it changes what actually renders by
+  frame 205, and the fixed build is *behind* the buggy one at that point
+  (it catches up later: `PROBE_FRAMES=2400` shows the fixed build's
+  first genuinely non-uniform frame at 991).
+
+*What is not yet characterized*: why the masked-IRQ wake — which is
+correct per the WDC datasheet and fires on real, on-target raster
+matches — changes what the pre-fix build was doing by frame 205 enough
+to delay real content by ~800 frames. The credit-only build reaching
+colorful content at 205 does not, by itself, prove that content is
+*correct* (it could be a different, also-wrong path the old undercount
+happened to take), and confirming or refuting that needs more trace
+budget than this session has left. **Needs Brad's ruling**: file a
+follow-up ticket to finish this trace, raise `boot_census.rs`'s `FRAMES`
+constant, special-case this title, or accept the bucket move as a known,
+unresolved side effect of the WAI correctness fix.
+
+**Gate:** `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — **363 passed** (361 + the two
+new WAI tests), 0 failed; `cargo test --workspace` — every crate green, 0
+failed. Ignored SNES suites: `singlestep_65816_vectors` — **5,080,000
+passed, 0 failed**; `spc700_vectors`'s `singlestep_spc700_vectors` —
+**256,000 passed, 0 failed**; `gilyon_cputest` —
+`test_num=0x0649/0x0649, ROM says "Success"`, unchanged; `blargg_spc`'s
+`spc_timer_reports_pass` — `"PASSED TESTS"`.
+
+**Census children, this session's full checklist:** exit 0 (rendered) —
+Full Throttle - All-American Racing (USA) (Beta), Full Throttle -
+All-American Racing (USA) [retail], The Flintstones (USA, En/Fr/De/Es/It),
+Samurai Shodown (USA), Samurai Shodown (USA) (Beta), Super Mario World
+(USA), Wild Guns (USA), NHL 95 (USA), Super Mario RPG - Legend of the Seven
+Stars (USA), Final Fantasy - Mystic Quest (USA), Kirby Super Star (USA),
+F-Zero (USA). Exit 10 (blank, within the 600-frame budget only) — Jungle
+Strike (USA), open finding above.
+
+**Determinism:** both changes are pure function of already-deterministic
+state (`I`, `irq.fired`, the opcode that set `stopped`); no RNG, wall-clock
+or thread dependency introduced. `Cpu::wai` is now part of save state
+(`Cpu::save`/`Cpu::load` both append it) — a save taken mid-`WAI` restores
+which kind of halt it was, so a load does not risk waking a restored `STP`.

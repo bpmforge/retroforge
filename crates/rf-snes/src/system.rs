@@ -384,6 +384,28 @@ impl SnesSystem {
                 Some(vector) => self.cpu.interrupt_to_vector(&mut self.bus, vector),
                 None => self.cpu.interrupt(&mut self.bus, false),
             }
+        } else if (self.bus.irq.fired || sa1_irq_to_snes)
+            && self.cpu.flag(crate::cpu::flags::I)
+            && self.cpu.wai
+        {
+            // W14-28: an IRQ that is masked by `I` is never dispatched
+            // (the branch above), but per the WDC W65C816S datasheet
+            // `WAI` does not wait for a *dispatched* interrupt -- it
+            // waits for the interrupt LINE, and resumes "with the next
+            // instruction" (not the handler) when that line asserts
+            // while `I` is set. Without this, a title that legitimately
+            // executes `WAI` with `I` set (common for the H/V-IRQ-only
+            // wait idiom, since NMI needs no unmasking) parks forever the
+            // first time only the masked IRQ -- never NMI -- fires:
+            // `self.cpu.stopped` is the CPU's only "am I running" bit,
+            // and nothing upstream of this `else if` ever clears it for
+            // that case. Traced in Full Throttle - All-American Racing
+            // (USA) (Beta): `$81:CB94` `WAI` with `NMITIMEN`'s H/V mode
+            // enabled and `I` set, parked at frame 108 (docs/TESTING.md,
+            // W14-28). `STP` (`cpu.wai == false`) is deliberately excluded
+            // -- it wakes only on reset, never on an interrupt line.
+            self.cpu.stopped = false;
+            self.cpu.wai = false;
         }
 
         // Ticket W17-02 acceptance #2: interleave the SA-1 on the master

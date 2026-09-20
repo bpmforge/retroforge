@@ -316,6 +316,7 @@ fn cpu_from(state: &State) -> Cpu {
         p: state.p,
         e: state.e != 0,
         stopped: false,
+        wai: false,
     }
 }
 

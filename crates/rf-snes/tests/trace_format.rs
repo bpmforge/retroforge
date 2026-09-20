@@ -153,6 +153,7 @@ fn the_trace_line_format_is_pinned() {
         p: flags::M | flags::X,
         e: false,
         stopped: false,
+        wai: false,
     };
     assert_eq!(
         format_trace_line(&cpu, &m),
