@@ -231,6 +231,29 @@ fn coprocessor_name(chipset: u8) -> &'static str {
     }
 }
 
+/// Cartridges whose header names the generic "DSP" chipset (coprocessor
+/// nibble $0, hw $3-$5) but whose actual chip is a DSP variant other than
+/// DSP-1, keyed by the header checksum rather than by title text (law 5:
+/// no copyrighted title strings in engine code; a checksum is an opaque
+/// 16-bit fingerprint, not the title itself, and is exactly how
+/// bsnes/higan's and snes9x's own per-board databases resolve the same
+/// ambiguity — fullsnes and snes.nesdev.org both note the header's
+/// chipset byte cannot distinguish DSP-1/2/3/4).
+///
+/// `0x5327` is Top Gear 3000 (USA)'s header checksum: DSP-4 (fullsnes
+/// "SNES Add-on Chips" / snes.nesdev.org "DSP-4" — the only commercially
+/// released DSP-4 title). This build implements only DSP-1 (ticket
+/// W14-19); returning its real chip here routes it to
+/// [`CartError::UnsupportedChip`] instead of the DSP-1 HLE, which used to
+/// accept it and then hang forever on a status byte no DSP-1 command
+/// produces (ticket W14-43).
+fn known_non_dsp1_checksum(checksum: u16) -> Option<&'static str> {
+    match checksum {
+        0x5327 => Some("DSP-4"),
+        _ => None,
+    }
+}
+
 /// Name a map-mode nibble (map-mode byte low 4 bits).
 fn map_mode_name(nibble: u8) -> &'static str {
     match nibble {
@@ -482,6 +505,16 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
     let rom_size = kb_pow2(data[base + 0x17])?;
     let ram_size = kb_pow2(data[base + 0x18])?;
 
+    // Needed before the coprocessor decision below (W14-43): the header's
+    // "DSP" chipset byte ($03/$04/$05, coprocessor nibble $0) is the same
+    // for DSP-1, DSP-2, DSP-3 and DSP-4 — fullsnes and snes.nesdev.org
+    // both note the byte alone cannot tell the variants apart, which is
+    // why every emulator that supports more than one of them (bsnes/higan,
+    // snes9x) disambiguates from a per-title board database keyed by the
+    // header checksum, not the chipset byte.
+    let checksum = u16::from_le_bytes([data[base + 0x1E], data[base + 0x1F]]);
+    let checksum_complement = u16::from_le_bytes([data[base + 0x1C], data[base + 0x1D]]);
+
     let chipset = data[base + 0x16];
     let hw = chipset & 0x0F;
     let coprocessor_nibble = (chipset & 0xF0) >> 4;
@@ -491,6 +524,20 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
     // Coprocessor::Dsp1 instead. hw=6..=15 is not an assigned combination
     // for any chipset and still refuses exactly as before, same as every
     // other coprocessor nibble at hw>=3.
+    //
+    // W14-43: EXCEPT when the checksum matches a known non-DSP-1 board —
+    // see `known_non_dsp1_checksum`'s doc. Before this, a $03 "DSP"
+    // chipset ROM whose real chip is DSP-4 (Top Gear 3000: checksum
+    // $5327) was silently accepted as `Coprocessor::Dsp1` and routed
+    // through the DSP-1 HLE (`crate::dsp1`, ticket W14-19), which answers
+    // every idle/unmatched read with $80 (fullsnes DSP-1: "idle reads
+    // return $80") — a value the game's `LDA $308000` polling loop, which
+    // is waiting on a DSP-4 status byte no DSP-1 command ever produces,
+    // never sees change, so the title hung forever instead of failing
+    // honestly. `docs/TESTING.md`'s W14-34 re-triage named this as a
+    // "ROM-mirror mismatch"; tracing it with `title_probe`'s `PROBE_PEEK`
+    // showed the polled byte was the DSP-1 HLE's own $80 sentinel, not a
+    // ROM-mirroring bug at all.
     let (coprocessor, battery) = if map_mode == SnesMapMode::Sa1 {
         // D-013 / ticket W17-01: map mode $23 must ALSO carry the SA-1
         // chipset byte to be accepted — a header naming this map mode
@@ -514,8 +561,21 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
                 ),
             });
         }
-    } else if (0x3..=0x5).contains(&hw) && coprocessor_nibble == 0x0 {
+    } else if (0x3..=0x5).contains(&hw)
+        && coprocessor_nibble == 0x0
+        && known_non_dsp1_checksum(checksum).is_none()
+    {
         (Coprocessor::Dsp1, hw == 0x5)
+    } else if (0x3..=0x5).contains(&hw) && coprocessor_nibble == 0x0 {
+        // Matched a known non-DSP-1 checksum above: refuse honestly,
+        // naming the real chip, instead of misrouting through the DSP-1
+        // HLE (see the doc note above this `if`/`else` chain).
+        return Err(CartError::UnsupportedChip {
+            name: format!(
+                "{} (SNES chipset ${chipset:02X}, not DSP-1)",
+                known_non_dsp1_checksum(checksum).unwrap_or("unknown DSP variant")
+            ),
+        });
     } else if hw >= 0x3 {
         return Err(CartError::UnsupportedChip {
             name: format!(
@@ -530,9 +590,6 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         Coprocessor::Dsp1 => Some(dsp_window_for(map_mode, rom_size)),
         Coprocessor::None | Coprocessor::Sa1(_) => None,
     };
-
-    let checksum = u16::from_le_bytes([data[base + 0x1E], data[base + 0x1F]]);
-    let checksum_complement = u16::from_le_bytes([data[base + 0x1C], data[base + 0x1D]]);
 
     Ok(SnesHeader {
         map_mode,
@@ -762,6 +819,28 @@ mod tests {
         let err = parse_snes_header(&rom).unwrap_err();
         match &err {
             CartError::UnsupportedChip { name } => assert!(name.contains("OBC1"), "got: {name}"),
+            other => panic!("expected UnsupportedChip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    /// W14-43: a $03 "DSP" chipset ROM whose header checksum matches Top
+    /// Gear 3000's ($5327, DSP-4) must be refused by name, not accepted
+    /// as `Coprocessor::Dsp1` — the checksum, not the chipset byte, is
+    /// what disambiguates DSP-1 from DSP-4 (see `known_non_dsp1_checksum`'s
+    /// doc). Everything else about the image is the same shape
+    /// `dsp1_lorom_cart_parses_with_bus_window` below accepts, so this
+    /// isolates the checksum as the only thing that must change the
+    /// outcome.
+    fn known_dsp4_checksum_is_refused_honestly_not_run_as_dsp1() {
+        let mut rom = lorom_image(0x20, 0x03);
+        set_checksum(&mut rom, LOROM_HEADER_OFFSET, 0x5327);
+        let err = parse_snes_header(&rom).expect_err("DSP-4 must be refused, not run as DSP-1");
+        match err {
+            CartError::UnsupportedChip { name } => assert!(
+                name.contains("DSP-4"),
+                "refusal must name the real chip, got: {name}"
+            ),
             other => panic!("expected UnsupportedChip, got {other:?}"),
         }
     }

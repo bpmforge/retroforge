@@ -2,7 +2,7 @@
 //! the WRAM port (ticket W6-02a).
 
 use crate::bus::SnesBus;
-use crate::cpu::CpuBus;
+use crate::cpu::{flags, Cpu, CpuBus};
 use crate::regs::{IrqMode, IrqTimer, MathUnit, NmiTimen, WramPort, DIV_STEPS, MUL_STEPS};
 use crate::timing::MASTER_PER_DOT;
 use rf_cart::SnesMapMode;
@@ -372,4 +372,82 @@ fn wrio_falling_edge_latches_the_counters() {
     b.write(0x00_4201, 0x00);
     assert_eq!(b.read(0x00_213F) & 0x40, 0x40, "the falling edge latches");
     assert_eq!(b.read(0x00_213D), 77);
+}
+
+/// W14-43: `$4200` NMITIMEN is write-only (fullsnes "4200h-437Fh - PPU2
+/// and CPU Register Overview" leaves its R/W column blank). Reading it
+/// must return open bus, not the byte the game last wrote there — the
+/// two coincide only by accident, and Shien's Revenge's boot loop
+/// (`LDA $4200; BIT #$01; BNE`) depends on them NOT coinciding to ever
+/// terminate. `LDA $4200` absolute fetches its two operand bytes
+/// (`Cpu::fetch16`, low then high) before the data read itself, so the
+/// last thing driven on the bus is the operand's high byte, `$42`
+/// (snes.nesdev.org "Open bus behavior": an open-bus read returns the
+/// last byte transferred on the bus, here the instruction's own operand
+/// fetch).
+/// W14-43, the ticket's own contract: pin the exact shape that hung
+/// Shien's Revenge — an `LDA $4200` absolute read — not just the bus's
+/// open-bus plumbing in isolation. `AD 00 42` is placed in WRAM (bank
+/// `$00`, which mirrors the low 8 KiB there) so the CPU actually fetches
+/// and executes it: `Cpu::fetch16` (`crates/rf-snes/src/cpu/mod.rs`)
+/// reads the operand's low byte (`$00`) then its high byte (`$42`), and
+/// that high-byte fetch is the last bus transfer before the register
+/// read itself, so on real hardware (fullsnes "Open Bus" /
+/// snes.nesdev.org "Open bus behavior") the value that lands in `A` is
+/// the operand's own high byte.
+#[test]
+fn lda_4200_absolute_reads_back_the_operand_high_byte_not_nmitimen() {
+    let mut b = bus();
+    // A value whose low bit is set — matching the shape that hung: if
+    // the read echoed this back, `BIT #$01` would find the bit set
+    // forever and `BNE` would never fall through.
+    b.write(0x00_4200, 0x81);
+    // `LDA $4200` absolute, at bank $00 offset $0000 (WRAM).
+    b.write(0x00_0000, 0xAD);
+    b.write(0x00_0001, 0x00);
+    b.write(0x00_0002, 0x42);
+
+    let mut cpu = Cpu {
+        a: 0,
+        x: 0,
+        y: 0,
+        sp: 0x01FF,
+        d: 0,
+        dbr: 0,
+        pbr: 0,
+        pc: 0,
+        p: flags::M, // 8-bit accumulator, matching the game's `SEP #$20`
+        e: false,
+        stopped: false,
+        wai: false,
+        internal_cycles: 0,
+    };
+    cpu.step(&mut b).expect("LDA absolute must be implemented");
+    assert_eq!(
+        cpu.a & 0xFF,
+        0x42,
+        "A must hold the operand's own high byte (open bus), not NMITIMEN's written 0x81"
+    );
+}
+
+#[test]
+fn reading_nmitimen_returns_open_bus_not_the_written_value() {
+    let mut b = bus();
+    // Write a value to NMITIMEN whose low bit is set, matching the shape
+    // that hung: if the read echoed this back, `BIT #$01` would find the
+    // bit set forever.
+    b.write(0x00_4200, 0x81);
+    // Drive the bus to $42 directly — standing in for the operand-high-
+    // byte fetch an `LDA $4200` absolute read performs immediately
+    // before the register read itself (`Cpu::fetch16` reads low then
+    // high; the high byte, $42, is the last thing on the bus).
+    b.write(0x00_00FF, 0x42);
+    assert_eq!(
+        b.read(0x00_4200),
+        0x42,
+        "must echo the last byte driven on the bus, not the written NMITIMEN value 0x81"
+    );
+    // peek must agree with read for an open-bus register: it is
+    // side-effect-free but must not diverge in VALUE.
+    assert_eq!(b.peek(0x00_4200), 0x42);
 }

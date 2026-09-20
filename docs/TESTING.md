@@ -852,7 +852,12 @@ pass.** The three DSP-2/3/4 titles named in D-010 (Dungeon Master, SD Gundam GX
 Rasetsu no Sho, Top Gear 3000) now load through the DSP-1 HLE as
 known-wrong, per the identification rule rf-cart applies (coprocessor
 nibble alone cannot tell the DSP families apart) — none of the three is
-expected to render correctly, and none is claimed to.
+expected to render correctly, and none is claimed to. **W14-43 update
+(2026-09-20): Top Gear 3000 no longer loads through the DSP-1 HLE at
+all.** Its header checksum ($5327) is now recognized as DSP-4 and
+refused honestly at cart-load time (see that ticket's section below);
+Dungeon Master and SD Gundam GX Rasetsu no Sho are unaffected and still
+load through the DSP-1 HLE as documented here.
 
 **W14-21 (DSP-1 HLE slice 2)**, 2026-09-17/18, release build: implements
 Manual §5.4-5.6 (projection parameter setting, raster, object
@@ -900,8 +905,12 @@ exactly **12** archives in `~/Games/Roms/snes` whose header reports the
 DSP coprocessor nibble (both `Ballz 3D` dumps, `Dungeon Master`,
 `Lock On`, both `Michael Andretti's Indy Car Challenge` dumps,
 `Pilotwings`, `Super Bases Loaded 2`, both `Super Mario Kart` dumps,
-`Suzuka 8 Hours`, `Top Gear 3000`), all twelve of which load and render
-(none refused). `Metal Combat - Falcon's Revenge` — a title sometimes
+`Suzuka 8 Hours`, `Top Gear 3000`), all twelve of which loaded and
+rendered at the time of this ticket (none refused). **W14-43 update
+(2026-09-20): this is no longer true of Top Gear 3000** — its checksum
+is now recognized as DSP-4 and it is refused at cart-load time instead
+of loading through the DSP-1 HLE; the other eleven are unaffected.
+`Metal Combat - Falcon's Revenge` — a title sometimes
 mentally grouped with the DSP-1 racing/flight titles for its similar
 sprite-scaling pseudo-3D effect — is **not** DSP-family at all:
 `rf_cart::Cartridge::load` on its raw ROM bytes returns
@@ -5225,3 +5234,193 @@ afford), not the cycle-by-cycle interleaving W6-02a defers.
 Tennis Tour** and **Rendering Ranger R2** (both had been in the
 forced-blank/NMI-off tail of the W14-34 table — the same handoff-edge
 clobber, never separately traced).
+
+## W14-43 — register-read family: Shien's Revenge x2 open-bus $4200,
+Top Gear 3000's DSP-4 misidentified as DSP-1 (2026-09-20)
+
+The W14-34 re-triage's register-read family named two shapes; both
+traced back to something this build got wrong rather than a mapping
+mirror gap the "Top Gear 3000" one-liner guessed at.
+
+### Shien's Revenge (USA) and (Beta): `$4200` NMITIMEN read as open bus
+
+`title_probe` (`PROBE_RING=1 PROBE_RINGP=1 PROBE_DIS=80:f2f0:f320`) shows
+both dumps stuck in an identical 3-instruction loop:
+
+```
+$80:8307 SEP #$20        ; M=1 (8-bit A) from here on
+$80:F309 LDA $4200       ; ad 00 42
+$80:F30C BIT #$01        ; 89 01
+$80:F30E BNE $F309       ; d0 f9
+```
+
+`NmiTimen(1)` is the only value this ROM ever writes to `$4200` (bit 0
+set), and `crates/rf-snes/src/bus.rs`'s `read_register_pure` had
+`0x4200 => self.nmitimen.0` — the read echoed the register's own stored
+bits back. `BIT #$01` against a value whose bit 0 is permanently 1 never
+clears the CPU's Z flag, so `BNE $F309` never falls through: a genuine
+infinite loop, not a probe budget issue.
+
+**Hardware's value, per the sources the ticket named:** fullsnes
+"4200h-437Fh - PPU2 and CPU Register Overview" leaves NMITIMEN's R/W
+column blank — it is write-only. snes.nesdev.org "Open bus behavior"
+documents an open-bus read as returning the last byte the address/data
+bus actually carried. `LDA $4200` is absolute addressing; `Cpu::fetch16`
+(`crates/rf-snes/src/cpu/mod.rs`) fetches the low operand byte then the
+high operand byte, so the last bus transfer before the register read
+itself is the high byte of the operand, `$42` — and `SnesBus::read`
+already updates `self.open_bus` on every single bus transfer
+(`crates/rf-snes/src/bus.rs`, both `read` and `write`), so this bus
+already implements a real MDR (memory data register) model, not a
+constant. The `0x4200` arm in `read_register_pure` was the one place
+that bypassed it.
+
+**The fix:** removed the `0x4200 => self.nmitimen.0` arm entirely. With
+no arm, the read falls through to `read_register`'s `_` catch-all,
+`self.read_register_pure(offset).unwrap_or(self.open_bus)`, which now
+returns whatever was last driven on the bus — `$42` for this exact
+instruction shape, matching hardware. `nmitimen`'s stored value is still
+used correctly everywhere else (`SnesSystem::step`'s IRQ-mode/auto-
+joypad checks, save state) — only the CPU-visible *read* of the register
+changed. New unit test,
+`reading_nmitimen_returns_open_bus_not_the_written_value`
+(`crates/rf-snes/src/tests/regs.rs`): writes `$81` to NMITIMEN, drives
+the bus to `$42` via an ordinary WRAM write, and asserts both `read` and
+`peek` of `$4200` return `$42`, not `$81`.
+
+**Verified fixed:** `PROBE_MODE=frames PROBE_FRAMES=1800` on both dumps
+together now reports `varied_at=Some(156) total_instr_at_varied=Some(2852459)`
+for each — both boot straight through the poll that used to hang
+forever.
+
+**Regression check on other open-bus paths:** grepped every
+`self.open_bus` site in `bus.rs` — $213C/$213D (OPHCT/OPVCT), $213F
+(STAT78), $2137 (SLHV), the DSP-1/SA-1 register fallbacks, and the
+generic `Target::Open`/unmapped-cart-space arm — none of those read
+`self`'s own written state back the way `$4200` did; they were already
+either open-bus or side-effecting reads with their own documented
+semantics, untouched by this change. `$4016`/`$4017` (manual joypad
+shift) and `$2180` (WMDATA auto-increment) are unrelated read paths with
+side effects, also untouched.
+
+### Top Gear 3000 (USA): header names generic "DSP", real chip is DSP-4
+
+The W14-34 table's one-line guess ("bank `$30` offset `$8000`... a
+mapping/mirroring gap") does not survive a trace. `title_probe`
+(`PROBE_RING=1 PROBE_DIS=80:8060:80a0 PROBE_PEEK=00308000`) shows:
+
+```
+$80:807F PHB
+$80:8080 PEA #$3030       ; f4 30 30
+$80:8083 PLB              ; DBR = $30
+$80:8084 PLB              ; DBR = $30 (again; harmless, same byte both halves)
+$80:8085 LDA #$FFFF       ; REP #$20 above, 16-bit A
+$80:8088 CMP $308000      ; cf 00 80 30 — DBR:offset = $30:8000
+$80:808C BNE $8088
+```
+
+and `PROBE_PEEK` shows `00308000=80` — but this is **not** a raw ROM
+byte (the ROM's byte at the equivalent LoROM-mirrored offset is `$4A`,
+confirmed by reading the unzipped file directly). `$80` is exactly
+`crate::dsp1::Dsp1::read_dr`'s idle-output sentinel
+(`crates/rf-snes/src/dsp1.rs`: "fullsnes: idle/past-end-of-output reads
+return `0x80`") and `read_sr`'s permanent "ready" value. The cartridge
+**is** being routed through this build's DSP-1 HLE at that address —
+the header's chipset byte is `$03` (coprocessor nibble `$0` "DSP", hw
+`$3`), which `rf-cart/src/snes.rs`'s `parse_snes_header` accepted as
+`Coprocessor::Dsp1` and gave the LoROM `<=1 MiB` DSP-1 bus window
+(banks `$20-$3F`/`$A0-$BF`, DR `$8000-$BFFF`) — bank `$30` offset
+`$8000` sits inside it.
+
+fullsnes's "SNES Add-on Chips" and snes.nesdev.org's DSP-4 page both
+document that the SNES header's chipset byte **cannot distinguish which
+DSP variant** a `$03`/`$04`/`$05` "ROM+DSP" cartridge actually carries —
+DSP-1, DSP-2, DSP-3 and DSP-4 all share the same byte, which is why
+every emulator supporting more than one of them (bsnes/higan, snes9x)
+resolves the ambiguity from a per-board database keyed by the
+cartridge's own header checksum, never the chipset byte. Top Gear
+3000's header checksum is `$5327` (verified by reading the ROM's LoROM
+header directly: `checksum=5327 complement=ACD8`, `5327 ^ ACD8 ==
+FFFF`), and it is the one commercially released DSP-4 title. This
+build implements only DSP-1 (ticket W14-19); silently running a DSP-4
+title through the DSP-1 HLE means every command the game issues gets a
+DSP-1-shaped answer the game never asked for, and the boot poll waiting
+on a real DSP-4 status/output byte just sees the HLE's idle `$80`
+forever — the exact hang traced above.
+
+**The fix** (`crates/rf-cart/src/snes.rs`): added
+`known_non_dsp1_checksum`, a small checksum-keyed table (currently one
+entry, `$5327 -> "DSP-4"`) consulted before the existing `hw in 3..=5 &&
+coprocessor_nibble == 0` branch accepts a cartridge as `Coprocessor::
+Dsp1`. A checksum match now returns `CartError::UnsupportedChip` naming
+the real chip instead of the generic "DSP" the chipset byte alone would
+give — refusing honestly (the W14-34 census's "refused" bucket) rather
+than half-running through the wrong HLE and reporting as a silent hang.
+The table is keyed by the numeric header checksum, not by the
+cartridge's title string, per law 5 (no copyrighted titles hardcoded in
+engine code) — the same approach real emulator board databases use for
+this exact ambiguity. New unit test,
+`known_dsp4_checksum_is_refused_honestly_not_run_as_dsp1`
+(`crates/rf-cart/src/tests` — inline `mod tests` in `snes.rs`): a
+synthetic `$03`-chipset LoROM image with the checksum bytes overwritten
+to `$5327` must return `UnsupportedChip` naming "DSP-4", not
+`Coprocessor::Dsp1`.
+
+**Verified fixed:** `boot_census_child` on Top Gear 3000 now exits `12`
+(`EXIT_NO_ROM_IN_ARCHIVE`) rather than hanging past the census's frame
+budget — the harness's own `rom_bytes` helper picks the file inside a
+zip archive by asking `Cartridge::load(&buf).is_ok()`, so once the
+cartridge is refused there is no other file in a single-ROM archive for
+it to fall back to and `rom_bytes` returns `None` before the
+`CartError`'s chip name (or the exit code the direct `Cartridge::load`
+path would give, `EXIT_REFUSED`) ever reaches the child process; the
+parent's own bucket classification already treats `EXIT_REFUSED` and
+`EXIT_NO_ROM_IN_ARCHIVE` identically (`Bucket::Refused`), confirmed
+against `Star Fox (USA).zip` (a long-refused Super FX title) exiting
+the same way. Top Gear 3000 moves from the *uniform screen* bucket to
+*refused* in the census; the DSP-4 name is only visible to a caller
+that loads the cartridge bytes directly (`rf_cart::Cartridge::load`),
+which is what the new unit test below checks.
+
+**Regression check — the fix is checksum-scoped, not chipset-scoped:**
+every other title that shares Top Gear 3000's `$03`/coprocessor-nibble-
+`0` chipset byte must still load through the DSP-1 HLE exactly as
+before. `boot_census_child` on **Pilotwings (USA)**, **Super Mario Kart
+(USA)**, **Suzuka 8 Hours (USA)** and **Dungeon Master (USA)** (the
+known-wrong DSP-2 title from the W14-19 write-up above) all still exit
+`0` (rendered), unmoved.
+
+**Gate:** `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes -p rf-cart` — **rf-cart 53
+passed** (one new), **rf-snes lib 368 passed / 1 ignored** (two new — the
+open-bus unit test plus a second that actually executes `LDA $4200`
+through `Cpu::step` end to end, per the ticket's own contract — 0
+failed) plus the crate's other integration suites all green. Ignored
+suites: `gilyon_cputest::cputest_full_reports_success_and_every_test_
+passes` — `test_num=0x0649/0x0649, ROM says "Success"`; `blargg_spc::
+spc_timer_reports_pass` — `"PASSED TESTS"`; `spc700_vectors::
+singlestep_spc700_vectors` — 256000/256000 passed, 256/256 opcodes
+covered; `peterlemon_golden::peterlemon_bg_map_goldens_match` — all
+goldens match; `singlestep_65816_vectors` — **5,080,000 passed, 0
+failed**, 254/256 opcodes covered (the $44/$54 block-move exclusions are
+pre-existing and documented in the suite's own module doc, unrelated to
+this ticket).
+
+**Census children** (`boot_census_child`, per-title): **Shien's Revenge
+(USA)** and **Shien's Revenge (USA) (Beta)** now exit `0` (rendered) —
+the regression this ticket was filed for. **Top Gear 3000 (USA)** now
+exits `12`/refused (was hanging past budget in the uniform bucket). The
+canaries all still exit `0` unmoved: **Super Mario World (USA)**,
+**Wild Guns (USA)**, **NHL 95 (USA)**, **Super Mario RPG - Legend of
+the Seven Stars (USA)**, **Kirby Super Star (USA)**, **WWF Super
+WrestleMania (USA)**, **The Flintstones (USA) (En,Fr,De,Es,It)**, and
+**Full Throttle - All-American Racing (USA) (Beta)**. The full SNES census re-run (to move the bucket
+counts and name every other title the open-bus $4200 fix touches — any
+ROM that polls a write-only register expecting open bus, not just this
+one) is the orchestrator's, per this ticket's brief.
+
+**Determinism:** neither fix adds RNG, wall-clock or thread state.
+`$4200`'s read side now depends only on `self.open_bus`, which is
+already part of the bus's deterministic, saved state (updated
+synchronously on every bus transfer); the DSP-4 checksum check is a
+pure function of header bytes evaluated once at cartridge load.

@@ -361,7 +361,21 @@ impl SnesBus {
             0x4215 => (self.math.rddiv >> 8) as u8,
             0x4216 => self.math.rdmpy as u8,
             0x4217 => (self.math.rdmpy >> 8) as u8,
-            0x4200 => self.nmitimen.0,
+            // W14-43: $4200 NMITIMEN is write-only (fullsnes "4200h-437Fh
+            // - PPU2 and CPU Register Overview": NMITIMEN's R/W column is
+            // blank; snes.nesdev.org "Open bus behavior" gives the write-
+            // only registers' read value as open bus, the last byte driven
+            // on the data bus). There is no read-side arm for it here on
+            // purpose — falling through to `None` sends the read through
+            // `read_register`'s `_` arm, `.unwrap_or(self.open_bus)`,
+            // which is the MDR this bus already maintains on every read
+            // and write (`SnesBus::read`/`write`). Previously this arm
+            // echoed `self.nmitimen.0` back on read, which is not what
+            // hardware does and hung Shien's Revenge's `LDA $4200; BIT
+            // #$01; BNE` poll forever waiting for a bit the emulator's own
+            // write value could never clear. See
+            // `open_bus_reads_nmitimen_as_the_operand_high_byte` in
+            // `tests/registers.rs`.
             0x420D => u8::from(self.fast_rom),
             0x2180 => self.wram[(self.wram_port.address as usize) % WRAM_LEN],
             0x4212 => self.timing.read_hvbjoy(),
