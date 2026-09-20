@@ -583,6 +583,123 @@ fn a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo(
     );
 }
 
+/// **A CPU port READ that immediately follows the hand-over must not see
+/// the freshly-run program's own first instruction either** (ticket
+/// W14-41, Tommy Moe's Winter Extreme's residual — `docs/TESTING.md`'s
+/// "second, deeper reason" section).
+///
+/// W14-39's follow-up fixed the hand-over CALL itself (the test above):
+/// `catch_up_apu` now stops the instant `poll_boot` fires `BootAction::
+/// Run`, carrying its leftover budget to the next call instead of
+/// spending it on the freshly-woken SPC700 in the same call. But the
+/// 65816's own very next instruction, per Tommy Moe's exact driver shape
+/// (`$80:B8C5 CMP $2140`), is a bus **read** of that same port, and
+/// `SnesBus`'s `$2140` read arm calls `catch_up_apu` again before
+/// returning a value — with only that tiny carried remainder as debt.
+/// Before this ticket, any nonzero owed budget once `boot.is_running()`
+/// unconditionally committed the loop to running one whole SPC700
+/// instruction (instructions cannot run partially) — here, the uploaded
+/// driver's own entry point, `MOV $F4,#$F1` (Tommy Moe's exact opcode),
+/// clobbering the `Run` echo the CPU's read was there to observe.
+///
+/// This test reproduces the shape from `docs/TESTING.md` exactly: the
+/// uploaded SPC700 program is
+/// ```text
+/// $0200: MOV $F4,#$F1   ; 8F F1 F4
+/// $0203: MOV $F5,#$F1   ; 8F F1 F5
+/// $0206: MOV A,$F4      ; E4 F4
+/// $0208: CMP A,#$FF     ; 68 FF
+/// $020A: BNE $0200      ; D0 F4
+/// ```
+/// and, after the hand-over call leaves a small carried remainder (as
+/// W14-39's fix does), a SEPARATE `catch_up_apu()` call — standing in for
+/// the CPU's `CMP $2140` read, which on real hardware happens before any
+/// further real time has elapsed for the SPC700 — must still observe the
+/// `Run` echo, not `$F1`. Only once further real CPU time (more
+/// `apu_debt`) actually elapses does the SPC's first instruction get to
+/// run and the port then reads back the driver's own value.
+#[test]
+fn a_port_read_immediately_after_hand_over_does_not_see_the_next_instruction_early() {
+    let mut s = system();
+    let dest: u16 = 0x0200;
+    // The exact Tommy Moe's driver shape from docs/TESTING.md.
+    let program: [u8; 10] = [
+        0x8F, 0xF1, 0xF4, // MOV $F4, #$F1
+        0x8F, 0xF1, 0xF5, // MOV $F5, #$F1
+        0xE4, 0xF4, // MOV A, $F4
+        0x68,
+        0xFF, // CMP A, #$FF
+              // BNE $0200 would follow on real hardware; omitted here since
+              // this test only needs the FIRST instruction to stay unexecuted.
+    ];
+
+    let write = |s: &mut SnesSystem, index: usize, value: u8| {
+        s.bus.apu.cpu_write_port(index, value);
+        s.bus.apu.poll_boot();
+    };
+    write(&mut s, 1, 0x01);
+    write(&mut s, 2, dest as u8);
+    write(&mut s, 3, (dest >> 8) as u8);
+    write(&mut s, 0, 0xCC);
+    for (i, b) in program.iter().enumerate() {
+        write(&mut s, 1, *b);
+        write(&mut s, 0, i as u8);
+    }
+    write(&mut s, 1, 0x00);
+    write(&mut s, 2, dest as u8);
+    write(&mut s, 3, (dest >> 8) as u8);
+    let run_echo = program.len() as u8 + 1;
+    s.bus.apu.cpu_write_port(0, run_echo);
+
+    // A modest debt, sized so the hand-over itself happens but leaves a
+    // real, small carried remainder afterwards — the shape W14-39's
+    // follow-up already established happens routinely under its
+    // corrected per-instruction charge.
+    s.bus.apu_debt = 21 * 3;
+    s.bus.catch_up_apu();
+    assert!(s.bus.apu.boot.is_running(), "the hand-over must happen");
+    assert_eq!(
+        s.bus.apu.cpu_read_port(0),
+        run_echo,
+        "the hand-over call itself must not clobber its own echo"
+    );
+    assert_eq!(
+        s.bus.apu.cpu.pc, dest,
+        "the SPC700 must not have executed anything yet"
+    );
+
+    // The CPU's OWN NEXT INSTRUCTION is a READ of the same port — modelled
+    // as a second, separate `catch_up_apu()` call with NO additional debt
+    // added beyond whatever was carried over, exactly like `SnesBus`'s
+    // `$2140` read arm calling this before `SnesSystem::step` has added
+    // the current instruction's own cost to `apu_debt`.
+    s.bus.catch_up_apu();
+    assert_eq!(
+        s.bus.apu.cpu_read_port(0),
+        run_echo,
+        "a port READ one instruction after the hand-over must still see \
+         the Run echo ({run_echo:#04X}), not the driver's own first port \
+         write ({:#04X}) run early on a debt too small to have earned it",
+        s.bus.apu.cpu_read_port(0)
+    );
+    assert_eq!(
+        s.bus.apu.cpu.pc, dest,
+        "the driver's first instruction must not have run early either"
+    );
+
+    // Real time keeps passing on the CPU side even while it spins on
+    // `CMP $2140` (each failed poll is itself an instruction with its own
+    // real cost) — once enough of it has genuinely elapsed, the deferred
+    // instruction is honestly earned and runs.
+    s.bus.apu_debt += 21 * 10;
+    s.bus.catch_up_apu();
+    assert_ne!(
+        s.bus.apu.cpu.pc, dest,
+        "given enough real elapsed time the deferred instruction must \
+         eventually run — this is a reordering fix, not a permanent stall"
+    );
+}
+
 // ---------------------------------------------------------------------
 // S-DSP skeleton
 // ---------------------------------------------------------------------
