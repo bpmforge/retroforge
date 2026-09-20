@@ -36,6 +36,11 @@
 //!                                    above SP (what a RET would pop) whenever the
 //!                                    SPC700 is about to execute an instruction at
 //!                                    one of these 16-bit ARAM PCs (W14-27)
+//! PROBE_SPCPCCOUNT=hex[,hex]        count genuine transitions into each of these
+//!                                    16-bit ARAM PCs over the *entire* run (unlike
+//!                                    PROBE_SPCRING's ring, this is never evicted —
+//!                                    use it to ask "how many times total", not just
+//!                                    "what does recent history look like") (W14-27)
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -159,6 +164,13 @@ fn probe() {
         let mut ring_last = u32::MAX;
         let mut spcring: std::collections::VecDeque<u16> = std::collections::VecDeque::new();
         let mut spc_last = u16::MAX;
+        // W14-27: spcring is capped at 3000 entries and evicts the oldest
+        // on overflow, so its printed contents alone cannot answer "how
+        // many times total" for a run with more than 3000 distinct SPC
+        // PC transitions. This counter is never evicted.
+        let mut spc_pc_transitions: u64 = 0;
+        let mut spcpc_counts: std::collections::HashMap<u16, u64> =
+            std::collections::HashMap::new();
         let timerlog = std::env::var("PROBE_TIMERLOG").is_ok();
         let mut timer_last = [false, false, false];
         let packetlog = std::env::var("PROBE_PACKETLOG").is_ok();
@@ -246,6 +258,22 @@ fn probe() {
             let spcv = apu.cpu.pc;
             if spcv != spc_last {
                 spcring.push_back(spcv);
+                spc_pc_transitions += 1;
+                // W14-27: spcring's 3000-entry cap evicts old history, so
+                // it cannot answer "how many times total" for an SPC PC of
+                // interest over a run with more transitions than that.
+                // PROBE_SPCPCCOUNT counts genuine transitions (not samples
+                // of an already-parked PC) into each given 16-bit ARAM PC
+                // across the whole run.
+                if let Ok(list) = std::env::var("PROBE_SPCPCCOUNT") {
+                    for tok in list.split(',') {
+                        if let Ok(target) = u16::from_str_radix(tok, 16) {
+                            if spcv == target {
+                                *spcpc_counts.entry(target).or_insert(0u64) += 1;
+                            }
+                        }
+                    }
+                }
                 spc_last = spcv;
                 if spcring.len() > 3000 {
                     spcring.pop_front();
@@ -377,7 +405,23 @@ fn probe() {
                 "      PACKETLOG totals: x_register_changes={x_changes} ports_in0_changes={port0_changes}"
             );
         }
+        if !spcpc_counts.is_empty() {
+            let mut counts: Vec<_> = spcpc_counts.iter().collect();
+            counts.sort_by_key(|(pc, _)| **pc);
+            println!(
+                "      SPCPCCOUNT (whole run, not evicted): {}",
+                counts
+                    .iter()
+                    .map(|(pc, n)| format!("{pc:04X}x{n}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
         if std::env::var("PROBE_SPCRING").is_ok() {
+            println!(
+                "    spcring: total_distinct_pc_transitions={spc_pc_transitions} (ring holds last {})",
+                spcring.len()
+            );
             println!(
                 "    spcring: {}",
                 spcring

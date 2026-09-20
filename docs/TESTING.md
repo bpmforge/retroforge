@@ -1680,33 +1680,48 @@ is `$FA` (`Y=$F4`); bytes for `$FB` onward (`01 01 02 03 00 01 02 01
 operand-length array** for the 27 valid commands (small values, 0-3)
 than like address-table entries — i.e. `$07C3` has no bounds check of
 its own beyond the caller's `A>=$E0`, and command `$FE` (`Y=$FC`) reads
-one slot past the table's real end (`$FB`, `Y=$F6`) into that adjacent
-array — 1 to 5 slots past `$FA` for commands `$FB`-`$FF` respectively,
-not "4-8" as an earlier draft of this note said.
+4 slots past the table's last real entry (`$FA`, `Y=$F4`) into that
+adjacent array (commands `$FB`-`$FF` are 1 to 5 slots past `$FA`
+respectively; an earlier draft of this note said "4-8", which was
+wrong).
 
-**A material fact that argues against calling this settled, found on
-review of the exhaustive PC census below: this table-dispatch path
-(`$07C3`) fires exactly once in the entire ~6,000,000-instruction
-traced run, and that one invocation is the fatal one.** `PROBE_SPCRING`'s
-ring never wrapped (2,999 of its 3,000 slots used for a run this long
-— an exhaustive count of every distinct SPC PC transition, not a
-sample), so counting tokens in it is authoritative: `07C3` appears
-once; all 27 valid handler targets (`$07DF`, `$0849`, `$0857`, ...,
-`$0A05`) appear zero times **via this dispatcher**. `$07DF` (the
-`cmd=$E0` handler) is reached 7 times in the run, but by a *different*,
-direct `CALL !$07DF` at ARAM `$06DB` that bypasses the table entirely
-— so the 27 handlers are exercised by the driver, just never once
-through the computed-jump path this ticket is tracing. A driver
-carrying a 27-entry command table that fires zero times successfully
-in six million instructions of gameplay, then fires once with a value
-that overruns it, is not strong evidence that this dispatch is a
-routine, well-worn part of the game's design — it is exactly the
-signature a fetch/skip-loop pointer desync earlier in the score parse
-would leave. `PROBE_FIND` located the data blob containing this exact
-byte run in ARAM at `$B51E` (upper ARAM, well away from the
-`$0600-$0A94` driver-code region this trace otherwise covers) — a
-plausible song/pattern data bank, but this session did not trace the
-read-pointer that walks it.
+**Frequency check, done properly after a first attempt at it was
+wrong.** An earlier pass of this write-up counted tokens in
+`PROBE_SPCRING`'s printed ring and claimed that was exhaustive for the
+whole run — it is not: the ring is capped at 3,000 entries and evicts
+the oldest on overflow, and a new counter added for this ticket
+(`PROBE_SPCPCCOUNT`, never evicted) shows the run actually has
+**1,027,705** distinct SPC PC transitions, over 300x the ring's
+capacity, so the ring only ever reflected recent history near the
+halt, not the full run. `PROBE_SPCPCCOUNT` over the complete
+~6,000,000-instruction run gives the real totals: `$07C3` (the
+computed-jump dispatcher) fires **exactly once**, and that one firing
+is the fatal one; `$07D5` (the increment-and-return utility identified
+in the disassembly above) fires **twice**, ruling it out as the song's
+main per-note read loop — whatever reads through the score note by
+note runs elsewhere, not yet located; `$07DF` (the `cmd=$E0` handler,
+reached only by a separate, direct `CALL !$07DF` at ARAM `$06DB` that
+bypasses the table) fires **7 times**, and `$0849` (`cmd=$E1`) fires
+**8 times**. None of the other 25 handler targets fire at all in this
+run.
+
+This complicates rather than settles the "is a rare firing suspicious"
+question. Extended commands `$E0` and `$E1` are handled by hardcoded
+direct calls elsewhere in the driver and are each exercised a handful
+of times — a pattern consistent with an ordinary tracker/composer tool
+that special-cases its most-used extended commands and falls back to a
+generic table dispatch (`$07C3`) for everything else, which would make
+firing rarely, even exactly once, unremarkable rather than a defect
+signature. It is equally consistent with an upstream pointer desync
+that happens to trigger this specific rare path. **This count does not
+distinguish the two theories**; it only rules out the specific
+"aliasing" and "central per-note length-table skip at `$07D5`"
+mechanisms considered along the way. `PROBE_FIND` located the data
+blob containing the transmitted byte run in ARAM at `$B51E` (upper
+ARAM, well away from the `$0600-$0A94` driver-code region this trace
+otherwise covers) — a plausible song/pattern data bank — but the
+routine that actually walks it note by note was not located this
+session.
 
 **Every byte on this path matches the ROM exactly — checked, not
 assumed.** `PROBE_FINDROM` located the dispatcher routine itself
@@ -1789,19 +1804,33 @@ once" fact above means the second is not a remote possibility:
   take the identical overrun, and "fires once" would just mean this
   extended command is genuinely rare in this song).
 - If the pointer has drifted by even one byte from an earlier
-  mis-skipped operand — plausible precisely because the table-dispatch
-  path is otherwise unexercised in this run — that is a real emulator
-  defect in this driver's byte-consumption, in the same desync class
-  the ticket brief's hypothesis 2 anticipated, just one step further
-  upstream than the `$2140` upload itself, and it should be fixed
-  under a new ticket in `crates/rf-snes` rather than left BLOCKED.
+  mis-skipped operand, that is a real emulator defect in this driver's
+  byte-consumption, in the same desync class the ticket brief's
+  hypothesis 2 anticipated, just one step further upstream than the
+  `$2140` upload itself, and it should be fixed under a new ticket in
+  `crates/rf-snes` rather than left BLOCKED.
 
-**New diagnostic, kept**: `title_probe.rs` gained `PROBE_SPCREGPC=hex[,hex]`
-(module doc updated) — prints the SPC700's `A`/`X`/`Y`/`SP` and the
-four bytes above `SP` (what a `RET` would pop) whenever the SPC700 is
-about to execute an instruction at one of the given 16-bit ARAM PCs.
-It is what pinned the exact registers and stack contents above; no
-`rf-snes` source changed.
+`$07C3` firing once does not by itself favor either outcome:
+`PROBE_SPCPCCOUNT` over the whole run also shows `$07DF` (`cmd=$E0`)
+firing 7 times and `$0849` (`cmd=$E1`) firing 8 times, both via
+hardcoded direct calls elsewhere in the driver rather than through this
+table — a pattern just as consistent with "common extended commands
+are special-cased, rare ones fall through to the generic table, and
+`$FE` is one such rare, legitimate command" as it is with a desync.
+Only the fetch-loop disassembly above can settle which.
+
+**New diagnostics, kept**: `title_probe.rs` gained two env vars (module
+doc updated). `PROBE_SPCREGPC=hex[,hex]` prints the SPC700's
+`A`/`X`/`Y`/`SP` and the four bytes above `SP` (what a `RET` would pop)
+whenever the SPC700 is about to execute an instruction at one of the
+given 16-bit ARAM PCs — it is what pinned the exact registers and
+stack contents above. `PROBE_SPCPCCOUNT=hex[,hex]` counts genuine
+transitions into each given 16-bit ARAM PC over the *entire* run,
+unlike `PROBE_SPCRING`'s ring (capped at 3,000 entries, evicts the
+oldest) — it is what corrected this write-up's own first, wrong
+attempt at "how many times does `$07C3` fire," which had assumed the
+ring was exhaustive when the run actually has 1,027,705 distinct SPC
+PC transitions. No `rf-snes` source changed.
 
 **Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
 warnings` clean; `cargo test -p rf-snes` — 357 passed, 0 failed
