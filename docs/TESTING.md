@@ -1611,6 +1611,199 @@ the commit trailer for counts. The SNES census was not re-run (no
 behavior changed); Super Ninja Boy (both the retail and Beta dumps)
 stays wherever the last census left it.
 
+## W14-30 — Soul Blazer follow-up: the fetch/operand-skip loop is
+exonerated in full, but the fatal byte is runtime-written and not found
+in the ROM; BLOCKED on an unidentified writer, not WONTFIX (2026-09-20)
+
+W14-27 named this the first-priority next step: disassemble the
+command-fetch/operand-skip loop that hands the extended-command
+dispatcher its command byte, and confirm its length-table reads against
+ROM the same way the dispatcher itself was confirmed. That loop is now
+fully disassembled and it settles the ticket-brief question cleanly, but
+what it found next reopens a different one.
+
+**The fetch loop has no length table at all.** Hand-disassembled from
+the ARAM dump (byte-length arithmetic checked against two independent
+anchors — the known-good `$0745` `CMP A,#$E0` and the running byte-count
+from `$0723`, both landing exactly on `$0745`):
+
+```
+0701: 3F D5 07    CALL !$07D5      ; fetch+advance: read [$D4+X], INC the
+                                   ; 16-bit pointer at DP $D4/$D5,X, Y=byte
+0704: D0 1D       BNE $0723        ; nonzero byte -> classify it
+0706..0721:                       ; byte==0: "sustain" -- decrement a
+                                   ; per-channel duration counter ($03B8+X)
+                                   ; and loop, or reload the pointer from a
+                                   ; secondary table and restart -- no
+                                   ; length table here either
+0723: 30 20       BMI $0745       ; byte>=$80 (bit7 set): treat directly
+                                   ; as an extended-command value
+0725: D5 00 02    MOV !$0200+X,A  ; byte<$80: it's a pitch -- store it
+0728: 3F D5 07    CALL !$07D5     ; fetch byte 2 (gate/velocity, encoded)
+072B: 30 18       BMI $0745       ; byte2>=$80: also falls into $0745
+072D..0741:                       ; byte2<$80: split its nibbles into two
+                                   ; small table lookups ($2F00+Y, $2F08+Y)
+0742: 3F D5 07    CALL !$07D5     ; fetch byte 3 (checked at $0745 too)
+0745: 68 E0       CMP A,#$E0      ; the dispatcher gate W14-27 found
+```
+
+Every branch consumes a **fixed, hardcoded** number of bytes decided by
+inline `BMI`/bit-7 tests on the byte just fetched — never a
+table-indexed skip. This supersedes W14-27's "$0A8A parallel
+operand-length array" hypothesis: that region is not a second table the
+fetch loop reads at all, it is simply what lies *after* the $0994/$0995
+jump table's real 27 entries, encountered only as an artifact of the
+dispatcher's own missing bounds check (confirmed already, W14-27). There
+is no operand-length mechanism in this driver for a wrong length to
+corrupt.
+
+**This channel's loop runs exactly once, so there is no prior note to
+have desynced.** `PROBE_SPCPCCOUNT=0701,0723,0745,07c3,07d5` over the
+whole run: `0701`, `0723`, `0745`, and `07C3` each fire **exactly once**
+— the fatal firing is the loop's first and only iteration for this
+channel. The very first byte it ever reads is `$FE`.
+
+**That byte's value is genuine ARAM content, and its channel-init
+pointer is byte-exact to ROM.** `$FE` sits at ARAM `$90F1` (dumped
+directly: `90F0: cf FE 03 32 ...`). The pointer arrives there via a
+copy-loop at `$06C0-$06CA` (`MOV A,[$16]+Y` / `MOV !$00D4+Y,A` / `DEC Y`
+/ `BPL`) that copies a per-channel init block from a table at
+`$0C1C`/`$0C1D` (literal bytes `F1`, `90`) into DP `$D4`/`$D5`.
+`PROBE_FINDROM` on a 32-byte window spanning both the copy-loop code and
+its source table (`c4121c1c900248fffdf4ad68f19005280fcf2f04cfdd8d003fab0c5f2d05bbac`)
+hits **once**, at LoROM `9F:F962` — byte-for-byte identical. The starting
+pointer `$90F1` is exactly what the ROM's own per-channel table
+specifies; this is not an emulator computation defect.
+
+**But the byte the pointer lands on is written at runtime, not
+uploaded, and is not found in the ROM file at all.** `PROBE_ARAM=90e0:9110`
+is **all-zero** through CPU instruction 4,000,000 and **fully populated**
+by 4,700,000 — this region is a runtime-built buffer, not boot-uploaded
+static data. `PROBE_FINDROM` on several windows drawn directly from it
+(7, 9, 18, and 32 bytes, including the fatal `FE` and its neighbors)
+finds **zero matches anywhere in the 1MB ROM file**, in sharp contrast to
+the copy-loop/table check two paragraphs up, which matched on the first
+try a few hundred bytes away. New diagnostic `PROBE_SPCMEMWATCH=90f1`
+pins the single write: ARAM `$90F1` goes `00->FE` at CPU instruction
+**4,114,366**.
+
+**Two specific mechanisms were checked and both come back negative —
+this is a real dead end, not an unexamined one.**
+
+1. *A driver-side `$F4`/`$F5` APU-upload race (duplicate or dropped
+   byte).* New diagnostic `PROBE_APUPORTLOG=1` traces the CPU's
+   accepted `(index, data)` pairs on the upload-protocol ports directly
+   (closing a gap in W14-27's own method, which checked the
+   *transmitted* bytes against ROM via the port ring, but never checked
+   ARAM's *resting* content against ROM for a data blob). For the
+   transfer segment that sends this exact ROM byte-run elsewhere in
+   ARAM, the trace is clean and monotonic — indices `223, 224, 225`
+   carrying data `FE, 30, D3` in order, no duplicate, no skip. That
+   transfer's own destination arithmetic (`MOV !$9336+Y,A`, base
+   `$9336`) also proves it cannot physically reach `$90F1`: the base is
+   already above `$90F1` and `Y` is an unsigned 0-255 index, so no `Y`
+   makes `$9336+Y = $90F1`. Whatever writes `$90F1` is a different
+   piece of code than the one carrying this ROM byte-run to its other
+   ARAM location.
+2. *The S-DSP echo buffer sweeping over `$90xx`.* Refuted directly by
+   reading the DSP state at CPU instruction 4,114,360 (new unconditional
+   `echo:` line in the probe's summary): `write_disabled=true` for the
+   entire run (the real hardware `FLG` reset value, matching this
+   emulator's default), and `base_page=$F7` throughout (echo buffer at
+   `$F700-$FEFF`, `EDL=1`), nowhere near `$90xx`.
+3. *The IPL boot HLE writing ARAM directly from Rust (`Apu::poll_boot`'s
+   `BootAction::Store` arm, `self.aram[address] = value` — no SPC700
+   instruction executes for this write at all, which would explain why
+   no store instruction's PC ever lined up).* Checked directly:
+   `poll_boot` only acts while `self.boot.is_running()` is false
+   (`boot::BootState::Running` means the HLE has already handed off to
+   real SPC700 execution — `crates/rf-snes/src/apu/boot.rs`'s
+   `cpu_wrote`/`poll`). At CPU instruction 4,114,370, `apu.boot_running`
+   (`self.boot.is_running()`) is **already true** and `spc.stopped` is
+   **false** — the HLE handed off long before this write and the SPC700
+   is actively running its own code, matching the `$0F20`
+   (`MOV !$9336+Y,A`) activity the port trace shows at this exact point.
+   The HLE cannot be the writer here.
+
+**Conclusion: BLOCKED, but narrowly — not WONTFIX.** Every byte and
+opcode on the path this ticket's brief asked about (`$0701`-`$0745`,
+the shared fetch/advance tail at `$07D5`-`$07DE`, and the channel-init
+copy at `$06C0`-`$06CA` plus its ROM table) is proven, byte-for-byte,
+either identical to ROM or executed correctly per SPC700 semantics —
+that fully answers and closes the ticket-brief question. But
+"hardware would read the same byte" is **unproven** for the byte
+itself: `$90F1`'s content is written at runtime by a still-unidentified
+piece of code, not uploaded from ROM, so it cannot be certified as
+authored game content the way the dispatcher, its table, and the
+channel-init pointer were. Per law 5, nothing in `crates/rf-snes` is
+patched on a partial trace, so no fix ships either way, and the ticket
+goes BLOCKED on "the writer of `$90F1` is unidentified" — a materially
+different, narrower claim than either outcome the acceptance criteria
+anticipated.
+
+**Named next step**: find the SPC700 instruction (or subsystem) that
+executes at CPU instruction ~4,114,366 and writes ARAM `$90F1`. Three
+mechanisms are ruled out (the traced `$0F18` receive loop, by
+destination arithmetic; the DSP echo sweep, by `write_disabled`; the IPL
+boot HLE's direct-from-Rust `BootAction::Store`, by `boot_running=true`
+at exactly this instruction). Candidates still open: a *different* upload chunk, since the CPU
+sender's outer loop (`DEC $0C` / `BRL $F02A`) restarts with a fresh
+`$2142`/`$2143` destination per chunk and this session did not enumerate
+every chunk's destination page; or a driver routine that computes or
+expands table data into scratch RAM at runtime (a per-voice
+envelope/pitch buffer construction, a common technique in SNES sound
+drivers to save ROM space) that happens to alias this channel's
+track-pointer target. Either finding would let a future session settle
+whether `$90F1`'s value is itself correct (closing WONTFIX after all) or
+corrupted (a real, fixable `rf-snes` defect, in whichever subsystem
+turns out to own that write).
+
+**A correction, recorded because it cost real time this session and
+will mislead the next reader too.** `PROBE_SPCMEMWATCH` and
+`PROBE_SPCREGPC` both sample once per 65816 instruction, *after*
+`core.step` — several SPC700 instructions can run inside that one step,
+so the printed `spcpc` is wherever the SPC700 had reached by the time of
+the sample, not necessarily the program counter of the instruction that
+produced the observed change. This misattributed `$90F1`'s write to an
+unrelated instruction (`$0F23`, then a `MOV !$B241+Y,A` at a completely
+different point in the run) twice before the destination-arithmetic
+check above ruled both out. The caveat is now in `title_probe.rs`'s
+module doc.
+
+**New diagnostics, kept** (module doc updated in `title_probe.rs`):
+`PROBE_SPCMEMWATCH=hex[,hex]` prints the SPC700 PC and old/new byte
+value whenever one of the given absolute 16-bit ARAM addresses changes
+— blind to `$00F4`-`$00F7`, which are backed by `ports_in`/`ports_out`,
+not the raw `aram` array. `PROBE_APUPORTLOG=1` prints the accepted
+`(index, data)` sequence on the `$F4`/`$F5` upload-protocol ports
+whenever either changes. `PROBE_SPCREGPC` gained `psw`/`p` (the SPC700's
+direct-page flag) to confirm DP base is `$0000` for this driver (it is,
+throughout). The dump summary gained an unconditional `echo:` line
+(`write_disabled`/`base_page`/`delay`/`dir`). No `rf-snes` source
+changed.
+
+**Gate — measured this session**: `cargo fmt --check` clean; `cargo
+clippy --workspace -- -D warnings` clean; `cargo test -p rf-snes` — 358
+passed, 0 failed (unchanged by this ticket; `rf-snes` source was not
+touched — only `rf-harness`'s `title_probe.rs` gained diagnostics). All
+four suites this ticket's brief named as oracles finished green, the
+last two arriving after this write-up's first draft (the 65816 vector
+suite alone runs ~7 minutes): `singlestep_spc700_vectors` — 256,000
+passed, 0 failed, 256/256 opcodes covered; `singlestep_65816_vectors` —
+ok (`finished in 426.58s`); `spc_timer_reports_pass` — `"PASSED TESTS
+Running tests: timer read vs write"`; `gilyon_cputest`'s
+`cputest_full_reports_success_and_every_test_passes` —
+`test_num=0x0649/0x0649, ROM says "Success", 6700000 instructions`. All
+unchanged from W14-27, consistent with `rf-snes` source not being
+touched. The seven-title census-child run was not executed this
+session — per the coordinator, the orchestrator runs the census
+separately, and no `rf-snes` code changed here, so none of the seven
+titles have any mechanism by which this ticket could have moved them
+from W14-27's own reported bucket.
+
+`plan.json`'s W14-30 entry is left `status: "blocked"` with this same
+finding, matching the W14-23/W14-25/W14-27 handoff convention.
+
 ## W14-27 — Soul Blazer: driver dispatch RETs to $0102 after a
 byte-exact-to-ROM extended-command table overrun; BLOCKED on the
 sequencer's fetch loop, not confirmed as the game's own behavior

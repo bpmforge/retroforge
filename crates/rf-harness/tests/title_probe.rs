@@ -92,6 +92,30 @@
 //!                                    forced_blank/brightness edge, since
 //!                                    that register is what the trace is
 //!                                    ultimately trying to explain (W14-29)
+//! PROBE_SPCMEMWATCH=hex[,hex]       print the SPC700 PC and old/new byte value
+//!                                    whenever one of these absolute 16-bit ARAM
+//!                                    addresses changes value — used to find who
+//!                                    wrote a suspect direct-page cell (e.g. a
+//!                                    track-pointer low/high byte pair) rather
+//!                                    than only observing its final value. CAVEAT:
+//!                                    it (like PROBE_SPCREGPC) samples once per
+//!                                    65816 instruction, AFTER `core.step` — the
+//!                                    printed `spcpc` is wherever the SPC700 has
+//!                                    reached by then, not necessarily the PC of
+//!                                    the instruction that produced the change,
+//!                                    since several SPC700 instructions can run
+//!                                    inside one 65816 step (W14-30). It also
+//!                                    reads raw ARAM bytes, so it is blind to
+//!                                    $00F4-$00F7 (the port registers) — those
+//!                                    are backed by `ports_in`/`ports_out`, not
+//!                                    the `aram` array; use PROBE_APUPORTLOG.
+//! PROBE_APUPORTLOG=1                print n, SPC pc, and all four
+//!                                    ports_in/ports_out bytes whenever either
+//!                                    ports_in[0] (CPU-sent index) or
+//!                                    ports_in[1] (CPU-sent data) changes — the
+//!                                    accepted-transfer trace for an APU upload
+//!                                    protocol built on $F4 (index)/$F5 (data)
+//!                                    (W14-30)
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -253,6 +277,28 @@ fn probe() {
         let timerlog = std::env::var("PROBE_TIMERLOG").is_ok();
         let mut timer_last = [false, false, false];
         let packetlog = std::env::var("PROBE_PACKETLOG").is_ok();
+        // W14-30: watch a set of absolute 16-bit ARAM addresses and print
+        // whenever one of them changes value, with the SPC PC that ran the
+        // instruction which produced the change. Built to find who writes
+        // a suspect direct-page cell (a track-pointer low/high byte pair)
+        // rather than only ever seeing its value after the fact via
+        // PROBE_ARAM/PROBE_SPCREGPC.
+        let spcmemwatch: Vec<u16> = std::env::var("PROBE_SPCMEMWATCH")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| u16::from_str_radix(s, 16).unwrap())
+            .collect();
+        let mut spcmemwatch_last: HashMap<u16, u8> = HashMap::new();
+        // W14-30: trace the accepted-transfer sequence of an APU upload
+        // protocol built on $F4 (CPU-sent index)/$F5 (CPU-sent data) —
+        // ports_in/ports_out are separate arrays from `aram`, so
+        // PROBE_SPCMEMWATCH cannot see them. Prints on every change to
+        // either ports_in[0] or ports_in[1] (whichever moved), plus the
+        // other three port bytes, so the (index, data) pairs the CPU
+        // wrote can be diffed against the ROM's own byte-run.
+        let apuportlog = std::env::var("PROBE_APUPORTLOG").is_ok();
+        let mut apuportlog_last = [u8::MAX; 4];
         let mut x_last = u8::MAX;
         let mut port0_last = u8::MAX;
         let mut dp1_last = u8::MAX;
@@ -393,6 +439,31 @@ fn probe() {
             n += 1;
             let sys = core.system();
             let apu = &sys.bus.apu;
+            for &addr in &spcmemwatch {
+                let cur = apu.aram[addr as usize];
+                match spcmemwatch_last.get(&addr) {
+                    Some(&prev) if prev != cur => {
+                        println!(
+                            "      SPCMEMWATCH n={n} addr={addr:04X} spcpc={:04X} {prev:02X}->{cur:02X}",
+                            apu.cpu.pc
+                        );
+                        spcmemwatch_last.insert(addr, cur);
+                    }
+                    Some(_) => {}
+                    None => {
+                        spcmemwatch_last.insert(addr, cur);
+                    }
+                }
+            }
+            if apuportlog
+                && (apu.ports_in[0] != apuportlog_last[0] || apu.ports_in[1] != apuportlog_last[1])
+            {
+                println!(
+                    "      APUPORTLOG n={n} spcpc={:04X} ports_in={:02X?} ports_out={:02X?}",
+                    apu.cpu.pc, apu.ports_in, apu.ports_out
+                );
+                apuportlog_last = apu.ports_in;
+            }
             let pcv = sys.cpu.pc24()
                 | if std::env::var("PROBE_RINGP").is_ok() {
                     u32::from(sys.cpu.p) << 24
@@ -641,12 +712,15 @@ fn probe() {
                         if apu.cpu.pc == target {
                             println!(
                                 "      SPCPCLOG n={n} pc={:04X} a={:02X} x={:02X} y={:02X} sp={:02X} \
+                                 psw={:02X} p={} \
                                  stack01={:02X} stack02={:02X} stack03={:02X} stack04={:02X}",
                                 apu.cpu.pc,
                                 apu.cpu.a,
                                 apu.cpu.x,
                                 apu.cpu.y,
                                 apu.cpu.sp,
+                                apu.cpu.psw,
+                                apu.cpu.psw & 0x20 != 0,
                                 apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(1)) as usize)],
                                 apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(2)) as usize)],
                                 apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(3)) as usize)],
@@ -979,6 +1053,14 @@ fn probe() {
         println!("    spc regs: a={:02x} x={:02x} y={:02x} ; F4-F7 in(spc reads)={:02x?} out(cpu reads)={:02x?} timers en={:?} counters={:?}",
             apu.cpu.a, apu.cpu.x, apu.cpu.y, apu.ports_in, apu.ports_out,
             apu.timers.iter().map(|t| t.enabled).collect::<Vec<_>>(), apu.timers.iter().map(|t| t.peek_counter()).collect::<Vec<_>>());
+        println!(
+            "    echo: write_disabled={} base_page={:02X} (base={:04X}) delay={:02X} dir={:02X}",
+            apu.dsp.echo.write_disabled,
+            apu.dsp.echo.base_page,
+            u16::from(apu.dsp.echo.base_page) << 8,
+            apu.dsp.echo.delay,
+            apu.dsp.dir,
+        );
         print_sa1_reg_report(&core);
     }
 }
