@@ -7645,7 +7645,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-42",
   "title": "Quintet driver deadlock on the corrected timing base: ActRaiser 2, Illusion of Gaia, Robotrek (and Soul Blazer) after W14-39/W14-41",
