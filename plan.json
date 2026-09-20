@@ -7786,6 +7786,30 @@
   "notes": [
    "W14-47 FILED 2026-09-21 by the orchestrator from W14-45's family table (9 titles): W14-45 proved these are genuine WAI instructions (one-byte-back PROBE_DIS), not spins, so the interrupt they wait for is the question."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-48",
+  "title": "APU upload rate and premature handoff: Battle Grand Prix's per-byte handshake never finishes; Urban Strike's first-stage stub runs into unwritten ARAM",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-48 (Battle Grand Prix): W14-46 found a genuine progressing per-byte handshake (driver loop at ARAM $0E1F, 836 transfers per 20k CPU instructions) that is still not complete after 1800 frames; measure CPU instructions and master cycles per transferred byte on this emulator, compute what the same loop costs on hardware from the disassembled CPU loop (65C816 cycle counts, now charged) and the SPC loop (the CYCLES table), and state the expected bytes-per-frame on hardware vs here; if the emulator is slower, name where the extra latency comes from (the W14-41 deferral holding the SPC's echo past the CPU's poll — instrument catch_up_apu's deferred count per port access; the CPU's per-access catch-up granularity; IPL pending delays applied where the driver is not the IPL) and fix with a citation + unit test that pins the handshake's throughput",
+   "W14-48 (Urban Strike): the SPC's first-stage stub (131 bytes) leaves its own code within ~60 instructions and NOP-slides into $FFC0; with PROBE_SPCRING/PROBE_SPCREGPC/PROBE_ARAM at the handoff, show whether the stub executed before its upload was complete (BootAction::Run delivered while bytes were still arriving — compare the byte count the CPU had sent at the Run instant with the stub's length), whether the jump address the CPU sent matches the ROM's, and whether an SPC700 opcode in the stub misbehaves (decode the 131 bytes against ops.rs); fix with citation + unit test",
+   "the fix, if any, is cited (fullsnes / snes.nesdev.org) and pinned; ignored SNES suites (65816 vectors, spc700_vectors, spc_timer, gilyon, peterlemon) stay green; determinism unaffected; census children on both titles, NBA Live 96, Tekken 2, Rival Turf!, Super Turrican, Wario's Woods, Tommy Moe's, Super Mario RPG (USA), Super Mario World, Wild Guns, Kirby Super Star, NHL 95; the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and names every moved title",
+   "a BLOCKED verdict must reach ROM bytes or a checked register read — which port, which value, which side"
+  ],
+  "notes": [
+   "W14-48 FILED 2026-09-21 by the orchestrator from W14-46's two concrete leads. Both smell like the W14-41 class (SPC visibility at call granularity) seen from the other side: throughput and premature Run."
+  ]
  }
 ]
 }
