@@ -7568,7 +7568,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 5,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-39",
   "title": "65C816 internal cycles are never charged: charge them per instruction, pinned by the singlestep vectors' cycle lists (5.08M cases)",
