@@ -805,6 +805,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-28 | 1265 | **1061** | 74 | 130 | **0** | **0** |
 | SNES, after W14-36 | 1265 | **1066** | 69 | 130 | **0** | **0** |
 | SNES, after W14-39 | 1265 | **1076** | 59 | 130 | **0** | **0** |
+| SNES, after W14-41 | 1265 | **1079** | 56 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -5087,3 +5088,12 @@ This closes W14-41: the residual W14-39 left open is fixed, not left
 BLOCKED under W6-02a — the fix needed was a call-granularity ordering
 correction (never start an instruction the current call's debt cannot
 afford), not the cycle-by-cycle interleaving W6-02a defers.
+
+**Full SNES census (orchestrator, 2026-09-21, W14-41 tree, per-title
+`RF_CENSUS_OUT` diff against the W14-39 run):** **1076/59/130/0/0 ->
+1079/56/130/0/0** ("SNES, after W14-41" row above). Three rows moved to
+*rendered something*, none the other way: **Tommy Moe's Winter Extreme**
+(the W14-39 regression this ticket was filed for), **International
+Tennis Tour** and **Rendering Ranger R2** (both had been in the
+forced-blank/NMI-off tail of the W14-34 table — the same handoff-edge
+clobber, never separately traced).
