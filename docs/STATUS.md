@@ -3982,3 +3982,21 @@ stories, 10 decisions).
   disassembled, so "hardware does the same" is not claimed; that loop
   is the named next step. Gate: workspace **2217 passing / 0 failed /
   43 ignored**, clippy clean, arch OK.
+
+- **W14-31 done, W14-29 / W14-30 blocked — the per-line PPU record
+  now reaches composition** (2026-09-20). W14-29's IRQ event log
+  cleared Mystic Quest's raster chain of any timing fault and instead
+  found that the frame-start hook wiped every per-line register record
+  before the frame was composed, so the W13-02 latching machinery had
+  never reached the renderer. W14-31 swaps the live per-line buffers
+  into a completed set at the frame boundary and composes from
+  completed, then live, then raw registers (the third tier keeps the
+  W13-02 bare-PPU tests honest). Census 1037/98/130 -> **1054/81/130**:
+  seventeen titles moved to rendering and none regressed, among them
+  all three Mystic Quest dumps, Cybernator, The Pagemaster, The Peace
+  Keepers, Ranma 1/2, Taz-Mania, and two titles whose earlier verdicts
+  are now partly superseded, Power Rangers Zeo and Super Ninja Boy.
+  W14-30 (Soul Blazer) is blocked narrowly: the sequencer's fetch loop
+  and its init table are byte-exact to ROM, and the `$FE` command byte
+  is runtime-written by a writer not yet identified. Gate: workspace
+  **2219 passing / 0 failed / 43 ignored**, clippy clean, arch OK.

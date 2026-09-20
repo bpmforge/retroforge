@@ -7369,7 +7369,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "id": "W14-31",
   "title": "PPU per-line register records are wiped at frame start before the frame is composed — compose from the completed frame's records",
@@ -7386,7 +7386,8 @@
    "cited: fullsnes 'SNES PPU' on which registers take effect mid-scanline; the existing PpuRegs::capture / is_segmentable contract is reused, not redesigned"
   ],
   "notes": [
-   "FILED 2026-09-20 by the orchestrator as W14-29's named follow-up. The line-state machinery (W13-02) is dead in the frame path today: composition sees a cleared buffer. Keep the fix to the buffer lifetime; do not touch what is latched or when."
+   "FILED 2026-09-20 by the orchestrator as W14-29's named follow-up. The line-state machinery (W13-02) is dead in the frame path today: composition sees a cleared buffer. Keep the fix to the buffer lifetime; do not touch what is latched or when.",
+   "CLOSED 2026-09-20: swapped the three per-line buffers into a completed set at frame_started instead of wiping them; composition reads completed-then-live-then-raw-registers (three-tier, not the two-tier sketch -- the W13-02 bare-Ppu latching tests need the live tier). Two new regression tests in crates/rf-snes/src/tests/system.rs, verified to fail on the pre-fix code. All three Mystic Quest dumps move from census exit 10 to exit 0; seven named canaries unmoved. See docs/TESTING.md's W14-31 write-up."
   ]
  }
 ]

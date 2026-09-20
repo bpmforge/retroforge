@@ -801,6 +801,7 @@ First run, 2026-09-15, release build:
 | SNES, after W17-04 | 1265 | **1017** | 118 | 130 | **0** | **0** |
 | SNES, after W14-24 | 1265 | **1019** | 116 | 130 | **0** | **0** |
 | SNES, after W14-26 | 1265 | **1037** | 98 | 130 | **0** | **0** |
+| SNES, after W14-31 | 1265 | **1054** | 81 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -2377,3 +2378,143 @@ with Mystic Quest (all three dumps) as its reproduction case and a
 regression test built on the `PROBE_LINEWRITES=216`-style observation
 above (a mid-frame write in the last ~20 lines of a frame must survive
 into that frame's own `render_scanline` call).
+
+## W14-31 — the per-line record now survives to composition: swap into
+a `completed` snapshot at `frame_started` instead of wiping in place
+(2026-09-20, CLOSED)
+
+W14-29's named next step, fixed as sketched. `Ppu` gained three
+`completed_line_*` fields mirroring `line_state`/`line_writes`/
+`line_regs`. `Ppu::advance_line_state` (called from `SnesSystem::step`'s
+`frame_started` arm, replacing the old `clear_line_state()` call there)
+`std::mem::swap`s the three live buffers into the three completed ones,
+then clears what is now `line_*` — an allocation-free rotation, not a
+realloc, since both sets are always `VISIBLE_LINES_OVERSCAN`-sized `Vec`s
+built once at `Ppu::new()`. `clear_line_state()` itself now clears BOTH
+sets and is reserved for a full reset (`Ppu::load` — a restored save
+state must not serve either set's prior contents).
+
+`Ppu::apply_line_state` and `Ppu::compose_line_segmented` — the two
+composition entry points W14-29 named — now read `completed_line_state`/
+`completed_line_writes`/`completed_line_regs` FIRST, via one shared test
+(`Ppu::line_uses_completed`, keyed on `completed_line_state[line]` being
+`Some`, since every line a fully-elapsed frame reaches gets latched, so
+its presence means the other two completed buffers are the right source
+for that line too). This is exactly what `Step::Frame`'s `emit_frame` and
+`SnesSystem::render_frame` need: by the time either calls
+`render_scanline`, the frame they are composing has already had
+`advance_line_state` run for it, so its own per-line records are sitting
+in `completed_*` rather than gone.
+
+**Deviation from the design sketch, and why the code proved it
+necessary**: the sketch (and this ticket's acceptance text) described a
+two-tier fallback — completed, else the live registers with no per-line
+override at all. Read literally, that breaks
+`window_and_mosaic_registers_are_latched_per_scanline` and its
+neighbours in `crates/rf-snes/src/tests/ppu.rs` (the W13-02 latching
+suite this ticket was told to keep passing unchanged): those tests call
+`Ppu::latch_line` and then `Ppu::render_scanline` directly against a bare
+`Ppu`, with no frame boundary ever crossed — `completed_line_state` is
+`None` for every line in that scenario, and a two-tier fallback would
+compose from the plain live registers, losing exactly the manually-set
+latch the test asserts on. The actual implementation is three-tier:
+completed, then the LIVE `line_state`/`line_writes`/`line_regs` (this is
+what a bare-`Ppu` test's own latch lands in), and only past that the
+plain live registers (`apply_line_state` returning `false`, unchanged
+from before this ticket). This also matters for real
+`Step::Frame`/`render_frame` calls, not just tests: the very first
+visible line of the NEW frame can already have its own live latch by the
+time `emit_frame` runs (crossing out of vblank latches line 1 in the same
+`SnesSystem::step` call that fires `frame_started`) — completed-first
+priority is what stops that fresh, barely-populated live entry from
+shadowing the just-finished frame's own real record for that line.
+
+Two unit tests added, `crates/rf-snes/src/tests/system.rs`: a `BRA *`
+cartridge with a full-line BG1 tile and a window mask (window registers,
+not `$2100`, are the "is_segmentable register" used — `$2100`'s
+forced-blank flag is deliberately absent from `LineState`, so a
+cross-line assertion built on it would fail regardless of this fix, for
+reasons outside this ticket's `write_scope`; window span IS latched into
+`LineState` for every line, which is exactly the record this fix stops
+discarding).
+`a_mid_frame_write_on_a_late_visible_line_survives_into_that_frames_own_composition`
+drives `system.bus.write(0x00_2126/0x2127, ...)` (via `CpuBus::write`,
+the same entry point real 65816 code uses) while the beam is inside
+hardware line 216's active display, then calls `SnesSystem::render_frame`
+to finish and compose that same frame: row 214 (line 215, before the
+write) keeps the old span, rows 217 and 223 (after) show the new one.
+`a_write_during_vblank_is_not_applied_to_the_just_completed_frame` moves
+the span during vblank instead and asserts the frame `render_frame`
+returns — the one that had already fully latched before vblank started —
+shows the OLD span everywhere, at row 0 and row 223 alike. Both tests
+were run against the pre-fix code (`git stash` of `ppu/mod.rs` and
+`system.rs` only) and fail there with exactly the predicted symptom —
+the first frame shows the NEW span throughout (uniform, matching "reads
+as flat/uniform" from W14-29), the second shows it at row 0 too (the
+vblank write reaching a frame it has no business touching) — confirming
+these are real regression tests, not vacuously true ones.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — **360 passed**, 0 failed (358
+before this ticket plus the 2 new tests above; every pre-existing test,
+including the full W13-02 per-line latching suite, is unchanged and
+still green); `cargo test -p rf-renderer -p rf-enhance -p rf-harness` —
+221 + 0 + 119 passed (plus assorted `0 passed / N ignored` runs for
+suites gated on fetched fixtures), 0 failed. Ignored suites: the four
+W14-29 named ones — `singlestep_spc700_vectors` (256,000/256,000),
+`singlestep_65816_vectors`, `spc_timer_reports_pass` ("PASSED TESTS"),
+`gilyon_cputest`'s `cputest_full_reports_success_and_every_test_passes`
+(`test_num=0x0649/0x0649, ROM says "Success"`) — all still pass unchanged
+(none of them touch `rf-snes`'s PPU at all, so this is confirmation, not
+new coverage). The in-repo SNES fixture's own ignored suite,
+`rf_scroller_s_five_minute_replay_is_deterministic` (18,000 frames, the
+Tier-A regression for FR-CORE-037), also passes unchanged — the
+determinism law and this ticket's own "determinism unaffected" claim are
+not just asserted, they are exercised by 5 simulated minutes of a real
+cartridge composing every one of its frames through the exact
+`render_frame`/`Step::Frame` path this ticket changed.
+
+**Census children** (`boot_census_child`, per this ticket's acceptance —
+the orchestrator owns the full `RF_CENSUS_OUT` re-run): all three Mystic
+Quest dumps now exit **0** (rendered) — **USA**, **USA (Rev 1)**, and
+**Japan ("Final Fantasy USA - Mystic Quest")** — moved from **10**
+(uniform/blank) before this fix, confirmed by re-running the same
+harness build against a `git stash` of the two source files above (all
+three reproduce exit 10 pre-fix, exit 0 post-fix). The seven named
+canaries all still exit **0**, unmoved: **Super Mario World**, **Wild
+Guns**, **Super Mario Kart**, **F-Zero**, **Kirby Super Star**, **NHL
+95**, **Super Mario RPG**.
+
+**Determinism**: unaffected. The fix is a buffer-lifetime change only —
+what gets latched, when, and by what still-existing code path is
+untouched; `advance_line_state` swaps and clears `Vec`s already sized at
+construction, allocating nothing per frame. `rf_scroller_s_five_minute_replay_is_deterministic`
+(above) is a direct empirical check of this claim across 18,000 composed
+frames, not just an inference from the diff's shape.
+
+**Files changed**: `crates/rf-snes/src/ppu/mod.rs` (three new fields,
+`advance_line_state`, `line_uses_completed`, `clear_line_state` clearing
+both sets, `apply_line_state`/`compose_line_segmented` reading the
+completed-then-live chain); `crates/rf-snes/src/system.rs`
+(`frame_started` calls `advance_line_state` instead of
+`clear_line_state`); `crates/rf-snes/src/tests/system.rs` (the two new
+regression tests plus their shared `window_test_system`/`masked_at`/
+`step_to_mid_line` helpers).
+
+**Full SNES census (orchestrator, 2026-09-20, release build, per-title
+`RF_CENSUS_OUT` diff against the W14-26 run):** **1037/98/130/0/0 ->
+1054/81/130/0/0** ("SNES, after W14-31" row above). Seventeen rows
+changed, every one from *uniform screen* to *rendered something*, none
+the other way: **Final Fantasy Mystic Quest** (USA, Rev 1, and the
+Japanese "Final Fantasy USA"), **Cybernator** (USA and the 1992-11
+beta), **The Pagemaster** (USA, Beta 2, Beta 3), **The Peace Keepers**
+(USA and beta), **Power Rangers Zeo: Battle Racers**, **Ranma 1/2: Hard
+Battle**, **Super Ninja Boy**, and **Taz-Mania** (USA, Rev 1, Beta 1,
+Beta 2). Two of those carry earlier verdicts that this result
+supersedes in part: Power Rangers Zeo was recorded in W17-04 as "forced
+blank lifts around frame 4,800 in the attract loop" and Super Ninja Boy
+in W14-25 as a game-side DMA/NMI race — both titles now render within
+the census budget, so whatever those traces described, the uniform
+screen the census saw was the wiped per-line record, not the game. The
+W14-25 race trace stands as a description of the emulator's behaviour
+at that time and should be re-checked before it is cited again.
