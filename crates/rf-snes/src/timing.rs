@@ -25,6 +25,15 @@
 //! whole suite, not an edge case. It is also why [`Timing::read_rdnmi`]
 //! takes `&mut self` and why `peek` must never route to it.
 //!
+//! **It also clears at end of Vblank, not only on read (W14-35).**
+//! fullsnes, "SNES Interrupts", $4210 RDNMI: "The flag gets reset
+//! automatically at end of Vblank, and gets also reset after reading
+//! from this register." `Timing::advance` models both halves: the read
+//! path above, and — at the `line == 0` frame-wrap instant, alongside
+//! `events.frame_started` — an unconditional clear so a title that never
+//! polled `$4210` during one vblank does not carry a stale flag into the
+//! next frame's active display.
+//!
 //! ## Auto-joypad
 //!
 //! When `$4200` bit 0 is set, the CPU reads the controllers
@@ -307,6 +316,14 @@ impl Timing {
                 }
                 if self.line == 0 {
                     events.frame_started = true;
+                    // fullsnes "SNES Interrupts", $4210 RDNMI: "The flag
+                    // gets reset automatically at end of Vblank, and gets
+                    // also reset after reading from this register." Read-
+                    // on-clear (below) was already modelled; this is the
+                    // other half — a title that never reads $4210 during
+                    // one vblank must not see a stale flag carried into
+                    // the NEXT frame's active display (W14-35).
+                    self.nmi_flag = false;
                 }
                 if self.line == self.vblank_start {
                     // The NMI edge. The flag latches here and stays set
