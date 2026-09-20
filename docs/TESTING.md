@@ -1785,18 +1785,21 @@ changed.
 **Gate — measured this session**: `cargo fmt --check` clean; `cargo
 clippy --workspace -- -D warnings` clean; `cargo test -p rf-snes` — 358
 passed, 0 failed (unchanged by this ticket; `rf-snes` source was not
-touched — only `rf-harness`'s `title_probe.rs` gained diagnostics).
-`singlestep_spc700_vectors`, the one oracle suite this session actually
-saw finish, reports **256,000 passed, 0 failed (256000 cases), 256 of
-256 opcodes covered** — unchanged from W14-27. The other three named
-oracles (`singlestep_65816_vectors`, `spc_timer_reports_pass`,
-`gilyon_cputest`'s `cputest_full_reports_success_and_every_test_passes`)
-and the seven-title census-child run were started this session but not
-confirmed complete before handoff; per the coordinator, the orchestrator
-runs the full workspace gate and census separately — this write-up does
-not assert their numbers to avoid reporting anything unmeasured. No
-`rf-snes` source changed, so none of these have any mechanism by which
-this ticket could have moved them from W14-27's own reported values.
+touched — only `rf-harness`'s `title_probe.rs` gained diagnostics). All
+four suites this ticket's brief named as oracles finished green, the
+last two arriving after this write-up's first draft (the 65816 vector
+suite alone runs ~7 minutes): `singlestep_spc700_vectors` — 256,000
+passed, 0 failed, 256/256 opcodes covered; `singlestep_65816_vectors` —
+ok (`finished in 426.58s`); `spc_timer_reports_pass` — `"PASSED TESTS
+Running tests: timer read vs write"`; `gilyon_cputest`'s
+`cputest_full_reports_success_and_every_test_passes` —
+`test_num=0x0649/0x0649, ROM says "Success", 6700000 instructions`. All
+unchanged from W14-27, consistent with `rf-snes` source not being
+touched. The seven-title census-child run was not executed this
+session — per the coordinator, the orchestrator runs the census
+separately, and no `rf-snes` code changed here, so none of the seven
+titles have any mechanism by which this ticket could have moved them
+from W14-27's own reported bucket.
 
 `plan.json`'s W14-30 entry is left `status: "blocked"` with this same
 finding, matching the W14-23/W14-25/W14-27 handoff convention.
