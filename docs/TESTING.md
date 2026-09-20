@@ -3741,3 +3741,186 @@ pass either. **BLOCKED**.
 diagnostics only, same suites as above (`cargo fmt --check`/`clippy`/
 `cargo test -p rf-snes --release` 390/0, ignored SNES oracle suites
 green). Census children unchanged (same exit codes as the first pass).
+
+## W14-37 — the IPL boot ROM's own instruction cost on the go->jump
+handoff and the per-byte handshake, from fullsnes' published
+disassembly, 2026-09-20, release build.
+
+Filed from W14-33's Super Turrican finding: the HLE's `Run`/`Store`
+actions were applied in the SAME poll cycle that detected them, so the
+uploaded driver's first port read could observe the SPC "having already
+run" relative to the CPU's own cleanup write in a way real hardware
+cannot — real hardware's boot ROM spends its own documented instruction
+sequence between detecting each protocol event and making it observable.
+
+**Citation.** snes.nesdev.org's `S-SMP` page's "IPL Boot ROM" section
+gives only the high-level protocol steps and "about 520 master clocks
+per byte" — no disassembly. fullsnes' "SNES APU Main CPU Communication
+Port" section, however, publishes the full clean-room disassembly under
+the heading "Boot ROM Disassembly" (fetched into this session's
+scratchpad, not committed — the 64 bytes stay out of the tree per law 5;
+only the derived cycle counts below are code). Every cycle cost quoted
+is a lookup into this crate's own vector-verified
+`spc700::timing::CYCLES` table (`crates/rf-snes/src/apu/spc700/
+timing.rs`), pinned against that table by
+`the_listings_cycle_counts_match_this_crates_own_timing_table`
+(`crates/rf-snes/src/tests/apu_ports.rs`) so a drift in either the
+constants or the table's entries for these opcodes fails a test instead
+of silently rotting.
+
+**(a) Go->jump handoff, after a transfer** (`$FFDA`-`$FFFB` — the
+CPU's counter jumps by 2+ to end a block, then the boot ROM hands over;
+this is the shape every title in this ticket's census brief uses):
+
+```
+$FFDA cmp Y,$F4      3   observes the mismatch
+$FFDC jnz $FFE9      4   taken (2 base + 2 BRANCH_TAKEN_EXTRA)
+$FFE9 jns $FFDA      2   not taken
+$FFEB cmp Y,$F4      3   re-checks the same counter
+$FFED jns $FFDA      2   not taken -> falls into `main`
+$FFEF movw YA,$F6    5   loads the destination/entry address
+$FFF1 movw $00,YA    5   stashes it at zero page for the JMP operand
+$FFF3 movw YA,$F4    5   reloads the kick/cmd pair
+$FFF5 mov $F4,A      4   echoes the kick byte -- the CPU's spin ends here
+$FFF7 mov A,Y        2   cmd into A
+$FFF8 mov X,A        2   cmd into X, sets Z for cmd==0
+$FFF9 jnz $FFD6      2   not taken: cmd==0 means "execute"
+$FFFB jmp [$0000+X]  6   X==0: the transfer/entry address just stashed
+```
+Total: **45 SPC cycles** — `RUN_HANDOFF_AFTER_TRANSFER_CYCLES`.
+
+**(a') The same handoff, immediate run** (`$FFCF`-`$FFFB` — the CPU's
+very first `$CC` already carries kind 0, "run immediately"):
+```
+$FFCF cmp $F4,#$CC   5   observes the go byte
+$FFD2 jnz $FFCF      2   not taken
+$FFD4 jr main        4   unconditional
+```
+then the same `$FFEF`-`$FFFB` tail as above (31). Total: **42 SPC
+cycles** — `RUN_HANDOFF_IMMEDIATE_CYCLES`.
+
+**(b) Per-byte handshake** (`$FFDA`-`$FFE5`, one accepted byte, from the
+counter match to being positioned to see the next):
+```
+$FFDA cmp Y,$F4      3   the compare that matches
+$FFDC jnz $FFE9      2   not taken: Z set by the match
+$FFDE mov A,$F5      3   fetches the data byte
+$FFE0 mov $F4,Y      4   echoes the counter -- the CPU's spin ends here
+$FFE2 mov [$00]+Y,A  7   stores the byte at the destination
+$FFE4 inc Y          2   advances the counter
+$FFE5 jnz $FFDA      4   taken: loops back to poll for the next byte
+```
+Total: **25 SPC cycles** — `BYTE_HANDSHAKE_CYCLES`.
+
+**(c) Reset to `$BBAA` ready.** Already modelled (`IPL_INIT_CYCLES` =
+2404, `crates/rf-snes/src/apu/boot.rs`, cited to fullsnes since W14-10).
+Independently re-derived this session from the same disassembly's
+zero-page-clear loop (`$FFC0 mov X,#$EF` / `$FFC2 mov SP,X` / `$FFC3 mov
+A,#$00`, then `$FFC5 mov (X),A` / `$FFC6 dec X` / `$FFC7 jnz` looping):
+stepping X from `$EF` down, the STORE happens before the DECREMENT, so
+the loop body runs once per value `X` takes from `$EF` down to `$01`
+(239 passes — addresses `$01`-`$EF`, matching fullsnes' own "excluding
+$00h..01h [zero-page]" framing of this exact loop) before `dec X` reaches
+zero and the branch is not taken: 238 taken laps of `mov(X),A`(4)+`dec
+X`(2)+`jnz taken`(4)=10 each, plus one final lap of 4+2+`jnz not
+taken`(2)=8, plus the three setup instructions (2+2+2). That totals
+2+2+2 + 238x10 + 8 = **2394**, ten cycles under the existing constant's
+2404 (which counts 239 taken laps rather than 238). **Not changed in
+this ticket** — (c) is not in this ticket's acceptance (only (a)/(b) are
+newly charged), the existing constant is independently cited and tested
+back to W14-10 (the Super Bonk fix), and a 10-cycle/~0.01ms difference in
+a one-time 2.3ms startup delay is not worth the regression risk of
+touching a shipped, working constant outside this ticket's scope. Left
+as a named discrepancy for whoever next re-verifies (c).
+
+**What changed.** `crates/rf-snes/src/apu/boot.rs`: `IplBoot` gained a
+`pending: Option<(u16, BootAction)>` field. `cpu_wrote` (the pure
+protocol decision function the existing direct-call unit tests exercise)
+is UNCHANGED — it still decides the protocol outcome instantaneously,
+which is what keeps it testable without a clock around it. `poll` (the
+entry point `SnesBus::catch_up_apu`/`Apu::poll_boot` actually call, once
+per SPC cycle) now intercepts a `Run` or `Store` action: instead of
+returning it immediately, it stashes `(delay, action)` in `pending` and
+returns `BootAction::None`. Each subsequent `poll` call while `pending`
+is `Some` decrements the counter and returns `None` WITHOUT calling
+`cpu_wrote` again — real hardware is not polling the ports while it is
+mid-way through this fixed instruction tail either. When the counter
+reaches zero the held action is returned and applied for real (the ARAM
+write/echo/PC jump). `is_running()` was changed to `state == Running &&
+pending.is_none()` — `cpu_wrote` still flips `state` to `Running` the
+instant it decides to hand over, and if `is_running()` reported that
+early, `catch_up_apu`'s `!self.apu.boot.is_running()` guard would stop
+calling `poll` altogether and strand the pending action mid-countdown
+forever. `save`/`load` gained the two extra fields so a state saved
+mid-delay resumes the countdown rather than either replaying the action
+early or losing it (a lost pending `Run` would leave the 65816 spinning
+on an echo forever).
+
+**Before/after.** Before: `Run`/`Store` applied in the same poll cycle
+that decided them — 0 cycles charged for either the handoff or the
+per-byte handshake beyond `IPL_INIT_CYCLES`. After: `RUN_HANDOFF_AFTER_
+TRANSFER_CYCLES`(45)/`RUN_HANDOFF_IMMEDIATE_CYCLES`(42) charged on every
+`Run`, `BYTE_HANDSHAKE_CYCLES`(25) charged on every `Store`.
+
+**Tests.** New: `the_listings_cycle_counts_match_this_crates_own_
+timing_table` (pins all three constants against `spc700::timing::cycles`
+opcode-by-opcode, cited above), `the_immediate_run_handoff_is_not_
+observable_before_its_listed_cycles_elapse` and `the_byte_handshake_is_
+not_observable_before_its_listed_cycles_elapse` (behavioural: the action
+must not be visible one poll early, and must be visible exactly at the
+documented count). Existing `IplBoot`/`apu_ports` tests that asserted an
+instant handoff after a single `write_port`/`poll_boot` call were updated
+to settle the new delay first — `write_port`'s own helper now drains
+`RUN_HANDOFF_AFTER_TRANSFER_CYCLES` extra polls after every write (it
+already documented "assert against a machine that has run", which this
+extends), and the two CPU-driven tests that reach the handoff via `STP`
+or a real `NOP:BRA` loop (`real_65816_code_completes_the_boot_handshake`,
+`the_apu_keeps_running_while_the_cpu_never_touches_a_port`) hand the APU
+clock the extra cycles no CPU instruction produced, the same technique
+`apu_debt_past_the_per_call_bound_is_carried_not_dropped` already uses.
+No test's asserted OUTCOME changed, only how many cycles it takes to
+reach it.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean (one `needless_return` fixed along the way); `cargo test
+--workspace --release` — every crate green, 0 failures; `cargo test -p
+rf-snes --release` — **366 passed, 0 failed** (390 in the aggregate
+workspace count above includes rf-nes and other crates; 363 pre-existing
+rf-snes unit/integration tests plus the 3 new ones above); ignored SNES
+oracle suites: `singlestep_spc700_vectors` and
+`spc700_cycle_table_matches_the_vectors` pass, `spc_timer_reports_pass`
+(`blargg_spc`, "PASSED TESTS") passes,
+`gilyon_cputest::cputest_full_reports_success_and_every_test_passes`
+passes, `peterlemon_golden`'s three ignored tests pass,
+`undisbeliever_golden` passes. `scripts/validate-arch.sh` — `arch OK`.
+
+**Census children** (`RF_CENSUS_ROM=<zip> boot_census-* --ignored --exact
+boot_census_child`, exit 0 = rendered, 10 = blank within the 600-frame
+budget): Super Turrican (USA) 10, Super Turrican (USA) (Virtual Console)
+10, Rival Turf! (USA) 10, Wario's Woods (USA) 10, Soul Blazer (USA) 10,
+Super Mario RPG - Legend of the Seven Stars (USA) 0, Super Mario World
+(USA) 0, Wild Guns (USA) 0, Kirby Super Star (USA) 0, ActRaiser 2 (USA)
+10, Robotrek (USA) 10, Clay Fighter (USA) 0, Full Throttle - All-American
+Racing (USA) (Beta) 0, NHL 95 (USA) 0, Final Fantasy - Mystic Quest (USA)
+0. **No title in this list moved in either direction** — matching every
+prior triage's documented status for each. This is the expected result:
+this ticket's fix addresses one specific, previously-unverified timing
+gap the W14-33 note flagged as a "candidate", not a proven root cause for
+any of the five still-BLOCKED titles in this list, and the earlier
+per-title traces (Rival Turf!'s exact zero-byte provenance, Super
+Turrican's stuck-`out[0]` call sequence, Wario's Woods' driver-level
+second handshake) all locate their deadlocks strictly inside the
+uploaded driver's own logic, not in the HLE handoff's timing. The full
+SNES census re-run with `RF_CENSUS_OUT` is the orchestrator's job per
+this ticket's brief and is left to them; nothing in `crates/rf-snes/**`
+outside the boot handshake changed, so no other title's boot behaviour
+should differ, but the fixed cycle charges do shift the APU's clock
+relative to the CPU by a few dozen cycles at every upload's handoff and
+every byte, which is exactly the kind of change a full re-census is for.
+
+**Determinism**: unaffected — the added delays are fixed SPC-cycle
+counts driven by the same shared APU clock the SPC700 core already
+advances on (`Apu::tick_clock`), not wall time, not per-instruction
+special-casing, and not randomised; a save-state taken mid-delay resumes
+the same countdown on load (`IplBoot::save`/`load`, new fields for
+`pending`).

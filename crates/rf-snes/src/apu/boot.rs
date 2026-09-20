@@ -63,6 +63,68 @@ pub enum BootState {
 /// it — Super Bonk waited for `$E3` for ever while the port held `$AA`.
 pub const IPL_INIT_CYCLES: u16 = 2404;
 
+/// SPC cycles between the boot ROM detecting the CPU's final "go" write
+/// and the uploaded program's first instruction executing, for the
+/// **post-transfer** run (the CPU's counter jumped by 2+, ending a
+/// block) — the shape every census title in this ticket's brief uses.
+///
+/// fullsnes "SNES APU Main CPU Communication Port" -> "Boot ROM
+/// Disassembly" (clean-room disassembly of the documented protocol, not
+/// Nintendo's bytes — law 5). Cycle costs from this crate's own
+/// vector-verified `spc700::timing::CYCLES`:
+///
+/// ```text
+/// $FFDA cmp Y,$F4     3   (the compare that observes the mismatch)
+/// $FFDC jnz $FFE9     4   (taken: 2 base + 2 BRANCH_TAKEN_EXTRA)
+/// $FFE9 jns $FFDA     2   (not taken)
+/// $FFEB cmp Y,$F4     3   (re-checks the same counter)
+/// $FFED jns $FFDA     2   (not taken -> falls into `main`)
+/// $FFEF movw YA,$F6   5   (load the destination/entry address)
+/// $FFF1 movw $00,YA   5   (stash it at zero page for the JMP operand)
+/// $FFF3 movw YA,$F4   5   (reload the kick/cmd pair)
+/// $FFF5 mov $F4,A     4   (echo the kick byte — the CPU's spin ends here)
+/// $FFF7 mov A,Y       2   (cmd into A)
+/// $FFF8 mov X,A       2   (cmd into X, sets Z for cmd==0)
+/// $FFF9 jnz $FFD6     2   (not taken: cmd==0 means "execute")
+/// $FFFB jmp [$0000+X] 6   (X==0: the transfer/entry address just stashed)
+/// ```
+///
+/// Total: 3+4+2+3+2+5+5+5+4+2+2+2+6 = 45.
+pub const RUN_HANDOFF_AFTER_TRANSFER_CYCLES: u16 = 45;
+
+/// The same handoff when the CPU's very first `$CC` already carries a
+/// zero "kind" byte in port 1 — "run immediately, nothing to transfer".
+/// The boot ROM takes the `jr main` fast path instead of the two-compare
+/// wait-loop tail above.
+///
+/// ```text
+/// $FFCF cmp $F4,#$CC   5   (the compare that observes the go byte)
+/// $FFD2 jnz $FFCF      2   (not taken)
+/// $FFD4 jr main        4   (unconditional)
+/// ```
+/// then the same `$FFEF..$FFFB` tail as above (31 cycles: 5+5+5+4+2+2+2+6).
+///
+/// Total: 5+2+4+31 = 42.
+pub const RUN_HANDOFF_IMMEDIATE_CYCLES: u16 = 42;
+
+/// SPC cycles the boot ROM spends per accepted upload byte, from the
+/// counter match to being positioned to see the next one.
+///
+/// fullsnes "Boot ROM Disassembly":
+///
+/// ```text
+/// $FFDA cmp Y,$F4     3   (the compare that matches)
+/// $FFDC jnz $FFE9     2   (not taken: Z set by the match)
+/// $FFDE mov A,$F5     3   (fetch the data byte)
+/// $FFE0 mov $F4,Y     4   (echo the counter — the CPU's spin ends here)
+/// $FFE2 mov [$00]+Y,A 7   (store the byte at the destination)
+/// $FFE4 inc Y         2   (advance the counter)
+/// $FFE5 jnz $FFDA     4   (taken: loop back to poll for the next byte)
+/// ```
+///
+/// Total: 3+2+3+4+7+2+4 = 25.
+pub const BYTE_HANDSHAKE_CYCLES: u16 = 25;
+
 /// The HLE boot handshake.
 #[derive(Debug, Clone)]
 pub struct IplBoot {
@@ -73,6 +135,19 @@ pub struct IplBoot {
     pub entry: u16,
     /// Bytes transferred, so tests can assert the upload actually moved.
     pub transferred: usize,
+    /// A [`BootAction`] the protocol already decided on, held back for
+    /// the boot ROM's own documented instruction cost (ticket W14-37)
+    /// before it becomes observable — `(cycles left, the action)`.
+    ///
+    /// `cpu_wrote` is the pure protocol decision and stays instantaneous
+    /// (so it is still directly testable without a clock around it); this
+    /// is what makes [`IplBoot::poll`], which is the entry point the
+    /// machine's clock actually calls, delay the OUTPUT by the listing's
+    /// cycle counts instead. While this is `Some`, `poll` does not
+    /// re-examine the ports at all — matching real hardware, which is not
+    /// polling `$F4` while it is mid-way through this fixed instruction
+    /// tail.
+    pending: Option<(u16, BootAction)>,
 }
 
 impl Default for IplBoot {
@@ -89,6 +164,7 @@ impl IplBoot {
             address: 0,
             entry: 0,
             transferred: 0,
+            pending: None,
         }
     }
 
@@ -104,7 +180,14 @@ impl IplBoot {
 
     #[must_use]
     pub fn is_running(&self) -> bool {
-        self.state == BootState::Running
+        // `cpu_wrote` sets `state` to `Running` the instant it DECIDES to
+        // hand over — see `poll`'s doc comment — but the SPC700 core is
+        // not actually free to run until the pending `Run` action's delay
+        // (ticket W14-37) has been paid out. Reporting `Running` early
+        // would make `SnesBus::catch_up_apu`/`Apu::poll_boot` stop calling
+        // `poll` altogether, which is exactly what would strand the
+        // pending action mid-countdown forever.
+        self.state == BootState::Running && self.pending.is_none()
     }
 
     /// The `$AA`/`$BB` the CPU polls for.
@@ -171,6 +254,20 @@ impl IplBoot {
     /// value this is waiting for, so re-reading an unchanged port 0 never
     /// matches twice.
     pub fn poll(&mut self, ports_in: [u8; 4]) -> BootAction {
+        // A `Run` or `Store` this function already returned once is
+        // sitting in `pending`, ticking down the boot ROM's own
+        // instruction cost (ticket W14-37) before it is delivered. Real
+        // hardware is not polling the ports during that window either —
+        // it is mid-way through the fixed tail those cycles model — so
+        // this deliberately does not fall through to `cpu_wrote` here.
+        if let Some((left, action)) = self.pending {
+            if left > 1 {
+                self.pending = Some((left - 1, action));
+                return BootAction::None;
+            }
+            self.pending = None;
+            return action;
+        }
         if let BootState::Initialising(left) = self.state {
             // One poll per SPC cycle while the HLE owns the machine —
             // see `SnesBus::catch_up_apu`.
@@ -181,7 +278,29 @@ impl IplBoot {
             self.state = BootState::Ready;
             return BootAction::Publish;
         }
-        self.cpu_wrote(0, ports_in[0], ports_in)
+        // Captured before `cpu_wrote` runs: it decides the protocol
+        // outcome (and, for a `Run`, already advances `self.state` to
+        // `Running`) in one instantaneous step, so the state that
+        // determines WHICH handoff path the real ROM took has to be read
+        // beforehand.
+        let was_ready = self.state == BootState::Ready;
+        let action = self.cpu_wrote(0, ports_in[0], ports_in);
+        match action {
+            BootAction::Run { .. } => {
+                let delay = if was_ready {
+                    RUN_HANDOFF_IMMEDIATE_CYCLES
+                } else {
+                    RUN_HANDOFF_AFTER_TRANSFER_CYCLES
+                };
+                self.pending = Some((delay, action));
+                BootAction::None
+            }
+            BootAction::Store { .. } => {
+                self.pending = Some((BYTE_HANDSHAKE_CYCLES, action));
+                BootAction::None
+            }
+            other => other,
+        }
     }
 
     pub(crate) fn cpu_wrote(&mut self, index: usize, value: u8, ports_in: [u8; 4]) -> BootAction {
@@ -302,7 +421,41 @@ impl IplBoot {
         o.u16(arg)?;
         o.u16(self.address)?;
         o.u16(self.entry)?;
-        o.usize(self.transferred)
+        o.usize(self.transferred)?;
+        // W14-37: a handoff or byte-store queued behind the boot ROM's own
+        // instruction cost. Must round-trip — a save mid-countdown that
+        // silently dropped this would resume with the CPU still spinning
+        // on an echo that already "happened" from the protocol's point of
+        // view (`state` already moved on) but was never written to the
+        // port, hanging the boot forever.
+        match self.pending {
+            None => o.bool(false),
+            Some((left, BootAction::Run { entry, echo })) => {
+                o.bool(true)?;
+                o.u8(0)?; // pending action kind: Run
+                o.u16(left)?;
+                o.u16(entry)?;
+                o.u8(echo)
+            }
+            Some((
+                left,
+                BootAction::Store {
+                    address,
+                    value,
+                    echo,
+                },
+            )) => {
+                o.bool(true)?;
+                o.u8(1)?; // pending action kind: Store
+                o.u16(left)?;
+                o.u16(address)?;
+                o.u8(value)?;
+                o.u8(echo)
+            }
+            Some((_, other)) => Err(rf_core_api::StateError::Corrupt(format!(
+                "IPL boot has an unexpected pending action {other:?} — only Run/Store are ever queued"
+            ))),
+        }
     }
 
     pub(crate) fn load(
@@ -326,6 +479,31 @@ impl IplBoot {
         self.address = i.u16()?;
         self.entry = i.u16()?;
         self.transferred = i.usize()?;
+        self.pending = if i.bool()? {
+            let kind = i.u8()?;
+            let left = i.u16()?;
+            Some((
+                left,
+                match kind {
+                    0 => BootAction::Run {
+                        entry: i.u16()?,
+                        echo: i.u8()?,
+                    },
+                    1 => BootAction::Store {
+                        address: i.u16()?,
+                        value: i.u8()?,
+                        echo: i.u8()?,
+                    },
+                    other => {
+                        return Err(rf_core_api::StateError::Corrupt(format!(
+                            "IPL boot pending-action kind {other} is not one of Run(0)/Store(1)"
+                        )))
+                    }
+                },
+            ))
+        } else {
+            None
+        };
         Ok(())
     }
 }

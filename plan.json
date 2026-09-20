@@ -7519,7 +7519,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "id": "W14-37",
   "title": "IPL boot HLE: charge the real 64-byte boot ROM's cycles on the go->jump handoff and the per-byte handshake, from the published IPL listing",
@@ -7534,6 +7534,7 @@
    "W14-37: census children on Super Turrican (USA and VC), Rival Turf!, Wario's Woods, Soul Blazer, Super Mario RPG (USA), Super Mario World, Wild Guns, Kirby Super Star, ActRaiser 2, Robotrek, Clay Fighter (USA); then the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and every title that moved in either direction is named in docs/TESTING.md"
   ],
   "notes": [
+   "W14-37 DONE 2026-09-20, release build. fullsnes 'SNES APU Main CPU Communication Port' -> 'Boot ROM Disassembly' gives the clean-room listing (nesdev's S-SMP page only has the high-level steps); derived against this crate's own spc700::timing::CYCLES table: after-transfer go->jump handoff 45 cycles, immediate-run handoff 42 cycles, per-byte handshake 25 cycles (all pinned by a new test that recomputes them from the table). IplBoot::poll now holds a Run/Store action in a pending countdown before applying it; cpu_wrote (the pure protocol decision, still directly unit-tested) is unchanged. is_running() had to become `state==Running && pending.is_none()` or catch_up_apu's early-return would strand the countdown forever. Save-stated. Gate green: fmt/clippy clean, cargo test --workspace 0 failures, rf-snes 366/366 (+3 new), ignored SNES oracle suites (spc700_vectors, spc_timer_reports_pass, gilyon_cputest, peterlemon_golden, undisbeliever_golden) all pass, validate-arch.sh OK. Census children: none of the 15 named titles moved (Super Turrican x2/Rival Turf!/Wario's Woods/Soul Blazer/ActRaiser 2/Robotrek stay exit-10 BLOCKED; the other 8 canaries stay exit-0) — this fix closes a real timing gap but is not the root cause of any of the five still-blocked titles' deadlocks, which the W14-33 traces already located inside the uploaded drivers' own logic. Full-census re-run with RF_CENSUS_OUT left to the orchestrator per the ticket brief. (c) (reset-to-ready) was independently re-derived and found to differ from the shipped IPL_INIT_CYCLES=2404 by 10 cycles (239 vs 238 taken laps in the zero-page clear) — out of this ticket's acceptance, left unchanged and named in docs/TESTING.md for whoever next touches it. See docs/TESTING.md 'W14-37' section for full derivations and citations.",
    "W14-37 FILED 2026-09-20 by the orchestrator from W14-33's Super Turrican finding. IplBoot (crates/rf-snes/src/apu/boot.rs) is a high-level model of the boot ROM's protocol; its timing between protocol steps is the suspect. The listing is documentation; the 64 bytes are Sony's and stay out of the tree."
   ]
  }
