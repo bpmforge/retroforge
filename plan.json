@@ -7422,7 +7422,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-33",
   "title": "APU port-protocol deadlocks: Rival Turf!, Super Turrican, Wario's Woods — trace the driver-side handshake against the ports",
