@@ -800,6 +800,7 @@ First run, 2026-09-15, release build:
 | SNES, after W17-01 | 1265 | **1015** | 120 | 130 | **0** | **0** |
 | SNES, after W17-04 | 1265 | **1017** | 118 | 130 | **0** | **0** |
 | SNES, after W14-24 | 1265 | **1019** | 116 | 130 | **0** | **0** |
+| SNES, after W14-26 | 1265 | **1037** | 98 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -1758,3 +1759,20 @@ ticket's brief.
 fix only adds a read path over `Channel`'s existing fields, which were
 already part of save state. No RNG, wall-clock, or thread dependency
 was introduced.
+
+**Full SNES census (orchestrator, 2026-09-20, release build, per-title
+`RF_CENSUS_OUT` diff against the W14-24 run):** **1019/116/130/0/0 ->
+1037/98/130/0/0** ("SNES, after W14-26" row above). Eighteen rows
+changed, every one from *uniform screen* to *rendered something*, none
+the other way: **Bill Walsh College Football**, **Earth Defense Force**
+(USA and the Switch Online dump), **Madden NFL '94**, **MechWarrior
+3050**, **MLBPA Baseball**, **Ms. Pac-Man** (USA and the 1996-06-18
+beta), **NHL 95**, **NHL 96**, **NHL 97** (USA, Rev 1 and the beta),
+**NHL 98**, **Secret of Mana** (USA and Virtual Console), and **We're
+Back! A Dinosaur's Story** (USA and beta). The EA Sports titles share
+the DP-at-`$4300` idiom NHL 95 exposed; the rest read a `$43xx`
+register back for other reasons, which is why the write-only gap was
+worth eighteen titles and not one. Residual, not modelled: `$43xB`
+(and its `$43xF` mirror), the unused read/write byte fullsnes lists for
+each channel, still returns open bus; no title in the library has been
+shown to depend on it.
