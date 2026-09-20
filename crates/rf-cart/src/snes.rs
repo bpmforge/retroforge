@@ -440,9 +440,34 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
     let mode_byte = data[base + 0x15];
     let mode_nibble = mode_byte & 0x0F;
     let fast_rom = mode_byte & 0x10 != 0;
+    // W14-36: nibble $0/$1 name LoROM/HiROM, but `score_candidate`'s own doc
+    // already records that the nibble is evidence, not a requirement,
+    // because a real dump's mode byte can disagree with WHERE its header
+    // sits — `WWF Super WrestleMania (USA)` ships nibble $1 ("HiROM") at
+    // the LoROM header location ($7FC0: valid checksum/complement pair,
+    // legible title, reset vector $FF51 into bank 0's upper half). Before
+    // this fix the nibble alone picked `SnesMapMode::HiRom` regardless of
+    // `base`, so `mapping.rs` addressed a physically-LoROM cartridge as
+    // HiROM: the reset-vector read at $00:FFFC resolved to the wrong file
+    // offset, came back as $0000, and the CPU booted straight into WRAM
+    // executing `BRK`/open-bus `$FF` in a loop that walked SP down until it
+    // crashed into the vector table — the exact "$00:0003 BRK #$00 /
+    // $00:FFFF SBC $000000,X" shape `docs/TESTING.md`'s W14-34 re-triage
+    // named for this title. The winning LOCATION (`base`, already decided
+    // by the checksum/reset-vector/title scoring above) is what actually
+    // governs the memory map on real hardware — a LoROM board's header
+    // lives at $7FC0 no matter what its mode byte happens to say — so it
+    // takes priority over the nibble for $0/$1; only $3 (SA-1, which
+    // fullsnes documents as always headered at the LoROM location too) and
+    // the explicitly-unsupported nibbles keep reading the nibble itself.
     let map_mode = match mode_nibble {
-        0x0 => SnesMapMode::LoRom,
-        0x1 => SnesMapMode::HiRom,
+        0x0 | 0x1 => {
+            if base == LOROM_HEADER_OFFSET {
+                SnesMapMode::LoRom
+            } else {
+                SnesMapMode::HiRom
+            }
+        }
         0x3 => SnesMapMode::Sa1,
         _ => {
             return Err(CartError::UnsupportedChip {
@@ -576,6 +601,34 @@ mod tests {
         assert_eq!(header.ram_size, 8 * 1024);
         assert!(!header.battery);
         assert!(!header.had_copier_header);
+    }
+
+    #[test]
+    /// W14-36 regression: `WWF Super WrestleMania (USA)`'s real dump has a
+    /// valid, self-consistent header at the LoROM location ($7FC0) —
+    /// checksum/complement XOR to $FFFF, a legible 21-byte title, and a
+    /// reset vector ($FF51) into bank 0's upper half — but its map-mode
+    /// byte is $41, whose low nibble ($1) names HiROM. Before this fix
+    /// `map_mode` was read straight off that nibble regardless of where
+    /// the header actually won, so this cartridge was addressed as HiROM:
+    /// `$00:FFFC`'s reset-vector read resolved to the wrong file offset,
+    /// came back $0000 instead of $FF51, and the CPU booted into WRAM
+    /// executing BRK/open-bus in a loop that crashed into the vector
+    /// table — the exact shape `docs/TESTING.md`'s W14-34 re-triage named
+    /// for this title. The winning LOCATION must govern the map mode, not
+    /// the disagreeing nibble.
+    fn nibble_disagreeing_with_the_winning_location_defers_to_location() {
+        let rom = lorom_image(0x41, 0x00); // WWF Super WrestleMania's real mode byte
+        let header = parse_snes_header(&rom).expect("valid LoROM header despite the nibble");
+        assert_eq!(
+            header.map_mode,
+            SnesMapMode::LoRom,
+            "the LoROM header location must win over a disagreeing nibble"
+        );
+        assert!(
+            !header.fast_rom,
+            "$41's bit 0x10 is clear, so this is SlowROM"
+        );
     }
 
     #[test]

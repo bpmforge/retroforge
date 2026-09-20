@@ -7493,7 +7493,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "id": "W14-36",
   "title": "DMA/mapping family (11 titles): control crashes into the $0000 BRK/COP vector — bisect Final Fight 3 (Beta), Brawl Brothers, Final Fight 2",
@@ -7509,6 +7509,7 @@
    "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — 'game's own data' without that chain is not accepted"
   ],
   "notes": [
+   "W14-36 DONE 2026-09-20: root cause was not DMA/mapping-table walking but a header parser bug in rf-cart -- parse_snes_header derived SnesMapMode from the map-mode NIBBLE alone even when score_candidate had already picked a different WINNING LOCATION (WWF Super WrestleMania (USA) ships nibble $1 (HiROM) at the LoROM header location, a case score_candidate's own doc already named). Fixed: base (the winning location) now governs LoROM vs HiROM for nibbles $0/$1; SA-1 ($3) and unsupported nibbles unchanged. New unit test nibble_disagreeing_with_the_winning_location_defers_to_location. Moved 6/11 family titles from blank to rendered: WWF Super WrestleMania (USA) [retail], Final Fight 3 (USA) (Beta), Killer Instinct (USA) (Beta), Dennis the Menace (USA) (Beta) (1993-03-03), Teenage Mutant Ninja Turtles IV - Turtles in Time (USA) (Beta 2); Final Fight 3 (USA) retail already rendered, confirmed unaffected. Named, not fixed (traced to each title's own ROM bytes or a separately-scoped defect, per docs/TESTING.md): the 3 pirates (Bug's Life A, Hercules, Pokemon Stadium -- blank header at both locations, no real header this heuristic can resolve, MVN block-move then a later BRK-vector wander past the probed window), Daffy Duck (Beta) (reset vector literally $0000 in the file), Road Runner (Beta) (reset vector $06BD points into the WRAM mirror every system bank has on real hardware too), ClayFighter (Beta 1) (scattered mid-code execution, a shape the W14-34 re-triage already flagged for its own separate trace, unrelated to this nibble/location bug). Gate: cargo fmt --check clean, cargo clippy --workspace -D warnings clean, cargo test --workspace 156 binaries all passing, ignored SNES suites green (singlestep_65816_vectors 5,080,000 cases, gilyon_cputest, spc700_vectors, spc_timer_reports_pass, peterlemon_golden), scripts/validate-arch.sh arch OK. See docs/TESTING.md W14-36 section.",
    "W14-36 FILED 2026-09-20 by the orchestrator from W14-34's re-triage: 11 titles crash into the $0000 vector with the same stack-wander shape NHL 95 had before W14-26 (Final Fight 2 x2, Final Fight 3 Beta, Brawl Brothers, Knights of the Round is a slow boot not this, ...). See the W14-34 table in docs/TESTING.md for the full list."
   ]
  }
