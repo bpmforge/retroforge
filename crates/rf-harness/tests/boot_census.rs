@@ -222,6 +222,20 @@ fn boot_census() {
             // interrupted.
             eprintln!("  [{}] {}: {title}", index + 1, bucket.label());
         }
+        // Optional per-title record (ticket W14-24): `RF_CENSUS_OUT` names a
+        // TSV file that gets one `bucket<TAB>title` line per archive, so two
+        // census runs can be diffed title by title instead of by counts.
+        // Titles only, never paths or ROM bytes (law 5).
+        if let Ok(out) = std::env::var("RF_CENSUS_OUT") {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&out)
+            {
+                let _ = writeln!(f, "{}\t{title}", bucket.label());
+            }
+        }
         results.push((bucket, title));
     }
 
