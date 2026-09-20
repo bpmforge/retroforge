@@ -4449,3 +4449,143 @@ ticket), `spc_timer_reports_pass` ("PASSED TESTS"), `gilyon_cputest`
 write-record goldens, six write-records re-pinned), and
 `rf_scroller_s_five_minute_replay_is_deterministic` (26s release,
 deterministic). `scripts/validate-arch.sh`: `arch OK`.
+
+## W14-39 follow-up — full-census regressions traced: Pagemaster (budget edge, not a stall), Tommy Moe's (a new APU-handshake deadlock)
+
+The orchestrator's full SNES census on `w14-39` merged with `main` moved
+1066 -> 1076 rendering (fifteen up, five down). Traced the two the
+orchestrator flagged as blocking (not budget-edge like Power Rangers Zeo,
+591 -> 604 frames): **Pagemaster, The (USA)** (main varies at frame 203,
+branch not within 2400) and **Tommy Moe's Winter Extreme** (main frame
+31, branch not within 2400), using `title_probe` (`PROBE_MODE=frames`,
+`PROBE_RING`/`PROBE_RINGP`/`PROBE_DIS`/`PROBE_ARAM`/`PROBE_PORTS`)
+against both this worktree's release build and `/Users/bmatthews/Code/
+retroforge`'s existing release `title_probe` binary (read-only, main's
+HEAD).
+
+### Pagemaster: not a stall — the fixed 2400-frame probe window is too tight
+
+Raising `PROBE_FRAMES` past the orchestrator's 2400-frame check finds it
+varies at **frame 2955**: `PROBE_M7=1` shows `bg_mode` switching from 3
+to 1 and `forced_blank` clearing exactly there, with `distinct_indices`
+going from 1 (flat) to 4. Not a permanent hang. At `n=100000`-`2000000`
+instructions the CPU is in a real, advancing intro sequence (a brightness
+fade climbing steadily via `INIDISP` writes each vblank, matching main's
+own fade cadence almost exactly) — the divergence is a large gap
+*between* the fade completing (~frame 130-215 on both) and the first
+content draw after it (frame 203 on main, 2955 on branch), which
+`PROBE_RING`/`PROBE_RINGP` shows is CPU-bound work (no `$21xx`/`$42xx`
+port polling, no APU interaction) — the same class of finding as
+Jungle Strike above: a delay this project's old ~47%-too-fast CPU
+pacing artificially shortened in FRAME terms, now taking the frame count
+real hardware pacing implies. **Named, not tuned around**: the fixed
+frame budgets in both `boot_census.rs` (600) and the orchestrator's own
+2400-frame probe are the tight constant, not a CPU-timing defect.
+
+### Tommy Moe's: a genuine, reproducible APU-handshake deadlock — the same class W14-33/38 already catalogued, not fixable in this ticket's scope
+
+Confirmed a PERMANENT stall (unmoved through 20,000 frames, `PROBE_M7`
+showing `forced_blank=true bright=0 tm=[0000]` — completely flat —
+the entire time). `PROBE_RING`/`PROBE_RINGP` at `n=500000` onward pin
+the CPU to exactly two program-bank addresses, capping the 10,000-entry
+ring:
+
+```
+cpu 80B8C5: [cf, 40, 21, 00]  CMP $002140   ; APU port 0
+cpu 80B8C9: [d0, fa]          BNE $B8C5
+```
+
+`PROBE_ARAM=1f0:220` at the same instant shows `apu.boot_running=true`
+and the SPC pinned in its own tiny loop, disassembling to (SPC700, ARAM
+`$0200`):
+
+```
+0200: 8F F1 F4   MOV $F4, #$F1     ; announce $F1 on port 0
+0203: 8F F1 F5   MOV $F5, #$F1     ; and port 1
+0206: E4 F4      MOV A, $F4        ; read port 0 back
+0208: 68 FF      CMP A, #$FF       ; wait for the CPU's $FF ack
+020A: D0 F4      BNE $0200
+```
+
+This is a **mutual wait**: the CPU polls port 0 for a value the SPC will
+only produce after seeing a `$FF` acknowledgement on the SAME port pair
+— which, per this disassembly, only the CPU can supply, and the CPU's
+own code (traced no further within this ticket's scope) is not shown
+supplying it before entering the `CMP $002140` spin. This is the
+identical shape to the W14-33/W14-38 "APU handshake deadlock" family
+this ticket's own acceptance criteria named and partially fixed (Rival
+Turf!, Super Turrican, Wario's Woods — confirmed still rendering, see
+above). **Not reproducible on main within a comparable instruction
+budget** — at `n=500000`/`1000000`/`3000000`/`8000000` main's `PROBE_RING`
+shows continuously DIFFERENT program regions (real forward progress,
+reaching frame 430 with `forced_blank=false`, `bg_mode=7` — active
+gameplay), never dwelling on `$80B8C5`.
+
+**Root cause, and why it is not patched here.** The corrected CPU pacing
+(this ticket's whole point) genuinely shifted the real-time relationship
+between the CPU's polling and the SPC's port writes for this title's
+particular handshake margin — the same sensitivity class W14-33/38's own
+BLOCKED verdicts for ActRaiser 2/Illusion of Gaia/Robotrek already
+established for this general defect family. The mechanism is
+architectural, not a line-level bug this ticket's cycle model owns:
+`SnesBus::catch_up_apu` drives the SPC700 forward in bursts sized by
+whatever `spent` (real master cycles) the CPU's LAST INSTRUCTION cost —
+correctly *more* per instruction now, and per fullsnes-documented ratios
+— but still only at CPU-instruction granularity, not truly interleaved
+cycle-by-cycle. A protocol this tight needs the two cores' individual
+cycles interleaved to land a port write and a port poll on the correct
+relative side of each other, which is exactly the cycle-accurate
+executor this project's own docs (`speed.rs`'s closing section,
+`EMULATION_CORES.md`'s "what is still not modelled") defer to a future
+ticket (W6-02a), not something W14-39's per-instruction cycle *count*
+model can close. No interrupt is involved here (`nmitimen=0`, `irq
+mode=Off`) — the CPU-side interrupt-dispatch charging gap
+(`Cpu::interrupt`/`interrupt_to_vector`, called directly by
+`SnesSystem::step` outside `AccessCost`, so its own real cost is
+uncharged) was checked and ruled out as a factor for this specific
+stall, though it remains a real, separate, pre-existing gap worth its
+own ticket regardless of this one. No DMA is armed in this window
+either. Forcing an unverified change to the CPU/SPC catch-up granularity
+without a hardware trace to check it against risks re-breaking Rival
+Turf!/Super Turrican/Wario's Woods (all now correctly rendering) for an
+unverified guess at Tommy Moe's exact margin — the same discipline this
+project already applied to ActRaiser 2/Illusion of Gaia/Robotrek. Named
+here as **BLOCKED**, same as those three, for the next ticket that owns
+CPU/SPC interleaving.
+
+### Gate and full requested census re-check
+
+No `crates/rf-snes` source changed in this follow-up (diagnosis only):
+`cargo fmt --check` clean, `cargo clippy --workspace -- -D warnings`
+clean, `cargo test -p rf-snes --release` 364 passed / 0 failed / 2
+ignored — identical to the HEAD this session already validated the full
+ignored-oracle gate against (`singlestep_65816_vectors` 5,080,000/
+5,080,000, `spc700_vectors`, `spc_timer_reports_pass`, `gilyon_cputest`,
+`peterlemon_golden`, `undisbeliever_golden`,
+`rf_scroller_s_five_minute_replay_is_deterministic` — all green, per the
+W14-39 section above).
+
+Census children (exit 0 = rendered, 10 = blank at the 600-frame window):
+
+| Title | Exit |
+|---|---|
+| Pagemaster, The (USA) | 10 (not a stall — see above, varies at 2955) |
+| Tommy Moe's Winter Extreme | 10 (genuine BLOCKED deadlock — see above) |
+| Power Rangers Zeo - Battle Racers (USA) | 10 (budget edge, 604 > 600) |
+| Rival Turf! (USA) | 0 |
+| Super Turrican (USA) | 0 |
+| Wario's Woods (USA) | 0 |
+| Brawl Brothers (USA) | 0 |
+| Legend (USA) | 0 |
+| Super Valis IV (USA) | 0 |
+| Super Mario World (USA) | 0 |
+| Wild Guns (USA) | 0 |
+| Super Mario RPG (USA) | 0 |
+| NHL 95 (USA) | 0 |
+| Kirby Super Star (USA) | 0 |
+| Full Throttle - All-American Racing (USA) (Beta) | 0 |
+| Flintstones, The (USA) (En,Fr,De,Es,It) | 0 |
+| WWF Super WrestleMania (USA) | 0 |
+
+All fourteen non-blocked titles from the orchestrator's request are
+unmoved at exit 0, confirming nothing else regressed.
