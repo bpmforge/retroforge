@@ -7744,7 +7744,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-46",
   "title": "APU handshake family after W14-45 (11 titles, three sub-shapes): halted drivers (Tekken 2, Urban Strike, NBA Live 96), never-acking drivers (Blackthorne x3, Battle Grand Prix), boot never started (Batman proto, Phalanx x2, Sonic Blast Man II)",
