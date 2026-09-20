@@ -7469,7 +7469,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-35",
   "title": "Raster/IRQ family (25 titles): the CPU polls $4210 RDNMI / $4212 HVBJOY with NMI entered once or twice — trace ActRaiser 2, Illusion of Gaia, Lagoon, Phalanx",
