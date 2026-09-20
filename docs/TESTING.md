@@ -4589,3 +4589,221 @@ Census children (exit 0 = rendered, 10 = blank at the 600-frame window):
 
 All fourteen non-blocked titles from the orchestrator's request are
 unmoved at exit 0, confirming nothing else regressed.
+
+## W14-39 second follow-up — Pagemaster quantified (poll loop, not a
+## per-opcode overcharge); a real APU hand-off defect found and fixed for
+## Tommy Moe's, deadlock still BLOCKED for a second, deeper reason
+
+The orchestrator's own math forced a re-check of the "budget edge, not a
+stall" verdict above: a corrected CPU that is at most ~50% slower per
+instruction cannot produce a 14x *frame* increase (Pagemaster: main frame
+203, branch frame 2955) by simple straight-line slowdown alone. `title_probe`
+(`crates/rf-harness/tests/title_probe.rs`) gained a small, permanent
+enhancement to answer this precisely: `PROBE_MODE=frames` now also reports
+`total_instr_at_varied`, the cumulative CPU instruction count at the frame
+`sink.varied` first fires, taken from `StepResult::cycles` (which
+`SnesCore::step`'s own doc already documents as an instruction count, not
+master cycles — see the module doc's new lines under `PROBE_FRAMES`). No
+new env var; existing output gained a field.
+
+### Pagemaster: an 11x instruction-count increase, not a per-opcode bug
+
+Rebuilt `title_probe` identically in a throwaway clone of this session's
+`main` HEAD (`a0f9b69`, pre-W14-39) with the same instrumentation, so both
+trees report the same number:
+
+| Tree | Frame varied | Instructions to reach it |
+|---|---|---|
+| main (`a0f9b69`) | 203 | 4,169,311 |
+| `w14-39` (this branch) | 2955 | 45,708,683 |
+
+**~11.0x more CPU instructions**, not the same instruction count taking
+~14.6x longer in frame terms. This is the decisive measurement the
+ticket asked for: `cpu::cycles::internal_cycles` is pinned exactly against
+5,080,000 SingleStepTests cases (`accesses + internal == cycles.len()`,
+no `<=`), so a per-instruction overcharge would have failed that oracle
+outright — it did not, and 11x more *instructions* cannot be explained by
+any per-instruction cycle miscount (which changes cycles per instruction,
+never how many instructions run). The residual gap between the 11.0x
+instruction increase and the 14.6x frame increase (roughly consistent
+with correcting a ~47%-too-fast CPU: `45708683/2955 = 15468`
+instructions/frame on the branch versus `4169311/203 = 20537` on main,
+`15468/20537 ≈ 0.75`) is exactly the ordinary per-instruction pacing
+fix this ticket makes; it is the extra 11x that needed explaining.
+
+`PROBE_RING` at `n=20,000,000` (frame 1297, well before the reported
+"varied" event) already shows `bg_mode=3`, `forced_blank=false`,
+`bright=15`, `oam_nonzero=196` — real content is on screen; the CPU
+sits in a four-instruction idle loop the whole time:
+
+```
+cpu 9DFE35: [c5, 12] CMP $12
+cpu 9DFE37: [08]     PHP
+cpu 9DFE38: [28]     PLP
+cpu 9DFE39: [f0, fa] BEQ $FE35
+```
+
+This is a software wait-for-flag idle loop (not `WAI`/`STP`), spinning on
+a direct-page byte an interrupt handler sets; `PROBE_RING`/`PROBE_M7` at
+the reported divergence (`n≈45,700,000`-`45,712,000`, frame 2958-2959)
+shows the CPU's `distinct_pc` sample flip cleanly from this loop to
+`$BBF8C1`-range code the instant the flag changes — i.e. this is the
+loop *exiting*, once, not a hang. **This confirms — with hard numbers
+instead of the earlier verdict's prose — the second of the ticket's two
+named possibilities: the game is spinning in a poll loop whose exit
+condition the corrected pacing changed, not a per-opcode overcharge.**
+What sets the flag is outside this ticket's traced scope (no `$21xx`/
+`$42xx` port activity in the loop itself, confirmed by the prior
+follow-up's `PROBE_RING`/`PROBE_RINGP`); it is real APU/driver-side
+state, consistent with a delay whose real-hardware length the old
+~47%-too-fast CPU pacing artificially shortened in frame terms. Named,
+quantified, not tuned around — the fixed frame budgets in
+`boot_census.rs` (600) and the orchestrator's own 2400-frame probe are
+the tight constant here, not a CPU-timing defect.
+
+### Tommy Moe's: a real defect found and fixed in `catch_up_apu` — the
+### deadlock nonetheless remains BLOCKED for a second, distinct reason
+
+`PROBE_APUPORTLOG`/`PROBE_DIS` traced the exact instant the two trees
+diverge, at the same instruction count (`n=425363`) on both — the SNES
+CPU's own APU-upload driver (`$80B890`-`$80B8CF`) finishing its transfer
+and handing the just-uploaded program control at `$0200`:
+
+```
+main:   n=425363 spcpc=0200 ports_in=[C8,00,00,02] ports_out=[C8,BB,00,00]
+branch: n=425363 spcpc=0200 ports_in=[C8,00,00,02] ports_out=[F1,BB,00,00]
+```
+
+`ports_out[0]` is the "Run" echo `apu/boot.rs`'s `BootAction::Run` doc
+calls "not optional and not cosmetic" — the 65816 is spinning on
+`CMP $2140`/`BNE` waiting to see it. On main it is still `$C8` (intact);
+on the branch it is already `$F1` — the SPC700's own uploaded program
+(entry `$0200`: `MOV $F4,#$F1` / `MOV $F5,#$F1` / wait for `$FF`) has
+**already run its first instruction and overwritten the echo before the
+65816's own next instruction ever reads it.**
+
+**Root cause, confirmed and fixed.** `SnesBus::catch_up_apu`
+(`bus.rs`) settles one CPU instruction's worth of `apu_debt` per call in
+a single `while` loop. Before this fix, if that loop's own leftover
+budget crossed the "not running" -> "running" edge (`poll_boot` firing
+`BootAction::Run`) partway through, the SAME call kept spending the rest
+of its budget on the now-real SPC700 core — running the uploaded
+program's own first instructions inside the identical call that performed
+the hand-off, before the 65816 could possibly have read anything yet.
+`apu/boot.rs` already names and fixes the SAME class of clobber for a
+*re-entry* at `$FFC0` (`IPL_INIT_CYCLES`, added after Super Bonk hung the
+same way); that guard never covered the FIRST hand-off to an arbitrary
+uploaded entry point, because before W14-39 a single call's budget came
+from access-only master cycles and essentially never had leftover room to
+run a whole SPC700 instruction on top of `poll_boot`'s own one-cycle
+charge. W14-39's larger (correct) per-instruction charge makes that
+leftover room routine.
+
+Fixed by stopping `catch_up_apu`'s loop the instant it crosses that edge,
+carrying the unspent portion of the budget into `apu_debt` for the next
+call rather than spending it in the same one (`bus.rs`, `catch_up_apu`,
+the `just_handed_over` guard). Unit test added and verified to fail
+without the fix and pass with it:
+`crates/rf-snes/src/tests/apu_ports.rs::a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo`
+— it reproduces the exact clobber (`MOV $F4,#$F1` at the uploaded entry
+point) with a synthetic large debt and asserts the 65816's next read
+still sees the `Run` echo. Confirmed against `git stash` on `bus.rs`:
+`panicked ... left: 241, right: 5` (0xF1 vs the expected 0x05 echo)
+without the fix, green with it.
+
+**This is a genuine emulator defect, independently correct regardless of
+Tommy Moe's outcome, and it does not regress anything**: Rival Turf!,
+Super Turrican and Wario's Woods (this ticket's three confirmed fixes)
+still render at census-child exit 0 after this change; Pagemaster's
+`total_instr_at_varied`/`varied_at` are byte-for-byte unchanged (the fix
+is APU-only and this delay has no port traffic in it, per above); the
+fourteen unrelated census children are unmoved (see the re-run table
+below).
+
+**Tommy Moe's itself remains BLOCKED, for a second, deeper reason the
+fix does not reach.** Re-tracing with `DEBUG_CATCHUP`-style
+instrumentation (removed before commit; the finding is reproducible from
+the trace above) shows the fix defers the hand-off's own leftover budget
+(`spc_cycles=2, spent=1` at the real hand-off instant) into `apu_debt` as
+designed — but the 65816's *very next* instruction is `CMP $2140`, whose
+own bus **read** calls `catch_up_apu` again before returning a value
+(`bus.rs`'s `$2140-$2143` read arm, "catch the APU up FIRST"). By then
+`apu_debt` holds that tiny deferred remainder (one CPU instruction's
+worth, now routinely >= 21 master cycles — one whole SPC cycle — because
+of this ticket's corrected, larger per-instruction charge). Because an
+SPC700 instruction cannot run partially, **any nonzero owed budget once
+`boot.is_running()` is true commits `catch_up_apu` to running one whole
+SPC700 instruction**, unconditionally overspending the rest
+(`apu_overspent`, an existing, correct mechanism for cost `>` budget).
+That whole instruction is the driver's own `MOV $F4,#$F1` — so the very
+read this fix was protecting the echo for is the read that triggers its
+clobber, one call later than before, via the read path rather than the
+write path.
+
+On **main**, the identical CMP's own pre-read `catch_up_apu` call sees an
+`apu_debt` so small (built from the OLD, access-only per-instruction
+cost) that `owed = apu_debt / 21` truncates to **0** — the loop body
+never runs at all, and the SPC700 stays exactly where the hand-off left
+it. Main was never cycle-accurate here either; it wins this race only
+because its smaller per-instruction cost happens to round `owed` down to
+zero often enough. W14-39's correct, larger charge crosses the
+`owed >= 1` threshold routinely, which — because an SPC700 instruction
+is atomic and `catch_up_apu` only settles debt at CPU-instruction
+granularity — removes that accidental protection.
+
+**This is the exact gap `docs/TESTING.md`'s prior follow-up and
+`speed.rs`'s closing section already name**: closing it for real needs
+the two cores' cycles genuinely interleaved (the deferred W6-02a
+cycle-accurate executor), not a per-call ordering fix, because the
+failure mode is not "the wrong call runs the clobbering instruction" (the
+fix above closes exactly that) but "no call-granularity model can avoid
+running a whole SPC700 instruction on top of however small a nonzero
+debt is, and this specific race's outcome depends on winning by less
+than one SPC700 instruction's worth of real time." Re-confirmed
+BLOCKED, now with the real (fixed) defect separated out from the
+remaining, correctly-scoped-out architectural one. Named here for the
+ticket that owns CPU/SPC interleaving (W6-02a), same as the prior
+follow-up already recommended.
+
+### Gate
+
+`cargo fmt --check` clean. `cargo clippy --workspace -- -D warnings`
+clean. `cargo test --workspace` all green (rf-snes: 365 passed — the one
+new unit test above — 0 failed, 2 ignored). Ignored oracle suites, all
+re-run clean after the `bus.rs` change: `singlestep_65816_vectors`
+(5,080,000/5,080,000), `spc700_vectors` (256,000/256,000),
+`spc_timer_reports_pass` ("PASSED TESTS"), `gilyon_cputest`
+(`test_num=0x0649/0x0649, "Success"`, 6,100,000 instructions),
+`peterlemon_golden` (all three tests), `undisbeliever_golden` (both live
+tests), `rf_scroller_s_five_minute_replay_is_deterministic` (~60s
+release, deterministic). `scripts/validate-arch.sh`: `arch OK`.
+
+Census children re-run (exit 0 = rendered, 10 = blank at the 600-frame
+window):
+
+| Title | Exit | Note |
+|---|---|---|
+| Pagemaster, The (USA) | 10 | unchanged — quantified above, not a stall |
+| Tommy Moe's Winter Extreme | 10 | unchanged — real defect fixed, BLOCKED for the deeper reason above |
+| Power Rangers Zeo - Battle Racers (USA) | 10 | unchanged — budget edge |
+| Rival Turf! (USA) | 0 | unmoved — the `catch_up_apu` fix does not regress it |
+| Super Turrican (USA) | 0 | unmoved |
+| Wario's Woods (USA) | 0 | unmoved |
+| Brawl Brothers (USA) | 0 | unmoved |
+| Legend (USA) | 0 | unmoved |
+| Super Valis IV (USA) | 0 | unmoved |
+| Spanky's Quest (USA) | 0 | unmoved |
+| Super Mario World (USA) | 0 | unmoved |
+| Wild Guns (USA) | 0 | unmoved |
+| Super Mario RPG (USA) | 0 | unmoved |
+| NHL 95 (USA) | 0 | unmoved |
+| Kirby Super Star (USA) | 0 | unmoved |
+| Full Throttle - All-American Racing (USA) (Beta) | 0 | unmoved |
+| Flintstones, The (USA) (En,Fr,De,Es,It) | 0 | unmoved |
+| WWF Super WrestleMania (USA) | 0 | unmoved |
+| Final Fantasy - Mystic Quest (USA) | 0 | unmoved |
+| Super Mario Kart (USA) | 0 | unmoved |
+
+All twenty requested titles accounted for; nothing regressed, one real
+defect fixed and unit-tested, both original findings quantified or
+sharpened with hard numbers rather than restated.

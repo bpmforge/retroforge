@@ -465,6 +465,75 @@ fn apu_debt_past_the_per_call_bound_is_carried_not_dropped() {
     assert!(s.bus.apu_debt < 21, "and be settled by the next one");
 }
 
+/// **A large post-hand-over catch-up burst must not let the freshly-run
+/// program clobber its own `Run` echo** (ticket W14-39 follow-up; traced
+/// against Tommy Moe's Winter Extreme in `docs/TESTING.md`).
+///
+/// `BootAction::Run`'s doc calls the echo it publishes on port 0 "not
+/// optional and not cosmetic" — the 65816 is spinning on `CMP $2140`
+/// waiting for it — and `IPL_INIT_CYCLES` already exists to stop the
+/// SPC700's own next instructions from overwriting it for a re-entry at
+/// `$FFC0`. That guard never covered the FIRST hand-off to an arbitrary
+/// uploaded entry point: before this fix, `catch_up_apu`'s loop kept
+/// spending the SAME call's leftover budget on the just-woken SPC700
+/// once `poll_boot` fired `Run`, so a large enough debt ran the
+/// uploaded program's own first instruction (here, `MOV $F4,#$F1` —
+/// exactly Tommy Moe's driver's entry code) before the 65816's next
+/// instruction could ever read the echo. Before this ticket a plain
+/// `STA $2140`'s access-only debt was rarely big enough to trigger it;
+/// W14-39's corrected (larger) per-instruction charge makes it routine.
+#[test]
+fn a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo() {
+    let mut s = system();
+    let dest: u16 = 0x0200;
+    // MOV $F4, #$F1 (the exact clobber Tommy Moe's driver performs at
+    // its entry point), then NOPs so a generous budget has somewhere
+    // harmless to spend the rest of its cycles.
+    let program: [u8; 4] = [0x8F, 0xF1, 0xF4, 0x00];
+
+    let write = |s: &mut SnesSystem, index: usize, value: u8| {
+        s.bus.apu.cpu_write_port(index, value);
+        s.bus.apu.poll_boot();
+    };
+    write(&mut s, 1, 0x01);
+    write(&mut s, 2, dest as u8);
+    write(&mut s, 3, (dest >> 8) as u8);
+    write(&mut s, 0, 0xCC);
+    for (i, b) in program.iter().enumerate() {
+        write(&mut s, 1, *b);
+        write(&mut s, 0, i as u8);
+    }
+    write(&mut s, 1, 0x00);
+    write(&mut s, 2, dest as u8);
+    write(&mut s, 3, (dest >> 8) as u8);
+    // The counter-skip write that fires `Run` — stored but NOT polled,
+    // exactly as `SnesBus::write_register`'s `$2140` arm does: a real
+    // write's own `catch_up_apu()` call runs on the STALE port state,
+    // and the fresh value is only seen the NEXT time something catches
+    // the APU up — here, the single `catch_up_apu()` call below, mirroring
+    // `SnesSystem::step`'s unconditional post-instruction catch-up.
+    let run_echo = program.len() as u8 + 1;
+    s.bus.apu.cpu_write_port(0, run_echo);
+
+    // A large debt: what W14-39's corrected per-instruction charge hands
+    // `catch_up_apu` after a heavier CPU instruction, not the handful of
+    // access-only cycles a plain `STA` used to leave it.
+    s.bus.apu_debt = 21 * 40;
+    s.bus.catch_up_apu();
+
+    assert!(
+        s.bus.apu.boot.is_running(),
+        "the hand-over itself must still happen this call"
+    );
+    assert_eq!(
+        s.bus.apu.cpu_read_port(0),
+        run_echo,
+        "the 65816's next read must see the Run echo ({run_echo:#04X}), not \
+         the uploaded program's own first port write ({:#04X})",
+        s.bus.apu.cpu_read_port(0)
+    );
+}
+
 // ---------------------------------------------------------------------
 // S-DSP skeleton
 // ---------------------------------------------------------------------
