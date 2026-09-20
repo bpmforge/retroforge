@@ -7342,7 +7342,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-30",
   "title": "Soul Blazer follow-up: disassemble the SPC sequencer's command-fetch loop and verify its length-table reads against ROM",
