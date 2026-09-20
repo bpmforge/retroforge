@@ -1,7 +1,10 @@
 //! CPU<->APU ports, the boot handshake, and the S-DSP skeleton
 //! (ticket W6-04b).
 
-use crate::apu::boot::{BootAction, BootState, IplBoot, IPL_INIT_CYCLES};
+use crate::apu::boot::{
+    BootAction, BootState, IplBoot, BYTE_HANDSHAKE_CYCLES, IPL_INIT_CYCLES,
+    RUN_HANDOFF_AFTER_TRANSFER_CYCLES, RUN_HANDOFF_IMMEDIATE_CYCLES,
+};
 use crate::apu::dsp::{decode_brr, Dsp};
 use crate::apu::Apu;
 // `read`/`write` are ApuBus methods; the trait must be in scope to call them.
@@ -21,6 +24,17 @@ use rf_cart::SnesMapMode;
 fn write_port(apu: &mut Apu, index: usize, value: u8) {
     apu.cpu_write_port(index, value);
     apu.poll_boot();
+    // W14-37: a `Store`/`Run` the protocol just decided on is held back
+    // for the boot ROM's own documented instruction cost (see
+    // `IplBoot::poll`'s `pending`) before it becomes observable on the
+    // ports/ARAM/PC. `RUN_HANDOFF_AFTER_TRANSFER_CYCLES` (45) is the
+    // largest of the delays this can ever queue, so draining that many
+    // more polls always settles whatever this write just queued —
+    // matching this helper's own documented "assert against a machine
+    // that has run" contract, now extended to the new delay.
+    for _ in 0..RUN_HANDOFF_AFTER_TRANSFER_CYCLES {
+        apu.poll_boot();
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -360,6 +374,32 @@ fn real_65816_code_completes_the_boot_handshake() {
     s.run_until(10_000, None).expect("implemented");
 
     assert!(s.cpu.stopped, "the init routine reached its STP");
+    // W14-37: the final counter write no longer resolves in the same
+    // instant it is seen. The byte stored just before it is still paying
+    // off its own `BYTE_HANDSHAKE_CYCLES` (25) — during which `poll`
+    // does not even look at the ports again (see `IplBoot::poll`'s
+    // `pending`) — before the "counter skipped -> run" write can be
+    // noticed at all, and THEN the boot ROM's post-detection tail
+    // (`RUN_HANDOFF_AFTER_TRANSFER_CYCLES`, 45) has to run out too.
+    // `run_until` stops the INSTANT the CPU hits its `STP`, well before
+    // that many real cycles accrue from the handful of instructions
+    // between the final write and the `STP`, and a stopped 65816 does
+    // not drive the master clock forward on its own — so hand the APU
+    // clock the cycles no CPU instruction produced, the same technique
+    // `apu_debt_past_the_per_call_bound_is_carried_not_dropped` already
+    // uses. One cycle of debt per call, not one big lump: `catch_up_apu`
+    // pays down any already-overspent debt from the CPU's own
+    // instructions first, so a single large injection can be partly
+    // absorbed by that instead of turning into new forward progress.
+    let settle_budget =
+        u64::from(BYTE_HANDSHAKE_CYCLES) + u64::from(RUN_HANDOFF_AFTER_TRANSFER_CYCLES) + 10;
+    for _ in 0..settle_budget {
+        if s.bus.apu.boot.is_running() {
+            break;
+        }
+        s.bus.apu_debt += 21;
+        s.bus.catch_up_apu();
+    }
     assert!(
         s.bus.apu.boot.is_running(),
         "a game-shaped init sequence must complete the handshake"
@@ -424,6 +464,15 @@ fn the_apu_keeps_running_while_the_cpu_never_touches_a_port() {
         s.cpu.pc, loop_pc,
         "the upload must complete and reach the silent loop"
     );
+    // W14-37: the CPU reaches its silent `NOP : BRA` loop only a handful
+    // of its own instructions after the final counter write, which is not
+    // enough real time for the boot ROM's documented post-detection tail
+    // (`RUN_HANDOFF_AFTER_TRANSFER_CYCLES`, 45 SPC cycles) to have run
+    // out yet. Unlike the STP tests, the 65816 is still very much running
+    // here, so let it keep looping a little longer — cheap, and it is
+    // exactly the settling the two `run_until` calls below already do at
+    // a larger scale.
+    s.run_until(500, None).expect("implemented");
     assert!(s.bus.apu.boot.is_running());
     assert!(
         (0x0200..0x0204).contains(&s.bus.apu.cpu.pc),
@@ -491,9 +540,22 @@ fn a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo(
     // harmless to spend the rest of its cycles.
     let program: [u8; 4] = [0x8F, 0xF1, 0xF4, 0x00];
 
+    // Since W14-37, a `Store`/`Run` the protocol decides on on one
+    // `poll_boot` call is not delivered until its own pending countdown
+    // elapses (`IplBoot::poll`'s `pending`), and while it is pending the
+    // next call does not even look at the ports again. A setup helper
+    // that polled only once per write (as this closure used to) would
+    // leave most of this block's byte-accepts sitting in `pending`
+    // indefinitely, mangling the transfer instead of merely delaying it.
+    // Match the crate's own `write_port` free function above: drain
+    // `RUN_HANDOFF_AFTER_TRANSFER_CYCLES`, the largest delay any write
+    // can ever queue, after every write.
     let write = |s: &mut SnesSystem, index: usize, value: u8| {
         s.bus.apu.cpu_write_port(index, value);
         s.bus.apu.poll_boot();
+        for _ in 0..RUN_HANDOFF_AFTER_TRANSFER_CYCLES {
+            s.bus.apu.poll_boot();
+        }
     };
     write(&mut s, 1, 0x01);
     write(&mut s, 2, dest as u8);
@@ -517,8 +579,15 @@ fn a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo(
 
     // A large debt: what W14-39's corrected per-instruction charge hands
     // `catch_up_apu` after a heavier CPU instruction, not the handful of
-    // access-only cycles a plain `STA` used to leave it.
-    s.bus.apu_debt = 21 * 40;
+    // access-only cycles a plain `STA` used to leave it. Since W14-37,
+    // `Run` is not delivered the instant `poll_boot` decides it: the
+    // pending countdown IS the boot ROM's own listed instruction tail
+    // (`RUN_HANDOFF_AFTER_TRANSFER_CYCLES` = 45, `boot.rs`), paid out of
+    // this exact call's SPC-cycle budget one poll per cycle — so the
+    // budget must cover the full 45 cycles before the hand-over can
+    // complete in a single call at all, with plenty left over to prove
+    // the freshly-woken SPC700 still does not get to spend it.
+    s.bus.apu_debt = 21 * 80;
     s.bus.catch_up_apu();
 
     assert!(
@@ -584,9 +653,14 @@ fn a_port_read_immediately_after_hand_over_does_not_see_the_next_instruction_ear
               // this test only needs the FIRST instruction to stay unexecuted.
     ];
 
+    // See the drain rationale on the test above: a single poll per write
+    // leaves most of this block's byte-accepts stuck in `pending`.
     let write = |s: &mut SnesSystem, index: usize, value: u8| {
         s.bus.apu.cpu_write_port(index, value);
         s.bus.apu.poll_boot();
+        for _ in 0..RUN_HANDOFF_AFTER_TRANSFER_CYCLES {
+            s.bus.apu.poll_boot();
+        }
     };
     write(&mut s, 1, 0x01);
     write(&mut s, 2, dest as u8);
@@ -602,11 +676,21 @@ fn a_port_read_immediately_after_hand_over_does_not_see_the_next_instruction_ear
     let run_echo = program.len() as u8 + 1;
     s.bus.apu.cpu_write_port(0, run_echo);
 
-    // A modest debt, sized so the hand-over itself happens but leaves a
-    // real, small carried remainder afterwards — the shape W14-39's
-    // follow-up already established happens routinely under its
-    // corrected per-instruction charge.
-    s.bus.apu_debt = 21 * 3;
+    // A debt sized so the hand-over itself happens but leaves a real,
+    // small carried remainder afterwards. Since W14-37 the `Run` action
+    // is not delivered the instant `catch_up_apu`'s first iteration
+    // decides it: that iteration itself spends one SPC cycle of the
+    // budget (it still ticks the shared clock and polls), and the
+    // decided action then sits in `IplBoot::poll`'s `pending` for
+    // `RUN_HANDOFF_AFTER_TRANSFER_CYCLES` (45) MORE polls before it is
+    // delivered — 46 SPC cycles total from this call's budget, confirmed
+    // against `the_immediate_run_handoff_is_not_observable_before_its_
+    // listed_cycles_elapse`'s own call-counting convention. One more
+    // (47) leaves the 1-cycle remainder this test's whole point depends
+    // on — too small to fund the driver's own first instruction (`MOV
+    // $F4,#$F1`, base cost 5 per `timing::CYCLES[0x8F]`), the shape
+    // W14-41's fix defers.
+    s.bus.apu_debt = 21 * 47;
     s.bus.catch_up_apu();
     assert!(s.bus.apu.boot.is_running(), "the hand-over must happen");
     assert_eq!(
@@ -880,6 +964,14 @@ fn a_settled_zero_kind_still_runs_immediately() {
     apu.cpu_write_port(1, 0x00);
     apu.cpu_write_port(0, 0xCC);
     apu.poll_boot();
+    // W14-37: the immediate-run path is still not FREE — the boot ROM's
+    // `jr main` fast path plus its shared jump tail costs
+    // `RUN_HANDOFF_IMMEDIATE_CYCLES` (42) SPC cycles, held in `pending`
+    // (see `IplBoot::poll`) — drain it before asserting the handoff
+    // completed.
+    for _ in 0..crate::apu::boot::RUN_HANDOFF_IMMEDIATE_CYCLES {
+        apu.poll_boot();
+    }
     assert!(apu.boot.is_running());
     assert_eq!(apu.cpu.pc, 0x0400);
     assert_eq!(apu.boot.transferred, 0);
@@ -941,4 +1033,146 @@ fn writes_still_reach_aram_under_a_supplied_boot_rom() {
     apu.write(0xFFC0, 0x99);
     assert_eq!(apu.read(0xFFC0), 0xCD, "the read still comes from the ROM");
     assert_eq!(apu.aram[0xFFC0], 0x99, "and the write still reached ARAM");
+}
+
+// ---------------------------------------------------------------------
+// W14-37: the boot ROM's own instruction cost on the go->jump handoff
+// and the per-byte handshake, from fullsnes' published disassembly.
+// ---------------------------------------------------------------------
+
+/// Pins the three cycle counts this ticket derived from fullsnes "SNES
+/// APU Main CPU Communication Port" -> "Boot ROM Disassembly" (a
+/// clean-room disassembly of the documented protocol — never Nintendo's
+/// bytes, per law 5) against this crate's own vector-verified
+/// `spc700::timing::CYCLES` table, so a change to either the constants
+/// or the table's entries for these opcodes is caught here rather than
+/// discovered as a fresh boot-race regression.
+///
+/// **After-transfer run** (`$FFDA`-`$FFFB`, the shape every title in this
+/// ticket's census brief uses — the CPU's counter jumps by 2+ to end a
+/// block, then hands over):
+/// `cmp Y,$F4`(3) + `jnz taken`(2+2) + `jns nt`(2) + `cmp Y,$F4`(3) +
+/// `jns nt`(2) + `movw YA,$F6`(5) + `movw $00,YA`(5) + `movw YA,$F4`(5) +
+/// `mov $F4,A`(4) + `mov A,Y`(2) + `mov X,A`(2) + `jnz nt`(2) +
+/// `jmp [$0000+X]`(6) = 45.
+///
+/// **Immediate run** (`$FFCF`-`$FFFB`, first `$CC` already carries kind
+/// 0): `cmp $F4,#$CC`(5) + `jnz nt`(2) + `jr main`(4), then the same
+/// `$FFEF`-`$FFFB` tail (31) = 42.
+///
+/// **Per-byte handshake** (`$FFDA`-`$FFE5`, one accepted byte): `cmp
+/// Y,$F4`(3) + `jnz nt`(2) + `mov A,$F5`(3) + `mov $F4,Y`(4) + `mov
+/// [$00]+Y,A`(7) + `inc Y`(2) + `jnz taken`(2+2) = 25.
+#[test]
+fn the_listings_cycle_counts_match_this_crates_own_timing_table() {
+    use crate::apu::spc700::timing::cycles;
+
+    // Opcode bytes are quoted here ONLY to index this crate's own
+    // vector-derived table — not transcribed as executable ROM content,
+    // and never stored, loaded or executed as SPC700 code anywhere in
+    // this crate (law 5). Each is the exact byte fullsnes' disassembly
+    // names at that address.
+    let after_transfer = cycles(0x7E, false) // $FFDA cmp Y,dp
+        + cycles(0xD0, true)   // $FFDC jnz, taken
+        + cycles(0x10, false)  // $FFE9 jns, not taken
+        + cycles(0x7E, false)  // $FFEB cmp Y,dp
+        + cycles(0x10, false)  // $FFED jns, not taken
+        + cycles(0xBA, false)  // $FFEF movw YA,dp
+        + cycles(0xDA, false)  // $FFF1 movw dp,YA
+        + cycles(0xBA, false)  // $FFF3 movw YA,dp
+        + cycles(0xC4, false)  // $FFF5 mov dp,A (the echo)
+        + cycles(0xDD, false)  // $FFF7 mov A,Y
+        + cycles(0x5D, false)  // $FFF8 mov X,A
+        + cycles(0xD0, false)  // $FFF9 jnz, not taken (cmd==0)
+        + cycles(0x1F, false); // $FFFB jmp [!abs+X]
+    assert_eq!(u16::from(after_transfer), RUN_HANDOFF_AFTER_TRANSFER_CYCLES);
+
+    let immediate = cycles(0x78, false) // $FFCF cmp dp,#imm
+        + cycles(0xD0, false)  // $FFD2 jnz, not taken
+        + cycles(0x2F, false)  // $FFD4 jr (bra)
+        + cycles(0xBA, false)  // $FFEF movw YA,dp
+        + cycles(0xDA, false)  // $FFF1 movw dp,YA
+        + cycles(0xBA, false)  // $FFF3 movw YA,dp
+        + cycles(0xC4, false)  // $FFF5 mov dp,A
+        + cycles(0xDD, false)  // $FFF7 mov A,Y
+        + cycles(0x5D, false)  // $FFF8 mov X,A
+        + cycles(0xD0, false)  // $FFF9 jnz, not taken
+        + cycles(0x1F, false); // $FFFB jmp [!abs+X]
+    assert_eq!(u16::from(immediate), RUN_HANDOFF_IMMEDIATE_CYCLES);
+
+    let per_byte = cycles(0x7E, false) // $FFDA cmp Y,dp (the match)
+        + cycles(0xD0, false)  // $FFDC jnz, not taken
+        + cycles(0xE4, false)  // $FFDE mov A,dp (fetch the data byte)
+        + cycles(0xCB, false)  // $FFE0 mov dp,Y (the echo)
+        + cycles(0xD7, false)  // $FFE2 mov [dp]+Y,A (store)
+        + cycles(0xFC, false)  // $FFE4 inc Y
+        + cycles(0xD0, true); // $FFE5 jnz, taken (loop back)
+    assert_eq!(u16::from(per_byte), BYTE_HANDSHAKE_CYCLES);
+}
+
+/// The handoff is not observable one cycle early: with
+/// `RUN_HANDOFF_IMMEDIATE_CYCLES - 1` polls spent, the CPU's own spin on
+/// `CMP $2140` must still see nothing new, and `pc`/`stopped` must be
+/// untouched — the whole point of charging the listing's cycles rather
+/// than handing over "for free" (the Super Turrican race this ticket was
+/// filed from, docs/TESTING.md's W14-33 note).
+#[test]
+fn the_immediate_run_handoff_is_not_observable_before_its_listed_cycles_elapse() {
+    let mut apu = Apu::new();
+    apu.cpu_write_port(2, 0x00);
+    apu.cpu_write_port(3, 0x04);
+    apu.cpu_write_port(1, 0x00);
+    apu.cpu_write_port(0, 0xCC);
+    apu.poll_boot();
+    for _ in 0..u16::from(crate::apu::boot::RUN_HANDOFF_IMMEDIATE_CYCLES) - 1 {
+        apu.poll_boot();
+        assert!(
+            !apu.boot.is_running(),
+            "the handoff fired before its documented cycle count elapsed"
+        );
+    }
+    apu.poll_boot();
+    assert!(
+        apu.boot.is_running(),
+        "and exactly at the documented count, it must have"
+    );
+    assert_eq!(apu.cpu.pc, 0x0400);
+}
+
+/// Same shape for the per-byte handshake: the echo/store must not be
+/// visible before `BYTE_HANDSHAKE_CYCLES` polls, and must be exactly at
+/// that count.
+#[test]
+fn the_byte_handshake_is_not_observable_before_its_listed_cycles_elapse() {
+    let mut apu = Apu::new();
+    apu.cpu_write_port(1, 0x01);
+    apu.cpu_write_port(2, 0x00);
+    apu.cpu_write_port(3, 0x02);
+    apu.cpu_write_port(0, 0xCC);
+    apu.poll_boot();
+    for _ in 0..u16::from(RUN_HANDOFF_AFTER_TRANSFER_CYCLES) {
+        apu.poll_boot();
+    }
+    assert_eq!(apu.ports_out[0], 0xCC, "the $CC echo settled first");
+
+    apu.cpu_write_port(1, 0xAB);
+    apu.cpu_write_port(0, 0x00);
+    apu.poll_boot();
+    for _ in 0..u16::from(BYTE_HANDSHAKE_CYCLES) - 1 {
+        apu.poll_boot();
+        assert_eq!(
+            apu.ports_out[0], 0xCC,
+            "the byte's echo fired before its documented cycle count elapsed"
+        );
+        assert_eq!(
+            apu.aram[0x0200], 0,
+            "and the store hadn't landed yet either"
+        );
+    }
+    apu.poll_boot();
+    assert_eq!(
+        apu.ports_out[0], 0x00,
+        "and exactly at the count, both must have"
+    );
+    assert_eq!(apu.aram[0x0200], 0xAB);
 }

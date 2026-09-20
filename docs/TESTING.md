@@ -806,6 +806,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-36 | 1265 | **1066** | 69 | 130 | **0** | **0** |
 | SNES, after W14-39 | 1265 | **1076** | 59 | 130 | **0** | **0** |
 | SNES, after W14-41 | 1265 | **1079** | 56 | 130 | **0** | **0** |
+| SNES, after W14-37/42/43 | 1265 | **1093** | 41 | 131 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -4903,6 +4904,343 @@ needs cycle-level CPU/SPC interleaving; follow-up W14-41 under W6-02a).
 Net +10, and the per-instruction cycle model is pinned exactly by
 5,080,000 vector cases.
 
+## W14-37 — the IPL boot ROM's own instruction cost on the go->jump
+handoff and the per-byte handshake, from fullsnes' published
+disassembly, 2026-09-20, release build.
+
+Filed from W14-33's Super Turrican finding: the HLE's `Run`/`Store`
+actions were applied in the SAME poll cycle that detected them, so the
+uploaded driver's first port read could observe the SPC "having already
+run" relative to the CPU's own cleanup write in a way real hardware
+cannot — real hardware's boot ROM spends its own documented instruction
+sequence between detecting each protocol event and making it observable.
+
+**Citation.** snes.nesdev.org's `S-SMP` page's "IPL Boot ROM" section
+gives only the high-level protocol steps and "about 520 master clocks
+per byte" — no disassembly. fullsnes' "SNES APU Main CPU Communication
+Port" section, however, publishes the full clean-room disassembly under
+the heading "Boot ROM Disassembly" (fetched into this session's
+scratchpad, not committed — the 64 bytes stay out of the tree per law 5;
+only the derived cycle counts below are code). Every cycle cost quoted
+is a lookup into this crate's own vector-verified
+`spc700::timing::CYCLES` table (`crates/rf-snes/src/apu/spc700/
+timing.rs`), pinned against that table by
+`the_listings_cycle_counts_match_this_crates_own_timing_table`
+(`crates/rf-snes/src/tests/apu_ports.rs`) so a drift in either the
+constants or the table's entries for these opcodes fails a test instead
+of silently rotting.
+
+**(a) Go->jump handoff, after a transfer** (`$FFDA`-`$FFFB` — the
+CPU's counter jumps by 2+ to end a block, then the boot ROM hands over;
+this is the shape every title in this ticket's census brief uses):
+
+```
+$FFDA cmp Y,$F4      3   observes the mismatch
+$FFDC jnz $FFE9      4   taken (2 base + 2 BRANCH_TAKEN_EXTRA)
+$FFE9 jns $FFDA      2   not taken
+$FFEB cmp Y,$F4      3   re-checks the same counter
+$FFED jns $FFDA      2   not taken -> falls into `main`
+$FFEF movw YA,$F6    5   loads the destination/entry address
+$FFF1 movw $00,YA    5   stashes it at zero page for the JMP operand
+$FFF3 movw YA,$F4    5   reloads the kick/cmd pair
+$FFF5 mov $F4,A      4   echoes the kick byte -- the CPU's spin ends here
+$FFF7 mov A,Y        2   cmd into A
+$FFF8 mov X,A        2   cmd into X, sets Z for cmd==0
+$FFF9 jnz $FFD6      2   not taken: cmd==0 means "execute"
+$FFFB jmp [$0000+X]  6   X==0: the transfer/entry address just stashed
+```
+Total: **45 SPC cycles** — `RUN_HANDOFF_AFTER_TRANSFER_CYCLES`.
+
+**(a') The same handoff, immediate run** (`$FFCF`-`$FFFB` — the CPU's
+very first `$CC` already carries kind 0, "run immediately"):
+```
+$FFCF cmp $F4,#$CC   5   observes the go byte
+$FFD2 jnz $FFCF      2   not taken
+$FFD4 jr main        4   unconditional
+```
+then the same `$FFEF`-`$FFFB` tail as above (31). Total: **42 SPC
+cycles** — `RUN_HANDOFF_IMMEDIATE_CYCLES`.
+
+**(b) Per-byte handshake** (`$FFDA`-`$FFE5`, one accepted byte, from the
+counter match to being positioned to see the next):
+```
+$FFDA cmp Y,$F4      3   the compare that matches
+$FFDC jnz $FFE9      2   not taken: Z set by the match
+$FFDE mov A,$F5      3   fetches the data byte
+$FFE0 mov $F4,Y      4   echoes the counter -- the CPU's spin ends here
+$FFE2 mov [$00]+Y,A  7   stores the byte at the destination
+$FFE4 inc Y          2   advances the counter
+$FFE5 jnz $FFDA      4   taken: loops back to poll for the next byte
+```
+Total: **25 SPC cycles** — `BYTE_HANDSHAKE_CYCLES`.
+
+**(c) Reset to `$BBAA` ready.** Already modelled (`IPL_INIT_CYCLES` =
+2404, `crates/rf-snes/src/apu/boot.rs`, cited to fullsnes since W14-10).
+Independently re-derived this session from the same disassembly's
+zero-page-clear loop (`$FFC0 mov X,#$EF` / `$FFC2 mov SP,X` / `$FFC3 mov
+A,#$00`, then `$FFC5 mov (X),A` / `$FFC6 dec X` / `$FFC7 jnz` looping):
+stepping X from `$EF` down, the STORE happens before the DECREMENT, so
+the loop body runs once per value `X` takes from `$EF` down to `$01`
+(239 passes — addresses `$01`-`$EF`, matching fullsnes' own "excluding
+$00h..01h [zero-page]" framing of this exact loop) before `dec X` reaches
+zero and the branch is not taken: 238 taken laps of `mov(X),A`(4)+`dec
+X`(2)+`jnz taken`(4)=10 each, plus one final lap of 4+2+`jnz not
+taken`(2)=8, plus the three setup instructions (2+2+2). That totals
+2+2+2 + 238x10 + 8 = **2394**, ten cycles under the existing constant's
+2404 (which counts 239 taken laps rather than 238). **Not changed in
+this ticket** — (c) is not in this ticket's acceptance (only (a)/(b) are
+newly charged), the existing constant is independently cited and tested
+back to W14-10 (the Super Bonk fix), and a 10-cycle/~0.01ms difference in
+a one-time 2.3ms startup delay is not worth the regression risk of
+touching a shipped, working constant outside this ticket's scope. Left
+as a named discrepancy for whoever next re-verifies (c).
+
+**What changed.** `crates/rf-snes/src/apu/boot.rs`: `IplBoot` gained a
+`pending: Option<(u16, BootAction)>` field. `cpu_wrote` (the pure
+protocol decision function the existing direct-call unit tests exercise)
+is UNCHANGED — it still decides the protocol outcome instantaneously,
+which is what keeps it testable without a clock around it. `poll` (the
+entry point `SnesBus::catch_up_apu`/`Apu::poll_boot` actually call, once
+per SPC cycle) now intercepts a `Run` or `Store` action: instead of
+returning it immediately, it stashes `(delay, action)` in `pending` and
+returns `BootAction::None`. Each subsequent `poll` call while `pending`
+is `Some` decrements the counter and returns `None` WITHOUT calling
+`cpu_wrote` again — real hardware is not polling the ports while it is
+mid-way through this fixed instruction tail either. When the counter
+reaches zero the held action is returned and applied for real (the ARAM
+write/echo/PC jump). `is_running()` was changed to `state == Running &&
+pending.is_none()` — `cpu_wrote` still flips `state` to `Running` the
+instant it decides to hand over, and if `is_running()` reported that
+early, `catch_up_apu`'s `!self.apu.boot.is_running()` guard would stop
+calling `poll` altogether and strand the pending action mid-countdown
+forever. `save`/`load` gained the two extra fields so a state saved
+mid-delay resumes the countdown rather than either replaying the action
+early or losing it (a lost pending `Run` would leave the 65816 spinning
+on an echo forever).
+
+**Before/after.** Before: `Run`/`Store` applied in the same poll cycle
+that decided them — 0 cycles charged for either the handoff or the
+per-byte handshake beyond `IPL_INIT_CYCLES`. After: `RUN_HANDOFF_AFTER_
+TRANSFER_CYCLES`(45)/`RUN_HANDOFF_IMMEDIATE_CYCLES`(42) charged on every
+`Run`, `BYTE_HANDSHAKE_CYCLES`(25) charged on every `Store`.
+
+**Tests.** New: `the_listings_cycle_counts_match_this_crates_own_
+timing_table` (pins all three constants against `spc700::timing::cycles`
+opcode-by-opcode, cited above), `the_immediate_run_handoff_is_not_
+observable_before_its_listed_cycles_elapse` and `the_byte_handshake_is_
+not_observable_before_its_listed_cycles_elapse` (behavioural: the action
+must not be visible one poll early, and must be visible exactly at the
+documented count). Existing `IplBoot`/`apu_ports` tests that asserted an
+instant handoff after a single `write_port`/`poll_boot` call were updated
+to settle the new delay first — `write_port`'s own helper now drains
+`RUN_HANDOFF_AFTER_TRANSFER_CYCLES` extra polls after every write (it
+already documented "assert against a machine that has run", which this
+extends), and the two CPU-driven tests that reach the handoff via `STP`
+or a real `NOP:BRA` loop (`real_65816_code_completes_the_boot_handshake`,
+`the_apu_keeps_running_while_the_cpu_never_touches_a_port`) hand the APU
+clock the extra cycles no CPU instruction produced, the same technique
+`apu_debt_past_the_per_call_bound_is_carried_not_dropped` already uses.
+No test's asserted OUTCOME changed, only how many cycles it takes to
+reach it.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean (one `needless_return` fixed along the way); `cargo test
+--workspace --release` — every crate green, 0 failures; `cargo test -p
+rf-snes --release` — **366 passed, 0 failed** (390 in the aggregate
+workspace count above includes rf-nes and other crates; 363 pre-existing
+rf-snes unit/integration tests plus the 3 new ones above); ignored SNES
+oracle suites: `singlestep_spc700_vectors` and
+`spc700_cycle_table_matches_the_vectors` pass, `spc_timer_reports_pass`
+(`blargg_spc`, "PASSED TESTS") passes,
+`gilyon_cputest::cputest_full_reports_success_and_every_test_passes`
+passes, `peterlemon_golden`'s three ignored tests pass,
+`undisbeliever_golden` passes. `scripts/validate-arch.sh` — `arch OK`.
+
+**Census children** (`RF_CENSUS_ROM=<zip> boot_census-* --ignored --exact
+boot_census_child`, exit 0 = rendered, 10 = blank within the 600-frame
+budget): Super Turrican (USA) 10, Super Turrican (USA) (Virtual Console)
+10, Rival Turf! (USA) 10, Wario's Woods (USA) 10, Soul Blazer (USA) 10,
+Super Mario RPG - Legend of the Seven Stars (USA) 0, Super Mario World
+(USA) 0, Wild Guns (USA) 0, Kirby Super Star (USA) 0, ActRaiser 2 (USA)
+10, Robotrek (USA) 10, Clay Fighter (USA) 0, Full Throttle - All-American
+Racing (USA) (Beta) 0, NHL 95 (USA) 0, Final Fantasy - Mystic Quest (USA)
+0. **No title in this list moved in either direction** — matching every
+prior triage's documented status for each. This is the expected result:
+this ticket's fix addresses one specific, previously-unverified timing
+gap the W14-33 note flagged as a "candidate", not a proven root cause for
+any of the five still-BLOCKED titles in this list, and the earlier
+per-title traces (Rival Turf!'s exact zero-byte provenance, Super
+Turrican's stuck-`out[0]` call sequence, Wario's Woods' driver-level
+second handshake) all locate their deadlocks strictly inside the
+uploaded driver's own logic, not in the HLE handoff's timing. The full
+SNES census re-run with `RF_CENSUS_OUT` is the orchestrator's job per
+this ticket's brief and is left to them; nothing in `crates/rf-snes/**`
+outside the boot handshake changed, so no other title's boot behaviour
+should differ, but the fixed cycle charges do shift the APU's clock
+relative to the CPU by a few dozen cycles at every upload's handoff and
+every byte, which is exactly the kind of change a full re-census is for.
+
+**Determinism**: unaffected — the added delays are fixed SPC-cycle
+counts driven by the same shared APU clock the SPC700 core already
+advances on (`Apu::tick_clock`), not wall time, not per-instruction
+special-casing, and not randomised; a save-state taken mid-delay resumes
+the same countdown on load (`IplBoot::save`/`load`, new fields for
+`pending`).
+
+### Re-applied on the W14-39/W14-41 base: one unified handoff-instant model (2026-09-20)
+
+W14-37 was parked (see the note above and the plan.json HELD entry) because
+merged onto the W14-39/W14-41 base it failed
+`a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo`
+and `a_port_read_immediately_after_hand_over_does_not_see_the_next_
+instruction_early`: two models of the same handoff instant, never
+reconciled. This re-applies W14-37 unchanged in mechanism and shows the two
+models were never actually in conflict — only two of the newer tests were.
+
+**The unified model.** `IplBoot::poll`'s `pending` countdown (`boot.rs`,
+unchanged by this session) already pays the boot ROM's listed instruction
+cost — 45/42/25 SPC cycles for the after-transfer/immediate/per-byte cases
+— out of the SAME clock `SnesBus::catch_up_apu`'s loop spends on every
+ordinary SPC700 instruction: each call to `poll_boot` while `pending` is
+`Some` happens inside that loop's "boot still owns the machine" branch
+(`!self.apu.boot.is_running()`), which ticks the shared APU clock by
+exactly one SPC cycle and charges it against the call's own `spc_cycles`
+budget before returning. `pending` is not a second clock bolted on
+alongside `apu_debt`/`apu_overspent` — it is a sequence of instructions
+this same budget has to fund, one cycle at a time, exactly like any real
+SPC700 opcode. This is why `boot.rs`, `bus.rs` and `apu/mod.rs` needed
+**zero logic changes** to compose with W14-39/W14-41: `IplBoot::is_running()`
+already reports `false` for the whole pending window (`state == Running &&
+pending.is_none()`), so `catch_up_apu`'s loop never leaves the "not
+running" branch until the delayed action is actually delivered — the exact
+same invariant W14-39's hand-over-edge stop and W14-41's per-instruction
+peek-and-defer both rely on. The `Run` edge lands at a well-defined point
+in that same budget (see below), and W14-41's deferral rule for ordinary
+instructions applies unchanged the instant control passes to the freshly
+woken SPC700, because nothing about it inspects how the hand-over got
+decided.
+
+**Where the edge actually lands.** The iteration that decides `Run`/`Store`
+(the one where `cpu_wrote` fires) is itself one budget cycle, and the
+listed constant is exactly how many MORE cycles the pending countdown
+needs before it delivers the action — confirmed against the pre-existing,
+already-passing `the_immediate_run_handoff_is_not_observable_before_its_
+listed_cycles_elapse`/`the_byte_handshake_is_not_observable_before_its_
+listed_cycles_elapse` (`crates/rf-snes/src/tests/apu_ports.rs`), which
+poll directly and pin this exact convention: 1 (decision) + N (the
+constant) total polls from the triggering write to delivery. So a
+`catch_up_apu` call needs **46** SPC cycles of budget to complete an
+after-transfer `Run` hand-over in one call (1 + 45), **43** for an
+immediate one (1 + 42), **26** per accepted byte (1 + 25).
+
+**Test changes and why.** Two tests, both added under W14-39/W14-41 on a
+base that had no post-decision delay at all, encoded that assumption two
+ways — not a defect in the unified model, per this ticket's own
+instruction to fix the test's expectation rather than the model when the
+listing is the arbiter here:
+- `a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_
+  echo` and `a_port_read_immediately_after_hand_over_does_not_see_the_next_
+  instruction_early` (`crates/rf-snes/src/tests/apu_ports.rs`) each defined
+  a local `write` closure that called `poll_boot()` exactly once per port
+  write. That is correct against a model where `Store`/`Run` complete
+  instantly, but under W14-37 a `Store` decided mid-closure sits in
+  `pending` for 25 more cycles, and while `pending` is `Some`, `poll`
+  does not even look at `ports_in` — so the very next write in the same
+  closure was silently dropped rather than delayed, only surviving by
+  accident when a later out-of-range counter value forced the "end of
+  block" mismatch branch regardless of the mangled per-byte history. Fixed
+  by draining `RUN_HANDOFF_AFTER_TRANSFER_CYCLES` extra polls after every
+  write, exactly the pattern the crate's own top-of-file `write_port` free
+  function already established for this reason.
+- Both tests' `apu_debt` values were sized for the old zero-delay model
+  (40 and 3 SPC cycles) and are now too small to let the `Run` hand-over
+  complete in a single `catch_up_apu` call at all (needs 46, per the
+  accounting above). Raised to `21 * 80` (comfortably over 46, to also
+  prove a large leftover budget still does not let the freshly-run program
+  execute) and `21 * 47` (46 to complete the hand-over plus a genuine
+  1-cycle remainder, too small to fund the driver's own first instruction,
+  `MOV $F4,#$F1` at base cost 5 per `timing::CYCLES[0x8F]` — the exact
+  shape W14-41's fix defers) respectively.
+
+No other test changed, and none of the existing `IplBoot`/`apu_ports`
+tests, `spc700_vectors`, `spc_timer_reports_pass`, `gilyon_cputest`,
+`singlestep_65816_vectors`, `peterlemon_golden`, `undisbeliever_golden`, or
+the `rf_scroller_s` five-minute determinism replay needed any change —
+all pass unmodified. Determinism is unaffected for the same reason W14-37's
+original write-up gave: the pending countdown is fixed SPC-cycle counts on
+the same shared, deterministic clock, not wall time.
+
+**Gate.** `cargo fmt --check` clean. `cargo clippy --workspace -- -D
+warnings` clean (exit 0). `cargo test -p rf-snes` (debug, and separately
+`--release`): **369 passed, 0 failed, 1 ignored** both ways. Ignored
+oracle suites, all re-run green: `singlestep_spc700_vectors` and
+`spc700_cycle_table_matches_the_vectors` (`spc700_vectors`, exit 0),
+`spc_timer_reports_pass` (`blargg_spc`, "PASSED TESTS", exit 0),
+`cputest_full_reports_success_and_every_test_passes` (gilyon, exit 0),
+`singlestep_65816_vectors` (5,080,000/5,080,000, exit 0, ~961s release),
+`peterlemon_golden`'s three tests (exit 0), `undisbeliever_goldens_match`
+(exit 0), `rf_scroller_s_five_minute_replay_is_deterministic` (exit 0,
+57s release).
+
+**Census children**, `RF_CENSUS_ROM=<zip> boot_census-* --ignored --exact
+boot_census_child` against the real library (`~/Games/Roms/snes`), this
+ticket's fifteen plus the seven titles W14-37's first census (on the old
+base) had regressed, each cross-checked against an unmodified `main` tip
+(894bd05) built the same way to isolate what THIS re-application moves,
+not what W14-39/W14-41 already changed:
+
+| Title | main | this branch | moved? |
+|---|---|---|---|
+| Super Turrican (USA) | 0 | 0 | no |
+| Rival Turf! (USA) | 0 | 0 | no |
+| Wario's Woods (USA) | 0 | 0 | no |
+| Tommy Moe's Winter Extreme | 0 | 0 | no |
+| International Tennis Tour (USA) | 0 | 0 | no |
+| Rendering Ranger R2 (USA) | 0 | 0 | no |
+| Soul Blazer (USA) | 10 | 10 | no (pre-existing W14-33/38 family) |
+| ActRaiser 2 (USA) | 10 | 10 | no (same family) |
+| Super Mario RPG (USA) | 0 | 0 | no |
+| Super Mario World (USA) | 0 | 0 | no |
+| Wild Guns (USA) | 0 | 0 | no |
+| Kirby Super Star (USA) | 0 | 0 | no |
+| NHL 95 (USA) | 0 | 0 | no |
+| Clay Fighter (USA) | 0 | 0 | no |
+| Full Throttle (USA) (Beta) | 0 | 0 | no |
+| Best of the Best (USA) | 0 | 0 | no |
+| Men in Black (USA) (Pirate) | 0 | 0 | no |
+| Power Rangers Zeo (USA) | 10 | 10 | no — already blank on `main` alone (a pre-existing W14-39 "budget edge", not this ticket's doing) |
+| Super Aquatic Games (USA) | 0 | 0 | no |
+| Troddlers (USA) | 0 | 0 | no |
+| Xardion (USA) | **0** | **10** | **yes — regressed** |
+
+Six of the seven titles the OLD (pre-W14-39/41) W14-37 branch traded away
+now match `main` exactly — the base this ticket re-applies onto already
+absorbed most of that shifted race. **Only Xardion regresses, and it is
+named, not tuned around:** `title_probe` (`PROBE_ROMS=<Xardion zip>
+PROBE_INSTR=45700000`) shows the title is not deadlocked — by 45.7M CPU
+instructions `apu.boot_running=true`, `forced_blank=false`, `bright=15`,
+`vram_nonzero=40416`, `cgram_nonzero=113`, i.e. it boots and draws real
+content — but `sys.bus.timing.frame=3443` at that point, an order of
+magnitude past `boot_census`'s 600-frame/10-second cutoff. This is the
+same "budget edge" shape already documented for Power Rangers Zeo in
+W14-39's own notes (`first varied frame 591 -> 604`): the newly-charged
+45/25-cycle handoff and per-byte costs shift Xardion's own boot sequence
+just enough that its first visible frame moves from inside the census
+window to outside it. Not investigated further in this ticket's scope —
+`boot_census`'s 600-frame cutoff is a triage budget, not a correctness
+oracle, and confirming the exact instruction where the shift accumulates
+would need the same per-title trace discipline as W14-33's — but it is a
+real, reproducible, single-title timing shift this specific re-application
+causes, so **status stays BLOCKED**, not DONE, per this ticket's own gate:
+one canary regressed. All other movement in this table (International
+Tennis Tour, Rendering Ranger R2, and the recovery of the other six of the
+original seven) is W14-39/W14-41's, already recorded under those tickets'
+own sections above; this table exists only to isolate what re-applying
+W14-37 changes on top of them, which is exactly one title.
+
+**Determinism**: unaffected — same shared APU clock, no wall time, no
+per-instruction special-casing added or changed by this session.
+
 ## W14-40 — the "BRK-dispatched OS calls" do not exist; corrected
 ## disassembly of $9D:FE44-FF09; idle length not isolated, BLOCKED
 
@@ -5646,3 +5984,24 @@ test hides its `eprintln!` rep log, so the exact rep count under that
 run isn't recoverable, but the target test passed on this concurrent
 run same as the three isolated `-p rf-enhance` runs).
 `scripts/validate-arch.sh`/`validate-plan.mjs`: both OK.
+
+**Full SNES census (orchestrator, 2026-09-21, the W14-37 tree stacked on
+W14-42 and W14-43, per-title `RF_CENSUS_OUT` diff against the W14-41
+run):** **1079/56/130/0/0 -> 1093/41/131/0/0** ("SNES, after
+W14-37/42/43" row above). The run itself reported 1091 rendered and two
+TIMED OUT (Donkey Kong Country, Donkey Kong Country 2) because a sibling
+lane was deliberately saturating the machine for W14-44's load test
+during it; both re-run in 1-2 s and exit 0 on an idle machine, so the
+row records the effective result. Fifteen rows moved to *rendered
+something*: **ActRaiser 2**, **Illusion of Gaia** (USA, Beta 1, Beta
+2), **Robotrek**, **Soul Blazer** (W14-42's CGWSEL fix — the "APU
+deadlock" family's last members were a black main screen, not a
+deadlock), **Shien's Revenge** (USA and beta; W14-43's `$4200` open
+bus), **Adventures of Yogi Bear**, **Jim Power: The Lost Dimension in
+3D**, **Mighty Max (Auto Demo)**, **Nickelodeon GUTS**, **Pinocchio**
+(both betas), **Slap Stick (Beta)** (CGWSEL as well — none had been
+traced to it, all had left the colour window disabled). **Top Gear
+3000** moved from uniform to *refused* with its real chip named
+(DSP-4). One row moved to uniform: **Xardion**, first varied frame 562
+-> 621 under W14-37's listed boot-handoff cycles — a budget edge like
+Power Rangers Zeo, not a stall.

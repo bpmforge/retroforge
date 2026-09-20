@@ -4076,3 +4076,41 @@ stories, 10 decisions).
   stays named. W14-37 is parked behind this ticket: its IPL cycle
   counts must be re-applied on the new handoff model. Gate: workspace
   **2226 passing / 0 failed / 43 ignored**, clippy clean, arch OK.
+
+- **W14-37 re-applied, still BLOCKED** (2026-09-20, lane wt-w14-37). The
+  pending Run/Store delay and the W14-39/41 catch-up edge stop turned
+  out to be one model, not two: `pending` is an SPC-instruction-cost
+  paid from `catch_up_apu`'s own budget, and `is_running()` already kept
+  the loop in the boot-owns-the-machine branch for the whole delay, so
+  `boot.rs`/`bus.rs`/`apu/mod.rs` needed zero logic changes to compose.
+  Only two newer `apu_ports.rs` tests needed fixing (single-poll setup
+  helpers and zero-delay-era debt budgets); fixed per the listing's own
+  cycle accounting, not by changing the model. Gate green: rf-snes
+  369/369, every named ignored oracle suite green including
+  `singlestep_65816_vectors` (5.08M/5.08M) and the `rf_scroller_s`
+  five-minute determinism replay. Census against the real ROM library,
+  cross-checked against unmodified `main`: six of the seven titles the
+  old pre-W14-39 branch traded away now match `main` exactly, but
+  **Xardion (USA) regresses** — not deadlocked (renders real content by
+  45.7M instructions per `title_probe`), just past `boot_census`'s
+  600-frame cutoff, the same budget-edge shape already named for Power
+  Rangers Zeo. One canary regressed, so status stays BLOCKED per this
+  ticket's own gate. Full derivation and census table in
+  `docs/TESTING.md`'s W14-37 subsection.
+
+- **W14-42, W14-43, W14-37 done — the "APU deadlock" family was a black
+  screen** (2026-09-21). Re-tracing the Quintet titles on the corrected
+  timing base found their handshake completes; what kept the census
+  blank was `$2130` CGWSEL's clip-to-black and prevent-math window
+  modes 1 and 2 being swapped (fullsnes: 1 = outside the colour window,
+  2 = inside), so a disabled colour window with mode 2 forced every
+  main-screen pixel black. One swap, one corrected test, one new test.
+  W14-43 made `$4200` read open bus (Shien's Revenge polls it) and
+  refused Top Gear 3000's DSP-4 honestly by header checksum. W14-37's
+  IPL boot-ROM cycle counts landed once the pending delay was shown to
+  be paid from the same catch-up budget as W14-39/41's deferral — no
+  logic change, two tests corrected. Census 1079/56/130 ->
+  **1093/41/131**: fifteen up, Top Gear 3000 to refused, Xardion to a
+  budget edge. W14-44 made the stitcher budget test best-of-five after
+  two load flakes. Gate on the stacked tree: workspace **2232 passing /
+  0 failed / 43 ignored**, clippy clean, arch OK.
