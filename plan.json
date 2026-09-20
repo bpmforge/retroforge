@@ -7690,6 +7690,27 @@
    "W14-43 FILED 2026-09-21 by the orchestrator from the W14-34 register-read family (3 titles). Small, self-contained; both shapes recur in the library.",
    "W14-43 DONE 2026-09-20: Shien's Revenge x2 fixed (bus.rs $4200 read was echoing nmitimen's written bits instead of open bus; removed the arm so it falls through to the bus's existing MDR model, per fullsnes '4200h-437Fh' + snes.nesdev.org open-bus). Top Gear 3000 traced to a misidentification, not a mirror bug: header chipset $03 is generic DSP (fullsnes/nesdev: the byte cannot distinguish DSP-1/2/3/4), so it was accepted as Coprocessor::Dsp1 and routed through the DSP-1 HLE, whose idle sentinel $80 the boot poll never saw change; added a checksum-keyed (not title-keyed, law 5) refusal in rf-cart/src/snes.rs naming DSP-4 for checksum $5327. Two new unit tests (one exercises Cpu::step end to end per the ticket's contract). Also verified: no regression on DSP-1 titles sharing the same chipset byte (Pilotwings/Super Mario Kart/Suzuka 8 Hours/Dungeon Master all still render), plus Flintstones (En,Fr,De,Es,It) and Full Throttle (Beta) census children. Gate green: fmt/clippy clean, rf-cart 53 passed, rf-snes lib 368 passed/1 ignored, gilyon/blargg_spc/spc700_vectors/peterlemon_golden all green; singlestep_65816_vectors 5,080,000 passed/0 failed (933s). Census: both Shien's Revenge dumps now exit 0 (rendered); Top Gear 3000 now exits 12/refused (was hanging in the uniform bucket); all named canaries unmoved. See docs/TESTING.md W14-43 section for the full trace."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-enhance",
+  "depends_on": [],
+  "points": 1,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-44",
+  "title": "rf-enhance stitcher frame-budget test flakes under a parallel workspace run (2.7 s vs 0.45 s alone) — make the budget assertion load-robust",
+  "write_scope": [
+   "crates/rf-enhance/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-44: per_frame_tracking_and_stitching_cost_fits_comfortably_in_the_frame_budget (crates/rf-enhance/tests/stitcher_determinism.rs:371) failed twice on 2026-09-21 under `cargo test --workspace` with three sibling cargo builds running, and passes 3/3 in isolation at ~0.45 s; the test either measures CPU time rather than wall time, takes the best of N repetitions, or is marked as a benchmark-class test that the gate runs serially — chosen with a one-line justification, keeping a real performance assertion (not deleting it)",
+   "W14-44: `cargo test -p rf-enhance` and the full workspace gate pass; the change is documented in docs/TESTING.md's flaky-test notes"
+  ],
+  "notes": [
+   "W14-44 FILED 2026-09-21 by the orchestrator: two false gate failures in one day cost a re-run each."
+  ]
  }
 ]
 }
