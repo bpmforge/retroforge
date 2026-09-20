@@ -7620,7 +7620,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "id": "W14-41",
   "title": "CPU/SPC interleave granularity: catch_up_apu commits whole SPC instructions past a port write — Tommy Moe's residual handoff race",
@@ -7634,6 +7634,7 @@
    "W14-41: spc700_vectors, spc_timer_reports_pass, gilyon and the IplBoot tests stay green; census children on Tommy Moe's, Rival Turf!, Super Turrican, Wario's Woods, Super Mario RPG (USA), Soul Blazer, ActRaiser 2, Super Mario World, Wild Guns; orchestrator census with RF_CENSUS_OUT; if only the cycle-accurate executor (W6-02a) can close it, say so with the trace and leave it blocked under W6-02a"
   ],
   "notes": [
+   "W14-41 DONE 2026-09-20 by the executor. Fixed the residual Tommy Moe's clobber W14-39's follow-up left open: catch_up_apu now peeks the next SPC700 opcode (ApuBus::peek, side-effect-free) and its base cost from timing::CYCLES before starting it, deferring (carrying the shortfall into apu_debt, same bookkeeping as the existing hand-over guard) whenever even that lower-bound cost would overshoot the call's remaining budget -- generalising the hand-over-only just_handed_over guard to every instruction boundary. Unit test a_port_read_immediately_after_hand_over_does_not_see_the_next_instruction_early reproduces Tommy Moe's exact SPC700 shape, fails without the fix (left: 241 i.e. 0xF1, right: 11 i.e. the Run echo) and passes with it; a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo (W14-39) stays green. Census: Tommy Moe's boot_census_child moves 10 -> 0 (confirmed with a stash/pop A-B build in this worktree); Rival Turf!, Super Turrican, Wario's Woods, Super Mario RPG, Super Mario World, Wild Guns unmoved at 0; Soul Blazer and ActRaiser 2 unmoved at 10, confirmed pre-existing and unrelated (same on unmodified main) -- the W14-33/38 BLOCKED family, out of this ticket's scope. Gate: cargo fmt --check clean, cargo clippy --workspace -D warnings clean, cargo test -p rf-snes --release 366 passed/0 failed/1 ignored, singlestep_spc700_vectors/spc_timer_reports_pass/gilyon cputest_full_reports_success_and_every_test_passes/peterlemon_golden (3)/undisbeliever_golden (2)/rf_scroller_s_five_minute_replay_is_deterministic/singlestep_65816_vectors (5,080,000/5,080,000) all green, scripts/validate-arch.sh arch OK. Not the W6-02a cycle-accurate executor -- a call-granularity ordering fix (never start an instruction the current call's debt has not earned), not cycle-by-cycle core interleaving.",
    "W14-41 FILED 2026-09-21 by the orchestrator from W14-39's Tommy Moe's finding. Main rendered it by accident (smaller per-instruction cost rounded the owed budget to zero)."
   ]
  }

@@ -17,6 +17,7 @@
 
 use rf_cart::SnesMapMode;
 
+use crate::apu::spc700::{timing, ApuBus};
 use crate::apu::Apu;
 use crate::cpu::CpuBus;
 use crate::dma::{Dma, CYCLES_PER_BYTE, CYCLES_PER_CHANNEL};
@@ -718,17 +719,17 @@ impl SnesBus {
         // SPC had already executed a 5-cycle instruction on 1 cycle of
         // debt, clobbering the echo the 65816 was still waiting for.
         let mut spent = 0u64;
-        // Ticket W14-39 follow-up (Tommy Moe's Winter Extreme): does THIS
-        // call's own leftover budget let the SPC700 run its own first
-        // real instructions immediately after `poll_boot` hands control
-        // over? `BootAction::Run`'s doc calls its echo "not optional and
-        // not cosmetic" for exactly this reason — the 65816 is spinning
-        // on `CMP $2140` for it — and `IPL_INIT_CYCLES` already exists to
-        // stop the SAME kind of clobber for a re-entry at `$FFC0`. That
-        // protection never covered THIS handoff edge, because before
-        // W14-39 a single call's `spc_cycles` budget came from
-        // access-only master cycles and was rarely big enough to run a
-        // whole SPC700 instruction on top of the one cycle `poll_boot`
+        // Ticket W14-39 follow-up (Tommy Moe's Winter Extreme, part 1):
+        // does THIS call's own leftover budget let the SPC700 run its own
+        // first real instructions immediately after `poll_boot` hands
+        // control over? `BootAction::Run`'s doc calls its echo "not
+        // optional and not cosmetic" for exactly this reason — the 65816
+        // is spinning on `CMP $2140` for it — and `IPL_INIT_CYCLES`
+        // already exists to stop the SAME kind of clobber for a re-entry
+        // at `$FFC0`. That protection never covered THIS handoff edge,
+        // because before W14-39 a single call's `spc_cycles` budget came
+        // from access-only master cycles and was rarely big enough to run
+        // a whole SPC700 instruction on top of the one cycle `poll_boot`
         // itself charges. W14-39's correct (larger) per-instruction
         // charge makes that leftover common, so the uploaded program's
         // own first port write (e.g. Tommy Moe's driver's `MOV $F4,#$F1`
@@ -736,7 +737,51 @@ impl SnesBus {
         // catch-up call that performed the hand-over, before the 65816's
         // NEXT instruction ever gets to read the echo — real hardware
         // interleaves the two cores cycle by cycle and cannot do this.
-        let mut just_handed_over = false;
+        //
+        // Ticket W14-41 (Tommy Moe's, part 2): stopping at the hand-over
+        // edge is not enough on its own. The CPU's *very next* instruction
+        // is `CMP $2140`, whose bus **read** calls this function again
+        // before returning a value. That second call sees only the tiny
+        // remainder deferred above — routinely >= 1 owed SPC cycle, now
+        // that W14-39 charges real per-instruction cost — and an SPC700
+        // instruction cannot run partially: any nonzero owed budget once
+        // `boot.is_running()` used to commit this loop to running one
+        // whole instruction regardless of whether the debt covered its
+        // real cost, unconditionally overspending the rest via
+        // `apu_overspent`. That whole instruction is the driver's own
+        // first `MOV $F4,#$F1` — so the very read this fix was protecting
+        // the echo for was the read that triggered its clobber, one call
+        // later than before, via the read path rather than the write
+        // path.
+        //
+        // The fix: before starting ANY real SPC700 instruction, peek its
+        // opcode (`ApuBus::peek`, side-effect-free) and look up its BASE
+        // cost from `timing::CYCLES` — the not-taken cost, which is a
+        // true lower bound on what the instruction will actually cost
+        // (a taken branch only ever adds `BRANCH_TAKEN_EXTRA` on top).
+        // If even that lower bound would overshoot this call's remaining
+        // budget, the instruction has not genuinely been earned by real
+        // elapsed CPU time yet — real hardware would not have finished
+        // it, let alone let its port writes become visible — so this call
+        // stops WITHOUT starting it, carrying the untouched remainder to
+        // `apu_debt` for the next call to draw on. This is the same
+        // "defer the shortfall" bookkeeping the hand-over edge above
+        // already uses, generalised to every instruction rather than just
+        // the first one after a hand-over (fullsnes "SNES APU Memory and
+        // I/O Map": `$F4`-`$F7` are the two ports each side reads the
+        // other's last WRITE from, so which SIDE's write another core's
+        // read observes is exactly what this ordering decides). A small
+        // residual overshoot from a branch's taken-vs-not-taken cost can
+        // still land (bounded by `BRANCH_TAKEN_EXTRA` = 2 SPC cycles, far
+        // short of a whole extra instruction) and is absorbed by
+        // `apu_overspent` exactly as before. `DBNZ dp`/`CBNE dp`/`BBS`/
+        // `BBC dp.bit` are direct-page read-modify-write branches and CAN
+        // touch `$F4`-`$F7` if a program's direct page happens to land
+        // there — this residual is not categorically port-free, only
+        // bounded at 2 SPC cycles versus a whole extra instruction's
+        // worth (5+ here), which is why it has never reproduced this
+        // bug's failure mode in practice.
+        let mut deferred = false;
         while spent < spc_cycles {
             if self.apu.cpu.stopped || !self.apu.boot.is_running() {
                 let running_before = self.apu.boot.is_running();
@@ -763,15 +808,26 @@ impl SnesBus {
                     // so the 65816's next instruction is guaranteed to
                     // observe the `Run` echo before the freshly-woken
                     // core gets a chance to overwrite it.
-                    just_handed_over = true;
+                    deferred = true;
                     break;
                 }
                 continue;
             }
+            let opcode = self.apu.peek(self.apu.cpu.pc);
+            let min_cost = u64::from(timing::cycles(opcode, false));
+            if spent + min_cost > spc_cycles {
+                // This instruction cannot possibly finish inside this
+                // call's remaining budget — starting it anyway is exactly
+                // last ticket's bug at every instruction boundary instead
+                // of just the hand-over one. Leave the SPC's PC untouched
+                // and defer.
+                deferred = true;
+                break;
+            }
             let cycles = self.apu.step_counted().unwrap_or(1);
             spent += u64::from(cycles.max(1));
         }
-        if just_handed_over {
+        if deferred {
             // The unspent portion is a shortfall, not an overrun — the
             // opposite of `apu_overspent`'s usual direction — so it goes
             // back into `apu_debt` for the next call to draw on, rather
