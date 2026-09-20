@@ -32,6 +32,10 @@
 //! PROBE_ACCESSWIN=start:end         sum bus accesses and master cycles charged over
 //!                                    every instruction from PC start (inclusive) to
 //!                                    end (exclusive), 24-bit hex (W14-24)
+//! PROBE_SPCREGPC=hex[,hex]          print the SPC700's A/X/Y/SP and the four bytes
+//!                                    above SP (what a RET would pop) whenever the
+//!                                    SPC700 is about to execute an instruction at
+//!                                    one of these 16-bit ARAM PCs (W14-27)
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -310,6 +314,33 @@ fn probe() {
                     sys.cpu.x,
                     sys.cpu.y
                 );
+            }
+            // W14-27: print SPC700 register + top-of-stack state whenever
+            // the SPC700 is about to execute an instruction at one of the
+            // given 16-bit ARAM PCs. Used to catch the A/Y register and
+            // the RET-popped return address at a suspected push-address/
+            // RET computed-jump dispatch (see PROBE_SPCREGPC in the
+            // module doc).
+            if let Ok(list) = std::env::var("PROBE_SPCREGPC") {
+                for tok in list.split(',') {
+                    if let Ok(target) = u16::from_str_radix(tok, 16) {
+                        if apu.cpu.pc == target {
+                            println!(
+                                "      SPCPCLOG n={n} pc={:04X} a={:02X} x={:02X} y={:02X} sp={:02X} \
+                                 stack01={:02X} stack02={:02X} stack03={:02X} stack04={:02X}",
+                                apu.cpu.pc,
+                                apu.cpu.a,
+                                apu.cpu.x,
+                                apu.cpu.y,
+                                apu.cpu.sp,
+                                apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(1)) as usize)],
+                                apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(2)) as usize)],
+                                apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(3)) as usize)],
+                                apu.aram[0x0100 | ((apu.cpu.sp.wrapping_add(4)) as usize)],
+                            );
+                        }
+                    }
+                }
             }
             if pcv != ring_last {
                 pcring.push_back(pcv);

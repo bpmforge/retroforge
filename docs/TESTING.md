@@ -1609,3 +1609,130 @@ unchanged, since nothing in `rf-snes`/`rf-harness` was touched — see
 the commit trailer for counts. The SNES census was not re-run (no
 behavior changed); Super Ninja Boy (both the retail and Beta dumps)
 stays wherever the last census left it.
+
+## W14-27 — Soul Blazer: driver dispatch RETs to $0102 after a
+byte-exact-to-ROM extended-command table read; BLOCKED, the game's own
+data (2026-09-20)
+
+The 2026-09-17 triage guessed this was the same class as W14-24 (a
+`$4204-$4217` math-unit count feeding a corrupted upload). It is not.
+Traced end to end, every byte involved matches the ROM exactly; no
+emulator defect was found anywhere on the path.
+
+**The halt, pinned with `PROBE_STOP_ON_SPC_STOP`/`PROBE_SPCRING`/
+`PROBE_ARAM`.** `spc.stopped=true` with `apu.boot.is_running()=true`;
+SPC PC settles at `$0306` (`STOP`, opcode `$FF`) after a straight-line
+climb through ARAM `$0102-$0306`, every byte of which is `$00` (`NOP`)
+— a PC that ran off the end of cleared direct-page work RAM into a
+stray `$FF`. `PROBE_ARAM=100:310` dumped at five points from
+instruction 100,000 to 3,000,000 shows this region is **deterministically
+all-zero for the entire run** (the only live byte is an unrelated
+counter at `$01CB-$01CF`) — real, ordinary cleared work RAM, not a
+region that was ever supposed to hold code and came up empty from a
+failed upload.
+
+**How the SPC gets there, disassembled by hand from the ARAM dump (no
+SPC700 disassembler in `title_probe`, same method as W14-23 stage 2).**
+A one-shot instrumented run (`PROBE_SPCREGPC`, new and kept — see
+below) caught the exact registers at the fault:
+
+```
+09B4-like dispatcher, this game's own table at $0994:
+  07C3: 1C          ASL A            ; A=$FE -> A=$FC (8-bit wrap)
+  07C4: FD          MOV Y,A          ; Y=$FC
+  07C5: F6 95 09    MOV A,!$0995+Y   ; reads $0A91 -> A=$01
+  07C8: 2D          PUSH A           ; pushes hi byte of target
+  07C9: F6 94 09    MOV A,!$0994+Y   ; reads $0A90 -> A=$02
+  07CC: 2D          PUSH A           ; pushes lo byte of target
+  ...
+  07DE: 6F          RET              ; pops $02,$01 -> jumps to $0102
+```
+
+`PROBE_SPCREGPC=07c3,07de` confirms the exact registers at the two
+ends of this: `n=4735112 pc=07C3 a=FE y=FE sp=CB` (about to double the
+raw command byte `$FE`), then `n=4735165 pc=07DE sp=C9 stack01=02
+stack02=01` (about to `RET`, top of stack holds the just-pushed
+`$02,$01` — target `$0102` byte for byte). This is the well-known
+SPC700 "push address, `RET`-to-jump" computed-dispatch idiom, correctly
+executed: `ASL`/`MOV`/`PUSH`/`RET` all behave exactly per the SPC700
+opcode definitions (snes.nesdev.org/wiki/SPC700_instruction_set), with
+the ordinary 8-bit wraparound of the `Y` register that real hardware
+has no way to avoid either — `cmd*2` for an 8-bit `Y` aliases every
+`cmd` 128 apart onto the same table slot, so command `$FE` reads the
+same table entry as command `$7E`.
+
+**Every byte on this path matches the ROM exactly — checked, not
+assumed.** `PROBE_FINDROM` located the dispatcher routine itself
+(`1C FD F6 95 09 2D F6 94 09 2D DD 5C FD F6 2A 0A F0 08 E7 D4 BB D4 D0
+02 BB D5 FD 6F`) at LoROM `9F:F515`, and the jump-table bytes actually
+read (`$0A8A-$0A94`, containing the `$01`/`$02` pair) at `9F:F7DC` —
+both byte-for-byte identical to the ARAM contents at the moment of the
+fault. The command byte `$FE` itself was traced back through
+`PROBE_PORTS`'s port-change ring to a normal `$2140`/`$2141` upload
+completing around instruction 4,345,434 (`in=[df, fe, 41, b2]`); the
+CPU-side sender (`PROBE_DIS=1f:f070:f100`, LoROM bank `$1F`, a plain
+`LDA [$2C],Y`/`INY` indirect-long copy loop with **no `$4204-$4217`
+access anywhere in it** — hypothesis 1 from the ticket brief is
+exonerated by this disassembly, not by argument) reads straight from
+ROM and sends what it reads. `PROBE_FINDROM` confirms the exact
+transmitted run (`B5 2F EF 20 1F 0F F3 91 ... 3D F4 FE 30 D3`) exists
+unbroken in the ROM at `88:B2D9-88:B2E8` — the `$FE` is the game's own
+data, not a corrupted or short transfer (hypothesis 2 exonerated).
+
+**Conclusion: this is the game's own code and data producing the
+outcome; real hardware would do the same.** Given an unmodified copy
+of the dispatcher, an unmodified copy of its table, an unmodified copy
+of the uploaded command byte, and SPC700 opcodes (`ASL`, `PUSH`,
+`RET`) executing exactly as documented — including the 8-bit `Y`
+wraparound that is architectural, not an emulation choice — landing on
+`$0102` and running off into cleared RAM until a stray `$FF` stops the
+chip is not something this emulator invented. Per acceptance criterion
+4 and law 5, no fix ships and no game bytes are patched around.
+
+**Named next step**, left for whoever picks this back up: this
+investigation stops at "command byte `$FE` reaches this dispatcher and
+aliases onto table slot `$7E`'s entry"; it does not explain *why* the
+data stream hands the sequencer `$FE` at this position, i.e. whether
+`$FE` is a legitimate extended-command byte whose real target is
+supposed to be a genuine no-op/halt (plausible — SPC700 "wait for
+reset" idioms exist), or whether an earlier byte in the same stream
+was mis-consumed (one byte short or long) by this driver's *own*
+sequencer logic, desyncing which bytes are read as commands versus
+data. Both are the game's own code either way (no bound-check to add
+under this ticket's write scope without patching ROM-sourced control
+flow), but the second would be a more interesting finding for a future
+audio-driver deep-dive; it needs disassembling the full sequencer this
+loop is called from, out of this session's budget.
+
+**New diagnostic, kept**: `title_probe.rs` gained `PROBE_SPCREGPC=hex[,hex]`
+(module doc updated) — prints the SPC700's `A`/`X`/`Y`/`SP` and the
+four bytes above `SP` (what a `RET` would pop) whenever the SPC700 is
+about to execute an instruction at one of the given 16-bit ARAM PCs.
+It is what pinned the exact registers and stack contents above; no
+`rf-snes` source changed.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — 357 passed, 0 failed
+(unchanged, since `rf-snes` was not touched); the four suites this
+ticket's brief named as oracles all pass unchanged from W14-24:
+`singlestep_spc700_vectors` (256,000/256,000), `singlestep_65816_vectors`
+(5,080,000/5,080,000), `spc_timer_reports_pass` ("PASSED TESTS"),
+`gilyon_cputest`'s `cputest_full_reports_success_and_every_test_passes`
+(`test_num=0x0649/0x0649, ROM says "Success"`). `cargo test --workspace`
+— **2216 passed, 0 failed**.
+
+**Census children** (`boot_census_child`, per-title, not the full
+orchestrator run — no code changed, so no bucket counts can have
+moved): **Soul Blazer (USA)** exits **10** (uniform screen, unchanged —
+this ticket did not fix it); **Super Mario RPG - Legend of the Seven
+Stars** (USA) and (USA, Europe) (Virtual Console) both exit **0**,
+unmoved since W14-24; **Super Mario World**, **Wild Guns**, **Kirby
+Super Star** all exit **0**, unmoved; **ActRaiser 2** and **Robotrek**
+both exit **10** — pre-existing state, unrelated to this ticket (no
+`rf-snes` code changed, so nothing could have moved them either way).
+The full SNES census was not re-run, per the acceptance criteria (only
+required if a fix lands).
+
+`plan.json`'s W14-27 entry is left `status: "in_progress"` with a
+BLOCKED note carrying this same finding, matching the W14-23/W14-25
+handoff convention.
