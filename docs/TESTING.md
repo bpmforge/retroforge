@@ -1151,3 +1151,142 @@ code that has since been reverted and is not a finding about the current
 tree — flagged as a place to instrument (`write_register` on `$F6`/
 `$F7`, with the writing SPC PC) before assuming it is the same class of
 bug as the SLEEP overflow above.
+
+**W14-23 stage 2, 2026-09-19, release build — corrects stage 1's own
+"unbounded X" framing; the three ranked mechanisms in the ticket are
+each traced and rejected as stated; the real destination-corruption
+event is pinned to one instruction pair; no fix shipped, ticket stays
+BLOCKED.**
+
+Stage 1 described the defect as "X has no bound and no reset." That is
+wrong, and the trace that corrects it is worth recording so it is not
+retried: `title_probe`'s new `PROBE_TIMERLOG`/`PROBE_PACKETLOG` env vars
+(module doc has the contract) plus a manual disassembly of ARAM
+`$0970-$09E2` (dumped clean at instruction 80,000, before the region is
+corrupted) show the receive loop is **not** an unbounded index. It is:
+
+```
+09B4: E4 16        MOV A,$16
+09B6: 64 F4        CMP A,$F4
+09B8: F0 FC        BEQ $09B6        ; spin for the CPU's next $2140 write
+09BA: E4 F5        MOV A,$F5
+09BC: D5 12 4B     MOV !$4B12+X,A   ; self-patched operand at $09BD/$09BE
+09BF: E4 F6        MOV A,$F6
+09C1: D5 13 4B     MOV !$4B13+X,A   ; operand at $09C2/$09C3
+09C4: E4 F7        MOV A,$F7
+09C6: D5 14 4B     MOV !$4B14+X,A   ; operand at $09C7/$09C8
+09C9: E4 F4        MOV A,$F4
+09CB: 2E F4 FB     CBNE $F4,$09C9
+09CE: C4 F4        MOV $F4,A        ; echo the command byte back
+09D0: C4 16        MOV $16,A
+09D2: 60           CLRC
+09D3: 7D           MOV A,X
+09D4: 88 03        ADC A,#$03       ; X += 3, with the carry OUT kept
+09D6: 90 09        BCC $09E1        ; no page rollover this time -> done
+09D8: AC BE 09     INC !$09BE       ; three carries into the self-patched
+09DB: AC C3 09     INC !$09C3       ; page bytes -- ALL THREE in lockstep
+09DE: AC C8 09     INC !$09C8
+09E1: 5D           MOV X,A
+09E2: FE D0        DBNZ Y,$09B4     ; the loop IS bounded, by Y
+```
+
+`X` is the low byte of a 16-bit destination pointer with an explicit
+`ADC`/`BCC` carry chain into the three page bytes, and the outer loop
+is bounded by `DBNZ Y`. **Ruled out by this disassembly, not by
+argument: an unbounded raw index.** `spcring` across the actual run
+confirms the carry path is taken (`... 09D6 09D8 09DB 09DE 09E1 ...`),
+and it is legitimate, ordinary buffer-fill code — the same shape reused
+for three parallel per-voice buffers, seeded once from a 16-bit pointer
+in `$0000`/`$0001` via `MOVW YA,$00` / `MOV !$09BD,A` / `MOV !$09BE,Y`
+(and the `+1`/`+1` pair for the second and third buffers) at ARAM
+`$0986-$09A1`.
+
+**The three ranked mechanisms, traced and rejected as stated:**
+
+1. **Consumer never runs (timer0/1-paced).** `PROBE_TIMERLOG` on the
+   full run to the halt shows timer0/timer1 (target `$00` = divide by
+   256) **enabled from instruction 74,213** — essentially the whole
+   run — and only disabled at **instruction 988,617**. The pointer
+   corruption this ticket chases happens at **instruction 984,014**,
+   *before* the disable, not after. The consumer ran for the entire
+   window that matters; "never runs" is refuted by the timer log
+   itself, and the later disable is downstream of the corruption, not
+   its cause.
+2. **Duplicate packets from non-atomic `$2140-$2143` writes.** Refuted
+   two ways. By protocol: the receive loop only gates on `$F4`
+   (`$2140`) changing (`CMP A,$F4` / `BEQ`), and the CPU's own port
+   ring (`PROBE_PORTS`) shows it writes `$2141-$2143` first and `$2140`
+   last every time — there is no intermediate state for the SPC to
+   observe as a phantom packet, because the SPC isn't watching the
+   other three ports for a trigger. By count: `PROBE_PACKETLOG`'s
+   totals over the whole run are `x_register_changes=17036`,
+   `ports_in0_changes=22218` — the CPU changes port 0 *more* often than
+   the receive loop consumes a packet, the opposite of the
+   over-consumption this theory needs.
+3. **Clock ratio (SPC starved relative to the main CPU).** Not
+   reproduced. `catch_up_apu` (ticket W14-09) already runs the APU to
+   the exact master-cycle count before every `$2140-$2143` access, so
+   the two sides are synchronous by construction on this path, not
+   free-running; the steady ~68-instruction cadence between packets in
+   `PROBE_PACKETLOG`'s per-call lines (main CPU write loop timing
+   unchanged for the whole run) shows no starvation or catch-up
+   backlog forming.
+
+**The actual corruption, pinned to one instruction pair.** None of the
+three mechanisms explains the failure, so the search moved to *why* the
+self-patched page bytes (`$09BE`/`$09C3`/`$09C8`) end up at `$09`
+instead of the safe `$4B-$4D` range they start at. `PROBE_PACKETLOG`'s
+new dp`$01` watch shows the 16-bit reseed pointer at ARAM `$0000`/
+`$0001` — normally written only at boot (`$0000/$0001` set to
+`$0048`/`$0012` around instruction 79,656, matching the `$4812`-ish
+base the disassembly above shows, folded through the `+1`/`+1` seeding
+pattern) — changes **again**, unexpectedly, at **instruction 984,014**:
+`dp$01: 48->07`. A one-shot local trace on `Apu::write` (added and
+removed for this session; not shipped) caught the writer: **the write
+comes from the receive loop's own store instructions**, `MOV
+!$4B13+X,A` at `$09C1` and `MOV !$4B14+X,A` at `$09C6` — i.e. by
+instruction 984,014 the self-patched operands at `$09C2/$09C3` and
+`$09C7/$09C8` have *already* carried down through page `$01` and `$00`
+via the plain `INC`-on-carry chain (steps 09D8/09DB/09DE above, which
+has no upper or lower bound and no periodic reset anywhere in this
+disassembly), so the receive loop's own writes land on `$0000`/`$0001`
+— **the exact bytes that seed the next reseed** — and stamp them with
+whatever incoming command byte happened to be in `A`/`X` at that
+moment (`$FB`/`$07`). The `$07` that lands in `$0001` is not a table
+value or a deliberate page selection at all; it is leftover port data,
+and it becomes the new page. Two more `INC`-on-carry steps (`$07->$08
+->$09`, consistent with the ~55,000 instructions and ~9-10 more
+`DBNZ`-bounded passes between instruction 984,014 and the halt at
+1,039,833) walk that page onto `$09` — the driver's own code — matching
+stage 1's `$09B3-$09B5` overwrite exactly.
+
+**Not confirmed, and not shipped as a fix.** The three carry chains
+(`$09BE`/`$09C3`/`$09C8`) are the game's own ROM bytes with no visible
+bound or periodic reset in this disassembly window — law 5 forbids
+patching around them, and this ticket's write scope (`IplBoot`, the
+SPC700 core) has no way to add one without doing exactly that. Two
+explanations remain open and neither is verified: (a) real hardware
+never drives this loop through ~200 page-carries in one boot sequence
+in the first place, meaning some other rate or gating difference (not
+the three mechanisms above — clock ratio was checked and synchronous)
+feeds this driver faster than real hardware would; or (b) a reset does
+exist somewhere else in the ROM (a jump target this session never
+reached, gated on a condition this emulator computes differently) and
+this emulator fails to reach it. Distinguishing those needs either a
+real-hardware capture of this exact boot sequence's `$2140` traffic
+rate, or disassembling the full command dispatcher this loop is called
+from (out of this session's budget) — **left for the next ticket, with
+this trace as its starting point** so it does not re-derive the
+disassembly above.
+
+Named cause updated again: *the uploaded driver's own self-modifying
+buffer-pointer arithmetic (an `ADC`/`BCC` carry into three page bytes,
+looped via `DBNZ Y`) has no bound and no periodic reset in the window
+traced; once the carry chain passes through ARAM page `$00`, the same
+loop's in-flight stores corrupt the 16-bit reseed pointer that feeds
+it, and the corrupted value walks the pointer onto the driver's own
+code page.* Both Super Mario RPG dumps stay in the **uniform screen**
+bucket; census not re-run (no code changed — `crates/rf-harness/tests/
+title_probe.rs` gained two diagnostic env vars, `PROBE_TIMERLOG` and
+`PROBE_PACKETLOG`, and nothing in `crates/rf-snes` changed). Gate at
+close: see the commit trailer.

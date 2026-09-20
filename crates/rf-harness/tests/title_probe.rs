@@ -22,6 +22,10 @@
 //! PROBE_RING=1 / PROBE_SPCRING=1    print the last distinct CPU / SPC PCs
 //! PROBE_ALLPC=1                     print every sampled CPU PC, sorted
 //! PROBE_STOP_ON_SPC_STOP=1          stop early when the SPC700 halts under a running program
+//! PROBE_TIMERLOG=1                  print every SPC timer 0-2 enable/target transition
+//! PROBE_PACKETLOG=1                 print every SPC X-register (command index) and ARAM
+//!                                    dp$01 change, plus totals of X-register vs. $2140
+//!                                    (port 0) changes over the whole run
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -145,6 +149,14 @@ fn probe() {
         let mut ring_last = u32::MAX;
         let mut spcring: std::collections::VecDeque<u16> = std::collections::VecDeque::new();
         let mut spc_last = u16::MAX;
+        let timerlog = std::env::var("PROBE_TIMERLOG").is_ok();
+        let mut timer_last = [false, false, false];
+        let packetlog = std::env::var("PROBE_PACKETLOG").is_ok();
+        let mut x_last = u8::MAX;
+        let mut port0_last = u8::MAX;
+        let mut dp1_last = u8::MAX;
+        let mut x_changes: u64 = 0;
+        let mut port0_changes: u64 = 0;
         let cap: u64 = std::env::var("PROBE_INSTR")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -173,6 +185,50 @@ fn probe() {
                 && apu.boot.is_running()
             {
                 break;
+            }
+            if packetlog {
+                let dp1 = apu.aram[0x0001];
+                if dp1 != dp1_last {
+                    println!(
+                        "      DP01LOG n={n} spc={:04X} dp$01: {:02X}->{:02X}",
+                        apu.cpu.pc, dp1_last, dp1
+                    );
+                    dp1_last = dp1;
+                }
+                if apu.cpu.x != x_last {
+                    x_changes += 1;
+                    if x_last != u8::MAX {
+                        println!(
+                            "      PACKETLOG n={n} spc={:04X} X: {:02X}->{:02X} ports_in={:02x?}",
+                            apu.cpu.pc, x_last, apu.cpu.x, apu.ports_in
+                        );
+                    }
+                    x_last = apu.cpu.x;
+                }
+                if apu.ports_in[0] != port0_last {
+                    port0_changes += 1;
+                    port0_last = apu.ports_in[0];
+                }
+            }
+            if timerlog {
+                let t = [
+                    apu.timers[0].enabled,
+                    apu.timers[1].enabled,
+                    apu.timers[2].enabled,
+                ];
+                if t != timer_last {
+                    println!(
+                        "      TIMERLOG n={n} spc={:04X} en={:?} target={:?}",
+                        apu.cpu.pc,
+                        t,
+                        [
+                            apu.timers[0].target,
+                            apu.timers[1].target,
+                            apu.timers[2].target
+                        ]
+                    );
+                    timer_last = t;
+                }
             }
             if pcv != ring_last {
                 pcring.push_back(pcv);
@@ -203,6 +259,11 @@ fn probe() {
             for l in &ring {
                 println!("      {l}");
             }
+        }
+        if packetlog {
+            println!(
+                "      PACKETLOG totals: x_register_changes={x_changes} ports_in0_changes={port0_changes}"
+            );
         }
         if std::env::var("PROBE_SPCRING").is_ok() {
             println!(
