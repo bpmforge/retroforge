@@ -7416,6 +7416,52 @@
    "W14-32 CLOSED BLOCKED 2026-09-20: diagnosed with title_probe (PROBE_IRQLOG/PROBE_WAILOG/PROBE_WAIWAKE/PROBE_WATCH/PROBE_NMICOUNT, all temporary, reverted, no diff survives) before any code change. Jungle Strike runs a three-site masked-WAI raster split ($A0:D3DD/$A0:D744/$A0:D78C, I set throughout, 611 WAI wakes sampled, 1014/1014 IRQ assert/ack pairs, every wake on-target) from the first frame -- steady-state per-frame overhead, not a boot stall. PROBE_WATCH=000CAF traced the dominant polling loop ($A0:8155 LDA $0CAF; BEQ $8155) to a flag set once per raster-split pass at $A0:D77B and cleared at $A0:8152: 144 of 145 turnarounds finish in under 1200 instructions (well under a frame), and exactly one takes 1,138,333 instructions (~65-70 frames) -- the boot is built from several additive, variable-length stages, not one runaway loop. PROBE_NMICOUNT (temporary counter on SnesSystem::step's pending_nmi dispatch) counted 971 real NMI dispatches across 991 Step::Frame calls -- essentially one per frame, not a stalled or degenerate rate; title_probe's own nmi_entries is only a trailing-20000- instruction spot check and unreliable here regardless (WRAM-trampolined NMI vector) so was not relied on. IrqTimer::fired (regs.rs) is set only on a genuine H/V match and cleared only by the two sites fullsnes documents: $4211 (read_timeup) and a $4200 write that disables H/V IRQ mode (bus.rs:503, cites fullsnes 'reset ... on disabling IRQs via 4200h') -- no other site clears it -- matching fullsnes 'SNES Interrupts' (line stays asserted until $4211 or $4200 disables it) and the WDC W65C816S datasheet (WAI wakes on the line regardless of I, STP never does, NMI ignores I). No discrepancy found: verdict is 991 frames is what hardware does (a long, blanked, multi-stage intro with IRQ/NMI both ticking normally throughout), and the 205-frame credit-only timeline is not a competing correct one -- that tree lacks the datasheet-mandated WAI wake, so it runs different, unverified code through the same path. No fix lands; named cause is a slow, hardware-accurate boot past the census's fixed 600-frame budget -- the budget is not touched per this ticket's brief. Gate re-run clean: cargo fmt --check, cargo clippy -D warnings, cargo test -p rf-snes (363 passed, 1 ignored), singlestep_65816_vectors run separately under --ignored -- 5,080,000 passed, 0 failed (254/256 opcodes, $44/$54 excluded as already documented in-suite) -- and the other ignored SNES suites green (spc700_vectors 256,000 passed; gilyon_cputest 0x0649/0x0649 Success; blargg_spc spc_timer PASSED). Census children re-run unchanged: 10 titles exit 0, Jungle Strike exit 10, matching the W14-28 baseline exactly -- no regression. See docs/TESTING.md's W14-32 write-up.",
    "W14-32 FILED 2026-09-20 by the orchestrator as W14-28's named follow-up: the WAI masked-IRQ wake (correct per WDC) changed Jungle Strike's boot timeline; whether the new one is hardware's is unverified."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-33",
+  "title": "APU port-protocol deadlocks: Rival Turf!, Super Turrican, Wario's Woods — trace the driver-side handshake against the ports",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-33: for each of the three titles, title_probe (PROBE_PORTS, PROBE_PACKETLOG, PROBE_SPCRING, PROBE_SPCREGPC, PROBE_APUPORTLOG, PROBE_TIMERLOG) shows which side is waiting on which port value, what the other side last wrote, and what the driver code (disassembled from the ARAM dump) expects — the first divergence from what hardware would present is named (a $F4-$F7 read/write semantic, timer $FD-$FF counter read, $F1 control clearing ports, IPL re-entry, catch_up_apu ordering, or a math-unit/register read on the 65C816 side per W14-24/W14-28)",
+   "the fix, if any, is cited to published documentation (fullsnes 'SNES APU' / snes.nesdev.org SPC700 and S-SMP pages) and pinned by a unit test that reproduces the exact handshake shape; ignored SNES suites (65816 and SPC700 vectors, gilyon, spc_timer) stay green; determinism unaffected",
+   "if a fix lands: the titles render in the census child (exit 0); the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and every title that moved is named in docs/TESTING.md",
+   "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — 'game's own data' without that chain is not accepted (W14-24/26/28 all hid behind such verdicts)"
+  ],
+  "notes": [
+   "W14-33 FILED 2026-09-20 by the orchestrator from the 2026-09-17 triage list ('driver-side port protocols deadlocked, likely timing'). All three survived W14-24/28's math-unit timing changes and W14-28's WAI wake, so the cause is on the APU handshake itself."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-34",
+  "title": "Re-triage the 74 remaining uniform-screen SNES titles after W14-24..W14-32: 1800-frame sweep, shape classification, next tickets named",
+  "write_scope": [
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-34: every title in the current uniform bucket (the RF_CENSUS_OUT list from the W14-28 census) is run through title_probe in frames mode for 1800 frames; slow boots (varied within 1800) are listed separately from stuck titles",
+   "W14-34: each stuck title gets a one-line shape from a 3M-instruction probe (CPU spin PC + what it polls, SPC state, forced-blank/brightness, NMITIMEN, DMA/HDMA state), grouped into families (APU handshake, raster/IRQ, register-read, DMA/mapping, unknown); the families are tabulated in docs/TESTING.md with the titles under each",
+   "W14-34: the three largest families are proposed as the next tickets with the evidence that would confirm each; no core code changes in this ticket"
+  ],
+  "notes": [
+   "W14-34 FILED 2026-09-20 by the orchestrator: the 2026-09-17 named-cause list is stale after 44 titles moved; a fresh shape census picks the next systemic fixes."
+  ]
  }
 ]
 }
