@@ -7294,7 +7294,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "in_progress",
+  "status": "blocked",
   "stories": [],
   "id": "W14-28",
   "title": "The Flintstones: RTS loop on boot — trace the divergence from reset",
@@ -7310,7 +7310,8 @@
    "if the trace shows the game's own code produces the stall and hardware would behave the same, that is stated with the trace and the ticket goes BLOCKED with a named next step (no patching around game bytes, law 5)"
   ],
   "notes": [
-   "FILED 2026-09-20 by the orchestrator from the 2026-09-17 triage list (untraced RTS loop). W14-24 (divider timing) and W14-26 ($43xx readback) both came from untraced titles and moved 20 titles between them; check register-read semantics first (every $21xx/$42xx/$43xx read the boot path makes vs fullsnes R/W columns). Two dumps: 'Flintstones, The (USA) (En,Fr,De,Es,It).zip' and the Treasure of Sierra Madrock title — probe both, they may differ."
+   "FILED 2026-09-20 by the orchestrator from the 2026-09-17 triage list (untraced RTS loop). W14-24 (divider timing) and W14-26 ($43xx readback) both came from untraced titles and moved 20 titles between them; check register-read semantics first (every $21xx/$42xx/$43xx read the boot path makes vs fullsnes R/W columns). Two dumps: 'Flintstones, The (USA) (En,Fr,De,Es,It).zip' and the Treasure of Sierra Madrock title — probe both, they may differ.",
+   "BLOCKED 2026-09-20: traced to instruction-level precision, not the RTS loop the 2026-09-17 triage guessed. The CPU ends up in a BRK storm caused by the game's own per-object OAM-list cursor ($064A/$064C, feeding a shared $0656/X) growing without any per-frame bound; at instruction 2577318 X=$1F80 makes the game's own STA $0200,X (at $80:D27B) land on $80:2180 = WMDATA with WMADD=$000000, corrupting the low byte of the NMI-vector trampoline at WRAM $0000 from $15 to $FF. The next NMI dispatches into $80:A6FF (mid-routine, a JSL-only callee) instead of the real handler $80:A615; that routine's RTL (correct for a JSL callee, wrong for a bare JML entry) misreads the CPU's own 4-byte interrupt frame, lands at garbage $D2:7501, hits a BRK, and vectors into $00:FB83's JML $70800B -- ROM padding, more BRK, forever. rf-snes's JML-[addr] (bank-0-fixed, opcode 0xDC), LoROM mirroring, and WMDATA/WMADD handling are all correct per fullsnes and were checked, not assumed. The ROM's only cursor-reset call site ($80:8DAA, gated on a one-shot $44 latch) and its only alternate hook ($82F174, gated on an NMI-vector value the ROM's own hardcoded installer, $83:CDB6, never produces) are both genuinely unreachable by the ROM's own construction -- not a flag/register divergence. Deterministic, input-independent, reproduces in under 100 frames from a cold boot; fixing it would mean changing the game's own STA/X behavior (law 5). The Treasure of Sierra Madrock dump is unaffected (renders, exit 0). Full trace, byte-exact citations, and the new PROBE_WATCH/PROBE_SDUMP diagnostics (d=/dbr=/wmadd=/vec0000=) are in docs/TESTING.md's W14-28 write-up. Named next step: if real-hardware evidence ever shows this title surviving its title screen, check whether rf-snes's NMI/IRQ cadence differs from real hardware enough to change how many per-object sprite-adder calls happen before the cursor reaches $2180 -- would change timing of the crash, not whether the underlying ROM defect exists."
   ]
  },
  {

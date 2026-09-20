@@ -2023,3 +2023,175 @@ worth eighteen titles and not one. Residual, not modelled: `$43xB`
 (and its `$43xF` mirror), the unused read/write byte fullsnes lists for
 each channel, still returns open bus; no title in the library has been
 shown to depend on it.
+
+
+## W14-28 — The Flintstones: a persistent OAM-slot cursor with no per-frame
+bound wanders into hardware-register space and corrupts its own NMI vector
+(2026-09-20, BLOCKED — game's own defect)
+
+The 2026-09-17 triage called this an "RTS loop." It is not: the CPU is stuck
+in a **`BRK` storm**, and the storm is the *third* stage of a fully-traced,
+byte-exact chain that starts in the game's own sprite-placement code, not in
+`rf-snes`. Both dumps were probed; only `Flintstones, The (USA)
+(En,Fr,De,Es,It).zip` hits this — `Flintstones, The - The Treasure of Sierra
+Madrock (USA).zip` boots and renders normally (`boot_census_child` exits 0,
+`bright=15`, `oam_nonzero` growing 160→450 over 30M instructions), so the
+sibling dump is unaffected and needed no further work.
+
+**The blank-screen premise was checked and is false.** `forced_blank` is
+`true` for roughly the first 2.3M instructions (still loading/pre-title —
+normal), then genuinely turns off: `PROBE_INSTR=2500000` shows
+`forced_blank=false`, and by `PROBE_INSTR=2560000` the PPU is actively
+rendering (`bright=15 mode=0 tm=[1111+obj]`, all four BG layers plus OBJ
+enabled). The title screen renders correctly for roughly 100 frames before
+the crash. The census's "uniform screen" verdict is the storm's aftermath,
+sampled after the CPU is already stuck — not a sign the display never came
+on.
+
+**Bisection.** `title_probe`'s `PROBE_INSTR` binary search narrowed the
+divergence to between instruction 2,560,000 (still in the game's healthy
+per-frame OAM-builder loop) and 2,590,000 (already in the storm). A new
+diagnostic, **`PROBE_WATCH=hex[,hex]`** (prints `n`, the PC that just ran,
+and the old/new byte whenever one of the given 24-bit addresses changes
+between instruction boundaries — kept in `title_probe.rs`, documented in its
+module doc, the same precedent as W14-26's `PROBE_SPWIN`), found the exact
+writer without having to guess a PC first:
+
+```
+WATCH n=2577318 addr=000000 old=15 new=FF prev_pc=80D27B
+```
+
+**The wrong value and the instruction that produced it.** `$80:D27B` is
+`STA $0200,X` inside the game's per-object OAM-entry writer
+(`$80:D270`-`$80:D2DB`, disassembled from real ROM bytes, cross-checked
+against the `.sfc` file directly). At `n=2577318`, `X=$1F80`
+(confirmed via `PROBE_SDUMP=80d27b`, which now also prints `dbr=` and
+`wmadd=` — both added this ticket) and `DBR=$80`. Per the 65816's
+absolute-indexed addressing (no citation needed beyond the opcode's own
+definition), the effective address is `DBR:($0200+X) = $80:2180`. `$80:2180`
+in bank `$80` (a "system area" bank under LoROM, offset `<$2000`) is not
+WRAM — fullsnes ("4200h-437Fh"/"2140h-2183h Registers", `$2180` = WMDATA)
+lists `$2180` as the CPU-side WRAM-access port: writes land at the 24-bit
+address latched in `$2181-$2183` (WMADD), then auto-increment it.
+`sys.bus.wram_port.address` (peeked via the new `wmadd=` field) was `$000000`
+at that instant — so this store, meant for OAM slot `$1F80` (an index nowhere
+near the cartridge's actual sprite count), landed on WRAM `$000000` instead,
+overwriting its low byte from `$15` to `$FF`.
+
+**Why `$000000`'s low byte matters.** `$00:0000-$0002` is the target of the
+game's own NMI-redirection trampoline: the fixed native-mode NMI vector
+(`$00:FFEA/FFEB`, verified `87 FB`) is `$00:FB87: JML [$0000]`. Opcode `$DC`
+(absolute-indirect-long) always sources its pointer from bank `$00`
+regardless of D/DBR/PBR — verified against `crates/rf-snes/src/cpu/ops.rs`'s
+`0xDC` arm, which forms `at` as `u32::from(cpu.fetch16(bus))` (zero-extended,
+bank 0) before calling `am::read_pointer24`; this matches the 65C816
+datasheet's definition of `JML [addr]` and is not the defect. Seven healthy
+NMIs sampled before the crash (`PROBE_SDUMP=00fb87`) all read
+`vec0000=[15, a6, 80, ...]` — pointer `$80:A615`, the real top-level NMI
+handler (`NOP; REP #$30; PHA; PHX; PHY; SEP #$20; PHB; ...`, ending
+`PLB;...;RTI` at `$80:A67D`). The one at `n=2584634` (immediately after the
+corrupting write) reads `vec0000=[FF, a6, 80, ...]` — pointer now `$80:A6FF`,
+**19 bytes into the middle of an unrelated helper** (`$80:A6BC`-`$80:A71A`, a
+`JSL`-only callee that copies buffered scroll/window/IRQ-timer values into
+`$210D`-`$2112`/`$212C`-`$212D`/`$4207`-`$4209`) — skipping that helper's own
+`X`-register setup and the outer handler's `PLB`/push frame entirely.
+
+**The second-order corruption that turns a bad jump into a runaway loop.**
+`$80:A6FF`-`$80:A71A`'s real ROM bytes (verified byte-for-byte against the
+`.sfc` file) end in `RTL` (`$6B`) — correct for a routine only ever reached
+via `JSL` elsewhere in the ROM. But the NMI got here via a bare `JML`, so the
+only frame on the stack is the CPU's own automatic interrupt-entry push
+(`PBR,PCH,PCL,P`, 4 bytes — SP `$01DA`→`$01D6`, confirmed via
+`PROBE_SDUMP`'s `sp=`). `RTL` pops 3 bytes (`PCL,PCH,PBR`), so it reads `P`
+(`$01`) as the new PC's low byte, the real `PCL` (`$75`) as the high byte,
+and the real `PCH` (`$D2`) as the new PBR — landing at `$D2:7501` (confirmed
+exactly: `SPWIN` shows `prev_pc=D27501` the very next instruction) and
+leaving the true `PBR` (`$80`) unpopped, a permanent 1-byte-per-crash stack
+leak. `$D2:7501` happens to hold a `BRK` opcode; the native `BRK` vector
+(`$00:FFE6/E7`, verified `83 FB`) is `$00:FB83: JML $70:800B` — LoROM offset
+`$18000B` (`(0x70&0x7F)<<15 | (0x800B&0x7FFF)`, `mapping.rs`'s existing
+formula, checked against the raw `.sfc` bytes: 16 bytes of `$00` at that
+offset, real ROM padding) — more `BRK`, forever, draining the stack 4 bytes
+per pass until the 30M-instruction budget runs out. `mapping.rs`'s LoROM
+mirroring and `read_register_pure`'s `$2180`/WMADD handling are both correct
+per fullsnes; nothing here is an `rf-snes` register-semantics or
+DMA/mapping gap in the W14-24/W14-26 sense.
+
+**Why this is the game's own defect, not an emulator timing/flag
+divergence.** `$0656` (the shared scratch cursor `$80:D270` reads at entry
+and writes back at exit) is fed from one of two **persistent, per-category**
+WRAM cursors, `$064A`/`$064C`, each read into `$0656` before a call and
+written back after — a legitimate incremental-OAM-list pattern. Both are
+initialized exactly once, early in boot (`$80:D049`-`$80:D056`: `$064A=0`,
+`$064C=$00F0`, confirmed via `PROBE_WATCH=00064c,00064a`: `$064C: 00→F0 @
+n=2334770`, no further *legitimate* write ever). The **only** place in the
+2 MB ROM that resets a category cursor afterward is `$80:8DAA`'s
+`JSR $90B9` (`LDA #0; STA $0656; ...`), gated behind a one-shot latch at
+`$44` (`$80:A62C: LDA $44; BEQ ...`) that the same NMI trips exactly once
+(`$44: 00→01 @ n=2334399`, confirmed via `PROBE_WATCH=000044` over the whole
+2.58M-instruction run — one hit, ever). `$80:8DAA` (and everything under it,
+including the reset) was never reached even once in this run
+(`PROBE_SDUMP=808daa,808dff,809045,808e03` — zero hits over 2.58M
+instructions). A second, unreachable-by-construction hook exists at
+`$82F174` (its sole caller, `$80:D067`, is gated on `LDA $00; CMP #$A616`) —
+but the game's *only* NMI-vector installer (`$83:CDB3-CDB6`:
+`LDX #$A615; STX $00`) hardcodes `$A615`, one byte before `$A616`
+(`$A615` is a leading `NOP` before the real handler body at `$A616`), so
+this branch can never take the true path in this ROM; it is dead by the
+ROM's own construction, not a flag- or register-read-driven divergence — no
+arithmetic or condition computes the installed value, so there is nothing
+here for `rf-snes` to get wrong. With no per-frame bound anywhere in the
+ROM, `$064A`/`$064C` — and the shared `X` they feed — grow by a handful of
+bytes every frame the per-object sprite-adder runs (confirmed: `X` climbs
+`+4` per call across dozens of samples from `$1F58` to `$1F80`, self-
+corrupting `$064A` and `$064C` in passing once `X` first reaches them, well
+before the eventual `$2180`/WMDATA hit) with no wraparound, cap, or
+recycling of any kind. This is unconditional and deterministic: it does not
+depend on player input, RNG, or any state this probe's headless boot could
+have gotten wrong, and reproduces in well under 100 frames (~2 seconds) from
+a cold, all-defaults boot. Fixing it in the emulator would mean changing
+when/whether the game's own `STA $0200,X` executes or what `X` holds —
+patching around the game's own bytes, which law 5 forbids.
+
+**Verified:** `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean (the workspace-wide `cargo clippy --workspace --all-targets`
+also surfaces one pre-existing, unrelated `manual_is_multiple_of` lint in
+`crates/rf-snes/src/tests/regs.rs` from a clippy version bump — not touched
+by this ticket, not in `write_scope`, not gating per law 3's literal
+command); `cargo test -p rf-snes` — **358 passed**, 0 failed, unchanged from
+W14-26 (this ticket made no `rf-snes` source changes, only `rf-harness`
+diagnostics). Ignored SNES suites: `singlestep_65816_vectors` —
+**5,080,000 passed, 0 failed** (254/256 opcodes; `$44`/`$54` excluded as
+already documented in-suite, not gating); `gilyon_cputest`'s
+`cputest_full_reports_success_and_every_test_passes` —
+`test_num=0x0649/0x0649, ROM says "Success"`; `blargg_spc`'s
+`spc_timer_reports_pass` — `"PASSED TESTS"`; `spc700_vectors`'s
+`singlestep_spc700_vectors` — **256,000 passed, 0 failed** (256/256
+opcodes). All four green.
+
+**Census children** (`boot_census_child`, per-title, no full census re-run —
+no fix landed): **Flintstones, The (USA) (En,Fr,De,Es,It) exits 10**
+(uniform screen, the bug this ticket traced). **Flintstones, The - The
+Treasure of Sierra Madrock (USA) exits 0** (renders; unaffected, no further
+work needed on it). The four canaries are unmoved at exit 0: **Super Mario
+World (USA)**, **Wild Guns (USA)**, **NHL 95 (USA)**, **Super Mario RPG -
+Legend of the Seven Stars (USA)**.
+
+**Determinism:** unaffected — this ticket added only `rf-harness` test
+diagnostics (`PROBE_WATCH`, and `d=`/`dbr=`/`wmadd=`/`vec0000=` fields on
+`PROBE_SDUMP`); no `rf-snes` core state, timing, or register semantics
+changed.
+
+**BLOCKED. Named next step:** none of the register-read, DMA/mapping, or
+interrupt-flag hypotheses this ticket was asked to rank apply — the trace
+is complete down to the exact wrong value and the game's own instruction
+that produced it, and the missing per-frame bound is absent from the ROM
+itself, not skipped by a divergent emulator condition. If evidence ever
+surfaces that this title is expected to survive past its title screen on
+real hardware (a strategy guide, a longplay, or a real-cartridge test), the
+next step is to check whether `rf-snes`'s NMI/IRQ *cadence* (frames-per-
+real-second, or a joypad-auto-read timing quirk) differs from real hardware
+enough to change how many per-object sprite-adder calls happen before the
+cursor reaches `$2180` — that would change *when* the crash lands, not
+*whether* the underlying defect exists, but is the only remaining lever
+this trace did not rule out.
