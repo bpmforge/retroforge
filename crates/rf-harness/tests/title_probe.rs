@@ -63,7 +63,25 @@
 //!                                    addresses changes value — used to find who
 //!                                    wrote a suspect direct-page cell (e.g. a
 //!                                    track-pointer low/high byte pair) rather
-//!                                    than only observing its final value (W14-30)
+//!                                    than only observing its final value. CAVEAT:
+//!                                    it (like PROBE_SPCREGPC) samples once per
+//!                                    65816 instruction, AFTER `core.step` — the
+//!                                    printed `spcpc` is wherever the SPC700 has
+//!                                    reached by then, not necessarily the PC of
+//!                                    the instruction that produced the change,
+//!                                    since several SPC700 instructions can run
+//!                                    inside one 65816 step (W14-30). It also
+//!                                    reads raw ARAM bytes, so it is blind to
+//!                                    $00F4-$00F7 (the port registers) — those
+//!                                    are backed by `ports_in`/`ports_out`, not
+//!                                    the `aram` array; use PROBE_APUPORTLOG.
+//! PROBE_APUPORTLOG=1                print n, SPC pc, and all four
+//!                                    ports_in/ports_out bytes whenever either
+//!                                    ports_in[0] (CPU-sent index) or
+//!                                    ports_in[1] (CPU-sent data) changes — the
+//!                                    accepted-transfer trace for an APU upload
+//!                                    protocol built on $F4 (index)/$F5 (data)
+//!                                    (W14-30)
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -210,6 +228,15 @@ fn probe() {
             .map(|s| u16::from_str_radix(s, 16).unwrap())
             .collect();
         let mut spcmemwatch_last: HashMap<u16, u8> = HashMap::new();
+        // W14-30: trace the accepted-transfer sequence of an APU upload
+        // protocol built on $F4 (CPU-sent index)/$F5 (CPU-sent data) —
+        // ports_in/ports_out are separate arrays from `aram`, so
+        // PROBE_SPCMEMWATCH cannot see them. Prints on every change to
+        // either ports_in[0] or ports_in[1] (whichever moved), plus the
+        // other three port bytes, so the (index, data) pairs the CPU
+        // wrote can be diffed against the ROM's own byte-run.
+        let apuportlog = std::env::var("PROBE_APUPORTLOG").is_ok();
+        let mut apuportlog_last = [u8::MAX; 4];
         let mut x_last = u8::MAX;
         let mut port0_last = u8::MAX;
         let mut dp1_last = u8::MAX;
@@ -295,6 +322,15 @@ fn probe() {
                         spcmemwatch_last.insert(addr, cur);
                     }
                 }
+            }
+            if apuportlog
+                && (apu.ports_in[0] != apuportlog_last[0] || apu.ports_in[1] != apuportlog_last[1])
+            {
+                println!(
+                    "      APUPORTLOG n={n} spcpc={:04X} ports_in={:02X?} ports_out={:02X?}",
+                    apu.cpu.pc, apu.ports_in, apu.ports_out
+                );
+                apuportlog_last = apu.ports_in;
             }
             let pcv = sys.cpu.pc24()
                 | if std::env::var("PROBE_RINGP").is_ok() {
