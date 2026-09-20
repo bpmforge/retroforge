@@ -92,6 +92,15 @@ use sha2::{Digest, Sha256};
 
 /// Pinned goldens: `(rom file, sha256 of the frame's palette indices)`.
 ///
+/// Re-pinned 2026-09-20 (ticket W14-31): six frames changed hash when
+/// composition started reading the completed frame's per-line record
+/// instead of a buffer the frame-start hook had already wiped. Each new
+/// frame was dumped with `RF_GOLDEN_DUMP` and looked at: WaveHDMA shows
+/// the wave across the whole picture, WindowHDMA/WindowMultiHDMA show
+/// the per-line window shapes, MosaicMode3/MosaicMode5 show the mosaic,
+/// and the 8bpp map is the castle. The previous hashes had pinned frames
+/// whose per-line record was only partly latched.
+///
 /// Hashing **palette indices, not colours**, matches
 /// `rf_harness::golden_frame`'s rule: the golden is about the pixels the
 /// PPU produced, not about how a renderer later resolves CGRAM.
@@ -125,7 +134,7 @@ const GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "8x8BGMap8BPP32x32.sfc",
-        "76e1ab67aa089a7c82f73e695f83362f400fc73fdbad5218b801d8e753ab2147",
+        "5ddbffe7f97be5ab1320c166dcf7a8f10b69bba2176f9cad08d6beedf25a93f1",
     ),
     (
         "8x8BGMap8BPP32x64.sfc",
@@ -168,21 +177,21 @@ const GOLDENS: &[(&str, &str)] = &[
     // pixels sampled every 28 lines) and the cathedral shows through it.
     (
         "WindowHDMA.sfc",
-        "ba01ba95aa9ffbdcdb5a9970c761df033ce34bad75ae53323552127c52af5b5f",
+        "6433d77d31634c7d65adcd4f24e97573ea359436ffe96a4c3cbf41076ad74afc",
     ),
     // WindowMultiHDMA draws a 2x2 grid of visible quadrants: two windows
     // splitting each line, and HDMA blanking a band of lines between the
     // upper and lower halves.
     (
         "WindowMultiHDMA.sfc",
-        "9c05fdd822d73a74465a600a11f56646c795118c0abb7a8c4a33cb360c0f8043",
+        "e146e983a45726e39f2abc99211b47cc3fe0d25d9d6b0e341a976e34cc4bd419",
     ),
     // MosaicMode3 at a block size of 8: the landscape photograph is
     // visibly blockified. See `capture_plan` for why the harness has to
     // hold a button to get here at all.
     (
         "MosaicMode3.sfc",
-        "9606457f53ee2f7324cb96215e4ad5dd276bdc37d465021c7dfca31f8c601b69",
+        "d76be84ccfb54d54a45b691a3758c3a87f808806ece0cd72676b46f894c82a67",
     ),
     // HDMA (W7-07's amended criterion 4). Two of the four are pinned;
     // the RedSpace pair is in EXCLUDED with evidence -- see there, because
@@ -193,7 +202,7 @@ const GOLDENS: &[(&str, &str)] = &[
     // per-line scroll working end to end.
     (
         "WaveHDMA.sfc",
-        "2e6b2da85aff29e40f88c00cba976be3e84232804f50da6eb7fcbc24d4b60bc5",
+        "951627b0367b40dbc428991261b732e6e0dadfcecbcbbd1b5c64e2591858daff",
     ),
     // Mode7HDMA switches BG mode mid-frame: sky and a sun and a row of
     // trees above, a mode-7 ground plane receding below. It needs both
@@ -258,7 +267,7 @@ const GOLDENS: &[(&str, &str)] = &[
     // MosaicMode5.sfc: the moogle again under mosaic -- FLAT blocks of one colour, which is the check that mattered here (see the mosaic note in bg.rs: the wrong space to snap in fills every block with a two-colour stripe instead).
     (
         "MosaicMode5.sfc",
-        "1a8ca01511ba641085315ee0bdb6c6be51825638be061baa8ddf111562de6531",
+        "fe81d51a98a3b5db87a7f7f43dc5d174d04c518164ca745da27d97956e5996d0",
     ),
     // InterlaceFont.sfc: the full printable-ASCII chart, sharp: ! through @ on the top row, A-Z, then a-z. Its whole purpose is 512-dot text and every glyph is correctly formed.
     (
@@ -657,6 +666,13 @@ fn the_tilemap_geometry_is_honoured_once_you_scroll_into_it() {
         // One screen right, into the territory the two maps disagree about.
         s.bus.ppu.bgs[0].hofs = 256;
         s.bus.ppu.bgs[1].hofs = 256;
+        // Ticket W14-31: composition now reads the per-line record latched
+        // while the ROM ran (completed frame first, then the live one)
+        // before it falls back to the raw registers, so a register poked
+        // from outside the simulation is invisible until that record is
+        // dropped. This test deliberately renders from the poked raw
+        // registers, so drop it.
+        s.bus.ppu.clear_line_state();
         let mut hasher = Sha256::new();
         for y in 0..HEIGHT {
             let line = s.bus.ppu.render_scanline(y);

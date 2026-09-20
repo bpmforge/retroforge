@@ -2518,3 +2518,19 @@ the census budget, so whatever those traces described, the uniform
 screen the census saw was the wiped per-line record, not the game. The
 W14-25 race trace stands as a description of the emulator's behaviour
 at that time and should be re-checked before it is cited again.
+
+**Hidden-gate follow-up (orchestrator, 2026-09-20):** `scripts/local-gate.sh`
+at the W14-31 merge failed on the ignored `peterlemon_golden` suite — six
+pinned frames (8x8BGMap8BPP32x32, WindowHDMA, WindowMultiHDMA,
+MosaicMode3, MosaicMode5, WaveHDMA) changed hash, and the tilemap-geometry
+test's two hashes became equal. Both are consequences of the fix, not
+regressions: the goldens had been pinned while `render_scanline` read a
+per-line record that was only partly latched (the suite renders after
+stepping to an arbitrary point mid-frame), and every re-dumped frame
+(`RF_GOLDEN_DUMP`) was looked at — the wave, the window shapes, the
+mosaics and the map are the demos' intended full-frame pictures. The
+geometry test pokes `hofs` from outside the simulation and renders, which
+the per-line record now hides, so it drops the record first
+(`clear_line_state`). Six hashes re-pinned in
+`crates/rf-snes/tests/peterlemon_golden.rs` with the reason recorded
+beside the table.
