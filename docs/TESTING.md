@@ -804,6 +804,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-31 | 1265 | **1054** | 81 | 130 | **0** | **0** |
 | SNES, after W14-28 | 1265 | **1061** | 74 | 130 | **0** | **0** |
 | SNES, after W14-36 | 1265 | **1066** | 69 | 130 | **0** | **0** |
+| SNES, after W14-39 | 1265 | **1076** | 59 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -4867,3 +4868,25 @@ DMA/audio service) beyond this ticket's scope. No emulator defect is
 demonstrated here, so none is invented: named, quantified, bounded, and
 left for a ticket that can commit to decompiling this title's loader,
 not tuned around.
+
+**Full SNES census (orchestrator, 2026-09-21, W14-39 tree merged with
+main, per-title `RF_CENSUS_OUT` diff against the W14-36 run):**
+**1066/69/130/0/0 -> 1076/59/130/0/0** ("SNES, after W14-39" row above).
+Fifteen rows moved to *rendered something*: **Rival Turf!**, **Super
+Turrican** (USA and Virtual Console), **Wario's Woods** (three of the
+W14-33 APU deadlocks — the CPU was outrunning the SPC), **Brawl
+Brothers**, **Legend** (USA and beta), **Super Valis IV**, **Spanky's
+Quest**, **Rocky Rodent**, **Family Dog**, **The Adventures of Rocky and
+Bullwinkle**, **J.R.R. Tolkien's The Lord of the Rings Vol. 1**, **Spot
+Goes to Hollywood (Proto)**, **Super Turrican 2 (Beta 1)**. Five rows
+moved the other way and are recorded, not tuned around: **Power Rangers
+Zeo** (first varied frame 591 -> 604, a budget edge); **The Pagemaster**
+(USA, Beta 2, Beta 3: first varied frame 203 -> 2955, an 11x instruction
+count to leave a stock WaitVBlank whose NMI-side counter is healthy —
+the ~1660 idle frames sit in the title's own BRK-dispatched loader with
+no port, raster or timer traffic; follow-up W14-40); **Tommy Moe's Winter
+Extreme** (a catch-up burst let the SPC's first post-handoff instructions
+clobber its handshake echo — fixed for the first edge, but the residual
+needs cycle-level CPU/SPC interleaving; follow-up W14-41 under W6-02a).
+Net +10, and the per-instruction cycle model is pinned exactly by
+5,080,000 vector cases.
