@@ -7521,7 +7521,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "blocked",
   "stories": [],
   "id": "W14-37",
   "title": "IPL boot HLE: charge the real 64-byte boot ROM's cycles on the go->jump handoff and the per-byte handshake, from the published IPL listing",
@@ -7536,7 +7536,8 @@
    "W14-37: census children on Super Turrican (USA and VC), Rival Turf!, Wario's Woods, Soul Blazer, Super Mario RPG (USA), Super Mario World, Wild Guns, Kirby Super Star, ActRaiser 2, Robotrek, Clay Fighter (USA); then the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and every title that moved in either direction is named in docs/TESTING.md"
   ],
   "notes": [
-   "W14-37 FILED 2026-09-20 by the orchestrator from W14-33's Super Turrican finding. IplBoot (crates/rf-snes/src/apu/boot.rs) is a high-level model of the boot ROM's protocol; its timing between protocol steps is the suspect. The listing is documentation; the 64 bytes are Sony's and stay out of the tree."
+   "W14-37 FILED 2026-09-20 by the orchestrator from W14-33's Super Turrican finding. IplBoot (crates/rf-snes/src/apu/boot.rs) is a high-level model of the boot ROM's protocol; its timing between protocol steps is the suspect. The listing is documentation; the 64 bytes are Sony's and stay out of the tree.",
+   "W14-37 HELD 2026-09-20 by the orchestrator: the branch w14-37 (HEAD 7e40c0d, merged with main) is done and gate-green, but the full census on it is a +7/-7 trade against main — Dennis the Menace (Beta), Final Fight 3 (Beta), Killer Instinct (Beta), Rocky Rodent, Spot Goes to Hollywood (Proto), Super Turrican 2 (Beta 1), TMNT IV (Beta 2) move to rendering while Best of the Best, Men in Black (Pirate), Power Rangers Zeo, Super Aquatic Games x2, Tommy Moe's Winter Extreme, Troddlers, Xardion move to uniform (all seven verified rendering on main without it). A boot-handoff delay that trades titles is a shifted race, not fidelity; the likely partner is W14-39 (the CPU runs fast because internal cycles are uncharged). Not merged; re-census on top of W14-39 before deciding."
   ]
  },
  {

@@ -803,6 +803,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-26 | 1265 | **1037** | 98 | 130 | **0** | **0** |
 | SNES, after W14-31 | 1265 | **1054** | 81 | 130 | **0** | **0** |
 | SNES, after W14-28 | 1265 | **1061** | 74 | 130 | **0** | **0** |
+| SNES, after W14-36 | 1265 | **1066** | 69 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -4251,6 +4252,18 @@ millions more instructions) to find out whether they eventually reach
 the same APU-command stage the trio does, or something else entirely;
 not pursued here since none of the three showed anything past the
 already-characterized healthy idle.
+
+**Full SNES census (orchestrator, 2026-09-20, main at the W14-36 merge,
+per-title `RF_CENSUS_OUT` diff against the W14-35 run):**
+**1061/74/130/0/0 -> 1066/69/130/0/0** ("SNES, after W14-36" row above).
+Five rows changed, all from *uniform screen* to *rendered something*:
+**WWF Super WrestleMania** (retail) and four betas that share its
+LoROM-with-HiROM-nibble header, **Dennis the Menace (Beta)**, **Final
+Fight 3 (Beta)**, **Killer Instinct (Beta)**, **TMNT IV: Turtles in Time
+(Beta 2)**. None regressed. W14-37 (IPL handoff cycles) was censused on a
+tree that also carried this fix and came out a +7/-7 trade against main
+(the seven regressions verified rendering here), so it is held unmerged
+until W14-39 lands and it can be re-censused on top of that.
 
 ## W14-39 — 65C816 internal cycles: charge them for real, pinned by the vectors' cycle lists
 
