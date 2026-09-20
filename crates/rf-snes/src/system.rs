@@ -267,7 +267,13 @@ impl SnesSystem {
             // record resets where HDMA itself re-initialises.
             self.bus.clear_hdma_lanes();
             self.bus.hdma_init();
-            self.bus.ppu.clear_line_state();
+            // Ticket W14-31: swap the just-elapsed frame's per-line
+            // records into `completed_*` rather than wiping them — a
+            // `Step::Frame`/`render_frame` composer only regains control
+            // AFTER this instruction, so a plain clear here destroyed
+            // every mid-frame register write's attribution before
+            // anything could read it. See `Ppu::advance_line_state`.
+            self.bus.ppu.advance_line_state();
             // Ticket W13-02h: the frame boundary, in the order
             // `CoreEvent::FrameEnd`/`FrameStart` document — "after the
             // last scanline" then "before the first" — both landing at

@@ -497,6 +497,46 @@ pub struct Ppu {
     /// no business touching.
     line_regs: Vec<Option<PpuRegs>>,
 
+    /// The three fields above, as they stood for the LAST FRAME THAT
+    /// FULLY ELAPSED — ticket W14-31.
+    ///
+    /// `line_state`/`line_writes`/`line_regs` are the CURRENT frame's
+    /// scratch: they fill in as the beam scans out and, before this
+    /// ticket, were wiped by [`Ppu::clear_line_state`] at the very
+    /// instant the frame boundary crossed — which is BEFORE a
+    /// `Step::Frame`/`render_frame` caller ever regains control to
+    /// compose the frame that just ended (`emit_frame` runs on the SAME
+    /// call that already stepped past `frame_started`). So a batch
+    /// composer reading `line_state` etc. directly always saw an empty
+    /// buffer, and every mid-frame register write (raster IRQ chains,
+    /// `$2100` fades, HDMA-adjacent writes) silently fell back to
+    /// whatever the live registers happened to be at that instant —
+    /// always mid-blank, at a frame boundary. See docs/TESTING.md's
+    /// W14-29 write-up for the traced case (Final Fantasy Mystic Quest).
+    ///
+    /// [`Ppu::advance_line_state`] runs at `frame_started` INSTEAD of
+    /// clearing in place: it swaps the current (now-finished) frame's
+    /// three buffers in here, then clears the (now live-again, but
+    /// stale-by-two-frames) buffers left behind — an allocation-free
+    /// rotation, not a realloc. [`Ppu::apply_line_state`] and
+    /// [`Ppu::compose_line_segmented`] read from here FIRST and fall
+    /// back to the live buffers only when a line has no record here —
+    /// which is either "the completed frame never latched this line"
+    /// (the pre-existing fallback-to-live-registers case) or "nothing
+    /// has been swapped in yet at all", the case every direct
+    /// `Ppu::new()` unit test is in, since it never calls
+    /// `advance_line_state`. That second case is why this is a
+    /// **fallback to the live buffer**, not a fallback straight to raw
+    /// live registers as first sketched: the W13-02 latching tests
+    /// (`window_and_mosaic_registers_are_latched_per_scanline` et al.)
+    /// call `latch_line` and `render_scanline` directly against a bare
+    /// `Ppu`, with no frame boundary ever crossed, and must see their
+    /// own latch composed — which only the live buffer holds in that
+    /// scenario.
+    completed_line_state: Vec<Option<LineState>>,
+    completed_line_writes: Vec<Vec<(u16, u16, u8)>>,
+    completed_line_regs: Vec<Option<PpuRegs>>,
+
     /// `$213E` bit 6: more than 32 sprites on a line.
     pub range_over: bool,
     /// `$213E` bit 7: more than 34 tile slivers on a line.
@@ -544,6 +584,9 @@ impl Ppu {
             line_state: vec![None; VISIBLE_LINES_OVERSCAN as usize],
             line_writes: vec![Vec::new(); VISIBLE_LINES_OVERSCAN as usize],
             line_regs: vec![None; VISIBLE_LINES_OVERSCAN as usize],
+            completed_line_state: vec![None; VISIBLE_LINES_OVERSCAN as usize],
+            completed_line_writes: vec![Vec::new(); VISIBLE_LINES_OVERSCAN as usize],
+            completed_line_regs: vec![None; VISIBLE_LINES_OVERSCAN as usize],
             direct_color: false,
             range_over: false,
             time_over: false,
@@ -758,18 +801,78 @@ impl Ppu {
         *self.line_state.get(usize::from(y))?
     }
 
-    /// Forget every latched line. Called at the start of a frame so a
-    /// line nothing reached this frame cannot serve last frame's state.
+    /// Forget every latched line, in BOTH the live and completed sets.
+    ///
+    /// For a full reset (load-state — ticket W7-09/W14-31): a restored
+    /// PPU must not serve a prior save's latched lines from either set.
+    /// `frame_started` does NOT call this any more; see
+    /// [`Ppu::advance_line_state`].
     pub fn clear_line_state(&mut self) {
-        for slot in &mut self.line_state {
+        Self::clear_line_buffers(
+            &mut self.line_state,
+            &mut self.line_writes,
+            &mut self.line_regs,
+        );
+        Self::clear_line_buffers(
+            &mut self.completed_line_state,
+            &mut self.completed_line_writes,
+            &mut self.completed_line_regs,
+        );
+    }
+
+    fn clear_line_buffers(
+        state: &mut [Option<LineState>],
+        writes: &mut [Vec<(u16, u16, u8)>],
+        regs: &mut [Option<PpuRegs>],
+    ) {
+        for slot in state {
             *slot = None;
         }
-        for w in &mut self.line_writes {
+        for w in writes {
             w.clear();
         }
-        for r in &mut self.line_regs {
+        for r in regs {
             *r = None;
         }
+    }
+
+    /// Move the frame that just finished into the `completed` snapshot the
+    /// render path composes from, then reset the live buffers for the
+    /// frame starting now (ticket W14-31).
+    ///
+    /// Called at `frame_started`, replacing the old `clear_line_state()`
+    /// call there. **Swaps rather than reallocates**: after this call
+    /// `completed_line_*` holds exactly what `line_*` held the instant
+    /// before (the frame that just elapsed, in full), and `line_*` holds
+    /// whatever `completed_line_*` held before that (two frames stale,
+    /// already composed, now cleared in place) — so no `Vec` is ever
+    /// freed or grown here, only cleared.
+    pub fn advance_line_state(&mut self) {
+        std::mem::swap(&mut self.line_state, &mut self.completed_line_state);
+        std::mem::swap(&mut self.line_writes, &mut self.completed_line_writes);
+        std::mem::swap(&mut self.line_regs, &mut self.completed_line_regs);
+        Self::clear_line_buffers(
+            &mut self.line_state,
+            &mut self.line_writes,
+            &mut self.line_regs,
+        );
+    }
+
+    /// Does the just-completed frame carry its own record for hardware
+    /// line `idx`?
+    ///
+    /// The proxy for "which set should composition read for this line":
+    /// every line a full elapsed frame reaches gets latched (the
+    /// `visible_lines_crossed` loop in `SnesSystem::step` calls
+    /// `latch_line` for every one), so `completed_line_state[idx]` being
+    /// `Some` after `advance_line_state` means the OTHER two completed
+    /// buffers are the right source for this line too — all three are
+    /// always advanced together. `Some` is impossible before the first
+    /// `advance_line_state` ever runs, which is exactly when a direct
+    /// `Ppu::new()` test (no frame boundary crossed) needs this to say
+    /// "read the live buffer instead".
+    fn line_uses_completed(&self, idx: usize) -> bool {
+        matches!(self.completed_line_state.get(idx), Some(Some(_)))
     }
 
     /// Write a register, recording it as a mid-line event when `at` says
@@ -847,15 +950,29 @@ impl Ppu {
     /// single line could carry thousands of misattributed frame-setup
     /// writes.
     fn compose_line_segmented(&mut self, line: u16, width: usize) -> Scanline {
-        let writes = self
-            .line_writes
-            .get(usize::from(line))
-            .cloned()
-            .unwrap_or_default();
+        let idx = usize::from(line);
+        // Read the same set `apply_line_state` picked for this line
+        // (ticket W14-31) — completed-frame data when the just-elapsed
+        // frame recorded this line, the live scratch otherwise. See
+        // `line_uses_completed`'s doc for why that is the right test.
+        let (writes, regs) = if self.line_uses_completed(idx) {
+            (
+                self.completed_line_writes
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_default(),
+                self.completed_line_regs.get(idx).copied().flatten(),
+            )
+        } else {
+            (
+                self.line_writes.get(idx).cloned().unwrap_or_default(),
+                self.line_regs.get(idx).copied().flatten(),
+            )
+        };
         // Rewind to the registers as they stood before this line's first
         // mid-line write, then replay forward. Lines with no writes skip
         // this entirely and compose exactly as they always did.
-        if let Some(Some(regs)) = self.line_regs.get(usize::from(line)).copied() {
+        if let Some(regs) = regs {
             regs.apply(self);
         }
         let phase = self.hires_phase(bg::HiresPhase::Odd);
@@ -886,7 +1003,20 @@ impl Ppu {
     /// touched. The caller owns putting the registers back — see
     /// [`LineScratch`] for why this is no longer a clone.
     fn apply_line_state(&mut self, y: u16) -> bool {
-        let Some(Some(state)) = self.line_state.get(usize::from(y)).copied() else {
+        let idx = usize::from(y);
+        // Prefer the just-completed frame's own record (ticket W14-31);
+        // fall back to the live scratch — either because the completed
+        // frame never latched this line (the pre-existing fallback,
+        // which then also returns `false` below) or because nothing has
+        // ever been swapped into `completed_*` yet, which is every W13-02
+        // unit test that latches and composes against a bare `Ppu`
+        // without a frame boundary in between.
+        let state = if self.line_uses_completed(idx) {
+            self.completed_line_state[idx]
+        } else {
+            self.line_state.get(idx).copied().flatten()
+        };
+        let Some(state) = state else {
             return false;
         };
         self.mode7 = state.mode7;
