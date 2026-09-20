@@ -7493,7 +7493,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-36",
   "title": "DMA/mapping family (11 titles): control crashes into the $0000 BRK/COP vector — bisect Final Fight 3 (Beta), Brawl Brothers, Final Fight 2",
