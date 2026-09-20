@@ -7620,7 +7620,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-41",
   "title": "CPU/SPC interleave granularity: catch_up_apu commits whole SPC instructions past a port write — Tommy Moe's residual handoff race",
