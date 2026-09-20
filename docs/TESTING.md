@@ -1061,3 +1061,93 @@ ROM searches and rings of port changes and PCs on request. The census says
 *which* titles; the probe says *where to look*. Its module doc has the
 env-var contract. Like the census it takes ROM paths from the environment
 and is in no gate.
+
+**W14-23 (SPC700 halts during the boot upload: Super Mario RPG's `$2140`
+poll never completes), 2026-09-19, release build — corrects W17-04's
+named cause, no fix shipped, ticket left BLOCKED.**
+
+Traced past where W17-04 stopped. `apu.cpu.stopped=true` /
+`apu.boot_running=true` is real, but it is **not** the IPL handshake
+stalling: the first-stage IPL transfer completes cleanly (37 bytes to
+`$0200`, `boot=Running`, `ipl` still banked in) and the SPC700 runs real
+uploaded driver code afterward. The halt, pinned three ways with
+`title_probe`'s `PROBE_STOP_ON_SPC_STOP`/`PROBE_PORTS`/`PROBE_ARAM`: SPC
+PC settles at `$09B6` with `stopped=true`; `spcring` shows the final
+pass through the driver's own port-polling loop going `$09B4 → $09B5 →
+$09B6` where every earlier pass went straight `$09B4 → $09B6`; ARAM
+`$09B4` held `E4 16` (`MOV A,$16`, live code) at instruction 70,000 and
+`FD EF` (`MOV Y,A` / `SLEEP`) at the halt. Byte-for-byte: the CPU's
+packet at the halting write carried data `$40 $FD $EF`, and the driver's
+own receive loop stores three bytes per call at `$0912+X`/`$0913+X`/
+`$0914+X` with **no bound and no reset on `X`** — traced climbing `0x98
+→ 0x9B → 0x9E → 0xA1 → 0xA4` by 3 per call across dozens of calls. At
+`X=0xA1` the three stores land on `$09B3`/`$09B4`/`$09B5` — **the
+driver's own command-receive loop overwrites its own code with ordinary
+incoming data**, and the next fetch through `$09B4` executes the
+just-written `SLEEP`.
+
+Ruled out by trace, not by argument: an unimplemented opcode (`$EF`
+SLEEP is implemented, `ops.rs:800`, and `step_counted` returns `Ok`, not
+an error); the IPL boot machine exiting with the PC still in the
+`SLEEP`-filled `$FFC0-$FFFF` window (`ipl=false` throughout the halt,
+and the halt PC is in ARAM, not the IPL region); and the first-stage
+upload itself being short or misaddressed (37 bytes landed at the
+correct `$0200`, `entry=$0200`, cleanly).
+
+**A fix was attempted in `IplBoot` and reverted — recorded so the next
+executor does not repeat the three hours.** The working theory was that
+`IplBoot`'s per-byte counter prediction (`expected.wrapping_add(1)`)
+should skip `$00` on wraparound, per snes.nesdev.org/wiki/S-SMP: "if
+your counter is 0 after incrementing ... increment it a third time to be
+non-zero ... because a value of 0 in port 0 will also signal the first
+byte of the transfer." **That page states the rule for the two-step
+"next block" increment specifically; extrapolating it to every ordinary
+`+1` continuation is wrong**, disproved by a same-tree A/B: Wild Guns'
+own uploader wraps its counter `$FF → $00` in the plain, undocumented
+way (traced with `PROBE_PORTS=1`), and the skip-zero prediction turned
+that legitimate continuation into a false counter mismatch, misreading
+`ports_in[2]`/`[3]` as a bogus destination address and jumping to
+`$A400` — the same failure *shape* this ticket set out to fix, now
+hitting a previously-working title. Super Mario World was not checked
+before the Wild Guns regression surfaced and disproved the rule, so it
+was not needed to kill the theory, but both are census-baseline titles
+that must not move. The attempted change (`crates/rf-snes/src/apu/
+boot.rs`, `next_counter`/`last_counter`, plus a new
+`crates/rf-snes/src/tests/apu_ports.rs` case) was reverted in full; the
+working tree for this ticket's close is identical to before it started.
+
+**Named cause corrected**: W17-04's "SPC700 IPL/upload handshake"
+framing was too narrow — the IPL upload itself is clean. The actual
+cause is a buffer overflow in the **uploaded driver's own runtime
+command-receive loop** (unbounded `X` walking into adjacent code), which
+this ticket's write scope (`IplBoot`, the SPC700 core) cannot fix by
+construction: the driver bytes are the game's own, real hardware would
+run the identical code, and law 5 forbids reconstructing or patching
+around them. Whether real hardware avoids this specific overflow (a
+different, still-uncorrupted `X` growth rate; a bound this emulator
+isn't honouring; a rate mismatch between the SPC700 and the main CPU)
+is unresolved and is the next ticket's question — **not** an IPL
+handshake question, so it should not be filed as one.
+
+Both Super Mario RPG dumps stay in the **uniform screen** bucket. Named
+cause updated to: *uploaded driver's command-receive loop overflows its
+own destination buffer into adjacent code (SLEEP at ARAM `$09B5`), not
+an IPL handshake stall; unresolved whether this is a timing mismatch
+against real hardware or a buffer real hardware also relies on being
+sized differently.* Census not re-run — no code changed, so no bucket
+counts can have moved and doing so would only spend budget confirming a
+tautology. `plan.json`'s W14-23 note carries the same finding as a
+BLOCKED handoff; ticket status left `in_progress`, not `done`.
+
+**One instrumented-but-unconfirmed lead for whoever picks this up**:
+under the (reverted) `next_counter` change, SMRPG's execution got
+further — past the SLEEP, into a second `IplBoot`-managed transfer
+triggered by the driver jumping back to `$FFC0` — before hanging on a
+*different* spin, `LDA $2142` / `BNE $086E`, waiting for `$2143==2`.
+`ports_out[3]` is set only by an SPC700 write to `$F7`, and neither
+`Publish` nor `reenter_ipl` touch it, so either the driver never reaches
+that write or something clears it first. This was observed only under
+code that has since been reverted and is not a finding about the current
+tree — flagged as a place to instrument (`write_register` on `$F6`/
+`$F7`, with the writing SPC PC) before assuming it is the same class of
+bug as the SLEEP overflow above.
