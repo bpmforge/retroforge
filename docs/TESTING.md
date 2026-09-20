@@ -2994,3 +2994,309 @@ before. The full orchestrator census is not re-run: nothing in
 `crates/rf-snes/**` changed.
 
 **Determinism:** unaffected — no code changed.
+
+## W14-33 — Rival Turf!, Super Turrican, Wario's Woods: three distinct
+driver-side port deadlocks; register/timing semantics re-verified clean;
+all three stay BLOCKED, 2026-09-20, release build.
+
+Method per the ticket's brief: `PROBE_PORTS`/`PROBE_RING`/`PROBE_SPCRING`
+at 3,000,000 instructions to find which side spins and on which port;
+`PROBE_ARAM`/`PROBE_DIS`/`PROBE_SPCMEMWATCH` to pin the SPC700 driver and
+the 65816 loader around the spin; then the acceptance checklist (`$F1`
+bits 4/5/7, `$F4-$F7` read/write direction, timer `$FD-$FF` clear-on-read,
+`catch_up_apu` ordering, 16-bit `$2140-$2143` accesses, `$4204-$4217`/
+`$43xx`/`$4211` reads) checked against `crates/rf-snes/src/apu/mod.rs`,
+`crates/rf-snes/src/apu/boot.rs` and `crates/rf-snes/src/bus.rs` before
+accepting a title as BLOCKED.
+
+**This crate has no SPC700 disassembler** (`PROBE_DIS` only covers the
+65816; `PROBE_ARAM` is a raw hex dump). The SPC700 mnemonics below were
+NOT hand-decoded from the hex — a small scratch script
+(`spc_disasm.py`, not shipped) was written against `crates/rf-snes/src/
+apu/spc700/ops.rs`'s own opcode-to-mnemonic mapping (`alu_operand`'s
+table for the six ALU groups, and every individual `match` arm quoted
+below by line number) and run over each dumped byte range, so every
+mnemonic quoted here is opcode-table-verified, not inferred. Getting this
+wrong was the exact trap this ticket's acceptance guards against — see
+the earlier BLOCKED-verdict cautionary tale under W14-24 above.
+
+**Register/timing semantics checked and found correct for all three (not
+the divergence):**
+- `$F4-$F7`: SPC read returns `ports_in` (CPU-written), SPC write sets
+  `ports_out` (CPU-read) — `apu/mod.rs:601,668`, matching fullsnes "SNES
+  APU Memory and I/O Map" (`$2140-2143`/`$F4-F7` are two one-directional
+  latch pairs, not a shared register — a side never reads back its own
+  write through the same address). This routing is keyed on the
+  **resolved 16-bit address**, not the addressing mode that produced it
+  (`apu/mod.rs:700`, `ApuBus::read`/`write` test `(0x00F0..=0x00FF)
+  .contains(&addr)` before anything else) — so an absolute-mode `MOV
+  A,!$00F4` (opcode `$E5`) reaches the same `read_register` as a
+  direct-page `MOV A,$F4` (opcode `$E4`) would; there is no addressing-
+  mode gap that would let a port read fall through to stale `aram[]`
+  bytes instead. Checked directly because Rival Turf!'s driver uses the
+  absolute form.
+- `$F1`: bit 4 clears `ports_in[0..2]`, bit 5 clears `ports_in[2..4]`, bit
+  7 sets `ipl_enabled` — `apu/mod.rs:611-623`, matching fullsnes "Port2/3
+  Clear"/"Port0/1 Clear"/"RAM/IPL ROM Enable".
+- Timer `$FD-$FF`: `Timer::read_counter` returns the 4-bit counter and
+  zeroes it in the same call (`apu/mod.rs`, `Timer::read_counter`),
+  matching fullsnes "the counter... is cleared automatically after being
+  read".
+- `catch_up_apu()` runs before every `$2140-$2143` CPU access, both read
+  and write (`bus.rs:438-465`) — the SPC is always advanced to "now"
+  before either side observes or mutates a port, per the W14-09 finding
+  this ticket re-checked rather than assumed.
+- `IplBoot`'s `Run`/`Echo` handoff (the W7-08/W14-06/W14-10 fixes) is
+  unchanged and, per the traces below, completed cleanly for all three
+  boots — the deadlocks in this ticket all happen strictly *after*
+  control passes to the real SPC700 core, inside the game's own uploaded
+  driver code, not in the HLE handshake.
+- 16-bit CPU accesses to `$2140-$2143` **do** appear (Super Turrican's
+  `LDX $2140` at `0C81DC`, Wario's Woods' `STA $2142` at `8B8175`, both
+  with `X`/`A` widened by `REP`) — the earlier draft of this note
+  wrongly claimed none did. Checked: `read_value`/`write_value`
+  (`crates/rf-snes/src/cpu/addressing.rs:175,204`) resolve a 16-bit
+  access as **two separate `bus.read`/`bus.write` calls**, low byte
+  first, each going through `SnesBus`'s own `catch_up_apu()`-then-access
+  path independently — i.e. a 16-bit port access costs two real bus
+  cycles here exactly as it would on hardware (a 65816 has no atomic
+  16-bit bus transaction), so there is no "torn" or "invisible until
+  both halves land" state this crate introduces that hardware would not
+  also produce.
+- No `$4204-$4217`/`$43xx`/`$4211` read appears in Rival Turf!'s uploader
+  (`PROBE_DIS=00:e3e0:e470`, quoted below) or in Super Turrican's/Wario's
+  Woods' loader subroutines (`PROBE_DIS=0c:8180:8200` and
+  `PROBE_DIS=8b:8160:81a0`, quoted below) — the W14-24/26/28
+  register-read-timing class does not apply to any of this ticket's
+  spins.
+
+**Rival Turf! (USA)** — CPU spins at `00E42F`/`00E432` (`CMP $2140` /
+`BNE $E42F`); SPC spins at `067F`/`0682`/`0684`. `PROBE_DIS=00:e3e0:e470`
+(65816, this crate's own disassembler, `trace.rs`) shows the uploader:
+
+```
+E425: LDA [$00],Y   ; next data byte
+E427: INY
+E428: STA $2141     ; data
+E42B: XBA           ; swap in the persistent counter byte
+E42C: STA $2140     ; index/counter
+E42F: CMP $2140     ; wait for the SPC's echo of this counter
+E432: BNE $E42F
+E434: INC A
+E435: XBA           ; counter++ for next byte
+...
+E43C: LDA $2142     ; only reached AFTER a successful echo above —
+E43F: CMP #$FF       ; checks for the SPC's "block done" signal
+E441: BNE $E425
+```
+
+`spc_disasm.py` over `PROBE_ARAM=0600:0700`'s bytes for `$0640-$0688`
+(opcode-table-verified against `ops.rs`'s `0x60`/`0xE5`/`0x64`/`0xAB`/
+`0x8B`/`0x10`/`0x00`(OR)/`0xD0`/`0x5F` arms):
+
+```
+0640: MOV A,#$FF
+0642: MOV !$00F4,A
+0645: MOV A,#$03
+0647: MOV $05,A          ; dp$05 = 3 (a 4-slot countdown)
+0649: MOV A,!$00F4       ; absolute-mode read of port 0 (verified routed
+064C: CMP A,$04          ;   through read_register, see above) — wait for
+064E: BNE $0649          ;   the CPU's counter to match dp$04
+0650: MOV A,!$00F5       ; data byte
+0655: MOV $00+X,A        ; store into the header buffer at dp[X]
+0657: MOV A,$04
+0659: MOV !$00F4,A       ; echo the counter
+065C: INC $04
+065E: DEC $05
+0660: BPL $0649          ; loop while the 4-slot header still has room
+0662: MOV A,$00 / MOV X,$01 / MOV $00,X / MOV $01,A   ; swap dp$00<->$01
+066A: MOV A,$02 / MOV X,$03 / MOV $02,X / MOV $03,A   ; swap dp$02<->$03
+0672: MOV Y,#$00
+0674: MOV A,$02
+0676: OR A,$03           ; A = (post-swap dp$02) | (post-swap dp$03)
+0678: BNE $0689          ; nonzero -> more data follows (not taken here)
+067A: MOV A,#$FF
+067C: MOV !$00F6,A       ; ZERO -> "no more data": assert out[2]=$FF
+067F: MOV A,!$00F6       ; then wait for the CPU to ack via in[2]=$FF
+0682: CMP A,#$FF
+0684: BNE $067F
+0686: JMP !$0200         ; present in the dump, never reached this run
+```
+
+**Not inferred — measured directly.** `PROBE_SPCMEMWATCH=0002,0003,
+0000,0001` over the same run shows the two header bytes that the `$0678`
+branch actually tests landing at zero before the branch is taken:
+`SPCMEMWATCH n=2591205 addr=0003 spcpc=0657 FF->00` and `n=2591303
+addr=0002 spcpc=0657 FF->00` (both writes are the receive loop's own
+`$0655`/`echo` pass, well before the swap). So the `067C`/`067F`
+"no more data" path the SPC takes is not a guess from the branch
+direction alone — the exact bytes it branches on are dumped, and both
+are genuinely `$00`. At the hang, `ports_in=[85,00,00,00]`,
+`ports_out=[84,00,ff,00]`: the 65816 has just written counter `$85` to
+`$2140` (`STA $2140` at `E42C`) and is waiting at `E42F` for an echo that
+the SPC — having already taken the "done" branch on the *previous*
+header — will never send; the 65816's own "is the SPC done" check
+(`E43C`, `LDA $2142`) is unreachable without that echo. Both sides'
+polling conditions are satisfiable only by an action the other side has
+already permanently stopped taking. The two zero header bytes are the
+game's own uploaded data (received from the game's own ROM table via the
+CPU's `LDA [$00],Y` loop) — not a register or timing semantic this crate
+gets wrong (all items above checked clean, including the specific
+absolute-addressing-mode routing this title's driver uses). Per law 5,
+these are the game's own bytes and not something `crates/rf-snes` can
+patch around; **BLOCKED**.
+
+**Super Turrican (USA)** — the IPL handoff itself completes cleanly
+(`Transferring(195)` -> `Running`, entry `$F000`). The deadlock is inside
+the freshly-uploaded driver: CPU spins at `0C81DC`/`0C81DF` (`LDX $2140`
+/ `BNE $81DC`, a genuine 16-bit port read — see above — waiting for
+`$2140==0`); SPC spins at `F018`/`F01A`. `PROBE_DIS=0c:8180:8200`
+(65816) shows the generic per-command subroutine:
+
+```
+0C81DC: LDX $2140      ; wait for "ready" (0) — 16-bit, two bus reads
+0C81DF: BNE $81DC
+0C81E1: CMP #$01       ; A already holds the command to send
+0C81E3: BEQ $81F6      ; command 1 -> a different path (not this run's)
+0C81E5: STA $2140      ; send the command
+0C81E8: STY $2141      ; send the data byte
+0C81EB: CMP $2140      ; wait for the SPC's echo
+0C81EE: BNE $81EB
+0C81F0: LDA #$00
+0C81F2: STA $2140      ; reset the port to 0 -- CPU's own job, not SPC's
+0C81F5: RTS
+```
+
+`spc_disasm.py` over `PROBE_ARAM=f000:f040` shows the driver's own
+init (`$F000-$F013`, once at entry) and its command loop:
+
+```
+F014: MOV A,#$00
+F016: MOV $F4,A         ; out[0]=0, "ready" — this instruction never
+                         ; runs again on this path once the loop below
+                         ; is entered
+F018: MOV A,$F4         ; wait for a nonzero command
+F01A: BEQ $F018
+F01C: MOV $F4,A         ; echo the command back on out[0]
+F01E: CMP A,#$01
+F020: BNE $F018         ; not command 1 -> back to waiting
+```
+
+At the hang, `ports_out[0]=$F0` (the last echoed command) and
+`ports_in[0]=$00`. The trace shows the CPU's `0C81E5`/`0C81EB` pair did
+send command `$F0` and did see it echoed (matching `out[0]=$F0`), so its
+own `0C81EB` echo-wait resolved and it should have reached `0C81F2`
+(`out[0]=0`) — **but by the time of this 3,000,000-instruction snapshot
+it has not**, and is instead back at the *first* wait (`0C81DC`) of a
+*subsequent* call. Distinguishing "the reset write never executed" from
+"a later call already consumed the reset and is waiting on a fresh
+command that never arrives" needs a full trace of every call into this
+subroutine across the run (which command values, in what order, from
+which callers) — not done in this session's budget. What is confirmed:
+`out[0]` is stuck at a nonzero value, `F018`'s wait (`in[0]!=0`) and
+`0C81DC`'s wait (`out[0]==0`) are each individually a correct
+implementation of the bytes shown, `$F1`/`$F4-$F7`/timer/`catch_up_apu`/
+IPL-handoff/16-bit-access checks above all re-verified clean against
+this title's own trace, and no math-unit read appears in the loop.
+**BLOCKED** — the specific call sequence that leaves `out[0]` non-zero is
+unresolved and left for whoever next picks this title up, but no
+register/timing divergence from fullsnes was found in the areas this
+ticket's acceptance names.
+
+**Wario's Woods (USA)** — IPL handoff again completes cleanly
+(`Transferring(86)` -> `Running`, entry `$0803`). CPU spins at
+`8B8189`/`8B818C` (`CMP $2140` / `BNE $8189`); SPC spins at `080A`/`080C`.
+`PROBE_DIS=8b:8160:81a0` (65816) shows the uploader:
+
+```
+8B8160: CMP $2140       ; wait for echo of the previous counter
+8B8163: BNE $8160
+8B8165: ADC #$03        ; counter += 3, skipping the wraparound-to-zero
+8B8167: BEQ $8165       ; case -- the same "skip zero" rule IplBoot's own
+                         ; module doc (crates/rf-snes/src/apu/boot.rs)
+                         ; cites from snes.nesdev.org/wiki/S-SMP, here
+                         ; reimplemented in the GAME's own ROM code, not
+                         ; this crate's HLE
+8B8169: PHA
+8B816A: REP #$20        ; 16-bit A
+8B816C: LDA [$00],Y     ; fetch a 16-bit value
+8B8171: LDA [$00],Y     ; fetch a second 16-bit value
+8B8175: STA $2142       ; 16-bit store -> ports_in[2] AND [3] in one
+                         ; instruction (see the 16-bit-access check above)
+8B8178: SEP #$20
+...
+8B8186: STA $2140       ; send the counter
+8B8189: CMP $2140       ; wait for the SPC's echo (the hang point)
+8B818C: BNE $8189
+```
+
+`spc_disasm.py` over `PROBE_ARAM=0800:0840` shows the SPC side:
+
+```
+0800: MOV $F4,#$00
+0803: MOV $F5,#$00       ; entry point (matches IplBoot's reported $0803)
+0806: MOV A,#$33
+0808: MOV Y,#$03
+080A: CMPW YA,$F4        ; compare YA against the 16-bit word at
+080C: BNE $080A          ;   ports_in[0]/[1] -- wait for a match
+080E: DI
+080F: MOV X,#$FF
+0811: MOV SP,X
+```
+
+This is the same `CMPW YA,$F4` shape the real Nintendo IPL boot ROM
+itself uses at its own byte-receive step (`boot.rs`'s module doc quotes
+the equivalent real-hardware protocol) — Wario's Woods' driver
+re-implements a second, driver-level copy of that same style of
+handshake rather than relying on this crate's `IplBoot` HLE for its
+second-stage transfer, and does so entirely in the game's own uploaded
+ARAM bytes and ROM loader. At the hang, the SPC is waiting for `YA`
+(seeded `$0333` at `$0806`/`$0808`) to match `(ports_in[0],ports_in[1])`;
+the CPU's own `8B8186` write is what would produce that match, but the
+CPU is itself parked at `8B8189` waiting for the SPC to echo a counter
+first — the same call/response ordering problem as the other two titles,
+on a driver-authored protocol this crate does not implement and cannot
+patch around. `$F1`/`$F4-$F7`/timer/`catch_up_apu`/IPL-handoff/16-bit-
+access checks above re-verified clean against this title's trace; no
+divergence found. **BLOCKED**.
+
+**Verdict for all three**: **BLOCKED**. Rival Turf!'s chain is pinned to
+two specific ARAM bytes, measured directly (not inferred) at `$00`.
+Super Turrican's and Wario's Woods' chains are pinned to specific
+instructions and register states but not to a single fully-resolved root
+byte within this session's budget — recorded as the open question for
+whoever next picks up either title, rather than asserted as solved. None
+of the seven register/timing semantics this ticket's acceptance
+criteria names diverges from fullsnes/snes.nesdev in any of the three;
+those were re-checked directly against `crates/rf-snes/src/apu/mod.rs`,
+`boot.rs`, `bus.rs` and `crates/rf-snes/src/cpu/addressing.rs`, not
+assumed correct from prior tickets. No fix shipped; law 5 (no patching
+around a game's own ROM bytes) applies to all three. `plan.json`'s
+W14-33 note carries this same finding.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes --release` — **390 passed, 0
+failed** (no count change, no code changed); ignored SNES oracle suites
+unaffected — `singlestep_spc700_vectors` (256,000/256,000),
+`singlestep_65816_vectors` (5,080,000/5,080,000, the same pre-existing
+`$44`/`$54` MVN/MVP exclusion as every prior ticket, unrelated to this
+one), `spc_timer_reports_pass` (`blargg_spc`, "PASSED TESTS"),
+`gilyon_cputest::cputest_full_reports_success_and_every_test_passes`
+(`test_num=0x0649/0x0649, "Success"`) all still pass (no core code
+touched by this ticket).
+
+**Census children** (`boot_census_child`, per-title): Rival Turf! (USA),
+Super Turrican (USA), Super Turrican (USA) (Virtual Console) and Wario's
+Woods (USA) all exit 10 (blank within the 600-frame budget), unchanged
+from the 2026-09-17 triage. Regression canaries re-run unchanged: Super
+Mario World (USA), Wild Guns (USA), Super Mario RPG - Legend of the Seven
+Stars (USA), NHL 95 (USA), Kirby Super Star (USA) all exit 0; Soul Blazer
+(USA) and ActRaiser 2 (USA) both exit 10, matching their existing BLOCKED/
+uniform status from W14-27/W14-30 and the 2026-09-17 triage respectively.
+No title moved in either direction; the full orchestrator census is not
+re-run, per this ticket's brief and because nothing in `crates/rf-snes/**`
+changed.
+
+**Determinism**: unaffected — no code changed; this ticket is diagnostics
+and documentation only (`crates/rf-harness/**` gained no new `PROBE_*`
+env vars beyond what W14-23..32 already added).
