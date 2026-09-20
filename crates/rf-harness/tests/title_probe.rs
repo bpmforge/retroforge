@@ -807,6 +807,14 @@ fn probe() {
         println!("    spc regs: a={:02x} x={:02x} y={:02x} ; F4-F7 in(spc reads)={:02x?} out(cpu reads)={:02x?} timers en={:?} counters={:?}",
             apu.cpu.a, apu.cpu.x, apu.cpu.y, apu.ports_in, apu.ports_out,
             apu.timers.iter().map(|t| t.enabled).collect::<Vec<_>>(), apu.timers.iter().map(|t| t.peek_counter()).collect::<Vec<_>>());
+        println!(
+            "    echo: write_disabled={} base_page={:02X} (base={:04X}) delay={:02X} dir={:02X}",
+            apu.dsp.echo.write_disabled,
+            apu.dsp.echo.base_page,
+            u16::from(apu.dsp.echo.base_page) << 8,
+            apu.dsp.echo.delay,
+            apu.dsp.dir,
+        );
         print_sa1_reg_report(&core);
     }
 }
