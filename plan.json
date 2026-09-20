@@ -7398,7 +7398,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-32",
   "title": "Jungle Strike: first varied frame moved from 205 to 991 once WAI wakes on a masked IRQ — verify which boot timeline hardware has",
