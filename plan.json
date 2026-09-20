@@ -7592,6 +7592,50 @@
    "W14-39 second follow-up DONE 2026-09-20. Pagemaster quantified, not just re-asserted: title_probe's frames mode gained total_instr_at_varied (StepResult::cycles); main needs 4,169,311 instructions to reach frame 203, branch needs 45,708,683 to reach frame 2955 -- an 11.0x instruction-count increase, which the exact-cycle vector oracle (5,080,000/5,080,000) rules out as a per-opcode overcharge and confirms as a poll loop (PROBE_RING: a 4-instruction direct-page-flag wait at $9DFE35, real content already on screen at frame 1297) whose real-hardware-length exit condition the corrected pacing now reaches honestly. Tommy Moe's: found and fixed a real defect in SnesBus::catch_up_apu -- a single call could run the SPC700's own first post-hand-over instructions before the 65816 read the BootAction::Run echo boot.rs calls 'not optional and not cosmetic', the same clobber class IPL_INIT_CYCLES already guards for $FFC0 re-entry but never for the first hand-off; fixed by stopping the call's loop the instant it crosses that edge and carrying the remainder to apu_debt. Unit-tested (apu_ports.rs::a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo; confirmed red without the fix via git stash, green with it). Tommy Moe's remains BLOCKED regardless: the CPU's very next instruction (CMP $2140) triggers its own catch_up_apu call whose now-larger-than-before apu_debt rounds up to >=1 owed SPC cycle (was 0 on main), and since an SPC700 instruction cannot run partially, any nonzero owed budget once boot.is_running() commits a full instruction -- the same MOV $F4,#$F1 clobber, one call later. Root cause is call-granularity APU catch-up versus a race whose real margin is under one SPC700 instruction; closing it needs true cycle-accurate CPU/SPC interleaving (W6-02a), not a further per-call ordering fix. No regressions: Rival Turf!/Super Turrican/Wario's Woods still render, Pagemaster's numbers are unchanged by the APU fix, the other 14 requested census children are unmoved. Full gate green (rf-snes: 365/0/1, workspace: all ok, singlestep_65816_vectors 5,080,000/5,080,000, spc700_vectors 256,000/256,000, spc_timer_reports_pass, gilyon_cputest 0x0649/0x0649, peterlemon_golden x3, undisbeliever_golden x2, rf_scroller_s replay determinism, validate-arch.sh OK). See docs/TESTING.md's second follow-up section.",
    "W14-39 third follow-up DONE 2026-09-20 (coordinator's bounded ask). Traced $12's writer: D=0 so it is absolute $000012, written ONLY by $9DFEDB inside the NMI handler, exactly once per real vblank throughout the whole run (PROBE_WATCH=000012, unbroken cadence from n=75201 to n=45,707,454, no gaps, no retries). Its reader is a generic WaitVBlank library primitive at $9DFE2B-$9DFE3C (snapshot $12, spin until it changes) -- innocent, hardware-paced, not the site of the slowdown. PROBE_RING/PROBE_APUPORTLOG bracketed where the frames actually go: real per-frame work (byte-copy loop at $BCFA3D/$BCFA40, scan loop at $B9FBEF) plus several intact APU music/cue sessions (34,965 port changes, every echo matches its write, no clobber of the catch_up_apu shape fixed above) continue to n~17.8M (frame ~1154); then TOTAL SILENCE -- zero $2140-$2143 traffic -- from n=17,762,275 to n=45,707,622 (~1660 frames), during which PROBE_RING shows nothing but the WaitVBlank loop. Answered the bounded ask directly: this is NOT the APU-race shape (no port traffic in the costly window, so nothing for the catch_up_apu edge fix to race against) and not a raster/$4212 dependency (irq mode=Off throughout). No emulator defect demonstrated for Pagemaster specifically; the ~1660-frame idle's target is set by this title's own BRK-dispatched OS-call routines ($9DFE49/$9DFE9B), which would need decompiling to trace further -- named, bounded, not invented. No code changed this round (docs + plan.json only); gate re-confirmed clean (fmt, clippy) since no source changed. See docs/TESTING.md's third follow-up section."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-40",
+  "title": "The Pagemaster: 1660 idle frames in the loader after W14-39 — decode the BRK-dispatched OS calls that set the wait target",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-40: starting from W14-39's trace (writer of $000012 is the NMI at $9D:FEDB, reader is WaitVBlank at $9D:FE2B; port traffic stops at frame ~1154; the idle ends at frame 2955), the BRK-dispatched routines at $9D:FE49/$9D:FE9B are decoded and the value that sets the idle's length is traced to its source (a frame count computed from a math-unit result, a timer, a table in ROM, a joypad/auto-read value, an APU cue that never arrives) and checked against fullsnes / the ROM bytes; the verdict names why main reached frame 203 and this tree 2955 and which is hardware's",
+   "W14-40: fix if emulator-side (citation + unit test); census children on all three Pagemaster dumps and the usual canaries; orchestrator census with RF_CENSUS_OUT if a fix lands; a BLOCKED verdict must reach ROM bytes or a checked register read"
+  ],
+  "notes": [
+   "W14-40 FILED 2026-09-21 by the orchestrator from W14-39's named regression (three dumps). A 49-second black boot is not hardware behaviour; the writer chain is clean, so the wait target's source is the question."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-41",
+  "title": "CPU/SPC interleave granularity: catch_up_apu commits whole SPC instructions past a port write — Tommy Moe's residual handoff race",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-41: W14-39 stopped the catch-up burst at the BootAction::Run edge so the SPC's first post-handoff instruction cannot clobber the echo in the same call, but any owed budget on the CPU's next port access still commits a whole SPC instruction; the fix models the SPC's visibility at instruction granularity honestly (e.g. catch the APU up to the master cycle of the CPU's port WRITE before it lands, and defer the overshoot so a CPU read that follows within one SPC instruction sees the pre-clobber value) with a unit test reproducing Tommy Moe's shape ($0200: MOV $F4,#$F1 / MOV $F5,#$F1 / MOV A,$F4 / CMP A,#$FF / BNE) and the W14-39 test kept green",
+   "W14-41: spc700_vectors, spc_timer_reports_pass, gilyon and the IplBoot tests stay green; census children on Tommy Moe's, Rival Turf!, Super Turrican, Wario's Woods, Super Mario RPG (USA), Soul Blazer, ActRaiser 2, Super Mario World, Wild Guns; orchestrator census with RF_CENSUS_OUT; if only the cycle-accurate executor (W6-02a) can close it, say so with the trace and leave it blocked under W6-02a"
+  ],
+  "notes": [
+   "W14-41 FILED 2026-09-21 by the orchestrator from W14-39's Tommy Moe's finding. Main rendered it by accident (smaller per-instruction cost rounded the owed budget to zero)."
+  ]
  }
 ]
 }
