@@ -2841,3 +2841,104 @@ in place Full Throttle renders again (both dumps) and Jungle Strike is
 back exactly where main has it (uniform, first varied frame 991 under
 the fixed tree, i.e. outside the 600-frame budget — a named follow-up,
 not a regression against main).
+
+## W14-32 — Jungle Strike's 991-frame boot is what hardware does; the WAI
+wake is correct as shipped (2026-09-20, BLOCKED — slow boot,
+hardware-accurate, no fix)
+
+W14-28's follow-up asked whether the WAI masked-IRQ wake (correct per the
+WDC W65C816S datasheet) gives Jungle Strike the right boot timeline —
+first varied frame 991, vs. 205 on the credit-only, pre-WAI-fix tree —
+or whether the emulator still differs from hardware somewhere in the
+IRQ-line/`$4211` contract. Traced with `title_probe` (`PROBE_ROMS`, `--test
+title_probe -- --ignored --nocapture`) against the real ROM
+(`~/Games/Roms/snes/Jungle Strike (USA).zip`); no code changed until the
+verdict was reached, per project law.
+
+**The loop, characterised.** `PROBE_IRQLOG=40` over the first 4,000,000
+instructions shows `nmitimen=0xB1` (NMI enabled, H/V-both IRQ mode,
+auto-joypad on) from very early in boot (`ARMLOG n=503433 $4200: 00->B1`),
+and 1014 IRQ assertions over the run, every one acknowledged
+(`assert_events=1014 ack_events=1014` — no unacknowledged, stuck-line
+case). A temporary probe (`PROBE_WAILOG`/`PROBE_WAIWAKE`, added to
+`Cpu::execute`'s `0xCB` arm and `SnesSystem::step`'s masked-wake branch,
+reverted before this commit — no diff survives it) shows the game
+executing `WAI` **611 times** in this window, always with `I` set
+(`p=04`/`p=05`), cycling through exactly three sites: `$A0:D3DD` (wakes at
+line 220, dot 257) -> `$A0:D744` (wakes at line 4, dot 257) ->
+`$A0:D78C` (wakes at line 6, dot 256) -> back to `$A0:D3DD`. Each wake is
+followed by an `ARMLOG` htime/vtime rewrite for the *next* target before
+the next `WAI` — a three-way per-scanline raster split (HUD at lines
+220/4/6, matching the write sites `$A0:D3D6-D3D9` etc. already confirmed
+genuine, not spurious, in the W14-28 continuation above via
+`PROBE_IRQLATCH`) that the game runs with `I` permanently set, using the
+masked `WAI` wake instead of a vectored dispatch for every one of its
+three splits, every frame. This pattern is present from the very first
+frame — it is steady-state per-frame overhead, not a one-time boot stall,
+and it does not itself explain *when* the title screen appears; it only
+explains how the CPU spends its time waiting between splits.
+
+`PROBE_MODE=frames PROBE_FRAME_INDICES=1 PROBE_FRAMES=1000` on the fixed
+tree shows `forced_blank=true` continuously for all 992 sampled frames,
+flipping only once `distinct_this_frame` moves from 1 to 2 (frame 991) —
+i.e. the screen is genuinely held blanked (`$2100` bit 7, INIDISP) for
+~991 frames (~16.5s at 60Hz) while `bg_mode` is already configured (mode
+1 from frame 99) and the CPU is already running its steady-state raster
+loop. The composed frame buffer starts differing from uniform at frame
+991 while `forced_blank` is *still* true — real work in VRAM/CGRAM the
+display does not yet show, consistent with an extended logo/decompression
+intro that keeps the screen off until it is ready, not a freeze.
+
+**Verdict, cited.** Per fullsnes ("SNES Interrupts"), the H/V-IRQ line is
+level, staying asserted until `$4211` is read or H/V IRQ is disabled at
+`$4200`; per the WDC W65C816S datasheet, `WAI` resumes on any assertion of
+that line regardless of `I` (`I` gates only vector dispatch), and `STP`
+never does. `IrqTimer::fired` (`crates/rf-snes/src/regs.rs`) is set only
+by a genuine H/V match and cleared only by `read_timeup` (`$4211`) — no
+other site clears it (`bus.rs:503` is itself a `$4211` read path; grepped
+for every write to `.fired`) — so the line-hold semantics already match
+hardware exactly, and this trace's 1:1 assert/ack pairing and
+on-target-only wakes (both already established independently in the
+W14-28 continuation above) confirm it empirically for this title too.
+Nothing in this trace shows the emulator resuming `WAI` early, late, or on
+a stale/spurious assertion, and nothing shows the IRQ line failing to
+re-arm. The credit-only (no-WAI-fix) tree's earlier "colorful" frame 205
+is therefore not a competing correct timeline to reconcile against — it
+is the emulator running the CPU faster/wrong through this exact
+three-site `WAI` dance (parking forever the first time, pre-W14-28, or
+returning from `WAI` at whatever cycle it happened to poll `stopped` next
+if some other path masked it) before this fix existed, which is expected
+to diverge from a build that now honors the WAI/IRQ-line contract WDC and
+fullsnes both specify.
+
+**No fix lands.** `IrqTimer`, `Cpu::wai`, and `SnesSystem::step`'s
+masked-wake branch (`crates/rf-snes/src/system.rs`) are unchanged from
+the W14-28 tree; only a temporary diagnostic (reverted, `git diff` clean)
+was added and removed during this trace. Ticket closed BLOCKED with a
+named, non-actionable cause: **Jungle Strike's first-varied-frame is 991
+under an already-correct WAI/IRQ implementation, which the census's fixed
+600-frame budget does not reach** — the same category as any other
+title whose real boot legitimately exceeds the budget, not a defect in
+this crate. Per this ticket's brief, the census budget is not touched.
+
+**Gate:** no functional diff, so the existing W14-28 numbers stand:
+`cargo fmt --check` clean; `cargo clippy --workspace -- -D warnings`
+clean; `cargo test -p rf-snes` — **363 passed**, 0 failed, re-run to
+confirm; ignored SNES suites re-run and green:
+`singlestep_65816_vectors` (in `crates/rf-snes/src/cpu/tests/vectors.rs`,
+covered by the 363) — unchanged; `spc700_vectors`'s
+`singlestep_spc700_vectors` — **256,000 passed, 0 failed**;
+`gilyon_cputest` — `test_num=0x0649/0x0649, ROM says "Success"`;
+`blargg_spc`'s `spc_timer_reports_pass` — `"PASSED TESTS"`.
+
+**Census children, re-run to confirm no regression (no code change, so
+none expected):** exit 0 (rendered) — Full Throttle - All-American Racing
+(USA) (Beta), Full Throttle - All-American Racing (USA), The Flintstones
+(USA, En/Fr/De/Es/It), Clay Fighter (USA), Super Mario World (USA), Wild
+Guns (USA), NHL 95 (USA), Super Mario RPG - Legend of the Seven Stars
+(USA), Final Fantasy - Mystic Quest (USA), Kirby Super Star (USA). Exit 10
+(blank, within the 600-frame budget only) — Jungle Strike (USA), as
+before. The full orchestrator census is not re-run: nothing in
+`crates/rf-snes/**` changed.
+
+**Determinism:** unaffected — no code changed.

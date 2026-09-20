@@ -7398,7 +7398,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 2,
-  "status": "in_progress",
+  "status": "blocked",
   "stories": [],
   "id": "W14-32",
   "title": "Jungle Strike: first varied frame moved from 205 to 991 once WAI wakes on a masked IRQ — verify which boot timeline hardware has",
@@ -7413,6 +7413,7 @@
    "W14-32: if a fix lands, the full SNES census is re-run by the orchestrator with RF_CENSUS_OUT and every title that moved is named in docs/TESTING.md; ignored SNES suites stay green; determinism unaffected"
   ],
   "notes": [
+   "W14-32 CLOSED BLOCKED 2026-09-20: diagnosed with title_probe (PROBE_IRQLOG/PROBE_WAILOG/PROBE_WAIWAKE, the latter two temporary, reverted, no diff survives) before any code change. Jungle Strike runs a three-site masked-WAI raster split ($A0:D3DD/$A0:D744/$A0:D78C, I set throughout, 611 WAI wakes sampled, 1014/1014 IRQ assert/ack pairs, every wake on-target) from the first frame -- steady-state per-frame overhead, not a boot stall. The screen stays forced_blank for 991 frames (~16.5s) while bg_mode is already configured by frame 99; content in the composed buffer first differs at frame 991, still forced_blank -- an extended intro held behind INIDISP, not a freeze. IrqTimer::fired is set only on a genuine H/V match and cleared only by $4211 (regs.rs) -- no other site clears it -- matching fullsnes 'SNES Interrupts' (line stays asserted until $4211 or $4200 disables it) and the WDC W65C816S datasheet (WAI wakes on the line regardless of I, STP never does). No discrepancy found: verdict is 991 frames is what hardware does, and the 205-frame credit-only timeline was the pre-W14-28 bug's artifact, not a competing correct one. No fix lands; named cause is a slow, hardware-accurate boot past the census's fixed 600-frame budget -- the budget is not touched per this ticket's brief. Gate re-run clean: cargo fmt --check, cargo clippy -D warnings, cargo test -p rf-snes (363 passed), ignored SNES suites (singlestep_65816_vectors covered by the 363; spc700_vectors 256,000 passed; gilyon_cputest 0x0649/0x0649 Success; blargg_spc spc_timer PASSED). Census children re-run unchanged: 10 titles exit 0, Jungle Strike exit 10, matching the W14-28 baseline exactly -- no regression. See docs/TESTING.md's W14-32 write-up.",
    "W14-32 FILED 2026-09-20 by the orchestrator as W14-28's named follow-up: the WAI masked-IRQ wake (correct per WDC) changed Jungle Strike's boot timeline; whether the new one is hardware's is unverified."
   ]
  }
