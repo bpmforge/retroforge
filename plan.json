@@ -7519,7 +7519,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-37",
   "title": "IPL boot HLE: charge the real 64-byte boot ROM's cycles on the go->jump handoff and the per-byte handshake, from the published IPL listing",
