@@ -2186,7 +2186,7 @@ formed at `$80:D242-D247: LDA $9A; AND #$7FFF; TAX` — confirmed via
 `PROBE_SDUMP=80d24b`: `X=$4000` at the fatal call. `$9A` itself (confirmed
 via `PROBE_PEEK=00009a,00009b`: `$4000`, and `PROBE_WATCH=00009a,00009b`:
 last written at `n=2335448` from `$80:D10C: STA $9A`, which is preceded by
-`$80:D109: LDA $DFBF,X` with `X` from `$80:D106: LDX $0768,Y` — a per-object
+`$80:D109: LDA $DFBF,X` (effective address `$80:DFBF+X`, DBR=`$80`) with `X` from `$80:D106: LDX $0768,Y` — a per-object
 "graphic/type ID" field read straight out of this object's own record, no
 CPU arithmetic or flag-dependent computation involved anywhere in this
 sub-chain) is a **ROM/object-data value**, not a register read, DMA
@@ -2249,7 +2249,7 @@ changed.
 authoring issue.** None of the register-read, DMA/mapping, or
 interrupt-flag hypotheses this ticket was asked to rank apply. The chain is
 closed end to end: an object's own type field (`$9A`, read from
-`$DFBF,X`/`$0768,Y` — this object's data record) is used as a table index
+`$80:DFBF,X` (DBR-relative, not a literal `$DF:BF` bank:offset) via `$0768,Y` — this object's data record) is used as a table index
 without being bounded to the small range the table (`$D69B`) actually has;
 the resulting out-of-range, 16-bit-wrapped read yields a `$0000` object
 count; a 16-bit `DEC` of `$0000` (well-defined 65816 behavior) underflows to
