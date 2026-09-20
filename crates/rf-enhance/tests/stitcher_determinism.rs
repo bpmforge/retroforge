@@ -350,27 +350,72 @@ fn scroll_tracker_computes_the_exact_predicted_world_position_every_frame() {
 /// What CAN be measured honestly is this crate's own per-frame cost, on
 /// real 256x240 video buffers through the real event/bus pipeline, wall
 /// clock (fine in a `tests/` file -- `scripts/validate-arch.sh` rule 4's
-/// determinism lint only scans `crates/*/src`). A loose upper-bound
-/// assertion (10 ms/frame, well under the 16.67 ms budget one frame has
-/// end to end, most of which real rendering/audio/input will also need)
-/// catches a gross regression without being a flaky micro-benchmark.
+/// determinism lint only scans `crates/*/src`).
+///
+/// W14-44: this used to time a single `run_pipeline` call and assert
+/// `< 10 ms`/frame, which failed twice under `cargo test --workspace`
+/// with sibling `cargo build`s saturating the machine (2.73 s measured,
+/// ~22.75 ms/frame, vs 0.45 s / ~3.75 ms/frame alone) while passing 3/3
+/// in isolation -- not a code regression, a scheduler-contention false
+/// positive. Two other fixes were considered and rejected:
+/// - **Process/thread CPU time** (`CLOCK_THREAD_CPUTIME_ID` via `libc`)
+///   would be immune to preemption, but `rf-enhance`'s `write_scope` is
+///   `crates/rf-enhance/**` + `docs/TESTING.md`; adding a new direct
+///   dependency rewrites `rf-enhance`'s entry in the root `Cargo.lock`,
+///   which is out of scope. `std` has no CPU-time clock.
+/// - **Widening the wall-clock budget** loses sensitivity outright:
+///   0.45 s / 120 frames is already only a 2.7x margin under 10 ms, so
+///   widening far enough to survive a 6x contention spike (as measured
+///   above) would stop catching a real 5x regression.
+///
+/// So: **best of N wall-clock repetitions**, same 10 ms/frame budget.
+/// `run_pipeline` reads no global/static state and spawns no threads
+/// (confirmed by inspection), so re-running it repeatedly measures the
+/// same cost each time with no cross-call interference. The loop below
+/// (law 8: bounded `for _ in 0..MAX_REPS`, unconditional advance, no
+/// hand-rolled index) breaks the instant one repetition beats the
+/// budget, so the common uncontended case still costs exactly one
+/// ~0.45 s repetition; only a run unlucky enough to be preempted on
+/// every one of `MAX_REPS` tries pays for all of them. A single
+/// transient scheduling hiccup can no longer fail this test; a real
+/// systemic regression still fails every repetition and is still
+/// caught.
 #[test]
 fn per_frame_tracking_and_stitching_cost_fits_comfortably_in_the_frame_budget() {
+    const MAX_REPS: u32 = 5;
+    const BUDGET_MS: f64 = 10.0;
+
     let log = build_log(120);
-    let start = std::time::Instant::now();
-    let (canvas, _) = run_pipeline(&log);
-    let elapsed = start.elapsed();
-    let per_frame_ms = elapsed.as_secs_f64() * 1000.0 / log.len() as f64;
+    let mut best_per_frame_ms = f64::INFINITY;
+    let mut last_canvas_dims = (0usize, 0usize);
+
+    for rep in 0..MAX_REPS {
+        let start = std::time::Instant::now();
+        let (canvas, _) = run_pipeline(&log);
+        let elapsed = start.elapsed();
+        let per_frame_ms = elapsed.as_secs_f64() * 1000.0 / log.len() as f64;
+        last_canvas_dims = (canvas.width(), canvas.height());
+        eprintln!(
+            "per_frame_tracking_and_stitching_cost: rep {rep} = {per_frame_ms:.4} ms/frame \
+             over {} frames",
+            log.len(),
+        );
+        if per_frame_ms < best_per_frame_ms {
+            best_per_frame_ms = per_frame_ms;
+        }
+        if best_per_frame_ms < BUDGET_MS {
+            break;
+        }
+    }
+
     eprintln!(
-        "per_frame_tracking_and_stitching_cost: {per_frame_ms:.4} ms/frame over {} frames \
-         (final canvas {}x{})",
-        log.len(),
-        canvas.width(),
-        canvas.height()
+        "per_frame_tracking_and_stitching_cost: best of up to {MAX_REPS} = \
+         {best_per_frame_ms:.4} ms/frame (final canvas {}x{})",
+        last_canvas_dims.0, last_canvas_dims.1
     );
     assert!(
-        per_frame_ms < 10.0,
-        "tracking+stitching cost {per_frame_ms:.4} ms/frame exceeds the 10 ms loose bound \
-         (16.67 ms is the whole-frame budget at 60 fps)"
+        best_per_frame_ms < BUDGET_MS,
+        "tracking+stitching cost {best_per_frame_ms:.4} ms/frame (best of {MAX_REPS}) exceeds \
+         the {BUDGET_MS} ms loose bound (16.67 ms is the whole-frame budget at 60 fps)"
     );
 }

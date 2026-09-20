@@ -5575,3 +5575,74 @@ included — the same suite that would show a colour-math/window
 regression first), `singlestep_65816_vectors` (5,080,000/5,080,000, same
 pre-existing MVN/MVP exclusion as every prior ticket).
 `scripts/validate-arch.sh`: `arch OK`.
+
+## W14-44 — flaky wall-clock tests: rule and inventory (2026-09-20)
+
+`per_frame_tracking_and_stitching_cost_fits_comfortably_in_the_frame_budget`
+(`crates/rf-enhance/tests/stitcher_determinism.rs`) failed twice under
+`cargo test --workspace` on 2026-09-20 with three sibling `cargo build`s
+saturating the machine: 2.73 s measured for its 120-frame pipeline run
+(~22.75 ms/frame) against a 10 ms/frame budget, vs. 0.45 s (~3.75 ms/frame)
+and 3/3 passing when run alone — a scheduler-contention false positive,
+not a code regression.
+
+**Rule for any test asserting an upper bound on measured wall-clock time**
+(`Instant::now()` / `.elapsed()` feeding an `assert!` with a `<` bound):
+take the best (minimum) of up to N repetitions of the measured work, break
+the loop the instant a repetition beats the budget, and keep the same
+budget — don't widen it to paper over contention, since widening loses
+the ability to catch a real regression of the same order as the
+contention noise. A single transient scheduling hiccup can no longer fail
+the test; a systemic regression still fails every repetition. This is
+what `per_frame_tracking_and_stitching_cost_fits_comfortably_in_the_frame_budget`
+now does (best of up to 5, same 10 ms/frame bound); see that test's own
+doc comment for the two alternatives considered and rejected (process/
+thread CPU time — would need a new `libc` dependency outside W14-44's
+`write_scope`; widening the budget — loses sensitivity).
+
+A ratio-of-two-measurements-in-the-same-run assertion (e.g.
+`crates/retroforge/tests/debugger_idle_cost.rs`'s `idle_ratio < NOISE_BUDGET`,
+`crates/retroforge/tests/breakpoint_cost.rs`'s
+`unarmed_time <= armed_time.mul_f64(1.10)`) is different: both sides
+scale together under contention, so it does not need this treatment —
+`debugger_idle_cost.rs` already additionally uses `best_of_three` and is
+`#[ignore]`d from the default gate.
+
+**Workspace grep for the same pattern** (`Instant::now`/`.elapsed()` under
+`crates/*/tests` and `crates/*/src`, upper-bound `assert!`s only — a
+lower-bound assert proving a sleep/timeout actually waited is load-immune
+and left alone): all other hits are in `crates/retroforge/**`,
+`crates/rf-ai/**`, `crates/rf-harness/**`, `crates/rf-renderer/**`, which
+are outside W14-44's `write_scope` (`crates/rf-enhance/**` +
+`docs/TESTING.md`), inspected and left as-is:
+
+- `crates/retroforge/tests/frame_bundle_perf.rs` — `assert!(fps > 58.0, ...)`,
+  a single-sample absolute wall-clock threshold with no repetition; the
+  same contention failure mode as W14-44's test is plausible here but
+  fixing it is a separate ticket (write scope).
+- `crates/retroforge/tests/audio_soak.rs` — fixed 5-minute wall-clock
+  deadline gating a frame-count assertion; real-time by nature (paces an
+  audio device), so "best of N" does not apply the same way; noted, not
+  touched.
+- `crates/retroforge/tests/breakpoint_cost.rs`,
+  `crates/retroforge/tests/debugger_idle_cost.rs` — ratio-based (see
+  above), already load-robust or already best-of-three; no change needed.
+- `crates/rf-ai/tests/onnx_bench.rs`, `crates/rf-harness/tests/boot_census.rs`,
+  `crates/rf-renderer/tests/metalfx_bench.rs` — `Instant`/`elapsed` present
+  for reporting only; their `assert!`s check artifact existence /
+  non-uniform output, not elapsed time — no treatment needed.
+
+### Gate
+
+`cargo fmt --check` clean. `cargo clippy --workspace -- -D warnings`
+clean. `cargo test -p rf-enhance`: **3/3 runs, 8 passed / 0 failed / 0
+ignored each** (4 in `stitcher_determinism.rs` + 4 profile-family tests),
+including `per_frame_tracking_and_stitching_cost_fits_comfortably_in_the_frame_budget`
+at ~5.2 ms/frame (best of 1 rep, no contention in these runs).
+`cargo test --workspace --no-fail-fast` while `cargo build --release -p
+retroforge` ran concurrently in a second shell (simulated load): **2230
+passed / 0 failed / 43 ignored**, exit 0 (`stdout` capture on a passing
+test hides its `eprintln!` rep log, so the exact rep count under that
+run isn't recoverable, but the target test passed on this concurrent
+run same as the three isolated `-p rf-enhance` runs).
+`scripts/validate-arch.sh`/`validate-plan.mjs`: both OK.

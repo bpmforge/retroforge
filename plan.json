@@ -7696,7 +7696,7 @@
   "crate": "rf-enhance",
   "depends_on": [],
   "points": 1,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "id": "W14-44",
   "title": "rf-enhance stitcher frame-budget test flakes under a parallel workspace run (2.7 s vs 0.45 s alone) — make the budget assertion load-robust",
@@ -7709,6 +7709,7 @@
    "W14-44: `cargo test -p rf-enhance` and the full workspace gate pass; the change is documented in docs/TESTING.md's flaky-test notes"
   ],
   "notes": [
+   "W14-44 done 2026-09-20: per_frame_tracking_and_stitching_cost_fits_comfortably_in_the_frame_budget now takes the best of up to 5 wall-clock repetitions of the same 10 ms/frame budget (was a single measurement) -- fixes the two false failures under cargo test --workspace with sibling cargo builds saturating the machine, without widening the budget. CPU-time (libc) rejected: adding libc as a new direct rf-enhance dependency is out of write_scope (rewrites Cargo.lock). Workspace grep for other elapsed()-based assert!s found frame_bundle_perf.rs/audio_soak.rs (out of scope, noted) and two ratio-based tests already load-robust. Gate: fmt/clippy clean, cargo test -p rf-enhance 3/3 (8 passed each), cargo test --workspace --no-fail-fast concurrent with cargo build --release -p retroforge: 2230 passed / 0 failed / 43 ignored. docs/TESTING.md flaky-wall-clock-tests note added.",
    "W14-44 FILED 2026-09-21 by the orchestrator: two false gate failures in one day cost a re-run each."
   ]
  }
