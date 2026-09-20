@@ -124,7 +124,7 @@ fn tick_accumulates_partial_master_cycles_across_calls() {
     // master cycles, which never land on a `cycle` boundary alone.
     let mut fed = 0u32;
     while fed < total {
-        let piece = if fed % 3 == 0 { 2 } else { 4 };
+        let piece = if fed.is_multiple_of(3) { 2 } else { 4 };
         drip_fed.tick(piece);
         fed += piece;
     }
