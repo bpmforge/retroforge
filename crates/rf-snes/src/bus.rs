@@ -390,6 +390,9 @@ impl SnesBus {
                     (word >> 8) as u8
                 }
             }
+            // W14-26: DMA/HDMA channel registers read back what was
+            // written — see `read_dma_register`'s doc.
+            0x4300..=0x437F => return self.read_dma_register(offset),
             _ => return None,
         })
     }
@@ -553,6 +556,44 @@ impl SnesBus {
             0xA => c.line_counter = value,
             _ => {}
         }
+    }
+
+    /// Read back `$43x0`-`$43xA` — ticket W14-26.
+    ///
+    /// fullsnes ("4200h-437Fh - PPU2 and CPU Register Overview / DMA")
+    /// lists every `$43x0`-`$43xA` DMA/HDMA channel register as `(R/W)`,
+    /// not write-only: unlike, say, `$2100`-block PPU registers, the CPU
+    /// can read back exactly what it wrote. Before this ticket, only
+    /// [`Self::write_dma_register`] existed — [`Self::read_register_pure`]
+    /// had no `0x4300..=0x437F` arm, so any read in that range fell
+    /// through to open bus, discarding `Channel`'s state.
+    ///
+    /// This is not a hypothetical gap: at least one shipping title (NHL
+    /// 95) sets the CPU's direct page to `$4300` and uses a channel's
+    /// `A1Tn`/`A1Bn` bytes (`$43x2`-`$43x4`) as ordinary 24-bit-pointer
+    /// scratch storage — write a pointer there with `STA`, read it back
+    /// with an indirect-long `LDA [dp]`. Returning open bus instead of
+    /// the real bytes hands that `LDA` a garbage pointer, and everything
+    /// downstream (a jump built from the garbage, an eventual stack
+    /// imbalance, a wild WRAM-as-code walk) is a consequence of that one
+    /// wrong read, not a defect in any of those later opcodes.
+    fn read_dma_register(&self, offset: u16) -> Option<u8> {
+        let ch = ((offset >> 4) & 0x07) as usize;
+        let c = &self.dma.channels[ch];
+        Some(match offset & 0x000F {
+            0x0 => c.control,
+            0x1 => c.b_address,
+            0x2 => c.a_address as u8,
+            0x3 => (c.a_address >> 8) as u8,
+            0x4 => (c.a_address >> 16) as u8,
+            0x5 => c.count as u8,
+            0x6 => (c.count >> 8) as u8,
+            0x7 => c.indirect_bank,
+            0x8 => c.table_addr as u8,
+            0x9 => (c.table_addr >> 8) as u8,
+            0xA => c.line_counter,
+            _ => return None,
+        })
     }
 
     /// Run any DMA armed by a `$420B` write, returning its master-cycle

@@ -135,3 +135,64 @@ fn the_transfer_patterns_have_the_documented_shapes() {
     assert_eq!(pattern(6), pattern(2), "mode 6 mirrors mode 2");
     assert_eq!(pattern(7), pattern(3), "mode 7 mirrors mode 3");
 }
+
+/// W14-26: `$43x0`-`$43xA` are `(R/W)` per fullsnes ("4200h-437Fh - PPU2
+/// and CPU Register Overview / DMA"), not write-only — the CPU can read
+/// back exactly what it wrote. Before this ticket, `read_register_pure`
+/// had no arm for `0x4300..=0x437F`, so every read there fell through to
+/// open bus and silently discarded `Channel`'s state; NHL 95 (USA) uses
+/// channel 1's `A1T1`/`A1B1` bytes (`$4312`-`$4314`) as 24-bit-pointer
+/// scratch storage via `LDA [dp]` after setting the CPU's direct page to
+/// `$4300`, and a wrong readback there fed it a garbage pointer that
+/// walked into a hardware register, corrupting X, and ultimately ran the
+/// stack pointer into ROM.
+#[test]
+fn dma_channel_registers_read_back_what_was_written() {
+    let mut b = bus();
+    // Channel 1's block is $4310-$431F.
+    b.write(0x00_4310, 0x81); // DMAPn
+    b.write(0x00_4311, 0x22); // BBADn
+    b.write(0x00_4312, 0x12); // A1TnL
+    b.write(0x00_4313, 0x34); // A1TnH
+    b.write(0x00_4314, 0x56); // A1Bn
+    b.write(0x00_4315, 0x78); // DASnL
+    b.write(0x00_4316, 0x9A); // DASnH
+    b.write(0x00_4317, 0xBC); // DASBn
+    b.write(0x00_4318, 0xDE); // A2AnL
+    b.write(0x00_4319, 0xF0); // A2AnH
+    b.write(0x00_431A, 0x55); // NLTRn
+
+    assert_eq!(b.read(0x00_4310), 0x81);
+    assert_eq!(b.read(0x00_4311), 0x22);
+    assert_eq!(b.read(0x00_4312), 0x12);
+    assert_eq!(b.read(0x00_4313), 0x34);
+    assert_eq!(b.read(0x00_4314), 0x56);
+    assert_eq!(b.read(0x00_4315), 0x78);
+    assert_eq!(b.read(0x00_4316), 0x9A);
+    assert_eq!(b.read(0x00_4317), 0xBC);
+    assert_eq!(b.read(0x00_4318), 0xDE);
+    assert_eq!(b.read(0x00_4319), 0xF0);
+    assert_eq!(b.read(0x00_431A), 0x55);
+
+    // A different channel's bytes must not alias — this is the exact
+    // shape the game's own `LDA [$12]` pointer read depends on: bytes at
+    // $4312-$4314 belong to channel 1 only.
+    b.write(0x00_4302, 0xAA);
+    assert_eq!(b.read(0x00_4312), 0x12, "channel 0's A1TL must not alias");
+
+    // `peek` (the debugger/tool path) must agree with `read` — this is
+    // what `title_probe`'s diagnostics rely on.
+    assert_eq!(CpuBus::peek(&b, 0x00_4312), 0x12);
+    assert_eq!(CpuBus::peek(&b, 0x00_4314), 0x56);
+
+    // Running DMA on an unrelated channel must not disturb the value —
+    // the game reads this back long after the write, across whatever
+    // else the frame does.
+    b.wram[0x600] = 0x01;
+    transfer(&mut b, 0x00, 0x80, 0x00_0600, 1);
+    assert_eq!(
+        b.read(0x00_4312),
+        0x12,
+        "channel 1's scratch bytes must survive channel 0's own DMA"
+    );
+}
