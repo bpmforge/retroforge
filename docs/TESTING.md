@@ -4807,3 +4807,63 @@ window):
 All twenty requested titles accounted for; nothing regressed, one real
 defect fixed and unit-tested, both original findings quantified or
 sharpened with hard numbers rather than restated.
+
+## W14-39 third follow-up — Pagemaster's writer traced to source: a
+## generic library primitive, not an emulator defect
+
+The coordinator's objection stands on its own math (a <=50%-slower CPU
+cannot produce a 14x frame increase by simple slowdown) and asked for the
+writer of direct-page `$12`, its enclosing routine's per-frame rate, and
+an APU-race check against the `catch_up_apu` edge case fixed above.
+
+**The writer.** `D=0`, so `$12` is absolute `$000012`. `PROBE_WATCH=000012`
+across the whole run finds exactly one writer, `$9DFEDB` (inside the
+NMI handler), incrementing it by exactly **one every real vblank**, with
+no gaps and no retries, from `n=75201` (frame ~5) straight through the
+divergence at `n=45,707,454` (frame 2958) — an unbroken, hardware-paced
+tick. `PROBE_DIS=9D:FE00:FF00` shows the reader: a generic
+`WaitVBlank`-style library routine at `$9DFE2B`-`$9DFE3C`
+(`LDA $12` snapshot, `CMP $12`/`PHP`/`PLP`/`BEQ` spin until the snapshot
+no longer matches, gated by a `$14` flag test). This is a stock
+"wait for the next frame" primitive, not the site of anything — it is
+called correctly, once, and returns within one vblank on both trees.
+**It is not itself gated on the APU, a timer, or a raster position; it
+is gated on the NMI, which fires once per real frame regardless of CPU
+speed.** This rules out the writer/reader pair itself as a defect.
+
+**Where the frames actually go.** `PROBE_RING` bracketing the run shows
+three phases on the branch: real per-frame work (a byte-copy loop at
+`$BCFA3D`/`$BCFA40`, then a table-scan loop at `$B9FBEF`-`$B9FBF3`)
+continuing to about `n=17.8M` (frame ~1154); several APU communication
+sessions in the SAME window (`PROBE_APUPORTLOG`, `n=1`-`17,762,275`,
+34,965 ports_in/out changes in bursts separated by multi-second silent
+gaps — a normal streamed music/cue sequence, every echo intact, no
+clobber of the shape the `catch_up_apu` fix above targets: every
+`ports_out[0]` change matches its `ports_in[0]` cause); then **total
+silence** — zero `$2140`-`$2143` traffic — from `n=17,762,275` to
+`n=45,707,622` (frame ~1150 to ~2958, ~1660 frames, ~28M instructions),
+during which `PROBE_RING` shows nothing but the `WaitVBlank` loop
+running essentially every sampled instruction.
+
+**Answering the bounded ask directly: no, this is not the APU-race
+shape.** There is no port traffic at all during the stretch that
+actually costs the frames, so the `catch_up_apu` edge case fixed above
+for Tommy Moe's cannot be the mechanism here — there is nothing for it
+to race against. The APU sessions that DO exist complete with intact
+echoes throughout. No raster/HDMA/`$4212` dependency was found either
+(`irq: mode=Off` throughout this whole span, per the original
+follow-up's `PROBE_RING`/`PROBE_RINGP`).
+
+**Verdict.** The writer and its enclosing routine are both innocent,
+generic library code, run at the hardware-correct rate on both trees.
+The 11x instruction-count gap is real but was not produced by anything
+this ticket's model owns: no per-opcode miscount (oracle-exact), no APU
+hand-off race (no traffic in the costly window), no raster/timer
+dependency (`irq mode=Off`). What decides the ~1660-frame idle's length
+is a value this session did not trace to its source without reverse-
+engineering the title's own `BRK`-dispatched driver calls
+(`$9DFE49`/`$9DFE9B`, an OS-call convention this ROM uses for
+DMA/audio service) beyond this ticket's scope. No emulator defect is
+demonstrated here, so none is invented: named, quantified, bounded, and
+left for a ticket that can commit to decompiling this title's loader,
+not tuned around.
