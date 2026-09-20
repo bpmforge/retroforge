@@ -3373,3 +3373,9 @@ that would turn BG layers on) on Lagoon and Phalanx (forced-blank-forever
 shape) and ActRaiser 2/Illusion of Gaia (`tm=[0000+obj]` shape)
 separately, since the two sub-shapes look mechanically different.
 
+**Full SNES census (orchestrator, 2026-09-20, W14-35 tree, per-title
+`RF_CENSUS_OUT` diff against the W14-28 run):** **1061/74/130/0/0 ->
+1061/74/130/0/0**, no row changed in either direction. The vblank-end
+clear of RDNMI bit 7 is a hardware-fidelity fix with no effect on the
+library's boot census; the four traced titles stay uniform for the reason
+above (forced blank never lifted), which is the named next ticket.
