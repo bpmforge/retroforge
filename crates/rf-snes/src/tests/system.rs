@@ -105,6 +105,48 @@ fn stepping_accumulates_master_cycles_by_region() {
     assert_eq!(system.cpu.a & 0xFF, 0x42);
 }
 
+/// Ticket W14-28: eight `NOP`s -- the ordinary, documented idiom for
+/// waiting out the hardware divider's 16-cycle latency (fullsnes "SNES
+/// Maths Multiply/Divide": the latency "is a CPU-cycle count, independent
+/// of whether any given cycle is fast or slow on the bus, or internal")
+/// -- must be enough real CPU time for a divide to finish, the same as on
+/// hardware. `NOP` is a single-byte, implied-mode opcode: it makes exactly
+/// one bus access (the opcode fetch) but no 65816 instruction executes in
+/// fewer than 2 cycles (WDC 65C816 datasheet, instruction timing), so it
+/// always has one internal cycle beyond that access. Before this ticket,
+/// `SnesSystem::step` fed `MathUnit::tick` the access-charged master
+/// cycles only, so `NOP`'s internal cycle was silently dropped — eight of
+/// them left a divide one step short, and the game reading the result
+/// (here, and in the real ROM this reproduces, The Flintstones' boot; see
+/// `docs/TESTING.md`) saw a stale, still-shifting remainder instead of the
+/// finished one.
+#[test]
+fn eight_nops_are_enough_to_finish_a_divide_the_way_hardware_would() {
+    let mut rom = lorom_image(0x20, 0x00);
+    let mut code: Vec<u8> = vec![
+        0xA9, 0x3F, // LDA #$3F        (dividend 63)
+        0x8D, 0x04, 0x42, // STA $4204 (WRDIVL)
+        0xA9, 0x0B, // LDA #$0B        (divisor 11)
+        0x8D, 0x06, 0x42, // STA $4206 (WRDIVB -- starts the divide)
+    ];
+    code.extend(std::iter::repeat(0xEA).take(8)); // eight NOPs
+    rom[..code.len()].copy_from_slice(&code);
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+
+    let mut system = SnesSystem::load(&rom).expect("loads");
+    for _ in 0..(4 + 8) {
+        system.step().expect("implemented");
+    }
+    assert!(
+        !system.bus.math.busy(),
+        "63 / 11's divide must be finished after the write plus 8 NOPs, \
+         the same as on hardware"
+    );
+    assert_eq!(system.bus.math.rddiv, 5, "63 / 11 quotient");
+    assert_eq!(system.bus.math.rdmpy, 8, "63 / 11 remainder");
+}
+
 /// A bounded runner: a ROM that never finishes must fail a test, not hang
 /// it.
 #[test]
