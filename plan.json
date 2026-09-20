@@ -7715,6 +7715,28 @@
    "W14-44 done 2026-09-20: per_frame_tracking_and_stitching_cost_fits_comfortably_in_the_frame_budget now takes the best of up to 5 wall-clock repetitions of the same 10 ms/frame budget (was a single measurement) -- fixes the two false failures under cargo test --workspace with sibling cargo builds saturating the machine, without widening the budget. CPU-time (libc) rejected: adding libc as a new direct rf-enhance dependency is out of write_scope (rewrites Cargo.lock). Workspace grep for other elapsed()-based assert!s found frame_bundle_perf.rs/audio_soak.rs (out of scope, noted) and two ratio-based tests already load-robust. Gate: fmt/clippy clean, cargo test -p rf-enhance 3/3 (8 passed each), cargo test --workspace --no-fail-fast concurrent with cargo build --release -p retroforge: 2230 passed / 0 failed / 43 ignored. docs/TESTING.md flaky-wall-clock-tests note added.",
    "W14-44 FILED 2026-09-21 by the orchestrator: two false gate failures in one day cost a re-run each."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-45",
+  "title": "Re-triage the 41 remaining uniform-screen SNES titles after W14-35..W14-43: 1800-frame sweep, shape families, next tickets named",
+  "write_scope": [
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-45: every title in the current uniform bucket (the RF_CENSUS_OUT list from the W14-37/42/43 census) is run through title_probe in frames mode for 1800 frames; slow boots are listed with their first varied frame, separately from stuck titles",
+   "W14-45: each stuck title gets a one-line shape from a 3M-instruction probe plus PROBE_MODE=frames evidence (W14-38 showed PROBE_INSTR alone never exercises the renderer), grouped into families with the evidence for each — APU handshake (which port/value/side), raster/IRQ, register-read (checked against fullsnes R/W columns), DMA/mapping, PPU composition (a forced-blank/TM/CGWSEL/window state that blanks the picture while the game runs — W14-42's class), unknown; betas/protos/pirates named separately; the W14-34 table's stale verdicts for these titles are superseded explicitly",
+   "W14-45: the three largest families are proposed as the next tickets with the confirming evidence each needs; no core code changes in this ticket"
+  ],
+  "notes": [
+   "W14-45 FILED 2026-09-21 by the orchestrator: 33 of the W14-34 list's 74 have moved since; the remaining 41 need fresh shapes on the corrected timing and composition."
+  ]
  }
 ]
 }
