@@ -7538,6 +7538,29 @@
   "notes": [
    "W14-37 FILED 2026-09-20 by the orchestrator from W14-33's Super Turrican finding. IplBoot (crates/rf-snes/src/apu/boot.rs) is a high-level model of the boot ROM's protocol; its timing between protocol steps is the suspect. The listing is documentation; the 64 bytes are Sony's and stay out of the tree."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-38",
+  "title": "Forced-blank-never-lifted family: ActRaiser 2, Illusion of Gaia, Lagoon, Phalanx, Goal!, Robotrek run their main loops but never write a non-blank $2100 — trace what each is waiting for",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-38: W14-35 proved these titles' NMI and vblank flags are healthy (frame counters climb, NMI dispatches every frame) and the uniform screen is INIDISP $2100 never leaving forced blank (or TM $212C never enabling a layer); for each title the trace names the condition the game's own code checks before it would write $2100 (an APU ready byte on $2140-$2143 — then the W14-33/W14-37 APU handshake evidence applies and the exact port wait is recorded; a DMA/decompression completion flag in WRAM; a joypad/auto-read value from $4218-$421F or $4016; a timer; a math-unit result) and follows that condition to the first value the emulator presents that hardware would not, checked against fullsnes",
+   "W14-38: the fix, if any, is cited and pinned by a unit test; ignored SNES suites stay green; determinism unaffected; census children on the six titles plus the usual canaries; the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and names every moved title",
+   "W14-38: a BLOCKED verdict must trace the chain back to ROM bytes or a checked register read; 'waiting on the APU' alone is not a verdict — which port, which value, which side"
+  ],
+  "notes": [
+   "W14-38 FILED 2026-09-20 by the orchestrator from W14-35's reclassification of the raster/IRQ family. ActRaiser 2, Illusion of Gaia and Robotrek are Quintet titles that share a sound driver; if the wait is on the APU, one trace may cover all three."
+  ]
  }
 ]
 }
