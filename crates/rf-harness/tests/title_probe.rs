@@ -29,6 +29,9 @@
 //! PROBE_MATHPC=hex[,hex]            print the $4204-$4217 hardware multiply/divide
 //!                                    unit's state whenever the CPU is about to execute
 //!                                    an instruction at one of these 24-bit PCs (W14-24)
+//! PROBE_ACCESSWIN=start:end         sum bus accesses and master cycles charged over
+//!                                    every instruction from PC start (inclusive) to
+//!                                    end (exclusive), 24-bit hex (W14-24)
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -172,6 +175,29 @@ fn probe() {
             .filter(|s| !s.is_empty())
             .map(|s| u32::from_str_radix(s, 16).unwrap())
             .collect();
+        // W14-24 (coordinator review): measure, rather than assert, what
+        // `SnesSystem::step`'s `spent` actually contains between two
+        // 24-bit PCs — "PROBE_ACCESSWIN=start:end". Accumulates every
+        // instruction's `last_instr_accesses`/`last_instr_master_cycles`
+        // from the point the CPU is about to execute `start` up to (not
+        // including) the point it is about to execute `end`, and prints
+        // the totals plus `spent/6` when `end` is reached. Answers
+        // exactly the question `MathUnit::tick`'s doc makes a claim
+        // about: how many bus accesses and master cycles actually occur
+        // in the window a game spaces its own divide-latency wait with,
+        // and whether that master-cycle figure has any internal-cycle
+        // content in it at all (it does not — see the doc).
+        let accesswin: Option<(u32, u32)> = std::env::var("PROBE_ACCESSWIN").ok().map(|s| {
+            let (a, b) = s.split_once(':').unwrap();
+            (
+                u32::from_str_radix(a, 16).unwrap(),
+                u32::from_str_radix(b, 16).unwrap(),
+            )
+        });
+        let mut accesswin_active = false;
+        let mut accesswin_accesses: u64 = 0;
+        let mut accesswin_master_cycles: u64 = 0;
+        let mut prev_pc: u32 = 0;
         let cap: u64 = std::env::var("PROBE_INSTR")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -187,6 +213,32 @@ fn probe() {
                 } else {
                     0
                 };
+            if let Some((start, end)) = accesswin {
+                // `prev_pc` is the address the instruction that JUST ran
+                // (this iteration's `core.step`) was fetched from, since
+                // nothing else changes `sys.cpu.pc24()` between
+                // iterations.
+                if accesswin_active && prev_pc == end {
+                    println!(
+                        "      ACCESSWIN n={n} window={start:06X}..{end:06X} \
+                         accesses={accesswin_accesses} \
+                         spent_master_cycles={accesswin_master_cycles} \
+                         spent_master_cycles/6={}",
+                        accesswin_master_cycles / 6
+                    );
+                    accesswin_active = false;
+                }
+                if !accesswin_active && prev_pc == start {
+                    accesswin_active = true;
+                    accesswin_accesses = 0;
+                    accesswin_master_cycles = 0;
+                }
+                if accesswin_active {
+                    accesswin_accesses += sys.last_instr_accesses;
+                    accesswin_master_cycles += sys.last_instr_master_cycles;
+                }
+            }
+            prev_pc = pcv & 0x00FF_FFFF;
             let spcv = apu.cpu.pc;
             if spcv != spc_last {
                 spcring.push_back(spcv);

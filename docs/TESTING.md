@@ -1355,51 +1355,84 @@ buffer capacity, so nothing about the outer dispatcher or a second block
 is needed to explain the overshoot.
 
 **Root cause: `SnesBus::tick_math` stepped the divide/multiply unit once
-per CPU *bus access*, not once per elapsed CPU cycle** (`system.rs`'s own
-prior comment: "internal cycles are not modelled yet"). `INY`, `NOP` and
-`XBA` cost real 65816 cycles but touch no address in this core (`ops.rs`
-`0xEA => {}` for `NOP` is representative), so `AccessCost` — correctly
-scoped to what it can actually charge, per `speed.rs`'s own doc — counted
-zero for them, and the 16-step divide fell behind wall-clock time. Any
-game that reads a math-unit result after this kind of filler is exposed;
-most census titles either don't do this or land on a divisor/dividend
-combination where the stale shift-register bits happen to match the
-final answer (as the first logged block above did) — Super Mario RPG's
-second boot-time block did not.
+per CPU *bus access*, and every access counted as exactly one step
+regardless of how many real CPU cycles it actually cost.** Per fullsnes
+("SNES Maths Multiply/Divide"): "set WRDIVB, wait 16 clk cycles, then
+read the ... result", and "the 42xxh Ports are clocked by the CPU Clock,
+meaning that one needs the same amount of 'wait' opcodes no matter if the
+CPU Clock is 3.5MHz or 2.6MHz" — the divider's latency is 16 **CPU**
+cycles, one per CPU cycle regardless of that cycle's bus cost. `INY`,
+`NOP` and `XBA`'s second cycle cost real CPU cycles but touch no address
+in this core (`ops.rs`'s `0xEA => {}` for `NOP` is representative), so
+`AccessCost` — correctly scoped to what it can actually charge, per
+`speed.rs`'s own doc — counted zero accesses for them, and the divide
+fell behind real CPU-cycle time whenever a game filled with that kind of
+instruction between the `$4206` write and its result read.
 
-**Fix (crates/rf-snes/src/regs.rs, bus.rs, system.rs — narrowly scoped,
-not the full cycle-accurate 65816 executor `W6-02a` still defers):**
-`MathUnit` gained `tick(&mut self, master_cycles: u32)`, which accrues
-master cycles and calls the existing `step()` once per
-[`crate::cpu::speed::FAST`] (6) master cycles — the fixed cost of one
-internal CPU cycle on this hardware, regardless of FastROM, since
-internal cycles never touch the bus — the same established cost
-`speed.rs`'s own doc encodes, and the same constant
-`SnesSystem::step_one`'s pre-existing WAI/STP credit already uses for the
-identical reason, not a new hardware claim. `SnesBus::tick_math` now just
-forwards to `MathUnit::tick`, and `system.rs` feeds it `spent` (the
-instruction's real master-cycle cost, already computed for the master
-clock and the APU catch-up) instead of `counting.accesses`. A `carry: u32`
-field (sub-6-master-cycle remainder) was added to `MathUnit` and to its
+**Traced with a new diagnostic, `PROBE_ACCESSWIN=start:end`** (sums
+`accesses` and `spent` master cycles over every instruction from `start`
+to `end`), over the exact window the game spaces with `INY; INY; STY
+$3D; NOP; NOP; LDX #$FFFF` between the `$4206` write (`C4:04F1`) and the
+`$4215` high-byte read (`C4:04FD`): **15 accesses, 118 master cycles**.
+Under the old model (one step per access), 15 steps is one short of the
+16 the divide needs — exactly matching the observed `rddiv=0x8010`
+(step 15 of 16 in this crate's own shift-and-subtract algorithm,
+confirmed independently by hand-simulating `MathUnit::step` in Python
+against the same `wrdiv=0x65`/divisor-3 inputs). Over the full window to
+the `$4214` low-byte read (`C4:0505`, two more instructions further):
+**26 accesses, 202 master cycles** — the old model's 26 steps has long
+since finished the divide by then, which is why the low byte read at
+`C4:0505` was always correct and only the high-byte read at `C4:04FD`
+was exposed.
+
+**The fix is not "internal cycles are now counted" — no internal-cycle
+time is added anywhere.** `master_cycles`/`spent` still comes entirely
+from `AccessCost`, which still charges bus accesses only; an
+internal-only instruction still contributes zero extra `master_cycles`
+for real CPU cycles it spent touching no address. What actually changed
+(`crates/rf-snes/src/regs.rs`, `bus.rs`, `system.rs` — narrowly scoped,
+not the full cycle-accurate 65816 executor `W6-02a` still defers):
+`MathUnit` gained `tick(&mut self, master_cycles: u32)`, which re-buckets
+that same access-based `master_cycles` figure into
+[`crate::cpu::speed::FAST`]-sized (6-master-cycle) steps instead of one
+step per access. Since real accesses on this machine cost 6, 8 or 12
+master cycles (`speed.rs`'s table), this over-credits every access
+slower than `FAST` — a `SLOW` (8) access is worth 8/6 ≈ 1.33 re-bucketed
+steps, an `XSLOW` (12) access worth 2 — which is exactly why the 118
+master cycles above (mostly `SLOW`-region WRAM/register/ROM accesses)
+convert to 118/6 = 19 re-bucketed steps, comfortably past the 16 needed,
+where the old model's 15 raw accesses were not. This is a coarse,
+deliberate compensation for the undercount above, not a real internal-
+cycle model, and the direction is safe either way: over-crediting can
+only make the divide finish *sooner* in emulated time than 16 real CPU
+cycles would, never later, so software that waits out the documented
+latency (the correct thing to do) is unaffected, while software that
+was exposed to a partial result before (this bug) now more often is not.
+`SnesBus::tick_math` now just forwards to `MathUnit::tick`, and
+`system.rs` feeds it `spent` (already computed for the master clock and
+the APU catch-up) instead of `counting.accesses`. A `carry: u32` field
+(sub-6-master-cycle remainder) was added to `MathUnit` and to its
 save/load state so a mid-divide save/load round-trip stays exact. This
 does **not** add per-opcode internal-cycle accounting to the rest of the
 timing model — `master_cycles`/scanline/frame timing are unchanged and
-still have the same internal-cycle gap W6-02a's deferred cycle-accurate
-executor is for; only the math unit's own clocking moved off the wrong
-unit (bus accesses) onto the right one (real elapsed time).
+still have the same internal-cycle undercount W6-02a's deferred cycle-
+accurate executor is for; only the math unit's own clocking moved from
+"one step per access" to "one step per 6 master cycles of access cost",
+which happens to compensate for the right thing in the direction that
+only ever helps.
 
 **Known residual, not fixed here** (documented on `MathUnit::tick`): the
 `$4206` write happens mid-instruction, but `tick_math` is only called
 with that whole instruction's cost after the instruction finishes, so
-the handful of cycles the triggering instruction spent *before* reaching
-the write (its own opcode/operand fetches) are also credited toward the
-divide's latency — over-crediting the first `tick` by a few cycles out
-of sixteen. Harmless for every case checked here (`gilyon_cputest` and
-the SMRPG fix both have comfortable margin), but a title timed exactly
-against the 16-cycle boundary could still see a read complete one or two
-cycles early. Fixing that needs sub-instruction timing, which is what
-W6-02a's deferred cycle-accurate executor is for, not a change to this
-method.
+the handful of accesses the triggering instruction made *before*
+reaching the write (its own opcode/operand fetches) are also credited
+toward the divide's latency — over-crediting the first `tick` by a few
+re-bucketed steps. Harmless for every case checked here (`gilyon_cputest`
+and the SMRPG fix both have comfortable margin), but a title timed
+exactly against the 16-step boundary could still see a read complete a
+step or two early. Fixing that needs sub-instruction timing, which is
+what W6-02a's deferred cycle-accurate executor is for, not a change to
+this method.
 
 Three new unit tests cover `tick` directly (`crates/rf-snes/src/tests/
 regs.rs`): `tick_completes_a_divide_after_its_real_master_cycle_latency`
