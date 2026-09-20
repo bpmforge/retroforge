@@ -3155,6 +3155,121 @@ excluded, since several duplicate a released sibling's exact PC and shape
 Super Turrican) — evidence the defect is shared with the retail ROM, not a
 beta-specific corruption.
 
+### W14-36 — DMA/mapping family resolved: a header-nibble/location mapping
+bug, not DMA (2026-09-20)
+
+The W14-34 re-triage's guessed bisection targets (Final Fight 3 (Beta),
+Brawl Brothers, Final Fight 2) were stale — the re-triage's own table above
+does not actually contain Brawl Brothers or Final Fight 2 (both are in the
+raster/IRQ family instead, filed as W14-35); of the family's 11 titles the
+only retail dump is `WWF Super WrestleMania (USA)`, so that is what this
+ticket bisected first.
+
+**Bisection.** `PROBE_SPWIN=0:400` on `WWF Super WrestleMania (USA)` shows
+the crash from literally the first instruction: `n=1 prev_pc=000000 op=00
+sp=01FF` — reset itself lands PC at `$00:0000`, not the header's real reset
+vector. The ROM's own bytes are fine: the LoROM header at file offset
+`$7FC0` is fully self-consistent (checksum `$F1D1`/complement `$0E2E` XOR
+to `$FFFF`, title `WWF SUPER WRESTLEMANI` all-printable, reset vector
+`$FF51` sane into bank 0's upper half) and its RESET vector bytes at file
+offset `$7FFC-D` genuinely read `51 FF` ($FF51). The defect is entirely on
+the emulator side of `rf_cart::parse_snes_header`
+(`crates/rf-cart/src/snes.rs`): this cart's map-mode byte is `$41` — low
+nibble `$1`, which `map_mode_name` reads as "HiROM" — even though the
+header structurally lives at the *LoROM* location. `score_candidate`'s own
+doc already named this exact title as the reason the nibble is scored as
+evidence rather than required to agree with location ("real dumps exist
+whose header sits at one location while its mode byte names the other, and
+`WWF Super WrestleMania (USA)` is one of them") — the location-scoring was
+already right (LoROM won 5-1 over the HiROM candidate) — but the final
+`map_mode = match mode_nibble { 0x0 => LoRom, 0x1 => HiRom, ... }` read the
+nibble anyway, discarding which location had actually won. So a physically
+LoROM cartridge was addressed as HiROM: `SnesSystem::reset`'s `$00:FFFC`
+read resolved through the wrong mapping arithmetic, came back `$0000`
+instead of `$FF51`, and the CPU booted straight into WRAM — `BRK #$00` at
+`$00:0000`/`$00:0003` pushing P/PC (SP wraps 8-bit-in-emulation-mode 3
+bytes per push), vectoring through open-bus `$FFFF` reads on the (wrongly
+mapped) BRK vector, landing on a `$FF` byte decoded as `SBC $000000,X`
+(4-byte long-addressing) that wraps PC straight back to `$0003` — exactly
+`docs/TESTING.md`'s own recorded shape for this title.
+
+**Fix.** `parse_snes_header` (`crates/rf-cart/src/snes.rs`) now derives
+`SnesMapMode::LoRom`/`HiRom` from the WINNING header location (`base`) for
+nibbles `$0`/`$1`, falling back to the nibble only when it disagrees with
+location — SA-1's nibble `$3` (always headered at the LoROM location per
+fullsnes "SNES Cart SA-1") and the explicitly-unsupported nibbles are
+unaffected. New unit test
+`nibble_disagreeing_with_the_winning_location_defers_to_location` pins the
+exact WWF Super WrestleMania byte pattern (`lorom_image(0x41, 0x00)`). All
+52 `rf-cart` unit tests, the ignored SNES suites (`singlestep_65816_vectors`
+5,080,000 cases, `gilyon_cputest`, `spc700_vectors`, `spc_timer_reports_pass`,
+`peterlemon_golden`), and `cargo test --workspace` (156 test binaries) stay
+green; `scripts/validate-arch.sh` reports `arch OK`.
+
+**Census-child results after the fix** (`RF_CENSUS_ROM=<zip>
+boot_census-* --ignored --exact boot_census_child`; exit 0 rendered, 10
+blank): the fix moved **6 of the 11 family titles** from blank to
+rendered — the one retail title plus five betas, including both halves of
+a beta/retail pair:
+
+| Title | Before | After |
+|---|---|---|
+| WWF Super WrestleMania (USA) | 10 | **0** |
+| Final Fight 3 (USA) (Beta) | 10 | **0** |
+| Final Fight 3 (USA) (retail, for comparison) | 0 | 0 (unaffected — already rendered) |
+| Killer Instinct (USA) (Beta) | 10 | **0** |
+| Dennis the Menace (USA) (Beta) (1993-03-03) | 10 | **0** |
+| Teenage Mutant Ninja Turtles IV - Turtles in Time (USA) (Beta 2) | 10 | **0** |
+
+No regressions: Super Mario World (USA), Wild Guns (USA), NHL 95 (USA),
+Super Mario RPG - Legend of the Seven Stars (USA), Flintstones, The (USA)
+(En,Fr,De,Es,It), Kirby Super Star (USA), and Teenage Mutant Ninja Turtles
+IV - Turtles in Time (USA) (retail) all still exit 0 after the fix.
+
+**The remaining 5 titles are named, each traced back to its own ROM
+bytes or a distinct, separately-scoped shape — not this fix's bug:**
+
+- **Bug's Life, A (USA) (Pirate)**, **Hercules (USA) (Pirate)**, **Pokemon
+  Stadium (USA) (Pirate)**: all three carry an all-zero header at BOTH the
+  LoROM ($7FC0) and HiROM ($FFC0) locations (title bytes all `$00`,
+  checksum/complement both `$0000`) — these unlicensed multicarts ship no
+  real SNES header at all; `score_candidate` accepts the LoROM location
+  only because the reset-vector-sanity point plus the (vacuously true)
+  nibble-`$0`-at-LoROM-location point sum to exactly `MINIMUM_SCORE`. This
+  is not a mapping disagreement W14-36's fix touches (nibble and location
+  already agree at `$0`/LoROM). Each spends its early instructions in a
+  legitimate `MVN $7F,$7F` WRAM block-move (real 65816 semantics, not a
+  crash) before eventually reaching `$00:0000`/`COP #$00` well past the
+  probed 100K-instruction mark — Hercules's `PROBE_SPWIN` ring at 3M
+  instructions shows it looping cleanly in real code at `$00:BD47-BD61`
+  first, so the wander into the vector table happens later, deeper than
+  this ticket traced. Named for a future ticket; not the DMA/mapping
+  nibble bug.
+- **Daffy Duck - The Marvin Missions (USA) (Beta)**: the LoROM location is
+  pure `$FF` filler (not a header); the HiROM location at `$FFC0` is a
+  fully valid, self-consistent header (checksum/complement XOR to
+  `$FFFF`, legible title `DAFFY DUCK: MARV MISS`) — but the RESET vector
+  bytes it declares, read straight from the file at offset `$FFFC-D`, are
+  literally `00 00`. The ROM's own byte content points reset at `$00:0000`
+  before the emulator's mapping is even consulted; this is the beta dump's
+  own defect, not a mapping bug.
+- **Road Runner (USA) (Beta)**: same valid-HiROM-header shape as Daffy
+  Duck, but its declared reset vector is `$06BD` — file bytes `bd 06` at
+  `$FFFC-D`. `$00:06BD` falls inside the WRAM mirror that `mapping.rs`
+  gives every system bank ($0000-$1FFF, unconditionally, on real hardware
+  too — fullsnes's memory map, not an emulator choice), so on real
+  hardware this reset vector would also boot into zeroed WRAM and execute
+  `$00`/BRK. Traced to the ROM's own (beta) vector table, not a mapping
+  defect.
+- **ClayFighter (USA) (Beta 1) (1993-09-28) [b]**: parses as a
+  self-consistent HiROM cart (nibble `$1` at the HiROM location — no
+  nibble/location disagreement for W14-36's fix to touch), but the probe
+  shows scattered execution (`$50:8503 ORA ($01,X)`, top-PC hit only
+  3/20000) rather than a tight BRK-vector loop — the same "crash happens
+  much earlier, mid-legitimate-code" shape the W14-34 re-triage already
+  flagged this title as needing its own separate trace pass for. Left
+  named, not diagnosed further here.
+
 ### Next tickets — the three largest families, and what would confirm each
 
 1. **Raster/IRQ: NMI enabled but never (or almost never) fires (25 titles,
