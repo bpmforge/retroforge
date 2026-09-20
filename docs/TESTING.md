@@ -4884,9 +4884,137 @@ Zeo** (first varied frame 591 -> 604, a budget edge); **The Pagemaster**
 (USA, Beta 2, Beta 3: first varied frame 203 -> 2955, an 11x instruction
 count to leave a stock WaitVBlank whose NMI-side counter is healthy —
 the ~1660 idle frames sit in the title's own BRK-dispatched loader with
-no port, raster or timer traffic; follow-up W14-40); **Tommy Moe's Winter
+no port, raster or timer traffic; follow-up W14-40 **— correction below:
+there is no BRK dispatcher; that reading was a stale-P disassembly
+artifact**); **Tommy Moe's Winter
 Extreme** (a catch-up burst let the SPC's first post-handoff instructions
 clobber its handshake echo — fixed for the first edge, but the residual
 needs cycle-level CPU/SPC interleaving; follow-up W14-41 under W6-02a).
 Net +10, and the per-instruction cycle model is pinned exactly by
 5,080,000 vector cases.
+
+## W14-40 — the "BRK-dispatched OS calls" do not exist; corrected
+## disassembly of $9D:FE44-FF09; idle length not isolated, BLOCKED
+
+The W14-39 third follow-up's `PROBE_DIS=9D:FE00:FF00` was decoded with
+one CPU-P snapshot taken from wherever the run happened to be when the
+probe printed (16-bit A/X, `M=0`), applied uniformly across a range that
+the code itself changes with `SEP #$20`/`REP #$20` mid-stream — exactly
+the caveat the tool's own doc names ("PROBE_DIS decodes with one
+snapshot P; re-decode from the ring's P across REP/SEP"). Applied
+blindly, every `SEP #$20; LDA #imm` pair in this range mis-widens the
+following `LDA` to a 3-byte 16-bit immediate, walking one byte off phase
+for the rest of the block — which is what turned two ordinary 8-bit
+`STA $004200` long-address writes into phantom `00 42`/`00 C2` `BRK`
+opcodes. **There is no BRK dispatcher and no OS-call convention at
+`$9D:FE49`/`$9D:FE9B` in this ROM.**
+
+Re-decoded by hand from the ROM's own bytes (`fixtures` untouched — this
+is stock cartridge data), tracking every `SEP`/`REP` seen so each
+instruction's immediate width is the width the CPU actually had at that
+point (verified against `PROBE_SDUMP`'s `p`/`e` snapshot at several of
+these PCs, matching): `$9D:FE44` is `SEP #$20; LDA #$81; STA $004200;
+REP #$20; RTL` — installs NMITIMEN=$81 (NMI + auto-joypad). `$9D:FE4F`
+is `LDA $14; AND #$FFFE; STA $14; SEP #$20; LDA #$01; STA $004200; REP
+#$20; RTL` — NMITIMEN=$01 (auto-joypad only, NMI off). `$9D:FE89`
+(reached via `JSL` from `$9D:FE7C`'s `JSL $9DFDF9`) tests WRAM flag bit
+`$14`&4; if clear, it points the raster-IRQ trampoline (`$D3`/`$D5`,
+25-bit target `$9D:FED1`) at the shared interrupt body, sets
+`NMITIMEN=$31` (H+V-IRQ + auto-joypad, **NMI off**), then re-arms
+`$4207`/`$4209` (HTIME/VTIME) from a WRAM shadow (`$0270`/`$0272`) and
+`CLI`s. `$9D:FED1` — the routine the W14-39 write-up called "the NMI
+handler at `$9DFEDB`" — is entered via this raster-IRQ trampoline, not
+the hardware NMI vector: it reads **`$4211`** (TIMEUP, the H/V-IRQ
+acknowledge register, not `$4210`/RDNMI) before `INC $12`, then
+re-arms `$4207`/`$4209` again from a *second* WRAM pair (`$0274`/
+`$0276`) for the next field, sets a bank-`$9D`/`$FF0A` follow-on
+pointer, spins a short fixed delay (`LDA #$17; DEC A; BPL`, ~23
+iterations), and sets a WRAM flag bit before `RTI`. **This means `$12`
+is ticked by one leg of a raster-IRQ chain that continuously re-arms its
+own next trigger line from a WRAM shadow, not by the fixed, CPU-speed-
+independent hardware NMI** the third follow-up's "gated on the NMI...
+regardless of CPU speed" claim assumed — a re-arm miss would be exactly
+the shape of bug this ticket exists to find, so it was checked directly
+(next paragraph) rather than left as a corrected-but-unverified claim.
+
+**Checked: `$12` still ticks at 1.000/field, so the raster chain is not
+missing beats.** `PROBE_WATCH=000012` over the whole run to
+`n=45,700,000` counts **2951** increments; `sys.bus.timing.frame`
+(read via `PROBE_INSTR=<n>`'s end-of-run `timing:` line, independent of
+`$12`) reads 1166/1942/2589/2912 at `n`=18.0M/30.0M/40.0M/45.0M — a
+clean 1:1 ratio with the PPU's own field counter throughout the idle,
+inside the sampling granularity used. The raster-IRQ re-arm is healthy;
+the W14-39 write-up's outcome (writer traced, pacing correct) still
+holds, only its *mechanism* (NMI, not IRQ) was wrong.
+
+**Checked and corrected: the idle is not "nothing but the WaitVBlank
+loop."** `PROBE_RING`'s ring buffer (a few thousand entries) only shows
+the *most recent* history before a probe cutoff, and in this ROM the
+inner spin (`$9D:FE35`-`FE39`, four instructions) dominates instruction
+*count* every field, evicting everything else from a small ring — that
+is what produced the "essentially every sampled instruction" reading.
+`PROBE_ALLPC` with a 100,000-instruction sample window taken inside the
+idle (`n`=40,000,000) shows **732 distinct PCs**, most of them *not* the
+spin: an active call chain through `$9D:ED7F`/`$8F:F3CF` (a small
+trampoline), a long routine at `$97:FAE0`-`$97:FBFE` (state-flag tests,
+a copy of five actor fields via `LDA/STA .absx` with `X`, a sub-call at
+`$97:FB50`+`$97:FB73`/`$97:FBE4` that reads long-address string tables
+and writes `$991000,Y`), and a much larger block in bank `$A9`
+(`$A9:DE42` through `$A9:FFFF`, hundreds of distinct PCs — clearly an
+active per-object/state-machine update, not a stall). **The engine is
+still running substantial per-frame logic throughout the "idle"; it
+simply is not producing new APU port traffic or a new rendered pixel the
+probe's own-pixel-vs-frame-zero test can see.**
+
+**Checked and not confirmed: the hardware math unit is not idle either,
+but no dependency from it to `$12`'s own pacing was found.**
+`PROBE_WATCH=004214,004215,004216,004217` (register-content based, so
+it does not depend on knowing which `STA` addressing form the ROM
+uses, unlike a `PROBE_FINDROM` byte search) fires 630 times across the
+run, in a periodic burst pattern at `prev_pc=A9:F513/F516/F518` roughly
+every ~123,000 instructions. Decoded (again hand-tracked across
+`SEP`/`REP`, `p=$20` confirmed via `PROBE_SDUMP` at `$A9:F50C`): `LDA
+$22; STA $4202; LDA $28; STA $4203` — an 8-step **multiply** (`$22 x
+$28`, both WRAM bytes), `REP #$20`, four `NOP`s (the documented
+wait-out-the-latency idiom), `LDA $4216` (product), then `DEC A; ASL A;
+TAY; LDA ($24),Y` — a jump/data-table index computed from the product,
+consistent with a generic per-object state-table dispatch, not a frame
+counter. No `$4206`-divide call was found anywhere in the run (the
+register-watch method above would have caught a divide via the same
+`rddiv` cell regardless of opcode form), so the "math-unit landed one
+cycle early" theory named in this ticket does not apply to this
+particular idle — the one math-unit user found here computes a table
+index, not a wait length, and this session did not chase every one of
+the hundreds of distinct PCs in bank `$A9`'s active block to rule out a
+*different*, not-yet-found multiply/divide feeding the loop's actual
+trip count.
+
+**Verdict: BLOCKED, not fixed.** Two of the ticket's named mechanisms
+are ruled out with ROM bytes and register-content watches: there is no
+BRK/OS-call convention (bytes), and the `$12` counter that gates
+`WaitVBlank` ticks 1:1 with real PPU fields throughout the idle (checked
+register read via `sys.bus.timing.frame` cross-referenced against
+`PROBE_WATCH=000012`'s count). The corrected disassembly further shows
+the counter's own re-arm mechanism is a raster-IRQ chain, not the plain
+NMI the prior write-up assumed — corrected above rather than left
+standing, per this ticket's own finding that a wrong premise costs the
+next session the same investigation. What remains unresolved is the
+outer loop's *trip count*: this idle is not a spin with nothing else
+running (per-frame engine logic is active across banks `$97`/`$9D`/
+`$8F`/`$A9` throughout), so the 1660-field difference from the pre-
+W14-39 baseline (`docs/TESTING.md`'s frame-203 figure) is a difference
+in how long that engine logic's own state machine takes to reach its
+next visible change — not a stuck wait on a single register. The
+current `main` tip (this ticket's worktree branched from it) reproduces
+the exact same `varied_at=2955 / total_instr=45,708,683` result byte-for-
+byte with `PROBE_MODE=frames`, confirming there is no *fresh*
+regression between this branch and `main` — the standing gap predates
+this ticket and was already the subject of W14-39's own follow-ups.
+Isolating the exact WRAM cell driving the state machine's pace would
+require tracing the hundreds of distinct PCs sampled in bank `$A9`
+above (an actor/object update loop) to their own data, which is beyond
+what this ticket's remaining scope covers; left named, quantified and
+bounded, not tuned around, for a future ticket that can commit to
+decompiling that block specifically. No emulator defect is demonstrated
+here, so none is invented, and no fix is applied to
+`crates/rf-snes/**`.

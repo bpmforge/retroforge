@@ -7598,7 +7598,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "in_progress",
+  "status": "blocked",
   "stories": [],
   "id": "W14-40",
   "title": "The Pagemaster: 1660 idle frames in the loader after W14-39 — decode the BRK-dispatched OS calls that set the wait target",
@@ -7612,6 +7612,7 @@
    "W14-40: fix if emulator-side (citation + unit test); census children on all three Pagemaster dumps and the usual canaries; orchestrator census with RF_CENSUS_OUT if a fix lands; a BLOCKED verdict must reach ROM bytes or a checked register read"
   ],
   "notes": [
+   "W14-40 BLOCKED 2026-09-20: the BRK-dispatched-OS-call theory is FALSE (stale-P disassembly artifact; re-decoded by hand, no BRK anywhere in $9D:FE44-FF09 -- see docs/TESTING.md). $12 confirmed ticking 1:1 with real PPU fields throughout the idle (raster-IRQ chain, not plain NMI as previously claimed -- corrected). The idle is not a bare spin either: PROBE_ALLPC shows active per-frame engine code across banks 97/9D/8F/A9 the whole time. The outer loop's trip-count source (a per-object state machine in bank A9) was not isolated within scope. main tip reproduces the identical varied_at=2955/instr=45,708,683 result -- no fresh regression from this branch.",
    "W14-40 FILED 2026-09-21 by the orchestrator from W14-39's named regression (three dumps). A 49-second black boot is not hardware behaviour; the writer chain is clean, so the wait target's source is the question."
   ]
  },
