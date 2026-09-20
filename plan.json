@@ -7244,7 +7244,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-26",
   "title": "NHL 95: CPU walks WRAM with NMI off before 1.2M instructions — trace the divergence from reset",
