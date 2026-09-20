@@ -7767,7 +7767,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-47",
   "title": "Raster/IRQ family after W14-45 (9 titles): WAI parked on an interrupt that never fires — Final Fight 2 x2 (NMI and IRQ enabled, neither entered), Battletoads in Battlemaniacs x2; test the NMI-enable-edge dispatch W14-35 named but did not fix",
