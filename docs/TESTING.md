@@ -1290,3 +1290,112 @@ bucket; census not re-run (no code changed — `crates/rf-harness/tests/
 title_probe.rs` gained two diagnostic env vars, `PROBE_TIMERLOG` and
 `PROBE_PACKETLOG`, and nothing in `crates/rf-snes` changed). Gate at
 close: see the commit trailer.
+
+## W14-25 — Super Ninja Boy NMI storm: the M-clear/STZ $4305 theory does
+not reproduce; BLOCKED on a real-hardware timing reference (2026-09-19)
+
+The 2026-09-17 triage named a specific mechanism: an `STZ $4305` executed
+with M clear, so a 16-bit store zeroed both `$4305` and `$4306` (DASxL/H),
+giving a DMA count of 0 = 65536 bytes to VRAM (fullsnes "SNES DMA/HDMA
+Registers"). This ticket's job was to trace that divergence from reset.
+It does not exist.
+
+**The hypothesis, checked exhaustively.** `PROBE_FINDROM` located every
+byte pattern in the ROM that stores to `$4305`/`$4306`: one `STZ $4305`
+(`9C 05 43`, LoROM `80:99F5`) and three `STA $4305` (`8D 05 43`, at
+`80:8F9A`, `80:9394`, `80:94AD`). `PROBE_DIS` traced each site's own code
+path backward to the nearest flag-width instruction: every one of the
+four sits immediately downstream of a `SEP #$30` or `SEP #$20` on the
+*same* straight-line path, with no intervening branch that could skip
+it. `STA`/`STZ` absolute is 3 bytes regardless of M, so this is exact —
+not something a misdecoded immediate operand could hide. **M is 1 (8-bit)
+at all four sites; the CPU never has this flag clear when the game
+writes here.**
+
+The 2026-09-17 reading is best explained as a tool artifact: `title_probe`'s
+`PROBE_DIS` hands `rf_snes::trace::disassemble` one snapshot `cpu.p` for
+an entire linear range, and instruction width for immediate operands
+(`LDA #$xx` vs `LDA #$xxxx`) depends on M/X *at that instruction*, not at
+snapshot time. Proof, from this session: `PROBE_DIS=80:8d00:8d80` at an
+early, still-native-mode snapshot decodes `80:9334` as `LDY #$B100`
+(3 bytes) — but `80:9324`'s `SEP #$30` (2 bytes fixed, unaffected by the
+bug) makes X 8-bit by that point, so the real instruction is `LDY #$00`
+(2 bytes) followed by `LDA ($AA),Y`, which is exactly what re-running
+`PROBE_DIS` from a live snapshot already inside that 8-bit window
+decodes correctly. A linear disassembly that free-rides on stale flags
+across a `REP`/`SEP` boundary will misread everything downstream of it,
+including — apparently — the 2026-09-17 read of this exact code.
+
+**The actual mechanism** (found with a temporary, unshipped
+`eprintln!` trace on `SnesSystem::step`, `SnesBus::service_dma`, and
+`Timing::advance` — reproduce by instrumenting the same three functions
+the same way; nothing in the diff below ships). The shared DMA-arm
+helper at `80:8D2A` — called both by a direct-fire caller
+(`80:92DC`/`92E0`/`92E3`) and, unconditionally, via its own `TSB $78` —
+arms WRAM `$78` bit 0 as a "run this channel at the next vblank" latch
+for channel 0. The NMI handler at `80:8E69` unconditionally drains that
+latch (`LDA $78` / `STA $420B` / `STZ $78`) and fires whatever channel-0
+registers currently hold. Two independent consumers, same channel, same
+latch, no exclusion between them.
+
+Traced sequence at the actual failure (instruction counts from a
+`PROBE_INSTR`-stepped run): at n=1,619,670 `8D2A` arms `$78=1` and
+programs channel 0 for a legitimate 16,384-byte VRAM fill (control
+`$08` fixed-source, B `$18` = `$2118`, count 16384). The direct caller
+has not yet reached its own `STA $420B`/`TRB $78` cleanup (still ~20
+instructions away) when this transfer runs long enough — 131,080 master
+cycles, matching fullsnes's 8 cycles/byte plus per-channel overhead, ~96
+scanlines — to cross the next vblank edge (`Timing::advance` traced
+directly: entry line 181/frame 102 to exit line 15/frame 103, with
+`vblank_start=240` since overscan is enabled — arithmetically exact, 96
+lines from 181 reaches 240 with 22 lines left to wrap 262→0→15). The NMI
+fires *before* the direct caller's own `TRB $78`, drains `$78` (still
+armed) and re-fires channel 0 using its post-transfer register state —
+count 0, which is DASxL/H = 0 meaning 65536 bytes, the hardware-defined
+encoding, not a clobbered write. That 65536-byte transfer is itself
+long enough (524,296 cycles, ~384 lines, over one full 262-line frame)
+to guarantee crossing *another* vblank edge before its own `STZ $78`
+ever executes, so the NMI handler re-enters before clearing the latch —
+forever. `$78` is never seen at 0 again for the rest of the traced run.
+
+**Ruled out as the swing factor**: `Timing::advance` itself. A second,
+non-storming instance of the identical 16,384-byte transfer was
+captured later in the same run (armed at line 85/frame 138, fires line
+86→182 — nowhere near `vblank_start=240`) and `advance`'s entry/exit
+lines matched the cycle math exactly in both cases, storming and not.
+The function is correct; the only variable is *which scanline* the
+game's own code reaches the DMA-arm call at, which is fixed by how many
+cycles everything since the previous vblank actually cost.
+
+**Why this is BLOCKED and not fixed or WONTFIX.** The trace shows the
+game's own code creates the race (an unconditional queue-arm shared
+with a synchronous direct-fire path, no exclusion between them) —
+ticket acceptance criterion 4's exact scenario. Whether real hardware
+ever lands at the same dangerously-late scanline (181 of 262, 59 lines
+of margin before the overscan `vblank_start`) or always arrives earlier
+with more margin (as the safe instance at line 85 does) depends on
+cycle-exact timing of every instruction executed since the prior
+vblank — something this investigation has no way to certify against
+real hardware from a black-box trace alone.
+
+**Named next step**: capture a cycle-exact trace of Super Ninja Boy's
+boot from a reference emulator (a cycle-accurate core, e.g. bsnes's
+performance/accuracy profile) up to this same `80:8D2A` call, and
+compare the scanline/cycle count reached against `rf-snes`'s own. A
+divergence points at a specific CPU/PPU/APU timing defect upstream of
+this ticket's write scope; an exact match means the game genuinely
+ships this race and RetroForge is reproducing real hardware, in which
+case this closes WONTFIX (law 5: no patching around a game's own code)
+rather than reopening as a timing-fix ticket.
+
+No code changed in `crates/rf-snes` or `crates/rf-harness` this pass —
+every temporary trace line was reverted before this write-up. The
+existing `PROBE_DIS`/`PROBE_RING`/`PROBE_RINGP`/`PROBE_PEEK` env-var
+contract in `title_probe.rs` already covers everything needed to redo
+this trace; no new env var was added. Gate at close: `cargo fmt
+--check`, `cargo clippy --workspace -- -D warnings`, `cargo test -p
+rf-snes` and the ignored SNES singlestep/SPC suites all still pass
+unchanged, since nothing in `rf-snes`/`rf-harness` was touched — see
+the commit trailer for counts. The SNES census was not re-run (no
+behavior changed); Super Ninja Boy (both the retail and Beta dumps)
+stays wherever the last census left it.
