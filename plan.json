@@ -7463,6 +7463,54 @@
    "W14-34 CLOSED 2026-09-20: 1800-frame sweep over the 74-title uniform bucket found 4 slow boots (Knights of the Round f=909, Jungle Strike f=991, Justice League Task Force (Beta) f=1643, Undercover Cops (Retro-Bit) f=1767) and 70 stuck titles. Default 3M-instruction probes grouped the 70 into: raster/IRQ NMI-enabled-never-fires (25, largest), APU $2140-$2143 handshake (23), DMA/mapping crash-into-vector (11, same shape as W14-26), register-read semantics (3: Shien's Revenge x2, Top Gear 3000), forced-blank/NMI-off unknown (3), and one-off unknown (4, incl. XBAND STP-halt). Full family table and per-title one-line shapes in docs/TESTING.md under the dated W14-34 heading. Three next tickets proposed with confirming evidence: raster/IRQ NMI dispatch trace, DMA/mapping SPWIN/SDUMP bisection on Final Fight 3 (Beta), APU handshake STOP_ON_SPC_STOP + APUPORTLOG trace. No core code changed (docs-only ticket).",
    "W14-34 FILED 2026-09-20 by the orchestrator: the 2026-09-17 named-cause list is stale after 44 titles moved; a fresh shape census picks the next systemic fixes."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-35",
+  "title": "Raster/IRQ family (25 titles): the CPU polls $4210 RDNMI / $4212 HVBJOY with NMI entered once or twice — trace ActRaiser 2, Illusion of Gaia, Lagoon, Phalanx",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-35: with PROBE_IRQLOG and the PC ring on ActRaiser 2 / Illusion of Gaia / Lagoon / Phalanx (the W14-34 table's identical shape: `LDA $4210` / `BPL`, nmi_entries 1-2), the trace shows the exact sequence of $4200 NMITIMEN writes, NMI dispatches, $4210 reads (with the value returned and the raster position) and what the game's NMI handler does — and names why the poll never sees bit 7 set: RDNMI's set/clear timing vs fullsnes (set at vblank start, cleared on read; check whether hardware also clears it at vblank end, and whether enabling NMI in $4200 while the flag is set must dispatch immediately), an NMI handler that acknowledges the flag before the main loop can see it (then how hardware differs), or a state upstream (a WRAM flag the handler should set)",
+   "the fix, if any, is cited to published documentation (fullsnes / snes.nesdev.org / WDC) and pinned by a unit test that reproduces the exact shape; ignored SNES suites (65816 and SPC700 vectors, gilyon, spc_timer, peterlemon goldens) stay green; determinism unaffected",
+   "if a fix lands: the traced titles render in the census child (exit 0); the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and every title that moved is named in docs/TESTING.md",
+   "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — 'game's own data' without that chain is not accepted"
+  ],
+  "notes": [
+   "W14-35 FILED 2026-09-20 by the orchestrator from W14-34's re-triage: 25 titles share the $4210/$4212 poll shape with NMI entered once or twice (ActRaiser 2, Goal!, Illusion of Gaia x3, Lagoon, Phalanx x2, Pinocchio betas, ...). Timing::read_rdnmi and Timing::advance (nmi_flag at vblank_start) and SnesSystem::step's dispatch (`events.vblank_started && nmi_enabled`) are the code under test."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-36",
+  "title": "DMA/mapping family (11 titles): control crashes into the $0000 BRK/COP vector — bisect Final Fight 3 (Beta), Brawl Brothers, Final Fight 2",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-36: W14-26's method (PROBE_SPWIN stack-drift attribution, PROBE_SDUMP at the RTS/RTI/RTL that pops garbage, PROBE_WATCH on the corrupted cell) on Final Fight 3 (Beta), Brawl Brothers and Final Fight 2 (retail and Virtual Console) names the first wrong value each consumed and where it came from: a register read (W14-24/26/28 class — check every $21xx/$42xx/$43xx read on the path against fullsnes's R/W column), a DMA/HDMA size/bank/table walk, a LoROM/HiROM/SRAM mapping miss (check the cart header vs mapping.rs target for the banks read), or a flag-state divergence",
+   "the fix, if any, is cited to published documentation (fullsnes / snes.nesdev.org / WDC) and pinned by a unit test that reproduces the exact shape; ignored SNES suites (65816 and SPC700 vectors, gilyon, spc_timer, peterlemon goldens) stay green; determinism unaffected",
+   "if a fix lands: the traced titles render in the census child (exit 0); the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and every title that moved is named in docs/TESTING.md",
+   "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — 'game's own data' without that chain is not accepted"
+  ],
+  "notes": [
+   "W14-36 FILED 2026-09-20 by the orchestrator from W14-34's re-triage: 11 titles crash into the $0000 vector with the same stack-wander shape NHL 95 had before W14-26 (Final Fight 2 x2, Final Fight 3 Beta, Brawl Brothers, Knights of the Round is a slow boot not this, ...). See the W14-34 table in docs/TESTING.md for the full list."
+  ]
  }
 ]
 }
