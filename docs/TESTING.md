@@ -6005,3 +6005,226 @@ traced to it, all had left the colour window disabled). **Top Gear
 (DSP-4). One row moved to uniform: **Xardion**, first varied frame 562
 -> 621 under W14-37's listed boot-handoff cycles — a budget edge like
 Power Rangers Zeo, not a stall.
+
+## W14-45 re-triage — the 41 remaining uniform titles after W14-35..W14-43:
+1800-frame sweep, shape families, next tickets named (2026-09-21, docs-only)
+
+**Supersedes the W14-34 re-triage table above for these 41 titles.** That
+table's verdicts predate the RDNMI vblank-end clear (W14-35), the CGWSEL
+clip/prevent mode swap fix (W14-42), the `$4200` open-bus fix and DSP-4
+refusal (W14-43), and the internal-cycle/`catch_up_apu` timing corrections
+(W14-37/39/41) — 33 of the original 74 titles moved buckets under those
+fixes (ActRaiser 2, Illusion of Gaia, Robotrek, Soul Blazer, Shien's
+Revenge x2, Top Gear 3000 -> refused, WWF Super WrestleMania, three more
+W14-36 header-mapping betas, fifteen APU-deadlock/raster titles under
+W14-39, Adventures of Yogi Bear/Jim Power/Mighty Max/Nickelodeon
+GUTS/Pinocchio x2/Slap Stick under W14-42's CGWSEL fix). The 41 titles
+below are `RF_CENSUS_OUT`'s current uniform-screen bucket (census
+`1093/41/131/0/0`, per W14-43's own count); two of them (Power Rangers Zeo,
+Xardion) are *new* arrivals — budget-edge regressions the corrected timing
+pushed just past the 600-frame census window, not defects (W14-37/W14-39's
+own notes already named both).
+
+### Step 1 — 1800-frame sweep (`PROBE_MODE=frames PROBE_FRAMES=1800`,
+release build, 5-8 titles per run)
+
+6 of the 41 are slow boots — real, paced games whose first varied frame
+sits inside 1800 frames but past the census's 600-frame budget, the same
+"budget, not bug" shape as Jungle Strike/Knights of the Round/Justice
+League Task Force (Beta)/Undercover Cops in the W14-34 table (all four
+recur here, unmoved) plus the two new arrivals:
+
+| Title | varied_at (frame) | total_instr_at_varied |
+|---|---|---|
+| Power Rangers Zeo - Battle Racers (USA) | 624 | 7,960,482 |
+| Xardion (USA) | 621 | 8,415,627 |
+| Knights of the Round (USA) | 950 | 16,226,170 |
+| Jungle Strike (USA) | 1174 | 17,118,576 |
+| Justice League Task Force (USA) (Beta) | 1719 | 24,522,095 |
+| Undercover Cops (USA) (Retro-Bit) | 1780 | 26,779,848 |
+
+The remaining **35 never vary inside 1800 frames** and went on to step 2.
+Note the split: Justice League Task Force's **retail** dump does NOT
+recover by 1800 frames (it lands in the unknown/one-off family below) even
+though its own **Beta** does — a genuinely different pair, not a
+duplicate-shape entry.
+
+### Step 2 — one default probe per stuck title (`PROBE_INSTR=3000000
+PROBE_PORTS=1 PROBE_RING=1 PROBE_SPCRING=1`) plus one `PROBE_MODE=frames
+PROBE_FRAMES=600 PROBE_M7=1 PROBE_OAM=1` line, one title per run
+
+`distinct_indices_now=1` (flat, single palette index) for all 35 at frame
+600 — the composited picture really is uniform for every title in this
+bucket, not a `PROBE_INSTR`-vs-`Step::Frame` measurement artifact (the
+W14-38 lesson). Only one title showed a nonzero `clip_mode`/`prevent_mode`
+in the frame-600 `PROBE_M7` dump (ClayFighter Beta 1, `clip_mode=2
+prevent_mode=2` with a nonsense window/hofs/vofs state) and that title is
+already scattered-execution garbage per the DMA/mapping family below, not
+a second CGWSEL case — W14-42's fix is not implicated in any of these 35.
+
+**A new diagnostic finding first, since it reclassifies 9 titles:** five
+of the "CPU spins on a WRAM/register poll" shapes below actually sample a
+frozen **post-`WAI`** resume PC, not a spin loop — `cpu.stopped=true`
+alone (`crates/rf-snes/src/cpu/mod.rs`'s own field doc) cannot distinguish
+`WAI` ($CB, wakes on any interrupt) from `STP` ($DB, wakes only on reset).
+`PROBE_DIS` one byte before each sampled top-PC resolved it directly:
+Battletoads in Battlemaniacs (USA)/(Beta) (`$94808F: WAI`), Final Fight 2
+(USA)/(Virtual Console) (`$808C0A: WAI`) are genuine `WAI`s parked waiting
+for an NMI/IRQ that the trace shows never arrives again after boot
+(`nmi_entries<=1`, `irq_entries=0` across the whole 3,000,000-instruction
+window) — mechanically the same "enabled but doesn't fire" symptom as the
+raster/IRQ family's spin-loop titles, just expressed as a halted `WAI`
+instead of a polling `BPL`/`BEQ`. XBAND (USA) (v1.0.1) is confirmed the
+opposite: `$D03AD8: STP`, a genuine hardware halt matching the W14-34
+table's own unmoved verdict exactly (`cpu.stopped=true`, `distinct_pc=1`).
+All four are moved into the families below on this evidence, not left in
+an ad hoc "CPU halted" bucket.
+
+### Family: APU handshake (11 titles) — CPU polls $2140-$2143 for a byte
+the SPC700 driver never delivers; three distinct sub-shapes, evidence for
+each
+
+| Title | Shape |
+|---|---|
+| Blackthorne (USA) / (Beta) / (Beta) (CES) | `$81:8F0B BNE $8F07` / `CMP $002140` (long addressing); `ports_in=ports_out=[00,00,00,00]` (balanced at zero — no command ever sent) while the SPC700 is genuinely busy (`spc distinct_pc=245`, top PC `$19D3`, real driver code) — the CPU is waiting for a byte the driver never writes, not an unstarted boot |
+| Battle Grand Prix (USA) | `$01:82A9 BNE $82A6` / `CMP $2140`; `ports_in=[f1,3f,00,d0] ports_out=[f1,bb,00,00]` — port 0 balanced (`f1=f1`) but port 1 mismatched (`3f` vs `bb`), SPC actively running (`distinct_pc=9`) |
+| Tekken 2 (USA) (Pirate) | `$00:E1B7 BNE $E1B4` / `CMP $2142`; **`spc.stopped=true`**, SPC parked at ARAM `$0005` (past the IPL entry, mid-driver) — the driver itself halted, same class W14-23 named for Super Mario RPG |
+| Urban Strike (USA) | `$92:80FA CMP $2140` / `BNE $80E2`; `apu.boot_running=false`, **`spc.stopped=true`** frozen at IPL entry `$FFC0` — the IPL boot handshake itself never got past `Ready` |
+| NBA Live 96 (USA) | `$80:AB9F BNE $AB9C` / `LDA $2140`; **`apu.boot_running=false`, `spc.stopped=true`**; `ports_in=[00,00,80,03]` shows the CPU already wrote data at index 2/3, but the SPC halted mid-IPL before ever acknowledging it |
+| Batman - Revenge of the Joker (USA) (Proto) | `$80:8024 BNE $8021` / `CMP $2140`; `apu.boot_running=false`, SPC frozen at `$FFC0` (boot never started at all — `ports_out=[aa,bb,00,00]`, the IPL's own idle sentinel, unmoved for the entire 3M-instruction window) |
+| Phalanx (USA) / (Beta) | `$00:811A LDA $4210` / `BPL $811A` — the ordinary vblank idiom, not a port poll; `apu.boot_running=false`, SPC frozen at `$FFC0` — same `IplBoot::BootState::Ready` shape W14-38 already named healthy-but-not-yet-started for these two exact titles; still not started by 3,000,000 instructions |
+| Sonic Blast Man II (USA) | `$C0:9021 BIT #$80` / `BEQ $901E` then `LDA $4210`; `apu.boot_running=false`, SPC frozen at `$FFC0`; `ports_in=[01,00,00,e0]` shows the CPU has already written non-zero data the driver never acknowledges |
+
+### Family: raster/IRQ — NMI/IRQ enabled but essentially never fires
+across the whole 3,000,000-instruction window (9 titles) — a stronger
+symptom than W14-35's four titles, which fired 30-175 times each over a
+comparable window
+
+| Title | Shape |
+|---|---|
+| Battletoads in Battlemaniacs (USA) / (Beta) | genuine **`WAI`** at `$94808F`/`$948090`, reclassified above; `nmitimen=NmiTimen(129)` (NMI enabled, no H/V-IRQ), `nmi_entries=1` (one dispatch near boot, then never again), `irq_entries=0`; one HDMA channel (`Beta`: `do_transfer=true`) still mid-transfer at the snapshot |
+| Final Fight 2 (USA) / (Virtual Console) | genuine **`WAI`** at `$808C0A`, reclassified above; `nmitimen=NmiTimen(161)` (NMI **and** V-IRQ both enabled), `nmi_entries=0`, `irq_entries=0` — **neither** ever fires across the whole run, a stronger deviation than any W14-35 title |
+| Goal! (USA) | `$1C:8DF4 BPL $8DF1` / `LDA $4210`; `nmi_entries=1`; `cgram_nonzero=5 vram_nonzero=4030` — some content loaded, unlike the pure-idle titles below |
+| Tuff E Nuff (USA) | `$80:F400 LDA $4210` / `BPL $F400`; `nmi_entries=1`; `cgram_nonzero=0 vram_nonzero=0` — nothing loaded yet |
+| Dragon - The Bruce Lee Story (USA) (Beta) (1993-04-23) | `$80:8057 BNE $8054` / `LDA $7412` (WRAM mirror, not the register directly); `nmi_entries=0`; `tm=[0010]` (BG2 only) with real `cgram_nonzero=12 vram_nonzero=3902` |
+| Spot Goes to Hollywood (USA) (Proto) (1995-08-05) | `BEQ` / `LDA $00` (direct-page zero); `nmi_entries=0`, `irq_entries=2` (V/H-IRQ fires, NMI does not) — unchanged from the W14-34 table |
+| WeaponLord (USA) | `$EA:646A BEQ $6467` / `CMP $3632` (WRAM); `nmi_entries=0`, `irq_entries=6` — same asymmetric shape as Spot Goes to Hollywood, unchanged from the W14-34 table |
+
+### Family: DMA/mapping — crash into the reset/BRK/COP vector, or
+scattered execution through corrupted memory (6 titles) — the pirates
+and betas W14-36 already traced to their own ROM bytes, not this
+emulator's bug; none reproduce W14-36's header-nibble defect (already
+fixed)
+
+| Title | Shape |
+|---|---|
+| Hercules (USA) (Pirate) | `$00:0000 COP #$00` (already crashed by 3M instructions); all-zero header at both LoROM/HiROM locations (W14-36) |
+| Pokemon Stadium (USA) (Pirate) | `$00:0000 BRK #$00`; same all-zero-header multicart shape |
+| Bug's Life, A (USA) (Pirate) | now caught *before* its eventual crash: legitimate-looking loop `$40:8B7F DEC $0174` (`distinct_pc=1`, `cpu.stopped=true`), consistent with W14-36's note that this title "loops cleanly in real code first" before wandering into the vector table later than 3M instructions probes |
+| Daffy Duck - The Marvin Missions (USA) (Beta) | `$00:0000 BRK #$00`; W14-36 already traced this to the beta's own HiROM-header reset vector reading literal `00 00` in the file — not a mapping bug |
+| Road Runner (USA) (Beta) | `$00:0000 BRK #$00`; W14-36 already traced this to the beta's own vector (`$06BD`) falling inside the universal WRAM mirror — real-hardware-accurate behaviour for this dump |
+| ClayFighter (USA) (Beta 1) (1993-09-28) [b] | scattered execution (`$10:94C8 ORA ($01,X)`, top PC only 4/20000 hits — not a loop), `distinct_pc=6503`; the only title in the 41 with a nonzero `clip_mode`/`prevent_mode` at frame 600, but with nonsensical window/`hofs`/`vofs` values consistent with corrupted state, not a second CGWSEL case; needs its own bisection per W14-34's original note |
+
+### Pagemaster's own 11x-instruction-count `WaitVBlank` stall (4 titles,
+already root-caused and left BLOCKED by W14-39's three follow-ups —
+named here, not rediscovered)
+
+All four Pagemaster dumps in this bucket sample a variant of the exact
+generic `WaitVBlank` library primitive W14-39's third follow-up traced to
+source (`$9DFE2B`-`$9DFE3C` in the retail tree): a direct-page snapshot/
+compare/spin gated by an NMI-incremented counter that ticks at the
+hardware-correct one-per-frame rate on both trees, whose *reader* is
+innocent — the ~1660 real idle frames the title spends before its own
+`varied_at` (traced to frame 2955 in the W14-39 follow-up, past this
+ticket's own 1800-frame sweep, hence "stuck" here) sit inside the title's
+own `BRK`-dispatched loader, not yet reverse-engineered.
+
+| Title | Shape |
+|---|---|
+| Pagemaster, The (USA) | `$B9:FC4A LSR A` / `$B9:FC4E BEQ $FC67` (table-scan loop) |
+| Pagemaster, The (USA) (Beta 1) (1994-07-18) | `$BD:FE72 CMP $12` / `BEQ $FE72` — the exact writer/reader pair W14-39's follow-up traced |
+| Pagemaster, The (USA) (Beta 2) | `$BB:FBEC BNE $FBE3` / `CMP [$DE],Y` — same family, different compiled offset |
+| Pagemaster, The (USA) (Beta 3) (1994-08-29) | `$B9:FC4D BEQ $FC66` / `ROR $E5` — same shape as retail |
+
+### Family: unknown / one-off (5 titles)
+
+| Title | Shape |
+|---|---|
+| Justice League Task Force (USA) | `$80:842A BNE $8427` / `LDA $0316` (WRAM); `nmi_entries=1` — NMI *does* fire, yet the game is still stuck; unchanged from the W14-34 table. Its own **Beta** is a slow boot (step 1) — the two dumps genuinely diverge, not a duplicate |
+| Lagoon (USA) | `$00:814B BPL $8148` / `LDA $4210`; `ports_in=ports_out=[00,00,00,00]` (never written), `nmi_entries=1` — the same "healthy per-frame idling, hasn't reached the APU driver yet" shape W14-38 already named for this exact title; still not talking to the APU by 3M instructions |
+| Firearm (USA) (Proto) (1993-12-17) | `$02:84DC CMP $0006` / `PHA`/`PLA` (WRAM); `nmi_entries=2` — NMI fires occasionally, yet stuck; one HDMA channel (`control=0x40`) still `hdma_done=false` at the snapshot — unchanged from the W14-34 table |
+| Brandish (USA) | `$80:841A AND #$1C` (real, 657-distinct-PC code, not a register/WRAM-flag poll); `apu.boot_running=false`, SPC frozen at `$FFC0` (boot never started) but the CPU isn't waiting on it — `irq mode=Both`, `irq_entries=3` (raster IRQs do fire); least understood of the 41, needs its own `PROBE_WATCH` trace |
+| XBAND (USA) (v1.0.1) | confirmed genuine `$D0:3AD8 STP` (reclassified above, not `WAI`) — `distinct_pc=1`, a real hardware halt; unmoved from the W14-34 table |
+
+### Betas/protos/pirates named separately (per acceptance)
+
+**Pirates (4):** Bug's Life, A (USA); Hercules (USA); Pokemon Stadium
+(USA); Tekken 2 (USA).
+**Protos (2 remaining after Firearm/Batman above are already listed under
+their families):** Batman - Revenge of the Joker (USA); Firearm (USA)
+(1993-12-17); Spot Goes to Hollywood (USA) (1995-08-05).
+**Betas (11):** Battletoads in Battlemaniacs (USA); Blackthorne (USA)
+(Beta) and (Beta) (CES); ClayFighter (USA) (Beta 1); Daffy Duck - The
+Marvin Missions (USA); Dragon - The Bruce Lee Story (USA); Justice League
+Task Force (USA) [slow boot, step 1]; Pagemaster, The (USA) (Beta 1/2/3);
+Phalanx (USA); Road Runner (USA).
+**Other non-retail-standard dumps:** Final Fight 2 (USA) (Virtual
+Console) — shares its retail sibling's exact `WAI` PC and register state;
+Undercover Cops (USA) (Retro-Bit) [slow boot, step 1] — a reissue
+cartridge, not a ROM hack; XBAND (USA) (v1.0.1) — a network add-on
+cartridge with its own boot ROM, not an ordinary game cart.
+
+### Next tickets — the three largest families, and what would confirm each
+
+1. **APU handshake (11 titles, largest family).** Confirming evidence
+   needed: for the `spc.stopped=true` subset (Tekken 2, Urban Strike, NBA
+   Live 96), repeat W14-23's method (`PROBE_STOP_ON_SPC_STOP` plus
+   `PROBE_SPCRING`/`PROBE_ARAM` around the halt PC) to check whether the
+   same "unbounded receive-loop index overwrites the driver's own polling
+   code" mechanism that explained Super Mario RPG (W14-23/W17-04) recurs
+   here. For the "boot never started" subset (Batman (Proto), Phalanx x2,
+   Sonic Blast Man II, Urban Strike) — `PROBE_APUPORTLOG`/`PROBE_PACKETLOG`
+   to see whether the CPU ever issues the `$CC` start-upload command at
+   all, or writes it to the wrong port, plus a much longer `PROBE_INSTR`
+   sweep (45-60M, the same budget W14-38 needed for ActRaiser 2) to check
+   whether any of them eventually reach the driver stage the way ActRaiser
+   2 did. For the Blackthorne trio and Battle Grand Prix (SPC genuinely
+   running, ports balanced or partially mismatched), trace the driver's
+   own send side with `PROBE_APUPORTLOG` to see whether the CPU's expected
+   ack byte is ever produced.
+
+2. **Raster/IRQ: NMI/IRQ enabled but essentially never fires (9 titles,
+   including 4 titles newly reclassified from a frozen `WAI` rather than a
+   spin loop).** Confirming evidence needed: Final Fight 2's `nmi_entries=0
+   AND irq_entries=0` with BOTH interrupt sources enabled is a stronger
+   deviation than any of W14-35's four already-cleared titles (which fired
+   30-175 times); a `PROBE_IRQLOG` trace on Final Fight 2 and Battletoads
+   specifically should check W14-35's own named-but-unfixed hypothesis (b)
+   — the NMI-enable-edge immediate-dispatch path (`[4200h].7 AND
+   [4210h].7`, edge on EITHER operand) — since a `WAI`'d CPU sitting past
+   its own NMI enable write is exactly the scenario that hypothesis
+   predicts would need it. Dragon - The Bruce Lee Story, Spot Goes to
+   Hollywood and WeaponLord (all `nmi_entries=0`) need the same
+   `PROBE_IRQLOG` trace W14-35 ran for its four titles, since none of
+   them have had it yet.
+
+3. **DMA/mapping: crash/scattered execution (6 titles).** Confirming
+   evidence needed: the three all-zero-header pirates (Hercules, Pokemon
+   Stadium, Bug's Life) need `PROBE_SPWIN` at a much higher instruction
+   count than 3M (W14-36 found Bug's Life still in legitimate code at that
+   point) to find the actual wander-into-the-vector-table instant, the way
+   W14-36 did for WWF Super WrestleMania — confirming these really do
+   reach `$00:0000`/`COP` through the *same* mechanism rather than a new
+   one. ClayFighter (Beta 1)'s scattered execution needs a `PROBE_SPWIN`
+   bisection across its early boot to find the first out-of-spec
+   instruction fetch, since W14-34 already flagged it as needing separate
+   treatment from the tight-loop titles.
+
+### Gate
+
+`cargo fmt --check` clean (this ticket touched only `docs/TESTING.md`,
+`plan.json` — no `crates/**` diff). No code changed, so no
+`cargo test`/`cargo clippy` regression is possible; the harness build
+used for every probe in this ticket (`cargo test --release -p rf-harness
+--test title_probe --no-run`) compiled clean with zero warnings on this
+tree.

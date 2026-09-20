@@ -7721,7 +7721,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "id": "W14-45",
   "title": "Re-triage the 41 remaining uniform-screen SNES titles after W14-35..W14-43: 1800-frame sweep, shape families, next tickets named",
@@ -7735,6 +7735,7 @@
    "W14-45: the three largest families are proposed as the next tickets with the confirming evidence each needs; no core code changes in this ticket"
   ],
   "notes": [
+   "W14-45 CLOSED 2026-09-21: 1800-frame sweep + per-title probes on the 41-title uniform bucket. 6 slow boots named (2 new budget-edge arrivals: Power Rangers Zeo, Xardion). 35 stuck titles grouped into APU handshake (11), raster/IRQ (9, including 4 titles reclassified from a frozen WAI via one-byte-back PROBE_DIS), DMA/mapping (6), Pagemaster's own already-BLOCKED WaitVBlank stall (4), unknown/one-off (5). Three largest families proposed as next tickets with confirming evidence named. No core code changed; docs/TESTING.md W14-34 table explicitly superseded for these 41.",
    "W14-45 FILED 2026-09-21 by the orchestrator: 33 of the W14-34 list's 74 have moved since; the remaining 41 need fresh shapes on the corrected timing and composition."
   ]
  }
