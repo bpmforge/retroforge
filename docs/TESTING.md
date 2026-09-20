@@ -799,6 +799,7 @@ First run, 2026-09-15, release build:
 | SNES, after W16-11 | 1265 | **1012** | 115 | 138 | **0** | **0** |
 | SNES, after W17-01 | 1265 | **1015** | 120 | 130 | **0** | **0** |
 | SNES, after W17-04 | 1265 | **1017** | 118 | 130 | **0** | **0** |
+| SNES, after W14-24 | 1265 | **1019** | 116 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -1481,6 +1482,19 @@ regression canaries all still exit 0 unmoved: **Kirby Super Star**,
 SNES census re-run (to move the bucket counts and name every title this
 touches) is the orchestrator's — not run here, per this session's
 instructions.
+
+**Full SNES census (orchestrator, 2026-09-19, release build, run twice —
+baseline `main` and this branch, each with the new `RF_CENSUS_OUT`
+per-title TSV so the runs diff title by title):** baseline
+**1017/118/130/0/0**, this branch **1019/116/130/0/0** ("SNES, after
+W14-24" row above). Exactly two rows changed, both from *uniform screen*
+to *rendered something*: **Super Mario RPG (USA)** and **Super Mario RPG
+(USA, Europe) (Virtual Console)**. No other title moved in either
+direction, so the divider re-bucketing regressed nothing in the library
+even though it changes timing for every title that uses `$4204-$4217`.
+The two runs were executed concurrently on separate target directories
+with 0 timed out in both, so the census's 30 s child cap tolerates a
+second census (a full `cargo test` alongside it is still avoided).
 
 **Determinism**: no core state field was made non-deterministic; `carry`
 is included in `MathUnit`'s save/load so a save/load round trip mid-divide

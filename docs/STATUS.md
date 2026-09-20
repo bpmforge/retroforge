@@ -3940,3 +3940,26 @@ stories, 10 decisions).
   unknown register, and the census holds at 1017 render, 118 uniform,
   130 refused, 0 crashed, 0 timed out. Gate: workspace **2213 passing /
   0 failed / 43 ignored**, clippy clean, arch OK.
+
+- **W14-23 / W14-25 blocked, W14-24 done — the SMRPG boot upload was
+  a divider-timing bug** (2026-09-19). W14-23's two stages refuted the
+  IPL-handshake framing and three ranked mechanisms by trace, and pinned
+  Super Mario RPG's SPC halt to its own driver storing ~51 KB of
+  3-byte packets into a 46 KB span, wrapping through ARAM `$0000` and
+  stamping its own code page. Since the SPC consumed exactly what the
+  65C816 sent, W14-24 traced the producer: the packet count comes from
+  the `$4204-$4217` hardware divider, which `SnesBus::tick_math` stepped
+  once per bus access, so the game's internal-only filler (`INY`, `NOP`)
+  never advanced it and the quotient read landed mid-shift (`0x8021`
+  packets instead of 33). The unit now steps once per 6 master cycles of
+  the instruction's access cost — documented honestly as an over-credit
+  of slow accesses that compensates for the unmodelled internal cycles
+  (fullsnes: the divider counts CPU clocks, 16 for divide), never a late
+  finish. Census, run twice with the new per-title `RF_CENSUS_OUT` TSV:
+  1017/118/130 -> **1019/116/130**, and the only two rows that changed
+  are the two Super Mario RPG dumps. W14-25 (Super Ninja Boy) is blocked
+  with a named cause: the game's own DMA channel 0 race between a
+  synchronous 16 KB VRAM fill and the NMI handler's latch drain, which
+  storms only when the fill straddles a vblank edge; the original
+  "M clear at STZ $4305" reading was a disassembler artefact. Gate on
+  the closing commit: see its trailer.
