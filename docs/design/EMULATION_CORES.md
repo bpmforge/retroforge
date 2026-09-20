@@ -167,6 +167,42 @@ below is NTSC-first; PAL is a Phase 7 config.
   master cycles by region (FastROM $80+ 6 vs SlowROM 8; $4000-41FF joypad
   12). CPU timing is expressed in master cycles from day one — retrofitting
   is not viable.
+- **Internal (no-bus-access) cycles are charged too (ticket W14-39).**
+  `speed::AccessCost` prices bus accesses only, by design (its own doc's
+  closing section); `cpu::cycles::internal_cycles` computes the rest —
+  the cycles a 65C816 instruction spends touching no address at all —
+  from a per-opcode/addressing-mode table built from a histogram of
+  `cycles.len() - accesses` across all 5,080,000 SingleStepTests vector
+  cases and cross-checked against the WDC W65C816S datasheet's penalty
+  rules: DP low byte nonzero (+1, any direct-page-relative mode),
+  direct-page indexing (+1 fixed for `dp,X`/`dp,Y`/`(dp,X)`),
+  indexed-absolute or `(dp),Y` page-cross (+1, conditional on the actual
+  carry for an 8-bit index, but **unconditional** for a 16-bit index —
+  the CPU cannot add a full 16-bit index in one cycle regardless of
+  whether it happens to cross), RMW's extra modify cycle (+1), branch
+  taken (+1, +1 more crossing a page in emulation mode only), stack-
+  relative forms (+1 fixed, `(sr,S),Y` +2), a one-byte implied
+  instruction (never fewer than 2 cycles total), and fixed per-opcode
+  costs for jumps/calls/returns/interrupts/`WAI`/`STP`/`PEA`/`PEI`/`PER`.
+  Computed via side-effect-free `CpuBus::peek` reads before
+  `ops::execute` runs, so the addressing/execution code itself — already
+  verified against the same 5,080,000 vectors — is untouched.
+  `SnesSystem::step` charges `internal_cycles * speed::FAST` master
+  cycles alongside the access cost. This superseded two local
+  compensations that had accumulated for the gap (W14-24's master-cycle
+  re-bucketing of the math unit's clock, W14-28's single-access credit);
+  both are gone now that the underlying undercount is fixed. Corrected
+  pacing was ~47% too fast before this ticket, root-causing the
+  W14-33/W14-38 APU handshake deadlock family for at least three titles
+  (Rival Turf!, Super Turrican, Wario's Woods — confirmed rendering after
+  the fix; ActRaiser 2/Illusion of Gaia/Robotrek's deadlock persists and
+  is a distinct, driver-side defect per W14-33/38's own tracing).
+- The `$42xx` math-unit ports are clocked by the CPU clock, not by master
+  cycles (fullsnes "SNES Maths Multiply/Divide": "one needs the same
+  amount of 'wait' opcodes no matter if the CPU Clock is 3.5MHz or
+  2.6MHz"). `MathUnit::tick` takes a real CPU-cycle count — bus accesses
+  plus internal cycles for the instruction, from `AccessCost::accesses`
+  and `Cpu::internal_cycles` — directly, one unit step per cycle.
 - 5A22 extras: hardware multiply/divide regs ($4202-$4206) with real
   latency (8/16 cycles, intermediate-value reads readable mid-operation —
   emulate the shift-register intermediates in Accuracy mode); NMITIMEN
@@ -176,8 +212,19 @@ below is NTSC-first; PAL is a Phase 7 config.
 - Interrupt timing: NMI at V=225(240 overscan)/H≈0.5 with the $4210 read
   race; IRQ per H/V compare with the one-dot-late quirk.
 - Test gates: **SingleStepTests `65816`** JSON vectors first (native unit
-  test), then **gilyon/snes-tests `cputest`** (golden `tests.txt` +
-  framebuffer hash), PeterLemon CPU tests (golden frame).
+  test — as of W14-39, `accesses + internal == cycles.len()` is checked
+  exactly, not just registers and memory), then **gilyon/snes-tests
+  `cputest`** (golden `tests.txt` + framebuffer hash), PeterLemon CPU
+  tests (golden frame).
+- **What is still NOT modelled**: per-cycle bus timing inside an
+  instruction — which of an instruction's several cycles touches which
+  address, and in what order. W14-39 gives an exact total cycle *count*
+  per instruction (pinned against the vectors) but not a replay of the
+  cycle-by-cycle bus *sequence*; that needs a genuinely cycle-accurate
+  executor and remains W6-02a's open scope. The `MVN`/`MVP` vector
+  exclusions exist for exactly this reason — their SingleStepTests cases
+  are captured mid-iteration, which only a resumable sub-instruction
+  executor could replay.
 
 ### 3.2 DMA / HDMA
 

@@ -175,6 +175,15 @@ impl SnesSystem {
         self.bus.sa1_rom_contended = false;
         self.bus.sa1_bwram_contended = false;
         let fast_rom = self.bus.fast_rom;
+        // Captured BEFORE `Cpu::step`, not after: an instruction that
+        // itself halts the CPU (`WAI`/`STP`) must still be charged its
+        // own real cycles (ticket W14-39's `internal_cycles` among them)
+        // — only a step that was ALREADY halted on entry gets the flat
+        // one-cycle idle credit below. Checking `self.cpu.stopped` after
+        // the call would charge the halt-triggering instruction nothing,
+        // since `stopped` is already `true` by the time this line reads
+        // it.
+        let was_halted = self.cpu.stopped;
         let mut counting = crate::cpu::AccessCost::new(&mut self.bus, fast_rom);
         let result = self.cpu.step(&mut counting);
         // **A HALTED CPU STILL BURNS TIME** (ticket W7-15).
@@ -197,64 +206,52 @@ impl SnesSystem {
         // One internal CPU cycle (`speed::FAST`, 6 master cycles) per
         // halted step: on hardware WAI does not access the bus, but the
         // clock keeps running, and 6 is what an internal cycle costs.
-        let spent = if counting.master_cycles == 0 && self.cpu.stopped {
+        //
+        // Ticket W14-39: a RUNNING instruction now also charges its real
+        // internal (no-bus-access) cycles, from `Cpu::internal_cycles` —
+        // computed by `cpu::cycles::internal_cycles` from the WDC W65C816S
+        // datasheet's per-opcode/addressing-mode penalties and pinned
+        // exactly against the SingleStepTests vectors' `cycles` arrays
+        // (`cpu/tests/vectors.rs`). This is what W14-24 and W14-28 were
+        // each compensating for locally (see their superseded credits,
+        // removed below) and what left the CPU's pacing against the
+        // raster and the APU roughly 47% too fast — the root of the
+        // W14-33/W14-38 APU handshake deadlock family.
+        let internal = if was_halted {
+            0
+        } else {
+            u64::from(self.cpu.internal_cycles) * u64::from(crate::cpu::speed::FAST)
+        };
+        let spent = if was_halted {
             u64::from(crate::cpu::speed::FAST)
         } else {
-            counting.master_cycles
+            counting.master_cycles + internal
         };
         self.master_cycles += spent;
         self.last_instr_accesses = counting.accesses;
         self.last_instr_master_cycles = spent;
 
-        // The math unit now advances off `spent` (this instruction's
-        // charged master cycles) instead of `counting.accesses` (ticket
-        // W14-24) — but read `MathUnit::tick`'s doc before assuming that
-        // means "internal cycles are now counted". They are not: `spent`
-        // comes from `AccessCost`, which — correctly, per `speed.rs`'s
-        // own doc — charges bus accesses ONLY, so an instruction with
-        // more real cycles than bus accesses (`INY`, `NOP`, `XBA`'s
-        // second cycle) still contributes nothing extra here. What this
-        // change actually does is re-bucket the SAME access-based
-        // credit into `speed::FAST`-sized (6-master-cycle) steps instead
-        // of one step per access, which over-credits every access
-        // costing more than 6 (the `SLOW`/`XSLOW` regions this crate's
-        // own `access_cycles` table prices at 8 or 12) — see
-        // `MathUnit::tick`'s doc for the arithmetic and why that
-        // direction is safe.
-        // W14-28: a single-access instruction (an implied-mode, single-byte
-        // opcode -- `NOP`, `INX`, `TAX`, `SEP`/`REP`'s operand fetch makes
-        // those two-access, but plain register-to-register moves and `NOP`
-        // itself land here) has, per the WDC 65816 datasheet, no fewer
-        // than 2 real CPU cycles: the opcode fetch (the one access
-        // `AccessCost` already charged) plus at least one internal cycle
-        // that touches no address. `spent` alone under-counts that
-        // internal cycle for the SAME reason `MathUnit::tick`'s doc
-        // describes -- `AccessCost` charges bus accesses only -- and it is
-        // exactly this gap that let a divide finish two steps late in The
-        // Flintstones' boot (docs/TESTING.md, W14-28): eight `NOP`s meant
-        // to wait out a divide's 16-cycle latency (fullsnes "SNES Maths
-        // Multiply/Divide") credited only 8 access-based steps instead of
-        // the 16 real CPU cycles they take, leaving `$4216` (RDMPY) still
-        // mid-shift when the game read it, and a stray table index
-        // downstream of that stale value corrupted a WRAM slot the CPU
-        // depends on to stay in sync with the interrupt vector table.
-        //
-        // This credit is scoped to the math unit alone, not to
-        // `self.master_cycles` (which drives PPU/APU catch-up and the
-        // raster for all 1265 titles this core runs) -- see W7-15's
-        // identical one-`FAST`-cycle precedent a few lines up for a
-        // zero-access (halted) step. It cannot make the unit finish
-        // *earlier* than hardware in any case that previously passed:
-        // every multi-access instruction is unaffected, and a real
-        // single-access instruction always has this cycle on hardware too,
-        // so this only closes part of the documented undercount, in the
-        // same safe direction `MathUnit::tick`'s doc already relies on.
-        let math_spent = if counting.accesses == 1 {
-            spent + u64::from(crate::cpu::speed::FAST)
+        // The math unit is "clocked by the CPU Clock" (fullsnes "SNES
+        // Maths Multiply/Divide": "one needs the same amount of 'wait'
+        // opcodes no matter if the CPU Clock is 3.5MHz or 2.6MHz") — a
+        // real CPU-CYCLE count, not a master-cycle one. `MathUnit::tick`
+        // now takes that count directly (ticket W14-39; see its doc for
+        // what changed from the master-cycle/6 re-bucketing this
+        // supersedes). A CPU cycle is one bus access OR one internal
+        // cycle; `counting.accesses` and `self.cpu.internal_cycles` are
+        // exactly those two counts for this instruction. The W7-15
+        // halted credit and the W14-28 single-access credit are both
+        // superseded by real accounting: a halted step still advances
+        // the math unit by one CPU cycle (hardware's clock does not stop
+        // just because the CPU is waiting), and a running step advances
+        // it by its true cycle count, accesses plus internal, with no
+        // separate credit needed.
+        let math_cycles = if was_halted {
+            1
         } else {
-            spent
+            counting.accesses + u64::from(self.cpu.internal_cycles)
         };
-        self.bus.tick_math(math_spent as u32);
+        self.bus.tick_math(math_cycles as u32);
         // The APU accrues debt with every master cycle the CPU spends —
         // DMA included, because a transfer stalls the CPU and not the
         // sound chip — and is settled at the end of every instruction

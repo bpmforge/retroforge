@@ -4041,3 +4041,22 @@ stories, 10 decisions).
   65C816 never charges internal cycles, so the CPU outruns the SPC and
   the raster (W14-24/W14-28 were local patches over it) — W14-39 is
   charging them for real, pinned by the singlestep vectors' cycle lists.
+
+- **W14-39 done — the 65C816 finally pays for its internal cycles**
+  (2026-09-21). `AccessCost` had only ever charged bus accesses, so every
+  implied, RMW, branch-taken, DP and indexed penalty cycle was free and
+  the CPU outran both the raster and the SPC; W14-24 and W14-28 were
+  local patches over that. A per-opcode model (`cpu/cycles.rs`), rebuilt
+  from a histogram of the SingleStepTests cycle lists the runner used to
+  skip, now charges them, and the vector suite asserts
+  `accesses + internal == cycles.len()` for all 5,080,000 cases. The
+  math unit counts real CPU cycles (fullsnes: "clocked by the CPU
+  Clock"), superseding both earlier credits. Census 1066/69/130 ->
+  **1076/59/130**: fifteen up including three of the "deadlocked on its
+  own driver" titles, five down and named (Zeo's budget edge, the three
+  Pagemaster dumps' 49-second loader idle, Tommy Moe's residual
+  handoff race). Two peterlemon and six undisbeliever goldens re-pinned
+  after the capture instant shifted; frames dumped and looked at. W14-37
+  stays held for a re-census on this base. Gate: workspace **2224
+  passing / 0 failed / 43 ignored** (one wall-clock budget test flaked
+  under the parallel run and passes 3/3 alone), clippy clean, arch OK.

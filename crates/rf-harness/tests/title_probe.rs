@@ -13,6 +13,16 @@
 //! PROBE_INSTR=6000000               CPU instructions to run first (default 30M)
 //! PROBE_SAMPLE=20000                instructions to sample after that
 //! PROBE_MODE=frames PROBE_FRAMES=N  instead: step N frames, report the first varied frame
+//!                                    (and, since W14-39's follow-up, the cumulative CPU
+//!                                    instruction count at that frame — `StepResult::cycles`
+//!                                    is this core's instruction count, not master cycles,
+//!                                    per `SnesCore::step`'s own doc — so an A/B run against
+//!                                    another tree's `title_probe` answers "did the SAME
+//!                                    frame-visible event take about the same number of
+//!                                    CPU instructions" (a per-instruction cycle-cost bug,
+//!                                    if not) or "did it take many more instructions" (a
+//!                                    poll loop whose exit condition the corrected pacing
+//!                                    changed, not a cycle-costing bug))
 //! PROBE_M7=1                        with frames mode: print Mode 7 state and palette diversity
 //! PROBE_DIS=bb:start:end[,...]      65816 disassembly ranges (hex, end exclusive)
 //! PROBE_ARAM=start:end[,...]        ARAM hex dumps
@@ -253,10 +263,13 @@ fn probe() {
         let mut sink = Sink::default();
         if std::env::var("PROBE_MODE").as_deref() == Ok("frames") {
             let mut first_varied: Option<usize> = None;
+            let mut first_varied_instr: Option<u64> = None;
+            let mut total_instr: u64 = 0;
             let frame_indices_log = std::env::var("PROBE_FRAME_INDICES").is_ok();
             for f in 0..frames {
                 sink.frame_indices.clear();
-                core.step(Step::Frame, &mut sink);
+                let step_result = core.step(Step::Frame, &mut sink);
+                total_instr += step_result.cycles;
                 if frame_indices_log {
                     let sys = core.system();
                     println!(
@@ -274,12 +287,14 @@ fn probe() {
                 }
                 if sink.varied && first_varied.is_none() {
                     first_varied = Some(f);
+                    first_varied_instr = Some(total_instr);
                     break;
                 }
             }
             println!(
-                "FRAMES varied_at={:?} {}",
+                "FRAMES varied_at={:?} total_instr_at_varied={:?} {}",
                 first_varied,
+                first_varied_instr,
                 Path::new(path).file_name().unwrap().to_string_lossy()
             );
             if std::env::var("PROBE_M7").is_ok() {

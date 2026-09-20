@@ -681,6 +681,17 @@ impl SnesBus {
     /// being started, and the `$FF` the CPU then sent was wiped by the
     /// stub's own `$F1` init write. The port arms still call this first,
     /// so what the CPU reads is a state the APU actually reached.
+    ///
+    /// **One call never runs the freshly-woken SPC700 past its own
+    /// hand-over** (ticket W14-39 follow-up). If this call's leftover
+    /// budget lets `poll_boot` fire `BootAction::Run` and then the loop
+    /// keeps going, the just-uploaded program's own first instructions
+    /// run before the 65816's next instruction can read the `Run` echo
+    /// `boot.rs` documents as "not optional and not cosmetic" — the same
+    /// clobber `IPL_INIT_CYCLES` already prevents for a re-entry at
+    /// `$FFC0`, just on the hand-over edge that guard never covered. The
+    /// loop below stops the instant that edge is crossed and carries the
+    /// unspent budget to the next call instead.
     pub fn catch_up_apu(&mut self) {
         const MASTER_PER_SPC_CYCLE: u64 = 21;
         // A sanity bound on one call, NOT a budget: the remainder is
@@ -707,8 +718,28 @@ impl SnesBus {
         // SPC had already executed a 5-cycle instruction on 1 cycle of
         // debt, clobbering the echo the 65816 was still waiting for.
         let mut spent = 0u64;
+        // Ticket W14-39 follow-up (Tommy Moe's Winter Extreme): does THIS
+        // call's own leftover budget let the SPC700 run its own first
+        // real instructions immediately after `poll_boot` hands control
+        // over? `BootAction::Run`'s doc calls its echo "not optional and
+        // not cosmetic" for exactly this reason — the 65816 is spinning
+        // on `CMP $2140` for it — and `IPL_INIT_CYCLES` already exists to
+        // stop the SAME kind of clobber for a re-entry at `$FFC0`. That
+        // protection never covered THIS handoff edge, because before
+        // W14-39 a single call's `spc_cycles` budget came from
+        // access-only master cycles and was rarely big enough to run a
+        // whole SPC700 instruction on top of the one cycle `poll_boot`
+        // itself charges. W14-39's correct (larger) per-instruction
+        // charge makes that leftover common, so the uploaded program's
+        // own first port write (e.g. Tommy Moe's driver's `MOV $F4,#$F1`
+        // at its entry point) now regularly runs inside the SAME
+        // catch-up call that performed the hand-over, before the 65816's
+        // NEXT instruction ever gets to read the echo — real hardware
+        // interleaves the two cores cycle by cycle and cannot do this.
+        let mut just_handed_over = false;
         while spent < spc_cycles {
             if self.apu.cpu.stopped || !self.apu.boot.is_running() {
+                let running_before = self.apu.boot.is_running();
                 // Nothing to execute: either halted, or the HLE boot
                 // handshake still owns the machine. Still costs a cycle —
                 // charging zero is what froze the clock in W7-15's
@@ -725,14 +756,34 @@ impl SnesBus {
                 // there would leave the handshake frozen forever.
                 self.apu.poll_boot();
                 spent += 1;
+                if !running_before && self.apu.boot.is_running() {
+                    // The handoff just happened on this very iteration.
+                    // Stop spending THIS call's budget on the SPC — the
+                    // rest is carried to the next call, never dropped —
+                    // so the 65816's next instruction is guaranteed to
+                    // observe the `Run` echo before the freshly-woken
+                    // core gets a chance to overwrite it.
+                    just_handed_over = true;
+                    break;
+                }
                 continue;
             }
             let cycles = self.apu.step_counted().unwrap_or(1);
             spent += u64::from(cycles.max(1));
         }
-        // Anything overspent comes out of the next catch-up, so the APU
-        // cannot drift ahead one instruction at a time.
-        self.apu_overspent = spent - spc_cycles;
+        if just_handed_over {
+            // The unspent portion is a shortfall, not an overrun — the
+            // opposite of `apu_overspent`'s usual direction — so it goes
+            // back into `apu_debt` for the next call to draw on, rather
+            // than being folded into `apu_overspent` (which means "ran
+            // ahead of what was owed").
+            self.apu_debt += (spc_cycles - spent) * MASTER_PER_SPC_CYCLE;
+            self.apu_overspent = 0;
+        } else {
+            // Anything overspent comes out of the next catch-up, so the
+            // APU cannot drift ahead one instruction at a time.
+            self.apu_overspent = spent - spc_cycles;
+        }
     }
 
     /// VMAIN bits 0-1 select the address increment: 1, 32, 128, 128
@@ -893,13 +944,12 @@ impl SnesBus {
         moved * CYCLES_PER_BYTE
     }
 
-    /// Advance the math unit by `master_cycles` of this instruction's
-    /// charged bus-access cost (ticket W14-24 — was a raw *access count*;
-    /// see [`crate::regs::MathUnit::tick`] for what changed and, just as
-    /// importantly, what did not: this is still access-derived, not a
-    /// real internal-cycle count).
-    pub fn tick_math(&mut self, master_cycles: u32) {
-        self.math.tick(master_cycles);
+    /// Advance the math unit by `cpu_cycles` — this instruction's REAL
+    /// CPU-cycle count, bus accesses and internal cycles alike (ticket
+    /// W14-39; see [`crate::regs::MathUnit::tick`] for the model and
+    /// what it supersedes).
+    pub fn tick_math(&mut self, cpu_cycles: u32) {
+        self.math.tick(cpu_cycles);
     }
 }
 

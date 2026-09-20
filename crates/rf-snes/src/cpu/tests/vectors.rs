@@ -22,32 +22,41 @@
 //!
 //! ## What is compared, and what is not
 //!
-//! **Registers and memory, not cycles.** Each vector carries a
-//! cycle-by-cycle bus trace, and this runner deliberately ignores it:
-//! W6-01a builds the CPU's *behaviour*, and the master-cycle memory-speed
-//! model is W6-01b. Comparing traces now would fail every vector for a
-//! reason this ticket is not about, and weakening the comparison later to
-//! make them pass would be worse. When W6-01b lands, the trace is right
-//! here waiting.
+//! **Registers, memory, AND cycle count — not the cycle-by-cycle trace
+//! itself (ticket W14-39).** Each case's `cycles` array is one entry per
+//! CPU cycle, bus accesses and internal cycles alike; W6-01a through
+//! W14-28 built the CPU's register/memory *behaviour* and skipped this
+//! array entirely (see the superseded history below). W14-39 adds
+//! exactly one more check per case: `accesses + internal ==
+//! cycles.len()`, where `accesses` comes from wrapping the test bus in
+//! [`super::super::AccessCost`] and `internal` from
+//! [`Cpu::internal_cycles`](super::super::Cpu) — see
+//! `cpu::cycles::internal_cycles`'s doc for the model this pins.
 //!
-//! Stated rather than left implicit, because "vectors pass" reads as
-//! stronger than it is if nobody says which half passed.
+//! What this does NOT do is replay the cycle-by-cycle bus SEQUENCE (which
+//! address each individual cycle touches, and in what order) — only its
+//! total length. That distinction still matters: sub-instruction bus
+//! timing (which cycle of a multi-cycle instruction touches which
+//! address) is what a cycle-accurate executor would need, and this crate
+//! does not have one — see the `MVN`/`MVP` exclusions below, which exist
+//! because those two opcodes' *cases* are cut off mid-iteration, not
+//! because their cycle *counts* are unknown.
 //!
-//! **W6-01b did not change this, and the earlier promise here that it
-//! would is withdrawn.** That ticket added the memory-speed model
-//! ([`super::super::speed`]), which gives the master-cycle COST of an
-//! access — a different thing from the ability to replay a cycle
-//! sequence. Comparing the traces needs a cycle-accurate executor that
-//! models internal (no-access) cycles too; the vector files show those as
-//! entries with no value, and every opcode has some. That work belongs
-//! with the bus and interrupt-timing tickets (W6-02a/W6-02b), where
-//! cycle-level behaviour is actually observable, and it is recorded on
-//! W6-02a rather than left as an aspiration in a doc comment.
-//!
-//! Note also what the traces would and would not prove: they are CPU
-//! cycles and bus ACCESSES, so they verify the access *sequence* and say
-//! nothing about the 6/8/12 master-cycle mapping. Those are separate
-//! oracles, and `speed.rs` has its own.
+//! **Superseded history, kept for the record.** W6-01a's original
+//! comparison ignored the `cycles` array outright, reasoning that the
+//! master-cycle memory-speed model (`speed.rs`, W6-01b) prices bus
+//! ACCESSES only and cannot by itself total a whole instruction's real
+//! cycle count, since an instruction can spend cycles touching no
+//! address at all. That reasoning was correct as far as it went — W6-01b
+//! never did add that ability — but it undersold what the vectors
+//! already made possible: [`Cpu::step`](super::super::Cpu::step) can
+//! report an exact internal-cycle count without needing a cycle-accurate
+//! executor at all, because every fact that count depends on (`D`, `X`,
+//! `Y`, `E`, the flags a branch tests) is decided before the instruction
+//! runs. W14-39 is that count, built from a histogram of this exact
+//! `cycles.len() - accesses` gap across all 5,080,000 cases
+//! (`docs/TESTING.md`'s W14-39 section) rather than left as a W6-02a
+//! aspiration.
 //!
 //! ## Running them
 //!
@@ -254,6 +263,30 @@ struct Vector {
     name: String,
     initial: State,
     final_: State,
+    /// Length of the case's `cycles` array — one entry per CPU cycle,
+    /// bus accesses and internal cycles alike (module doc). Parsed
+    /// eagerly rather than skipped: W14-39's oracle is
+    /// `accesses + internal == cycles.len()`.
+    cycles_len: usize,
+}
+
+/// Skip a `cycles` array while counting its entries.
+fn skip_cycles_array(cur: &mut Cursor<'_>) -> usize {
+    cur.expect(b'[');
+    if cur.eat(b']') {
+        return 0;
+    }
+    let mut n = 1;
+    loop {
+        cur.skip_value();
+        if cur.eat(b',') {
+            n += 1;
+        } else {
+            break;
+        }
+    }
+    cur.expect(b']');
+    n
 }
 
 fn parse_file(bytes: &[u8]) -> Vec<Vector> {
@@ -268,6 +301,7 @@ fn parse_file(bytes: &[u8]) -> Vec<Vector> {
         let mut name = String::new();
         let mut initial = State::default();
         let mut final_ = State::default();
+        let mut cycles_len = 0usize;
         loop {
             let k = cur.key();
             match k {
@@ -283,7 +317,7 @@ fn parse_file(bytes: &[u8]) -> Vec<Vector> {
                 }
                 "initial" => initial = parse_state(&mut cur),
                 "final" => final_ = parse_state(&mut cur),
-                // `cycles` is skipped — see the module doc.
+                "cycles" => cycles_len = skip_cycles_array(&mut cur),
                 _ => cur.skip_value(),
             }
             if !cur.eat(b',') {
@@ -295,6 +329,7 @@ fn parse_file(bytes: &[u8]) -> Vec<Vector> {
             name,
             initial,
             final_,
+            cycles_len,
         });
         if !cur.eat(b',') {
             break;
@@ -317,18 +352,29 @@ fn cpu_from(state: &State) -> Cpu {
         e: state.e != 0,
         stopped: false,
         wai: false,
+        internal_cycles: 0,
     }
 }
 
 /// Run one vector. Returns a description of the first mismatch.
+///
+/// Ticket W14-39: the case's `cycles` array is now part of the oracle,
+/// not skipped — each entry is one CPU cycle, bus accesses and internal
+/// cycles alike (module doc), so `accesses + internal == cycles.len()`
+/// is checked alongside every register and RAM byte. `bus` is wrapped in
+/// [`super::super::AccessCost`] (fast-ROM `false`: these vectors carry no
+/// cartridge, so the fast/slow distinction cannot apply) purely to count
+/// accesses — the master-cycle total it also computes is not part of
+/// this ticket's oracle (see the module doc's "What is compared" section).
 fn run_one(v: &Vector) -> Result<(), String> {
     let mut cpu = cpu_from(&v.initial);
     let mut bus = FlatBus::new();
     for (addr, value) in &v.initial.ram {
         bus.mem[*addr as usize] = *value;
     }
+    let mut counting = super::super::AccessCost::new(&mut bus, false);
 
-    cpu.step(&mut bus)
+    cpu.step(&mut counting)
         .map_err(|op| format!("unimplemented opcode {op:#04X}"))?;
 
     let mut wrong = Vec::new();
@@ -347,6 +393,8 @@ fn run_one(v: &Vector) -> Result<(), String> {
     check("dbr", cpu.dbr.into(), v.final_.dbr.into());
     check("pbr", cpu.pbr.into(), v.final_.pbr.into());
     check("e", u64::from(cpu.e), v.final_.e.into());
+    let cycles = counting.accesses + u64::from(cpu.internal_cycles);
+    check("cycles", cycles, v.cycles_len as u64);
     for (addr, want) in &v.final_.ram {
         let got = bus.mem[*addr as usize];
         if got != *want {
@@ -608,6 +656,7 @@ fn the_vector_harness_reports_a_mismatch_rather_than_passing_everything() {
             ram: vec![(0x0000_8000, 0xEA)],
             ..State::default()
         },
+        cycles_len: 2,
     };
     let err = run_one(&v).expect_err("a wrong expectation must be reported");
     assert!(
