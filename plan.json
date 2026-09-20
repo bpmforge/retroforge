@@ -7268,7 +7268,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "in_progress",
+  "status": "blocked",
   "stories": [],
   "id": "W14-27",
   "title": "Soul Blazer: driver dispatch RETs to $0102 after a driver-side APU upload — corrupted upload or 65816 defect",
