@@ -7288,6 +7288,79 @@
    "FILED 2026-09-20 by the orchestrator from the 2026-09-17 triage list. W14-24 found the $4204-$4217 divider was clocked per bus access; Soul Blazer's driver-side upload is the next APU-upload stall and may share the class (packet count or length computed via the math unit) — check that first.",
    "BLOCKED 2026-09-20: traced end to end, not the W14-24 class -- but NOT confirmed as game behavior, unlike the note's earlier phrasing. The CPU-side upload routine (LoROM bank $1F) has no $4204-$4217 access at all (hypothesis 1 exonerated by disassembly). PROBE_FINDROM confirms the uploaded command byte $FE, the SPC-side dispatcher at ARAM $07C3-$07DE, and its jump table at $0994 are all byte-for-byte identical to the ROM (LoROM 88:B2D9, 9F:F515, 9F:F7DC respectively). The dispatcher's own bounds check (CMP #$E0/BCC) means only A>=$E0 ever reaches $07C3, so ASL A is injective there -- NOT an 8-bit wraparound/aliasing case (an earlier draft of this note was wrong on that point, corrected on review). The table decoded in full: commands $E0-$FA (27 entries, Y=$C0-$F4) point to valid code addresses; $FB-$FF read 1-5 slots past the table's real end (corrected from an earlier wrong '4-8') into what is very likely a parallel operand-length array, landing on $0100-$0302 -- deterministically-zeroed work RAM (checked at 5 points across the run). A new counter (PROBE_SPCPCCOUNT, never evicted, added after the first attempt at this count wrongly assumed PROBE_SPCRING's 3000-entry ring was exhaustive for a run with 1,027,705 distinct SPC PC transitions) gives the real, whole-run totals: the $07C3 table-dispatch path fires EXACTLY ONCE, and that one firing is the fatal $FE case. But $07DF (cmd=$E0, direct CALL bypassing the table) fires 7 times and $0849 (cmd=$E1, same) fires 8 times -- a pattern consistent with common extended commands being hardcoded and rare ones falling through to the generic table, which would make firing once for $FE unremarkable rather than a bug signature. The frequency count does NOT distinguish 'legitimate rare command' from 'upstream pointer desync'; only disassembling the fetch/operand-skip loop can. PROBE_FIND located the song/pattern data blob in ARAM at $B51E (upper ARAM, well outside the $0600-$0A94 code region traced), but the read-pointer that walks it into $0704/$0723/$0745 was not disassembled this session. No fix ships (law 5) either way; see docs/TESTING.md's W14-27 write-up. Named next step (now first priority, not optional): disassemble that fetch/skip loop and confirm its length-table reads against ROM the same way $07C3-$07DE was verified here -- if it's clean, this closes WONTFIX; if the pointer has drifted, it is a real rf-snes defect in this driver's byte-consumption (same class as ticket brief hypothesis 2, one step further upstream) and should be fixed under a new ticket rather than left BLOCKED."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-28",
+  "title": "The Flintstones: RTS loop on boot — trace the divergence from reset",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "the cause is DIAGNOSED from a trace before anything changes: title_probe (PROBE_RINGP/PROBE_PEEK/PROBE_SDUMP/PROBE_INSTR bisect) names the first instruction where control leaves the game's intended path and the wrong value it consumed (a register read that returned open bus or a stale value — W14-24/W14-26 class — a DMA/HDMA sizing or bank issue, a mapping miss, or a flag-state divergence)",
+   "the fix, if any, is cited to published documentation (fullsnes / snes.nesdev.org / WDC) and pinned by a unit test that reproduces the exact shape; ignored SNES suites (65816 and SPC700 vectors, gilyon, spc_timer) stay green; determinism unaffected",
+   "if a fix lands: the title renders in the census child (exit 0); the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and every title that moved is named in docs/TESTING.md",
+   "if the trace shows the game's own code produces the stall and hardware would behave the same, that is stated with the trace and the ticket goes BLOCKED with a named next step (no patching around game bytes, law 5)"
+  ],
+  "notes": [
+   "FILED 2026-09-20 by the orchestrator from the 2026-09-17 triage list (untraced RTS loop). W14-24 (divider timing) and W14-26 ($43xx readback) both came from untraced titles and moved 20 titles between them; check register-read semantics first (every $21xx/$42xx/$43xx read the boot path makes vs fullsnes R/W columns). Two dumps: 'Flintstones, The (USA) (En,Fr,De,Es,It).zip' and the Treasure of Sierra Madrock title — probe both, they may differ."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-29",
+  "title": "Final Fantasy Mystic Quest: Mode 7 raster IRQ chain rewrites its vector trampoline — IRQ event trace",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "the cause is DIAGNOSED from a trace before anything changes: an IRQ event log (H/V IRQ arm via $4200/$4207-$420A, the raster position at each IRQ assertion and acknowledge $4211, and the trampoline bytes the handler rewrites) shows where the emulator's IRQ timing or acknowledge semantics differ from fullsnes 'SNES Interrupts' and the handler's own assumptions; title_probe may gain a PROBE_IRQLOG diagnostic for this",
+   "the fix, if any, is cited to published documentation (fullsnes / snes.nesdev.org / WDC) and pinned by a unit test that reproduces the exact shape; ignored SNES suites (65816 and SPC700 vectors, gilyon, spc_timer) stay green; determinism unaffected",
+   "if a fix lands: the title renders in the census child (exit 0); the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and every title that moved is named in docs/TESTING.md",
+   "if the trace shows the game's own code produces the stall and hardware would behave the same, that is stated with the trace and the ticket goes BLOCKED with a named next step (no patching around game bytes, law 5)"
+  ],
+  "notes": [
+   "FILED 2026-09-20 by the orchestrator from the 2026-09-17 triage list: Mode 7 raster chain rewriting its vector trampoline, needs an IRQ event trace. Three dumps (USA, USA Rev 1, Japan 'Final Fantasy USA')."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-30",
+  "title": "Soul Blazer follow-up: disassemble the SPC sequencer's command-fetch loop and verify its length-table reads against ROM",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "starts from W14-27's write-up in docs/TESTING.md (dispatcher $07C3-$07DE, jump table $0994, command byte $FE overrunning a 27-entry table into $0102): the sequencer's fetch/operand-skip loop that produced $FE is located from the ARAM dump, disassembled, and its length-table and pointer reads are verified byte-for-byte against the ROM's copy (LoROM bank $9F region) and against what the 65C816 uploaded",
+   "the trace states whether $FE is a legitimate command hardware would also dispatch (then BLOCKED with the reason) or the product of an emulator defect upstream (an SPC700 opcode/flag edge, a port-read semantic, a timer-paced skip) — with the instruction and wrong value named",
+   "the fix, if any, is cited to published documentation (fullsnes / snes.nesdev.org / WDC) and pinned by a unit test that reproduces the exact shape; ignored SNES suites (65816 and SPC700 vectors, gilyon, spc_timer) stay green; determinism unaffected",
+   "if a fix lands: the title renders in the census child (exit 0); the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and every title that moved is named in docs/TESTING.md",
+   "if the trace shows the game's own code produces the stall and hardware would behave the same, that is stated with the trace and the ticket goes BLOCKED with a named next step (no patching around game bytes, law 5)"
+  ],
+  "notes": [
+   "FILED 2026-09-20 by the orchestrator as W14-27's named next step. PROBE_SPCREGPC / PROBE_SPCPCCOUNT / PROBE_ARAM / PROBE_PACKETLOG exist for this."
+  ]
  }
 ]
 }
