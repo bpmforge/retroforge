@@ -2025,9 +2025,9 @@ each channel, still returns open bus; no title in the library has been
 shown to depend on it.
 
 
-## W14-28 — The Flintstones: a persistent OAM-slot cursor with no per-frame
-bound wanders into hardware-register space and corrupts its own NMI vector
-(2026-09-20, BLOCKED — game's own defect)
+## W14-28 — The Flintstones: an OAM-slot cursor wanders into hardware-register
+space and corrupts its own NMI vector; the loading routine that drives it
+never returns (2026-09-20, BLOCKED — ROM-side, root loop not fully decoded)
 
 The 2026-09-17 triage called this an "RTS loop." It is not: the CPU is stuck
 in a **`BRK` storm**, and the storm is the *third* stage of a fully-traced,
@@ -2117,41 +2117,69 @@ mirroring and `read_register_pure`'s `$2180`/WMADD handling are both correct
 per fullsnes; nothing here is an `rf-snes` register-semantics or
 DMA/mapping gap in the W14-24/W14-26 sense.
 
-**Why this is the game's own defect, not an emulator timing/flag
-divergence.** `$0656` (the shared scratch cursor `$80:D270` reads at entry
-and writes back at exit) is fed from one of two **persistent, per-category**
-WRAM cursors, `$064A`/`$064C`, each read into `$0656` before a call and
-written back after — a legitimate incremental-OAM-list pattern. Both are
-initialized exactly once, early in boot (`$80:D049`-`$80:D056`: `$064A=0`,
-`$064C=$00F0`, confirmed via `PROBE_WATCH=00064c,00064a`: `$064C: 00→F0 @
-n=2334770`, no further *legitimate* write ever). The **only** place in the
-2 MB ROM that resets a category cursor afterward is `$80:8DAA`'s
-`JSR $90B9` (`LDA #0; STA $0656; ...`), gated behind a one-shot latch at
-`$44` (`$80:A62C: LDA $44; BEQ ...`) that the same NMI trips exactly once
-(`$44: 00→01 @ n=2334399`, confirmed via `PROBE_WATCH=000044` over the whole
-2.58M-instruction run — one hit, ever). `$80:8DAA` (and everything under it,
-including the reset) was never reached even once in this run
-(`PROBE_SDUMP=808daa,808dff,809045,808e03` — zero hits over 2.58M
-instructions). A second, unreachable-by-construction hook exists at
-`$82F174` (its sole caller, `$80:D067`, is gated on `LDA $00; CMP #$A616`) —
-but the game's *only* NMI-vector installer (`$83:CDB3-CDB6`:
-`LDX #$A615; STX $00`) hardcodes `$A615`, one byte before `$A616`
-(`$A615` is a leading `NOP` before the real handler body at `$A616`), so
-this branch can never take the true path in this ROM; it is dead by the
-ROM's own construction, not a flag- or register-read-driven divergence — no
-arithmetic or condition computes the installed value, so there is nothing
-here for `rf-snes` to get wrong. With no per-frame bound anywhere in the
-ROM, `$064A`/`$064C` — and the shared `X` they feed — grow by a handful of
-bytes every frame the per-object sprite-adder runs (confirmed: `X` climbs
-`+4` per call across dozens of samples from `$1F58` to `$1F80`, self-
-corrupting `$064A` and `$064C` in passing once `X` first reaches them, well
-before the eventual `$2180`/WMDATA hit) with no wraparound, cap, or
-recycling of any kind. This is unconditional and deterministic: it does not
-depend on player input, RNG, or any state this probe's headless boot could
-have gotten wrong, and reproduces in well under 100 frames (~2 seconds) from
-a cold, all-defaults boot. Fixing it in the emulator would mean changing
-when/whether the game's own `STA $0200,X` executes or what `X` holds —
-patching around the game's own bytes, which law 5 forbids.
+**Correction (same session):** an earlier draft of this section
+mischaracterized `$44` as a one-shot "latch" and claimed the per-frame reset
+was "absent from the ROM." Both are wrong and are corrected here rather than
+silently rewritten. `$44` is an ordinary **re-entrancy guard**: the NMI
+handler's gated body ends with `$80:A671-A673: SEP #$20; STZ $44` before
+falling into the shared epilogue at `$80:A675`, and the *skip* path
+(`$80:A62E: BEQ $A633` false → `$80:A630: BRL $A675`) deliberately jumps
+**past** that `STZ`, landing straight on the epilogue. `PROBE_SPWIN` over a
+nested-NMI window (`PROBE_SPWIN=2334399:2353500`) confirms the skip path
+runs exactly as designed: a second NMI fires (`$44` still `1` from the
+first's `INC`) roughly one frame later, takes the `BRL`, executes only the
+epilogue (`$80:A675/A677/A67D`, `PLB;...;RTI`) and returns cleanly — real,
+correct re-entrancy protection, not a bug. And the reset **does** exist in
+the ROM (`$80:8DAA`'s `JSR $90B9`, gated on the same `$44==0`) — it is
+unreached in this run, but not because it is unreachable by construction.
+
+**What actually happens instead, fully re-verified:** the guard's `INC $44`
+fires exactly once (`n=2334399`, confirmed via `PROBE_WATCH=000044` — one
+hit in the whole 2.58M-instruction run), and that single gated-body
+invocation **never reaches its own `STZ $44`** — `PROBE_SPWIN` over the same
+window shows the body reach `$80:A656: JSL $80A71E` (→ `JML [$0040]` →
+`$83:CED7: JSR $CF37; JSL $80D049; RTL`) at `n=2334563` and then never
+execute `$80:A65A` (the very next instruction after that `JSL` returns) nor
+`$80:A673` again through at least `n=2584634` — confirmed two ways: (1) none
+of `$CF37`'s own return points (`$83:CF02/CF14/CF36/CF7A`, all short,
+RTS-terminated dispatch handlers — this state-machine dispatcher is not
+itself a loop) fire again after the one legitimate call, and (2) the shared
+per-object OAM cursor (`$0656`, fed from `$064A`/`$064C`, both correctly
+one-time-initialized by that same `$80:D049` call — `$064C: 00→F0 @
+n=2334770`, matching the design) keeps climbing by `+4` per call for the
+rest of the run (confirmed across dozens of samples from `$1F58` to `$1F80`
+before self-corrupting `$064A`/`$064C` in passing, well before the eventual
+`$2180`/WMDATA hit). Something reachable only from inside that one `JML
+[$0040]` call keeps re-driving the per-object sprite-adder (`$80:D170`-
+`$80:D270`) without ever returning control to the NMI handler that called
+it. `$80:D076`'s own visible object loop (`Y` from `$42` down to `0` by
+`-2`, twice — at most ~68 iterations) is far too small on its own to account
+for the observed growth (~2,000+ calls to reach `X=$1F80`), so the actual
+non-returning loop is deeper in this ROM's level/object-table code than
+this ticket traced (candidates not yet ruled out: `$80:D0C1`'s own call
+tree, or a table this ticket did not decode driving repeat calls into
+`$80:D170`/`$80:D191`).
+
+**Still BLOCKED, on narrower and more honest grounds.** Every step of this
+chain — the NMI re-entrancy guard, the state-machine dispatcher's short
+RTS-terminated handlers, the object-adder's own addressing math, the
+`$2180`/WMDATA hit, and the `RTL`-vs-bare-`JML` stack mismatch — is real ROM
+code and real 65816/WMDATA semantics, checked against fullsnes and the
+ROM's own bytes, not assumed; no register-read, DMA/mapping, or
+interrupt-flag gap in `rf-snes` was found anywhere along it, and each
+`rf-snes` behavior implicated (`JML [addr]`'s bank-0-fixed pointer, LoROM
+mirroring, WMDATA/WMADD) was verified correct rather than left as an
+assumption. What remains unproven is *why* the specific call chain under
+`JML [$0040]` never returns — whether that is a legitimately large
+one-time object count for this title's loading screen, or a genuine
+non-terminating loop in the game's own level-table code — and this ticket
+did not have the budget to fully decode that deeper table-driven system.
+Either way it is unambiguously game-authored ROM code with no `rf-snes`
+defect implicated, so a fix here would mean patching around the game's own
+bytes (law 5) without first knowing what "correct" looks like. Deterministic
+and input-independent: it does not depend on player input, RNG, or any
+state this probe's headless boot could have gotten wrong, and reproduces in
+well under 100 frames (~2 seconds) from a cold, all-defaults boot.
 
 **Verified:** `cargo fmt --check` clean; `cargo clippy --workspace -- -D
 warnings` clean (the workspace-wide `cargo clippy --workspace --all-targets`
@@ -2183,15 +2211,25 @@ diagnostics (`PROBE_WATCH`, and `d=`/`dbr=`/`wmadd=`/`vec0000=` fields on
 changed.
 
 **BLOCKED. Named next step:** none of the register-read, DMA/mapping, or
-interrupt-flag hypotheses this ticket was asked to rank apply — the trace
-is complete down to the exact wrong value and the game's own instruction
-that produced it, and the missing per-frame bound is absent from the ROM
-itself, not skipped by a divergent emulator condition. If evidence ever
-surfaces that this title is expected to survive past its title screen on
-real hardware (a strategy guide, a longplay, or a real-cartridge test), the
-next step is to check whether `rf-snes`'s NMI/IRQ *cadence* (frames-per-
-real-second, or a joypad-auto-read timing quirk) differs from real hardware
-enough to change how many per-object sprite-adder calls happen before the
-cursor reaches `$2180` — that would change *when* the crash lands, not
-*whether* the underlying defect exists, but is the only remaining lever
-this trace did not rule out.
+interrupt-flag hypotheses this ticket was asked to rank apply — every
+`rf-snes` behavior this chain touches (`JML [addr]`'s bank-0-fixed pointer
+source, LoROM mirroring, WMDATA/WMADD, the NMI re-entrancy guard's own
+correctness) was checked against fullsnes/the 65816 spec/the ROM's own bytes
+and found correct, not assumed. What this ticket did not finish: fully
+decode the level/object-table system reached through `$80:A656`'s
+`JML [$0040]` (landing in bank `$83`'s state-machine dispatcher at `$CF37`,
+then somewhere further into the game's own level data) to name the specific
+call or table that keeps re-driving `$80:D170`-`$80:D270` for roughly 2,000+
+calls without ever returning — that number could be a legitimately large
+one-time object count for this title's loading screen, or a genuine
+non-terminating loop in the game's own code; this ticket's trace rules out
+`rf-snes` all the way down to that boundary but does not cross it. The next
+ticket should pick up exactly there: `PROBE_DIS`/`PROBE_SPWIN` from
+`$80:D0C1` onward (the routine `$80:D076`'s bounded 68-iteration loop calls
+per object), and the table `$83:CF37` reads via `$83:D04F,X`/`$83:D001,X`,
+to find the actual non-returning call and name what it iterates over. If
+that turns out to be `rf-snes`-driven (an interrupt-flag or timing
+divergence changing how many times a per-frame path runs before this one
+NMI ever returns), this write-up's "no `rf-snes` defect found" verdict
+should be revisited; if it is a real, ROM-side non-terminating loop, this
+stays BLOCKED with that loop named precisely instead of inferred.
