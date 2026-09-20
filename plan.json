@@ -7738,6 +7738,53 @@
    "W14-45 CLOSED 2026-09-21: 1800-frame sweep + per-title probes on the 41-title uniform bucket. 6 slow boots named (2 new budget-edge arrivals: Power Rangers Zeo, Xardion). 35 stuck titles grouped into APU handshake (11), raster/IRQ (9, including 4 titles reclassified from a frozen WAI via one-byte-back PROBE_DIS), DMA/mapping (6), Pagemaster's own already-BLOCKED WaitVBlank stall (4), unknown/one-off (5). Three largest families proposed as next tickets with confirming evidence named. No core code changed; docs/TESTING.md W14-34 table explicitly superseded for these 41.",
    "W14-45 FILED 2026-09-21 by the orchestrator: 33 of the W14-34 list's 74 have moved since; the remaining 41 need fresh shapes on the corrected timing and composition."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-46",
+  "title": "APU handshake family after W14-45 (11 titles, three sub-shapes): halted drivers (Tekken 2, Urban Strike, NBA Live 96), never-acking drivers (Blackthorne x3, Battle Grand Prix), boot never started (Batman proto, Phalanx x2, Sonic Blast Man II)",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-46: per sub-shape, one title is traced end to end on the current timing base — halted: PROBE_STOP_ON_SPC_STOP + PROBE_SPCRING name the SPC instruction that halted (STOP/SLEEP) and the driver state that led there (ARAM dump + disassembly with a scratch decoder verified against ops.rs); never-acking: PROBE_PORTS/PROBE_APUPORTLOG/PROBE_SPCMEMWATCH show which port and value each side waits on and the first divergence from hardware (port visibility order, $F1 clears, timer $FD-$FF reads, the W14-41 deferral, an SPC700 opcode/flag edge vs the singlestep semantics, or the 65C816 feeding wrong data — Blackthorne is the W7-08 S-DSP ENVX poller: say whether it now waits on the DSP and route it there); boot never started: what the CPU is doing instead of uploading (a 45-60M instruction budget, PROBE_ALLPC) and what it waits on",
+   "the fix, if any, is cited (fullsnes / snes.nesdev.org / WDC) and pinned by a unit test; ignored SNES suites (65816 vectors with the cycle assertion, spc700_vectors, spc_timer, gilyon, peterlemon) stay green; determinism unaffected; census children on the traced titles and the usual canaries; the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and names every moved title",
+   "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — which port, which value, which side"
+  ],
+  "notes": [
+   "W14-46 FILED 2026-09-21 by the orchestrator from W14-45's family table (11 titles). The three sub-shapes may be three causes; one traced title per sub-shape is the minimum."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-47",
+  "title": "Raster/IRQ family after W14-45 (9 titles): WAI parked on an interrupt that never fires — Final Fight 2 x2 (NMI and IRQ enabled, neither entered), Battletoads in Battlemaniacs x2; test the NMI-enable-edge dispatch W14-35 named but did not fix",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-47: on Final Fight 2 (retail) with PROBE_IRQLOG (NMITIMEN writes, NMI/IRQ dispatches, $4210/$4211/$4212 reads with raster position) the trace shows why neither interrupt is ever entered while both are enabled: check first the enable-edge rule W14-35 cited — fullsnes 'SNES Interrupts': writing $4200 with NMI enable while RDNMI bit 7 is already set triggers an NMI immediately (the flag is level-sensitive against the enable), and the equivalent for H/V IRQ enable with the IRQ flag pending — against SnesSystem::step's dispatch (`events.vblank_started && nmi_enabled`, and the irq.fired path); then the WAI wake path (W14-28) and the I flag; then the vectors ($FFEA/$FFEE native, $FFFA/$FFFE emulation) and the E flag at the WAI",
+   "W14-47: if the enable-edge dispatch is missing, implement it with a citation + unit test (NMI enabled during vblank with the flag set dispatches at once; enabled outside vblank waits for the next edge; disabling and re-enabling within one vblank does not double-dispatch — check fullsnes for that case) and re-check the four W14-35 titles",
+   "the fix, if any, is cited (fullsnes / snes.nesdev.org / WDC) and pinned by a unit test; ignored SNES suites (65816 vectors with the cycle assertion, spc700_vectors, spc_timer, gilyon, peterlemon) stay green; determinism unaffected; census children on the traced titles and the usual canaries; the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and names every moved title",
+   "a BLOCKED verdict must trace the chain back to ROM bytes or a register read whose value is checked against fullsnes — which port, which value, which side"
+  ],
+  "notes": [
+   "W14-47 FILED 2026-09-21 by the orchestrator from W14-45's family table (9 titles): W14-45 proved these are genuine WAI instructions (one-byte-back PROBE_DIS), not spins, so the interrupt they wait for is the question."
+  ]
  }
 ]
 }
