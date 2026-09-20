@@ -3155,6 +3155,121 @@ excluded, since several duplicate a released sibling's exact PC and shape
 Super Turrican) — evidence the defect is shared with the retail ROM, not a
 beta-specific corruption.
 
+### W14-36 — DMA/mapping family resolved: a header-nibble/location mapping
+bug, not DMA (2026-09-20)
+
+The W14-34 re-triage's guessed bisection targets (Final Fight 3 (Beta),
+Brawl Brothers, Final Fight 2) were stale — the re-triage's own table above
+does not actually contain Brawl Brothers or Final Fight 2 (both are in the
+raster/IRQ family instead, filed as W14-35); of the family's 11 titles the
+only retail dump is `WWF Super WrestleMania (USA)`, so that is what this
+ticket bisected first.
+
+**Bisection.** `PROBE_SPWIN=0:400` on `WWF Super WrestleMania (USA)` shows
+the crash from literally the first instruction: `n=1 prev_pc=000000 op=00
+sp=01FF` — reset itself lands PC at `$00:0000`, not the header's real reset
+vector. The ROM's own bytes are fine: the LoROM header at file offset
+`$7FC0` is fully self-consistent (checksum `$F1D1`/complement `$0E2E` XOR
+to `$FFFF`, title `WWF SUPER WRESTLEMANI` all-printable, reset vector
+`$FF51` sane into bank 0's upper half) and its RESET vector bytes at file
+offset `$7FFC-D` genuinely read `51 FF` ($FF51). The defect is entirely on
+the emulator side of `rf_cart::parse_snes_header`
+(`crates/rf-cart/src/snes.rs`): this cart's map-mode byte is `$41` — low
+nibble `$1`, which `map_mode_name` reads as "HiROM" — even though the
+header structurally lives at the *LoROM* location. `score_candidate`'s own
+doc already named this exact title as the reason the nibble is scored as
+evidence rather than required to agree with location ("real dumps exist
+whose header sits at one location while its mode byte names the other, and
+`WWF Super WrestleMania (USA)` is one of them") — the location-scoring was
+already right (LoROM won 5-1 over the HiROM candidate) — but the final
+`map_mode = match mode_nibble { 0x0 => LoRom, 0x1 => HiRom, ... }` read the
+nibble anyway, discarding which location had actually won. So a physically
+LoROM cartridge was addressed as HiROM: `SnesSystem::reset`'s `$00:FFFC`
+read resolved through the wrong mapping arithmetic, came back `$0000`
+instead of `$FF51`, and the CPU booted straight into WRAM — `BRK #$00` at
+`$00:0000`/`$00:0003` pushing P/PC (SP wraps 8-bit-in-emulation-mode 3
+bytes per push), vectoring through open-bus `$FFFF` reads on the (wrongly
+mapped) BRK vector, landing on a `$FF` byte decoded as `SBC $000000,X`
+(4-byte long-addressing) that wraps PC straight back to `$0003` — exactly
+`docs/TESTING.md`'s own recorded shape for this title.
+
+**Fix.** `parse_snes_header` (`crates/rf-cart/src/snes.rs`) now derives
+`SnesMapMode::LoRom`/`HiRom` from the WINNING header location (`base`) for
+nibbles `$0`/`$1`, falling back to the nibble only when it disagrees with
+location — SA-1's nibble `$3` (always headered at the LoROM location per
+fullsnes "SNES Cart SA-1") and the explicitly-unsupported nibbles are
+unaffected. New unit test
+`nibble_disagreeing_with_the_winning_location_defers_to_location` pins the
+exact WWF Super WrestleMania byte pattern (`lorom_image(0x41, 0x00)`). All
+52 `rf-cart` unit tests, the ignored SNES suites (`singlestep_65816_vectors`
+5,080,000 cases, `gilyon_cputest`, `spc700_vectors`, `spc_timer_reports_pass`,
+`peterlemon_golden`), and `cargo test --workspace` (156 test binaries) stay
+green; `scripts/validate-arch.sh` reports `arch OK`.
+
+**Census-child results after the fix** (`RF_CENSUS_ROM=<zip>
+boot_census-* --ignored --exact boot_census_child`; exit 0 rendered, 10
+blank): the fix moved **6 of the 11 family titles** from blank to
+rendered — the one retail title plus five betas, including both halves of
+a beta/retail pair:
+
+| Title | Before | After |
+|---|---|---|
+| WWF Super WrestleMania (USA) | 10 | **0** |
+| Final Fight 3 (USA) (Beta) | 10 | **0** |
+| Final Fight 3 (USA) (retail, for comparison) | 0 | 0 (unaffected — already rendered) |
+| Killer Instinct (USA) (Beta) | 10 | **0** |
+| Dennis the Menace (USA) (Beta) (1993-03-03) | 10 | **0** |
+| Teenage Mutant Ninja Turtles IV - Turtles in Time (USA) (Beta 2) | 10 | **0** |
+
+No regressions: Super Mario World (USA), Wild Guns (USA), NHL 95 (USA),
+Super Mario RPG - Legend of the Seven Stars (USA), Flintstones, The (USA)
+(En,Fr,De,Es,It), Kirby Super Star (USA), and Teenage Mutant Ninja Turtles
+IV - Turtles in Time (USA) (retail) all still exit 0 after the fix.
+
+**The remaining 5 titles are named, each traced back to its own ROM
+bytes or a distinct, separately-scoped shape — not this fix's bug:**
+
+- **Bug's Life, A (USA) (Pirate)**, **Hercules (USA) (Pirate)**, **Pokemon
+  Stadium (USA) (Pirate)**: all three carry an all-zero header at BOTH the
+  LoROM ($7FC0) and HiROM ($FFC0) locations (title bytes all `$00`,
+  checksum/complement both `$0000`) — these unlicensed multicarts ship no
+  real SNES header at all; `score_candidate` accepts the LoROM location
+  only because the reset-vector-sanity point plus the (vacuously true)
+  nibble-`$0`-at-LoROM-location point sum to exactly `MINIMUM_SCORE`. This
+  is not a mapping disagreement W14-36's fix touches (nibble and location
+  already agree at `$0`/LoROM). Each spends its early instructions in a
+  legitimate `MVN $7F,$7F` WRAM block-move (real 65816 semantics, not a
+  crash) before eventually reaching `$00:0000`/`COP #$00` well past the
+  probed 100K-instruction mark — Hercules's `PROBE_SPWIN` ring at 3M
+  instructions shows it looping cleanly in real code at `$00:BD47-BD61`
+  first, so the wander into the vector table happens later, deeper than
+  this ticket traced. Named for a future ticket; not the DMA/mapping
+  nibble bug.
+- **Daffy Duck - The Marvin Missions (USA) (Beta)**: the LoROM location is
+  pure `$FF` filler (not a header); the HiROM location at `$FFC0` is a
+  fully valid, self-consistent header (checksum/complement XOR to
+  `$FFFF`, legible title `DAFFY DUCK: MARV MISS`) — but the RESET vector
+  bytes it declares, read straight from the file at offset `$FFFC-D`, are
+  literally `00 00`. The ROM's own byte content points reset at `$00:0000`
+  before the emulator's mapping is even consulted; this is the beta dump's
+  own defect, not a mapping bug.
+- **Road Runner (USA) (Beta)**: same valid-HiROM-header shape as Daffy
+  Duck, but its declared reset vector is `$06BD` — file bytes `bd 06` at
+  `$FFFC-D`. `$00:06BD` falls inside the WRAM mirror that `mapping.rs`
+  gives every system bank ($0000-$1FFF, unconditionally, on real hardware
+  too — fullsnes's memory map, not an emulator choice), so on real
+  hardware this reset vector would also boot into zeroed WRAM and execute
+  `$00`/BRK. Traced to the ROM's own (beta) vector table, not a mapping
+  defect.
+- **ClayFighter (USA) (Beta 1) (1993-09-28) [b]**: parses as a
+  self-consistent HiROM cart (nibble `$1` at the HiROM location — no
+  nibble/location disagreement for W14-36's fix to touch), but the probe
+  shows scattered execution (`$50:8503 ORA ($01,X)`, top-PC hit only
+  3/20000) rather than a tight BRK-vector loop — the same "crash happens
+  much earlier, mid-legitimate-code" shape the W14-34 re-triage already
+  flagged this title as needing its own separate trace pass for. Left
+  named, not diagnosed further here.
+
 ### Next tickets — the three largest families, and what would confirm each
 
 1. **Raster/IRQ: NMI enabled but never (or almost never) fires (25 titles,
@@ -3741,6 +3856,186 @@ pass either. **BLOCKED**.
 diagnostics only, same suites as above (`cargo fmt --check`/`clippy`/
 `cargo test -p rf-snes --release` 390/0, ignored SNES oracle suites
 green). Census children unchanged (same exit codes as the first pass).
+
+## W14-35 — the raster/IRQ family's premise is refuted for all four traced
+titles: RDNMI/HVBJOY/NMI dispatch all match fullsnes and never miss a
+vblank; one real `$4210` spec deviation found and fixed, but it explains
+none of the "uniform screen" symptom (2026-09-20, BLOCKED)
+
+W14-34's re-triage classified 25 titles as "NMITIMEN's NMI-enable bit is
+set but `nmi_entries` sits at 0-2 for the whole 3M-instruction run" —
+inferred from a **20000-instruction sample taken at the very END of a
+3,000,000-instruction run**, which is why the top spin PC is always the
+`LDA $4210`/`BPL` (or `$4212`) idiom: that sample window lands inside
+whichever busy-wait a HEALTHY, correctly frame-paced game happens to be
+in at that instant, not evidence of a hang. This ticket's job was to
+build the missing trace and check that inference against the full run.
+
+**New diagnostics, `PROBE_IRQLOG` (module doc in
+`crates/rf-harness/tests/title_probe.rs` updated)**: `RDNMILOG` on every
+edge of `Timing::nmi_flag` (SET at the vblank edge, CLEARED — with the
+CPU PC — when a `$4210` read consumes a pending bit7=1); `HVBJOYLOG` on
+every ENTER/EXIT edge of `Timing::in_vblank()` (the level `$4212` bit 7
+reports); `NMILOG` whenever the CPU PC lands on the NMI vector (native
+`$FFEA` or emulation `$FFFA`), the same detection the post-run
+`nmi_entries` sample already used, but live across the whole probe
+window. None of the three needed a new `rf-snes` field: the RDNMI/HVBJOY
+bits are already fully described by existing public state, and NMI
+dispatch is inferred from PC the same way the pre-existing sample already
+did.
+
+**Trace, all four titles, `PROBE_IRQLOG=200-400 PROBE_INSTR=3000000`**:
+
+| Title | rdnmi set=clear | hvbjoy enter/exit | nmi dispatches | frames reached |
+|---|---|---|---|---|
+| ActRaiser 2 (USA) | 158/158 | 158/157 | 35 | 159 |
+| Illusion of Gaia (USA) | 152/152 | 185/185 | 113 | 189 |
+| Lagoon (USA) | 165/165 | 190/190 | 164 | 193 |
+| Phalanx (USA) | 176/176 | 190/190 | 175 | 194 |
+
+Every single `RDNMILOG SET` is matched by exactly one `RDNMILOG CLEARED`
+— the poll **never** misses a vblank across the full 3,000,000-instruction
+run, for any of the four titles. `HVBJOYLOG` enter/exit pairs track the
+raster exactly at line 225 (enter) and line 0 (exit), matching
+`VBLANK_START_LINE`. NMI dispatches whenever `NMITIMEN` bit 7 is on at
+the vblank edge (ActRaiser 2 toggles NMI on/off itself once per frame —
+`ARMLOG $4200: 81->01` at line 235, `01->81` again by line ~3-16 of the
+next frame — and every one of those enabled windows produces exactly one
+`NMILOG DISPATCH`). All four titles' frame counters climb steadily (159
+to 194 frames within 3,000,000 instructions) — none of them is frozen;
+they are live, correctly-paced games idling in the standard
+`wait_for_vblank` idiom (`timing.rs`'s own module doc names this exact
+gilyon `cputest` pattern) for most of each frame, which is normal, not a
+symptom.
+
+**Acceptance's five named checks, against fullsnes "SNES Interrupts" /
+"CPU Registers" (fetched 2026-09-20)**:
+(a) *RDNMI also clears at vblank end, not just on read* — **fullsnes
+confirms this, and RetroForge did NOT model it**: "The flag gets reset
+automatically at end of Vblank, and gets also reset after reading from
+this register." Only the read half was implemented. **Fixed** (see
+below) — moot for these four titles, since every trace shows the read
+always happens within ~20 dots of the flag being set, long before vblank
+ends, so the missing auto-clear never manifested as a missed poll here.
+(b) *Enabling NMI via `$4200` while the flag is already set should
+dispatch immediately* — fullsnes: the CPU's internal NMI-pending line is
+"`[4200h].7 AND [4210h].7`" transitioning 0-to-1, which can fire on
+EITHER operand's edge, not only the flag's. RetroForge's dispatch
+(`system.rs` ~line 348, `events.vblank_started && nmitimen.nmi_enabled()`)
+only checks the flag's edge. **This is a real, second spec deviation,
+found but not fixed in this ticket** (write_scope/one-ticket-at-a-time
+discipline: it needs a cross-module edge-latch either in `SnesBus` or
+`SnesSystem`, checked at every `$4200` write as well as every vblank
+edge, which is a bigger design decision than this 3-point ticket's
+hypothesis-verification charter). Traced empirically for all four titles
+regardless: every `$4200` re-enable observed happens several lines into
+the FOLLOWING frame, well after that frame's own vblank read has already
+cleared the flag, so the flag is always 0 at the moment of re-enabling —
+the missing immediate-dispatch path never fires for any of the four.
+Named as the next ticket's starting point if a future title's trace ever
+shows a re-enable while the flag is genuinely still 1.
+(c) *An NMI handler's own `$4210` read starves the main loop's poll* —
+not applicable to any of the four: the polling PC (`$80:BDE4` etc.) is
+the main-loop idiom itself, not inside an NMI handler, confirmed by
+`PROBE_RING`/disassembly (`cpu 80BDE8: [10,fa] BPL $BDE4`, `cpu 80BDE4:
+[af,10,42,00] LDA $004210` — a standalone two-instruction wait loop).
+(d) *HVBJOY bit 7 (vblank) / bit 6 (hblank) timing vs raster* — confirmed
+exact: `HVBJOYLOG` enters at line 225 dot 0-9, exits at line 0 dot 0-10,
+matching `VBLANK_START_LINE`/`Timing::in_vblank()` with no drift across
+150-190 transitions per title.
+(e) *NMI vector/P-register dispatch correctness* — no crash, no BRK/COP
+drop, no stack-wander symptom observed in any of the 35-175 dispatches
+per title (contrast the DMA/mapping family's `$00:0000 BRK` shape, W14-36
+— none of that appears here); not exhaustively byte-audited past-dispatch
+CPU state, since nothing in the trace motivates it.
+
+**Fix shipped**: `crates/rf-snes/src/timing.rs`, `Timing::advance` — at
+the `line == 0` frame-wrap instant (already the `events.frame_started`
+site), `self.nmi_flag = false` per fullsnes's "also reset ... at end of
+Vblank" clause. New test,
+`the_nmi_flag_also_clears_at_end_of_vblank_even_if_never_read`
+(`crates/rf-snes/src/tests/timing.rs`): sets the flag at vblank start,
+advances across the frame wrap WITHOUT reading `$4210`, asserts the flag
+is false on the other side — fails against the pre-fix code (verified via
+`git stash` of `timing.rs` alone). Confirmed behaviourally meaningful,
+not a no-op: re-running the ActRaiser 2 trace post-fix shows
+`rdnmi_set_events` rise from 90 to 158 (now essentially one SET per
+`HVBJOYLOG` vblank entry, 158 of 158, instead of some vblanks silently
+finding the flag already `true` from a previous unread cycle and
+producing no edge) — a real, measurable correction, even though it
+changes nothing about ActRaiser 2's render outcome.
+
+**Why these four titles actually show a uniform screen — outside this
+ticket's raster/IRQ hypothesis, named for the next ticket rather than
+fixed here (same discipline as W14-29's precedent)**: `INIDISPLOG`
+(existing diagnostic, already in `PROBE_IRQLOG`) shows **zero** forced-
+blank/brightness edges across the full 3,000,000-instruction run for
+Lagoon and Phalanx — `$2100` (INIDISP) is never touched, or is written
+repeatedly with the same value, the entire time; both sit in
+`forced_blank=true, bright=0` (screen deliberately blanked) with
+`cgram_nonzero=0` (Phalanx also `oam_nonzero=0`) — no palette or sprite
+data has ever been loaded despite 190+ frames elapsing. ActRaiser 2 and
+Illusion of Gaia instead show `tm=[0000+obj]` — the `$212C` main-screen
+enable register has all four BG layers off, OBJ only — which may be a
+legitimate early-logo state or a `$212C` handling gap; Illusion of Gaia
+does run a genuine `INIDISP` fade (`bright:0->15` over many frames,
+recognisably the same idiom W14-29 traced for Mystic Quest) but the
+picture behind it apparently never gains BG content. None of this is a
+raster/IRQ defect — it points at `$2100`/`$212C` register consumption or
+at data (CGRAM/OAM/VRAM upload) never arriving, a different mechanism
+this ticket's `write_scope` and hypothesis set were not chartered to
+chase.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — **364 passed**, 0 failed (363
+before this ticket plus the 1 new test); ignored suites all still pass:
+`singlestep_spc700_vectors` (unchanged), `spc_timer_reports_pass`
+("PASSED TESTS"), `cputest_full_reports_success_and_every_test_passes`
+(`test_num=0x0649/0x0649, ROM says "Success"`), `peterlemon_golden`'s
+three tests, and `singlestep_65816_vectors` — **5,080,000 cases passed, 0
+failed** (254/256 opcodes covered; the two excluded MVN/MVP files are a
+pre-existing, documented exclusion unrelated to this change).
+
+**Census children** (`boot_census_child`, per this ticket's brief — the
+orchestrator owns any full re-run): all traced titles unmoved at exit
+**10** both before and after the fix — **ActRaiser 2, Illusion of Gaia,
+Lagoon, Phalanx, Goal!, Robotrek** (Goal!/Robotrek share the identical
+`LDA $4210`/`BPL` PC-relative shape per the W14-34 table, checked as
+extra confirmation that the fix genuinely does not move this family).
+Named canaries all unmoved at exit **0**: **Super Mario World, Wild
+Guns, Super Mario RPG, NHL 95, Final Fantasy Mystic Quest, Kirby Super
+Star, Full Throttle - All-American Racing (Beta)**.
+
+**Determinism**: unaffected for the four traced titles and every canary
+(no census child moved buckets). The `Timing::nmi_flag` auto-clear is a
+pure function of already-existing state (`self.line == 0`, the same
+instant `frame_started` already fires) with no new field and no
+save/state surface change — `Timing::save`/`load` already (de)serialise
+`nmi_flag` as a plain bool, unaffected by when it flips.
+
+**Ticket disposition**: BLOCKED, not WONTFIX. The chain traces to
+specific, fullsnes-checked register reads (`$4210` RDNMI, `$4212`
+HVBJOY, `$4200` NMITIMEN) with quantitative full-run evidence, not
+"game's own data" — satisfying the acceptance's BLOCKED standard. One
+real spec deviation ((a), RDNMI's missing end-of-vblank auto-clear) was
+found and fixed with a citation and a regression test; a second ((b),
+the NMI-enable-edge immediate-dispatch path) was found, cited, and
+named as a follow-up rather than fixed, since it does not reproduce any
+observed title's symptom and needs a cross-module design this ticket's
+scope should not absorb unreviewed. Named next step: a `$2100`/`$212C`
+consumption trace (`PROBE_INIDISPLOG`/`PROBE_MATHPC`-style register-write
+tracking already exists; what's missing is tracing WHY these titles'
+own code never issues the CGRAM/OAM/VRAM uploads or the `$212C` write
+that would turn BG layers on) on Lagoon and Phalanx (forced-blank-forever
+shape) and ActRaiser 2/Illusion of Gaia (`tm=[0000+obj]` shape)
+separately, since the two sub-shapes look mechanically different.
+
+**Full SNES census (orchestrator, 2026-09-20, W14-35 tree, per-title
+`RF_CENSUS_OUT` diff against the W14-28 run):** **1061/74/130/0/0 ->
+1061/74/130/0/0**, no row changed in either direction. The vblank-end
+clear of RDNMI bit 7 is a hardware-fidelity fix with no effect on the
+library's boot census; the four traced titles stay uniform for the reason
+above (forced blank never lifted), which is the named next ticket.
 
 ## W14-37 — the IPL boot ROM's own instruction cost on the go->jump
 handoff and the per-byte handshake, from fullsnes' published
