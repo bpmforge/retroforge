@@ -4097,3 +4097,20 @@ stories, 10 decisions).
   Rangers Zeo. One canary regressed, so status stays BLOCKED per this
   ticket's own gate. Full derivation and census table in
   `docs/TESTING.md`'s W14-37 subsection.
+
+- **W14-42, W14-43, W14-37 done — the "APU deadlock" family was a black
+  screen** (2026-09-21). Re-tracing the Quintet titles on the corrected
+  timing base found their handshake completes; what kept the census
+  blank was `$2130` CGWSEL's clip-to-black and prevent-math window
+  modes 1 and 2 being swapped (fullsnes: 1 = outside the colour window,
+  2 = inside), so a disabled colour window with mode 2 forced every
+  main-screen pixel black. One swap, one corrected test, one new test.
+  W14-43 made `$4200` read open bus (Shien's Revenge polls it) and
+  refused Top Gear 3000's DSP-4 honestly by header checksum. W14-37's
+  IPL boot-ROM cycle counts landed once the pending delay was shown to
+  be paid from the same catch-up budget as W14-39/41's deferral — no
+  logic change, two tests corrected. Census 1079/56/130 ->
+  **1093/41/131**: fifteen up, Top Gear 3000 to refused, Xardion to a
+  budget edge. W14-44 made the stitcher budget test best-of-five after
+  two load flakes. Gate on the stacked tree: workspace **2232 passing /
+  0 failed / 43 ignored**, clippy clean, arch OK.

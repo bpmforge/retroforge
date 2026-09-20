@@ -806,6 +806,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-36 | 1265 | **1066** | 69 | 130 | **0** | **0** |
 | SNES, after W14-39 | 1265 | **1076** | 59 | 130 | **0** | **0** |
 | SNES, after W14-41 | 1265 | **1079** | 56 | 130 | **0** | **0** |
+| SNES, after W14-37/42/43 | 1265 | **1093** | 41 | 131 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -5912,3 +5913,24 @@ included — the same suite that would show a colour-math/window
 regression first), `singlestep_65816_vectors` (5,080,000/5,080,000, same
 pre-existing MVN/MVP exclusion as every prior ticket).
 `scripts/validate-arch.sh`: `arch OK`.
+
+**Full SNES census (orchestrator, 2026-09-21, the W14-37 tree stacked on
+W14-42 and W14-43, per-title `RF_CENSUS_OUT` diff against the W14-41
+run):** **1079/56/130/0/0 -> 1093/41/131/0/0** ("SNES, after
+W14-37/42/43" row above). The run itself reported 1091 rendered and two
+TIMED OUT (Donkey Kong Country, Donkey Kong Country 2) because a sibling
+lane was deliberately saturating the machine for W14-44's load test
+during it; both re-run in 1-2 s and exit 0 on an idle machine, so the
+row records the effective result. Fifteen rows moved to *rendered
+something*: **ActRaiser 2**, **Illusion of Gaia** (USA, Beta 1, Beta
+2), **Robotrek**, **Soul Blazer** (W14-42's CGWSEL fix — the "APU
+deadlock" family's last members were a black main screen, not a
+deadlock), **Shien's Revenge** (USA and beta; W14-43's `$4200` open
+bus), **Adventures of Yogi Bear**, **Jim Power: The Lost Dimension in
+3D**, **Mighty Max (Auto Demo)**, **Nickelodeon GUTS**, **Pinocchio**
+(both betas), **Slap Stick (Beta)** (CGWSEL as well — none had been
+traced to it, all had left the colour window disabled). **Top Gear
+3000** moved from uniform to *refused* with its real chip named
+(DSP-4). One row moved to uniform: **Xardion**, first varied frame 562
+-> 621 under W14-37's listed boot-handoff cycles — a budget edge like
+Power Rangers Zeo, not a stall.
