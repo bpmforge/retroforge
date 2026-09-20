@@ -2994,3 +2994,209 @@ before. The full orchestrator census is not re-run: nothing in
 `crates/rf-snes/**` changed.
 
 **Determinism:** unaffected — no code changed.
+
+## W14-34 re-triage — the 74 uniform titles after W14-24..W14-32: 1800-frame
+sweep, shape classification, next tickets named (2026-09-20, docs-only)
+
+The 2026-09-17 named-cause list is stale after 44 titles moved buckets across
+W14-24/26/28/31. This ticket re-swept the current 74-title uniform-screen
+bucket (`RF_CENSUS_OUT` from the W14-28 census) from scratch, using the
+method in the sections above: `boot_census` shows *which* titles, `title_probe`
+(this crate's `crates/rf-harness/tests/title_probe.rs`) shows *where to
+look*. No core code changed; write scope was this file only.
+
+**Step 1 — 1800-frame sweep** (`PROBE_MODE=frames PROBE_FRAMES=1800`, ten
+titles per run, release build): 4 of the 74 are slow boots whose picture
+starts varying well inside a plausible real boot time but past the census's
+600-frame budget — not defects, the same "budget, not bug" shape as
+Jungle Strike in the W14-28 write-up above:
+
+| Title | varied_at (frame) |
+|---|---|
+| Knights of the Round (USA) | 909 |
+| Jungle Strike (USA) | 991 |
+| Justice League Task Force (USA) (Beta) | 1643 |
+| Undercover Cops (USA) (Retro-Bit) | 1767 |
+
+The remaining **70 titles never vary inside 1800 frames** and went on to
+step 2.
+
+**Step 2 — one default probe per stuck title** (`PROBE_INSTR=3000000
+PROBE_PORTS=1 PROBE_RING=1 PROBE_SPCRING=1`, one title per run so each
+probe's own top-PC/DMA/IRQ state can't blend across titles). The one-line
+shape below is the CPU's top spin PC and its disassembly, the SPC700's top
+PC, and the handshake/IRQ state that explains why neither side of the
+divergence can proceed.
+
+### Family: APU handshake (23 titles) — CPU spins on a $2140-$2143 read waiting
+for a word the SPC700's driver never (or no longer) writes; several of these
+show `spc.stopped=true` — the SPC700 itself has halted mid-driver, the same
+shape W14-23 named for Super Mario RPG (a data write from a bounded-less
+receive loop overwrites the driver's own polling code).
+
+| Title | Shape |
+|---|---|
+| ActRaiser-adjacent — Batman - Revenge of the Joker (USA) (Proto) | `$80:8021 BNE $8021` / `CMP $2140`, nmi_entries=0 |
+| Blackthorne (USA) / (Beta) / (Beta) (CES) | `$81:8F07 CMP $002140` / `BNE $8F07`, top-PC hit ~944/20000 (a slow, not tight, spin) |
+| Brawl Brothers (USA) | `$80:D6D5 CMP $0002` / `$80:D6D2 LDA $2141` |
+| Family Dog (USA) | `$8F:EE09 CMP $2140` / `BEQ $EE50` |
+| International Tennis Tour (USA) | `$82:F9E7 BNE $F9E3` / `CMP $002140` |
+| Jim Power - The Lost Dimension in 3D (USA) | `$8C:822E BNE $822B` / `CPX $2140` |
+| Legend (USA) / (Beta) | `$7F:25D3 LDA $2140` / `BNE $25D3` |
+| NBA Live 96 (USA) | `$80:AB9C LDA $2140` / `BNE $AB9C`; **`apu.boot_running=false`, `spc.stopped=true`** — SPC halted after the IPL phase, not during it |
+| Rival Turf! (USA) | `$00:E432 BNE $E42F` / `CMP $2140`; `forced_blank=true` throughout |
+| Rocky Rodent (USA) | `$9A:8214 CMP #$AA` / `BNE $8211` / `$9A:8211 LDA $2140` — the classic SPC IPL "ready byte" ($AA/$BB) compare feeding straight off a $2140 read |
+| Spanky's Quest (USA) | `$04:8074 CMP $2140` / `BNE $8074` |
+| Super Turrican (USA) / (Virtual Console) / 2 (Beta 1) | `$0C:81DF BNE $81DC` / `LDX $2140` |
+| Super Valis IV (USA) | `$00:DFB6 CMP #$AA` / `$00:DFB3 LDA $2140` — same $AA-ready-byte shape as Rocky Rodent |
+| Tekken 2 (USA) (Pirate) | `$00:E1B7 BNE $E1B4` / `CMP $2142`; **`spc.stopped=true`** |
+| Wario's Woods (USA) | `$8B:818C BNE $8189` / `CMP $2140` |
+| Battletoads in Battlemaniacs (USA) / (Beta) | `$94:8090 LDA $0810` (WRAM mirror of a port flag); **`spc.stopped=true`**, one HDMA channel still `hdma_done=false` at the snapshot |
+| Urban Strike (USA) | `$92:80FD BNE $80E2` / `DEC $56`; **`spc.stopped=true`** |
+
+### Family: raster/IRQ — NMI enabled, never (or almost never) fires (25 titles)
+`NMITIMEN`'s NMI-enable bit is set (`nmitimen` bit7 on wherever printed
+nonzero) but `nmi_entries` sits at 0-2 for the whole 3M-instruction run.
+Fourteen of these poll the hardware register directly; the other eleven poll
+a WRAM mirror flag that only an NMI (or NMI+IRQ) handler would ever set —
+same root symptom, just one instruction removed from the register.
+
+| Title | Shape |
+|---|---|
+| ActRaiser 2 (USA) | `$80:BDE4 LDA $004210` / `BPL $BDE4`; nmi_entries=1 |
+| Goal! (USA) | `$1C:8DF4 BPL $8DF1` / `LDA $4210`; nmi_entries=2 |
+| Illusion of Gaia (USA) / (Beta 1) / (Beta 2) | `$82:8051 BPL $804D` / `LDA $804210`; nmi_entries=1 |
+| Lagoon (USA) | `$00:8148 LDA $4210` / `BPL $8148`; nmi_entries=1 |
+| Phalanx (USA) / (Beta) | `$00:811A LDA $4210` / `BPL $811A`; nmi_entries=2 |
+| Pinocchio (USA) (Beta) (1995-07-26) / (Beta) (Early) | `LDA $4212` / `BPL` (HVBJOY, not RDNMI) |
+| Robotrek (USA) | `$84:8009 LDA $004210` / `BPL $8009`; nmi_entries=2 |
+| Slap Stick (USA) (Beta) | same PC/shape as Robotrek (shared engine) |
+| Sonic Blast Man II (USA) | `$C0:901E LDA $4210` / `BIT #$80`; nmi_entries=1 |
+| Tuff E Nuff (USA) | `$80:F400 LDA $4210` / `BPL $F400`; nmi_entries=1 |
+| Adventures of Yogi Bear (USA) | `$80:C076 DEC A` / `BNE $C076` (WRAM countdown); nmi_entries=1, so the eventual NMI already fired and this is a separate stall past it — grouped tentatively, needs its own check |
+| Brandish (USA) | `$80:8416 INC A` loop; **`apu.boot_running=false`** (unusual — the APU boot sequence itself never entered/exited normally) |
+| Dragon - The Bruce Lee Story (USA) (Beta) (1993-04-23) | `$80:8057 BNE $8054` / `LDA $7412` (WRAM) |
+| Final Fight 2 (USA) / (Virtual Console) | `$81:8058 BNE $8056` / `CMP $40` (direct page); `forced_blank=true` |
+| J.R.R. Tolkien's LOTR - Volume 1 (USA) | `$80:80C6 BNE $80C3` / `LDA $0403` (WRAM) |
+| Mighty Max (USA) (Auto Demo) | `$00:E4FC LDA $4212` / `BPL $E4FC`; **`apu.boot_running=false`**, one DMA channel still active at the snapshot |
+| Pagemaster, The (USA) (Beta 1) (1994-07-18) | `$BD:FE74 PHP` / `BEQ $FE72`; `forced_blank=true` |
+| Soul Blazer (USA) | `$02:B2D0 STA $0000,X` / `$02:B2C8 LDA ($21)` (indirect DP); `irq_mode=7` (NMI+H+V) yet 0 entries; `forced_blank=true` |
+| Spot Goes to Hollywood (USA) (Proto) (1995-03-07) / (1995-08-05) | `BEQ` / `LDA $00` (direct page zero) |
+| WeaponLord (USA) | `$EA:646A BEQ $6467` / `CMP $3632` (WRAM) |
+
+### Family: DMA/mapping — crash into the reset/BRK/COP vector, same shape as
+W14-26's NHL 95 stack-wander (11 titles)
+CPU PC lands at or near `$00:0000`/`$00:0003`, executing `BRK #$00` or
+`COP #$00` in a tight or scattered loop — the stack-pointer-into-ROM shape
+W14-26 fixed for one title, here recurring in eleven more. `Final Fight 3
+(Beta)`'s shape (an unbounded index into an absolute table) is the same
+mechanism one step upstream.
+
+| Title | Shape |
+|---|---|
+| Bug's Life, A (USA) (Pirate) | `$00:0000 BRK #$00`, distinct_pc=huge (PC wandering, not a tight loop) |
+| Hercules (USA) (Pirate) | `$00:0000 COP #$00` — same crash, different vector |
+| Pokemon Stadium (USA) (Pirate) | `$00:6061 RTS` / `$00:0000 BRK #$00` |
+| ClayFighter (USA) (Beta 1) (1993-09-28) [b] | `$50:8503 ORA ($01,X)` — top PC hit only 3/20000, i.e. scattered execution through garbage, not a real loop |
+| Killer Instinct (USA) (Beta) | `$00:5D74 BVC` — top PC hit only 131/20000, same scattered-execution signature |
+| Dennis the Menace (USA) (Beta) (1993-03-03) | `$00:2027 ASL A` — top PC hit only 69/20000 |
+| Daffy Duck - The Marvin Missions (USA) (Beta) | `$00:0000 BRK #$00`; **irq_entries=20000** (every sampled instruction reads as a firing IRQ — an artifact of PC=0 execution, not a real interrupt storm) |
+| Road Runner (USA) (Beta) | same as Daffy Duck: `BRK #$00` loop, irq_entries=20000 |
+| Teenage Mutant Ninja Turtles IV - Turtles in Time (USA) (Beta 2) | `$00:FFFF SBC $000000,X` / `$00:0003 BRK #$00`; nmi_entries=irq_entries=10000 — same PC=0-adjacent artifact |
+| WWF Super WrestleMania (USA) | `$00:0003 BRK #$00` / `$00:FFFF SBC $000000,X` |
+| Final Fight 3 (USA) (Beta) | `$00:829E INX` / `$00:829A LDA $C002DA,X` — an unbounded `X` walking a long-form table read, the same upstream mechanism (uncapped index) the W14-26/W14-28 chain both named, just not yet manifested as a stack wander here |
+
+### Family: register-read (3 titles) — a register read whose semantics look
+wrong against fullsnes's R/W column, same class as W14-26 ($43xx) and
+W14-28 ($4216)
+| Title | Shape |
+|---|---|
+| Shien's Revenge (USA) / (Beta) | `$80:F30E BNE $F309` / `LDA $4200` — reading `$4200` (NMITIMEN), which fullsnes documents as **write-only**; whatever value this emulator's bus returns for that read needs checking against fullsnes's open-bus rule, since the loop is waiting for one particular byte from it |
+| Top Gear 3000 (USA) | `$80:808C BNE $8088` / `CMP $308000` — bank `$30` offset `$8000`, a LoROM mirror address; the compare that should match this bank's mirrored ROM byte does not, pointing at a mapping/mirroring gap rather than a hardware-register gap |
+
+### Family: forced-blank, NMI disabled, no register in the spin (3 titles)
+NMI is explicitly *off* (unlike the raster/IRQ family above) and the CPU
+spins on plain WRAM with no register or DMA signature in this probe's
+capture — least understood group, needs its own trace pass (`PROBE_DIS`
+around the loop, `PROBE_WATCH` on whatever WRAM cell is being polled).
+
+| Title | Shape |
+|---|---|
+| Adventures of Rocky and Bullwinkle and Friends, The (USA) | `$9E:F607 DEY` / `BEQ $F651`; `forced_blank=true`, irq_mode=Off |
+| Battle Grand Prix (USA) | `$01:826A BNE $8269` / `DEY`; `forced_blank=true`, irq_mode=Off |
+| Rendering Ranger R2 (USA) (Limited Run Games) | `$36:813E LDA #$6B` / `BNE $813E`; `forced_blank=true`, irq_mode=Off |
+
+### Family: unknown / one-off (4 titles)
+| Title | Shape |
+|---|---|
+| Justice League Task Force (USA) | `$80:842A BNE $8427` / `LDA $0316` (WRAM); **nmi_entries=2** — NMI *is* firing occasionally, yet the game is still stuck, so this is not the raster/IRQ family's root cause and needs its own trace |
+| Nickelodeon GUTS (USA) | `$80:83A6 BEQ $83A3` / `LDA $1410` (WRAM); nmi_entries=2, irq_mode=7 — same "NMI does fire, still stuck" shape as Justice League Task Force |
+| Firearm (USA) (Proto) (1993-12-17) | `$02:84DC CMP $0006` / `PHA`/`PLA` (WRAM); nmi_entries=1, **one HDMA channel (`control=0x40`) still `hdma_done=false`, `line_counter=75`** at the 3M-instruction snapshot — the only title in the bucket with live, incomplete HDMA state |
+| XBAND (USA) (v1.0.1) | `distinct_pc=1`, frozen at `$D0:3AD9 REP #$20`; **`cpu.stopped=true`** — the 65816 executed a `STP` and is genuinely halted, not spinning; a different shape from every other row here |
+
+### ROM dumps that are betas/protos/pirates (may be legitimately broken, not
+this emulator's bug)
+**Pirates (4):** Bug's Life, A (USA) (Pirate); Hercules (USA) (Pirate);
+Pokemon Stadium (USA) (Pirate); Tekken 2 (USA) (Pirate).
+**Protos (4):** Batman - Revenge of the Joker (USA) (Proto); Firearm (USA)
+(Proto) (1993-12-17); Spot Goes to Hollywood (USA) (Proto) (1995-03-07) and
+(1995-08-05).
+**Betas (16):** Battletoads in Battlemaniacs (USA) (Beta); Blackthorne (USA)
+(Beta) and (Beta) (CES); ClayFighter (USA) (Beta 1); Daffy Duck - The Marvin
+Missions (USA) (Beta); Dennis the Menace (USA) (Beta); Dragon - The Bruce
+Lee Story (USA) (Beta); Final Fight 3 (USA) (Beta); Illusion of Gaia (USA)
+(Beta 1) and (Beta 2); Killer Instinct (USA) (Beta); Legend (USA) (Beta);
+Pagemaster, The (USA) (Beta 1); Phalanx (USA) (Beta); Pinocchio (USA) (Beta)
+x2; Road Runner (USA) (Beta); Shien's Revenge (USA) (Beta); Slap Stick (USA)
+(Beta); Super Turrican 2 (USA) (Beta 1); Teenage Mutant Ninja Turtles IV
+(USA) (Beta 2). These titles are named per-family above rather than
+excluded, since several duplicate a released sibling's exact PC and shape
+(Blackthorne, Illusion of Gaia, Legend, Phalanx, Pinocchio, Shien's Revenge,
+Super Turrican) — evidence the defect is shared with the retail ROM, not a
+beta-specific corruption.
+
+### Next tickets — the three largest families, and what would confirm each
+
+1. **Raster/IRQ: NMI enabled but never (or almost never) fires (25 titles,
+   largest family).** Confirming evidence needed: for two or three
+   representative titles (ActRaiser 2, Illusion of Gaia, Robotrek all share
+   the identical `LDA $004210`/`BPL` shape and PC-relative offset, so one
+   trace likely explains all three), use `PROBE_IRQLOG=20` to see whether
+   any `$4200`/`$4207-$420A` writes ever happen and whether the VBlank-edge
+   NMI dispatch is even reached in `rf-snes`'s timing loop — the open
+   question is whether NMI is being requested by the PPU at the right
+   raster position at all, or requested and then dropped before `nmi_entries`
+   increments. If the dispatch is confirmed correct and the bug is instead in
+   `RDNMI` ($4210)'s own read-and-clear semantics (a title reads it, the
+   flag doesn't visibly ever go high even though NMI did fire), that is a
+   narrower, single-register fix reachable via a targeted `PROBE_WATCH`.
+
+2. **DMA/mapping: crash into the reset/BRK/COP vector (11 titles).**
+   Confirming evidence needed: repeat W14-26's `PROBE_SPWIN`/`PROBE_SDUMP`
+   bisection on one non-pirate, non-scattered title in this family (Final
+   Fight 3 (Beta)'s unbounded-index shape is the cleanest starting point,
+   since it has a real, if wrong, table read rather than already-crashed PC
+   noise) to find whether the same "$43xx/$42xx read returns a stale or
+   wrong value, an index computed from it goes out of bounds, SP eventually
+   wanders into ROM" chain recurs, or whether this batch has a distinct new
+   root cause. The three scattered-PC titles (ClayFighter Beta, Killer
+   Instinct Beta, Dennis the Menace Beta) should be triaged separately from
+   the tight `BRK`-loop titles — scattered execution suggests the crash
+   happens much earlier, mid-legitimate-code, rather than at a boot-time
+   register read.
+
+3. **APU handshake: CPU polls $2140-$2143 for a word the SPC700 never
+   sends (23 titles).** Confirming evidence needed: for the `spc.stopped=true`
+   subset (Battletoads in Battlemaniacs x2, NBA Live 96, Tekken 2 (Pirate),
+   Urban Strike), repeat W14-23's method — `PROBE_STOP_ON_SPC_STOP` plus
+   `PROBE_SPCRING`/`PROBE_ARAM` around the halt PC — to check whether the
+   same "unbounded receive-loop index overwrites the driver's own polling
+   code" mechanism recurs, since it already explained one title (Super Mario
+   RPG, W14-23/W17-04) precisely. For the larger `$AA`/`$BB`-ready-byte
+   subset (Rocky Rodent, Super Valis IV, and by shape resemblance the
+   `CMP $2140`/`BNE` titles), trace the SPC700 driver's own send side with
+   `PROBE_APUPORTLOG=1` to see whether the CPU-sent index/data pairs ever
+   reach the value the driver is waiting to echo back, or whether the
+   driver itself never reaches its echo instruction (an SPC700 core gap
+   rather than a port-register gap).
+

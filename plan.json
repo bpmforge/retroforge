@@ -7446,7 +7446,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 2,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "id": "W14-34",
   "title": "Re-triage the 74 remaining uniform-screen SNES titles after W14-24..W14-32: 1800-frame sweep, shape classification, next tickets named",
@@ -7460,6 +7460,7 @@
    "W14-34: the three largest families are proposed as the next tickets with the evidence that would confirm each; no core code changes in this ticket"
   ],
   "notes": [
+   "W14-34 CLOSED 2026-09-20: 1800-frame sweep over the 74-title uniform bucket found 4 slow boots (Knights of the Round f=909, Jungle Strike f=991, Justice League Task Force (Beta) f=1643, Undercover Cops (Retro-Bit) f=1767) and 70 stuck titles. Default 3M-instruction probes grouped the 70 into: raster/IRQ NMI-enabled-never-fires (25, largest), APU $2140-$2143 handshake (23), DMA/mapping crash-into-vector (11, same shape as W14-26), register-read semantics (3: Shien's Revenge x2, Top Gear 3000), forced-blank/NMI-off unknown (3), and one-off unknown (4, incl. XBAND STP-halt). Full family table and per-title one-line shapes in docs/TESTING.md under the dated W14-34 heading. Three next tickets proposed with confirming evidence: raster/IRQ NMI dispatch trace, DMA/mapping SPWIN/SDUMP bisection on Final Fight 3 (Beta), APU handshake STOP_ON_SPC_STOP + APUPORTLOG trace. No core code changed (docs-only ticket).",
    "W14-34 FILED 2026-09-20 by the orchestrator: the 2026-09-17 named-cause list is stale after 44 titles moved; a fresh shape census picks the next systemic fixes."
   ]
  }
