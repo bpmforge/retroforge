@@ -41,6 +41,23 @@
 //!                                    PROBE_SPCRING's ring, this is never evicted —
 //!                                    use it to ask "how many times total", not just
 //!                                    "what does recent history look like") (W14-27)
+//! PROBE_SDUMP=hex[,hex]             print e/p/sp/a/x/y and the 12 bytes above the
+//!                                    stack pointer whenever the CPU is about to
+//!                                    execute an instruction at one of these 24-bit
+//!                                    PCs — checks whether an about-to-run RTI/RTS/
+//!                                    RTL is about to pop a real return address, or
+//!                                    static ROM/open-bus content because SP has
+//!                                    wandered into non-WRAM space (W14-26)
+//! PROBE_SDUMP_TABLE=1               with PROBE_SDUMP, additionally decode the
+//!                                    matched PC as a `JSR`/`JMP ($nnnn,X)` table
+//!                                    dispatch and print the table address/entry —
+//!                                    only meaningful when the matched opcode
+//!                                    really is one of those two (W14-26)
+//! PROBE_SPWIN=start:end             log every instruction's opcode byte and the
+//!                                    stack pointer AFTER it runs, across this
+//!                                    decimal instruction-count window (`n`, end
+//!                                    exclusive) — attributes an SP drift to the
+//!                                    exact opcode that moved it (W14-26)
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -191,6 +208,27 @@ fn probe() {
             .filter(|s| !s.is_empty())
             .map(|s| u32::from_str_radix(s, 16).unwrap())
             .collect();
+        // W14-26: dump the stack pointer and the bytes above it whenever
+        // the CPU is about to execute an instruction at one of these
+        // 24-bit PCs (comma-separated hex) — used to check whether an
+        // `RTI`/`RTS`/`RTL` about to run is about to pop a return address
+        // that actually points back into the interrupted code, or into
+        // garbage (e.g. WRAM the game never wrote a return address into).
+        let sdumps: Vec<u32> = std::env::var("PROBE_SDUMP")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| u32::from_str_radix(s, 16).unwrap())
+            .collect();
+        // W14-26: log every instruction's opcode byte and the stack
+        // pointer's value AFTER it runs, across the instruction-count
+        // window `PROBE_SPWIN=start:end` (decimal `n`, end exclusive) —
+        // used to attribute a stack-pointer drift to the exact opcode
+        // that moved it, rather than a coarser per-PC sample.
+        let spwin: Option<(u64, u64)> = std::env::var("PROBE_SPWIN").ok().map(|s| {
+            let (a, b) = s.split_once(':').unwrap();
+            (a.parse().unwrap(), b.parse().unwrap())
+        });
         // W14-24 (coordinator review): measure, rather than assert, what
         // `SnesSystem::step`'s `spent` actually contains between two
         // 24-bit PCs — "PROBE_ACCESSWIN=start:end". Accumulates every
@@ -229,6 +267,15 @@ fn probe() {
                 } else {
                     0
                 };
+            if let Some((start, end)) = spwin {
+                if n > start && n <= end {
+                    let op = rf_snes::cpu::CpuBus::peek(&sys.bus, prev_pc);
+                    println!(
+                        "      SPWIN n={n} prev_pc={prev_pc:06X} op={op:02X} sp={:04X}",
+                        sys.cpu.sp
+                    );
+                }
+            }
             if let Some((start, end)) = accesswin {
                 // `prev_pc` is the address the instruction that JUST ran
                 // (this iteration's `core.step`) was fetched from, since
@@ -370,6 +417,53 @@ fn probe() {
                     }
                 }
             }
+            if !sdumps.is_empty() && sdumps.contains(&(pcv & 0x00FF_FFFF)) {
+                let sp = sys.cpu.sp;
+                let bytes: Vec<u8> = (0..12)
+                    .map(|i| {
+                        rf_snes::cpu::CpuBus::peek(&sys.bus, u32::from(sp.wrapping_add(1 + i)))
+                    })
+                    .collect();
+                println!(
+                    "      SDUMP n={n} pc={:06X} e={} p={:02X} sp={:04X} a={:04X} x={:04X} y={:04X} stack[sp+1..+12]={bytes:02x?}",
+                    pcv & 0x00FF_FFFF,
+                    sys.cpu.e,
+                    sys.cpu.p,
+                    sp,
+                    sys.cpu.a,
+                    sys.cpu.x,
+                    sys.cpu.y
+                );
+                // Optional: decode this PC as if it were a `JSR ($nnnn,X)`/
+                // `JMP ($nnnn,X)` table dispatch — `base` is the next two
+                // bytes (the operand), the table entry lives at
+                // `PBR:(base+X)`, and its 16-bit contents is the would-be
+                // jump target. Only meaningful when the matched PC really
+                // is one of those two opcodes — gated behind its own env
+                // var so it cannot be misread as part of an unrelated
+                // instruction's state (W14-26 almost was, once).
+                if std::env::var("PROBE_SDUMP_TABLE").is_ok() {
+                    let opbank = (pcv & 0x00FF_0000) >> 16;
+                    let opoff = (pcv & 0xFFFF) as u16;
+                    let base = u16::from(rf_snes::cpu::CpuBus::peek(
+                        &sys.bus,
+                        u32::from(opoff.wrapping_add(1)) | (opbank << 16),
+                    )) | (u16::from(rf_snes::cpu::CpuBus::peek(
+                        &sys.bus,
+                        u32::from(opoff.wrapping_add(2)) | (opbank << 16),
+                    )) << 8);
+                    let table_off = base.wrapping_add(sys.cpu.x);
+                    let table_addr = (opbank << 16) | u32::from(table_off);
+                    let lo = rf_snes::cpu::CpuBus::peek(&sys.bus, table_addr);
+                    let hi = rf_snes::cpu::CpuBus::peek(
+                        &sys.bus,
+                        (opbank << 16) | u32::from(table_off.wrapping_add(1)),
+                    );
+                    println!(
+                        "      SDUMP-TABLE table_base={base:04X} table_addr={table_addr:06X} table_entry={hi:02X}{lo:02X}"
+                    );
+                }
+            }
             if pcv != ring_last {
                 pcring.push_back(pcv);
                 ring_last = pcv;
@@ -394,6 +488,9 @@ fn probe() {
                 }
                 last = now;
             }
+        }
+        if std::env::var("W1426_SP").is_ok() {
+            println!("      W1426_SP final sp={:04X}", core.system().cpu.sp);
         }
         if std::env::var("PROBE_PORTS").is_ok() {
             for l in &ring {

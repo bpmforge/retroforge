@@ -800,6 +800,7 @@ First run, 2026-09-15, release build:
 | SNES, after W17-01 | 1265 | **1015** | 120 | 130 | **0** | **0** |
 | SNES, after W17-04 | 1265 | **1017** | 118 | 130 | **0** | **0** |
 | SNES, after W14-24 | 1265 | **1019** | 116 | 130 | **0** | **0** |
+| SNES, after W14-26 | 1265 | **1037** | 98 | 130 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -1857,3 +1858,168 @@ required if a fix lands).
 `plan.json`'s W14-27 entry is left `status: "in_progress"` with a
 BLOCKED note carrying this same finding, matching the W14-23/W14-25
 handoff convention.
+## W14-26 — NHL 95: `$43xx` DMA registers were write-only in this
+emulator; a shipping title reads them back as 24-bit-pointer scratch
+storage (2026-09-20)
+
+The 2026-09-17 triage named the symptom: NHL 95 walks off into WRAM and
+starts executing it as code, before 1.2M instructions, with NMI off by
+the time it happens. This ticket's job was to trace the divergence from
+reset before changing anything. None of the three ranked hypotheses
+(math-unit/joypad register timing, a DMA/HDMA sizing or bank
+mis-mapping, an interrupt-entry/exit flag divergence) was the mechanism
+— the actual defect is upstream of all three, in the DMA channel
+registers' own *read* side, which had never been wired up at all.
+
+**Bisection.** `title_probe`'s `PROBE_INSTR` binary search (bisecting on
+whether the sampled PC's bank was `$7E`/`$7F`) narrowed the first WRAM
+execution to instruction 1,145,810, `PC=$7E:0033`. That address is a
+symptom, not the start: `PROBE_RING`/`PROBE_RINGP` around it showed the
+CPU cycling through a tight ~8-instruction loop
+(`$FF:8181`-`$FF:8191`, then `$00:FD17`, an `RTI`) for the entire
+6000-entry ring buffer, meaning the divergence was much older than the
+bisection point. A new diagnostic, **`PROBE_SDUMP=hex[,hex]`** (prints
+`e`/`p`/`sp`/`a`/`x`/`y` and the twelve bytes above the stack pointer
+whenever the CPU is about to execute one of the given 24-bit PCs — kept
+in `title_probe.rs`, documented in its module doc), showed the `RTI` at
+`$00:FD17` popping a return address that didn't match anything the CPU
+had actually been running — the giveaway that `SP` itself had gone
+somewhere it shouldn't.
+
+**A second new diagnostic, `PROBE_SPWIN=start:end`** (logs every
+instruction's opcode byte and the stack pointer *after* it runs, across
+a decimal instruction-count window — the only way to attribute an `SP`
+change to the exact opcode that caused it, rather than a coarser per-PC
+sample), tracked `SP` back through a steady drain: healthy at
+`$1FF6`-`$1FF9` through instruction ~1,063,179, then a `TCS` at
+`$C5:E8CE` (loading `SP` from `A=$03FF`, itself a legitimate, deliberate
+switch to a small auxiliary stack a game may reasonably do) after which
+`SP` bleeds away by a consistent **6 bytes every 226 instructions** —
+confirmed byte-exact three times running (`0242→023C→0236`,
+`Δ=-6` each) — until it underflows `$0000` around instruction
+1,106,159 and wraps into `$FFDC`-`$FFE0`. Bank `$00` offsets
+`$8000`-`$FFFF` are ROM under this cartridge's LoROM mapping, so once
+`SP` is in that range every further push is a silent no-op
+(`SnesBus::write`'s `Target::Rom => {}`, matching real hardware: ROM is
+not writable) while every pull instead reads back fixed ROM bytes. The
+`$00:FFD9`-`$FFDC` bytes that one `RTI` popped there (`01 33 00 7E`,
+decoding to `PC=$0033, PBR=$7E`) are *exactly* the ROM's own static
+content at that offset (verified with `PROBE_PEEK=00ffd9,...` at
+instruction 1 — before anything could have written there) — that is the
+`$7E:0033` entry point the 2026-09-17 triage saw, and it is a symptom of
+the stack wrap, not a cause in itself.
+
+**The 6-byte-per-pass leak, isolated with `PROBE_SPWIN`:** a `PHA`
+(`$00:FFB4`, pushes 2 bytes, native/16-bit `A`, never popped) followed
+two instructions later by a `BRK #$00` (`$00:FFB7`, pushes 4 bytes)
+whose *hardware* vector (`$00:FFE6`/`$FFE7`, verified `1C FD` =
+`$00:FD1C`) was never given a real handler — `$00:FD1C` itself decodes
+to `COP #$00` (pushes another 4 bytes, vectoring to `$00:FD17`, this
+ROM's shared "swallow a stray interrupt" stub — a bare `RTI`, also
+legitimately used elsewhere for real `COP` calls). That `RTI` only
+unwinds the `COP`'s own 4-byte frame, so the original `BRK`'s 4 bytes
+and the `PHA`'s 2 bytes are never reclaimed: `-2 -4 -4 +4 = -6` net,
+every pass. But `$00:FF49`-`$00:FFB7` is not code at all — `PROBE_DIS`
+shows `$00:FF49`-`$00:FFAE` as unbroken `CD CD CD` filler (this ROM's
+padding byte) decoding as `CMP $CDCD`, then real header bytes
+(maker/title text) from `$00:FFAF` on, then the all-zero checksum-
+complement region at `$00:FFB4`+ — this is the tail of the LoROM
+header, the CPU wandering through data as if it were instructions. The
+`BRK`/`COP` chain is a real, correctly-shipped absorber for a stray
+interrupt; hitting it 47-plus times per frame via header bytes is proof
+the CPU was already lost, not the cause of getting lost.
+
+**Root cause, traced back to the actual wrong jump:** immediately after
+the `TCS`, real code at `$C5:F071` sets the CPU's direct page to
+`$4300` (`LDA #$4300; TCD`) and then uses direct-page-indirect-long
+addressing (`LDA [$12]`, i.e. a pointer read through `$4300+$12 =
+$4312`-`$4314`) as a linked-list walk over per-entity data — a common
+SNES trick, using ordinary addressable memory as scratch storage
+instead of a WRAM table. Bytes `$4312`-`$4314` are DMA channel 1's
+`A1T1L`/`A1T1H`/`A1B1` registers (the channel's own 24-bit A-bus
+address) — the game had earlier written its pointer there with
+`STA $004312` and expects `LDA [$12]` to read the exact bytes back, per
+fullsnes ("4200h-437Fh - PPU2 and CPU Register Overview / DMA"), which
+marks every `$43x0`-`$43xA` DMA/HDMA channel register `(R/W)`, not
+write-only. **`crates/rf-snes/src/bus.rs`'s `read_register_pure` had no
+arm for `0x4300..=0x437F` at all** — `write_dma_register` existed and
+stored into `Channel`'s fields correctly, but nothing on the read side
+ever looked at them, so every read in that range fell through to
+`self.open_bus` (whatever byte was last driven on the bus by an
+unrelated access) instead of the channel's actual state. The garbage
+pointer that produced sent the walk's index (`X`) somewhere wrong;
+eventually the walk executes `JMP $4320` (bank `$85`, offset `$4320` —
+below `$8000`, so `$85` being in LoROM's `$80`-`$BF` "system area"
+means this is DMA channel 2's own register block, not code at all) and
+the CPU starts fetching opcodes from a hardware register — which is
+also what real hardware would do with a garbage pointer, but only
+because this emulator's garbage pointer differs from what real hardware
+would actually read back.
+
+**The fix** (`crates/rf-snes/src/bus.rs`): added
+`read_dma_register`, the read-side mirror of the existing
+`write_dma_register`, wired into `read_register_pure`'s
+`0x4300..=0x437F` arm (so both `read` and the side-effect-free `peek`
+path pick it up). Every `$43x0`-`$43xA` sub-register maps back through
+the same byte split `write_dma_register` uses, read in reverse. No
+other register's behavior changed. A new unit test,
+`dma_channel_registers_read_back_what_was_written`
+(`crates/rf-snes/src/tests/dma.rs`), writes all eleven bytes of one
+channel's block, reads them back through both `read` and `peek`,
+confirms a different channel's identical-offset byte does not alias,
+and confirms running an unrelated channel's DMA transfer does not
+disturb the first channel's now-readable state — the exact shape NHL
+95's own code depends on.
+
+**Verified fixed:** `PROBE_INSTR` + a temporary `W1426_SP` stack-pointer
+probe (not shipped — env-guarded print reverted before this write-up
+the same way `title_probe.rs`'s existing diagnostics are) show `SP`
+legitimately dipping to `$03CC` around instruction 1,070,000 (real,
+bounded work on the auxiliary stack) and then **recovering** to
+`$1FF6`-`$1FF9` by instruction 1,100,000 and staying there through at
+least 3,000,000 instructions — no more underflow, no more wandering
+into ROM or WRAM. `title_probe`'s default 30M-instruction run reaches
+that state and keeps rendering.
+
+**Gate:** `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — **358 passed** (one new,
+above), 0 failed. The ignored suites this class of change should be
+checked against: `gilyon_cputest`'s
+`cputest_full_reports_success_and_every_test_passes` —
+`test_num=0x0649/0x0649, ROM says "Success"`; `blargg_spc`'s
+`spc_timer_reports_pass` — `"PASSED TESTS"`; `singlestep_65816_vectors`
+— pending in this session (release-mode run still in flight at
+write-up time; the debug-mode run this session started first was killed
+for taking too long and is not evidence of anything).
+
+**Census children** (`boot_census_child`, per-title, not the full
+orchestrator run): **NHL 95 (USA) now exits 0** (rendered) — the
+regression the fix was for. The four canaries all still exit 0
+unmoved: **Super Mario World (USA)**, **Wild Guns (USA)**, **Kirby
+Super Star (USA)**, **Super Mario RPG - Legend of the Seven Stars
+(USA)**. The full SNES census re-run (to move the bucket counts and
+name every title `$43xx` readback touches — any ROM that reads a DMA
+register back, not just this one) is the orchestrator's, per this
+ticket's brief.
+
+**Determinism:** no core state field was made non-deterministic; the
+fix only adds a read path over `Channel`'s existing fields, which were
+already part of save state. No RNG, wall-clock, or thread dependency
+was introduced.
+
+**Full SNES census (orchestrator, 2026-09-20, release build, per-title
+`RF_CENSUS_OUT` diff against the W14-24 run):** **1019/116/130/0/0 ->
+1037/98/130/0/0** ("SNES, after W14-26" row above). Eighteen rows
+changed, every one from *uniform screen* to *rendered something*, none
+the other way: **Bill Walsh College Football**, **Earth Defense Force**
+(USA and the Switch Online dump), **Madden NFL '94**, **MechWarrior
+3050**, **MLBPA Baseball**, **Ms. Pac-Man** (USA and the 1996-06-18
+beta), **NHL 95**, **NHL 96**, **NHL 97** (USA, Rev 1 and the beta),
+**NHL 98**, **Secret of Mana** (USA and Virtual Console), and **We're
+Back! A Dinosaur's Story** (USA and beta). The EA Sports titles share
+the DP-at-`$4300` idiom NHL 95 exposed; the rest read a `$43xx`
+register back for other reasons, which is why the write-only gap was
+worth eighteen titles and not one. Residual, not modelled: `$43xB`
+(and its `$43xF` mirror), the unused read/write byte fullsnes lists for
+each channel, still returns open bus; no title in the library has been
+shown to depend on it.

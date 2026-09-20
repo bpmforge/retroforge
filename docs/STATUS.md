@@ -3963,3 +3963,22 @@ stories, 10 decisions).
   storms only when the fill straddles a vblank edge; the original
   "M clear at STZ $4305" reading was a disassembler artefact. Gate on
   the closing commit: see its trailer.
+
+- **W14-26 done, W14-27 blocked — DMA channel registers become
+  readable** (2026-09-20). NHL 95 sets its direct page to `$4300` and
+  parks a 24-bit pointer in DMA channel 1's address bytes; this
+  emulator returned open bus for every `$43xx` read (fullsnes: all of
+  `$43x0-$43xA` are R/W, "8x12 bytes of read/write-able memory"), so
+  the pointer came back as garbage, a jump landed in register space,
+  and a stray-interrupt absorber leaked six stack bytes per pass until
+  the stack underflowed into ROM. One read path plus a unit test.
+  Census 1019/116/130 -> **1037/98/130**: eighteen titles moved to
+  rendering and none regressed (the EA Sports line, Secret of Mana,
+  Earth Defense Force, MechWarrior 3050, Ms. Pac-Man, We're Back!).
+  W14-27 (Soul Blazer) is blocked honestly: the SPC dispatcher, jump
+  table and command byte are byte-exact against ROM and the `$FE`
+  command indexes four slots past the table's last entry into zeroed
+  work RAM, but the sequencer's fetch loop that produced `$FE` was not
+  disassembled, so "hardware does the same" is not claimed; that loop
+  is the named next step. Gate: workspace **2217 passing / 0 failed /
+  43 ignored**, clippy clean, arch OK.

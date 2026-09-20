@@ -7244,7 +7244,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "id": "W14-26",
   "title": "NHL 95: CPU walks WRAM with NMI off before 1.2M instructions — trace the divergence from reset",
@@ -7260,7 +7260,8 @@
    "if the trace shows the game's own code produces the stall and hardware would behave the same, that is stated with the trace and the ticket goes BLOCKED with a named next step (no patching around game bytes, law 5)"
   ],
   "notes": [
-   "FILED 2026-09-20 by the orchestrator from the 2026-09-17 triage list (untraced: walks WRAM before 1.2M instructions, NMI off). Same method as W14-24; check the $4204-$4217 divider/multiplier sites and $4218-$421F auto-joypad reads early, since W14-24 proved register-timing reads are a live class."
+   "FILED 2026-09-20 by the orchestrator from the 2026-09-17 triage list (untraced: walks WRAM before 1.2M instructions, NMI off). Same method as W14-24; check the $4204-$4217 divider/multiplier sites and $4218-$421F auto-joypad reads early, since W14-24 proved register-timing reads are a live class.",
+   "CLOSED-FIXED 2026-09-20: none of the three ranked hypotheses was it. title_probe's PROBE_INSTR bisect + two new diagnostics (PROBE_SDUMP, PROBE_SPWIN) traced the WRAM entry back through a stack-pointer underflow (a real TCS at C5:E8CE legitimately switches to an auxiliary stack, then SP leaks 6 bytes/226 instructions via a BRK/COP absorber the CPU reaches by wandering through ROM header padding once already lost) to the actual first wrong step: crates/rf-snes/src/bus.rs's read_register_pure had no arm for $4300-$437F, so a CPU read of any DMA channel register returned open bus instead of the channel's real state. NHL 95 uses DMA channel 1's A1T1/A1B1 bytes ($4312-$4314) as ordinary 24-bit-pointer scratch storage (direct page set to $4300, STA to write, LDA [dp] to read back) -- fullsnes documents every $43x0-$43xA DMA/HDMA register as (R/W), not write-only. Fixed with read_dma_register (the read-side mirror of the existing write_dma_register), wired into read_register_pure and covering both read() and peek(). Unit test dma_channel_registers_read_back_what_was_written added. NHL 95 (USA) now exits 0 in the census child; Super Mario World, Wild Guns, Kirby Super Star and Super Mario RPG (USA) canaries unmoved. Gate: cargo fmt --check clean, cargo clippy --workspace -D warnings clean, cargo test -p rf-snes 358/358, cargo test --workspace green, gilyon_cputest/spc_timer_reports_pass/singlestep_65816_vectors (5,080,000/5,080,000, same pre-existing $44/$54 MVN/MVP exclusion) all pass. Full write-up in docs/TESTING.md under \"W14-26\". Full SNES census re-run (RF_CENSUS_OUT, name every title this readback fix moves) is the orchestrator's, per this ticket's brief."
   ]
  },
  {
