@@ -2910,11 +2910,15 @@ counter at `SnesSystem::step`'s `self.pending_nmi` dispatch arm
 (`PROBE_NMICOUNT`, reverted) run across `PROBE_MODE=frames
 PROBE_FRAMES=991` (frame indices `0..=990`, i.e. 991 real `Step::Frame`
 calls) counted **971 real NMI dispatches** — essentially one per frame
-(98%) for the entire boot, not a stalled or degenerate rate. NMI is
-edge-triggered on the vblank transition and ignores `I` (fullsnes "SNES
-Interrupts"), so this confirms the vblank clock the game's own timing
-ultimately rests on keeps ticking normally throughout the 991 frames;
-nothing here is parked or skipping vblanks.
+(98%) for the entire boot, not a stalled or degenerate rate; the
+remaining 20 are accounted for, not a residual gap — the earlier
+`ARMLOG n=503433 $4200: 00->B1` enables NMI only around frame 20-30 (at
+this ROM's measured ~17,391 instructions/frame), so the first ~20-30
+frames legitimately dispatch none. NMI is edge-triggered on the vblank
+transition and ignores `I` (fullsnes "SNES Interrupts"), so this confirms
+the vblank clock the game's own timing ultimately rests on keeps ticking
+normally throughout the 991 frames once enabled; nothing here is parked
+or skipping vblanks.
 
 `PROBE_MODE=frames PROBE_FRAME_INDICES=1 PROBE_FRAMES=1000` on the fixed
 tree shows `forced_blank=true` continuously for all 992 sampled frames,
