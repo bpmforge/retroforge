@@ -7696,7 +7696,7 @@
   "crate": "rf-enhance",
   "depends_on": [],
   "points": 1,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-44",
   "title": "rf-enhance stitcher frame-budget test flakes under a parallel workspace run (2.7 s vs 0.45 s alone) — make the budget assertion load-robust",
