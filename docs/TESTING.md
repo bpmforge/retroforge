@@ -6445,3 +6445,283 @@ rf-snes` exit 0 (all passing, 2 pre-existing `#[ignore]`d locals
 unaffected). `boot_census_child` exit codes: all 11 W14-46 titles still
 10 (blank, unchanged); canaries Super Mario World (USA), Wild Guns (USA),
 Kirby Super Star (USA), NHL 95 (USA) all 0 (rendered, unaffected).
+
+## W14-48 — APU upload rate and premature handoff: both parts BLOCKED,
+## W14-46's premises corrected by measurement
+
+(2026-09-20, docs-only; ticket left `blocked`)
+
+Baseline: `cargo fmt --check` exit 0, `cargo clippy --workspace -- -D
+warnings` exit 0, `cargo test -p rf-snes --release` all passing, all
+five ignored oracle suites re-run and green (`spc700_cycle_table_
+matches_the_vectors`, `singlestep_spc700_vectors`, `spc_timer_reports_
+pass`, `cputest_full_reports_success_and_every_test_passes` (gilyon),
+`peterlemon_golden` x3), `scripts/validate-arch.sh` exit 0. No
+`crates/**` changes — see the Bug Fix Discipline note at the end of each
+part below for why.
+
+### Part A (Battle Grand Prix): W14-46's "never finishes" is not
+### supported by a longer run — the driver loop completes; the census
+### blank has a different, unrelated cause
+
+W14-46 sampled a fixed 3,000,000-instruction / 1800-frame window and
+found the CPU still inside the `$0182A6: CMP $2140 / BNE $82A6` poll at
+the end of it, and read that as "not complete". Re-running with a wider
+`PROBE_INSTR` sweep (`title_probe`, this ticket) shows the loop actually
+exits well before that: at `PROBE_INSTR=3,000,000` (frame 182) the CPU
+is still polling; at `PROBE_INSTR=10,000,000` (frame 720) it is already
+running an unrelated `$038080`-`$038088` vblank-wait idiom
+(`LDA $4212`/`BPL`/`BMI`, the standard `WaitVBlank` shape) and never
+returns to the transfer loop. `PROBE_PACKETLOG`'s
+`ports_in0_changes` total — the CPU's own write-counter, which advances
+once per accepted byte in this protocol — confirms this without relying
+on a single PC sample: **55,357 at 3,000,000 instructions (frame 182),
+58,595 at 30,000,000 instructions (frame 2284)** — only 3,238 more
+transfers across the next 27,000,000 instructions, i.e. the transfer
+completes and stops advancing; it is not still climbing.
+
+**Measured throughput vs. the hand-computed hardware rate.** The
+driver's own SPC700 receive loop (decoded with a scratch disassembler,
+verified opcode-by-opcode against `crates/rf-snes/src/apu/spc700/
+ops.rs`; addresses and bytes from `PROBE_APUPORTLOG`/`PROBE_DIS`):
+
+```text
+0E1F: 5E F4 00   CMP Y,!$00F4      4 cycles (Absolute, alu_operand low=0x16... )
+0E22: D0 0F      BNE $0E33         2 (not taken, the common case while polling)
+0E24: E5 F5 00   MOV A,!$00F5      4
+0E27: CC F4 00   MOV !$00F4,Y      5   <- the echo; CPU's spin ends here
+0E2A: D7 14      MOV [$14]+Y,A     7
+0E2C: FC         INC Y             2
+0E2D: D0 F0      BNE $0E1F         4 (taken, loops for the next byte)
+```
+Cycle costs are this crate's own vector-verified `spc700::timing::
+CYCLES` table (`crates/rf-snes/src/apu/spc700/timing.rs`), the same
+lower-bound table `catch_up_apu`'s deferral already uses. An accepted
+byte costs the mismatch-poll pass(es) plus one exact match: the
+`PROBE_ALLPC` histogram from this session (`0E2Ax5208 0E1Fx3978
+0E27x3408 0E24x2697` over a representative window) shows `$0E1F`
+visited about 1.45x per accepted byte (poll overhead from the driver
+racing the CPU's own, faster, poll loop), giving roughly (4+2)x0.45 +
+4+5+7+2+4 = ~25 cycles average per accepted byte, ~525 master cycles
+(21 master/SPC-cycle). At 357,366 master cycles/frame (NTSC, 21.477 MHz
+/ 60.098 Hz) that is a **hardware estimate of roughly 680 bytes/frame**
+if the SPC side were the sole bottleneck with no poll overhead, or
+**roughly 425-500 bytes/frame** accounting for the measured 1.45x
+`$0E1F` revisit rate. **Measured on this emulator: 55,357 bytes / 182
+frames = ~304 bytes/frame** — about 1.4-2x slower than the hardware
+estimate, not the multiple-orders-of-magnitude stall the "never
+finishes" framing implied.
+
+**Where the 1.4-2x comes from, without a fix.** `SnesBus::catch_up_apu`
+(`crates/rf-snes/src/bus.rs:710`) is called both from the CPU's `$2140`
+read/write arms (lines 453-456, 478-480) and once per CPU instruction
+from `system.rs` (`self.bus.apu_debt += spent; ... self.bus.
+catch_up_apu();`, `system.rs:261-265`). Since `apu_debt` is drained to
+its sub-21-master-cycle remainder every instruction, the port-arm calls
+are a no-op in steady state (confirmed: `apu_debt` at the top of a port
+read is always < 21 once the per-instruction call above has already
+run) — so **`catch_up_apu` is already invoked before both reads and
+writes** (the acceptance's own open question), and it makes no
+difference either way here. The remaining 1.4-2x gap is consistent with
+ordinary CPU-instruction-granularity quantisation (a 65816 poll
+instruction typically costs under 21 master cycles, so several
+instructions' worth of debt must accumulate before even one SPC cycle
+is dispatched) rather than a specific accounting bug — `apu_debt`
+persists and is never dropped, so this is jitter bounded by one SPC
+instruction's cost, not a structural throttle. **This ticket declines to
+touch `catch_up_apu`'s deferral to close the 1.4-2x gap**: W14-41's own
+fix in the same function is exactly what protects Tommy Moe's (a census
+canary this ticket is required to watch), and any looser deferral rule
+risks reopening that exact clobber for a gain that does not change the
+census outcome (below).
+
+**It does not matter for the census outcome.** Even at 2x the measured
+rate the transfer would finish around frame 350-400 — the CPU already
+leaves the loop by frame 720 at the ACTUAL rate, well inside
+`boot_census`'s 600-frame budget (`crates/rf-harness/tests/
+boot_census.rs:68`, `const FRAMES: u32 = 600`)... other than it doesn't:
+`boot_census_child` still reports `EXIT_BLANK` (10) for Battle Grand
+Prix (below), which the transfer-completion timing above rules out as
+the cause. **The actual chain**: `PROBE_ALLPC` over a
+200,000-instruction window at `PROBE_INSTR=23,000,000` (well past the
+loop's exit) shows 43 distinct CPU PCs — genuine varied execution, not a
+second stall — while `cgram_nonzero=0` and `forced_blank=true` the
+entire time (confirmed from frame 182 through frame 2284, i.e. from
+before the transfer even starts to nearly 4x past `boot_census`'s
+600-frame window). The CPU is running real code and never writes a
+single non-zero CGRAM byte or clears the forced-blank bit
+(`$2100` INIDISP) in that whole window. This is upstream of (and
+unrelated to) the APU port pair `$2140`-`$2143` this ticket's scope
+covers — no port write appears anywhere near the CPU PCs sampled in that
+window — so it is out of scope here.
+
+**Verdict: BLOCKED, not fixed** (Bug Fix Discipline: the two live
+hypotheses going in — "the SPC's echo is held past the CPU's poll by
+`catch_up_apu`'s deferral" and "IPL `pending` delays fire on this
+non-IPL driver path" — were both checked directly: `boot.is_running()`
+is `true` throughout this window (control was handed to the real SPC700
+core long before this loop runs), so `IplBoot::poll`/`pending` are never
+consulted at all on this path; and the port-arm-vs.-per-instruction
+catch-up ordering question above resolves to "already both, and it does
+not matter". Neither hypothesis survived verification, so per CLAUDE.md's
+Bug Fix Discipline no fix is proposed here — shipping a change to
+`catch_up_apu`'s deferral without a confirmed defect risks the Tommy
+Moe's regression it exists to prevent, for a throughput change that does
+not move the census.) The chain reaches specific, checked state: ARAM
+destination pointer `[$14]/[$15]` and port pair `$2140`-`$2143`
+(measured rate, ruled out as this title's actual blank-screen cause) and
+`$2100`/CGRAM (never written, the census's real cause, out of this
+ticket's scope). **Sibling, not separately traced:** NBA Live 96 (USA)
+shows the same `apu.boot_running=true`/active-driver shape per W14-46;
+not independently re-measured in this pass.
+
+### Part B (Urban Strike): the premature `Run` hands off to the wrong
+### address — traced to a specific opcode reading a specific zero ARAM
+### range this HLE never populates
+
+`PROBE_STOP_ON_SPC_STOP=1 PROBE_PORTS=1` on the real handshake (not a
+synthetic one) shows the exact hand-over instant:
+
+```text
+n=157668 cpu=928037 boot=Transferring(131) in=[82,00,60,04] out=[81,bb,00,00]
+n=157694 cpu=928037 boot=Transferring(131) in=[82,00,60,04] out=[82,bb,00,00]
+n=157717 cpu=92805D boot=Running          in=[86,00,60,04] out=[82,bb,00,00]
+n=157761 cpu=92805D spc=0460 boot=Running in=[86,00,60,04] out=[86,bb,00,00]
+n=157776 cpu=808071 spc=EFF2              in=[f0,00,60,04] out=[86,bb,00,00]
+```
+
+`ports_in[2..4] = [60,04]` at the `Run` instant decodes as address
+**$0460 — the START of the just-uploaded 131-byte block, not $0486** (38
+bytes in, where the block's own real driver code begins per
+`PROBE_FINDROM`, below). The SPC's PC at the first sample after hand-over
+is `$0460`, matching the port pair exactly, not `$0486`. `IplBoot::
+cpu_wrote`'s `Transferring` arm (`crates/rf-snes/src/apu/boot.rs:366-367`)
+sets `self.entry = self.address = ports_in[2..4]` from whatever the CPU's
+LAST address write was — here, that is genuinely `$0460`, matching the
+disassembled 65816 finish sequence (`PROBE_DIS=92:8020:8070`): the code
+at `$928034`-`$92805D` does the final byte-echo wait, an indexed table
+lookup (`JSR ($C248,X)`, `LDA [$68],Y`), a single `STA $2142` (low
+address byte, `$928049`) with no accompanying `STA $2143` (the high byte
+carries over unchanged from the block's own base, `$04`), then the kick
+(`STA $2140`, `$92805A`) and the final echo-wait (`CMP $2140`,
+`$92805D`, matching `n=157717` above exactly). **The CPU genuinely sends
+$0460 as the run address — this is not an ordering bug in when ports 2/3
+are latched; the 65816 itself computed and sent that address.**
+
+**Decoding $0460 (verified byte-by-byte against `ops.rs`):** `$0460 = $01`
+is `TCALL 0` (`ops.rs:709-716`, the `op & 0x0F == 0x01` arm) — push PC,
+then jump via the 16-bit vector at `$FFDE`/`$FFDF`. `PROBE_ARAM=ffd0:ffe0`
+shows this range is **all zero** in this emulator's ARAM. `TCALL 0`
+therefore jumps to `$0000` and free-wheels through NOP (`$00`) — exactly
+the walk `PROBE_SPCREGPC`/the sample at `n=157776` (`spc=EFF2`, ~60KB
+past anything ever transferred) already showed W14-46 could not explain.
+This is a **real hardware technique this HLE does not model**: fullsnes
+("SNES APU Boot ROM") documents the 64-byte IPL ROM at `$FFC0`-`$FFFF`
+as containing, among other things, the sixteen `TCALL` vectors —
+commercial SPC700 drivers commonly call back into the still-mapped boot
+ROM via `TCALL` after the initial handoff (a documented way to reuse the
+IPL's own byte-receive routine for a second, larger transfer without
+re-deriving it). `crates/rf-snes/src/apu/boot.rs`'s own module doc says
+plainly: "this module is a state machine, not SPC700 code" — no bytes
+are ever resident at `$FFC0`-`$FFFF`; `Apu::reenter_ipl` only reacts to
+the SPC's *program counter* landing there (a real jump, correctly
+triggering a reboot per fullsnes), never to a plain *data read* of the
+same range, which is what `TCALL 0`'s vector fetch is. Real hardware
+gates this region between the boot ROM and ordinary RAM with `$00F1` bit
+7 (documented in fullsnes "SNES APU Memory and I/O Map"); this crate's
+`echo.write_disabled` field (visible in every probe dump above) tracks a
+related but distinct bit and was not extended to this question in this
+pass.
+
+**Confirms/refutes W14-46's own two hypotheses.** (a) "a second, larger
+upload was supposed to follow" — refuted directly: `PROBE_FINDROM` on the
+CALL targets the 131-byte stub's OWN code invokes (`$07D3`, `$06BA`x3,
+`$05A9`) finds them non-zero and structurally plausible (e.g. `cd1e
+3fd307` — the stub's own opening bytes — appear verbatim in the ROM at
+LoROM `92:83B8`), so those calls are into already-resident, real driver
+code, not missing data; the CPU also moves on to unrelated code
+(`$808071`) within a handful of SPC instructions of the handoff rather
+than sending more upload bytes, so no second block was pending. (b) "the
+real driver relies on a transfer mechanism this HLE does not model at
+all" — **confirmed, specifically**: the mechanism is `TCALL`-into-boot-ROM,
+and this HLE's boot ROM has no bytes, only a state machine.
+
+**Verdict: BLOCKED, not fixed.** The chain is complete and checked at
+every step: port pair (`$2142`, value `$60`; `$2143` unchanged at `$04`)
+-> address (`$0460`) -> opcode (`$01`, `TCALL 0`) -> vector address
+(`$FFDE`) -> vector value (confirmed `$0000` via direct ARAM dump) -> the
+observed walk into unwritten ARAM -> `Apu::reenter_ipl`'s correct (per
+fullsnes) but too-late reboot at `$FFC0`. A real fix needs `SnesBus`/
+`Apu` to serve `$FFC0`-`$FFFF` reads as the documented real IPL ROM
+bytes (at minimum the `TCALL` vector table) whenever `$00F1` bit 7 has
+the boot ROM mapped in, which is a change to what "the boot handshake
+is a state machine with no resident bytes" (`boot.rs`'s own founding
+design note, W6-04b) means for reads outside the handshake's own
+port-driven writes — exactly the kind of core/layer-boundary change
+CLAUDE.md law 4 asks not to rush, and this session's remaining budget did
+not allow verifying it against the rest of the IPL/boot test suite and
+the other ROMs that reboot via `$FFC0` (Super Bonk, per `boot.rs`'s own
+`IPL_INIT_CYCLES` doc). Filed as a follow-up rather than shipped
+speculatively.
+
+### Gate
+
+`cargo fmt --check` exit 0. `cargo clippy --workspace -- -D warnings`
+exit 0. `cargo test -p rf-snes --release`: all passing, 0 failed.
+Ignored oracle suites, all re-run and green on this tree:
+`spc700_cycle_table_matches_the_vectors`, `singlestep_spc700_vectors`
+(256,000/256,000), `spc_timer_reports_pass` (`blargg_spc`, "PASSED
+TESTS"), `cputest_full_reports_success_and_every_test_passes` (gilyon),
+`peterlemon_golden` (all three), `singlestep_65816_vectors`
+(`cargo test --release -p rf-snes --lib cpu::tests::vectors --
+--ignored`, 5,080,000/5,080,000, ~621s — run in the background; exceeds
+the 600s foreground ceiling). `scripts/validate-arch.sh`: `arch OK`.
+`cargo test --workspace` (law 3's exact command): one pre-existing failure, `retroforge::memory_editor_writes_the_machine::an_edit_committed_while_paused_reaches_the_machine_and_one_sent_running_does_not` ("left: 0, right: 171"), unrelated to this ticket (`crates/retroforge/tests/`, a UI memory-editor test with no path through `rf-snes` or the APU) and reproduced alone, not under worktree contention like the W14-41-era flake — confirmed pre-existing since this worktree has zero source diffs from the `main` commit it branched from. All other crates pass.
+
+**Census** (`RF_CENSUS_ROM=<zip> boot_census-* --ignored --exact
+boot_census_child`, built once with `cargo test --release -p rf-harness
+--test boot_census --no-run`), the ticket's full sixteen, exit codes as
+measured on this (unmodified) tree:
+
+| Title | Exit | Meaning |
+|---|---|---|
+| Battle Grand Prix (USA) | 10 | blank — traced above, CGRAM-related, not APU |
+| Urban Strike (USA) | 10 | blank — traced above, TCALL-into-boot-ROM |
+| NBA Live 96 (USA) | 10 | blank — sibling, not separately traced |
+| Tekken 2 (USA) (Pirate) | 10 | blank — named only, per ticket priority |
+| Rival Turf! (USA) | 10 | blank |
+| Super Turrican (USA) | 10 | blank |
+| Wario's Woods (USA) | 10 | blank |
+| Tommy Moe's Winter Extreme (USA) | 10 | blank |
+| International Tennis Tour (USA) | 10 | blank |
+| Super Mario RPG (USA) | 0 | rendered |
+| Super Mario World (USA) | 0 | rendered |
+| Wild Guns (USA) | 0 | rendered |
+| Kirby Super Star (USA) | 0 | rendered |
+| NHL 95 (USA) | 0 | rendered |
+| ActRaiser 2 (USA) | 10 | blank — pre-existing W14-33/38 family |
+| Full Throttle - AAR (USA) (Beta) | 0 | rendered |
+
+No exit code differs from this ticket's start (no `crates/**` changes
+were made, so none could). **One anomaly worth naming, not this
+ticket's to resolve:** Rival Turf!, Super Turrican, Wario's Woods and
+Tommy Moe's report `EXIT_BLANK` (10) here, where W14-41's own write-up
+table records them "0 — unmoved" (rendered) on the tree immediately
+after that ticket's fix landed. `title_probe`'s own frame-mode sweep on
+Tommy Moe's (`PROBE_MODE=frames PROBE_FRAMES=600`) reports
+`varied_at=Some(48)` — it DOES vary well inside `boot_census`'s 600-frame
+budget — while the sibling `boot_census_child` process, run against the
+identical ROM and commit with no code between them, reports never-varied.
+Since this ticket made no source changes, this discrepancy cannot be
+something this session introduced; it looks like a difference between
+`title_probe`'s and `boot_census`'s own "varied" criteria (frame-buffer
+sink construction, or the exact number of forced-blank/bright=0 frames
+counted at the front of the run) rather than an emulation regression, but
+it was not run down further here — flagging for the orchestrator/next
+ticket, since `boot_census` is the ledger's own source of truth and this
+change is unexplained by anything in this ticket's write_scope.
+
+plan.json flipped to `blocked` (both parts unresolved with citations,
+per the acceptance's own BLOCKED allowance); the orchestrator's own
+full-census re-run is left to them per the acceptance's standing
+instruction.
