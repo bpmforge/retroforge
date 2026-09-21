@@ -261,12 +261,17 @@ impl crate::system::SnesSystem {
                 if let Some(d) = &b.dsp1 {
                     d.save(o)?;
                 }
-                // W14-47: the enable-edge NMI latch — see
-                // `SnesSystem::nmi_and_line`'s doc. Appended last, same
-                // reasoning as DSP-1/SA-1 above: a state saved before this
-                // ticket and one saved after only disagree in what
-                // trails the byte the older format already ends at.
-                o.bool(self.nmi_and_line)
+                // W14-47 shipped an enable-edge NMI latch here
+                // (`nmi_and_line`) plus a follow-up "seen before" flag;
+                // both were removed by the W14-47 follow-up ticket
+                // (2026-09-20) once real ROMs (The Terminator, Super
+                // Black Bass, Magical Drop II) proved the enable-edge
+                // rule they backed regresses commercial titles with no
+                // offsetting fix — see `SnesSystem::step`'s NMI-dispatch
+                // doc. Nothing appended in their place; `pending_nmi`
+                // above and the ordinary flag-edge dispatch need no
+                // extra state.
+                Ok(())
             }
             StateRegion::Ppu => self.bus.ppu.save(o),
             StateRegion::Apu => self.bus.apu.save(o),
@@ -373,7 +378,9 @@ impl crate::system::SnesSystem {
                 } else {
                     self.bus.dsp1 = None;
                 }
-                self.nmi_and_line = i.bool()?;
+                // W14-47's enable-edge latch and its follow-up's "seen
+                // before" flag are gone (see the matching write above) —
+                // nothing left to read here.
                 Ok(())
             }
             StateRegion::Ppu => self.bus.ppu.load(i),

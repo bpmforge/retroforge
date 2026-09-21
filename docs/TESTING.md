@@ -6406,3 +6406,179 @@ with unit tests, per the acceptance's "if missing, implement it"
 instruction — independently of whether it explains either title's
 symptom, exactly as W14-35's RDNMI vblank-end fix was independently
 correct despite explaining none of its four titles' symptoms either.
+
+## W14-47 follow-up — the enable-edge NMI rule refuted by real ROMs,
+reverted to flag-edge-only (2026-09-20, RESOLVED)
+
+**The five titles the enable-edge rule regressed.** W14-47's fix (see
+above) made `SnesSystem::step` dispatch NMI on ANY 0-to-1 edge of
+`nmitimen.nmi_enabled() && timing.nmi_flag`, not only the flag's own
+rise. A full census run on the resulting tree, compared against main
+(pre-W14-47), showed no title improved and five regressed from rendered
+to uniform: Magical Drop II (USA, Europe) (Switch Online), Super Black
+Bass (USA), Tecmo Super Bowl III - Final Edition (USA), The Terminator
+(USA), War 3010 - The Revolution (USA).
+
+**Three of the five traced end to end with `PROBE_IRQLOG`/`PROBE_RINGP`,
+each refuting a different width of the rule.**
+
+- **The Terminator (USA)**: boots with NMI disabled, polls `$4210`
+  directly for ~205 frames, then writes `$4200: 00->A1` at n=2,143,181
+  (line 225 dot 90) — its first-ever enable — while `$4210` bit 7 is
+  still 1 from this SAME vblank's edge at dot 7 (never read in between).
+  On main (no enable-edge rule) this write does NOT dispatch; the game
+  waits for the next real vblank edge (n=2,153,414) and renders correctly
+  from then on, 81 further dispatches over the rest of the traced window.
+  Under W14-47's rule, the write dispatches immediately, running the NMI
+  handler a full vblank before the ROM's own boot sequence is ready for
+  it; the handler responds by writing `$4200: A1->00`, disabling NMI for
+  good (`nmitimen=NmiTimen(0)` for the rest of the run, `nmi_dispatch_
+  events=1` total instead of 81), and the title hangs on a handler-only
+  frame counter (`00:D67D CMP $00003C` / `00:D681 BEQ`) that nothing ever
+  advances again.
+- **Super Black Bass (USA)**: identical shape, one degree worse: `$4200:
+  00->81` at n=17,504 while `$4210` has been stale since line 225 dot 7 —
+  over 2,500 master cycles earlier, ruling out any plausible
+  instruction-pipeline delay as an excuse. Main waits 51,426 more steps
+  for the real edge (n=68,930) and never disables NMI again
+  (`nmi_dispatch_events=116` over the rest of the run). W14-47's rule
+  fires at n=17,505 (or n=17,505 exactly with a one-instruction defer,
+  tried and rejected below); the ROM's handler disables NMI at n=17,755
+  and never re-enables it, hanging on a direct `$4210` poll.
+- **Magical Drop II (USA, Europe) (Switch Online)**: refutes even
+  fullsnes's OWN narrower wording. This ROM disables and re-enables bit 7
+  EVERY single frame as routine practice (`$4200: 81->01` then `01->81`
+  a few dots apart, e.g. n=1,040,797/1,040,812), with `$4210` unread and
+  set the whole time — literally fullsnes's named "disable and
+  re-enable" case, on a title that neither wants nor tolerates the
+  redispatch it describes. Main (no enable-edge rule, so the toggle is a
+  no-op) dispatches on only 68 of the 121 vblanks it observes — the
+  ordinary flag edge sometimes lands mid-toggle and main simply misses
+  it, exactly as unmodified hardware would, and the title still renders
+  fine. A history-gated version of the rule (redispatch only once enable
+  has been seen at least once before — tried below) fires on every one of
+  those 121 toggles instead, far more often than main ever does, and the
+  title goes uniform.
+
+**Two designs were tried and rejected before settling on a full revert,
+each falsified by the SAME three titles.**
+
+1. *A one-instruction-deferred enable-edge* (fullsnes: the internal flag
+   "gets cleared when the NMI gets executed, **which should happen
+   around after the next opcode**"; bsnes's reference implementation,
+   `sfc/cpu/irq.cpp`, models exactly this as a hard split — `nmitimenUpdate`
+   only sets `status.nmiTransition` and unconditionally sets
+   `status.irqLock = 1`; `CPU::lastCycle` tests `nmiTest()` only `if
+   (!status.irqLock)`, and `irqLock` clears on the CPU's NEXT bus access,
+   not on the write that set it). Implemented as a `nmi_edge_latched`
+   field promoted to `pending_nmi` at the top of the FOLLOWING `step()`
+   call. This fixed The Terminator by accident (the one extra
+   intervening instruction happened to matter for that title's specific
+   boot sequence) but fired 51,425 steps too early for Super Black Bass
+   — a full extra, unscheduled vblank early is not a timing-precision
+   problem a one-opcode defer can paper over, because there is no
+   previously-armed NMI to redispatch in either case: this is software's
+   FIRST-EVER enable, not fullsnes's named special case.
+2. *A history-gated redispatch* (`nmi_enable_seen_before`: only a GENUINE
+   re-enable — bit 7 has been 1 at least once since reset — redispatches;
+   a first-ever enable never does). This matched main exactly for both
+   The Terminator and Super Black Bass, but Magical Drop II's routine
+   per-frame disable/re-enable then redispatches every single frame,
+   which no title (including Magical Drop II itself) needs or tolerates.
+
+Both attempts are left documented in this entry and were reverted rather
+than kept as dead code; neither is in the shipped fix.
+
+**The shipped fix**: `SnesSystem::step` dispatches NMI on the FLAG
+operand's own 0-to-1 edge (`events.vblank_started && nmitimen.
+nmi_enabled()`) and nothing else — exactly main's pre-W14-47 rule. The
+ENABLE operand's own edge never dispatches, in any of its three tried
+forms. `SnesSystem::nmi_and_line` and the follow-up's
+`nmi_enable_seen_before` fields, and their two trailing state-format
+bytes, are removed entirely; `pending_nmi` needs no companion state for
+this rule.
+
+**Zero of the five census-regressed titles, and neither of W14-35's
+originally-traced titles (Final Fight 2, Battletoads in Battlemaniacs),
+were ever explained or fixed by ANY version of the enable-edge rule** —
+the acceptance brief's hypothesis (b) is refuted, not merely
+"unconfirmed": every version tried made the census strictly worse than
+having no rule at all.
+
+**Unit tests** (`crates/rf-snes/src/tests/system.rs`) replace the three
+W14-47 tests with three that pin the reverted behaviour:
+`nmi_enable_write_never_dispatches_by_itself_even_with_a_stale_flag` (a
+`$4200` write must never dispatch alone, matching The Terminator/Super
+Black Bass); `nmi_dispatches_on_the_next_real_vblank_edge_once_enabled`
+(the one rule kept, driven through `Timing::advance` itself rather than
+by poking `nmi_flag`, so `events.vblank_started` is set the same way a
+real vblank sets it); `disable_then_reenable_does_not_redispatch_while_
+the_flag_is_still_set` (pins the ABSENCE of fullsnes's literal
+redispatch, per Magical Drop II). All three fail against the W14-47
+tree's dispatch logic and pass against this fix.
+
+**A second real regression, found and reverted, not merely re-pinned.**
+`cargo test -p rf-snes --test undisbeliever_golden -- --ignored` failed
+on `inidisp_enable_display_mid_frame.sfc`'s write-record hash, moving
+from W14-47's pinned value
+(`ec428d365cbc5603c529a1aed56e5397250e8b82bb5237a02c2d10efa14ee9d5`) to
+`b344422632b66c199157f96fbd32908caee491b18ea2b451940296436e8e4d4d` — which
+is EXACTLY the hash pinned before W14-47 (commit `b28b53d`). W14-47's own
+write-up treated its move (the opposite direction) as confirmation the
+enable-edge rule was correct; that reasoning was circular — this golden
+hashes a write-record trace for self-consistency across code changes,
+not against an independent hardware oracle, so "the golden moved to
+match the code that just changed" cannot confirm the code. Reverting to
+the exact pre-W14-47 hash here is the strongest available evidence that
+this fix restores main's own timing rather than producing a third,
+coincidentally-different trace.
+
+**bsnes citation** (`sfc/cpu/irq.cpp`, fetched 2026-09-20 from
+`github.com/bsnes-emu/bsnes`): `nmitimenUpdate`'s enable-rise check —
+`if (io.nmiEnable.raise(data & 0x80) && status.nmiLine) status.
+nmiTransition = 1;` — matches fullsnes's literal AND-edge reading with no
+history check of its own, but gates delivery behind `status.irqLock`
+(set on every `$4200` write, cleared only by the CPU's next bus access),
+a real hardware delay this codebase does not model at that granularity.
+Magical Drop II's every-frame disable/re-enable shows that even bsnes's
+exact rule, ungated by history, would over-fire for that title the way
+attempt 2 above did — bsnes's `irqLock` is doing more work here than a
+same-tick or one-opcode defer can reproduce without also modelling real
+per-access timing this ticket does not implement. Given three real ROMs
+converge on "the enable operand's edge never needs to fire" and zero
+converge on any version that does, the simpler, fully-reverted rule is
+what ships.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — **375 passed**, 0 failed, 1
+ignored (unchanged count: three W14-47 tests replaced by three new
+ones). Ignored SNES suites: `singlestep_65816_vectors` — **5,080,000
+passed, 0 failed**; `spc700_vectors`'s `singlestep_spc700_vectors` —
+**256,000 passed, 0 failed**; `gilyon_cputest` — `test_num=0x0649/0x0649,
+ROM says "Success"`; `blargg_spc`'s `spc_timer_reports_pass` — `"PASSED
+TESTS"`; `peterlemon_golden` — all 3 tests pass; `undisbeliever_golden`
+— both gating tests pass post-re-pin; `retroforge`'s `determinism.rs`
+— both 10k-frame replay-determinism tests pass
+(`same_log_two_10k_frame_runs_produce_identical_hash_sequences`,
+`different_10k_frame_logs_produce_divergence_detected_at_first_occurrence`).
+`scripts/validate-arch.sh` — `arch OK`.
+
+**Census children**, built fresh with the reverted rule, RELEASE, exit 0
+= rendered, 10 = uniform: all five regressed titles — **10 -> 0**
+(fixed). W14-35's four (must stay as documented): Final Fight 2,
+Battletoads in Battlemaniacs — **10** (unmoved, unrelated cause per
+W14-47 above); ActRaiser 2, Illusion of Gaia — **0** (unmoved); Lagoon,
+Phalanx — **10** (unmoved, unrelated `$2100`/`$212C` cause). Canaries:
+Super Mario World, Wild Guns, Super Mario RPG, NHL 95, Kirby Super Star,
+Final Fantasy Mystic Quest, Super Mario Kart, F-Zero, Full Throttle -
+All-American Racing (Beta), Donkey Kong Country — **0**, all unmoved.
+
+**Determinism**: the dispatch condition is now a pure function of two
+already-deterministic bus fields with no extra state at all — simpler
+than before this follow-up, not just reverted.
+
+**Ticket disposition**: RESOLVED for the five census regressions this
+follow-up was filed to fix. The raster/IRQ family itself (Final Fight 2,
+Battletoads) remains BLOCKED exactly as W14-47 left it — this follow-up
+touched only the enable-edge rule, which never explained either title
+and is now gone.

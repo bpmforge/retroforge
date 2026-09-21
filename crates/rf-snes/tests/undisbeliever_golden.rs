@@ -215,7 +215,23 @@ const WRITE_GOLDENS: &[(&str, &str)] = &[
     // register: `regs=[2100]` under `survey_the_whole_set`, unchanged.
     (
         "inidisp_enable_display_mid_frame.sfc",
-        "ec428d365cbc5603c529a1aed56e5397250e8b82bb5237a02c2d10efa14ee9d5",
+        // W14-47's enable-edge dispatch moved this hash from its
+        // pre-ticket value (see below) to
+        // "ec428d365cbc5603c529a1aed56e5397250e8b82bb5237a02c2d10efa14ee9d5"
+        // and W14-47's own write-up read that move as confirmation the
+        // rule was correct. It was not independent confirmation — this
+        // golden hashes a write-record TRACE for self-consistency, not
+        // against a real-hardware oracle, so "the golden moved to match
+        // the code that just changed" is circular. The W14-47 follow-up
+        // ticket (2026-09-20) reverted the enable-edge rule after three
+        // real ROMs (The Terminator, Super Black Bass, Magical Drop II)
+        // proved it regresses commercial titles; this hash is back to
+        // EXACTLY the value pinned before W14-47
+        // (`b28b53d`/`b344422632b66c199157f96fbd32908caee491b18ea2b451940296436e8e4d4d`),
+        // which is the strongest available confirmation that reverting
+        // the rule restored main's own timing rather than coincidentally
+        // producing a third, different trace.
+        "b344422632b66c199157f96fbd32908caee491b18ea2b451940296436e8e4d4d",
     ),
     // 5,460 writes across all 224 lines (was 1,988 over 70) — now
     // identical to the record `inidisp_hammer_0f00.sfc` used to have,
