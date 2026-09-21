@@ -945,3 +945,151 @@ fn stp_does_not_wake_on_a_masked_irq() {
         "STP must stay halted -- it wakes only on reset, never an IRQ"
     );
 }
+/// Ticket W14-47 follow-up (2026-09-20 census regressions: Magical Drop
+/// II, Super Black Bass, Tecmo Super Bowl III, The Terminator, War
+/// 3010). W14-47 read fullsnes "SNES Interrupts" -- "The CPU includes
+/// another internal NMI flag, which gets set when '[4200h].7 AND
+/// [4210h].7' changes from 0-to-1" -- as licensing a dispatch from the
+/// ENABLE operand's own rise (a `$4200` write turning bit 7 on while
+/// `$4210` bit 7 is already stale), not only the flag's. Real ROMs
+/// refute it: The Terminator and Super Black Bass both enable NMI for
+/// the first time ever while `$4210` is stale from an earlier vblank
+/// (NMI was off through it), and neither dispatches on hardware -- both
+/// wait for the next genuine vblank edge. This test pins that: a `$4200`
+/// write must never dispatch by itself, no matter what `$4210` holds:
+/// only a real vblank edge (`events.vblank_started`, driven by
+/// `Timing::advance`) may.
+#[test]
+fn nmi_enable_write_never_dispatches_by_itself_even_with_a_stale_flag() {
+    let mut rom = lorom_image(0x20, 0x00);
+    rom[0x0000] = 0xEA; // NOP, ×2 -- something harmless to execute
+    rom[0x0001] = 0xEA;
+    rom[0x7FFA] = 0x50; // emulation-mode NMI vector ($00:FFFA/FFFB)
+    rom[0x7FFB] = 0x80; // -> $80:8050
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("loads");
+    assert!(system.cpu.e, "reset leaves the CPU in emulation mode");
+
+    // The vblank flag is already set (a prior vblank whose $4210 read
+    // never happened) and NMI is not yet enabled -- no dispatch from
+    // this alone, same as always.
+    system.bus.timing.nmi_flag = true;
+    system.step().expect("NOP is implemented");
+    assert_ne!(
+        system.cpu.pc, 0x8050,
+        "NMI is still disabled -- an already-set flag alone must not dispatch"
+    );
+
+    // Now enable NMI while that same flag is still set -- fullsnes's
+    // AND-edge rises here too, but this is software's first-ever enable,
+    // not a redispatch of an already-armed NMI, and The Terminator/Super
+    // Black Bass both prove real hardware does not fire from this alone.
+    system.bus.write(0x4200, 0x80);
+    assert!(
+        system.bus.timing.nmi_flag,
+        "the write must not itself have touched the flag"
+    );
+    system.step().expect("NOP is implemented");
+    assert_ne!(
+        system.cpu.pc, 0x8050,
+        "enabling NMI while $4210 bit 7 is already stale must NOT dispatch \
+         immediately -- it must wait for the next real vblank edge, exactly \
+         like main (no enable-edge rule at all)"
+    );
+}
+
+/// The flag's own edge is untouched by any of the above: enabling NMI
+/// while the flag is 0, then the flag genuinely rising later, must still
+/// dispatch -- this is the one rule `SnesSystem::step` keeps.
+#[test]
+fn nmi_dispatches_on_the_next_real_vblank_edge_once_enabled() {
+    let mut rom = lorom_image(0x20, 0x00);
+    rom[0x0000] = 0xEA;
+    rom[0x0001] = 0xEA;
+    rom[0x7FFA] = 0x50;
+    rom[0x7FFB] = 0x80;
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("loads");
+    assert!(
+        !system.bus.timing.nmi_flag,
+        "starts clear, well outside vblank"
+    );
+
+    system.bus.write(0x4200, 0x80); // enable NMI; flag is still 0
+    system.step().expect("NOP is implemented");
+    assert_ne!(
+        system.cpu.pc, 0x8050,
+        "enabling NMI while the flag is 0 must not dispatch by itself"
+    );
+
+    // A genuine flag rise (the vblank edge) with NMI already enabled
+    // must still dispatch -- this is the ordinary, pre-W14-47,
+    // hundreds-of-titles-verified path, unaffected by any of the above.
+    // Driven through `Timing::advance` itself (one master cycle short of
+    // the vblank line), not by poking `nmi_flag` directly, so
+    // `events.vblank_started` -- what `SnesSystem::step` actually keys
+    // its dispatch on -- is set the same way a real vblank sets it.
+    system.bus.timing.line = system.bus.timing.vblank_start - 1;
+    system.bus.timing.line_cycles = crate::timing::MASTER_PER_LINE - 1;
+    system.step().expect("NOP is implemented");
+    assert_eq!(
+        system.cpu.pc, 0x8050,
+        "a real flag edge while NMI is enabled must still dispatch"
+    );
+}
+
+/// fullsnes "SNES Interrupts": "If one does disable and re-enable NMIs,
+/// then an old NMI may be executed again; acknowledging avoids that
+/// effect." A THIRD real ROM (Magical Drop II) shows this sentence is
+/// also not safe to implement literally: it disables and re-enables bit
+/// 7 EVERY single frame as routine practice, with `$4210` unread and set
+/// the whole time, and does not want -- and main never produces -- a
+/// redispatch on any of those toggles. Since no real title this ticket
+/// or its follow-up traced ever needed the disable/re-enable redispatch
+/// either, `SnesSystem::step` does not implement it at all; this test
+/// pins that absence rather than the redispatch fullsnes's sentence
+/// describes.
+#[test]
+fn disable_then_reenable_does_not_redispatch_while_the_flag_is_still_set() {
+    let mut rom = lorom_image(0x20, 0x00);
+    for i in 0..4 {
+        rom[i] = 0xEA; // four NOPs: one per step below
+    }
+    rom[0x7FFA] = 0x50;
+    rom[0x7FFB] = 0x80;
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("loads");
+
+    // Get NMI genuinely armed once via the ordinary flag edge (driven
+    // through `Timing::advance`, exactly like a real boot would reach
+    // it -- see the previous test's doc for why poking `nmi_flag`
+    // directly is not equivalent), then acknowledge nothing so the flag
+    // stays set (the precondition fullsnes's sentence needs).
+    system.bus.write(0x4200, 0x80);
+    system.bus.timing.line = system.bus.timing.vblank_start - 1;
+    system.bus.timing.line_cycles = crate::timing::MASTER_PER_LINE - 1;
+    system.step().expect("NOP is implemented");
+    assert_eq!(system.cpu.pc, 0x8050, "the ordinary flag-edge dispatch");
+    system.cpu.pc = 0x8001;
+    assert!(
+        system.bus.timing.nmi_flag,
+        "the flag is only cleared by a $4210 read or vblank end -- neither happened"
+    );
+
+    system.bus.write(0x4200, 0x00); // disable
+    system.step().expect("NOP is implemented");
+    assert_ne!(system.cpu.pc, 0x8050, "disabling must not itself dispatch");
+
+    system.cpu.pc = 0x8003;
+    system.bus.write(0x4200, 0x80); // re-enable while the flag is STILL set
+    system.step().expect("NOP is implemented");
+    assert_ne!(
+        system.cpu.pc, 0x8050,
+        "re-enabling while the old flag is still unread must NOT redispatch \
+         -- Magical Drop II does this every frame and main never redispatches \
+         from it"
+    );
+}

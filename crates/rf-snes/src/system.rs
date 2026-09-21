@@ -342,6 +342,60 @@ impl SnesSystem {
         if events.vblank_started && self.bus.wants(rf_core_api::EventMask::VBLANK_START) {
             self.bus.queue_event(rf_core_api::CoreEvent::VblankStart);
         }
+        // W14-47 follow-up (2026-09-20): NMI dispatches ONLY on the
+        // `$4210` vblank flag's own 0-to-1 edge while NMI is already
+        // enabled — the pre-W14-47 rule, reinstated after W14-47's
+        // broader "either operand" reading of fullsnes's AND-edge
+        // sentence was refuted by real, shipped ROMs.
+        //
+        // fullsnes "SNES Interrupts": "The CPU includes another internal
+        // NMI flag, which gets set when '[4200h].7 AND [4210h].7' changes
+        // from 0-to-1" reads, taken literally, as licensing a dispatch
+        // from the ENABLE operand's rise too (a `$4200` write turning bit
+        // 7 on while `$4210` bit 7 is already stale) — W14-35 named this
+        // shape and W14-47 shipped it. Three real titles were traced
+        // end-to-end against main (no such rule) to check it, and all
+        // three refute it:
+        //
+        // - **The Terminator (USA)**: boots with NMI off, polls `$4210`
+        //   in software, then writes `$4200: 00->A1` at n=2,143,181
+        //   (line 225 dot 90) while `$4210` bit 7 is stale from dot 7 of
+        //   the SAME vblank — its first-ever enable. Main does not
+        //   dispatch there; it waits for the next real vblank edge
+        //   (n=2,153,414) and renders correctly forever after. Dispatching
+        //   immediately (W14-47) OR one instruction later (tried during
+        //   this follow-up, to model bsnes's `irqLock`/`nmiTransition`
+        //   split in `sfc/cpu/irq.cpp`) both run the NMI handler before
+        //   the ROM's own boot sequence is ready for it; its handler
+        //   responds by disabling NMI for good, hanging on a
+        //   handler-only frame counter (`$00:D67D CMP $00003C`) that
+        //   never advances again.
+        // - **Super Black Bass (USA)**: the same shape, `$4200: 00->81`
+        //   at n=17,504 with `$4210` stale since 2,500+ master cycles
+        //   earlier — too old for any plausible instruction-pipeline
+        //   delay to excuse. Main waits 51,426 more steps for the real
+        //   edge (n=68,930). Firing here (with or without a one-step
+        //   defer) is a full extra, unscheduled vblank early; the ROM's
+        //   handler disables NMI and never re-enables it.
+        // - **Magical Drop II (USA, Europe) (Switch Online)**: refutes
+        //   even fullsnes's OWN narrower "disable and re-enable" wording
+        //   — this ROM disables and re-enables bit 7 EVERY single frame
+        //   as routine practice (`$4200: 81->01` then `01->81` a few
+        //   dots apart, every vblank, e.g. n=1,040,797/1,040,812) while
+        //   `$4210` stays unread and set the whole time. Main (which has
+        //   no enable-edge rule at all, so this toggle is a no-op to it)
+        //   dispatches on only 68 of the 121 vblanks it sees — the
+        //   ordinary flag edge sometimes lands mid-toggle and is simply
+        //   missed, same as real hardware would. Gating a redispatch on
+        //   "has enable ever been true before" (tried during this
+        //   follow-up, matching fullsnes's sentence literally) fires
+        //   EVERY frame for this title instead, once enabled — far more
+        //   dispatches than main ever produces, and it goes uniform.
+        //
+        // Zero of the five titles the original acceptance brief or this
+        // follow-up traced were EVER explained or fixed by any version of
+        // the enable-edge rule; the census only ever regressed under it.
+        // See `docs/TESTING.md`'s dated entry for the full census diff.
         if events.vblank_started && self.bus.nmitimen.nmi_enabled() {
             self.pending_nmi = true;
         }
