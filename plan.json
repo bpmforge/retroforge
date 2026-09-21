@@ -7819,7 +7819,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "blocked",
   "stories": [],
   "id": "W14-49",
   "title": "IPL HLE: a driver that TCALLs or jumps into the boot ROM's address range after handoff must reach the listed routine (Urban Strike's TCALL 0 through $FFDE/$FFDF)",
@@ -7834,7 +7834,8 @@
    "W14-49: census children on Urban Strike, NBA Live 96, Super Bonk (if present), Rival Turf!, Super Turrican, Wario's Woods, Tommy Moe's, Super Mario RPG (USA), Super Mario World, Wild Guns, Kirby Super Star; the orchestrator re-runs the full SNES census with RF_CENSUS_OUT and names every moved title"
   ],
   "notes": [
-   "W14-49 FILED 2026-09-21 by the orchestrator from W14-48's Urban Strike chain (the CPU sends Run=$0460; $0460 is TCALL 0; $FFDE/$FFDF are zero under the HLE)."
+   "W14-49 FILED 2026-09-21 by the orchestrator from W14-48's Urban Strike chain (the CPU sends Run=$0460; $0460 is TCALL 0; $FFDE/$FFDF are zero under the HLE).",
+   "W14-49 HELD 2026-09-21 by the orchestrator: branch w14-49 (HEAD ba9e979) implements the TCALL-0 trap into the IPL HLE, gate-green, but no title moved once the census children were re-run with the newest binary (the six 'moved' titles already rendered on main; the lane had run a stale boot_census binary), and no source states the $FFDE/$FFDF vector value. Kept as a branch for reference; merge only if a title is shown to depend on it."
   ]
  }
 ]

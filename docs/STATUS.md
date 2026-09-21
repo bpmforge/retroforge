@@ -4114,3 +4114,25 @@ stories, 10 decisions).
   budget edge. W14-44 made the stitcher budget test best-of-five after
   two load flakes. Gate on the stacked tree: workspace **2232 passing /
   0 failed / 43 ignored**, clippy clean, arch OK.
+
+- **W14-45..W14-49: the tail of the uniform bucket** (2026-09-21).
+  W14-45 re-triaged the 41 titles left after the day's fixes: six slow
+  boots past the 600-frame census budget, eleven APU handshakes in
+  three sub-shapes, nine WAI parks, six pirate/beta header cases, the
+  four Pagemaster dumps, five one-offs. W14-46 traced one title per APU
+  sub-shape and blocked all three with chains (Urban Strike's stub
+  leaves its code within sixty instructions; Battle Grand Prix's
+  upload runs at ~304 bytes/frame and finishes; Phalanx never uploads,
+  gated on a WRAM flag its NMI handler never sets); Blackthorne is the
+  W7-08 S-DSP poller. W14-47 tried fullsnes's NMI enable-edge dispatch,
+  found three shipped titles (The Terminator, Super Black Bass,
+  Magical Drop II) that enable NMI against a stale vblank flag and
+  would fire early, and reverted it with tests that pin the vblank-edge
+  rule; a golden that had shifted one dot came back to its exact prior
+  hash. W14-48 measured the handshake throughput and found Urban
+  Strike's stub `TCALL 0`s through the boot ROM's vector slot; W14-49
+  built a trap for that but moved no title and is held on a branch.
+  Census stays **1093/41/131**; two census runs this evening reported
+  load-induced timeouts (Donkey Kong Country 1/2, Star Trek, Super
+  Buster Bros.) that all render in under two seconds idle — the
+  census is only trustworthy on an otherwise idle machine.
