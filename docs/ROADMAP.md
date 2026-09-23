@@ -257,3 +257,14 @@ projection; W17-04 timing accuracy, save state, determinism, census, and
 by-eye on Super Mario RPG, Kirby Super Star, Kirby's Dream Land 3.
 Sources: fullsnes "SNES Cart SA-1" sections, snes.nesdev.org SA-1 pages;
 clean-room (NFR-011).
+
+## Wave 18 — Super FX (Brad's go, 2026-09-22; D-014)
+
+Five serial slices, one executor at a time, the SA-1 arc's shape:
+W18-01 mapping, register window, refusal lifted (the 20 archives boot to
+the SNES side with the GSU idle); W18-02 the instruction core (MOV, ALU,
+JMP, prefixes, pseudo-ops) pinned by a hand-assembled program;
+W18-03 PLOT/RPIX, the pixel cache and the bitmap modes; W18-04 the code
+cache, ROM/RAM buffers and clocking against the master clock;
+W18-05 census and by-eye on Star Fox and Yoshi's Island. Exit: every
+Super FX archive in the library renders or has a named cause.

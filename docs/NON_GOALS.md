@@ -49,8 +49,8 @@ requires a design doc, not a ticket.
    scene-graph output, multi-panel debugger, or authoring UX (§5 of
    prior-art). A flattened libretro export (wide geometry + core options) is
    plausible post-Phase 9; the core/frontend seam is designed to allow it.
-10. **SNES enhancement chips deferred.** Super FX (~16) waits until
-    plain LoROM/HiROM accuracy is gated (met 2026-09-17); **SA-1 (~34
+10. **SNES enhancement chips deferred.** **Super FX (~16) lifted 2026-09-22
+    (D-014, Brad), Wave 18;** the LoROM/HiROM gate was met 2026-09-17; **SA-1 (~34
     games) lifted 2026-09-18 (D-013, Brad), Wave 17;** DSP-2/3/4, Cx4, S-DD1,
     SPC7110, ST01x (1-3 games each) may never come. **DSP-1 (~13 games)
     lifted from this deferral 2026-09-17** (Brad's ruling): the LoROM/HiROM

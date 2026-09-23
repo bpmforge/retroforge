@@ -8,7 +8,7 @@ Phases refer to `docs/ROADMAP.md`; requirement IDs to `docs/SRS.md`.
 | Subsystem | In scope (v1 = Phases 0-9) | Later / conditional | Out (see NON_GOALS) |
 |---|---|---|---|
 | NES core | 2A03 CPU+APU, per-dot PPU, NROM/MMC1/UxROM/CNROM/MMC3 (~91.5% of licensed NA library), then AxROM (~96%) | FDS, MMC5, VRC family | Everything past ~96% coverage as a goal |
-| SNES core | 65C816/5A22, DMA/HDMA, PPU modes 0-7 (Mode 7, windows, mosaic, color math), S-SMP/S-DSP, LoROM/HiROM, battery saves, DSP-1 (HLE, added 2026-09-17 — see history below) | ExHiROM; SA-1, Super FX | One-off chips (Cx4, S-DD1, SPC7110...) |
+| SNES core | 65C816/5A22, DMA/HDMA, PPU modes 0-7 (Mode 7, windows, mosaic, color math), S-SMP/S-DSP, LoROM/HiROM, battery saves, DSP-1 (HLE, added 2026-09-17 — see history below), SA-1 (Wave 17), Super FX (Wave 18, D-014) | ExHiROM | One-off chips (Cx4, S-DD1, SPC7110...) |
 | Modes | Accuracy / Compatibility / Enhanced / Research-Debug / Game-Aware presets + CI mode-invariant | — | — |
 | Renderer | wgpu original + enhanced pipelines, integer/aspect scaling, WGSL shader chain (CRT, xbr-class — MIT xBR basis, RENDERER §4 licensing law), layered scene-graph composition, ultrawide, side-by-side, headless golden-frame mode | HDR output (wgpu 30 supports), custom user shaders | slang/GLSL preset compat in v1 |
 | Enhancement (generic) | Sprite-limit bypass + auto-re-enable heuristic, temporal de-flicker, wideNES-style stitcher (scroll telemetry, IRQ/HDMA split detection, scene hashing, re-entrant canvases), HUD heuristics | MappyLand-style smarter segmentation | Generic full-level or widescreen-gameplay promises |
@@ -53,7 +53,8 @@ may only be relaxed with new research evidence.
 
 - **2026-09-18** — SA-1 moved from "Later / conditional" to "In scope"
   (D-013, Brad's "go"): a second 65C816 over its own bus, four slices
-  in Wave 17 (W17-01..04). Super FX and the one-off chips stay deferred.
+  in Wave 17 (W17-01..04). **Super FX lifted 2026-09-22 (D-014), Wave 18
+  (W18-01..05).** The one-off chips stay deferred.
 
 - **2026-09-17** — Local real-time AI enhancement/upscaling moved from
   "Won't (v1)" to "In scope, hardware-gated" (D-012, Brad). Offline pack
