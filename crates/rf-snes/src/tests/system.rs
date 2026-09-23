@@ -231,11 +231,16 @@ fn fastrom_from_the_header_changes_the_access_cost() {
 /// `sa1_carts_load_with_the_board_wired_up` below, since (under map mode
 /// $23) it now loads instead of refusing. Super FX ($13/$15/$1A) is
 /// likewise absent as of ticket W18-01 (D-014) — moved to
-/// `gsu_carts_load_with_the_board_wired_up` below.
+/// `gsu_carts_load_with_the_board_wired_up` below. OBC1 ($25) is likewise
+/// absent as of ticket W19-01 (D-013's sibling ruling for this chip) —
+/// moved to `obc1_carts_load_with_the_registers_wired_up` below; chipset
+/// $23/$24 (nibble 2, hw 3/4) under this same nibble stay refused, since
+/// hw=5 is the only assigned OBC1 combination (see `rf_cart::snes`'s own
+/// `unsupported_chip_obc1_reported_from_chipset_byte` test).
 #[test]
 fn every_named_coprocessor_family_is_refused_and_named() {
     for (chipset, expect) in [
-        (0x25u8, "OBC1"),
+        (0x23u8, "OBC1"),
         (0x43, "S-DD1"),
         (0x55, "S-RTC"),
         (0xE3, "Super Game Boy"),
@@ -347,6 +352,80 @@ fn gsu_carts_load_with_the_board_wired_up() {
     // A plain LoROM cart never gets one.
     let plain = SnesSystem::load(&lorom_image(0x20, 0x00)).expect("loads");
     assert!(plain.bus.gsu.is_none());
+}
+
+/// Ticket W19-01: chipset $25 now loads with the OBC1 registers wired up
+/// instead of the FR-CORE-013 refusal — an OBC1 cart keeps the plain
+/// LoROM map mode (fullsnes gives it no dedicated one, unlike SA-1's $23).
+#[test]
+fn obc1_carts_load_with_the_registers_wired_up() {
+    let system = SnesSystem::load(&lorom_image(0x20, 0x25))
+        .unwrap_or_else(|e| panic!("chipset $25 (OBC1) must load, got {e:?}"));
+    assert!(
+        system.bus.obc1.is_some(),
+        "chipset $25: OBC1 registers must be installed"
+    );
+    assert_eq!(system.bus.mode, SnesMapMode::LoRom);
+    assert_eq!(system.bus.sram.len(), 8 * 1024, "header RAM size is 8 KiB");
+    // A plain LoROM cart never gets one.
+    let plain = SnesSystem::load(&lorom_image(0x20, 0x00)).expect("loads");
+    assert!(plain.bus.obc1.is_none());
+}
+
+/// Ticket W19-01 acceptance: reads/writes through the bus reach the real
+/// chip behaviour, not just the register-presence check above.
+///
+/// Exercises every register per fullsnes "SNES Cart OBC1 I/O Ports":
+/// - `$7FF0-$7FF3` redirect to `[Base+Index*4+0..3]`.
+/// - `$7FF4` write is a 2-bit read-modify-write at `[Base+Index/4+200h]`;
+///   read returns the whole undecoded byte.
+/// - `$7FF5` base select flips which 220h-byte region `$7FF0-$7FF4`
+///   address.
+/// - Bytes outside `$7FF0-$7FF7` are ordinary SRAM, so a value written
+///   through the redirect ($7FF0) is also visible at its own direct SRAM
+///   address (base+index*4), proving the redirect and not a private copy.
+#[test]
+fn the_obc1_window_reaches_the_registers_and_table_through_the_bus() {
+    let mut system = SnesSystem::load(&lorom_image(0x20, 0x25)).expect("OBC1 loads");
+
+    // Base defaults to $7C00 (bit0=0); pick index 3.
+    system.bus.write(0x00_7FF6, 3);
+    system.bus.write(0x00_7FF0, 0x11); // Xloc
+    system.bus.write(0x00_7FF1, 0x22); // Yloc
+    system.bus.write(0x00_7FF2, 0x33); // Tile
+    system.bus.write(0x00_7FF3, 0x44); // Attr
+    assert_eq!(system.bus.read(0x00_7FF0), 0x11);
+    assert_eq!(system.bus.read(0x00_7FF3), 0x44);
+    // The same bytes are ordinary SRAM at their direct address:
+    // base($7C00) + index(3)*4 = $7C0C, within the $6000-$7FFF window.
+    assert_eq!(system.bus.read(0x00_7C0C), 0x11);
+    assert_eq!(system.bus.read(0x00_7C0F), 0x44);
+
+    // $7FF4 (Bits): index 3 -> byte at Base+0/4+200h = $7C00+$200 = $7E00,
+    // bit position (3&3)*2 = 6. A write of 0b10 there must only touch bits
+    // 6-7, leaving whatever else lives in that shared byte untouched.
+    system.bus.write(0x00_7E00, 0b0011_1111); // seed the byte directly
+    system.bus.write(0x00_7FF4, 0b10); // value's low 2 bits matter
+    assert_eq!(
+        system.bus.read(0x00_7E00),
+        0b10_111111,
+        "only bits 6-7 must change"
+    );
+    // Read of $7FF4 returns the whole raw byte, unshifted.
+    assert_eq!(system.bus.read(0x00_7FF4), system.bus.read(0x00_7E00));
+
+    // Base select ($7FF5): flipping to $7800 moves the SAME index's table
+    // entry to a different SRAM address.
+    system.bus.write(0x00_7FF5, 0x01);
+    system.bus.write(0x00_7FF0, 0x99);
+    assert_eq!(system.bus.read(0x00_7800 + 3 * 4), 0x99);
+    // The old $7C00-region byte is untouched by the base flip.
+    assert_eq!(system.bus.read(0x00_7C0C), 0x11);
+
+    // Index isn't auto-incremented (fullsnes): writing $7FF0 again with
+    // the same index overwrites the same cell rather than advancing.
+    system.bus.write(0x00_7FF0, 0xAB);
+    assert_eq!(system.bus.read(0x00_7800 + 3 * 4), 0xAB);
 }
 
 /// Ticket W18-01 acceptance: the SNES side can boot a GSU cart to its

@@ -93,6 +93,25 @@ pub enum Target {
     /// ticket W18-01, fullsnes "SNES Cart GSU-n I/O Map"). Carries the raw
     /// offset; [`crate::gsu::Gsu`] sorts out which register/mirror it is.
     GsuRegister(u16),
+    /// One of the OBC1's three true registers — `$7FF5` (base select),
+    /// `$7FF6` (index) or `$7FF7` (unknown) — ticket W19-01, fullsnes
+    /// "SNES Cart OBC1 I/O Ports". Carries the raw offset;
+    /// [`crate::obc1::Obc1Regs`] sorts out which one it is. Unlike those
+    /// three, `$7FF0-$7FF4` are NOT registers of their own — fullsnes
+    /// calls them "totally useless" ports that just redirect to a computed
+    /// SRAM address — so [`obc1_target`] resolves those straight to
+    /// [`Target::Sram`]/[`Target::Obc1Bits`] instead of a fourth variant
+    /// here.
+    Obc1Register(u16),
+    /// The OBC1's `$7FF4` "OAM Bits" port, carrying the SRAM byte offset
+    /// it redirects to (ticket W19-01). Split from the plain
+    /// [`Target::Sram`] redirection the other three OAM ports
+    /// (`$7FF0-$7FF3`) use because fullsnes documents asymmetric R/W
+    /// semantics here — write does a 2-bit read-modify-write, read returns
+    /// the whole undecoded byte — that a plain SRAM cell cannot express;
+    /// [`crate::bus::SnesBus`] resolves the bit position from the OBC1's
+    /// current index at access time.
+    Obc1Bits(usize),
     /// Nothing is mapped here. Reads see open bus; writes are dropped.
     Open,
 }
@@ -461,6 +480,81 @@ pub fn gsu_target(board: &GsuBoard, bank: u8, offset: u16) -> Option<Target> {
         return Some(Target::GsuRam(index % board.ram_len));
     }
     None
+}
+
+/// The live state [`obc1_target`] needs to resolve an address: the two
+/// register values that decide where in SRAM the `$7FF0-$7FF4` ports
+/// redirect, plus the cartridge's SRAM size (ticket W19-01).
+#[derive(Debug, Clone, Copy)]
+pub struct Obc1Board {
+    /// SRAM byte offset of the selected `$7C00`/`$7800` base
+    /// (`$7C00-$6000` or `$7800-$6000`) — see [`crate::obc1::Obc1Regs::base_offset`].
+    pub base_offset: usize,
+    /// `$7FF6` Index (OBJ Number), already masked to the documented 0..127
+    /// range — see [`crate::obc1::Obc1Regs::index_masked`].
+    pub index: u8,
+    /// Cartridge SRAM length in bytes (8 KiB on the one real board).
+    pub sram_len: usize,
+}
+
+/// Resolve `(bank, offset)` against an OBC1 cartridge's SNES-side memory
+/// map. Checked by [`crate::bus::SnesBus::target`] BEFORE [`map`], same
+/// reasoning as [`sa1_target`]/[`gsu_target`]/[`dsp1_target`]: an OBC1
+/// cart's register ports sit inside bank/offset space `map` would
+/// otherwise resolve as plain SRAM (or, for these system-area banks under
+/// plain LoROM, open bus — see `map`'s own `$6000-$7FFF` comment). `board`
+/// is only ever built for a cartridge whose header reports
+/// [`rf_cart::Coprocessor::Obc1`], so a non-OBC1 cart never calls this and
+/// every other cartridge's mapping is unchanged.
+///
+/// Cited to fullsnes "SNES Cart OBC1 (OBJ Controller)", "OBC1 I/O Ports"
+/// and the paragraph beneath it:
+/// - The whole `$6000-$7FFF` window ("Other bytes at 6000h..7FFFh contain
+///   8Kbyte battery-backed SRAM") is claimed here, in the system-area
+///   banks (`$00-$3F`/`$80-$BF`) that every other bus window in this
+///   module uses for a cartridge-resident chip's register space — the
+///   chapter gives no explicit bank list of its own (unlike SA-1/GSU),
+///   so this follows their convention rather than inventing a new one.
+///   The generic LoROM `$70-$7D` SRAM window `map` already provides is
+///   left alone: no fullsnes sentence names it for this chip, and Metal
+///   Combat's own code addresses the chip through this window, not that
+///   one.
+/// - `$7FF0h/7FF1h/7FF2h/7FF3h` (OAM Xloc/Yloc/Tile/Attr) redirect to
+///   `[Base+Index*4+0..3]` — resolved straight to [`Target::Sram`] here
+///   rather than a dedicated register, since fullsnes calls these ports
+///   "totally useless": the byte they expose has no existence of its own
+///   independent of the table cell it aliases.
+/// - `$7FF4h` (OAM Bits) redirects to `[Base+Index/4+200h]`, but with R/W
+///   semantics no plain SRAM cell has (2-bit write, whole-byte read) — see
+///   [`Target::Obc1Bits`]'s doc.
+/// - `$7FF5h/7FF6h/7FF7h` (Base select/Index/Unknown) are true chip
+///   registers, not SRAM redirections — [`Target::Obc1Register`].
+/// - Every other byte in the window (outside `$7FF0-$7FF7`) is ordinary
+///   SRAM, including the two named workspace ranges
+///   (`7800h-7A1Fh`/`7C00h-7E1Fh`) the two `Base` values point at.
+#[must_use]
+pub fn obc1_target(board: &Obc1Board, bank: u8, offset: u16) -> Option<Target> {
+    let system_area = bank < 0x40 || (0x80..0xC0).contains(&bank);
+    if !system_area || !(0x6000..=0x7FFF).contains(&offset) {
+        return None;
+    }
+    let sram_idx = usize::from(offset - 0x6000);
+    if board.sram_len == 0 {
+        return Some(Target::Open);
+    }
+    match offset {
+        0x7FF0..=0x7FF3 => {
+            let reg = usize::from(offset - 0x7FF0);
+            let addr = board.base_offset + usize::from(board.index) * 4 + reg;
+            Some(Target::Sram(addr % board.sram_len))
+        }
+        0x7FF4 => {
+            let addr = board.base_offset + usize::from(board.index / 4) + 0x200;
+            Some(Target::Obc1Bits(addr % board.sram_len))
+        }
+        0x7FF5..=0x7FF7 => Some(Target::Obc1Register(offset)),
+        _ => Some(Target::Sram(sram_idx % board.sram_len)),
+    }
 }
 
 /// Resolve a 24-bit address.

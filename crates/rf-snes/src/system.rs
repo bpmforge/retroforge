@@ -116,6 +116,14 @@ impl SnesSystem {
         if let rf_cart::Coprocessor::SuperFx { version, ram_kib } = header.coprocessor {
             system.bus.install_gsu(version, header.rom_size, ram_kib);
         }
+        // OBC1 (ticket W19-01, fullsnes "SNES Cart OBC1"): a pure register
+        // window over the cart's own SRAM — `sram_len` above is already
+        // `header.ram_size` for this cartridge (it does not fall into the
+        // SA-1/SuperFx zero-out branch), so the bus's ordinary `sram`
+        // buffer is exactly the 8 KiB workspace this chip addresses.
+        if matches!(header.coprocessor, rf_cart::Coprocessor::Obc1) {
+            system.bus.install_obc1();
+        }
         system.reset();
         Ok(system)
     }
