@@ -1123,6 +1123,7 @@ First run, 2026-09-15, release build:
 | SNES, after W18-02 | 1265 | **1100** | 45 | 120 | **0** | **0** |
 | SNES, after W18-03 | 1265 | **1100** | 45 | 120 | **0** | **0** |
 | SNES, after W18-04 | 1265 | **1101** | 44 | 120 | **0** | **0** |
+| SNES, after W18-06 | 1265 | **1101** | 44 | 120 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -9358,3 +9359,14 @@ and now render for the right reason (first varied frame 155). No row
 moved down. Still uniform among the GSU archives: Star Fox 2 (Classic
 Mini dump; GSU RAM size undocumented), Super Star Fox Weekend, Vortex —
 W18-05's list.
+
+**Full SNES census (orchestrator, 2026-09-23, main after the W18-06
+merge, idle machine, per-title `RF_CENSUS_OUT` diff against the W18-04
+run):** **1101/44/120/0/0 -> 1101/44/120/0/0**, no row changed. The
+split ownership rule (SNES writes into GSU RAM land while the GSU is
+stopped even with RAN set; SNES reads of ROM keep the raw RON gate)
+moves Vortex's setup block into GSU RAM — forced blank now clears with
+VRAM populated at ~80M instructions — but the title still parks on a
+downstream trampoline inside the census window, so its bucket is
+unchanged. Star Fox's three dumps confirmed unmoved after the earlier
+GO-gated variant had regressed them.
