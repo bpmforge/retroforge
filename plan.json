@@ -8035,6 +8035,31 @@
    "W14-51 DONE-AS-BLOCKED 2026-09-22: no PPU register defect found for either title. At frame 600 both show forced_blank=false bright=15 tm=[0000], clip_mode=0/prevent_mode=0 (not W14-42's swap class), all windows disabled -- ruled out directly, not assumed. Added PROBE_MODE=ppuwrites to title_probe.rs (decode-side register-write watch, since PROBE_WATCH is blind on write-only $2100-$213F; also counts APU port-pair changes). Traced $212C/$2100's own writes to an ordinary WRAM-shadow vsync idiom ($244A/$AA38/$AA3A, $8085F7/$808963/$808C0B) -- a genuine software fade plus a blinking single-BG splash. Canary check (Super Mario World varied_at=88, Wild Guns varied_at=84, matching W14-42's 53-150 range) vs Final Fight 2 varied_at=6607 (~110s) / Battletoads varied_at=3520 (~59s) shows both titles are 40-80x outliers -- NOT a mild 'long intro', ruling out the Lagoon/Phalanx census-methodology framing as the front-running explanation. apu_port_changes=0 at every checkpoint (frames 600/2000/4000/6000, 300k instructions each) rules out an SPC-handshake-gated wait specifically, so the S-DSP echo/ADSR work active under W7-08 is NOT implicated (checked, not just deferred). Remaining candidate: a CPU-side scene/mode dispatcher whose WRAM counter or comparison is emulated wrong, independent of audio -- requires disassembling each title's own scene dispatcher to pin down, outside this ticket's budget. No crates/rf-snes source change (Bug Fix Discipline: neither surviving hypothesis is confirmed enough to fix blind). Gate: fmt/clippy clean, cargo test -p rf-snes 381 passed (0 new, harness-only diagnostic), peterlemon_golden 3/3, region_golden 1/1, undisbeliever_goldens_match 1/1, singlestep_65816_vectors 5,080,000/5,080,000 passed, singlestep_spc700_vectors/gilyon_cputest/blargg_spc all green, validate-arch OK. Census: Final Fight 2 and Battletoads both exit 10 (unchanged, expected -- no fix shipped); 11 canaries all exit 0 (unmoved). P8 concurrent-active overlap with W7-08 left as-is per the claim commit's note -- file-level disjoint (ppu/ vs apu/), and now positively confirmed disjoint in practice (apu ports never touched during the plateau).",
    "W14-51 FILED 2026-09-22 by the orchestrator from W14-47's disposition."
   ]
+ },
+ {
+  "phase": 18,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W18-06",
+  "title": "Super FX follow-up: Vortex's computed-jump spin and Star Fox 2's idle GSU — trace the INPUTS (RAM the SNES wrote, ROM bytes the GSU read), not the opcodes",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W18-06 (Vortex): the `JMP Rn` loop's jump-target register and every value it derives from are traced to their sources — a RAM cell (who wrote it: SNES CPU write, DMA, or the GSU itself; is the SNES write reaching GSU RAM — the W18-04 dropped-RAM class; RAMBR/the $6000 mirror/bank $70 mapping for THIS cart's RAM size and header), a ROM byte (ROMBR:R14 address math for a GSU2 cart's ROM layout — fullsnes 'GSU-n Memory Map' distinguishes GSU1 and GSU2 mappings; quote), or an SFR/port value the SNES was supposed to change; the first value that differs from what the ROM/SNES supplied is the bug; fix with citation + unit test",
+   "W18-06 (Star Fox 2, Classic Mini dump): after eighteen clean GSU start/stop cycles the GSU idles and the SNES side waits — trace what the SNES polls (a GSU RAM result cell, SFR, an IRQ) and what the GSU's last program wrote there vs what the SNES expects; check the GSU2-specific map (fullsnes: the second ROM window/bank layout and RAM bank $70-$71 for 64 KiB), the extended header's RAM size ($7FBD=$06 → 64 KiB), and the 21.4 MHz CLSR path; fix with citation + unit test or name the exact cell and both values",
+   "gate: fmt, clippy -D warnings, cargo test -p rf-snes -p rf-cart, the ignored SNES suites that fit; census children on every GSU archive and the canaries; the orchestrator's full census names every moved title; a BLOCKED verdict must reach ROM bytes or a checked register/RAM value"
+  ],
+  "notes": [
+   "W18-06 FILED 2026-09-23 by the orchestrator. Method lesson from W18-04: three opcode audits found nothing; the bug was a dropped INPUT (GSU RAM size 0). Start from the values, not the instructions."
+  ]
  }
 ]
 }
