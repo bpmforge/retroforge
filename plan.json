@@ -8094,7 +8094,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 2,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "id": "W19-01",
   "title": "OBC1 (Metal Combat: Falcon's Revenge): the sprite-table controller per fullsnes 'SNES Cart OBC1'",
@@ -8109,7 +8109,8 @@
    "W19-01: rf-cart detects chipset $25 (OBC1); rf-snes implements the OBC1 register window ($7FF0-$7FF5 in the SRAM bank) and the OAM-format sprite table it maintains in cart RAM per fullsnes 'SNES Cart OBC1' (base address select, the 4-entry attribute packing, read/write mirror rules), cited by section; unit tests per register; Metal Combat renders in the census child; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; ignored SNES suites green; no ROM bytes or copyrighted titles in engine code; every hardware claim cites fullsnes by section; the orchestrator's full SNES census names every moved title"
   ],
   "notes": [
-   "W19-01 FILED 2026-09-23 by the orchestrator: one retail title, small chip, self-contained."
+   "W19-01 FILED 2026-09-23 by the orchestrator: one retail title, small chip, self-contained.",
+   "W19-01 DONE 2026-09-23: rf-cart accepts chipset $25 (nibble 2 hw 5, the only assigned OBC1 combination) as Coprocessor::Obc1, verified against the real Metal Combat: Falcon's Revenge (USA) dump ($7FC0+0x16=0x25). rf-snes/src/obc1.rs models the three true registers ($7FF5 base select, $7FF6 index, $7FF7 unknown-hedged byte); crate::mapping::obc1_target claims the system-area $6000-$7FFF window and redirects $7FF0-$7FF3 straight to Target::Sram at [Base+Index*4+0..3] (fullsnes calls them 'totally useless') and $7FF4 to a dedicated Target::Obc1Bits for its asymmetric 2-bit-write/whole-byte-read semantics; every other window byte is ordinary SRAM. Two fullsnes-hedged behaviours ('reportedly enables SRAM mapping...?', 'ROM reportedly mapped to bank 70h..71h too?') are explicitly left unmodelled, cited in obc1.rs's module doc. Save/load: presence-flag pattern after GSU's, no bulk buffer (table lives in SnesBus::sram, already saved). Tests: 17 new (6 obc1.rs, 9 mapping.rs, 2 end-to-end via SnesSystem/SnesBus covering every register and the RMW). Gate: fmt/clippy -D warnings clean; cargo test -p rf-snes -p rf-cart: 458+62 passing; cargo test --workspace: 2337 passing, 0 failed, 157 binaries; ignored SNES suites (peterlemon_golden, spc700_vectors, gilyon_cputest) all green; scripts/validate-arch.sh: arch OK; scripts/docs-gate.sh: OK. Census children (RELEASE, boot_census_child --ignored --exact): Metal Combat - Falcon's Revenge (USA) exit 0 (rendered something); canaries Super Mario World, Wild Guns, Super Mario RPG, Kirby Super Star, NHL 95 all unmoved, exit 0. Docs: docs/TESTING.md W19-01 section, docs/design/EMULATION_CORES.md Sec3.7 OBC1. Claimed against a pre-existing P8 validate-plan violation (W7-08 left in_progress on rf-snes pending Brad's ruling, unrelated to this ticket's own scope) — confirmed by stashing the claim and re-running validate-plan on pristine main (exit 0); recorded on the chore(W19-01): claim commit."
   ]
  },
  {
