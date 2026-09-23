@@ -8232,6 +8232,28 @@
   "notes": [
    "W19-04 FILED 2026-09-23 by the orchestrator: fullsnes lines 9265-9290 list the ST010 commands; the chapter's per-command parameter notes (after line 9300) are the spec. fullsnes: 'the only feature really used is the battery-backed on-chip RAM'."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-cart",
+  "depends_on": [],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-55",
+  "title": "Header fallback follow-ups: keep a chipset-byte coprocessor when the fallback fires (Star Fox 2 betas lose GSU, Zool beta loses SA-1); prefer a candidate location whose own header is sane before guessing by prologue (The Lion King beta 3)",
+  "write_scope": [
+   "crates/rf-cart/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-55: when `fallback_mapping_guess` fires, the chipset byte at the chosen location is still honoured when it names a chip this build runs (GSU $13-$1A, SA-1 $33-$35, S-DD1 $43/$45, OBC1 $25, Cx4 $F3, ST010 $F6, DSP $03-$05) and the location's map-mode nibble corroborates it per W14-53's rule; only a chipset byte that is garbage falls to None — pinned by tests using the Star Fox 2 beta shape (GSU chipset, bad checksum) and the Zool beta shape",
+   "W14-55: the fallback's candidate order prefers a location whose header block is internally sane (legible title, map-mode byte with a valid speed bit and known nibble, RAM/ROM size bytes plausible) over a bare reset-prologue match at the other location; The Lion King (Beta 3) shape (HiROM header with SEI/CLC/XCE/JML at its vector, LoROM location with a coincidental one-byte-offset prologue) loads as HiROM — pinned by a test",
+   "W14-55: the seven affected archives render or load in the census child; canaries (Star Fox, Super Mario RPG, Kirby Super Star, Contra III, Super Mario World, WWF Super WrestleMania) unmoved; gate: fmt, clippy -D warnings, cargo test -p rf-cart -p rf-snes, validate-arch; the orchestrator's full census names every moved title"
+  ],
+  "notes": [
+   "W14-55 FILED 2026-09-23 by the orchestrator from W14-54's two root-caused newcomer families (4 + 1 titles)."
+  ]
  }
 ]
 }
