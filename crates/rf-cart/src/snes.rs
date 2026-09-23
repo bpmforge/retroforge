@@ -610,6 +610,32 @@ fn looks_like_reset_prologue(bytes: &[u8]) -> bool {
 /// qualify) the one whose header title is majority-printable ASCII —
 /// exactly the two extra signals `score_candidate` already uses, just
 /// applied as a tie-break instead of a score.
+/// Ticket W14-55: does the reset-vector target this guess just validated
+/// fall INSIDE the very header block the guess is evaluating? Real code a
+/// RESET vector points at is always outside the 64-byte header/vector-table
+/// block (fullsnes "SNES Cartridge ROM Header" — the block is fixed-layout
+/// data, never executable), so a vector that resolves back into its own
+/// header is definitionally not a real reset target, whatever bytes happen
+/// to sit there. This is the fix for The Lion King (USA) (Beta 3) (v.21):
+/// its LoROM header block ($7FC0-$7FFF) is wholesale `$FF` filler,
+/// including the vector field itself (`$7FFC`/`$7FFD` = `$FF $FF`, i.e. the
+/// vector IS the filler value $FFFF, not a surviving real address) — which
+/// decodes to file offset `$7FFF`, the last byte of that same header block.
+/// The byte at `$7FFF` is `$FF` (still filler) and `looks_like_reset_
+/// prologue` only accepts it because the CLC/XCE pair it finds at
+/// `$7FFF+2..+4` (`$18 $FB`) actually belongs to the FOLLOWING bank's real
+/// content (which happens to be HiROM's own genuine reset prologue at
+/// `$8000`) — a one-byte-offset coincidence at the seam between the header
+/// block and the next bank, not code this candidate's own vector reaches.
+/// Rejecting any guess whose 4-byte read window overlaps its own header
+/// block closes exactly this coincidence without needing a title-keyed
+/// exception (law 5).
+fn resolves_into_own_header_block(base: usize, file_offset: usize) -> bool {
+    let header_end = base + HEADER_BLOCK_LEN;
+    let read_end = file_offset + 4;
+    file_offset < header_end && read_end > base
+}
+
 fn fallback_mapping_guess(data: &[u8]) -> Option<(SnesMapMode, usize, HeaderFallback)> {
     struct Guess {
         mode: SnesMapMode,
@@ -665,6 +691,13 @@ fn fallback_mapping_guess(data: &[u8]) -> Option<(SnesMapMode, usize, HeaderFall
         if file_offset + 4 > data.len() {
             continue;
         }
+        // Ticket W14-55: a vector that resolves back into the header block
+        // it came from is not pointing at real code, whatever the bytes
+        // there happen to look like — see `resolves_into_own_header_block`'s
+        // doc (The Lion King (Beta 3) shape).
+        if resolves_into_own_header_block(g.base, file_offset) {
+            continue;
+        }
         if !looks_like_reset_prologue(&data[file_offset..file_offset + 4]) {
             continue;
         }
@@ -680,6 +713,24 @@ fn fallback_mapping_guess(data: &[u8]) -> Option<(SnesMapMode, usize, HeaderFall
         if printable >= 12 {
             score += 1;
         }
+        // Ticket W14-55, rule B: a candidate whose OWN header block is
+        // internally sane outranks a bare prologue match at the other
+        // location — the same "location wins" spirit `score_candidate`
+        // already applies, just scored here instead of assumed from
+        // prologue alone. A plausible ROM-size exponent (`score_candidate`'s
+        // own $08-$0D bracket) and a map-mode byte with a VALID speed bit
+        // (fullsnes "ROM Speed and Map Mode (FFD5h)": "Bit7-6 Always 0",
+        // "Bit5 Always 1" — a real board's mode byte always has this exact
+        // `mode_byte & 0xE0 == 0x20` shape, whatever its speed bit or low
+        // nibble say) are both fields a wholesale-filler ($00 or $FF)
+        // header block fails, unlike a location that merely happens to have
+        // a plausible-looking byte or two.
+        if (0x08..=0x0D).contains(&data[g.base + 0x17]) {
+            score += 1;
+        }
+        if mode_byte & 0xE0 == 0x20 {
+            score += 1;
+        }
         // Order acts as the final tie-break (LoROM, then HiROM, then
         // ExHiROM), so only a STRICTLY better score displaces the earlier
         // guess.
@@ -689,6 +740,122 @@ fn fallback_mapping_guess(data: &[u8]) -> Option<(SnesMapMode, usize, HeaderFall
         }
     }
     best.map(|(_, _, mode, base, kind)| (mode, base, kind))
+}
+
+/// Ticket W14-55, rule A: once [`fallback_mapping_guess`] has picked a
+/// mapping from the RESET vector alone, should the chipset byte AT THAT
+/// LOCATION still be trusted to name a coprocessor?
+///
+/// W14-52 shipped a blanket "coprocessor is always `None`" rule for a
+/// fallback-loaded cartridge, reasoning that a chipset byte found this way
+/// "has no more credibility than the map-mode byte that just failed" — true
+/// in general, but the population this ticket was filed over shows real
+/// counter-examples: the three Star Fox 2 betas carry a fully-corroborated
+/// GSU chipset (`$15`: coprocessor nibble $1, hw $5, squarely in fullsnes's
+/// documented `$13-$1A` GSU-n range) at a LoROM location whose map-mode
+/// NIBBLE independently agrees ($20, nibble $0 = LoROM) — the header failed
+/// scoring only because its revision byte is $FF (fails `MAX_ROM_VERSION`)
+/// and its checksum/complement both read `$FFFF` (fails the "not literally
+/// 0/summed" checks), fields that say nothing about the chipset byte's own
+/// trustworthiness. Stripping SuperFx here is what leaves the betas' CPU
+/// spinning forever on a "wait for GSU ready" WRAM flag that no chip ever
+/// sets (`docs/TESTING.md`'s W14-54 re-triage).
+///
+/// This function re-checks the SAME chipset ranges `parse_snes_header`'s
+/// scored path already trusts (GSU $13-$1A; SA-1 $33-$35, gated on the
+/// mode-mode nibble also reading $3, same W14-53 "both fields must agree"
+/// shape; S-DD1 $43/$45, gated on the map-mode nibble reading $2; OBC1
+/// $25; Cx4 $F3 with the `$FFBF` sub-type byte $10; DSP $03-$05 via
+/// `known_non_dsp1_checksum`) and returns `Coprocessor::None` for anything
+/// else — a chipset byte this build has no chip for (including ST010's
+/// $F6: W19-04 is unimplemented as of this ticket, so nothing here can
+/// "honour" it yet; deliberately NOT special-cased so a future W19-04 arm
+/// can be added without colliding with this one) is exactly as garbage as
+/// before, and NEVER refuses the cartridge outright — a chip this build
+/// cannot run yet must still fall through to `None` here, not
+/// `UnsupportedChip`, because doing otherwise would flip a title that
+/// currently boots (uniform screen or better) into a fresh refusal, which
+/// is a regression this ticket's acceptance does not ask for (Zool (Beta)'s
+/// chipset $53 — coprocessor nibble $5 "S-RTC", hw $3 — matches none of
+/// these ranges and stays `None`, exactly as the ticket names it).
+///
+/// Returns `(coprocessor, battery, dsp_window, map_mode_override)` — SA-1
+/// and S-DD1 also need their own `SnesMapMode` (the memory map, not just
+/// the chip), same as the scored path.
+fn fallback_chipset_coprocessor(
+    data: &[u8],
+    base: usize,
+    mode_nibble: u8,
+    rom_size: usize,
+    ram_size: usize,
+    checksum: u16,
+) -> (Coprocessor, bool, Option<DspWindow>, Option<SnesMapMode>) {
+    let chipset = data[base + 0x16];
+    let hw = chipset & 0x0F;
+    let coprocessor_nibble = (chipset & 0xF0) >> 4;
+
+    if coprocessor_nibble == 0x1 && (0x3..=0xA).contains(&hw) {
+        // GSU-n, fullsnes "SNES Cart GSU-n Cartridge Header" — same
+        // decision `parse_snes_header`'s scored path makes, see there for
+        // the battery-bit citation.
+        let version = if rom_size > GSU2_ROM_THRESHOLD_BYTES {
+            SuperFxVersion::Gsu2
+        } else {
+            SuperFxVersion::Gsu1
+        };
+        let ram_kib = superfx_expansion_ram_kib(data, base);
+        return (
+            Coprocessor::SuperFx { version, ram_kib },
+            matches!(hw, 0x5 | 0xA),
+            None,
+            None,
+        );
+    }
+    if mode_nibble == 0x3 && coprocessor_nibble == 0x3 && (0x3..=0x5).contains(&hw) {
+        // SA-1, W17-01/W14-53's "both fields must agree" shape: the
+        // map-mode nibble at this SAME location must also read $3, not
+        // just the chipset byte.
+        return (
+            Coprocessor::Sa1(Sa1Board {
+                rom_len: rom_size,
+                bwram_len: ram_size,
+                iram_len: SA1_IRAM_LEN,
+            }),
+            hw == 0x5,
+            None,
+            Some(SnesMapMode::Sa1),
+        );
+    }
+    if mode_nibble == 0x2 && coprocessor_nibble == 0x4 && (0x3..=0x5).contains(&hw) {
+        // S-DD1, same "both fields must agree" shape (W19-03/W14-53).
+        return (Coprocessor::Sdd1, hw == 0x5, None, Some(SnesMapMode::Sdd1));
+    }
+    if coprocessor_nibble == 0x2 && hw == 0x5 {
+        // OBC1: chipset $25 is the only assigned combination.
+        return (Coprocessor::Obc1, true, None, None);
+    }
+    if coprocessor_nibble == 0xF && hw == 0x3 && base >= 1 && data[base - 1] == 0x10 {
+        // CX4: chipset $F3 with extended-header sub-type $10.
+        return (Coprocessor::Cx4, false, None, None);
+    }
+    if coprocessor_nibble == 0x0
+        && (0x3..=0x5).contains(&hw)
+        && known_non_dsp1_checksum(checksum).is_none()
+    {
+        // DSP-1 (not a known DSP-2/3/4 checksum, W14-43).
+        let map_mode = if base == LOROM_HEADER_OFFSET {
+            SnesMapMode::LoRom
+        } else {
+            SnesMapMode::HiRom
+        };
+        return (
+            Coprocessor::Dsp1,
+            hw == 0x5,
+            Some(dsp_window_for(map_mode, rom_size)),
+            None,
+        );
+    }
+    (Coprocessor::None, chipset == 0x02, None, None)
 }
 
 /// Build a [`SnesHeader`] once [`fallback_mapping_guess`] has already
@@ -707,14 +874,13 @@ fn fallback_mapping_guess(data: &[u8]) -> Option<(SnesMapMode, usize, HeaderFall
 ///   back to 0 (no RAM) on an implausible exponent rather than failing the
 ///   whole cartridge over a field that, worst case, only affects save
 ///   support.
-/// - the coprocessor is only ever read as `Coprocessor::None`, per the
-///   ticket's own acceptance ("the title's chipset stays 'none' unless the
-///   header says otherwise"): a chipset byte found via this fallback has
-///   no more credibility than the map-mode byte that just failed to name
-///   this location, so it is trusted only for the plain ROM/ROM+RAM/
-///   ROM+RAM+battery values ($00/$01/$02) that carry no coprocessor claim
-///   at all, and ignored (treated as plain ROM, no battery) otherwise
-///   rather than routed through a chip HLE on unreliable evidence.
+/// - the coprocessor is read as `Coprocessor::None` UNLESS the chipset byte
+///   at this location names a chip this build runs AND (where W14-53
+///   requires it) the location's own map-mode nibble corroborates it —
+///   ticket W14-55, [`fallback_chipset_coprocessor`]. A chipset byte this
+///   build cannot run is treated exactly like a garbage one (`None`, never
+///   a fresh refusal) rather than routed through a chip HLE on unreliable
+///   evidence.
 /// - `ExHiROM` is detected (so FR-CORE-013 can name it) but still refused:
 ///   `rf-snes` has no ExHiROM memory map regardless of how the header was
 ///   found, so accepting it here would just move the half-boot this ticket
@@ -753,18 +919,20 @@ fn build_header_from_fallback(
     };
     let checksum = u16::from_le_bytes([data[base + 0x1E], data[base + 0x1F]]);
     let checksum_complement = u16::from_le_bytes([data[base + 0x1C], data[base + 0x1D]]);
+    let mode_nibble = mode_byte & 0x0F;
 
-    let chipset = data[base + 0x16];
-    let battery = chipset == 0x02;
+    let (coprocessor, battery, dsp_window, map_mode_override) =
+        fallback_chipset_coprocessor(data, base, mode_nibble, rom_size, ram_size, checksum);
+    let map_mode = map_mode_override.unwrap_or(mode);
 
     Ok(SnesHeader {
-        map_mode: mode,
+        map_mode,
         fast_rom,
         rom_size,
         ram_size,
         battery,
-        coprocessor: Coprocessor::None,
-        dsp_window: None,
+        coprocessor,
+        dsp_window,
         checksum,
         checksum_complement,
         had_copier_header,
@@ -2163,5 +2331,118 @@ mod tests {
             ),
             "non-header data must still be refused even with the fallback in place, got {err:?}"
         );
+    }
+
+    /// Ticket W14-55, rule A — the Star Fox 2 (Beta) shape: a LoROM location
+    /// whose header fails scoring on the revision byte alone (real dumps
+    /// carry `$FF`, past `MAX_ROM_VERSION`) but whose chipset byte ($15:
+    /// coprocessor nibble $1, hw $5) squarely names GSU-n, and whose own
+    /// map-mode byte ($20, nibble $0) agrees with the LoROM location. Before
+    /// this ticket, W14-52's blanket fallback rule reported `Coprocessor::
+    /// None` here — the actual bug docs/TESTING.md's W14-54 re-triage
+    /// found: the betas' CPU spins forever on a "GSU ready" WRAM flag no
+    /// chip ever sets. The chipset byte must now be honoured instead.
+    #[test]
+    fn fallback_honours_corroborated_gsu_chipset_star_fox_2_beta_shape() {
+        let mut data = vec![0u8; 0x8000];
+        let base = LOROM_HEADER_OFFSET;
+        data[0] = 0x78; // SEI
+        data[1] = 0x18; // CLC
+        data[2] = 0xFB; // XCE
+        data[base + 0x15] = 0x20; // LoROM, nibble agrees with location
+        data[base + 0x16] = 0x15; // GSU-n chipset (nibble $1, hw $5)
+        data[base + 0x17] = 0x0A; // plausible ROM size exponent
+        data[base + 0x1B] = 0xFF; // revision byte past MAX_ROM_VERSION
+        set_checksum(&mut data, base, 0x0000); // checksum stays 0 -> no xor point
+        set_reset_vector(&mut data, base, 0x8000); // -> file offset 0
+
+        let header = parse_snes_header(&data).expect("RESET-vector fallback must accept this");
+        assert_eq!(
+            header.header_fallback,
+            Some(HeaderFallback::LoRomResetVector)
+        );
+        assert_eq!(header.map_mode, SnesMapMode::LoRom);
+        assert_eq!(
+            header.coprocessor,
+            Coprocessor::SuperFx {
+                version: SuperFxVersion::Gsu1,
+                ram_kib: 0,
+            },
+            "a corroborated GSU chipset byte must survive the header fallback"
+        );
+        assert!(header.battery, "hw=$5 GSU chipset carries a battery");
+    }
+
+    /// Ticket W14-55, rule A — the Zool (USA) (Beta) shape: a LoROM location
+    /// whose header fails scoring on the country byte (real dump carries
+    /// $57, past `MAX_COUNTRY_CODE`) and whose chipset byte ($53:
+    /// coprocessor nibble $5 "S-RTC", hw $3) does NOT match any chip this
+    /// build runs — a garbage/irrelevant chipset byte, not a corroborated
+    /// one, so the fallback must still report `Coprocessor::None` exactly
+    /// as W14-52 shipped, per this ticket's own acceptance.
+    #[test]
+    fn fallback_uncorroborated_chipset_zool_beta_shape_stays_none() {
+        let mut data = vec![0u8; 0x8000];
+        let base = LOROM_HEADER_OFFSET;
+        data[0x18] = 0x78; // SEI
+        data[0x19] = 0x18; // CLC
+        data[0x1A] = 0xFB; // XCE
+        data[base + 0x15] = 0x4F; // unassigned map-mode nibble ($F)
+        data[base + 0x16] = 0x53; // chipset naming a chip this build has no arm for
+        data[base + 0x19] = 0x57; // country byte past MAX_COUNTRY_CODE
+        set_checksum(&mut data, base, 0x0000);
+        set_reset_vector(&mut data, base, 0x8018); // -> file offset 0x18
+
+        let header = parse_snes_header(&data).expect("RESET-vector fallback must accept this");
+        assert_eq!(
+            header.header_fallback,
+            Some(HeaderFallback::LoRomResetVector)
+        );
+        assert_eq!(
+            header.coprocessor,
+            Coprocessor::None,
+            "an uncorroborated/unimplemented chipset byte must not be trusted"
+        );
+        assert!(!header.battery);
+    }
+
+    /// Ticket W14-55, rule B — the Lion King (USA) (Beta 3) (v.21) shape:
+    /// the LoROM header block is wholesale `$FF` filler, including the
+    /// vector field itself (so the "RESET vector" is just the filler value
+    /// $FFFF, not a survived real address), and the byte immediately AFTER
+    /// that vector's decoded file offset happens to be the start of a real
+    /// `SEI CLC XCE JML` prologue — but that prologue belongs to the HiROM
+    /// candidate's own, genuinely-set RESET vector ($8000), one byte over
+    /// from where LoROM's coincidental math landed. Before this ticket the
+    /// LoROM guess (tried first) won outright; `resolves_into_own_header_
+    /// block` must now reject it, leaving HiROM as the only candidate.
+    #[test]
+    fn fallback_prefers_hirom_over_lorom_seam_coincidence_lion_king_beta3_shape() {
+        // Both header blocks start as wholesale `$FF` filler, matching the
+        // real dump exactly; only the two genuinely-differing bytes (HiROM's
+        // RESET vector) and the shared prologue bytes at file offset $8000
+        // are overwritten below.
+        let mut data = vec![0xFFu8; 0x10000];
+        // The real prologue: SEI/CLC/XCE/JML at file offset $8000. LoROM's
+        // spurious vector ($FFFF - $8000 = $7FFF) reads this location's
+        // first three bytes one position late, with the header block's own
+        // trailing $FF filler as its bogus leading byte.
+        data[0x8000] = 0x78; // SEI
+        data[0x8001] = 0x18; // CLC
+        data[0x8002] = 0xFB; // XCE
+        data[0x8003] = 0x5C; // JML
+                             // HiROM's own RESET vector: the only non-filler bytes in its header
+                             // block, per the real dump.
+        let hirom_base = HIROM_HEADER_OFFSET;
+        data[hirom_base + RESET_VECTOR_OFFSET] = 0x00;
+        data[hirom_base + RESET_VECTOR_OFFSET + 1] = 0x80;
+
+        let header = parse_snes_header(&data).expect("RESET-vector fallback must accept this");
+        assert_eq!(
+            header.header_fallback,
+            Some(HeaderFallback::HiRomResetVector),
+            "the LoROM candidate's vector resolves into its own header block and must be rejected"
+        );
+        assert_eq!(header.map_mode, SnesMapMode::HiRom);
     }
 }
