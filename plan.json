@@ -8191,12 +8191,11 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-54",
   "title": "Re-triage the 60 uniform-screen SNES titles after W14-52/53, W19-01..03: the 16 newcomers (header-fallback loads, SFA2) plus the W14-45 residue — shapes, families, next tickets",
   "write_scope": [
-   "crates/rf-harness/**",
    "docs/TESTING.md"
   ],
   "acceptance": [
