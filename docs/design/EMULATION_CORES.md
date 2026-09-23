@@ -408,7 +408,7 @@ majority of games; per-dot upgrade path documented in code).
     and writing the register that triggers it, and confirms the restored
     run copies the same bytes a never-interrupted run does.
 
-### 3.6 Super FX (GSU) — slice 2 of 5
+### 3.6 Super FX (GSU) — slice 3 of 5
 
 **Super FX / GSU-1/GSU-2 (~10 games, D-014, SRS FR-CORE-040, Wave 18,
 `crates/rf-snes/src/gsu.rs`).** A cartridge-resident 10.74MHz (GSU1) or
@@ -522,13 +522,73 @@ from `GsuState::run`/`step_one`/`exec_opcode` in `gsu.rs`.
   that disabled the mask still sees the SFR bit but the CPU never
   dispatches. The MC1/GSU1 "STOP after a RAM write hangs" erratum is not
   modelled (no cycle-accurate bus state exists yet to detect it).
-- **PLOT/RPIX** are recording no-ops (`Gsu::plot_calls`/`rpix_calls`,
-  diagnostic, not saved) — PLOT still advances R1 per fullsnes ("Pixel=
-  COLR, R1=R1+1") without touching RAM; RPIX returns a deterministic `0`.
+- **PLOT/RPIX** are given the real pixel cache and RAM bitmap in slice 3
+  below; `plot_calls`/`rpix_calls` remain simple call counters (not
+  saved), now alongside real behaviour rather than in place of it.
   **COLOR/CMODE are real**, not stubbed — their documented effect is a
-  plain register write (`COLR`/`POR`), not the pixel path, so they are
-  implemented in full; only the pixel-cache/bitmap-RAM side (W18-03) is
-  deferred.
+  plain register write (`COLR`/`POR`).
+
+**Slice 3 (this ticket, D-014) gives PLOT/RPIX the real pixel cache and
+RAM bitmap writeback**, per fullsnes "SNES Cart GSU-n Bitmap I/O Ports"
+and "Pixel-Cache" (`Gsu::primary_cache`/`secondary_cache`,
+`GsuState::exec_plot`/`exec_rpix`/`flush_primary`/`flush_line_to_ram`).
+
+- **Pixel cache** (fullsnes "Pixel-Cache": "RAM-Pixel-Write-Cache (two
+  8-pixel rows)"): `PixelCacheLine` holds a `valid` flag, the 8-aligned
+  `x_base`/`y` the line was opened for, 8 colour bytes, and an 8-bit
+  `pending` mask ("8 flags (indicating if (nontransparent) pixels were
+  plotted)"). PLOT computes `seg_x = X AND F8h`; if the primary cache is
+  valid and `(x_base, y)` differs from the new pixel's, the primary is
+  flushed first (flush condition 1, "when plotting to different values");
+  a fresh line is opened if none is active; the plotted pixel's bit is
+  set in `pending` only when it isn't skipped by transparency. All 8
+  pending bits set triggers flush condition 3 ("cache full") immediately
+  after the same PLOT. RPIX is flush condition 2: it always flushes
+  first, then reads RAM directly, never the cache ("RPIX isn't cached, it
+  does always read data from RAM").
+- **Second cache**: `Gsu::secondary_cache` models the documented hand-off
+  stage ("Primary Pixel Cache... Secondary Pixel Cache (data copied from
+  Primary Cache, this WAITs if Secondary cache wasn't yet forwarded to
+  RAM)") structurally — `GsuState::flush_primary` moves the primary line
+  into it, drains any stale secondary line to RAM first, then drains the
+  new one — but performs both hand-offs **synchronously** within one
+  call. No WAIT/stall state exists yet to make the overlap observable, so
+  `secondary_cache` is always empty again by the time `flush_primary`
+  returns; that stall timing is explicitly deferred to slice 4, which is
+  also where `STEP_BUDGET`'s uncharged-cycle model as a whole gets fixed.
+- **POR semantics** (fullsnes "Bitmap I/O Ports", POR bits 0-4): bit0
+  Transparent=0 skips color 0 (PLOT still advances R1, never sets the
+  pending bit); bit1 Dither uses `(R1 XOR R2) & 1` to pick COLR's high
+  nibble (`COLOR/10h`) instead of the full byte, 4/16-color mode only;
+  bit2 High-Nibble and bit3 Freeze-High transform COLOR/GETC's *incoming*
+  byte before it lands in COLR (`GsuState::write_colr`: High-Nibble
+  replaces the low nibble with the high nibble first, then Freeze-High
+  writes only the low nibble of the stored register, "write-protect
+  COLOR.MSB"); Freeze-High separately narrows PLOT's own transparency
+  check to the low 2/4 bits even in 256-color mode ("ignores upper 4bit
+  even when in 256-color mode"); bit4 OBJ Mode forces OBJ tile numbering
+  regardless of SCMR.HT0/HT1.
+- **RAM address formulas** (fullsnes "Bitmap I/O Ports", cited verbatim
+  in `GsuState::tile_number`/`tile_row_addr`'s doc comments): Tile Number
+  is `(X/8)*10h/14h/18h + (Y/8)` for 128/160/192-pixel height, or
+  `(Y/80h)*200h + (X/80h)*100h + (Y/8 AND 0Fh)*10h + (X/8 AND 0Fh)` for
+  OBJ mode; Tile-Row Address is `TileNo*10h/20h/40h (2/4/8bpp) +
+  SCBR*400h + (Y AND 7)*2`, with plane pairs at `Addr+0/0x10/0x20/0x30`.
+  This is always bank-`$70`-relative (`SCBR`'s own "Base =
+  700000h+N*400h") — **not** RAMBR-relative, unlike LDB/STB/LDW/STW/SM/
+  SMS/SBK — so `GsuState::bitmap_ram_index` folds the raw 17-bit offset
+  onto `self.ram` directly (mod `ram_len`), the same flat-array shape
+  `gsu_ram_index` already gives bank `$70`/`$71`. Each pixel's bits are
+  packed MSB-first per plane byte (`plot_pixel_bits`/`read_pixel_bits`),
+  matching the SNES-standard bitplane layout `crate::sa1::write_tile_pixel`
+  already uses for SA-1's character conversion. Flush is a true
+  read-modify-write: only `pending`-set pixels are written, so untouched
+  RAM bytes (and untouched bit positions within a written byte) keep
+  their prior value.
+- **Not yet modelled**: cycle-accurate flush/stall timing (slice 4); the
+  MC1/GSU1-specific pixel-cache erratum, if any (none is documented in
+  the cited fullsnes chapter beyond the STOP-after-RAM-write note already
+  covered in slice 2).
 - **Provisional scheduling**: `GsuState::run` executes up to
   `STEP_BUDGET` (`64`, not a hardware constant) opcodes per
   `SnesSystem::step` while GO is set, with **no** cycle cost charged
