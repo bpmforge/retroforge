@@ -8238,7 +8238,7 @@
   "crate": "rf-cart",
   "depends_on": [],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-55",
   "title": "Header fallback follow-ups: keep a chipset-byte coprocessor when the fallback fires (Star Fox 2 betas lose GSU, Zool beta loses SA-1); prefer a candidate location whose own header is sane before guessing by prologue (The Lion King beta 3)",
