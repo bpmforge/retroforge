@@ -17,6 +17,7 @@ pub mod obc1;
 pub mod ppu;
 pub mod regs;
 pub mod sa1;
+pub mod sdd1;
 pub mod state;
 pub mod system;
 pub mod timing;

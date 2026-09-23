@@ -372,6 +372,25 @@ fn obc1_carts_load_with_the_registers_wired_up() {
     assert!(plain.bus.obc1.is_none());
 }
 
+/// Ticket W19-03: chipset $43 under map mode $22 now loads with the
+/// S-DD1's registers wired up instead of the FR-CORE-013 refusal — unlike
+/// OBC1/GSU, S-DD1 DOES get a dedicated map mode (fullsnes "ROM Speed and
+/// Map Mode": "2=LoROM/32K Banks + S-DD1"), the same D-013 shape SA-1's
+/// map mode $23 already has.
+#[test]
+fn sdd1_carts_load_with_the_registers_wired_up() {
+    let system = SnesSystem::load(&lorom_image(0x22, 0x43))
+        .unwrap_or_else(|e| panic!("chipset $43 (S-DD1) must load, got {e:?}"));
+    assert!(
+        system.bus.sdd1.is_some(),
+        "chipset $43: S-DD1 registers must be installed"
+    );
+    assert_eq!(system.bus.mode, SnesMapMode::Sdd1);
+    // A plain LoROM cart never gets one.
+    let plain = SnesSystem::load(&lorom_image(0x20, 0x00)).expect("loads");
+    assert!(plain.bus.sdd1.is_none());
+}
+
 /// Ticket W19-01 acceptance: reads/writes through the bus reach the real
 /// chip behaviour, not just the register-presence check above.
 ///

@@ -24,6 +24,7 @@ mod hdma;
 mod mapping;
 mod ppu;
 mod regs;
+mod sdd1_dma;
 mod system;
 mod timing;
 mod window;

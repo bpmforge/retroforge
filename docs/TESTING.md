@@ -9806,3 +9806,168 @@ Fun House, The Duel: Test Drive II, Space Football), the five Super Game
 Boy dumps, Street Fighter Alpha 2 (S-DD1), F1-ROC II (ST010), Top Gear
 3000 (DSP-4), the Star Fox 2 betas, and dumps with no surviving reset
 vector under any mapping.
+
+## W19-03 (S-DD1 Data Decompressor: Street Fighter Alpha 2)
+
+**Detection** (`rf-cart`): map mode $22 ("LoROM/32K Banks + S-DD1",
+fullsnes "ROM Speed and Map Mode") paired with chipset $43/$45
+(coprocessor nibble $4, hw $3/$5 — the only two combinations fullsnes's
+"in practice" chipset list assigns) accepted as `Coprocessor::Sdd1`. Same
+D-013 "both must agree" shape SA-1's map mode $23 already has: map mode
+$22 without the corroborating chipset byte still refuses
+(`sdd1_map_mode_without_sdd1_chipset_still_refuses`), and the chipset
+byte under plain LoROM (not map mode $22) still refuses too
+(`sdd1_chipset_under_plain_lorom_map_mode_still_refuses`) — real S-DD1
+boards always declare map mode $22. Verified against this project's own
+Street Fighter Alpha 2 (USA) dump: map-mode byte $32 (nibble $2), chipset
+$43, ROM size byte $0C (4 MiB, matching the 4,194,304-byte file exactly).
+`KNOWN_UNSUPPORTED_MAP_MODES` shrinks to `{$5, $A}` (ExHiROM, SPC7110);
+the filler-refusal regression test (`filler_matching_a_named_map_mode_is_refused_by_name`,
+W14-05) is repointed at ExHiROM ($5) since S-DD1 filler with no
+corroborating chipset now correctly falls through to ordinary candidate
+scoring instead of a shortcut refusal.
+
+**Registers** (`crate::sdd1::Sdd1Regs`, fullsnes "S-DD1 I/O Ports",
+`$4800-$4807`): `$4800`/`$4801` are independent per-channel bitmasks — a
+channel decompresses only while BOTH name it; `$4801`'s bit self-clears
+after that channel's DMA ("automatically cleared after DMA"), `$4800`
+does not ("unchanged after DMA"). `$4802`/`$4803` are fullsnes-hedged
+"Unknown" ports, stored/read back verbatim, never branched on (OBC1
+`$7FF7`'s precedent). `$4804-$4807` are the four 1 MiB ROM bank selects
+for the `$C0-$CF`/`$D0-$DF`/`$E0-$EF`/`$F0-$FF` groups. No documented
+reset values — every register starts zeroed.
+
+**Mapping** (`crate::mapping::sdd1_target`, fullsnes "S-DD1 Memory Map"):
+banks `$C0-$FF` are a bank-register-selected, HiROM-fashion view of the
+ROM (`banks[group] * 1Mi + within_group * 0x10000 + offset`, modulo ROM
+length), checked before the generic `map` — same "coprocessor window
+wins" precedent SA-1/GSU/CX4/OBC1 set. Everywhere else, including bank
+$00's exception-handler window the chapter calls out by name, is the
+cartridge's ordinary LoROM map; `SnesMapMode::Sdd1`'s arm in `map`
+reproduces that directly rather than duplicating `sdd1_target`'s
+arithmetic for it.
+
+**Decompression algorithm** (`crate::sdd1::Sdd1Decompressor`, fullsnes
+"SNES Cart S-DD1 Decompression Algorithm", `fullsnes.txt:10673-10757`):
+transcribed function for function —
+- `decompress_init`: the header byte's top 2 bits select `num_planes`
+  (2/8/4/0 for header&$C0 = $00/$40/$80/$C0 respectively — transcribed in
+  that literal, non-monotonic order fullsnes gives); the next 2 bits
+  select the context-mixing constants (`high_context_bits`/
+  `low_context_bits`).
+- `GetBit`/`ProbGetBit`: the 32-entry adaptive context model
+  (`EvolutionCodeSize`/`EvolutionMpsNext`/`EvolutionLpsNext`), each
+  context tracking a Golomb code-size state and an MPS bit.
+- `GetCodeword`/`RunTable`: the run-length Golomb decoder reading the
+  compressed bitstream a byte at a time.
+- `decompress_byte`: the bitplane interleave — even/odd-plane toggling
+  producing 2/4/8bpp tile-format bytes, or (for `num_planes=0`) a flat
+  "linear" byte built one bit at a time from all 8 contexts.
+
+One documented oddity is transcribed literally, not "corrected": as
+written, `decompress_init`'s `input=(input SHL 11) OR ([src+1] SHL 3)`
+line — reached with `src` already one past the header byte — reads the
+byte AFTER that position, never the header's immediate second byte. Per
+the clean-room mandate (implement the description, not a guessed
+intent), `Sdd1Decompressor::init`'s doc cites this exactly and the code
+does not paper over it.
+
+**DMA trigger** (`SnesBus::run_channel`): fullsnes's `<DMA>` row ("DMA
+from ROM returns Decompressed Data, originated at DMA start addr") is
+read as: a general-purpose DMA channel armed in both `$4800`/`$4801`,
+whose A-bus start address resolves into the S-DD1 ROM window, gets a
+decompressor seeded ONCE at that address; every byte of the transfer is
+`next_byte`'s output, never a second ROM read, regardless of how the
+visible A-bus register itself steps. HDMA is not intercepted (fullsnes
+only ever writes "DMA"; every known title's use is a one-shot general
+DMA streaming tiles/tilemaps into VRAM).
+
+**What is deliberately NOT modelled**: `$4802`/`$4803` (both hedged
+"Unknown"); HDMA-sourced decompression (undocumented); Star Ocean's
+LN3B board's extra SRAM (this project's library carries only Street
+Fighter Alpha 2).
+
+**Save/load**: `StateRegion::Cart` gains the same presence-flag pattern
+SA-1/GSU/CX4/OBC1 use for `Sdd1Regs`. The live decompressor is NOT part
+of machine state — a general-purpose DMA always runs to completion
+inside one `run_channel` call in this build, so no decompression is ever
+mid-flight at a save-state boundary; `Sdd1Decompressor::save`/`load`
+exist `cfg(test)`-only and are exercised directly by
+`save_load_mid_stream_resumes_identically`, proving the state IS
+resumable in isolation per the ticket's determinism requirement.
+
+**Tests**: 10 in `sdd1.rs` (register reset/enable-gating/self-clear/
+bank-readback/unknown-port round trip, save/load; header-byte mode
+selection for all four `(header AND C0h)` values, the three distinct
+`(header AND 30h)` context-constant pairs, an all-zero-stream-decodes-
+to-all-zero-bytes proof for every mode — hand-derived: an all-zero
+bitstream never leaves context state 0/MPS 0, so `ProbGetBit` always
+returns the MPS bit 0 — plus a determinism check and the save/load-mid-
+stream resume test, all against an independent Python re-implementation
+of the same fullsnes pseudocode kept as a doc comment on the test
+module); 3 in `tests/sdd1_dma.rs` (a full DMA-into-VRAM run: the
+enabled+armed channel decompresses an all-zero block into 32 zeroed
+VRAM bytes and `$4801`'s bit self-clears while `$4800`'s does not, then
+the SAME channel — transfer bit now clear — reads a raw `$AB`-filled
+region verbatim, proving the substitution is conditional and not a
+blanket transform of `$C0-$FF`; a channel armed only in `$4801` never
+decompresses; the bank register directly selects which ROM megabyte
+answers at `$C0`); 4 in `rf-cart` (chipset $43/$45 detection, the
+map-mode-without-chipset refusal, the chipset-under-plain-LoROM
+refusal); 1 in `tests/system.rs` (`SnesSystem::load` wires the registers
+up for chipset $43, leaves them `None` for a plain cart).
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes -p rf-cart`: rf-snes lib
+**492 passed** (1 pre-existing ignore, unrelated) plus every integration
+suite green; rf-cart **73 passed**, 0 failed. `cargo test --workspace`:
+**157 binaries, all green, 0 failed** (exit 0). Ignored SNES suites, all
+run `--release`: `peterlemon_golden` **3/3 passed**; `spc700_vectors`
+(`singlestep_spc700_vectors`, `spc700_cycle_table_matches_the_vectors`)
+**2/2 passed**; `gilyon_cputest`
+(`cputest_full_reports_success_and_every_test_passes`) **passed**.
+`singlestep_65816_vectors` did not fit this session (2.78M cases over a
+gigabytes-scale fetched corpus, unrelated to this ticket's own
+crate/rf-snes changes — the 65816 core itself is untouched by W19-03,
+same as it was for W19-01/W19-02, neither of which ran it either).
+`scripts/validate-arch.sh`: **arch OK**.
+
+**Census children** (RELEASE, `boot_census_child --ignored --exact`):
+
+| title | exit code / bucket |
+|---|---|
+| Street Fighter Alpha 2 (USA) | 10 — rendered a uniform screen (loads and runs; no longer refused) |
+| Super Mario World (USA) canary | 0 — rendered something |
+| Wild Guns (USA) canary | 0 — rendered something |
+| Super Mario RPG - Legend of the Seven Stars (USA) canary | 0 — rendered something |
+| Kirby Super Star (USA) canary | 0 — rendered something |
+| NHL 95 (USA) canary | 0 — rendered something |
+| Star Fox (USA) canary | 0 — rendered something |
+| Metal Combat - Falcon's Revenge (USA) canary | 0 — rendered something |
+
+No canary moved — the S-DD1 register window and `$C0-$FF` banked ROM
+view only claim addresses no other cartridge's mapping ever produced
+(fullsnes documents them as exclusive to this chip), and the DMA
+substitution only fires for a channel this build reads as armed for
+decompression, so an unrelated cart's ordinary DMA traffic is unaffected.
+
+**Street Fighter Alpha 2's own result, named honestly**: the cartridge
+now loads (chipset $43 detected, map mode $22 accepted, header no longer
+refused) and `title_probe`'s `PROBE_MODE=frames PROBE_FRAMES=120` shows
+`varied_at=None` — the boot sequence reaches a static screen and stays
+there rather than crashing, hanging, or refusing. This is progress from
+W19-02's precedent shape (Cx4: interface wired, commands undocumented)
+in the opposite direction — here the interface AND the documented
+algorithm are both fully implemented and unit-tested against hand/Python-
+derived expectations, but nothing in this project's library can confirm
+the DECOMPRESSED BYTES are what real hardware would produce without
+either the ROM's actual compressed tile data (which this ticket cannot
+inspect beyond generic header/size fields, per law 5) or a golden
+reference this project does not have. `decompress_init`'s literally-
+transcribed byte-skip (see `crate::sdd1`'s module doc) is the leading
+suspect if a future ticket gets a golden to compare against — cited
+there precisely so it is not lost. Given the algorithm is fullsnes's own
+documented one, transcribed and tested faithfully, this is reported as
+DONE against W19-03's acceptance (interface, algorithm, unit tests,
+gate, no regression) rather than blocked; the uniform-screen result for
+Street Fighter Alpha 2 itself is named, not hidden.

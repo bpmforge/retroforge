@@ -351,6 +351,20 @@ impl crate::system::SnesSystem {
                 match &self.bus.obc1 {
                     Some(regs) => regs.save(o),
                     None => Ok(()),
+                }?;
+                // S-DD1 registers (ticket W19-03), same presence-flag
+                // pattern as SA-1/GSU/CX4/OBC1 above, appended last so an
+                // older state and one saved after this ticket only disagree
+                // in what trails the byte the older format already ends
+                // at. The decompressor itself (`crate::sdd1::Sdd1Decompressor`)
+                // is NOT part of machine state: a general-purpose DMA
+                // always runs to completion within one `run_channel` call
+                // in this build, so no decompression is ever in flight at
+                // a frame boundary (see `crate::sdd1`'s module doc).
+                o.bool(self.bus.sdd1.is_some())?;
+                match &self.bus.sdd1 {
+                    Some(regs) => regs.save(o),
+                    None => Ok(()),
                 }
             }
         }
@@ -490,6 +504,15 @@ impl crate::system::SnesSystem {
                         "OBC1 presence in the saved state disagrees with the mounted cartridge"
                             .to_string(),
                     )),
+                }?;
+                let sdd1_present = i.bool()?;
+                match (self.bus.sdd1.as_mut(), sdd1_present) {
+                    (Some(s), true) => s.load(i),
+                    (None, false) => Ok(()),
+                    (Some(_), false) | (None, true) => Err(StateError::Corrupt(
+                        "S-DD1 presence in the saved state disagrees with the mounted cartridge"
+                            .to_string(),
+                    )),
                 }
             }
         }
@@ -508,6 +531,8 @@ fn map_mode_bits(mode: rf_cart::SnesMapMode) -> u8 {
         rf_cart::SnesMapMode::HiRom => 1,
         // Ticket W17-01.
         rf_cart::SnesMapMode::Sa1 => 2,
+        // Ticket W19-03.
+        rf_cart::SnesMapMode::Sdd1 => 3,
     }
 }
 
@@ -516,9 +541,10 @@ fn map_mode_from_bits(bits: u8) -> Result<rf_cart::SnesMapMode, StateError> {
         0 => rf_cart::SnesMapMode::LoRom,
         1 => rf_cart::SnesMapMode::HiRom,
         2 => rf_cart::SnesMapMode::Sa1,
+        3 => rf_cart::SnesMapMode::Sdd1,
         other => {
             return Err(StateError::Corrupt(format!(
-                "map mode {other} is not one of LoROM/HiROM/SA-1"
+                "map mode {other} is not one of LoROM/HiROM/SA-1/S-DD1"
             )))
         }
     })
