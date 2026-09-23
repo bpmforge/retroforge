@@ -5,7 +5,7 @@ use rf_cart::{
     SnesMapMode::{HiRom, LoRom},
 };
 
-use crate::mapping::{map, sa1_target, Sa1RomBanks, Target, WRAM_LEN};
+use crate::mapping::{gsu_target, map, sa1_target, GsuBoard, Sa1RomBanks, Target, WRAM_LEN};
 
 const ROM_32K: usize = 32 * 1024;
 const ROM_1M: usize = 1024 * 1024;
@@ -175,6 +175,8 @@ fn every_address_maps_within_bounds() {
                     | Target::Sa1BwRam(_)
                     | Target::Sa1Register(_)
                     | Target::Sa1Bitmap(_)
+                    | Target::GsuRam(_)
+                    | Target::GsuRegister(_)
                     | Target::Open => {}
                 }
             }
@@ -294,5 +296,108 @@ mod sa1 {
         let r = regs(0, 0);
         assert_eq!(sa1_target(&r, 0x00, 0x8000), None);
         assert_eq!(sa1_target(&r, 0xC0, 0x0000), None);
+    }
+}
+
+/// Ticket W18-01: `gsu_target` (fullsnes "SNES Cart GSU-n Memory Map" /
+/// "...I/O Map", the GSU2 table this project uses uniformly).
+mod gsu {
+    use super::*;
+
+    fn board(rom_len: usize, ram_len: usize) -> GsuBoard {
+        GsuBoard {
+            rom_len,
+            ram_len,
+            ron: false,
+            ran: false,
+        }
+    }
+
+    #[test]
+    fn register_window_is_3000_to_3fff_in_low_and_mirror_banks() {
+        let b = board(ROM_1M, 0);
+        assert_eq!(
+            gsu_target(&b, 0x00, 0x3000),
+            Some(Target::GsuRegister(0x3000))
+        );
+        assert_eq!(
+            gsu_target(&b, 0x80, 0x3FFF),
+            Some(Target::GsuRegister(0x3FFF))
+        );
+        assert_eq!(gsu_target(&b, 0x00, 0x2FFF), None, "PPU/APU regs, not GSU");
+        assert_eq!(
+            gsu_target(&b, 0x00, 0x4000),
+            None,
+            "past the register window"
+        );
+    }
+
+    #[test]
+    fn ram_mirror_is_6000_to_7fff() {
+        let b = board(ROM_1M, 32 * 1024);
+        assert_eq!(gsu_target(&b, 0x00, 0x6000), Some(Target::GsuRam(0)));
+        assert_eq!(gsu_target(&b, 0x3F, 0x7FFF), Some(Target::GsuRam(0x1FFF)));
+        // With no RAM at all, the window is not claimed here.
+        let none = board(ROM_1M, 0);
+        assert_eq!(gsu_target(&none, 0x00, 0x6000), None);
+    }
+
+    #[test]
+    fn rom_is_8000_to_ffff_lorom_style_in_banks_00_to_3f_only() {
+        let b = board(2 * 1024 * 1024, 0);
+        assert_eq!(gsu_target(&b, 0x00, 0x8000), Some(Target::Rom(0)));
+        assert_eq!(gsu_target(&b, 0x3F, 0x8000), Some(Target::Rom(0x1F_8000)));
+        // Banks $80-$BF are fullsnes's separate, unpopulated "Additional
+        // CPU ROM" chip select — `gsu_target` reports `None` for it here
+        // and leaves the ordinary LoROM mirror (via the generic `map`) to
+        // supply the answer, see `gsu_target`'s doc.
+        assert_eq!(gsu_target(&b, 0x80, 0x8000), None);
+        assert_eq!(gsu_target(&b, 0xBF, 0x8000), None);
+    }
+
+    #[test]
+    fn rom_mirrors_undersized_images() {
+        // A 512 KiB ROM (GSU1-sized) still resolves every bank via modulo.
+        let b = board(512 * 1024, 0);
+        assert_eq!(gsu_target(&b, 0x00, 0x8000), Some(Target::Rom(0)));
+        assert_eq!(gsu_target(&b, 0x10, 0x8000), Some(Target::Rom(0)));
+    }
+
+    #[test]
+    fn hirom_style_40_to_5f_mirrors_the_same_rom_linearly() {
+        let b = board(2 * 1024 * 1024, 0);
+        assert_eq!(gsu_target(&b, 0x40, 0x0000), Some(Target::Rom(0)));
+        assert_eq!(gsu_target(&b, 0x41, 0x0000), Some(Target::Rom(0x1_0000)));
+        assert_eq!(
+            gsu_target(&b, 0x5F, 0xFFFF),
+            Some(Target::Rom(2 * 1024 * 1024 - 1))
+        );
+    }
+
+    #[test]
+    fn full_ram_is_70_to_71() {
+        let b = board(ROM_1M, 128 * 1024);
+        assert_eq!(gsu_target(&b, 0x70, 0x0000), Some(Target::GsuRam(0)));
+        assert_eq!(
+            gsu_target(&b, 0x71, 0xFFFF),
+            Some(Target::GsuRam(128 * 1024 - 1))
+        );
+    }
+
+    #[test]
+    fn additional_backup_ram_and_cpu_rom_banks_are_untouched() {
+        // Fullsnes's "not installed in existing cartridges" regions:
+        // banks $78-$79, $80-$BF:$8000-FFFF (as additional CPU ROM, not
+        // the LoROM mirror this test's other cases exercise), $C0-$FF.
+        let b = board(ROM_1M, 0);
+        assert_eq!(gsu_target(&b, 0x78, 0x0000), None);
+        assert_eq!(gsu_target(&b, 0xC0, 0x0000), None);
+    }
+
+    #[test]
+    fn non_gsu_addresses_are_untouched_when_rom_and_ram_are_absent() {
+        let b = board(0, 0);
+        assert_eq!(gsu_target(&b, 0x00, 0x8000), None);
+        assert_eq!(gsu_target(&b, 0x70, 0x0000), None);
     }
 }

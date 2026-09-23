@@ -83,6 +83,16 @@ pub enum Target {
     /// per that reading of the ambiguity (see this module's report
     /// note).
     Sa1Bitmap(usize),
+    /// GSU (Super FX) on-cartridge RAM, at an offset already reduced
+    /// modulo its size (ticket W18-01, fullsnes "SNES Cart GSU-n Memory
+    /// Map"). Covers both the `$70-$71` full-bank window and its
+    /// `$6000-$7FFF` mirror — [`gsu_target`] resolves both onto the same
+    /// index space.
+    GsuRam(usize),
+    /// The GSU register window (`$3000-$3FFF` and its documented mirrors,
+    /// ticket W18-01, fullsnes "SNES Cart GSU-n I/O Map"). Carries the raw
+    /// offset; [`crate::gsu::Gsu`] sorts out which register/mirror it is.
+    GsuRegister(u16),
     /// Nothing is mapped here. Reads see open bus; writes are dropped.
     Open,
 }
@@ -338,6 +348,119 @@ fn lorom_quarter_target(regs: &Sa1RomBanks, bank: u8, offset: u16) -> usize {
         let local = usize::from(bank - direct_bank_base); // 0..63
         local * 0x8000 + off + direct_region_base
     }
+}
+
+/// The live sizes and bus-ownership bits [`gsu_target`] needs to resolve
+/// an address for a Super FX cartridge. Unlike SA-1's [`Sa1RomBanks`],
+/// there are no SNES-side ROM/RAM bank-select registers to track — fullsnes
+/// "SNES Cart GSU-n Memory Map" gives the GSU a fixed SNES-side shape,
+/// only the RON/RAM-bus-ownership bits (`$303Ah` SCMR) change at runtime.
+#[derive(Debug, Clone, Copy)]
+pub struct GsuBoard {
+    /// Cartridge ROM length in bytes.
+    pub rom_len: usize,
+    /// GSU RAM length in bytes (from the header's expansion-RAM field;
+    /// `0` for a cart whose header states none, including the extended-
+    /// header-absent case — see `rf_cart::snes::superfx_expansion_ram_kib`'s
+    /// doc).
+    pub ram_len: usize,
+    /// `$303Ah` SCMR bit 4 (RON): `false` = SNES owns the ROM bus,
+    /// `true` = the GSU does. Fullsnes "SNES Cart GSU-n Bitmap I/O Ports":
+    /// "4 RON Game Pak ROM bus access (0=SNES, 1=GSU)".
+    pub ron: bool,
+    /// `$303Ah` SCMR bit 3 (RAN): same rule, for the RAM bus.
+    pub ran: bool,
+}
+
+/// Resolve `(bank, offset)` against a Super FX cartridge's SNES-side
+/// memory map. Checked by [`crate::bus::SnesBus::target`] BEFORE [`map`]
+/// whenever the cartridge carries [`rf_cart::Coprocessor::SuperFx`] — a
+/// cart with none never calls this, so every other cartridge's mapping is
+/// unchanged.
+///
+/// GSU carts keep a plain LoROM (or, per fullsnes, an equally valid HiROM-
+/// style) header — fullsnes "SNES Cart GSU-n Cartridge Header": "the
+/// header & exception vectors are located at ROM Offset 7Fxxh... the
+/// cartridge header declares the cartridge as LoROM" — so this is layered
+/// the same way [`sa1_target`]/[`dsp1_target`] are, rather than a new
+/// [`rf_cart::SnesMapMode`] variant.
+///
+/// Cited to fullsnes "SNES Cart GSU-n Memory Map", the GSU2 table (the
+/// documented superset this build uses uniformly for GSU1 and GSU2 — GSU1
+/// is the same shape at smaller sizes, and fullsnes gives no SNES-side
+/// mapping difference between them beyond size):
+/// - `$3000-$3FFF` (banks `$00-$3F`/`$80-$BF`) — the register window and
+///   its mirrors ("SNES Cart GSU-n I/O Map"'s "Full I/O Map with Mirrors
+///   for GSU2"); resolved whole here, [`crate::gsu::Gsu`] decodes the
+///   mirror.
+/// - `$6000-$7FFF` (same banks) — "Mirror of 70:0000-1FFF (ie. FIRST 8K of
+///   Game Pak RAM)".
+/// - `$8000-$FFFF` in banks `$00-$3F` ONLY — "Game Pak ROM in LoRom
+///   mapping (2Mbyte max)". Banks `$80-$BF` do NOT get this: fullsnes
+///   lists `$80-BF:8000-FFFFh` as a separate "Additional 'CPU' ROM LoRom
+///   (2Mbyte max, usually none)" chip select no board in this project's
+///   library populates — `None` here for that combination falls through
+///   to [`map`], whose ordinary LoROM mirror (`bank & 0x7F`) already
+///   answers it the same way every other unbanked LoROM cartridge mirrors
+///   its FastROM half onto its SlowROM half.
+/// - banks `$40-$5F` — "Game Pak ROM in HiRom mapping (mirror of above)".
+/// - banks `$70-$71` — "Game Pak RAM (128Kbyte max, usually 32K or 64K)".
+/// - Everything else this project's boards don't populate (the additional
+///   "Backup" RAM at `$78-$79`, the additional "CPU" ROM at banks
+///   `$C0-$FF`): `None` here falls through to [`map`], which also has
+///   nothing for those addresses on a GSU cart (`rom_len`/`ram_len` gate
+///   every arm above, so an unbacked board still resolves cleanly to
+///   `Open`).
+///
+/// The SCMR RON/RAN ownership rule ("RON/RAN can be temporarily cleared
+/// during GSU operation, this causes the GSU to enter WAIT status") is
+/// NOT applied here — mapping only says WHERE an address lands; WHETHER
+/// the SNES side actually sees ROM/RAM there or open bus while the GSU
+/// owns the bus is [`crate::bus::SnesBus::read`]'s job (fullsnes documents
+/// the GSU's own WAIT behaviour but not literally what byte the SNES CPU
+/// reads meanwhile; this project's own convention — open bus, the same
+/// answer every other "nothing here right now" case in this bus already
+/// gives — is applied there rather than invented a second time in this
+/// module).
+#[must_use]
+pub fn gsu_target(board: &GsuBoard, bank: u8, offset: u16) -> Option<Target> {
+    // The register window and the `$6000-$7FFF` RAM mirror are the SAME
+    // in banks `$00-$3F` and `$80-$BF` (fullsnes literally writes both
+    // ranges on one row: "00-3F/80-BF:3000-34FFh"/"...:6000-7FFFh"). The
+    // PRIMARY ROM window is not: fullsnes gives it only to `$00-$3F`
+    // ("00-3F:8000-FFFFh... 2Mbyte max") and lists `$80-BF:8000-FFFFh`
+    // separately as "Additional 'CPU' ROM LoRom (2Mbyte max, usually
+    // none)" — a second, physically distinct chip select no board in this
+    // project's library populates. Returning `None` for it here (rather
+    // than claiming it as more GSU ROM) lets it fall through to the
+    // generic LoROM `map`, which mirrors `$80-$BF` onto `$00-$3F` the
+    // ordinary way every plain LoROM cartridge already mirrors FastROM
+    // banks onto SlowROM ones — the correct answer for an unpopulated
+    // second chip select on a cartridge whose header still declares plain
+    // LoROM.
+    let mirrored_system = bank < 0x40 || (0x80..0xC0).contains(&bank);
+    if mirrored_system {
+        if (0x3000..=0x3FFF).contains(&offset) {
+            return Some(Target::GsuRegister(offset));
+        }
+        if (0x6000..=0x7FFF).contains(&offset) && board.ram_len > 0 {
+            let idx = usize::from(offset - 0x6000);
+            return Some(Target::GsuRam(idx % board.ram_len));
+        }
+    }
+    if bank < 0x40 && offset >= 0x8000 && board.rom_len > 0 {
+        let index = (usize::from(bank) << 15) | usize::from(offset & 0x7FFF);
+        return Some(Target::Rom(index % board.rom_len));
+    }
+    if (0x40..=0x5F).contains(&bank) && board.rom_len > 0 {
+        let index = (usize::from(bank - 0x40) << 16) | usize::from(offset);
+        return Some(Target::Rom(index % board.rom_len));
+    }
+    if (0x70..=0x71).contains(&bank) && board.ram_len > 0 {
+        let index = (usize::from(bank - 0x70) << 16) | usize::from(offset);
+        return Some(Target::GsuRam(index % board.ram_len));
+    }
+    None
 }
 
 /// Resolve a 24-bit address.

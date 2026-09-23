@@ -1523,6 +1523,8 @@ impl CpuBus for Sa1Bus<'_> {
             | Target::Register(_)
             | Target::Dsp1Dr
             | Target::Dsp1Sr
+            | Target::GsuRam(_)
+            | Target::GsuRegister(_)
             | Target::Open => 0,
         }
     }
@@ -1572,6 +1574,8 @@ impl CpuBus for Sa1Bus<'_> {
             | Target::Register(_)
             | Target::Dsp1Dr
             | Target::Dsp1Sr
+            | Target::GsuRam(_)
+            | Target::GsuRegister(_)
             | Target::Open => {}
         }
     }
@@ -1588,6 +1592,8 @@ impl CpuBus for Sa1Bus<'_> {
             | Target::Register(_)
             | Target::Dsp1Dr
             | Target::Dsp1Sr
+            | Target::GsuRam(_)
+            | Target::GsuRegister(_)
             | Target::Open => 0,
         }
     }
