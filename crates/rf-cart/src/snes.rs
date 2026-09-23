@@ -355,6 +355,49 @@ fn kb_pow2(exp: u8) -> Result<usize, CartError> {
         .ok_or_else(|| CartError::InvalidHeader(format!("implausible SNES size exponent: {exp}")))
 }
 
+/// Ticket W14-57, rule A: decode the ROM-size byte ($FFD7h/$7FD7h), falling
+/// back to the actual image length when the byte is unusable — the same
+/// trust [`build_header_from_fallback`] already gives a header it doesn't
+/// otherwise believe (its own doc: "the file's own length is strictly more
+/// trustworthy than a byte inside the same header block"). fullsnes "SNES
+/// Cartridge ROM Header": "FFD7h ROM size (1 SHL n) Kbytes (usually
+/// 8=256KByte .. 0Ch=4MByte)" — real hardware never reads this byte at all,
+/// so an exponent `kb_pow2` refuses (overflow) or that decodes to a literal
+/// zero-byte ROM (as implausible a "size" as a byte can name — nowhere near
+/// any real dump's length) must not abort the load. A byte that decodes to
+/// SOME nonzero size is still trusted verbatim even when it disagrees with
+/// the actual file length: several of this module's own test fixtures (and
+/// real DSP-1B carts, whose declared size selects the wider snes9x DSP
+/// window) intentionally understate the file for test purposes, and only
+/// the two degenerate cases above are ones no real cartridge could ever
+/// produce.
+fn rom_size_from_header_byte_or_length(rom_size_byte: u8, data_len: usize) -> usize {
+    match kb_pow2(rom_size_byte) {
+        Ok(0) | Err(_) => data_len,
+        Ok(decoded) => decoded,
+    }
+}
+
+/// Ticket W14-57, rule A: decode the RAM-size byte ($FFD8h/$7FD8h), clamping
+/// to "no RAM" on an implausible exponent instead of trusting `kb_pow2`'s
+/// own guard, which only refuses an exponent large enough to overflow
+/// `usize` outright (>=54 or so) — nowhere near tight enough for a BYTE
+/// fullsnes documents as "usually 1=2Kbyte .. 5=32Kbyte) (0=None)". This is
+/// [`build_header_from_fallback`]'s own RAM clamp (see its doc for the Beta
+/// F-Zero $24-exponent regression that motivated it), lifted out so
+/// `parse_snes_header`'s scored path can share it rather than duplicating
+/// it: a scored header's OTHER fields already passed plausibility checks,
+/// but the RAM-size byte specifically is one fullsnes says the console
+/// itself never reads, so a garbage exponent there says nothing about
+/// whether the rest of the header is trustworthy.
+fn ram_size_from_header_byte(ram_size_byte: u8) -> usize {
+    if ram_size_byte <= 0x0D {
+        kb_pow2(ram_size_byte).unwrap_or(0)
+    } else {
+        0
+    }
+}
+
 /// ROM size above which [`SuperFxVersion::Gsu2`] is picked over `Gsu1` —
 /// see [`SuperFxVersion`]'s doc for the fullsnes citation and its known
 /// Star Fox 2 mismatch.
@@ -946,13 +989,11 @@ fn build_header_from_fallback(
     // entirely, read only once the SA-1 chipset byte itself is trusted,
     // never through this fallback) so anything past the same plausible
     // ceiling `score_candidate` uses for ROM size ($0D, 8 MiB) is treated
-    // as corrupt and defaulted to "no RAM" rather than allocated.
-    let ram_size_byte = data[base + 0x18];
-    let ram_size = if ram_size_byte <= 0x0D {
-        kb_pow2(ram_size_byte).unwrap_or(0)
-    } else {
-        0
-    };
+    // as corrupt and defaulted to "no RAM" rather than allocated. Ticket
+    // W14-57 lifted this clamp into `ram_size_from_header_byte` so
+    // `parse_snes_header`'s scored path can share it instead of
+    // duplicating it.
+    let ram_size = ram_size_from_header_byte(data[base + 0x18]);
     let checksum = u16::from_le_bytes([data[base + 0x1E], data[base + 0x1F]]);
     let checksum_complement = u16::from_le_bytes([data[base + 0x1C], data[base + 0x1D]]);
     let mode_nibble = mode_byte & 0x0F;
@@ -1236,8 +1277,19 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         }
     };
 
-    let rom_size = kb_pow2(data[base + 0x17])?;
-    let ram_size = kb_pow2(data[base + 0x18])?;
+    // Ticket W14-57, rule A: this location WON scoring, but the ROM/RAM
+    // size bytes at $FFD7h/$FFD8h are never among the fields that scoring
+    // actually checks (`score_candidate`'s "plausible ROM size" point is
+    // evidence, not a requirement — a header can win on checksum/reset
+    // vector/title alone with a garbage size byte). Real hardware never
+    // reads either byte (see `rom_size_from_header_byte_or_length` and
+    // `ram_size_from_header_byte`'s docs for the fullsnes citations), so an
+    // implausible exponent here must clamp exactly the way
+    // `build_header_from_fallback` already does for a header this build
+    // trusts even less — never abort the whole load over a byte the SNES
+    // itself ignores.
+    let rom_size = rom_size_from_header_byte_or_length(data[base + 0x17], data.len());
+    let ram_size = ram_size_from_header_byte(data[base + 0x18]);
 
     // The header's "DSP" chipset byte ($03/$04/$05, coprocessor nibble $0)
     // is the same for DSP-1, DSP-2, DSP-3 and DSP-4 — fullsnes and
@@ -1393,6 +1445,48 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         // Always battery-backed (the chapter: "8Kbyte battery-backed
         // SRAM").
         (Coprocessor::Obc1, true)
+    } else if (0x6..=0xD).contains(&coprocessor_nibble) || chipset == 0xFF {
+        // Ticket W14-57, rule B: fullsnes's Chipset (FFD6h) table assigns
+        // coprocessor nibbles $0 (DSP), $1 (GSU), $2 (OBC1), $3 (SA-1), $4
+        // (S-DD1), $5 (S-RTC), then jumps straight to $E (Super Game Boy /
+        // Satellaview) and $F (custom) — $6-$D are never assigned to
+        // anything, on any hardware that shipped. The same "an unassigned
+        // value can never legitimately name a real board" reasoning W14-52
+        // already applies to unassigned MAP-MODE nibbles (see the long
+        // comment above `map_mode`'s match) applies here to an unassigned
+        // COPROCESSOR nibble: a real cartridge's chipset byte can only ever
+        // read one of the values the table actually defines, so a $6-$D
+        // high nibble is mastering noise, not evidence of a real chip this
+        // build refuses to run. Falls to `Coprocessor::None` rather than
+        // `UnsupportedChip`, but still reads the low hw nibble for RAM/
+        // battery the same way the plain-ROM `else` arm below does — `hw ==
+        // 0x2` is fullsnes's own "ROM+RAM+Battery" value for a cart with NO
+        // coprocessor bit set, which is exactly the verdict this arm just
+        // reached, so it reuses that arm's convention rather than the
+        // "+Co-processor+RAM+Battery" hw==5 idiom the real coprocessor arms
+        // use (there is no coprocessor here to attach that RAM/battery to).
+        // Chips fullsnes DOES name in this byte but this build cannot run
+        // yet (DSP-4 via `known_non_dsp1_checksum`, S-RTC $5x, SGB/
+        // Satellaview $Ex, ST018) are unaffected — none of their nibbles
+        // fall in $6-$D — and keep refusing by name below.
+        //
+        // `chipset == 0xFF` is a narrower, separate carve-out this rule's
+        // own test fixture (the Doom Troopers (Beta) shape) forced into
+        // view: nibble $F ("custom") IS assigned in fullsnes's table, so it
+        // does not fall under the $6-$D range above, but $FF's hw nibble
+        // ($F) is not any documented custom sub-type either (CX4 is hw $3,
+        // SPC7110 is hw $5/$9, ST010/ST011 is hw $6) — it is the same
+        // wholesale-filler idiom this whole ticket arc has repeatedly found
+        // in beta/proto dumps (`resolves_into_own_header_block`'s doc notes
+        // the identical $FFFF-as-filler shape for a RESET vector). A byte
+        // that is ALL ones names no real board under nibble $F any more
+        // than nibbles $6-$D do, and — unlike the general "any unassigned
+        // hw nibble" idea — this cannot collide with a currently-refused
+        // named chip, because none of nibble $F's documented sub-types use
+        // hw $F. This one byte value is outside this ticket's literal
+        // "$6-$D" wording; flagged as a deviation in the ticket close-out
+        // note rather than silently widened.
+        (Coprocessor::None, hw == 0x2)
     } else if hw >= 0x3 {
         return Err(CartError::UnsupportedChip {
             name: format!(
@@ -2584,5 +2678,156 @@ mod tests {
         assert!(resolves_into_own_header_block(base, base + 0x3F));
         assert!(!resolves_into_own_header_block(base, base + 0x40));
         assert!(!resolves_into_own_header_block(base, base - 4));
+    }
+
+    // ---- W14-57: SCORED-path size-byte clamps + unassigned coprocessor ---
+
+    /// Ticket W14-57, rule A — the Doom Troopers (Beta) shape: a header
+    /// block that is otherwise wholesale $00 filler, scoring exactly
+    /// `MINIMUM_SCORE` (reset-vector-into-upper-half + map-mode-nibble-
+    /// agrees, both LoROM), so this wins as a SCORED candidate rather than
+    /// falling through to the RESET-vector fallback. Its ROM-size byte
+    /// ($00, `kb_pow2` decodes to a literal zero-byte ROM) and RAM-size
+    /// byte ($FF, `kb_pow2` overflows) are exactly the bytes real hardware
+    /// never reads (fullsnes "SNES Cartridge ROM Header": FFD7h/FFD8h).
+    /// Before this ticket's fix, the RAM byte's `kb_pow2(0xFF)?` aborted
+    /// the whole load with `InvalidHeader("implausible SNES size exponent:
+    /// 255")` — asserted first below, then the real assertions.
+    #[test]
+    fn doom_troopers_beta_shape_clamps_size_bytes_instead_of_refusing() {
+        let mut data = vec![0u8; 0x8000];
+        data[0] = 0x78; // SEI
+        data[1] = 0x18; // CLC
+        data[2] = 0xFB; // XCE
+        let base = LOROM_HEADER_OFFSET;
+        data[base + 0x15] = 0x00; // map mode: LoROM, slow
+        data[base + 0x16] = 0xFF; // chipset: wholesale filler
+        data[base + 0x17] = 0x00; // ROM size byte: decodes to 0 bytes
+        data[base + 0x18] = 0xFF; // RAM size byte: kb_pow2 overflows
+        data[base + 0x19] = 0x00; // country
+        data[base + 0x1B] = 0x00; // version
+        set_reset_vector(&mut data, base, 0x8000);
+        // checksum/complement stay $0000 -- no XOR score point, matching
+        // the real beta dump's own corrupted checksum.
+
+        let pre_fix_err = kb_pow2(data[base + 0x18]).unwrap_err();
+        match &pre_fix_err {
+            CartError::InvalidHeader(msg) => {
+                assert!(
+                    msg.contains("implausible SNES size exponent: 255"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidHeader, got {other:?}"),
+        }
+
+        let header = parse_snes_header(&data)
+            .expect("an implausible size byte must clamp, not refuse the cart");
+        assert_eq!(
+            header.header_fallback, None,
+            "must win as a SCORED candidate"
+        );
+        assert_eq!(header.map_mode, SnesMapMode::LoRom);
+        assert_eq!(
+            header.rom_size,
+            data.len(),
+            "a zero-byte ROM size must fall back to the real image length"
+        );
+        assert_eq!(
+            header.ram_size, 0,
+            "an overflowing RAM exponent clamps to 0"
+        );
+    }
+
+    /// Ticket W14-57, rule A — the NFL Quarterback Club (Beta) shape: an
+    /// otherwise fully legible, high-scoring LoROM header whose RAM-size
+    /// byte ($53 = 83 decimal) is nowhere near `kb_pow2`'s plausible range
+    /// (fullsnes: RAM is "usually 1=2Kbyte .. 5=32Kbyte) (0=None)"), and
+    /// must clamp to 0 exactly like `build_header_from_fallback` already
+    /// does for a header this build trusts far less. Chipset $02 (plain
+    /// ROM+RAM+Battery, hw=2) is unrelated to rule B and confirms rule A's
+    /// clamp does not disturb the ordinary no-coprocessor decode.
+    #[test]
+    fn nfl_quarterback_club_beta_shape_clamps_implausible_ram_byte() {
+        let mut data = vec![0x20u8; 3 * 1024 * 1024];
+        let base = LOROM_HEADER_OFFSET;
+        data[base..base + 0x15].fill(0x20); // legible (blank) title
+        data[base + 0x15] = 0x30; // map mode: LoROM, slow, valid speed bit
+        data[base + 0x16] = 0x02; // chipset: ROM+RAM+Battery, no coprocessor
+        data[base + 0x17] = 0x0C; // ROM size: 4 MiB, a plausible exponent
+        data[base + 0x18] = 0x53; // RAM size: implausible exponent (83)
+        data[base + 0x19] = 0x01; // country
+        data[base + 0x1B] = 0x00; // version
+        set_checksum(&mut data, base, 0xABCD);
+        set_reset_vector(&mut data, base, 0x8000);
+        data[0] = 0x78; // SEI
+        data[1] = 0x18; // CLC
+        data[2] = 0xFB; // XCE
+
+        let header =
+            parse_snes_header(&data).expect("a legible header with a bad RAM byte must parse");
+        assert_eq!(
+            header.header_fallback, None,
+            "must win as a SCORED candidate"
+        );
+        assert_eq!(header.ram_size, 0, "implausible RAM exponent clamps to 0");
+        assert_eq!(header.coprocessor, Coprocessor::None);
+        assert!(header.battery, "chipset $02 (hw=2) is ROM+RAM+Battery");
+    }
+
+    /// Ticket W14-57, rule B — the Aero the Acro-Bat 2 (Beta) shape: an
+    /// otherwise legible LoROM header whose chipset byte is $7F —
+    /// coprocessor nibble $7, squarely inside the $6-$D range fullsnes's
+    /// Chipset (FFD6h) table never assigns to anything (the table stops at
+    /// $5x S-RTC and resumes at $Ex SGB/Satellaview). Must decode as
+    /// `Coprocessor::None` rather than refuse. hw=$F is not itself a
+    /// documented hw value for ANY chipset nibble (the generic table only
+    /// assigns $0-$6), so this build treats it the same as any other
+    /// undocumented hw nibble reached through this arm: no RAM/battery
+    /// implied by it (RAM capacity itself still comes from the RAM-size
+    /// byte, $00 here, which is unrelated to this hw nibble).
+    #[test]
+    fn aero_the_acro_bat_2_beta_shape_unassigned_coprocessor_nibble_is_none() {
+        let mut data = vec![0x20u8; 2 * 1024 * 1024];
+        let base = LOROM_HEADER_OFFSET;
+        data[base..base + 0x15].fill(0x20); // legible (blank) title
+        data[base + 0x15] = 0x30; // map mode: LoROM, slow, valid speed bit
+        data[base + 0x16] = 0x7F; // chipset: unassigned coprocessor nibble $7
+        data[base + 0x17] = 0x0B; // ROM size: 2 MiB, a plausible exponent
+        data[base + 0x18] = 0x00; // RAM size: none
+        data[base + 0x19] = 0x01; // country
+        data[base + 0x1B] = 0x00; // version
+        set_checksum(&mut data, base, 0x1234);
+        set_reset_vector(&mut data, base, 0x8000);
+        data[0] = 0x78; // SEI
+        data[1] = 0x18; // CLC
+        data[2] = 0xFB; // XCE
+
+        let header = parse_snes_header(&data)
+            .expect("an unassigned coprocessor nibble must not refuse the cart");
+        assert_eq!(
+            header.header_fallback, None,
+            "must win as a SCORED candidate"
+        );
+        assert_eq!(header.coprocessor, Coprocessor::None);
+        assert!(
+            !header.battery,
+            "hw=$F is not the documented battery value for this arm"
+        );
+    }
+
+    /// Ticket W14-57, rule B must not widen beyond the unassigned range:
+    /// chipset $E3 names Super Game Boy / Satellaview (nibble $E, assigned)
+    /// and must keep refusing by name exactly as before this ticket.
+    #[test]
+    fn sgb_chipset_e3_still_refuses_rule_b_did_not_widen() {
+        let rom = lorom_image(0x20, 0xE3);
+        let err = parse_snes_header(&rom).unwrap_err();
+        match &err {
+            CartError::UnsupportedChip { name } => {
+                assert!(name.contains("Super Game Boy"), "got: {name}");
+            }
+            other => panic!("expected UnsupportedChip, got {other:?}"),
+        }
     }
 }
