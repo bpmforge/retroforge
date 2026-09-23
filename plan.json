@@ -8003,7 +8003,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-51",
   "title": "Final Fight 2 (x2) and Battletoads in Battlemaniacs (x2): $2100/$212C never consumed while the game runs — trace the picture state",
