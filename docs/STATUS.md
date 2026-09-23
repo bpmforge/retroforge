@@ -4136,3 +4136,30 @@ stories, 10 decisions).
   load-induced timeouts (Donkey Kong Country 1/2, Star Trek, Super
   Buster Bros.) that all render in under two seconds idle — the
   census is only trustworthy on an otherwise idle machine.
+
+- **Wave 18 — Super FX, five slices, and W7-08's four stages**
+  (2026-09-22/23, D-014/D-015). W18-01 detected GSU carts from the
+  header, mapped ROM/RAM/the register window per fullsnes and lifted
+  the refusal (eleven archives left *refused*); W18-02 implemented the
+  full opcode set pinned by hand-assembled programs; W18-03 the pixel
+  cache, PLOT/RPIX and the bitmap RAM writeback; W18-04 the credit clock
+  at 10.7/21.4 MHz, the 512-byte code cache and the ROM/RAM buffers.
+  W18-04's accurate clock exposed a bug that three audits had missed:
+  carts without an extended header parsed as 0 KiB of GSU RAM, so every
+  SNES write into GSU RAM was dropped and Star Fox's decompressor read
+  the vector table; fullsnes's "32 KiB for Starfox" default fixed all
+  three dumps (first varied frame 155). W18-05 named the rest: Super
+  Star Fox Weekend boots at frame 788 (past the census budget), Star Fox
+  2's Classic Mini dump idles after eighteen clean GSU runs (a GSU2-only
+  map quirk or a long menu wrapper), Vortex spins on a computed jump,
+  the three Star Fox 2 betas fail header plausibility, and Tommy Moe's
+  is not a GSU dump at all. SNES census over the wave: 1093/41/131 ->
+  **1101/44/120** (nine GSU archives render; nothing regressed; the
+  three new uniform rows are the named GSU titles). W7-08 landed the
+  real Gaussian table, the BRR lost-sign wrap, the echo FIR read/write
+  fixes and FLG's mute/soft-reset bits; blargg's spc_dsp6 stays at check
+  0x0A with the arithmetic verified equal to fullsnes at the traced
+  write. Also: W14-50 (NES mapper 18, 1226/6/49) and W14-51 (Final Fight
+  2 / Battletoads boot at frames 6607/3520, named). Gate at the W18-04
+  merge: workspace **2319 passing / 0 failed / 43 ignored** incl. the
+  65816 vector suite, clippy clean, arch OK.

@@ -408,7 +408,7 @@ majority of games; per-dot upgrade path documented in code).
     and writing the register that triggers it, and confirms the restored
     run copies the same bytes a never-interrupted run does.
 
-### 3.6 Super FX (GSU) — slice 4 of 5
+### 3.6 Super FX (GSU) — slice 5 of 5 (census + named causes)
 
 **Super FX / GSU-1/GSU-2 (~10 games, D-014, SRS FR-CORE-040, Wave 18,
 `crates/rf-snes/src/gsu.rs`).** A cartridge-resident 10.74MHz (GSU1) or
@@ -689,6 +689,95 @@ definition, `GsuState::run_credited`/`step_one`/`fetch_byte`).
   documented to depend on it, and special-casing it would make ordinary
   FMULT-into-R4 wrong for everyone else; FMULT/LMULT's CY flag has no
   documented definition, so this slice always clears it.
+
+**Slice 5 (this ticket, W18-05) is census + named causes, not new GSU
+mechanism.** One fix shipped, one diagnostic gap closed, everything else
+named. Full per-title table and traces: docs/TESTING.md's own W18-05
+section.
+
+- **GSU RAM defaults to 32 KiB when the extended header is absent**
+  shipped in the prior ticket (`W18-04`'s `fix(W18-04)` commit,
+  `superfx_expansion_ram_kib`'s `raw == 0xFF` arm) is the one change
+  this whole slice-5 arc rests on: it is what let Star Fox / Rev 1 /
+  Rev 2 start rendering (fullsnes "Caution: Starfox/Star Wing,
+  Powerslide, and Starfox 2 do not have extended headers... RAM Size
+  for Starfox/Starwing is 32Kbytes"). This slice verified, rather than
+  assumed, that the fix's own scope boundary is correct: Star Fox 2's
+  own real cartridges (per this same fullsnes sentence) have their RAM
+  size documented as **unknown**, not 32 KiB, so the fix's `raw == 0xFF`
+  condition deliberately does not claim to cover it — and, checked
+  against the actual `Star Fox 2 (USA, Europe) (Classic Mini, Switch
+  Online).zip` header this ticket, that title's extended-header byte
+  (`$7FBD`) is `$06` (64 KiB, the other size fullsnes's header chapter
+  documents as existing), not `$FF` — this specific dump *does* carry a
+  real extended header, unlike an original unreleased prototype, so the
+  "RAM size unknown" caution does not even apply to it; GSU RAM parses
+  non-zero (64 KiB) for this dump today, confirmed by `plot_calls=2`
+  over an 1800-frame run (RAM-gated PLOT can only fire at all once
+  `mapping::gsu_target`'s `board.ram_len > 0` gate passes) where it used
+  to be `0` before any RAM existed.
+- **`title_probe`'s `frames` mode gained the GSU core-state dump**
+  (`PROBE_GSUREGS=1 PROBE_MODE=frames`, `crates/rf-harness/tests/
+  title_probe.rs`): the register/PC/counter report `print_gsu_reg_report`
+  already prints under the default (`PROBE_INSTR`-budget) mode and under
+  `PROBE_MODE=gsuhist` had never been wired into `frames` mode, which is
+  the one mode that answers "does this title ever render" directly — a
+  stuck-GSU trace previously had to switch modes mid-investigation to
+  see both facts at once. Now both print from one run.
+- **Named, not fixed, for the still-non-rendering GSU archives** (full
+  evidence in docs/TESTING.md): **Star Fox 2 (Classic Mini/Switch
+  Online dump)** — RAM is not the blocker (see above); the GSU is
+  started and cleanly stopped 18 times over an 1800-frame run and
+  produces only 2 PLOTs before going idle, a shape this ticket could
+  not distinguish between "a GSU2-only memory/bank detail this project's
+  shared GSU1/GSU2 map does not yet model" and "a menu/boot wrapper this
+  specific repackaged dump carries that genuinely needs more than 1800
+  frames" — both named, neither verified, per Bug Fix Discipline (a
+  theory not independently confirmed is not shipped as a fix).
+  **Vortex** — still parked on a `JMP Rn`-family opcode with GO set,
+  the same shape three prior tickets (W18-02/03/04) traced without
+  finding an opcode, interleave, or cache defect; this session's own
+  fresh counters (huge cache-hit and RAM-buffer-stall counts) confirm
+  it is a genuinely active, not idle, loop, adding no new theory. **The
+  three Star Fox 2 betas** — confirmed this ticket by calling
+  `rf_cart::Cartridge::load` directly on their extracted bytes: all
+  three return `InvalidHeader("no plausible SNES header at $7FC0 or
+  $FFC0: neither location has a map mode matching it, an assigned
+  country code and a plausible revision")` — non-canonical, incomplete
+  prototype dumps (1,047,074 and 1,048,259 bytes, not the canonical
+  1,048,576), refused by this project's ordinary, chip-agnostic header
+  plausibility check, not a GSU-specific gap.
+- **Super Star Fox Weekend is not stuck** — the one title this ticket's
+  own `PROBE_FRAMES=1800` sweep resolves outright: `varied_at=Some(788)`,
+  which is past `boot_census`'s fixed 600-frame budget but well inside a
+  1800-frame window, the same "census-fixture, not a GSU defect" shape
+  W18-04's own follow-up #3 named for Star Fox's boot-decompression
+  pass. `boot_census`'s bucket for this title is therefore a fixture
+  limitation, not a rendering defect — left unchanged rather than
+  special-cased per-title (law 5).
+- **Census** (RELEASE, same 15 real GSU archives + 5 canaries as every
+  prior slice, `boot_census_child`): unchanged from the post-W18-04
+  state committed at HEAD — **1101/44/120/0/0** — since nothing in this
+  ticket's one production change (the RAM-default fix already landed
+  last ticket) altered which title varies inside the fixed 600-frame
+  window; only Super Star Fox Weekend's true, past-the-window varied
+  frame changed, which `boot_census` cannot see by construction.
+- **What is still not modelled, named honestly rather than implied
+  complete**: the RAM-Address-Cache's own WAIT rules beyond
+  `Gsu::last_ram_addr`'s SBK writeback; the MC1/GSU1-only "STOP after a
+  RAM write hangs" erratum (no cycle-accurate bus state exists to detect
+  the specific pattern fullsnes describes); the pixel cache's overlap
+  between a later instruction and an in-flight flush (this project's
+  flush is always synchronous, so it never spans multiple opcodes the
+  way real hardware's WAIT could); FMULT's Dreg=R4 erratum and its
+  undocumented CY-flag behaviour (both named in slice 2's own bullet
+  above); any GSU2-only bank/mirror behaviour beyond the "GSU2 table
+  used uniformly for both chip versions" choice slice 1 made — Star Fox
+  2's still-unresolved cause (above) is the concrete case this
+  simplification may or may not be responsible for, not yet
+  distinguished from a boot-length explanation; and an SNES-side
+  golden-frame test DMAing the GSU RAM bitmap to VRAM, named as a gap
+  rather than claimed done back in slice 3 and still not written.
 
 ## 4. Cartridge layer boundary (`rf-cart`)
 

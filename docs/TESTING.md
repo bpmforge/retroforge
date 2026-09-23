@@ -8487,6 +8487,198 @@ all clean.
 
 **HEAD**: see the `fix(W18-04): ...` commit this entry ships with.
 
+## W18-05 (Super FX / GSU slice 5: census, named causes, by-eye)
+
+Scope per the ticket: no new GSU mechanism, only tracing the archives
+still not rendering after W18-04's RAM-default fix, one tooling gap
+closed in `title_probe`, and the by-eye list. `title_probe`'s `frames`
+mode never called `print_gsu_reg_report` (only the default mode and
+`gsuhist` did), so `PROBE_GSUREGS=1 PROBE_MODE=frames` — the combination
+that answers "does it render, and what is the GSU core doing when it
+doesn't" in one run — printed nothing GSU-specific; fixed by adding the
+existing, env-gated `print_gsu_reg_report(&core)` call to the `frames`
+branch (`crates/rf-harness/tests/title_probe.rs`, right after the
+existing `print_sa1_reg_report` call). No other source changed this
+ticket — the RAM-default fix that unblocked the Star Fox family already
+shipped last ticket.
+
+**Per-title table** (all 15 real GSU-labelled archives in the library +
+the 3 non-canonical betas, `PROBE_MODE=frames PROBE_FRAMES=1800` this
+session, `boot_census`'s own 600-frame bucket alongside it):
+
+| title | bucket (600f) | first varied frame (1800f) | note |
+|---|---|---|---|
+| Star Fox (USA) | rendered | 155 | fixed by W18-04's RAM default |
+| Star Fox (USA) (Rev 1) | rendered | (unchanged, renders early) | fixed by W18-04 |
+| Star Fox (USA) (Rev 2) | rendered | (unchanged, renders early) | fixed by W18-04 (accurate clock) |
+| Star Fox 2 (Classic Mini, Switch Online) | uniform | **none by frame 1800** | named below, not fixed |
+| Star Fox 2 (Beta) (1994-12-28 CES) | refused | n/a | `Cartridge::load` refuses: non-canonical header (below) |
+| Star Fox 2 (Beta) (1995-09-12) | refused | n/a | same |
+| Star Fox 2 (Beta) (1995-09-13) | refused | n/a | same |
+| Super Star Fox Weekend (Competition Cart) | uniform (600f) | **788** | renders — past the 600-frame census window, not stuck (named below) |
+| Vortex (USA) (En,Es) | uniform | **none by frame 1800** | still parked on a computed jump, named below |
+| Dirt Trax FX (USA) | rendered | 204 | unchanged |
+| Doom (USA) | rendered | 4 | unchanged; GSU core never invoked in this window (`bus.gsu` present but idle — SNES side draws first) |
+| Stunt Race FX (USA) (Rev 1) | rendered | 79 | unchanged; GSU core idle in this window, same as Doom |
+| Super Mario World 2: Yoshi's Island (USA) | rendered | 91 | 7,680 PLOT / 120 RPIX calls over the run — the by-eye title for the pixel path |
+| Super Mario World 2: Yoshi's Island (USA) (Rev 1) | rendered | (unchanged) | |
+| Tommy Moe's Winter Extreme (USA) | rendered | 48 | **not actually a GSU title in this dump** — its header chipset byte is `$00` (plain ROM, no coprocessor: `body[0x7FD6]=0x00`, checked directly against the ROM this ticket), unlike fullsnes's "Winter Gold / FX Skiing" GSU2 listing for what is presumably the same game's EU release; `bus.gsu` is `None` for this archive. It has been carried in this project's own "15 GSU archives" tracking list since W18-01 without anyone checking its actual chipset byte until now — named here rather than silently left implying it exercises the GSU core |
+
+**Star Fox 2 (Classic Mini, Switch Online dump) — RAM is verified not to
+be the blocker; the real cause is still open.** fullsnes states plainly:
+"Caution: Starfox/Star Wing, Powerslide, and Starfox 2 do not have
+extended headers... RAM Size for Starfox/Starwing is 32Kbytes, RAM Size
+for Powerslide and Starfox 2 is unknown" — the general Star Fox 2
+prototype's RAM size is undocumented, which is why W18-04's RAM-default
+fix deliberately does not claim to cover it (its `raw == 0xFF` condition
+only fires when the extended header is genuinely absent). Checked this
+dump's actual header byte directly rather than assuming the general
+case applies: `$7FBD` (the extended-header expansion-RAM-size byte) is
+**`$06`**, not `$FF` — this specific, officially-released repackaging
+(SNES Classic Mini / Switch Online, 2017) *does* carry a real extended
+header, declaring 64 KiB, one of the two sizes fullsnes's header chapter
+documents as existing ("32Kbyte and 64Kbyte exist"). So RAM already
+parses non-zero for this dump today (confirmed: `plot_calls=2` over the
+1800-frame run — a RAM-gated PLOT can only execute at all once
+`mapping::gsu_target`'s `board.ram_len > 0` gate passes, which it could
+not before any RAM existed). `PROBE_GSUREGS=1 PROBE_MODE=frames
+PROBE_FRAMES=1800`: `go_set=18 go_clear=18 go_clear_by_stop=18` (18
+clean start/stop cycles, never left spinning) but only `instructions=
+6166` and `plot_calls=2` by the last cycle, then idle (`go=false`) —
+the GSU is being invoked repeatedly for very short bursts rather than
+running one long boot-and-render pass the way Star Fox does. **Bug Fix
+Discipline — two candidates, ranked, neither verified:** (1) a
+GSU2-only memory/bank behaviour this project's memory map does not yet
+distinguish from GSU1's (`crate::mapping::gsu_target` and
+`superfx_expansion_ram_kib`'s own doc both note the map is "the GSU2
+table used uniformly for both chip versions," an explicit, cited
+simplification, not a proven-correct GSU2 model) — most likely given
+this is the one GSU2 title in the library whose own board this project's
+1-MiB-vs-2-MiB heuristic mis-detects as GSU1 in the first place (per
+W18-01); (2) this specific repackaged dump carries a menu/compatibility
+wrapper (common for Classic Mini/Virtual-Console-style re-releases)
+whose own boot sequence genuinely needs more real time than 1800 frames
+(30 real seconds) before its first visible pixel — the same class W18-04
+follow-up #3 named for Star Fox's own boot-decompression pass, just not
+confirmed here since 1800 frames (versus Star Fox's 600) already found
+nothing. Neither theory was independently confirmed with the tools
+available this session (no reference GSU2 disassembly, no cycle-accurate
+cross-check), so per Law/Bug-Fix-Discipline neither ships as a fix —
+named for a future ticket instead of guessed at.
+
+**Super Star Fox Weekend — resolved: it renders, past the census
+window, not stuck.** Every prior slice (W18-01 through W18-04) reported
+this title as "uniform" using `boot_census`'s fixed 600-frame budget.
+This ticket's own `PROBE_MODE=frames PROBE_FRAMES=1800` sweep finds
+**`varied_at=Some(788), total_instr_at_varied=Some(11,810,450)`** —
+comfortably inside 1800 frames, well outside 600. This is the same
+"census-fixture problem, not a GSU-core bug" shape W18-04's own
+follow-up #3 named for Star Fox's boot-decompression pass (which needed
+frame 155, safely inside the window, once the RAM fix landed — Super
+Star Fox Weekend's competition-cart boot/timer overlay apparently needs
+substantially longer). `boot_census`'s 600-frame budget is shared across
+every NES/SA-1/plain-SNES/GSU title in the library and was not tuned
+for this specific GSU1 title; widening it globally is out of this
+ticket's write scope (it would need re-validating every other title's
+bucket) and title-keying it would violate law 5, so this is named as a
+census-fixture limitation, not fixed, and `boot_census`'s bucket for
+this archive is left unchanged.
+
+**Vortex — still parked, no new theory.** `PROBE_GSUREGS=1
+PROBE_MODE=frames PROBE_FRAMES=1800`: `PBR:R15=06:00A4`, last opcode
+`$90` (`JMP R0`, the same `JMP Rn` family the W18-02/03/04 trace found
+at a different address/register each session), `go=true`,
+`instructions=173,560,331`, `cache_hits=186,628,764`,
+`ram_stalls=26,612,380` — a genuinely active, high-throughput loop (not
+an idle WAIT this project fails to model), consistent with but adding
+nothing beyond the three prior tickets' own conclusion: extensive
+tracing (interleave granularity, opcode semantics, code-cache targeting)
+found no verifiable GSU-core defect for this specific spin. Distinguishing
+"real Vortex hardware also spins here transiently" from "this project's
+model disagrees with real hardware somewhere upstream of this PC" still
+needs a reference disassembly or a cycle-accurate cross-check this
+project does not have — named, not fixed, same disposition as before.
+
+**The three Star Fox 2 betas — confirmed, not merely repeated.** Rather
+than trust the pre-existing `exit 12` (`EXIT_NO_ROM_IN_ARCHIVE`) bucket
+label, this ticket called `rf_cart::Cartridge::load` directly on each
+beta's extracted ROM bytes (a temporary, reverted-before-commit test).
+All three return the same error: `InvalidHeader("no plausible SNES
+header at $7FC0 or $FFC0: neither location has a map mode matching it,
+an assigned country code and a plausible revision")`. All three are also
+non-canonical sizes (1,047,074 and 1,048,259 bytes, against the
+canonical release's 1,048,576) — consistent with incomplete or
+otherwise-modified prototype leaks, not clean commercial dumps. This is
+this project's ordinary, chip-agnostic header-plausibility gate refusing
+a genuinely non-canonical dump, not a GSU-specific gap; no change is
+warranted or made.
+
+**Census** (RELEASE, same 15 real GSU archives + 5 canaries,
+`boot_census_child` direct invocation): unchanged from the state
+committed at HEAD after W18-04 — **1101/44/120/0/0** — since this
+ticket's only production change (`title_probe`'s `frames`-mode
+diagnostic) does not affect emulation, and the RAM-default fix that
+moved the count already landed last ticket. Super Star Fox Weekend's
+true varied frame (788) is outside `boot_census`'s 600-frame window by
+construction, so the bucket count itself does not move.
+
+**By-eye items for Brad** (what to look for, and what a wrong picture
+would look like):
+
+- **Star Fox (USA), Rev 1, Rev 2** — boot to the Nintendo/Argonaut logo
+  sequence, then the title screen's rotating wireframe Arwing (the
+  first GSU-rendered 3D polygon). A wrong picture: the logo/title
+  screens render as ordinary 2D tiles/text but the wireframe ship is
+  missing, frozen on a single frame, or a solid garbage-colored blob —
+  any of those means PLOT/RPIX or the pixel-cache flush is drawing
+  something, but not the ship's actual polygon data.
+- **Super Mario World 2: Yoshi's Island (USA)** — the GSU drives sprite
+  scaling/rotation (Yoshi and enemies growing/shrinking, the intro's
+  stork sequence) and several Mode-7-like background effects (the
+  map-screen "sunken ship"/"forest" rotate-zoom transitions, some
+  boss-fight backgrounds). A wrong picture: those specific elements
+  render as static, unscaled sprites/flat backgrounds while everything
+  else (ordinary tile-based platforming) looks correct — that is
+  exactly what "PLOT/RPIX never fire for this element" looks like,
+  distinguishable from a general PPU bug because the rest of the frame
+  is fine.
+- **Stunt Race FX (USA) (Rev 1)** — the GSU-rendered 3D vehicle models
+  and track geometry (Mode 7-esque, blocky "voxel" cars). A wrong
+  picture: the track/road renders (that part is separate, ordinary PPU
+  Mode 7) but cars are missing, flat-colored blocks, or don't rotate
+  with steering input.
+- **Doom (USA)** — the GSU renders the first-person 3D view itself
+  (walls/floor/ceiling as textured or flat-shaded polygons/columns). A
+  wrong picture: the HUD (ordinary 2D tiles) renders but the 3D
+  viewport is black, frozen, or a single flat color — that specific
+  split (HUD fine, viewport wrong) is the tell, since Doom's HUD and
+  3D view are drawn through different paths.
+- **Dirt Trax FX (USA)** — GSU-rendered 3D track/vehicle, similar shape
+  to Stunt Race FX but simpler geometry. A wrong picture: same
+  "everything except the GSU-drawn 3D content" split as the titles
+  above.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes -p rf-cart` — all green, no
+source in either crate changed this ticket (only `rf-harness`'s test
+binary did) so counts are unchanged from W18-04's own report; `cargo
+test --workspace` clean; `scripts/validate-arch.sh` — `arch OK`. Census
+children re-run for all 15 GSU archives + 5 canaries (Super Mario World,
+Wild Guns, Super Mario RPG (USA), Kirby Super Star, NHL 95): all
+unchanged from the post-W18-04 table above. No ROM bytes or copyrighted
+titles committed anywhere (the beta-header probe and the GSU-register
+mirror probe used this ticket were temporary, `#[ignore]`d, ROM-path or
+hand-constructed-register-value tests, reverted before this commit).
+
+**Not delivered this ticket, named rather than silently dropped**: a
+fix for Star Fox 2 (Classic Mini) or Vortex — both traced with concrete,
+ranked candidate causes and reasons neither could be verified with the
+tools/references available (see above); `boot_census`'s frame budget
+was not widened for Super Star Fox Weekend, since doing so safely needs
+re-validating every other title's bucket, out of this ticket's scope.
+
+**HEAD**: see the `docs(W18-05): ...` commit this entry ships with.
+
 ## W14-51 — Final Fight 2 / Battletoads: no register defect found; both
 titles' picture appears well outside the census window, the same
 "boot longer than window" class as Lagoon/Phalanx (W14-35). BLOCKED
