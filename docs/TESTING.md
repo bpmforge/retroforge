@@ -1125,6 +1125,7 @@ First run, 2026-09-15, release build:
 | SNES, after W18-04 | 1265 | **1101** | 44 | 120 | **0** | **0** |
 | SNES, after W18-06 | 1265 | **1101** | 44 | 120 | **0** | **0** |
 | SNES, after W14-52/W19-01/W19-02 | 1265 | **1169** | 59 | 37 | **0** | **0** |
+| SNES, after W14-53/W19-03 | 1265 | **1180** | 60 | 25 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -10148,3 +10149,19 @@ peterlemon_golden --test region_golden --test gilyon_cputest --
 passes`, `peterlemon_bg_map_goldens_match`, the two other peterlemon
 tests, `a_pal_frame_is_pixel_identical_to_its_ntsc_counterpart`).
 `scripts/validate-arch.sh`: `arch OK`.
+
+**Full SNES census (orchestrator, 2026-09-23, main after the W14-53 and
+W19-03 merges, idle machine, per-title `RF_CENSUS_OUT` diff against the
+W14-52 run):** **1169/59/37/0/0 -> 1180/60/25/0/0**. Twelve rows left
+*refused* for *rendered something*: **Contra III: The Alien Wars** (USA,
+Virtual Console, and the beta), **Krusty's Super Fun House**, **The
+Duel: Test Drive II** (USA and beta), **Space Football: One on One**,
+Batman Forever (two betas), Arcus Spirits (proto), Mortal Kombat II
+(Rev 1 sample) — all W14-53's uncorroborated-nibble rule; **Street
+Fighter Alpha 2** moved from *refused* to *uniform screen* (W19-03: the
+S-DD1 interface and the chapter's decompressor are in, the title loads,
+and whether its decompressed bytes are right cannot be verified without
+a reference — named). No row moved down. The 25 still refused: five
+Super Game Boy dumps (no Game Boy core), F1-ROC II (ST010), Top Gear
+3000 (DSP-4, refused by name), the three Star Fox 2 betas, and dumps
+with no surviving reset vector under any mapping.

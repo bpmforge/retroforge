@@ -4181,3 +4181,20 @@ stories, 10 decisions).
   cost a round of brace repairs at their shared seams — recorded as a
   process trap. Gate: workspace **2362 passing / 0 failed / 43
   ignored**, clippy clean, arch OK.
+
+- **W14-53, W19-03 — the refused bucket falls to 25** (2026-09-23).
+  W14-53 printed the five retail carts' headers: all plain LoROM with a
+  map-mode nibble naming SA-1, S-DD1 or ExHiROM that the chipset byte
+  does not corroborate — mastering quirks, since hardware reads neither
+  byte — so the winning header location now decides, and Contra III,
+  Krusty's Super Fun House, The Duel and Space Football load. W19-03
+  models the S-DD1's register window, bank selects and the decompressor
+  fullsnes documents function by function (the 32-state context model,
+  the Golomb decoder, the bitplane interleave modes), substituting a
+  channel's A-bus reads when the chip is armed; Street Fighter Alpha 2
+  loads to a uniform screen and its decompressed bytes stay unverified
+  without a golden. The two lanes' overlapping rf-cart edits needed a
+  semantic merge (corroboration now gates the S-DD1 arm, chipset $44
+  accepted). Census 1169/59/37 -> **1180/60/25**, twelve up, none down.
+  Gate: workspace **2391 passing / 0 failed / 43 ignored** incl. the
+  65816 vector suite, clippy clean, arch OK.
