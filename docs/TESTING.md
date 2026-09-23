@@ -10165,3 +10165,84 @@ a reference — named). No row moved down. The 25 still refused: five
 Super Game Boy dumps (no Game Boy core), F1-ROC II (ST010), Top Gear
 3000 (DSP-4, refused by name), the three Star Fox 2 betas, and dumps
 with no surviving reset vector under any mapping.
+
+## W19-04 (ST010: F1 Race of Champions / Exhaust Heat II — register window, RAM, one documented command)
+
+**Detection** (`rf-cart`): chipset `$F6` ("ROM+Custom+Battery", coprocessor
+nibble `$F`, `hw=$6`) AND the extended header's `$FFBF` sub-type byte
+`=$01` together name the ST010/ST011 (fullsnes "DSPn/ST010/ST011
+Cartridge Header": `"[FFD6h]=F6h"`, `"[FFBFh]=01h Chipset Sub Type =
+ST010/ST011"`) — nibble `$F` alone is reused by CX4 (`$FFBF=$10`) and
+SPC7110 (`$FFBF=$00`), so both fields must agree, refused otherwise. Unit
+tests: accepts `$F6`+`$FFBF=$01` (always battery-backed), refuses `$F6`
+with a different sub-type, refuses `$F3` (CX4's chipset) with `$FFBF=$01`
+as neither chip (pinning both directions of the two-field check).
+
+**What the chapter actually documents — a grep-verified finding, not an
+assumption**: fullsnes's "ST010 Commands" table promises "See individual
+commands for input and output parameter addresses," but a full-file grep
+for `ST010`, `Driver Placements`, `0010h]` and `Sort Driver` finds nothing
+between the command table (`fullsnes.txt:9265-9284`) and an unrelated
+oscillator part number 13,000+ lines later — "ST010 Commands" is
+immediately followed by "ST011 Commands" then the unrelated ST018
+chapter. Only `00h` ("Set RAM[0010h]=0000h") has a stated effect;
+`01h`/`04h` are explicitly "Unknown Command"; `02h`/`03h`/`05h`/`06h`/
+`07h`/`08h` are bare names with no documented address, width or sign
+rule for any of them — including `06h` "Multiply", whose acceptance
+clause ("06h multiply if operands are given") does not fire because no
+operands are given. This corrects the filing note's premise ("the
+chapter's per-command parameter notes... are the spec") — those notes do
+not exist in the source text.
+
+**Register window / RAM / command protocol** (`crates/rf-snes/src/st010.rs`,
+`crates/rf-snes/src/mapping.rs`'s `st010_target`, `crates/rf-snes/src/
+bus.rs`): the whole 4096-byte on-chip RAM (fullsnes: "2Kx16bit... accesses
+it as 4Kx8bit") is mapped, mirrored, across banks `$68-$6F`/`$E8-$EF`,
+offsets `$0000-$0FFF`; the separate `$60-$67:0000/0001` DR/SR pair the
+generic per-board table names is mapped but inert (no documented command
+is reachable through it). The command/busy protocol (`$0020` command,
+bit 7 of `$0021` busy) lives inside the RAM at word index `$0010` — the
+same word `00h` clears — and is modelled as synchronous: busy is stored
+already cleared on the write that sets it, the same completion model
+§3.8/W19-02 already uses for the CX4's `$7F5E` bit 6. 17 unit tests cover
+every command's busy-clear-only behaviour (with a "poison the buffer,
+assert nothing but the command/busy word changed" check for the eight
+undocumented commands), the `09h-0Fh`/`10h-FFh` mirror folding, the RAM
+window's mirroring and the inert DR/SR pair's mapping, save/load
+round-tripping the RAM but not the diagnostic counters, and (in
+`crates/rf-snes/src/tests/system.rs`) an end-to-end `SnesSystem::load`
+test issuing command `00h` through the ordinary bus.
+
+**Gate** (all exit-checked): `cargo fmt --check`: 0. `cargo clippy
+--workspace -- -D warnings`: 0. `cargo test -p rf-snes -p rf-cart`: 0
+(rf-cart 82 passed/0 failed; rf-snes lib 509 passed/1 ignored/0 failed,
+every other rf-snes test binary green). `cargo test --release -p rf-snes
+--test peterlemon_golden --test spc700_vectors --test gilyon_cputest --
+--ignored`: 0, all 6 pass. `scripts/validate-arch.sh`: `arch OK`. `cargo
+test --workspace`: 0 (2410 passed, 0 failed across every crate).
+
+**Census** (`boot_census_child` run directly against each archive, idle
+machine):
+
+| Title | Exit | Bucket |
+|---|---|---|
+| F1-ROC II - Race of Champions (USA).zip | 0 | RenderedSomething (moved: was `Refused`) |
+| Pilotwings (USA).zip | 0 | RenderedSomething (DSP-1 canary, unmoved) |
+| Super Mario Kart (USA).zip | 0 | RenderedSomething (DSP-1 canary, unmoved) |
+| Top Gear 3000 (USA).zip | 12 | Refused (DSP-4, stays refused by name — untouched by this ticket's detection branch, nibble `$F` vs. its own nibble `$0`) |
+| Super Mario World (USA).zip | 0 | RenderedSomething (unmoved) |
+| Wild Guns (USA).zip | 0 | RenderedSomething (unmoved) |
+| NHL 95 (USA).zip | 0 | RenderedSomething (unmoved) |
+| Kirby Super Star (USA).zip | 0 | RenderedSomething (unmoved) |
+
+`title_probe PROBE_MODE=frames PROBE_FRAMES=120` on F1-ROC II: first
+varied frame `35` (`total_instr_at_varied=630553`) — the title boots past
+its header and produces varying pixel output within the first two
+seconds of emulated time, consistent with an ordinary boot/logo sequence
+rather than a hang.
+
+**By-eye items for Brad**: none required — this ticket's one modelled
+command (`00h`) has no visible effect by its own definition (it clears an
+internal RAM word), and the eight undocumented commands are deliberately
+inert. F1-ROC II moving from `Refused` to `RenderedSomething` is the only
+observable change, already captured in the census table above.

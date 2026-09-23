@@ -8213,7 +8213,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "id": "W19-04",
   "title": "ST010 (F1-ROC II: Race of Champions): the register window, the battery-backed on-chip RAM, and the documented commands per fullsnes 'ST010 Commands'",
@@ -8230,6 +8230,7 @@
    "W19-04: DSP-4 (Top Gear 3000) is NOT in scope — fullsnes lists its commands as 'Unknown'; the ticket records that finding in EMULATION_CORES.md so it is not re-investigated"
   ],
   "notes": [
+   "DONE 2026-09-23. Corrects the filing note's premise: fullsnes's \"See individual commands for input and output parameter addresses\" is never fulfilled in the text -- a full-file grep for ST010/Driver Placements/0010h]/Sort Driver finds nothing between the command table (9265-9284) and an unrelated oscillator entry 13000+ lines later. Only 00h (\"Set RAM[0010h]=0000h\") has a documented effect; 01h/04h are named Unknown; 02h/03h/05h/06h/07h/08h are bare names with no address/width/sign rule -- including 06h Multiply, so the acceptance's own fallback clause applies to all eight, not a partial 06h implementation. Detection: chipset $F6 + extended-header $FFBF=$01 (two-field check, same shape as CX4's own $F3+$FFBF=$10). RAM: the whole 4096-byte on-chip buffer mapped/mirrored across banks $68-$6F/$E8-$EF; the command/busy word ($0020/$0021) lives inside it at word index $0010 -- the same word 00h clears. Busy modelled synchronous, same completion model as CX4's $7F5E (W19-02). Battery: no .sav persistence layer exists anywhere in this codebase (checked by grep) -- rides in the ordinary save-state, same as every other coprocessor's battery-backed memory. Gate: fmt/clippy/validate-arch all 0; rf-cart 82 passed, rf-snes lib 509 passed/1 ignored, workspace 2410 passed/0 failed; ignored peterlemon_golden/spc700_vectors/gilyon_cputest all green. Census: F1-ROC II moved Refused -> RenderedSomething (exit 0, title_probe first varied frame 35); Top Gear 3000 (DSP-4) stays refused (exit 12), untouched by this ticket's nibble-$F detection; Pilotwings/Super Mario Kart/Super Mario World/Wild Guns/NHL 95/Kirby Super Star all unmoved. Pre-existing P8 note: W7-08 (rf-snes, unrelated S-DD1/echo work) was already in_progress when this ticket claimed -- no file overlap (different files entirely), flagged for the orchestrator rather than resolved here.",
    "W19-04 FILED 2026-09-23 by the orchestrator: fullsnes lines 9265-9290 list the ST010 commands; the chapter's per-command parameter notes (after line 9300) are the spec. fullsnes: 'the only feature really used is the battery-backed on-chip RAM'."
   ]
  }
