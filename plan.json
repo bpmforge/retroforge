@@ -8191,12 +8191,11 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "id": "W14-54",
   "title": "Re-triage the 60 uniform-screen SNES titles after W14-52/53, W19-01..03: the 16 newcomers (header-fallback loads, SFA2) plus the W14-45 residue — shapes, families, next tickets",
   "write_scope": [
-   "crates/rf-harness/**",
    "docs/TESTING.md"
   ],
   "acceptance": [
@@ -8205,7 +8204,8 @@
    "W14-54: the three largest families are proposed as the next tickets with the confirming evidence each needs; no core code changes in this ticket"
   ],
   "notes": [
-   "W14-54 FILED 2026-09-23 by the orchestrator after the refused bucket fell from 120 to 25: 16 titles entered the uniform bucket today and have never been probed."
+   "W14-54 FILED 2026-09-23 by the orchestrator after the refused bucket fell from 120 to 25: 16 titles entered the uniform bucket today and have never been probed.",
+   "W14-54 DONE 2026-09-23. Ground truth is 19 newcomers, not 16 (comm -13 against wt-uniform-41.txt), plus the 41 carried from W14-45 (35 stuck, unchanged families/evidence -- none of W14-52/53/W19-01..03 touch their APU/raster/DMA machinery) and 6 unchanged slow boots. 1800-frame sweep across all 60: 7 slow boots (6 carried + Super Star Fox Weekend, new), 53 stuck. The 18 stuck newcomers got a default probe (PROBE_INSTR=3000000 PROBE_PORTS/RING/SPCRING=1) plus a PROBE_MODE=frames PROBE_FRAMES=600 PROBE_M7=1 line; header path (scored vs W14-52 fallback, and the mapping) came from a standalone scratch crate against rf-cart (Cartridge::load / SnesHeader::header_fallback), not a title_probe.rs edit -- W7-08 holds crates/rf-harness/** this session (its own notes are dated today), so this ticket's write_scope was narrowed to docs/TESTING.md at claim time (P8 concurrent-active overlap otherwise). Families found: 15 of 19 newcomers took the RESET-vector fallback (all LoRom). NEW families: pirate-cart shared bootloader stall (9, byte-identical PCs across unrelated titles -- Digimon Adventure/Pokemon Gold & Silver share one bootloader, King of Fighters 98/2000 share another); header-fallback strips a real coprocessor (4: three Star Fox 2 betas lose GSU, Zool (Beta) loses a chipset-byte-suggested SA-1, since the fallback's own rule reports coprocessor=None unconditionally); a wrong-fallback mapping guess (1: The Lion King (Beta 3) -- LoROM's prologue match is a one-byte-offset coincidence at a bank-mirror seam; HiROM's own header has a clean SEI/CLC/XCE/JML fallback never reaches because LoROM is tried first); GSU/SuperFX real execution not yet composing (2: Star Fox 2 Switch Online, Vortex -- both corroborated, both genuinely running, TM=0000 at frame 600); S-DD1 decompression still unverifiable without a golden (1: Street Fighter Alpha 2, W19-03's own named limitation, not re-derived); scattered execution joining the carried DMA/mapping family (Aladdin 2000). Three largest families proposed as next tickets: APU handshake (11, carried, unchanged), pirate-cart bootloader stall (9, NEW), raster/IRQ (9, carried, unchanged). No core code changed; cargo fmt --check clean (docs-only diff). Full tables, evidence and the smaller header-fallback bug findings: docs/TESTING.md 'W14-54 re-triage' section."
   ]
  },
  {
