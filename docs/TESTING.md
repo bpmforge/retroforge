@@ -10165,3 +10165,194 @@ a reference — named). No row moved down. The 25 still refused: five
 Super Game Boy dumps (no Game Boy core), F1-ROC II (ST010), Top Gear
 3000 (DSP-4, refused by name), the three Star Fox 2 betas, and dumps
 with no surviving reset vector under any mapping.
+
+## W14-54 re-triage (2026-09-23, docs-only) — the 60 uniform-screen SNES
+## titles after W14-52/53, W19-01..03: 19 newcomers plus the W14-45 residue
+
+**Newcomer count note:** the filing note guessed 16 newcomers; `comm -13`
+between `wt-uniform-41.txt` (the exact W14-45 table) and the current
+60-title `RF_CENSUS_OUT` list gives **19** (Aladdin 2000 (Pirate), Digimon
+Adventure (Pirate), King of Fighters '98/2000 (Pirate), The Lion King
+(Beta 3), Marvel Super Heroes vs. Street Fighter (Pirate), Pokemon Gold &
+Silver (Pirate), PowerFest 94, Soul Edge vs Samurai (Pirate), the Star Fox
+2 Switch Online release plus its three betas, Street Fighter Alpha 2,
+Street Fighter EX Plus Alpha (Pirate), Super Star Fox Weekend, Vortex,
+X-Men vs. Street Fighter (Pirate), Zool (Beta)) — no title left the
+bucket. Taken as ground truth over the filing note's estimate.
+
+### Step 1 — 1800-frame sweep (`PROBE_MODE=frames PROBE_FRAMES=1800`,
+release build, one 60-title run)
+
+**7 of the 60 are slow boots**, not stuck — the same "budget, not bug"
+shape the W14-45/W14-34 tables already named for four of these six, plus
+one genuinely new slow boot among the newcomers:
+
+| Title | varied_at (frame) | total_instr_at_varied |
+|---|---|---|
+| Power Rangers Zeo - Battle Racers (USA) | 624 | 7,960,482 |
+| Xardion (USA) | 621 | 8,415,627 |
+| Super Star Fox Weekend (USA) (Competition Cart) | 788 | 11,810,450 | **NEW**
+| Knights of the Round (USA) | 950 | 16,226,170 |
+| Jungle Strike (USA) | 1174 | 17,118,576 |
+| Justice League Task Force (USA) (Beta) | 1719 | 24,522,095 |
+| Undercover Cops (USA) (Retro-Bit) | 1780 | 26,779,848 |
+
+All six carried-forward slow boots are unchanged from the W14-45 table
+(`varied_at`/`total_instr_at_varied` identical). The remaining **53 never
+vary inside 1800 frames.**
+
+### Carried forward unchanged (35 of the W14-45 stuck titles)
+
+None of W14-52 (header fallback), W14-53 (nibble-collision rule), W19-01
+(OBC1), W19-02 (Cx4) or W19-03 (S-DD1) touch the APU/raster/DMA machinery
+these 35 titles are stuck in, and the frames sweep above reconfirms every
+one is still flat at 1800 frames — so the W14-45 table's families,
+shapes and evidence stand **unchanged, not re-derived**:
+
+- **APU handshake (11):** Blackthorne (USA)/(Beta)/(Beta) (CES), Battle
+  Grand Prix, Tekken 2 (Pirate), Urban Strike, NBA Live 96, Batman -
+  Revenge of the Joker (Proto), Phalanx/(Beta), Sonic Blast Man II.
+- **Raster/IRQ (9):** Battletoads in Battlemaniacs (USA)/(Beta), Final
+  Fight 2 (USA)/(Virtual Console), Goal!, Tuff E Nuff, Dragon - The Bruce
+  Lee Story (Beta), Spot Goes to Hollywood (Proto), WeaponLord.
+- **DMA/mapping (6):** Hercules (Pirate), Pokemon Stadium (Pirate), Bug's
+  Life A (Pirate), Daffy Duck - The Marvin Missions (Beta), Road Runner
+  (Beta), ClayFighter (Beta 1).
+- **Pagemaster's WaitVBlank stall (4, still BLOCKED by W14-39):**
+  Pagemaster retail, Beta 1/2/3.
+- **Unknown/one-off (5):** Justice League Task Force (retail), Lagoon,
+  Firearm (Proto), Brandish, XBAND (v1.0.1).
+
+Full per-title shapes for all 35: docs/TESTING.md's own "W14-45
+re-triage" section above (unmoved, not reproduced here).
+
+### Step 2 — 18 stuck newcomers: one default probe each (`PROBE_INSTR=
+3000000 PROBE_PORTS=1 PROBE_RING=1 PROBE_SPCRING=1`) plus one
+`PROBE_MODE=frames PROBE_FRAMES=600 PROBE_M7=1` line, plus the new
+`rf-cart`-level header-path check (a standalone scratch tool against
+`Cartridge::load`, not a `title_probe.rs` change — W7-08 holds
+`crates/rf-harness/**` this session, so this ticket's own `write_scope`
+was narrowed to `docs/TESTING.md` at claim time; `SnesHeader::header_
+fallback` was read directly instead)
+
+**Header path for all 19 newcomers:** 15 took W14-52's RESET-vector
+fallback (all LoRom), 4 scored normally (Star Fox 2 Switch Online and
+Vortex — both SuperFX/GSU, corroborated; Street Fighter Alpha 2 — S-DD1,
+corroborated; Super Star Fox Weekend — SuperFX/GSU, corroborated, and a
+slow boot, not stuck).
+
+**Family: header-fallback strips a real coprocessor (4 titles) — NEW,
+smaller than the top 3 but a genuine, evidenced bug**
+
+| Title | Shape |
+|---|---|
+| Star Fox 2 (Beta) (1994-12-28) (CES) / (1995-09-12) / (1995-09-13) | `header_path=fallback(LoRomResetVector)` **`coprocessor=None`**; CPU spins a 3-PC WRAM loop at bank `$7F` (`$7F789A`/`$7F7897`/`$7F789C`, near-identical across all three betas); the SPC700 driver is genuinely alive (`distinct_pc=205-209`, PCs `$0664`/`$066C`/`$0653`/`$0656` — the *same* driver code the scored Switch Online release's SPC runs) but `nmi_entries=0 irq_entries=0` for the whole 3,000,000-instruction window. The scored sibling (Star Fox 2 Switch Online, corroborated GSU, `coprocessor=SuperFx{Gsu1,64KiB}`) shares the identical SPC driver and *does* fire NMI/IRQ 13 times each — the betas are the same game minus the chip this build's conservative fallback rule (W14-52: "coprocessor is always reported None" for a fallback load) cannot grant them, so the WRAM loop is a real wait-for-GSU-ready flag that never gets set. |
+| Zool (USA) (Beta) | `header_path=fallback(LoRomResetVector)`; header's own chipset byte is `$53` (hw nibble `$3`, the SA-1 range) but the map-mode byte is `$4F` (nibble `$F`, unassigned — fails scoring outright, unrelated to the SA-1 nibble path), so the fallback's own rule reports `coprocessor=None` regardless. CPU scatters across 5 PCs including bank `$70` (`$708012`/`$70800B`/`$70800F`/`$70800D`, each x4000) — outside ordinary LoROM ROM/WRAM territory, consistent with code that expects the SA-1 I-RAM/register window this build never wires up for a fallback-loaded cart. `apu.boot_running=false`, SPC frozen at `$FFC0` (boot never started). |
+
+**Family: wrong-fallback mapping guess (1 title) — NEW, the "family of
+its own" the ticket brief names**
+
+| Title | Shape |
+|---|---|
+| The Lion King (USA) (Beta 3) (v.21) | `header_path=fallback(LoRomResetVector)`. Read via `dump_header.py` against the raw 3 MiB dump: the LoROM header block ($7FC0-$7FFF) is wholesale `$FF` filler — including the vector bytes themselves ($7FFC/$7FFD = `$FF $FF` → vector `$FFFF`), not a surviving real vector (unlike the genuine W14-52 population-survey shape). The bytes at that vector's LoROM file location (`$7FFF`) are `FF 78 18 FB` — a `SEI`/`CLC`/`XCE` triple that only "looks like a prologue" starting one byte late, at the seam between two unrelated 32 KiB banks; a coincidence, not code. The HiROM candidate is never reached because LoROM is tried first, yet HiROM's own header location has a genuinely clean, bank-aligned prologue: reset vector `$8000`, file bytes `78 18 FB 5C` — `SEI CLC XCE JML`, four real instructions with no leading garbage byte. Probe evidence matches a wrong-mapping crash exactly: `distinct_pc=2` (`$00FFFF`/`$000003`), `nmi_vec=irq_vec=$FFFF`, and **`nmi_entries=irq_entries=10000/10000`** — an interrupt firing on every single sampled instruction, reading the same garbage vector as "an interrupt" over and over. |
+
+**Family: pirate-cart shared bootloader stall (9 titles) — NEW, second-
+largest of the 19 newcomer families, all header-fallback LoRom loads
+that plausibly ARE correct LoRom carts (own-ROM-bytes, W14-36 precedent)**
+
+| Title | Shape |
+|---|---|
+| Digimon Adventure (Pirate) / Pokemon Gold & Silver (Pirate) | Byte-identical bootloader: CPU parks at `$008101` (19,543-19,559/20,000 samples), `cpu.stopped=true`, `nmi_entries=1` (one dispatch, never again); SPC genuinely running the same driver (`$0856`/`$0859` dominant, `distinct_pc=28`) — the W14-45 "post-`WAI`, not a spin loop" shape, unconfirmed here (no `PROBE_DIS` byte-before-PC run this pass). |
+| King of Fighters '98 (Pirate) / King of Fighters 2000 (Pirate) | Byte-identical 2-PC register poll at `$008105`/`$008102` (10,000/10,000 each); '98's SPC driver is alive (`distinct_pc=113`), 2000's SPC sits at ARAM `$0001` the entire window (`distinct_pc=1`) — a different halt point than the ordinary `$FFC0` IPL-idle sentinel, unexplained. |
+| Marvel Super Heroes vs. Street Fighter (Pirate) / Street Fighter EX Plus Alpha (Pirate) | Near-identical small loop at `$00810x`/`$0080Fx` (5,845-5,851/20,000 dominant PC, ~13 distinct total); SPC frozen at `$FFC0`, boot never started. |
+| Soul Edge vs Samurai (Pirate) | 2-PC poll at `$00809A`/`$00809D`; **SPC halted at `$1827`** (mid-driver, not the `$FFC0` sentinel) — the W14-46 "halted driver" sub-shape, not traced further this pass. |
+| X-Men vs. Street Fighter (Pirate) | 2-PC poll at `$0080D0`/`$0080D3`; SPC parked at `$EFF3`/`$EFEF`/`$EFF1` — the exact NOP-sliding-into-empty-ARAM address range W14-46 traced for Urban Strike, strongly suggesting the same `reenter_ipl` mechanism, not independently confirmed here. |
+| PowerFest 94 (Competition Cart) | Not a pirate (a genuine Nintendo Power kiosk cart) but the same shape: 4-PC loop (`$008203`/`$0081F8`/`$0081FF`/`$0081FB`), SPC frozen at `$FFC0`, `forced_blank=true bright=15` (brightness set but display never turned on). |
+
+**Family: scattered execution (1 title, joins the carried-forward
+DMA/mapping family, not counted separately)**
+
+Aladdin 2000 (Pirate): `header_path=fallback(LoRomResetVector)`,
+`distinct_pc=2676`, every top PC only 6-8/20000 hits (no loop at all) —
+the same "own corrupted ROM bytes, not this emulator's bug" shape
+W14-36 already named for Hercules/Pokemon Stadium/ClayFighter (Beta 1).
+
+**Family: GSU/SuperFX real execution, composition not yet resolving (2
+titles) — corroborated header, chip genuinely running**
+
+| Title | Shape |
+|---|---|
+| Star Fox 2 (USA, Europe) (Classic Mini, Switch Online) | `header_path=scored`, `coprocessor=SuperFx{Gsu1,64KiB}`; `distinct_pc=1520` (real, spread execution, not a loop), SPC alive (`distinct_pc=209`), `nmi_entries=irq_entries=13` (both firing normally); at frame 600, `forced_blank=true tm=[0000]` — the display is simply never turned on within the window, same precedent shape as W19-02's Cx4 (interface wired, scene not drawn). |
+| Vortex (USA) (En,Es) | `header_path=scored`, `coprocessor=SuperFx{Gsu1,32KiB}`; `distinct_pc=11456` (real execution), SPC alive; at frame 600 `forced_blank=false` but `tm=[0000]` (every layer disabled at the register level) with implausible-looking Mode 7/window register values (`hofs=46336`, `screen_over=3`) — either mid-setup or a GSU-to-PPU register hookup gap, not distinguished this pass. |
+
+**Family: S-DD1 decompression, unverifiable without a golden (1 title,
+per W19-03's own named limitation, not re-derived)**
+
+Street Fighter Alpha 2 (USA): `header_path=scored`, `coprocessor=Sdd1`;
+CPU loop at `$00F6FE`/`$00F703`/`$00F701` plus 60 visits each to three
+PCs inside the S-DD1 ROM window (bank `$C0`) — real, brief execution from
+decompressed data — but at frame 600 `forced_blank=true tm=[0000]`,
+VRAM still all-zero at the 3,000,000-instruction sample point. Whether
+the decompressed bytes are correct remains unverifiable per W19-03's own
+report (no golden reference in this library); this pass adds only that
+the S-DD1 ROM window is genuinely being executed from, not skipped.
+
+### Next tickets — the three largest families
+
+1. **APU handshake (11 titles, carried forward unchanged, still the
+   largest family overall).** Confirming evidence: unchanged from
+   W14-45/W14-46's own next-ticket section (`PROBE_STOP_ON_SPC_STOP`,
+   `PROBE_APUPORTLOG`, longer `PROBE_INSTR` sweeps per sub-shape).
+2. **Pirate-cart shared bootloader stall (9 titles, NEW).** Confirming
+   evidence needed: `PROBE_DIS` one byte before each dominant PC (the
+   W14-45 `WAI`-vs-spin-loop lesson) for Digimon Adventure/Pokemon Gold &
+   Silver's `$008101` halt and KOF '98/2000's `$008105`/`$008102` poll,
+   to check whether these two pairs really do share one vendor bootloader
+   (byte-identical PCs across unrelated licensed IPs is strong evidence
+   of a common pirate cartridge PCB/ROM base) waiting on a lockout or
+   save-chip signal this build cannot supply; `PROBE_SPCREGPC`/`PROBE_
+   ARAM` on King of Fighters 2000's SPC (parked at `$0001`, not the usual
+   `$FFC0`) and X-Men vs. Street Fighter's (parked at `$EFF3`, the W14-46
+   NOP-slide range) to confirm or rule out the `reenter_ipl` mechanism.
+3. **Raster/IRQ (9 titles, carried forward unchanged).** Confirming
+   evidence: unchanged from W14-45's own next-ticket section (`PROBE_
+   IRQLOG` on Final Fight 2/Battletoads testing hypothesis (b), then the
+   three untraced `nmi_entries=0` titles).
+
+**Smaller findings worth a ticket on their own merit, not by size:**
+the header-fallback-strips-coprocessor family (4 titles: 3 Star Fox 2
+betas losing GSU, Zool (Beta) losing a chipset-byte-suggested SA-1) and
+the single wrong-fallback-guess title (Lion King (Beta 3), LoROM's
+coincidental one-byte-offset prologue match beating a genuinely cleaner
+HiROM prologue that fallback never reaches) are both root-caused with
+concrete evidence in this pass, not merely triaged — either could become
+a direct fix ticket (e.g., preferring a "prologue starts exactly at the
+vector's own first byte, no offset" match, or trying all plausible
+mappings and preferring the cleanest prologue rather than first-LoROM-
+then-HiROM) without needing further probing first.
+
+### Betas/protos/pirates/other, newcomers only (per acceptance)
+
+**Pirates (9):** Aladdin 2000; Digimon Adventure; King of Fighters '98
+and 2000; Marvel Super Heroes vs. Street Fighter; Pokemon Gold & Silver;
+Soul Edge vs Samurai; Street Fighter EX Plus Alpha; X-Men vs. Street
+Fighter. **Betas (4):** The Lion King (Beta 3); Star Fox 2 (Beta)
+(1994-12-28) (CES), (1995-09-12), (1995-09-13); Zool (Beta). **Other
+non-retail-standard dumps:** PowerFest 94 (USA) (Competition Cart) — a
+Nintendo Power kiosk cart, not a hack; Super Star Fox Weekend (USA)
+(Competition Cart, Nintendo Power mail-order) — same, and a slow boot
+(step 1). **Retail:** Star Fox 2 (USA, Europe) (Classic Mini, Switch
+Online); Street Fighter Alpha 2 (USA); Vortex (USA) (En,Es).
+
+### Gate
+
+`cargo fmt --check`: clean (this ticket's own `write_scope` is
+`docs/TESTING.md` only — narrowed at claim time because W7-08 holds
+`crates/rf-harness/**` concurrently; no `crates/**` diff from this
+ticket). No code changed, so no `cargo test`/`cargo clippy` regression is
+possible. All probes ran against the unmodified `title_probe` binary
+already on this tree (`cargo test --release -p rf-harness --test
+title_probe --no-run`, compiled clean, zero warnings); the header-path
+diagnostic came from a standalone scratch crate against `rf-cart`
+(`$SCRATCH/hdr`, not part of this tree), read-only, no engine behavior
+touched.
