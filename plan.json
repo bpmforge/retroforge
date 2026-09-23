@@ -8064,6 +8064,77 @@
    "FOLLOWUP 2026-09-23: coordinator ruled (citing Vortex's 8 KiB dropped write) that GO&&RAN/GO&&RON is the correct hardware gate, quoting fullsnes GSU Interrupt Vectors (\"When the GSU is running (with GO=1 and RON=1), ROM isn't mapped to SNES memory\") and Code-Cache (\"usually one would have RAN set\"). Implemented exactly as directed: Gsu::owns_rom_bus/owns_ram_bus, all 4 SnesBus gate sites switched, W18-01 test updated to the GO-gated semantic with citation, new test pinning Vortex's exact shape added. Full gate green: fmt 0, clippy 0, cargo test -p rf-snes -p rf-cart 0 (440 passed, up 1, 0 failed, 1 ignored), all 4 ignored suites 0, validate-arch 0. THEN census children on all 15 GSU archives found a REGRESSION: Star Fox (USA)/(Rev 1)/(Rev 2) -- three real, previously-rendering titles -- all flip to exit 10 (uniform) under the patch, confirmed by direct git-stash A/B twice. Vortex and Star Fox 2 (the fix's actual targets) did NOT improve: both still varied_at=None at PROBE_FRAMES=1800, identical GSU-core numbers to before the patch. Net: 3 titles broken, 0 fixed -- reverted in full (git diff vs main empty again for gsu.rs/bus.rs/tests/system.rs) rather than shipped, per Bug Fix Discipline (this session's own requested verification step is what caught it). This conflicts with the coordinator's ruling and is reported rather than silently overridden or complied with: the GO&&RON reading is directly cited for ROM; extending the identical rule to RAM was this session's own extrapolation (fullsnes's GO+RON sentence never mentions RAM), and Star Fox's regression suggests either Star Fox's own boot relies on seeing open bus during a chip-presence-detection idiom (not traced this session) or the real rule is narrower than a flat GO&&RAN/GO&&RON for both busses. NEEDS BRAD'S RULING before either shipping GO&&RAN/RON or trying a narrower variant (e.g. ROM-only GO-gating, RAM ungated as before). Docs updated (docs/TESTING.md D-016 follow-up subsection); no shipped code changed. LEFT blocked, unchanged verdict -- Vortex and Star Fox 2 still do not render.",
    "SHIPPED 2026-09-23: coordinator asked for one more trace before ruling -- re-applied GO&&RAN/RON, added a divergence hook logging every SNES-side READ into GSU RAM/ROM ranges while GO=0 (patched value vs raw-bit main value), ran against Star Fox (USA) for 3M instructions. First differing read: pc=7E4EFA addr=00FFEE patch=0C main=20 (native IRQ vector low byte; ROM file bytes there really are 0C 01, matching fullsnes GSU fixed-vector value by design). Total: 2361 divergent reads, ALL on ROM (Target::Rom), ZERO on RAM (Target::GsuRam), scattered across ordinary code addresses ($00852E, $00ACC8, $00D2BD, $02F484-BA, $038ACA-E9, $03A8E0-E9, $03AB22-CB), not just the vector region. Where the SNES parks under the patch (PROBE_RINGP, end of 3M-instr run): alternates $000822-846(WRAM, incrementing)/$00FF9A(WRAM,fixed) then lands at $000000 executing zeroed WRAM as opcodes until a stray STP -- a real crash, confirmed by boot_census_child: Star Fox (USA)/(Rev1)/(Rev2) flip rendered->uniform, reproduced twice via git stash A/B. CONCLUSION: fullsnes GO&&RON sentence describes the FIXED VECTOR VALUES at $FFE4-FFFF specifically under GO=1 -- it says nothing about GO=0, and Star Fox relies on the ordinary raw-bit RON gate for ROM reads everywhere. Vortex, separately, relies on GO-gating for RAM WRITES only (SCMR=$39,GO=0, 8KiB store that must land). The two traces do not conflict (different bus ops, different address classes) -- rule shipped: Gsu::owns_ram_bus (GO&&RAN) used ONLY in SnesBus::write Target::GsuRam; every read/peek site (ROM and RAM) reverted to the original raw ron()/ran() gate, matching W18-01 exactly; owns_rom_bus removed entirely (ROM has no SNES-side write path to gate). gsu_scmr_ron_ran_gate_the_snes_sides_own_reads (W18-01 pinned test) UNCHANGED in assertions, doc comment extended with the citation. New test snes_ram_setup_write_lands_even_with_ran_set_while_the_gsu_is_stopped pins Vortex's exact shape end to end (SCMR=$39/GO=0/8KiB write/GO=1/GSU LDB reads it back). GATE ALL EXIT-CHECKED: fmt 0; clippy -D warnings 0; cargo test -p rf-snes -p rf-cart 0 (440 passed, 0 failed, 1 ignored); spc700_vectors/blargg_spc/gilyon_cputest/peterlemon_golden --ignored 0 each; validate-arch 0. CENSUS re-verified on all 15 GSU archives + 5 canaries (17 distinct): Star Fox (USA)/(Rev1)/(Rev2) back to exit 0 (regression from the first attempt gone); Star Fox 2/Super Star Fox Weekend/Vortex remain exit 10; 3 betas remain exit 12; everything else exit 0 -- matches W18-05's 1101/44/120/0/0 table exactly, zero regression. FIRST VARIED FRAME: Star Fox 2 unchanged (None, plot_calls=2). Vortex MATERIALLY CHANGED: plot_calls 0->4 (a first), and at 80M instructions forced_blank clears and vram_nonzero=7550 (both firsts) -- but still varied_at=None: GSU stops cleanly at instructions=740512 (go=false, not a spin) and never restarts; CPU parks forever alternating $00:0000 (WRAM interrupt-vector trampoline cell) and $00:FD21 (ROM: a lone RTI followed by unused $FF space) -- a DIFFERENT, downstream defect this ticket did not cause: the real NMI/IRQ handler was apparently never installed at that trampoline, so every interrupt returns immediately without doing the work that enables the display. NAMED as the next cell for a follow-up ticket (WRAM $0000's own installer routine, not yet traced). VERDICT: Vortex's dropped-write defect (the literal symptom this ticket was filed to fix) is FIXED, tested, and shipped with zero regressions across the full GSU archive set. Star Fox 2 remains fully BLOCKED, unchanged, with its own already-named register evidence (8 SFR reads total, GO stays false for 30M instructions). Flipping to done: one title's named defect fixed+verified, other title's BLOCKED verdict backed by a checked register value per this ticket's own acceptance bar. A follow-up ticket should own Vortex's new WRAM $0000 trampoline cell and Star Fox 2's still-open GSU-run-#19 trigger."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-52",
+  "title": "SNES header plausibility: 74 archives (incl. Contra III x2, Super Adventure Island, Krusty's Super Fun House, HAL's Hole in One Golf, The Duel, Space Football, and ~70 betas/protos) are refused although real hardware never reads the header — fall back to a mapping guess",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W14-52: rf-cart's header scoring currently returns InvalidHeader('no plausible SNES header') when neither $7FC0 nor $FFC0 (nor $40FFC0) has a checksum/complement pair and plausible fields; hardware boots any cart whose PCB wiring is LoROM/HiROM regardless. New rule: when scoring finds no plausible header, try LoROM then HiROM (then ExHiROM for >4 MiB) and accept the first mapping whose reset vector ($FFFC/$FFFD via that mapping) lands in ROM at an address holding a plausible first instruction (SEI/CLC/XCE/JMP/REP/SEP — document the heuristic and cite the 65816 reset sequence), preferring a mapping whose header block at least has a sane map-mode byte; the title's chipset stays 'none' unless the header says otherwise; a diagnostic names which fallback was taken",
+   "W14-52: unit tests: a LoROM image with a corrupted checksum loads as LoROM; a HiROM image with a garbage map-mode byte loads as HiROM; a random-bytes image is still refused; the existing header tests keep passing; the seven retail titles named in the title render in the census child (exit 0) or are named with the reason; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; ignored SNES suites green; no ROM bytes or copyrighted titles in engine code; every hardware claim cites fullsnes by section; the orchestrator's full SNES census names every moved title"
+  ],
+  "notes": [
+   "W14-52 FILED 2026-09-23 by the orchestrator from a header tally of the 120 refused SNES archives: 74 are no-plausible-header (16 retail titles refused in all; the rest betas/protos/pirates that hardware also runs). This is the largest remaining bucket by far."
+  ]
+ },
+ {
+  "phase": 19,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "id": "W19-01",
+  "title": "OBC1 (Metal Combat: Falcon's Revenge): the sprite-table controller per fullsnes 'SNES Cart OBC1'",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W19-01: rf-cart detects chipset $25 (OBC1); rf-snes implements the OBC1 register window ($7FF0-$7FF5 in the SRAM bank) and the OAM-format sprite table it maintains in cart RAM per fullsnes 'SNES Cart OBC1' (base address select, the 4-entry attribute packing, read/write mirror rules), cited by section; unit tests per register; Metal Combat renders in the census child; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; ignored SNES suites green; no ROM bytes or copyrighted titles in engine code; every hardware claim cites fullsnes by section; the orchestrator's full SNES census names every moved title"
+  ],
+  "notes": [
+   "W19-01 FILED 2026-09-23 by the orchestrator: one retail title, small chip, self-contained."
+  ]
+ },
+ {
+  "phase": 19,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 8,
+  "status": "todo",
+  "stories": [],
+  "id": "W19-02",
+  "title": "Cx4 (Mega Man X2, Mega Man X3): the Hitachi HG51B coprocessor per fullsnes 'SNES Cart Cx4' — clean-room, register window, DMA/transfer, and the documented command set",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W19-02: rf-cart detects chipset $F3 (Cx4); rf-snes maps the Cx4's data RAM and register window ($6000-$7FFF in the documented banks) per fullsnes 'SNES Cart Cx4' (memory map, I/O ports, the command list — wireframe/sprite/vector ops the two games use, the 24-bit registers, the ROM transfer/DMA ports, the busy flag, the interrupt), implemented as a clean-room HLE of each documented command with its documented math (fixed-point, the trig table fullsnes gives), cited by section; a title uses only what the chapter documents — anything undocumented is named, not guessed",
+   "W19-02: unit tests per command against hand-computed results; Mega Man X2 and X3 render in the census child and their Cx4 scenes are listed for Brad's by-eye (the wireframe/rotating sprite intro effects); determinism and save/load; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; ignored SNES suites green; no ROM bytes or copyrighted titles in engine code; every hardware claim cites fullsnes by section; the orchestrator's full SNES census names every moved title"
+  ],
+  "notes": [
+   "W19-02 FILED 2026-09-23 by the orchestrator: two retail titles. If fullsnes's Cx4 chapter only documents the register interface and not each command's algorithm, the ticket reports which commands are undocumented and stops there."
+  ]
  }
 ]
 }
