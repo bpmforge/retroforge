@@ -7878,7 +7878,7 @@
    "W18-01"
   ],
   "points": 8,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W18-02",
   "title": "Super FX slice 2: the GSU instruction core (MOV, ALU, JMP/branches, ALT1/ALT2/ALT3 prefixes, pseudo-ops), pinned by a hand-assembled program",
