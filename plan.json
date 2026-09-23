@@ -4011,10 +4011,11 @@
    "The oracle that made this ticket productive (blargg's SPC ROMs, running and reporting since W7-08's earlier work) is the thing that will say whether the schedule was implemented correctly.",
    "THE DSP HALF IS DONE AND THE ORACLE SAYS SO, 2026-08-27. spc_dsp6.sfc reports 'Echo/basics Passed 01'. It had said 'Failed 03' since 2026-08-23 and was the one specific gap this ticket was blocked on. Two of the four designated ROMs now pass (spc_dsp6, spc_smp); spc_smp went from stalling in 'Edge arith' to passing without any change aimed at it. WHAT WAS BUILT: anomie's 32-cycle schedule, transcribed verbatim into a table and driven one SPC cycle at a time. Dsp::tick is the engine and Dsp::mix is a wrapper that runs 32 of them, so there is one model of a sample rather than two. The point is the prepared->visible split — ENDX prepared at S5 and readable at S7, OUTX at S6/S8, ENVX at S7/S9 — which is what the suite measures and which a sample-granular mixer cannot express at all. Two tests pin the exact cycles. Also landed from the same document: the real global counter with its rate AND offset tables replacing a proportional approximation that admitted as much in its own doc comment; ADSR as the documented pretend-GAIN decode rather than three hand-transcribed rate tables; KON/KOFF latched and polled at cycle 30 every other sample over a 64-cycle loop; the echo split across cycles 22-30; rate-gated noise. The save-state never carried the DSP register file at all — a restored state read back zeros for every register a program had written — and now carries it plus the loop position and latches. HOW THE LAST BUG WAS FOUND, because the method mattered more than the fix. The obvious suspect was CPU/DSP alignment: Apu::step_counted runs a whole instruction and only then advances the DSP, so a $F3 read is up to five cycles stale, and the failing check counts reads. That would have justified a sub-instruction bus-timing refactor of the SPC700 — days of work. It was TESTED instead: crates/rf-snes/tests/spc_dsp6_phase_probe.rs runs the ROM at all 32 starting phases. All 32 failed identically, which rules alignment out, because no alignment existed that fixed it. The real causes were three echo details read LIVE where hardware LATCHES: EDL is '----dddd' and only four bits wide (the whole byte was used, allowing a 512 KiB ring inside a 64 KiB ARAM); the ring length is latched only when the offset is 0, so a new EDL can take up to .24s to take effect; and ESA is latched at cycle 29 for the next sample. The probe is kept, now asserting that all 32 phases agree, so the disproved refactor is not reached for again. WHAT REMAINS, AND IT IS A SPLIT DECISION FOR BRAD, NOT A SCOPE CALL I SHOULD TAKE. spc_timer.sfc fails in 'timer read vs write' and spc_mem_access_times.sfc in memory access timing. NEITHER IS S-DSP WORK — neither touches dsp.rs, and this ticket is titled 'S-DSP: echo, gaussian interpolation, ADSR/GAIN'. Note 22's own warning applies: DO NOT ASSUME ONE CAUSE COVERS FOUR. Critically, anomie's apudsp.txt is a DSP document and does NOT carry the SPC700 timer spec — so continuing into the timer here would mean sourcing a different subsystem from a different document while using a pass/fail ROM as a search oracle, which is exactly the mode note 22 blocked this ticket to avoid and which has already produced three plausible-but-wrong models on this ticket. RECOMMENDATION: take note 22's path (d) for the REMAINDER only — file SPC700 timer and memory-access timing as their own ticket, and close W7-08 on its own subject matter, which its own designated oracle now passes. The alternative is to leave W7-08 open until all four ROMs pass, which bundles CPU bus timing into a DSP ticket. Brad's call either way; W7-08 stays in_progress until he makes it. workspace: 1693 passing; ten-command gate green.",
    "CORRECTION 2026-08-27, AND IT REVERSES THIS TICKET'S CLOSURE. I reported that 'spc_dsp6.sfc passes' and Brad closed W7-08 on that basis. THE REPORT WAS WRONG and the ruling was made on it, so the closure does not stand. WHAT WAS ACTUALLY TRUE: the ROM printed 'Echo/basics Passed 01' and the acceptance test's check was `text.to_ascii_lowercase().contains(\"passed\")`. blargg's ROMs print 'Passed NN' after EACH SUBTEST with a running count, and print 'PASSED TESTS' once at the end when all of them have passed. So the check matched subtest 1 of many and called the whole ROM green. spc_dsp6.sfc carries Echo/basics, Echo/esa_changes, Echo/edl_changes, Echo/wrap_around, Echo/zero_length, Echo/echo calc, Echo/edl 0 quirk, Echo/edl lengths and Envelope/envelope rates — NINE subtests, of which ONE ran. spc_smp.sfc carries nine more and also ran one. The oracle's criterion is now `contains(\"PASSED TESTS\")`, all four ROMs are correctly red, and this ticket returns to blocked because law 3 requires ALL acceptance to pass before done. WHAT IS STILL TRUE AND NOT WALKED BACK: the S-DSP work is real and the fixes were real. Echo/basics went from 'Failed 03' to passing because EDL's four-bit width, the latched ring length and the latched ESA were genuinely wrong and are now right, each verified against anomie's document. The 32-cycle schedule, the global counter with its offset table, the pretend-GAIN ADSR decode and the register-file save-state are all real deliveries. What was wrong was the CLAIM ABOUT COVERAGE, not the code. WHY IT IS BLOCKED RATHER THAN MERELY UNFINISHED, and this is the substantive finding: THE REMAINING SUBTESTS NEVER RUN. All four ROMs end with the SPC700 HALTED at $FFC0 with the boot handshake not running and the IPL banked back in — measured, by sampling both CPUs' PCs after the output stabilises. blargg's ROMs run ONE subtest per upload, then jump to $FFC0 to request the next. Apu::reenter_ipl exists to HLE exactly that and DOES NOT FIRE. Its guard reads `if !self.boot.is_running() || self.cpu.stopped { return }` — it demands the handshake already be running, which is when re-entry is not needed, and the HLE parks the SPC700 with stopped=true while it runs, so the second clause bails on the very case the first admits. Between them it is close to dead code. THE OBVIOUS FIX DOES NOT WORK, and that is recorded so it is not simply retried: inverting the guard to `if self.boot.is_running() { return }` made ALL FOUR ROMs stop printing any verdict at all. Instrumenting the re-entry with a counter reported ZERO firings in the same build, which does not explain the regression — so the re-entry model is not understood yet and needs instrumenting again before it is changed. Note also that reenter_ipl is only reachable from Apu::step_counted, which SnesBus skips entirely once cpu.stopped is set, so once the SPC halts at $FFC0 nothing can ever re-arm it. WHY THIS MATTERS FOR THIS TICKET SPECIFICALLY: the unrun subtests are W7-08's own subject matter — esa_changes, edl_changes, edl 0 quirk, edl lengths and envelope rates test precisely the latching and counter work this ticket just landed. They are the verification this ticket's criteria 2 and 3 ask for, and they are one working IPL re-entry away.",
-   "STILL BLOCKED 2026-08-27, and now behind a NAMED ticket rather than an open question: W7-18 (the SPC700 charges time per memory access). This ticket's own remaining verification — Echo/esa_changes, Echo/edl_changes, Echo/edl 0 quirk, Echo/edl lengths, Envelope/envelope rates, all of which test the latching and counter work THIS ticket landed — cannot run until the suite gets further, and it does not get further until the SPC700's timing model changes. No S-DSP work is outstanding that anyone has identified."
+   "STILL BLOCKED 2026-08-27, and now behind a NAMED ticket rather than an open question: W7-18 (the SPC700 charges time per memory access). This ticket's own remaining verification — Echo/esa_changes, Echo/edl_changes, Echo/edl 0 quirk, Echo/edl lengths, Envelope/envelope rates, all of which test the latching and counter work THIS ticket landed — cannot run until the suite gets further, and it does not get further until the SPC700's timing model changes. No S-DSP work is outstanding that anyone has identified.",
+   "W7-08 UNBLOCKED 2026-09-22 by Brad (D-015): W7-18 (per-access SPC700 timing) closed 2026-09-04, so the named blocker is gone; the audio RMS oracle against a designated SPC set is the acceptance; W7-17 owns the known-red spc_dsp6 ROM and stays as is. Blackthorne x3 (ENVX poller, W14-46) are the census titles that depend on this."
   ],
   "points": 8,
-  "status": "blocked",
+  "status": "todo",
   "stories": []
  },
   {
@@ -7836,6 +7837,183 @@
   "notes": [
    "W14-49 FILED 2026-09-21 by the orchestrator from W14-48's Urban Strike chain (the CPU sends Run=$0460; $0460 is TCALL 0; $FFDE/$FFDF are zero under the HLE).",
    "W14-49 HELD 2026-09-21 by the orchestrator: branch w14-49 (HEAD ba9e979) implements the TCALL-0 trap into the IPL HLE, gate-green, but no title moved once the census children were re-run with the newest binary (the six 'moved' titles already rendered on main; the lane had run a stale boot_census binary), and no source states the $FFDE/$FFDF vector value. Kept as a branch for reference; merge only if a title is shown to depend on it."
+  ]
+ },
+ {
+  "phase": 18,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "id": "W18-01",
+  "title": "Super FX slice 1: cart detection, memory map and the $3000-$32FF register window; the 20 GSU archives boot with the chip idle",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W18-01: rf-cart identifies GSU carts (chipset $13-$15 per fullsnes 'GSU-n List of Games, Chips, and PCB versions': GSU-1 vs GSU-2, RAM size, ROM size) and rf-snes maps them per 'GSU-n Memory Map' from the SNES side: ROM in $00-$3F:$8000-$FFFF and $40-$5F (linear), RAM at $70-$71 (and its mirrors), the register window at $00-$3F:$3000-$32FF and SNES-side access rules (SCMR RON/RAN: when the GSU owns ROM/RAM the SNES reads open bus / the documented values), all cited",
+   "W18-01: a `Gsu` state struct holds R0-R15, SFR, PBR, ROMBR, RAMBR, CBR, SCBR, SCMR, COLR, POR, CLSR, VCR, BRAMR with the documented reset values, read/write semantics for each port ('GSU-n General I/O Ports' / 'Bitmap I/O Ports'), the GO bit and IRQ flag plumbing to the SNES (the GSU's IRQ line into the 65C816's IRQ input via SFR bit 15 and the SNES-side clear), save/load; the GSU does not execute yet — GO sets the flag and the slice's tests pin the window's behaviour, not execution",
+   "W18-01: the refusal is lifted for GSU carts (FR-CORE-013 diagnostic no longer fires); census children on all 20 GSU archives run (expected: SNES-side boot only, most will sit waiting on the GSU — exit codes recorded per title), plus the usual canaries; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; ignored SNES suites green; determinism (a save-state round trip mid-GSU-run reproduces the same frames); no ROM bytes or copyrighted titles in engine code; every hardware claim cites fullsnes 'SNES Cart GSU-n' by section"
+  ],
+  "notes": [
+   "W18-01 FILED 2026-09-22 by the orchestrator (D-014). The fullsnes chapter is extracted at the scratchpad's gsu-fullsnes.txt (792 lines, sections: List of Games, Memory Map, I/O Map, General I/O Ports, Bitmap I/O Ports, MOV/ALU/JMP-Prefix/Pseudo opcodes, CPU Misc, Code-Cache, Pixel-Cache, Other Caches)."
+  ]
+ },
+ {
+  "phase": 18,
+  "crate": "rf-snes",
+  "depends_on": [
+   "W18-01"
+  ],
+  "points": 8,
+  "status": "todo",
+  "stories": [],
+  "id": "W18-02",
+  "title": "Super FX slice 2: the GSU instruction core (MOV, ALU, JMP/branches, ALT1/ALT2/ALT3 prefixes, pseudo-ops), pinned by a hand-assembled program",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W18-02: every opcode in 'GSU-n CPU MOV Opcodes', 'ALU Opcodes', 'JMP and Prefix Opcodes', 'Pseudo Opcodes' and 'CPU Misc' is implemented with its documented flag effects (Z, S, CY, OV, B, ALT1/ALT2, IL/IH immediate state, the source/destination register prefixes TO/FROM/WITH and their auto-reset), the register-side effects (R14 ROM buffer fetch on write, R15 as PC, R13/R12 LOOP), and the STOP/IRQ end; fetch comes from ROM/RAM/cache per PBR and the memory map; cycle costs per 'CPU Misc' are recorded per instruction (charged in slice 4)",
+   "W18-02: a hand-assembled GSU program (bytes written by the test, no game code) exercises each opcode group and asserts registers/flags/memory after; a second program runs a loop with LOOP/LINK/JMP; the SNES side starts it with GO and waits on SFR; determinism and save/load mid-program are tested",
+   "W18-02: census children on the 20 GSU archives (record which now progress past the GSU wait), canaries; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; ignored SNES suites green; determinism (a save-state round trip mid-GSU-run reproduces the same frames); no ROM bytes or copyrighted titles in engine code; every hardware claim cites fullsnes 'SNES Cart GSU-n' by section"
+  ],
+  "notes": [
+   "W18-02 FILED 2026-09-22 by the orchestrator (D-014). Depends on W18-01's register window and memory map."
+  ]
+ },
+ {
+  "phase": 18,
+  "crate": "rf-snes",
+  "depends_on": [
+   "W18-02"
+  ],
+  "points": 8,
+  "status": "todo",
+  "stories": [],
+  "id": "W18-03",
+  "title": "Super FX slice 3: PLOT/RPIX, the pixel cache, bitmap modes (2/4/8 bpp, OBJ mode, height modes), COLR/POR semantics and the RAM writeback",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W18-03: PLOT and RPIX per 'GSU-n Bitmap I/O Ports' and 'Pixel-Cache': the pixel cache's 8-pixel line, its bit-pending mask, flush to RAM in the bitmap layout for SCMR's MD (2/4/8 bpp) and HT (128/160/192/OBJ) modes, the SCBR base, COLR with POR's transparent/dither/freeze-high/high-nibble/OBJ bits, the second cache and its flush timing; RAM writes go through the GSU's RAM buffer semantics",
+   "W18-03: unit tests draw known pixels through a hand-assembled program and assert the resulting RAM bitmap bytes for each bpp/height mode; an SNES-side DMA of that RAM to VRAM renders in a golden frame test; save/load mid-flush; census children on the 20 GSU archives and canaries; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; ignored SNES suites green; determinism (a save-state round trip mid-GSU-run reproduces the same frames); no ROM bytes or copyrighted titles in engine code; every hardware claim cites fullsnes 'SNES Cart GSU-n' by section"
+  ],
+  "notes": [
+   "W18-03 FILED 2026-09-22 by the orchestrator (D-014)."
+  ]
+ },
+ {
+  "phase": 18,
+  "crate": "rf-snes",
+  "depends_on": [
+   "W18-03"
+  ],
+  "points": 8,
+  "status": "todo",
+  "stories": [],
+  "id": "W18-04",
+  "title": "Super FX slice 4: code cache, ROM/RAM buffers, clocking and contention against the master clock",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W18-04: the 512-byte code cache per 'GSU-n Code-Cache' (CBR alignment, the 16-byte line fill and its cost, CACHE opcode), the ROM buffer (R14 fetch latency, GETB/GETBH/GETBL/GETBS stalls) and the RAM buffer (write queue, RAM access stalls) per 'Other Caches' and 'CPU Misc'; the GSU runs interleaved with the 65C816 in SnesSystem::step at 10.7 MHz (CLSR=0) or 21.4 MHz (CLSR=1) with per-instruction costs from slice 2, and the SNES-side ROM/RAM ownership (SCMR RON/RAN, the SNES reads while the GSU owns the bus) is modelled per the memory map's rules",
+   "W18-04: unit tests pin cache-hit vs cache-miss instruction costs and the buffer stalls; the replay determinism test and save-state tests cover a mid-cache-fill state; census children on the 20 GSU archives (expected: most render) and canaries; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; ignored SNES suites green; determinism (a save-state round trip mid-GSU-run reproduces the same frames); no ROM bytes or copyrighted titles in engine code; every hardware claim cites fullsnes 'SNES Cart GSU-n' by section"
+  ],
+  "notes": [
+   "W18-04 FILED 2026-09-22 by the orchestrator (D-014)."
+  ]
+ },
+ {
+  "phase": 18,
+  "crate": "rf-harness",
+  "depends_on": [
+   "W18-04"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W18-05",
+  "title": "Super FX slice 5: census, named causes for every GSU archive that still does not render, by-eye on Star Fox and Yoshi's Island",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W18-05: the orchestrator's full SNES census with RF_CENSUS_OUT; every GSU archive is named as rendering or with a traced cause (title_probe gains a PROBE_GSU register/PC dump if needed); docs/TESTING.md gets the census row and the per-title table; docs/design/EMULATION_CORES.md gets a Super FX section (what is modelled, what is not); by-eye items for Brad listed",
+   "gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; ignored SNES suites green; determinism (a save-state round trip mid-GSU-run reproduces the same frames); no ROM bytes or copyrighted titles in engine code; every hardware claim cites fullsnes 'SNES Cart GSU-n' by section"
+  ],
+  "notes": [
+   "W18-05 FILED 2026-09-22 by the orchestrator (D-014)."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-nes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-50",
+  "title": "NES: Jaleco SS88006 (mapper 18) — 4 titles in the library refused",
+  "write_scope": [
+   "crates/rf-nes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-50: mapper 18 per nesdev.org/wiki/INES_Mapper_018 (PRG banks $8000-$9FFF/$A000-$BFFF/$C000-$DFFF via nibble registers $8000-$9003, CHR 1 KiB banks via $A000-$DFFF, IRQ counter $E000-$F003 with its 4/8/12/16-bit size select and reload, mirroring $F000, PRG RAM enable; the expansion sound pin is out of scope) implemented as a Mapper with unit tests per register block; the 4 titles render in the census child; NES census re-run by the orchestrator (RF_CENSUS_OUT) and the TESTING NES row updated",
+   "gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; NES ignored suites green; no ROM bytes in git"
+  ],
+  "notes": [
+   "W14-50 FILED 2026-09-22 by the orchestrator (D-015). Tally the 4 archives with a 10-line python over ~/Games/Roms/nes iNES headers (mapper 18), not the census. TQROM (119, 3 titles) stays blocked on the CHR-RAM round-trip design."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-51",
+  "title": "Final Fight 2 (x2) and Battletoads in Battlemaniacs (x2): $2100/$212C never consumed while the game runs — trace the picture state",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W14-51: W14-47 proved these run healthy interrupt loops (158 NMIs, 315 IRQ pairs in 3M instructions for Final Fight 2); the picture stays uniform. With PROBE_MODE=frames (+PROBE_M7/PROBE_OAM) and a register-write watch on $2100/$212C/$212D/$2130-$2131/$2126-$212B, name the composition state (forced blank, TM, CGWSEL/CGADSUB, windows, mosaic, mode) at frame 600 and which register the game writes differently from what the picture needs; follow that write's source to a register read, a DMA, or a WRAM flag, and check it against fullsnes (W14-42's CGWSEL class, or a window/colour-math/mode-7 semantic not yet caught); fix with citation + unit test",
+   "W14-51: census children on the four titles and canaries; orchestrator census with RF_CENSUS_OUT; a BLOCKED verdict must reach ROM bytes or a checked register read"
+  ],
+  "notes": [
+   "W14-51 FILED 2026-09-22 by the orchestrator from W14-47's disposition."
   ]
  }
 ]
