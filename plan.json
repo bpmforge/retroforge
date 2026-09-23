@@ -8185,6 +8185,28 @@
    "W14-53 FILED 2026-09-23 by the orchestrator from W14-52's report. Contra III is a major title.",
    "W14-53 DONE 2026-09-23. Read real archive dumps of all five carts: every one is a plain LoROM cartridge, chipset $00 (no RAM/battery), valid checksum/complement, a real 65816 reset prologue under LoROM and garbage ($FF fill) at the HiROM location -- Contra III included, not HiROM as the filing note guessed. Rule (fullsnes 'SNES Cartridge ROM Header', 'ROM Speed and Map Mode (FFD5h)' / 'Chipset (FFD6h)'): a map-mode nibble naming a coprocessor mapping ($2 S-DD1, $3 SA-1, $5 ExHiROM, $A SPC7110) that the chipset byte does not corroborate (SA-1: coprocessor nibble $3 hw $3-$5; S-DD1: nibble $4 hw $3-$5; SPC7110: chipset $F5/$F9 with $FFBF=$00; ExHiROM: no chipset corroboration exists, so image size >4 MiB substitutes) is a mastering quirk -- the winning header LOCATION governs, same as W14-36/W14-52's location-wins rule. Corroborated nibbles are unchanged: SA-1 still accepted, S-DD1/ExHiROM/SPC7110 still refused by name (no bus wiring for them yet). Widened the SA-1 chipset hw range from $4-$5 to $3-$5 (fullsnes's generic x3h..x5h shape). crates/rf-cart/src/snes.rs: moved the chipset-byte read above the map-mode decision, added coprocessor_nibble_corroborated, updated W17-01's sa1_map_mode_without_sa1_chipset_still_refuses (renamed, assertion flipped) and unsupported_exhirom_map_mode_reported_without_panicking (replaced), added 5 new tests (one per shape: HiROM+$3+chipset $02, LoROM+$2+chipset $00, LoROM+$5+1MiB, genuine SA-1 chipset $33, genuine S-DD1 chipset $43/$45). cargo test -p rf-cart: 74 passed/0 failed (was 69). cargo test -p rf-cart -p rf-snes: 0 exit, rf-snes unchanged (write_scope narrowed to rf-cart+docs only at claim time -- no rf-snes edit was needed). Ignored suites (peterlemon_golden, region_golden, gilyon_cputest) --ignored: 0, all pass. fmt/clippy -D warnings/validate-arch.sh: all 0. Census (this ticket's own boot_census_child run, release build): all five named carts exit 0 (rendered something); canaries (Super Mario RPG, Kirby Super Star, Super Mario World, Wild Guns, NHL 95, Star Fox USA) exit 0, no regression. Full details and the printed header bytes: docs/TESTING.md 'W14-53' section."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-54",
+  "title": "Re-triage the 60 uniform-screen SNES titles after W14-52/53, W19-01..03: the 16 newcomers (header-fallback loads, SFA2) plus the W14-45 residue — shapes, families, next tickets",
+  "write_scope": [
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-54: every title in the current uniform bucket (RF_CENSUS_OUT list from the W14-53/W19-03 census) is run through title_probe in frames mode for 1800 frames; slow boots listed with their first varied frame, separately from stuck titles; the W14-45 table's verdicts are carried forward where unchanged and superseded where not",
+   "W14-54: each stuck newcomer gets a one-line shape (3M-instruction probe plus a frames-mode composition line: forced blank, TM, CGWSEL, windows, mode, VRAM/CGRAM/OAM counts; for header-fallback loads also which mapping the fallback chose and whether the reset prologue looked sane — a wrong fallback guess is a family of its own) grouped into families with evidence; betas/protos/pirates named separately",
+   "W14-54: the three largest families are proposed as the next tickets with the confirming evidence each needs; no core code changes in this ticket"
+  ],
+  "notes": [
+   "W14-54 FILED 2026-09-23 by the orchestrator after the refused bucket fell from 120 to 25: 16 titles entered the uniform bucket today and have never been probed."
+  ]
  }
 ]
 }
