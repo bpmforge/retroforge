@@ -7348,14 +7348,10 @@ Ignored oracle suites re-run: `peterlemon_golden` — **3/3 passed**;
 vectors` — **2/2 passed**; `gilyon_cputest`'s
 `cputest_full_reports_success_and_every_test_passes` — `test_num=
 0x0649/0x0649, ROM says "Success"`; `blargg_spc` — **3/3 passed**
-(`spc_timer.sfc`: "PASSED TESTS"). `scripts/validate-arch.sh`:
-`arch OK`. **`singlestep_65816_vectors` skipped** — started against
-the local 2.7 GiB vector set (`roms/snes/singlestep-65816`, present
-in this worktree) but did not finish inside this session; the
-orchestrator's own gate re-covers this suite, and W14-47 already
-verified it green (5,080,000/5,080,000) on the tree this ticket
-builds on with no CPU-core changes since. Reported as skipped, not
-claimed as passing.
+(`spc_timer.sfc`: "PASSED TESTS"); `singlestep_65816_vectors` —
+**5,080,000 passed, 0 failed** (254/256 opcodes, the same pre-existing
+MVN/MVP exclusion noted by every prior ticket), 494.5s. `scripts/
+validate-arch.sh`: `arch OK`.
 
 ### Census children
 
