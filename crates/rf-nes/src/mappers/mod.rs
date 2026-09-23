@@ -134,6 +134,7 @@ mod bnrom;
 mod camerica;
 mod cnrom;
 mod color_dreams;
+mod cprom;
 mod dxrom;
 mod fme7;
 mod gxrom;
@@ -148,6 +149,7 @@ mod nrom;
 mod quattro;
 mod rambo1;
 mod sachen;
+mod unrom512;
 mod uxrom;
 
 #[cfg(test)]
@@ -159,6 +161,7 @@ pub use bnrom::Bnrom;
 pub use camerica::Camerica;
 pub use cnrom::Cnrom;
 pub use color_dreams::ColorDreams;
+pub use cprom::Cprom;
 pub use dxrom::DxRom;
 pub use fme7::Fme7;
 pub use gxrom::GxRom;
@@ -173,6 +176,7 @@ pub use nrom::Nrom;
 pub use quattro::Quattro;
 pub use rambo1::Rambo1;
 pub use sachen::Sachen;
+pub use unrom512::Unrom512;
 pub use uxrom::UxRom;
 
 /// One cartridge mapper's CPU-side and CHR-bank-selection behavior. See
@@ -376,8 +380,13 @@ pub trait Mapper {
     /// (`NesBus::push_mapper_view`, and once more before
     /// [`Mapper::save_state`] so a save captures live RAM edits). This is
     /// what lets a mapper mix CHR-ROM and CHR-RAM pages in one window —
-    /// TQROM ([`Mmc3::new_tqrom`]) is the only implementor — without the
-    /// silent-loss failure mode [`Mapper::chr_window`]'s own doc describes
+    /// TQROM ([`Mmc3::new_tqrom`]) is the only mixed-ROM/RAM implementor,
+    /// and (ticket W14-5859 merge) [`Cprom`] and [`Unrom512`] use it too
+    /// for their all-RAM windows, each keeping a `materialized_*` snapshot
+    /// of which page/bank was selected before the write that just ran so
+    /// they fold these bytes into the right place rather than the
+    /// freshly-changed selection — see those two modules' docs — without
+    /// the silent-loss failure mode [`Mapper::chr_window`]'s own doc describes
     /// for a naive push of CHR-RAM: **NesBus calls this FIRST, while the
     /// PPU buffer still reflects the window this mapper had selected
     /// BEFORE the register write that is about to change it**, so any RAM

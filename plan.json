@@ -8338,7 +8338,7 @@
    "W14-50"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "id": "W14-59",
   "title": "NES: CPROM (mapper 13, Videomation x2), UNROM 512 (mapper 30, 1 title), and NES 2.0 exponent-multiplier ROM sizes (2 archives refused at the header)",
@@ -8354,7 +8354,8 @@
    "W14-59: gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; no ROM bytes in git; the orchestrator's full census names every moved title"
   ],
   "notes": [
-   "W14-59 FILED 2026-09-23 by the orchestrator from the post-W14-50 NES refused list (49). Remaining refused after W14-58/W14-59: Racermate 168 x6, Action 52/Cheetahmen 228 x4, mapper 268 x6 and 446 x4 (modern re-release boards), Maxi 15 234 x2, Buzz & Waldog/Street Hero 156 x2, and singletons (41, 46, 68, 75 VRC1, 81, 86, 105 NWC, 158, 173, 19 Namco 163, 290, 389, 470, 487, 493, 555) — each its own ticket if ever wanted."
+   "W14-59 FILED 2026-09-23 by the orchestrator from the post-W14-50 NES refused list (49). Remaining refused after W14-58/W14-59: Racermate 168 x6, Action 52/Cheetahmen 228 x4, mapper 268 x6 and 446 x4 (modern re-release boards), Maxi 15 234 x2, Buzz & Waldog/Street Hero 156 x2, and singletons (41, 46, 68, 75 VRC1, 81, 86, 105 NWC, 158, 173, 19 Namco 163, 290, 389, 470, 487, 493, 555) — each its own ticket if ever wanted.",
+   "W14-59 done 2026-09-23: CPROM (mapper 13) and UNROM 512 (mapper 30) implemented self-contained (no sight of W14-58) via one new default-no-op `Mapper::chr_writeback` hook (crates/rf-nes/src/mappers/mod.rs) that NesBus feeds `ppu.chr()` into at all four push sites BEFORE the mapper's own write handler can move the selected bank -- see docs/TESTING.md's new W14-59 section for the ordering argument and both mappers' module docs. NES 2.0 exponent-multiplier sizes decoded in rf-cart with checked_shl/checked_mul and a named 64 MiB InvalidHeader guard; parse_nes_header now carries byte sizes end-to-end instead of bank counts. The old `nes2_exponent_notation_is_reported_not_panicked` test was renamed to `nes2_exponent_notation_is_decoded_not_refused` (its assertion is the opposite of what the old name said) rather than kept verbatim -- content matches the acceptance criterion (asserts the decoded size). UNROM 512's one-screen-hardwired header signalling (flags6 bit3-with-bit0) is implemented per the ticket brief but not independently verified against a fetched nesdev page (none cached locally) -- named as an honest gap in both the module doc and docs/TESTING.md. Gate: cargo fmt --check, cargo clippy --workspace -D warnings, scripts/validate-arch.sh all clean; cargo test -p rf-nes -p rf-cart: rf-cart 91 passed (90 lib + 1 integration), rf-nes 383 passed (378 lib + 1 ignored + 4 emulator-core-contract), 0 failed. Full `cargo test --workspace` left to the orchestrator per instructions. Two pre-existing tests that used mapper 13 as a stand-in unsupported mapper were retargeted to mapper 15 (rf-cart's mapper28_tests, rf-nes's a_mapper_rf_cart_cannot_identify_is_refused_not_loaded). Census of the four named archives left to the orchestrator."
   ]
  }
 ]

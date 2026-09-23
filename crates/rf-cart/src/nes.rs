@@ -26,8 +26,8 @@ const CHR_BANK: usize = 8 * 1024;
 /// (2026-09-15) bucketed all 223 refusals by mapper number, and these four
 /// were the largest buckets at 54, 17, 28 and 17 games — 116 between them.
 const SUPPORTED_MAPPERS: &[u16] = &[
-    0, 1, 2, 3, 4, 5, 7, 9, 11, 18, 28, 34, 47, 64, 66, 69, 71, 79, 87, 118, 119, 144, 148, 206,
-    232,
+    0, 1, 2, 3, 4, 5, 7, 9, 11, 13, 18, 28, 30, 34, 47, 64, 66, 69, 71, 79, 87, 118, 119, 144, 148,
+    206, 232,
 ];
 
 /// A handful of well-known mapper names, used only to make an
@@ -46,11 +46,13 @@ fn mapper_name(id: u16) -> Option<&'static str> {
         9 => "MMC2 / PxROM",
         10 => "MMC4 / FxROM",
         11 => "Color Dreams",
+        13 => "CPROM",
         16 => "Bandai FCG",
         18 => "Jaleco SS88006",
         19 => "Namco 129/163",
         21 | 22 | 23 | 25 => "VRC2/VRC4",
         24 | 26 => "VRC6",
+        30 => "UNROM 512",
         34 => "BNROM / NINA-001",
         47 => "MMC3 2-in-1 (outer bank)",
         66 => "GxROM",
@@ -137,11 +139,53 @@ pub struct NesHeader {
     pub trainer: bool,
 }
 
+/// The allocation guard on a decoded NES 2.0 exponent-multiplier size
+/// (ticket W14-59): 64 MiB is already implausibly large for any real NES
+/// cartridge (the biggest licensed/homebrew boards top out around 1 MiB),
+/// so a header naming more than this is treated as malformed rather than
+/// honored — law 8's "prove progress, don't let a hand-rolled walk become
+/// a memory bomb" spirit applied to a single allocation instead of a loop.
+const EXPONENT_SIZE_MAX: u64 = 64 * 1024 * 1024;
+
+/// NES 2.0 "exponent-multiplier" ROM size notation
+/// ([nesdev.org/wiki/NES_2.0](https://www.nesdev.org/wiki/NES_2.0),
+/// "PRG-ROM Area"/"CHR-ROM Area"): when the relevant nibble of byte 9 is
+/// `$F`, the LSB byte (`data[4]` for PRG, `data[5]` for CHR) is
+/// reinterpreted as `EEEEEEMM` — `E` (bits 2-7) and `MM` (bits 0-1) — and
+/// the size is `2^E * (MM*2+1)` bytes, not a bank count. `lsb >> 2` is at
+/// most 63, so `1u64.checked_shl` never sees an out-of-range shift amount
+/// (undefined/panicking only at >= 64) and the only realistic failure is
+/// the multiply overflowing `u64`, guarded by `checked_mul` rather than a
+/// bare `*` — both turned into a named [`CartError::InvalidHeader`]
+/// instead of a panic, alongside the explicit [`EXPONENT_SIZE_MAX`] cap.
+fn decode_exponent_multiplier_size(lsb: u8, area: &'static str) -> Result<usize, CartError> {
+    let exponent = u32::from(lsb >> 2);
+    let multiplier = u64::from(lsb & 0x03) * 2 + 1;
+    let size = 1u64
+        .checked_shl(exponent)
+        .and_then(|base| base.checked_mul(multiplier))
+        .ok_or_else(|| {
+            CartError::InvalidHeader(format!(
+                "NES 2.0 {area} exponent-multiplier size (2^{exponent} * {multiplier}) overflows"
+            ))
+        })?;
+    if size > EXPONENT_SIZE_MAX {
+        return Err(CartError::InvalidHeader(format!(
+            "NES 2.0 {area} exponent-multiplier size ({size} bytes) exceeds the \
+             {EXPONENT_SIZE_MAX}-byte allocation guard"
+        )));
+    }
+    // `size` is now bounded by `EXPONENT_SIZE_MAX`, well under `usize::MAX`
+    // on every platform this workspace targets (32-bit or wider).
+    Ok(size as usize)
+}
+
 /// Parse an iNES or NES 2.0 header from the start of `data` (FR-CORE-010).
 ///
 /// Returns `Err` — never panics — for a missing magic, a truncated file,
-/// an NES 2.0 exponent-notation size field (rare, unimplemented), or a
-/// mapper number `rf-nes` doesn't implement yet (FR-CORE-013).
+/// an NES 2.0 exponent-notation size that overflows or exceeds
+/// [`EXPONENT_SIZE_MAX`], or a mapper number `rf-nes` doesn't implement
+/// yet (FR-CORE-013).
 pub fn parse_nes_header(data: &[u8]) -> Result<NesHeader, CartError> {
     if data.len() < HEADER_LEN || data[0..4] != INES_MAGIC {
         return Err(CartError::InvalidHeader(
@@ -166,7 +210,7 @@ pub fn parse_nes_header(data: &[u8]) -> Result<NesHeader, CartError> {
     // Mapper D0-D3 from flags6 high nibble, D4-D7 from flags7 high nibble.
     let mut mapper = ((flags7 & 0xF0) as u16) | ((flags6 >> 4) as u16);
 
-    let (format, submapper, prg_banks, chr_banks, prg_ram_size, prg_nvram_size) = if is_nes2 {
+    let (format, submapper, prg_rom_size, chr_rom_size, prg_ram_size, prg_nvram_size) = if is_nes2 {
         let byte8 = data[8];
         let byte9 = data[9];
         mapper |= ((byte8 & 0x0F) as u16) << 8;
@@ -174,15 +218,19 @@ pub fn parse_nes_header(data: &[u8]) -> Result<NesHeader, CartError> {
 
         let prg_msb = byte9 & 0x0F;
         let chr_msb = (byte9 >> 4) & 0x0F;
-        if prg_msb == 0x0F || chr_msb == 0x0F {
-            // Exponent-multiplier notation for implausibly large ROMs;
-            // vanishingly rare in practice, not implemented.
-            return Err(CartError::InvalidHeader(
-                "NES 2.0 exponent-multiplier size notation is not supported".to_string(),
-            ));
-        }
-        let prg_banks = ((prg_msb as usize) << 8) | data[4] as usize;
-        let chr_banks = ((chr_msb as usize) << 8) | data[5] as usize;
+        // Ticket W14-59: `$F` in either nibble means the LSB byte is
+        // exponent-multiplier notation, not a bank-count high nibble —
+        // see `decode_exponent_multiplier_size`'s doc.
+        let prg_rom_size = if prg_msb == 0x0F {
+            decode_exponent_multiplier_size(data[4], "PRG-ROM")?
+        } else {
+            (((prg_msb as usize) << 8) | data[4] as usize) * PRG_BANK
+        };
+        let chr_rom_size = if chr_msb == 0x0F {
+            decode_exponent_multiplier_size(data[5], "CHR-ROM")?
+        } else {
+            (((chr_msb as usize) << 8) | data[5] as usize) * CHR_BANK
+        };
 
         let prg_ram_nibble = data[10] & 0x0F;
         let prg_ram_size = if prg_ram_nibble == 0 {
@@ -200,8 +248,8 @@ pub fn parse_nes_header(data: &[u8]) -> Result<NesHeader, CartError> {
         (
             NesFormat::Nes2,
             Some(submapper),
-            prg_banks,
-            chr_banks,
+            prg_rom_size,
+            chr_rom_size,
             prg_ram_size,
             prg_nvram_size,
         )
@@ -216,11 +264,15 @@ pub fn parse_nes_header(data: &[u8]) -> Result<NesHeader, CartError> {
         } else {
             prg_ram_byte as usize * 8 * 1024
         };
-        (NesFormat::INes, None, prg_banks, chr_banks, prg_ram_size, 0)
+        (
+            NesFormat::INes,
+            None,
+            prg_banks * PRG_BANK,
+            chr_banks * CHR_BANK,
+            prg_ram_size,
+            0,
+        )
     };
-
-    let prg_rom_size = prg_banks * PRG_BANK;
-    let chr_rom_size = chr_banks * CHR_BANK;
 
     let needed = HEADER_LEN + if trainer { TRAINER_LEN } else { 0 } + prg_rom_size + chr_rom_size;
     if data.len() < needed {
@@ -433,12 +485,79 @@ mod tests {
         assert!(matches!(err, CartError::Truncated { .. }));
     }
 
+    /// Builds a synthetic NES 2.0 image whose PRG-ROM area byte 9 nibble
+    /// is `$F` (exponent-multiplier notation) with `prg_lsb` as byte 4;
+    /// CHR stays an ordinary small bank count so only the PRG side
+    /// exercises the notation. `payload_len` bytes of zeroed PRG data
+    /// follow -- callers that expect a refusal before the length check
+    /// runs can pass `0` to avoid allocating a large `Vec` for nothing.
+    fn build_nes2_prg_exponent(prg_lsb: u8, chr_banks: u8, payload_len: usize) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&INES_MAGIC);
+        data.push(0); // byte 4: PRG size LSB is repurposed by exponent notation below
+        data.push(chr_banks); // byte 5: ordinary CHR bank count
+        data.push(0); // flags6: mapper 0, horizontal, no battery/trainer/four-screen
+        data.push(0x08); // flags7: NES 2.0 identifier bits, mapper high nibble 0
+        data.push(0); // byte8: mapper bits 8-11 = 0, submapper 0
+        data.push(0x0F); // byte9: PRG-ROM area MSB nibble $F => exponent notation
+        data.extend_from_slice(&[0u8; 6]); // bytes 10-15
+        data[4] = prg_lsb; // byte 4 is now the exponent-notation LSB, not a bank count
+        data.extend(vec![0u8; payload_len]);
+        data.extend(vec![0u8; chr_banks as usize * CHR_BANK]);
+        data
+    }
+
     #[test]
-    fn nes2_exponent_notation_is_reported_not_panicked() {
-        let mut rom = build_nes2(0, 0, 1, 1);
-        rom[9] = 0x0F; // prg_msb == 0xF => exponent notation, unsupported
+    fn nes2_exponent_notation_is_decoded_not_refused() {
+        // E=15, MM=1: 2^15 * (1*2+1) = 32768 * 3 = 98304 bytes (96 KiB),
+        // the exact example nesdev.org/wiki/NES_2.0's "PRG-ROM Area"
+        // section gives for this notation.
+        let lsb = (15 << 2) | 1;
+        let rom = build_nes2_prg_exponent(lsb, 1, 98_304);
+        let header =
+            parse_nes_header(&rom).expect("exponent-notation size must decode, not refuse");
+        assert_eq!(header.prg_rom_size, 98_304);
+        assert_eq!(header.chr_rom_size, CHR_BANK);
+    }
+
+    #[test]
+    fn nes2_exponent_notation_above_64mib_is_refused() {
+        // E=27, MM=0: 2^27 * 1 = 134,217,728 bytes (128 MiB) — well past
+        // the 64 MiB allocation guard. No payload needed: this must be
+        // refused before the truncation length check ever runs.
+        let lsb = 27 << 2;
+        let rom = build_nes2_prg_exponent(lsb, 0, 0);
+        let err = parse_nes_header(&rom).unwrap_err();
+        assert!(
+            matches!(err, CartError::InvalidHeader(_)),
+            "got {err:?}, expected a named InvalidHeader refusal"
+        );
+    }
+
+    #[test]
+    fn nes2_exponent_multiplier_overflow_is_refused_not_panicked() {
+        // E=63, MM=3: 2^63 * 7 overflows u64 outright (not just the 64
+        // MiB guard) -- must be caught by `checked_mul`, never panic.
+        let lsb = (63 << 2) | 3;
+        let rom = build_nes2_prg_exponent(lsb, 0, 0);
         let err = parse_nes_header(&rom).unwrap_err();
         assert!(matches!(err, CartError::InvalidHeader(_)));
+    }
+
+    #[test]
+    fn nes2_exponent_notation_allows_a_prg_size_not_a_multiple_of_16kib() {
+        // E=13, MM=3: 2^13 * 7 = 8192 * 7 = 57344 bytes (56 KiB) -- the
+        // notation's whole point is expressing sizes ordinary bank counts
+        // can't, so a non-multiple-of-16-KiB PRG size must parse cleanly
+        // rather than panicking anywhere downstream (ticket W14-59).
+        let lsb = (13 << 2) | 3;
+        let rom = build_nes2_prg_exponent(lsb, 1, 57_344);
+        let header = parse_nes_header(&rom).expect("non-bank-multiple size must still parse");
+        assert_eq!(header.prg_rom_size, 57_344);
+        assert!(
+            !header.prg_rom_size.is_multiple_of(PRG_BANK),
+            "the whole point of this test is a size the ordinary bank encoding can't express"
+        );
     }
 
     /// Ticket W14-22 (HANDOFF from `rf-nes`): NES 2.0 byte 10's two
@@ -494,11 +613,19 @@ mod mapper28_tests {
     fn mapper_28_is_supported_and_unknown_mappers_still_name_themselves() {
         assert!(SUPPORTED_MAPPERS.contains(&28), "Action 53");
         assert!(SUPPORTED_MAPPERS.contains(&7), "AxROM");
+        assert!(SUPPORTED_MAPPERS.contains(&13), "CPROM (ticket W14-59)");
+        assert!(SUPPORTED_MAPPERS.contains(&30), "UNROM 512 (ticket W14-59)");
+        assert!(SUPPORTED_MAPPERS.contains(&119), "TQROM (ticket W14-58)");
+        assert!(
+            SUPPORTED_MAPPERS.contains(&47),
+            "MMC3 2-in-1 (ticket W14-58)"
+        );
 
-        // Ticket W14-58 added 119 (TQROM) and 47 (MMC3 2-in-1) to
-        // `SUPPORTED_MAPPERS` -- 210 and 13 stand in as still-refused
-        // mappers so this test keeps proving the refusal path works.
-        for unsupported in [210u16, 13] {
+        // Ticket W14-5859 merge: 13, 30, 47 and 119 are all supported now
+        // (W14-58 and W14-59 landed together) -- 210 and 15 stand in as
+        // still-refused mappers so this test keeps proving the refusal
+        // path works.
+        for unsupported in [210u16, 15] {
             assert!(
                 !SUPPORTED_MAPPERS.contains(&unsupported),
                 "mapper {unsupported} must still be refused"

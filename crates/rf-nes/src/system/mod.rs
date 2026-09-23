@@ -109,8 +109,9 @@ pub use controller::Controller;
 use crate::apu::Apu;
 use crate::cpu::CpuBus;
 use crate::mappers::{
-    Action53, AxRom, Bnrom, Camerica, Cnrom, ColorDreams, DxRom, Fme7, GxRom, JalecoJf, Mapper,
-    Mmc1, Mmc2, Mmc3, Mmc3Revision, Mmc5, Nina, Nrom, Quattro, Rambo1, Sachen, Ss88006, UxRom,
+    Action53, AxRom, Bnrom, Camerica, Cnrom, ColorDreams, Cprom, DxRom, Fme7, GxRom, JalecoJf,
+    Mapper, Mmc1, Mmc2, Mmc3, Mmc3Revision, Mmc5, Nina, Nrom, Quattro, Rambo1, Sachen, Ss88006,
+    Unrom512, UxRom,
 };
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
@@ -360,6 +361,12 @@ impl NesBus {
                 rom.prg_rom().to_vec(),
                 rom.chr_rom().to_vec(),
                 rom.chr_is_ram(),
+                rom.header().mirroring,
+            )),
+            // Ticket W14-59.
+            13 => Box::new(Cprom::new(rom.prg_rom().to_vec(), rom.header().mirroring)),
+            30 => Box::new(Unrom512::new(
+                rom.prg_rom().to_vec(),
                 rom.header().mirroring,
             )),
             other => unreachable!(
