@@ -7844,7 +7844,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 5,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W18-01",
   "title": "Super FX slice 1: cart detection, memory map and the $3000-$32FF register window; the 20 GSU archives boot with the chip idle",
