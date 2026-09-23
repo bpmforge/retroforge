@@ -546,6 +546,17 @@ impl SnesSystem {
             }
         }
 
+        // Ticket W18-02 (D-014, slice 2 of 5): run the GSU's instruction
+        // core while GO is set. Unlike SA-1's credit loop above, this is
+        // NOT yet interleaved on the master clock — `GsuState::run`'s doc
+        // explains the provisional flat per-step opcode budget slice 4
+        // replaces with real cycle accounting. `bus.rom` is borrowed the
+        // same disjoint-field way the SA-1 loop above already borrows it
+        // alongside `bus.sa1`.
+        if let Some(gsu) = bus.gsu.as_mut() {
+            gsu.run(&bus.rom);
+        }
+
         result
     }
 

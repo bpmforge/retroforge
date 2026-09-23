@@ -1494,6 +1494,14 @@ fn print_sa1_reg_report(core: &rf_snes::core::SnesCore) {
 /// (see `rf_snes::gsu::Gsu::unknown_write_offsets`'s doc). `PROBE_GSUREGS=1`
 /// opts in; silent (and free) for every non-GSU title this probe also runs
 /// against.
+///
+/// Ticket W18-02 extends this with the instruction core's own state: PC
+/// (`PBR:R15`), the most recently fetched opcode byte, and the total
+/// instruction count — so a title whose GSU program gets "stuck" (the
+/// register window sits uniform, per the census, because the core parked
+/// on a WAIT-shaped condition this slice does not model, or because it
+/// looped on a real bug) shows exactly where, rather than only "GO is
+/// still set".
 fn print_gsu_reg_report(core: &rf_snes::core::SnesCore) {
     if std::env::var("PROBE_GSUREGS").is_err() {
         return;
@@ -1509,4 +1517,17 @@ fn print_gsu_reg_report(core: &rf_snes::core::SnesCore) {
             gsu.regs.unknown_write_offsets
         );
     }
+    println!(
+        "    gsu core: PBR:R15={:02X}:{:04X} last_opcode={:02X} last_cost={} \
+         instructions={} go={} irq={} plot_calls={} rpix_calls={}",
+        gsu.regs.pbr(),
+        gsu.regs.r15(),
+        gsu.regs.last_opcode,
+        gsu.regs.last_cost(),
+        gsu.regs.instructions_executed(),
+        gsu.regs.go(),
+        gsu.regs.irq_pending(),
+        gsu.regs.plot_calls,
+        gsu.regs.rpix_calls,
+    );
 }
