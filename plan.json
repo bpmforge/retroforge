@@ -8094,7 +8094,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W19-01",
   "title": "OBC1 (Metal Combat: Falcon's Revenge): the sprite-table controller per fullsnes 'SNES Cart OBC1'",
