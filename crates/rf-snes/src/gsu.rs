@@ -69,6 +69,95 @@ const REG_BLOCK_LEN: u16 = 0x20;
 /// `$3100-$32FF` cache RAM's byte count.
 const CACHE_LEN: usize = 0x200;
 
+// ============================================================================
+// Ticket W18-04 (D-014, slice 4 of 5): clock conversion and the documented
+// cache/buffer cycle costs. Every constant below is cited to fullsnes's
+// "SNES Cart GSU-n CPU Misc"/"Code-Cache"/"Other Caches" sections (the
+// scratchpad's `gsu-fullsnes.txt` extraction); several of those sections
+// are explicit that the real hardware's exact figures are not fully known
+// ("aren't well documented" / "unknown ... ?") — each constant's doc below
+// says exactly which number is documented fact and which is this project's
+// stated interpolation for an undocumented case.
+// ============================================================================
+
+/// Master cycles per GSU clock cycle, from CLSR bit 0 (fullsnes "3039h -
+/// CLSR": "0 CLS Clock Select (0=10.7MHz, 1=21.4MHz)"). The SNES NTSC
+/// master clock is 21.47727 MHz (`crate::timing::Region::Ntsc`'s own
+/// constant); 21.47727/10.738635=2 and 21.47727/21.47727=1 exactly, so the
+/// conversion is an exact integer ratio in both clock modes, not an
+/// approximation.
+fn master_cycles_per_gsu_cycle(clsr: u8) -> u64 {
+    if clsr & 1 != 0 {
+        1
+    } else {
+        2
+    }
+}
+
+/// Convert a GSU-cycle cost (as [`Gsu::last_cost`]/[`GsuState::step_one`]
+/// compute it) to master cycles for [`GsuState::run_credited`]'s credit
+/// ledger.
+fn gsu_cycles_to_master(gsu_cycles: u32, clsr: u8) -> u64 {
+    u64::from(gsu_cycles) * master_cycles_per_gsu_cycle(clsr)
+}
+
+/// The code-cache's documented speed multiple over an uncached ROM/RAM
+/// opcode-byte fetch (fullsnes "SNES Cart GSU-n CPU Misc": "ROM/RAM
+/// Opcode-byte-read: 3 cycles at both 21MHz and 10MHz"; "SNES Cart GSU-n
+/// Code-Cache": "Cache-Code is 6 times faster than ROM/RAM... [or] only 3
+/// times faster... maybe 6 times refers to 21MHz mode, and 3 times to
+/// 10MHz mode"). This project's model (see [`GsuState::fetch_byte`]'s doc)
+/// treats every opcode's base [`Gsu::last_cost`] contribution as already
+/// assuming a 1-GSU-cycle cache-hit fetch for each opcode/operand byte it
+/// reads; a cache MISS upgrades that single byte's assumed 1 cycle to the
+/// documented uncached 3 cycles, i.e. `+2` extra cycles per missed byte —
+/// consistent with the "3x faster" reading fullsnes itself prefers as the
+/// less speculative of its two conflicting numbers.
+const CACHE_MISS_EXTRA_GSU_CYCLES: u32 = 2;
+
+/// GETxx's ROM-buffer-not-ready stall cost, fullsnes "SNES Cart GSU-n CPU
+/// Misc" "Uncached ROM/RAM-Read-Timings": "ROM Read: 5 cycles per byte at
+/// 21MHz, or 3 cycles per byte at 10MHz". Charged only when a GETxx opcode
+/// executes before the ROM-Read-Data Cache this project's
+/// [`Gsu::rom_buffer_ready_after`] models has finished its background load
+/// (fullsnes "Other Caches": "In some situations WAITs can occur: When the
+/// cache-load hasn't yet completed (ie. GETxx executed shortly after
+/// changing R14)").
+fn rom_buffer_stall_cycles(clsr: u8) -> u32 {
+    if clsr & 1 != 0 {
+        5
+    } else {
+        3
+    }
+}
+
+/// The RAM-Write-Data Cache's per-word drain cost, fullsnes "CPU Misc":
+/// "RAM Write: 10 cycles per word at 21MHz, or unknown at 10MHz?". fullsnes
+/// itself offers one guess for the missing 10MHz figure two lines later
+/// ("Possibly ROM/RAM-byte read/write are all having the same timing (3/5
+/// clks at 10/21MHz) (and RAM-word 6/10)?" — i.e. maybe 6 cycles at 10MHz,
+/// mirroring the ROM-read 3-at-10MHz/5-at-21MHz split), but flags it with
+/// its own "Possibly... ?". This project charges the flat, stated `10`
+/// regardless of CLSR rather than adopting fullsnes's own unconfirmed
+/// guess — one explicit, clearly-labelled assumption instead of layering a
+/// second speculative number on top of the first.
+fn ram_word_drain_cycles(_clsr: u8) -> u32 {
+    10
+}
+
+/// A single RAM byte's drain cost — fullsnes "CPU Misc": "RAM Write:
+/// unknown number of cycles per byte?" is explicitly undocumented. This
+/// project's stated interpolation: half [`ram_word_drain_cycles`] (5,
+/// rounding up), on the reasoning that a word write is two adjacent bytes
+/// of the same bus transaction and fullsnes gives no reason to think a
+/// byte-granular write is cheaper per byte than a word write. Used by the
+/// pixel-cache flush ([`GsuState::flush_line_to_ram`]), which writes
+/// individual bitplane bytes, and by the RAM-buffer stall's `STB`
+/// (byte-store) case.
+fn ram_byte_drain_cycles(clsr: u8) -> u32 {
+    ram_word_drain_cycles(clsr).div_ceil(2)
+}
+
 /// The Super FX (GSU) SNES-side register file (ticket W18-01).
 ///
 /// Field-for-field the register list fullsnes's "SNES Cart GSU-n I/O Map"
@@ -212,6 +301,46 @@ pub struct Gsu {
     primary_cache: PixelCacheLine,
     /// Secondary pixel cache: the hand-off stage between primary and RAM.
     secondary_cache: PixelCacheLine,
+
+    // --- Ticket W18-04 (D-014, slice 4 of 5): code cache validity, and the
+    // ROM-buffer/RAM-buffer "background load in progress" state.
+    /// Per-byte validity for the 512-byte code cache (fullsnes "SNES Cart
+    /// GSU-n Code-Cache": "32 lines of 16-bytes"; this project tracks
+    /// validity per byte rather than per 16-byte line because "Code-Cache
+    /// Loading Notes" documents the fill happening progressively, byte by
+    /// byte, "loaded alongside while executing opcodes" — a jump into the
+    /// middle of a line only pre-loads that line's leading bytes, not the
+    /// whole line at once). Index `i` corresponds to GSU address `CBR+i`
+    /// (`i` in `0..CACHE_LEN`); shares backing storage with [`Self::cache`]
+    /// itself, since real hardware's code-cache RAM is the SAME 512 bytes
+    /// the SNES can pre-load through `$3100-$32FF` (fullsnes gives no
+    /// second, separate array for GSU-side-loaded code).
+    cache_valid: Box<[bool; CACHE_LEN]>,
+    /// The ROM-Read-Data Cache's "not ready until this instruction count"
+    /// watermark (fullsnes "Other Caches", "ROM-Read-Data Cache (1-byte
+    /// read-ahead)": "Loading the cache is invoked by any opcodes that do
+    /// change R14... In some situations WAITs can occur: When the
+    /// cache-load hasn't yet completed (ie. GETxx executed shortly after
+    /// changing R14)"). Set to `instructions_executed + 2` whenever R14 or
+    /// ROMBR changes (see [`Self::commit_to`] and the `ROMB` opcode);
+    /// [`GsuState::rom_data_byte`]'s caller stalls
+    /// ([`rom_buffer_stall_cycles`]) iff `instructions_executed` (read
+    /// BEFORE this instruction's own count bumps, i.e. the instruction
+    /// immediately following the R14/ROMBR change) is still less than this
+    /// watermark. A generation counter rather than a plain bool so a
+    /// second R14 change mid-stall correctly re-arms the watermark instead
+    /// of a same-instruction bool toggle racing itself.
+    rom_buffer_ready_after: u64,
+    /// The RAM-Write-Data Cache's equivalent watermark (fullsnes "Other
+    /// Caches", "RAM-Write-Data Cache (1-byte/1-word write queue)": "In
+    /// some situations WAITs can occur: When cache already contained data
+    /// (ie. when executing two store opcodes shortly after each other)...
+    /// when the RAMBR register is changed"). Set to
+    /// `instructions_executed + 2` by every STB/STW/SBK/SM/SMS store
+    /// opcode; the next store opcode stalls
+    /// ([`ram_byte_drain_cycles`]/[`ram_word_drain_cycles`]) iff it runs
+    /// before that watermark, i.e. immediately after the previous store.
+    ram_buffer_ready_after: u64,
 }
 
 impl Gsu {
@@ -255,7 +384,20 @@ impl Gsu {
             last_opcode: 0,
             primary_cache: PixelCacheLine::EMPTY,
             secondary_cache: PixelCacheLine::EMPTY,
+            cache_valid: Box::new([false; CACHE_LEN]),
+            rom_buffer_ready_after: 0,
+            ram_buffer_ready_after: 0,
         }
+    }
+
+    /// Mark every code-cache byte empty (fullsnes "Code-Cache Loading
+    /// Notes": "All Code-Cache lines are marked as empty when executing
+    /// CACHE or LJMP opcodes, or when the SNES clears the GO flag"). Does
+    /// NOT touch [`Self::cbr`] itself — each of those three call sites
+    /// assigns `cbr` its own documented new value (`0` for a GO=0 write,
+    /// `R15 AND FFF0h` for CACHE/LJMP) independently of cache validity.
+    fn invalidate_code_cache(&mut self) {
+        self.cache_valid.fill(false);
     }
 
     /// The most recently executed opcode's documented clock count (ticket
@@ -436,7 +578,21 @@ impl Gsu {
         };
         match Self::locate(rel) {
             Location::Block(b) => self.write_canonical(offset, b, value),
-            Location::Cache(i) => self.cache[i] = value,
+            Location::Cache(i) => {
+                self.cache[i] = value;
+                // Ticket W18-04: the SNES-side code-cache preload path
+                // (fullsnes "Writing to Code-Cache (by SNES CPU)": write
+                // opcodes to $3100-$32FF, then set R15 into 0000h-01FFh and
+                // start the GSU "without RON/RAN flags being set") shares
+                // the exact same 512-byte array `GsuState::fetch_byte`
+                // reads through `Gsu::cache_valid` — a title that preloads
+                // the cache this way and never touches ROM/RAM (RON/RAN
+                // clear) needs those bytes marked valid NOW, or the first
+                // GSU-side fetch at that offset would fall through to
+                // whatever ROM/RAM byte happens to sit at `CBR+i` instead
+                // of the byte the SNES just wrote.
+                self.cache_valid[i] = true;
+            }
             Location::OpenBus => {
                 *self.unknown_write_offsets.entry(offset).or_insert(0) += 1;
             }
@@ -462,9 +618,12 @@ impl Gsu {
             SFR_LO => {
                 self.sfr = (self.sfr & !0x003E) | (u16::from(value) & 0x003E);
                 // fullsnes "303Eh/303Fh CBR": "the SNES can set CBR=0000h
-                // by writing GO=0".
+                // by writing GO=0". Ticket W18-04: the same write also
+                // empties every code-cache line (see
+                // `Self::invalidate_code_cache`'s doc).
                 if value & 0x20 == 0 {
                     self.cbr = 0;
+                    self.invalidate_code_cache();
                 }
             }
             SFR_HI => {}
@@ -603,7 +762,17 @@ impl Gsu {
         // Ticket W18-03: pixel cache, appended after slice 2's fields for
         // the same forward-compat reason given above.
         self.primary_cache.save(o)?;
-        self.secondary_cache.save(o)
+        self.secondary_cache.save(o)?;
+        // Ticket W18-04: code-cache validity plus the ROM/RAM buffer
+        // watermarks, appended last for the same forward-compat reason.
+        // Determinism (acceptance #2): a save/load round trip mid-cache-
+        // fill or mid-stall must reproduce identical subsequent behaviour,
+        // which requires these three fields, not just the register file.
+        for v in self.cache_valid.iter() {
+            o.bool(*v)?;
+        }
+        o.u64(self.rom_buffer_ready_after)?;
+        o.u64(self.ram_buffer_ready_after)
     }
 
     pub(crate) fn load(&mut self, i: &mut StateIn) -> Result<(), StateError> {
@@ -642,6 +811,11 @@ impl Gsu {
         self.instructions_executed = i.u64()?;
         self.primary_cache = PixelCacheLine::load(i)?;
         self.secondary_cache = PixelCacheLine::load(i)?;
+        for v in self.cache_valid.iter_mut() {
+            *v = i.bool()?;
+        }
+        self.rom_buffer_ready_after = i.u64()?;
+        self.ram_buffer_ready_after = i.u64()?;
         Ok(())
     }
 }
@@ -735,6 +909,15 @@ impl Gsu {
             self.pending_jump = Some((self.pbr, v));
         } else {
             self.regs[usize::from(n)] = v;
+            // Ticket W18-04: any write to R14 restarts the ROM-Read-Data
+            // Cache's background load — see `Self::rom_buffer_ready_after`'s
+            // doc. `+2` (not `+1`): `instructions_executed` still holds
+            // THIS instruction's own count when this runs (it increments
+            // after `exec_opcode` returns), so the watermark must clear
+            // the instruction after next, not this one.
+            if n == 14 {
+                self.rom_buffer_ready_after = self.instructions_executed + 2;
+            }
         }
     }
     /// Commit `v` to the current destination register (Dreg) — the common
@@ -841,6 +1024,23 @@ pub struct GsuState {
     /// recomputing lengths — same reasoning as `Sa1State::board`.
     pub rom_len: usize,
     pub ram_len: usize,
+    /// Master cycles the GSU is owed and has not yet spent (ticket W18-04,
+    /// the same credit-based interleave `Sa1State::credit` uses — see
+    /// [`Self::run_credited`]'s doc). Part of save state (this ticket's
+    /// acceptance: "Determinism: credit is saved state") — a save/load
+    /// round trip that dropped a fractional credit balance would let a
+    /// GSU opcode's completion land on a different master-clock cycle
+    /// after reload than it would have without the round trip, which is
+    /// exactly the class of divergence the replay determinism test exists
+    /// to catch.
+    pub credit: u64,
+    /// This-instruction-only accumulator for [`Self::fetch_byte`]'s
+    /// code-cache-miss surcharge (ticket W18-04) — reset to `0` at the
+    /// start of every [`Self::step_one`], read back at its end. Not part
+    /// of save state: it never holds a value outside the span of one
+    /// `step_one` call, the same reasoning [`Gsu::last_cost`] itself
+    /// already documents for values that only matter mid-instruction.
+    fetch_extra_cost: u32,
 }
 
 impl GsuState {
@@ -852,6 +1052,8 @@ impl GsuState {
             ram: vec![0; ram_len],
             rom_len,
             ram_len,
+            credit: 0,
+            fetch_extra_cost: 0,
         }
     }
 
@@ -869,75 +1071,82 @@ impl GsuState {
 }
 
 // ============================================================================
-// Ticket W18-02 (D-014, slice 2 of 5): the instruction core.
+// Ticket W18-02 (D-014, slice 2 of 5): the instruction core. Ticket W18-04
+// (slice 4 of 5) replaced the flat per-`SnesSystem::step` opcode budget
+// this banner used to describe with the credit-based master-clock
+// interleave [`GsuState::run_credited`] documents, and gave the
+// code-cache, ROM buffer and RAM buffer real cost/stall models (see the
+// module-level constants above [`CACHE_MISS_EXTRA_GSU_CYCLES`] etc., and
+// [`GsuState::fetch_byte`]/[`GsuState::rom_data_byte`]/the store opcodes'
+// own doc comments). The pixel cache's flush-to-RAM cost is charged the
+// same way (fullsnes "Pixel-Cache"/"Other Caches") — see
+// [`GsuState::flush_line_to_ram`].
 // ============================================================================
-//
-// This slice does not charge cycles against the master clock (that is
-// slice 4's job — see [`GsuState::STEP_BUDGET`]'s doc) and does not model
-// the code-cache, pixel-cache, or ROM/RAM-data-cache as separate hardware
-// stages (fullsnes "SNES Cart GSU-n Code-Cache"/"Pixel-Cache"/"Other
-// Caches" — the code-cache is opcode-fetch-from-cache only, which never
-// happens here since fetch always goes straight to ROM/RAM; the pixel
-// cache belongs to PLOT/RPIX, stubbed below and given a real
-// implementation in W18-03; the ROM/RAM-data caches only affect *when* a
-// GETxx/store opcode would WAIT, which this slice's uncharged-cycle model
-// has no use for). Every fetch and every GETxx/LDx/STx/SBK access reads or
-// writes ROM/RAM directly and immediately, exactly as ticket W18-02's brief
-// says is acceptable for this slice.
 impl GsuState {
-    /// Provisional per-`SnesSystem::step` opcode budget: the GSU executes
-    /// at most this many opcodes each SNES master-clock step while GO is
-    /// set, with **no** cycle cost charged against that master clock yet.
-    /// Slice 4 replaces this with the same credit-based interleave
-    /// `SnesSystem::step` already runs for SA-1 (`Sa1State::credit`),
-    /// charging each opcode's [`Gsu::last_cost`] against the shared master
-    /// clock instead of a flat opcode count. `64` is not a hardware
-    /// constant — it is simply large enough that a title's boot-time GSU
-    /// program (typically dozens of opcodes: clear some registers, CACHE,
-    /// jump into a loop) can make visible progress within one SNES
-    /// instruction's worth of `SnesSystem::step` calls, without letting a
-    /// runaway or infinite-looping GSU program monopolise a single step
-    /// indefinitely.
-    pub const STEP_BUDGET: u32 = 64;
-
-    /// Run up to [`Self::STEP_BUDGET`] GSU opcodes, stopping early if STOP
-    /// (or an SNES-side `SFR` write) clears GO. `rom` is the cartridge's
-    /// flat ROM bytes, borrowed for the duration of this call only — the
-    /// same short-lived-borrow shape [`crate::sa1::Sa1State::step`] uses
-    /// `&SnesBus::rom` for, and for the same reason: `GsuState` needs
-    /// `&bus.rom` while `SnesSystem::step` is simultaneously mutating
-    /// `bus.gsu`, which the call site resolves with the same
-    /// disjoint-field borrow (`let bus = &mut self.bus;` then
-    /// `bus.gsu.as_mut()` alongside `&bus.rom`) SA-1 already established.
+    /// Run the GSU interleaved with the 65C816 on the master clock (ticket
+    /// W18-04 acceptance #1), exactly the credit-based shape
+    /// `SnesSystem::step` already runs for SA-1 (`Sa1State::credit`):
+    /// `master_cycles` (the 65C816 instruction, its MDMA and HDMA, all
+    /// folded together — the same `master_this_step` value SA-1's own
+    /// interleave uses) is banked, then GSU opcodes run one at a time,
+    /// each one's [`gsu_cycles_to_master`]-converted cost debited from the
+    /// balance, until the balance cannot cover another opcode or GO
+    /// clears.
     ///
-    /// Law 8 (`docs/design/...`/`CLAUDE.md`): `budget` is decremented
-    /// unconditionally, first, every iteration — before dispatch, not
-    /// after — so a hand-assembled test program with a mis-encoded branch
-    /// (or one that never executes STOP) cannot spin this loop forever;
-    /// the worst case is exactly [`Self::STEP_BUDGET`] opcodes executed
-    /// this call, full stop.
-    pub fn run(&mut self, rom: &[u8]) {
-        let mut budget = Self::STEP_BUDGET;
-        while budget > 0 && self.regs.go() {
-            budget -= 1;
-            self.step_one(rom);
+    /// Credit never accumulates while GO is clear (mirrors
+    /// `Sa1State::credit`'s "never banked while held" rule): hardware does
+    /// not owe cycles to a core that is not running, and letting the debt
+    /// grow across many idle steps would turn the next catch-up loop, once
+    /// GO is finally set, into an unbounded one.
+    ///
+    /// `rom` is the cartridge's flat ROM bytes, borrowed for the duration
+    /// of this call only — the same short-lived-borrow shape
+    /// [`crate::sa1::Sa1State::step`] uses `&SnesBus::rom` for.
+    ///
+    /// Law 8: the `while` condition's own `credit > 0` bound, combined
+    /// with every [`Self::step_one`] call costing at least 1 GSU cycle
+    /// (`gsu_cycles_to_master` of which is at least 1, since
+    /// [`master_cycles_per_gsu_cycle`] is never `0`), proves this loop
+    /// terminates — `credit` strictly decreases by at least 1 every
+    /// iteration from a finite starting value, the same termination
+    /// argument SA-1's own credit loop in `SnesSystem::step` relies on.
+    pub fn run_credited(&mut self, rom: &[u8], master_cycles: u64) {
+        if !self.regs.go() {
+            self.credit = 0;
+            return;
+        }
+        self.credit += master_cycles;
+        while self.credit > 0 && self.regs.go() {
+            let gsu_cycles = self.step_one(rom);
+            let spent = gsu_cycles_to_master(gsu_cycles, self.regs.clsr);
+            self.credit = self.credit.saturating_sub(spent);
+        }
+        if !self.regs.go() {
+            self.credit = 0;
         }
     }
 
     /// Run exactly one GSU opcode (including applying a control-flow
     /// redirect the PREVIOUS opcode set up but deferred one instruction —
-    /// see [`Gsu::pending_jump`]'s doc).
-    fn step_one(&mut self, rom: &[u8]) {
+    /// see [`Gsu::pending_jump`]'s doc), returning its total documented
+    /// cost in GSU cycles: [`Self::exec_opcode`]'s own returned base cost
+    /// (which assumes every opcode/operand byte it fetched was a
+    /// code-cache hit) plus [`Self::fetch_byte`]'s per-call code-cache-miss
+    /// surcharge for this instruction (ticket W18-04).
+    fn step_one(&mut self, rom: &[u8]) -> u32 {
         let had_pending = self.regs.pending_jump.take();
+        self.fetch_extra_cost = 0;
         let opcode = self.fetch_byte(rom);
         self.regs.last_opcode = opcode;
-        let cost = self.exec_opcode(rom, opcode);
-        self.regs.last_cost = cost;
+        let base_cost = self.exec_opcode(rom, opcode);
+        let total_cost = base_cost + self.fetch_extra_cost;
+        self.regs.last_cost = total_cost;
         self.regs.instructions_executed += 1;
         if let Some((bank, pc)) = had_pending {
             self.regs.pbr = bank;
             self.regs.regs[15] = pc;
         }
+        total_cost
     }
 
     // --- Fetch/memory -------------------------------------------------
@@ -979,13 +1188,50 @@ impl GsuState {
     /// — fullsnes "301Eh-301Fh R15 Program Counter". PBR pointing at
     /// `$70`/`$71` fetches from GSU RAM (fullsnes allows PBR to address
     /// either ROM or RAM, unlike ROMBR/RAMBR); everything else fetches
-    /// from ROM. Real hardware can also execute from the 512-byte code
-    /// cache (`$00-$1FF`-relative to CBR) — not modelled this slice, see
-    /// this section's banner comment.
+    /// from ROM.
+    ///
+    /// Ticket W18-04: also the 512-byte code cache's read/fill path
+    /// (fullsnes "SNES Cart GSU-n Code-Cache"). `Self::regs.cbr` marks the
+    /// start of the currently-cached 512-byte window ("Cache Area":
+    /// `SNES_Addr = (CBR AND 1FFh)+3100h`, i.e. GSU address `CBR..CBR+
+    /// 0x200` is cacheable regardless of whether PBR points at ROM or RAM
+    /// — fullsnes's own caution that a title must clear the cache by
+    /// writing GO=0 "if... code in GamePak RAM has changed" only makes
+    /// sense if RAM-resident code is cached exactly like ROM-resident
+    /// code). A byte inside that window is read from (and, on first
+    /// touch, filled into) [`Gsu::cache`]/[`Gsu::cache_valid`] at cost `0`
+    /// extra (the base per-opcode cost already assumes a 1-cycle cache-hit
+    /// fetch — see [`CACHE_MISS_EXTRA_GSU_CYCLES`]'s doc) on a hit, or
+    /// [`CACHE_MISS_EXTRA_GSU_CYCLES`] on a miss (which also fills the
+    /// line, matching "Code-Cache Loading Notes": bytes load "alongside
+    /// while executing opcodes", not as a separate bulk-load stage). A
+    /// byte outside the window is never cached at all — same surcharge,
+    /// but the underlying byte always comes from ROM/RAM directly, never
+    /// from `Gsu::cache`.
     fn fetch_byte(&mut self, rom: &[u8]) -> u8 {
         let pc = self.regs.regs[15];
         self.regs.regs[15] = pc.wrapping_add(1);
         let bank = self.regs.pbr;
+        let offset = pc.wrapping_sub(self.regs.cbr);
+        if (offset as usize) < CACHE_LEN {
+            let idx = offset as usize;
+            if self.regs.cache_valid[idx] {
+                return self.regs.cache[idx];
+            }
+            let byte = if bank == 0x70 || bank == 0x71 {
+                match self.gsu_ram_index(bank, pc) {
+                    Some(i) => self.ram[i],
+                    None => 0,
+                }
+            } else {
+                Self::rom_byte(rom, bank, pc)
+            };
+            self.regs.cache[idx] = byte;
+            self.regs.cache_valid[idx] = true;
+            self.fetch_extra_cost += CACHE_MISS_EXTRA_GSU_CYCLES;
+            return byte;
+        }
+        self.fetch_extra_cost += CACHE_MISS_EXTRA_GSU_CYCLES;
         if bank == 0x70 || bank == 0x71 {
             match self.gsu_ram_index(bank, pc) {
                 Some(i) => self.ram[i],
@@ -1002,6 +1248,38 @@ impl GsuState {
     /// accepted simplification.
     fn rom_data_byte(&self, rom: &[u8]) -> u8 {
         Self::rom_byte(rom, self.regs.rombr, self.regs.r14())
+    }
+
+    /// GETxx/GETC's ROM-Read-Data Cache stall (ticket W18-04): non-zero
+    /// exactly when this instruction runs before
+    /// [`Gsu::rom_buffer_ready_after`]'s watermark, i.e. immediately after
+    /// R14 or ROMBR changed — see that field's doc.
+    fn rom_buffer_stall_cost(&self) -> u32 {
+        if self.regs.instructions_executed < self.regs.rom_buffer_ready_after {
+            rom_buffer_stall_cycles(self.regs.clsr)
+        } else {
+            0
+        }
+    }
+
+    /// STB/STW/SBK/SM/SMS's RAM-Write-Data Cache stall (ticket W18-04):
+    /// non-zero when this store runs before
+    /// [`Gsu::ram_buffer_ready_after`]'s watermark, i.e. immediately after
+    /// a previous store — see that field's doc. Every caller that reads
+    /// this must also re-arm the watermark for the NEXT store, which this
+    /// method does not do itself (each call site already computes its own
+    /// `instructions_executed + 2`, since some stores need that value
+    /// before the write and some after).
+    fn ram_buffer_stall_cost(&self, word: bool) -> u32 {
+        if self.regs.instructions_executed < self.regs.ram_buffer_ready_after {
+            if word {
+                ram_word_drain_cycles(self.regs.clsr)
+            } else {
+                ram_byte_drain_cycles(self.regs.clsr)
+            }
+        } else {
+            0
+        }
     }
 
     /// `[RAMBR:addr]` byte, `0` if there is no GSU RAM (fullsnes "GSU MOV
@@ -1192,51 +1470,71 @@ impl GsuState {
     /// Flush one cache line's pending pixels into the RAM bitmap,
     /// read-modify-write per fullsnes: untouched pixels (`pending` bit
     /// clear) keep whatever value RAM already had, since
-    /// [`Self::plot_pixel_bits`] is only called for set bits.
-    fn flush_line_to_ram(&mut self, line: PixelCacheLine) {
+    /// [`Self::plot_pixel_bits`] is only called for set bits. Returns the
+    /// GSU-cycle cost of the RAM bytes this flush actually wrote (ticket
+    /// W18-04: [`ram_byte_drain_cycles`] per written bitplane byte —
+    /// fullsnes "Pixel-Cache"/"Other Caches" give the pixel-cache flush no
+    /// cost of its own beyond "it happens through the RAM-Write-Data
+    /// Cache", so this project charges it exactly like any other RAM byte
+    /// write).
+    fn flush_line_to_ram(&mut self, line: PixelCacheLine) -> u32 {
         if !line.valid || line.pending == 0 {
-            return;
+            return 0;
         }
         let bpp = Self::bpp_for_scmr(self.regs.scmr);
         let row_addr = self.bitmap_row_addr(line.x_base, line.y);
+        let mut bytes_written = 0u32;
         for i in 0..8u8 {
             if line.pending & (1 << i) != 0 {
                 self.plot_pixel_bits(row_addr, bpp, i, line.colors[usize::from(i)]);
+                bytes_written += u32::from(bpp);
             }
         }
+        bytes_written * ram_byte_drain_cycles(self.regs.clsr)
     }
 
     /// Flush the primary cache: fullsnes "Pixel-Cache" describes a
     /// two-stage hand-off (primary -> secondary -> RAM), the secondary
     /// stage existing so PLOT can keep filling a *new* primary line while
-    /// the old one is still draining to RAM. This slice does not model
-    /// that overlap's timing (no stall/WAIT state exists yet — slice 4);
-    /// it performs both hand-offs synchronously, so `secondary_cache` is
-    /// always empty again immediately after this call returns. Called on
-    /// flush condition 1) (a PLOT to a different 8-aligned segment) and 3)
-    /// (cache full — all 8 pending bits set); condition 2) (RPIX) calls
-    /// this too, then reads RAM directly (fullsnes: "RPIX isn't cached, it
-    /// does always read data from RAM").
-    fn flush_primary(&mut self) {
+    /// the old one is still draining to RAM. This project does not model
+    /// that overlap as separate pipeline stages spanning multiple opcodes
+    /// — it performs both hand-offs synchronously within the ONE PLOT/RPIX
+    /// call that triggered them, so `secondary_cache` is always empty
+    /// again immediately after this call returns. Ticket W18-04 gives that
+    /// synchronous flush a real cost instead of a free one: the caller
+    /// (PLOT/RPIX) is charged the summed RAM-write cost of everything
+    /// drained here, which is exactly fullsnes's documented "a PLOT that
+    /// needs the secondary cache while it is still flushing stalls" —
+    /// since nothing here overlaps with a later instruction, the PLOT that
+    /// triggers the flush pays for the whole flush up front rather than a
+    /// later PLOT paying for it piecemeal. Called on flush condition 1) (a
+    /// PLOT to a different 8-aligned segment) and 3) (cache full — all 8
+    /// pending bits set); condition 2) (RPIX) calls this too, then reads
+    /// RAM directly (fullsnes: "RPIX isn't cached, it does always read
+    /// data from RAM").
+    fn flush_primary(&mut self) -> u32 {
         if !self.regs.primary_cache.valid {
-            return;
+            return 0;
         }
         // If the secondary still held an (in this model, always-already-
         // flushed) line, drain it first — real hardware would WAIT here.
         let stale_secondary =
             std::mem::replace(&mut self.regs.secondary_cache, PixelCacheLine::EMPTY);
-        self.flush_line_to_ram(stale_secondary);
+        let mut cost = self.flush_line_to_ram(stale_secondary);
         let primary = std::mem::replace(&mut self.regs.primary_cache, PixelCacheLine::EMPTY);
         self.regs.secondary_cache = primary;
         let secondary = std::mem::replace(&mut self.regs.secondary_cache, PixelCacheLine::EMPTY);
-        self.flush_line_to_ram(secondary);
+        cost += self.flush_line_to_ram(secondary);
+        cost
     }
 
     /// PLOT (fullsnes "GSU Bitmap Opcodes": `plot [r1,r2],color ;Pixel=COLR,
     /// R1=R1+1`), given the real pixel cache. `por`/`colr`/`scmr` are read
     /// fresh from `self.regs` each call — a title can legally change POR
-    /// (CMODE) between PLOTs.
-    fn exec_plot(&mut self) {
+    /// (CMODE) between PLOTs. Returns the GSU-cycle cost of any flush this
+    /// PLOT triggered (ticket W18-04; `0` if it only filled the cache).
+    fn exec_plot(&mut self) -> u32 {
+        let mut flush_cost = 0u32;
         let x = self.regs.reg(1) as u8;
         let y = self.regs.reg(2) as u8;
         let seg_x = x & 0xF8;
@@ -1247,7 +1545,7 @@ impl GsuState {
         if self.regs.primary_cache.valid
             && (self.regs.primary_cache.x_base != seg_x || self.regs.primary_cache.y != y)
         {
-            self.flush_primary();
+            flush_cost += self.flush_primary();
         }
         if !self.regs.primary_cache.valid {
             self.regs.primary_cache = PixelCacheLine {
@@ -1299,22 +1597,28 @@ impl GsuState {
 
         // Flush condition 3): all 8 cache flags set.
         if self.regs.primary_cache.pending == 0xFF {
-            self.flush_primary();
+            flush_cost += self.flush_primary();
         }
+        flush_cost
     }
 
     /// RPIX (fullsnes "GSU Bitmap Opcodes": `rpix Rd,[r1,r2] ;Rd=Pixel?
     /// FlushPixCache`): force both caches to RAM, then read the pixel at
     /// `(R1,R2)` back from RAM (never from cache — see this method's
-    /// module-doc citation). Returns the reassembled colour; the caller
-    /// commits it to Dreg and sets Z/S.
-    fn exec_rpix(&mut self) -> u16 {
-        self.flush_primary();
+    /// module-doc citation). Returns the reassembled colour and the
+    /// GSU-cycle cost of the force-flush (ticket W18-04) — the caller
+    /// commits the colour to Dreg and sets Z/S, and adds the cost to
+    /// RPIX's own base cost.
+    fn exec_rpix(&mut self) -> (u16, u32) {
+        let flush_cost = self.flush_primary();
         let x = self.regs.reg(1) as u8;
         let y = self.regs.reg(2) as u8;
         let bpp = Self::bpp_for_scmr(self.regs.scmr);
         let row_addr = self.bitmap_row_addr(x, y);
-        u16::from(self.read_pixel_bits(row_addr, bpp, x & 7))
+        (
+            u16::from(self.read_pixel_bits(row_addr, bpp, x & 7)),
+            flush_cost,
+        )
     }
 
     /// COLOR/GETC's shared "incoming byte -> COLR" transform (fullsnes
@@ -1361,11 +1665,12 @@ impl GsuState {
             }
             0x02 => {
                 // CACHE: fullsnes "Code-Cache Loading Notes": "CACHE sets
-                // CBR to 'R15 AND FFF0h'". Only CBR itself is modelled
-                // (the cache contents are the plain `Gsu::cache` bytes
-                // slice 1 already gives read/write semantics — no opcode
-                // executes out of them this slice).
+                // CBR to 'R15 AND FFF0h'... All Code-Cache lines are
+                // marked as empty when executing CACHE". Ticket W18-04
+                // adds the documented line-empty side effect to slice 1's
+                // CBR-only handling.
                 self.regs.cbr = self.regs.regs[15] & 0xFFF0;
+                self.regs.invalidate_code_cache();
                 self.regs.reset_prefix_state();
                 1
             }
@@ -1430,18 +1735,25 @@ impl GsuState {
             0x30..=0x3B => {
                 let n = op & 0x0F;
                 let addr = self.regs.reg(n);
+                // Ticket W18-04: the RAM-Write-Data Cache's stall — see
+                // `Self::ram_buffer_stall_cost`'s doc — read BEFORE this
+                // store re-arms the watermark for the next one.
                 if alt1 {
+                    let stall = self.ram_buffer_stall_cost(false);
                     let v = self.regs.src() as u8;
                     self.ram_write_byte(addr, v);
                     self.regs.last_ram_addr = addr;
+                    self.regs.ram_buffer_ready_after = self.regs.instructions_executed + 2;
                     self.regs.reset_prefix_state();
-                    2
+                    2 + stall
                 } else {
+                    let stall = self.ram_buffer_stall_cost(true);
                     let v = self.regs.src();
                     self.ram_write_word(addr, v);
                     self.regs.last_ram_addr = addr;
+                    self.regs.ram_buffer_ready_after = self.regs.instructions_executed + 2;
                     self.regs.reset_prefix_state();
-                    1
+                    1 + stall
                 }
             }
             0x3C => {
@@ -1492,16 +1804,17 @@ impl GsuState {
                     // pixel back from RAM (fullsnes: "RPIX isn't cached,
                     // it does always read data from RAM").
                     self.regs.rpix_calls += 1;
-                    let v = self.exec_rpix();
+                    let (v, flush_cost) = self.exec_rpix();
                     self.regs.commit_dest(v);
                     self.regs.set_zs(v);
-                    20
+                    20 + flush_cost
                 } else {
                     // PLOT: fullsnes "Pixel=COLR, R1=R1+1", through the
-                    // real pixel cache (ticket W18-03).
+                    // real pixel cache (ticket W18-03), plus ticket
+                    // W18-04's flush cost if this PLOT triggered one.
                     self.regs.plot_calls += 1;
-                    self.exec_plot();
-                    2
+                    let flush_cost = self.exec_plot();
+                    2 + flush_cost
                 };
                 self.regs.reset_prefix_state();
                 cost
@@ -1643,11 +1956,15 @@ impl GsuState {
 
             // --- SBK / LINK / SEX / ASR / ROR / JMP / LOB / FMULT ------
             0x90 => {
+                // SBK: writeback to the RAM-Address-Cache's memorized
+                // address — same RAM-Write-Data Cache stall as STW/STB.
+                let stall = self.ram_buffer_stall_cost(true);
                 let addr = self.regs.last_ram_addr;
                 let v = self.regs.src();
                 self.ram_write_word(addr, v);
+                self.regs.ram_buffer_ready_after = self.regs.instructions_executed + 2;
                 self.regs.reset_prefix_state();
-                2
+                2 + stall
             }
             0x91..=0x94 => {
                 // LINK #n: R11 = R15 + n. `regs[15]` already points at the
@@ -1700,10 +2017,20 @@ impl GsuState {
             0x98..=0x9D => {
                 let n = op & 0x0F;
                 let cost = if alt1 || alt3 {
-                    // LJMP Rn: fullsnes "jmp Rn:Rs ;R15=Rs, PBR=Rn".
+                    // LJMP Rn: fullsnes "jmp Rn:Rs ;R15=Rs, PBR=Rn". Ticket
+                    // W18-04: "LJMP sets CBR to R15 AND FFF0h (whereas
+                    // R15=jump target address)" and empties every cache
+                    // line, same as CACHE — applied here against the known
+                    // jump target rather than deferred to when the pending
+                    // jump commits, since either timing has the cache
+                    // fully reset well before the GSU's next fetch from
+                    // the new address (the one delay-slot opcode that
+                    // follows never itself depends on the new CBR).
                     let new_pbr = self.regs.reg(n) as u8;
                     let new_pc = self.regs.src();
                     self.regs.pending_jump = Some((new_pbr, new_pc));
+                    self.regs.cbr = new_pc & 0xFFF0;
+                    self.regs.invalidate_code_cache();
                     2
                 } else {
                     let new_pc = self.regs.reg(n);
@@ -1761,11 +2088,13 @@ impl GsuState {
                 let cost = if alt2 && !alt1 {
                     let kk = self.fetch_byte(rom);
                     let addr = u16::from(kk) * 2;
+                    let stall = self.ram_buffer_stall_cost(true);
                     // SMS's data register is `Rn` (the opcode nibble
                     // itself), not Sreg — fullsnes "mov [ramb:kk*2],Rn".
                     self.ram_write_word(addr, self.regs.reg(n));
                     self.regs.last_ram_addr = addr;
-                    8
+                    self.regs.ram_buffer_ready_after = self.regs.instructions_executed + 2;
+                    8 + stall
                 } else if alt1 || alt3 {
                     let kk = self.fetch_byte(rom);
                     let addr = u16::from(kk) * 2;
@@ -1834,7 +2163,12 @@ impl GsuState {
             }
             0xDF => {
                 let cost = if alt3 {
+                    // ROMB: fullsnes "Other Caches" lists "ROMBR is
+                    // changed" among the ROM-Read-Data Cache's documented
+                    // WAIT triggers (ticket W18-04) — same watermark bump
+                    // as an R14 write.
                     self.regs.rombr = self.regs.src() as u8;
+                    self.regs.rom_buffer_ready_after = self.regs.instructions_executed + 2;
                     2
                 } else if alt2 {
                     self.regs.rambr = (self.regs.src() as u8) & 0x01;
@@ -1843,8 +2177,9 @@ impl GsuState {
                     // GETC (ALT1 has no documented form, so it falls back
                     // to base per fullsnes's "ignored prefixes" rule).
                     let incoming = self.rom_data_byte(rom);
+                    let stall = self.rom_buffer_stall_cost();
                     self.write_colr(incoming);
-                    2
+                    2 + stall
                 };
                 self.regs.reset_prefix_state();
                 cost
@@ -1860,6 +2195,7 @@ impl GsuState {
             }
             0xEF => {
                 let byte = self.rom_data_byte(rom);
+                let stall = self.rom_buffer_stall_cost();
                 let cur = self.regs.reg(self.regs.dreg);
                 let v = match (alt1, alt2) {
                     (false, false) => u16::from(byte), // GETB: zero-expand
@@ -1869,7 +2205,7 @@ impl GsuState {
                 };
                 self.regs.commit_dest(v);
                 self.regs.reset_prefix_state();
-                2
+                2 + stall
             }
             // --- IWT Rn,#yyxx / ALT1: LM Rn,(hilo) / ALT2: SM (hilo),Rn --
             0xF0..=0xFF => {
@@ -1878,10 +2214,12 @@ impl GsuState {
                     let lo = self.fetch_byte(rom);
                     let hi = self.fetch_byte(rom);
                     let addr = u16::from_le_bytes([lo, hi]);
+                    let stall = self.ram_buffer_stall_cost(true);
                     // SM's data register is `Rn`, not Sreg — same as SMS.
                     self.ram_write_word(addr, self.regs.reg(n));
                     self.regs.last_ram_addr = addr;
-                    9
+                    self.regs.ram_buffer_ready_after = self.regs.instructions_executed + 2;
+                    9 + stall
                 } else if alt1 || alt3 {
                     let lo = self.fetch_byte(rom);
                     let hi = self.fetch_byte(rom);
@@ -1969,15 +2307,32 @@ mod exec_tests {
         (g, rom)
     }
 
-    /// Execute exactly `n` opcodes, bypassing the GO/budget gate
-    /// [`GsuState::run`] uses — the per-opcode-group tests below want
-    /// precise control over how many instructions have executed, not the
-    /// SNES-visible GO dance (which [`stop_sets_go_false_and_raises_irq`]
-    /// and [`loop_link_and_jmp_program`] exercise separately).
+    /// Execute exactly `n` opcodes, bypassing the GO gate
+    /// [`GsuState::run_credited`] uses — the per-opcode-group tests below
+    /// want precise control over how many instructions have executed, not
+    /// the SNES-visible GO dance (which
+    /// [`stop_sets_go_false_and_raises_irq`] and
+    /// [`loop_link_and_jmp_program`] exercise separately).
     fn step_n(g: &mut GsuState, rom: &[u8], n: usize) {
         for _ in 0..n {
             g.step_one(rom);
         }
+    }
+
+    /// Run a hand-assembled program directly (no master-clock credit
+    /// involved — see [`GsuState::run_credited`]'s doc for the real
+    /// interleave `SnesSystem::step` drives) until GO clears, for tests
+    /// that only care about the SNES-visible GO/STOP/IRQ dance. Bounded
+    /// (law 8): a test program that never executes STOP is a test bug, not
+    /// this harness's problem to hang on.
+    fn run_until_stopped(g: &mut GsuState, rom: &[u8]) {
+        for _ in 0..10_000 {
+            if !g.regs.go() {
+                return;
+            }
+            g.step_one(rom);
+        }
+        panic!("GSU test program did not clear GO within the bounded test budget");
     }
 
     // --- MOV opcodes (fullsnes "SNES Cart GSU-n CPU MOV Opcodes") -------
@@ -2474,7 +2829,7 @@ mod exec_tests {
             g.regs.go(),
             "R15.MSB write sets GO (fullsnes, ticket W18-01)"
         );
-        g.run(&rom);
+        run_until_stopped(&mut g, &rom);
         assert!(!g.regs.go(), "STOP cleared GO");
         assert_eq!(g.regs.reg(15), 2, "R15 = STOP's address + 2");
         // "the SNES side... waits on SFR": the IRQ line is still asserted
@@ -2495,7 +2850,7 @@ mod exec_tests {
         g.regs.write(0x3037, 0x80); // CFGR.IRQ = 1 (disable)
         g.regs.write(0x301E, 0x00);
         g.regs.write(0x301F, 0x00);
-        g.run(&rom);
+        run_until_stopped(&mut g, &rom);
         assert!(!g.regs.irq_pending(), "masked from the CPU line");
         assert_ne!(
             g.regs.peek(0x3031).unwrap() & 0x80,
@@ -2576,6 +2931,8 @@ mod exec_tests {
             ram: g.ram.clone(),
             rom_len: g.rom_len,
             ram_len: g.ram_len,
+            credit: g.credit,
+            fetch_extra_cost: 0,
         };
         step_n(&mut g, &rom, 3);
         step_n(&mut restored_state, &rom, 3);
@@ -2618,7 +2975,7 @@ mod exec_tests {
         let (mut g, rom) = program(&bytes);
         g.regs.write(0x301E, 0x00);
         g.regs.write(0x301F, 0x00);
-        g.run(&rom);
+        run_until_stopped(&mut g, &rom);
         assert!(!g.regs.go(), "program ran to STOP");
         assert_eq!(g.regs.plot_calls, 8);
         // Bit-plane pack of colours [0,1,2,3,0,1,2,3], MSB = leftmost
@@ -2652,7 +3009,7 @@ mod exec_tests {
         // immediately (a real title re-reads via decrementing R1, or via
         // GETC-style bookkeeping — this test just wants the same address).
         g.regs.regs[1] = 5;
-        let v = g.exec_rpix();
+        let (v, _) = g.exec_rpix();
         assert_eq!(v, 2, "RPIX reassembled the 2bpp colour PLOT wrote");
     }
 
@@ -2674,9 +3031,9 @@ mod exec_tests {
         g.regs.colr = 0b11; // non-zero -> must be plotted
         g.exec_plot();
         g.regs.regs[1] = 0;
-        assert_eq!(g.exec_rpix(), 0, "color-0 PLOT never touched RAM");
+        assert_eq!(g.exec_rpix().0, 0, "color-0 PLOT never touched RAM");
         g.regs.regs[1] = 1;
-        assert_eq!(g.exec_rpix(), 0b11, "the neighbour still plotted fine");
+        assert_eq!(g.exec_rpix().0, 0b11, "the neighbour still plotted fine");
     }
 
     /// POR bit1 (Dither): fullsnes "if (r1.bit0 XOR r2.bit0)=1 then
@@ -2695,10 +3052,10 @@ mod exec_tests {
         g.regs.regs[1] = 1; // X=1, Y=0 -> parity 1 -> dithered (high nibble)
         g.exec_plot();
         g.regs.regs[1] = 0;
-        assert_eq!(g.exec_rpix(), 0x4, "even parity: COLR's low nibble");
+        assert_eq!(g.exec_rpix().0, 0x4, "even parity: COLR's low nibble");
         g.regs.regs[1] = 1;
         assert_eq!(
-            g.exec_rpix(),
+            g.exec_rpix().0,
             0xB,
             "odd parity: COLR's high nibble (dithered)"
         );
@@ -2722,12 +3079,12 @@ mod exec_tests {
         g.exec_plot();
         g.regs.regs[1] = 0;
         assert_eq!(
-            g.exec_rpix(),
+            g.exec_rpix().0,
             0,
             "freeze-high made 0xA0 read as transparent"
         );
         g.regs.regs[1] = 1;
-        assert_eq!(g.exec_rpix(), 0xA1);
+        assert_eq!(g.exec_rpix().0, 0xA1);
     }
 
     /// COLOR/GETC's POR bit2 (High-Nibble)/bit3 (Freeze-High) transform
@@ -2782,7 +3139,7 @@ mod exec_tests {
         // The new segment (tile 1, x=8) is still only cached.
         g.regs.regs[1] = 8;
         assert_eq!(
-            g.exec_rpix(),
+            g.exec_rpix().0,
             0b01,
             "RPIX flushes+reads the new segment too"
         );
@@ -2814,7 +3171,7 @@ mod exec_tests {
             g.regs.regs[1] = x;
             g.regs.regs[2] = y;
             assert_eq!(
-                g.exec_rpix(),
+                g.exec_rpix().0,
                 u16::from(expected),
                 "scmr={scmr:#04x} x={x} y={y}"
             );
@@ -2838,7 +3195,7 @@ mod exec_tests {
             g.exec_plot();
             g.regs.regs[1] = 130;
             g.regs.regs[2] = 200;
-            assert_eq!(g.exec_rpix(), 0b10, "scmr={scmr:#04x}");
+            assert_eq!(g.exec_rpix().0, 0b10, "scmr={scmr:#04x}");
         }
     }
 
@@ -2900,6 +3257,8 @@ mod exec_tests {
             ram: a.ram.clone(),
             rom_len: a.rom_len,
             ram_len: a.ram_len,
+            credit: a.credit,
+            fetch_extra_cost: 0,
         };
 
         // Finish both the same way (three more PLOTs to fill the segment,
@@ -2917,5 +3276,268 @@ mod exec_tests {
             "save/load-restored run matches an uninterrupted one"
         );
         assert_ne!(baseline.ram[0], 0, "the segment did flush by the end");
+    }
+
+    // =====================================================================
+    // Ticket W18-04: clocking, code cache, ROM/RAM buffers.
+    // =====================================================================
+
+    /// Mark `rom[0..len]` (bank `$00`, `PBR=0`, default `CBR=0`) as already
+    /// code-cached, bypassing [`GsuState::fetch_byte`]'s normal fill path.
+    /// The ROM-buffer/RAM-buffer stall tests below use this so their
+    /// programs' OWN opcode/operand bytes are cache hits throughout (cost
+    /// `0` surcharge), isolating exactly the documented stall cost this
+    /// project's [`CACHE_MISS_EXTRA_GSU_CYCLES`] surcharge would otherwise
+    /// mix in on every byte's first fetch.
+    fn prime_cache(g: &mut GsuState, rom: &[u8], len: usize) {
+        for i in 0..len {
+            g.regs.cache[i] = rom[i];
+            g.regs.cache_valid[i] = true;
+        }
+    }
+
+    #[test]
+    fn code_cache_hit_costs_less_than_a_miss() {
+        // CACHE (addr 0); NOP (addr 1). CACHE sets CBR = R15(=1) AND
+        // FFF0h = 0, so addr 1 falls inside the freshly-emptied cache
+        // window and the first NOP fetch is a miss.
+        let bytes = [0x02, 0x01];
+        let (mut g, rom) = program(&bytes);
+        step_n(&mut g, &rom, 1); // CACHE
+        assert_eq!(g.regs.cbr, 0);
+        step_n(&mut g, &rom, 1); // NOP: first touch of addr 1 -> miss
+        let miss_cost = g.regs.last_cost();
+        assert_eq!(
+            miss_cost,
+            1 + CACHE_MISS_EXTRA_GSU_CYCLES,
+            "NOP's base cost (1, cache-hit-assumed) plus the documented \
+             cache-miss surcharge (fullsnes CPU Misc: uncached opcode-byte \
+             read is 3 cycles vs a cached 1)"
+        );
+        g.regs.regs[15] = 1; // re-fetch the exact same byte
+        step_n(&mut g, &rom, 1);
+        let hit_cost = g.regs.last_cost();
+        assert_eq!(hit_cost, 1, "same byte, now cached: no surcharge");
+        assert!(hit_cost < miss_cost, "cache hit is documented as faster");
+    }
+
+    #[test]
+    fn getb_stalls_immediately_after_an_r14_write_but_not_the_instruction_after() {
+        // IWT R14,#0100h; GETB; GETB. fullsnes "Other Caches": "In some
+        // situations WAITs can occur: When the cache-load hasn't yet
+        // completed (ie. GETxx executed shortly after changing R14)".
+        let mut bytes = vec![0xFE, 0x00, 0x01, 0xEF, 0xEF];
+        bytes.resize(0x101, 0);
+        bytes[0x100] = 0x42;
+        let (mut g, rom) = program(&bytes);
+        prime_cache(&mut g, &rom, 5); // isolate the stall from cache-fill cost
+        step_n(&mut g, &rom, 1); // IWT R14,#0100h
+        step_n(&mut g, &rom, 1); // GETB immediately after -> stalls
+        assert_eq!(
+            g.regs.last_cost(),
+            2 + 3,
+            "GETB's base cost (2) plus the documented 3-cycle-at-10MHz \
+             ROM-buffer stall (fullsnes CPU Misc \"Uncached ROM/RAM-Read- \
+             Timings\": \"ROM Read: ...3 cycles per byte at 10MHz\")"
+        );
+        step_n(&mut g, &rom, 1); // GETB one instruction later -> ready
+        assert_eq!(
+            g.regs.last_cost(),
+            2,
+            "the background load had a full instruction to finish"
+        );
+    }
+
+    #[test]
+    fn ram_buffer_stalls_on_a_second_store_immediately_after_the_first() {
+        // IBT R1,#10h; STW (R1); STW (R1). fullsnes "Other Caches": "In
+        // some situations WAITs can occur: When cache already contained
+        // data (ie. when executing two store opcodes shortly after each
+        // other)".
+        let bytes = [0xA1, 0x10, 0x31, 0x31];
+        let (mut g, rom) = program(&bytes);
+        prime_cache(&mut g, &rom, 4); // isolate the stall from cache-fill cost
+        step_n(&mut g, &rom, 1); // IBT R1,#10h
+        step_n(&mut g, &rom, 1); // STW (R1): RAM-Write-Data Cache was idle
+        assert_eq!(g.regs.last_cost(), 1, "first store: no stall");
+        step_n(&mut g, &rom, 1); // STW (R1) again, immediately
+        assert_eq!(
+            g.regs.last_cost(),
+            1 + 10,
+            "documented 10-cycle-per-word RAM write stall (fullsnes CPU \
+             Misc: \"RAM Write: 10 cycles per word at 21MHz\")"
+        );
+    }
+
+    #[test]
+    fn clsr_1_runs_twice_the_opcodes_per_master_cycle_of_clsr_0() {
+        // NOP (addr 0); BRA -3 (addr 1-2, loops back to addr 0); NOP
+        // (addr 3, the branch's delay-slot instruction) -- an infinite
+        // loop whose steady-state per-opcode GSU-cycle cost does not
+        // depend on CLSR at all, so the only thing that can change
+        // opcodes-per-master-cycle is `master_cycles_per_gsu_cycle`
+        // itself (fullsnes "3039h - CLSR": 10.7MHz vs 21.4MHz).
+        let bytes = [0x01, 0x05, 0xFD, 0x01];
+        let (mut slow, rom_slow) = program(&bytes);
+        slow.regs.write(0x301E, 0x00);
+        slow.regs.write(0x301F, 0x00); // GO=1; CLSR left at reset (0)
+        slow.run_credited(&rom_slow, 100_000);
+
+        let (mut fast, rom_fast) = program(&bytes);
+        fast.regs.write(0x3039, 0x01); // CLSR=1 (21.4MHz)
+        fast.regs.write(0x301E, 0x00);
+        fast.regs.write(0x301F, 0x00);
+        fast.run_credited(&rom_fast, 100_000);
+
+        let slow_n = slow.regs.instructions_executed();
+        let fast_n = fast.regs.instructions_executed();
+        assert!(
+            fast_n > slow_n,
+            "21.4MHz mode should execute more opcodes for the same \
+             master-cycle budget (slow={slow_n}, fast={fast_n})"
+        );
+        let ratio = fast_n as f64 / slow_n as f64;
+        assert!(
+            (1.9..=2.1).contains(&ratio),
+            "expected ~2x throughput (one-time cache-fill cost aside), got {ratio} (slow={slow_n}, fast={fast_n})"
+        );
+    }
+
+    #[test]
+    fn run_credited_two_runs_with_the_same_budget_match() {
+        let bytes = mixed_program();
+        let (mut a, rom_a) = program(&bytes);
+        let (mut b, rom_b) = program(&bytes);
+        for g in [&mut a, &mut b] {
+            g.regs.write(0x301E, 0x00);
+            g.regs.write(0x301F, 0x00);
+        }
+        a.run_credited(&rom_a, 500);
+        b.run_credited(&rom_b, 500);
+        assert_eq!(a.regs.regs, b.regs.regs);
+        assert_eq!(a.regs.sfr, b.regs.sfr);
+        assert_eq!(a.credit, b.credit);
+        assert_eq!(a.regs.instructions_executed, b.regs.instructions_executed);
+    }
+
+    #[test]
+    fn save_load_mid_code_cache_fill_matches_an_uninterrupted_run() {
+        let bytes = [0x02, 0x01, 0x01, 0x01, 0x01, 0x01]; // CACHE; 5x NOP
+        let (mut a, rom) = program(&bytes);
+        step_n(&mut a, &rom, 1); // CACHE
+        step_n(&mut a, &rom, 2); // two NOPs: a partial (2/512-byte) fill
+
+        let mut stream = MemStream {
+            buf: Vec::new(),
+            at: 0,
+        };
+        a.regs.save(&mut StateOut::new(&mut stream)).expect("save");
+        let mut restored = Gsu::new(rf_cart::SuperFxVersion::Gsu2);
+        restored.load(&mut StateIn::new(&mut stream)).expect("load");
+        assert_eq!(restored.cbr, a.regs.cbr);
+        assert_eq!(
+            restored.cache_valid, a.regs.cache_valid,
+            "the partial fill's per-byte validity round-tripped"
+        );
+        let mut b = GsuState {
+            regs: restored,
+            ram: a.ram.clone(),
+            rom_len: a.rom_len,
+            ram_len: a.ram_len,
+            credit: a.credit,
+            fetch_extra_cost: 0,
+        };
+
+        // Continue both for the remaining NOPs; hit/miss costs must match
+        // exactly instruction-for-instruction, proving the restored copy
+        // resumes with the same cache state instead of restarting cold.
+        for _ in 0..3 {
+            step_n(&mut a, &rom, 1);
+            step_n(&mut b, &rom, 1);
+            assert_eq!(a.regs.last_cost(), b.regs.last_cost());
+        }
+    }
+
+    #[test]
+    fn save_load_mid_rom_buffer_stall_matches_an_uninterrupted_run() {
+        let mut bytes = vec![0xFE, 0x00, 0x01, 0xEF]; // IWT R14,#0100h; GETB
+        bytes.resize(0x101, 0);
+        bytes[0x100] = 0x99;
+        let (mut a, rom) = program(&bytes);
+        step_n(&mut a, &rom, 1); // IWT R14,#0100h: arms the stall watermark
+
+        let mut stream = MemStream {
+            buf: Vec::new(),
+            at: 0,
+        };
+        a.regs.save(&mut StateOut::new(&mut stream)).expect("save");
+        let mut restored = Gsu::new(rf_cart::SuperFxVersion::Gsu2);
+        restored.load(&mut StateIn::new(&mut stream)).expect("load");
+        assert_eq!(
+            restored.rom_buffer_ready_after,
+            a.regs.rom_buffer_ready_after
+        );
+        let mut b = GsuState {
+            regs: restored,
+            ram: a.ram.clone(),
+            rom_len: a.rom_len,
+            ram_len: a.ram_len,
+            credit: a.credit,
+            fetch_extra_cost: 0,
+        };
+
+        step_n(&mut a, &rom, 1); // GETB: stalls
+        step_n(&mut b, &rom, 1);
+        assert_eq!(
+            a.regs.last_cost(),
+            b.regs.last_cost(),
+            "restored copy stalls exactly like the uninterrupted run"
+        );
+        assert_eq!(
+            a.regs.last_cost(),
+            2 + 3 + CACHE_MISS_EXTRA_GSU_CYCLES,
+            "GETB's base cost, the documented ROM-buffer stall, and this \
+             GETB opcode byte's own first-touch code-cache miss (offset 3 \
+             was never executed before this step in either copy)"
+        );
+    }
+
+    /// A real bug this ticket's own census run caught: the SNES-side
+    /// code-cache preload path (fullsnes "Code-Cache" / "Writing to
+    /// Code-Cache (by SNES CPU)": write opcodes to `$3100-$32FF`, then set
+    /// `R15` into `0000h-01FFh` and start the GSU "without RON/RAN flags
+    /// being set") shares the exact same 512-byte array
+    /// `GsuState::fetch_byte` reads through `Gsu::cache_valid`. The first
+    /// implementation of `Gsu::write`'s `Location::Cache` arm updated
+    /// `Gsu::cache` but never `Gsu::cache_valid`, so a title using this
+    /// documented boot idiom would execute garbage (whatever ROM/RAM byte
+    /// happened to sit at `CBR+i`) instead of the byte the SNES just
+    /// wrote — reproduced here directly rather than through a real title's
+    /// boot ROM.
+    #[test]
+    fn snes_side_code_cache_preload_is_immediately_executable() {
+        let (mut g, rom) = program(&[]);
+        // SNES writes opcode $01 (NOP) to $3100 (cache byte 0), then CACHE
+        // is never executed by the GSU — real hardware's documented path
+        // is CBR=0 already (reset value) plus GO set directly.
+        g.regs.write(0x3100, 0x01); // NOP
+        g.regs.write(0x3101, 0x00); // STOP
+        g.regs.write(0x3102, 0x01); // STOP's prefetched dummy byte
+        assert_eq!(g.regs.cache[0], 0x01, "the SNES-side write itself");
+        // PBR left at its reset value (0 = ROM bank 0), which this fake
+        // ROM never populated — if the fetch fell through to ROM instead
+        // of the cache, it would read `0x00` (STOP) here instead of the
+        // preloaded NOP, and the assertion below would see zero
+        // instructions run before STOP rather than the two the preloaded
+        // program actually has.
+        g.regs.write(0x301E, 0x00);
+        g.regs.write(0x301F, 0x00); // GO=1, R15=0
+        run_until_stopped(&mut g, &rom);
+        assert_eq!(
+            g.regs.instructions_executed(),
+            2,
+            "NOP then STOP, both fetched from the SNES-preloaded cache, \
+             not from the (empty) underlying ROM"
+        );
     }
 }

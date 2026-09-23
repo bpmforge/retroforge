@@ -408,7 +408,7 @@ majority of games; per-dot upgrade path documented in code).
     and writing the register that triggers it, and confirms the restored
     run copies the same bytes a never-interrupted run does.
 
-### 3.6 Super FX (GSU) — slice 3 of 5
+### 3.6 Super FX (GSU) — slice 4 of 5
 
 **Super FX / GSU-1/GSU-2 (~10 games, D-014, SRS FR-CORE-040, Wave 18,
 `crates/rf-snes/src/gsu.rs`).** A cartridge-resident 10.74MHz (GSU1) or
@@ -585,19 +585,99 @@ and "Pixel-Cache" (`Gsu::primary_cache`/`secondary_cache`,
   read-modify-write: only `pending`-set pixels are written, so untouched
   RAM bytes (and untouched bit positions within a written byte) keep
   their prior value.
-- **Not yet modelled**: cycle-accurate flush/stall timing (slice 4); the
-  MC1/GSU1-specific pixel-cache erratum, if any (none is documented in
-  the cited fullsnes chapter beyond the STOP-after-RAM-write note already
-  covered in slice 2).
-- **Provisional scheduling**: `GsuState::run` executes up to
-  `STEP_BUDGET` (`64`, not a hardware constant) opcodes per
-  `SnesSystem::step` while GO is set, with **no** cycle cost charged
-  against the master clock — `Gsu::last_cost` records each opcode's
-  documented clock count (fullsnes "CPU Misc") for slice 4 to consume,
-  but nothing reads it yet. Wired into `SnesSystem::step` right after the
-  SA-1 credit loop, borrowing `&bus.rom` the same disjoint-field way.
-  Law 8: the budget counter decrements unconditionally, first, every
-  iteration, so a mis-encoded program cannot hang the loop.
+- **Cycle-accurate flush timing (slice 4, below)** replaces the "not yet
+  modelled" note this bullet used to carry. The MC1/GSU1-specific
+  pixel-cache erratum remains unmodelled — none is documented in the
+  cited fullsnes chapter beyond the STOP-after-RAM-write note already
+  covered in slice 2.
+
+**Slice 4 (this ticket, D-014) gives the GSU real clocking against the
+SNES master clock, plus the code cache, ROM buffer and RAM buffer**, per
+fullsnes "SNES Cart GSU-n CPU Misc"/"Code-Cache"/"Other Caches"
+(`crates/rf-snes/src/gsu.rs`, the module constants above `Gsu`'s
+definition, `GsuState::run_credited`/`step_one`/`fetch_byte`).
+
+- **Clock conversion** (fullsnes "3039h - CLSR": "0=10.7MHz, 1=21.4MHz"):
+  the SNES NTSC master clock is 21.47727 MHz
+  (`crate::timing::Region::Ntsc`), which divides evenly by both rates —
+  `master_cycles_per_gsu_cycle` returns `2` (CLSR=0) or `1` (CLSR=1), an
+  exact integer ratio in both modes, not an approximation.
+- **Credit-based interleave** (`GsuState::run_credited`, called from
+  `SnesSystem::step` the same place the provisional `GsuState::run` used
+  to be, right after the SA-1 credit loop): replaces `STEP_BUDGET`
+  entirely. Each `SnesSystem::step` deposits the master cycles the
+  65C816 (plus its MDMA/HDMA) just spent into `GsuState::credit`; opcodes
+  run one at a time, each one's cost (in GSU cycles, converted to master
+  cycles) debited from the balance, until the balance cannot cover
+  another opcode or GO clears — the exact shape `Sa1State::credit`
+  already established for SA-1. Credit never accumulates while GO is
+  clear, and is itself part of save state (`crates/rf-snes/src/state.rs`,
+  the `Cart` region's GSU block) — a save/load round trip must not lose a
+  fractional credit balance, since that would shift which master-clock
+  cycle a subsequent GSU opcode completes on.
+- **Per-opcode cost table**: every opcode's `exec_opcode` arm already
+  returned its documented clock count as of W18-02 (kept as this
+  project's canonical cache-hit cost table — the fullsnes chapter
+  extracted for this project gives no full per-opcode cycle table of its
+  own, only the aggregate facts below); this slice adds three
+  surcharges on top of that base cost, each cited to "CPU Misc"/
+  "Code-Cache"/"Other Caches":
+  | source | cost | cited fact |
+  |---|---|---|
+  | code-cache hit (opcode/operand byte) | `+0` (already in the base cost) | "Cache-Code is 6/3 times faster than ROM/RAM" — this project reads the base cost as already assuming a 1-cycle cache-hit fetch |
+  | code-cache miss (same byte) | `+2` | upgrades the assumed 1 cycle to the documented uncached "3 cycles at both 21MHz and 10MHz" |
+  | ROM-buffer stall (GETxx/GETC right after R14/ROMBR changes) | `+3` (CLSR=0) / `+5` (CLSR=1) | "ROM Read: 5 cycles per byte at 21MHz, or 3 cycles per byte at 10MHz" |
+  | RAM-buffer stall (a store right after another store) | `+10` per word / `+5` per byte | "RAM Write: 10 cycles per word at 21MHz" (10MHz-word and per-byte figures are undocumented — see the constants' own doc for the stated interpolation) |
+  | pixel-cache flush (a PLOT/RPIX that drains the primary/secondary cache) | `+5` per bitplane byte written | same per-byte RAM-write figure as the RAM buffer, since fullsnes gives the flush no cost of its own beyond "it happens through the RAM-Write-Data Cache" |
+- **Code cache** (fullsnes "Code-Cache": "512-byte cache... 32 lines of
+  16-bytes"): `Gsu::cache_valid` is a 512-entry per-byte validity bitmap
+  sharing `Gsu::cache`'s backing storage (real hardware's code-cache RAM
+  *is* the same 512 bytes the SNES can pre-load through `$3100-$32FF` —
+  "Code-Cache Loading Notes" describes GSU-side fill happening
+  progressively, byte by byte, "loaded alongside while executing
+  opcodes", which per-byte (not per-16-byte-line) tracking matches
+  exactly). `GsuState::fetch_byte` is the single fetch/fill/cost path: a
+  byte inside the current `[CBR, CBR+0x200)` window is a hit if already
+  valid, or a miss that fills it and charges the surcharge above; a byte
+  outside the window is never cached (always the surcharge, byte read
+  straight from ROM/RAM). Lines empty on: an SNES `SFR` write with GO=0
+  (`CBR=0` too, "the SNES can set CBR=0000h by writing GO=0"); the
+  `CACHE` opcode (`CBR = R15 AND FFF0h`); `LJMP` (`CBR = R15 AND FFF0h`,
+  R15 = the jump target — applied at dispatch against the already-known
+  target rather than deferred to the delay slot, since either timing
+  clears the cache well before the GSU's next fetch from the new
+  address). Executing from Game Pak RAM ($70/$71 via PBR) is cached
+  exactly like ROM — fullsnes's own caution that a title "must clear the
+  cache by writing GO=0" if GamePak RAM code changed only makes sense if
+  RAM-resident code is cached the same way ROM-resident code is.
+- **ROM buffer** (fullsnes "Other Caches", "ROM-Read-Data Cache (1-byte
+  read-ahead)"): modelled as a generation watermark, `Gsu::
+  rom_buffer_ready_after`, bumped to `instructions_executed + 2` whenever
+  R14 or ROMBR changes (`Gsu::commit_to`, the `ROMB` opcode); a
+  GETB/GETBH/GETBL/GETBS/GETC that runs before that watermark (i.e. the
+  instruction immediately after the change) pays the ROM-read stall from
+  the cost table above, matching "GETxx executed shortly after changing
+  R14".
+- **RAM buffer** (fullsnes "Other Caches", "RAM-Write-Data Cache
+  (1-byte/1-word write queue)"): the same watermark shape,
+  `Gsu::ram_buffer_ready_after`, bumped by every STB/STW/SBK/SM/SMS store
+  to `instructions_executed + 2`; a store that runs before that
+  watermark (two stores back to back) pays the RAM-write stall, matching
+  "executing two store opcodes shortly after each other".
+- **SNES-side ownership while the GSU holds the bus** (SCMR RON/RAN):
+  unchanged from slice 1 — the SNES still reads open bus for ROM/RAM the
+  GSU owns (`SnesBus::read`/`peek`'s `Target::Rom`/`Gsu::ran` gates); this
+  slice's caches/buffers only change what the *GSU itself* pays in
+  cycles, not what the SNES CPU observes on its own reads.
+- **Not yet modelled**: the RAM-Address-Cache's own WAIT rules beyond
+  what `Gsu::last_ram_addr`'s SBK writeback already needs; the
+  MC1/GSU1-only "STOP after a RAM write hangs" erratum (still, as slice
+  2 left it, not modelled — no cycle-accurate bus state exists to detect
+  the specific pattern fullsnes describes); the pixel cache's overlap
+  between a *later* instruction and an in-flight flush (this project's
+  flush is always synchronous within the triggering PLOT/RPIX, so a
+  flush never spans multiple opcodes the way real hardware's WAIT would
+  let it).
 - **Undocumented-but-cited opcodes implemented as documented**: UMULT #n
   and XOR Rn/#n (fullsnes "GSU Undoc opcodes": present in the chip's
   opcode summary/index but not spelled out in the alphabetical body) are

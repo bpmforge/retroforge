@@ -7858,6 +7858,163 @@ session; filed as a follow-up rather than claimed done.
 
 **HEAD**: see the `feat(W18-03): ...` commit this entry ships with.
 
+## W18-04 (Super FX / GSU slice 4: code cache, ROM/RAM buffers, clocking against the master clock)
+
+**Clock conversion** (fullsnes "SNES Cart GSU-n CPU Misc"/"3039h - CLSR"):
+`master_cycles_per_gsu_cycle` returns `2` for CLSR=0 (10.7MHz) or `1` for
+CLSR=1 (21.4MHz) against the NTSC master clock (21.47727MHz,
+`crate::timing::Region::Ntsc`) — an exact integer ratio both ways, not an
+approximation.
+
+**Credit-based interleave** (`GsuState::run_credited`, replacing
+`STEP_BUDGET`): the exact shape `Sa1State::credit` already established for
+SA-1, wired into `SnesSystem::step` right after the SA-1 credit loop —
+`master_this_step` (the 65C816 instruction plus its MDMA/HDMA) is banked
+into `GsuState::credit`; opcodes run one at a time, each one's
+[gsu-cycles-converted-to-master-cycles] cost debited, until the balance
+cannot cover another opcode or GO clears. Credit never accumulates while
+GO is clear, and is itself part of save state (`crates/rf-snes/src/state.rs`
+`Cart` region, GSU block, `o.u64(g.credit)`/loaded back) — acceptance's
+"Determinism: credit is saved state".
+
+**Cost table** (every citation below is fullsnes "CPU Misc"/"Code-Cache"/
+"Other Caches"):
+
+| source | surcharge | cited fact |
+|---|---|---|
+| code-cache hit | `+0` | base per-opcode cost (W18-02's table) already assumes a 1-cycle cache-hit fetch |
+| code-cache miss | `+2` | "ROM/RAM Opcode-byte-read: 3 cycles at both 21MHz and 10MHz" vs the assumed 1 |
+| ROM-buffer stall (GETxx/GETC right after R14/ROMBR changes) | `+3` (CLSR=0) / `+5` (CLSR=1) | "ROM Read: 5 cycles per byte at 21MHz, or 3 cycles per byte at 10MHz" |
+| RAM-buffer stall (a store right after another store) | `+10`/word, `+5`/byte | "RAM Write: 10 cycles per word at 21MHz" (10MHz-word and per-byte figures are fullsnes's own unconfirmed guesses — this project picks one explicit number, see `ram_word_drain_cycles`'s doc) |
+| pixel-cache flush (PLOT/RPIX draining primary/secondary) | `+5`/bitplane byte | same RAM-write figure — fullsnes gives the flush no cost of its own |
+
+**Code cache** (`Gsu::cache_valid`, a 512-entry per-byte validity bitmap
+sharing `Gsu::cache`'s backing array — real hardware's code-cache RAM
+*is* the SNES-writable `$3100-$32FF` bytes): `GsuState::fetch_byte` is the
+single fetch/fill/cost path — a byte inside `[CBR, CBR+0x200)` is a hit if
+valid, else a miss that fills it and charges the surcharge; outside the
+window is never cached. Lines empty on an SNES `SFR` write with GO=0
+(`CBR=0` too), on `CACHE` (`CBR=R15 AND FFF0h`), and on `LJMP` (same
+formula, applied at dispatch against the known jump target). Game Pak RAM
+($70/$71 via PBR) is cached exactly like ROM.
+
+**ROM buffer / RAM buffer**: both modelled as a generation watermark
+(`Gsu::rom_buffer_ready_after`/`ram_buffer_ready_after`, bumped to
+`instructions_executed + 2` on the triggering event) rather than a
+literal one-byte queue — a GETxx/GETC or a store that runs in the
+instruction immediately after R14/ROMBR changed (ROM) or another store
+(RAM) pays the stall from the table above.
+
+**A real bug this ticket's own census run caught**: the SNES-side
+code-cache preload path (fullsnes "Writing to Code-Cache (by SNES CPU)":
+write opcodes to `$3100-$32FF`, then start the GSU with `R15` in
+`0000h-01FFh`, "without RON/RAN flags being set") shares `Gsu::cache`'s
+array with `GsuState::fetch_byte`'s fill path, but the first
+implementation of `Gsu::write`'s cache arm updated `Gsu::cache` without
+ever setting `Gsu::cache_valid` — a title using that documented boot
+idiom would execute garbage (whatever ROM/RAM byte sat at `CBR+i`)
+instead of the SNES-written byte. Caught while investigating the census
+regression below (not by a title that turned out to depend on it), fixed
+by setting `cache_valid[i] = true` alongside the write, and pinned by
+`exec_tests::snes_side_code_cache_preload_is_immediately_executable`.
+
+**Tests** (`crates/rf-snes/src/gsu.rs`, `mod exec_tests`, 8 new unit
+tests, total 51 GSU tests): `code_cache_hit_costs_less_than_a_miss` pins
+the documented 1-vs-3-cycle fetch cost; `getb_stalls_immediately_after_
+an_r14_write_but_not_the_instruction_after` and `ram_buffer_stalls_on_a_
+second_store_immediately_after_the_first` pin the two buffer stalls
+(using a `prime_cache` test helper to pre-seed the code cache so the
+stall assertion isn't mixed with the byte's own first-touch miss cost);
+`clsr_1_runs_twice_the_opcodes_per_master_cycle_of_clsr_0` runs an
+infinite NOP/BRA loop through `run_credited` with an identical master-
+cycle budget at both clock speeds and checks the ~2x ratio;
+`run_credited_two_runs_with_the_same_budget_match` and the two
+`save_load_mid_*` tests (mid-code-cache-fill, mid-ROM-buffer-stall) cover
+determinism and save/load mid-state, per acceptance #2;
+`snes_side_code_cache_preload_is_immediately_executable` pins the bug fix
+above. `cargo test -p rf-snes --lib`: 436 passed, 0 failed, 1 ignored.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — all suites green (see above);
+`scripts/validate-arch.sh` — `arch OK`. Per the orchestrator's explicit
+instruction this session, `cargo test --workspace` and the 65816-vector
+suite were left to the orchestrator's own board-wide gate (already
+observed green in this same session before that instruction landed: 2305+
+passed, 0 failed). Ignored SNES suites run directly this session, all
+green: `gilyon_cputest` (0x0649/0x0649 Success), `peterlemon_bg_map_
+goldens_match` (3/3), `spc_timer_reports_pass` (PASSED), `rf_scroller_s_
+five_minute_replay_is_deterministic` (a save-state round trip mid-GSU-run
+reproducing identical frames, now exercised against the real credit-based
+clock rather than the old flat budget).
+
+**Census** (RELEASE, `boot_census_child` direct invocation, same 15 real
+GSU archives + 5 canaries as W18-01/02/03):
+
+| title | exit | bucket |
+|---|---|---|
+| Star Fox (USA) | **10** | **regressed: blank (was 0/rendered in W18-02/03)** |
+| Star Fox (USA) (Rev 1) | **10** | **regressed: blank (was 0/rendered in W18-02/03)** |
+| Star Fox (USA) (Rev 2) | 10 | uniform (unchanged since W18-01) |
+| Star Fox 2 (Classic Mini, Switch Online) | 10 | uniform (unchanged) |
+| Star Fox 2 (Beta) x3 | 12 | refused (pre-existing, unrelated: non-canonical header) |
+| Stunt Race FX (USA) (Rev 1) | 0 | rendered (unchanged) |
+| Yoshi's Island (USA) | 0 | rendered (unchanged) |
+| Yoshi's Island (USA) (Rev 1) | 0 | rendered (unchanged) |
+| Super Star Fox Weekend | 10 | uniform (unchanged) |
+| Vortex (USA) (En,Es) | 10 | uniform (unchanged — still parked, see W18-02/03) |
+| Dirt Trax FX (USA) | 0 | rendered (unchanged) |
+| Doom (USA) | 0 | rendered (unchanged) |
+| Tommy Moe's Winter Extreme | 0 | rendered (unchanged) |
+| Super Mario World (USA) canary | 0 | rendered |
+| Wild Guns (USA) canary | 0 | rendered |
+| Super Mario RPG (USA) canary | 0 | rendered |
+| Kirby Super Star (USA) canary | 0 | rendered |
+| NHL 95 (USA) canary | 0 | rendered |
+
+**Named finding, not silently dropped: Star Fox / Star Fox (Rev 1)
+regressed from rendering to blank.** Traced with `title_probe`
+`PROBE_GSUREGS=1 PROBE_MODE=frames PROBE_FRAMES=600` (the same 600-frame
+window `boot_census` uses): the GSU never stalls or hangs — it consumes
+its full, real-hardware-accurate credit budget every step (CLSR=0,
+confirmed correct for a GSU1 chip; `credit` reaches `0` almost every call,
+i.e. every available cycle is spent, not wasted) and its `CBR`/`R15`
+genuinely advance through the ROM across the whole 600-frame run — this
+is not the earlier slices' "parked on a WAIT this project doesn't model"
+shape (that is Vortex, unchanged). Over 600 real frames (10 emulated
+seconds) it executes ~35 million GSU opcodes from ~107 million real GSU
+cycles (`214M` master cycles credited, `/2` for CLSR=0) — that cycle
+BUDGET is exactly what a real 10.74MHz GSU1 chip provides in 10 seconds,
+confirming `run_credited`'s conversion itself is correct — but
+`plot_calls` is still `0` at the end of that window, so Star Fox's boot
+sequence (Nintendo/Argonaut logo setup, before the first 3D-rendered
+pixel) needs more than 35M real GSU opcodes' worth of work to reach its
+first PLOT under this project's current opcode-cost model. The prior
+(W18-02/03) result of "renders" was produced by the flat, explicitly
+provisional `STEP_BUDGET=64`-opcodes-per-CPU-instruction placeholder,
+which is **not** hardware-accurate — it gave the GSU roughly 15-20x more
+opcodes than a real 10.74MHz chip earns in the same 65816-instruction
+window, so the earlier "renders" result was never proof the timing was
+right, only that the placeholder was generous enough to mask whatever
+this real budget now exposes. Two explanations remain open, not yet
+distinguished, and are named here as the W18-05 follow-up's starting
+point rather than guessed at: (1) this project's opcode-cost table
+and/or code-cache-miss modelling makes ordinary (non-preloaded,
+non-CACHE'd) GSU execution slower than real hardware, so Star Fox's own
+boot code — which this session's `CBR` sampling shows wandering across a
+wide address range rather than settling into one `CACHE`'d hot loop —
+pays the uncached 3-cycle-per-byte surcharge far more than real hardware
+would if its boot path is meant to run mostly from cache; or (2) Star
+Fox's real boot sequence genuinely does take close to or slightly over 10
+seconds on real hardware before its first GSU-rendered pixel, and
+`boot_census`'s `FRAMES=600` window (chosen for NES/SA-1/plain-SNES
+titles) is simply too short for this specific GSU1 title now that the
+clock is accurate. Stunt Race FX and Dirt Trax FX are also GSU1
+(identical 10.7MHz budget) and both still render within the same window,
+which argues for (2) over a blanket "GSU1 is too slow" reading, but does
+not rule out (1) for Star Fox specifically.
+
+**HEAD**: see the `feat(W18-04): ...` commit this entry ships with.
+
 ## W14-51 — Final Fight 2 / Battletoads: no register defect found; both
 titles' picture appears well outside the census window, the same
 "boot longer than window" class as Lagoon/Phalanx (W14-35). BLOCKED

@@ -326,7 +326,11 @@ impl crate::system::SnesSystem {
                 match &self.bus.gsu {
                     Some(g) => {
                         g.regs.save(o)?;
-                        o.blob(&g.ram)
+                        o.blob(&g.ram)?;
+                        // Ticket W18-04: the credit-based interleave's
+                        // banked master cycles, same reasoning as SA-1's
+                        // `credit` above.
+                        o.u64(g.credit)
                     }
                     None => Ok(()),
                 }
@@ -442,6 +446,7 @@ impl crate::system::SnesSystem {
                     (Some(g), true) => {
                         g.regs.load(i)?;
                         i.blob_into(&mut g.ram, "GSU RAM")?;
+                        g.credit = i.u64()?;
                         Ok(())
                     }
                     (None, false) => Ok(()),
