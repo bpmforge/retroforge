@@ -333,6 +333,15 @@ impl crate::system::SnesSystem {
                         o.u64(g.credit)
                     }
                     None => Ok(()),
+                }?;
+                // CX4 board state (ticket W19-02), same presence-flag
+                // pattern as SA-1/GSU above, appended last so an older
+                // state and one saved after this ticket only disagree in
+                // what trails the byte the older format already ends at.
+                o.bool(self.bus.cx4.is_some())?;
+                match &self.bus.cx4 {
+                    Some(c) => c.save(o),
+                    None => Ok(()),
                 }
             }
         }
@@ -452,6 +461,15 @@ impl crate::system::SnesSystem {
                     (None, false) => Ok(()),
                     (Some(_), false) | (None, true) => Err(StateError::Corrupt(
                         "GSU presence in the saved state disagrees with the mounted cartridge"
+                            .to_string(),
+                    )),
+                }?;
+                let cx4_present = i.bool()?;
+                match (self.bus.cx4.as_mut(), cx4_present) {
+                    (Some(c), true) => c.load(i),
+                    (None, false) => Ok(()),
+                    (Some(_), false) | (None, true) => Err(StateError::Corrupt(
+                        "CX4 presence in the saved state disagrees with the mounted cartridge"
                             .to_string(),
                     )),
                 }

@@ -861,6 +861,94 @@ own W18-06 section.**
   production change). Full per-title exit codes: docs/TESTING.md's own
   W18-06 section.
 
+### 3.8 Capcom Cx4 (ticket W19-02): register window only, commands undocumented
+
+**Cx4 (Mega Man X2, Mega Man X3 — 2 games, `crates/rf-snes/src/cx4.rs`).**
+A Hitachi HG51B169 RISC CPU (fullsnes "SNES Cart Capcom CX4"), architecturally
+the same class of chip as SA-1/GSU: it runs a *program from the cartridge's
+own SNES ROM* (`$7F49-$7F4B` Program ROM Base, e.g. `$02:8000` in Mega
+Man), not an undisclosed internal firmware — so, like SA-1/GSU, an
+instruction-level core is ordinary clean-room hardware emulation, not
+HLE against copyrighted firmware.
+
+**Detection (`rf-cart`).** Chipset `$F3` (coprocessor nibble `$F`
+"custom", `hw=$3`) alone is not enough — fullsnes reuses nibble `$F` for
+other custom chips — so `parse_snes_header` also requires the extended
+header's `$FFBF` sub-type byte `=$10` (fullsnes "CX4 Cartridge Header":
+`"[FFD6]=F3h"`, `"[FFBF]=10h ;CustomChip=CX4"`), the same two-field
+disambiguation SA-1/GSU already apply to their own nibbles. A chipset-$F3
+cart whose `$FFBF` names something else (e.g. ST010/ST011's `$01`) is
+refused, not guessed.
+
+**What is modelled — fullsnes documents this well enough to implement
+directly, cited by section ("...I/O Ports"):**
+
+- The fixed `$6000-$7FFF` window, banks `$00-$3F`/`$80-$BF`
+  (`crate::mapping::cx4_target`, checked by `SnesBus::target` before the
+  generic LoROM `map`, same layering as `sa1_target`/`gsu_target`): 3 KiB
+  CX4RAM at `$6000-$6BFF`; the documented register/DMA/status/vector-
+  shadow ports (`$7F40-$7F52`, `$7F5E`, `$7F6A-$7F6B`, `$7F6E-$7F6F`,
+  `$7F80-$7FAF`); every other offset in `$6C00-$7FFF` is fullsnes's own
+  "Unknown/unused" and falls through to open bus, unclaimed.
+- The DMA transfer: `$7F40-$7F42` (24-bit LoROM source), `$7F43-$7F44`
+  (byte length), `$7F45-$7F46` (CX4RAM destination), `$7F47` write `$00`
+  triggers the one documented direction (SNES-to-CX4) — any other write
+  value is a documented no-op, since fullsnes names no other encoding.
+- The sixteen 24-bit general registers R0-R15 (`$7F80+N*3`, little-endian,
+  masked to 24 bits on write) and the NMI/IRQ vector shadows
+  (`$7F6A-$7F6B`/`$7F6E-$7F6F`).
+- The CX4ROM: 1024 24-bit values from six documented closed-form tables
+  (Div/Sqrt/Sin/Asin/Tan/Cos), including the Div(0)/Cos(0)
+  overflow-truncation rule fullsnes states explicitly.
+- The busy flag (`$7F5E` bit 6): fullsnes says it is set by a write to
+  `$7F47`/`$7F48`/`$7F4F` and clears "when the command has completed" —
+  with no program execution (below), there is no real completion event,
+  so this project models the transition as synchronous (set, then
+  immediately cleared within the same write) rather than leaving it stuck
+  set, which would hang any title's poll loop. Stated as a stub for
+  undocumented timing, not a claim of real hardware behaviour.
+
+**What is undocumented, and why this ticket stops at the register
+window** (per the ticket's own acceptance: "if the chapter documents only
+the interface and not each command's algorithm... stop there"):
+
+| Documented piece | Documentation quality |
+|---|---|
+| Register/DMA/status window | Full — implemented above |
+| CX4ROM math tables | Full closed-form formulas — implemented above |
+| Opcode encodings (all ~40) | Full bit patterns given |
+| Opcode flag effects (N/Z/C) | Mostly `???`/unstated — only a handful of `<op>`-vs-`<imm>` variants get concrete letters |
+| ROM/vertex byte-read sequence (`612Eh`/`4000h`/`1C00h`) | Fullsnes states outright: "the exact meaning... is unknown (which one does what part?)" |
+| Two of eight `skip<cond>` conditions | `?` |
+| ~12 opcodes (`0400h`, `1800h`, `2000h`, `3800h`, `4400h`, `5C00h`, `7400h`, `A000h`, `A400h`, `E400h`, `F400h`, `F800h`) | Reserved, no stated effect |
+| `$7F48`/`$7F4C`/`$7F50-51`/`$7F52` | "Unknown" — `$7F48`'s own entry says its documented guess doesn't match how the real games use it |
+| All opcode/DMA timings | "100% unknown" |
+| The 26 named game-facing functions (`build_oam`, `scale_tiles`, `hires_sqrt`, `sqrt`, `propulsion`, `get_sin`, `get_cos`, `set_vector_length`, `triangle1`, `triangle2`, `pythagorean`, `arc_tan`, `trapeziod`, `multiply`, `transform_coordinates`, `scale_rotate1`, `transform_lines`, `scale_rotate2`, `draw_wireframe_without_clearing_buffer`, `draw_wireframe_with_clearing_buffer`, `disintergrate`, `wave`, plus the 4 `test_*` functions) | Name + entry address only (`0000:00`-`000E:89`) — **no register-level input/output semantics or algorithm for any of them**. `test_square` (`R1:R2=R0*R0`) and `test_set_r0_to_0Xh` are the only two given any stated behaviour at all, and even `test_square`'s is too thin (no operand width/sign rule) to implement with confidence rather than guess. |
+
+An opcode-level interpreter would need to guess the flag model,
+`finish ext_dta`'s exact split of work, the two unknown skip conditions
+and the reserved opcodes' effects — diverging from the real program on
+its first affected branch or ROM read. That is not "clean-room HLE of a
+documented command", it is guessing relocated to the opcode level, which
+NFR-011/law 5 forbid the same as guessing a whole function's algorithm.
+**Consequence: neither Mega Man X2 nor X3's Cx4-driven effects render**
+(wireframe intro, rotating boss sprites) — the SNES CPU runs the cartridge's
+own code as normal, but nothing the CX4 would have computed for it ever
+appears, since the CX4 never executes.
+
+**Tests** (`crates/rf-snes/src/cx4.rs`, `crates/rf-cart/src/snes.rs`,
+`crates/rf-snes/src/tests/system.rs`): every CX4ROM table entry against
+hand-computed values from fullsnes's own formulas (exact for Div/Sqrt/Sin/
+Cos's documented endpoints, tolerance-bounded for Asin/Tan given fullsnes's
+own approximate domain notes); register read/write semantics (write-only
+ports read 0, 24-bit register masking, vector-shadow round-trip); the DMA
+transfer (documented direction only, wrapping destination); save/load
+round-trip preserving every field; chipset+extended-header detection
+(accepts `$F3`+`$FFBF=$10`, refuses `$F3` with any other sub-type, refuses
+other nibble-`$F` hw values); and an end-to-end `SnesSystem::load` test
+that writes the DMA ports through the ordinary bus and reads the
+transferred bytes back out of CX4RAM.
+
 ## 4. Cartridge layer boundary (`rf-cart`)
 
 `rf-cart` owns file parsing (iNES/NES 2.0 incl. submapper/PRG-RAM fields,

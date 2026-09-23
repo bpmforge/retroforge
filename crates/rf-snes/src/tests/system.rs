@@ -1543,3 +1543,55 @@ fn disable_then_reenable_does_not_redispatch_while_the_flag_is_still_set() {
          from it"
     );
 }
+
+/// Ticket W19-02: an end-to-end check that a Cx4 cartridge's header wires
+/// up the real register window through `SnesSystem::load` — the SNES CPU
+/// side can write the DMA ports, trigger a transfer, and read the result
+/// back out of CX4RAM through the ordinary bus, exactly as `Coprocessor::
+/// Cx4`'s doc says a real title's boot code would poke the chip.
+#[test]
+fn cx4_cart_dma_transfer_is_visible_through_the_bus() {
+    let mut rom = lorom_image(0x20, 0xF3); // fullsnes "[FFD6]=F3h" Cx4.
+    rom[0x7FC0 - 1] = 0x10; // fullsnes "[FFBF]=10h ;CustomChip=CX4".
+                            // Four bytes of payload the DMA will copy, placed at LoROM $01:8000
+                            // (file offset 0x8000, since bank 1 offset 0x8000 -> index 1*0x8000).
+    rom.resize(0x1_0000, 0);
+    rom[0x8000] = 0xCA;
+    rom[0x8001] = 0xFE;
+    rom[0x8002] = 0xBA;
+    rom[0x8003] = 0xBE;
+
+    let cart = rf_cart::Cartridge::load(&rom).expect("Cx4 cart accepted");
+    let header = match &cart {
+        rf_cart::Cartridge::Snes { header, .. } => header,
+        other => panic!("expected an SNES cartridge, got {other:?}"),
+    };
+    assert_eq!(header.coprocessor, rf_cart::Coprocessor::Cx4);
+
+    let mut system = SnesSystem::load(&rom).expect("Cx4 cart loads");
+    assert!(system.bus.cx4.is_some());
+
+    // Program the documented DMA ports (fullsnes "CX4 I/O Map") through
+    // the ordinary SNES-side bus write path, bank $00.
+    system.bus.write(0x00_7F40, 0x00); // source lsb
+    system.bus.write(0x00_7F41, 0x80); // source mid
+    system.bus.write(0x00_7F42, 0x01); // source msb -> $01:8000
+    system.bus.write(0x00_7F43, 0x04); // length lsb = 4
+    system.bus.write(0x00_7F44, 0x00); // length msb
+    system.bus.write(0x00_7F45, 0x10); // dest lsb -> CX4RAM+$0010
+    system.bus.write(0x00_7F46, 0x00); // dest msb
+    system.bus.write(0x00_7F47, 0x00); // start, SNES-to-CX4 direction
+
+    // The transfer landed in CX4RAM, visible at $6010 in bank $00.
+    assert_eq!(system.bus.read(0x00_6010), 0xCA);
+    assert_eq!(system.bus.read(0x00_6011), 0xFE);
+    assert_eq!(system.bus.read(0x00_6012), 0xBA);
+    assert_eq!(system.bus.read(0x00_6013), 0xBE);
+
+    // A general register round-trips through the bus too (R2 at
+    // $7F80+2*3=$7F86).
+    system.bus.write(0x00_7F86, 0x11);
+    system.bus.write(0x00_7F87, 0x22);
+    system.bus.write(0x00_7F88, 0x33);
+    assert_eq!(system.bus.cx4.as_ref().unwrap().regs[2], 0x0033_2211);
+}

@@ -188,6 +188,12 @@ pub struct SnesBus {
     /// CPU does not exist yet, only the SNES-side memory map and register
     /// storage — the same starting point W17-01 gave SA-1.
     pub gsu: Option<crate::gsu::GsuState>,
+    /// The CX4 board state (`None` for every cartridge that does not
+    /// report [`rf_cart::Coprocessor::Cx4`]) — see [`Self::install_cx4`].
+    /// Ticket W19-02: the register window, CX4RAM, DMA ports and CX4ROM
+    /// math tables only — the CX4's own program never executes (see
+    /// `crate::cx4`'s module doc for why).
+    pub cx4: Option<crate::cx4::Cx4>,
     /// Set whenever a SNES-side access this `SnesSystem::step` (main CPU
     /// instruction, its DMA, or its HDMA) has landed on the cartridge ROM
     /// window (ticket W17-04's cost model — see
@@ -303,6 +309,7 @@ impl SnesBus {
             dsp1: None,
             sa1: None,
             gsu: None,
+            cx4: None,
             sa1_rom_contended: false,
             sa1_bwram_contended: false,
         }
@@ -340,6 +347,17 @@ impl SnesBus {
         self.gsu = Some(crate::gsu::GsuState::new(version, rom_len, ram_kib));
     }
 
+    /// Wire up the cartridge's CX4 (ticket W19-02). Called by
+    /// [`crate::system::SnesSystem::load`] when the header reports
+    /// [`rf_cart::Coprocessor::Cx4`]; every other cartridge's `cx4` stays
+    /// `None`, so `target` never routes through the CX4 arm for it and
+    /// every existing golden's mapping is unchanged. No board sizing is
+    /// needed (unlike SA-1/GSU): fullsnes documents one fixed window and
+    /// one fixed 3 KiB RAM/ROM size for both known Cx4 titles.
+    pub fn install_cx4(&mut self) {
+        self.cx4 = Some(crate::cx4::Cx4::new());
+    }
+
     fn target(&self, addr: u32) -> Target {
         let bank = ((addr >> 16) & 0xFF) as u8;
         let offset = addr as u16;
@@ -371,6 +389,15 @@ impl SnesBus {
         // every non-GSU cartridge (ticket W18-01).
         if let Some(gsu) = &self.gsu {
             if let Some(target) = crate::mapping::gsu_target(&gsu.board(), bank, offset) {
+                return target;
+            }
+        }
+        // Checked BEFORE the generic map, same reasoning as the others
+        // above: the CX4's `$6000-$7FFF` window sits inside bank/offset
+        // space `map` would otherwise resolve as open bus on a LoROM cart
+        // (ticket W19-02). `cx4` is `None` for every non-Cx4 cartridge.
+        if self.cx4.is_some() {
+            if let Some(target) = crate::mapping::cx4_target(bank, offset) {
                 return target;
             }
         }
@@ -1169,6 +1196,12 @@ impl CpuBus for SnesBus {
                 .as_mut()
                 .and_then(|g| g.regs.read(offset))
                 .unwrap_or(self.open_bus),
+            // Ticket W19-02: plain memory/register reads, no side effect
+            // — `Cx4::read` never mutates (see its doc).
+            Target::Cx4Ram(i) => self.cx4.as_ref().map_or(self.open_bus, |c| c.ram[i]),
+            Target::Cx4Register(offset) => {
+                self.cx4.as_ref().map_or(self.open_bus, |c| c.read(offset))
+            }
             Target::Open => self.open_bus,
         };
         self.open_bus = value;
@@ -1281,6 +1314,24 @@ impl CpuBus for SnesBus {
                     g.regs.write(offset, value);
                 }
             }
+            // Ticket W19-02: plain memory write.
+            Target::Cx4Ram(i) => {
+                if let Some(c) = self.cx4.as_mut() {
+                    c.ram[i] = value;
+                }
+            }
+            Target::Cx4Register(offset) => {
+                if let Some(c) = self.cx4.as_mut() {
+                    c.write(offset, value);
+                    // DMA start: only `$7F47` triggers it, and only the
+                    // documented SNES-to-CX4 direction (write `$00`) is
+                    // modelled — see `crate::cx4::dma_transfer`'s doc.
+                    // Needs `self.rom`, which `Cx4` does not hold.
+                    if offset == 0x7F47 {
+                        crate::cx4::dma_transfer(c, self.mode, &self.rom, value);
+                    }
+                }
+            }
             // ROM is read-only; a write is dropped rather than panicking,
             // because real cartridges ignore it and a game doing it by
             // accident must not take the emulator down (FR-CORE-013's
@@ -1333,6 +1384,11 @@ impl CpuBus for SnesBus {
                 .as_ref()
                 .and_then(|g| g.regs.peek(offset))
                 .unwrap_or(self.open_bus),
+            // Non-perturbing: `Cx4::read` has no side effect (its doc).
+            Target::Cx4Ram(i) => self.cx4.as_ref().map_or(self.open_bus, |c| c.ram[i]),
+            Target::Cx4Register(offset) => {
+                self.cx4.as_ref().map_or(self.open_bus, |c| c.read(offset))
+            }
             Target::Open => self.open_bus,
         }
     }
