@@ -414,6 +414,20 @@ fn the_obc1_window_reaches_the_registers_and_table_through_the_bus() {
     // Read of $7FF4 returns the whole raw byte, unshifted.
     assert_eq!(system.bus.read(0x00_7FF4), system.bus.read(0x00_7E00));
 
+    // A full-byte write (nothing documents the other 6 bits as required
+    // to be zero — a title need only care about its own field) must
+    // still only touch bits 6-7, and must not panic (FR-CORE-013's
+    // "never a crash" — an earlier draft shifted the raw byte before
+    // masking, which happened to be equivalent here but was untested at
+    // this exact boundary).
+    system.bus.write(0x00_7E00, 0b0011_1111);
+    system.bus.write(0x00_7FF4, 0xFF);
+    assert_eq!(
+        system.bus.read(0x00_7E00),
+        0b11_111111,
+        "a full-byte write must still only set bits 6-7"
+    );
+
     // Base select ($7FF5): flipping to $7800 moves the SAME index's table
     // entry to a different SRAM address.
     system.bus.write(0x00_7FF5, 0x01);

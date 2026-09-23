@@ -1334,7 +1334,12 @@ impl CpuBus for SnesBus {
                     let shift = (o.index_masked() & 0x3) * 2;
                     let mask = 0b11u8 << shift;
                     let old = self.sram[i];
-                    self.sram[i] = (old & !mask) | ((value << shift) & mask);
+                    // Only the write's own low 2 bits are documented as
+                    // meaningful (fullsnes gives $7FF4 no wider field) —
+                    // masked BEFORE the shift so a title that writes a
+                    // full byte (nothing says the other 6 bits must be
+                    // zero) cannot smear into neighbouring OBJs' fields.
+                    self.sram[i] = (old & !mask) | ((value & 0b11) << shift);
                 }
             }
             Target::Obc1Register(offset) => {
