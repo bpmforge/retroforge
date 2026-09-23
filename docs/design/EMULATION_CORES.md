@@ -853,7 +853,8 @@ docs/TESTING.md's own W18-06 section.**
   that absence of evidence.
 - **Census, unchanged** (RELEASE, `boot_census_child` run individually
   against all 15 of W18-05's own tracked GSU archives, direct against the
-  `.zip` files, plus all five canaries — 20 titles): every bucket matches
+  `.zip` files, plus all five canaries (3 of which overlap the fifteen,
+  17 distinct archives run): every bucket matches
   W18-05's own recorded `1101/44/120/0/0` table exactly — no regression,
   matching the pre-session state exactly (this ticket shipped no
   production change). Full per-title exit codes: docs/TESTING.md's own

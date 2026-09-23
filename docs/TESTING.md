@@ -8747,7 +8747,8 @@ finds zero re-writes of that range — only unrelated addresses
 (`$7D50`,`$73A5`,`$7395`,...) appear afterward. **The named cell and both
 values**: GSU RAM offset `$0000` — the SNES's own store there (the
 sweep's LAST write, since the sweep runs `$00:7FFF` down to `$00:6000`)
-carried `$85`; a RAM dump at spin entry (`gsu.ram[0..0x200]`, via a
+carried `$85`; a RAM dump taken at the end of a 2,000,000-instruction
+window -- well into the spin, not at its entry (`gsu.ram[0..0x200]`, via a
 second temporary hook, also removed before this commit) measured the
 value actually there as `$90`, not `$85` and not RAM's `$00`
 zero-initialized default — meaning the GSU's own subsequent execution
@@ -8889,18 +8890,18 @@ resolved unilaterally.
 against the newest `boot_census` binary — `RF_CENSUS_ROM` per archive,
 exit code as the bucket, run directly against the `.zip` files in
 `~/Games/Roms/snes`, no unzipping needed): all 15 of W18-05's own
-tracked GSU archives plus the 5 canaries, 20 titles total — Star Fox
-(USA)/(Rev 1)/(Rev 2) exit `0`; Star Fox 2 (Classic Mini/Switch Online)
-exit `10`; the three Star Fox 2 betas exit `12` (refused, non-canonical
-header); Super Star Fox Weekend exit `10`; Vortex exit `10`; Dirt Trax
-FX exit `0`; Doom exit `0`; Stunt Race FX (Rev 1) exit `0`; Yoshi's
-Island/(Rev 1) exit `0`; Tommy Moe's Winter Extreme exit `0`; the five
-canaries (Star Fox (USA), Super Mario World 2: Yoshi's Island (USA),
-Doom (USA), Super Mario World (USA), Wild Guns (USA) — the last two
-already counted above/among the fifteen where they overlap) all exit
-`0`. Every bucket matches W18-05's own recorded `1101/44/120/0/0`
-per-title table exactly — no regression, matching this ticket's zero
-production changes.
+tracked GSU archives plus the 5 canaries — 17 distinct archives run
+(3 of the 5 canaries, Star Fox (USA)/Yoshi's Island (USA)/Doom (USA),
+already overlap the fifteen; Super Mario World (USA) and Wild Guns
+(USA) are the other 2): Star Fox (USA)/(Rev 1)/(Rev 2) exit `0`; Star
+Fox 2 (Classic Mini/Switch Online) exit `10`; the three Star Fox 2
+betas exit `12` (refused, non-canonical header); Super Star Fox
+Weekend exit `10`; Vortex exit `10`; Dirt Trax FX exit `0`; Doom exit
+`0`; Stunt Race FX (Rev 1) exit `0`; Yoshi's Island/(Rev 1) exit `0`;
+Tommy Moe's Winter Extreme exit `0`; Super Mario World exit `0`; Wild
+Guns exit `0`. Every bucket matches W18-05's own recorded
+`1101/44/120/0/0` per-title table exactly — no regression, matching
+this ticket's zero production changes.
 
 **First varied frame** (`PROBE_MODE=frames PROBE_FRAMES=1800
 PROBE_GSUREGS=1`, run against the unmodified baseline after the
