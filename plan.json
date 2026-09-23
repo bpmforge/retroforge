@@ -8287,7 +8287,7 @@
    "W14-56"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-57",
   "title": "Header bytes hardware never reads, part 3: an implausible ROM/RAM size exponent at a SCORED header location must clamp like the fallback path does (9 refused betas/protos); an UNASSIGNED coprocessor nibble ($6-$D) falls to no coprocessor instead of refusing (Aero the Acro-Bat 2 / Superman betas, chipset $7F)",
