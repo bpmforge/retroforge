@@ -434,6 +434,244 @@ fn gsu_irq_flag_ors_into_the_cpu_and_clears_on_read() {
     );
 }
 
+/// Ticket W18-04 follow-up (coordinator-directed, tracing the Star Fox
+/// census regression): pins the credit-based interleave's actual
+/// granularity — a real concern the coordinator raised was "does a single
+/// `SnesSystem::step` call hand the GSU an unbounded credit, starving the
+/// 65C816 for millions of GSU opcodes at a time". It does not: every
+/// `SnesSystem::step` call executes exactly ONE 65C816 instruction, THEN
+/// deposits only THAT instruction's own master-cycle cost as GSU credit
+/// before returning — so the GSU can never run more opcodes in one call
+/// than that one instruction's worth of real 10.7/21.4MHz time affords,
+/// which for an ordinary (non-DMA-heavy) 65C816 instruction is a handful
+/// of GSU opcodes, not millions. This test runs the 65C816 on a tight
+/// `JMP $8000` loop (cheap, constant per-instruction cost) alongside a
+/// GSU `NOP;BRA;NOP` loop (ticket W18-04's own
+/// `clsr_1_runs_twice_the_opcodes_per_master_cycle_of_clsr_0` unit test
+/// uses the identical GSU program) and asserts, over many
+/// `SnesSystem::step` calls, that the GSU's `instructions_executed`
+/// counter never jumps by more than a small bound in any ONE call.
+#[test]
+fn gsu_credit_per_step_is_bounded_by_that_steps_own_instruction_cost() {
+    let mut rom = lorom_image(0x20, 0x15);
+    // 65C816 program at $00:8000 (the reset vector `lorom_image` sets):
+    // `JMP $8000` — an unconditional 3-byte jump back to itself, the
+    // cheapest possible "keeps stepping forever" loop.
+    rom[0] = 0x4C;
+    rom[1] = 0x00;
+    rom[2] = 0x80;
+    // GSU program at GSU address $0100 (bank 0, PBR's reset value):
+    // NOP; BRA -3 (back to the NOP); NOP (the branch's delay slot) — the
+    // same infinite loop `clsr_1_runs_twice_the_opcodes_per_master_cycle_
+    // of_clsr_0` already pins in isolation.
+    rom[0x100] = 0x01;
+    rom[0x101] = 0x05;
+    rom[0x102] = 0xFD;
+    rom[0x103] = 0x01;
+    let mut system = SnesSystem::load(&rom).expect("GSU cart loads");
+    // SNES-side: R15 = $0100, which also sets GO (fullsnes: R15.MSB write
+    // "does also set GO=1").
+    system.bus.write(0x00_301E, 0x00);
+    system.bus.write(0x00_301F, 0x01);
+    assert!(system.bus.gsu.as_ref().unwrap().regs.go());
+
+    // A real GSU opcode's cheapest documented cost is 1 GSU cycle; a
+    // `JMP $8000` instruction (an ordinary, uncontended 3-byte absolute
+    // jump, no DMA) spends only a handful of master cycles per step — a
+    // generous bound (`50`) catches an actual "one step hands out a
+    // massive credit" regression by orders of magnitude while leaving
+    // plenty of headroom over the ~2-6 opcodes/step this project's own
+    // census tracing (docs/TESTING.md W18-04) measured for real titles.
+    const MAX_GSU_OPS_PER_STEP: u64 = 50;
+    let mut total_gsu_ops = 0u64;
+    for _ in 0..5000 {
+        let before = system
+            .bus
+            .gsu
+            .as_ref()
+            .unwrap()
+            .regs
+            .instructions_executed();
+        system.step().expect("JMP is implemented");
+        let after = system
+            .bus
+            .gsu
+            .as_ref()
+            .unwrap()
+            .regs
+            .instructions_executed();
+        let this_step = after - before;
+        assert!(
+            this_step <= MAX_GSU_OPS_PER_STEP,
+            "one SnesSystem::step call ran {this_step} GSU opcodes -- \
+             the credit-based interleave must bound this to roughly one \
+             65C816 instruction's worth of real GSU time, not an \
+             unbounded burst"
+        );
+        total_gsu_ops += this_step;
+    }
+    // Sanity: the GSU is actually making progress (not starved to zero by
+    // an over-correction), at a rate in the same order of magnitude as
+    // the real hardware ratio (~3-4 GSU opcodes per 65C816 instruction
+    // for this cheap a loop, per this project's own clock-conversion
+    // constants).
+    assert!(
+        total_gsu_ops > 5000,
+        "the GSU should average at least ~1 opcode per step for a loop \
+         this cheap, got {total_gsu_ops} over 5000 steps"
+    );
+}
+
+/// Ticket W18-04 follow-up 5: the actual Star Fox boot regression's root
+/// cause was `rf_cart::snes::superfx_expansion_ram_kib` defaulting a real
+/// dump's unpopulated extended header (a `$FF` fill byte, exactly Star
+/// Fox (USA)'s own header shape) to `0` GSU RAM — with no RAM at all, the
+/// game's own decompressor priming its ROM read pointer from a value the
+/// SNES DMAs into cartridge RAM before GO reads back zero instead of the
+/// real base address. This end-to-end test reproduces the exact real
+/// header shape (chipset `$13`, extended-header byte `$FF`) and proves
+/// the full path: the cart parses to 32 KiB of GSU RAM (fullsnes "RAM Size
+/// for Starfox/Starwing is 32Kbytes"), a plain 65C816 byte write to
+/// `$70:0000` lands in it (SCMR's reset-value `RAN=0` means the SNES owns
+/// the bus, per fullsnes SCMR bit 3 "0=SNES, 1=GSU"), and a GSU `LDB (R1)`
+/// with `R1=0` reads that exact byte back — the same RAM-pointer idiom
+/// Star Fox's own code uses, just with a literal address instead of one
+/// loaded from ROM.
+#[test]
+fn snes_write_to_gsu_ram_is_visible_to_a_gsu_ldb() {
+    let mut rom = lorom_image(0x20, 0x13); // Star Fox's real chipset byte.
+    rom[0x7FC0 - 3] = 0xFF; // Unpopulated extended header (Star Fox's own).
+    let cart = rf_cart::Cartridge::load(&rom).expect("GSU cart accepted");
+    let header = match &cart {
+        rf_cart::Cartridge::Snes { header, .. } => header,
+        other => panic!("expected an SNES cartridge, got {other:?}"),
+    };
+    assert_eq!(
+        header.coprocessor,
+        rf_cart::Coprocessor::SuperFx {
+            version: rf_cart::SuperFxVersion::Gsu1,
+            ram_kib: 32,
+        },
+        "an unpopulated extended header must default to fullsnes's stated \
+         32 KiB for this board shape, not 0"
+    );
+
+    // 65C816 program at $00:8000 (the reset vector `lorom_image` sets):
+    // `JMP $8000` — an unconditional 3-byte jump back to itself, the same
+    // "keeps stepping forever" idle loop the credit-interleave test above
+    // uses, so `system.step()` has something to run while the GSU works.
+    rom[0] = 0x4C;
+    rom[1] = 0x00;
+    rom[2] = 0x80;
+    // GSU program at $0100 (bank 0, PBR's reset value): IWT R1,#0000; TO
+    // R2; ALT1; LDB (R1) -> R2 = ram[R1] (zero-extended byte); NOP forever.
+    rom[0x100] = 0xF1; // IWT R1,#$0000
+    rom[0x101] = 0x00;
+    rom[0x102] = 0x00;
+    rom[0x103] = 0x12; // TO R2
+    rom[0x104] = 0x3D; // ALT1
+    rom[0x105] = 0x41; // LDB (R1)
+    rom[0x106] = 0x01; // NOP
+    rom[0x107] = 0x05; // BRA -3 (spin on the NOP forever)
+    rom[0x108] = 0xFD;
+    rom[0x109] = 0x01; // NOP (BRA's delay slot)
+    let mut system = SnesSystem::load(&rom).expect("GSU cart loads");
+
+    // The plain 65C816 write path (no DMA needed to exercise the mapping):
+    // $70:0000 is GSU RAM bank $70, offset $0000 (fullsnes "70-71:0000-
+    // FFFF Game Pak RAM").
+    assert!(
+        !system.bus.gsu.as_ref().unwrap().regs.ran(),
+        "SCMR's reset value must leave RAN=0 (SNES owns the RAM bus)"
+    );
+    system.bus.write(0x70_0000, 0x77);
+    assert_eq!(
+        system.bus.gsu.as_ref().unwrap().ram[0],
+        0x77,
+        "the SNES-side write must land in Gsu RAM, not be dropped or \
+         misrouted to cart SRAM/open bus"
+    );
+
+    // Start the GSU: R15 = $0100 sets GO (fullsnes: R15.MSB write "does
+    // also set GO=1").
+    system.bus.write(0x00_301E, 0x00);
+    system.bus.write(0x00_301F, 0x01);
+    assert!(system.bus.gsu.as_ref().unwrap().regs.go());
+    for _ in 0..10 {
+        system.step().expect("GSU program is implemented");
+    }
+    let r2 = {
+        let gsu = system.bus.gsu.as_ref().unwrap();
+        let lo = gsu.regs.peek(0x3004).unwrap();
+        let hi = gsu.regs.peek(0x3005).unwrap();
+        u16::from_le_bytes([lo, hi])
+    };
+    assert_eq!(
+        r2, 0x77,
+        "GSU LDB (R1) must read back the exact byte the SNES wrote to \
+         $70:0000, proving the write path is not dropped/misrouted"
+    );
+}
+
+/// Ticket W18-04 follow-up 5, part 2: the coordinator's explicit second
+/// scenario — a DMA transfer, not just a plain CPU store, landing in GSU
+/// RAM through the `$6000-$7FFF` mirror (`mapping::gsu_target`'s
+/// `mirrored_system` arm) rather than through bank `$70` directly. Proves
+/// `SnesBus::run_channel`'s generic `self.write(a, v)` (the same path
+/// every DMA channel uses, shared with plain WRAM-to-WRAM transfers —
+/// `dma_moves_real_bytes_through_the_wram_port` pins that path in
+/// isolation) reaches `Target::GsuRam` through the mirror exactly like it
+/// does through `$70:xxxx`, and that both address forms share the SAME
+/// underlying index (`gsu_target`'s `idx = offset - 0x6000` for the
+/// mirror vs `index = (bank-0x70)<<16 | offset` for bank `$70` — both `0`
+/// for offset `$6000`/bank `$70` offset `$0000`).
+///
+/// The transfer reads through `$2180` WMDATA (the WRAM data port, real
+/// and already exercised in isolation by `dma_moves_real_bytes_through_
+/// the_wram_port`) in reverse (B-bus source, A-bus destination) — the
+/// SNES-side idiom for "copy WRAM into an arbitrary A-bus address" DMA
+/// direction, landing the byte at `$00:6000` (bank `$00`'s `mirrored_
+/// system` GSU-RAM window).
+#[test]
+fn dma_transfer_into_the_6000_mirror_reaches_gsu_ram() {
+    let mut rom = lorom_image(0x20, 0x13); // Star Fox's real chipset byte.
+    rom[0x7FC0 - 3] = 0xFF; // Unpopulated extended header (32 KiB GSU RAM).
+    rom[0] = 0x4C; // 65C816: JMP $8000 (idle self-loop).
+    rom[1] = 0x00;
+    rom[2] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("GSU cart loads");
+    assert_eq!(
+        system.bus.gsu.as_ref().unwrap().ram.len(),
+        32 * 1024,
+        "the fixed cart-header follow-up must give this board 32 KiB"
+    );
+
+    // Source: WRAM offset $0050, reachable through $2180-$2183.
+    system.bus.wram[0x50] = 0x99;
+    system.bus.write(0x00_2181, 0x50); // WMADDL
+    system.bus.write(0x00_2182, 0x00); // WMADDM
+    system.bus.write(0x00_2183, 0x00); // WMADDH
+
+    // Channel 0: control=$80 (reverse: B->A, pattern 0, A-bus increment),
+    // B-bus=$2180 (WMDATA), A-bus=$00:6000 (the GSU-RAM mirror), 1 byte.
+    system.bus.write(0x00_4300, 0x80);
+    system.bus.write(0x00_4301, 0x80);
+    system.bus.write(0x00_4302, 0x00);
+    system.bus.write(0x00_4303, 0x60);
+    system.bus.write(0x00_4304, 0x00);
+    system.bus.write(0x00_4305, 0x01);
+    system.bus.write(0x00_4306, 0x00);
+    system.bus.write(0x00_420B, 0x01);
+    system.bus.service_dma();
+
+    assert_eq!(
+        system.bus.gsu.as_ref().unwrap().ram[0],
+        0x99,
+        "a DMA transfer through the $6000-$7FFF mirror must land in the \
+         same GSU RAM buffer $70:0000 does, not cart SRAM or open bus"
+    );
+}
+
 /// Ticket W17-01 acceptance #3: "the SNES-side CPU can boot an SA-1 cart
 /// to its reset vector and run" — with the SA-1 CPU itself absent (W17-02
 /// adds it), which is the "uniform" bucket the ticket's census criterion

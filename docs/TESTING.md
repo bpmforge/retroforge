@@ -7936,6 +7936,556 @@ session; filed as a follow-up rather than claimed done.
 
 **HEAD**: see the `feat(W18-03): ...` commit this entry ships with.
 
+## W18-04 (Super FX / GSU slice 4: code cache, ROM/RAM buffers, clocking against the master clock)
+
+**Clock conversion** (fullsnes "SNES Cart GSU-n CPU Misc"/"3039h - CLSR"):
+`master_cycles_per_gsu_cycle` returns `2` for CLSR=0 (10.7MHz) or `1` for
+CLSR=1 (21.4MHz) against the NTSC master clock (21.47727MHz,
+`crate::timing::Region::Ntsc`) — an exact integer ratio both ways, not an
+approximation.
+
+**Credit-based interleave** (`GsuState::run_credited`, replacing
+`STEP_BUDGET`): the exact shape `Sa1State::credit` already established for
+SA-1, wired into `SnesSystem::step` right after the SA-1 credit loop —
+`master_this_step` (the 65C816 instruction plus its MDMA/HDMA) is banked
+into `GsuState::credit`; opcodes run one at a time, each one's
+[gsu-cycles-converted-to-master-cycles] cost debited, until the balance
+cannot cover another opcode or GO clears. Credit never accumulates while
+GO is clear, and is itself part of save state (`crates/rf-snes/src/state.rs`
+`Cart` region, GSU block, `o.u64(g.credit)`/loaded back) — acceptance's
+"Determinism: credit is saved state".
+
+**Cost table** (every citation below is fullsnes "CPU Misc"/"Code-Cache"/
+"Other Caches"):
+
+| source | surcharge | cited fact |
+|---|---|---|
+| code-cache hit | `+0` | base per-opcode cost (W18-02's table) already assumes a 1-cycle cache-hit fetch |
+| code-cache miss | `+2` | "ROM/RAM Opcode-byte-read: 3 cycles at both 21MHz and 10MHz" vs the assumed 1 |
+| ROM-buffer stall (GETxx/GETC right after R14/ROMBR changes) | `+3` (CLSR=0) / `+5` (CLSR=1) | "ROM Read: 5 cycles per byte at 21MHz, or 3 cycles per byte at 10MHz" |
+| RAM-buffer stall (a store right after another store) | `+10`/word, `+5`/byte | "RAM Write: 10 cycles per word at 21MHz" (10MHz-word and per-byte figures are fullsnes's own unconfirmed guesses — this project picks one explicit number, see `ram_word_drain_cycles`'s doc) |
+| pixel-cache flush (PLOT/RPIX draining primary/secondary) | `+5`/bitplane byte | same RAM-write figure — fullsnes gives the flush no cost of its own |
+
+**Code cache** (`Gsu::cache_valid`, a 512-entry per-byte validity bitmap
+sharing `Gsu::cache`'s backing array — real hardware's code-cache RAM
+*is* the SNES-writable `$3100-$32FF` bytes): `GsuState::fetch_byte` is the
+single fetch/fill/cost path — a byte inside `[CBR, CBR+0x200)` is a hit if
+valid, else a miss that fills it and charges the surcharge; outside the
+window is never cached. Lines empty on an SNES `SFR` write with GO=0
+(`CBR=0` too), on `CACHE` (`CBR=R15 AND FFF0h`), and on `LJMP` (same
+formula, applied at dispatch against the known jump target). Game Pak RAM
+($70/$71 via PBR) is cached exactly like ROM.
+
+**ROM buffer / RAM buffer**: both modelled as a generation watermark
+(`Gsu::rom_buffer_ready_after`/`ram_buffer_ready_after`, bumped to
+`instructions_executed + 2` on the triggering event) rather than a
+literal one-byte queue — a GETxx/GETC or a store that runs in the
+instruction immediately after R14/ROMBR changed (ROM) or another store
+(RAM) pays the stall from the table above.
+
+**A real bug this ticket's own census run caught**: the SNES-side
+code-cache preload path (fullsnes "Writing to Code-Cache (by SNES CPU)":
+write opcodes to `$3100-$32FF`, then start the GSU with `R15` in
+`0000h-01FFh`, "without RON/RAN flags being set") shares `Gsu::cache`'s
+array with `GsuState::fetch_byte`'s fill path, but the first
+implementation of `Gsu::write`'s cache arm updated `Gsu::cache` without
+ever setting `Gsu::cache_valid` — a title using that documented boot
+idiom would execute garbage (whatever ROM/RAM byte sat at `CBR+i`)
+instead of the SNES-written byte. Caught while investigating the census
+regression below (not by a title that turned out to depend on it), fixed
+by setting `cache_valid[i] = true` alongside the write, and pinned by
+`exec_tests::snes_side_code_cache_preload_is_immediately_executable`.
+
+**Tests** (`crates/rf-snes/src/gsu.rs`, `mod exec_tests`, 8 new unit
+tests, total 51 GSU tests): `code_cache_hit_costs_less_than_a_miss` pins
+the documented 1-vs-3-cycle fetch cost; `getb_stalls_immediately_after_
+an_r14_write_but_not_the_instruction_after` and `ram_buffer_stalls_on_a_
+second_store_immediately_after_the_first` pin the two buffer stalls
+(using a `prime_cache` test helper to pre-seed the code cache so the
+stall assertion isn't mixed with the byte's own first-touch miss cost);
+`clsr_1_runs_twice_the_opcodes_per_master_cycle_of_clsr_0` runs an
+infinite NOP/BRA loop through `run_credited` with an identical master-
+cycle budget at both clock speeds and checks the ~2x ratio;
+`run_credited_two_runs_with_the_same_budget_match` and the two
+`save_load_mid_*` tests (mid-code-cache-fill, mid-ROM-buffer-stall) cover
+determinism and save/load mid-state, per acceptance #2;
+`snes_side_code_cache_preload_is_immediately_executable` pins the bug fix
+above. `cargo test -p rf-snes --lib`: 436 passed, 0 failed, 1 ignored.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — all suites green (see above);
+`scripts/validate-arch.sh` — `arch OK`. Per the orchestrator's explicit
+instruction this session, `cargo test --workspace` and the 65816-vector
+suite were left to the orchestrator's own board-wide gate (already
+observed green in this same session before that instruction landed: 2305+
+passed, 0 failed). Ignored SNES suites run directly this session, all
+green: `gilyon_cputest` (0x0649/0x0649 Success), `peterlemon_bg_map_
+goldens_match` (3/3), `spc_timer_reports_pass` (PASSED), `rf_scroller_s_
+five_minute_replay_is_deterministic` (a save-state round trip mid-GSU-run
+reproducing identical frames, now exercised against the real credit-based
+clock rather than the old flat budget).
+
+**Census** (RELEASE, `boot_census_child` direct invocation, same 15 real
+GSU archives + 5 canaries as W18-01/02/03):
+
+| title | exit | bucket |
+|---|---|---|
+| Star Fox (USA) | **10** | **regressed: blank (was 0/rendered in W18-02/03)** |
+| Star Fox (USA) (Rev 1) | **10** | **regressed: blank (was 0/rendered in W18-02/03)** |
+| Star Fox (USA) (Rev 2) | 10 | uniform (unchanged since W18-01) |
+| Star Fox 2 (Classic Mini, Switch Online) | 10 | uniform (unchanged) |
+| Star Fox 2 (Beta) x3 | 12 | refused (pre-existing, unrelated: non-canonical header) |
+| Stunt Race FX (USA) (Rev 1) | 0 | rendered (unchanged) |
+| Yoshi's Island (USA) | 0 | rendered (unchanged) |
+| Yoshi's Island (USA) (Rev 1) | 0 | rendered (unchanged) |
+| Super Star Fox Weekend | 10 | uniform (unchanged) |
+| Vortex (USA) (En,Es) | 10 | uniform (unchanged — still parked, see W18-02/03) |
+| Dirt Trax FX (USA) | 0 | rendered (unchanged) |
+| Doom (USA) | 0 | rendered (unchanged) |
+| Tommy Moe's Winter Extreme | 0 | rendered (unchanged) |
+| Super Mario World (USA) canary | 0 | rendered |
+| Wild Guns (USA) canary | 0 | rendered |
+| Super Mario RPG (USA) canary | 0 | rendered |
+| Kirby Super Star (USA) canary | 0 | rendered |
+| NHL 95 (USA) canary | 0 | rendered |
+
+**Named finding, not silently dropped: Star Fox / Star Fox (Rev 1)
+regressed from rendering to blank.** Traced with `title_probe`
+`PROBE_GSUREGS=1 PROBE_MODE=frames PROBE_FRAMES=600` (the same 600-frame
+window `boot_census` uses): the GSU never stalls or hangs — it consumes
+its full, real-hardware-accurate credit budget every step (CLSR=0,
+confirmed correct for a GSU1 chip; `credit` reaches `0` almost every call,
+i.e. every available cycle is spent, not wasted) and its `CBR`/`R15`
+genuinely advance through the ROM across the whole 600-frame run — this
+is not the earlier slices' "parked on a WAIT this project doesn't model"
+shape (that is Vortex, unchanged). Over 600 real frames (10 emulated
+seconds) it executes ~35 million GSU opcodes from ~107 million real GSU
+cycles (`214M` master cycles credited, `/2` for CLSR=0) — that cycle
+BUDGET is exactly what a real 10.74MHz GSU1 chip provides in 10 seconds,
+confirming `run_credited`'s conversion itself is correct — but
+`plot_calls` is still `0` at the end of that window, so Star Fox's boot
+sequence (Nintendo/Argonaut logo setup, before the first 3D-rendered
+pixel) needs more than 35M real GSU opcodes' worth of work to reach its
+first PLOT under this project's current opcode-cost model. The prior
+(W18-02/03) result of "renders" was produced by the flat, explicitly
+provisional `STEP_BUDGET=64`-opcodes-per-CPU-instruction placeholder,
+which is **not** hardware-accurate — it gave the GSU roughly 15-20x more
+opcodes than a real 10.74MHz chip earns in the same 65816-instruction
+window, so the earlier "renders" result was never proof the timing was
+right, only that the placeholder was generous enough to mask whatever
+this real budget now exposes. Two explanations remain open, not yet
+distinguished, and are named here as the W18-05 follow-up's starting
+point rather than guessed at: (1) this project's opcode-cost table
+and/or code-cache-miss modelling makes ordinary (non-preloaded,
+non-CACHE'd) GSU execution slower than real hardware, so Star Fox's own
+boot code — which this session's `CBR` sampling shows wandering across a
+wide address range rather than settling into one `CACHE`'d hot loop —
+pays the uncached 3-cycle-per-byte surcharge far more than real hardware
+would if its boot path is meant to run mostly from cache; or (2) Star
+Fox's real boot sequence genuinely does take close to or slightly over 10
+seconds on real hardware before its first GSU-rendered pixel, and
+`boot_census`'s `FRAMES=600` window (chosen for NES/SA-1/plain-SNES
+titles) is simply too short for this specific GSU1 title now that the
+clock is accurate. Stunt Race FX and Dirt Trax FX are also GSU1
+(identical 10.7MHz budget) and both still render within the same window,
+which argues for (2) over a blanket "GSU1 is too slow" reading, but does
+not rule out (1) for Star Fox specifically.
+
+### W18-04 follow-up: tracing the Star Fox regression (coordinator-directed)
+
+The coordinator's hypothesis was that a bad interleave granularity lets a
+single `SnesSystem::step` hand the GSU an unbounded credit, starving the
+65C816 while the GSU spins. Traced with a new `title_probe`
+`PROBE_MODE=gsuhist` (a PC/opcode histogram sampled after every
+`Step::Instruction`, plus new diagnostic counters on `Gsu`: `cache_hits`,
+`cache_misses`, `rom_stall_events`, `ram_stall_events`,
+`go_set_events`/`go_clear_events`/`go_cleared_by_stop_events`) and a
+register watch (`PROBE_GSUHIST_REGS=1`).
+
+**The interleave hypothesis is disproven, with numbers.** Over 3,000,000
+`Step::Instruction` calls, `credit` never carries a multi-instruction
+burst: `run_credited`'s own per-call opcode count stayed in the 2-14
+range throughout (confirmed both by direct instrumentation and by the
+new `tests::system::gsu_credit_per_step_is_bounded_by_that_steps_own_
+instruction_cost` unit test, which pins it: no single `SnesSystem::step`
+call may run more than 50 GSU opcodes for a cheap `JMP $8000`/GSU-NOP-
+loop pair, and it must average at least ~1/step). GO was set exactly
+once (`go_set=1`) and never cleared (`go_clear=0`) in the sampled window
+— the GSU is not being stopped/restarted or fighting the SNES side over
+GO.
+
+**The hot loop is real, ROM-table-driven arithmetic, not a null spin.**
+Top PC-histogram entries (3M-instruction sample, `01:PPPP` = bank
+1:R15):
+
+| PBR:R15 | opcode | samples |
+|---|---|---|
+| 01:B38C | 09 (BEQ) | 333,971 |
+| 01:B389 | B2 (FROM R2) | 301,215 |
+| 01:B386 | 03 (LSR) | 257,192 |
+| 01:B38F | 04 (ROL) | 236,737 |
+| 01:B392 | 3C (LOOP) | 207,006 |
+| 01:B387 | 23 (WITH R3) | 175,092 |
+| 01:B384 | 01 (NOP) | 152,285 |
+| 01:B38A | C3 (OR) | 143,159 |
+
+276 distinct `(PBR:R15,opcode)` samples total, all within `$B380-$B3AC`
+— a single ~48-byte block. Hand-decoding those bytes directly from the
+ROM (`AC 08 2F 1D 22 03 23 97 B2 C3 09 12 01 26 04 25 04 3C 01 E1 B6 3D
+31 E4 08 E6 ...`) against the GSU opcode tables shows: `IBT R12,#8`;
+`MOV R13,R15` (the documented LOOP-address idiom); an 8-pass inner loop
+(`LSR`/`ROL`/`ROR` plus an `OR`-gated `BEQ`) that falls through to a
+second block reading 16-bit values from ROM via decrementing `R14` and
+`GETB`/`GETBH` pairs, and a `DEC R1`/`STB (R1)` write-back; the whole
+block is bounded by an outer `DEC R4`/`BNE $B380`. A register watch
+(`PROBE_GSUHIST_REGS=1`, sampled every 300,000 instructions) shows `R1`
+smoothly counting down and wrapping (16-bit) multiple times over the
+3M-instruction window, and `R14` actively decrementing through ROM —
+this is a genuine ROM-scan/table-processing pass (shape matches a boot-
+time ROM verification or a large coefficient-table load), not a data
+cell the GSU is idly polling.
+
+**Comparison against the W18-03 build** (`git worktree add` at
+`de1e5b4`, `PROBE_MODE=frames PROBE_FRAMES=600`): the OLD, provisional
+`STEP_BUDGET=64` model does NOT finish this quickly either — it first
+varies at **frame 547 of 600** (`total_instr_at_varied=8,386,343`), i.e.
+it needed the flat budget's full `8,386,343 * up to 64 ≈ 536M` opcode
+allowance, arriving with only 9% of the 600-frame window to spare. This
+project's new, real-hardware-accurate model produces ~35M opcodes (~107M
+real GSU cycles, matching a 10.74MHz GSU1 chip's exact 10-second budget)
+over the same window — roughly 15x short of what the old, admittedly
+inaccurate placeholder needed to finish. That 15x gap is the same order
+of magnitude as `STEP_BUDGET=64`'s own overprovisioning versus a real
+~3-4-opcodes-per-CPU-instruction hardware ratio, so the old "renders"
+result was arithmetic luck (a 15-20x-too-generous budget finishing with
+9% to spare), not evidence the timing was ever right.
+
+**Root cause is named, not fixed, in this session**: the hot loop
+(`$B380-$B3AC`) runs entirely OUTSIDE the code-cache window this run's
+`CBR` sits at (`$B3E0`, confirmed via `Gsu::peek(0x303E/0x303F)`) — every
+opcode/operand byte in it pays this ticket's `CACHE_MISS_EXTRA_GSU_
+CYCLES` surcharge on every pass (`cache_hits=209,575` vs
+`cache_misses=10,907,712`, a ~98% miss rate). If real hardware's own code
+never calls `CACHE` for this specific block either (plausible — a
+one-time boot-time ROM scan is a reasonable thing to leave uncached), the
+~3x uncached penalty is correct and real hardware would need the same
+proportionally long time; if it does and this project's `CBR` handling
+disagrees with real hardware about when/where that `CACHE` call lands,
+the fix would cut this loop's cost roughly 3x (bringing the 15x gap down
+to ~5x) — but this session found no evidence of a `CBR`-computation bug
+(the "CBR = R15 AND FFF0h" formula matches fullsnes exactly, and CACHE/
+LJMP both apply it correctly per their own unit tests). Distinguishing
+"real hardware also pays this cost" from "this project's cache logic
+disagrees with real hardware" needs either a real disassembly (ROM bytes
+decoded here are execution evidence only, not reproduced or committed)
+cross-referenced against a known Star Fox source/disassembly project, or
+a cycle-count comparison against a reference cycle-accurate GSU emulator
+— both out of scope for what this session could complete. Filed as the
+concrete, numbers-backed starting point for W18-05 rather than left as
+an unexplained regression.
+
+**What shipped this follow-up**: the diagnostic counters and
+`PROBE_MODE=gsuhist`/`PROBE_GSUHIST_REGS` tooling (permanent, opt-in,
+same "never gates, never saved" contract as `plot_calls`), and
+`tests::system::gsu_credit_per_step_is_bounded_by_that_steps_own_
+instruction_cost`, which pins the interleave-ratio finding above as a
+regression test. Census re-run after this follow-up (unchanged from
+before, since no execution-affecting code changed): identical
+exit-code table to the one above.
+
+### W18-04 follow-up #2: closing out the coordinator's opcode-semantics audit
+
+Re-opened per coordinator directive to check the `$B380-$B3AC` loop's own
+opcode semantics against fullsnes (not just its cost model), on the
+hypothesis that a delay-slot or LOOP/branch timing bug — not the already-
+named cache-miss cost — could be inflating the real iteration count.
+
+**Full decode.** The loop is not one flat block; it is a small subroutine.
+Hand-decoding the actual ROM bytes at `$B380` (a clean-room disassembly
+done here for verification only — the bytes are execution evidence, never
+reproduced or committed) against fullsnes's GSU opcode tables gives:
+`IBT R12,#8` / `WITH R15` / `MOVE R13,R15` (`$B380-$B383`, run once per
+call — this is the documented "LOOP-target" idiom, fullsnes "CPU Misc":
+R15 at a MOVE is "addr of next opcode", so R13 becomes `$B384`); an 8-pass
+`WITH R2/LSR` + `WITH R3/ROR` + `FROM R2/OR R3` + `BEQ` bit-scan
+(`$B384-$B392`, `LOOP` closing it); a `BEQ`-only exit at `$B38A` into a
+4-byte ROM read (`DEC R14`/`GETB`/`DEC R14`/`WITH+ALT1 GETBH`, twice,
+`$B39E-$B3AB`) feeding a second 8-pass `ROR`/`ROL` bit-scan reusing the
+same `R12`/`R13` pair (`$B3AC-$B3B7`); both paths converge on
+`DEC R1`/`FROM R6`/`ALT1 STB (R1)`/`DEC R4`/`BNE $B380` (`$B393-$B398` and
+`$B3B9-$B3BE`). This is a bit-unpacker/decompressor called repeatedly
+(`R4` reloaded fresh by whatever calls `$B380` each time it hits 0), not
+one giant flat loop — consistent with the prior follow-up's "boot-time
+ROM-scan/table-processing pass" read.
+
+**Register trace (temporary `PROBE_MODE=gsuloop`, watching
+`(PBR,R15)==(1,$B380)`, removed after this session): the shape is exactly
+right, no defect found.** Over a 5,000,000-`Step::Instruction` sample:
+`R13=$B384` and `R12=$0000` at every single arrival (LOOP always
+exhausts its 8-pass count exactly, confirming `LOOP`'s "R12=R12-1, if
+R12<>0 then R15=R13" is applied correctly every pass); `R4`, `R1`, and
+`R14` all decrease monotonically call-to-call with no resets, wraps, or
+reversals (`R4`: 0x3D3→0x3C7→0x3BF→0x3B3→...; matching deltas of −8/−12
+alternating on `R1`/`R14` too). Since the sample only lands on `$B380`
+once per `Step::Instruction` (CPU-granularity) but the loop body is only
+~13 GSU opcodes, most real passes fall between samples — the observed
+"64,344 hits" in this window undercounts the true pass count by roughly
+the −8/−12 deltas themselves (8-12 real passes per observed hit, so
+~500K-700K real passes in the 5M-instruction sample, not 64,344). The
+per-pass delta pattern is exactly self-consistent (one `DEC R4` and one
+`DEC R1` per pass; `DEC R14` fires 4 times only on the `BEQ`-taken path,
+matching the observed alternation) — a correctly-behaving decoder, not a
+runaway.
+
+**The delay-slot hypothesis is empirically inapplicable, not just
+theoretically fine.** All three delay-slot bytes in this loop —
+`$B38C` (BEQ's), `$B392` (LOOP's), `$B39A` (BNE's) — are `01` (NOP) in
+the ROM. A flag-changing delay-slot instruction flipping a branch's
+already-decided condition (task hypothesis 2a) cannot occur here
+regardless of `exec_opcode`'s own before/after ordering, since NOP
+changes no flags. (The ordering is correct anyway: `exec_branch` and
+`LOOP` both read/set flags before `step_one` applies the deferred
+`pending_jump`, matching fullsnes's "Bxx addr...branch opcodes (no
+change)" and `LOOP`'s own R12-decrement-then-test wording.) DEC/INC,
+LSR/ROL/ROR, the OR/WITH/FROM prefix lifetimes, GETB/GETBH's
+Dreg-preserving byte transforms, STB's RAMBR routing, and IBT/IWT's
+immediate-byte ordering were all re-checked against this exact byte
+sequence and matched fullsnes's tables with no deviation.
+
+**The remaining question from the last follow-up is now closed: real
+Star Fox code does not cache this loop either.** Instrumented every
+`CACHE`/`LJMP` CBR write (temporary `PROBE_GSU_CACHE_LOG`, removed after
+this session) over the same 5M-instruction window: `CACHE` executes 294
+times, 293 of them from the exact same opcode address (`$B3E6`, "R15
+post-fetch" `$B3E7`), setting `CBR=$B3E0` every time — never once from an
+address whose `R15 AND FFF0h` would cover `$B380-$B3AF`. The one other
+call sets `CBR=$B330`, also nowhere near the loop. This is the
+distinguishing measurement the previous follow-up filed as needing "a
+real disassembly or a cycle-accurate cross-check": Star Fox's own code
+never asks the GSU to cache this 44-byte decoder, on any of the ~pass
+counts sampled. Real hardware therefore pays the same uncached-ROM-read
+cost this project's model already charges here — **the ~3x cache-miss
+penalty (and the ROM-buffer stall on the DEC-R14-then-GETB pattern) are
+correct, not a CBR-computation bug.**
+
+**Conclusion: no GSU emulation defect found.** The loop is a correctly-
+implemented, ROM-table-driven decompressor that real hardware also runs
+uncached; the accurate GSU1 clock model (35M opcodes/~107M cycles over
+600 frames, matching a real 10.74MHz GSU1's 10-second budget — see the
+prior follow-up) is doing its job. Star Fox's boot decompression pass
+appears to need substantially more real GSU time than this project's
+600-frame boot-census window budgets for — which, given no defect was
+found in three follow-up sessions across the interleave granularity, the
+opcode semantics, and the code-cache targeting, now reads as a **census-
+fixture problem** (the window was tuned against the old, ~15-20x-
+overprovisioned `STEP_BUDGET=64` placeholder, not against real GSU1
+timing) rather than a GSU-core bug. Filed as the concrete next step for
+W18-05: either extend the GSU1 boot-census window, or accept that titles
+whose boot-time decompression exceeds it render later than frame 600
+on real hardware too, and adjust the census bucket accordingly — not
+another opcode-correctness audit.
+
+**What shipped this follow-up**: documentation only. The `PROBE_MODE=
+gsuloop` register-arrival watch and the `PROBE_GSU_CACHE_LOG` CACHE/LJMP
+logger were both temporary, env-gated additions used only to produce the
+numbers above; both were reverted before this commit (not left as
+permanent opt-in tooling like `gsuhist`/`plot_calls`, since neither
+answers a question this project expects to ask again the way a PC
+histogram does). No execution-affecting code changed. `cargo test
+-p rf-snes`: 437 passed, 0 failed (unchanged from the prior follow-up,
+since no source changed). Census re-run: identical exit-code table.
+
+### W18-04 follow-up #4: the loop's INPUTS, opcode-exact at first entry
+
+Re-opened per coordinator pushback: 536M opcodes (the old fast model) is
+~50s of a real 10.7MHz GSU, but Star Fox boots in ~2s on hardware — a
+correct decoder fed enormous inputs still does 25x too much work, so if
+the opcodes are right (follow-up #3), the loop's INPUTS must be checked.
+The `gsuloop`/`gsuhist` probes sample once per 65816 instruction, and the
+GSU runs several opcodes per instruction, so they can (and did) skip the
+true first arrival at a watched PC by several passes. This follow-up adds
+one-shot, **opcode-exact** hooks (temporary, reverted after this
+session): a watch in `step_one` firing the instant `(PBR,R15)` first
+equals a target address, and a per-register write watch in `commit_to`
+for the boot window.
+
+**(1) Register state at $01:B380's true first entry** (`instr_exec=231`,
+i.e. the 231st GSU opcode since GO): `R0=6BFE R1=9AFF R2=0002 R3=6BFE
+R4=03D6 R5=0000 R6=0000 R7=B4B6 R8=B337 R9=0000 R10=0000 R11=B367
+R12=0000 R13=B4B6 R14=FFF8 PBR=01 ROMBR=00 RAMBR=00 CBR=B330`. **R4 is
+982 (`$03D6`), not enormous** — R12/R13 here are stale values from
+before $B380's own `IBT R12,#8`/`MOV R13,R15` preamble overwrites them
+next instruction, not a divergence.
+
+**(2) The SNES-side writes before GO.** Watching every byte change at
+`$3000-$301F`/`$3030`/`$3034`/`$3036`/`$303C` from cold boot: exactly two
+real SNES writes happen before GO — `PBR ($3034) 00->01` at 65816
+`pc=$7E4EE7`, then (same instruction) `$301E 00->05` followed by `$301F
+00->B3` at `pc=$7E4EF7`. Per fullsnes "Writes to 3000h-301Eh (even) set
+LATCH=data" / "Writes to 3001h-301Fh (odd) apply LSB=LATCH and MSB=data":
+committing gives `R15 = LSB($05) | MSB($B3)<<8 = $B305` — matches
+`write_register_word`'s `u16::from_le_bytes([latch, value])` exactly, low
+byte first, no swap. **R0-R14 are left at their reset value (0) by the
+SNES** — every one of R1/R4/R12/R13/R14's real values is computed by the
+GSU's *own* code after GO, not written by the 65C816. Ask (2)'s premise
+("the SNES-side writes that produced R4...") does not apply to this
+title; (3) is the real mechanism.
+
+**(3) Where R4=982 actually comes from — verified bit-by-bit, not
+guessed.** Watching every write to R4 from GO: `IBT R4,#0` (deterministic
+default) is overwritten immediately after by a *doubling* sequence at
+`$01:B4C0`, sampled at `instr_exec`=61,72,83,111(reset to 0),123,134,
+145,156,167,178,189,200,211,222: `0000->0001->0003->0007->0000(!)
+->0001->0003->0007->000F->001E->003D->007A->00F5->01EB->03D6`. Every step
+is `R4' = R4*2 (+1 if the extracted bit is set)` — a textbook
+variable-length-integer bit-unpacker (Elias-gamma/Golomb-style), consuming
+one new bit from the ROM byte stream per doubling. This is the same
+bit-scan idiom follow-up #3 decoded at `$B384-$B392`; 982 is *read*, not
+computed from a corrupted seed, and every opcode in that read chain
+(LSR/ROR/OR/BEQ/LOOP) was already checked against fullsnes in follow-up
+#3 with no deviation found.
+
+**(4) GETB's address math, verified against the raw ROM file.** The bit
+source for this specific decode is `[ROMBR:R14]` with `ROMBR=$00` for
+this entire run (a live watch confirms it never changes once, over the
+whole boot — no `ROMB`/`SEX` opcode executes anywhere in this code path,
+confirmed both by hand-decoding $B305-$B380 and by the empty change log;
+`ROMBR` is fullsnes `"(R)"` — SNES-non-writable — so nothing else could
+set it either). `R14` reaches the loop via `LMS R14,($0062)` at `$B30A`
+(`addr = kk*2 = $00C4`, read from GSU RAM bank `$70` since `RAMBR=0`); a
+live watch on every SNES-side GSU-RAM write over the whole 20-frame
+window found **zero writes to GSU RAM at any offset** — the SNES never
+DMAs or stores into cartridge RAM at all along this path, so `R14=$0000`
+at the `LMS` is GSU RAM's untouched (not gated/dropped — `RAN` was never
+tested against a real write attempt) power-on state, not an emulator
+bug in the write path. Four `DEC R14` bring it to `$FFFC-$FFFF`; with
+`ROMBR=0`, `gsu_rom_index` folds that through the documented
+`b<0x40 => (b<<15)|(addr&0x7FFF)` LoROM mirror to flat file offset
+`$7FFC-$7FFF` — verified against the actual ROM file
+(`Star Fox (USA).sfc`, headerless, exactly 1,048,576 bytes): bytes there
+are `96 FF 9A FF`, which is also the SNES's own mandatory native-vector-
+table byte range. The address math matches fullsnes's mirror rule
+exactly and is internally consistent; **what remains unverified is
+whether real Star Fox hardware also sources this exact bitstream from
+that same byte range**, or whether a still-unfound earlier step (in a
+part of the boot this session did not trace — before $B305, or a
+different subroutine that should have primed a nonzero GSU-RAM base
+this game never DMAs) is supposed to point `R14`/`ROMBR` somewhere else
+entirely.
+
+**Conclusion: still no verifiable code defect, but the investigation
+floor has moved.** Three independent things confirmed correct against
+fullsnes and the raw ROM/RAM state this session (the R15 write-commit
+protocol, the R4 bit-unpacking arithmetic, and the ROMBR:R14-to-flat-
+offset address math) rule out the specific "corrupted register" and
+"wrong byte-order" failure modes the coordinator's hypothesis named.
+What is NOT verified, and cannot be from inside this repo alone (no
+reference disassembly, no cycle-accurate cross-check, per this ticket's
+own constraints): whether $B305's dispatcher is even the right entry for
+this phase of boot, or whether a piece of setup upstream of it (not
+traced this session) was supposed to leave a nonzero value somewhere
+this game's code reads and currently finds zero. Per Law 4 (bug-fix
+discipline — verify before shipping a fix), no code change ships this
+follow-up: every theory tried either failed to reproduce a defect or
+lacks a ground truth to confirm one against. Filed for W18-05 with a
+concrete next step: obtain or approximate a real Star Fox disassembly
+(community resources, not reproduced in-tree) to check what real
+hardware's R14/ROMBR are at this exact PC, which is the one piece of
+ground truth this session lacked.
+
+No execution-affecting code changed (all probes were temporary,
+env-gated, and reverted before this commit — `step_one`'s one-shot PC
+watch, `commit_to`'s register-write watch, and `bus.rs`'s GSU-RAM-write
+watch). `cargo test -p rf-snes`: 437 passed, 0 failed, 1 ignored
+(unchanged). fmt/clippy -D warnings/validate-arch clean. Census re-run:
+identical exit-code table to every prior follow-up. Star Fox (USA),
+`PROBE_MODE=frames PROBE_FRAMES=600`: `varied_at=None` (unchanged).
+
+### W18-04 follow-up #5: found and fixed — GSU RAM was zero-sized
+
+Re-opened per coordinator pushback on follow-up #4's own numbers:
+`LMS R14,($0062)` reads GSU RAM offset `$C4` for the decompressor's ROM
+read pointer; on hardware the 65C816 fills that RAM before GO; a live
+watch found **zero SNES writes to GSU RAM anywhere in the run**. The
+report named the mechanism but stopped short of asking *why* every write
+attempt vanished — this follow-up traces that to its root.
+
+**Root cause: `rf_cart::snes::superfx_expansion_ram_kib` was reporting
+`0` KiB of GSU RAM for this exact ROM.** Star Fox (USA)'s real cartridge
+header has no SNES "extended header" (fullsnes: "Starfox/Star Wing,
+Powerslide, and Starfox 2 do not have extended headers" — confirmed
+directly against the ROM file: byte `$7FBD` is `$FF`, the flash-erase
+fill value, and the standard RAM-size byte `$7FD8` is `$00`, exactly as
+fullsnes describes for a GSU cart). The function's existing, deliberate
+policy (from W18-01, cited in its own doc comment) was to report `0`
+rather than "hardcode a real board's known fixed size by title" —
+technically law-5-compliant, but it silently gives this whole family of
+carts **no GSU RAM at all**. With `board.ram_len == 0`,
+`mapping::gsu_target` returns `None` for every address in banks
+`$70-$71` and the `$6000-$7FFF` mirror in `$00-$3F`/`$80-$BF` (both
+arms are gated `&& board.ram_len > 0`), so every SNES-side write the
+game makes into cartridge RAM falls through to the ordinary LoROM `map`
+— which, with this cart's `sram_len` also `0` (no battery, per its real
+chipset byte `$13`), resolves to `Target::Open` and is silently
+dropped. `LMS R14,($0062)` then reads GSU RAM's untouched
+(never-allocated, always-zero) backing store, so `R14=$0000` instead of
+whatever base address the SNES actually meant to prime — and the
+decoder built in follow-up #4 walks off the low end of ROM (the SNES's
+own vector-table bytes) instead of the real, SNES-supplied table.
+
+**The fix stays general, not title-keyed** (law 5's actual constraint —
+the code does not branch on title): the very next sentence in the same
+fullsnes chapter, for exactly this "extended header absent" condition,
+states "RAM Size for Starfox/Starwing is 32Kbytes"; a second, independent
+line elsewhere in the same chapter gives the general rule ("Game Pak RAM
+with mirrors (64Kbyte max?, usually 32K)"). `superfx_expansion_ram_kib`'s
+`raw == 0xFF` (extended header genuinely absent) arm now returns `32`
+instead of `0` — a flat default for that one documented condition, cited
+to fullsnes twice over, not a per-title lookup. The `raw == 0x00`
+("header present, explicitly states zero RAM") case is untouched and
+still reports `0` — a real GSU board can legitimately have no RAM chip,
+and this project's own test fixture (`superfx_no_battery_no_ram_chipset`,
+Star Fox's own chipset byte with a *populated*-zero header) still passes
+unchanged.
+
+**Verified end-to-end with two new unit tests** (`crates/rf-snes/src/
+tests/system.rs`): `snes_write_to_gsu_ram_is_visible_to_a_gsu_ldb`
+reproduces Star Fox's exact real header bytes (chipset `$13`, extended
+header `$FF`), asserts the cart now parses to 32 KiB, writes a byte to
+`$70:0000` through the plain CPU bus path, and has a hand-assembled GSU
+program (`IWT R1,#0000; TO R2; ALT1; LDB (R1)`) read that exact byte
+back. `dma_transfer_into_the_6000_mirror_reaches_gsu_ram` proves the
+`$6000-$7FFF` mirror (the OTHER address form `gsu_target` accepts) shares
+the same underlying buffer, through a real MDMA channel (reverse
+direction, B-bus `$2180` WMDATA, A-bus `$00:6000`) — the same
+`SnesBus::run_channel`/generic `self.write(a, v)` path
+`dma_moves_real_bytes_through_the_wram_port` already pins in isolation,
+so a DMA-based cart-RAM preload (not just a plain `STA` loop) is covered
+too.
+
+**Census re-run (release, 15 GSU archives + 5 canaries): Star Fox (USA),
+(USA) (Rev 1), and (USA) (Rev 2) now render** (`exit 0`, up from `exit
+10`) — three titles fixed. `PROBE_MODE=frames PROBE_FRAMES=600` on Star
+Fox (USA): **`varied_at=Some(155)`, `total_instr_at_varied=Some(2,204,
+980)`** — the picture first changes at frame 155 of 600, comfortably
+inside the window (the old, inaccurate `STEP_BUDGET=64` placeholder
+needed frame 547 to just barely finish; this is the first time the
+*accurate* clock model has ever rendered this title, at under a third of
+the window). Star Fox 2 (Classic Mini, both betas) and Super Star Fox
+Weekend/Vortex are unchanged (`exit 10`/`exit 12`) — fullsnes states
+Star Fox 2's own RAM size as "unknown", so this fix does not claim to
+cover it, and Vortex/Super Star Fox Weekend were already uniform before
+this ticket for unrelated, previously-named reasons. All 5 canaries and
+the other 6 already-rendering GSU titles are unchanged.
+
+`cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo
+test --workspace` (157 `test result: ok` lines, 0 failures — includes
+the 2 new tests: `rf-cart` 60→60 passed with one test renamed/re-
+asserted, `rf-snes` lib 437→439 passed), and `scripts/validate-arch.sh`
+all clean.
+
+**HEAD**: see the `fix(W18-04): ...` commit this entry ships with.
+
 ## W14-51 — Final Fight 2 / Battletoads: no register defect found; both
 titles' picture appears well outside the census window, the same
 "boot longer than window" class as Lagoon/Phalanx (W14-35). BLOCKED

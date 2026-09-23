@@ -397,6 +397,62 @@ fn probe() {
             );
             continue;
         }
+        // Ticket W18-04 follow-up (coordinator-directed): a GSU PC
+        // histogram over a real, frame-driven run — `Step::Instruction`
+        // in a loop so we sample the GSU's PC/last-opcode/counters after
+        // EVERY 65816 instruction (the same granularity `SnesSystem::step`
+        // interleaves the GSU on), not just at frame boundaries, so a
+        // tight GSU-side poll loop shows up as one or two dominant PCs
+        // rather than being averaged away.
+        if std::env::var("PROBE_MODE").as_deref() == Ok("gsuhist") {
+            let sample: u64 = std::env::var("PROBE_GSUHIST_INSTR")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3_000_000);
+            let mut hist: HashMap<(u8, u16, u8), u64> = HashMap::new();
+            let regword = |sys: &rf_snes::system::SnesSystem, off: u16| -> u16 {
+                let gsu = sys.bus.gsu.as_ref().unwrap();
+                let lo = gsu.regs.peek(0x3000 + off).unwrap_or(0);
+                let hi = gsu.regs.peek(0x3001 + off).unwrap_or(0);
+                u16::from_le_bytes([lo, hi])
+            };
+            for i in 0..sample {
+                core.step(Step::Instruction, &mut sink);
+                let Some(gsu) = core.system().bus.gsu.as_ref() else {
+                    break;
+                };
+                *hist
+                    .entry((gsu.regs.pbr(), gsu.regs.r15(), gsu.regs.last_opcode))
+                    .or_default() += 1;
+                if std::env::var("PROBE_GSUHIST_REGS").is_ok() && i % 300_000 == 0 {
+                    let sys = core.system();
+                    println!(
+                        "    GSUREGWATCH i={i} R1={:04X} R2={:04X} R3={:04X} R4={:04X} \
+                         R5={:04X} R6={:04X} R12={:04X} R13={:04X}",
+                        regword(sys, 2),
+                        regword(sys, 4),
+                        regword(sys, 6),
+                        regword(sys, 8),
+                        regword(sys, 10),
+                        regword(sys, 12),
+                        regword(sys, 24),
+                        regword(sys, 26),
+                    );
+                }
+            }
+            println!(
+                "=== GSUHIST {}",
+                Path::new(path).file_name().unwrap().to_string_lossy()
+            );
+            print_gsu_reg_report(&core);
+            let mut top: Vec<_> = hist.into_iter().collect();
+            top.sort_by(|a, b| b.1.cmp(&a.1));
+            println!("    distinct (PBR:R15,opcode) samples: {}", top.len());
+            for ((pbr, r15, op), n) in top.into_iter().take(20) {
+                println!("    GSUHIST {pbr:02X}:{r15:04X} op={op:02X} samples={n}");
+            }
+            continue;
+        }
         if std::env::var("PROBE_MODE").as_deref() == Ok("frames") {
             let mut first_varied: Option<usize> = None;
             let mut first_varied_instr: Option<u64> = None;
@@ -1529,5 +1585,26 @@ fn print_gsu_reg_report(core: &rf_snes::core::SnesCore) {
         gsu.regs.irq_pending(),
         gsu.regs.plot_calls,
         gsu.regs.rpix_calls,
+    );
+    // Ticket W18-04 follow-up (coordinator-directed trace of the Star Fox
+    // census regression): the code-cache hit/miss and ROM/RAM-buffer
+    // stall counters, plus how many times GO was set/cleared and by whom
+    // (an SNES-side write vs the GSU's own STOP), so a stuck title's
+    // report says WHY it is spending cycles the way it is, not just where
+    // its PC sits.
+    let cbr_lo = gsu.regs.peek(0x303E).unwrap_or(0);
+    let cbr_hi = gsu.regs.peek(0x303F).unwrap_or(0);
+    println!(
+        "    gsu counters: cache_hits={} cache_misses={} rom_stalls={} ram_stalls={} \
+         go_set={} go_clear={} go_clear_by_stop={} credit={} cbr={:04X}",
+        gsu.regs.cache_hits,
+        gsu.regs.cache_misses,
+        gsu.regs.rom_stall_events,
+        gsu.regs.ram_stall_events,
+        gsu.regs.go_set_events,
+        gsu.regs.go_clear_events,
+        gsu.regs.go_cleared_by_stop_events,
+        gsu.credit,
+        u16::from_le_bytes([cbr_lo, cbr_hi]),
     );
 }
