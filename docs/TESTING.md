@@ -8217,6 +8217,112 @@ histogram does). No execution-affecting code changed. `cargo test
 -p rf-snes`: 437 passed, 0 failed (unchanged from the prior follow-up,
 since no source changed). Census re-run: identical exit-code table.
 
+### W18-04 follow-up #4: the loop's INPUTS, opcode-exact at first entry
+
+Re-opened per coordinator pushback: 536M opcodes (the old fast model) is
+~50s of a real 10.7MHz GSU, but Star Fox boots in ~2s on hardware — a
+correct decoder fed enormous inputs still does 25x too much work, so if
+the opcodes are right (follow-up #3), the loop's INPUTS must be checked.
+The `gsuloop`/`gsuhist` probes sample once per 65816 instruction, and the
+GSU runs several opcodes per instruction, so they can (and did) skip the
+true first arrival at a watched PC by several passes. This follow-up adds
+one-shot, **opcode-exact** hooks (temporary, reverted after this
+session): a watch in `step_one` firing the instant `(PBR,R15)` first
+equals a target address, and a per-register write watch in `commit_to`
+for the boot window.
+
+**(1) Register state at $01:B380's true first entry** (`instr_exec=231`,
+i.e. the 231st GSU opcode since GO): `R0=6BFE R1=9AFF R2=0002 R3=6BFE
+R4=03D6 R5=0000 R6=0000 R7=B4B6 R8=B337 R9=0000 R10=0000 R11=B367
+R12=0000 R13=B4B6 R14=FFF8 PBR=01 ROMBR=00 RAMBR=00 CBR=B330`. **R4 is
+982 (`$03D6`), not enormous** — R12/R13 here are stale values from
+before $B380's own `IBT R12,#8`/`MOV R13,R15` preamble overwrites them
+next instruction, not a divergence.
+
+**(2) The SNES-side writes before GO.** Watching every byte change at
+`$3000-$301F`/`$3030`/`$3034`/`$3036`/`$303C` from cold boot: exactly two
+real SNES writes happen before GO — `PBR ($3034) 00->01` at 65816
+`pc=$7E4EE7`, then (same instruction) `$301E 00->05` followed by `$301F
+00->B3` at `pc=$7E4EF7`. Per fullsnes "Writes to 3000h-301Eh (even) set
+LATCH=data" / "Writes to 3001h-301Fh (odd) apply LSB=LATCH and MSB=data":
+committing gives `R15 = LSB($05) | MSB($B3)<<8 = $B305` — matches
+`write_register_word`'s `u16::from_le_bytes([latch, value])` exactly, low
+byte first, no swap. **R0-R14 are left at their reset value (0) by the
+SNES** — every one of R1/R4/R12/R13/R14's real values is computed by the
+GSU's *own* code after GO, not written by the 65C816. Ask (2)'s premise
+("the SNES-side writes that produced R4...") does not apply to this
+title; (3) is the real mechanism.
+
+**(3) Where R4=982 actually comes from — verified bit-by-bit, not
+guessed.** Watching every write to R4 from GO: `IBT R4,#0` (deterministic
+default) is overwritten immediately after by a *doubling* sequence at
+`$01:B4C0`, sampled at `instr_exec`=61,72,83,111(reset to 0),123,134,
+145,156,167,178,189,200,211,222: `0000->0001->0003->0007->0000(!)
+->0001->0003->0007->000F->001E->003D->007A->00F5->01EB->03D6`. Every step
+is `R4' = R4*2 (+1 if the extracted bit is set)` — a textbook
+variable-length-integer bit-unpacker (Elias-gamma/Golomb-style), consuming
+one new bit from the ROM byte stream per doubling. This is the same
+bit-scan idiom follow-up #3 decoded at `$B384-$B392`; 982 is *read*, not
+computed from a corrupted seed, and every opcode in that read chain
+(LSR/ROR/OR/BEQ/LOOP) was already checked against fullsnes in follow-up
+#3 with no deviation found.
+
+**(4) GETB's address math, verified against the raw ROM file.** The bit
+source for this specific decode is `[ROMBR:R14]` with `ROMBR=$00` for
+this entire run (a live watch confirms it never changes once, over the
+whole boot — no `ROMB`/`SEX` opcode executes anywhere in this code path,
+confirmed both by hand-decoding $B305-$B380 and by the empty change log;
+`ROMBR` is fullsnes `"(R)"` — SNES-non-writable — so nothing else could
+set it either). `R14` reaches the loop via `LMS R14,($0062)` at `$B30A`
+(`addr = kk*2 = $00C4`, read from GSU RAM bank `$70` since `RAMBR=0`); a
+live watch on every SNES-side GSU-RAM write over the whole 20-frame
+window found **zero writes to GSU RAM at any offset** — the SNES never
+DMAs or stores into cartridge RAM at all along this path, so `R14=$0000`
+at the `LMS` is GSU RAM's untouched (not gated/dropped — `RAN` was never
+tested against a real write attempt) power-on state, not an emulator
+bug in the write path. Four `DEC R14` bring it to `$FFFC-$FFFF`; with
+`ROMBR=0`, `gsu_rom_index` folds that through the documented
+`b<0x40 => (b<<15)|(addr&0x7FFF)` LoROM mirror to flat file offset
+`$7FFC-$7FFF` — verified against the actual ROM file
+(`Star Fox (USA).sfc`, headerless, exactly 1,048,576 bytes): bytes there
+are `96 FF 9A FF`, which is also the SNES's own mandatory native-vector-
+table byte range. The address math matches fullsnes's mirror rule
+exactly and is internally consistent; **what remains unverified is
+whether real Star Fox hardware also sources this exact bitstream from
+that same byte range**, or whether a still-unfound earlier step (in a
+part of the boot this session did not trace — before $B305, or a
+different subroutine that should have primed a nonzero GSU-RAM base
+this game never DMAs) is supposed to point `R14`/`ROMBR` somewhere else
+entirely.
+
+**Conclusion: still no verifiable code defect, but the investigation
+floor has moved.** Three independent things confirmed correct against
+fullsnes and the raw ROM/RAM state this session (the R15 write-commit
+protocol, the R4 bit-unpacking arithmetic, and the ROMBR:R14-to-flat-
+offset address math) rule out the specific "corrupted register" and
+"wrong byte-order" failure modes the coordinator's hypothesis named.
+What is NOT verified, and cannot be from inside this repo alone (no
+reference disassembly, no cycle-accurate cross-check, per this ticket's
+own constraints): whether $B305's dispatcher is even the right entry for
+this phase of boot, or whether a piece of setup upstream of it (not
+traced this session) was supposed to leave a nonzero value somewhere
+this game's code reads and currently finds zero. Per Law 4 (bug-fix
+discipline — verify before shipping a fix), no code change ships this
+follow-up: every theory tried either failed to reproduce a defect or
+lacks a ground truth to confirm one against. Filed for W18-05 with a
+concrete next step: obtain or approximate a real Star Fox disassembly
+(community resources, not reproduced in-tree) to check what real
+hardware's R14/ROMBR are at this exact PC, which is the one piece of
+ground truth this session lacked.
+
+No execution-affecting code changed (all probes were temporary,
+env-gated, and reverted before this commit — `step_one`'s one-shot PC
+watch, `commit_to`'s register-write watch, and `bus.rs`'s GSU-RAM-write
+watch). `cargo test -p rf-snes`: 437 passed, 0 failed, 1 ignored
+(unchanged). fmt/clippy -D warnings/validate-arch clean. Census re-run:
+identical exit-code table to every prior follow-up. Star Fox (USA),
+`PROBE_MODE=frames PROBE_FRAMES=600`: `varied_at=None` (unchanged).
+
 **HEAD**: see the `chore(W18-04): ...` commit this entry ships with.
 
 ## W14-51 — Final Fight 2 / Battletoads: no register defect found; both
