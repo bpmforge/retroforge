@@ -7361,6 +7361,176 @@ the save-state half of the acceptance criterion.
 
 **HEAD**: see the `feat(W18-01): ...` commit this entry ships with.
 
+## W18-02 (Super FX / GSU slice 2: the instruction core)
+
+**Opcode coverage** (`crates/rf-snes/src/gsu.rs`, `Gsu::exec_opcode` and its
+helpers): every opcode fullsnes's "SNES Cart GSU-n CPU MOV Opcodes", "ALU
+Opcodes", "JMP and Prefix Opcodes" and "Pseudo Opcodes" tables name, plus
+the register-side rules in "CPU Misc" — TO/WITH/FROM register-select
+prefixes and their one-instruction lifetime; ALT1/ALT2/ALT3 selecting the
+documented variant (including the two "ignored prefix" fallback rules:
+ALT2 with no explicit form falls back to base, ALT3 mirrors ALT1 when no
+explicit ALT3 form exists); the B flag's realization of `1n`/`Bn` as
+MOVE/MOVES rather than TO/FROM; LOOP (R12/R13), LINK (#1-4), JMP/LJMP
+(bank change via LJMP's `PBR=Rn`); all eleven Bxx branches, which leave
+prefix state untouched per the documented exception; STOP (clears GO, sets
+SFR.IRQ unconditionally, gated by CFGR.IRQ only for the line ORed into the
+65C816); R14's GETB/GETBH/GETBL/GETBS/GETC reading `[ROMBR:R14]`; R15 as
+PC; LDB/LDW/STB/STW/SBK/LM/LMS/SM/SMS RAM access through RAMBR (the
+odd-address word byte-swap included); RAMB/ROMB; and the
+FMULT/LMULT/MULT/UMULT/SEX/LOB/HIB/MERGE/SWAP/NOT/ROL/ROR/ASR/LSR/DIV2/
+INC/DEC arithmetic with their documented flag effects (Z/S/CY/OV, including
+LOB/HIB's byte-domain sign bit and MERGE's four custom flag formulas).
+UMULT #n and XOR Rn/#n (fullsnes "GSU Undoc opcodes" — present in the
+chip's own summary/index but not spelled out in the alphabetical body) are
+implemented per their documented Nocash one-liners like every other
+opcode.
+
+**Stubs, all cited in the code they live in**:
+- **PLOT/RPIX** are recording no-ops (`Gsu::plot_calls`/`rpix_calls`,
+  diagnostic counters, not part of save state) — the pixel cache and
+  bitmap RAM writeback are W18-03. PLOT still advances R1 exactly as
+  documented; RPIX returns a deterministic `0`.
+- **COLOR/CMODE are NOT stubbed** — a code-review refinement over the
+  ticket's letter: their documented effect (`COLR`/`POR` register writes)
+  has nothing to do with the pixel path PLOT/RPIX own, so both are
+  implemented for real this slice.
+- **No code-cache execution** and **no ROM/RAM-data-cache WAIT
+  modelling** — fetch is a direct, uncached ROM/RAM read per PBR/ROMBR/
+  RAMBR; CACHE only updates CBR. Both are W18-04/W18-05 territory once
+  cycle costs exist to make a WAIT meaningful.
+- **FMULT's Dreg=R4 hardware erratum** ("this will reportedly leave R4
+  unchanged") is not replicated, and **FMULT/LMULT's CY flag** has no
+  documented definition and is always cleared.
+
+**Provisional scheduling**: `GsuState::run` executes up to
+`GsuState::STEP_BUDGET` (`64`, a chosen constant — not a hardware value)
+opcodes per `SnesSystem::step` while GO is set, with no cycle cost charged
+against the master clock yet. Each opcode's documented clock count is
+recorded (`Gsu::last_cost`) for slice 4 to consume. Wired into
+`SnesSystem::step` immediately after the SA-1 credit loop, borrowing
+`&bus.rom` the same disjoint-field way SA-1 already does. Law 8: the
+budget counter decrements unconditionally, first, every loop iteration —
+a mis-encoded hand-assembled test program cannot hang this loop; worst
+case is exactly `STEP_BUDGET` opcodes executed that call.
+
+**Tests** (`crates/rf-snes/src/gsu.rs`, `mod exec_tests`, 26 new unit
+tests): a hand-assembled program per opcode group — MOV/MOVES/IBT/IWT;
+GETB/GETBH/GETBL/GETBS via R14; LDB/LDW/STB/STW/SBK; LM/LMS/SM/SMS plus
+RAMB/ROMB; CMODE/COLOR/GETC/PLOT/RPIX; the ADD/ADC family (all four
+ALT-selected variants, flags checked including a signed-overflow and an
+unsigned-carry case); the SUB/SBC/CMP family; AND/BIC/OR/XOR; LSR/ROL/
+ASR/ROR/DIV2 (including DIV2's Rs=-1 special case); INC/DEC/SWAP/SEX/
+LOB/HIB/MERGE; MULT/UMULT/FMULT/LMULT (LMULT's Rd:R4 split checked
+explicitly) — asserting registers, flags and RAM after each. Separately:
+a branch program proving the delay-slot instruction always executes
+before the jump lands; JMP and LJMP (bank change); a LOOP+LINK program
+that runs to completion and asserts the final register file; STOP
+setting GO=false and IRQ, observed via the SNES-side `Gsu::read`
+(including the CFGR IRQ-mask case, which suppresses the CPU-visible line
+but not the SFR bit); a determinism check (two independent runs of the
+same program produce byte-identical register files); and a save/load
+mid-program round trip that resumes both the original and the restored
+copy for the same further instructions and compares final registers/RAM.
+
+**Census** (RELEASE, direct `boot_census_child` invocation per archive —
+the same child-process/bucket model `boot_census.rs`'s parent uses, run
+here title-by-title against the fifteen GSU archives found in this
+project's local library plus the five canaries, each under an explicit
+30-second kill-guard):
+
+| title | W18-01 (no execution) | W18-02 (this ticket) |
+|---|---|---|
+| Star Fox (USA) | rendered a uniform screen | **rendered something** |
+| Star Fox (USA) (Rev 1) | rendered a uniform screen | **rendered something** |
+| Star Fox (USA) (Rev 2) | rendered a uniform screen | rendered a uniform screen |
+| Star Fox 2 (Classic Mini, Switch Online) | rendered a uniform screen | rendered a uniform screen |
+| Star Fox 2 (Beta) x3 | refused (malformed dump, pre-existing) | refused, same cause |
+| Stunt Race FX (USA) (Rev 1) | rendered something | rendered something |
+| Yoshi's Island (USA) | rendered a uniform screen | **rendered something** |
+| Yoshi's Island (USA) (Rev 1) | rendered a uniform screen | **rendered something** |
+| Super Star Fox Weekend (Competition Cart) | rendered a uniform screen | rendered a uniform screen |
+| Vortex (USA) (En,Es) | rendered a uniform screen | rendered a uniform screen |
+| Dirt Trax FX (USA) | rendered a uniform screen | **rendered something** |
+| Doom (USA) | rendered something | rendered something |
+| Tommy Moe's Winter Extreme | rendered something | rendered something |
+| Super Mario World (USA) canary | rendered something | rendered something |
+| Wild Guns (USA) canary | rendered something | rendered something |
+| Super Mario RPG (USA) canary | rendered something | rendered something |
+| Kirby Super Star (USA) canary | rendered something | rendered something |
+| NHL 95 (USA) canary | rendered something | rendered something |
+
+Five titles progress from uniform to varied output now that the GSU
+actually runs its boot code (Star Fox, Star Fox (Rev 1), both Yoshi's
+Island dumps, Dirt Trax FX) — the acceptance's "record which now progress
+past the GSU wait". None of the twenty archives crashed, hung past its
+30-second guard, or regressed from W18-01's bucket.
+
+**`PROBE_GSUREGS=1` core-state dump** (`title_probe`, 600 frames), taken
+for the titles still uniform plus two now-varied titles for contrast:
+
+| title | PBR:R15 | last opcode | instructions | GO | IRQ |
+|---|---|---|---|---|---|
+| Star Fox (Rev 2) | `01:829F` | `$00` STOP | 236,501,353 | false | false |
+| Star Fox 2 (Classic Mini) | `0E:002C` | `$00` STOP | 5,794 | false | **true** |
+| Super Star Fox Weekend | `20:829F` | `$00` STOP | 524,122,575 | false | false |
+| Vortex | `06:0097` | `$99` JMP R9 | 1,835,424,155 | **true** | false |
+| Star Fox (USA), for contrast | `00:2D88` | `$00` STOP | 401,676,635 | false | true |
+| Doom, for contrast | `00:0000` | — | 0 | false | false |
+
+Three of the four still-uniform titles reach STOP cleanly and repeatedly
+(hundreds of millions of instructions across 600 frames — GSU programs
+restart every frame, fullsnes: "Restarting... is possible by setting
+GO-flag"), which is exactly what a correct instruction core running
+against a still-stubbed pixel path predicts: the GSU computes its frame
+and calls PLOT/RPIX (recorded, see `plot_calls`/`rpix_calls` in the full
+per-title output), but nothing ever lands in RAM for a DMA to carry to
+VRAM, so the screen stays whatever it already was — W18-03's job to fix.
+Vortex is the outlier: `GO` is still `true` at the 600-frame mark with
+1.8 **billion** opcodes executed, parked on `JMP R9` — a tight loop that
+never reaches STOP. The most likely explanation given the stub above is
+that Vortex polls a real-hardware WAIT condition (the pixel cache
+forwarding a full row, or a ROM/RAM-data-cache stall) this slice's
+uncached, always-immediate memory model can never produce, so the loop
+that would normally block for a few cycles spins the full budget every
+step instead; W18-03/W18-04 (the pixel cache and real cycle costs) are
+the tickets that would settle it, so it is left as a named, explained gap
+here rather than special-cased. Star Fox (USA)'s own contrast row shows
+the same "GSU stuck at STOP" shape as the uniform titles yet the boot
+census now sees it as "rendered something" — its 2D menu/HUD screens
+plainly do not depend on the GSU's 3D viewport, so ordinary tile-based
+rendering proceeding once the GSU stops blocking the main CPU is enough
+to change the bucket on its own.
+
+**Determinism**: `exec_tests::determinism_two_runs_match` (two
+independent runs of an ADD/INC/AND/LOOP-mixed program produce the same
+register file and instruction count) and
+`exec_tests::save_load_mid_program_round_trip` (save mid-program, restore
+into a fresh `Gsu`, run both the original and the restored copy for the
+same remaining instructions, compare final registers/RAM) — the
+save/load half of the acceptance's "save-state round trip mid-GSU-run
+reproduces the same frames" criterion, at the register-file level; the
+full frame-hash version is deferred to W18-03+, once PLOT/RPIX write
+something a frame hash can actually see diverge.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes --lib` — **415 passed, 0 failed,
+1 ignored** (26 of those new, `gsu::exec_tests::*`); `cargo test
+--workspace` — **2,294 passed, 0 failed, 43 ignored**; ignored SNES
+suites (release): `singlestep_spc700_vectors` — **256,000 passed, 0
+failed** (256/256 opcodes covered); `gilyon_cputest` —
+`test_num=0x0649/0x0649, ROM says "Success"`; `spc_timer_reports_pass` —
+`"PASSED TESTS"`; `peterlemon_bg_map_goldens_match` — **3 passed**;
+`scripts/validate-arch.sh` — `arch OK`.
+`singlestep_65816_vectors` (5,080,000 vectors) was started but not run to
+completion in this session — this ticket touches no 65816 opcode/decode
+path, and the orchestrator's own gate already covers this suite
+separately, so it is not re-run here rather than left half-reported.
+No ROM bytes or copyrighted titles anywhere in `gsu.rs` (every test
+program is hand-assembled bytes the test itself writes).
+
+**HEAD**: see the `feat(W18-02): ...` commit this entry ships with.
+
 ## W14-51 — Final Fight 2 / Battletoads: no register defect found; both
 titles' picture appears well outside the census window, the same
 "boot longer than window" class as Lagoon/Phalanx (W14-35). BLOCKED

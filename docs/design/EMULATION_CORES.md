@@ -408,7 +408,7 @@ majority of games; per-dot upgrade path documented in code).
     and writing the register that triggers it, and confirms the restored
     run copies the same bytes a never-interrupted run does.
 
-### 3.6 Super FX (GSU) — slice 1 of 5
+### 3.6 Super FX (GSU) — slice 2 of 5
 
 **Super FX / GSU-1/GSU-2 (~10 games, D-014, SRS FR-CORE-040, Wave 18,
 `crates/rf-snes/src/gsu.rs`).** A cartridge-resident 10.74MHz (GSU1) or
@@ -470,11 +470,85 @@ SA-1's dedicated map mode $23).
   (unlike SA-1's `$220E`/`$220F`), a GSU IRQ always dispatches through the
   ROM's own IRQ vector. Nothing sets the flag this slice (no STOP opcode
   runs yet); the plumbing is exercised directly by a test-only setter.
-- **What is deliberately NOT modelled yet**: every opcode (W18-02), timing/
-  cycle costs (W18-04), the code/pixel/other caches' actual semantics
-  (W18-02/W18-05), and the bitmap-plot pixel format (W18-05). `Gsu`'s
-  fields for those (COLR, POR, the cache buffer) exist now purely so a
-  later slice does not have to touch this slice's save-state format.
+- **What is deliberately NOT modelled yet**: timing/cycle costs charged
+  against the master clock (W18-04), the code/pixel/other caches' actual
+  semantics (W18-04/W18-05), and the bitmap-plot pixel format (W18-05).
+  `Gsu`'s fields for those (COLR, POR, the cache buffer) existed since
+  slice 1 purely so a later slice does not have to touch the save-state
+  format; slice 2 below gives COLR/POR their real write semantics.
+
+**Slice 2 (this ticket, D-014) gives the GSU an instruction core** —
+every opcode in fullsnes "SNES Cart GSU-n CPU MOV/ALU/JMP and
+Prefix/Pseudo Opcodes" plus the register-side rules in "CPU Misc", run
+from `GsuState::run`/`step_one`/`exec_opcode` in `gsu.rs`.
+
+- **Fetch/memory model**: opcode and operand bytes are fetched at
+  `PBR:R15` (`GsuState::fetch_byte`, advancing R15 exactly like real
+  hardware's PC); `PBR` in `$70`/`$71` fetches from GSU RAM, everything
+  else from ROM via the same LoROM (`$00-$3F`, offset-masked so
+  `$0000-$7FFF` mirrors `$8000-$FFFF` — "for 'GETB R15' vectors") /
+  linear-HiROM (`$40-$5F`) addressing fullsnes's "Memory Map (at GSU
+  Side)" documents. GETB/GETBH/GETBL/GETBS/GETC read `[ROMBR:R14]` the
+  same direct way. **No code-cache execution** (the 512-byte cache is
+  still plain read/write storage — CACHE only updates CBR) **and no
+  ROM/RAM-data-cache WAIT modelling** — ticket W18-02's brief accepts a
+  direct, uncached read/write for this slice; both are W18-04/W18-05
+  territory once cycle costs exist to make a WAIT meaningful.
+- **Prefix state** (`Gsu::sreg`/`dreg`/`alt1`/`alt2`/`b_flag`, one
+  instruction's lifetime): TO/WITH/FROM select Dreg/Sreg/both (WITH also
+  sets B); ALT1/ALT2/ALT3 (`$3D`/`$3E`/`$3F`) select the opcode variant
+  a `match` arm reads directly; "other" opcodes reset all five fields at
+  the end of `exec_opcode` (`Gsu::reset_prefix_state`) — Bxx branches and
+  the prefix opcodes themselves are the only opcodes that skip that call,
+  per fullsnes's explicit exception. The B flag's realization of 1n/Bn as
+  MOVE/MOVES (rather than TO/FROM) is a plain `if self.regs.b_flag` branch
+  in those two opcode-range arms. SFR's ALT1/ALT2/B bits (`$3031`,
+  read-only from the SNES) now reflect this live state instead of slice
+  1's permanent zero.
+- **Control-flow delay slot** (`Gsu::pending_jump`, fullsnes "Jump
+  Notes": "the next BYTE after the jump opcode is fetched...and is
+  executed before continuing at the jump-target address"): every branch
+  taken, JMP/LJMP, a taken LOOP, and any MOV/ALU whose Dreg is R15 sets
+  `pending_jump` instead of writing `R15` directly; `GsuState::step_one`
+  applies it only after the ONE opcode that follows has finished — one
+  `Option` field carries both the new PBR (for LJMP) and the new PC, so
+  the same mechanism serves every one of these cases without duplicating
+  the one-instruction delay in each opcode body.
+- **STOP/IRQ**: STOP prefetches one dummy byte (never executed, landing
+  R15 at `$+2`), clears GO, and sets SFR bit 15 unconditionally. The bit
+  is always visible to a title polling `$3031` (and resets on that read,
+  fullsnes); `Gsu::irq_pending` — the line ORed into the 65C816 — is
+  additionally gated by `CFGR.Bit7` (the documented IRQ mask), so a title
+  that disabled the mask still sees the SFR bit but the CPU never
+  dispatches. The MC1/GSU1 "STOP after a RAM write hangs" erratum is not
+  modelled (no cycle-accurate bus state exists yet to detect it).
+- **PLOT/RPIX** are recording no-ops (`Gsu::plot_calls`/`rpix_calls`,
+  diagnostic, not saved) — PLOT still advances R1 per fullsnes ("Pixel=
+  COLR, R1=R1+1") without touching RAM; RPIX returns a deterministic `0`.
+  **COLOR/CMODE are real**, not stubbed — their documented effect is a
+  plain register write (`COLR`/`POR`), not the pixel path, so they are
+  implemented in full; only the pixel-cache/bitmap-RAM side (W18-03) is
+  deferred.
+- **Provisional scheduling**: `GsuState::run` executes up to
+  `STEP_BUDGET` (`64`, not a hardware constant) opcodes per
+  `SnesSystem::step` while GO is set, with **no** cycle cost charged
+  against the master clock — `Gsu::last_cost` records each opcode's
+  documented clock count (fullsnes "CPU Misc") for slice 4 to consume,
+  but nothing reads it yet. Wired into `SnesSystem::step` right after the
+  SA-1 credit loop, borrowing `&bus.rom` the same disjoint-field way.
+  Law 8: the budget counter decrements unconditionally, first, every
+  iteration, so a mis-encoded program cannot hang the loop.
+- **Undocumented-but-cited opcodes implemented as documented**: UMULT #n
+  and XOR Rn/#n (fullsnes "GSU Undoc opcodes": present in the chip's
+  opcode summary/index but not spelled out in the alphabetical body) are
+  implemented per their Nocash-syntax one-liners, same as every
+  documented opcode.
+- **Known simplifications, cited where they live in code**: FMULT's
+  real-hardware Dreg=R4 erratum ("this will reportedly leave R4
+  unchanged") is not replicated — no title in this project's library is
+  documented to depend on it, and special-casing it would make ordinary
+  FMULT-into-R4 wrong for everyone else; FMULT/LMULT's CY flag has no
+  documented definition, so this slice always clears it.
 
 ## 4. Cartridge layer boundary (`rf-cart`)
 
