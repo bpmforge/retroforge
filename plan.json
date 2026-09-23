@@ -7906,7 +7906,7 @@
    "W18-02"
   ],
   "points": 8,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W18-03",
   "title": "Super FX slice 3: PLOT/RPIX, the pixel cache, bitmap modes (2/4/8 bpp, OBJ mode, height modes), COLR/POR semantics and the RAM writeback",
