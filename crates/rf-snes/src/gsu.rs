@@ -244,7 +244,7 @@ impl Gsu {
     fn read_canonical(&self, b: u16) -> u8 {
         if b < REG_BLOCK_LEN {
             let idx = usize::from(b / 2);
-            return if b % 2 == 0 {
+            return if b.is_multiple_of(2) {
                 self.regs[idx] as u8
             } else {
                 (self.regs[idx] >> 8) as u8
@@ -361,7 +361,7 @@ impl Gsu {
     /// R15 (`b == 0x1E`/`0x1F`) — also sets GO.
     fn write_register_word(&mut self, offset: u16, b: u16, value: u8) {
         let idx = usize::from(b / 2);
-        if offset % 2 == 0 {
+        if offset.is_multiple_of(2) {
             self.latch = value;
         } else {
             self.regs[idx] = u16::from_le_bytes([self.latch, value]);

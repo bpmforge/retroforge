@@ -408,6 +408,74 @@ majority of games; per-dot upgrade path documented in code).
     and writing the register that triggers it, and confirms the restored
     run copies the same bytes a never-interrupted run does.
 
+### 3.6 Super FX (GSU) — slice 1 of 5
+
+**Super FX / GSU-1/GSU-2 (~10 games, D-014, SRS FR-CORE-040, Wave 18,
+`crates/rf-snes/src/gsu.rs`).** A cartridge-resident 10.74MHz (GSU1) or
+21.4MHz-capable (GSU2) RISC CPU with its own R0-R15 register file, a
+mappable ROM/RAM view, a code cache and a pixel/bitmap-plot unit for
+Mode-7-style raster games — clean-room from fullsnes "SNES Cart GSU-n"
+(NFR-011, no emulator source). Detection (`rf-cart`): chipset $13-$1A
+(coprocessor nibble $1) accepted as `Coprocessor::SuperFx { version,
+ram_kib }`; `version` is GSU1 vs GSU2, picked by fullsnes's own stated
+heuristic ("Games with 2MByte ROM are typically using GSU2") since the
+header carries no field that names it directly — this knowingly
+mis-detects Star Fox 2 (1 MiB, GSU2) as GSU1, exactly as fullsnes's own
+caveat predicts; `ram_kib` comes from the extended header's expansion-RAM
+byte (`$FFBD`-canonical, 3 bytes before the LoROM/HiROM header base this
+project already anchors on), `0` when that header is absent (a real,
+observed shape in this project's own library dumps).
+
+**Slice 1 (this ticket) models only the SNES-side memory map and register
+window — the GSU does not execute.** Shape mirrors SA-1 slice 1 (W17-01):
+`rf-cart` parses the board data, `SnesSystem::load` wires it into a live
+`crate::gsu::GsuState` (a register file plus the cartridge's own RAM
+buffer), and `crate::mapping::gsu_target` is checked by `SnesBus::target`
+before the generic LoROM/HiROM `map` — a GSU cart keeps a plain LoROM
+header (fullsnes: "the cartridge header declares the cartridge as
+LoROM"), so this is a bus-window overlay, not a new `SnesMapMode` (unlike
+SA-1's dedicated map mode $23).
+
+- **Memory map** (fullsnes "SNES Cart GSU-n Memory Map", the GSU2 table
+  used uniformly for both chip versions — GSU1 is the same shape at
+  smaller sizes): register window `$3000-$3FFF` and RAM mirror
+  `$6000-$7FFF`, both in banks `$00-$3F`**and**`$80-$BF`; primary ROM
+  `$8000-$FFFF` in banks `$00-$3F` **only** — fullsnes lists `$80-BF` as a
+  separate, unpopulated "Additional CPU ROM" chip select, so `gsu_target`
+  reports `None` there and lets the ordinary LoROM mirror in the generic
+  `map` answer it instead (the correct behaviour for hardware nothing
+  populates); ROM again, HiROM-style and linear, in banks `$40-$5F`; RAM
+  in banks `$70-$71`.
+- **Register window** (fullsnes "...I/O Map"/"...General I/O
+  Ports"/"...Bitmap I/O Ports"): R0-R15 with the documented even/odd
+  LATCH write protocol (writing R15's MSB also sets GO and starts
+  "execution" — which this slice never actually runs); SFR with bits 1-5
+  (Z/CY/S/OV/GO) SNES-writable and bit 15 (IRQ) cleared on read; PBR
+  (R/W), ROMBR/RAMBR/CBR/VCR (R, GSU-opcode-set only, so they never leave
+  reset this slice), SCBR/SCMR/CLSR/CFGR/BRAMR (W); COLR/POR held for a
+  future opcode slice with no SNES-side address, per fullsnes's own "N/A".
+  Mirrors (`$3020-$302F`, `$3040-$30FF`, `$3300-$34FF`) fold onto the
+  canonical `$3000-$303F` block exactly as fullsnes's own "Full I/O Map
+  with Mirrors for GSU2" table lays out; cache RAM (`$3100-$32FF`) is
+  plain, uninterpreted read/write storage this slice does not execute
+  against.
+- **SCMR RON/RAN ownership** (`$303Ah` bits 3-4): while the GSU owns the
+  ROM or RAM bus, the SNES side's own read of that window returns open
+  bus (`SnesBus::read`/`peek`) rather than the cartridge — fullsnes states
+  the rule ("0=SNES, 1=GSU") but not literally what byte the SNES CPU
+  reads while the GSU holds the bus, so this project's own existing
+  open-bus convention is applied rather than invented a second time.
+- **IRQ**: SFR bit 15 ORs into the 65C816's IRQ input alongside SA-1's
+  `$2209` bit 7 (`SnesSystem::step`) — with no vector-override register
+  (unlike SA-1's `$220E`/`$220F`), a GSU IRQ always dispatches through the
+  ROM's own IRQ vector. Nothing sets the flag this slice (no STOP opcode
+  runs yet); the plumbing is exercised directly by a test-only setter.
+- **What is deliberately NOT modelled yet**: every opcode (W18-02), timing/
+  cycle costs (W18-04), the code/pixel/other caches' actual semantics
+  (W18-02/W18-05), and the bitmap-plot pixel format (W18-05). `Gsu`'s
+  fields for those (COLR, POR, the cache buffer) exist now purely so a
+  later slice does not have to touch this slice's save-state format.
+
 ## 4. Cartridge layer boundary (`rf-cart`)
 
 `rf-cart` owns file parsing (iNES/NES 2.0 incl. submapper/PRG-RAM fields,

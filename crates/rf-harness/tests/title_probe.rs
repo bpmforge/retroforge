@@ -1344,6 +1344,7 @@ fn probe() {
             apu.dsp.dir,
         );
         print_sa1_reg_report(&core);
+        print_gsu_reg_report(&core);
     }
 }
 
@@ -1365,6 +1366,27 @@ fn print_sa1_reg_report(core: &rf_snes::core::SnesCore) {
         println!(
             "    sa1 unknown register writes: {:?}",
             sa1.regs.unknown_write_offsets
+        );
+    }
+}
+
+/// Ticket W18-01: the GSU-register equivalent of `print_sa1_reg_report`
+/// (see `rf_snes::gsu::Gsu::unknown_write_offsets`'s doc). `PROBE_GSUREGS=1`
+/// opts in; silent (and free) for every non-GSU title this probe also runs
+/// against.
+fn print_gsu_reg_report(core: &rf_snes::core::SnesCore) {
+    if std::env::var("PROBE_GSUREGS").is_err() {
+        return;
+    }
+    let Some(gsu) = core.system().bus.gsu.as_ref() else {
+        return;
+    };
+    if gsu.regs.unknown_write_offsets.is_empty() {
+        println!("    gsu unknown register writes: none");
+    } else {
+        println!(
+            "    gsu unknown register writes: {:?}",
+            gsu.regs.unknown_write_offsets
         );
     }
 }
