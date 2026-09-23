@@ -7974,7 +7974,7 @@
   "crate": "rf-nes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-50",
   "title": "NES: Jaleco SS88006 (mapper 18) — 4 titles in the library refused",
