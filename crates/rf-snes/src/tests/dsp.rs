@@ -295,6 +295,10 @@ fn the_noise_lfsr_actually_varies() {
 fn noise_replaces_a_voices_sample_source() {
     let mut aram = vec![0u8; 4096];
     let mut dsp = Dsp::new();
+    // `Dsp::new()` now defaults FLG to hardware's `E0h` reset value (soft
+    // reset + mute + echo-write-disable) — clear it so key-on can
+    // actually be heard.
+    dsp.write_register(0x6C, 0x20, &aram);
     dsp.voices[0].vol_left = 0x7F;
     dsp.voices[0].envelope.gain = 0x7F;
     dsp.voices[0].pitch = 0x1000;
@@ -653,6 +657,10 @@ fn a_directory_entry_past_aram_is_not_a_panic() {
 fn envx_and_outx_are_storage_the_dsp_overwrites_each_sample() {
     let mut dsp = Dsp::new();
     let aram = [0u8; 64];
+    // `Dsp::new()` now defaults FLG to hardware's `E0h` reset value (soft
+    // reset + mute + echo-write-disable) — clear it, or soft reset would
+    // zero the envelope this test sets below on the very first sample.
+    dsp.write_register(0x6C, 0x20, &aram);
 
     // The write sticks and reads straight back.
     dsp.write_register(0x08, 0x88, &aram);
@@ -712,6 +720,130 @@ fn flg_bit_five_disables_echo_writes() {
     assert!(!dsp.echo.write_disabled);
     dsp.write_register(0x6C, 0x20, &aram);
     assert!(dsp.echo.write_disabled);
+}
+
+/// `$6C` FLG bit 6 (mute) silences only the DAC sample; the echo write
+/// still lands in ARAM the same cycle. fullsnes ("SNES APU DSP Control
+/// Registers", `6Ch - FLG`): "6 Mute Amplifier (0=Normal, 1=Mute)
+/// (doesn't stop internal processing)".
+///
+/// **No voice, deliberately** — this drives the echo path directly by
+/// pre-seeding the ARAM the echo ring reads from, which sidesteps BRR
+/// decode, key-on latency and envelope ramp-up entirely (all of them
+/// genuinely fragile to hand-tune, as an earlier version of this test
+/// on a real BRR voice discovered — a hand-set `last_output` happened to
+/// leak through voice 0's `S5`, and a real looping block only ever
+/// produced a brief transient blip rather than a sustained tone, both
+/// found via mutation-testing and neither worth chasing further here).
+/// `ESA`/`EDL` point the ring at `$2000` in an otherwise-empty ARAM;
+/// `FIR7` alone is non-zero so the FIR sum comes ONLY from the freshly
+/// seeded word (`Echo::read_and_filter`'s history starts at all zero);
+/// `EVOL` makes that sum audible and `EFB` makes it feed back into the
+/// write. Three `mix()` calls run in sequence: the first only lets
+/// `ESA`'s cycle-29 latch take effect (`Echo::latch`) and is not asserted
+/// on; the second (unmuted) is checked for audible output and an ARAM
+/// write; the third (muted) is checked for a silent DAC sample with ARAM
+/// still changing.
+#[test]
+fn flg_bit_six_mutes_the_dac_without_stopping_the_echo_write() {
+    let mut aram = vec![0u8; 0x10000]; // a real 64 KiB ARAM — ESA*256 needs room
+                                       // The same loud word ($4000, SAR 1 -> $2000) repeated across the
+                                       // first several ring entries, not just one — the read offset
+                                       // advances by 4 bytes every sample (`Echo::advance`), so a single
+                                       // seeded word would only be under the read head for exactly one of
+                                       // the three samples this test runs.
+    for w in aram[0x2000..0x2020].chunks_exact_mut(2) {
+        w[0] = 0x00;
+        w[1] = 0x40;
+    }
+    let mut dsp = Dsp::new();
+    dsp.write_register(0x6D, 0x20, &aram); // ESA = page $20 ($2000)
+    dsp.write_register(0x7D, 0x01, &aram); // EDL = 1
+    dsp.write_register(0x7F, 0x40, &aram); // FIR7 only, so sum = seed alone
+    dsp.write_register(0x2C, 0x7F, &aram); // EVOLL
+    dsp.write_register(0x3C, 0x7F, &aram); // EVOLR
+    dsp.write_register(0x0D, 0x40, &aram); // EFB, so the write-back is non-zero
+    dsp.write_register(0x6C, 0x00, &aram); // unmuted, echo writes enabled
+
+    dsp.mix(&mut aram); // let the ESA latch (cycle 29) take effect
+
+    // The whole seeded region, not one fixed 4-byte slice: the read/write
+    // offset advances by 4 bytes every sample (`Echo::advance`), so each
+    // of the three `mix()` calls below touches a DIFFERENT 4-byte word
+    // within it.
+    const ECHO: std::ops::Range<usize> = 0x2000..0x2020;
+    let unmuted = dsp.mix(&mut aram);
+    assert_ne!(unmuted, (0, 0), "test setup must be audible before muting");
+    let aram_after_unmuted = aram[ECHO].to_vec();
+    assert_ne!(
+        aram_after_unmuted,
+        vec![0u8; ECHO.len()],
+        "the echo send must have reached ARAM while unmuted"
+    );
+
+    dsp.write_register(0x6C, 0x40, &aram); // mute (bit 6), echo writes still on
+    let muted = dsp.mix(&mut aram);
+    assert_eq!(muted, (0, 0), "FLG.MUTE must zero the DAC sample");
+    assert_ne!(
+        aram[ECHO],
+        aram_after_unmuted[..],
+        "echo write-back must keep running while muted — \
+         fullsnes says mute \"doesn't stop internal processing\""
+    );
+}
+
+/// `$6C` FLG bit 7 (soft reset) forces a voice's envelope to exactly 0
+/// on the very next sample, which plain KOFF does not — KOFF only starts
+/// an 8-per-sample Release decay from wherever the level already was.
+/// fullsnes ("KON/KOFF Notes"): "If FLG bit 7 or the KOFF bit for the
+/// channel is set, transition to the Release state. If FLG bit 7 is set,
+/// also set the envelope to 0."
+#[test]
+fn flg_bit_seven_zeroes_the_envelope_immediately_unlike_koff_alone() {
+    let mut aram = vec![0u8; 64];
+
+    let mut via_koff = Dsp::new();
+    // `Dsp::new()` defaults FLG to `E0h` (soft reset + mute + echo-write
+    // disable all set, matching hardware's power-on value) — clear it
+    // first so this half of the test isolates KOFF from the OTHER new
+    // behaviour this ticket added.
+    via_koff.write_register(0x6C, 0x20, &aram);
+    via_koff.voices[0].envelope.stage = EnvelopeStage::Sustain;
+    via_koff.voices[0].envelope.level = 0x400;
+    // ADSR enabled with sustain_rate 0 ("rate zero never fires" —
+    // `rate_zero_never_fires` above) so the level does not move on its
+    // own before KOFF's forced Release takes over; without this, the
+    // Sustain stage's un-set GAIN byte decodes as Direct(0) and zeroes
+    // the level on the very first sample regardless of KOFF.
+    via_koff.voices[0].envelope.adsr_enabled = true;
+    via_koff.voices[0].envelope.sustain_rate = 0;
+    via_koff.write_register(0x5C, 0x01, &aram); // KOFF voice 0
+    via_koff.mix(&mut aram); // one sample: KOFF polls every OTHER sample
+    via_koff.mix(&mut aram); // ensure the poll has definitely run once
+    assert_eq!(
+        via_koff.voices[0].envelope.stage,
+        EnvelopeStage::Release,
+        "KOFF alone must still enter Release"
+    );
+    assert!(
+        via_koff.voices[0].envelope.level > 0,
+        "KOFF alone must NOT jump straight to 0 — it decays by 8/sample \
+         from {:#X}, got {:#X} after two samples",
+        0x400,
+        via_koff.voices[0].envelope.level
+    );
+
+    let mut via_soft_reset = Dsp::new();
+    via_soft_reset.voices[0].envelope.stage = EnvelopeStage::Sustain;
+    via_soft_reset.voices[0].envelope.level = 0x400;
+    via_soft_reset.voices[0].envelope.adsr_enabled = true;
+    via_soft_reset.voices[0].envelope.sustain_rate = 0;
+    via_soft_reset.write_register(0x6C, 0x80, &aram); // FLG bit 7
+    via_soft_reset.mix(&mut aram);
+    assert_eq!(
+        via_soft_reset.voices[0].envelope.level, 0,
+        "FLG bit 7 must zero the envelope on the very next sample"
+    );
 }
 
 /// The eight FIR coefficients live one per voice row at `$xF`.

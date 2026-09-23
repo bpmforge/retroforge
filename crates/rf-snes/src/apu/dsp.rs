@@ -1120,6 +1120,42 @@ pub struct Dsp {
     koff_internal: u8,
     /// `$6C` FLG bits 0-4 — the noise generator's rate.
     noise_rate: u8,
+    /// `$6C` FLG bit 6 — mute the amplifier.
+    ///
+    /// fullsnes ("SNES APU DSP Control Registers", `6Ch - FLG`): "6 Mute
+    /// Amplifier (0=Normal, 1=Mute) (doesn't stop internal processing)".
+    /// It zeroes only the DAC sample at cycles 26/27 — `acc`, `echo_send`
+    /// and the echo write-back all keep running, which is why a game can
+    /// mute the speaker output and still hear its echo tail resume the
+    /// instant it unmutes.
+    mute: bool,
+    /// `$6C` FLG bit 7 — soft reset.
+    ///
+    /// fullsnes, same register: "7 Soft Reset (0=Normal, 1=KeyOff all
+    /// voices, and set Envelopes=0)", and the "KON/KOFF Notes" section:
+    /// "FLG bit 7, however, is polled every sample and polled for each
+    /// voice... If FLG bit 7 or the KOFF bit for the channel is set,
+    /// transition to the Release state. If FLG bit 7 is set, also set the
+    /// envelope to 0." Unlike `koff_internal` (latched every OTHER
+    /// sample from the CPU-written `$5C`), this is read LIVE every sample
+    /// in `voice_step`'s `S3c` — the register value itself, not a copy
+    /// polled on a delay, which is what "polled every sample" means as
+    /// distinct from KON/KOFF's own polling cadence.
+    ///
+    /// **Missing entirely was a real bug, not a documentation gap** —
+    /// found (register-poke trace of `$F2`/`$F3`, not ROM disassembly,
+    /// NFR-011) while investigating why spc_dsp6.sfc's `Echo/echo calc`
+    /// subtest fails at check `0x0A`: the ROM writes FLG `$E0` (soft
+    /// reset + mute + echo-write-disable all set) between its
+    /// per-channel coefficient sweeps, and this bit combination had NO
+    /// effect at all before this fix. **This did NOT turn out to be
+    /// check `0x0A`'s cause** — a separate trace confirmed `echo_send`
+    /// is exactly zero at every `write_back` call across the whole ROM
+    /// run, before and after this fix, so no voice was ever contributing
+    /// a stray signal for soft reset to have silenced. The gap is real
+    /// and cited regardless (see `docs/TESTING.md` section 5b for the
+    /// full account of what was ruled out and what remains open).
+    soft_reset: bool,
     /// Which of the four samples of the 8 kHz timer period this is.
     sample_in_four: u8,
 }
@@ -1164,6 +1200,11 @@ impl Dsp {
             kon_internal: 0,
             koff_internal: 0,
             noise_rate: 0,
+            // "The initial value on Reset is E0h" — bit 7 (soft reset)
+            // and bit 6 (mute) both set, matching `Echo::write_disabled`
+            // defaulting to `true` for the same byte's bit 5.
+            mute: true,
+            soft_reset: true,
             sample_in_four: 0,
         }
     }
@@ -1281,8 +1322,16 @@ impl Dsp {
                     // which is how a game freezes an echo tail without
                     // clearing it. Bits 0-4 are the noise rate, read
                     // through the same counter table as the envelopes.
+                    // Bit 6 (mute) and bit 7 (soft reset) are decoded here
+                    // too but ACTED ON elsewhere: mute at the DAC stage
+                    // (`Dsp::tick`, cycles 26/27) and soft reset every
+                    // sample in `voice_step`'s `S3c` — see their doc
+                    // comments on the `mute`/`soft_reset` fields for why
+                    // a one-time decode here is not enough for either.
                     self.echo.write_disabled = value & 0x20 != 0;
                     self.noise_rate = value & 0x1F;
+                    self.mute = value & 0x40 != 0;
+                    self.soft_reset = value & 0x80 != 0;
                 }
                 // ENDX: hardware clears every flag on ANY write and
                 // ignores the value, so this must not store `value`.
@@ -1355,10 +1404,23 @@ impl Dsp {
             // drives.
             VStep::S3b => {}
 
-            // S3c: KOFF/KON on the PREVIOUSLY loaded values, then the
-            // envelope and this voice's output.
+            // S3c: FLG.7/KOFF/KON on the PREVIOUSLY loaded values, then
+            // the envelope and this voice's output.
+            //
+            // **FLG bit 7 (soft reset) is read LIVE here, not through
+            // `koff_internal`'s latch.** fullsnes ("KON/KOFF Notes"):
+            // "FLG bit 7, however, is polled every sample and polled for
+            // each voice" — unlike KON/KOFF, which are polled only every
+            // OTHER sample via `kon_internal`/`koff_internal`. "If FLG
+            // bit 7 or the KOFF bit for the channel is set, transition to
+            // the Release state. If FLG bit 7 is set, also set the
+            // envelope to 0" — so soft reset does strictly more than
+            // `key_off` alone (which only changes `stage`, not `level`).
             VStep::S3c => {
-                if self.koff_internal & bit != 0 {
+                if self.soft_reset {
+                    self.voices[v].key_off();
+                    self.voices[v].envelope.level = 0;
+                } else if self.koff_internal & bit != 0 {
                     self.voices[v].key_off();
                 }
                 if self.kon_internal & bit != 0 {
@@ -1495,16 +1557,32 @@ impl Dsp {
             }
             // "Load and apply MVOLL. Load and apply EVOLL. Output the
             // left sample to the DAC. Load and apply EFB."
+            //
+            // FLG bit 6 (mute) zeroes ONLY this DAC sample — fullsnes:
+            // "if FLG.MUTE then sum = 0000h", applied after the MVOL/EVOL
+            // sum quoted on `Dsp::mute`'s doc comment, and "(doesn't stop
+            // internal processing)" on the register description itself.
+            // `acc`/`echo_send`/the echo write-back all still ran this
+            // cycle; only the value that would have reached the speaker
+            // is replaced.
             26 => {
                 let main = (self.acc.0 * i32::from(self.main_vol_left)) >> 7;
                 let echo = i32::from(self.echo.out().0);
-                self.dac.0 = (main + echo).clamp(-0x8000, 0x7FFF) as i16;
+                self.dac.0 = if self.mute {
+                    0
+                } else {
+                    (main + echo).clamp(-0x8000, 0x7FFF) as i16
+                };
             }
             // Same for the right channel, plus PMON.
             27 => {
                 let main = (self.acc.1 * i32::from(self.main_vol_right)) >> 7;
                 let echo = i32::from(self.echo.out().1);
-                self.dac.1 = (main + echo).clamp(-0x8000, 0x7FFF) as i16;
+                self.dac.1 = if self.mute {
+                    0
+                } else {
+                    (main + echo).clamp(-0x8000, 0x7FFF) as i16
+                };
                 out.sample = Some(self.dac);
             }
             // "Load NON, EON, and DIR." Eagerly decoded on write.
@@ -1715,6 +1793,8 @@ impl Dsp {
         o.u8(self.kon_internal)?;
         o.u8(self.koff_internal)?;
         o.u8(self.noise_rate)?;
+        o.bool(self.mute)?;
+        o.bool(self.soft_reset)?;
         o.u8(self.sample_in_four)?;
         o.usize(self.echo.at)?;
         o.i16(self.echo.last_fir.0)?;
@@ -1825,6 +1905,8 @@ impl Dsp {
         self.kon_internal = i.u8()?;
         self.koff_internal = i.u8()?;
         self.noise_rate = i.u8()?;
+        self.mute = i.bool()?;
+        self.soft_reset = i.bool()?;
         self.sample_in_four = i.u8()?;
         self.echo.at = i.usize()?;
         self.echo.last_fir = (i.i16()?, i.i16()?);

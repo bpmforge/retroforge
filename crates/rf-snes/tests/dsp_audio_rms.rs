@@ -108,6 +108,12 @@ fn configure_voice(dsp: &mut Dsp, voice: usize, vol: i8, pitch: u16) {
 fn two_phase_inverted_identical_voices_cancel_exactly() {
     let mut aram = aram_with_sine_block();
     let mut dsp = Dsp::new();
+    // `Dsp::new()` defaults FLG to hardware's `E0h` reset value (soft
+    // reset + mute + echo-write-disable, ticket W7-08 stage 3) — clear
+    // it, or soft reset re-silences both voices every sample and this
+    // oracle would pass VACUOUSLY on all-zero output instead of on a
+    // genuine cancellation.
+    dsp.write_register(0x6C, 0x20, &aram);
     configure_voice(&mut dsp, 1, 100, 0x1000);
     configure_voice(&mut dsp, 2, -100, 0x1000);
     dsp.key_on(0x06);
@@ -141,6 +147,8 @@ fn two_phase_inverted_identical_voices_cancel_exactly() {
 fn detuning_one_voice_breaks_the_exact_cancellation() {
     let mut aram = aram_with_sine_block();
     let mut dsp = Dsp::new();
+    // See the sibling test above for why this write is required now.
+    dsp.write_register(0x6C, 0x20, &aram);
     configure_voice(&mut dsp, 1, 100, 0x1000);
     configure_voice(&mut dsp, 2, -100, 0x1040);
     dsp.key_on(0x06);

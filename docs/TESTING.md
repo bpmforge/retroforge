@@ -659,6 +659,177 @@ posture does not do. `Echo/esa_changes`, `Echo/edl_changes`,
 `Echo/edl_0_quirk`, `Echo/edl_lengths` and `Envelope/envelope_rates` are
 still unreached. W7-08 stays `in_progress`.
 
+### 5b. `Echo/echo calc`'s check `0x0A`, 2026-09-22/23 — one real gap fixed, the check itself not moved
+
+Continuing from 5a via the same method (register-poke trace of `$F2`/
+`$F3`, no ROM disassembly, NFR-011): `Echo/echo calc`'s register writes
+were traced end-to-end (a temporary `RF_DSP_TRACE` env-gated `eprintln!`
+in `Dsp::write_register`/`Dsp::tick`, removed before this commit — the
+method, not the instrumentation, is what stays). The subtest's writes
+decode into TWO byte-identical 9-step sweeps of `FIR0..7`/`EFB` (all-zero,
+all-`08`, a ramp `01..08`, then five single-tap-7 configurations
+including the documented-dangerous `FIR7=-128` and `EFB=-128`), each
+preceded by `KOFF=$FF`, `MVOL`/`EVOL` zeroed, `ESA=$E0`, `EDL=1`, and each
+step bracketed by `FLG=$FF` (mute+echo-write-disable, i.e. "pause") /
+`FLG=$00` (resume) — plus, between the two sweeps only, a `FLG=$E0` write
+(soft reset + mute + echo-write-disable together) held for roughly 4,900
+samples before the second sweep's setup begins. Register-write timestamps
+(sample-tick counts, from the same temporary trace) confirm `EchoVoices`
+(`echo_send`) is **exactly zero at every `write_back` call across the
+entire ROM run** — traced directly, not inferred — which rules out a
+leftover playing voice as check `0x0A`'s cause; with `MVOL`/`EVOL`
+already zero and `EchoVoices` confirmed zero, `echo_input` for the first
+step of each sweep (`FIR=[0]*8`, `EFB=0`) reduces to `0 & 0xFFFE = 0`
+regardless of any FIR/EFB arithmetic detail, so the failure at check
+`0x0A` — the first step of the SECOND sweep, by the checkpoint counter's
+own arithmetic (9 checks in sweep 1, so check 10 = `0x0A` is sweep 2's
+first) — is not an arithmetic bug in `fir_tap`/`write_back` at that
+specific step either. This reads as a contradiction of section 5a's own
+"the check counter is very likely global across every `Echo/*` group" —
+it is not, and the data rules the global reading out rather than merely
+disfavouring it: `wrap_around` and `zero_length` had ALREADY printed as
+completed before the failure ever reached `echo calc`, so a counter
+global across every group encountered so far would have consumed check
+numbers on those two groups BEFORE `echo calc` even began, which makes
+it impossible for `echo calc` to have been failing as low as check
+`0x03` — yet that is exactly where section 5a recorded the pre-fix
+failure. A counter LOCAL to `echo calc`'s own two sweeps is the only
+reading consistent with both observations: sweep 1 is nine
+unmute-and-check steps, so checks 3-9 are the seven 5a already recorded
+as newly passing, and check 10 = `0x0A` is sweep 2's first step — no
+coincidence required, just a local counter starting over at 1.
+
+**A real, separate gap was found and fixed while chasing this**, even
+though it did not move the check: `Dsp::write_register`'s `$6C` (FLG) arm
+decoded only bit 5 (echo-write disable) and bits 0-4 (noise rate). Bits 6
+(Mute Amplifier) and 7 (Soft Reset) had NO implementation at all — not a
+partial one, an absent one — despite the ROM using exactly this
+combination (`FLG=$E0`/`$7F`/`$FF` all carry bit 6 and/or 7) throughout
+`echo calc`'s setup. fullsnes ("SNES APU DSP Control Registers", `6Ch -
+FLG`): "6 Mute Amplifier (0=Normal, 1=Mute) (doesn't stop internal
+processing)" and "7 Soft Reset (0=Normal, 1=KeyOff all voices, and set
+Envelopes=0)"; the "KON/KOFF Notes" section adds that bit 7, unlike
+KON/KOFF, "is polled every sample and polled for each voice" and that
+"If FLG bit 7 or the KOFF bit for the channel is set, transition to the
+Release state. If FLG bit 7 is set, also set the envelope to 0" — strictly
+more than `key_off()` alone, which only changes `stage`. Both are now
+implemented in `crates/rf-snes/src/apu/dsp.rs`: mute zeroes only the DAC
+sample at cycles 26/27 (`acc`/`echo_send`/the echo write-back all keep
+running, per "doesn't stop internal processing"); soft reset is read live
+every sample in `voice_step`'s `S3c` (not latched every-other-sample the
+way `koff_internal` is) and forces both `key_off()` and
+`envelope.level = 0`. `Dsp::new()`'s defaults changed from implicit
+"normal" to `mute: true, soft_reset: true`, matching fullsnes's stated
+`E0h` power-on value (the same byte whose bit 5 already defaulted
+`Echo::write_disabled` to `true`). Two new unit tests in
+`crates/rf-snes/src/tests/dsp.rs`, both **mutation-checked** (reverting
+the fix each pins made the test fail, not just pass on the fix present —
+the discipline section 5a's own fix earned its keep with, applied here
+after one of the two initially did NOT catch its own revert, below):
+`flg_bit_six_mutes_the_dac_without_stopping_the_echo_write` seeds ARAM
+directly at the echo pointer rather than routing through a voice (an
+unmuted sample is audible and reaches ARAM via the echo write-back;
+muting the very next sample zeroes the DAC output while ARAM keeps
+changing), and `flg_bit_seven_zeroes_the_envelope_immediately_unlike_koff_alone`
+(KOFF alone only starts an 8-per-sample Release decay from whatever
+level it found; FLG bit 7 zeroes it on the very next sample).
+
+**Both tests went through a mutation-test failure of their own before
+being trusted.** The mute test's first version hand-set a voice's
+`last_output` right before calling `mix()` rather than deriving it from
+real playback, and passed with the mute check DELETED — voice 0's own
+`S5` (cycle 0 of the schedule) consumed that stale preset value one full
+cycle before `S3c`/`S4` (cycles 30/31) overwrote it with the voice's
+real (silent) state, a coincidence of the schedule rather than a test of
+muting. Replacing the hand-set voice with a real, key-on'd, looping BRR
+block (matching `apu_ports.rs`'s own pattern) did not fix it either — a
+range-10 BRR block's decoded amplitude survives the voice's own `>> 7`
+VOL shift but rounds to zero under a SECOND `>> 7` MVOL shift on top of
+it, and every range in `13..=15` collapses this specific low-nibble
+block toward zero by design (`decode_brr`'s own reserved-range handling,
+section on BRR overflow), so raising the range past 12 made it WORSE,
+not louder; even at range 12 the voice's key-on transient turned out to
+be a brief blip that decayed back to silence within ~15 samples rather
+than a sustained tone, an artifact of the 4-tap Gaussian window filling
+and re-draining around a single edge in the decoded stream, not
+something worth chasing further for this specific gate. The version that
+stayed drives the echo path directly: ARAM is pre-seeded with a loud
+word across several ring entries, `FIR7` alone is non-zero so the sum
+comes only from that seed, and no voice, envelope, or BRR decode is
+involved at all — the smallest test that can still fail the way the
+gate above describes. The KOFF/soft-reset test's own via-KOFF half
+mutation-failed for an unrelated but equally instructive reason on its
+first draft: it forgot to clear `Dsp::new()`'s own new `mute`/
+`soft_reset` defaults before asserting KOFF's GRADUAL decay, so soft
+reset zeroed the envelope on the first sample regardless of what KOFF
+did, making the "KOFF alone must NOT jump straight to 0" assertion fail
+for the wrong reason — caught by running it, not by inspection.
+
+**The new default broke five pre-existing tests, and the suite alone did
+not catch the worst of it.** Any test building a bare `Dsp::new()` and
+expecting it to be immediately playable now got a silently-forced-off
+voice: `noise_replaces_a_voices_sample_source`,
+`envx_and_outx_are_storage_the_dsp_overwrites_each_sample`, and three in
+`apu_ports.rs` (`a_keyed_voice_produces_output_scaled_by_its_volume`,
+`key_on_resets_the_filter_history`, `a_non_looping_sample_stops_at_its_end`)
+went red, which is the easy case — a red test is a test doing its job.
+The dangerous case was `crates/rf-snes/tests/dsp_audio_rms.rs`'s TWO
+criterion-3 oracle tests: `two_phase_inverted_identical_voices_cancel_exactly`
+asserts `|l| <= 1`, which an all-silence DSP satisfies trivially, so this
+regression would have made that oracle pass for the WRONG reason —
+exactly the false-green shape this section already warns about — without
+a single test turning red to announce it. It was caught only because
+`echo_send` had just been traced as exactly zero throughout the ROM run
+(the investigation above) and the audio-RMS file's own two-voice `dsp.mix`
+setup was re-examined against that same fact, not because a red test
+pointed at it. That re-examination also closes the question rather than
+leaving it open: `two_phase_inverted_identical_voices_cancel_exactly`'s
+sibling test, `detuning_one_voice_breaks_the_exact_cancellation`, asserts
+that RMS EXCEEDS a threshold once the two voices are detuned, and that
+assertion still passes after the fix — which is only possible if the
+`Dsp` is genuinely producing sound under this default, so the paired
+near-zero result on the exact-cancellation test is a real cancellation of
+real signal, not a leftover all-silence false-green. All eight now write
+`FLG=$20` before using a voice — `echo::write_disabled` bit 5 stays SET
+(its own pre-existing default), only mute/soft-reset (bits 6/7) are
+cleared. The first attempt used `FLG=$00` and broke three of the eight a
+SECOND, different way: clearing bit 5 too enables echo writes, and with
+`ESA`/`EDL` left at their `Echo::default()` values (base page `$00`), the
+echo write-back (writing zero words, since no `EON` voice feeds it)
+started overwriting the very BRR block at ARAM `$0000` those tests decode
+their voice from — found by `git stash`-diffing the failing tests against
+`main` rather than assumed fixed on the first green run. Two of the eight
+own weaknesses that this session's `FLG=$20` addition does not cure and
+was never meant to: `key_on_resets_the_filter_history` only asserts that
+a re-key reproduces an earlier `first` sample, and
+`a_non_looping_sample_stops_at_its_end` only asserts `(0, 0)` after the
+sample ends — both hold on an all-silence `Dsp` too, a weakness that
+predates this session. The `FLG=$20` write was added to these two purely
+for consistency with the rest of the file's new default, not because it
+makes either assertion meaningfully stronger.
+
+**Named honestly, since this is exactly the false-green shape the
+2026-08-27 correction note warned against:** `cargo test -p rf-snes
+--release --test blargg_spc -- --ignored` prints the *identical*
+`spc_dsp6.sfc` line before and after this fix —
+`Echo/wrap_around Echo/zero_length Echo/echo calc Failed 0A Running
+tests: Echo/basics Echo/esa_changes Echo/edl_changes`. The FLG bits 6/7
+gap is real, cited, and tested, but it is not check `0x0A`'s cause; the
+line only reads "unchanged" because the mute/soft-reset defect it fixes
+never interacted with `EchoVoices` in this subtest (confirmed zero
+throughout, as above). An experiment that also did not move the check,
+tried and reverted rather than kept speculatively: truncating
+`fir_tap`'s tap-7 product to `i16` *before* the final saturating add
+(hypothesising the hardware ALU feeds a pre-wrapped 16-bit term into a
+saturating adder rather than saturating the exact mathematical sum) —
+moot at check `0x0A` specifically since that step's `FIR=[0]*8` makes the
+tap-7 product zero regardless of truncation order, but worth naming as
+ruled out for THIS check rather than silently dropped; it remains an open
+question for the later steps that do exercise `FIR7=-128`/`EFB=-128`,
+which this session did not reach. `Echo/esa_changes`, `Echo/edl_changes`,
+`Echo/edl_0_quirk`, `Echo/edl_lengths` and `Envelope/envelope_rates` are
+still unreached. W7-08 stays `in_progress`.
+
 ## 6. Determinism, state, and mode-invariant suites
 
 | Test | Assertion | SRS |

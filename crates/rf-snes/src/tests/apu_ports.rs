@@ -794,6 +794,10 @@ fn a_keyed_voice_produces_output_scaled_by_its_volume() {
         *b = 0x77;
     }
     let mut dsp = Dsp::new();
+    // `Dsp::new()` now defaults FLG to hardware's `E0h` reset value (soft
+    // reset + mute + echo-write-disable) — clear it, or soft reset would
+    // key this voice back off (and zero its envelope) every sample.
+    dsp.write_register(0x6C, 0x20, &aram);
     dsp.voices[0].start = 0;
     dsp.voices[0].loop_addr = 0;
     dsp.voices[0].vol_left = 0x7F;
@@ -833,6 +837,11 @@ fn key_on_resets_the_filter_history() {
         *b = 0x44;
     }
     let mut dsp = Dsp::new();
+    // `Dsp::new()` now defaults FLG to hardware's `E0h` reset value (soft
+    // reset + mute + echo-write-disable) — clear it, or soft reset would
+    // key this voice back off every sample, making the test pass
+    // vacuously on all-silence rather than on a reproduced sample.
+    dsp.write_register(0x6C, 0x20, &aram);
     dsp.voices[0].vol_left = 0x7F;
     dsp.voices[0].envelope.gain = 0x7F;
     dsp.voices[0].pitch = 0x1000;
@@ -859,6 +868,11 @@ fn a_non_looping_sample_stops_at_its_end() {
         *b = 0x33;
     }
     let mut dsp = Dsp::new();
+    // `Dsp::new()` now defaults FLG to hardware's `E0h` reset value (soft
+    // reset + mute + echo-write-disable) — clear it so the trailing
+    // `(0, 0)` below is because the sample ended, not because soft reset
+    // silenced the voice from the very first sample.
+    dsp.write_register(0x6C, 0x20, &aram);
     dsp.voices[0].vol_left = 0x7F;
     dsp.voices[0].envelope.gain = 0x7F;
     dsp.voices[0].pitch = 0x1000;
