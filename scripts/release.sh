@@ -109,7 +109,7 @@ echo "release: building host artifacts for $host..." >&2
 # `cargo test --workspace` needs no ALSA/udev headers on Linux); a release built
 # without them is silent and pad-less, which is how the 2026-09-17 m4max build
 # shipped with no sound.
-cargo build --release -p retroforge -p retroforge-tool --features retroforge/audio,retroforge/gamepad
+cargo build --release -p retroforge -p retroforge-tool --features retroforge/audio,retroforge/gamepad,retroforge/metalfx
 for bin in retroforge retroforge-tool; do
   if [ -f "$repo_root/target/release/$bin" ]; then
     cp "$repo_root/target/release/$bin" "$artifact_dir/$bin-$host"
