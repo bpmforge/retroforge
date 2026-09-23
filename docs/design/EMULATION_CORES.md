@@ -852,11 +852,12 @@ docs/TESTING.md's own W18-06 section.**
   title, and the experiment to force GSU2 and re-check was not run given
   that absence of evidence.
 - **Census, unchanged** (RELEASE, `boot_census_child` run individually
-  against Vortex, Star Fox 2, and all five canaries — Star Fox, Yoshi's
-  Island, Doom, Super Mario World, Wild Guns): Vortex and Star Fox 2 both
-  exit `10` (rendered a uniform screen); all five canaries exit `0`
-  (rendered something) — no regression, matching the pre-session state
-  exactly (this ticket shipped no production change).
+  against all 15 of W18-05's own tracked GSU archives, direct against the
+  `.zip` files, plus all five canaries — 20 titles): every bucket matches
+  W18-05's own recorded `1101/44/120/0/0` table exactly — no regression,
+  matching the pre-session state exactly (this ticket shipped no
+  production change). Full per-title exit codes: docs/TESTING.md's own
+  W18-06 section.
 
 ## 4. Cartridge layer boundary (`rf-cart`)
 

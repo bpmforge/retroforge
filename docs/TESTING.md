@@ -8745,11 +8745,26 @@ delayed: grepping the full write log for a second pass over
 `$6000-$7FFF` after RAN clears (thousands of `SCMR=$00` writes follow)
 finds zero re-writes of that range — only unrelated addresses
 (`$7D50`,`$73A5`,`$7395`,...) appear afterward. **The named cell and both
-values**: GSU RAM offset `$0000` (and the other 8,191 bytes of the same
-block) — SNES wrote `$85` (first byte of the descending sweep, at
-`$00:7FFF`) through `$85` (last byte, at `$00:6000`); the GSU's own
-`LMS Rn,(kk)` reads in the spin loop see `$00` (RAM's zero-initialized
-default) at those same offsets, because the write never landed.
+values**: GSU RAM offset `$0000` — the SNES's own store there (the
+sweep's LAST write, since the sweep runs `$00:7FFF` down to `$00:6000`)
+carried `$85`; a RAM dump at spin entry (`gsu.ram[0..0x200]`, via a
+second temporary hook, also removed before this commit) measured the
+value actually there as `$90`, not `$85` and not RAM's `$00`
+zero-initialized default — meaning the GSU's own subsequent execution
+(173M+ instructions of an active `go=true` run, much of it `SBK`/store
+opcodes) has already overwritten that cell by the time of the dump, so
+this specific offset's CURRENT value does not, by itself, prove which
+byte the spin loop's own read instruction saw. What IS directly measured
+and load-bearing is upstream of that ambiguity: the SNES wrote `$85` to
+offset `$0000` and it never landed (confirmed by the `ran=true` trace
+entry for that exact write) — the GSU's decompression/setup logic was
+built expecting that byte and 8,191 others like it to be present in RAM
+before its first opcode ever runs, and instead found RAM's zero-init
+default, before whatever it wrote there itself during its own run makes
+the offset's value ambiguous in hindsight. The dump (`90FF0000...`
+for offsets `$0000-$001F`, mostly zero from `$0020` on with scattered
+non-zero cells further in) is reported as measured evidence, not
+over-claimed as isolating one single read.
 
 **A candidate fix was written, tested, and explicitly REVERTED** after
 an advisor review caught a direct conflict with a pinned acceptance
@@ -8871,13 +8886,21 @@ commit and repeated here per the setup instructions rather than
 resolved unilaterally.
 
 **Census children** (RELEASE, `boot_census_child` run individually
-against the newest `boot_census` binary — `RF_CENSUS_ROM` per title,
-exit code as the bucket): Vortex exit `10` (rendered a uniform screen);
-Star Fox 2 (Classic Mini/Switch Online) exit `10`; the five canaries —
-Star Fox (USA), Super Mario World 2: Yoshi's Island (USA), Doom (USA),
-Super Mario World (USA), Wild Guns (USA) — all exit `0` (rendered
-something). No regression: this ticket shipped zero production changes,
-so every bucket matches the pre-session state exactly.
+against the newest `boot_census` binary — `RF_CENSUS_ROM` per archive,
+exit code as the bucket, run directly against the `.zip` files in
+`~/Games/Roms/snes`, no unzipping needed): all 15 of W18-05's own
+tracked GSU archives plus the 5 canaries, 20 titles total — Star Fox
+(USA)/(Rev 1)/(Rev 2) exit `0`; Star Fox 2 (Classic Mini/Switch Online)
+exit `10`; the three Star Fox 2 betas exit `12` (refused, non-canonical
+header); Super Star Fox Weekend exit `10`; Vortex exit `10`; Dirt Trax
+FX exit `0`; Doom exit `0`; Stunt Race FX (Rev 1) exit `0`; Yoshi's
+Island/(Rev 1) exit `0`; Tommy Moe's Winter Extreme exit `0`; the five
+canaries (Star Fox (USA), Super Mario World 2: Yoshi's Island (USA),
+Doom (USA), Super Mario World (USA), Wild Guns (USA) — the last two
+already counted above/among the fifteen where they overlap) all exit
+`0`. Every bucket matches W18-05's own recorded `1101/44/120/0/0`
+per-title table exactly — no regression, matching this ticket's zero
+production changes.
 
 **First varied frame** (`PROBE_MODE=frames PROBE_FRAMES=1800
 PROBE_GSUREGS=1`, run against the unmodified baseline after the
@@ -8892,7 +8915,7 @@ began, confirming no drift from tracing/reverting.
 wording ("a BLOCKED verdict must reach ROM bytes or a checked register/
 RAM value"): Vortex's verdict reaches a checked RAM value (GSU RAM
 offset `$0000`, SNES wrote `$85`, GSU reads `$00`) and ROM bytes (the
-`$06:0090-$060B0` cache-fill window, verified byte-exact against the raw
+`$06:0090-$06:00B0` cache-fill window, verified byte-exact against the raw
 file); Star Fox 2's verdict reaches a checked register value (SFR high
 byte read only 8 times total, `go=false` for the remaining
 30,000,000-instruction span) though not yet a single named cell for the
