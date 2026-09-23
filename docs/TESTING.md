@@ -7079,3 +7079,91 @@ follow-up was filed to fix. The raster/IRQ family itself (Final Fight 2,
 Battletoads) remains BLOCKED exactly as W14-47 left it — this follow-up
 touched only the enable-edge rule, which never explained either title
 and is now gone.
+
+## W14-50 — Jaleco SS88006 (mapper 18): 4 titles in the library refused (2026-09-22)
+
+Register model implemented per
+[nesdev.org/wiki/INES_Mapper_018](https://www.nesdev.org/wiki/INES_Mapper_018)
+in `crates/rf-nes/src/mappers/jaleco_ss88006.rs` (`Ss88006`) — see that
+module's doc for the full register table with citations, quoted verbatim
+from the page's own ASCII bit diagrams and Disch's notes (fetched raw via
+`curl`, not summarized, after an intermediate paraphrase mis-stated the
+`$F001` bit order and was caught by cross-checking against Disch's worked
+`$1232` example before any code was written).
+
+Three 8 KiB PRG windows (`$8000-$9FFF`/`$A000-$BFFF`/`$C000-$DFFF`) and
+eight 1 KiB CHR windows, each selected by a low/high-nibble register pair
+decoded on `addr & 0xF003` (the page's own "Range,Mask" note — address
+bits outside that mask mirror the canonical register, pinned by a unit
+test); `$E000-$FFFF` fixed to the last PRG bank. The IRQ counter is one
+`u16` clocked every CPU cycle via `Mapper::tick_cpu_cycles` (the same seam
+FME-7/RAMBO-1 added, ticket W14-14); `$F001`'s three size-select bits
+(priority F > E > T, "F overrides E overrides T") mask the counter to its
+low 4/8/12/16 bits, wrapping only within that width and leaving the
+untouched high bits alone — pinned against Disch's own `$1232`-in-4-bit-mode
+worked example. `$F000`/`$F001` both acknowledge the IRQ; `$F000` always
+reloads the full 16 bits regardless of the size select. `$F002` mirroring
+(0 horizontal, 1 vertical, 2 1ScA, 3 1ScB — note bits 0/1 are the opposite
+sense from FME-7's own mirroring register). `$9002` PRG RAM chip-enable
+(bit 0) and write-allow (bit 1) gate `Mapper::prg_ram_write_enabled`,
+power-on-disabled like MMC5/MMC3's own precedent in this crate. `$F003`
+expansion ADPCM sound is decoded (so no write is misrouted) but produces
+no audio — out of scope per this ticket's acceptance; none of the 4
+titles in this ticket's library use the sound IC.
+
+Added to both mapper gates in the same commit (`rf_cart::nes::
+SUPPORTED_MAPPERS` and `rf_nes::system::cartridge::EMULATED_MAPPERS`) and
+wired into `NesBus::new`'s dispatch — the exact three-place shape ticket
+W7-11's note warns is easy to leave out of sync.
+
+**Unit tests**, one block per register group (9 tests, all in
+`jaleco_ss88006.rs`): PRG window switching + fixed last bank; the
+`$F003`-mask address mirroring; all 8 CHR pairs fill low-to-high; `$F002`'s
+4-way mirroring table; PRG RAM needing both `$9002` bits; the 4-bit-mode
+wrap pinned to Disch's `$1232` example; 12-bit/8-bit priority selection;
+16-bit mode plus counting-disabled no-op (mirrors FME-7's own IRQ test
+shape); `$F000`'s full-width reload-and-acknowledge regardless of size
+select.
+
+**4 archives** tallied 2026-09-22 by a 10-line python header scan of
+`~/Games/Roms/nes` (iNES bytes 6/7 -> mapper 18), not the census, per this
+ticket's plan.json note: `Pizza Pop! (USA, Europe) (Broke Studio)`, `USA
+Ice Hockey in FC (Japan)`, `Ninja JaJaMaru - The Legend of the Golden
+Castle (USA, Europe) (Ninja JaJaMaru Retro Collection) (Switch)`, `Ninja
+JaJaMaru - Operation Milky Way (USA, Europe) (Ninja JaJaMaru Retro
+Collection) (Switch)`.
+
+### Gate
+
+`cargo fmt --check` clean; `cargo clippy --workspace -- -D warnings`
+clean; `cargo test -p rf-nes -p rf-cart` — **369 passed**, 0 failed, 0
+ignored (rf-nes) plus rf-cart's own suite, all green (9 of the 369 are
+this ticket's new `jaleco_ss88006` tests). Ignored NES suites: mapper-28
+`action53_fixture_passes_the_6000_protocol` — pass (fixture rebuilt from
+`fixtures/nes/action53/build`, copied into this worktree).
+`rf_scroller_replay`'s 5-minute replay was started (debug build, RF-L-09
+caution — no other code in this crate's hot paths changed) but not
+finished: it was still running well past its expected wall-clock budget
+when this session's monitor could not be delivered a completion signal,
+and it was killed rather than left unattended. **Not run**:
+`rf_scroller_replay`, `rf_scroller_split_timing`, `alter_ego_replay` —
+none of this ticket's changes touch the NES CPU/PPU/APU core or the
+`rf-harness` replay fixtures themselves (only a new mapper module plus
+the two allow-lists and one dispatch arm), so the risk this leaves
+uncovered is low, but it is an honest gap, not a pass. `scripts/
+validate-arch.sh` — `arch OK`.
+
+**Census children** (`boot_census_child`, release build, exit 0 =
+rendered), each mapper-18 archive individually plus this ticket's four
+canaries: `Pizza Pop!` — **0**, `USA Ice Hockey in FC` — **0**, `Ninja
+JaJaMaru - The Legend of the Golden Castle` — **0**, `Ninja JaJaMaru -
+Operation Milky Way` — **0**; canaries `Super Mario Bros. 3 (USA)` — **0**,
+`Castlevania III - Dracula's Curse (USA)` — **0**, `Kirby's Adventure
+(USA)` — **0**, `Uncharted Waters (USA)` — **0** (all eight unmoved/newly
+rendered, none refused/blank/crashed/timed out). Full NES census re-run
+left to the orchestrator (`RF_CENSUS_OUT`); this ticket does not update
+the `boot_census` table above.
+
+No ROM bytes or copyrighted titles entered engine code (only Broke
+Studio's homebrew `Pizza Pop!` and title strings, in this doc and the
+mapper's own module doc, name a real cartridge).

@@ -26,7 +26,7 @@ const CHR_BANK: usize = 8 * 1024;
 /// (2026-09-15) bucketed all 223 refusals by mapper number, and these four
 /// were the largest buckets at 54, 17, 28 and 17 games — 116 between them.
 const SUPPORTED_MAPPERS: &[u16] = &[
-    0, 1, 2, 3, 4, 5, 7, 9, 11, 28, 34, 64, 66, 69, 71, 79, 87, 118, 144, 148, 206, 232,
+    0, 1, 2, 3, 4, 5, 7, 9, 11, 18, 28, 34, 64, 66, 69, 71, 79, 87, 118, 144, 148, 206, 232,
 ];
 
 /// A handful of well-known mapper names, used only to make an
@@ -46,6 +46,7 @@ fn mapper_name(id: u16) -> Option<&'static str> {
         10 => "MMC4 / FxROM",
         11 => "Color Dreams",
         16 => "Bandai FCG",
+        18 => "Jaleco SS88006",
         19 => "Namco 129/163",
         21 | 22 | 23 | 25 => "VRC2/VRC4",
         24 | 26 => "VRC6",

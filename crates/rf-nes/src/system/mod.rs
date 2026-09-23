@@ -110,7 +110,7 @@ use crate::apu::Apu;
 use crate::cpu::CpuBus;
 use crate::mappers::{
     Action53, AxRom, Bnrom, Camerica, Cnrom, ColorDreams, DxRom, Fme7, GxRom, JalecoJf, Mapper,
-    Mmc1, Mmc2, Mmc3, Mmc3Revision, Mmc5, Nina, Nrom, Quattro, Rambo1, Sachen, UxRom,
+    Mmc1, Mmc2, Mmc3, Mmc3Revision, Mmc5, Nina, Nrom, Quattro, Rambo1, Sachen, Ss88006, UxRom,
 };
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
@@ -287,6 +287,12 @@ impl NesBus {
                 rom.chr_rom().to_vec(),
                 rom.chr_is_ram(),
                 rom.header().mirroring,
+            )),
+            // Ticket W14-50.
+            18 => Box::new(Ss88006::new(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+                rom.chr_is_ram(),
             )),
             87 => Box::new(JalecoJf::new(
                 rom.prg_rom().to_vec(),
