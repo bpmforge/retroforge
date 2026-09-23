@@ -4015,7 +4015,7 @@
    "W7-08 UNBLOCKED 2026-09-22 by Brad (D-015): W7-18 (per-access SPC700 timing) closed 2026-09-04, so the named blocker is gone; the audio RMS oracle against a designated SPC set is the acceptance; W7-17 owns the known-red spc_dsp6 ROM and stays as is. Blackthorne x3 (ENVX poller, W14-46) are the census titles that depend on this."
   ],
   "points": 8,
-  "status": "todo",
+  "status": "in_progress",
   "stories": []
  },
   {
