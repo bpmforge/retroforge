@@ -8303,6 +8303,58 @@
   "notes": [
    "W14-57 FILED 2026-09-23 by the orchestrator from the post-W14-56 refused list (24): a per-title `Cartridge::load` error dump showed `implausible SNES size exponent` for 9 archives and `unrecognized coprocessor (SNES chipset $7F)` for 2. The scored path decodes FFD7h/FFD8h through `kb_pow2` with `?` (snes.rs ~1239-1240) while the fallback path clamps (~940-952). Remaining refusals after this: 5 Super Game Boy (needs a GB core), Top Gear 3000 (DSP-4, undocumented), Porky Pig Beta (SPC7110 nibble on a 2034 KiB odd-size dump — likely a bad dump), Super Noah's Ark 3D (chipset $0A read as DSP; unlicensed, one-off), ESPN [b] / Eurit (no header, no prologue — dead dumps), Super 8 / Tri-Star (8 KiB, truncated), the bare ST010 chip dump."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-nes",
+  "depends_on": [
+   "W14-50"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-58",
+  "title": "NES: TQROM (mapper 119, 3 retail titles refused) — CHR-RAM pages mixed into the MMC3 CHR window via a write-back hook; plus mapper 47 (MMC3 2-in-1 outer bank, 1 title)",
+  "write_scope": [
+   "crates/rf-nes/**",
+   "crates/rf-cart/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-58 design: the push/materialize CHR design (mappers/mod.rs module doc) gains the inverse hook it lacks — before NesBus re-materializes a mapper's CHR window after a $8000-$FFFF write, it hands the PPU's current 8 KiB CHR buffer back to the mapper (`Mapper::chr_window_writeback(&mut self, ppu_chr: &[u8])`, default no-op) so pages the mapper had mapped to CHR-RAM keep the PPU's writes; the PPU's CHR-write path honours a per-1 KiB writable mask pushed with the window (ROM pages ignore writes, RAM pages take them) instead of the all-or-nothing chr_is_ram flag. Save/load state round-trips a TQROM image mid-frame deterministically (test: write to a RAM page, bank-switch, save, load, read back).",
+   "W14-58 mapper 119 per nesdev.org/wiki/INES_Mapper_119 (TQROM): CHR bank registers select 1 KiB pages where bit 6 set = 8 KiB CHR-RAM page (bits 0-2), bit 6 clear = CHR-ROM page (bits 0-5, 64 KiB max); everything else is MMC3 (PRG, IRQ, mirroring). Added to SUPPORTED_MAPPERS and the NesBus dispatch. Unit tests: a mixed window materializes ROM and RAM pages side by side; a PPU write to a RAM page survives a bank switch and re-select; a PPU write to a ROM page is ignored.",
+   "W14-58 mapper 47 per nesdev.org/wiki/INES_Mapper_047: $6000-$7FFF write bit 0 selects the 128 KiB PRG / 128 KiB CHR outer bank, MMC3 inner; PRG-RAM absent. Unit test: outer bank select changes which half of PRG/CHR the MMC3 registers address.",
+   "W14-58: the 3 TQROM archives and the mapper 47 archive load and render in the orchestrator's census; canaries (Super Mario Bros. 3, Kirby's Adventure, Mega Man 3, Punch-Out!!) unmoved; mmc3_test_2 + the MMC3 IRQ ignored suites still green; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; no ROM bytes in git"
+  ],
+  "notes": [
+   "W14-58 FILED 2026-09-23 by the orchestrator from the post-W14-50 NES refused list (49): every refusal is a named mapper or NES 2.0 exponent notation. TQROM was left out of W14-05 on purpose (STATUS 2026-09-17: the push design cannot round-trip CHR-RAM pages); this ticket adds the write-back half. Mapper 47 rides along as the other MMC3 variant in the library (Super Spike V'Ball + Nintendo World Cup)."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-nes",
+  "depends_on": [
+   "W14-50"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-59",
+  "title": "NES: CPROM (mapper 13, Videomation x2), UNROM 512 (mapper 30, 1 title), and NES 2.0 exponent-multiplier ROM sizes (2 archives refused at the header)",
+  "write_scope": [
+   "crates/rf-nes/**",
+   "crates/rf-cart/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-59 mapper 13 per nesdev.org/wiki/CPROM: 16 KiB CHR-RAM in two 4 KiB halves, $0000-$0FFF fixed to the first, $1000-$1FFF selected by bits 0-1 of any $8000-$FFFF write; PRG 32 KiB fixed. The CHR-RAM lives in the mapper and reaches the PPU through the existing window push plus the write-back hook if W14-58 has landed, otherwise through a self-contained write-through (say which in the write-up). Unit tests: bank select swaps the upper 4 KiB; a write to CHR-RAM in the upper half survives a bank switch and re-select.",
+   "W14-59 mapper 30 per nesdev.org/wiki/UNROM_512: $8000-$FFFF write selects a 16 KiB PRG bank (bits 0-4, 512 KiB max) and an 8 KiB CHR-RAM bank (bits 5-6, 32 KiB), bit 7 one-screen mirroring select when the header's mirroring flag names it; NES 2.0 submapper 1 (no bus conflicts) honoured, submapper 0 bus conflicts NOT modelled (nesdev: games work around it) and said so; the flash-write self-programming mode is out of scope and named. Added to SUPPORTED_MAPPERS and dispatch. Unit tests: PRG and CHR bank select, mirroring select.",
+   "W14-59 NES 2.0 exponent-multiplier notation per nesdev.org/wiki/NES_2.0#PRG-ROM_Area (\"if the MSB nibble is $F, the size is 2^E * (MM*2+1) bytes\" with E in bits 2-7 and MM in bits 0-1 of the LSB byte) decoded in rf-cart's NES header parser instead of refused; a size above 64 MiB is still refused with a named error (allocation guard). The existing `nes2_exponent_notation_is_reported_not_panicked` test is rewritten to assert the decoded size. Both refused archives (Magi Cube (Proto), [BIOS] Demo Vision) load in the orchestrator's census, or the write-up names why not.",
+   "W14-59: gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; no ROM bytes in git; the orchestrator's full census names every moved title"
+  ],
+  "notes": [
+   "W14-59 FILED 2026-09-23 by the orchestrator from the post-W14-50 NES refused list (49). Remaining refused after W14-58/W14-59: Racermate 168 x6, Action 52/Cheetahmen 228 x4, mapper 268 x6 and 446 x4 (modern re-release boards), Maxi 15 234 x2, Buzz & Waldog/Street Hero 156 x2, and singletons (41, 46, 68, 75 VRC1, 81, 86, 105 NWC, 158, 173, 19 Namco 163, 290, 389, 470, 487, 493, 555) — each its own ticket if ever wanted."
+  ]
  }
 ]
 }
