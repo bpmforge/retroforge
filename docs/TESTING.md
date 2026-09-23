@@ -596,6 +596,69 @@ waiver reopens red; a red row with no open ticket fails the report step
 (suite→FR→ticket mapping is a lookup from the tables above, never a
 judgment call).
 
+### 5a. `spc_dsp6.sfc`'s Echo sub-tests (W7-08, ongoing — not gated)
+
+`crates/rf-snes/tests/blargg_spc.rs`'s `spc_dsp6_and_spc_smp_report_status`
+is reporting-only (see its doc comment), so this ROM's per-subtest
+progress is tracked here rather than in a `#[test]` assertion. blargg's
+`spc_dsp6.sfc` runs its `Echo` group's sub-tests in order and prints
+`Failed NN` (a running, per-ROM check count, hex) at the first individual
+comparison that mismatches; unlike the `$6000` protocol there is no
+per-subtest "Passed" banner visible in the captured 32x32 text console
+(it uses hardware scroll, so a raw top-to-bottom VRAM raster does not
+match display order — confirmed by checkpointing the screen at 100K-
+instruction intervals and watching which line appears first, not by
+assumption).
+
+**2026-09-22, this session — one real bug found and fixed, verified
+against fullsnes (clean-room, NFR-011: text transcribed, no emulator
+source read):**
+
+- **Before:** `Echo/wrap_around Echo/zero_length Echo/echo calc Failed 03
+  Running tests: Echo/basics Echo/esa_changes Echo/edl_changes`
+- **After:** `Echo/wrap_around Echo/zero_length Echo/echo calc Failed 0A
+  Running tests: Echo/basics Echo/esa_changes Echo/edl_changes`
+
+The check count moved from 3 to 10 (hex `0A`) — seven more individual
+`Echo/echo calc` comparisons now pass. **The bug:** the echo buffer's
+16-bit ARAM word was fed straight into the FIR delay line, and the
+`AND FFFEh` (bit-0-clear) mask was applied to the FIR `sum` rather than
+to the write-back value. fullsnes ("SNES APU DSP", `xFh - FIRx`) documents
+these as two separate steps on two separate quantities:
+
+```text
+buf[(i-0) AND 7] = EchoRAM[addr] SAR 1      ; halve on READ, before the FIR
+...
+echo_input = EchoVoices + ((sum*EFB) SAR 7) ; sum is used AS-IS for audio_output
+echo_input = echo_input AND FFFEh           ; the mask belongs HERE, on echo_input
+```
+
+Fixed in `crates/rf-snes/src/apu/dsp.rs`: `Echo::read_and_filter` now
+applies the `SAR 1` (Rust's `>>` on `i16` is already arithmetic) to each
+16-bit word read out of ARAM before it enters the FIR history; the
+`AND FFFEh` mask moved from `Echo::fir_tap`'s return value to
+`Echo::write_back`'s write. Two new unit tests pin the mechanism and are
+mutation-checked against each other — one asserts the FIR `sum` computed
+from a raw stored word of `6` is the SAR-1-halved `3` (an odd, unmasked
+result), the other asserts an odd `echo_input` (`dry=1`, `feedback=0`) is
+written back as the even `0`. Reverting either half of the fix fails its
+own test without needing the ROM.
+
+**What remains, honestly:** `Echo/echo calc` still fails, now at a later
+individual check. The subtest sweeps roughly nine FIR/EFB coefficient
+configurations twice (once per stereo channel, per fullsnes's "filtered
+separately \[per channel\], but with identical coefficients"), and which
+specific configuration corresponds to check `0x0A` was not isolated —
+the check counter is very likely global across every `Echo/*` group
+encountered so far (not reset per subtest), so mapping a check number to
+a coefficient combination needs either a global count of every prior
+group's checks or reading the ROM's own comparison logic, and the latter
+crosses from observing register-level effects (used throughout this
+diagnosis) into reading blargg's code, which this ticket's NFR-011
+posture does not do. `Echo/esa_changes`, `Echo/edl_changes`,
+`Echo/edl_0_quirk`, `Echo/edl_lengths` and `Envelope/envelope_rates` are
+still unreached. W7-08 stays `in_progress`.
+
 ## 6. Determinism, state, and mode-invariant suites
 
 | Test | Assertion | SRS |

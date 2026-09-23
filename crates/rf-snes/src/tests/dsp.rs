@@ -2,8 +2,8 @@
 //! modulation (ticket W7-08).
 
 use crate::apu::dsp::{
-    counter_fires, decode_brr, gaussian, Dsp, Echo, Envelope, EnvelopeStage, Noise, COUNTER_MAX,
-    COUNTER_RATES, GAUSS, LOOP_CYCLES,
+    counter_fires, decode_brr, gaussian, Dsp, Echo, EchoChannel, Envelope, EnvelopeStage, Noise,
+    COUNTER_MAX, COUNTER_RATES, GAUSS, LOOP_CYCLES,
 };
 use crate::apu::Apu;
 
@@ -362,6 +362,61 @@ fn the_echo_buffer_lives_in_aram_at_esa() {
     assert!(
         aram[..0x1000].iter().all(|&b| b == 0),
         "and must not touch memory below it"
+    );
+}
+
+/// **The echo buffer's 16-bit word is halved (`SAR 1`) before the FIR
+/// sees it.** fullsnes ("SNES APU DSP", `xFh - FIRx`): "buf[(i-0) AND 7]
+/// = EchoRAM[addr] SAR 1 ;-input 15bit from Echo RAM" — the buffer stores
+/// a 15-bit sample with bit 0 always zero (`6Dh - ESA`'s byte layout:
+/// "Byte 0: Lower 7bit of Left sample (stored in bit1-7) (bit0=unused/
+/// zero)"), and this is what turns that stored word back into the value
+/// the FIR taps operate on.
+///
+/// This was missing entirely (ticket W7-08 stage 2, spc_dsp6.sfc's
+/// `Echo/echo calc` subtest) — the FIR ran on the raw 16-bit word, so
+/// every echo round-trip was twice as loud as hardware. With `fir =
+/// [0,0,0,0,0,0,0,64]` (`FIR7 = 0x40`, an exact `>>6` divide-by-1 tap)
+/// and a raw stored word of `6`, the documented pipeline is
+/// `(6 SAR 1) * 0x40 SAR 6 = 3 * 64 / 64 = 3` — an ODD result, which
+/// also proves this sum is not itself bit-0-masked (see the companion
+/// test on `write_back`).
+#[test]
+fn echo_read_applies_the_documented_sar_one_before_the_fir() {
+    let mut aram = vec![0u8; 8192];
+    let mut e = Echo::default();
+    e.base_page = 0x10; // ESA -> $1000
+    e.fir = [0, 0, 0, 0, 0, 0, 0, 64];
+    aram[0x1000] = 0x06; // raw stored word = 6, little-endian
+    aram[0x1001] = 0x00;
+    e.latch();
+    let (sum_left, _sum_right) = e.read_and_filter(&aram);
+    assert_eq!(
+        sum_left, 3,
+        "FIR sum must be computed from the SAR-1-halved sample (6 -> 3), not the raw word (6)"
+    );
+}
+
+/// **The `AND FFFEh` mask belongs on the echo write-back value
+/// (`echo_input`), not on the FIR `sum`.** fullsnes: `echo_input =
+/// EchoVoices + ((sum*EFB) SAR 7)` then `echo_input = echo_input AND
+/// FFFEh` — two separate quantities, only the second of which is masked.
+///
+/// With `feedback = 0`, `echo_input` reduces to `dry` alone: an odd
+/// `dry` of `1` must be written back as the even `0`, proving the mask
+/// runs on the write-back path (companion to the read-side test above,
+/// which proves the FIR `sum` itself is allowed to stay odd).
+#[test]
+fn echo_write_back_masks_bit_zero_not_the_fir_sum() {
+    let mut aram = vec![0u8; 16];
+    let mut e = Echo::default();
+    e.write_disabled = false;
+    e.feedback = 0;
+    e.write_back(&mut aram, 1, EchoChannel::Left);
+    let written = i16::from_le_bytes([aram[0], aram[1]]);
+    assert_eq!(
+        written, 0,
+        "an odd echo_input (dry=1, feedback=0) must be masked to even on write-back"
     );
 }
 
