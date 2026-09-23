@@ -4216,3 +4216,32 @@ stories, 10 decisions).
   **1182/59/24**: F1-ROC II and The Lion King (Beta 3) up, nothing down.
   Gate at the W14-56 merge: workspace **2415 passing / 0 failed / 43
   ignored** incl. the 65816 vector suite, clippy clean, arch OK.
+
+- **W14-57, W14-58, W14-59 — SNES refused falls to 13, NES refused to
+  40; every remaining refusal is named** (2026-09-23). A per-archive
+  dump of `Cartridge::load` errors over the SNES refused list showed nine
+  carts dying on an implausible ROM/RAM size byte at a header location
+  plausibility scoring had ACCEPTED (the fallback path already clamped
+  those bytes; the scored path did not) and two on chipset $7F, a
+  coprocessor nibble fullsnes never assigns. W14-57 clamps on the scored
+  path and lets unassigned nibbles fall to no coprocessor; chips fullsnes
+  names but this build lacks stay refused by name. On the NES side all
+  49 refusals were unsupported mappers or NES 2.0 exponent-notation
+  sizes. W14-58 adds TQROM (mapper 119) and mapper 47 by giving the
+  push/materialize CHR design the half it lacked: `Mapper::chr_window_
+  writeback` hands the PPU's CHR bytes back to the mapper before every
+  re-materialize, and a per-1 KiB writable mask travels with the window
+  so ROM pages ignore writes. W14-59 adds CPROM (13), UNROM 512 (30) and
+  the exponent-multiplier decode. The two NES lanes, working blind to
+  each other, built two write-back hooks; a third lane reconciled them
+  onto W14-58's, and in doing so found CPROM's original fold dropped
+  lower-half writes and that the two halves can alias one page. Census
+  SNES 1182/59/24 -> **1192/60/13** (ten render, Picachu pirate loads
+  uniform), NES 1226/6/49 -> **1234/7/40** (eight render, Magi Cube
+  proto loads uniform), nothing down on either. What remains refused:
+  SNES — five Super Game Boy carts (a GB core), Top Gear 3000 (DSP-4,
+  undocumented), and dead, truncated or chip-only dumps; NES — forty
+  archives on named mappers, mostly unlicensed multicarts and modern
+  re-release boards, each its own ticket if ever wanted. Gate at the
+  W14-58/59 merge: workspace **2439 passing / 0 failed / 43 ignored**
+  incl. the 65816 vector suite, clippy clean, arch OK.
