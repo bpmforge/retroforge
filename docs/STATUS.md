@@ -4198,3 +4198,21 @@ stories, 10 decisions).
   accepted). Census 1169/59/37 -> **1180/60/25**, twelve up, none down.
   Gate: workspace **2391 passing / 0 failed / 43 ignored** incl. the
   65816 vector suite, clippy clean, arch OK.
+
+- **W19-04, W14-55, W14-56 — the refused bucket falls to 24; a per-title
+  diff catches a regression the totals hid** (2026-09-23). W19-04 models
+  the ST010's register window, RAM and the one command fullsnes documents
+  (00h); F1-ROC II renders, and commands 01h-08h stay named as
+  undocumented rather than guessed. W14-55 keeps a corroborated chipset
+  byte when the RESET-vector fallback fires (the Star Fox 2 betas are
+  classified GSU again) and rejects a fallback vector that resolves into
+  its own header block (The Lion King (Beta 3) loads as HiROM). The
+  census after those two read 1181/59/25 — one up on paper — but the
+  per-title diff showed Operation Thunderbolt (USA) (Beta) had gone from
+  rendered to refused: its RESET vector is $FFE0, the four bytes fullsnes
+  lists as "Zerofilled (or ID XBOO)" rather than a vector, and a real
+  SEI/CLC/XCE/JML trampoline sits there. W14-56 narrows the rejection to
+  the header fields and assigned vector slots. Census 1180/60/25 ->
+  **1182/59/24**: F1-ROC II and The Lion King (Beta 3) up, nothing down.
+  Gate at the W14-56 merge: workspace **2415 passing / 0 failed / 43
+  ignored** incl. the 65816 vector suite, clippy clean, arch OK.
