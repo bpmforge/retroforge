@@ -949,6 +949,45 @@ other nibble-`$F` hw values); and an end-to-end `SnesSystem::load` test
 that writes the DMA ports through the ordinary bus and reads the
 transferred bytes back out of CX4RAM.
 
+### 3.7 OBC1 (OBJ Controller)
+
+**OBC1 (1 game: Metal Combat: Falcon's Revenge, W19-01,
+`crates/rf-snes/src/obc1.rs`).** Not a firmware coprocessor and not a
+second CPU — a pure address remapper in front of the cartridge's own
+8 KiB battery-backed SRAM, clean-room from fullsnes "SNES Cart OBC1
+(OBJ Controller)" (NFR-011, no emulator source). Detection (`rf-cart`):
+chipset $25 (coprocessor nibble $2, hw $5 — the only assigned
+combination) accepted as `Coprocessor::Obc1`, always battery-backed.
+
+- **Window** (`crate::mapping::obc1_target`): the whole `$6000-$7FFF`
+  system-area window (banks `$00-$3F`/`$80-$BF` — the same convention
+  SA-1/GSU/DSP-1 use for their own windows, since fullsnes gives OBC1
+  no bank list of its own) is either ordinary SRAM or one of the eight
+  `$7FF0-$7FF7` "OBC1 I/O Ports".
+- **Register model** (`crate::obc1::Obc1Regs`): `$7FF0-$7FF3` (OAM
+  Xloc/Yloc/Tile/Attr) redirect straight to the SRAM byte at
+  `[Base+Index*4+0..3]` rather than being registers of their own —
+  fullsnes calls them "totally useless": the byte they expose has no
+  existence independent of the table cell it aliases. `$7FF4` (OAM
+  Bits) redirects to `[Base+Index/4+200h]` with asymmetric R/W a plain
+  SRAM cell cannot express: write is a 2-bit read-modify-write at
+  `(Index AND 3)*2..+1`; read returns the whole raw byte, unshifted.
+  `$7FF5` selects the 220h-byte table's base address (bit0: 0=$7C00,
+  1=$7800 — the inverse of the usual "clear = first option"
+  convention). `$7FF6` is the Index (OBJ number), 0..127, not
+  auto-incremented. `$7FF7` ("Unknown, set to 00h or 0Ah") is stored
+  and read back verbatim; nothing branches on it.
+- **What is deliberately NOT modelled**: two fullsnes hedges ("Setting
+  Index bits7+5 does reportedly enable SRAM mapping at 6000h..77FFh?"
+  and "ROM is reportedly mapped to bank 00h..3Fh, and also to bank
+  70h..71h?") and the read/write timing restrictions the chapter says
+  `$7FF4` "may involve" — this build's read-modify-write is
+  instantaneous within one bus access, same as every other register in
+  this crate.
+- **Save/load**: `StateRegion::Cart` gains the same presence-flag
+  pattern SA-1/GSU use — no bulk buffer to add, since the 220h-byte
+  table lives in `SnesBus::sram`, already saved.
+
 ## 4. Cartridge layer boundary (`rf-cart`)
 
 `rf-cart` owns file parsing (iNES/NES 2.0 incl. submapper/PRG-RAM fields,

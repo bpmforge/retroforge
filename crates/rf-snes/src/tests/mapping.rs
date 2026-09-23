@@ -5,7 +5,9 @@ use rf_cart::{
     SnesMapMode::{HiRom, LoRom},
 };
 
-use crate::mapping::{gsu_target, map, sa1_target, GsuBoard, Sa1RomBanks, Target, WRAM_LEN};
+use crate::mapping::{
+    gsu_target, map, obc1_target, sa1_target, GsuBoard, Obc1Board, Sa1RomBanks, Target, WRAM_LEN,
+};
 
 const ROM_32K: usize = 32 * 1024;
 const ROM_1M: usize = 1024 * 1024;
@@ -179,6 +181,9 @@ fn every_address_maps_within_bounds() {
                     | Target::GsuRegister(_)
                     | Target::Cx4Ram(_)
                     | Target::Cx4Register(_)
+
+                    | Target::Obc1Register(_)
+                    | Target::Obc1Bits(_)
                     | Target::Open => {}
                 }
             }
@@ -401,5 +406,137 @@ mod gsu {
         let b = board(0, 0);
         assert_eq!(gsu_target(&b, 0x00, 0x8000), None);
         assert_eq!(gsu_target(&b, 0x70, 0x0000), None);
+    }
+}
+
+/// Ticket W19-01: `obc1_target` (fullsnes "SNES Cart OBC1 (OBJ
+/// Controller)" and its "OBC1 I/O Ports" table).
+mod obc1 {
+    use super::*;
+
+    fn board(base_offset: usize, index: u8, sram_len: usize) -> Obc1Board {
+        Obc1Board {
+            base_offset,
+            index,
+            sram_len,
+        }
+    }
+
+    #[test]
+    fn base_7c00_is_sram_offset_0x1c00_base_7800_is_0x1800() {
+        // fullsnes: "$7FF5h Base for 220h-byte region (bit0: 0=7C00h,
+        // 1=7800h)" — the two named workspace ranges
+        // (7800h-7A1Fh/7C00h-7E1Fh) are relative to bank $6000, so as an
+        // SRAM byte offset that's $1800/$1C00.
+        assert_eq!(0x7C00 - 0x6000, 0x1C00);
+        assert_eq!(0x7800 - 0x6000, 0x1800);
+    }
+
+    #[test]
+    fn registers_7ff5_7ff6_7ff7_are_obc1_register() {
+        let b = board(0x1C00, 0, 8192);
+        assert_eq!(
+            obc1_target(&b, 0x00, 0x7FF5),
+            Some(Target::Obc1Register(0x7FF5))
+        );
+        assert_eq!(
+            obc1_target(&b, 0x00, 0x7FF6),
+            Some(Target::Obc1Register(0x7FF6))
+        );
+        assert_eq!(
+            obc1_target(&b, 0x00, 0x7FF7),
+            Some(Target::Obc1Register(0x7FF7))
+        );
+    }
+
+    #[test]
+    fn ports_7ff0_7ff3_redirect_to_base_plus_index_times_4() {
+        // fullsnes: "7FF0h OAM Xloc = [Base+Index*4+0]" through
+        // "7FF3h OAM Attr = [Base+Index*4+3]".
+        let b = board(0x1C00, 5, 8192);
+        assert_eq!(
+            obc1_target(&b, 0x00, 0x7FF0),
+            Some(Target::Sram(0x1C00 + 5 * 4))
+        );
+        assert_eq!(
+            obc1_target(&b, 0x00, 0x7FF1),
+            Some(Target::Sram(0x1C00 + 5 * 4 + 1))
+        );
+        assert_eq!(
+            obc1_target(&b, 0x00, 0x7FF2),
+            Some(Target::Sram(0x1C00 + 5 * 4 + 2))
+        );
+        assert_eq!(
+            obc1_target(&b, 0x00, 0x7FF3),
+            Some(Target::Sram(0x1C00 + 5 * 4 + 3))
+        );
+    }
+
+    #[test]
+    fn port_7ff4_redirects_to_base_plus_index_div_4_plus_0x200_as_bits() {
+        // fullsnes: "7FF4h OAM Bits = [Base+Index/4+200h]...".
+        let b = board(0x1800, 127, 8192);
+        assert_eq!(
+            obc1_target(&b, 0x00, 0x7FF4),
+            Some(Target::Obc1Bits(0x1800 + 127 / 4 + 0x200))
+        );
+    }
+
+    #[test]
+    fn the_220h_table_spans_exactly_the_documented_workspace() {
+        // index 0..127: attributes span base+0..base+0x1FF (512 bytes),
+        // bits span base+0x200..base+0x21F (32 bytes) — 0x220 total,
+        // fullsnes's own "220h-byte region" naming.
+        let b = board(0x1C00, 127, 8192);
+        assert_eq!(
+            obc1_target(&b, 0x00, 0x7FF3),
+            Some(Target::Sram(0x1C00 + 127 * 4 + 3))
+        );
+        assert_eq!(0x1C00 + 127 * 4 + 3, 0x1C00 + 0x1FF);
+        assert_eq!(
+            obc1_target(&b, 0x00, 0x7FF4),
+            Some(Target::Obc1Bits(0x1C00 + 127 / 4 + 0x200))
+        );
+        assert_eq!(0x1C00 + 127 / 4 + 0x200, 0x1C00 + 0x21F);
+    }
+
+    #[test]
+    fn every_other_window_byte_is_plain_sram() {
+        let b = board(0x1C00, 0, 8192);
+        assert_eq!(obc1_target(&b, 0x00, 0x6000), Some(Target::Sram(0)));
+        assert_eq!(obc1_target(&b, 0x00, 0x7FEF), Some(Target::Sram(0x1FEF)));
+        assert_eq!(obc1_target(&b, 0x00, 0x7FFF), Some(Target::Sram(0x1FFF)));
+    }
+
+    #[test]
+    fn window_is_visible_in_every_system_area_bank() {
+        let b = board(0x1C00, 0, 8192);
+        for bank in [0x00u8, 0x3F, 0x80, 0xBF] {
+            assert_eq!(
+                obc1_target(&b, bank, 0x7FF6),
+                Some(Target::Obc1Register(0x7FF6)),
+                "bank {bank:02X}"
+            );
+        }
+    }
+
+    #[test]
+    fn outside_the_window_or_the_system_area_falls_through_to_map() {
+        let b = board(0x1C00, 0, 8192);
+        // Below $6000 in a system-area bank: not this chip's window.
+        assert_eq!(obc1_target(&b, 0x00, 0x1000), None);
+        // Above $7FFF: ROM territory.
+        assert_eq!(obc1_target(&b, 0x00, 0x8000), None);
+        // Banks $40-$7F/$C0-$FF are not the system area this chip claims.
+        assert_eq!(obc1_target(&b, 0x40, 0x7FF6), None);
+        assert_eq!(obc1_target(&b, 0x70, 0x7FF6), None);
+        assert_eq!(obc1_target(&b, 0xC0, 0x7FF6), None);
+    }
+
+    #[test]
+    fn zero_length_sram_reports_open_across_the_whole_window() {
+        let b = board(0x1C00, 0, 0);
+        assert_eq!(obc1_target(&b, 0x00, 0x7FF6), Some(Target::Open));
+        assert_eq!(obc1_target(&b, 0x00, 0x6000), Some(Target::Open));
     }
 }

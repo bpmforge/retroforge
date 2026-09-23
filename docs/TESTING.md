@@ -9463,3 +9463,106 @@ effects (X2's intro wireframe, X3's rotating boss sprites) do NOT render
 per the "commands undocumented" finding above; there is nothing new to
 look at until a future ticket either finds additional documentation or
 accepts building a guessed HLE against Brad's own explicit sign-off.
+
+## W19-01 (OBC1: Metal Combat: Falcon's Revenge)
+
+**Detection** (`rf-cart`): chipset $25 (coprocessor nibble $2, hw $5)
+accepted as `Coprocessor::Obc1` — fullsnes "SNES Cart OBC1 (OBJ
+Controller)" names one retail title, and $25 (ROM+OBC1+RAM+battery) is
+the only assigned combination; verified against this project's own
+Metal Combat: Falcon's Revenge (USA) dump ($7FC0+$16 = $25). hw $3/$4
+under the same coprocessor nibble stay refused (no documented board
+uses them) — `unsupported_chip_obc1_reported_from_chipset_byte` pins
+this. Always battery-backed (the chapter: "8Kbyte battery-backed
+SRAM").
+
+**Register model** (`crate::obc1::Obc1Regs`, `crate::mapping::obc1_target`):
+OBC1 is a pure address remapper over the cart's own 8 KiB SRAM, not a
+firmware coprocessor — clean-room hardware emulation with nothing
+copyrighted to avoid. The whole `$6000-$7FFF` window, in system-area
+banks `$00-$3F`/`$80-$BF` (the same convention SA-1/GSU/DSP-1 use for
+their own windows; fullsnes gives OBC1 no bank list of its own), is
+either ordinary SRAM or one of the eight `$7FF0-$7FF7` "OBC1 I/O
+Ports":
+- `$7FF0`/`$7FF1`/`$7FF2`/`$7FF3` (OAM Xloc/Yloc/Tile/Attr) redirect
+  straight to the SRAM byte at `[Base+Index*4+0..3]` — not real
+  registers of their own (fullsnes calls them "totally useless": the
+  byte they expose has no existence independent of the table cell it
+  aliases).
+- `$7FF4` (OAM Bits) redirects to `[Base+Index/4+200h]`, but with
+  asymmetric R/W the other three ports don't have: write does a 2-bit
+  read-modify-write at `(Index AND 3)*2..+1`, leaving the byte's other
+  three packed 2-bit fields untouched; read returns the whole raw byte,
+  unshifted (fullsnes: "reportedly return the desired BYTE... WITHOUT
+  isolating & shifting").
+- `$7FF5` (Base select) bit 0 picks the 220h-byte table's base address
+  — 0=$7C00, 1=$7800 (note this is the *inverse* of the usual "bit
+  clear = first option" convention).
+- `$7FF6` (Index/OBJ Number) is 0..127, masked to 7 bits for
+  addressing; fullsnes: "the Index isn't automatically incremented" —
+  confirmed by the bus test below (writing the same port twice with no
+  index change overwrites the same cell).
+- `$7FF7` ("Unknown, set to 00h or 0Ah, maybe SRAM vs I/O mode
+  select") is stored and read back verbatim; nothing branches on it.
+  Writes of any other value are counted diagnostically
+  (`unknown_reg_other_writes`), not gated.
+
+The 220h-byte table itself (4 attribute bytes x 128 OBJs = 512 bytes,
+plus a 32-byte packed-bits region — `128 / 4` = 32) spans exactly the
+two named workspace ranges (`7800h-7A1Fh`/`7C00h-7E1Fh`), confirmed by
+`the_220h_table_spans_exactly_the_documented_workspace`.
+
+**Unmodelled** (both hedged with "reportedly"/"?" in fullsnes, so left
+alone rather than guessed at — cited in `obc1.rs`'s module doc):
+"Setting Index bits7+5 does reportedly enable SRAM mapping at
+6000h..77FFh?" and "ROM is reportedly mapped to bank 00h..3Fh, and also
+to bank 70h..71h?"; also the read/write timing restrictions fullsnes
+says $7FF4 "may involve" — this build's read-modify-write is
+instantaneous within one bus access, same as every other register in
+this crate.
+
+**Save/load** (`crate::state`): `StateRegion::Cart` gains the same
+presence-flag pattern SA-1/GSU use, appended after GSU's — no bulk
+buffer to add, since the table lives in `SnesBus::sram`, already saved
+at the top of that region.
+
+**Tests**: 6 in `obc1.rs` (reset defaults, base-select bit0 semantics,
+index masking vs. raw readback, the unknown register's mirror-plus-
+counter behaviour, the `board()` view, a save/load round trip); 9 in
+`mapping.rs`'s `obc1_target` suite (each register offset, the redirect
+arithmetic for `$7FF0-$7FF4`, the exact 220h span, every system-area
+bank, the non-system-area/out-of-window fallthrough to the generic
+`map`, and the zero-SRAM edge case); 2 end-to-end in
+`tests/system.rs` through `SnesSystem::load`/`SnesBus` (presence-wiring
+plus a full register/table walk: writes through `$7FF0-$7FF3`, a read
+back through the direct SRAM address proving the redirect rather than a
+private copy, the `$7FF4` 2-bit RMW leaving the other 6 bits of a
+seeded byte untouched, and the base-select flip moving the same index
+to a different SRAM cell).
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes -p rf-cart` — **rf-snes 458
+passed** (lib, 1 pre-existing ignore unrelated to this ticket) plus
+every integration suite green, 0 failed; **rf-cart 62 passed**, 0
+failed. `cargo test --workspace`: **2337 passed, 0 failed**, 157
+binaries. Ignored SNES suites: `peterlemon_golden` — 3/3 passed;
+`spc700_vectors` — `singlestep_spc700_vectors` and
+`spc700_cycle_table_matches_the_vectors` both passed; `gilyon_cputest`
+— `cputest_full_reports_success_and_every_test_passes` passed.
+`scripts/validate-arch.sh` — `arch OK`.
+
+**Census children**, RELEASE, `boot_census_child --ignored --exact`,
+exit 0 = rendered something:
+
+| title | exit code / bucket |
+|---|---|
+| Metal Combat - Falcon's Revenge (USA) | rendered something |
+| Super Mario World (USA) canary | rendered something |
+| Wild Guns (USA) canary | rendered something |
+| Super Mario RPG - Legend of the Seven Stars (USA) canary | rendered something |
+| Kirby Super Star (USA) canary | rendered something |
+| NHL 95 (USA) canary | rendered something |
+
+No canary moved — the OBC1 window only claims addresses no other
+cartridge's mapping reaches (`obc1` is `None` for every non-OBC1 cart,
+same "one owner decides" pattern SA-1/GSU/DSP-1 use).

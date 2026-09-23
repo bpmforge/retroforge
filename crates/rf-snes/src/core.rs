@@ -462,6 +462,9 @@ impl EmulatorCore for SnesCore {
             | crate::mapping::Target::GsuRegister(_)
             | crate::mapping::Target::Cx4Ram(_)
             | crate::mapping::Target::Cx4Register(_)
+
+            | crate::mapping::Target::Obc1Register(_)
+            | crate::mapping::Target::Obc1Bits(_)
             | crate::mapping::Target::Open => 0,
         }
     }

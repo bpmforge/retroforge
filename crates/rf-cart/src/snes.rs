@@ -146,6 +146,17 @@ pub enum Coprocessor {
     /// short of an opcode-level core is a *documentation* gap (see
     /// `rf_snes::cx4`'s module doc), not a legal one.
     Cx4,
+
+    /// Coprocessor nibble $2 ("OBC1") with `hw` $5 (chipset $25,
+    /// ROM+OBC1+RAM+battery — the only chipset byte fullsnes or any board
+    /// database assigns to this chip; unlike DSP/SA-1/GSU there is no
+    /// documented $3/$4 variant to also accept). Ticket W19-01, fullsnes
+    /// "SNES Cart OBC1 (OBJ Controller)": one retail title (Metal Combat:
+    /// Falcon's Revenge). Clean-room hardware emulation — the chip is a
+    /// pure address-remapper over the cart's own 8 KiB battery-backed
+    /// SRAM, not a firmware coprocessor, so there is nothing to LLE or HLE
+    /// against copyrighted code.
+    Obc1,
 }
 
 /// Which physical GSU chip a cartridge carries. fullsnes "SNES Cart GSU-n
@@ -717,6 +728,13 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         // notation, the same arithmetic `superfx_expansion_ram_kib` uses
         // for `$FFBD` (`base - 3`).
         (Coprocessor::Cx4, false)
+
+    } else if coprocessor_nibble == 0x2 && hw == 0x5 {
+        // Ticket W19-01 / fullsnes "SNES Cart OBC1": chipset $25 only —
+        // the sole assigned OBC1 combination (ROM+OBC1+RAM+battery).
+        // Always battery-backed (the chapter: "8Kbyte battery-backed
+        // SRAM").
+        (Coprocessor::Obc1, true)
     } else if hw >= 0x3 {
         return Err(CartError::UnsupportedChip {
             name: format!(
@@ -733,6 +751,8 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         | Coprocessor::Sa1(_)
         | Coprocessor::SuperFx { .. }
         | Coprocessor::Cx4 => None,
+
+        | Coprocessor::Obc1 => None,
     };
 
     Ok(SnesHeader {
@@ -1107,14 +1127,29 @@ mod tests {
 
     #[test]
     fn unsupported_chip_obc1_reported_from_chipset_byte() {
-        // hw=3 (ROM+coprocessor), nibble 2 = OBC1: still refused, unaffected
-        // by the DSP carve-out (D-010 only touches nibble 0).
+        // hw=3 (ROM+coprocessor), nibble 2 = OBC1, but only hw=5 (chipset
+        // $25) is a real assigned combination (ticket W19-01) — hw=3 stays
+        // refused, unaffected by the DSP carve-out (D-010 only touches
+        // nibble 0) and by W19-01 (which only accepts hw=5).
         let rom = lorom_image(0x20, 0x23);
         let err = parse_snes_header(&rom).unwrap_err();
         match &err {
             CartError::UnsupportedChip { name } => assert!(name.contains("OBC1"), "got: {name}"),
             other => panic!("expected UnsupportedChip, got {other:?}"),
         }
+    }
+
+    #[test]
+    /// Ticket W19-01: chipset $25 (nibble 2 "OBC1", hw 5) is Metal Combat:
+    /// Falcon's Revenge's real header byte (verified against the archive
+    /// dump: `$7FC0+0x16 == 0x25`), and is the only chipset byte fullsnes
+    /// assigns to this chip.
+    fn chipset_0x25_detected_as_obc1_with_battery() {
+        let rom = lorom_image(0x20, 0x25);
+        let header = parse_snes_header(&rom).expect("valid OBC1 header");
+        assert_eq!(header.coprocessor, Coprocessor::Obc1);
+        assert!(header.battery, "OBC1 is always battery-backed SRAM");
+        assert_eq!(header.dsp_window, None);
     }
 
     #[test]

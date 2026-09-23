@@ -13,6 +13,7 @@ pub mod dma;
 pub mod dsp1;
 pub mod gsu;
 pub mod mapping;
+pub mod obc1;
 pub mod ppu;
 pub mod regs;
 pub mod sa1;

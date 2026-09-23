@@ -194,6 +194,13 @@ pub struct SnesBus {
     /// math tables only — the CX4's own program never executes (see
     /// `crate::cx4`'s module doc for why).
     pub cx4: Option<crate::cx4::Cx4>,
+
+    /// The OBC1's three registers (`None` for every cartridge that does
+    /// not report [`rf_cart::Coprocessor::Obc1`]) — see
+    /// [`Self::install_obc1`]. Ticket W19-01. Unlike SA-1/GSU there is no
+    /// separate board buffer: the sprite/attribute table this chip
+    /// addresses lives in `sram` itself (`crate::obc1`'s module doc).
+    pub obc1: Option<crate::obc1::Obc1Regs>,
     /// Set whenever a SNES-side access this `SnesSystem::step` (main CPU
     /// instruction, its DMA, or its HDMA) has landed on the cartridge ROM
     /// window (ticket W17-04's cost model — see
@@ -310,6 +317,8 @@ impl SnesBus {
             sa1: None,
             gsu: None,
             cx4: None,
+
+            obc1: None,
             sa1_rom_contended: false,
             sa1_bwram_contended: false,
         }
@@ -356,6 +365,14 @@ impl SnesBus {
     /// one fixed 3 KiB RAM/ROM size for both known Cx4 titles.
     pub fn install_cx4(&mut self) {
         self.cx4 = Some(crate::cx4::Cx4::new());
+
+    /// Wire up the cartridge's OBC1 registers (ticket W19-01). Called by
+    /// [`crate::system::SnesSystem::load`] when the header reports
+    /// [`rf_cart::Coprocessor::Obc1`]; every other cartridge's `obc1`
+    /// stays `None`, so `target` never routes through the OBC1 arm for it
+    /// and every existing golden's mapping is unchanged.
+    pub fn install_obc1(&mut self) {
+        self.obc1 = Some(crate::obc1::Obc1Regs::new());
     }
 
     fn target(&self, addr: u32) -> Target {
@@ -398,6 +415,17 @@ impl SnesBus {
         // (ticket W19-02). `cx4` is `None` for every non-Cx4 cartridge.
         if self.cx4.is_some() {
             if let Some(target) = crate::mapping::cx4_target(bank, offset) {
+
+        // Checked BEFORE the generic map, same reasoning as SA-1/DSP-1/GSU
+        // above: an OBC1 cart's register/redirect window sits inside
+        // bank/offset space `map` would otherwise resolve as open bus
+        // (plain LoROM leaves `$6000-$7FFF` unmapped in system-area banks
+        // — see `map`'s own comment) — see `obc1_target`'s doc. `obc1` is
+        // `None` for every non-OBC1 cartridge (ticket W19-01).
+        if let Some(obc1) = &self.obc1 {
+            if let Some(target) =
+                crate::mapping::obc1_target(&obc1.board(self.sram.len()), bank, offset)
+            {
                 return target;
             }
         }
@@ -1201,6 +1229,15 @@ impl CpuBus for SnesBus {
             Target::Cx4Ram(i) => self.cx4.as_ref().map_or(self.open_bus, |c| c.ram[i]),
             Target::Cx4Register(offset) => {
                 self.cx4.as_ref().map_or(self.open_bus, |c| c.read(offset))
+
+            // Ticket W19-01, fullsnes "SNES Cart OBC1": "$7FF4h... Reading
+            // from 7FF4h does reportedly return the desired BYTE, but
+            // WITHOUT isolating & shifting the desired BITS into place" —
+            // the whole raw SRAM byte, unshifted, same value a plain
+            // `Target::Sram` read at that offset would give.
+            Target::Obc1Bits(i) => self.sram[i],
+            Target::Obc1Register(offset) => {
+                self.obc1.as_ref().map_or(self.open_bus, |o| o.read(offset))
             }
             Target::Open => self.open_bus,
         };
@@ -1330,6 +1367,33 @@ impl CpuBus for SnesBus {
                     if offset == 0x7F47 {
                         crate::cx4::dma_transfer(c, self.mode, &self.rom, value);
                     }
+
+            // Ticket W19-01, fullsnes "SNES Cart OBC1": "$7FF4h... Port
+            // 7FF4h does read-modify-write operations" — only the 2 bits
+            // at `(Index AND 3)*2..+1` of the addressed byte change; the
+            // other 3 packed fields in that byte are left alone. Reading
+            // `obc1`'s index here (rather than trusting a value baked into
+            // the `Target` at resolution time) matters only if index
+            // changes between resolving the target and this write landing,
+            // which cannot happen within one bus access — done this way
+            // for symmetry with every other register arm, which all read
+            // `self.obc1`/`self.sa1`/`self.gsu` fresh at write time too.
+            Target::Obc1Bits(i) => {
+                if let Some(o) = self.obc1.as_ref() {
+                    let shift = (o.index_masked() & 0x3) * 2;
+                    let mask = 0b11u8 << shift;
+                    let old = self.sram[i];
+                    // Only the write's own low 2 bits are documented as
+                    // meaningful (fullsnes gives $7FF4 no wider field) —
+                    // masked BEFORE the shift so a title that writes a
+                    // full byte (nothing says the other 6 bits must be
+                    // zero) cannot smear into neighbouring OBJs' fields.
+                    self.sram[i] = (old & !mask) | ((value & 0b11) << shift);
+                }
+            }
+            Target::Obc1Register(offset) => {
+                if let Some(o) = self.obc1.as_mut() {
+                    o.write(offset, value);
                 }
             }
             // ROM is read-only; a write is dropped rather than panicking,
@@ -1388,6 +1452,12 @@ impl CpuBus for SnesBus {
             Target::Cx4Ram(i) => self.cx4.as_ref().map_or(self.open_bus, |c| c.ram[i]),
             Target::Cx4Register(offset) => {
                 self.cx4.as_ref().map_or(self.open_bus, |c| c.read(offset))
+
+            // Non-perturbing by construction: both arms are plain reads
+            // with no side effect either way (ticket W19-01).
+            Target::Obc1Bits(i) => self.sram[i],
+            Target::Obc1Register(offset) => {
+                self.obc1.as_ref().map_or(self.open_bus, |o| o.read(offset))
             }
             Target::Open => self.open_bus,
         }
