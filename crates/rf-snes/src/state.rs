@@ -365,6 +365,19 @@ impl crate::system::SnesSystem {
                 match &self.bus.sdd1 {
                     Some(regs) => regs.save(o),
                     None => Ok(()),
+                }?;
+                // ST010 (ticket W19-04), same presence-flag pattern as
+                // SA-1/GSU/CX4/OBC1/S-DD1 above, appended last so an older
+                // state and one saved after this ticket only disagree in
+                // what trails the byte the older format already ends at.
+                // The whole battery-backed RAM (including the command/busy
+                // word) is the payload — see `crate::st010`'s module doc.
+                // Diagnostic counters are not saved, same contract as
+                // OBC1's `unknown_reg_other_writes`.
+                o.bool(self.bus.st010.is_some())?;
+                match &self.bus.st010 {
+                    Some(c) => c.save(o),
+                    None => Ok(()),
                 }
             }
         }
@@ -511,6 +524,15 @@ impl crate::system::SnesSystem {
                     (None, false) => Ok(()),
                     (Some(_), false) | (None, true) => Err(StateError::Corrupt(
                         "S-DD1 presence in the saved state disagrees with the mounted cartridge"
+                            .to_string(),
+                    )),
+                }?;
+                let st010_present = i.bool()?;
+                match (self.bus.st010.as_mut(), st010_present) {
+                    (Some(c), true) => c.load(i),
+                    (None, false) => Ok(()),
+                    (Some(_), false) | (None, true) => Err(StateError::Corrupt(
+                        "ST010 presence in the saved state disagrees with the mounted cartridge"
                             .to_string(),
                     )),
                 }

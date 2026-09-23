@@ -1707,3 +1707,53 @@ fn cx4_cart_dma_transfer_is_visible_through_the_bus() {
     system.bus.write(0x00_7F88, 0x33);
     assert_eq!(system.bus.cx4.as_ref().unwrap().regs[2], 0x0033_2211);
 }
+
+/// Ticket W19-04: an end-to-end check that an ST010 cartridge's header
+/// wires up the real RAM window through `SnesSystem::load` — the SNES CPU
+/// side can write a parameter byte, issue a command through the
+/// command/busy word, and see busy clear again, all through the ordinary
+/// bus, exactly the protocol fullsnes "ST010 Commands" describes.
+#[test]
+fn st010_cart_ram_and_command_protocol_is_visible_through_the_bus() {
+    let mut rom = lorom_image(0x20, 0xF6); // fullsnes "[FFD6h]=F6h" ST010.
+    rom[0x7FC0 - 1] = 0x01; // fullsnes "[FFBFh]=01h" ST010/ST011.
+
+    let cart = rf_cart::Cartridge::load(&rom).expect("ST010 cart accepted");
+    let header = match &cart {
+        rf_cart::Cartridge::Snes { header, .. } => header,
+        other => panic!("expected an SNES cartridge, got {other:?}"),
+    };
+    assert_eq!(header.coprocessor, rf_cart::Coprocessor::St010);
+    assert!(header.battery);
+
+    let mut system = SnesSystem::load(&rom).expect("ST010 cart loads");
+    assert!(system.bus.st010.is_some());
+
+    // Bank $68, an ordinary RAM byte, round-trips through the bus.
+    system.bus.write(0x68_0500, 0x77);
+    assert_eq!(system.bus.read(0x68_0500), 0x77);
+
+    // Issue command $00 ("Set RAM[0010h]=0000h") through the documented
+    // protocol: stage the command byte at $0020, then set bit 7 of $0021.
+    system.bus.write(0x68_0010, 0xAA);
+    system.bus.write(0x68_0011, 0xBB);
+    system.bus.write(0x68_0020, 0x00);
+    system.bus.write(0x68_0021, 0x80);
+
+    assert_eq!(system.bus.read(0x68_0010), 0x00);
+    assert_eq!(system.bus.read(0x68_0011), 0x00);
+    assert_eq!(
+        system.bus.read(0x68_0021) & 0x80,
+        0,
+        "busy clears synchronously, same completion model as CX4's $7F5E"
+    );
+
+    // The window mirrors across every bank $68-$6F, and into $E8-$EF.
+    assert_eq!(system.bus.read(0x6F_0500), 0x77);
+    assert_eq!(system.bus.read(0xE8_0500), 0x77);
+
+    // The separate, inert $60-$67:0000/0001 DR/SR pair does not disturb
+    // the RAM: nothing documented is reachable through it.
+    system.bus.write(0x60_0000, 0xFF);
+    assert_eq!(system.bus.read(0x68_0000), 0x00);
+}

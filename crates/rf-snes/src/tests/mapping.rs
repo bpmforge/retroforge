@@ -6,7 +6,8 @@ use rf_cart::{
 };
 
 use crate::mapping::{
-    gsu_target, map, obc1_target, sa1_target, GsuBoard, Obc1Board, Sa1RomBanks, Target, WRAM_LEN,
+    gsu_target, map, obc1_target, sa1_target, st010_target, GsuBoard, Obc1Board, Sa1RomBanks,
+    Target, WRAM_LEN,
 };
 
 const ROM_32K: usize = 32 * 1024;
@@ -183,6 +184,8 @@ fn every_address_maps_within_bounds() {
                     | Target::Cx4Register(_)
                     | Target::Obc1Register(_)
                     | Target::Obc1Bits(_)
+                    | Target::St010Ram(_)
+                    | Target::St010Register(_)
                     | Target::Open => {}
                 }
             }
@@ -537,5 +540,77 @@ mod obc1 {
         let b = board(0x1C00, 0, 0);
         assert_eq!(obc1_target(&b, 0x00, 0x7FF6), Some(Target::Open));
         assert_eq!(obc1_target(&b, 0x00, 0x6000), Some(Target::Open));
+    }
+}
+
+/// Ticket W19-04: `st010_target` (fullsnes "SNES Cart DSP-n/ST010/ST011").
+mod st010_window {
+    use super::{st010_target, Target};
+
+    #[test]
+    fn ram_window_covers_the_whole_4kib_range_in_banks_68_through_6f() {
+        for bank in 0x68u8..=0x6F {
+            assert_eq!(
+                st010_target(bank, 0x0000),
+                Some(Target::St010Ram(0)),
+                "bank {bank:02X}"
+            );
+            assert_eq!(
+                st010_target(bank, 0x0FFF),
+                Some(Target::St010Ram(0x0FFF)),
+                "bank {bank:02X}"
+            );
+        }
+    }
+
+    #[test]
+    fn ram_window_mirrors_the_same_offsets_across_every_claimed_bank() {
+        // Every bank in $68-$6F is the SAME 4096-byte RAM, not eight
+        // different slices — see the function's own doc.
+        assert_eq!(st010_target(0x68, 0x0020), st010_target(0x6F, 0x0020));
+    }
+
+    #[test]
+    fn ram_window_is_not_mapped_above_offset_0fff() {
+        assert_eq!(st010_target(0x68, 0x1000), None);
+        assert_eq!(st010_target(0x6F, 0xFFFF), None);
+    }
+
+    #[test]
+    fn command_and_busy_bytes_resolve_inside_the_ram_window() {
+        assert_eq!(st010_target(0x68, 0x0020), Some(Target::St010Ram(0x0020)));
+        assert_eq!(st010_target(0x68, 0x0021), Some(Target::St010Ram(0x0021)));
+    }
+
+    #[test]
+    fn inert_dr_sr_pair_is_mapped_in_banks_60_through_67() {
+        for bank in 0x60u8..=0x67 {
+            assert_eq!(
+                st010_target(bank, 0x0000),
+                Some(Target::St010Register(0)),
+                "bank {bank:02X}"
+            );
+            assert_eq!(
+                st010_target(bank, 0x0001),
+                Some(Target::St010Register(1)),
+                "bank {bank:02X}"
+            );
+            assert_eq!(st010_target(bank, 0x0002), None, "bank {bank:02X}");
+        }
+    }
+
+    #[test]
+    fn every_bank_in_00_to_7f_mirrors_to_80_to_ff() {
+        // Fullsnes SNES I/O Ports section: "All banks in range 00-7F are
+        // also mirrored to 80-FF."
+        assert_eq!(st010_target(0x68, 0x0010), st010_target(0xE8, 0x0010));
+        assert_eq!(st010_target(0x60, 0x0000), st010_target(0xE0, 0x0000));
+    }
+
+    #[test]
+    fn banks_outside_60_through_6f_are_unclaimed() {
+        assert_eq!(st010_target(0x00, 0x0000), None);
+        assert_eq!(st010_target(0x40, 0x0020), None);
+        assert_eq!(st010_target(0x70, 0x0000), None);
     }
 }

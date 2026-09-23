@@ -1066,6 +1066,125 @@ must agree" D-013 shape SA-1's map mode `$23` already has — map mode
   production code) proves the state IS resumable in isolation, per the
   ticket's determinism/save-load requirement.
 
+### 3.10 ST010 (SETA D96050CW-012, extended NEC uPD77C25) — one command documented, eight named-only
+
+**ST010 (1 game: F1 Race of Champions / Exhaust Heat II, 1993, SETA Corp.;
+ticket W19-04, `crates/rf-snes/src/st010.rs`).** Architecturally the same
+class of chip as DSP-1 — a NEC uPD77C25-family firmware coprocessor whose
+program ROM is never shipped in this tree (law 5, NFR-011) — but fullsnes's
+own text says the battery-backed RAM, not any command, is what matters:
+"the only feature that is <really> used is the battery-backed on-chip
+RAM... the powerful chip is a waste of resources."
+
+**Detection (`rf-cart`).** Chipset `$F6` ("ROM+Custom+Battery", coprocessor
+nibble `$F`, `hw=$6`) alone is not enough — nibble `$F` also covers CX4
+(`$FFBF=$10`) and SPC7110 (`$FFBF=$00`) — so `parse_snes_header` also
+requires the extended header's `$FFBF` sub-type byte `=$01` (fullsnes
+"DSPn/ST010/ST011 Cartridge Header": `"[FFD6h]=F6h"`, `"[FFBFh]=01h
+Chipset Sub Type = ST010/ST011"`), the same two-field disambiguation CX4
+already uses for its own nibble. Always battery-backed: `$F6`'s "in
+practice" entry is `"ROM+Custom+Battery"`, no bare-`$F6` variant is
+documented. Both directions of the mismatch are pinned by test: `$F6`
+with a non-`$01` sub-type refuses, and `$F3` (CX4's own chipset) with
+sub-type `$01` also refuses rather than being accepted as either chip.
+
+**What the chapter actually documents — verified by a full-text grep, not
+assumed.** fullsnes's "BIOS Functions" gives an "ST010 Commands" table
+(`fullsnes.txt:9265-9284`) that promises "See individual commands for
+input and output parameter addresses" — a promise this chapter never
+keeps. A grep across the whole vendored `fullsnes.txt` for `ST010`,
+`Driver Placements`, `0010h]` and `Sort Driver` finds nothing between that
+table (ending "the only feature that is <really> used is the
+battery-backed on-chip RAM") and an unrelated oscillator part number at
+line 22770; "ST010 Commands" is immediately followed by "ST011 Commands"
+and then the unrelated ST018 chapter. So the only command whose *effect*
+is stated is `00h` ("Set RAM[0010h]=0000h"); `01h`/`04h` are explicitly
+"Unknown Command"; `02h`/`03h`/`05h`/`06h`/`07h`/`08h` are bare names
+("Sort Driver Placements", "2D Coordinate Scale", "Simulated Driver
+Coordinate Calculation", "Multiply", "Raster Data Calculation", "2D
+Coordinate Rotation") with no documented input address, output address,
+width or sign rule for any of them.
+
+**What is modelled — the RAM, the protocol, and command `00h`:**
+
+- **Memory** (`crate::st010::St010`, `crate::mapping::st010_target`): the
+  chip's whole on-chip RAM — fullsnes: `"the RAM is contained in the
+  ST01n chip, and is sized 2Kx16bit, whereas the SNES accesses it as
+  4Kx8bit (even addresses accessing the LSB, odd ones the MSB of the
+  16bit words)"` — as one flat 4096-byte buffer, mapped (mirrored) across
+  banks `$68-$6F`/`$E8-$EF`, offsets `$0000-$0FFF` (fullsnes memory-map
+  overview: `"680000h-6FFFFFh ST010/ST011 On-chip Battery-backed RAM"`;
+  per-board table `"68-6F:0000-0FFF (SRAM)"`).
+- **Command protocol**: fullsnes "ST010 Commands": `"Commands are
+  executed on the ST-0010 by writing the command to 0x0020 and setting
+  bit7 of 0x0021. Bit7 of 0x0021 will stay set until the Command has
+  completed."` Byte `$0020`/`$0021` is word index `$0010` of the RAM —
+  the same word `00h`'s own effect targets — so this build treats the
+  "command register" as a documented *use* of one RAM word, not separate
+  hardware. A write to `$0021` with bit 7 set dispatches the byte at
+  `$0020` synchronously and stores the busy byte already cleared — the
+  same completion model §3.8 already states for the CX4's `$7F5E` bit 6
+  ("set, then immediately cleared within the same write... rather than
+  leaving it stuck set, which would hang any title's poll loop"); this
+  project has no real timing to model either chip's busy window against.
+  `09h-0Fh`/`10h-FFh` fold onto `00h-08h` exactly as fullsnes's mirror
+  table states.
+- **Command `00h`**: "Set RAM[0010h]=0000h" — read as a *byte* offset
+  (zeroing `$0010`-`$0011`), matching every other address this chapter
+  states in byte terms; the word-index alternative (zeroing the command
+  word itself) is documented as an equally plausible reading in
+  `crate::st010`'s module doc and pinned by a dedicated test, since
+  nothing in the one census title this ticket covers distinguishes the
+  two.
+- **Commands `01h`-`08h`**: busy-clear only, each counted in
+  `St010::command_counts` for visibility. This is not a partial
+  implementation of `06h` "Multiply" — no operand address, width or sign
+  rule is documented for it, and guessing one would mean writing invented
+  results into the very buffer fullsnes calls the chip's one real
+  feature. The same call is already on record for the CX4's 26
+  named-but-unaddressed functions (§3.8): "guessing relocated to the
+  opcode level" is not clean-room HLE.
+- **The generic per-board summary table's separate `$60-$67:0000/0001`
+  DR/SR pair** is mapped (`Target::St010Register`) so it does not
+  silently become open bus, but kept inert: no documented behaviour
+  distinguishes it from the RAM-hosted protocol above, and no command is
+  reachable through it. Reads report open bus (no ST010-specific
+  idle sentinel is documented, unlike DSP-1's `$80` or DSP-4's `$FFFF`,
+  both stated for those chips only); writes are counted and dropped.
+- **Save/load**: `StateRegion::Cart` gains the same presence-flag pattern
+  SA-1/GSU/CX4/OBC1/S-DD1 use. The whole 4096-byte RAM (command/busy word
+  included) is the entire payload — this build has no separate `.sav`
+  persistence path for any coprocessor's battery-backed memory (SRAM
+  included; confirmed by grep across `rf-harness/src` and
+  `rf-snes/src/system.rs` — nothing exists to hook), so "battery-backed"
+  means exactly what OBC1/CX4/S-DD1's own battery already means here:
+  it rides in the ordinary save-state. Diagnostic counters
+  (`command_counts`, `inert_register_accesses`) are not saved, the same
+  "diagnostic, not machine state" contract `Obc1Regs::unknown_reg_other_writes`
+  and `Dsp1::unknown_opcode_hist` already use.
+
+**DSP-4 (Top Gear 3000) is unaffected and stays refused.** DSP-4's own
+"BIOS Functions" entry (fullsnes) gives every command as `"xxh Unknown"`
+except two test/version functions (`13h`, `14h`) — no game-facing command
+has stated semantics, so there is nothing to HLE. DSP-4's chipset byte
+(`$03`, coprocessor nibble `$0`) and this ticket's detection branch
+(nibble `$F`) never overlap, so this ticket makes no code change on that
+path; the census confirms Top Gear 3000 stays refused with the same exit
+code as before this ticket.
+
+**Tests** (`crates/rf-snes/src/st010.rs`, `crates/rf-snes/src/tests/mapping.rs`,
+`crates/rf-snes/src/tests/system.rs`, `crates/rf-cart/src/snes.rs`): every
+command's busy-clear-only or `00h`'s documented effect against
+hand-computed RAM contents (including the "poison the buffer, assert only
+the command/busy word changed" style for the eight undocumented commands);
+the `09h-0Fh`/`10h-FFh` mirror folding; the RAM window's mirroring across
+`$68-$6F` and into `$E8-$EF`, and the separate inert `$60-$67:0000/0001`
+pair; save/load round-tripping the RAM but not the diagnostic counters;
+chipset+extended-header detection (accepts `$F6`+`$FFBF=$01`, refuses
+`$F6` with any other sub-type, refuses `$F3`+`$FFBF=$01` as neither chip);
+and an end-to-end `SnesSystem::load` test that writes a parameter byte,
+issues command `00h` through the ordinary bus, and observes busy clear.
+
 ## 4. Cartridge layer boundary (`rf-cart`)
 
 `rf-cart` owns file parsing (iNES/NES 2.0 incl. submapper/PRG-RAM fields,

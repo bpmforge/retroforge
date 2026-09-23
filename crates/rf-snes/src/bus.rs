@@ -208,6 +208,11 @@ pub struct SnesBus {
     /// carry alongside it: the only per-cartridge input `sdd1_target` and
     /// the DMA hook below need (the ROM length) is already `self.rom.len()`.
     pub sdd1: Option<crate::sdd1::Sdd1Regs>,
+
+    /// The ST010 HLE (`None` for every cartridge that does not report
+    /// [`rf_cart::Coprocessor::St010`]) — see [`Self::install_st010`].
+    /// Ticket W19-04.
+    pub st010: Option<crate::st010::St010>,
     /// Set whenever a SNES-side access this `SnesSystem::step` (main CPU
     /// instruction, its DMA, or its HDMA) has landed on the cartridge ROM
     /// window (ticket W17-04's cost model — see
@@ -327,6 +332,7 @@ impl SnesBus {
 
             obc1: None,
             sdd1: None,
+            st010: None,
             sa1_rom_contended: false,
             sa1_bwram_contended: false,
         }
@@ -391,6 +397,15 @@ impl SnesBus {
     /// for it and every existing golden's mapping is unchanged.
     pub fn install_sdd1(&mut self) {
         self.sdd1 = Some(crate::sdd1::Sdd1Regs::new());
+    }
+
+    /// Wire up the cartridge's ST010 (ticket W19-04). Called by
+    /// [`crate::system::SnesSystem::load`] when the header reports
+    /// [`rf_cart::Coprocessor::St010`]; every other cartridge's `st010`
+    /// stays `None`, so `target` never routes through the ST010 arm for it
+    /// and every existing golden's mapping is unchanged.
+    pub fn install_st010(&mut self) {
+        self.st010 = Some(crate::st010::St010::new());
     }
 
     fn target(&self, addr: u32) -> Target {
@@ -460,6 +475,16 @@ impl SnesBus {
                 rom_len: self.rom.len(),
             };
             if let Some(target) = crate::mapping::sdd1_target(&board, bank, offset) {
+                return target;
+            }
+        }
+        // Checked BEFORE the generic map, same reasoning as the others
+        // above: an ST010 cart's RAM/register windows sit inside
+        // bank/offset space `map` would otherwise resolve as an ordinary
+        // LoROM ROM mirror (ticket W19-04). `st010` is `None` for every
+        // non-ST010 cartridge.
+        if self.st010.is_some() {
+            if let Some(target) = crate::mapping::st010_target(bank, offset) {
                 return target;
             }
         }
@@ -1326,6 +1351,19 @@ impl CpuBus for SnesBus {
             Target::Obc1Register(offset) => {
                 self.obc1.as_ref().map_or(self.open_bus, |o| o.read(offset))
             }
+            // Ticket W19-04: a plain RAM read, no side effect (module
+            // doc's "no read-side behaviour is documented" note).
+            Target::St010Ram(i) => self.st010.as_ref().map_or(self.open_bus, |c| c.read(i)),
+            // The inert DR/SR pair (`crate::st010`'s module doc): no
+            // command is reachable here, so a read just reports open bus
+            // (no ST010-specific sentinel is documented — unlike DSP-1's
+            // `$80` or DSP-4's `$FFFF`, both stated for THEIR chips only).
+            Target::St010Register(_) => {
+                if let Some(c) = self.st010.as_mut() {
+                    c.inert_register_accesses += 1;
+                }
+                self.open_bus
+            }
             Target::Open => self.open_bus,
         };
         self.open_bus = value;
@@ -1484,6 +1522,21 @@ impl CpuBus for SnesBus {
                     o.write(offset, value);
                 }
             }
+            // Ticket W19-04: a write into the RAM window — may dispatch a
+            // command if it lands on the busy byte with bit 7 set
+            // (`crate::st010::St010::write`'s own doc).
+            Target::St010Ram(i) => {
+                if let Some(c) = self.st010.as_mut() {
+                    c.write(i, value);
+                }
+            }
+            // The inert DR/SR pair: counted, dropped (module doc — no
+            // documented write behaviour for either byte).
+            Target::St010Register(_) => {
+                if let Some(c) = self.st010.as_mut() {
+                    c.inert_register_accesses += 1;
+                }
+            }
             // ROM is read-only; a write is dropped rather than panicking,
             // because real cartridges ignore it and a game doing it by
             // accident must not take the emulator down (FR-CORE-013's
@@ -1547,6 +1600,13 @@ impl CpuBus for SnesBus {
             Target::Obc1Register(offset) => {
                 self.obc1.as_ref().map_or(self.open_bus, |o| o.read(offset))
             }
+            // Non-perturbing: `St010::read` has no side effect either way
+            // (ticket W19-04).
+            Target::St010Ram(i) => self.st010.as_ref().map_or(self.open_bus, |c| c.read(i)),
+            // A peek must never trigger the diagnostic counter increment
+            // `read` performs, same "peek has no side effect" rule as
+            // every other register in this crate.
+            Target::St010Register(_) => self.open_bus,
             Target::Open => self.open_bus,
         }
     }

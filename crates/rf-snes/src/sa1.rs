@@ -1529,6 +1529,8 @@ impl CpuBus for Sa1Bus<'_> {
             | Target::Cx4Register(_)
             | Target::Obc1Register(_)
             | Target::Obc1Bits(_)
+            | Target::St010Ram(_)
+            | Target::St010Register(_)
             | Target::Open => 0,
         }
     }
@@ -1584,6 +1586,8 @@ impl CpuBus for Sa1Bus<'_> {
             | Target::Cx4Register(_)
             | Target::Obc1Register(_)
             | Target::Obc1Bits(_)
+            | Target::St010Ram(_)
+            | Target::St010Register(_)
             | Target::Open => {}
         }
     }
@@ -1606,6 +1610,8 @@ impl CpuBus for Sa1Bus<'_> {
             | Target::Cx4Register(_)
             | Target::Obc1Register(_)
             | Target::Obc1Bits(_)
+            | Target::St010Ram(_)
+            | Target::St010Register(_)
             | Target::Open => 0,
         }
     }
