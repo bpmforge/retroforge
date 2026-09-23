@@ -8207,6 +8207,31 @@
   "notes": [
    "W14-54 FILED 2026-09-23 by the orchestrator after the refused bucket fell from 120 to 25: 16 titles entered the uniform bucket today and have never been probed."
   ]
+ },
+ {
+  "phase": 19,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "id": "W19-04",
+  "title": "ST010 (F1-ROC II: Race of Champions): the register window, the battery-backed on-chip RAM, and the documented commands per fullsnes 'ST010 Commands'",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W19-04: rf-cart detects chipset $F6 (ST010, coprocessor nibble $F with the ST01x id byte per the header section) and lifts the refusal; rf-snes maps the ST010's SNES-visible RAM window and its command/status bytes ($0020 command, $0021 bit 7 busy) per fullsnes 'SNES Cart DSP-n/ST010/ST011' (memory map for the ST010 board: banks $60-$67 / $68-$6F data RAM per the chapter — quote it) with the RAM battery-backed like SRAM; every command in 'ST010 Commands' whose inputs/outputs fullsnes specifies (00h set RAM[0010h], 02h sort driver placements, 03h 2D coordinate scale, 05h simulated driver coordinate calculation, 06h multiply, 07h raster data calculation, 08h 2D coordinate rotation — read each command's parameter description in the chapter) is implemented as an HLE with the documented math and its busy-flag clear; 01h/04h 'Unknown Command' are named and clear busy with no effect; cited by section",
+   "W19-04: unit tests per implemented command against hand-computed results; register window and busy-flag semantics; save/load of the RAM and busy state; F1-ROC II renders in the census child (record PROBE_MODE=frames first varied frame); canaries unmoved; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; ignored SNES suites green; the orchestrator's full census names every moved title",
+   "W19-04: DSP-4 (Top Gear 3000) is NOT in scope — fullsnes lists its commands as 'Unknown'; the ticket records that finding in EMULATION_CORES.md so it is not re-investigated"
+  ],
+  "notes": [
+   "W19-04 FILED 2026-09-23 by the orchestrator: fullsnes lines 9265-9290 list the ST010 commands; the chapter's per-command parameter notes (after line 9300) are the spec. fullsnes: 'the only feature really used is the battery-backed on-chip RAM'."
+  ]
  }
 ]
 }
