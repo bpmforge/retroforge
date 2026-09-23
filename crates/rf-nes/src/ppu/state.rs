@@ -32,6 +32,11 @@ impl Ppu {
             read_buffer,
             chr: _,        // VRAM chunk (only when it is CHR RAM)
             chr_is_ram: _, // fixed by the cartridge, not machine state
+            // Ticket W14-58: derived fresh by `NesBus::push_mapper_view`
+            // (via `Mapper::chr_window`/`chr_ram_page_mask`) on every load,
+            // exactly like `chr` itself for a banked mapper — not machine
+            // state to persist.
+            chr_window_mask: _,
             // Ticket W11-05: an OBSERVATION facility, not machine state.
             // Deliberately not serialised — whether someone is watching
             // tiles is a property of this session's UI, and a save made

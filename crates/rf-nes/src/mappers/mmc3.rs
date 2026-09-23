@@ -156,6 +156,11 @@ use super::Mapper;
 const PRG_BANK: usize = 8 * 1024;
 const CHR_BANK_1K: usize = 1024;
 const CHR_VIEW_SIZE: usize = 8 * 1024;
+/// TQROM's on-board CHR-RAM chip (ticket W14-58; nesdev.org/wiki/
+/// INES_Mapper_119): a fixed 8 KiB, addressed in 1 KiB pages by a bank
+/// register's bits 0-2 whenever that register's bit 6 is set.
+const CHR_RAM_SIZE: usize = 8 * 1024;
+const CHR_RAM_PAGES: usize = 8;
 
 /// Which of the two documented MMC3 chip families' IRQ-fire rule this
 /// instance implements — see this module's doc "IRQ registers" section.
@@ -186,6 +191,33 @@ pub struct Mmc3 {
     /// the page for `$2000-$27FF` and R1 for `$2800-$2FFF`; with it set,
     /// R2-R5 select `$2000`, `$2400`, `$2800`, `$2C00` one each.
     txsrom: bool,
+
+    /// TQROM (mapper 119, ticket W14-58): the six CHR bank registers mix
+    /// CHR-ROM and 8 KiB on-board CHR-RAM pages, bit 6 of the raw register
+    /// byte selecting which. See [`Mmc3::new_tqrom`] and this module's
+    /// "TQROM" doc section.
+    tqrom: bool,
+    /// 8 KiB CHR-RAM chip TQROM boards carry alongside CHR-ROM.
+    /// Zero-sized (never read) for every other variant.
+    chr_ram: [u8; CHR_RAM_SIZE],
+    /// Bit `n` set: window slot `n` (the same 8 one-KiB slots
+    /// [`Mmc3::chr_view`] lays out) is currently backed by `chr_ram`
+    /// rather than `chr_rom` — [`Mapper::chr_ram_page_mask`]'s answer,
+    /// recomputed by [`Mmc3::recompute_chr_view_tqrom`].
+    chr_ram_mask: u8,
+    /// For each window slot with its `chr_ram_mask` bit set: which of
+    /// `chr_ram`'s 8 pages backs it — needed by
+    /// [`Mmc3::chr_window_writeback`] to know where a PPU-side write to
+    /// that slot belongs once the window moves on.
+    chr_ram_slot_page: [u8; 8],
+
+    /// Mapper 47 (ticket W14-58; nesdev.org/wiki/INES_Mapper_047): MMC3
+    /// wired behind a `$6000-$7FFF`-selected 128 KiB PRG / 128 KiB CHR
+    /// outer bank, bit 0 of any write there. See [`Mmc3::new_mapper47`].
+    mapper47: bool,
+    /// Mapper 47's outer bank select (0 or 1) — meaningless (stays 0) for
+    /// every other variant.
+    outer_bank: u8,
 
     bank_select: u8,
     /// R0-R7 (nesdev's own register numbering): R0/R1 CHR 2K banks
@@ -227,6 +259,12 @@ impl Mmc3 {
             four_screen: mirroring == Mirroring::FourScreen,
             revision,
             txsrom: false,
+            tqrom: false,
+            chr_ram: [0u8; CHR_RAM_SIZE],
+            chr_ram_mask: 0,
+            chr_ram_slot_page: [0u8; 8],
+            mapper47: false,
+            outer_bank: 0,
             bank_select: 0,
             registers: [0; 8],
             mirroring_reg: 0,
@@ -253,6 +291,61 @@ impl Mmc3 {
             Mmc3Revision::B,
         );
         mapper.txsrom = true;
+        mapper
+    }
+
+    /// A TQROM board (mapper 119, ticket W14-58) —
+    /// [nesdev.org/wiki/INES_Mapper_119](https://www.nesdev.org/wiki/INES_Mapper_119):
+    /// plain MMC3 PRG banking, IRQ and mirroring, but each of the six CHR
+    /// bank registers independently selects either a CHR-ROM page (bit 6
+    /// clear, bits 0-5, up to 64 KiB) or one of the 8 pages of an on-board
+    /// 8 KiB CHR-RAM chip (bit 6 set, bits 0-2) — see this module's
+    /// "TQROM" doc section for how the resulting mixed window round-trips
+    /// PPU-side writes through [`Mapper::chr_window_writeback`].
+    pub fn new_tqrom(prg_rom: Vec<u8>, chr_rom: Vec<u8>) -> Self {
+        debug_assert!(
+            !chr_rom.is_empty() && chr_rom.len().is_multiple_of(CHR_BANK_1K),
+            "TQROM CHR ROM must be a nonzero multiple of 1 KiB"
+        );
+        debug_assert!(
+            chr_rom.len() <= 64 * 1024,
+            "TQROM CHR-ROM bank field is 6 bits -- 64 KiB max"
+        );
+        let mut mapper = Self::new(
+            prg_rom,
+            chr_rom,
+            false, // chr_is_ram: false -- CHR-ROM exists; RAM is the separate on-board chip
+            Mirroring::Vertical,
+            Mmc3Revision::B,
+        );
+        mapper.tqrom = true;
+        mapper.recompute_chr_view_tqrom();
+        mapper
+    }
+
+    /// MMC3 2-in-1 (mapper 47, ticket W14-58) —
+    /// [nesdev.org/wiki/INES_Mapper_047](https://www.nesdev.org/wiki/INES_Mapper_047):
+    /// two full 128 KiB PRG / 128 KiB CHR MMC3 cartridges on one board, a
+    /// `$6000-$7FFF` write's bit 0 selecting which half the ordinary MMC3
+    /// bank registers address into. No PRG-RAM (that range is the outer
+    /// bank latch instead, per [`Mmc3::cpu_write_wram`]).
+    ///
+    /// The real board is a fixed 256 KiB PRG / 128 KiB CHR image, but
+    /// [`Mmc3::prg_bank`]/[`Mmc3::chr_bank_index`] only ever divide
+    /// whatever was actually passed in half — no assertion on the exact
+    /// size here, so `system::tests::rom_loading`'s
+    /// `every_emulated_mapper_loads_through_both_gates` (a generic 32
+    /// KiB PRG / 8 KiB CHR fixture run against every entry in
+    /// `EMULATED_MAPPERS`) still builds a bus rather than panicking.
+    pub fn new_mapper47(prg_rom: Vec<u8>, chr_rom: Vec<u8>) -> Self {
+        let mut mapper = Self::new(
+            prg_rom,
+            chr_rom,
+            false,
+            Mirroring::Vertical,
+            Mmc3Revision::B,
+        );
+        mapper.mapper47 = true;
         mapper
     }
 
@@ -292,14 +385,34 @@ impl Mmc3 {
     /// PRG bank `index` (already resolved to nesdev's `-1`/`-2`-relative
     /// convention as a real 0-based bank number by the caller), masked to
     /// this cartridge's real bank count.
+    ///
+    /// Mapper 47 (ticket W14-58): `index` addresses within the CURRENT
+    /// half only (nesdev.org/wiki/INES_Mapper_047: "the MMC3 registers
+    /// otherwise behave normally" within whichever 128 KiB half `$6000`
+    /// bit 0 selected), so it is confined to `prg_bank_count() / 2` banks
+    /// and offset by `outer_bank` halves before returning an absolute
+    /// index into `prg_rom`.
     fn prg_bank(&self, index: usize) -> usize {
-        index % self.prg_bank_count()
+        if self.mapper47 {
+            let half = (self.prg_bank_count() / 2).max(1);
+            self.outer_bank as usize * half + index % half
+        } else {
+            index % self.prg_bank_count()
+        }
     }
 
     fn recompute_prg_reads(&self) -> [usize; 4] {
-        let count = self.prg_bank_count();
-        let last = count - 1;
-        let second_last = count.saturating_sub(2) % count;
+        // Mapper 47: "last"/"second-last" are relative to the selected
+        // half too, not the whole 256 KiB image -- same reasoning as
+        // `prg_bank`'s doc.
+        let (half, offset) = if self.mapper47 {
+            let half = (self.prg_bank_count() / 2).max(1);
+            (half, self.outer_bank as usize * half)
+        } else {
+            (self.prg_bank_count(), 0)
+        };
+        let last = offset + half - 1;
+        let second_last = offset + half.saturating_sub(2) % half;
         let r6 = self.prg_bank((self.registers[6] & 0x3F) as usize);
         let r7 = self.prg_bank((self.registers[7] & 0x3F) as usize);
         if self.prg_mode() {
@@ -311,25 +424,41 @@ impl Mmc3 {
         }
     }
 
+    /// CHR 1 KiB bank `raw` (register bits, already masked to the
+    /// register's own granularity by the caller), resolved to an absolute
+    /// index into `chr_rom`.
+    ///
+    /// Mapper 47 (ticket W14-58): confined to the current half, the same
+    /// "outer bank picks which 64 KiB CHR half the inner registers
+    /// address" rule [`Mmc3::prg_bank`]'s doc describes for PRG.
+    fn chr_bank_index(&self, raw: usize) -> usize {
+        let count = self.chr_bank_count_1k();
+        if self.mapper47 {
+            let half = (count / 2).max(1);
+            self.outer_bank as usize * half + raw % half
+        } else {
+            raw % count
+        }
+    }
+
     fn recompute_chr_view(&mut self) {
         if self.chr_rom.is_empty() {
             return;
         }
-        let count = self.chr_bank_count_1k();
         // Same six raw register values regardless of A12-inversion; only
         // which 1 KiB *window* each lands in differs (nesdev: "two 2 KB
         // banks... four 1 KB banks", with the two halves swapping which
         // granularity they get when bit7 is set).
-        let r0_even = (self.registers[0] & 0xFE) as usize % count;
-        let r0_odd = (self.registers[0] | 0x01) as usize % count;
-        let r1_even = (self.registers[1] & 0xFE) as usize % count;
-        let r1_odd = (self.registers[1] | 0x01) as usize % count;
+        let r0_even = self.chr_bank_index((self.registers[0] & 0xFE) as usize);
+        let r0_odd = self.chr_bank_index((self.registers[0] | 0x01) as usize);
+        let r1_even = self.chr_bank_index((self.registers[1] & 0xFE) as usize);
+        let r1_odd = self.chr_bank_index((self.registers[1] | 0x01) as usize);
         let banks_2k = [r0_even, r0_odd, r1_even, r1_odd];
         let banks_1k = [
-            self.registers[2] as usize % count,
-            self.registers[3] as usize % count,
-            self.registers[4] as usize % count,
-            self.registers[5] as usize % count,
+            self.chr_bank_index(self.registers[2] as usize),
+            self.chr_bank_index(self.registers[3] as usize),
+            self.chr_bank_index(self.registers[4] as usize),
+            self.chr_bank_index(self.registers[5] as usize),
         ];
         let windows: [usize; 8] = if self.chr_a12_inverted() {
             [
@@ -361,6 +490,79 @@ impl Mmc3 {
                 .copy_from_slice(&self.chr_rom[src..src + CHR_BANK_1K]);
         }
     }
+
+    /// TQROM's CHR-window materializer (ticket W14-58) — lays out the same
+    /// eight 1 KiB window slots [`Mmc3::recompute_chr_view`] does (the
+    /// register-to-window mapping and the A12-inversion swap are identical
+    /// MMC3 hardware, nesdev.org/wiki/INES_Mapper_119: "CHR banking is
+    /// implemented similar to how MMC3 implements it"), but resolves each
+    /// slot's raw register BYTE (bit 6 intact, not yet masked to a page
+    /// number) into either `chr_rom` or `chr_ram` depending on that bit,
+    /// and records which in `chr_ram_mask`/`chr_ram_slot_page` for
+    /// [`Mmc3::chr_window_writeback`] and [`Mapper::chr_ram_page_mask`] to
+    /// use.
+    ///
+    /// Deliberately NOT called from [`Mmc3::cpu_write`] the way
+    /// [`Mmc3::recompute_chr_view`] is for every other variant — see
+    /// `cpu_write`'s own comment and this module's "TQROM" doc section for
+    /// why the recompute has to wait for
+    /// [`Mmc3::chr_window_writeback`] to run first.
+    fn recompute_chr_view_tqrom(&mut self) {
+        let count = self.chr_bank_count_1k();
+        let r0_even = self.registers[0] & 0xFE;
+        let r0_odd = self.registers[0] | 0x01;
+        let r1_even = self.registers[1] & 0xFE;
+        let r1_odd = self.registers[1] | 0x01;
+        let banks_2k = [r0_even, r0_odd, r1_even, r1_odd];
+        let banks_1k = [
+            self.registers[2],
+            self.registers[3],
+            self.registers[4],
+            self.registers[5],
+        ];
+        let windows: [u8; 8] = if self.chr_a12_inverted() {
+            [
+                banks_1k[0],
+                banks_1k[1],
+                banks_1k[2],
+                banks_1k[3],
+                banks_2k[0],
+                banks_2k[1],
+                banks_2k[2],
+                banks_2k[3],
+            ]
+        } else {
+            [
+                banks_2k[0],
+                banks_2k[1],
+                banks_2k[2],
+                banks_2k[3],
+                banks_1k[0],
+                banks_1k[1],
+                banks_1k[2],
+                banks_1k[3],
+            ]
+        };
+        self.chr_ram_mask = 0;
+        for (slot, &raw) in windows.iter().enumerate() {
+            let dst = slot * CHR_BANK_1K;
+            if raw & 0x40 != 0 {
+                // Bit 6 set: 8 KiB CHR-RAM page, bits 0-2.
+                let page = (raw & 0x07) as usize % CHR_RAM_PAGES;
+                self.chr_ram_mask |= 1 << slot;
+                self.chr_ram_slot_page[slot] = page as u8;
+                let src = page * CHR_BANK_1K;
+                self.chr_view[dst..dst + CHR_BANK_1K]
+                    .copy_from_slice(&self.chr_ram[src..src + CHR_BANK_1K]);
+            } else {
+                // Bit 6 clear: CHR-ROM page, bits 0-5 (64 KiB max).
+                let page = (raw & 0x3F) as usize % count;
+                let src = page * CHR_BANK_1K;
+                self.chr_view[dst..dst + CHR_BANK_1K]
+                    .copy_from_slice(&self.chr_rom[src..src + CHR_BANK_1K]);
+            }
+        }
+    }
 }
 
 impl Mapper for Mmc3 {
@@ -383,7 +585,21 @@ impl Mapper for Mmc3 {
             0x8001 => {
                 let reg = (self.bank_select & 0x07) as usize;
                 self.registers[reg] = value;
-                self.recompute_chr_view();
+                // Ticket W14-58: TQROM defers the CHR recompute to
+                // `chr_window_writeback` (called by `NesBus` right before
+                // `chr_window` is asked for the new view) instead of
+                // doing it eagerly here -- an eager recompute would
+                // overwrite `chr_ram_mask`/`chr_ram_slot_page` for the
+                // NEW window before this same write's `push_mapper_view`
+                // gets a chance to hand back the OLD window's live PPU
+                // buffer, corrupting whichever RAM page the OLD mapping
+                // pointed at (see `Mapper::chr_window_writeback`'s doc).
+                // Every other variant is unaffected: nothing else reads
+                // `chr_view` between this write and the next
+                // `push_mapper_view` call.
+                if !self.tqrom {
+                    self.recompute_chr_view();
+                }
             }
             0xA000 => self.mirroring_reg = value,
             0xA001 => self.prg_ram_protect = value,
@@ -421,6 +637,54 @@ impl Mapper for Mmc3 {
             None
         } else {
             Some(&self.chr_view[..])
+        }
+    }
+
+    /// Mapper 47's outer bank select (ticket W14-58; nesdev.org/wiki/
+    /// INES_Mapper_047): bit 0 of any `$6000-$7FFF` write picks the 128
+    /// KiB PRG / 128 KiB CHR half `prg_bank`/`chr_bank_index` confine the
+    /// ordinary MMC3 registers to. `NesBus` still stores the byte in its
+    /// own PRG-RAM array regardless (this board has none, but nothing
+    /// reads it back) -- this is purely an observer, the same shape
+    /// `NINA-001`/Jaleco JF already use for their own `$6000-$7FFF`
+    /// registers (this module's `super` doc, "Mapper scope"). No-op for
+    /// every other variant.
+    fn cpu_write_wram(&mut self, addr: u16, value: u8) {
+        let _ = addr;
+        if self.mapper47 {
+            self.outer_bank = value & 0x01;
+            self.recompute_chr_view();
+        }
+    }
+
+    /// Ticket W14-58 — see [`Mapper::chr_window_writeback`]'s doc and this
+    /// module's "TQROM" section. No-op for every non-TQROM variant.
+    fn chr_window_writeback(&mut self, ppu_chr: &[u8]) {
+        if !self.tqrom {
+            return;
+        }
+        for slot in 0..8usize {
+            if self.chr_ram_mask & (1 << slot) == 0 {
+                continue;
+            }
+            let page = self.chr_ram_slot_page[slot] as usize;
+            let src = slot * CHR_BANK_1K;
+            let dst = page * CHR_BANK_1K;
+            self.chr_ram[dst..dst + CHR_BANK_1K].copy_from_slice(&ppu_chr[src..src + CHR_BANK_1K]);
+        }
+        // Now that any live RAM edits are folded back into `chr_ram`,
+        // materialize the window this write's OWN register change (if
+        // any -- see `cpu_write`'s `0x8001` arm) selected.
+        self.recompute_chr_view_tqrom();
+    }
+
+    /// Ticket W14-58 — see [`Mapper::chr_ram_page_mask`]'s doc. `0` (every
+    /// page read-only) for every non-TQROM variant, matching the default.
+    fn chr_ram_page_mask(&self) -> u8 {
+        if self.tqrom {
+            self.chr_ram_mask
+        } else {
+            0
         }
     }
 
@@ -470,7 +734,19 @@ impl Mapper for Mmc3 {
         out.bool(self.irq_reload_flag)?;
         out.bool(self.irq_enabled)?;
         out.bool(self.irq_pending)?;
-        out.bytes(&self.chr_view)
+        out.bytes(&self.chr_view)?;
+        // Ticket W14-58: appended after every pre-existing field, without
+        // renumbering any of them (this module's ticket note) -- TQROM's
+        // 8 KiB CHR-RAM chip plus the mask/page bookkeeping
+        // `chr_window_writeback` needs to fold PPU-side writes back into
+        // the right page, and mapper 47's outer bank select. All three
+        // are `0`/all-zero for every other variant, so this costs a few
+        // harmless bytes on the common case rather than a format version
+        // flag.
+        out.u8(self.chr_ram_mask)?;
+        out.bytes(&self.chr_ram_slot_page)?;
+        out.bytes(&self.chr_ram)?;
+        out.u8(self.outer_bank)
     }
 
     fn load_state(&mut self, inp: &mut StateIn<'_>) -> Result<(), StateError> {
@@ -484,6 +760,10 @@ impl Mapper for Mmc3 {
         self.irq_enabled = inp.bool()?;
         self.irq_pending = inp.bool()?;
         inp.bytes(&mut self.chr_view)?;
+        self.chr_ram_mask = inp.u8()?;
+        inp.bytes(&mut self.chr_ram_slot_page)?;
+        inp.bytes(&mut self.chr_ram)?;
+        self.outer_bank = inp.u8()?;
         Ok(())
     }
 }
@@ -827,5 +1107,227 @@ mod tests {
         assert_eq!(m.mirroring(), Mirroring::PerTable([1, 0, 0, 1]));
         // The bank bit itself still banks CHR (masked by the bank count).
         assert_eq!(m.chr_window().unwrap()[0], 0x80, "R2 = $80 -> bank 0 of 64");
+    }
+
+    // ---- TQROM (mapper 119, ticket W14-58) ----
+
+    /// Drives `m` through exactly the sequence `NesBus::push_mapper_view`
+    /// does (module doc, "TQROM" section): hand the mapper back whatever
+    /// the PPU buffer currently holds FIRST, then ask for -- and copy in
+    /// -- the freshly materialized window. Every TQROM test below uses
+    /// this instead of reading `m.chr_window()` directly, because a raw
+    /// `chr_window()` read between two register writes can observe a
+    /// window `chr_window_writeback` hasn't recomputed yet (`cpu_write`'s
+    /// `0x8001` arm comment).
+    fn push(m: &mut Mmc3, ppu_chr: &mut [u8; CHR_VIEW_SIZE]) {
+        Mapper::chr_window_writeback(m, ppu_chr);
+        ppu_chr.copy_from_slice(m.chr_window().expect("TQROM always has CHR"));
+    }
+
+    #[test]
+    fn tqrom_window_mixes_rom_and_ram_pages_side_by_side() {
+        let mut m = Mmc3::new_tqrom(prg(2), chr(64)); // 64 x 1 KiB CHR-ROM pages
+        let mut ppu_chr = [0u8; CHR_VIEW_SIZE];
+        select(&mut m, 0, 4); // R0 (2K, slots 0-1): CHR-ROM page 4
+        select(&mut m, 2, 0x40 | 2); // R2 (1K, slot 4): CHR-RAM page 2
+        push(&mut m, &mut ppu_chr);
+
+        let mask = Mapper::chr_ram_page_mask(&m);
+        assert_eq!(mask & 0b0000_0011, 0, "slots 0-1 (R0's ROM pair) stay ROM");
+        assert_ne!(mask & (1 << 4), 0, "slot 4 (R2, bit6 set) is RAM");
+        assert_eq!(
+            ppu_chr[0],
+            0x80 + 4,
+            "ROM slot's bytes come straight from chr_rom"
+        );
+        assert_eq!(
+            ppu_chr[4 * CHR_BANK_1K],
+            0,
+            "RAM slot starts zeroed, not chr_rom garbage"
+        );
+    }
+
+    #[test]
+    fn tqrom_ram_page_write_is_ignored_when_the_slot_is_rom() {
+        let mut m = Mmc3::new_tqrom(prg(2), chr(64));
+        let mut ppu_chr = [0u8; CHR_VIEW_SIZE];
+        select(&mut m, 0, 4); // R0 -> ROM page 4 pair (slots 0-1)
+        push(&mut m, &mut ppu_chr);
+        assert_eq!(ppu_chr[0], 0x80 + 4);
+
+        // A PPU-side write lands in the buffer directly in this harness
+        // (ticket W14-58's real gate is `ppu::mem::chr_write`'s mask
+        // check, tested separately in `crate::ppu::mem`'s test module) --
+        // what this test proves is that `chr_window_writeback` never
+        // copies a ROM slot's bytes anywhere, so the "write" has nowhere
+        // to land: the next materialize re-derives the slot from
+        // `chr_rom`, byte-for-byte, regardless of what the buffer held.
+        ppu_chr[0] = 0xFF;
+        select(&mut m, 2, 0x40 | 1); // switch something else, forcing a push
+        push(&mut m, &mut ppu_chr);
+        select(&mut m, 0, 4); // switch back to the same ROM bank
+        push(&mut m, &mut ppu_chr);
+        assert_eq!(
+            ppu_chr[0],
+            0x80 + 4,
+            "ROM page content is unaffected by the earlier PPU-side write"
+        );
+    }
+
+    #[test]
+    fn tqrom_ram_page_write_survives_a_bank_switch_away_and_back() {
+        let mut m = Mmc3::new_tqrom(prg(2), chr(64));
+        let mut ppu_chr = [0u8; CHR_VIEW_SIZE];
+        select(&mut m, 2, 0x40 | 3); // R2 (slot 4) -> CHR-RAM page 3
+        push(&mut m, &mut ppu_chr);
+        assert_ne!(Mapper::chr_ram_page_mask(&m) & (1 << 4), 0);
+
+        ppu_chr[4 * CHR_BANK_1K] = 0xAB; // PPU-side write into RAM page 3
+
+        select(&mut m, 2, 0x40 | 5); // bank-switch AWAY to RAM page 5
+        push(&mut m, &mut ppu_chr);
+        assert_eq!(
+            ppu_chr[4 * CHR_BANK_1K],
+            0,
+            "now showing page 5, untouched by the earlier write"
+        );
+
+        select(&mut m, 2, 0x40 | 3); // switch BACK to page 3
+        push(&mut m, &mut ppu_chr);
+        assert_eq!(
+            ppu_chr[4 * CHR_BANK_1K],
+            0xAB,
+            "page 3's earlier PPU-side write survived the round trip"
+        );
+    }
+
+    #[test]
+    fn tqrom_save_load_round_trip_mid_frame_reads_back_a_ram_write() {
+        // This module's ticket note names the exact acceptance sequence:
+        // write to a RAM page, bank-switch, save, load, read back. The
+        // bank-switch matters, not just for plot -- it is what runs
+        // `chr_window_writeback` (`NesBus::push_mapper_view`'s doc; a
+        // direct-through-`Mmc3` test drives it via this module's `push`
+        // helper) and folds the edit into `chr_ram` BEFORE `save_state`
+        // ever runs. `save_state`/`save_region` take `&self` -- see
+        // `crate::system::state`'s `StateRegion::Mapper` arm doc for why
+        // a save strictly BETWEEN two register writes, with no
+        // bank-switch to flush an edit first, is this ticket's one
+        // documented gap instead.
+        let mut m = Mmc3::new_tqrom(prg(2), chr(64));
+        let mut ppu_chr = [0u8; CHR_VIEW_SIZE];
+        select(&mut m, 2, 0x40 | 3); // R2 (slot 4) -> CHR-RAM page 3
+        push(&mut m, &mut ppu_chr);
+        ppu_chr[4 * CHR_BANK_1K + 7] = 0x99; // a live PPU-side edit
+
+        // Bank-switch: same slot, same RAM page -- still runs the
+        // writeback/materialize cycle, flushing the edit into `chr_ram`.
+        select(&mut m, 2, 0x40 | 3);
+        push(&mut m, &mut ppu_chr);
+
+        let mut stream = MemStream {
+            buf: Vec::new(),
+            at: 0,
+        };
+        m.save_state(&mut StateOut::new(&mut stream)).unwrap();
+
+        let mut restored = Mmc3::new_tqrom(prg(2), chr(64));
+        restored.load_state(&mut StateIn::new(&mut stream)).unwrap();
+        assert_eq!(
+            restored.chr_window().unwrap()[4 * CHR_BANK_1K + 7],
+            0x99,
+            "the RAM write survived a save/load round trip"
+        );
+        // And it keeps surviving a further bank switch away and back,
+        // exactly as it did before the round trip.
+        let mut restored_ppu_chr = [0u8; CHR_VIEW_SIZE];
+        restored_ppu_chr.copy_from_slice(restored.chr_window().unwrap());
+        select(&mut restored, 2, 0x40 | 5);
+        push(&mut restored, &mut restored_ppu_chr);
+        select(&mut restored, 2, 0x40 | 3);
+        push(&mut restored, &mut restored_ppu_chr);
+        assert_eq!(restored_ppu_chr[4 * CHR_BANK_1K + 7], 0x99);
+    }
+
+    struct MemStream {
+        buf: Vec<u8>,
+        at: usize,
+    }
+
+    impl rf_core_api::StateWriter for MemStream {
+        fn write_all(&mut self, bytes: &[u8]) -> Result<(), StateError> {
+            self.buf.extend_from_slice(bytes);
+            Ok(())
+        }
+    }
+
+    impl rf_core_api::StateReader for MemStream {
+        fn read_exact(&mut self, out: &mut [u8]) -> Result<(), StateError> {
+            let end = self.at + out.len();
+            if end > self.buf.len() {
+                return Err(StateError::Io("state stream exhausted".to_string()));
+            }
+            out.copy_from_slice(&self.buf[self.at..end]);
+            self.at = end;
+            Ok(())
+        }
+    }
+
+    // ---- Mapper 47 (MMC3 2-in-1 outer bank, ticket W14-58) ----
+
+    /// Marks bank `n` of each 128 KiB half distinctly: PRG bank `n` of
+    /// half `h` starts with `0x40 + n` in half 0, `0x60 + n` in half 1;
+    /// CHR 1 KiB page `n` of half `h` starts with `0x80 + n` in half 0,
+    /// `0xA0 + n` in half 1 -- so a test can tell which half's data it's
+    /// actually reading without needing to inspect `outer_bank` itself.
+    fn mark_mapper47_halves(prg: &mut [u8], chr: &mut [u8]) {
+        let prg_half = prg.len() / 2;
+        let prg_bank_count = prg_half / PRG_BANK;
+        for half in 0..2u8 {
+            for n in 0..prg_bank_count {
+                let base = half as usize * prg_half + n * PRG_BANK;
+                prg[base] = (if half == 0 { 0x40 } else { 0x60 }) + n as u8;
+            }
+        }
+        let chr_half = chr.len() / 2;
+        let chr_bank_count = chr_half / CHR_BANK_1K;
+        for half in 0..2u8 {
+            for n in 0..chr_bank_count {
+                let base = half as usize * chr_half + n * CHR_BANK_1K;
+                chr[base] = (if half == 0 { 0x80 } else { 0xA0 }) + n as u8;
+            }
+        }
+    }
+
+    #[test]
+    fn mapper47_outer_bank_select_changes_which_half_prg_and_chr_address() {
+        let mut prg = vec![0u8; 256 * 1024];
+        let mut chr = vec![0u8; 128 * 1024];
+        mark_mapper47_halves(&mut prg, &mut chr);
+        let mut m = Mmc3::new_mapper47(prg, chr);
+
+        select(&mut m, 6, 2); // R6 -> PRG bank 2 within the current half
+        select(&mut m, 2, 3); // R2 (1K slot 4) -> CHR page 3 within the half
+        assert_eq!(m.cpu_read(0x8000), 0x40 + 2, "half 0 PRG bank 2");
+        assert_eq!(
+            m.chr_window().unwrap()[4 * CHR_BANK_1K],
+            0x80 + 3,
+            "half 0 CHR page 3"
+        );
+
+        m.cpu_write_wram(0x6000, 0x01); // outer bank -> half 1
+        assert_eq!(
+            m.cpu_read(0x8000),
+            0x60 + 2,
+            "same R6 value, now half 1's PRG bank 2"
+        );
+        assert_eq!(
+            m.chr_window().unwrap()[4 * CHR_BANK_1K],
+            0xA0 + 3,
+            "same R2 value, now half 1's CHR page 3"
+        );
+
+        m.cpu_write_wram(0x7FFF, 0x00); // any $6000-$7FFF address, bit0 -> half 0
+        assert_eq!(m.cpu_read(0x8000), 0x40 + 2, "back to half 0");
     }
 }

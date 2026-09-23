@@ -109,8 +109,9 @@ pub use controller::Controller;
 use crate::apu::Apu;
 use crate::cpu::CpuBus;
 use crate::mappers::{
-    Action53, AxRom, Bnrom, Camerica, Cnrom, ColorDreams, DxRom, Fme7, GxRom, JalecoJf, Mapper,
-    Mmc1, Mmc2, Mmc3, Mmc3Revision, Mmc5, Nina, Nrom, Quattro, Rambo1, Sachen, Ss88006, UxRom,
+    Action53, AxRom, Bnrom, Camerica, Cnrom, ColorDreams, Cprom, DxRom, Fme7, GxRom, JalecoJf,
+    Mapper, Mmc1, Mmc2, Mmc3, Mmc3Revision, Mmc5, Nina, Nrom, Quattro, Rambo1, Sachen, Ss88006,
+    Unrom512, UxRom,
 };
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
@@ -347,10 +348,25 @@ impl NesBus {
                 rom.chr_rom().to_vec(),
                 rom.chr_is_ram(),
             )),
+            // Ticket W14-58.
+            119 => Box::new(Mmc3::new_tqrom(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+            )),
+            47 => Box::new(Mmc3::new_mapper47(
+                rom.prg_rom().to_vec(),
+                rom.chr_rom().to_vec(),
+            )),
             206 => Box::new(DxRom::new(
                 rom.prg_rom().to_vec(),
                 rom.chr_rom().to_vec(),
                 rom.chr_is_ram(),
+                rom.header().mirroring,
+            )),
+            // Ticket W14-59.
+            13 => Box::new(Cprom::new(rom.prg_rom().to_vec(), rom.header().mirroring)),
+            30 => Box::new(Unrom512::new(
+                rom.prg_rom().to_vec(),
                 rom.header().mirroring,
             )),
             other => unreachable!(
@@ -1024,9 +1040,40 @@ impl NesBus {
     /// later" row needs.
     /// Push whatever the mapper now reports for CHR, an MMC2 latch and
     /// mirroring into the PPU — after any write that can change them.
+    ///
+    /// Ticket W14-58: hands the PPU's *current* CHR buffer back to the
+    /// mapper FIRST ([`crate::mappers::Mapper::chr_window_writeback`]),
+    /// while it still reflects whatever window was live before this
+    /// write — so a mapper mixing CHR-ROM and CHR-RAM pages (TQROM) can
+    /// fold any RAM-page edits back into its own store before
+    /// [`Mapper::chr_window`] below is asked to materialize the NEW
+    /// window. Default no-op for every other board (see that method's
+    /// doc), so this costs nothing for them.
+    ///
+    /// **Not used by the save-state LOAD path** — see
+    /// [`NesBus::materialize_and_push_mapper_view`], which this delegates
+    /// to for everything after the writeback call: loading restores the
+    /// mapper's own state byte-for-byte, and `self.ppu.chr()` at that
+    /// point holds whatever was in the buffer *before* the load began,
+    /// not anything related to the state being restored — writing that
+    /// back would corrupt the just-loaded RAM store instead of preserving
+    /// it. `crate::system::state`'s `load_region` calls
+    /// `materialize_and_push_mapper_view` directly for exactly this
+    /// reason.
     fn push_mapper_view(&mut self) {
+        self.mapper.chr_window_writeback(self.ppu.chr());
+        self.materialize_and_push_mapper_view();
+    }
+
+    /// The materialize/push half of [`NesBus::push_mapper_view`], split
+    /// out (ticket W14-58) so the save-state load path can push a
+    /// mapper's restored view into the PPU WITHOUT first running
+    /// [`crate::mappers::Mapper::chr_window_writeback`] against a PPU CHR
+    /// buffer that has nothing to do with the state just restored.
+    fn materialize_and_push_mapper_view(&mut self) {
         if let Some(window) = self.mapper.chr_window() {
-            self.ppu.set_chr_window(window);
+            self.ppu
+                .set_chr_window(window, self.mapper.chr_ram_page_mask());
         }
         if let Some(latch) = self.mapper.chr_latch() {
             self.ppu.set_chr_latch(latch);

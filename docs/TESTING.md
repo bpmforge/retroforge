@@ -10758,3 +10758,345 @@ Arcade's Greatest Hits (Beta), Burn-in Test Cartridge, Doom Troopers
 (Beta), and Death and Return of Superman (Beta). This ticket does not
 re-run the full census — that is the orchestrator's own record of what
 moved project-wide, per the ticket's acceptance.
+
+## W14-58 — TQROM (mapper 119) and mapper 47: a CHR write-back hook for RAM pages in a materialized window
+
+The `Mapper::chr_window`/`Ppu::set_chr_window` materialize/push design
+(`crates/rf-nes/src/mappers/mod.rs`'s module doc, "Why this trait is
+narrower than §2.4's sketch") has always refused to push a window for any
+CHR-RAM mapper, precisely because a naive push has no way to fold a
+PPU-side write to that RAM back into the mapper's own store before the
+next push overwrites it (`ppu/mem.rs`'s "CHR RAM is not banked by this
+design" section). TQROM (mapper 119,
+[nesdev.org/wiki/INES_Mapper_119](https://www.nesdev.org/wiki/INES_Mapper_119))
+needs exactly this: MMC3's six CHR bank registers each independently pick
+either a CHR-ROM page (bit 6 clear, bits 0-5, up to 64 KiB) or one of 8
+pages of an on-board 8 KiB CHR-RAM chip (bit 6 set, bits 0-2), mixed in
+one 8 KiB window — the "push a whole window, refuse if any of it is RAM"
+rule can't express that at all.
+
+### The write-back hook
+
+Two new `Mapper` trait members close the gap:
+
+- `fn chr_window_writeback(&mut self, ppu_chr: &[u8])` (default no-op) —
+  the inverse of `chr_window`. `NesBus::push_mapper_view` (the sole call
+  site of `Ppu::set_chr_window`, per `crates/rf-nes/src/mappers/mod.rs`'s
+  own module doc) now calls this FIRST, handing the mapper the PPU's CHR
+  buffer while it still reflects the window that was live BEFORE the
+  register write that triggered this push — then materializes and pushes
+  the NEW window. This ordering is what lets a RAM page's live edits
+  land back in the mapper's own store before the new window overwrites
+  the PPU buffer, and it is why `Mmc3::cpu_write`'s `$8001` arm
+  deliberately does NOT eagerly recompute TQROM's CHR view the way every
+  other MMC3 variant does — an eager recompute there would build the
+  mask/slot mapping for the NEW window before this same write's
+  `chr_window_writeback` call gets a chance to read the OLD window's
+  live buffer, misattributing whichever RAM page the OLD mapping pointed
+  at. `Mmc3::recompute_chr_view_tqrom` runs at the END of
+  `chr_window_writeback` instead, once the fold-back is done.
+- `fn chr_ram_page_mask(&self) -> u8` (default `0`) — bit `n` set means
+  1 KiB page `n` of the CURRENT window is CHR-RAM and writable; `0`
+  (every page read-only) is correct for every CHR-ROM mapper that pushes
+  a window at all. `Ppu::set_chr_window` now takes this mask alongside
+  the window bytes and stores it in a new `chr_window_mask: Option<u8>`
+  field; `ppu/mem.rs`'s `chr_write` consults it once any window has ever
+  been pushed (mask `Some`) instead of the old all-or-nothing
+  `chr_is_ram` flag — a page whose mask bit is clear ignores the write, a
+  set bit lands it directly in the PPU's flat `chr` buffer for the next
+  `chr_window_writeback` to fold back. A mapper that never pushes a
+  window at all (mask stays `None` forever) is completely unaffected —
+  the PPU-owned CHR-RAM path this ticket leaves untouched.
+
+`NesBus::push_mapper_view` was split into itself (writeback +
+materialize, used by every live `$8000-$FFFF`-family write dispatch) and
+a new `materialize_and_push_mapper_view` (materialize only). The
+save-state LOAD path (`system/state.rs`'s `StateRegion::Mapper` arm)
+calls the latter directly, deliberately skipping the writeback half: at
+load time `self.ppu.chr()` still holds whatever was in the buffer before
+the load began, unrelated to the state being restored, and folding it
+back would corrupt the just-restored RAM store. TQROM's `save_state`
+instead serializes its materialized `chr_view` (ROM and RAM bytes alike)
+directly, byte-for-byte, exactly like every other MMC3 variant already
+does — so a load needs no recompute to be correct.
+
+**One acceptance item named but not built as specified:** the ticket
+brief additionally asked for a write-back call inside
+`NesBus::save_region`'s `StateRegion::Mapper` arm, "so the mapper's RAM
+store is current" at save time even between two register writes.
+`save_region` takes `&self` (`crates/retroforge`'s `build_container`,
+outside this ticket's `write_scope`, holds only a shared reference at
+save time), and `chr_window_writeback` is `&mut self` by design — the
+same mutation the live-write dispatch needs. Widening `save_region` to
+`&mut self` would require editing `crates/retroforge/src/save_state.rs`'s
+`build_container` signature, which lies outside `crates/rf-nes/**` /
+`crates/rf-cart/**` / `docs/TESTING.md`. Not built; documented instead
+(`system/state.rs`'s `StateRegion::Mapper` save arm). The gap is narrow:
+`NesBus::push_mapper_view` already flushes on every register write, so
+the ticket's own acceptance sequence — "write to a RAM page,
+bank-switch, save, load, read back" — is unaffected (the bank-switch is
+what flushes, before the save ever runs); only a save strictly BETWEEN
+two register writes, with no bank-switch in between to flush, would miss
+a still-uncommitted PPU-side edit.
+
+### Mapper 119 (TQROM)
+
+`Mmc3::new_tqrom(prg_rom, chr_rom)`: plain MMC3 PRG banking, IRQ counter
+and mirroring (nesdev: "CHR banking is implemented similar to how MMC3
+implements it", everything else "behaves as expected of a normal MMC3
+chip"). `recompute_chr_view_tqrom` lays out the same eight 1 KiB window
+slots `Mmc3::recompute_chr_view` does (same register-to-window mapping,
+same A12-inversion swap — real MMC3 hardware, ticket W2-03), but resolves
+each slot's raw register byte through bit 6 into either `chr_rom`
+(bits 0-5) or the mapper's own fixed 8 KiB `chr_ram` chip (bits 0-2),
+recording the result in `chr_ram_mask`/`chr_ram_slot_page` for
+`chr_ram_page_mask` and the next `chr_window_writeback` to use.
+
+### Mapper 47 (MMC3 2-in-1 outer bank)
+
+`Mmc3::new_mapper47(prg_rom, chr_rom)`, per
+[nesdev.org/wiki/INES_Mapper_047](https://www.nesdev.org/wiki/INES_Mapper_047):
+two full 128 KiB PRG / 128 KiB CHR MMC3 images on one board, a
+`$6000-$7FFF` write's bit 0 (observed via `Mapper::cpu_write_wram`, the
+same NINA-001/Jaleco-JF-shaped hook, ticket W14-15) selecting which half
+the ordinary MMC3 registers address into — no PRG-RAM. `Mmc3::prg_bank`
+and the new `Mmc3::chr_bank_index` helper both confine an index to
+`count / 2` and offset by `outer_bank * half` when `mapper47` is set;
+`recompute_prg_reads`'s "last"/"second-last" fixed banks are computed the
+same half-relative way. No exact-size assertion on the constructor (the
+real board is a fixed 256 KiB/128 KiB image, but `system::tests::
+rom_loading::every_emulated_mapper_loads_through_both_gates` drives every
+entry in `EMULATED_MAPPERS` through a generic 32 KiB PRG / 8 KiB CHR
+fixture, and the halving arithmetic works for any even split).
+
+`Mmc3`'s save-state layout gained four fields, appended after the
+existing ones without renumbering (`chr_view` stays where it was):
+`chr_ram_mask: u8`, `chr_ram_slot_page: [u8; 8]`, `chr_ram: [u8; 8192]`,
+`outer_bank: u8`. All four are all-zero for every pre-existing MMC3/
+TxSROM save and cost a few harmless bytes there, the same "no version
+flag needed" convention `txsrom`/`revision` already use for
+construction-fixed facts.
+
+### Tests
+
+New unit tests in `crates/rf-nes/src/mappers/mmc3.rs`'s `tests` module
+(all drive `Mmc3` directly through a `push` harness that repeats
+`NesBus::push_mapper_view`'s exact writeback-then-materialize sequence,
+per this ticket's brief):
+
+- `tqrom_window_mixes_rom_and_ram_pages_side_by_side` — a 2 KiB ROM pair
+  and a 1 KiB RAM page in the same materialized window, `chr_ram_page_
+  mask` correctly zero over the ROM slots and set over the RAM slot.
+- `tqrom_ram_page_write_is_ignored_when_the_slot_is_rom` — a "write" to a
+  ROM slot's buffer position has nowhere to land; the next materialize
+  re-derives it from `chr_rom` unchanged.
+- `tqrom_ram_page_write_survives_a_bank_switch_away_and_back` — a
+  PPU-side write to a RAM page, a switch to a different RAM page (the
+  written page vanishes from view), a switch back (the write is still
+  there).
+- `tqrom_save_load_round_trip_mid_frame_reads_back_a_ram_write` — write,
+  bank-switch (flushing it, matching the acceptance's own sequence),
+  `save_state`/`load_state` round trip through a `MemStream`, restored
+  mapper reads the byte back, and the byte keeps surviving a further
+  bank switch away and back post-load.
+- `mapper47_outer_bank_select_changes_which_half_prg_and_chr_address` —
+  distinctly-marked PRG/CHR halves, same register values before and
+  after an outer-bank write address different bytes.
+
+Every pre-existing MMC3/TxSROM test in the same file is unchanged and
+stays green, plus the two oracle suites this ticket's acceptance names
+(`crates/rf-nes/src/ppu/tests/blargg_roms.rs`):
+`mmc3_test_2_3_a12_clocking_passes` and `mmc3_test_2_all_six_sub_roms_
+pass` — both run unconditionally against the `roms/nes` symlink (no
+`#[ignore]` attribute; `docs/TESTING.md`'s existing convention of an
+`eprintln!` skip-with-message when the fixture is absent) and both still
+pass.
+
+`crates/rf-cart/src/nes.rs`: `SUPPORTED_MAPPERS`/`system::cartridge::
+EMULATED_MAPPERS` gained `47` and `119` (kept sorted), `mapper_name`
+gained `47`, `118` and `119` entries, and the existing `mapper_28_is_
+supported_and_unknown_mappers_still_name_themselves` test's "still
+refused" list was updated from `[119, 210, 13]` to `[210, 13]` (119 is
+supported now).
+
+### Gate
+
+`cargo fmt --check`: clean. `cargo clippy --workspace -- -D warnings`:
+clean. `cargo test -p rf-nes -p rf-cart`: rf-cart 87 passed/0 failed;
+rf-nes lib 374 passed/0 failed (up from 369 — 5 new: 4 TQROM + 1 mapper
+47); rf-nes's two other test binaries and both crates' doctests
+unaffected. `scripts/validate-arch.sh`: `arch OK`.
+
+### Library archives targeted
+
+Pin Bot, High Speed x2 (TQROM, mapper 119) and Super Spike V'Ball +
+Nintendo World Cup (mapper 47) — the orchestrator's own census, not
+re-run by this ticket, is the record of whether they actually moved.
+## W14-59 — CPROM (mapper 13), UNROM 512 (mapper 30), NES 2.0 exponent-multiplier sizes
+
+Three independent pieces of the post-W14-50 NES refused list: two real
+mappers (CPROM/13, UNROM 512/30) and one header-parsing gap (NES 2.0's
+exponent-multiplier ROM size notation), landed together because all three
+were small and none depended on the others.
+
+### CHR-RAM banking: the self-contained write-back hook
+
+Both mappers bank CHR **RAM**, which `crate::mappers` module doc's
+push/materialize design (ticket W2-02) explicitly could not do: a PPU-side
+`$2007` write lands in `Ppu`'s pushed 8 KiB buffer, and the very next
+*unrelated* push would silently clobber it with the mapper's own stale
+copy (documented at length in `ppu/mem.rs`'s "CHR RAM is not banked"
+section). This ticket was warned a parallel lane (W14-58) might add its
+own CHR write-back mechanism to the `Mapper` trait for TQROM's MMC3
+variant; it was implemented without sight of that branch, self-contained,
+per the ticket's own acceptance wording.
+
+The fix landed here as one new default-no-op trait method,
+`Mapper::chr_writeback(&mut self, current_window: &[u8])`
+(`crates/rf-nes/src/mappers/mod.rs`), called from `NesBus` with
+`self.ppu.chr()` as the first action at every one of four write sites
+**before** the mapper's own write handler ran and could change which
+page/bank was selected.
+
+**Merge note (ticket W14-5859, 2026-09-23):** the parallel W14-58 lane
+did land its own hook, for TQROM's MMC3 CHR-RAM variant, and the merge
+kept that one instead of this ticket's: `Mapper::chr_window_writeback`
+plus `Mapper::chr_ram_page_mask` (`crates/rf-nes/src/mappers/mod.rs`).
+W14-58's hook fires the opposite way around — `NesBus::push_mapper_view`
+calls it AFTER the mapper's own write handler has already run and moved
+the selected page/bank, then re-materializes and pushes the window
+together with the page mask so `ppu/mem.rs` knows which pages are RAM.
+`Cprom` and `Unrom512` (`crates/rf-nes/src/mappers/cprom.rs`,
+`unrom512.rs`) were ported onto it: each now keeps a `materialized_*`
+field naming the page/bank that was actually in the window as of the last
+write-back call. Their own `cpu_write` only *stages* the new selection —
+it does not snapshot or materialize anything, because the register write
+and the write-back are two independent `NesBus` call sites and
+`chr_window_writeback` can run against a staged selection that has
+already moved past what's still on screen. `chr_window_writeback` itself
+folds against the OLD `materialized_*` value first, THEN advances it to
+the staged selection and rematerializes — this ordering also has to
+survive `push_mapper_view` calling the hook from sites that never touch
+`cpu_write` at all (a `$2000-$3FFF` PPUCTRL write, for one), so two
+write-backs in a row with no bank-select between them must be a no-op,
+which is now a named test on both mappers. The port also fixed a real bug
+in this ticket's original `Cprom::chr_writeback`: it only folded the
+upper 4 KiB back, silently dropping any write to the lower half, which is
+CPROM's fixed page-0 window (`$0000-$0FFF`) and is still CHR RAM. It also
+missed that when the upper half is bank-switched back onto page 0, both
+halves become independently-writable views of that ONE physical page (the
+flat PPU CHR buffer keeps them as separate bytes, so a write through
+either half doesn't automatically update the other) — a fixed-order copy
+of the two halves loses whichever one didn't "win" the copy. The merge's
+`Cprom::chr_window_writeback` folds both halves and, specifically for the
+aliased case, merges them byte-by-byte against what each byte held before
+the fold, so a write through either alias survives. Both mappers also
+implement `chr_ram_page_mask` as `0xFF` (their whole window is RAM) — a
+requirement of W14-58's design this ticket's original hook had no
+equivalent for, since it pushed no mask at all.
+
+### CPROM (mapper 13) — nesdev.org/wiki/CPROM
+
+PRG: fixed 32 KiB, no registers. CHR: 16 KiB RAM as four 4 KiB pages;
+`$0000-$0FFF` permanently page 0; `$1000-$1FFF` shows whichever page bits
+0-1 of the last `$8000-$FFFF` write named. Videomation (both known dumps)
+uses this board.
+
+Tests (`crates/rf-nes/src/mappers/cprom.rs`, all driven through a
+`write_bus` helper that reproduces `NesBus`'s real order — the register
+write, then a write-back fed the PRE-write PPU buffer, then a
+re-materialize): `bank_select_swaps_the_upper_4kib_only` (selecting a
+fresh page never touches the fixed lower half or an unrelated page),
+`write_to_chr_ram_survives_switching_away_and_back` (a write fed back,
+then two more bank switches, then back — the byte is still there),
+`lower_half_write_survives_a_bank_switch_away_and_back` (regression test
+for the merge's lower-half fold fix), `upper_half_write_survives_while_
+aliased_to_the_fixed_page` (regression test for the merge's byte-wise
+alias merge — a write through the upper half while it aliases page 0
+must survive a switch away and back), `two_writebacks_in_a_row_without_
+an_intervening_cpu_write_are_stable` (the PPUCTRL-style push path),
+`prg_is_fixed_32kib_with_no_bank_register`, `page_select_wraps_to_two_
+bits`, `chr_ram_page_mask_is_all_writable`.
+
+### UNROM 512 (mapper 30) — nesdev.org/wiki/UNROM_512
+
+One register (`MCCP PPPP`): bits 0-4 select a 16 KiB PRG bank at `$8000`
+(last bank fixed at `$C000`, same shape as UxROM, up to 512 KiB/32 banks);
+bits 5-6 select one of four 8 KiB CHR-RAM banks (32 KiB total, whole
+window swaps — no fixed half, unlike CPROM); bit 7 selects the one-screen
+nametable page when the header names this board one-screen-hardwired.
+
+**Mirroring honesty note**: per the ticket brief (no cached nesdev copy of
+this specific page exists in `docs/research/` to fetch and verify
+against), a one-screen-hardwired header sets both the four-screen bit and
+a mirroring bit together — a combination `rf_cart::nes::parse_nes_header`
+already collapses to plain `Mirroring::FourScreen`. `Unrom512::new` reads
+that as "one-screen select is live" and anything else as ordinary
+header-fixed H/V. This is sourced to the ticket description, not
+independently confirmed against a fetched nesdev page — an honest gap if
+that reading turns out wrong for a real dump.
+
+**Explicitly out of scope, named rather than silent**: bus conflicts
+(neither NES 2.0 submapper 0 nor 1 changes this implementation — this
+crate's blanket "the relevant games work around it in software" position,
+already applied to UxROM/CNROM/AxROM); flash self-programming (the
+board's actual namesake feature — no game in this ticket's library
+flashes itself at runtime).
+
+Tests (`crates/rf-nes/src/mappers/unrom512.rs`, same `write_bus`-helper
+order as CPROM's): `prg_bank_select_and_fixed_last_bank`, `chr_bank_
+select_swaps_the_whole_window`, `chr_write_survives_switching_away_and_
+back`, `two_writebacks_in_a_row_without_an_intervening_cpu_write_are_
+stable`, `mirror_bit_only_acts_when_header_names_one_screen` (both the
+"ignored" and "live" cases), `prg_bank_number_wraps_modulo_the_real_bank_
+count`, `chr_ram_page_mask_is_all_writable`.
+
+### NES 2.0 exponent-multiplier ROM sizes — nesdev.org/wiki/NES_2.0
+
+"PRG-ROM Area"/"CHR-ROM Area": when byte 9's relevant nibble is `$F`, the
+LSB byte (`data[4]` for PRG, `data[5]` for CHR) is `EEEEEEMM` instead of a
+bank-count high nibble — size = `2^E * (MM*2+1)` bytes. Previously
+refused outright (`nes2_exponent_notation_is_reported_not_panicked`);
+`crates/rf-cart/src/nes.rs`'s new `decode_exponent_multiplier_size` now
+computes it with `checked_shl`/`checked_mul` (never a bare `*`/`<<`, so a
+pathological header can't panic instead of erroring) and refuses anything
+over a named 64 MiB allocation guard (`EXPONENT_SIZE_MAX`) with
+`CartError::InvalidHeader`. `parse_nes_header`'s PRG/CHR size computation
+now carries actual byte sizes end-to-end instead of "bank count", so a
+non-bank-multiple exponent size flows through the existing `needed`/
+`Truncated` length check unchanged.
+
+Tests (`crates/rf-cart/src/nes.rs`): `nes2_exponent_notation_is_decoded_
+not_refused` (rewritten from the old refusal test — E=15, MM=1, nesdev's
+own worked example: 2^15 * 3 = 98304 bytes), `nes2_exponent_notation_
+above_64mib_is_refused` (E=27 → 128 MiB), `nes2_exponent_multiplier_
+overflow_is_refused_not_panicked` (E=63, MM=3 — overflows `u64` outright,
+caught by `checked_mul` before the size guard ever runs), `nes2_
+exponent_notation_allows_a_prg_size_not_a_multiple_of_16kib` (E=13, MM=3
+→ 56 KiB). `crates/rf-nes/src/system/tests/rom_loading.rs` adds `nes2_
+exponent_notation_prg_size_not_a_multiple_of_16kib_loads_without_
+panicking`, proving the same 56 KiB PRG size slices correctly
+(`NesRom::from_ines_bytes`) and builds a real `NesBus` (NROM's `%
+prg_rom.len()` PRG-read arithmetic, not a bank-count division) without
+panicking anywhere downstream.
+
+### Dispatch and gate
+
+Both mappers added to `rf_cart::nes::SUPPORTED_MAPPERS` and
+`crate::system::cartridge::EMULATED_MAPPERS` (sorted), `NesBus::new`'s
+dispatch, and `mapper_name` ("CPROM", "UNROM 512"). Two existing tests
+that used mapper 13 as a stand-in for "a mapper rf-cart cannot identify"
+were retargeted to mapper 15 (still unsupported), since 13 is now real:
+`rf-cart`'s `mapper28_tests::mapper_28_is_supported_and_unknown_mappers_
+still_name_themselves` and `rf-nes`'s `a_mapper_rf_cart_cannot_identify_
+is_refused_not_loaded`.
+
+`cargo fmt --check`, `cargo clippy --workspace -- -D warnings`,
+`scripts/validate-arch.sh`: all clean. `cargo test -p rf-nes -p rf-cart`:
+rf-cart 91 passed (90 lib + 1 integration), rf-nes 383 passed (378 lib + 1
+ignored action53 fixture + 4 emulator-core-contract), 0 failed.
+
+Library archives targeted (per the ticket; the orchestrator's own census
+is the record of what actually moved): Videomation, Videomation (Alt)
+(CPROM/mapper 13), one UNROM 512/mapper 30 title, Magi Cube (Proto) and
+[BIOS] Demo Vision (NES 2.0 exponent-multiplier sizes).

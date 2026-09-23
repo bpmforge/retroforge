@@ -37,6 +37,24 @@ impl NesBus {
             StateRegion::Oam => self.ppu.save_oam(&mut out),
             StateRegion::Cgram => self.ppu.save_palette(&mut out),
             StateRegion::Mapper => {
+                // Ticket W14-58: TQROM's own `chr_ram` store is already
+                // current here -- `NesBus::push_mapper_view` folds any
+                // live PPU-side CHR-RAM edit back into it on every
+                // `$8000-$FFFF`-family write (see that method's doc), so
+                // by the time a save follows a bank-switch (this ticket's
+                // own acceptance sequence: "write to a RAM page,
+                // bank-switch, save, load, read back") the edit is
+                // already committed. `save_region` takes `&self` --
+                // deliberately, `crates/retroforge`'s `build_container`
+                // (out of this ticket's write_scope) holds only a shared
+                // reference at save time -- so it CANNOT also call the
+                // `&mut self` `Mapper::chr_window_writeback` hook to flush
+                // an edit still sitting only in the PPU's buffer with NO
+                // register write since. That narrower case (a save taken
+                // strictly between two register writes, before any of
+                // them has flushed) is an honest, narrow, documented gap,
+                // not a silently wrong one: `docs/TESTING.md`'s W14-58
+                // section names it.
                 self.mapper.save_state(&mut out)?;
                 // Ticket W14-16: MMC5's extra nametable RAM lives in the
                 // PPU; it rides in this chunk right after the mapper.
@@ -83,10 +101,14 @@ impl NesBus {
                 // What the mapper now reports must reach the PPU again
                 // (ticket W14-13): the restored bank registers and, for
                 // an MMC2, the restored latch selection -- and, since
-                // ticket W14-17, the ExGrafix/split config too, which is
-                // exactly what `push_mapper_view` already does after
-                // every live register write.
-                self.push_mapper_view();
+                // ticket W14-17, the ExGrafix/split config too. Ticket
+                // W14-58: this calls `materialize_and_push_mapper_view`
+                // directly, NOT `push_mapper_view` -- the latter's
+                // writeback half would fold `self.ppu.chr()`'s
+                // pre-load-garbage bytes into the mapper's just-restored
+                // RAM store (see that method's doc), corrupting the very
+                // state this call is supposed to bring back.
+                self.materialize_and_push_mapper_view();
                 Ok(())
             }
             StateRegion::Cart => inp.bytes(&mut self.prg_ram),

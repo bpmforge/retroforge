@@ -67,7 +67,7 @@ fn sixteen_kib_halves_are_identical_not_independently_addressable() {
 // widening rf-cart's own API surface for a test, which is out of this
 // ticket's write_scope (`crates/rf-cart/**` is a different crate). The
 // sibling case — "rf-cart refuses it outright" — stays covered below by
-// `a_mapper_rf_cart_cannot_identify_is_refused_not_loaded` (mapper 66).
+// `a_mapper_rf_cart_cannot_identify_is_refused_not_loaded` (mapper 15).
 // Retarget a new test back into a real rejection assertion the moment
 // EITHER list gains a mapper number the other one doesn't have yet.
 
@@ -163,9 +163,10 @@ fn every_emulated_mapper_loads_through_the_production_path() {
 /// below, which is the half a user actually reads.
 #[test]
 fn a_mapper_rf_cart_cannot_identify_is_refused_not_loaded() {
-    // 13 = CPROM: absent from rf-cart's SUPPORTED_MAPPERS entirely. (This
-    // used 66, 64 and 5 until W14-12, W14-14 and W14-16 emulated them.)
-    let raw = ines_with_mapper(13, 1, 1);
+    // 15 = "100-in-1 Contra Function 16": absent from rf-cart's
+    // SUPPORTED_MAPPERS entirely. (This used 66, 64, 5 and 13 until
+    // W14-12, W14-14, W14-16 and W14-59 emulated them.)
+    let raw = ines_with_mapper(15, 1, 1);
     assert!(
         NesRom::from_ines_bytes(&raw).is_err(),
         "an unknown mapper must be refused, never loaded"
@@ -239,4 +240,46 @@ fn every_emulated_mapper_loads_through_both_gates() {
         // `unreachable!`.
         let _bus = NesBus::new(rom);
     }
+}
+
+/// Ticket W14-59: an NES 2.0 exponent-multiplier PRG size that is NOT a
+/// multiple of 16 KiB (the notation's whole point -- see
+/// `rf_cart::nes`'s own tests for the parser-level half of this) must
+/// still slice and construct a real `NesBus` without panicking anywhere
+/// downstream -- `rf-cart`'s `needed`/`Truncated` check already proves the
+/// slice indices stay in bounds; this proves `NesRom::from_ines_bytes`'s
+/// own slicing (`crates/rf-nes/src/system/cartridge.rs`) and `NesBus::new`
+/// (mapper construction, `Ppu::new`'s CHR seeding) agree, for a mapper
+/// (NROM) whose bank arithmetic is plain `% len`, never a bank-count
+/// division that a too-small size could turn into a divide-by-zero.
+#[test]
+fn nes2_exponent_notation_prg_size_not_a_multiple_of_16kib_loads_without_panicking() {
+    // E=13, MM=3: 2^13 * 7 = 57344 bytes (56 KiB) -- same values as
+    // `rf_cart::nes::tests::nes2_exponent_notation_allows_a_prg_size_not_a_multiple_of_16kib`.
+    let prg_lsb = (13u8 << 2) | 3;
+    let prg_size = 57_344usize;
+    let chr_banks = 1u8;
+
+    let mut data = Vec::new();
+    data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
+    data.push(0); // byte 4: repurposed below as the exponent-notation LSB
+    data.push(chr_banks);
+    data.push(0); // flags6: mapper 0, horizontal
+    data.push(0x08); // flags7: NES 2.0 identifier bits
+    data.push(0); // byte8: mapper high bits 0, submapper 0
+    data.push(0x0F); // byte9: PRG-ROM area MSB nibble $F => exponent notation
+    data.extend_from_slice(&[0u8; 6]); // bytes 10-15
+    data[4] = prg_lsb;
+    data.extend(vec![0u8; prg_size]);
+    data.extend(vec![0u8; chr_banks as usize * 8 * 1024]);
+
+    let rom = NesRom::from_ines_bytes(&data)
+        .unwrap_or_else(|e| panic!("non-bank-multiple PRG size must still load, got {e}"));
+    assert_eq!(rom.prg_rom().len(), prg_size);
+
+    // Construction and a handful of reads must not panic even though
+    // `prg_size` isn't a multiple of NROM's usual 16/32 KiB halves.
+    let mut bus = NesBus::from_ines_bytes(&data).expect("valid header, must build a real bus");
+    let _ = bus.read(0x8000);
+    let _ = bus.read(0xFFFF);
 }
