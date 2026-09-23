@@ -8144,7 +8144,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 5,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W19-03",
   "title": "S-DD1 (Street Fighter Alpha 2): the data decompressor per fullsnes 'SNES Cart S-DD1' and 'S-DD1 Decompression Algorithm'",
