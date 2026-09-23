@@ -830,6 +830,83 @@ which this session did not reach. `Echo/esa_changes`, `Echo/edl_changes`,
 `Echo/edl_0_quirk`, `Echo/edl_lengths` and `Envelope/envelope_rates` are
 still unreached. W7-08 stays `in_progress`.
 
+### 5c. Check `0x0A`, stage 4 (2026-09-23) — the buffer-dump method run, no new bug found, one wrong prior inference corrected
+
+Following stage 3's own recommendation: a temporary `RF_DSP_TRACE`-style
+instrumentation (env-gated `eprintln!`, removed before this commit — same
+discipline as 5a/5b) dumped the full 2048-byte echo buffer at every
+`FLG=$FF` write, plus a per-write-back trace of `dry`/FIR-sum/EFB/`v`
+inside narrow sample windows, plus every raw ARAM store into
+`$E000-$E7FF` (the echo buffer's address range under this subtest's
+`ESA=$E0`) from the ordinary SPC700 memory-write path, independent of the
+DSP register file.
+
+**The central correction: stage 3's "`EchoVoices` is exactly zero, so
+`echo_input` at check `0x0A` is trivially zero" reasoning was too
+strong.** It is true that no voice is playing (confirmed again this
+session), but that does not make the FIR arithmetic input-independent —
+**the subtest seeds the echo buffer directly**, via ordinary SPC700
+`MOV`-style stores into ARAM at `$E000`-range addresses, completely
+bypassing `Dsp::write_register` and the echo write-back path. Traced
+directly: `RF_DSP_TRACE_ARAM` shows writes such as `addr=0xe000
+value=0x00` / `addr=0xe001 value=0x10` landing at sample `n=104834`, mid
+DSP run, with no corresponding echo-register or write-back activity at
+that instant. `Echo::read_and_filter`'s `SAR 1` on that stored word
+(`0x1000 -> 0x0800` = 2048) is exactly the FIR's actual input the next
+time the ring wraps back to that address — traced at `n=105087`, 253
+samples later (`(105087-104575)` matches the 512-sample/2048-byte ring
+period from the wrap immediately preceding the poke), where
+`RF_DSP_TRACE_WB` shows `fir=256 efb=8 v=16`. That is exactly
+`fir_tap`'s documented output for a single active tap (`FIR[7]=8`,
+history `2048`): `(2048*8)>>6 = 256`, then `echo_input = 0 +
+((256*8)>>7) = 16`, `16 & 0xFFFE = 16` (already even) — **our own
+arithmetic matches fullsnes's formula exactly for this concrete,
+independently-verified case.** This corrects the record rather than
+merely adding to it: the buffer this subtest exercises is not silent
+input into a possibly-broken filter, it is a real, ROM-authored test
+vector, and this session found the filter processing it correctly.
+
+**Also checked and found correct, not just assumed:** the `ESA`/`EDL`
+latch-at-wrap behaviour across the `EDL=0`-then-`EDL=1` transition
+observed between sweeps (register trace: `EDL` written `$00` at
+`n=97647`, `$01` at `n=102527`). With `EDL=0` the ring is 4 bytes, so
+`offset` re-hits 0 on almost every sample; `Echo::latch`'s "only relatch
+at `offset==0`" rule picks up the new `EDL=1` (2048-byte) length on the
+very next such wrap, observed as `offset` growing linearly from 0 (at
+`n=102527`) rather than snapping or drifting — exactly the documented
+"a newly written value does not take effect until the ring next comes
+back round" behaviour, working as designed.
+
+**What this rules out, and what it does not.** Sweep 2's actual first
+step (register-traced: `FIR=[0]*8`, `EFB=0`, running `n=102536` to
+`n=103809`) produces `v=0` at every sample by construction — multiplying
+by all-zero coefficients is input-independent — so `Echo/echo calc`'s
+`check 0x0A`, whichever specific comparison it is, is **not** an FIR/EFB
+magnitude bug in that step. Combined with the two verified-correct
+mechanisms above (FIR/EFB arithmetic on a real seed, ESA/EDL latch
+timing across a shrink-then-grow ring), this session did not find a new
+S-DSP arithmetic bug to fix, despite the buffer-dump/live-trace method
+the ticket brief asked for actually running and producing concrete,
+checkable numbers — reported honestly as a negative result rather than
+stretched into a claimed fix. **Also discovered and left as an open
+question for whoever continues this:** the sweep's structure is more
+granular than 5b's "9 discrete pause/resume steps" — at least one
+`EFB`/`FIR` register is rewritten **mid-run**, without an intervening
+`FLG=$FF` pause (e.g. the `$0D` EFB write at `n=104846`, well inside an
+already-running step), meaning the check counter almost certainly
+advances on some sub-step boundary this session did not map, not only on
+pause boundaries. Locating exactly which live-write boundary corresponds
+to `check 0x0A` would need either a finer-grained instrumentation of
+every register write mapped against the check counter's own increments
+(not directly observable without reading the ROM's comparison logic,
+which NFR-011 rules out here) or accepting a slower, more exhaustive
+sample-by-sample Python replica than this session's budget covered.
+`Echo/esa_changes`, `Echo/edl_changes`, `Echo/edl_0_quirk`,
+`Echo/edl_lengths` and `Envelope/envelope_rates` remain unreached.
+`cargo test -p rf-snes --release --test blargg_spc -- --ignored` prints
+the same `spc_dsp6.sfc` line as 5b (`Failed 0A`) — unchanged, since no
+code changed this session. W7-08 stays `in_progress`.
+
 ## 6. Determinism, state, and mode-invariant suites
 
 | Test | Assertion | SRS |
