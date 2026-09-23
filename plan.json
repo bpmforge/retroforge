@@ -8003,7 +8003,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "in_progress",
+  "status": "blocked",
   "stories": [],
   "id": "W14-51",
   "title": "Final Fight 2 (x2) and Battletoads in Battlemaniacs (x2): $2100/$212C never consumed while the game runs — trace the picture state",
@@ -8019,6 +8019,7 @@
    "W14-51: census children on the four titles and canaries; orchestrator census with RF_CENSUS_OUT; a BLOCKED verdict must reach ROM bytes or a checked register read"
   ],
   "notes": [
+   "W14-51 DONE-AS-BLOCKED 2026-09-22: no PPU register defect found for either title. At frame 600 both show forced_blank=false bright=15 tm=[0000], clip_mode=0/prevent_mode=0 (not W14-42's swap class), all windows disabled -- ruled out directly, not assumed. Added PROBE_MODE=ppuwrites to title_probe.rs (decode-side register-write watch, since PROBE_WATCH is blind on write-only $2100-$213F). Traced $212C/$2100's own writes to an ordinary WRAM-shadow vsync idiom ($244A/$AA38/$AA3A, $8085F7/$808963/$808C0B) -- a genuine software fade plus a blinking single-BG splash, not a stuck/corrupted register. Both titles' picture eventually appears well past the census window: Final Fight 2 varied_at=6607 frames (~110s), Battletoads varied_at=3520 frames (~59s) -- same 'boot longer than census window' class as Lagoon/Phalanx (W14-35) and Battle Grand Prix (W14-48), not a picture-state register bug. Bug Fix Discipline: 3 ranked causes -- (1) stuck/misdecoded register, ruled out by direct fullsnes check; (2) genuinely long intro, supported by every internal timing signal (NMI cadence independently correct per W14-47, settle-delay loop and SPC upload rate both normal); (3) an SPC/DSP timing defect inflating an audio-gated wait -- plausible but NOT chased, since W7-08 (S-DSP echo/ADSR) is concurrently active on the exact same APU surface and its own echo path is still red. No crates/rf-snes source change. Gate: fmt/clippy clean, cargo test -p rf-snes 381 passed (0 new, harness-only diagnostic), peterlemon_golden 3/3, region_golden 1/1, undisbeliever_goldens_match 1/1, validate-arch OK. Census: Final Fight 2 and Battletoads both exit 10 (unchanged, expected -- no fix shipped); 11 canaries all exit 0 (unmoved). P8 concurrent-active overlap with W7-08 left as-is per the claim commit's note -- file-level disjoint (ppu/ vs apu/).",
    "W14-51 FILED 2026-09-22 by the orchestrator from W14-47's disposition."
   ]
  }

@@ -7177,3 +7177,163 @@ Ninja JaJaMaru: Operation Milky Way) moved from *refused* to *rendered
 something*; nothing else moved. The 49 still refused are unlicensed
 multicarts, Retro-Bit/Limited Run re-releases on modern boards, the
 competition carts, Racermate, and the TQROM trio.
+
+## W14-51 — Final Fight 2 / Battletoads: no register defect found; both
+titles' picture appears well outside the census window, the same
+"boot longer than window" class as Lagoon/Phalanx (W14-35). BLOCKED
+(2026-09-22)
+
+**Composition state at the census's own frame 600** (`PROBE_MODE=frames
+PROBE_FRAMES=600 PROBE_M7=1 PROBE_OAM=1`):
+
+| Title | `forced_blank` | `bright` | `tm` | `color_math` | `windows` |
+|---|---|---|---|---|---|
+| Final Fight 2 (USA) | false | 15 | `[0000]` (all BGs off, no OBJ) | `clip_mode=0 prevent_mode=0` (never forces black) | all six layers' window-enable pairs `(false,false)` — no window ever applies |
+| Battletoads in Battlemaniacs (USA) | false | 15 | `[0000]` | `clip_mode=0 prevent_mode=0` `enable=51` `use_subscreen=true` | same all-disabled shape |
+
+Both: `distinct_indices_now=1 sample=[0]` — a genuinely flat main screen,
+not a colour-math/window artefact (neither `clip_mode` nor
+`prevent_mode` is in a force-black configuration, so W14-42's
+inside/outside swap class does not apply here — confirmed directly
+rather than assumed, since that swap already burned one ticket).
+`cgram_nonzero=245 vram_nonzero=3296 oam_nonzero=160` for Final Fight 2
+(from the earlier W14-47 trace, re-confirmed here) — real graphics data
+loaded, `$212C` (TM) is simply zero at this instant.
+
+**Register-write watch, added this ticket (`PROBE_MODE=ppuwrites`,
+`crates/rf-harness/tests/title_probe.rs`).** `PROBE_WATCH` is
+documented as blind on `$2100`-`$213F` (write-only registers fall
+through `SnesBus::peek` to open bus), so a byte-level watch on `$212C`
+cannot see the game's own writes. Added a decode-side watch instead:
+fast-forwards to the frame of interest with `Step::Frame`, then
+single-steps and compares the PPU's own decoded `forced_blank`/
+`brightness`/`tm`/`obj_enabled`/`ts`/`color_math`/`windows` fields
+across instruction boundaries, printing the PC on any change. Documented
+in the module's own doc comment alongside `PROBE_WATCH`'s caveat.
+
+**What the watch found, both titles: an ordinary WRAM-shadow-copy
+vblank idiom, not a stuck or corrupted register.** Final Fight 2's
+`$8085F7`/`$808963`/`$808C0B` triangle (disassembled with
+`PROBE_DIS`): `$80895C: LDA $244A / STA $002100` copies a WRAM shadow
+byte to INIDISP once per main-loop iteration (the source of the
+observed `bright` ramp 8->9->10->...->15, a genuine software fade),
+gated by `$808963: LDA $AA3A / BNE $8963` and `$808C0B: LDA $AA38 /
+BNE $8C0A` — both ordinary "wait for the NMI handler to set a WRAM
+flag" vsync idioms, one iteration per frame. `$212C`'s own WRAM shadow
+is written as part of the same per-frame pass and is legitimately 0 for
+most of this stretch, with a brief BG3-only flicker (`tm=[0,0,true,0]`)
+recurring every few frames — consistent with a blinking single-layer
+splash/logo screen, not a dropped write (the value written is exactly
+what the watch shows landing in the decoded state; nothing is being
+silently discarded between the write and the read-back through
+`render_scanline`).
+
+**The SPC upload and the fixed hardware-settle delay, checked and
+ruled out as bugs.** `$808B1E-$808B27` (`LDX #$0005; DEC $201F; BNE
+$8B21; DEX; BNE $8B21`) is a fixed nested countdown: `5 * 65536`
+decrement/branch pairs, ~2.6M master cycles (~122 ms at 21.477 MHz) —
+a deliberate settle delay before `JSL $8180FF` starts the SPC upload,
+not a bug (its length is baked into the ROM and identical on real
+hardware). The upload itself (traced with `PROBE_PORTS=1`) progresses
+normally, incrementing the index/data port pair one byte per
+handshake round-trip (`in=[C5,EB,...] -> out=[C5,...]` climbing
+sequentially), matching the W14-48 Battle Grand Prix precedent's
+measured (not stalled) transfer shape.
+
+**The picture does eventually appear — well past the census window,
+at frames the acceptance did not ask about but that settle the
+question.** Sweeping `PROBE_FRAMES` (`FRAMES varied_at=...`, the
+`Sink::varied` flag, true once any pixel ever differs from the very
+first pixel of the whole run): Final Fight 2 **`varied_at=6607`**
+(`total_instr_at_varied=340,839,095`, ~110 s of emulated real time at
+60 fps); Battletoads **`varied_at=3520`** (`total_instr_at_varied=
+183,869,208`, ~59 s). Both are 6-11x past `boot_census`'s 600-frame
+budget (`crates/rf-harness/tests/boot_census.rs`). At the frame each
+title turns varied, `tm` genuinely carries multiple BGs
+(`[true,true,true,false]` for Final Fight 2 at the `PROBE_PPUWRITES`
+trace around n=872 of that final frame) — the compositor renders
+correctly once the game itself asks it to; nothing in the render path
+needed a fix to show it.
+
+**Bug Fix Discipline — the three candidate root causes for "why is the
+picture-content frame this far out", ranked, and why none is fixed
+here.**
+
+1. **A stuck/incorrectly-decoded PPU register (the ticket's own
+   framing — a CGWSEL-class or window-class bug).** Verified against
+   fullsnes directly: `clip_mode`/`prevent_mode` are both 0 (`Never`)
+   for both titles at frame 600 — not the `2`+disabled-window
+   configuration W14-42 fixed — and every window's enable pair is
+   `(false,false)` (never masks). Ruled out: no forcing-black or
+   masking configuration is present; the flat picture is explained
+   entirely by `tm=0`, and `tm`'s own writes (above) are internally
+   consistent with a legitimate multi-scene fade sequence, not a
+   corrupted decode.
+2. **The intro genuinely takes this long on real hardware too (a
+   census-methodology gap, the Lagoon/Phalanx class from W14-35).**
+   Supported by the WRAM-shadow-copy and per-frame vsync-gate evidence
+   above: every individual step (settle delay, SPC upload rate, fade
+   ramp, blinking splash BG) is a normal, correctly-timed primitive:
+   NMI cadence itself is independently known-correct for these two
+   titles (W14-47: 158 real NMI dispatches / 315 IRQ pairs over
+   3,000,000 instructions, exactly the expected per-frame rate) — so a
+   frame count this large is not a symptom of miscounted frames, it is
+   the game's own state machine genuinely iterating that many times
+   before showing content. Not independently confirmed against real
+   hardware capture (none available in this environment) but positively
+   supported by every piece of internal evidence gathered.
+3. **A CPU-side or SPC-side timing bug inflates a scene-duration wait
+   (e.g. an audio-driven "wait for this cue to finish" gate running
+   slower than intended because of an unrelated defect in the S-DSP).**
+   Plausible in principle — `rf-snes`'s S-DSP echo/ADSR is under active,
+   unfinished repair in the concurrently-claimed W7-08 lane (per that
+   ticket's own status: "spc_dsp6 echo still red") — but NOT chased
+   further here: doing so would mean reading and reasoning about
+   exactly the APU/DSP surface W7-08 already has in flight, redoing
+   work that ticket's own session is best positioned to finish, and
+   risking a diagnosis built on a mid-repair DSP state. Left as the
+   one open hypothesis for a future ticket to pick up once W7-08 lands,
+   not fixed or ruled out here.
+
+No source change to `crates/rf-snes/**` this ticket — nothing in
+hypothesis (1) survived verification, so per CLAUDE.md's Bug Fix
+Discipline no fix is proposed. The only change is the new
+`PROBE_MODE=ppuwrites` diagnostic in `crates/rf-harness/tests/
+title_probe.rs` (harness-only, `#[ignore]`d, no gate impact).
+
+### Gate
+
+`cargo fmt --check`: clean. `cargo clippy --workspace -- -D warnings`:
+clean. `cargo test -p rf-snes`: **381 passed**, 0 failed, 1 ignored
+(unchanged from W14-47's baseline — no production code touched).
+Ignored oracle suites re-run: `peterlemon_golden` — **3/3 passed**;
+`region_golden` — **1/1 passed**; `undisbeliever_golden`'s
+`undisbeliever_goldens_match` — **1/1 passed**. `scripts/
+validate-arch.sh`: `arch OK`. `singlestep_65816_vectors`/
+`singlestep_spc700_vectors`/`gilyon_cputest`/`blargg_spc` not re-run
+this session (no CPU/SPC core code touched; W14-47 already re-verified
+all four on the pre-existing tree this ticket builds on).
+
+### Census children
+
+Built fresh, RELEASE, `boot_census_child --ignored --exact`, exit 0 =
+rendered, 10 = uniform: **Final Fight 2 (USA) — 10 (unchanged)**;
+**Battletoads in Battlemaniacs (USA) — 10 (unchanged)** — expected,
+since no source fix was made. Canaries, all **exit 0** (unmoved):
+ActRaiser 2 (USA), Illusion of Gaia (USA), Super Mario World (USA),
+Wild Guns (USA), Super Mario RPG - Legend of the Seven Stars (USA), NHL
+95 (USA), Kirby Super Star (USA), Final Fantasy - Mystic Quest (USA),
+Super Mario Kart (USA), F-Zero (USA), Full Throttle - All-American
+Racing (USA) (Beta).
+
+### Ticket disposition
+
+**BLOCKED**, per the acceptance's own standard ("a BLOCKED verdict must
+reach ROM bytes or a checked register read"): the chain reaches
+specific checked register reads and WRAM addresses (`$244A`/`$AA38`/
+`$AA3A` and the `$212C`/`$2100` writes derived from them, disassembled
+at `$8085F7`/`$808963`/`$808C0B`/`$808B1E`), and rules out the
+CGWSEL/window class the ticket named by name. Same disposition family
+as W14-35's Lagoon/Phalanx and W14-48's Battle Grand Prix: a long,
+internally-consistent boot/intro sequence that outlasts the census's
+600-frame budget, not a picture-state register defect.
