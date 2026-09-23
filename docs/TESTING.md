@@ -9814,9 +9814,11 @@ fullsnes "ROM Speed and Map Mode") paired with chipset $43/$45
 (coprocessor nibble $4, hw $3/$5 — the only two combinations fullsnes's
 "in practice" chipset list assigns) accepted as `Coprocessor::Sdd1`. Same
 D-013 "both must agree" shape SA-1's map mode $23 already has: map mode
-$22 without the corroborating chipset byte still refuses
-(`sdd1_map_mode_without_sdd1_chipset_still_refuses`), and the chipset
-byte under plain LoROM (not map mode $22) still refuses too
+$22 without the corroborating chipset byte defers to the winning header
+LOCATION instead of refusing outright
+(`sdd1_nibble_without_sdd1_chipset_defers_to_location_not_refused`,
+also covered by `lorom_location_with_sdd1_nibble_and_plain_chipset_is_lorom`),
+and the chipset byte under plain LoROM (not map mode $22) still refuses
 (`sdd1_chipset_under_plain_lorom_map_mode_still_refuses`) — real S-DD1
 boards always declare map mode $22. Verified against this project's own
 Street Fighter Alpha 2 (USA) dump: map-mode byte $32 (nibble $2), chipset
@@ -9826,6 +9828,26 @@ the filler-refusal regression test (`filler_matching_a_named_map_mode_is_refused
 W14-05) is repointed at ExHiROM ($5) since S-DD1 filler with no
 corroborating chipset now correctly falls through to ordinary candidate
 scoring instead of a shortcut refusal.
+**Merge note (W19-03 into main, reconciled with W14-53):** the original
+"map mode $22 without corroboration still refuses" claim above predates
+W14-53's location-wins rule, which this merge folds S-DD1's corroboration
+gate into (`coprocessor_nibble_corroborated`'s `0x2` arm, unchanged from
+what this section already specified); the uncorroborated case now falls
+to plain LoROM/HiROM by location instead of refusing, matching SA-1's own
+W14-53 flip. Two W19-03 tests changed intent as a result, not one:
+`sdd1_map_mode_without_sdd1_chipset_still_refuses` was renamed
+`sdd1_nibble_without_sdd1_chipset_defers_to_location_not_refused` and its
+assertion flipped (mirroring W17-01/W14-53's own SA-1 flip), and
+`genuine_sdd1_header_still_refuses_by_name_until_w19_03` (W14-53's test,
+named in that section above) was renamed
+`genuine_sdd1_header_accepted_as_of_w19_03` and flipped to accept.
+The corroboration gate for nibble $2 uses the full `$3..=$5` hw range
+(matching SA-1's own range exactly, not just the two chipset bytes
+`{$43, $45}` seen in the wild) — the coprocessor-decision branch's inner
+chipset check was widened to match it (`(0x3..=0x5).contains(&hw)`, not
+`matches!(hw, 0x3 | 0x5)`) so hw=$4 ($44) cannot corroborate the map-mode
+arm and then fall into the `else` refusal as unreachable, mislabelled
+dead code; `sdd1_cart_chipset_44_accepted_no_battery` pins this.
 
 **Registers** (`crate::sdd1::Sdd1Regs`, fullsnes "S-DD1 I/O Ports",
 `$4800-$4807`): `$4800`/`$4801` are independent per-channel bitmasks — a
@@ -9971,3 +9993,158 @@ documented one, transcribed and tested faithfully, this is reported as
 DONE against W19-03's acceptance (interface, algorithm, unit tests,
 gate, no regression) rather than blocked; the uniform-screen result for
 Street Fighter Alpha 2 itself is named, not hidden.
+## W14-53: the five retail SA-1/S-DD1/ExHiROM-nibble collisions, corrected
+
+W14-52 found five retail cartridges whose map-mode nibble names a
+coprocessor mapping this build cannot run, while the chipset byte says
+plain ROM, and deliberately declined to fix them (three rejected
+alternatives, see W14-52's section above) pending a ruling on which fix
+was worth the risk to genuine SA-1/S-DD1/ExHiROM carts. This ticket makes
+that ruling: option (1) from that list, generalized "location wins,"
+implemented WITH the chipset-corroboration guard that makes it safe.
+
+### The five carts' header bytes (real archive dumps)
+
+Read with a standalone script against the actual `.sfc` files (not the
+engine — this is evidence-gathering before any code change), both header
+locations, per fullsnes "SNES Cartridge ROM Header":
+
+| Title | Size | LoROM $7FC0 | HiROM $FFC0 | Checksum/complement | Reset vector |
+|---|---|---|---|---|---|
+| Contra III - The Alien Wars (USA) | 1 MiB | mode $53 (nibble $3 SA-1), chipset $00, romsz $0A (1 MiB), ramsz $00 | all `$FF` (unmapped mirror) | valid ($0C3C^$F3C3=$FFFF) | $8000 -> file 0: `18 FB 78 D8` (CLC/XCE/SEI/CLD — a real prologue) |
+| Contra III (Virtual Console dump) | 1 MiB | same shape, checksum $EDCC/$1233 (different mastering, same fields) | all `$FF` | valid | same |
+| Krusty's Super Fun House (USA) | 512 KiB | mode $45 (nibble $5 ExHiROM), chipset $00, romsz $09 (512 KiB) | all `$FF` | valid ($B253^$4DAC=$FFFF) | $8000 -> file 0: `78 18 FB D8` |
+| The Duel - Test Drive II (USA) | 1 MiB | mode $32 (nibble $2 S-DD1), chipset $00, romsz $0A | all `$FF` | valid ($4FCD^$B032=$FFFF) | $802A -> file $2A: `18 FB C2 10` |
+| Space Football - One on One (USA) | 512 KiB | mode $45 (nibble $5 ExHiROM), chipset $00, romsz $09 | all `$FF` | valid ($B739^$48C6=$FFFF) | $80C2 -> file $C2: `78 18 FB E2` |
+
+Every one of the five: chipset byte **$00** ("00h ROM", fullsnes) — no
+RAM, no battery bit (hw=0), so Contra III is **not** battery-backed
+(matches: it has no save feature). HiROM location is uniformly `$FF`
+filler (the image is far smaller than $10000+$40 bytes past its real
+content in HiROM addressing — there is no second header there at all).
+Under LoROM, every reset vector decodes to a real `65C816` reset
+prologue (`SEI`/`CLC`/`XCE`/`CLD` in various orders — all in
+`looks_like_reset_prologue`'s recognized set) at a plausible file offset;
+under HiROM the same vectors point at nonsense (e.g. Contra III's $8000
+as a HiROM offset lands at file offset $8000, mid-ROM-content, not a
+prologue). **Conclusion: all five are plain LoROM cartridges** (Contra
+III included — its size and PCB are LoROM, not HiROM; the "HiROM per its
+size" theory in the ticket's filing note doesn't hold once the actual
+bytes are read: 1 MiB is well within LoROM's addressable range and the
+HiROM location has no header at all). The map-mode nibble on each is a
+mastering quirk, not evidence of real hardware — fullsnes documents no
+mechanism by which the SNES CPU ever reads $7FC0/$FFC0 itself.
+
+### The rule
+
+Per fullsnes "SNES Cartridge ROM Header", "ROM Speed and Map Mode
+(FFD5h)" and "Chipset (ROM/RAM information on cart) (FFD6h)": the
+map-mode byte's low nibble and the chipset byte are two independent
+fields a real board's manufacturer filled in separately, and hardware
+never reads either — both exist purely for software (originally
+Nintendo's own tools, now emulators) to guess the memory map and
+attached hardware from. When a nibble names a coprocessor mapping ($2
+S-DD1, $3 SA-1, $5 ExHiROM, $A SPC7110) and the chipset byte does not
+corroborate that specific chip (S-DD1: coprocessor nibble $4, hw $3-$5;
+SA-1: coprocessor nibble $3, hw $3-$5; SPC7110: chipset $F5/$F9 with
+$FFBF sub-type $00; ExHiROM has no chipset-byte corroboration of its own
+at all — the corroborating fact is size, since fullsnes's own note that
+ExHiROM shipped only on two titles, both handled in its ROM-size table,
+means every real release exceeds 4 MiB), the nibble is treated as a
+mastering quirk exactly like W14-36's $0/$1 collisions and W14-52's
+unassigned nibbles: the mapping comes from the winning header LOCATION
+(LoROM at $7FC0 / HiROM at $FFC0, decided by checksum/reset-vector/title
+scoring, never by the nibble). When the chipset byte DOES corroborate the
+named chip, nothing changes: SA-1 is accepted (as before W17-01), and
+ExHiROM/SPC7110 are still refused by name — this build has no bus wiring
+for either of them. (S-DD1 was filed as W19-03 at the time this ticket
+was written; merging that ticket in later lifted S-DD1 out of the refusal
+the same way — see its own section above, and the merge note on
+`genuine_sdd1_header_accepted_as_of_w19_03` below.)
+
+### Implementation
+
+`crates/rf-cart/src/snes.rs`, `parse_snes_header`: the chipset-byte read
+moved up (it was previously read after the map-mode decision, for W14-43's
+DSP-4 disambiguation) so a new `coprocessor_nibble_corroborated` flag can
+be computed from it before `map_mode` is decided. The `mode_nibble` match
+now has three outcomes instead of two: `$0`/`$1` unaffected;
+`$3` corroborated -> `SnesMapMode::Sa1` as before; `$2`/`$5`/`$A`
+corroborated -> `UnsupportedChip` as before; anything chip-naming that is
+NOT corroborated (including `$3`) -> falls through to the same
+location-wins arm unassigned nibbles already use. The SA-1 chipset-hw
+range was also widened from `$4-$5` to `$3-$5` in both the corroboration
+check and the (now-redundant, kept as defense in depth) inner check below
+it, matching fullsnes's generic `x3h..x5h` "ROM+Co-processor" ..
+"ROM+Co-processor+RAM+Battery" shape (the same range DSP-1's own hw check
+already uses) rather than the narrower range this build shipped with
+before any hw=3 SA-1 title was checked against it.
+
+### Tests
+
+`crates/rf-cart/src/snes.rs`, `mod tests`. W17-01's `sa1_map_mode_
+without_sa1_chipset_still_refuses` is renamed
+`sa1_nibble_without_sa1_chipset_defers_to_location_not_refused` and its
+assertion flipped from "refuses" to "parses as plain LoROM, no
+coprocessor" — the corrected rule this ticket ships.
+`unsupported_exhirom_map_mode_reported_without_panicking` (a 32 KB image,
+nowhere near ExHiROM's real size) is replaced by
+`lorom_location_with_exhirom_nibble_under_4mib_is_lorom` (same shape,
+corrected expectation) plus a new
+`genuine_exhirom_header_over_4mib_still_refuses_by_name` covering the
+corroborated case. One test per shape the ticket asked for:
+- `hirom_location_with_sa1_nibble_and_plain_chipset_is_hirom` — HiROM
+  location, nibble $3, chipset $02 -> HiROM.
+- `lorom_location_with_sdd1_nibble_and_plain_chipset_is_lorom` — LoROM
+  location, nibble $2, chipset $00 -> LoROM.
+- `lorom_location_with_exhirom_nibble_under_4mib_is_lorom` — LoROM,
+  nibble $5, 1 MiB image -> LoROM.
+- `sa1_cart_chipset_33_still_detects_sa1` — genuine SA-1 header (nibble
+  $3, chipset $33, the low end of the widened range) still detects SA-1,
+  alongside the pre-existing `_chipset_34_`/`_35_` tests for the rest of
+  $33-$35.
+- `genuine_sdd1_header_still_refuses_by_name_until_w19_03` — genuine
+  S-DD1 header (chipset $43 and $45) still refuses by name. **Merge note
+  (W19-03 into main):** once W19-03 landed and lifted the S-DD1 deferral,
+  this test's premise no longer held — it was renamed
+  `genuine_sdd1_header_accepted_as_of_w19_03` and its assertion flipped
+  from refuse to accept (`Coprocessor::Sdd1`, correct battery bit), same
+  shape as the `sa1_nibble_without_sa1_chipset_defers_to_location_not_
+  refused` flip two rows up.
+`sa1_chipset_under_plain_lorom_map_mode_still_refuses` is untouched: a
+chipset-only SA-1 declaration under a plain LoROM/HiROM mode byte (not
+$23) was never part of the corroboration path and still refuses exactly
+as before.
+
+`cargo test -p rf-cart`: **74 passed** (69 before this ticket + 5 net new
+tests: 7 new, 2 renamed-in-place don't double-count), 0 failed.
+`cargo test -p rf-snes`: unchanged, this ticket never touches `rf-snes`
+(the write_scope was narrowed at claim time to `crates/rf-cart/**` plus
+docs, once it became clear the fix is cart-detection only).
+
+### Census (this ticket's own run)
+
+Built `rf-harness` `--release` and ran `boot_census_child` directly
+(newest `boot_census` binary, one child process per archive,
+`RF_CENSUS_ROM` set) against the five named carts plus the seven
+canaries:
+
+- **The five: all exit 0 (rendered something).** Contra III - The Alien
+  Wars (USA), Contra III (Virtual Console dump), Krusty's Super Fun House
+  (USA), The Duel - Test Drive II (USA), Space Football - One on One
+  (USA).
+- **Canaries, exit 0 each, no regression:** Super Mario RPG (SA-1,
+  corroborated — unaffected by this ticket), Kirby Super Star (SA-1,
+  corroborated), Super Mario World, Wild Guns, NHL 95, Star Fox (USA).
+
+### Gate (all exit-checked)
+
+`cargo fmt --check`: 0. `cargo clippy --workspace -- -D warnings`: 0.
+`cargo test -p rf-cart -p rf-snes`: 0 (rf-cart 74 passed/0 failed;
+rf-snes 474 passed/1 ignored in `--lib`, every other rf-snes test binary
+green, unchanged from main). `cargo test --release -p rf-snes --test
+peterlemon_golden --test region_golden --test gilyon_cputest --
+--ignored`: 0, all pass (`cputest_full_reports_success_and_every_test_
+passes`, `peterlemon_bg_map_goldens_match`, the two other peterlemon
+tests, `a_pal_frame_is_pixel_identical_to_its_ntsc_counterpart`).
+`scripts/validate-arch.sh`: `arch OK`.
