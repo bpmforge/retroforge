@@ -481,11 +481,15 @@ mod tests {
     #[test]
     fn a_zipped_cartridge_this_build_refuses_is_named_not_generic() {
         let mut rom = snes_rom();
-        // Chipset byte $13 is Super FX, which `rf-cart` refuses by name —
-        // the single most common reason a real SNES library refuses a
-        // title, and an error kind only reachable once a header has been
-        // located and understood.
-        rom[0x7FD6] = 0x13;
+        // Chipset byte $43 is S-DD1 (coprocessor nibble $4, hw $3 —
+        // snes.nesdev.org/wiki/ROM_header's cartridge-type table), which
+        // `rf-cart` still refuses by name — an error kind only reachable
+        // once a header has been located and understood. Chipset $13
+        // (Super FX) used to be this test's example, but ticket W18-01
+        // (D-014) lifted Super FX into scope, so it now loads instead of
+        // refusing; S-DD1 keeps this test's intent (a real, still-refused
+        // chip) without depending on which chip that happens to be.
+        rom[0x7FD6] = 0x43;
         let archive = zip_with(
             &[("Star Whatever (USA).sfc", rom.as_slice())],
             zip::CompressionMethod::Stored,
