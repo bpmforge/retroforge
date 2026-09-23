@@ -85,7 +85,31 @@ pub fn decode_brr(block: &[u8; 9], prev: [i16; 2]) -> BrrBlock {
             _ => (p1 << 1) + ((-(p1 * 13)) >> 6) - p2 + ((p2 * 3) >> 4),
         };
 
-        let clamped = s.clamp(-0x8000, 0x7FFF) as i16;
+        // FR-CORE-036 sample-exactness: two sequential hardware steps, per
+        // fullsnes "Bit Rate Reduction (BRR) Format" ("When creating BRR
+        // data, take care that 'new' does never exceed -3FFAh..+3FF8h,
+        // otherwise a number of hardware glitches will occur"), not one
+        // plain clamp.
+        //
+        // (1) 16-bit clamp: "If new>+7FFFh then new=+7FFFh" / "If
+        // new<-8000h then new=-8000h".
+        let clamped16 = s.clamp(-0x8000, 0x7FFF);
+        // (2) 15-bit "lost sign" clip applied to the ALREADY 16-bit-
+        // clamped value: "If new=(+4000h..+7FFFh) then new=(-4000h..-1)"
+        // / "If new=(-8000h..-4001h) then new=(-0..-3FFFh)" — i.e. a
+        // value outside the legal 15-bit range wraps by +/-0x8000 rather
+        // than saturating at the 15-bit boundary. Well-formed BRR data
+        // (the encoder's own "never exceed -3FFAh..+3FF8h" contract)
+        // never reaches this branch; only out-of-spec data does, and the
+        // wrap (not a clamp) is the documented hardware behaviour.
+        let clipped15 = if (0x4000..=0x7FFF).contains(&clamped16) {
+            clamped16 - 0x8000
+        } else if (-0x8000..=-0x4001).contains(&clamped16) {
+            clamped16 + 0x8000
+        } else {
+            clamped16
+        };
+        let clamped = clipped15 as i16;
         samples[i] = clamped;
         p2 = p1;
         p1 = i32::from(clamped);
@@ -98,73 +122,70 @@ pub fn decode_brr(block: &[u8; 9], prev: [i16; 2]) -> BrrBlock {
     }
 }
 
-/// The S-DSP's 4-tap Gaussian resampling kernel, quarter table.
+/// The S-DSP's 4-tap Gaussian resampling kernel — the hardware's own
+/// 512-entry ROM table, transcribed value-for-value (FR-CORE-036).
 ///
-/// The hardware table is 512 entries covering the full fractional range;
-/// the four taps for a fraction `f` are read at `255-f`, `511-f`,
-/// `256+f` and `f`. Storing a quarter and mirroring is how the hardware
-/// ROM is laid out, and reproducing that layout keeps the tap selection
-/// below readable as the same expression the datasheet uses.
+/// The four taps for a fraction `i` (bits 4-11 of the pitch counter) are
+/// read at `0xFF-i`, `0x1FF-i`, `0x100+i` and `i` — the exact indexing
+/// [`gaussian`] uses below.
 ///
-/// **Not the hardware's ROM table** — see [`build_gauss`] for what it is
-/// and why.
-pub const GAUSS: [i16; 512] = build_gauss();
-
-const fn build_gauss() -> [i16; 512] {
-    // Built from the **cubic B-spline basis**, which is a partition of
-    // unity: its four weights sum to exactly 1 at every fraction, so the
-    // four taps sum to 2048 and the filter is unity-gain by
-    // construction rather than by luck.
-    //
-    // That property is the whole point. A resampling kernel whose taps do
-    // not sum to a constant changes VOLUME WITH PITCH, so a sustained
-    // note swells or fades as it bends — the subtlest possible audio bug,
-    // and one a spectrum plot shows long before an ear does. The first
-    // version of this table used a triangular-squared window and summed
-    // to 4080; `the_gaussian_kernel_is_unity_gain_at_every_fraction`
-    // caught it immediately.
-    //
-    // The cubic B-spline is bell-shaped and low-pass, i.e. the same
-    // family as the hardware's kernel, but it is NOT the S-DSP's exact
-    // 512-entry ROM table — reproducing that byte-for-byte belongs with
-    // the sample-exactness work (FR-CORE-036), not here. Named honestly
-    // so nobody mistakes this for the hardware table.
-    //
-    // Layout mirrors the hardware's: the low half holds one tap and the
-    // high half another, and the four taps for a fraction are read at
-    // `255-f`, `511-f`, `256+f` and `f`.
-    let mut t = [0i16; 512];
-    let s: i64 = 256;
-    let s3: i64 = s * s * s;
-    let mut i: i64 = 0;
-    while i < 256 {
-        // Low half: B3(t) = t^3 / 6.
-        t[i as usize] = ((2048 * i * i * i) / (6 * s3)) as i16;
-        // High half: B2(t) = (-3t^3 + 3t^2 + 3t + 1) / 6.
-        let num = -3 * i * i * i + 3 * i * i * s + 3 * i * s * s + s3;
-        t[(256 + i) as usize] = ((2048 * num) / (6 * s3)) as i16;
-        i += 1;
-    }
-
-    // Correct integer truncation so the sum is EXACTLY 2048.
-    //
-    // Fractions `f` and `255-f` read the same four indices, so there are
-    // 128 independent sums, not 256 — and index `f` participates in only
-    // that one pair. Adjusting it therefore fixes its pair without
-    // disturbing any other, which is why the loop runs to 128 and not
-    // 256. (Running it to 256 double-corrects every pair and leaves the
-    // table worse than it started.)
-    let mut f: i64 = 0;
-    while f < 128 {
-        let sum = t[(255 - f) as usize] as i64
-            + t[(511 - f) as usize] as i64
-            + t[(256 + f) as usize] as i64
-            + t[f as usize] as i64;
-        t[f as usize] = (t[f as usize] as i64 + (2048 - sum)) as i16;
-        f += 1;
-    }
-    t
-}
+/// Source: Nocash's fullsnes, "4-Point Gaussian Interpolation" (SNES APU
+/// DSP chapter), which prints the ROM contents in full ("The Gauss table
+/// contains the following values (in hex)"). Transcribed from that
+/// published table, not from emulator source (NFR-011).
+///
+/// **The table is not a clean partition of unity.** fullsnes names this
+/// explicitly: "Theoretically, each four values ... should sum up to
+/// 800h, but in practice they do sum up to 7FFh..801h." That is a real
+/// hardware quirk (and 801h can overflow 16-bit interpolation math), so
+/// `the_gaussian_kernel_sums_within_the_documented_hardware_tolerance`
+/// checks against that documented `0x7FF..=0x801` range rather than
+/// exact 0x800 — the previous table here (a cubic B-spline, chosen for
+/// exact unity gain before this ROM table was transcribed) does not
+/// reproduce this quirk and has been replaced rather than kept as an
+/// approximation.
+pub const GAUSS: [i16; 512] = [
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x001, 0x001, 0x001, 0x001, 0x001, 0x001, 0x001, 0x001, 0x001, 0x001,
+    0x001, 0x002, 0x002, 0x002, 0x002, 0x002, 0x002, 0x002, 0x003, 0x003, 0x003, 0x003, 0x003,
+    0x004, 0x004, 0x004, 0x004, 0x004, 0x005, 0x005, 0x005, 0x005, 0x006, 0x006, 0x006, 0x006,
+    0x007, 0x007, 0x007, 0x008, 0x008, 0x008, 0x009, 0x009, 0x009, 0x00A, 0x00A, 0x00A, 0x00B,
+    0x00B, 0x00B, 0x00C, 0x00C, 0x00D, 0x00D, 0x00E, 0x00E, 0x00F, 0x00F, 0x00F, 0x010, 0x010,
+    0x011, 0x011, 0x012, 0x013, 0x013, 0x014, 0x014, 0x015, 0x015, 0x016, 0x017, 0x017, 0x018,
+    0x018, 0x019, 0x01A, 0x01B, 0x01B, 0x01C, 0x01D, 0x01D, 0x01E, 0x01F, 0x020, 0x020, 0x021,
+    0x022, 0x023, 0x024, 0x024, 0x025, 0x026, 0x027, 0x028, 0x029, 0x02A, 0x02B, 0x02C, 0x02D,
+    0x02E, 0x02F, 0x030, 0x031, 0x032, 0x033, 0x034, 0x035, 0x036, 0x037, 0x038, 0x03A, 0x03B,
+    0x03C, 0x03D, 0x03E, 0x040, 0x041, 0x042, 0x043, 0x045, 0x046, 0x047, 0x049, 0x04A, 0x04C,
+    0x04D, 0x04E, 0x050, 0x051, 0x053, 0x054, 0x056, 0x057, 0x059, 0x05A, 0x05C, 0x05E, 0x05F,
+    0x061, 0x063, 0x064, 0x066, 0x068, 0x06A, 0x06B, 0x06D, 0x06F, 0x071, 0x073, 0x075, 0x076,
+    0x078, 0x07A, 0x07C, 0x07E, 0x080, 0x082, 0x084, 0x086, 0x089, 0x08B, 0x08D, 0x08F, 0x091,
+    0x093, 0x096, 0x098, 0x09A, 0x09C, 0x09F, 0x0A1, 0x0A3, 0x0A6, 0x0A8, 0x0AB, 0x0AD, 0x0AF,
+    0x0B2, 0x0B4, 0x0B7, 0x0BA, 0x0BC, 0x0BF, 0x0C1, 0x0C4, 0x0C7, 0x0C9, 0x0CC, 0x0CF, 0x0D2,
+    0x0D4, 0x0D7, 0x0DA, 0x0DD, 0x0E0, 0x0E3, 0x0E6, 0x0E9, 0x0EC, 0x0EF, 0x0F2, 0x0F5, 0x0F8,
+    0x0FB, 0x0FE, 0x101, 0x104, 0x107, 0x10B, 0x10E, 0x111, 0x114, 0x118, 0x11B, 0x11E, 0x122,
+    0x125, 0x129, 0x12C, 0x130, 0x133, 0x137, 0x13A, 0x13E, 0x141, 0x145, 0x148, 0x14C, 0x150,
+    0x153, 0x157, 0x15B, 0x15F, 0x162, 0x166, 0x16A, 0x16E, 0x172, 0x176, 0x17A, 0x17D, 0x181,
+    0x185, 0x189, 0x18D, 0x191, 0x195, 0x19A, 0x19E, 0x1A2, 0x1A6, 0x1AA, 0x1AE, 0x1B2, 0x1B7,
+    0x1BB, 0x1BF, 0x1C3, 0x1C8, 0x1CC, 0x1D0, 0x1D5, 0x1D9, 0x1DD, 0x1E2, 0x1E6, 0x1EB, 0x1EF,
+    0x1F3, 0x1F8, 0x1FC, 0x201, 0x205, 0x20A, 0x20F, 0x213, 0x218, 0x21C, 0x221, 0x226, 0x22A,
+    0x22F, 0x233, 0x238, 0x23D, 0x241, 0x246, 0x24B, 0x250, 0x254, 0x259, 0x25E, 0x263, 0x267,
+    0x26C, 0x271, 0x276, 0x27B, 0x280, 0x284, 0x289, 0x28E, 0x293, 0x298, 0x29D, 0x2A2, 0x2A6,
+    0x2AB, 0x2B0, 0x2B5, 0x2BA, 0x2BF, 0x2C4, 0x2C9, 0x2CE, 0x2D3, 0x2D8, 0x2DC, 0x2E1, 0x2E6,
+    0x2EB, 0x2F0, 0x2F5, 0x2FA, 0x2FF, 0x304, 0x309, 0x30E, 0x313, 0x318, 0x31D, 0x322, 0x326,
+    0x32B, 0x330, 0x335, 0x33A, 0x33F, 0x344, 0x349, 0x34E, 0x353, 0x357, 0x35C, 0x361, 0x366,
+    0x36B, 0x370, 0x374, 0x379, 0x37E, 0x383, 0x388, 0x38C, 0x391, 0x396, 0x39B, 0x39F, 0x3A4,
+    0x3A9, 0x3AD, 0x3B2, 0x3B7, 0x3BB, 0x3C0, 0x3C5, 0x3C9, 0x3CE, 0x3D2, 0x3D7, 0x3DC, 0x3E0,
+    0x3E5, 0x3E9, 0x3ED, 0x3F2, 0x3F6, 0x3FB, 0x3FF, 0x403, 0x408, 0x40C, 0x410, 0x415, 0x419,
+    0x41D, 0x421, 0x425, 0x42A, 0x42E, 0x432, 0x436, 0x43A, 0x43E, 0x442, 0x446, 0x44A, 0x44E,
+    0x452, 0x455, 0x459, 0x45D, 0x461, 0x465, 0x468, 0x46C, 0x470, 0x473, 0x477, 0x47A, 0x47E,
+    0x481, 0x485, 0x488, 0x48C, 0x48F, 0x492, 0x496, 0x499, 0x49C, 0x49F, 0x4A2, 0x4A6, 0x4A9,
+    0x4AC, 0x4AF, 0x4B2, 0x4B5, 0x4B7, 0x4BA, 0x4BD, 0x4C0, 0x4C3, 0x4C5, 0x4C8, 0x4CB, 0x4CD,
+    0x4D0, 0x4D2, 0x4D5, 0x4D7, 0x4D9, 0x4DC, 0x4DE, 0x4E0, 0x4E3, 0x4E5, 0x4E7, 0x4E9, 0x4EB,
+    0x4ED, 0x4EF, 0x4F1, 0x4F3, 0x4F5, 0x4F6, 0x4F8, 0x4FA, 0x4FB, 0x4FD, 0x4FF, 0x500, 0x502,
+    0x503, 0x504, 0x506, 0x507, 0x508, 0x50A, 0x50B, 0x50C, 0x50D, 0x50E, 0x50F, 0x510, 0x511,
+    0x511, 0x512, 0x513, 0x514, 0x514, 0x515, 0x516, 0x516, 0x517, 0x517, 0x517, 0x518, 0x518,
+    0x518, 0x518, 0x518, 0x519, 0x519,
+];
 
 /// The S-DSP's global counter, and the rate tables the envelope and noise
 /// generators consult through it.
@@ -566,7 +587,14 @@ impl Voice {
 ///
 /// The taps are read at four mirrored offsets into [`GAUSS`], which is
 /// how the hardware ROM is indexed. The result is shifted down by 11
-/// because the four coefficients sum to 2048.
+/// (rather than fullsnes's documented per-tap `SAR 10` then a final
+/// `SAR 1`) because summing first and shifting once is arithmetically
+/// identical when no intermediate term overflows 16 bits — fullsnes
+/// itself documents that overflow as a hardware **bug** on specific
+/// extreme BRR inputs ("some interpolation results will be +3FF8h
+/// instead of -4000h"), which this does not reproduce. Named here so it
+/// is not mistaken for full sample-exactness (FR-CORE-036 covers BRR
+/// decode; this specific overflow quirk is not modelled).
 #[must_use]
 pub fn gaussian(history: &[i16; 4], fraction: u16) -> i16 {
     let f = usize::from(fraction >> 4) & 0xFF;

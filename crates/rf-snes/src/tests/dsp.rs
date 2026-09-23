@@ -2,27 +2,32 @@
 //! modulation (ticket W7-08).
 
 use crate::apu::dsp::{
-    counter_fires, gaussian, Dsp, Echo, Envelope, EnvelopeStage, Noise, COUNTER_MAX, COUNTER_RATES,
-    GAUSS, LOOP_CYCLES,
+    counter_fires, decode_brr, gaussian, Dsp, Echo, Envelope, EnvelopeStage, Noise, COUNTER_MAX,
+    COUNTER_RATES, GAUSS, LOOP_CYCLES,
 };
 use crate::apu::Apu;
 
-/// The four Gaussian taps must sum to 2048 at every fraction — that is
-/// what makes the filter unity-gain.
+/// The four Gaussian taps must sum within the hardware's own documented
+/// tolerance at every fraction.
 ///
-/// A kernel that does not is the subtlest possible audio bug: it changes
-/// volume with pitch, so a sustained note swells or fades as it bends.
+/// `GAUSS` is now the S-DSP's actual ROM table (fullsnes, "4-Point
+/// Gaussian Interpolation"), which that same source says is "slightly
+/// bugged": "Theoretically, each four values ... should sum up to 800h,
+/// but in practice they do sum up to 7FFh..801h." This asserts the
+/// documented range, not exact unity — a table that clears this bound is
+/// either not the hardware table, or is transcribed wrong, either of
+/// which is worth catching.
 #[test]
-fn the_gaussian_kernel_is_unity_gain_at_every_fraction() {
+fn the_gaussian_kernel_sums_within_the_documented_hardware_tolerance() {
     for f in 0..256usize {
         let sum = i32::from(GAUSS[255 - f])
             + i32::from(GAUSS[511 - f])
             + i32::from(GAUSS[256 + f])
             + i32::from(GAUSS[f]);
-        assert_eq!(
-            sum, 2048,
-            "fraction {f} sums to {sum}, not 2048 — the kernel is not \
-             unity-gain, so volume would change with pitch"
+        assert!(
+            (0x7FF..=0x801).contains(&sum),
+            "fraction {f} sums to {sum:#X}, outside fullsnes's documented \
+             0x7FF..=0x801 hardware tolerance"
         );
     }
 }
@@ -688,4 +693,122 @@ fn the_dsp_is_clocked_by_the_apu() {
         apu.dsp.voices[0].envelope.level < before,
         "a released envelope must decay once the DSP is actually running;          level stayed at {before}"
     );
+}
+
+// ---------------------------------------------------------------------
+// BRR sample-exactness (FR-CORE-036)
+// ---------------------------------------------------------------------
+//
+// The filter formulas below (`decode_brr`'s own comment cites the same
+// source) are Nocash's fullsnes, "Bit Rate Reduction (BRR) Format",
+// "the exact formulas are": filter 1 `old*1+((-old*1) SAR 4)`, filter 2
+// `old*2+((-old*3) SAR 5) - older+((older*1) SAR 4)`, filter 3
+// `old*2+((-old*13) SAR 6) - older+((older*3) SAR 4)`. The expected
+// arrays here were computed from those formulas independently (a small
+// Python transcription, not `decode_brr`'s Rust), so this is a real
+// cross-check rather than the function re-stating its own arithmetic.
+
+fn nibbles_to_block(range: u8, filter: u8, nibbles: [i8; 16]) -> [u8; 9] {
+    let mut block = [0u8; 9];
+    block[0] = (range << 4) | (filter << 2);
+    for i in 0..8 {
+        let hi = (nibbles[2 * i] as u8) & 0x0F;
+        let lo = (nibbles[2 * i + 1] as u8) & 0x0F;
+        block[1 + i] = (hi << 4) | lo;
+    }
+    block
+}
+
+/// Filter 1 against the documented formula, starting from silence.
+#[test]
+fn brr_filter_one_matches_the_documented_formula() {
+    let nibbles: [i8; 16] = [1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7, 1, -1];
+    let block = nibbles_to_block(12, 1, nibbles);
+    let out = decode_brr(&block, [0, 0]);
+    let expected: [i16; 16] = [
+        2048, -128, 3976, -369, 5798, -709, 7527, -1136, 9175, -1639, 10751, -2209, 12265, -2838,
+        -613, -2623,
+    ];
+    assert_eq!(out.samples, expected);
+}
+
+/// Filter 2 against the documented formula, starting from silence.
+#[test]
+fn brr_filter_two_matches_the_documented_formula() {
+    let nibbles: [i8; 16] = [1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7, 1, -1];
+    let block = nibbles_to_block(12, 2, nibbles);
+    let out = decode_brr(&block, [0, 0]);
+    let expected: [i16; 16] = [
+        2048, 1856, 5714, 5056, 10425, 8988, 15551, 13025, -12280, 0, -8968, 3384, -3575, 8444,
+        -11273, 1313,
+    ];
+    assert_eq!(out.samples, expected);
+}
+
+/// Filter 3 against the documented formula, starting from silence.
+#[test]
+fn brr_filter_three_matches_the_documented_formula() {
+    let nibbles: [i8; 16] = [1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7, 1, -1];
+    let block = nibbles_to_block(12, 3, nibbles);
+    let out = decode_brr(&block, [0, 0]);
+    let expected: [i16; 16] = [
+        2048, 1632, 5364, 4216, 9360, 7248, 13610, 10374, -14947, 0, -8336, 5501, -1775, 10772,
+        -9923, 4136,
+    ];
+    assert_eq!(out.samples, expected);
+}
+
+/// The "lost sign" 15-bit clip: a value in `0x4000..=0x7FFF` after the
+/// 16-bit clamp wraps to `-0x4000..=-1` rather than saturating — fullsnes,
+/// same section: "If new=(+4000h..+7FFFh) then new=(-4000h..-1)". Only
+/// out-of-spec BRR data (predictor history the encoder's own contract
+/// says should never occur) reaches this path; it is exercised here by
+/// feeding `decode_brr` a `prev` outside any value real decoding would
+/// produce, which is exactly how an encoder bug would surface it.
+#[test]
+fn brr_positive_overflow_wraps_to_negative_not_saturating() {
+    let block = nibbles_to_block(12, 1, [7; 16]);
+    // filter 1: add = 32767 + ((-32767) >> 4) = 30719; raw = (7<<12)>>1 =
+    // 14336; sum = 45055, clamps to 16-bit 32767 (0x7FFF), which is in
+    // 0x4000..=0x7FFF, so it wraps to 32767 - 0x8000 = -1.
+    let out = decode_brr(&block, [32767, 0]);
+    assert_eq!(
+        out.samples[0], -1,
+        "a 16-bit-clamped 0x7FFF must wrap to -1 (lost-sign glitch), not \
+         saturate at 0x7FFF cast down"
+    );
+}
+
+/// The negative half of the same glitch: fullsnes "If
+/// new=(-8000h..-4001h) then new=(-0..-3FFFh)".
+#[test]
+fn brr_negative_overflow_wraps_to_zero_not_saturating() {
+    let block = nibbles_to_block(12, 1, [-8; 16]);
+    // filter 1: add = -32768 + ((32768) >> 4) = -30720; raw = (-8<<12)>>1
+    // = -16384; sum = -47104, clamps to 16-bit -32768 (0x8000), which is
+    // in -0x8000..=-0x4001, so it wraps to -32768 + 0x8000 = 0.
+    let out = decode_brr(&block, [-32768, 0]);
+    assert_eq!(
+        out.samples[0], 0,
+        "a 16-bit-clamped -0x8000 must wrap to 0 (lost-sign glitch)"
+    );
+}
+
+/// Range 13-15 behave as range 12 with the nibble arithmetic-shifted
+/// right by 3 first ("decoding works as if shift=12 and
+/// nibble=(nibble SAR 3)") — not "shift further", which is the mistake
+/// fullsnes calls out as the detail most decoders miss.
+#[test]
+fn brr_range_thirteen_to_fifteen_use_the_reserved_case_not_a_bigger_shift() {
+    for range in [13u8, 14, 15] {
+        let block = nibbles_to_block(range, 0, [4; 16]);
+        let out = decode_brr(&block, [0, 0]);
+        // nibble 4 SAR 3 = 0, so with filter 0 the sample is exactly 0 —
+        // NOT `(4 << range) >> 1`, which for range=13 would be 16384.
+        assert_eq!(
+            out.samples[0], 0,
+            "range {range}: must use the reserved shift=12-with-SAR-3 \
+             case, not keep shifting"
+        );
+    }
 }
