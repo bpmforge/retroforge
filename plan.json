@@ -8070,7 +8070,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 5,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-52",
   "title": "SNES header plausibility: 74 archives (incl. Contra III x2, Super Adventure Island, Krusty's Super Fun House, HAL's Hole in One Golf, The Duel, Space Football, and ~70 betas/protos) are refused although real hardware never reads the header — fall back to a mapping guess",
