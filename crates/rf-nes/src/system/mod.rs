@@ -109,8 +109,9 @@ pub use controller::Controller;
 use crate::apu::Apu;
 use crate::cpu::CpuBus;
 use crate::mappers::{
-    Action53, AxRom, Bnrom, Camerica, Cnrom, ColorDreams, DxRom, Fme7, GxRom, JalecoJf, Mapper,
-    Mmc1, Mmc2, Mmc3, Mmc3Revision, Mmc5, Nina, Nrom, Quattro, Rambo1, Sachen, Ss88006, UxRom,
+    Action53, AxRom, Bnrom, Camerica, Cnrom, ColorDreams, Cprom, DxRom, Fme7, GxRom, JalecoJf,
+    Mapper, Mmc1, Mmc2, Mmc3, Mmc3Revision, Mmc5, Nina, Nrom, Quattro, Rambo1, Sachen, Ss88006,
+    Unrom512, UxRom,
 };
 use crate::ppu::Ppu;
 use rf_cart::NesHeader;
@@ -351,6 +352,12 @@ impl NesBus {
                 rom.prg_rom().to_vec(),
                 rom.chr_rom().to_vec(),
                 rom.chr_is_ram(),
+                rom.header().mirroring,
+            )),
+            // Ticket W14-59.
+            13 => Box::new(Cprom::new(rom.prg_rom().to_vec(), rom.header().mirroring)),
+            30 => Box::new(Unrom512::new(
+                rom.prg_rom().to_vec(),
                 rom.header().mirroring,
             )),
             other => unreachable!(
@@ -846,6 +853,12 @@ impl NesBus {
                 // `mask` (`$2002` moves `status`, `$2007` moves `v`).
                 self.inert_recheck_in = 0;
                 if addr & 0x0007 == 0 {
+                    // Ticket W14-59: fold any PPU-side CHR-RAM write back
+                    // into the mapper BEFORE anything that could change
+                    // its selected bank runs — see `Mapper::chr_writeback`'s
+                    // doc and `crate::mappers::Cprom`'s module doc for why
+                    // the ordering matters.
+                    self.mapper.chr_writeback(self.ppu.chr());
                     // Ticket W14-16: MMC5 snoops PPUCTRL for the sprite size.
                     self.mapper.ppu_ctrl_written(value);
                     self.push_mapper_view();
@@ -873,6 +886,8 @@ impl NesBus {
                 self.ppu.ext_ram_write(usize::from(addr - 0x5C00), value);
             }
             0x4020..=0x5FFF => {
+                // Ticket W14-59: see the `$2000-$3FFF` arm's comment above.
+                self.mapper.chr_writeback(self.ppu.chr());
                 self.mapper.cpu_write_expansion(addr, value);
                 self.push_mapper_view();
             }
@@ -887,6 +902,8 @@ impl NesBus {
                     let offset = self.mapper.wram_offset(addr) % self.prg_ram.len();
                     self.prg_ram[offset] = value;
                 }
+                // Ticket W14-59: see the `$2000-$3FFF` arm's comment above.
+                self.mapper.chr_writeback(self.ppu.chr());
                 // Ticket W14-15: boards with registers in this range.
                 self.mapper.cpu_write_wram(addr, value);
                 self.push_mapper_view();
@@ -907,6 +924,12 @@ impl NesBus {
             // cheap and correct to do unconditionally even for mappers
             // that never change either.
             0x8000..=0xFFFF => {
+                // Ticket W14-59: see the `$2000-$3FFF` arm's comment
+                // above -- this is the one write range that can actually
+                // change a CHR-RAM-banking mapper's selected page
+                // (CPROM/UNROM 512's own `cpu_write`), so it is the site
+                // where getting the ordering right matters most.
+                self.mapper.chr_writeback(self.ppu.chr());
                 // Ticket W14-17: a RAM-selected window writes the bus's
                 // PRG RAM chip directly rather than reaching the
                 // mapper's own (no-op for MMC5) `cpu_write`.

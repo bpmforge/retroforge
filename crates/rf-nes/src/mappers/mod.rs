@@ -134,6 +134,7 @@ mod bnrom;
 mod camerica;
 mod cnrom;
 mod color_dreams;
+mod cprom;
 mod dxrom;
 mod fme7;
 mod gxrom;
@@ -148,6 +149,7 @@ mod nrom;
 mod quattro;
 mod rambo1;
 mod sachen;
+mod unrom512;
 mod uxrom;
 
 #[cfg(test)]
@@ -159,6 +161,7 @@ pub use bnrom::Bnrom;
 pub use camerica::Camerica;
 pub use cnrom::Cnrom;
 pub use color_dreams::ColorDreams;
+pub use cprom::Cprom;
 pub use dxrom::DxRom;
 pub use fme7::Fme7;
 pub use gxrom::GxRom;
@@ -173,6 +176,7 @@ pub use nrom::Nrom;
 pub use quattro::Quattro;
 pub use rambo1::Rambo1;
 pub use sachen::Sachen;
+pub use unrom512::Unrom512;
 pub use uxrom::UxRom;
 
 /// One cartridge mapper's CPU-side and CHR-bank-selection behavior. See
@@ -369,6 +373,31 @@ pub trait Mapper {
     /// every launch-set game in `docs/design/EMULATION_CORES.md`'s table
     /// actually ships, is unaffected).
     fn chr_window(&self) -> Option<&[u8]>;
+
+    /// Ticket W14-59's self-contained CHR-RAM write-back hook — a narrow,
+    /// single-purpose answer to the exact round-trip gap [`Mapper::
+    /// chr_window`]'s doc names above, built because the CHR-RAM boards
+    /// this ticket adds (CPROM/mapper 13, UNROM 512/mapper 30) cannot pass
+    /// their own acceptance tests ("a write survives a bank switch and
+    /// re-select") without one. [`crate::system::NesBus::push_mapper_view`]
+    /// calls this with [`crate::ppu::Ppu::chr`]'s CURRENT bytes as its
+    /// first action, before it asks the mapper for a (possibly different)
+    /// [`Mapper::chr_window`] and overwrites the PPU's buffer with it — so
+    /// a mapper that banks CHR-RAM gets one call per potential bank change
+    /// telling it what the PPU actually holds now, in time to fold any
+    /// PPU-side writes into its own per-bank storage before that bank is
+    /// swapped away. Default no-op: every mapper without banked CHR-RAM
+    /// (the whole existing set) ignores this at zero cost.
+    ///
+    /// This ticket was warned a parallel lane (W14-58) might add a
+    /// differently-shaped write-back hook to this same trait for TQROM's
+    /// MMC3 CHR-RAM variant; this method was written without sight of that
+    /// branch and does not assume it exists. If both land, whoever merges
+    /// second should treat this as one of two mechanisms needing
+    /// reconciliation, not a silent duplicate to delete.
+    fn chr_writeback(&mut self, current_window: &[u8]) {
+        let _ = current_window;
+    }
 
     /// One filtered PPU-A12 rising edge occurred (ticket W2-03) — see this
     /// module's doc "MMC3 additions" section for why this is pulled by
