@@ -8337,7 +8337,7 @@
    "W14-50"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-59",
   "title": "NES: CPROM (mapper 13, Videomation x2), UNROM 512 (mapper 30, 1 title), and NES 2.0 exponent-multiplier ROM sizes (2 archives refused at the header)",
