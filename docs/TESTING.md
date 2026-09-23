@@ -8323,7 +8323,90 @@ watch). `cargo test -p rf-snes`: 437 passed, 0 failed, 1 ignored
 identical exit-code table to every prior follow-up. Star Fox (USA),
 `PROBE_MODE=frames PROBE_FRAMES=600`: `varied_at=None` (unchanged).
 
-**HEAD**: see the `chore(W18-04): ...` commit this entry ships with.
+### W18-04 follow-up #5: found and fixed — GSU RAM was zero-sized
+
+Re-opened per coordinator pushback on follow-up #4's own numbers:
+`LMS R14,($0062)` reads GSU RAM offset `$C4` for the decompressor's ROM
+read pointer; on hardware the 65C816 fills that RAM before GO; a live
+watch found **zero SNES writes to GSU RAM anywhere in the run**. The
+report named the mechanism but stopped short of asking *why* every write
+attempt vanished — this follow-up traces that to its root.
+
+**Root cause: `rf_cart::snes::superfx_expansion_ram_kib` was reporting
+`0` KiB of GSU RAM for this exact ROM.** Star Fox (USA)'s real cartridge
+header has no SNES "extended header" (fullsnes: "Starfox/Star Wing,
+Powerslide, and Starfox 2 do not have extended headers" — confirmed
+directly against the ROM file: byte `$7FBD` is `$FF`, the flash-erase
+fill value, and the standard RAM-size byte `$7FD8` is `$00`, exactly as
+fullsnes describes for a GSU cart). The function's existing, deliberate
+policy (from W18-01, cited in its own doc comment) was to report `0`
+rather than "hardcode a real board's known fixed size by title" —
+technically law-5-compliant, but it silently gives this whole family of
+carts **no GSU RAM at all**. With `board.ram_len == 0`,
+`mapping::gsu_target` returns `None` for every address in banks
+`$70-$71` and the `$6000-$7FFF` mirror in `$00-$3F`/`$80-$BF` (both
+arms are gated `&& board.ram_len > 0`), so every SNES-side write the
+game makes into cartridge RAM falls through to the ordinary LoROM `map`
+— which, with this cart's `sram_len` also `0` (no battery, per its real
+chipset byte `$13`), resolves to `Target::Open` and is silently
+dropped. `LMS R14,($0062)` then reads GSU RAM's untouched
+(never-allocated, always-zero) backing store, so `R14=$0000` instead of
+whatever base address the SNES actually meant to prime — and the
+decoder built in follow-up #4 walks off the low end of ROM (the SNES's
+own vector-table bytes) instead of the real, SNES-supplied table.
+
+**The fix stays general, not title-keyed** (law 5's actual constraint —
+the code does not branch on title): the very next sentence in the same
+fullsnes chapter, for exactly this "extended header absent" condition,
+states "RAM Size for Starfox/Starwing is 32Kbytes"; a second, independent
+line elsewhere in the same chapter gives the general rule ("Game Pak RAM
+with mirrors (64Kbyte max?, usually 32K)"). `superfx_expansion_ram_kib`'s
+`raw == 0xFF` (extended header genuinely absent) arm now returns `32`
+instead of `0` — a flat default for that one documented condition, cited
+to fullsnes twice over, not a per-title lookup. The `raw == 0x00`
+("header present, explicitly states zero RAM") case is untouched and
+still reports `0` — a real GSU board can legitimately have no RAM chip,
+and this project's own test fixture (`superfx_no_battery_no_ram_chipset`,
+Star Fox's own chipset byte with a *populated*-zero header) still passes
+unchanged.
+
+**Verified end-to-end with two new unit tests** (`crates/rf-snes/src/
+tests/system.rs`): `snes_write_to_gsu_ram_is_visible_to_a_gsu_ldb`
+reproduces Star Fox's exact real header bytes (chipset `$13`, extended
+header `$FF`), asserts the cart now parses to 32 KiB, writes a byte to
+`$70:0000` through the plain CPU bus path, and has a hand-assembled GSU
+program (`IWT R1,#0000; TO R2; ALT1; LDB (R1)`) read that exact byte
+back. `dma_transfer_into_the_6000_mirror_reaches_gsu_ram` proves the
+`$6000-$7FFF` mirror (the OTHER address form `gsu_target` accepts) shares
+the same underlying buffer, through a real MDMA channel (reverse
+direction, B-bus `$2180` WMDATA, A-bus `$00:6000`) — the same
+`SnesBus::run_channel`/generic `self.write(a, v)` path
+`dma_moves_real_bytes_through_the_wram_port` already pins in isolation,
+so a DMA-based cart-RAM preload (not just a plain `STA` loop) is covered
+too.
+
+**Census re-run (release, 15 GSU archives + 5 canaries): Star Fox (USA),
+(USA) (Rev 1), and (USA) (Rev 2) now render** (`exit 0`, up from `exit
+10`) — three titles fixed. `PROBE_MODE=frames PROBE_FRAMES=600` on Star
+Fox (USA): **`varied_at=Some(155)`, `total_instr_at_varied=Some(2,204,
+980)`** — the picture first changes at frame 155 of 600, comfortably
+inside the window (the old, inaccurate `STEP_BUDGET=64` placeholder
+needed frame 547 to just barely finish; this is the first time the
+*accurate* clock model has ever rendered this title, at under a third of
+the window). Star Fox 2 (Classic Mini, both betas) and Super Star Fox
+Weekend/Vortex are unchanged (`exit 10`/`exit 12`) — fullsnes states
+Star Fox 2's own RAM size as "unknown", so this fix does not claim to
+cover it, and Vortex/Super Star Fox Weekend were already uniform before
+this ticket for unrelated, previously-named reasons. All 5 canaries and
+the other 6 already-rendering GSU titles are unchanged.
+
+`cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo
+test --workspace` (157 `test result: ok` lines, 0 failures — includes
+the 2 new tests: `rf-cart` 60→60 passed with one test renamed/re-
+asserted, `rf-snes` lib 437→439 passed), and `scripts/validate-arch.sh`
+all clean.
+
+**HEAD**: see the `fix(W18-04): ...` commit this entry ships with.
 
 ## W14-51 — Final Fight 2 / Battletoads: no register defect found; both
 titles' picture appears well outside the census window, the same

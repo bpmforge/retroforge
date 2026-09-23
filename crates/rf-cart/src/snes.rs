@@ -272,21 +272,36 @@ const GSU2_ROM_THRESHOLD_BYTES: usize = 1024 * 1024;
 /// documents immediately before the standard header.
 ///
 /// fullsnes's own caution — "Starfox/Star Wing, Powerslide, and Starfox 2
-/// do not have extended headers" for some dumps — is honoured by treating
-/// an unpopulated extended header (observed as a run of `$FF` bytes in
-/// this project's own library dumps, including a real Star Fox (USA)
-/// image) as "no expansion RAM stated", reporting `0` rather than
-/// hardcoding a real board's known fixed size by title (law 5). A
-/// present-but-implausible exponent (outside `kb_pow2`'s valid range) is
-/// treated the same way, rather than surfacing a header error for a
-/// non-essential field.
+/// do not have extended headers" for some dumps — names an unpopulated
+/// extended header (observed as a run of `$FF` bytes in this project's own
+/// library dumps, including a real Star Fox (USA) image) as a REAL,
+/// documented board condition, not an absence of information to shrug off:
+/// the very next sentence in the same chapter states the fact for exactly
+/// this case — "RAM Size for Starfox/Starwing is 32Kbytes" — and the
+/// chapter's general RAM note elsewhere ("Game Pak RAM with mirrors
+/// (64Kbyte max?, usually 32K)") independently backs 32 KiB as the
+/// ordinary size, not a per-title guess. Ticket W18-04's Star Fox trace
+/// found the previous `0` fallback here was the actual boot-regression
+/// root cause: with no GSU RAM at all, `LMS R14,($0062)` (Star Fox's own
+/// decompressor priming its ROM read pointer from a value the SNES DMAs
+/// into cartridge RAM before GO) reads back nothing but zero, so the
+/// decoder walks off into the ROM's own vector-table bytes instead of the
+/// real, SNES-supplied base address, and never converges within the census
+/// window. This is a flat default for the "extended header absent" case
+/// generally — the code does not branch on title (law 5's actual
+/// constraint) — it is simply cited to fullsnes for two independent
+/// reasons (the specific Starfox/Starwing fact and the general "usually
+/// 32K" rule) rather than asserted from nothing. A present-but-implausible
+/// exponent (outside `kb_pow2`'s valid range) is a different, genuinely
+/// ambiguous case fullsnes gives no fallback for, and still reports `0`
+/// rather than guessing.
 fn superfx_expansion_ram_kib(data: &[u8], base: usize) -> usize {
     if base < 3 {
         return 0;
     }
     let raw = data[base - 3];
     if raw == 0xFF {
-        return 0;
+        return 32;
     }
     kb_pow2(raw).map(|bytes| bytes / 1024).unwrap_or(0)
 }
@@ -928,16 +943,21 @@ mod tests {
     }
 
     #[test]
-    fn superfx_extended_header_absent_reports_zero_ram() {
+    fn superfx_extended_header_absent_reports_32kib_ram() {
         // A real dump with no extended header (fullsnes's own caution,
         // reproduced here rather than only asserted): the bytes preceding
         // the header are the flash-erase fill value $FF, not a real size
-        // exponent.
+        // exponent — this is Star Fox (USA)'s actual header shape.
+        // fullsnes states the fact directly for this exact case: "RAM Size
+        // for Starfox/Starwing is 32Kbytes" (ticket W18-04: the previous
+        // `0` here was the Star Fox boot regression's real root cause —
+        // no GSU RAM meant the decompressor's own RAM-sourced ROM pointer
+        // read back zero instead of the SNES-supplied base address).
         let mut rom = lorom_image(0x20, 0x13);
         rom[LOROM_HEADER_OFFSET - 3] = 0xFF;
         let header = parse_snes_header(&rom).expect("GSU cart accepted");
         match header.coprocessor {
-            Coprocessor::SuperFx { ram_kib, .. } => assert_eq!(ram_kib, 0),
+            Coprocessor::SuperFx { ram_kib, .. } => assert_eq!(ram_kib, 32),
             other => panic!("expected Coprocessor::SuperFx, got {other:?}"),
         }
     }
