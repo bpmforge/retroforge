@@ -10437,3 +10437,172 @@ command (`00h`) has no visible effect by its own definition (it clears an
 internal RAM word), and the eight undocumented commands are deliberately
 inert. F1-ROC II moving from `Refused` to `RenderedSomething` is the only
 observable change, already captured in the census table above.
+
+## W14-55 — Header fallback follow-ups: keep a corroborated chipset
+## coprocessor; prefer a sane header location over a bare prologue seam
+
+Two follow-ups to W14-52's RESET-vector fallback, from W14-54's re-triage
+of the two smaller "newcomer" families it root-caused but declined to fix
+(docs-only ticket, no `write_scope` for code): "header-fallback strips a
+real coprocessor" (Star Fox 2 (Beta) x3, Zool (Beta)) and "wrong-fallback
+mapping guess" (The Lion King (Beta 3)).
+
+### Header bytes for all five dumps (read via a standalone script against
+### the real archive dumps, both candidate locations)
+
+| Title | Size | LoROM $7FC0 | HiROM $FFC0 |
+|---|---|---|---|
+| Star Fox 2 (Beta) (1994-12-28) (CES) | 1,047,074 | title `STARFOX2` (21/21 printable), mode $20 (LoROM, nibble agrees), **chipset $15** (GSU-n: nibble $1, hw $5), romsz $0A, country $00, **version $FF** (fails `MAX_ROM_VERSION`), cksum/compl both $FFFF (xor fails), reset $F45A -> file $745A: `78 18 FB 5C` (real prologue) | all `$FF` filler (too far past the 1 MiB image to hold a second header) |
+| Star Fox 2 (Beta) (1995-09-12) / (1995-09-13) | 1,048,259 | identical shape, reset $FBB8 -> file $7BB8: `78 18 FB 5C` | all `$FF` |
+| Zool (USA) (Beta) | 1,048,576 | title mostly non-ASCII (14/21 printable, `\x00\x00\x00\xE5\xFF\x12\x00ERSTELLER COSM`), **mode $4F** (nibble $F, unassigned), **chipset $53** (coprocessor nibble $5 "S-RTC", hw $3 — not a GSU/SA-1/S-DD1/OBC1/Cx4/DSP combination this build runs), romsz $20, ramsz $44, **country $57** (fails `MAX_COUNTRY_CODE`), reset $8018 -> file $18: `78 D8 18 FB` (real prologue) | all `$FF`-ish garbage (`chipset=$FE`, `mode=$FF`), reset $FFFB -> file $FFFB: `FF FB FF EF` (no prologue) |
+| The Lion King (USA) (Beta 3) (v.21) | 3,145,728 | **wholesale `$FF` filler**, including the vector bytes themselves ($7FFC/$7FFD = `FF FF` -> vector `$FFFF`, itself just more filler, not a surviving address); vector's file offset $7FFF: `FF 78 18 FB` — the trailing `78 18 FB` is real code but belongs to the byte range starting at $8000, one past this candidate's own header block | **also wholesale `$FF` filler** in every field EXCEPT the reset vector: $FFFC/$FFFD = `00 80` -> vector `$8000` -> file $8000: `78 18 FB 5C` (`SEI CLC XCE JML`, a real, complete prologue with no leading garbage byte) |
+
+Canaries (unaffected, not re-dumped — already covered by W14-52/53):
+Star Fox (USA), Super Mario RPG, Kirby Super Star, Contra III, Super
+Mario World, WWF Super WrestleMania.
+
+### Rule A — honour a corroborated chipset byte when the fallback fires
+
+W14-52 shipped a blanket "coprocessor is always `None`" rule for a
+fallback-loaded cartridge, reasoning a chipset byte found this way "has no
+more credibility than the map-mode byte that just failed." The Star Fox 2
+betas are the counter-example: their chipset byte ($15, squarely in
+fullsnes's documented GSU-n `$13-$1A` range, "SNES Cart GSU-n Cartridge
+Header") failed scoring only because the REVISION byte is $FF and the
+checksum pair is $FFFF — fields that say nothing about the chipset byte's
+own trustworthiness. Per `docs/TESTING.md`'s W14-54 re-triage, stripping
+SuperFx here is exactly what leaves the betas' CPU spinning forever on a
+"GSU ready" WRAM flag that no chip ever sets, while the corroborated
+sibling (Star Fox 2 Switch Online) runs the identical SPC driver and
+actually fires its interrupts.
+
+`crates/rf-cart/src/snes.rs`'s new `fallback_chipset_coprocessor` re-checks
+the SAME ranges the scored path (`parse_snes_header`) already trusts —
+GSU $13-$1A (nibble $1, hw $3-$A, fullsnes "SNES Cart GSU-n Cartridge
+Header"); SA-1 $33-$35 (nibble $3, hw $3-$5) gated on the location's OWN
+map-mode nibble also reading $3, the same W14-53/W17-01 "both fields must
+agree" shape; S-DD1 $43/$45 (nibble $4, hw $3-$5) gated on the map-mode
+nibble reading $2 (W19-03/W14-53); OBC1 $25 (nibble $2, hw $5, the only
+assigned combination, fullsnes "SNES Cart OBC1"); Cx4 $F3 with the
+extended-header `$FFBF` sub-type byte $10 (fullsnes "CX4 Cartridge
+Header"); DSP $03-$05 (nibble $0, hw $3-$5) via the existing
+`known_non_dsp1_checksum` table (W14-43) — and returns `Coprocessor::None`
+for everything else, INCLUDING a chipset byte this build has no arm for at
+all. ST010's $F6 (nibble $F, hw $6) is deliberately NOT special-cased:
+W19-04 (filed the same day as this ticket) is still unimplemented, so
+there is no `Coprocessor::St010` to construct yet, and honoring it now
+would only mean choosing between silently misreporting it as `None` (fine,
+what this function already does for any unmatched chipset) or fabricating
+an `UnsupportedChip` refusal keyed to one specific byte value that W19-04
+would then have to touch to lift — leaving it alone lets W19-04 add its
+own arm to this same function later with no collision. This function NEVER
+refuses the cartridge outright, even for a chipset byte the location
+"names" as a real, unimplemented chip: a fresh refusal here would flip a
+title that currently boots (uniform screen or better under the old
+blanket-`None` rule) into a new failure, which none of this ticket's
+acceptance criteria call for. Zool (Beta)'s chipset $53 (coprocessor
+nibble $5, hw $3) matches none of the honoured ranges — it is exactly the
+"garbage chipset byte" case, and stays `None` regardless of its unrelated
+unassigned map-mode nibble ($F), matching the ticket's own naming of this
+shape.
+
+SA-1 and S-DD1 also carry their own `SnesMapMode` (not just a coprocessor
+value) once corroborated — `fallback_chipset_coprocessor` returns an
+`Option<SnesMapMode>` override that `build_header_from_fallback` applies
+over the RESET-vector-guessed LoROM/HiROM mapping, the same map-mode
+promotion the scored path already does for these two chips.
+
+### Rule B — prefer a header-sane candidate over a bare prologue-seam match
+
+The Lion King (Beta 3)'s LoROM candidate is a coincidence, not a boot
+path: its "RESET vector" ($FFFF) is itself just more of the same $FF
+filler that fills the rest of that header block — not a surviving real
+address — and the bytes `looks_like_reset_prologue` finds at its decoded
+file offset ($7FFF) belong to the FOLLOWING bank's real content (which
+happens to be HiROM's own genuine prologue at $8000), one byte over from
+where this candidate's arithmetic landed. `fallback_mapping_guess` tried
+LoROM first and, before this ticket, accepted that coincidence outright.
+
+New `resolves_into_own_header_block(base, file_offset)`: rejects any
+fallback guess whose 4-byte prologue read overlaps the SAME candidate's
+own 64-byte header/vector-table block (`$7FC0-$7FFF` for LoROM,
+`$FFC0-$FFFF` for HiROM). fullsnes documents the header block as
+fixed-layout data, never executable code, so a RESET vector that resolves
+back into it cannot be pointing at real code, whatever bytes happen to sit
+there — this is what a wholesale-filler header block being "not sane"
+actually cashes out to for Lion King, where the usual sanity SIGNALS
+(legible title, plausible size exponent) are equally absent at both
+locations and cannot break the tie by themselves. Applied before
+`looks_like_reset_prologue`, this removes LoROM as a candidate entirely,
+leaving HiROM (genuine, non-filler vector `$8000`, clean `SEI CLC XCE
+JML`) as the only survivor.
+
+Also added, for the general case docs/TESTING.md's W14-54 filing
+requested and any future population where BOTH locations pass the
+reset-vector/prologue checks: two more tie-break points in
+`fallback_mapping_guess`'s existing score (alongside the pre-existing
+nibble-agreement and legible-title points) — a plausible ROM-size
+exponent (`score_candidate`'s own $08-$0D bracket) and a map-mode byte
+whose reserved bits match fullsnes's documented fixed pattern ("ROM Speed
+and Map Mode (FFD5h)": "Bit7-6 Always 0", "Bit5 Always 1", i.e.
+`mode_byte & 0xE0 == 0x20`). Neither point is what flips the Lion King
+test (both of ITS candidates score 0 on every signal; the self-referential
+check above is what does the work there), but both are additional,
+correctly-cited evidence a wholesale-filler header block fails and a real
+one does not.
+
+### Tests
+
+`crates/rf-cart/src/snes.rs`, `mod tests`, three new tests, one per shape
+the ticket names:
+`fallback_honours_corroborated_gsu_chipset_star_fox_2_beta_shape` (chipset
+$15 corroborated -> `Coprocessor::SuperFx { Gsu1, ram_kib: 0 }`, battery
+true), `fallback_uncorroborated_chipset_zool_beta_shape_stays_none`
+(chipset $53, unassigned mode nibble -> `Coprocessor::None`, no battery),
+`fallback_prefers_hirom_over_lorom_seam_coincidence_lion_king_beta3_shape`
+(wholesale-`$FF` LoROM block with a coincidental vector vs. HiROM's own
+genuine vector -> `SnesMapMode::HiRom`). Every pre-existing `rf-cart` test
+(79 before this ticket, including all five of W14-52's own fallback
+tests) passes unchanged. `cargo test -p rf-cart`: **82 passed**, 0 failed.
+`cargo test -p rf-snes --release`: unchanged (this ticket's `write_scope`
+never touches `rf-snes`).
+
+### Census (this ticket's own run)
+
+Built `rf-harness --release --tests` and ran the newest `boot_census`
+binary's `boot_census_child` directly (`RF_CENSUS_ROM` per archive,
+`--exact --ignored`) against the five affected dumps plus the six named
+canaries:
+
+- **Canaries (6/6 exit 0, no regression):** Star Fox (USA), Super Mario
+  RPG, Kirby Super Star, Contra III, Super Mario World, WWF Super
+  WrestleMania.
+- **The five affected dumps, all load (none refused):** the three Star
+  Fox 2 betas — exit 10 (uniform screen), UNCHANGED from before this
+  ticket (the corroborated `SuperFx` coprocessor is now correctly named on
+  the header, but W18-02's note that "the GSU does not execute" still
+  applies, so the WRAM wait-loop this ticket's evidence names is not
+  expected to resolve until GSU execution lands); Zool (Beta) — exit 10
+  (uniform screen), UNCHANGED (coprocessor was already `None` under the
+  old blanket rule, still `None` under the new corroboration check); The
+  Lion King (Beta 3) — **exit 0** (rendered something), now mapped as
+  HiROM instead of crashing into the wrong map (previously an
+  interrupt-storm shape per W14-54's probe evidence:
+  `nmi_entries=irq_entries=10000/10000`).
+- No crash, hang or timeout.
+
+### Gate (all exit-checked)
+
+`cargo fmt --check`: 0. `cargo clippy --workspace -- -D warnings`: 0.
+`cargo test -p rf-cart -p rf-snes --release`: 0 (rf-cart 82 passed/0
+failed, up from 79; rf-snes unchanged). `cargo test --release -p rf-snes
+--test peterlemon_golden --test region_golden --test gilyon_cputest --
+--ignored`: 0, all pass (`cputest_full_reports_success_and_every_test_
+passes`; `peterlemon_bg_map_goldens_match` plus the other two peterlemon
+tests; `a_pal_frame_is_pixel_identical_to_its_ntsc_counterpart`).
+`scripts/validate-arch.sh`: `arch OK`.
+
+**Full SNES census:** not re-run by this ticket (the orchestrator's own
+full census, per the ticket's acceptance, is the record of what moved
+project-wide); this ticket's own evidence is the five-title-plus-canaries
+run above.
