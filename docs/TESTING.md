@@ -793,6 +793,7 @@ First run, 2026-09-15, release build:
 | NES, after W14-15 | 1281 | **1212** | 6 | 63 | **0** | **0** |
 | NES, after W14-16 | 1281 | **1222** | 6 | 53 | **0** | **0** |
 | NES, after W14-17 | 1281 | **1222** | 6 | 53 | **0** | **0** |
+| NES, after W14-50 | 1281 | **1226** | 6 | 49 | **0** | **0** |
 | SNES, after W14-19 slice 1 | 1265 | **1012** | 115 | 138 | **0** | **0** |
 | NES, after W14-22 | 1281 | **1222** | 6 | 53 | **0** | **0** |
 | SNES, after W14-21 | 1265 | **1012** | 115 | 138 | **0** | **0** |
@@ -7167,3 +7168,12 @@ the `boot_census` table above.
 No ROM bytes or copyrighted titles entered engine code (only Broke
 Studio's homebrew `Pizza Pop!` and title strings, in this doc and the
 mapper's own module doc, name a real cartridge).
+
+**Full NES census (orchestrator, 2026-09-22, main at the W14-50 merge,
+per-title `RF_CENSUS_OUT`):** **1222/6/53/0/0 -> 1226/6/49/0/0** ("NES,
+after W14-50" row above). The four Jaleco SS88006 archives (Pizza Pop!,
+USA Ice Hockey in FC, Ninja JaJaMaru: The Legend of the Golden Castle,
+Ninja JaJaMaru: Operation Milky Way) moved from *refused* to *rendered
+something*; nothing else moved. The 49 still refused are unlicensed
+multicarts, Retro-Bit/Limited Run re-releases on modern boards, the
+competition carts, Racermate, and the TQROM trio.
