@@ -93,6 +93,20 @@ pub enum Target {
     /// ticket W18-01, fullsnes "SNES Cart GSU-n I/O Map"). Carries the raw
     /// offset; [`crate::gsu::Gsu`] sorts out which register/mirror it is.
     GsuRegister(u16),
+    /// CX4 on-chip data RAM (ticket W19-02, fullsnes "CX4 I/O Map":
+    /// `"6000h..6BFFh R/W CX4RAM (3Kbytes)"`), banks `$00-$3F`/`$80-$BF`.
+    /// Carries the offset already reduced into `0..0xC00` (the window is
+    /// exactly the RAM's size, so no modulo is needed at the mapping
+    /// layer — see [`cx4_target`]).
+    Cx4Ram(usize),
+    /// The CX4 register/DMA/status window (`$7F40-$7F52`, `$7F5E`,
+    /// `$7F6A-$7F6B`, `$7F6E-$7F6F`, `$7F80-$7FAF` — ticket W19-02,
+    /// fullsnes "CX4 I/O Map"). Carries the raw offset; [`crate::cx4::Cx4`]
+    /// sorts out which register it is. Every OTHER offset in `$6C00-$7FFF`
+    /// is fullsnes-"Unknown/unused" and is left unclaimed here, falling
+    /// through to the generic [`map`] (open bus on a LoROM cart, which
+    /// every Cx4 cartridge is).
+    Cx4Register(u16),
     /// Nothing is mapped here. Reads see open bus; writes are dropped.
     Open,
 }
@@ -461,6 +475,48 @@ pub fn gsu_target(board: &GsuBoard, bank: u8, offset: u16) -> Option<Target> {
         return Some(Target::GsuRam(index % board.ram_len));
     }
     None
+}
+
+/// Resolve `(bank, offset)` against the CX4's fixed SNES-side window, if
+/// it falls inside it. Checked BEFORE the generic map by
+/// [`crate::bus::SnesBus::target`] whenever the cartridge carries
+/// [`rf_cart::Coprocessor::Cx4`] — a cart with none never calls this, so
+/// every other cartridge's mapping is unchanged.
+///
+/// Unlike [`sa1_target`]/[`gsu_target`], there is no bank-select register
+/// or board-size input: fullsnes's own "CX4 Memory Map" gives ONE fixed
+/// window — `"I/O 00-3F,80-BF:6000-7FFF"` — with no size variant across
+/// the two known titles, so this is a pure function of the address alone
+/// (ticket W19-02).
+///
+/// - `$6000-$6BFF` — CX4RAM, 3 KiB (fullsnes "CX4 I/O Map").
+/// - `$7F40-$7F52`, `$7F5E`, `$7F6A-$7F6B`, `$7F6E-$7F6F`, `$7F80-$7FAF` —
+///   the documented DMA/register/status/vector-shadow ports, same
+///   chapter. [`crate::cx4::Cx4::read`]/`write` sort out which register
+///   an offset in this set means.
+/// - Everything else in `$6C00-$7FFF` (`$6C00-$7F3F`, `$7F53-$7F5D`,
+///   `$7F5F-$7F69`, `$7F6C-$7F6D`, `$7F70-$7F7F`, `$7FB0-$7FFF`) is
+///   fullsnes's own "Unknown/unused" — left unclaimed here, so it falls
+///   through to [`map`], which resolves it as open bus for a LoROM cart
+///   (every documented Cx4 board is Slow LoROM, fullsnes "CX4 Cartridge
+///   Header": `"[FFD5]=20h ;Slow LoROM"`).
+/// - `$8000-$FFFF` (ROM) is intentionally NOT claimed here: fullsnes lists
+///   it as part of the same memory map, but it is the cartridge's
+///   ordinary LoROM window, not a CX4-specific register — [`map`] already
+///   resolves it.
+#[must_use]
+pub fn cx4_target(bank: u8, offset: u16) -> Option<Target> {
+    let mirrored_system = bank < 0x40 || (0x80..0xC0).contains(&bank);
+    if !mirrored_system {
+        return None;
+    }
+    match offset {
+        0x6000..=0x6BFF => Some(Target::Cx4Ram(usize::from(offset - 0x6000))),
+        0x7F40..=0x7F52 | 0x7F5E | 0x7F6A..=0x7F6B | 0x7F6E..=0x7F6F | 0x7F80..=0x7FAF => {
+            Some(Target::Cx4Register(offset))
+        }
+        _ => None,
+    }
 }
 
 /// Resolve a 24-bit address.

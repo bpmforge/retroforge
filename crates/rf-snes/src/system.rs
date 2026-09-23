@@ -116,6 +116,16 @@ impl SnesSystem {
         if let rf_cart::Coprocessor::SuperFx { version, ram_kib } = header.coprocessor {
             system.bus.install_gsu(version, header.rom_size, ram_kib);
         }
+        // CX4 (ticket W19-02): `rf-cart` already identified the chip from
+        // the header's chipset byte + extended-header sub-type; this wires
+        // up the register window/CX4RAM/CX4ROM state. The CX4's own
+        // program never executes (see `crate::cx4`'s module doc for why
+        // fullsnes's chapter does not document enough to run it) — the
+        // SNES CPU runs the cart's SNES-side code alone, same starting
+        // point SA-1/GSU slice 1 gave those chips.
+        if matches!(header.coprocessor, rf_cart::Coprocessor::Cx4) {
+            system.bus.install_cx4();
+        }
         system.reset();
         Ok(system)
     }

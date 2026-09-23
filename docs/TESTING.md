@@ -9370,3 +9370,96 @@ VRAM populated at ~80M instructions — but the title still parks on a
 downstream trampoline inside the census window, so its bucket is
 unchanged. Star Fox's three dumps confirmed unmoved after the earlier
 GO-gated variant had regressed them.
+
+## W19-02 (Capcom Cx4: register window, DMA, CX4ROM math tables — commands undocumented)
+
+**Detection** (`rf-cart`): chipset `$F3` (coprocessor nibble `$F`
+"custom", `hw=$3`) AND the extended header's `$FFBF` sub-type byte `=$10`
+together name the Cx4 (fullsnes "CX4 Cartridge Header": `"[FFD6]=F3h"`,
+`"[FFBF]=10h ;CustomChip=CX4"`) — nibble `$F` alone is reused by other
+custom chips (e.g. ST010/ST011's own `$FFBF=$01`), so both fields must
+agree, refused honestly otherwise. Unit tests: accepts `$F3`+`$FFBF=$10`,
+refuses `$F3` with a different sub-type, refuses other nibble-`$F` `hw`
+values.
+
+**Register window / CX4RAM / DMA / CX4ROM** (`crates/rf-snes/src/cx4.rs`,
+`crates/rf-snes/src/mapping.rs`'s `cx4_target`, `crates/rf-snes/src/
+bus.rs`): 16 unit tests in `cx4.rs` cover every CX4ROM table against
+fullsnes's own documented formulas and endpoints (Div/Sqrt/Sin/Cos exact,
+Asin/Tan tolerance-bounded per fullsnes's own approximate domain
+notes), register read/write semantics (write-only DMA ports read `0`,
+24-bit register masking, NMI/IRQ vector-shadow round-trip, ROM base/page/
+pointer round-trip), the documented DMA transfer (only the SNES-to-CX4
+direction; any other `$7F47` write value is a no-op; destination wraps
+within the 3 KiB RAM), and a full save/load round-trip preserving every
+field. `crates/rf-snes/src/tests/system.rs` adds an end-to-end test:
+`SnesSystem::load` on a synthetic Cx4 header, then the ordinary SNES-side
+bus write path programs the DMA ports and a general register, and the
+transferred bytes/register value are read back through `system.bus.read`.
+
+**Why no command HLE, and what was checked before concluding that**
+(ticket's own acceptance: "if the chapter documents only the interface and
+not each command's algorithm... stop there"): fullsnes's "CX4 Cartridge
+Header"/"...I/O Ports" chapters fully document the register/DMA/status
+window and the CX4ROM's six math tables, and its "...Opcodes" chapter
+gives every opcode's bit encoding — but explicitly withholds the flag
+model for most opcode forms (`???` for N/Z/C on all but a handful of
+`<op>`-vs-`<imm>` variants), states outright that the ROM/vertex byte-read
+sequence's exact semantics are unknown ("which one does what part?"),
+leaves two of eight `skip<cond>` conditions and ~12 opcodes as reserved/
+unstated, marks four I/O ports "Unknown" (one of them noting its own
+documented guess contradicts how the real games use it), and calls every
+opcode/DMA timing "100% unknown". Its "...Functions" chapter names all 26
+game-facing routines (`build_oam`, `draw_wireframe_*`, `propulsion`,
+`transform_coordinates`, `pythagorean`, `arc_tan`, `wave`, etc.) by entry
+address only — no register-level input/output semantics for any of them,
+and even the two routines with the thinnest stated behaviour
+(`test_square`, `test_set_r0_to_0Xh`) are too underspecified (no operand
+width/sign rule) to implement with confidence rather than guess. Building
+either an opcode-level interpreter or a per-function HLE from this would
+mean guessing what the chapter withholds — exactly the case the
+acceptance's last sentence names. `docs/design/EMULATION_CORES.md` §3.8
+carries the full documented/undocumented split as a table.
+
+**Consequence for the two titles**: neither Mega Man X2 nor X3's Cx4-driven
+effects render (the intro wireframe, the rotating boss sprites) — the SNES
+CPU runs the cartridge's own code as normal, polling a CX4 that never
+executes real work. Framed as "interface modelled, commands undocumented,
+no visual change expected", not a regression.
+
+**Gate**: `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`
+(exit-checked), `cargo test -p rf-snes -p rf-cart` (all passing, 0
+failed), the ignored `peterlemon_golden`/`spc700_vectors`/`gilyon_cputest`
+suites green (no `singlestep_65816_vectors` suite exists in this tree),
+`scripts/validate-arch.sh` OK, `cargo test --workspace` green.
+
+**Census** (orchestrator-named children, `boot_census_child` run directly
+against each archive, idle machine): every title exits `0`
+(`EXIT_RENDERED`) — no regression against pre-ticket behaviour for any of
+them:
+
+| Title | Exit | Bucket |
+|---|---|---|
+| Mega Man X2 (USA).zip | 0 | RenderedSomething |
+| Mega Man X3 (USA).zip | 0 | RenderedSomething |
+| Super Mario World (USA).zip | 0 | RenderedSomething |
+| Wild Guns (USA).zip | 0 | RenderedSomething |
+| Super Mario RPG - Legend of the Seven Stars (USA).zip | 0 | RenderedSomething |
+| Kirby Super Star (USA).zip | 0 | RenderedSomething |
+| NHL 95 (USA).zip | 0 | RenderedSomething |
+| Star Fox (USA).zip | 0 | RenderedSomething |
+
+`title_probe` `PROBE_MODE=frames PROBE_FRAMES=120` first-varied-frame
+check on the two Cx4 titles: both **Mega Man X2 and X3 vary at frame 60**
+(`total_instr_at_varied=826985`) — identical between the two, consistent
+with fullsnes's own note that "both Mega Man X2 and X3 are containing 1:1
+the same CX4 code". This is the ordinary boot/logo fade-in every title in
+this project's library shows by frame 60-ish, not a Cx4 effect — neither
+game's Cx4-driven content (intro wireframe, rotating boss sprites) is
+expected to appear, and this probe does not claim it did.
+
+**By-eye items for Brad**: none to check for this ticket — the Cx4's
+effects (X2's intro wireframe, X3's rotating boss sprites) do NOT render
+per the "commands undocumented" finding above; there is nothing new to
+look at until a future ticket either finds additional documentation or
+accepts building a guessed HLE against Brad's own explicit sign-off.

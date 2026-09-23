@@ -7,6 +7,7 @@ pub mod apu;
 pub mod bus;
 pub mod core;
 pub mod cpu;
+pub mod cx4;
 pub mod debug;
 pub mod dma;
 pub mod dsp1;

@@ -131,6 +131,21 @@ pub enum Coprocessor {
         /// caveats).
         ram_kib: usize,
     },
+    /// Coprocessor nibble $F ("custom coprocessor") with `hw=$3` (chipset
+    /// $F3, "ROM+CustomChip", no battery/no sram) AND the extended
+    /// header's `$FFBF` sub-type byte `=$10` (ticket W19-02, fullsnes "CX4
+    /// Cartridge Header": `"[FFD6]=F3h ;ROM+CustomChip"`, `"[FFBF]=10h
+    /// ;CustomChip=CX4"`). Nibble $F alone is not enough — fullsnes uses
+    /// the same nibble for other "custom" chips (e.g. ST010/ST011's
+    /// `$FFBF=$01`), so both the chipset byte AND the sub-type byte must
+    /// agree, the same two-field disambiguation SA-1/GSU already apply to
+    /// their own nibbles. Like SA-1 and GSU, this is clean-room hardware
+    /// emulation, never LLE'd against copyrighted firmware — the CX4's
+    /// program runs from the cartridge's own ROM, so there is no
+    /// undisclosed firmware to reverse-engineer; what stops this project
+    /// short of an opcode-level core is a *documentation* gap (see
+    /// `rf_snes::cx4`'s module doc), not a legal one.
+    Cx4,
 }
 
 /// Which physical GSU chip a cartridge carries. fullsnes "SNES Cart GSU-n
@@ -691,6 +706,17 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
             Coprocessor::SuperFx { version, ram_kib },
             matches!(hw, 0x5 | 0xA),
         )
+    } else if coprocessor_nibble == 0xF && hw == 0x3 && base >= 1 && data[base - 1] == 0x10 {
+        // Ticket W19-02 / fullsnes "CX4 Cartridge Header": "[FFD6]=F3h
+        // ;ROM+CustomChip (no battery, no sram)" together with
+        // "[FFBF]=10h ;CustomChip=CX4" — the extended-header sub-type byte
+        // is what distinguishes the CX4 from every other chip nibble $F
+        // ("custom") covers (e.g. ST010/ST011's own $FFBF=$01, documented
+        // in the neighbouring DSP-n/ST010/ST011 chapter). `base - 1` is
+        // `$FFC0 - 1 = $FFBF` in the chapter's own `$FFC0`-relative
+        // notation, the same arithmetic `superfx_expansion_ram_kib` uses
+        // for `$FFBD` (`base - 3`).
+        (Coprocessor::Cx4, false)
     } else if hw >= 0x3 {
         return Err(CartError::UnsupportedChip {
             name: format!(
@@ -703,7 +729,10 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
     };
     let dsp_window = match coprocessor {
         Coprocessor::Dsp1 => Some(dsp_window_for(map_mode, rom_size)),
-        Coprocessor::None | Coprocessor::Sa1(_) | Coprocessor::SuperFx { .. } => None,
+        Coprocessor::None
+        | Coprocessor::Sa1(_)
+        | Coprocessor::SuperFx { .. }
+        | Coprocessor::Cx4 => None,
     };
 
     Ok(SnesHeader {
@@ -913,6 +942,50 @@ mod tests {
             }
             other => panic!("expected Coprocessor::SuperFx, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn detects_cx4_from_chipset_and_extended_subtype() {
+        // Ticket W19-02: chipset $F3 (ROM+CustomChip) AND extended-header
+        // $FFBF=$10 together name the Cx4 (fullsnes "CX4 Cartridge
+        // Header").
+        let mut rom = lorom_image(0x20, 0xF3);
+        let base = LOROM_HEADER_OFFSET;
+        rom[base - 1] = 0x10;
+        let header = parse_snes_header(&rom).expect("Cx4 cart accepted");
+        assert_eq!(header.coprocessor, Coprocessor::Cx4);
+        assert!(
+            !header.battery,
+            "fullsnes: chipset $F3 is no battery, no sram"
+        );
+    }
+
+    #[test]
+    fn chipset_f3_without_cx4_subtype_is_refused() {
+        // Same chipset byte, but the extended-header sub-type does NOT
+        // name Cx4 (e.g. an unassigned/other custom-chip value) — this
+        // build refuses it honestly rather than guessing.
+        let mut rom = lorom_image(0x20, 0xF3);
+        let base = LOROM_HEADER_OFFSET;
+        rom[base - 1] = 0x01; // ST010/ST011's own sub-type, not Cx4
+        let err = parse_snes_header(&rom).unwrap_err();
+        match &err {
+            CartError::UnsupportedChip { name } => {
+                assert!(name.contains("custom coprocessor"), "got: {name}");
+            }
+            other => panic!("expected UnsupportedChip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_custom_coprocessor_hw_values_are_refused() {
+        // Nibble $F ("custom") at a hw other than $3 is not a documented
+        // Cx4 chipset byte at all.
+        let mut rom = lorom_image(0x20, 0xF5);
+        let base = LOROM_HEADER_OFFSET;
+        rom[base - 1] = 0x10;
+        let err = parse_snes_header(&rom).unwrap_err();
+        assert!(matches!(err, CartError::UnsupportedChip { .. }));
     }
 
     #[test]
