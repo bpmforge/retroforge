@@ -8922,6 +8922,80 @@ byte read only 8 times total, `go=false` for the remaining
 30,000,000-instruction span) though not yet a single named cell for the
 still-open "what triggers run #19" question.
 
+### D-016 follow-up: the coordinator's `GO && RAN` ruling, tried again, REGRESSES three real titles
+
+Brad/the coordinator ruled (2026-09-23, citing the Vortex evidence above)
+that the raw-RAN gate is slice 1's own guess, not hardware, and directed
+implementing `owns_rom_bus`/`owns_ram_bus` (`GO && RON`/`GO && RAN`) as
+the fix, with two supporting fullsnes quotes: "GSU Interrupt Vectors" —
+**"When the GSU is running (with GO=1 and RON=1), ROM isn't mapped to
+SNES memory"** (the joint GO=1 AND RON=1 condition, stated explicitly,
+for the ROM-bus case) — and "SNES Cart GSU-n Code-Cache" — **"the GSU can
+be operated without RON/RAN flags being set... Ie. usually one would
+have RAN set"** (RAN=1 described as the ordinary resting configuration,
+not a standing lock). This is a real, well-cited textual argument and
+was implemented exactly as directed: `Gsu::owns_rom_bus`/`owns_ram_bus`
+added, all four `SnesBus` read/write/peek gate sites switched to them,
+`gsu_scmr_ron_ran_gate_the_snes_sides_own_reads` updated to the
+GO-gated semantic with the citation in its doc comment, and a new test
+(`snes_ram_setup_write_lands_even_with_ran_set_while_the_gsu_is_stopped`)
+added pinning Vortex's exact shape (SCMR=$39, GO=0, 8 KiB SNES write,
+then GO=1, GSU LDB reads it back) — **all of this passed**: `cargo fmt
+--check` 0, `cargo clippy --workspace -- -D warnings` 0, `cargo test -p
+rf-snes -p rf-cart --release` 0 (440 passed — up one from the new test —
+0 failed, 1 ignored), `spc700_vectors`/`blargg_spc`/`gilyon_cputest`/
+`peterlemon_golden` `--ignored` 0 each, `scripts/validate-arch.sh` 0.
+
+**Then census children on all 15 GSU archives found the actual cost of
+this change, and it is a regression, not a fix.** Star Fox (USA), Star
+Fox (USA) (Rev 1), and Star Fox (USA) (Rev 2) — three real, previously
+`rendered` titles per W18-04/W18-05's own tables — all flipped to exit
+`10` (rendered a uniform screen) under the `GO && RAN` gate. Confirmed
+with a direct A/B (`git stash` / `git stash pop` around the exact same
+binary rebuild, same ROM, same census-child invocation): baseline exit
+`0`, patched exit `10`, for all three, reproduced twice. `PROBE_MODE=
+frames PROBE_FRAMES=1800` on Star Fox (USA) under the patch shows
+`varied_at=None`, `go=false`, `plot_calls=0` — the same "never renders"
+shape this ticket has been chasing for Vortex and Star Fox 2, now
+inflicted on three titles that worked before. Meanwhile the fix's own
+intended targets did NOT improve: re-checked `PROBE_MODE=frames
+PROBE_FRAMES=1800` for both Vortex and Star Fox 2 under the patch —
+both still `varied_at=None`, identical GSU-core state to the pre-patch
+numbers already recorded above (Vortex: `instructions=986,026,
+go=false, plot_calls=0`; Star Fox 2: `instructions=231,640, go=false,
+plot_calls=138`, both unchanged from the earlier "measured but
+reverted" experiment's own numbers).
+
+**Net result: 3 titles broken, 0 titles fixed.** This is not what "real
+hardware evidence" should produce if the `GO && RAN` reading were
+correct for every title — either Star Fox's own boot code relies on
+seeing open bus while RAN=1/GO=0 (a plausible, common chip-presence
+detection idiom: write a bus-ownership bit, read back, check whether the
+value is the cartridge's own data or something else, and branch on that
+— this session did not trace Star Fox's own boot far enough to confirm
+this, named as the next step for whoever picks this back up), or the
+real hardware rule is more specific than a flat `GO && RAN`/`GO && RON`
+(e.g. only ROM is truly GO-gated per the one sentence fullsnes states
+that condition for explicitly — the "GSU Interrupt Vectors" quote never
+mentions RAM/RAN at all, so applying the identical GO-gate to RAN was
+this session's own extrapolation from a same-register/same-wording
+argument, not a second directly-cited sentence). **The change was
+reverted in full** (`git diff` against `main` is empty for `gsu.rs`,
+`bus.rs`, and `tests/system.rs` again) rather than shipped, because
+Bug Fix Discipline requires verifying a theory before shipping it, and
+this session's own requested verification step (census children on
+every GSU archive) is what caught the regression. This conflicts with
+the coordinator's direct ruling and is reported rather than silently
+overridden or silently complied with: the coordinator's citation is
+real and the reasoning is sound for the ROM case specifically (the one
+sentence fullsnes states GO+RON for), but the RAM case's extension and
+the change's real-world effect on Star Fox contradict it, and that
+contradiction needs a ruling, not a unilateral pick either way.
+
+**Left BLOCKED, unchanged from the verdict above** — both Vortex and
+Star Fox 2 remain not-rendering, and no shipped code changed this
+session (docs only).
+
 **HEAD**: see the `docs(W18-06): ...` commit this entry ships with.
 
 ## W14-51 — Final Fight 2 / Battletoads: no register defect found; both
