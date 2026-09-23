@@ -8279,6 +8279,30 @@
   "notes": [
    "W14-56 FILED and DONE 2026-09-23 by the orchestrator: the post-W14-55 census moved Operation Thunderbolt (USA) (Beta) from rendered to refused. Its HiROM RESET vector is $FFE0 and a real SEI/CLC/XCE/JML trampoline sits there (JML operand spilling into the unused COP/BRK slots); W14-55's doc claim that the whole 64-byte block is never executable was wrong for that slot. Rule narrowed with the fullsnes citation; cargo test -p rf-cart: 87 passed (85 + 2 new)."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-cart",
+  "depends_on": [
+   "W14-56"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-57",
+  "title": "Header bytes hardware never reads, part 3: an implausible ROM/RAM size exponent at a SCORED header location must clamp like the fallback path does (9 refused betas/protos); an UNASSIGNED coprocessor nibble ($6-$D) falls to no coprocessor instead of refusing (Aero the Acro-Bat 2 / Superman betas, chipset $7F)",
+  "write_scope": [
+   "crates/rf-cart/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-57 rule A: when `parse_snes_header` accepts a location by score, a ROM-size byte whose exponent `kb_pow2` refuses (or that is nowhere near the file length) derives `rom_size` from the file length the way `build_header_from_fallback` already does, and a RAM-size byte whose exponent `kb_pow2` refuses clamps `ram_size` to 0 — never an `InvalidHeader` error for a byte real hardware never reads (fullsnes \"SNES Cartridge ROM Header\": FFD7h/FFD8h are 1 SHL n KByte hints, not decoded by the console). Pinned by tests using the Doom Troopers (Beta) shape (map $00, chipset $FF, ROM $00, RAM $FF, country $00, reset $8000 on SEI/CLC/XCE) and the NFL Quarterback Club (Beta) shape (a fully legible LoROM header with RAM byte $53)",
+   "W14-57 rule B: a chipset byte whose coprocessor nibble fullsnes never assigns ($6-$D; the table stops at 5xh and resumes at Exh) yields `Coprocessor::None` with the hw nibble still read for RAM/battery, instead of `UnsupportedChip(\"unrecognized coprocessor\")` — the same unassigned-value rule W14-52 applied to map-mode nibbles. Named-but-unimplemented chips (DSP-4, SPC7110, S-RTC $5x, SGB/Satellaview $Ex, ST018) stay refused by name. Pinned by a test using the Aero the Acro-Bat 2 (Beta) shape (chipset $7F, otherwise legible LoROM)",
+   "W14-57: rf-cart's existing 87 tests stay green, including `fallback_clamps_an_implausible_ram_size_exponent_to_zero` and the W14-05 random-bytes refusal; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; the orchestrator's full census names every moved title (expected: Arcade's Greatest Hits Beta, Burn-in Test Cartridge, Doom Troopers Beta 1/2, NFL QB Club Beta, Picachu (Pirate), The Shadow (Proto 1), Shadowhawk (Proto), Spider-Man (Beta), Aero 2 (Beta), Death and Return of Superman (Beta) leave the refused bucket)"
+  ],
+  "notes": [
+   "W14-57 FILED 2026-09-23 by the orchestrator from the post-W14-56 refused list (24): a per-title `Cartridge::load` error dump showed `implausible SNES size exponent` for 9 archives and `unrecognized coprocessor (SNES chipset $7F)` for 2. The scored path decodes FFD7h/FFD8h through `kb_pow2` with `?` (snes.rs ~1239-1240) while the fallback path clamps (~940-952). Remaining refusals after this: 5 Super Game Boy (needs a GB core), Top Gear 3000 (DSP-4, undocumented), Porky Pig Beta (SPC7110 nibble on a 2034 KiB odd-size dump — likely a bad dump), Super Noah's Ark 3D (chipset $0A read as DSP; unlicensed, one-off), ESPN [b] / Eurit (no header, no prologue — dead dumps), Super 8 / Tri-Star (8 KiB, truncated), the bare ST010 chip dump."
+  ]
  }
 ]
 }
