@@ -8041,7 +8041,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W18-06",
   "title": "Super FX follow-up: Vortex's computed-jump spin and Star Fox 2's idle GSU — trace the INPUTS (RAM the SNES wrote, ROM bytes the GSU read), not the opcodes",
