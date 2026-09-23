@@ -101,6 +101,11 @@ use rf_cart::Mirroring;
 /// for the full derivation and sourcing.
 const A12_FILTER_DOTS: u64 = 9;
 
+/// One CHR window page, for `chr_write`'s per-page RAM mask (ticket
+/// W14-58) — the same 1 KiB granularity [`crate::mappers::mmc3`]'s CHR
+/// bank registers use.
+const CHR_BANK_1K: usize = 1024;
+
 /// MMC2/MMC4 CHR latch state held by the PPU (ticket W14-13). See
 /// [`crate::mappers::Mapper::chr_latch`] for why the PPU, not the mapper,
 /// does the switching.
@@ -275,8 +280,30 @@ impl Ppu {
     /// CHR ROM writes have no effect (no mapper registers exist for mapper
     /// 0, and real ROM can't be written); CHR RAM cartridges (`chr_is_ram`)
     /// accept them.
+    ///
+    /// Ticket W14-58: once a mapper has ever pushed a window
+    /// ([`Ppu::set_chr_window`] has run at least once, `chr_window_mask` is
+    /// `Some`), the pushed per-1-KiB-page mask governs instead of the
+    /// all-or-nothing `chr_is_ram` flag above — TQROM mixes CHR-ROM and
+    /// CHR-RAM pages in the same 8 KiB window, something one flag can't
+    /// express. A mapper that never pushes a window at all (every
+    /// PPU-owned CHR-RAM board, `chr_window_mask` still `None`) is
+    /// unaffected — see this module's doc, "CHR RAM is not banked by this
+    /// design".
     fn chr_write(&mut self, addr: u16, value: u8) {
-        if !self.chr_is_ram || self.chr.is_empty() {
+        if self.chr.is_empty() {
+            return;
+        }
+        if let Some(mask) = self.chr_window_mask {
+            let page = (addr as usize / CHR_BANK_1K) % 8;
+            if mask & (1 << page) == 0 {
+                return; // this page is CHR-ROM (or unmapped) -- ignore
+            }
+            let len = self.chr.len();
+            self.chr[addr as usize % len] = value;
+            return;
+        }
+        if !self.chr_is_ram {
             return;
         }
         let len = self.chr.len();
@@ -297,13 +324,20 @@ impl Ppu {
     /// isn't a fixed 8 KiB), not a recoverable runtime condition, so this
     /// asserts rather than silently truncating or panicking on an
     /// out-of-bounds copy later.
-    pub(crate) fn set_chr_window(&mut self, window: &[u8]) {
+    ///
+    /// `ram_mask` (ticket W14-58) is [`crate::mappers::Mapper::chr_ram_page_mask`]'s
+    /// answer for THIS window — stored so `chr_write` (above) knows which
+    /// of the 1 KiB pages just copied in are writable. Once this has run
+    /// once, `chr_window_mask` stays `Some` for the rest of this `Ppu`'s
+    /// life (see that field's doc).
+    pub(crate) fn set_chr_window(&mut self, window: &[u8], ram_mask: u8) {
         assert_eq!(
             window.len(),
             self.chr.len(),
             "CHR window size must match the buffer NesBus::new seeded"
         );
         self.chr.copy_from_slice(window);
+        self.chr_window_mask = Some(ram_mask);
     }
 
     /// Update the nametable mirroring a mapper's own register controls
@@ -710,7 +744,7 @@ mod tests {
             "bank 0 (all zeroes) at construction"
         );
         let bank1 = [0x42u8; 0x2000];
-        ppu.set_chr_window(&bank1);
+        ppu.set_chr_window(&bank1, 0);
         assert_eq!(
             ppu.mem_read(0x0000),
             0x42,
@@ -728,7 +762,7 @@ mod tests {
     #[should_panic(expected = "CHR window size must match")]
     fn set_chr_window_rejects_a_mismatched_length() {
         let mut ppu = ppu_with_mirroring(Mirroring::Horizontal);
-        ppu.set_chr_window(&[0u8; 4]);
+        ppu.set_chr_window(&[0u8; 4], 0);
     }
 
     #[test]

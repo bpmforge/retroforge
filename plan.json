@@ -8311,7 +8311,7 @@
    "W14-50"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "id": "W14-58",
   "title": "NES: TQROM (mapper 119, 3 retail titles refused) — CHR-RAM pages mixed into the MMC3 CHR window via a write-back hook; plus mapper 47 (MMC3 2-in-1 outer bank, 1 title)",
@@ -8327,7 +8327,8 @@
    "W14-58: the 3 TQROM archives and the mapper 47 archive load and render in the orchestrator's census; canaries (Super Mario Bros. 3, Kirby's Adventure, Mega Man 3, Punch-Out!!) unmoved; mmc3_test_2 + the MMC3 IRQ ignored suites still green; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; no ROM bytes in git"
   ],
   "notes": [
-   "W14-58 FILED 2026-09-23 by the orchestrator from the post-W14-50 NES refused list (49): every refusal is a named mapper or NES 2.0 exponent notation. TQROM was left out of W14-05 on purpose (STATUS 2026-09-17: the push design cannot round-trip CHR-RAM pages); this ticket adds the write-back half. Mapper 47 rides along as the other MMC3 variant in the library (Super Spike V'Ball + Nintendo World Cup)."
+   "W14-58 FILED 2026-09-23 by the orchestrator from the post-W14-50 NES refused list (49): every refusal is a named mapper or NES 2.0 exponent notation. TQROM was left out of W14-05 on purpose (STATUS 2026-09-17: the push design cannot round-trip CHR-RAM pages); this ticket adds the write-back half. Mapper 47 rides along as the other MMC3 variant in the library (Super Spike V'Ball + Nintendo World Cup).",
+   "W14-58 done 2026-09-23: Mapper::chr_window_writeback/chr_ram_page_mask added (defaults no-op/0); NesBus::push_mapper_view split into itself (writeback+materialize, live writes) and materialize_and_push_mapper_view (materialize only, used by the save-state load path so it never folds pre-load-garbage PPU bytes into a just-restored RAM store); Ppu gained chr_window_mask: Option<u8> and ppu/mem.rs's chr_write honours it once any window has ever been pushed. Mmc3::new_tqrom (mapper 119) and Mmc3::new_mapper47 (mapper 47) added; both wired into SUPPORTED_MAPPERS, EMULATED_MAPPERS and NesBus's dispatch. One acceptance item not built as specified and documented instead (docs/TESTING.md's W14-58 section, system/state.rs's StateRegion::Mapper save arm): a chr_window_writeback call inside NesBus::save_region before mapper.save_state, because save_region takes &self (crates/retroforge's build_container, outside this ticket's write_scope, holds only a shared reference) and cannot call the &mut self writeback hook -- the ticket's own acceptance sequence (write RAM, bank-switch, save, load, read back) is unaffected since the bank-switch already flushes via push_mapper_view; only a save strictly between two register writes with no intervening bank-switch would miss an uncommitted edit. Gate all green: cargo fmt --check clean; cargo clippy --workspace -D warnings clean; cargo test -p rf-nes -p rf-cart: rf-cart 87 passed/0 failed, rf-nes lib 374 passed/0 failed (5 new: 4 TQROM + 1 mapper-47 unit tests), plus unchanged action53_fixture (1 ignored) and emulator_core_contract (4 passed) binaries and both crates' empty doctests; scripts/validate-arch.sh: arch OK. mmc3_test_2_3_a12_clocking_passes and mmc3_test_2_all_six_sub_roms_pass (not #[ignore]d -- they self-skip via eprintln when roms/nes is absent) both ran against the roms/nes symlink and passed, alongside every pre-existing MMC3/TxSROM test, unchanged. No ROM bytes committed. Full cargo test --workspace and the census left to the orchestrator per the ticket."
   ]
  },
  {

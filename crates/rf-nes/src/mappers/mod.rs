@@ -370,6 +370,42 @@ pub trait Mapper {
     /// actually ships, is unaffected).
     fn chr_window(&self) -> Option<&[u8]>;
 
+    /// The inverse of [`Mapper::chr_window`] (ticket W14-58): hands the
+    /// mapper the PPU's current 8 KiB CHR buffer, right before
+    /// [`crate::system::NesBus`] re-materializes and re-pushes the window
+    /// (`NesBus::push_mapper_view`, and once more before
+    /// [`Mapper::save_state`] so a save captures live RAM edits). This is
+    /// what lets a mapper mix CHR-ROM and CHR-RAM pages in one window —
+    /// TQROM ([`Mmc3::new_tqrom`]) is the only implementor — without the
+    /// silent-loss failure mode [`Mapper::chr_window`]'s own doc describes
+    /// for a naive push of CHR-RAM: **NesBus calls this FIRST, while the
+    /// PPU buffer still reflects the window this mapper had selected
+    /// BEFORE the register write that is about to change it**, so any RAM
+    /// page's live edits land back in the mapper's own store before the
+    /// new window overwrites the PPU buffer. Default no-op: every board
+    /// but TQROM either has no CHR-RAM window (an all-ROM
+    /// [`Mapper::chr_window`]) or never pushes one at all (a `None`
+    /// `chr_window`, [`crate::ppu::Ppu`]'s own flat CHR-RAM buffer already
+    /// round-trips PPU-side writes with no mapper involvement).
+    fn chr_window_writeback(&mut self, ppu_chr: &[u8]) {
+        let _ = ppu_chr;
+    }
+
+    /// Per-1-KiB-page writable mask for the window [`Mapper::chr_window`]
+    /// currently reports (ticket W14-58): bit `n` set means page `n` (PPU
+    /// `$0000 + n*0x400`) is CHR-RAM and a PPU-side write should land in
+    /// it; bit `n` clear means page `n` is CHR-ROM and a write is ignored.
+    /// [`crate::ppu::mem`]'s `chr_write` consults this once a window has
+    /// ever been pushed ([`crate::ppu::Ppu::set_chr_window`]'s mask
+    /// argument) instead of the all-or-nothing `chr_is_ram` flag that path
+    /// used before this ticket. Default `0` (every page read-only) is
+    /// correct for every CHR-ROM mapper that pushes a window at all
+    /// (CNROM, MMC1, plain MMC3/TxSROM, ...) — a PPU write to CHR-ROM has
+    /// always been a no-op here, mask or not.
+    fn chr_ram_page_mask(&self) -> u8 {
+        0
+    }
+
     /// One filtered PPU-A12 rising edge occurred (ticket W2-03) — see this
     /// module's doc "MMC3 additions" section for why this is pulled by
     /// [`crate::system::NesBus`] from [`crate::ppu::Ppu`] rather than

@@ -26,7 +26,8 @@ const CHR_BANK: usize = 8 * 1024;
 /// (2026-09-15) bucketed all 223 refusals by mapper number, and these four
 /// were the largest buckets at 54, 17, 28 and 17 games — 116 between them.
 const SUPPORTED_MAPPERS: &[u16] = &[
-    0, 1, 2, 3, 4, 5, 7, 9, 11, 18, 28, 34, 64, 66, 69, 71, 79, 87, 118, 144, 148, 206, 232,
+    0, 1, 2, 3, 4, 5, 7, 9, 11, 18, 28, 34, 47, 64, 66, 69, 71, 79, 87, 118, 119, 144, 148, 206,
+    232,
 ];
 
 /// A handful of well-known mapper names, used only to make an
@@ -51,6 +52,7 @@ fn mapper_name(id: u16) -> Option<&'static str> {
         21 | 22 | 23 | 25 => "VRC2/VRC4",
         24 | 26 => "VRC6",
         34 => "BNROM / NINA-001",
+        47 => "MMC3 2-in-1 (outer bank)",
         66 => "GxROM",
         69 => "Sunsoft FME-7",
         71 => "Camerica / Codemasters",
@@ -58,6 +60,8 @@ fn mapper_name(id: u16) -> Option<&'static str> {
         75 => "VRC1",
         79 => "NINA-03/06",
         85 => "VRC7",
+        118 => "TxSROM",
+        119 => "TQROM",
         206 => "DxROM",
         _ => return None,
     })
@@ -491,7 +495,10 @@ mod mapper28_tests {
         assert!(SUPPORTED_MAPPERS.contains(&28), "Action 53");
         assert!(SUPPORTED_MAPPERS.contains(&7), "AxROM");
 
-        for unsupported in [119u16, 210, 13] {
+        // Ticket W14-58 added 119 (TQROM) and 47 (MMC3 2-in-1) to
+        // `SUPPORTED_MAPPERS` -- 210 and 13 stand in as still-refused
+        // mappers so this test keeps proving the refusal path works.
+        for unsupported in [210u16, 13] {
             assert!(
                 !SUPPORTED_MAPPERS.contains(&unsupported),
                 "mapper {unsupported} must still be refused"

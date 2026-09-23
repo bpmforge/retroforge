@@ -10644,3 +10644,177 @@ starts at `$7FFF`, the IRQ/BRK slot, and stays rejected.
 Census child on the real dumps at this commit: Operation Thunderbolt
 (Beta), The Lion King (Beta 3) and F1-ROC II all exit 0 (rendered);
 Star Fox (USA) unmoved. The full-library row is in §0.
+
+## W14-58 — TQROM (mapper 119) and mapper 47: a CHR write-back hook for RAM pages in a materialized window
+
+The `Mapper::chr_window`/`Ppu::set_chr_window` materialize/push design
+(`crates/rf-nes/src/mappers/mod.rs`'s module doc, "Why this trait is
+narrower than §2.4's sketch") has always refused to push a window for any
+CHR-RAM mapper, precisely because a naive push has no way to fold a
+PPU-side write to that RAM back into the mapper's own store before the
+next push overwrites it (`ppu/mem.rs`'s "CHR RAM is not banked by this
+design" section). TQROM (mapper 119,
+[nesdev.org/wiki/INES_Mapper_119](https://www.nesdev.org/wiki/INES_Mapper_119))
+needs exactly this: MMC3's six CHR bank registers each independently pick
+either a CHR-ROM page (bit 6 clear, bits 0-5, up to 64 KiB) or one of 8
+pages of an on-board 8 KiB CHR-RAM chip (bit 6 set, bits 0-2), mixed in
+one 8 KiB window — the "push a whole window, refuse if any of it is RAM"
+rule can't express that at all.
+
+### The write-back hook
+
+Two new `Mapper` trait members close the gap:
+
+- `fn chr_window_writeback(&mut self, ppu_chr: &[u8])` (default no-op) —
+  the inverse of `chr_window`. `NesBus::push_mapper_view` (the sole call
+  site of `Ppu::set_chr_window`, per `crates/rf-nes/src/mappers/mod.rs`'s
+  own module doc) now calls this FIRST, handing the mapper the PPU's CHR
+  buffer while it still reflects the window that was live BEFORE the
+  register write that triggered this push — then materializes and pushes
+  the NEW window. This ordering is what lets a RAM page's live edits
+  land back in the mapper's own store before the new window overwrites
+  the PPU buffer, and it is why `Mmc3::cpu_write`'s `$8001` arm
+  deliberately does NOT eagerly recompute TQROM's CHR view the way every
+  other MMC3 variant does — an eager recompute there would build the
+  mask/slot mapping for the NEW window before this same write's
+  `chr_window_writeback` call gets a chance to read the OLD window's
+  live buffer, misattributing whichever RAM page the OLD mapping pointed
+  at. `Mmc3::recompute_chr_view_tqrom` runs at the END of
+  `chr_window_writeback` instead, once the fold-back is done.
+- `fn chr_ram_page_mask(&self) -> u8` (default `0`) — bit `n` set means
+  1 KiB page `n` of the CURRENT window is CHR-RAM and writable; `0`
+  (every page read-only) is correct for every CHR-ROM mapper that pushes
+  a window at all. `Ppu::set_chr_window` now takes this mask alongside
+  the window bytes and stores it in a new `chr_window_mask: Option<u8>`
+  field; `ppu/mem.rs`'s `chr_write` consults it once any window has ever
+  been pushed (mask `Some`) instead of the old all-or-nothing
+  `chr_is_ram` flag — a page whose mask bit is clear ignores the write, a
+  set bit lands it directly in the PPU's flat `chr` buffer for the next
+  `chr_window_writeback` to fold back. A mapper that never pushes a
+  window at all (mask stays `None` forever) is completely unaffected —
+  the PPU-owned CHR-RAM path this ticket leaves untouched.
+
+`NesBus::push_mapper_view` was split into itself (writeback +
+materialize, used by every live `$8000-$FFFF`-family write dispatch) and
+a new `materialize_and_push_mapper_view` (materialize only). The
+save-state LOAD path (`system/state.rs`'s `StateRegion::Mapper` arm)
+calls the latter directly, deliberately skipping the writeback half: at
+load time `self.ppu.chr()` still holds whatever was in the buffer before
+the load began, unrelated to the state being restored, and folding it
+back would corrupt the just-restored RAM store. TQROM's `save_state`
+instead serializes its materialized `chr_view` (ROM and RAM bytes alike)
+directly, byte-for-byte, exactly like every other MMC3 variant already
+does — so a load needs no recompute to be correct.
+
+**One acceptance item named but not built as specified:** the ticket
+brief additionally asked for a write-back call inside
+`NesBus::save_region`'s `StateRegion::Mapper` arm, "so the mapper's RAM
+store is current" at save time even between two register writes.
+`save_region` takes `&self` (`crates/retroforge`'s `build_container`,
+outside this ticket's `write_scope`, holds only a shared reference at
+save time), and `chr_window_writeback` is `&mut self` by design — the
+same mutation the live-write dispatch needs. Widening `save_region` to
+`&mut self` would require editing `crates/retroforge/src/save_state.rs`'s
+`build_container` signature, which lies outside `crates/rf-nes/**` /
+`crates/rf-cart/**` / `docs/TESTING.md`. Not built; documented instead
+(`system/state.rs`'s `StateRegion::Mapper` save arm). The gap is narrow:
+`NesBus::push_mapper_view` already flushes on every register write, so
+the ticket's own acceptance sequence — "write to a RAM page,
+bank-switch, save, load, read back" — is unaffected (the bank-switch is
+what flushes, before the save ever runs); only a save strictly BETWEEN
+two register writes, with no bank-switch in between to flush, would miss
+a still-uncommitted PPU-side edit.
+
+### Mapper 119 (TQROM)
+
+`Mmc3::new_tqrom(prg_rom, chr_rom)`: plain MMC3 PRG banking, IRQ counter
+and mirroring (nesdev: "CHR banking is implemented similar to how MMC3
+implements it", everything else "behaves as expected of a normal MMC3
+chip"). `recompute_chr_view_tqrom` lays out the same eight 1 KiB window
+slots `Mmc3::recompute_chr_view` does (same register-to-window mapping,
+same A12-inversion swap — real MMC3 hardware, ticket W2-03), but resolves
+each slot's raw register byte through bit 6 into either `chr_rom`
+(bits 0-5) or the mapper's own fixed 8 KiB `chr_ram` chip (bits 0-2),
+recording the result in `chr_ram_mask`/`chr_ram_slot_page` for
+`chr_ram_page_mask` and the next `chr_window_writeback` to use.
+
+### Mapper 47 (MMC3 2-in-1 outer bank)
+
+`Mmc3::new_mapper47(prg_rom, chr_rom)`, per
+[nesdev.org/wiki/INES_Mapper_047](https://www.nesdev.org/wiki/INES_Mapper_047):
+two full 128 KiB PRG / 128 KiB CHR MMC3 images on one board, a
+`$6000-$7FFF` write's bit 0 (observed via `Mapper::cpu_write_wram`, the
+same NINA-001/Jaleco-JF-shaped hook, ticket W14-15) selecting which half
+the ordinary MMC3 registers address into — no PRG-RAM. `Mmc3::prg_bank`
+and the new `Mmc3::chr_bank_index` helper both confine an index to
+`count / 2` and offset by `outer_bank * half` when `mapper47` is set;
+`recompute_prg_reads`'s "last"/"second-last" fixed banks are computed the
+same half-relative way. No exact-size assertion on the constructor (the
+real board is a fixed 256 KiB/128 KiB image, but `system::tests::
+rom_loading::every_emulated_mapper_loads_through_both_gates` drives every
+entry in `EMULATED_MAPPERS` through a generic 32 KiB PRG / 8 KiB CHR
+fixture, and the halving arithmetic works for any even split).
+
+`Mmc3`'s save-state layout gained four fields, appended after the
+existing ones without renumbering (`chr_view` stays where it was):
+`chr_ram_mask: u8`, `chr_ram_slot_page: [u8; 8]`, `chr_ram: [u8; 8192]`,
+`outer_bank: u8`. All four are all-zero for every pre-existing MMC3/
+TxSROM save and cost a few harmless bytes there, the same "no version
+flag needed" convention `txsrom`/`revision` already use for
+construction-fixed facts.
+
+### Tests
+
+New unit tests in `crates/rf-nes/src/mappers/mmc3.rs`'s `tests` module
+(all drive `Mmc3` directly through a `push` harness that repeats
+`NesBus::push_mapper_view`'s exact writeback-then-materialize sequence,
+per this ticket's brief):
+
+- `tqrom_window_mixes_rom_and_ram_pages_side_by_side` — a 2 KiB ROM pair
+  and a 1 KiB RAM page in the same materialized window, `chr_ram_page_
+  mask` correctly zero over the ROM slots and set over the RAM slot.
+- `tqrom_ram_page_write_is_ignored_when_the_slot_is_rom` — a "write" to a
+  ROM slot's buffer position has nowhere to land; the next materialize
+  re-derives it from `chr_rom` unchanged.
+- `tqrom_ram_page_write_survives_a_bank_switch_away_and_back` — a
+  PPU-side write to a RAM page, a switch to a different RAM page (the
+  written page vanishes from view), a switch back (the write is still
+  there).
+- `tqrom_save_load_round_trip_mid_frame_reads_back_a_ram_write` — write,
+  bank-switch (flushing it, matching the acceptance's own sequence),
+  `save_state`/`load_state` round trip through a `MemStream`, restored
+  mapper reads the byte back, and the byte keeps surviving a further
+  bank switch away and back post-load.
+- `mapper47_outer_bank_select_changes_which_half_prg_and_chr_address` —
+  distinctly-marked PRG/CHR halves, same register values before and
+  after an outer-bank write address different bytes.
+
+Every pre-existing MMC3/TxSROM test in the same file is unchanged and
+stays green, plus the two oracle suites this ticket's acceptance names
+(`crates/rf-nes/src/ppu/tests/blargg_roms.rs`):
+`mmc3_test_2_3_a12_clocking_passes` and `mmc3_test_2_all_six_sub_roms_
+pass` — both run unconditionally against the `roms/nes` symlink (no
+`#[ignore]` attribute; `docs/TESTING.md`'s existing convention of an
+`eprintln!` skip-with-message when the fixture is absent) and both still
+pass.
+
+`crates/rf-cart/src/nes.rs`: `SUPPORTED_MAPPERS`/`system::cartridge::
+EMULATED_MAPPERS` gained `47` and `119` (kept sorted), `mapper_name`
+gained `47`, `118` and `119` entries, and the existing `mapper_28_is_
+supported_and_unknown_mappers_still_name_themselves` test's "still
+refused" list was updated from `[119, 210, 13]` to `[210, 13]` (119 is
+supported now).
+
+### Gate
+
+`cargo fmt --check`: clean. `cargo clippy --workspace -- -D warnings`:
+clean. `cargo test -p rf-nes -p rf-cart`: rf-cart 87 passed/0 failed;
+rf-nes lib 374 passed/0 failed (up from 369 — 5 new: 4 TQROM + 1 mapper
+47); rf-nes's two other test binaries and both crates' doctests
+unaffected. `scripts/validate-arch.sh`: `arch OK`.
+
+### Library archives targeted
+
+Pin Bot, High Speed x2 (TQROM, mapper 119) and Super Spike V'Ball +
+Nintendo World Cup (mapper 47) — the orchestrator's own census, not
+re-run by this ticket, is the record of whether they actually moved.

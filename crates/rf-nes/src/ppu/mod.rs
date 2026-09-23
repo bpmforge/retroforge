@@ -510,6 +510,17 @@ pub struct Ppu {
     /// did: `drawn_tiles` returned 2 or 3 every frame.
     pub(super) completed_tiles: Vec<DrawnTile>,
     pub(super) chr: Vec<u8>,
+    /// Per-1-KiB-page writable mask for `chr`, as of the last
+    /// [`Ppu::set_chr_window`] push (ticket W14-58) — bit `n` set means
+    /// page `n` is CHR-RAM and `mem.rs`'s `chr_write` should accept a
+    /// write there; bit `n` clear means CHR-ROM (ignore the write). `None`
+    /// means no mapper has ever pushed a window at all — the PPU-owned
+    /// flat CHR-RAM path (`chr_is_ram`) this ticket leaves untouched.
+    /// `Some(mask)` is set the first time [`Ppu::set_chr_window`] runs and
+    /// stays `Some` (never reverts to `None`) from then on, even for a
+    /// mapper whose mask is always `0` (every CHR-ROM mapper that pushes
+    /// at all) — see that method's doc.
+    pub(super) chr_window_mask: Option<u8>,
     /// An MMC2-style CHR latch, when the mapper has one (ticket W14-13):
     /// four 4 KiB banks and the per-half selection this PPU flips itself
     /// at the triggering pattern fetch. `None` for every other board, in
@@ -867,6 +878,7 @@ impl Ppu {
             w: false,
             read_buffer: 0,
             chr,
+            chr_window_mask: None,
             chr_latch: None,
             chr_sprites: None,
             ext_nametable: None,
