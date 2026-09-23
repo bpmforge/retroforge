@@ -199,6 +199,29 @@
 //!                                    content the decode finds is actually
 //!                                    reaching the composited picture
 //!                                    (W14-42)
+//! PROBE_MODE=ppuwrites                a register-write watch for the
+//!                                    composition-relevant PPU registers
+//!                                    ($2100 INIDISP, $212C TM, $212D TS,
+//!                                    $2130/$2131 CGWSEL/CGADSUB, and the
+//!                                    $2123-$212B window enable/position/
+//!                                    logic block) that `PROBE_WATCH`
+//!                                    cannot see, since those addresses
+//!                                    are write-only and `SnesBus::peek`
+//!                                    falls through to open bus for all of
+//!                                    them (see `PROBE_WATCH`'s own doc).
+//!                                    Compares the PPU's own DECODED
+//!                                    fields across instruction boundaries
+//!                                    instead of raw bus bytes. Fast-
+//!                                    forwards `PROBE_FRAMES - 1` frames
+//!                                    with `Step::Frame` (cheap — no
+//!                                    per-instruction cost paid for the
+//!                                    frames that are not of interest),
+//!                                    then switches to `Step::Instruction`
+//!                                    for the final frame plus up to
+//!                                    `PROBE_INSTR` more instructions
+//!                                    (default 200_000) and prints the PC
+//!                                    every time one of those fields
+//!                                    changes (W14-51).
 //! ```
 //!
 //! Example (the W14-10 trace): `PROBE_INSTR=3000000 PROBE_PORTS=1
@@ -277,6 +300,103 @@ fn probe() {
         let bytes = rom_bytes(Path::new(path)).unwrap();
         let mut core = rf_snes::core::SnesCore::load(&bytes).unwrap();
         let mut sink = Sink::default();
+        if std::env::var("PROBE_MODE").as_deref() == Ok("ppuwrites") {
+            // W14-51: `PROBE_WATCH` is blind on `$2100`-`$213F` (write-only
+            // PPU registers fall through `SnesBus::peek` to open bus, per
+            // that probe's own doc) — so a register-write watch on the
+            // composition-relevant PPU registers ($2100 INIDISP, $212C TM,
+            // $212D TS, $2130/$2131 CGWSEL/CGADSUB, $2123-$212B the window
+            // enable/position/logic block) has to compare the PPU's own
+            // DECODED state across instruction boundaries instead of raw
+            // bus bytes. Fast-forwards `PROBE_FRAMES - 1` frames with
+            // `Step::Frame` (cheap), then switches to `Step::Instruction`
+            // for the final frame (plus PROBE_INSTR extra instructions,
+            // default 200_000) and prints the PC every time one of those
+            // fields changes value.
+            let target_frames = frames.saturating_sub(1);
+            for _ in 0..target_frames {
+                core.step(Step::Frame, &mut sink);
+            }
+            let cap: u64 = std::env::var("PROBE_INSTR")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(200_000);
+            #[derive(Clone, PartialEq, Debug)]
+            struct PpuWriteSnap {
+                forced_blank: bool,
+                brightness: u8,
+                tm: [bool; 4],
+                obj: bool,
+                ts: u8,
+                clip: u8,
+                prevent: u8,
+                enable: u8,
+                win_enable: [(bool, bool); 6],
+                main_mask: u8,
+                sub_mask: u8,
+                w1_left: u8,
+                w1_right: u8,
+                w2_left: u8,
+                w2_right: u8,
+            }
+            let snap = |c: &rf_snes::core::SnesCore| {
+                let p = &c.system().bus.ppu;
+                PpuWriteSnap {
+                    forced_blank: p.forced_blank,
+                    brightness: p.brightness,
+                    tm: [
+                        p.bgs[0].enabled,
+                        p.bgs[1].enabled,
+                        p.bgs[2].enabled,
+                        p.bgs[3].enabled,
+                    ],
+                    obj: p.obj_enabled,
+                    ts: p.ts,
+                    clip: p.color_math.clip_mode,
+                    prevent: p.color_math.prevent_mode,
+                    enable: p.color_math.enable,
+                    win_enable: p.windows.enable,
+                    main_mask: p.windows.main_mask,
+                    sub_mask: p.windows.sub_mask,
+                    w1_left: p.windows.w1_left,
+                    w1_right: p.windows.w1_right,
+                    w2_left: p.windows.w2_left,
+                    w2_right: p.windows.w2_right,
+                }
+            };
+            let mut prev = snap(&core);
+            // W14-51: alongside the PPU write watch, also track the APU
+            // port pair ($2140-$2143) — answers "is this stretch
+            // audio-gated" (ongoing CPU<->SPC handshake traffic) or
+            // purely a CPU-side WRAM countdown (ports never move) without
+            // needing a second full run.
+            let mut apu_prev = core.system().bus.apu.ports_in;
+            let mut n: u64 = 0;
+            let mut changes: u64 = 0;
+            let mut apu_changes: u64 = 0;
+            while n < cap {
+                core.step(Step::Instruction, &mut sink);
+                n += 1;
+                let cur = snap(&core);
+                if cur != prev {
+                    let pc = core.system().cpu.pc24();
+                    println!("    PPUWRITE n={n} pc={pc:06X} {prev:?} -> {cur:?}");
+                    changes += 1;
+                    prev = cur;
+                }
+                let apu_cur = core.system().bus.apu.ports_in;
+                if apu_cur != apu_prev {
+                    apu_changes += 1;
+                    apu_prev = apu_cur;
+                }
+            }
+            println!(
+                "PPUWRITES done frame={} changes={changes} apu_port_changes={apu_changes} n={n} {}",
+                core.system().bus.timing.frame,
+                Path::new(path).file_name().unwrap().to_string_lossy()
+            );
+            continue;
+        }
         if std::env::var("PROBE_MODE").as_deref() == Ok("frames") {
             let mut first_varied: Option<usize> = None;
             let mut first_varied_instr: Option<u64> = None;
