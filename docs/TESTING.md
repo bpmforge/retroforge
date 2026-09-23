@@ -10644,3 +10644,117 @@ starts at `$7FFF`, the IRQ/BRK slot, and stays rejected.
 Census child on the real dumps at this commit: Operation Thunderbolt
 (Beta), The Lion King (Beta 3) and F1-ROC II all exit 0 (rendered);
 Star Fox (USA) unmoved. The full-library row is in §0.
+
+## W14-57 — Header bytes hardware never reads, part 3: size exponents on the scored path; unassigned coprocessor nibbles
+
+The post-W14-56 refused-list triage found two more bytes hardware never
+reads causing outright refusals, this time at a header location that
+*won scoring* rather than one reached only through the RESET-vector
+fallback: an implausible ROM/RAM size exponent, and a chipset byte whose
+high nibble names no coprocessor fullsnes ever assigned.
+
+### Rule A — ROM/RAM size exponents on the scored path
+
+`parse_snes_header`'s scored path used to decode both size bytes with
+`kb_pow2(..)?`, propagating an `InvalidHeader` the instant either
+exponent overflowed `usize` (fullsnes "SNES Cartridge ROM Header": FFD7h
+"ROM size (1 SHL n) Kbytes (usually 8=256KByte .. 0Ch=4MByte)", FFD8h
+"RAM size (1 SHL n) Kbytes (usually 1=2Kbyte .. 5=32Kbyte) (0=None)" —
+real hardware never reads either byte, so no exponent it holds can
+legitimately abort a load). `build_header_from_fallback` already refused
+to trust these bytes the same way for a header it trusts far less; this
+ticket lifts that trust model onto the scored path via two shared
+helpers:
+
+- `rom_size_from_header_byte_or_length` derives `rom_size` from the
+  header byte via `kb_pow2` when that decodes to something other than a
+  literal zero; a byte that overflows `kb_pow2` (an `Err`) or decodes to
+  `Ok(0)` — a zero-byte ROM being as far from any real dump's length as a
+  "size" can get — instead uses the real image length, exactly the trust
+  `build_header_from_fallback`'s own doc already argues for ("the file's
+  own length is strictly more trustworthy than a byte inside the same
+  header block"). A byte that decodes to a nonzero size is still trusted
+  even when it disagrees with the file length — several existing test
+  fixtures (and real DSP-1B carts, whose declared size selects the wider
+  snes9x DSP window) intentionally understate the file on purpose, and
+  only the overflow/zero cases are ones no real cartridge could produce.
+- `ram_size_from_header_byte` is `build_header_from_fallback`'s own
+  RAM-size clamp (an exponent above `0x0D`, the same plausible-ROM-size
+  ceiling `score_candidate` uses, clamps to 0 rather than trusting
+  `kb_pow2`'s much looser overflow-only guard), lifted out so both paths
+  share one implementation instead of two copies drifting apart.
+
+### Rule B — unassigned coprocessor nibbles
+
+fullsnes's Chipset (FFD6h) table assigns coprocessor nibbles $0 (DSP), $1
+(GSU), $2 (OBC1), $3 (SA-1), $4 (S-DD1), $5 (S-RTC), then jumps to $E
+(Super Game Boy / Satellaview) and $F (custom, subclassed via FFBFh) —
+$6-$D are never assigned to anything, on any hardware that shipped. The
+scored path's final coprocessor decode used to refuse any chipset byte
+with `hw >= 0x3` that no earlier arm matched as `UnsupportedChip
+("unrecognized coprocessor")`, which conflated "a real, documented chip
+this build cannot run yet" (DSP-4, SPC7110, S-RTC $5x, SGB/Satellaview
+$Ex, ST018 — all correctly still refused) with "a nibble no cartridge
+ever legitimately used" — the identical unassigned-value shape ticket
+W14-52 already fixed for map-mode nibbles. An unassigned coprocessor
+nibble now decodes as `Coprocessor::None`, still reading the low hw
+nibble for RAM/battery (`hw == 0x2`, fullsnes's own "ROM+RAM+Battery"
+value for a cart with no coprocessor — the same convention the `else`
+arm immediately below already uses, not the coprocessor arms' `hw == 0x5`
+idiom, since there is no coprocessor here to attach that combination to).
+
+**Deviation from the ticket's literal wording:** the ticket's acceptance
+scopes rule B to coprocessor nibbles `$6-$D`. The Doom Troopers (Beta)
+test fixture below (chipset `$FF`) forced a narrow second carve-out:
+nibble `$F` ("custom") IS assigned in fullsnes's table, so `$FF` falls
+outside the `$6-$D` range, but its hw nibble (`$F`) is not any documented
+custom sub-type either (CX4 is hw `$3`, SPC7110 is hw `$5`/`$9`,
+ST010/ST011 is hw `$6`) — it is the same wholesale-`$FF`-filler idiom
+this whole ticket arc keeps finding in beta/proto dumps. The fix adds
+`chipset == 0xFF` as an explicit second condition on the same arm, rather
+than widening to "any unassigned hw nibble under nibble $F", specifically
+because that broader rule could not be shown not to collide with ST018's
+own (undetermined, not verified against a real dump) chipset byte —
+`chipset == 0xFF` cannot collide with any named nibble-$F sub-type, since
+none of them use hw `$F`.
+
+### Tests
+
+`crates/rf-cart/src/snes.rs`, `mod tests`:
+
+- `doom_troopers_beta_shape_clamps_size_bytes_instead_of_refusing` — a
+  wholesale-`$00`-filler LoROM header scoring exactly `MINIMUM_SCORE`
+  (reset-vector-into-upper-half + map-mode-nibble-agrees), so it wins as
+  a SCORED candidate. First asserts `kb_pow2(0xFF)` still returns
+  `InvalidHeader("implausible SNES size exponent: 255")` directly — the
+  exact error `parse_snes_header` used to propagate from this fixture's
+  RAM byte before this ticket's fix — then asserts the real cartridge
+  parses with `rom_size == data.len()` (ROM byte `$00`) and `ram_size ==
+  0` (RAM byte `$FF`).
+- `nfl_quarterback_club_beta_shape_clamps_implausible_ram_byte` — a fully
+  legible LoROM header (valid checksum/complement, printable title, ROM
+  byte `$0C`) whose RAM byte (`$53`) is implausible; asserts `ram_size ==
+  0`, `coprocessor == Coprocessor::None`, `battery == true` (chipset
+  `$02`, hw `$2`).
+- `aero_the_acro_bat_2_beta_shape_unassigned_coprocessor_nibble_is_none` —
+  a legible LoROM header with chipset `$7F` (coprocessor nibble `$7`,
+  squarely in `$6-$D`); asserts `Coprocessor::None` and `battery ==
+  false` (hw `$F` is not the documented `$2` battery value this arm
+  reads).
+- `sgb_chipset_e3_still_refuses_rule_b_did_not_widen` — chipset `$E3`
+  (Super Game Boy / Satellaview, nibble `$E`, assigned) still returns
+  `UnsupportedChip` naming it. `known_dsp4_checksum_is_refused_honestly_
+  not_run_as_dsp1` (chipset `$03`, DSP-4 checksum) was already green and
+  needed no change.
+
+`cargo test -p rf-cart`: 91 passed (87 + 4 new).
+
+### Named archives (ticket's acceptance, not re-verified by census here)
+
+The ticket names eleven archives it expects to leave the refused bucket:
+Arcade's Greatest Hits (Beta), Burn-in Test Cartridge, Doom Troopers
+(Beta 1/2), NFL Quarterback Club (Beta), Picachu (Pirate), The Shadow
+(Proto 1), Shadowhawk (Proto), Spider-Man (Beta), Aero the Acro-Bat 2
+(Beta), and Death and Return of Superman (Beta). This ticket does not
+re-run the full census — that is the orchestrator's own record of what
+moved project-wide, per the ticket's acceptance.
