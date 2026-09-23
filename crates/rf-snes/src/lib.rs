@@ -10,6 +10,7 @@ pub mod cpu;
 pub mod debug;
 pub mod dma;
 pub mod dsp1;
+pub mod gsu;
 pub mod mapping;
 pub mod ppu;
 pub mod regs;

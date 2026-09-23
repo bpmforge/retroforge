@@ -229,14 +229,13 @@ fn fastrom_from_the_header_changes_the_access_cost() {
 /// below for its positive coverage. SA-1 ($34/$35) is likewise absent as
 /// of ticket W17-01 (D-013) — moved to
 /// `sa1_carts_load_with_the_board_wired_up` below, since (under map mode
-/// $23) it now loads instead of refusing.
+/// $23) it now loads instead of refusing. Super FX ($13/$15/$1A) is
+/// likewise absent as of ticket W18-01 (D-014) — moved to
+/// `gsu_carts_load_with_the_board_wired_up` below.
 #[test]
 fn every_named_coprocessor_family_is_refused_and_named() {
     for (chipset, expect) in [
-        (0x13u8, "Super FX"),
-        (0x15, "Super FX"),
-        (0x1A, "Super FX"),
-        (0x25, "OBC1"),
+        (0x25u8, "OBC1"),
         (0x43, "S-DD1"),
         (0x55, "S-RTC"),
         (0xE3, "Super Game Boy"),
@@ -328,6 +327,111 @@ fn sa1_carts_load_with_the_board_wired_up() {
     // A plain LoROM cart never gets one.
     let plain = SnesSystem::load(&lorom_image(0x20, 0x00)).expect("loads");
     assert!(plain.bus.sa1.is_none());
+}
+
+/// Ticket W18-01 (D-014): chipset $13/$15/$1A now loads with the GSU
+/// board wired up instead of the FR-CORE-013 refusal — a GSU cart keeps
+/// the plain LoROM map mode (fullsnes: "the cartridge header declares the
+/// cartridge as LoROM"), unlike SA-1's dedicated map mode $23.
+#[test]
+fn gsu_carts_load_with_the_board_wired_up() {
+    for chipset in [0x13u8, 0x15, 0x1A] {
+        let system = SnesSystem::load(&lorom_image(0x20, chipset))
+            .unwrap_or_else(|e| panic!("chipset ${chipset:02X} (GSU) must load, got {e:?}"));
+        assert!(
+            system.bus.gsu.is_some(),
+            "chipset ${chipset:02X}: GSU board must be installed"
+        );
+        assert_eq!(system.bus.mode, SnesMapMode::LoRom);
+    }
+    // A plain LoROM cart never gets one.
+    let plain = SnesSystem::load(&lorom_image(0x20, 0x00)).expect("loads");
+    assert!(plain.bus.gsu.is_none());
+}
+
+/// Ticket W18-01 acceptance: the SNES side can boot a GSU cart to its
+/// reset vector and run, with GO reading back `false` until software
+/// writes R15's MSB.
+#[test]
+fn gsu_cart_boots_and_go_reads_back_after_r15_write() {
+    let mut system = SnesSystem::load(&lorom_image(0x20, 0x15)).expect("GSU cart loads");
+    let gsu = system.bus.gsu.as_ref().expect("GSU board installed");
+    assert!(!gsu.regs.go(), "GO must be clear at reset");
+
+    // Write R15 (PC): LSB then MSB, mirroring fullsnes's documented
+    // protocol. MSB write sets GO.
+    system.bus.write(0x00_301E, 0x34);
+    system.bus.write(0x00_301F, 0x12);
+    let gsu = system.bus.gsu.as_ref().expect("GSU board installed");
+    assert!(gsu.regs.go(), "writing R15's MSB must set GO");
+    assert_eq!(gsu.regs.r15(), 0x1234);
+
+    // SFR write can force GO back to 0 (fullsnes: "can be forcefully=0
+    // via 3030h").
+    system.bus.write(0x00_3030, 0x00);
+    assert!(!system.bus.gsu.as_ref().unwrap().regs.go());
+}
+
+/// Ticket W18-01 acceptance: SCMR RON/RAN gate which side owns the
+/// ROM/RAM bus — while the GSU owns it, the SNES side's own read sees
+/// open bus rather than the cartridge.
+#[test]
+fn gsu_scmr_ron_ran_gate_the_snes_sides_own_reads() {
+    let mut system = SnesSystem::load(&lorom_image(0x20, 0x15)).expect("GSU cart loads");
+    system.bus.rom[0] = 0x77;
+    // Before RON is set, the SNES reads its own ROM normally.
+    assert_eq!(system.bus.read(0x00_8000), 0x77);
+
+    // $303Ah SCMR: bit 4 = RON, bit 3 = RAN. The write itself drives
+    // `open_bus` to the value written ($10), so a read right after would
+    // trivially "see open bus" whether or not RON gating works — drive a
+    // different, distinguishing sentinel first to prove the ROM byte
+    // really is being replaced by open bus, not just coincidentally equal
+    // to the SCMR write's own value.
+    system.bus.write(0x00_303A, 0x10);
+    system.bus.open_bus = 0xAB;
+    assert_eq!(
+        system.bus.read(0x00_8000),
+        0xAB,
+        "RON=1: the SNES side must see open bus, not the cartridge"
+    );
+
+    system.bus.write(0x00_303A, 0x00);
+    assert_eq!(
+        system.bus.read(0x00_8000),
+        0x77,
+        "RON=0: the SNES side owns the ROM bus again"
+    );
+}
+
+/// Ticket W18-01 acceptance #2: the GSU's IRQ flag (SFR bit 15) ORs into
+/// the same 65C816 IRQ input SA-1's `$2209` bit 7 already does, and
+/// reading SFR's high byte clears it (fullsnes: "reset on read").
+#[test]
+fn gsu_irq_flag_ors_into_the_cpu_and_clears_on_read() {
+    let mut system = SnesSystem::load(&lorom_image(0x20, 0x15)).expect("GSU cart loads");
+    // NOP forever at the reset vector, with I clear so the ordinary IRQ
+    // dispatch path (not the WAI one) is what fires.
+    system.bus.rom[0] = 0xEA; // NOP, at $00:8000 (the reset vector `lorom_image` sets)
+    system.cpu.set_flag(crate::cpu::flags::I, false);
+    system.bus.gsu.as_mut().unwrap().regs.set_irq_for_test(true);
+    system.step().expect("NOP steps");
+    // An IRQ was taken: PC left the plain NOP's successor address for the
+    // IRQ vector's target instead.
+    assert_ne!(
+        system.cpu.pc, 0x8001,
+        "the GSU IRQ must have been dispatched"
+    );
+    // The flag is still set — dispatching the interrupt does not itself
+    // acknowledge it, exactly as real hardware works: the handler must
+    // read SFR. Simulate that handler read now.
+    assert!(system.bus.gsu.as_ref().unwrap().regs.irq_pending());
+    let hi = system.bus.read(0x00_3031);
+    assert_eq!(hi & 0x80, 0x80, "SFR's high byte reports the IRQ bit set");
+    assert!(
+        !system.bus.gsu.as_ref().unwrap().regs.irq_pending(),
+        "fullsnes: IRQ is \"reset on read\" — reading SFR's high byte must clear it"
+    );
 }
 
 /// Ticket W17-01 acceptance #3: "the SNES-side CPU can boot an SA-1 cart

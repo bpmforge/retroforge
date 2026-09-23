@@ -182,6 +182,12 @@ pub struct SnesBus {
     /// Ticket W17-01 (D-013): the SA-1 CPU itself does not exist yet, only
     /// the SNES-side memory map and register storage.
     pub sa1: Option<crate::sa1::Sa1State>,
+    /// The Super FX (GSU) board state (`None` for every cartridge that
+    /// does not report [`rf_cart::Coprocessor::SuperFx`]) — see
+    /// [`Self::install_gsu`]. Ticket W18-01 (D-014), slice 1 of 5: the GSU
+    /// CPU does not exist yet, only the SNES-side memory map and register
+    /// storage — the same starting point W17-01 gave SA-1.
+    pub gsu: Option<crate::gsu::GsuState>,
     /// Set whenever a SNES-side access this `SnesSystem::step` (main CPU
     /// instruction, its DMA, or its HDMA) has landed on the cartridge ROM
     /// window (ticket W17-04's cost model — see
@@ -296,6 +302,7 @@ impl SnesBus {
             dsp_window: None,
             dsp1: None,
             sa1: None,
+            gsu: None,
             sa1_rom_contended: false,
             sa1_bwram_contended: false,
         }
@@ -319,6 +326,20 @@ impl SnesBus {
         self.sa1 = Some(crate::sa1::Sa1State::new(board));
     }
 
+    /// Wire up the cartridge's Super FX board (ticket W18-01, D-014).
+    /// Called by [`crate::system::SnesSystem::load`] when the header
+    /// reports [`rf_cart::Coprocessor::SuperFx`]; every other cartridge's
+    /// `gsu` stays `None`, so `target` never routes through the GSU arm
+    /// for it and every existing golden's mapping is unchanged.
+    pub fn install_gsu(
+        &mut self,
+        version: rf_cart::SuperFxVersion,
+        rom_len: usize,
+        ram_kib: usize,
+    ) {
+        self.gsu = Some(crate::gsu::GsuState::new(version, rom_len, ram_kib));
+    }
+
     fn target(&self, addr: u32) -> Target {
         let bank = ((addr >> 16) & 0xFF) as u8;
         let offset = addr as u16;
@@ -340,6 +361,16 @@ impl SnesBus {
         // unchanged.
         if let Some(window) = &self.dsp_window {
             if let Some(target) = crate::mapping::dsp1_target(window, bank, offset) {
+                return target;
+            }
+        }
+        // Checked BEFORE the generic map, same reasoning as SA-1/DSP-1
+        // above: a GSU cart's RAM and register windows sit inside
+        // bank/offset space `map` would otherwise resolve as ROM or a
+        // plain register (see `gsu_target`'s doc). `gsu` is `None` for
+        // every non-GSU cartridge (ticket W18-01).
+        if let Some(gsu) = &self.gsu {
+            if let Some(target) = crate::mapping::gsu_target(&gsu.board(), bank, offset) {
                 return target;
             }
         }
@@ -1034,6 +1065,15 @@ impl CpuBus for SnesBus {
             _ => {}
         }
         let value = match target {
+            // Ticket W18-01: SCMR RON gates which side owns the ROM bus
+            // (fullsnes "SNES Cart GSU-n Bitmap I/O Ports": "4 RON Game
+            // Pak ROM bus access (0=SNES, 1=GSU)") — while the GSU owns
+            // it, the SNES CPU's own read sees open bus rather than the
+            // cartridge (see `crate::mapping::gsu_target`'s doc for why
+            // this bus, not mapping, is where that rule is applied).
+            // `gsu` is `None` for every non-GSU cartridge, so this is a
+            // no-op for them.
+            Target::Rom(_) if self.gsu.as_ref().is_some_and(|g| g.regs.ron()) => self.open_bus,
             Target::Rom(i) => self.rom[i],
             Target::Wram(i) => self.wram[i],
             Target::Sram(i) => self.sram[i],
@@ -1088,6 +1128,20 @@ impl CpuBus for SnesBus {
             // returns it, so this arm is unreachable in practice but
             // must still type-check.
             Target::Sa1Bitmap(_) => self.open_bus,
+            // Ticket W18-01: SCMR RAN gates the RAM bus the same way RON
+            // gates ROM above.
+            Target::GsuRam(i) => {
+                if self.gsu.as_ref().is_some_and(|g| g.regs.ran()) {
+                    self.open_bus
+                } else {
+                    self.gsu.as_ref().map_or(self.open_bus, |g| g.ram[i])
+                }
+            }
+            Target::GsuRegister(offset) => self
+                .gsu
+                .as_mut()
+                .and_then(|g| g.regs.read(offset))
+                .unwrap_or(self.open_bus),
             Target::Open => self.open_bus,
         };
         self.open_bus = value;
@@ -1186,6 +1240,20 @@ impl CpuBus for SnesBus {
             // Ticket W17-03: SA-1-side only, see [`Target::Sa1Bitmap`]'s
             // doc — unreachable from this (SNES-side) map.
             Target::Sa1Bitmap(_) => {}
+            // Ticket W18-01: SCMR RAN gates the SNES side's RAM writes,
+            // same rule as the read path above.
+            Target::GsuRam(i) => {
+                if let Some(g) = self.gsu.as_mut() {
+                    if !g.regs.ran() {
+                        g.ram[i] = value;
+                    }
+                }
+            }
+            Target::GsuRegister(offset) => {
+                if let Some(g) = self.gsu.as_mut() {
+                    g.regs.write(offset, value);
+                }
+            }
             // ROM is read-only; a write is dropped rather than panicking,
             // because real cartridges ignore it and a game doing it by
             // accident must not take the emulator down (FR-CORE-013's
@@ -1197,6 +1265,7 @@ impl CpuBus for SnesBus {
 
     fn peek(&self, addr: u32) -> u8 {
         match self.target(addr) {
+            Target::Rom(_) if self.gsu.as_ref().is_some_and(|g| g.regs.ron()) => self.open_bus,
             Target::Rom(i) => self.rom[i],
             Target::Wram(i) => self.wram[i],
             Target::Sram(i) => self.sram[i],
@@ -1222,6 +1291,18 @@ impl CpuBus for SnesBus {
                 .and_then(|s| s.regs.read(offset))
                 .unwrap_or(self.open_bus),
             Target::Sa1Bitmap(_) => self.open_bus,
+            Target::GsuRam(i) => {
+                if self.gsu.as_ref().is_some_and(|g| g.regs.ran()) {
+                    self.open_bus
+                } else {
+                    self.gsu.as_ref().map_or(self.open_bus, |g| g.ram[i])
+                }
+            }
+            Target::GsuRegister(offset) => self
+                .gsu
+                .as_ref()
+                .and_then(|g| g.regs.peek(offset))
+                .unwrap_or(self.open_bus),
             Target::Open => self.open_bus,
         }
     }

@@ -7240,3 +7240,122 @@ Ninja JaJaMaru: Operation Milky Way) moved from *refused* to *rendered
 something*; nothing else moved. The 49 still refused are unlicensed
 multicarts, Retro-Bit/Limited Run re-releases on modern boards, the
 competition carts, Racermate, and the TQROM trio.
+
+## W18-01 (Super FX / GSU slice 1: cart detection, memory map, register window)
+
+**Detection** (`rf-cart`): chipset $13-$1A (coprocessor nibble $1) accepted
+as `Coprocessor::SuperFx { version, ram_kib }` — fullsnes "SNES Cart
+GSU-n Cartridge Header": "[FFD6h]=13h..1Ah Chipset = GSUn (plus battery
+present/absent info)". `version` (GSU1/GSU2) uses fullsnes's own stated
+heuristic (ROM > 1 MiB -> GSU2), which knowingly mis-detects Star Fox 2
+(1 MiB, real GSU2) as GSU1, exactly as fullsnes's own caveat predicts —
+this project's local dump of Star Fox 2 (the Classic Mini/Switch Online
+release) hits that mismatch, and is accepted anyway (detection failing
+narrowly on chip *version* does not block the cart from loading). `hw`
+observed against real archives in this project's library: $3 (Star Fox,
+no RAM/battery), $4 (Doom, Dirt Trax FX, Vortex — RAM, no battery), $5
+(Star Fox 2, Yoshi's Island — RAM+battery), $A (Stunt Race FX —
+RAM+battery, cross-checked against the PCB table's own "Battery"
+column). `ram_kib` reads the extended header's expansion-RAM byte
+(canonical `$FFBD`, 3 bytes before the LoROM/HiROM header base); a real
+Star Fox (USA) dump in this library has an all-`$FF` extended header
+(fullsnes's own documented case), so this reports `0` there rather than
+hardcoding the board's real 32 KiB by title (law 5).
+
+**Memory map** (`crate::mapping::gsu_target`, fullsnes "SNES Cart GSU-n
+Memory Map", the GSU2 table): register window + `$6000-$7FFF` RAM
+mirror in banks `$00-$3F`/`$80-$BF`; primary ROM `$8000-$FFFF` in banks
+`$00-$3F` ONLY (banks `$80-$BF` are fullsnes's separate, unpopulated
+"Additional CPU ROM" chip select — left to the generic LoROM mirror,
+which answers it the same way any plain LoROM cart mirrors FastROM onto
+SlowROM banks); ROM again, HiROM-style, banks `$40-$5F`; RAM banks
+`$70-$71`. SCMR RON/RAN (`$303Ah` bits 4/3) gate `SnesBus::read`/`peek`
+so the SNES side sees open bus while the GSU owns the ROM/RAM bus —
+fullsnes states the ownership rule but not literally what the SNES CPU
+reads meanwhile, so this project's own existing open-bus convention
+answers it.
+
+**Register window** (`crate::gsu::Gsu`): R0-R15 with the documented
+even/odd LATCH write protocol (R15 MSB sets GO); SFR bits 1-5 SNES-
+writable, bit 15 (IRQ) cleared on read; PBR R/W; ROMBR/RAMBR/CBR/VCR
+read-only from the SNES side (GSU-opcode-set only, so they never leave
+reset this slice — no opcode core exists yet, W18-02); SCBR/SCMR/CLSR/
+CFGR/BRAMR write-only; mirrors fold onto the canonical `$3000-$303F`
+block exactly per fullsnes's "Full I/O Map with Mirrors for GSU2" table.
+The GSU's SFR bit 15 ORs into the 65C816 IRQ line alongside SA-1's
+`$2209` bit 7 (`SnesSystem::step`); nothing sets it yet (no STOP opcode),
+so the plumbing is pinned by a test-only setter
+(`Gsu::set_irq_for_test`) rather than a real dispatch.
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes -p rf-cart` — **rf-snes 389
+passed** (lib) plus every integration suite green, 0 failed; **rf-cart
+60 passed**, 0 failed. Ignored SNES suites: `singlestep_65816_vectors`
+— **5,080,000 passed, 0 failed**; `spc700_vectors`'s
+`singlestep_spc700_vectors` — **256,000 passed, 0 failed**;
+`gilyon_cputest` — `test_num=0x0649/0x0649, ROM says "Success"`;
+`blargg_spc`'s `spc_timer_reports_pass` — `"PASSED TESTS"`;
+`peterlemon_golden` — all 3 tests pass. `scripts/validate-arch.sh` —
+`arch OK`.
+
+**Census children**, RELEASE, 20 archives (15 real GSU titles found in
+this project's local library — Star Fox x3 dumps, Star Fox 2 x4 dumps
+[3 unofficial betas with non-canonical checksums/sizes, 1 canonical],
+Stunt Race FX, Yoshi's Island x2 dumps, Super Star Fox Weekend, Vortex,
+Dirt Trax FX, Doom, Tommy Moe's Winter Extreme/FX Skiing — plus 5
+canaries):
+
+| title | exit code / bucket |
+|---|---|
+| Star Fox (USA) | rendered a uniform screen |
+| Star Fox (USA) (Rev 1) | rendered a uniform screen |
+| Star Fox (USA) (Rev 2) | rendered a uniform screen |
+| Star Fox 2 (USA, Europe) (Classic Mini, Switch Online) | rendered a uniform screen |
+| Star Fox 2 (USA) (Beta) (1994-12-28) (CES) | refused — non-canonical dump (checksum fails, size not a power of 2), fails generic header scoring before coprocessor detection even runs; pre-existing, unrelated to this ticket |
+| Star Fox 2 (USA) (Beta) (1995-09-12) | refused — same cause |
+| Star Fox 2 (USA) (Beta) (1995-09-13) | refused — same cause |
+| Stunt Race FX (USA) (Rev 1) | rendered something |
+| Super Mario World 2 - Yoshi's Island (USA) | rendered a uniform screen |
+| Super Mario World 2 - Yoshi's Island (USA) (Rev 1) | rendered a uniform screen |
+| Super Star Fox Weekend (USA) (Competition Cart) | rendered a uniform screen |
+| Vortex (USA) (En,Es) | rendered a uniform screen |
+| Dirt Trax FX (USA) | rendered a uniform screen |
+| Doom (USA) | rendered something |
+| Tommy Moe's Winter Extreme (FX Skiing, USA) | rendered something |
+| Super Mario World (USA) canary | rendered something |
+| Wild Guns (USA) canary | rendered something |
+| Super Mario RPG (USA) canary | rendered something |
+| Kirby Super Star (USA) canary | rendered something |
+| NHL 95 (USA) canary | rendered something |
+
+Zero exit-11 (refused-as-unsupported-chip) for any canonical GSU dump —
+the acceptance criterion. The three Beta Star Fox 2 refusals are a
+pre-existing, unrelated limitation (malformed/non-canonical dumps whose
+checksum and size fail `rf-cart`'s generic header plausibility score
+before the chipset byte is ever consulted) — confirmed by inspecting
+their headers directly: checksum/complement do not satisfy `^0xFFFF`
+and file sizes (1,047,074 and 1,048,259 bytes) are not powers of two.
+None of the twenty titles crashed, timed out, or emitted no video.
+
+**Unknown-register probe** (`title_probe`'s new `PROBE_GSUREGS=1`,
+mirroring `PROBE_SA1REGS`), 600 frames each, 17 of the 20 archives
+(excluding the three malformed betas, which panic in `SnesCore::load`
+before `title_probe` reaches its per-title loop — a harness limitation,
+not a GSU one): **16 of 17 report "none"**. Dirt Trax FX (USA) is the
+one exception — 2,888 distinct offsets, split into 2,816 in the true
+open-bus tail (`$3500-$3FFF`, every address in it) and 72 hits on the
+canonical block's three documented-but-unused slots (`$3032`/`$3035`/
+`$3D`, mirrored across every `$3000-303F`-shaped block from `$3000` to
+`$34FF`) — consistent with a boot-time loop that clears or scans the
+whole `$3000-$3FFF` I/O window without knowing which addresses are real
+registers. Diagnostic only; nothing here gates or alters a write.
+
+**Determinism**: not separately re-verified against a fixed-instruction
+replay this slice (no GSU execution exists yet to make non-determinism
+observable beyond what `sa1_determinism.rs`-style coverage already
+established for the shared machine); `gsu_board_state_survives_a_cart_
+region_round_trip` (`crates/rf-snes/src/state.rs`) pins that the register
+file and RAM buffer round-trip a save/load cycle byte-for-byte, which is
+the save-state half of the acceptance criterion.
+
+**HEAD**: see the `feat(W18-01): ...` commit this entry ships with.

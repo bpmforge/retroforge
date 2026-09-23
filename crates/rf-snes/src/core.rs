@@ -458,6 +458,8 @@ impl EmulatorCore for SnesCore {
             | crate::mapping::Target::Sa1BwRam(_)
             | crate::mapping::Target::Sa1Register(_)
             | crate::mapping::Target::Sa1Bitmap(_)
+            | crate::mapping::Target::GsuRam(_)
+            | crate::mapping::Target::GsuRegister(_)
             | crate::mapping::Target::Open => 0,
         }
     }

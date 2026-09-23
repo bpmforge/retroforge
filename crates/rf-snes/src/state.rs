@@ -311,7 +311,22 @@ impl crate::system::SnesSystem {
                         // but there is no reason to when it is one `u64`.
                         s.cpu.save(o)?;
                         o.bool(s.booted)?;
-                        o.u64(s.credit)
+                        o.u64(s.credit)?;
+                        Ok(())
+                    }
+                    None => Ok(()),
+                }?;
+                // GSU board state (ticket W18-01), same presence-flag
+                // pattern as SA-1's above, appended after it so a state
+                // saved before this ticket and one saved after only
+                // disagree in what trails the byte the older format
+                // already ends at. `None` (every non-GSU cartridge) costs
+                // one byte.
+                o.bool(self.bus.gsu.is_some())?;
+                match &self.bus.gsu {
+                    Some(g) => {
+                        g.regs.save(o)?;
+                        o.blob(&g.ram)
                     }
                     None => Ok(()),
                 }
@@ -419,6 +434,19 @@ impl crate::system::SnesSystem {
                     // "has an SA-1 board at all" instead of "what size".
                     (Some(_), false) | (None, true) => Err(StateError::Corrupt(
                         "SA-1 presence in the saved state disagrees with the mounted cartridge"
+                            .to_string(),
+                    )),
+                }?;
+                let gsu_present = i.bool()?;
+                match (self.bus.gsu.as_mut(), gsu_present) {
+                    (Some(g), true) => {
+                        g.regs.load(i)?;
+                        i.blob_into(&mut g.ram, "GSU RAM")?;
+                        Ok(())
+                    }
+                    (None, false) => Ok(()),
+                    (Some(_), false) | (None, true) => Err(StateError::Corrupt(
+                        "GSU presence in the saved state disagrees with the mounted cartridge"
                             .to_string(),
                     )),
                 }
@@ -644,5 +672,73 @@ mod tests {
             .load_region(StateRegion::Cart, &mut stream)
             .expect("load");
         assert!(system.bus.sa1.is_none());
+    }
+
+    /// A minimal GSU LoROM image: chipset $15 (ROM+Super FX+RAM+battery).
+    fn gsu_lorom_image() -> Vec<u8> {
+        let mut data = vec![0u8; 0x8000];
+        let base = 0x7FC0;
+        data[base + 0x15] = 0x20; // plain LoROM map mode
+        data[base + 0x16] = 0x15; // chipset: Super FX, hw=5 (+RAM+battery)
+        data[base + 0x17] = 6;
+        data[base + 0x18] = 0;
+        data[base - 3] = 0x05; // extended header: 32 KiB expansion RAM
+        let checksum: u16 = 0xBEEF;
+        data[base + 0x1C..base + 0x1E].copy_from_slice(&(checksum ^ 0xFFFF).to_le_bytes());
+        data[base + 0x1E..base + 0x20].copy_from_slice(&checksum.to_le_bytes());
+        data[base + 0x3C] = 0x00;
+        data[base + 0x3D] = 0x80;
+        data
+    }
+
+    /// Ticket W18-01 acceptance: "a save-state round trip mid-GSU-run
+    /// reproduces the same frames" — the register file and RAM buffer must
+    /// both round-trip through the `Cart` region.
+    #[test]
+    fn gsu_board_state_survives_a_cart_region_round_trip() {
+        let rom = gsu_lorom_image();
+        let mut system = crate::SnesSystem::load(&rom).expect("GSU cart loads");
+
+        system.bus.write(0x00_301E, 0x34); // R15 LSB
+        system.bus.write(0x00_301F, 0x12); // R15 MSB: commits, sets GO
+        system.bus.write(0x00_7000, 0x99); // GSU RAM window
+
+        let mut stream = MemStream {
+            buf: Vec::new(),
+            at: 0,
+        };
+        system
+            .save_region(StateRegion::Cart, &mut stream)
+            .expect("save cart");
+
+        let mut restored = crate::SnesSystem::load(&rom).expect("GSU cart loads");
+        restored
+            .load_region(StateRegion::Cart, &mut stream)
+            .expect("load cart");
+
+        let gsu = restored.bus.gsu.as_ref().expect("GSU board installed");
+        assert!(gsu.regs.go(), "GO must round-trip set");
+        assert_eq!(gsu.regs.r15(), 0x1234);
+        assert_eq!(restored.bus.read(0x00_7000), 0x99);
+    }
+
+    /// A plain cartridge's `Cart` region round-trips with `gsu` staying
+    /// `None` throughout (the one-byte-longer flag this ticket added).
+    #[test]
+    fn a_plain_carts_cart_region_round_trips_without_a_gsu() {
+        let mut system =
+            crate::SnesSystem::from_rom(vec![0u8; 32 * 1024], rf_cart::SnesMapMode::LoRom, 0);
+        assert!(system.bus.gsu.is_none());
+        let mut stream = MemStream {
+            buf: Vec::new(),
+            at: 0,
+        };
+        system
+            .save_region(StateRegion::Cart, &mut stream)
+            .expect("save");
+        system
+            .load_region(StateRegion::Cart, &mut stream)
+            .expect("load");
+        assert!(system.bus.gsu.is_none());
     }
 }

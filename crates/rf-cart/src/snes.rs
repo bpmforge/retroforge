@@ -115,6 +115,41 @@ pub enum Coprocessor {
     /// from the cartridge's own ROM, so this is ordinary clean-room
     /// hardware emulation, not HLE.
     Sa1(Sa1Board),
+    /// Coprocessor nibble $1 ("Super FX / GSU-n") with `hw` in the
+    /// documented $3..=$A range (chipset $13-$1A, fullsnes "SNES Cart
+    /// GSU-n Cartridge Header": "[FFD6h]=13h..1Ah Chipset = GSUn (plus
+    /// battery present/absent info)"). Ticket W18-01: clean-room hardware
+    /// emulation of a second, cartridge-resident RISC CPU — like SA-1,
+    /// never LLE'd against copyrighted firmware because there is none (the
+    /// GSU runs from the cartridge's own ROM). This slice models detection
+    /// and the SNES-side memory map/register window only; the GSU does not
+    /// execute (W18-02+).
+    SuperFx {
+        version: SuperFxVersion,
+        /// Expansion RAM, in KiB, from the extended header (see
+        /// [`superfx_expansion_ram_kib`]'s doc for the address and its
+        /// caveats).
+        ram_kib: usize,
+    },
+}
+
+/// Which physical GSU chip a cartridge carries. fullsnes "SNES Cart GSU-n
+/// List of Games, Chips, and PCB versions" documents no header field that
+/// names this directly ("There is no info in the header (nor extended
+/// header) whether the game uses a GSU1 or GSU2."); it gives instead a
+/// heuristic: "Games with 2MByte ROM are typically using GSU2 (though that
+/// rule doesn't always match: Star Fox 2 is only 1MByte)." This build
+/// applies that heuristic literally — ROM > 1 MiB selects GSU2 — which
+/// means Star Fox 2 (a real, 1 MiB GSU2 title) is knowingly mis-detected
+/// as GSU1 by this rule, exactly as fullsnes's own caveat predicts. Chosen
+/// over hardcoding a per-title exception (law 5: no title-keyed behavior)
+/// since fullsnes states no other distinguishing signal exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuperFxVersion {
+    /// GSU-1/GSU-1A/MC1 ("Mario Chip 1"), 10.74MHz.
+    Gsu1,
+    /// GSU-2/GSU-2-SP1, 21.4MHz-capable.
+    Gsu2,
 }
 
 /// The SA-1 board data a parsed cartridge carries: sizes rf-snes needs to
@@ -213,6 +248,47 @@ fn kb_pow2(exp: u8) -> Result<usize, CartError> {
         .checked_shl(u32::from(exp))
         .and_then(|banks| banks.checked_mul(1024))
         .ok_or_else(|| CartError::InvalidHeader(format!("implausible SNES size exponent: {exp}")))
+}
+
+/// ROM size above which [`SuperFxVersion::Gsu2`] is picked over `Gsu1` —
+/// see [`SuperFxVersion`]'s doc for the fullsnes citation and its known
+/// Star Fox 2 mismatch.
+const GSU2_ROM_THRESHOLD_BYTES: usize = 1024 * 1024;
+
+/// Read the GSU cartridge's expansion RAM size (ticket W18-01), fullsnes
+/// "SNES Cart GSU-n Cartridge Header": "[FFBDh]=05h..06h Expansion RAM
+/// Size (32Kbyte and 64Kbyte exist)" — "always use the Expansion entry"
+/// rather than the standard RAM-size byte, which the same section
+/// documents as always `$00` for a GSU cart ($FFD8h).
+///
+/// fullsnes's `$FFBD` is written in the chapter's own canonical
+/// `$FFC0`-relative header notation (every other field in the same
+/// section — `$FFD5`, `$FFD6`, `$FFD8` — is that base plus the field's
+/// offset in this module, e.g. `base + 0x15/0x16/0x18`); `$FFBD` is
+/// `$FFC0 - 3`, i.e. `base - 3`, three bytes before the header block this
+/// module already anchors LoROM ($7FC0) and HiROM ($FFC0) headers to. That
+/// puts it in the SNES "extended header" area (maker code, game code,
+/// expansion RAM size, special version, sub-number) that snes.nesdev.org
+/// documents immediately before the standard header.
+///
+/// fullsnes's own caution — "Starfox/Star Wing, Powerslide, and Starfox 2
+/// do not have extended headers" for some dumps — is honoured by treating
+/// an unpopulated extended header (observed as a run of `$FF` bytes in
+/// this project's own library dumps, including a real Star Fox (USA)
+/// image) as "no expansion RAM stated", reporting `0` rather than
+/// hardcoding a real board's known fixed size by title (law 5). A
+/// present-but-implausible exponent (outside `kb_pow2`'s valid range) is
+/// treated the same way, rather than surfacing a header error for a
+/// non-essential field.
+fn superfx_expansion_ram_kib(data: &[u8], base: usize) -> usize {
+    if base < 3 {
+        return 0;
+    }
+    let raw = data[base - 3];
+    if raw == 0xFF {
+        return 0;
+    }
+    kb_pow2(raw).map(|bytes| bytes / 1024).unwrap_or(0)
 }
 
 /// Name a coprocessor from the cartridge-type byte's high nibble
@@ -576,6 +652,30 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
                 known_non_dsp1_checksum(checksum).unwrap_or("unknown DSP variant")
             ),
         });
+    } else if coprocessor_nibble == 0x1 && (0x3..=0xA).contains(&hw) {
+        // Ticket W18-01 / fullsnes "SNES Cart GSU-n Cartridge Header":
+        // "[FFD6h]=13h..1Ah Chipset = GSUn (plus battery present/absent
+        // info)" — the full documented range. Battery presence is not
+        // spelled out bit-by-bit, so this reads it off the same chapter's
+        // own PCB table ("List of Games, Chips, and PCB versions"): boards
+        // whose row names "Battery" (`SHVC-1CA6B-01` Stunt Race FX hw=$A,
+        // `SHVC-1CB5B-01`/`-20` Yoshi's Island hw=$5) against boards whose
+        // row does not (`SHVC-1CA0N5S-01`/`-1CA0N6S-01` Dirt Racer/Vortex/
+        // Dirt Trax FX hw=$4, `SHVC-1CB0N7S-01` Doom hw=$4) — confirmed by
+        // reading real archive headers in this project's own ROM library
+        // (Star Fox hw=$3 no RAM, Dirt Trax FX/Doom/Vortex hw=$4 RAM no
+        // battery, Yoshi's Island/Star Fox 2 hw=$5, Stunt Race FX hw=$A,
+        // all RAM+battery) rather than trusting an unwritten bit rule.
+        let version = if rom_size > GSU2_ROM_THRESHOLD_BYTES {
+            SuperFxVersion::Gsu2
+        } else {
+            SuperFxVersion::Gsu1
+        };
+        let ram_kib = superfx_expansion_ram_kib(data, base);
+        (
+            Coprocessor::SuperFx { version, ram_kib },
+            matches!(hw, 0x5 | 0xA),
+        )
     } else if hw >= 0x3 {
         return Err(CartError::UnsupportedChip {
             name: format!(
@@ -588,7 +688,7 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
     };
     let dsp_window = match coprocessor {
         Coprocessor::Dsp1 => Some(dsp_window_for(map_mode, rom_size)),
-        Coprocessor::None | Coprocessor::Sa1(_) => None,
+        Coprocessor::None | Coprocessor::Sa1(_) | Coprocessor::SuperFx { .. } => None,
     };
 
     Ok(SnesHeader {
@@ -765,8 +865,98 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_chip_superfx_reported_from_chipset_byte() {
-        let rom = lorom_image(0x20, 0x15); // ROM+Super FX+RAM+Battery
+    fn detects_superfx_gsu1_from_chipset_byte() {
+        // Ticket W18-01: chipset $15 (ROM+Super FX+RAM+Battery) is now
+        // accepted, not refused — 64 KB ROM stays under the GSU2
+        // threshold, so this is GSU1.
+        let rom = lorom_image(0x20, 0x15);
+        let header = parse_snes_header(&rom).expect("GSU cart accepted");
+        assert!(header.battery, "hw=$5 is a battery board");
+        match header.coprocessor {
+            Coprocessor::SuperFx { version, .. } => {
+                assert_eq!(version, SuperFxVersion::Gsu1);
+            }
+            other => panic!("expected Coprocessor::SuperFx, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detects_superfx_gsu2_from_rom_size() {
+        // fullsnes's own heuristic: >1 MiB ROM selects GSU2.
+        let mut data = vec![0u8; 0x8000];
+        let base = LOROM_HEADER_OFFSET;
+        data[base + 0x15] = 0x20;
+        data[base + 0x16] = 0x15;
+        data[base + 0x17] = 0x0B; // 1<<11 KB = 2048 KB = 2 MiB
+        data[base + 0x18] = 0;
+        set_checksum(&mut data, base, 0xBEEF);
+        set_reset_vector(&mut data, base, 0x8000);
+        let header = parse_snes_header(&data).expect("GSU cart accepted");
+        match header.coprocessor {
+            Coprocessor::SuperFx { version, .. } => {
+                assert_eq!(version, SuperFxVersion::Gsu2);
+            }
+            other => panic!("expected Coprocessor::SuperFx, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn superfx_no_battery_no_ram_chipset() {
+        // hw=$3 (Star Fox's real chipset byte): no RAM, no battery.
+        let rom = lorom_image(0x20, 0x13);
+        let header = parse_snes_header(&rom).expect("GSU cart accepted");
+        assert!(!header.battery);
+        match header.coprocessor {
+            Coprocessor::SuperFx { ram_kib, .. } => assert_eq!(ram_kib, 0),
+            other => panic!("expected Coprocessor::SuperFx, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn superfx_ram_no_battery_chipset() {
+        // hw=$4 (Doom/Vortex/Dirt Trax FX's real chipset byte): RAM, no
+        // battery. Extended-header expansion RAM byte set to $05 (32 KiB),
+        // 3 bytes before the LoROM header base.
+        let mut rom = lorom_image(0x20, 0x14);
+        rom[LOROM_HEADER_OFFSET - 3] = 0x05;
+        let header = parse_snes_header(&rom).expect("GSU cart accepted");
+        assert!(!header.battery);
+        match header.coprocessor {
+            Coprocessor::SuperFx { ram_kib, .. } => assert_eq!(ram_kib, 32),
+            other => panic!("expected Coprocessor::SuperFx, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn superfx_extended_header_absent_reports_zero_ram() {
+        // A real dump with no extended header (fullsnes's own caution,
+        // reproduced here rather than only asserted): the bytes preceding
+        // the header are the flash-erase fill value $FF, not a real size
+        // exponent.
+        let mut rom = lorom_image(0x20, 0x13);
+        rom[LOROM_HEADER_OFFSET - 3] = 0xFF;
+        let header = parse_snes_header(&rom).expect("GSU cart accepted");
+        match header.coprocessor {
+            Coprocessor::SuperFx { ram_kib, .. } => assert_eq!(ram_kib, 0),
+            other => panic!("expected Coprocessor::SuperFx, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn superfx_battery_chipset_variant_1a() {
+        // hw=$A (Stunt Race FX's real chipset byte): RAM+battery, the
+        // alternate encoding fullsnes's "13h..1Ah" range documents.
+        let rom = lorom_image(0x20, 0x1A);
+        let header = parse_snes_header(&rom).expect("GSU cart accepted");
+        assert!(header.battery);
+        assert!(matches!(header.coprocessor, Coprocessor::SuperFx { .. }));
+    }
+
+    #[test]
+    fn superfx_out_of_range_hw_still_refuses() {
+        // hw=$B is outside the documented $3..=$A range: still an
+        // unsupported chip, not silently accepted.
+        let rom = lorom_image(0x20, 0x1B);
         let err = parse_snes_header(&rom).unwrap_err();
         match &err {
             CartError::UnsupportedChip { name } => {
@@ -774,6 +964,17 @@ mod tests {
             }
             other => panic!("expected UnsupportedChip, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn non_gsu_cart_unaffected_by_superfx_detection() {
+        // A plain ROM+RAM+battery cart (chipset $02, coprocessor nibble
+        // $0's sibling `hw` values are DSP-only) still parses as
+        // `Coprocessor::None` — W18-01 only touches nibble $1.
+        let rom = lorom_image(0x20, 0x02);
+        let header = parse_snes_header(&rom).expect("plain cart accepted");
+        assert_eq!(header.coprocessor, Coprocessor::None);
+        assert!(header.battery);
     }
 
     #[test]

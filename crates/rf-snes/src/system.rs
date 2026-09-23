@@ -65,7 +65,16 @@ impl SnesSystem {
         // a cart (`SnesBus::target` routes through `sa1_target` first,
         // and `map`'s own `SnesMapMode::Sa1` arm never returns `Sram`), so
         // it is left empty rather than duplicating the allocation.
-        let sram_len = if matches!(header.coprocessor, rf_cart::Coprocessor::Sa1(_)) {
+        // Ticket W18-01: a GSU cart's `ram_size` is the STANDARD header
+        // field, always `$00` per fullsnes's own note ("[FFD8h]=00h Normal
+        // SRAM Size (None) (always use the Expansion entry)") — its real
+        // RAM comes from `Coprocessor::SuperFx`'s own `ram_kib`, given to
+        // `install_gsu` below, so `sram_len` is left `0` here the same way
+        // it is for SA-1.
+        let sram_len = if matches!(
+            header.coprocessor,
+            rf_cart::Coprocessor::Sa1(_) | rf_cart::Coprocessor::SuperFx { .. }
+        ) {
             0
         } else {
             header.ram_size
@@ -98,6 +107,14 @@ impl SnesSystem {
         // drives the second CPU that owns the interesting work yet.
         if let rf_cart::Coprocessor::Sa1(board) = header.coprocessor {
             system.bus.install_sa1(board);
+        }
+        // Super FX slice 1 (ticket W18-01, D-014): `rf-cart` already
+        // parsed the chip version and RAM size from the header; this
+        // wires them into a live register-window/RAM state. The GSU CPU
+        // itself does not exist yet (W18-02+) — the SNES CPU runs the
+        // cart's SNES-side code alone, exactly as SA-1 slice 1 did.
+        if let rf_cart::Coprocessor::SuperFx { version, ram_kib } = header.coprocessor {
+            system.bus.install_gsu(version, header.rom_size, ram_kib);
         }
         system.reset();
         Ok(system)
@@ -409,6 +426,16 @@ impl SnesSystem {
             .sa1
             .as_ref()
             .is_some_and(|s| s.regs.snes_irq_pending());
+        // Ticket W18-01 acceptance #2: the GSU's SFR bit 15 (IRQ) ORed
+        // into the same 65C816 IRQ input, the same pattern as SA-1's
+        // `$2209` bit 7 above — fullsnes documents no vector-override
+        // register for the GSU (unlike SA-1's `$220E`/`$220F`), so a GSU
+        // IRQ always dispatches through the ROM's own IRQ vector. `None`
+        // for every non-GSU cartridge. Nothing sets this yet this slice
+        // (no STOP opcode runs — see `crate::gsu::Gsu::irq_pending`'s
+        // doc), so this is always `false` in practice until W18-02+, but
+        // the OR plumbing itself is what this ticket's acceptance pins.
+        let gsu_irq_to_snes = self.bus.gsu.as_ref().is_some_and(|g| g.regs.irq_pending());
         if self.pending_nmi {
             self.pending_nmi = false;
             // `$2209` bit 4 optionally redirects the SNES's own NMI vector
@@ -424,7 +451,9 @@ impl SnesSystem {
                 Some(vector) => self.cpu.interrupt_to_vector(&mut self.bus, vector),
                 None => self.cpu.interrupt(&mut self.bus, true),
             }
-        } else if (self.bus.irq.fired || sa1_irq_to_snes) && !self.cpu.flag(crate::cpu::flags::I) {
+        } else if (self.bus.irq.fired || sa1_irq_to_snes || gsu_irq_to_snes)
+            && !self.cpu.flag(crate::cpu::flags::I)
+        {
             // Same override rule as NMI above, for `$2209` bit 6 / `$220E`-`$220F`.
             match self
                 .bus
@@ -435,7 +464,7 @@ impl SnesSystem {
                 Some(vector) => self.cpu.interrupt_to_vector(&mut self.bus, vector),
                 None => self.cpu.interrupt(&mut self.bus, false),
             }
-        } else if (self.bus.irq.fired || sa1_irq_to_snes)
+        } else if (self.bus.irq.fired || sa1_irq_to_snes || gsu_irq_to_snes)
             && self.cpu.flag(crate::cpu::flags::I)
             && self.cpu.wai
         {
