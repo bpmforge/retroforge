@@ -4163,3 +4163,21 @@ stories, 10 decisions).
   2 / Battletoads boot at frames 6607/3520, named). Gate at the W18-04
   merge: workspace **2319 passing / 0 failed / 43 ignored** incl. the
   65816 vector suite, clippy clean, arch OK.
+
+- **W14-52, W19-01, W19-02 — the refused bucket falls from 120 to 37**
+  (2026-09-23). A header tally showed 74 of the 120 refused SNES
+  archives were ordinary carts whose headers failed plausibility
+  scoring, which real hardware never reads. W14-52 adds a fallback:
+  when no header scores, try LoROM, HiROM and ExHiROM and accept the
+  first whose reset vector lands in ROM on a plausible 65816 reset
+  prologue; it also generalises W14-36's location-over-nibble rule to
+  nibbles fullsnes never assigns. W19-01 models the OBC1 sprite
+  controller over the cart's own SRAM (Metal Combat). W19-02 models the
+  Cx4's register window, DMA ports and math tables per fullsnes, then
+  stops honestly where the chapter stops: every command's algorithm is
+  undocumented, so Mega Man X2/X3 boot with their SNES-side graphics
+  only. Census 1101/44/120 -> **1169/59/37**: 83 archives left the
+  refused bucket (68 render), none regressed. Merging the two chip lanes
+  cost a round of brace repairs at their shared seams — recorded as a
+  process trap. Gate: workspace **2362 passing / 0 failed / 43
+  ignored**, clippy clean, arch OK.

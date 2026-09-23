@@ -1124,6 +1124,7 @@ First run, 2026-09-15, release build:
 | SNES, after W18-03 | 1265 | **1100** | 45 | 120 | **0** | **0** |
 | SNES, after W18-04 | 1265 | **1101** | 44 | 120 | **0** | **0** |
 | SNES, after W18-06 | 1265 | **1101** | 44 | 120 | **0** | **0** |
+| SNES, after W14-52/W19-01/W19-02 | 1265 | **1169** | 59 | 37 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -9788,3 +9789,20 @@ reproduced failing under the full parallel run and passing cleanly under
 cart-loader-only changes); `peterlemon_golden`/`region_golden`/
 `spc700_vectors`/`gilyon_cputest` --ignored: 0 each, all pass; `scripts/
 validate-arch.sh`: `arch OK`.
+
+**Full SNES census (orchestrator, 2026-09-23, main after the W14-52,
+W19-01 and W19-02 merges, idle machine, per-title `RF_CENSUS_OUT` diff
+against the W18-06 run):** **1101/44/120/0/0 -> 1169/59/37/0/0**.
+Eighty-three rows left *refused*: 68 to *rendered something* and 15 to
+*uniform screen*; none moved down. Retail among them: **HAL's Hole in
+One Golf** and **Super Adventure Island** (W14-52's unassigned-nibble
+rule), **Metal Combat: Falcon's Revenge** (W19-01 OBC1), **Mega Man X2**
+and **X3** (W19-02's Cx4 interface; their Cx4-drawn scenes are not
+modelled — the chapter documents the interface, not the commands). The
+rest are betas, protos and pirates that hardware also runs. Still
+refused (37): the five retail carts whose map-mode nibble names a chip
+the chipset byte does not corroborate (Contra III x2, Krusty's Super
+Fun House, The Duel: Test Drive II, Space Football), the five Super Game
+Boy dumps, Street Fighter Alpha 2 (S-DD1), F1-ROC II (ST010), Top Gear
+3000 (DSP-4), the Star Fox 2 betas, and dumps with no surviving reset
+vector under any mapping.

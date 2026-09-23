@@ -8138,6 +8138,53 @@
    "CLOSED 2026-09-23 as BLOCKED, not done -- two independent reasons. (1) COMMANDS UNDOCUMENTED, per this ticket's own acceptance escape clause: fullsnes 'SNES Cart Capcom CX4' fully documents the register/DMA/status window (implemented: 6000-6BFF CX4RAM, 7F40-7F52/7F5E/7F6A-7F6B/7F6E-7F6F/7F80-7FAF ports, 16x24-bit R0-R15, the CX4ROM's six closed-form math tables with the Div(0)/Cos(0) overflow rule) and the opcode ENCODINGS, but explicitly withholds what an interpreter or per-command HLE needs: opcode flag effects are mostly '???', the ROM/vertex byte-read sequence's exact meaning is stated as unknown ('which one does what part?'), two of eight skip-conditions and ~12 opcodes are unstated/reserved, four I/O ports are 'Unknown' (one admitting its own guess contradicts the real games), all timings are '100% unknown', and the 26 named game-facing functions (build_oam, draw_wireframe_without_clearing_buffer, draw_wireframe_with_clearing_buffer, disintergrate, wave, propulsion, set_vector_length, triangle1, triangle2, pythagorean, arc_tan, trapeziod, multiply, transform_coordinates, transform_lines, scale_rotate1, scale_rotate2, scale_tiles, hires_sqrt, sqrt, get_sin, get_cos, plus 4 test_* routines) have only a name and entry address each -- no register-level algorithm for any of them, not even the two (test_square, test_set_r0_to_0Xh) with the thinnest stated behaviour. Consequence: Mega Man X2/X3's Cx4-driven effects (intro wireframe, rotating boss sprites) do not render; census shows all 8 named children (incl. both Cx4 titles) still exit 0/RenderedSomething, first varied frame 60 for both X2 and X3 (identical, matching fullsnes's note that both games share the same CX4 code) -- no regression, no new visual, framed honestly as such in docs/TESTING.md's W19-02 section and EMULATION_CORES.md Sec.3.8's documented/undocumented table. (2) BOARD STATE: W7-08 (S-DSP) is concurrently in_progress with an overlapping crates/rf-snes/** write_scope, so validate-plan's P8 rule forbids this ticket also being in_progress -- same precedent as W7-04/W7-07's own blocked history in this file. All code for this ticket is committed and complete; nothing here is waiting on more effort, only on either new documentation (never emulator source, never CX4 program-ROM bytes -- NFR-011) or Brad's explicit sign-off to ship a guessed HLE against named risk. Gate green: fmt/clippy/rf-snes+rf-cart tests/ignored suites/validate-arch/full workspace test all pass; 16 new cx4.rs unit tests, 3 new rf-cart detection tests, 1 new end-to-end bus/DMA test.",
    "W19-02 FILED 2026-09-23 by the orchestrator: two retail titles. If fullsnes's Cx4 chapter only documents the register interface and not each command's algorithm, the ticket reports which commands are undocumented and stops there."
   ]
+ },
+ {
+  "phase": 19,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "id": "W19-03",
+  "title": "S-DD1 (Street Fighter Alpha 2): the data decompressor per fullsnes 'SNES Cart S-DD1' and 'S-DD1 Decompression Algorithm'",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W19-03: rf-cart detects chipset $43/$45 (S-DD1); rf-snes maps the S-DD1's register window ($4800-$4807: DMA-channel enable, transfer enable, the four ROM bank registers $4804-$4807 for banks $C0-$FF) and implements the documented decompression: when a DMA channel's A-bus address points into the S-DD1's mapped ROM region with the transfer flag set, the bytes the DMA reads are the decompressed stream produced by the chapter's algorithm (the Golomb-coded bitplane scheme, the context model, the bitplane interleave modes 0-4 per the header byte), cited by section; a unit test decompresses a hand-built compressed block against a hand-computed expectation for each mode; Street Fighter Alpha 2 renders in the census child; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; ignored SNES suites green; no ROM bytes or copyrighted titles in engine code; every hardware claim cites fullsnes by section; the orchestrator's full SNES census names every moved title"
+  ],
+  "notes": [
+   "W19-03 FILED 2026-09-23 by the orchestrator: one retail title; fullsnes documents the full algorithm (chapter at scratchpad fullsnes.txt lines 10628-~10800)."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-53",
+  "title": "Five retail carts still refused because the map-mode nibble names SA-1/S-DD1/ExHiROM while the chipset byte disagrees: Contra III (x2), Krusty's Super Fun House, The Duel: Test Drive II, Space Football",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md",
+   "docs/design/EMULATION_CORES.md"
+  ],
+  "acceptance": [
+   "W14-53: for each of the five, print the header bytes, the checksum verdict and the reset-vector plausibility under LoROM/HiROM; decide from the evidence (these are plain LoROM/HiROM carts — Contra III is HiROM per its size/layout; the nibble is a mastering quirk) a general rule: when the chipset byte says plain ROM/RAM and the nibble's named chip is absent from the chipset, trust the chipset and the location scoring (W14-36's rule) — and keep refusing only when the chipset byte itself names an unsupported chip; W17-01's 'both must agree' test is updated with the citation and the new rule pinned by a test per title shape (no title strings in code)",
+   "W14-53: the five render in the census child; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; ignored SNES suites green; no ROM bytes or copyrighted titles in engine code; every hardware claim cites fullsnes by section; the orchestrator's full SNES census names every moved title"
+  ],
+  "notes": [
+   "W14-53 FILED 2026-09-23 by the orchestrator from W14-52's report. Contra III is a major title."
+  ]
  }
 ]
 }
