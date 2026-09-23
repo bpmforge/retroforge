@@ -195,6 +195,23 @@ pub struct Gsu {
     /// `title_probe`'s `PROBE_GSUREGS` dump (ticket W18-02: "extend it
     /// with PC/opcode/instruction count").
     pub last_opcode: u8,
+
+    // --- Ticket W18-03 (D-014, slice 3 of 5): the pixel cache. fullsnes
+    // "SNES Cart GSU-n Pixel-Cache": "RAM-Pixel-Write-Cache (two 8-pixel
+    // rows)... Primary Pixel Cache (written to by PLOT)... Secondary Pixel
+    // Cache (data copied from Primary Cache, this WAITs if Secondary cache
+    // wasn't yet forwarded to RAM)". This slice does not model the WAIT —
+    // every hand-off from primary to secondary to RAM happens synchronously
+    // within one PLOT/RPIX call (see [`GsuState::flush_primary`]'s doc), so
+    // `secondary_cache` is always empty again by the time control returns
+    // to the caller. It is still real (save-)state, not a diagnostic,
+    // because a future slice-4 stall model changes only *when* the flush
+    // completes, not the two-stage shape acceptance #1 asks for.
+    /// Primary pixel cache: the 8-pixel-aligned row segment PLOT is
+    /// currently drawing into.
+    primary_cache: PixelCacheLine,
+    /// Secondary pixel cache: the hand-off stage between primary and RAM.
+    secondary_cache: PixelCacheLine,
 }
 
 impl Gsu {
@@ -236,6 +253,8 @@ impl Gsu {
             plot_calls: 0,
             rpix_calls: 0,
             last_opcode: 0,
+            primary_cache: PixelCacheLine::EMPTY,
+            secondary_cache: PixelCacheLine::EMPTY,
         }
     }
 
@@ -580,7 +599,11 @@ impl Gsu {
         }
         o.u16(self.last_ram_addr)?;
         o.u32(self.last_cost)?;
-        o.u64(self.instructions_executed)
+        o.u64(self.instructions_executed)?;
+        // Ticket W18-03: pixel cache, appended after slice 2's fields for
+        // the same forward-compat reason given above.
+        self.primary_cache.save(o)?;
+        self.secondary_cache.save(o)
     }
 
     pub(crate) fn load(&mut self, i: &mut StateIn) -> Result<(), StateError> {
@@ -617,7 +640,66 @@ impl Gsu {
         self.last_ram_addr = i.u16()?;
         self.last_cost = i.u32()?;
         self.instructions_executed = i.u64()?;
+        self.primary_cache = PixelCacheLine::load(i)?;
+        self.secondary_cache = PixelCacheLine::load(i)?;
         Ok(())
+    }
+}
+
+/// One pixel-cache line (fullsnes "SNES Cart GSU-n Pixel-Cache": "Each
+/// cache contains 8 pixels (with 2bit/4bit/8bit depth), plus 8 flags
+/// (indicating if (nontransparent) pixels were plotted)"). Shared shape for
+/// both the primary and secondary cache (see [`Gsu::primary_cache`]'s doc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PixelCacheLine {
+    /// Whether this line currently holds a claimed 8-pixel-aligned segment
+    /// (as opposed to being empty/reset after a flush).
+    valid: bool,
+    /// The 8-pixel-aligned X base (`X AND F8h`) this line was opened for.
+    x_base: u8,
+    /// The Y row this line was opened for.
+    y: u8,
+    /// Per-pixel colour byte (only meaningful where `pending` has the bit
+    /// set — an untouched slot is never read).
+    colors: [u8; 8],
+    /// Bit `i` set means pixel `i` (X = `x_base + i`) was plotted
+    /// non-transparently and must be written back on flush; a clear bit
+    /// means the pixel keeps whatever value is already in RAM (fullsnes:
+    /// "8 flags (indicating if (nontransparent) pixels were plotted)").
+    pending: u8,
+}
+
+impl PixelCacheLine {
+    const EMPTY: Self = Self {
+        valid: false,
+        x_base: 0,
+        y: 0,
+        colors: [0; 8],
+        pending: 0,
+    };
+
+    fn save(&self, o: &mut StateOut) -> Result<(), StateError> {
+        o.bool(self.valid)?;
+        o.u8(self.x_base)?;
+        o.u8(self.y)?;
+        o.bytes(&self.colors)?;
+        o.u8(self.pending)
+    }
+
+    fn load(i: &mut StateIn) -> Result<Self, StateError> {
+        let valid = i.bool()?;
+        let x_base = i.u8()?;
+        let y = i.u8()?;
+        let mut colors = [0u8; 8];
+        i.fill(&mut colors)?;
+        let pending = i.u8()?;
+        Ok(Self {
+            valid,
+            x_base,
+            y,
+            colors,
+            pending,
+        })
     }
 }
 
@@ -961,6 +1043,302 @@ impl GsuState {
         }
     }
 
+    // --- Ticket W18-03: pixel cache / bitmap RAM writeback -------------
+    //
+    // Addresses below are computed in the GSU's own flat 24-bit address
+    // space, then folded onto `self.ram` the same way [`Self::gsu_ram_index`]
+    // folds a `(bank,addr)` pair: bank `$70` contributes 0, bank `$71`
+    // contributes `0x10000`, and the whole thing wraps modulo `ram_len`.
+    // fullsnes "SNES Cart GSU-n Bitmap I/O Ports": "3038h - SCBR... Base =
+    // 700000h+N*400h" — bank `$70` is the documented base regardless of
+    // RAMBR (RAMBR only steers LDB/STB/LDW/STW/SM/SMS/SBK, never the bitmap
+    // ports), so a raw 17-bit offset `N*0x400 + tile_row_addr` mod `ram_len`
+    // reproduces that address directly without ever consulting RAMBR.
+
+    /// `$303Ah` SCMR bits 0-1 (MD) as a bits-per-pixel count. Bit pattern
+    /// `10` ("Reserved") has no documented meaning; this project treats it
+    /// as 8bpp (same plane count as `11`) rather than panicking — no title
+    /// in this project's library is known to set it.
+    fn bpp_for_scmr(scmr: u8) -> u8 {
+        match scmr & 0x03 {
+            0 => 2,
+            1 => 4,
+            _ => 8,
+        }
+    }
+
+    /// `$303Ah` SCMR's HT0/HT1 height field (bit2 | bit5<<1): `0/1/2` for
+    /// 128/160/192-pixel height, `3` for OBJ mode.
+    fn height_field(scmr: u8) -> u8 {
+        ((scmr >> 2) & 1) | (((scmr >> 5) & 1) << 1)
+    }
+
+    /// Whether OBJ-mode tile numbering applies: SCMR's HT field is `3`, or
+    /// POR bit4 forces it regardless of HT (fullsnes POR: "Bit4 OBJ Mode (0=
+    /// Normal, 1=Force OBJ mode; ignore SCMR.HT0/HT1)").
+    fn obj_mode(&self) -> bool {
+        self.regs.por & 0x10 != 0 || Self::height_field(self.regs.scmr) == 3
+    }
+
+    /// The Tile Number fullsnes "Bitmap I/O Ports" gives per height mode:
+    /// ```text
+    /// Height 128 --> (X/8)*10h + (Y/8)
+    /// Height 160 --> (X/8)*14h + (Y/8)
+    /// Height 192 --> (X/8)*18h + (Y/8)
+    /// OBJ Mode   --> (Y/80h)*200h + (X/80h)*100h + (Y/8 AND 0Fh)*10h + (X/8 AND 0Fh)
+    /// ```
+    fn tile_number(x: u8, y: u8, obj: bool, height: u8) -> u32 {
+        let (x, y) = (u32::from(x), u32::from(y));
+        if obj {
+            (y / 0x80) * 0x200 + (x / 0x80) * 0x100 + ((y / 8) & 0x0F) * 0x10 + ((x / 8) & 0x0F)
+        } else {
+            let stride = match height {
+                0 => 0x10,
+                1 => 0x14,
+                _ => 0x18, // 2 (192-pixel); OBJ (3) never reaches this arm.
+            };
+            (x / 8) * stride + y / 8
+        }
+    }
+
+    /// The Tile-Row Address fullsnes gives per colour depth:
+    /// ```text
+    /// 4 Color Mode    TileNo*10h + SCBR*400h + (Y AND 7)*2
+    /// 16 Color Mode   TileNo*20h + SCBR*400h + (Y AND 7)*2
+    /// 256 Color Mode  TileNo*40h + SCBR*400h + (Y AND 7)*2
+    /// ```
+    /// with "Plane0,1 stored at Addr+0, Plane 2,3 at Addr+10h, Plane 4,5 at
+    /// Addr+20h, Plane 6,7 at Addr+30h" — the row address of the *first*
+    /// plane pair; [`Self::plot_pixel_bits`]/[`Self::read_pixel_bits`] add
+    /// the `+0x10`-per-pair-of-planes offset themselves.
+    fn tile_row_addr(scbr: u8, bpp: u8, tile_no: u32, y: u8) -> u32 {
+        let per_tile = match bpp {
+            2 => 0x10,
+            4 => 0x20,
+            _ => 0x40,
+        };
+        tile_no * per_tile + u32::from(scbr) * 0x400 + (u32::from(y) & 7) * 2
+    }
+
+    /// Fold a raw GSU-address-space byte offset (bank `$70`-relative, i.e.
+    /// already `N*0x400 + tile_row_addr + plane_offset`) onto `self.ram`,
+    /// `None` if there is no GSU RAM.
+    fn bitmap_ram_index(&self, byte_addr: u32) -> Option<usize> {
+        if self.ram_len == 0 {
+            None
+        } else {
+            Some((byte_addr as usize) % self.ram_len)
+        }
+    }
+
+    /// Write one pixel's bits into the RAM bitmap in the documented
+    /// interleaved-bitplane layout (fullsnes: "Plane0,1 stored at Addr+0,
+    /// Plane 2,3 at Addr+10h, Plane 4,5 at Addr+20h, Plane 6,7 at Addr+30h";
+    /// each plane pair is two bytes — even byte holds the even-numbered
+    /// plane's bit for every X in the row, odd byte the odd-numbered plane
+    /// — MSB is the leftmost pixel, matching [`crate::sa1::write_tile_pixel`]'s
+    /// packing for the same SNES-standard bitplane shape). Only planes
+    /// `0..bpp` are touched — a 2bpp/4bpp bitmap's higher plane-pair bytes
+    /// are never written by PLOT.
+    fn plot_pixel_bits(&mut self, row_addr: u32, bpp: u8, x_in_tile: u8, colour: u8) {
+        let mask = 0x80u8 >> (x_in_tile & 7);
+        for p in 0..bpp {
+            let byte_addr = row_addr
+                .wrapping_add((u32::from(p) / 2) * 0x10)
+                .wrapping_add(u32::from(p) % 2);
+            let Some(idx) = self.bitmap_ram_index(byte_addr) else {
+                return;
+            };
+            let bit = (colour >> p) & 1 != 0;
+            if bit {
+                self.ram[idx] |= mask;
+            } else {
+                self.ram[idx] &= !mask;
+            }
+        }
+    }
+
+    /// Read one pixel's colour back out of the RAM bitmap — the inverse of
+    /// [`Self::plot_pixel_bits`], used by RPIX.
+    fn read_pixel_bits(&self, row_addr: u32, bpp: u8, x_in_tile: u8) -> u8 {
+        let mask = 0x80u8 >> (x_in_tile & 7);
+        let mut colour = 0u8;
+        for p in 0..bpp {
+            let byte_addr = row_addr
+                .wrapping_add((u32::from(p) / 2) * 0x10)
+                .wrapping_add(u32::from(p) % 2);
+            let byte = self
+                .bitmap_ram_index(byte_addr)
+                .map_or(0, |idx| self.ram[idx]);
+            if byte & mask != 0 {
+                colour |= 1 << p;
+            }
+        }
+        colour
+    }
+
+    /// The RAM row address (bank-`$70`-relative) for pixel `(x, y)` under
+    /// the current SCBR/SCMR/POR settings — shared by PLOT's flush and
+    /// RPIX's readback so both always agree on where a pixel lives.
+    fn bitmap_row_addr(&self, x: u8, y: u8) -> u32 {
+        let scmr = self.regs.scmr;
+        let bpp = Self::bpp_for_scmr(scmr);
+        let obj = self.obj_mode();
+        let height = Self::height_field(scmr);
+        let tile = Self::tile_number(x, y, obj, height);
+        Self::tile_row_addr(self.regs.scbr, bpp, tile, y)
+    }
+
+    /// Flush one cache line's pending pixels into the RAM bitmap,
+    /// read-modify-write per fullsnes: untouched pixels (`pending` bit
+    /// clear) keep whatever value RAM already had, since
+    /// [`Self::plot_pixel_bits`] is only called for set bits.
+    fn flush_line_to_ram(&mut self, line: PixelCacheLine) {
+        if !line.valid || line.pending == 0 {
+            return;
+        }
+        let bpp = Self::bpp_for_scmr(self.regs.scmr);
+        let row_addr = self.bitmap_row_addr(line.x_base, line.y);
+        for i in 0..8u8 {
+            if line.pending & (1 << i) != 0 {
+                self.plot_pixel_bits(row_addr, bpp, i, line.colors[usize::from(i)]);
+            }
+        }
+    }
+
+    /// Flush the primary cache: fullsnes "Pixel-Cache" describes a
+    /// two-stage hand-off (primary -> secondary -> RAM), the secondary
+    /// stage existing so PLOT can keep filling a *new* primary line while
+    /// the old one is still draining to RAM. This slice does not model
+    /// that overlap's timing (no stall/WAIT state exists yet — slice 4);
+    /// it performs both hand-offs synchronously, so `secondary_cache` is
+    /// always empty again immediately after this call returns. Called on
+    /// flush condition 1) (a PLOT to a different 8-aligned segment) and 3)
+    /// (cache full — all 8 pending bits set); condition 2) (RPIX) calls
+    /// this too, then reads RAM directly (fullsnes: "RPIX isn't cached, it
+    /// does always read data from RAM").
+    fn flush_primary(&mut self) {
+        if !self.regs.primary_cache.valid {
+            return;
+        }
+        // If the secondary still held an (in this model, always-already-
+        // flushed) line, drain it first — real hardware would WAIT here.
+        let stale_secondary =
+            std::mem::replace(&mut self.regs.secondary_cache, PixelCacheLine::EMPTY);
+        self.flush_line_to_ram(stale_secondary);
+        let primary = std::mem::replace(&mut self.regs.primary_cache, PixelCacheLine::EMPTY);
+        self.regs.secondary_cache = primary;
+        let secondary = std::mem::replace(&mut self.regs.secondary_cache, PixelCacheLine::EMPTY);
+        self.flush_line_to_ram(secondary);
+    }
+
+    /// PLOT (fullsnes "GSU Bitmap Opcodes": `plot [r1,r2],color ;Pixel=COLR,
+    /// R1=R1+1`), given the real pixel cache. `por`/`colr`/`scmr` are read
+    /// fresh from `self.regs` each call — a title can legally change POR
+    /// (CMODE) between PLOTs.
+    fn exec_plot(&mut self) {
+        let x = self.regs.reg(1) as u8;
+        let y = self.regs.reg(2) as u8;
+        let seg_x = x & 0xF8;
+        // Flush condition 1): PLOT lands on a different 8-aligned segment
+        // than the primary cache currently holds (fullsnes: "(X and F8h)
+        // and (Y and FFh) are memorized, when plotting to different
+        // values, Primary cache is forwarded to Secondary Cache").
+        if self.regs.primary_cache.valid
+            && (self.regs.primary_cache.x_base != seg_x || self.regs.primary_cache.y != y)
+        {
+            self.flush_primary();
+        }
+        if !self.regs.primary_cache.valid {
+            self.regs.primary_cache = PixelCacheLine {
+                valid: true,
+                x_base: seg_x,
+                y,
+                colors: [0; 8],
+                pending: 0,
+            };
+        }
+
+        let por = self.regs.por;
+        let scmr = self.regs.scmr;
+        let bpp = Self::bpp_for_scmr(scmr);
+        let plot_transparent = por & 0x01 != 0; // 1 = also plot color 0
+        let dither = por & 0x02 != 0;
+        let freeze_high = por & 0x08 != 0;
+
+        // Dither (POR bit1, 4/16-color mode only): fullsnes "if
+        // (r1.bit0 XOR r2.bit0)=1 then COLOR/10h is used as drawing
+        // color" — "COLOR/10h" is COLR divided by 0x10, i.e. its high
+        // nibble.
+        let mut colour = self.regs.colr;
+        if dither && bpp != 8 && (x ^ y) & 1 != 0 {
+            colour >>= 4;
+        }
+
+        // Transparency (POR bit0=0 skips color 0): the check width is
+        // normally `bpp` bits, but Freeze-High narrows a 256-color check
+        // to the low 4 bits (fullsnes: "if POR.Bit3 (Freeze-High) is set,
+        // then it checks only the lower 2/4 bits, and ignores upper 4bit
+        // even when in 256-color mode").
+        let check_bits = if freeze_high { bpp.min(4) } else { bpp };
+        let check_mask: u8 = if check_bits >= 8 {
+            0xFF
+        } else {
+            (1u8 << check_bits) - 1
+        };
+        let skip = !plot_transparent && colour & check_mask == 0;
+
+        if !skip {
+            let xi = usize::from(x & 7);
+            self.regs.primary_cache.colors[xi] = colour;
+            self.regs.primary_cache.pending |= 1 << (x & 7);
+        }
+
+        let new_r1 = self.regs.reg(1).wrapping_add(1);
+        self.regs.commit_to(1, new_r1);
+
+        // Flush condition 3): all 8 cache flags set.
+        if self.regs.primary_cache.pending == 0xFF {
+            self.flush_primary();
+        }
+    }
+
+    /// RPIX (fullsnes "GSU Bitmap Opcodes": `rpix Rd,[r1,r2] ;Rd=Pixel?
+    /// FlushPixCache`): force both caches to RAM, then read the pixel at
+    /// `(R1,R2)` back from RAM (never from cache — see this method's
+    /// module-doc citation). Returns the reassembled colour; the caller
+    /// commits it to Dreg and sets Z/S.
+    fn exec_rpix(&mut self) -> u16 {
+        self.flush_primary();
+        let x = self.regs.reg(1) as u8;
+        let y = self.regs.reg(2) as u8;
+        let bpp = Self::bpp_for_scmr(self.regs.scmr);
+        let row_addr = self.bitmap_row_addr(x, y);
+        u16::from(self.read_pixel_bits(row_addr, bpp, x & 7))
+    }
+
+    /// COLOR/GETC's shared "incoming byte -> COLR" transform (fullsnes
+    /// POR bits 2/3): High-Nibble (bit2) first replaces the incoming
+    /// byte's low nibble with its own high nibble ("replace incoming LSB
+    /// by incoming MSB"); Freeze-High (bit3) then write-protects COLR's
+    /// high nibble, updating only the low nibble of the stored register.
+    fn write_colr(&mut self, incoming: u8) {
+        let por = self.regs.por;
+        let high_nibble = por & 0x04 != 0;
+        let freeze_high = por & 0x08 != 0;
+        let effective = if high_nibble {
+            let hn = incoming >> 4;
+            (hn << 4) | hn
+        } else {
+            incoming
+        };
+        self.regs.colr = if freeze_high {
+            (self.regs.colr & 0xF0) | (effective & 0x0F)
+        } else {
+            effective
+        };
+    }
+
     // --- Opcode dispatch ------------------------------------------------
 
     /// Execute one already-fetched opcode byte, fetching any of its own
@@ -1110,22 +1488,19 @@ impl GsuState {
             // --- PLOT / ALT1(mirrors to ALT3 too): RPIX ---------------
             0x4C => {
                 let cost = if alt1 || alt3 {
-                    // RPIX (W18-03 gives this the real pixel-cache
-                    // flush+read; this slice records the call and
-                    // returns a deterministic 0 — fullsnes "RPIX isn't
-                    // cached, it does always read data from RAM").
+                    // RPIX: force-flush both pixel caches, then read the
+                    // pixel back from RAM (fullsnes: "RPIX isn't cached,
+                    // it does always read data from RAM").
                     self.regs.rpix_calls += 1;
-                    self.regs.commit_dest(0);
-                    self.regs.set_zs(0);
+                    let v = self.exec_rpix();
+                    self.regs.commit_dest(v);
+                    self.regs.set_zs(v);
                     20
                 } else {
-                    // PLOT (W18-03 gives this the real pixel cache; this
-                    // slice records the call and advances the X
-                    // coordinate exactly as fullsnes documents — "Pixel=
-                    // COLR, R1=R1+1" — without ever touching RAM).
+                    // PLOT: fullsnes "Pixel=COLR, R1=R1+1", through the
+                    // real pixel cache (ticket W18-03).
                     self.regs.plot_calls += 1;
-                    let x = self.regs.reg(1).wrapping_add(1);
-                    self.regs.commit_to(1, x);
+                    self.exec_plot();
                     2
                 };
                 self.regs.reset_prefix_state();
@@ -1146,7 +1521,8 @@ impl GsuState {
                     self.regs.por = (self.regs.src() as u8) & 0x1F;
                     2
                 } else {
-                    self.regs.colr = self.regs.src() as u8;
+                    let incoming = self.regs.src() as u8;
+                    self.write_colr(incoming);
                     1
                 };
                 self.regs.reset_prefix_state();
@@ -1466,7 +1842,8 @@ impl GsuState {
                 } else {
                     // GETC (ALT1 has no documented form, so it falls back
                     // to base per fullsnes's "ignored prefixes" rule).
-                    self.regs.colr = self.rom_data_byte(rom);
+                    let incoming = self.rom_data_byte(rom);
+                    self.write_colr(incoming);
                     2
                 };
                 self.regs.reset_prefix_state();
@@ -1730,9 +2107,14 @@ mod exec_tests {
     }
 
     #[test]
-    fn cmode_color_getc_plot_rpix_stubs() {
+    fn cmode_color_getc_plot_rpix_dispatch() {
         // WITH R1; COLOR (0x4E); WITH R2; CMODE (0x3D,0x4E); GETC (0xDF);
         // PLOT (0x4C); RPIX into R3 (TO R3; ALT1 RPIX = 0x3D,0x4C).
+        // Ticket W18-03: PLOT/RPIX now go through the real pixel cache and
+        // RAM bitmap (see the dedicated `plot_*`/`rpix_*` tests below for
+        // the address-formula/POR-semantics coverage); this test just
+        // pins opcode dispatch (which opcode ran, call counts, R1
+        // advancing).
         let mut bytes = vec![
             0x21, 0x4E, // WITH R1; COLOR
             0x22, 0x3D, 0x4E, // WITH R2; CMODE
@@ -1744,13 +2126,17 @@ mod exec_tests {
         bytes[0x100] = 0x77; // GETC's source byte
         let (mut g, rom) = program(&bytes);
         g.regs.regs[1] = 0x00AB;
-        g.regs.regs[2] = 0x1F; // CMODE masks to 5 bits
+        // POR bit4 (OBJ) only — masks a wider input (0x30) down to 0x10,
+        // exercising CMODE's "&0x1Fh" mask, while leaving POR bits 2/3
+        // (High-Nibble/Freeze-High, which change COLOR/GETC's own byte
+        // transform — see `write_colr`'s doc) clear so this test's GETC
+        // assertion stays a plain byte copy.
+        g.regs.regs[2] = 0x30; // also PLOT/RPIX's Y coordinate
         g.regs.regs[14] = 0x0100; // R14 for GETC
-        g.regs.regs[1] = 0x00AB; // (X coordinate, re-set after COLOR reads it)
         step_n(&mut g, &rom, 2); // WITH R1; COLOR
         assert_eq!(g.regs.colr, 0xAB);
         step_n(&mut g, &rom, 3); // WITH R2; ALT1; CMODE
-        assert_eq!(g.regs.por, 0x1F);
+        assert_eq!(g.regs.por, 0x10, "0x30 masked by CMODE's &0x1Fh");
         step_n(&mut g, &rom, 1); // GETC
         assert_eq!(g.regs.colr, 0x77, "GETC overwrote COLR from ROM");
         let x_before = g.regs.reg(1);
@@ -1759,7 +2145,11 @@ mod exec_tests {
         assert_eq!(g.regs.reg(1), x_before.wrapping_add(1), "PLOT advances X");
         step_n(&mut g, &rom, 3); // TO R3; ALT1; RPIX
         assert_eq!(g.regs.rpix_calls, 1);
-        assert_eq!(g.regs.reg(3), 0, "RPIX is a stub this slice");
+        assert_eq!(
+            g.regs.reg(3),
+            0,
+            "RPIX's R1/R2 read the column PLOT's own R1++ just moved past, which was never plotted"
+        );
     }
 
     // --- ALU opcodes (fullsnes "SNES Cart GSU-n CPU ALU Opcodes") -------
@@ -2192,5 +2582,340 @@ mod exec_tests {
         assert_eq!(g.regs.regs, restored_state.regs.regs);
         assert_eq!(g.regs.sfr, restored_state.regs.sfr);
         assert_eq!(g.ram, restored_state.ram);
+    }
+
+    // =====================================================================
+    // Ticket W18-03: pixel cache, PLOT/RPIX, bitmap RAM writeback.
+    // =====================================================================
+
+    /// A hand-assembled program: set X=Y=0, CMODE=1 (POR.Transparent — so
+    /// color 0 still plots, letting all 8 pixels of one segment reach the
+    /// "cache full" flush condition), then PLOT eight pixels with colours
+    /// cycling `0,1,2,3,0,1,2,3` (SCMR/SCBR left at their `0` reset value:
+    /// 2bpp, 128-pixel height, SCBR=0), then STOP. Filling the segment
+    /// triggers fullsnes's condition 3) ("cache full") automatically — no
+    /// RPIX needed — so by the time STOP runs, the bitmap is already in
+    /// RAM. Ticket W18-03 acceptance #2: "unit tests draw known pixels
+    /// through a hand-assembled program and assert the resulting RAM
+    /// bitmap bytes".
+    #[test]
+    fn plot_program_fills_one_segment_and_autoflushes_on_stop() {
+        let mut bytes = vec![
+            0xA1, 0x00, // IBT R1,#0        ; X=0
+            0xA2, 0x00, // IBT R2,#0        ; Y=0
+            0xA3, 0x01, // IBT R3,#1        ; POR value (Transparent=1)
+            0x23, 0x3D, 0x4E, // WITH R3; ALT1; CMODE  -> POR=1
+        ];
+        for colour in [0u8, 1, 2, 3, 0, 1, 2, 3] {
+            bytes.push(0xA4);
+            bytes.push(colour); // IBT R4,#colour
+            bytes.push(0x24); // WITH R4
+            bytes.push(0x4E); // COLOR
+            bytes.push(0x4C); // PLOT
+        }
+        bytes.push(0x00); // STOP
+        bytes.push(0x01); // STOP's prefetched dummy byte
+        let (mut g, rom) = program(&bytes);
+        g.regs.write(0x301E, 0x00);
+        g.regs.write(0x301F, 0x00);
+        g.run(&rom);
+        assert!(!g.regs.go(), "program ran to STOP");
+        assert_eq!(g.regs.plot_calls, 8);
+        // Bit-plane pack of colours [0,1,2,3,0,1,2,3], MSB = leftmost
+        // pixel (fullsnes "Bitmap I/O Ports" plane layout; see
+        // `GsuState::plot_pixel_bits`'s doc):
+        //   plane0 (colour bit0) per pixel: 0,1,0,1,0,1,0,1 -> 0x55
+        //   plane1 (colour bit1) per pixel: 0,0,1,1,0,0,1,1 -> 0x33
+        assert_eq!(g.ram[0], 0x55, "plane0 byte, tile 0 row 0");
+        assert_eq!(g.ram[1], 0x33, "plane1 byte, tile 0 row 0");
+        assert!(g.ram[2..].iter().all(|&b| b == 0), "nothing else touched");
+    }
+
+    /// RPIX flushes the primary cache and reads a pixel straight back from
+    /// RAM (fullsnes "Pixel-Cache": "RPIX isn't cached, it does always
+    /// read data from RAM"). Uses direct field/method access (private,
+    /// same-crate — [`GsuState::exec_plot`]/[`GsuState::exec_rpix`] are the
+    /// exact functions the `0x4C` opcode dispatches to) to pin the
+    /// pixel-cache/RAM-address math itself, independent of opcode
+    /// encoding, which the dispatch-level tests above already cover.
+    #[test]
+    fn rpix_reads_back_the_pixel_plot_just_wrote() {
+        let (mut g, _rom) = program(&[]);
+        g.regs.por = 0x01; // Transparent=1, so colour 0 still plots
+        g.regs.colr = 0b1010_1010; // low 2 bits = 2 (10b) for 2bpp
+        g.regs.regs[1] = 5; // X=5 (segment 0, x_in_tile=5)
+        g.regs.regs[2] = 9; // Y=9 (row 1 of tile, since Y AND 7 = 1)
+        g.exec_plot();
+        assert_eq!(g.regs.reg(1), 6, "PLOT advanced X, did not touch Y");
+        // R1 now points one column past the plotted pixel; move it back
+        // to read the same pixel RPIX would if software re-read (R1,R2)
+        // immediately (a real title re-reads via decrementing R1, or via
+        // GETC-style bookkeeping — this test just wants the same address).
+        g.regs.regs[1] = 5;
+        let v = g.exec_rpix();
+        assert_eq!(v, 2, "RPIX reassembled the 2bpp colour PLOT wrote");
+    }
+
+    /// PLOT's transparency rule (POR bit0=0, the default/reset value):
+    /// fullsnes "Bit0=0 (Transparent) causes PLOT to skip color 0... PLOT
+    /// does only increment R1..., but doesn't draw a pixel". Verified by
+    /// RPIX-ing the never-plotted pixel and getting RAM's untouched `0`
+    /// back, and a neighbouring non-zero-colour pixel in the SAME segment
+    /// coming back correctly, proving the skip didn't corrupt the flush.
+    #[test]
+    fn plot_transparent_default_skips_color_zero() {
+        let (mut g, _rom) = program(&[]);
+        // POR left at reset (`0`): Transparent=0 (skip color 0).
+        g.regs.regs[1] = 0;
+        g.regs.regs[2] = 0;
+        g.regs.colr = 0x00; // color 0 -> must be skipped
+        g.exec_plot();
+        g.regs.regs[1] = 1;
+        g.regs.colr = 0b11; // non-zero -> must be plotted
+        g.exec_plot();
+        g.regs.regs[1] = 0;
+        assert_eq!(g.exec_rpix(), 0, "color-0 PLOT never touched RAM");
+        g.regs.regs[1] = 1;
+        assert_eq!(g.exec_rpix(), 0b11, "the neighbour still plotted fine");
+    }
+
+    /// POR bit1 (Dither): fullsnes "if (r1.bit0 XOR r2.bit0)=1 then
+    /// COLOR/10h is used as drawing color" (COLR's high nibble), 4/16-color
+    /// mode only. Two pixels with the same COLR but different X/Y parity
+    /// must plot different colours.
+    #[test]
+    fn plot_dither_picks_high_nibble_on_odd_xy_parity() {
+        let (mut g, _rom) = program(&[]);
+        g.regs.scmr = 0x01; // MD=1: 16-color (4bpp)
+        g.regs.por = 0x03; // Transparent=1 (so both plot) + Dither=1
+        g.regs.colr = 0xB4; // low nibble 4, high nibble B
+        g.regs.regs[1] = 0; // X=0
+        g.regs.regs[2] = 0; // Y=0 -> (X^Y)&1 = 0 -> normal (low nibble)
+        g.exec_plot();
+        g.regs.regs[1] = 1; // X=1, Y=0 -> parity 1 -> dithered (high nibble)
+        g.exec_plot();
+        g.regs.regs[1] = 0;
+        assert_eq!(g.exec_rpix(), 0x4, "even parity: COLR's low nibble");
+        g.regs.regs[1] = 1;
+        assert_eq!(
+            g.exec_rpix(),
+            0xB,
+            "odd parity: COLR's high nibble (dithered)"
+        );
+    }
+
+    /// POR bit3 (Freeze-High) narrows the 256-color transparency check to
+    /// the low 4 bits (fullsnes: "it checks only the lower 2/4 bits, and
+    /// ignores upper 4bit even when in 256-color mode") — a colour whose
+    /// low nibble is 0 is skipped even with non-zero high bits.
+    #[test]
+    fn plot_freeze_high_narrows_256_color_transparency_check() {
+        let (mut g, _rom) = program(&[]);
+        g.regs.scmr = 0x03; // MD=3: 256-color (8bpp)
+        g.regs.por = 0x08; // Transparent=0 (default skip) + Freeze-High=1
+        g.regs.regs[1] = 0;
+        g.regs.regs[2] = 0;
+        g.regs.colr = 0xA0; // low nibble 0 -> skipped despite high bits set
+        g.exec_plot();
+        g.regs.regs[1] = 1;
+        g.regs.colr = 0xA1; // low nibble nonzero -> plots
+        g.exec_plot();
+        g.regs.regs[1] = 0;
+        assert_eq!(
+            g.exec_rpix(),
+            0,
+            "freeze-high made 0xA0 read as transparent"
+        );
+        g.regs.regs[1] = 1;
+        assert_eq!(g.exec_rpix(), 0xA1);
+    }
+
+    /// COLOR/GETC's POR bit2 (High-Nibble)/bit3 (Freeze-High) transform
+    /// (fullsnes: replace incoming LSB by incoming MSB, then optionally
+    /// write-protect COLR's own high nibble) — exercised directly on
+    /// [`GsuState::write_colr`] with each bit isolated.
+    #[test]
+    fn color_high_nibble_and_freeze_high_transform_incoming_byte() {
+        let (mut g, _rom) = program(&[]);
+        g.regs.colr = 0xFF;
+        g.regs.por = 0x00;
+        g.write_colr(0x12);
+        assert_eq!(g.regs.colr, 0x12, "no POR bits: plain byte copy");
+
+        g.regs.colr = 0xFF;
+        g.regs.por = 0x04; // High-Nibble only
+        g.write_colr(0x30); // MSB=3 replaces LSB -> 0x33
+        assert_eq!(g.regs.colr, 0x33);
+
+        g.regs.colr = 0xAB;
+        g.regs.por = 0x08; // Freeze-High only
+        g.write_colr(0xCD); // only the low nibble (D) updates
+        assert_eq!(g.regs.colr, 0xAD);
+
+        g.regs.colr = 0xAB;
+        g.regs.por = 0x0C; // High-Nibble + Freeze-High
+        g.write_colr(0x30); // effective byte 0x33, freeze keeps high nibble
+        assert_eq!(g.regs.colr, 0xA3);
+    }
+
+    /// Flush condition 1) — a PLOT to a different 8-pixel-aligned segment
+    /// forwards the OLD segment to RAM before the new one starts, so the
+    /// old segment's pixels are correct even though the primary cache
+    /// never filled and RPIX was never called on it.
+    #[test]
+    fn plot_flushes_old_segment_on_segment_change() {
+        let (mut g, _rom) = program(&[]);
+        g.regs.por = 0x01; // plot color 0 too, for a clean single-bit test
+        g.regs.regs[1] = 3; // X=3, segment [0..8)
+        g.regs.regs[2] = 0;
+        g.regs.colr = 0b11;
+        g.exec_plot(); // still cached, not yet in RAM
+        assert_eq!(g.ram[0], 0, "not flushed yet");
+        g.regs.regs[1] = 8; // X=8 -> a NEW 8-aligned segment
+        g.regs.colr = 0b01;
+        g.exec_plot(); // this PLOT's segment change flushes the old one
+        assert_eq!(
+            g.ram[0], 0x10,
+            "old segment (x=3) landed in RAM: bit for x=3"
+        );
+        assert_eq!(g.ram[1], 0x10, "plane1 bit for x=3 (colour 0b11)");
+        // The new segment (tile 1, x=8) is still only cached.
+        g.regs.regs[1] = 8;
+        assert_eq!(
+            g.exec_rpix(),
+            0b01,
+            "RPIX flushes+reads the new segment too"
+        );
+    }
+
+    /// 4bpp (MD=1) and 8bpp (MD=3) plane-count coverage, and the three
+    /// non-OBJ height strides (128/160/192), each via a direct plot+RPIX
+    /// round trip at a middling (x, y) so the stride actually matters.
+    #[test]
+    fn plot_bpp_and_height_mode_matrix() {
+        // SCMR bit2=HT0, bit5=HT1 (height field = HT0 | HT1<<1: 0=128,
+        // 1=160, 2=192, 3=OBJ), bits0-1=MD (0=2bpp,1=4bpp,3=8bpp).
+        let cases: &[(u8, u8, u16, u16, u8)] = &[
+            // (scmr MD/HT bits, colour, x, y, expected)
+            (0x00, 0b11, 20, 5, 0b11),       // 2bpp, height 128 (HT=0)
+            (0x05, 0b1010, 20, 130, 0b1010), // 4bpp, height 160 (HT0 | MD=1)
+            (0x02, 0b1111_1111u8, 20, 5, 0b1111_1111), // 8bpp reserved-MD alias
+            (0x23, 0b1011_0110, 40, 150, 0b1011_0110), // 8bpp, height 192 (HT1 | MD=3)
+            (0x20, 0b11, 90, 90, 0b11),      // 2bpp, HT1 set alone (height 192)
+        ];
+        for &(scmr, colour, x, y, expected) in cases {
+            let (mut g, _rom) = program(&[]);
+            g.regs.scmr = scmr;
+            g.regs.por = 0x01; // plot even colour 0 unambiguously
+            g.regs.regs[1] = x;
+            g.regs.regs[2] = y;
+            g.regs.colr = colour;
+            g.exec_plot();
+            g.regs.regs[1] = x;
+            g.regs.regs[2] = y;
+            assert_eq!(
+                g.exec_rpix(),
+                u16::from(expected),
+                "scmr={scmr:#04x} x={x} y={y}"
+            );
+        }
+    }
+
+    /// OBJ mode (SCMR HT=3, and separately POR bit4 forcing it with HT
+    /// left at a non-OBJ value) uses the documented 256x256 tile-number
+    /// formula rather than the linear-stride one.
+    #[test]
+    fn plot_obj_mode_via_scmr_and_via_por() {
+        for scmr in [0x24u8, 0x00] {
+            // First case: HT=3 (SCMR bit2 | bit5, both set -> OBJ via HT).
+            // Second: HT=0, OBJ forced by POR bit4 instead.
+            let (mut g, _rom) = program(&[]);
+            g.regs.scmr = scmr;
+            g.regs.por = if scmr == 0x00 { 0x11 } else { 0x01 }; // plot color0 too; force OBJ via POR in the second case
+            g.regs.regs[1] = 130;
+            g.regs.regs[2] = 200;
+            g.regs.colr = 0b10;
+            g.exec_plot();
+            g.regs.regs[1] = 130;
+            g.regs.regs[2] = 200;
+            assert_eq!(g.exec_rpix(), 0b10, "scmr={scmr:#04x}");
+        }
+    }
+
+    /// Determinism: two identical PLOT/RPIX sequences (including a
+    /// segment-change flush) produce byte-identical RAM.
+    #[test]
+    fn pixel_cache_determinism_two_runs_match() {
+        fn run() -> Vec<u8> {
+            let (mut g, _rom) = program(&[]);
+            g.regs.por = 0x03; // plot color 0, dither on
+            g.regs.scmr = 0x01;
+            for i in 0u16..12 {
+                g.regs.regs[1] = i;
+                g.regs.regs[2] = i / 2;
+                g.regs.colr = (i as u8).wrapping_mul(17);
+                g.exec_plot();
+            }
+            g.regs.regs[1] = 0;
+            g.regs.regs[2] = 0;
+            let _ = g.exec_rpix(); // force final flush
+            g.ram
+        }
+        assert_eq!(run(), run());
+    }
+
+    /// Save/load with pixels still sitting in the (unflushed) primary
+    /// cache: round-tripping through [`Gsu::save`]/[`Gsu::load`] must
+    /// preserve that pending state, so continuing after a load produces
+    /// the exact same RAM as continuing without ever saving.
+    #[test]
+    fn save_load_preserves_a_pending_pixel_cache() {
+        fn plot_five(g: &mut GsuState) {
+            g.regs.por = 0x01;
+            for x in 0u16..5 {
+                g.regs.regs[1] = x;
+                g.regs.regs[2] = 0;
+                g.regs.colr = (x as u8) + 1;
+                g.exec_plot();
+            }
+        }
+        let (mut baseline, _rom) = program(&[]);
+        plot_five(&mut baseline);
+        // Segment not yet full (5/8 pending) -> still only in the cache.
+        assert_eq!(baseline.ram[0], 0, "not flushed yet");
+
+        let (mut a, _rom) = program(&[]);
+        plot_five(&mut a);
+
+        let mut stream = MemStream {
+            buf: Vec::new(),
+            at: 0,
+        };
+        a.regs.save(&mut StateOut::new(&mut stream)).expect("save");
+        let mut restored = Gsu::new(rf_cart::SuperFxVersion::Gsu2);
+        restored.load(&mut StateIn::new(&mut stream)).expect("load");
+        assert_eq!(restored.primary_cache, a.regs.primary_cache);
+        let mut b = GsuState {
+            regs: restored,
+            ram: a.ram.clone(),
+            rom_len: a.rom_len,
+            ram_len: a.ram_len,
+        };
+
+        // Finish both the same way (three more PLOTs to fill the segment,
+        // triggering the "cache full" auto-flush) and compare RAM.
+        for g in [&mut baseline, &mut b] {
+            for x in 5u16..8 {
+                g.regs.regs[1] = x;
+                g.regs.regs[2] = 0;
+                g.regs.colr = (x as u8) + 1;
+                g.exec_plot();
+            }
+        }
+        assert_eq!(
+            baseline.ram, b.ram,
+            "save/load-restored run matches an uninterrupted one"
+        );
+        assert_ne!(baseline.ram[0], 0, "the segment did flush by the end");
     }
 }
