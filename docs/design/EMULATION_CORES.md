@@ -779,6 +779,88 @@ section.
   golden-frame test DMAing the GSU RAM bitmap to VRAM, named as a gap
   rather than claimed done back in slice 3 and still not written.
 
+**W18-06 (this ticket) traced both remaining titles to their actual
+inputs — a RAM cell and a bus-ownership register — rather than more
+opcode auditing, per W18-04's own method lesson. Vortex's dropped-write
+defect is FIXED and shipped, verified by two divergence traces (one per
+title) that jointly pin the correct asymmetric rule. Star Fox 2 remains
+BLOCKED with a named cell and both values. Full traces: docs/TESTING.md's
+own W18-06 section.**
+
+- **Vortex, root cause found and FIXED.** A traced boot writes `$303A`
+  SCMR = `$39` (RON=1, RAN=1) while GO=0 (confirmed on every SCMR write
+  sampled across the boot — the GSU program has not started yet), then
+  stores its whole 8 KiB `$00:6000-$00:7FFF` GSU RAM setup block (8192
+  consecutive SNES-side bytes, descending addresses, an `85/89/00`
+  tile-data pattern) through the ordinary CPU write path. Every one of
+  those 8192 writes was dropped: `SnesBus::write`'s `Target::GsuRam` arm
+  gated on the raw RAN bit alone, which reads back `1` regardless of
+  whether the GSU is actually running. The GSU's own program then read
+  back `0` for cells the SNES had just written real bytes to, and spun
+  forever inside a `JMP Rn`-family computed jump recomputed from that
+  zeroed RAM (the same `PBR:R15` region three prior tickets traced
+  without finding an opcode defect, because the defect was upstream of
+  every opcode in that loop). **Fix, shipped after two rounds of
+  verification**: `Gsu::owns_ram_bus` (`GO && RAN`) added, used ONLY in
+  `SnesBus::write`'s `Target::GsuRam` arm — every READ path (both ROM and
+  GSU RAM, in both `read` and `peek`) is UNCHANGED from W18-01's original
+  raw-bit gate. The first attempt applied `GO`-gating to reads too and
+  was reverted: a divergence trace against Star Fox (USA) found 2,361 ROM
+  reads (zero RAM reads) where GO=0/RON=1 and the raw gate was load-
+  bearing — Star Fox's own boot relies on seeing open bus at ordinary ROM
+  addresses scattered across its code, not just the exception-vector
+  region fullsnes's own GO-conditioned sentence describes — and
+  `boot_census_child` confirmed the regression directly (Star Fox (USA)/
+  (Rev 1)/(Rev 2) flipped from `rendered` to `uniform`, reproduced twice
+  via `git stash`). The two traces (Vortex's write-side, Star Fox's
+  read-side) do not conflict: they are about different bus operations on
+  different address classes, and the narrow, write-only rule satisfies
+  both. Verified: Vortex's GSU now stops cleanly (`go=false`, not a
+  spin), fires 4 `PLOT` calls (was `0` in every measurement this whole
+  investigation ever took), and — pushed to 80,000,000 instructions —
+  clears `forced_blank` and populates VRAM (`vram_nonzero=7550`), both
+  firsts. **Still does not render a frame**: the CPU parks permanently
+  alternating between `$00:0000` (WRAM, an interrupt-vector trampoline
+  cell) and `$00:FD21` (ROM, disassembled as a single `RTI` followed by
+  unused `$FF`-filled space) — a DIFFERENT, downstream defect this ticket
+  did not cause and did not fix: the real NMI/IRQ handler was apparently
+  never installed at that trampoline cell, so every interrupt returns
+  immediately. Named as the next cell for a follow-up ticket.
+- **Star Fox 2, named not fixed.** 18 clean GSU start/stop cycles
+  complete (`go_set=18/go_clear=18/go_clear_by_stop=18`), matching
+  W18-05's own finding. Traced further this ticket: the SNES CPU reads
+  `$3031` (SFR high byte, the IRQ flag) only 8 times in the entire run,
+  all clustered in the earliest few GSU cycles (offsets `3031`/`3021`/
+  `34B1`/`34A1` — SFR-high mirrors, consistent with one-time chip-version
+  probing) — so whatever gates the 19th GSU launch is NOT SFR/IRQ
+  polling; nothing reads it again for the rest of a 30,000,000-
+  instruction run. A large `$70:xxxx` STZ-loop (RAM bank `$70` clear,
+  `DBR=$70`, X climbing from ~`$5EF2` toward wraparound) found early in
+  this trace is NOT the hang — confirmed by running past it: VRAM/OAM/
+  CGRAM populate, NMI/IRQ fire repeatedly (13+ entries by frame 353),
+  frame count climbs to 2624 by 30,000,000 instructions — genuine
+  progress, just never with `forced_blank` cleared or brightness raised.
+  The GSU itself never restarts after its 18th STOP for the entire
+  30,000,000-instruction span (`go=false` unchanged). **Open**: which
+  cell/condition the main loop actually waits on to trigger GSU run #19
+  or enable the display — not yet found. The cart-fact mismatch already
+  on record (`GSU2_ROM_THRESHOLD_BYTES`'s strict `>` misdetects this
+  real 1 MiB GSU2 title as GSU1, acknowledged in `SuperFxVersion`'s own
+  doc) was NOT independently confirmed to matter this session: `$303B`
+  VCR is never read anywhere in the traced boot (the 8 SFR-mirror reads
+  above are the only register-window reads observed at all), so there is
+  no evidence yet that the GSU1/GSU2 misdetection is what blocks this
+  title, and the experiment to force GSU2 and re-check was not run given
+  that absence of evidence.
+- **Census, unchanged** (RELEASE, `boot_census_child` run individually
+  against all 15 of W18-05's own tracked GSU archives, direct against the
+  `.zip` files, plus all five canaries (3 of which overlap the fifteen,
+  17 distinct archives run): every bucket matches
+  W18-05's own recorded `1101/44/120/0/0` table exactly — no regression,
+  matching the pre-session state exactly (this ticket shipped no
+  production change). Full per-title exit codes: docs/TESTING.md's own
+  W18-06 section.
+
 ## 4. Cartridge layer boundary (`rf-cart`)
 
 `rf-cart` owns file parsing (iNES/NES 2.0 incl. submapper/PRG-RAM fields,

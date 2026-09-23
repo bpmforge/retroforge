@@ -375,6 +375,21 @@ fn gsu_cart_boots_and_go_reads_back_after_r15_write() {
 /// Ticket W18-01 acceptance: SCMR RON/RAN gate which side owns the
 /// ROM/RAM bus — while the GSU owns it, the SNES side's own read sees
 /// open bus rather than the cartridge.
+///
+/// Ticket W18-06 (D-016) tried and reverted a `GO && RON`/`GO && RAN`
+/// reading of this rule for READS too — a traced Star Fox (USA) boot
+/// sets RON=1 with GO=0 across 2,361 distinct ROM reads scattered
+/// through ordinary code (not just the exception-vector region) and
+/// expects open bus at every one of them; gating those on GO instead
+/// showed the CPU real ROM, which led it to a bad jump into
+/// zero-initialized WRAM and a stray STP, measured as `boot_census_child`
+/// flipping Star Fox (USA)/(Rev 1)/(Rev 2) from `rendered` to `uniform`.
+/// This test's ORIGINAL raw-bit assertion is therefore still correct and
+/// deliberately unchanged: RON/RAN gate SNES READS unconditionally. Only
+/// SNES WRITES to GSU RAM are gated by GO too (`Gsu::owns_ram_bus`,
+/// `SnesBus::write`'s `Target::GsuRam` arm) — see
+/// `snes_ram_setup_write_lands_even_with_ran_set_while_the_gsu_is_stopped`
+/// below for the write-side fix this asymmetry supports.
 #[test]
 fn gsu_scmr_ron_ran_gate_the_snes_sides_own_reads() {
     let mut system = SnesSystem::load(&lorom_image(0x20, 0x15)).expect("GSU cart loads");
@@ -669,6 +684,99 @@ fn dma_transfer_into_the_6000_mirror_reaches_gsu_ram() {
         0x99,
         "a DMA transfer through the $6000-$7FFF mirror must land in the \
          same GSU RAM buffer $70:0000 does, not cart SRAM or open bus"
+    );
+}
+
+/// Ticket W18-06 (D-016, both titles' traces): pins the exact real shape
+/// a traced Vortex boot uses and this project's original raw-RAN WRITE
+/// gate broke. Two traces jointly decided this fix: Vortex's own boot
+/// sets SCMR=$39 (RON=1, RAN=1) with GO=0 confirmed on every one of 5530
+/// sampled SCMR writes (docs/TESTING.md's W18-06 section), then writes
+/// its whole 8 KiB `$6000-$7FFF` GSU RAM mirror as plain SNES-side
+/// stores BEFORE ever setting GO — real hardware evidence that a
+/// stopped GSU (`GO=0`) is not actually contending for the RAM bus for
+/// a write no matter what SCMR says. A traced Star Fox (USA) boot,
+/// separately, showed the identical GO-gating applied to READS regresses
+/// (see `gsu_scmr_ron_ran_gate_the_snes_sides_own_reads`'s updated doc),
+/// so the two traces jointly support gating ONLY writes on GO, not reads
+/// — `Gsu::owns_ram_bus` (GO&&RAN), used only in `SnesBus::write`'s
+/// `Target::GsuRam` arm.
+#[test]
+fn snes_ram_setup_write_lands_even_with_ran_set_while_the_gsu_is_stopped() {
+    let mut rom = lorom_image(0x20, 0x14); // Vortex's real chipset byte ($14: GSU+RAM, no battery).
+    rom[0x7FC0 - 3] = 0x05; // Extended header: 32 KiB expansion RAM (fullsnes "$FFBDh=05h..06h").
+    rom[0] = 0x4C; // 65C816: JMP $8000 (idle self-loop) — the reset vector target.
+    rom[1] = 0x00;
+    rom[2] = 0x80;
+    // GSU program at $0100 (bank 0, PBR's reset value), same idiom as
+    // `snes_write_to_gsu_ram_is_visible_to_a_gsu_ldb`: IWT R1,#$1FFF (the
+    // LAST byte of the SNES's 8 KiB block, so this test proves the WHOLE
+    // range landed, not just its first byte); TO R2; ALT1; LDB (R1) -> R2
+    // = ram[R1] (zero-extended byte); NOP forever.
+    rom[0x100] = 0xF1; // IWT R1,#$1FFF
+    rom[0x101] = 0xFF;
+    rom[0x102] = 0x1F;
+    rom[0x103] = 0x12; // TO R2
+    rom[0x104] = 0x3D; // ALT1
+    rom[0x105] = 0x41; // LDB (R1)
+    rom[0x106] = 0x01; // NOP
+    rom[0x107] = 0x05; // BRA -3 (spin on the NOP forever)
+    rom[0x108] = 0xFD;
+    rom[0x109] = 0x01; // NOP (BRA's delay slot)
+    let mut system = SnesSystem::load(&rom).expect("GSU cart loads");
+    assert_eq!(
+        system.bus.gsu.as_ref().unwrap().ram.len(),
+        32 * 1024,
+        "Vortex's real header must give this board 32 KiB (fullsnes: \
+         $05h -> 32 KiByte)"
+    );
+
+    // SCMR = $39 (RON=1, RAN=1): the exact byte the traced boot leaves in
+    // place before its RAM setup block, with GO still 0.
+    system.bus.write(0x00_303A, 0x39);
+    assert!(
+        !system.bus.gsu.as_ref().unwrap().regs.go(),
+        "GO must still be 0 -- this scenario is entirely pre-launch setup"
+    );
+
+    // The whole 8 KiB $6000-$7FFF mirror, one SNES-side store per byte —
+    // Vortex's own descending sweep, reproduced as a plain ascending fill
+    // (direction does not matter to the bus; only that every byte lands).
+    for offset in 0u32..0x2000 {
+        let value = (offset & 0xFF) as u8;
+        system.bus.write(0x00_6000 + offset, value);
+    }
+    assert_eq!(
+        system.bus.gsu.as_ref().unwrap().ram[0],
+        0x00,
+        "byte 0 of the block must have landed (offset 0 -> value 0)"
+    );
+    assert_eq!(
+        system.bus.gsu.as_ref().unwrap().ram[0x1FFF],
+        0xFF,
+        "the LAST byte of the block must also have landed"
+    );
+
+    // Now actually start the GSU (sets GO=1 via R15's MSB write,
+    // fullsnes) and let its own LDB read the last byte back.
+    system.bus.write(0x00_301E, 0x00);
+    system.bus.write(0x00_301F, 0x01);
+    assert!(system.bus.gsu.as_ref().unwrap().regs.go());
+    for _ in 0..10 {
+        system.step().expect("GSU program is implemented");
+    }
+    let r2 = {
+        let gsu = system.bus.gsu.as_ref().unwrap();
+        let lo = gsu.regs.peek(0x3004).unwrap();
+        let hi = gsu.regs.peek(0x3005).unwrap();
+        u16::from_le_bytes([lo, hi])
+    };
+    assert_eq!(
+        r2, 0xFF,
+        "the GSU's own LDB (R1) must read back the exact byte the SNES \
+         wrote at $00:7FFF -- proving the whole 8 KiB block the SNES \
+         wrote BEFORE GO was set actually landed in GSU RAM, not just \
+         RAM's zero-initialized default"
     );
 }
 
