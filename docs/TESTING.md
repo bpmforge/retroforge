@@ -871,6 +871,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-39 | 1265 | **1076** | 59 | 130 | **0** | **0** |
 | SNES, after W14-41 | 1265 | **1079** | 56 | 130 | **0** | **0** |
 | SNES, after W14-37/42/43 | 1265 | **1093** | 41 | 131 | **0** | **0** |
+| SNES, after W18-01 (+W7-08 stages 1-2) | 1265 | **1095** | 50 | 120 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -7558,3 +7559,18 @@ CGWSEL/window class the ticket named by name. Same disposition family
 as W14-35's Lagoon/Phalanx and W14-48's Battle Grand Prix: a long,
 internally-consistent boot/intro sequence that outlasts the census's
 600-frame budget, not a picture-state register defect.
+
+**Full SNES census (orchestrator, 2026-09-22, main after the W7-08 stage
+1-2 and W18-01 merges, idle machine, per-title `RF_CENSUS_OUT` diff
+against the W14-37/42/43 run):** **1093/41/131/0/0 -> 1095/50/120/0/0**
+("SNES, after W18-01" row above). Eleven GSU archives left *refused*:
+**Doom** and **Stunt Race FX (Rev 1)** render with the GSU idle (their
+SNES side draws before handing off), while **Star Fox** (USA, Rev 1,
+Rev 2), **Star Fox 2** (Classic Mini/Switch Online dump), **Super Mario
+World 2: Yoshi's Island** (USA, Rev 1), **Super Star Fox Weekend**,
+**Vortex** and **Dirt Trax FX** boot to a uniform screen waiting on a
+GSU that does not execute yet (slices 2-4). No other row moved; the two
+Donkey Kong Country timeouts from the loaded W14-47 run render as
+before. The W7-08 S-DSP changes (real Gaussian table, BRR lost-sign wrap,
+FIR read halving and write-back mask) moved no title, as expected for
+audio-only fixes.
