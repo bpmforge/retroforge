@@ -24,6 +24,16 @@ use std::ops::RangeInclusive;
 const COPIER_HEADER_LEN: usize = 512;
 const LOROM_HEADER_OFFSET: usize = 0x7FC0;
 const HIROM_HEADER_OFFSET: usize = 0xFFC0;
+/// ExHiROM header location: bank $40's mirror of the $FFC0 block (fullsnes
+/// "SNES Memory Map" ExHiROM row: the header/vectors for the >4 MiB half of
+/// an ExHiROM cartridge sit at $40FFC0, not $FFC0 — only used by
+/// [`fallback_mapping_guess`]'s ExHiROM branch, ticket W14-52.
+const EXHIROM_HEADER_OFFSET: usize = 0x40FFC0;
+/// Images at or under this size cannot be ExHiROM (fullsnes: ExHiROM exists
+/// specifically to address cartridges too large for a single bank of
+/// mirrors — every real ExHiROM release is > 4 MiB); used only to decide
+/// whether the fallback's third mapping guess is worth trying.
+const EXHIROM_MIN_SIZE: usize = 4 * 1024 * 1024;
 /// Header fields ($00-$1F) plus the interrupt vector table ($20-$3F).
 const HEADER_BLOCK_LEN: usize = 0x40;
 
@@ -86,6 +96,30 @@ pub struct SnesHeader {
     pub checksum_complement: u16,
     /// Whether a 512-byte copier header was stripped before parsing.
     pub had_copier_header: bool,
+    /// `Some` iff `score_candidate` found no plausible header at either
+    /// location and [`fallback_mapping_guess`] had to name the mapping from
+    /// the RESET vector instead (ticket W14-52). `None` means the header
+    /// scored normally — real hardware never reads the header at all, so
+    /// this is purely a diagnostic for the census/UI, never behavior.
+    pub header_fallback: Option<HeaderFallback>,
+}
+
+/// Which mapping [`fallback_mapping_guess`] picked, and why, for a
+/// cartridge whose header failed ordinary plausibility scoring (ticket
+/// W14-52). Carried on [`SnesHeader`] purely as a diagnostic — the fallback
+/// itself already committed to a `SnesMapMode` before this is attached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderFallback {
+    /// The LoROM RESET vector (bank $00, file offset `vector - $8000`)
+    /// pointed at a plausible 65816 reset prologue.
+    LoRomResetVector,
+    /// The HiROM RESET vector (bank $00's upper half, file offset ==
+    /// vector) pointed at a plausible prologue.
+    HiRomResetVector,
+    /// The ExHiROM RESET vector (bank $00's upper half mapping into the
+    /// cartridge's second 4 MiB, file offset == `$400000 + vector`)
+    /// pointed at a plausible prologue. Only tried for images > 4 MiB.
+    ExHiRomResetVector,
 }
 
 /// Which enhancement coprocessor (if any) the cartridge exposes.
@@ -468,6 +502,220 @@ fn score_candidate(data: &[u8], base: usize) -> Option<Candidate> {
     Some(Candidate { base, score })
 }
 
+/// A plausible 65816 reset prologue's first opcode byte, per the WDC 65C816
+/// datasheet's reset behavior (emulation mode, M/X=1, PC loaded from
+/// $FFFC/$FFFD — snes.nesdev.org "65c816 reference" Reset) and the
+/// idioms every SNES boot ROM this project has traced uses immediately
+/// after: `SEI` ($78, disable IRQs first), `CLC`/`SEC` ($18/$38, set the
+/// carry ahead of `XCE`), `XCE` ($FB, swap emulation/native mode — the
+/// standard `CLC`/`XCE` idiom that leaves emulation mode), `JMP`/`JML`
+/// ($4C/$5C, some titles vector straight to a real init routine), `REP`/
+/// `SEP` ($C2/$E2, set the 8/16-bit register widths before touching A/X/Y),
+/// `LDA #imm` ($A9), or `STZ` ($9C, common as the very first instruction
+/// when the boot code zeroes a hardware register before anything else).
+/// This is a heuristic, not a disassembler: it looks at the first four
+/// bytes only, and a title-keyed table of "the" prologue would violate law
+/// 5 even if one existed, so this stays a generic opcode-shape check.
+fn looks_like_reset_prologue(bytes: &[u8]) -> bool {
+    const PLAUSIBLE_FIRST_BYTES: [u8; 10] =
+        [0x78, 0x18, 0xFB, 0x38, 0x4C, 0x5C, 0xC2, 0xE2, 0xA9, 0x9C];
+    if bytes.is_empty() {
+        return false;
+    }
+    if PLAUSIBLE_FIRST_BYTES.contains(&bytes[0]) {
+        return true;
+    }
+    // CLC/XCE as a pair starting at byte 0 is already covered by CLC
+    // ($18) above; this also catches a leading NOP/other filler byte
+    // immediately followed by the CLC/XCE idiom within the first four
+    // bytes, which several beta/proto dumps in the population this
+    // ticket was filed for actually do.
+    bytes.windows(2).any(|w| w == [0x18, 0xFB])
+}
+
+/// When neither header location scores as plausible, guess the mapping
+/// from the one thing every cartridge that boots actually has: a RESET
+/// vector that points at real code (ticket W14-52). Real hardware never
+/// reads $7FC0/$FFC0 at all — the header is a scoring convenience for
+/// emulators, not something the SNES CPU consults — so a cartridge with a
+/// corrupted checksum, garbage map-mode byte, or blanked-out title still
+/// boots on real hardware provided its PCB is wired LoROM or HiROM and its
+/// RESET vector is intact, which this fallback checks directly instead of
+/// the header fields that failed scoring.
+///
+/// Tries LoROM, then HiROM, then (for images > 4 MiB) ExHiROM. For each:
+/// the RESET vector at that mapping's header block must decode to an
+/// address `>= $8000` (WRAM/hardware registers live below that in every
+/// one of these maps, so a vector below it cannot be pointing at mapped
+/// ROM) and the bytes at the file offset that address maps to must look
+/// like a 65816 reset prologue ([`looks_like_reset_prologue`]). Among
+/// mappings that qualify, prefers one whose OWN map-mode byte nibble
+/// agrees with the mapping being tried, then (if LoROM and HiROM both
+/// qualify) the one whose header title is majority-printable ASCII —
+/// exactly the two extra signals `score_candidate` already uses, just
+/// applied as a tie-break instead of a score.
+fn fallback_mapping_guess(data: &[u8]) -> Option<(SnesMapMode, usize, HeaderFallback)> {
+    struct Guess {
+        mode: SnesMapMode,
+        base: usize,
+        kind: HeaderFallback,
+        expected_nibble: u8,
+    }
+    let mut guesses = vec![Guess {
+        mode: SnesMapMode::LoRom,
+        base: LOROM_HEADER_OFFSET,
+        kind: HeaderFallback::LoRomResetVector,
+        expected_nibble: 0x0,
+    }];
+    guesses.push(Guess {
+        mode: SnesMapMode::HiRom,
+        base: HIROM_HEADER_OFFSET,
+        kind: HeaderFallback::HiRomResetVector,
+        expected_nibble: 0x1,
+    });
+    if data.len() > EXHIROM_MIN_SIZE {
+        guesses.push(Guess {
+            mode: SnesMapMode::HiRom,
+            base: EXHIROM_HEADER_OFFSET,
+            kind: HeaderFallback::ExHiRomResetVector,
+            expected_nibble: 0x5,
+        });
+    }
+
+    let mut best: Option<(i32, usize, SnesMapMode, usize, HeaderFallback)> = None;
+    for (order, g) in guesses.into_iter().enumerate() {
+        if data.len() < g.base + HEADER_BLOCK_LEN {
+            continue;
+        }
+        let reset_vector = u16::from_le_bytes([
+            data[g.base + RESET_VECTOR_OFFSET],
+            data[g.base + RESET_VECTOR_OFFSET + 1],
+        ]);
+        if reset_vector < 0x8000 {
+            continue;
+        }
+        let file_offset = match g.kind {
+            // LoROM bank $00: file offset 0 is CPU $8000 (fullsnes "SNES
+            // Memory Map" LoROM row).
+            HeaderFallback::LoRomResetVector => usize::from(reset_vector) - 0x8000,
+            // HiROM bank $00's upper half mirrors bank $C0, whose file
+            // offset equals the address directly.
+            HeaderFallback::HiRomResetVector => usize::from(reset_vector),
+            // ExHiROM bank $00's upper half maps into the cartridge's
+            // SECOND 4 MiB (fullsnes "SNES Memory Map" ExHiROM row) — the
+            // same half the $40FFC0 header itself lives in.
+            HeaderFallback::ExHiRomResetVector => EXHIROM_MIN_SIZE + usize::from(reset_vector),
+        };
+        if file_offset + 4 > data.len() {
+            continue;
+        }
+        if !looks_like_reset_prologue(&data[file_offset..file_offset + 4]) {
+            continue;
+        }
+        let mode_byte = data[g.base + 0x15];
+        let mut score = 0i32;
+        if mode_byte & 0x0F == g.expected_nibble {
+            score += 1;
+        }
+        let printable = data[g.base..g.base + 0x15]
+            .iter()
+            .filter(|&&b| (0x20..=0x7E).contains(&b))
+            .count();
+        if printable >= 12 {
+            score += 1;
+        }
+        // Order acts as the final tie-break (LoROM, then HiROM, then
+        // ExHiROM), so only a STRICTLY better score displaces the earlier
+        // guess.
+        let candidate = (score, usize::MAX - order, g.mode, g.base, g.kind);
+        if best.as_ref().is_none_or(|b| candidate.0 > b.0) {
+            best = Some(candidate);
+        }
+    }
+    best.map(|(_, _, mode, base, kind)| (mode, base, kind))
+}
+
+/// Build a [`SnesHeader`] once [`fallback_mapping_guess`] has already
+/// confirmed a mapping from the RESET vector (ticket W14-52). The header
+/// FIELDS at `base` are, by construction, the ones that just failed
+/// plausibility scoring — so this trusts them far less than the scored
+/// path does:
+///
+/// - `rom_size` comes from the ACTUAL image length, not the header's size
+///   byte, which is exactly the field this ticket's population shows
+///   corrupted most often (garbage exponents that would overflow
+///   `kb_pow2`, or a value nowhere near the real dump size). The file's own
+///   length is strictly more trustworthy than a byte inside the same
+///   header block that just failed every other check.
+/// - `ram_size` still reads the header byte through `kb_pow2`, falling
+///   back to 0 (no RAM) on an implausible exponent rather than failing the
+///   whole cartridge over a field that, worst case, only affects save
+///   support.
+/// - the coprocessor is only ever read as `Coprocessor::None`, per the
+///   ticket's own acceptance ("the title's chipset stays 'none' unless the
+///   header says otherwise"): a chipset byte found via this fallback has
+///   no more credibility than the map-mode byte that just failed to name
+///   this location, so it is trusted only for the plain ROM/ROM+RAM/
+///   ROM+RAM+battery values ($00/$01/$02) that carry no coprocessor claim
+///   at all, and ignored (treated as plain ROM, no battery) otherwise
+///   rather than routed through a chip HLE on unreliable evidence.
+/// - `ExHiROM` is detected (so FR-CORE-013 can name it) but still refused:
+///   `rf-snes` has no ExHiROM memory map regardless of how the header was
+///   found, so accepting it here would just move the half-boot this ticket
+///   exists to prevent from "bad header" to "bad map".
+fn build_header_from_fallback(
+    data: &[u8],
+    mode: SnesMapMode,
+    base: usize,
+    kind: HeaderFallback,
+    had_copier_header: bool,
+) -> Result<SnesHeader, CartError> {
+    if matches!(kind, HeaderFallback::ExHiRomResetVector) {
+        return Err(CartError::UnsupportedChip {
+            name: "ExHiROM (header-fallback RESET vector)".to_string(),
+        });
+    }
+
+    let mode_byte = data[base + 0x15];
+    let fast_rom = mode_byte & 0x10 != 0;
+    let rom_size = data.len();
+    // `kb_pow2` only refuses an exponent that overflows `usize` outright
+    // (>=54 or so on a 64-bit build) — nowhere near tight enough for a
+    // BYTE this ticket's whole premise is that we cannot trust. A raw
+    // exponent like Beta F-Zero's real $24 (36) decodes "successfully" to
+    // 64 TiB and downstream code allocates it. Real cartridge RAM never
+    // exceeds a few hundred KiB (SA-1's 2 MiB BW-RAM is a different field
+    // entirely, read only once the SA-1 chipset byte itself is trusted,
+    // never through this fallback) so anything past the same plausible
+    // ceiling `score_candidate` uses for ROM size ($0D, 8 MiB) is treated
+    // as corrupt and defaulted to "no RAM" rather than allocated.
+    let ram_size_byte = data[base + 0x18];
+    let ram_size = if ram_size_byte <= 0x0D {
+        kb_pow2(ram_size_byte).unwrap_or(0)
+    } else {
+        0
+    };
+    let checksum = u16::from_le_bytes([data[base + 0x1E], data[base + 0x1F]]);
+    let checksum_complement = u16::from_le_bytes([data[base + 0x1C], data[base + 0x1D]]);
+
+    let chipset = data[base + 0x16];
+    let battery = chipset == 0x02;
+
+    Ok(SnesHeader {
+        map_mode: mode,
+        fast_rom,
+        rom_size,
+        ram_size,
+        battery,
+        coprocessor: Coprocessor::None,
+        dsp_window: None,
+        checksum,
+        checksum_complement,
+        had_copier_header,
+        header_fallback: Some(kind),
+    })
+}
+
 /// Parse a SNES header, first stripping a 512-byte copier header if
 /// `raw.len() % 8192 == 512` (FR-CORE-010), then locating LoROM ($7FC0) vs
 /// HiROM ($FFC0) by scoring both candidate locations.
@@ -515,10 +763,21 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
                     got: data.len(),
                 });
             }
+            // Ticket W14-52: `score_candidate`'s necessary conditions
+            // (country code, revision byte) failed at BOTH locations here
+            // — a corrupted header can clear those too, e.g. a filler byte
+            // over $14 in the country field — but that still says nothing
+            // about whether the cartridge boots. Try the RESET-vector
+            // fallback before giving up; see its doc and the call site
+            // below for the full rationale.
+            if let Some((mode, base, kind)) = fallback_mapping_guess(data) {
+                return build_header_from_fallback(data, mode, base, kind, had_copier_header);
+            }
             return Err(CartError::InvalidHeader(
                 "no plausible SNES header at $7FC0 or $FFC0: neither location has a \
                  map mode matching it, an assigned country code and a plausible \
-                 revision"
+                 revision, and no RESET-vector fallback mapping produced a \
+                 plausible reset prologue either"
                     .to_string(),
             ));
         }
@@ -543,9 +802,24 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         if let Some(err) = unsupported_map_mode_at_either_location(data) {
             return Err(err);
         }
+        // Ticket W14-52: real hardware never reads $7FC0/$FFC0 at all —
+        // scoring is an emulator convenience, not something a physical
+        // cartridge needs to pass. Before giving up, check whether the
+        // RESET vector alone (the one thing every cartridge that boots
+        // truly has) picks out a mapping. A survey of this project's own
+        // 74-title no-plausible-header population found the RESET-vector
+        // prologue intact — and pointing at real code — for the large
+        // majority of them: corrupted checksums, garbage map-mode bytes,
+        // and blanked-out titles from betas/protos/pirates all still leave
+        // the vector table alone.
+        if let Some((mode, base, kind)) = fallback_mapping_guess(data) {
+            return build_header_from_fallback(data, mode, base, kind, had_copier_header);
+        }
         return Err(CartError::InvalidHeader(format!(
             "no plausible SNES header at $7FC0 or $FFC0: best candidate scored \
-             {} of {} (checksum/complement, reset vector, map mode, title)",
+             {} of {} (checksum/complement, reset vector, map mode, title), and \
+             no RESET-vector fallback mapping produced a plausible reset prologue \
+             either",
             winner.score, MINIMUM_SCORE
         )));
     }
@@ -574,6 +848,29 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
     // takes priority over the nibble for $0/$1; only $3 (SA-1, which
     // fullsnes documents as always headered at the LoROM location too) and
     // the explicitly-unsupported nibbles keep reading the nibble itself.
+    //
+    // W14-52: this survey's population turned up the SAME shape for
+    // nibbles fullsnes never assigns at all (`Super Adventure Island` ships
+    // $44, `HAL's Hole in One Golf` ships $46 — both otherwise
+    // excellent-scoring LoROM headers: valid checksum/complement, a
+    // legible 21-byte title, a reset vector into real code). An
+    // UNASSIGNED nibble can never legitimately name a real board — unlike
+    // $2/$5/$A, which name real (if unsupported) hardware this build must
+    // still refuse honestly per FR-CORE-013 — so it gets the same
+    // location-wins treatment as $0/$1 rather than an "unrecognized map
+    // mode" refusal. `KNOWN_UNSUPPORTED_MAP_MODES` ($2 S-DD1, $5 ExHiROM,
+    // $A SPC7110) and $3 (SA-1, gated on the chipset byte separately below)
+    // are deliberately EXCLUDED from this: those nibbles collide with named
+    // chips this build cannot run, and `Contra III`/`The Duel`/`Krusty's
+    // Super Fun House`/`Space Football` in this same population happen to
+    // hit exactly those collisions (SA-1/S-DD1/ExHiROM nibbles with a
+    // chipset byte that does NOT corroborate the chip) — see
+    // `docs/TESTING.md`'s W14-52 section for why loosening THAT specific
+    // check is a separate call this ticket does not make unilaterally: the
+    // SA-1 corroboration requirement is W17-01's own deliberate "both must
+    // agree" ruling, pinned by
+    // `sa1_map_mode_without_sa1_chipset_still_refuses`, and the same
+    // argument applies to S-DD1/ExHiROM's blanket refusal.
     let map_mode = match mode_nibble {
         0x0 | 0x1 => {
             if base == LOROM_HEADER_OFFSET {
@@ -583,13 +880,20 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
             }
         }
         0x3 => SnesMapMode::Sa1,
-        _ => {
+        nibble if KNOWN_UNSUPPORTED_MAP_MODES.contains(&nibble) => {
             return Err(CartError::UnsupportedChip {
                 name: format!(
                     "{} (SNES map mode ${mode_byte:02X})",
                     map_mode_name(mode_nibble)
                 ),
             });
+        }
+        _ => {
+            if base == LOROM_HEADER_OFFSET {
+                SnesMapMode::LoRom
+            } else {
+                SnesMapMode::HiRom
+            }
         }
     };
 
@@ -717,6 +1021,7 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         checksum,
         checksum_complement,
         had_copier_header,
+        header_fallback: None,
     })
 }
 
@@ -1268,5 +1573,155 @@ mod tests {
     fn rejects_empty_input_without_panicking() {
         let err = parse_snes_header(&[]).unwrap_err();
         assert!(matches!(err, CartError::Truncated { .. }));
+    }
+
+    // ---- W14-52: RESET-vector fallback for headers that fail scoring -----
+
+    /// A LoROM image whose header block scores below `MINIMUM_SCORE` (bad
+    /// checksum/complement, disagreeing map-mode nibble, implausible ROM
+    /// size, unprintable title — the shape this ticket's population survey
+    /// found repeatedly among corrupted beta/proto/pirate dumps) but whose
+    /// LoROM RESET vector points at a real 65816 reset prologue
+    /// (`SEI`/`CLC`/`XCE`, $78 $18 $FB) at file offset 0.
+    #[test]
+    fn lorom_with_corrupted_checksum_loads_as_lorom_via_reset_vector_fallback() {
+        let mut data = vec![0u8; 0x8000];
+        let base = LOROM_HEADER_OFFSET;
+        data[0] = 0x78; // SEI
+        data[1] = 0x18; // CLC
+        data[2] = 0xFB; // XCE
+        data[base + 0x15] = 0xFF; // map-mode nibble disagrees with LoROM ($F)
+        data[base + 0x16] = 0x00; // plain ROM chipset
+        data[base + 0x17] = 0xFF; // implausible size exponent (no score point)
+        data[base + 0x18] = 0x00;
+        set_checksum(&mut data, base, 0x0000); // checksum stays 0 -> no xor point
+        set_reset_vector(&mut data, base, 0x8000); // -> file offset 0
+
+        let header = parse_snes_header(&data).expect("RESET-vector fallback must accept this");
+        assert_eq!(header.map_mode, SnesMapMode::LoRom);
+        assert_eq!(
+            header.header_fallback,
+            Some(HeaderFallback::LoRomResetVector)
+        );
+        assert_eq!(header.coprocessor, Coprocessor::None);
+        assert_eq!(
+            header.rom_size,
+            data.len(),
+            "fallback must size ROM from the real image length, not the corrupted byte"
+        );
+    }
+
+    /// A HiROM image whose map-mode byte is garbage (so `score_candidate`'s
+    /// nibble-agreement point is lost) and whose checksum/complement are
+    /// zeroed, but whose HiROM RESET vector points at a plausible prologue.
+    #[test]
+    fn hirom_with_garbage_map_mode_byte_loads_as_hirom_via_reset_vector_fallback() {
+        let mut data = vec![0u8; 0x10000];
+        let base = HIROM_HEADER_OFFSET;
+        let target = 0xC000usize; // an ordinary HiROM RESET target
+        data[target] = 0xC2; // REP #imm
+        data[target + 1] = 0x30;
+        data[base + 0x15] = 0x77; // garbage map-mode byte (nibble $7)
+        data[base + 0x16] = 0x00;
+        data[base + 0x17] = 0xFF; // implausible size exponent
+        data[base + 0x18] = 0x00;
+        set_checksum(&mut data, base, 0x0000);
+        set_reset_vector(&mut data, base, target as u16);
+
+        let header = parse_snes_header(&data).expect("RESET-vector fallback must accept this");
+        assert_eq!(header.map_mode, SnesMapMode::HiRom);
+        assert_eq!(
+            header.header_fallback,
+            Some(HeaderFallback::HiRomResetVector)
+        );
+    }
+
+    /// The fallback runs on the copier-header-stripped image, same as
+    /// ordinary scoring — a 512-byte copier header in front of an otherwise
+    /// fallback-only LoROM image must still be stripped before the RESET
+    /// vector is read.
+    #[test]
+    fn copier_headered_lorom_loads_via_reset_vector_fallback() {
+        let mut inner = vec![0u8; 0x8000];
+        let base = LOROM_HEADER_OFFSET;
+        inner[0] = 0x38; // SEC
+        inner[1] = 0xFB; // XCE (SEC/XCE: the emulation-mode-entry idiom)
+        inner[base + 0x15] = 0xFF;
+        inner[base + 0x16] = 0x00;
+        inner[base + 0x17] = 0xFF;
+        inner[base + 0x18] = 0x00;
+        set_checksum(&mut inner, base, 0x0000);
+        set_reset_vector(&mut inner, base, 0x8000);
+
+        let mut rom = vec![0u8; COPIER_HEADER_LEN];
+        rom.extend(inner);
+        assert_eq!(
+            rom.len() % 8192,
+            512,
+            "fixture must trip the copier heuristic"
+        );
+
+        let header =
+            parse_snes_header(&rom).expect("copier-headered fallback image must still load");
+        assert!(header.had_copier_header);
+        assert_eq!(header.map_mode, SnesMapMode::LoRom);
+        assert_eq!(
+            header.header_fallback,
+            Some(HeaderFallback::LoRomResetVector)
+        );
+    }
+
+    /// Regression: real Beta F-Zero (1991-05-13) carries a garbage RAM-size
+    /// byte ($24, exponent 36) at the fallback location — `kb_pow2` does
+    /// not treat that as an error (it only overflows past exponent ~54 on
+    /// a 64-bit `usize`), so the un-clamped fallback tried to report 64 TiB
+    /// of cartridge RAM and a downstream allocation aborted the process.
+    /// Pinned here so the RAM-size clamp in `build_header_from_fallback`
+    /// cannot regress silently.
+    #[test]
+    fn fallback_clamps_an_implausible_ram_size_exponent_to_zero() {
+        let mut data = vec![0u8; 0x8000];
+        let base = LOROM_HEADER_OFFSET;
+        data[0] = 0x78; // SEI
+        data[1] = 0x18; // CLC
+        data[2] = 0xFB; // XCE
+        data[base + 0x15] = 0xEC; // garbage map-mode byte, real F-Zero-beta value
+        data[base + 0x16] = 0x14;
+        data[base + 0x17] = 0xEC; // implausible ROM size exponent too
+        data[base + 0x18] = 0x24; // 1<<36 KiB if trusted -- 64 TiB
+        set_checksum(&mut data, base, 0x0000);
+        set_reset_vector(&mut data, base, 0x8000);
+
+        let header = parse_snes_header(&data).expect("fallback must still accept this cart");
+        assert_eq!(
+            header.ram_size, 0,
+            "an implausible RAM-size exponent must clamp to 0, not allocate it"
+        );
+    }
+
+    /// Uniformly random-shaped data must still be refused: nothing in it
+    /// resembles a header, AND its RESET vector at both candidate locations
+    /// reads as $0000 — below $8000, i.e. WRAM/registers, not mapped ROM —
+    /// which the fallback's own necessary condition rejects before it ever
+    /// looks at prologue bytes. This is what actually keeps the fallback
+    /// from re-admitting the all-zero-filler shape W14-05 was filed over,
+    /// so it is pinned as a test rather than assumed.
+    #[test]
+    fn random_bytes_image_still_refused_by_reset_vector_fallback() {
+        // All-zero filler: `score_candidate`'s necessary conditions (country
+        // $00, revision $00) both pass, but there is no checksum/complement
+        // pair, no legible title, and the reset vector at both candidate
+        // locations is $0000 -- below $8000, so the fallback's own "must
+        // point into mapped ROM" check rejects both before ever reaching
+        // `looks_like_reset_prologue`.
+        let data = vec![0x00u8; 0x20000];
+        let err = parse_snes_header(&data).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CartError::InvalidHeader(_) | CartError::UnsupportedChip { .. }
+            ),
+            "non-header data must still be refused even with the fallback in place, got {err:?}"
+        );
     }
 }
