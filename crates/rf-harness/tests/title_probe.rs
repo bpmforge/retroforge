@@ -365,8 +365,15 @@ fn probe() {
                 }
             };
             let mut prev = snap(&core);
+            // W14-51: alongside the PPU write watch, also track the APU
+            // port pair ($2140-$2143) — answers "is this stretch
+            // audio-gated" (ongoing CPU<->SPC handshake traffic) or
+            // purely a CPU-side WRAM countdown (ports never move) without
+            // needing a second full run.
+            let mut apu_prev = core.system().bus.apu.ports_in;
             let mut n: u64 = 0;
             let mut changes: u64 = 0;
+            let mut apu_changes: u64 = 0;
             while n < cap {
                 core.step(Step::Instruction, &mut sink);
                 n += 1;
@@ -377,9 +384,14 @@ fn probe() {
                     changes += 1;
                     prev = cur;
                 }
+                let apu_cur = core.system().bus.apu.ports_in;
+                if apu_cur != apu_prev {
+                    apu_changes += 1;
+                    apu_prev = apu_cur;
+                }
             }
             println!(
-                "PPUWRITES done frame={} changes={changes} n={n} {}",
+                "PPUWRITES done frame={} changes={changes} apu_port_changes={apu_changes} n={n} {}",
                 core.system().bus.timing.frame,
                 Path::new(path).file_name().unwrap().to_string_lossy()
             );

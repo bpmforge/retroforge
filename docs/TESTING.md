@@ -7255,9 +7255,40 @@ trace around n=872 of that final frame) — the compositor renders
 correctly once the game itself asks it to; nothing in the render path
 needed a fix to show it.
 
-**Bug Fix Discipline — the three candidate root causes for "why is the
-picture-content frame this far out", ranked, and why none is fixed
-here.**
+**The canary comparison that actually discriminates.** Sweeping the
+same `PROBE_MODE=frames PROBE_FRAMES=12000` on two titles the census
+already renders (`boot_census_child` exit 0): **Super Mario World
+`varied_at=88`**, **Wild Guns `varied_at=84`** — matching the W14-42
+titles' own range (53-150 frames). Final Fight 2 (6607) and Battletoads
+(3520) are **40-80x** that, not a mild multiple. That gap is the single
+strongest signal in this trace and rules out "ordinary intro, just a
+bit longer" as the plain reading — a title-specific defect this large
+and this consistent (both far outliers, from two unrelated publishers)
+needs a specific mechanism, not a shrug.
+
+**The APU port pair is completely silent across the entire plateau —
+ruling out an audio-gated wait specifically.** Extended
+`PROBE_MODE=ppuwrites` to also count changes to `apu.ports_in`
+($2140-$2143, readable so `PROBE_WATCH` could see it too, but the
+decode-side counter is cheaper here) across the same fast-forward-then-
+watch window. Checked at frames 600, 2000, 4000, and 6000 for Final
+Fight 2, each over the following 300,000 instructions:
+**`apu_port_changes=0` at every single checkpoint.** The CPU never
+touches the SPC handshake ports anywhere in this 6000-frame span — so
+whatever governs how long the intro runs is NOT gated on an
+SPC700/S-DSP response the CPU is waiting to see arrive. This directly
+rules out "an audio cue's completion signal is delayed by the S-DSP
+echo/ADSR work in progress under W7-08" as the mechanism, even though
+that S-DSP work is genuinely unfinished (`echo: write_disabled=true`
+observed in an earlier sample) — it simply isn't in this particular
+loop's dependency chain. (`changes=224` at the frame-4000 checkpoint,
+vs. 21-26 at the others, is a real per-frame PPU-write-count outlier —
+consistent with a specific scene doing more per-frame register work,
+e.g. a strobe/flash transition — not itself investigated further.)
+
+**Bug Fix Discipline — the two remaining candidate root causes for "why
+this 40-80x gap over every known-good title", ranked, and why neither
+is fixed here.**
 
 1. **A stuck/incorrectly-decoded PPU register (the ticket's own
    framing — a CGWSEL-class or window-class bug).** Verified against
@@ -7266,40 +7297,45 @@ here.**
    configuration W14-42 fixed — and every window's enable pair is
    `(false,false)` (never masks). Ruled out: no forcing-black or
    masking configuration is present; the flat picture is explained
-   entirely by `tm=0`, and `tm`'s own writes (above) are internally
-   consistent with a legitimate multi-scene fade sequence, not a
-   corrupted decode.
-2. **The intro genuinely takes this long on real hardware too (a
-   census-methodology gap, the Lagoon/Phalanx class from W14-35).**
-   Supported by the WRAM-shadow-copy and per-frame vsync-gate evidence
-   above: every individual step (settle delay, SPC upload rate, fade
-   ramp, blinking splash BG) is a normal, correctly-timed primitive:
-   NMI cadence itself is independently known-correct for these two
-   titles (W14-47: 158 real NMI dispatches / 315 IRQ pairs over
-   3,000,000 instructions, exactly the expected per-frame rate) — so a
-   frame count this large is not a symptom of miscounted frames, it is
-   the game's own state machine genuinely iterating that many times
-   before showing content. Not independently confirmed against real
-   hardware capture (none available in this environment) but positively
-   supported by every piece of internal evidence gathered.
-3. **A CPU-side or SPC-side timing bug inflates a scene-duration wait
-   (e.g. an audio-driven "wait for this cue to finish" gate running
-   slower than intended because of an unrelated defect in the S-DSP).**
-   Plausible in principle — `rf-snes`'s S-DSP echo/ADSR is under active,
-   unfinished repair in the concurrently-claimed W7-08 lane (per that
-   ticket's own status: "spc_dsp6 echo still red") — but NOT chased
-   further here: doing so would mean reading and reasoning about
-   exactly the APU/DSP surface W7-08 already has in flight, redoing
-   work that ticket's own session is best positioned to finish, and
-   risking a diagnosis built on a mid-repair DSP state. Left as the
-   one open hypothesis for a future ticket to pick up once W7-08 lands,
-   not fixed or ruled out here.
+   entirely by `tm=0`, and `tm`'s own writes are internally consistent
+   (an ordinary WRAM-shadow-copy vsync idiom, not a corrupted decode).
+2. **A CPU-side state-machine defect** — a scene/mode dispatcher whose
+   comparison against some large constant, or whose own WRAM counter
+   increment, is emulated incorrectly in a way that makes it iterate
+   40-80x more main-loop passes than the ROM author intended, entirely
+   independent of audio (per the port-silence finding above). The
+   `$808C0B`/`$8085F7`/`$808963` triangle disassembled here is the
+   game's ordinary per-frame main-loop tick, not an isolated "wait"
+   construct — it runs identically whether the title is mid-splash or
+   mid-gameplay, so the actual defect (if this hypothesis is right)
+   lives in whatever WRAM cell decides how many more times to run that
+   loop before advancing the scene/mode index, which requires
+   disassembling that title's own scene dispatcher to find — a
+   full reverse-engineering pass outside this ticket's remaining
+   budget, not a register-level defect this ticket's diagnostics reach
+   directly.
+3. **The intro genuinely is this long by design** (the Lagoon/Phalanx
+   census-methodology class, W14-35) is **weakened, not supported**, by
+   the canary comparison above: two unrelated titles both landing
+   40-80x past every known-good title's `varied_at` is a coincidence
+   this ticket does not have independent evidence for, and no longer
+   the front-running explanation — kept as a live possibility only
+   because arcade-derived beat-em-ups are known for unusually long
+   attract-mode cycles, not because anything measured here confirms it
+   for these two ROMs specifically.
 
-No source change to `crates/rf-snes/**` this ticket — nothing in
-hypothesis (1) survived verification, so per CLAUDE.md's Bug Fix
-Discipline no fix is proposed. The only change is the new
-`PROBE_MODE=ppuwrites` diagnostic in `crates/rf-harness/tests/
-title_probe.rs` (harness-only, `#[ignore]`d, no gate impact).
+Hypothesis (2) is ranked above (3) as the more likely explanation, on
+the strength of the canary gap; neither is confirmed. **No source
+change to `crates/rf-snes/**` this ticket** — nothing in hypothesis (1) survived
+verification, and (2)/(3) both require work (full scene-dispatcher
+reverse-engineering, or real-hardware timing capture neither available
+nor budgeted here) this ticket does not have the scope to complete
+responsibly; shipping a guess at either would violate CLAUDE.md's Bug
+Fix Discipline. The only change is the new `PROBE_MODE=ppuwrites`
+diagnostic (now also counting APU port-pair changes) in
+`crates/rf-harness/tests/title_probe.rs` (harness-only, `#[ignore]`d,
+no gate impact) — it is what a follow-up ticket should start from to
+locate the specific WRAM cell driving the scene/mode index.
 
 ### Gate
 
@@ -7308,11 +7344,18 @@ clean. `cargo test -p rf-snes`: **381 passed**, 0 failed, 1 ignored
 (unchanged from W14-47's baseline — no production code touched).
 Ignored oracle suites re-run: `peterlemon_golden` — **3/3 passed**;
 `region_golden` — **1/1 passed**; `undisbeliever_golden`'s
-`undisbeliever_goldens_match` — **1/1 passed**. `scripts/
-validate-arch.sh`: `arch OK`. `singlestep_65816_vectors`/
-`singlestep_spc700_vectors`/`gilyon_cputest`/`blargg_spc` not re-run
-this session (no CPU/SPC core code touched; W14-47 already re-verified
-all four on the pre-existing tree this ticket builds on).
+`undisbeliever_goldens_match` — **1/1 passed**; `singlestep_spc700_
+vectors` — **2/2 passed**; `gilyon_cputest`'s
+`cputest_full_reports_success_and_every_test_passes` — `test_num=
+0x0649/0x0649, ROM says "Success"`; `blargg_spc` — **3/3 passed**
+(`spc_timer.sfc`: "PASSED TESTS"). `scripts/validate-arch.sh`:
+`arch OK`. **`singlestep_65816_vectors` skipped** — started against
+the local 2.7 GiB vector set (`roms/snes/singlestep-65816`, present
+in this worktree) but did not finish inside this session; the
+orchestrator's own gate re-covers this suite, and W14-47 already
+verified it green (5,080,000/5,080,000) on the tree this ticket
+builds on with no CPU-core changes since. Reported as skipped, not
+claimed as passing.
 
 ### Census children
 
