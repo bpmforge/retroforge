@@ -531,6 +531,15 @@ fn probe() {
                 );
             }
             print_sa1_reg_report(&core);
+            // Ticket W18-05: `frames` mode never called this (only the
+            // default, PROBE_INSTR-budget mode and `gsuhist` did), so a
+            // GSU title's stuck-cause trace had to fall back to `gsuhist`
+            // or the slow default mode even though `frames` is the mode
+            // that actually answers "does it ever render" — added here so
+            // `PROBE_GSUREGS=1 PROBE_MODE=frames` reports the GSU core
+            // state (PC, GO, IRQ, cache/stall counters, plot/rpix calls)
+            // at the exact frame count `boot_census` itself uses.
+            print_gsu_reg_report(&core);
             continue;
         }
         // instruction-step the whole run, logging port/timer changes in a ring buffer
