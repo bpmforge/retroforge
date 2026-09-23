@@ -9566,3 +9566,225 @@ exit 0 = rendered something:
 No canary moved — the OBC1 window only claims addresses no other
 cartridge's mapping reaches (`obc1` is `None` for every non-OBC1 cart,
 same "one owner decides" pattern SA-1/GSU/DSP-1 use).
+
+## W14-52 — SNES header plausibility: a RESET-vector fallback for headers
+## that fail scoring, plus one nibble-collision generalization
+
+Real SNES hardware never reads $7FC0/$FFC0 at all — `score_candidate`'s
+whole scheme (checksum/complement, title, map-mode nibble, ROM size) is an
+*emulator's* convenience for guessing LoROM vs HiROM, not something a
+physical cartridge needs to pass. W14-05/W14-36/W14-43 built that scoring
+up carefully against false positives, but the flip side went unaddressed:
+a cartridge whose header FIELDS are corrupted (bad checksum, garbage
+map-mode byte, blanked title — common in the beta/proto/pirate corner of a
+real library) still boots on real hardware provided its PCB is wired
+LoROM/HiROM and its RESET vector is intact. The orchestrator's tally of
+the 120 `refused (unsupported mapper or chip)` archives in
+`census-main-w1806.tsv` named 74 of them as hitting the `InvalidHeader("no
+plausible SNES header...")` message specifically (16 of the 120 are
+retail; the other ~104 are betas/protos/pirates that real hardware also
+runs).
+
+### Population survey (74-title sample, LoROM/HiROM header blocks +
+### reset-vector prologue at both candidate mappings)
+
+A Python re-implementation of `score_candidate` against the real archives
+(`~/Games/Roms/snes`) found four repeating shapes among the population
+that fails scoring:
+
+1. **Corrupted checksum/complement, everything else sane.** E.g. `Chuck
+   Rock (USA) (Beta)`: LoROM header at $7FC0 has a legible 21-byte title
+   (`CHUCK ROCK`), mode byte $20 (LoROM, agrees with location), but
+   `checksum=$FF00 / complement=$00FF` — XORs to $FFFF but `checksum==0`
+   fails the "not literally 0" guard on the strong signal — and a reset
+   vector ($F1B2) that decodes to `78 18 FB C2` (`SEI CLC XCE REP`) at its
+   LoROM file offset: a textbook 65816 reset prologue.
+2. **Wholesale $FF (erased-flash) filler at the header block, but the
+   RESET vector survives.** The most common shape by far —
+   `Havoc (USA) (Demo)`, `Lobo (USA) (Proto)`, `NBA Live 97 (USA) (Beta)`,
+   dozens more: every header field from $00-$3B is `$FF`, country/revision
+   both read as $FF (fails the necessary-condition gate outright), but the
+   two RESET vector bytes are real and decode to a real prologue
+   (`78 18 FB ...` at file offset 0 for several of these — the reset
+   vector points at the very first byte of the ROM).
+3. **Overdump/pirate garbage in most of the header, but a real title
+   string and a real prologue.** `Marvel Super Heroes vs. Street Fighter
+   (USA) (Pirate)`: mode byte $88 (bit 4 set = FastROM, low nibble 8 is
+   unassigned), yet `Marvel Vs Street` is legible ASCII and the checksum
+   pair XORs correctly — this is a genuine cartridge dump with an odd but
+   internally-consistent header, not noise.
+4. **Genuinely corrupt/incomplete dumps where NEITHER mapping's RESET
+   vector survives** (4 of the 74: `ESPN Sunday Night NFL (Beta) [b]`,
+   `Eurit (Proto)`, `ST010 (Enhancement Chip)`, `Terminator, The (Beta)`).
+   These stay refused under the fallback too — exactly the population
+   `score_candidate`'s stricter-than-before scoring was built to exclude,
+   so no plausible boot path exists at either mapping.
+
+### The rule (cited)
+
+When neither $7FC0 nor $FFC0 scores as a plausible header,
+`fallback_mapping_guess` (`crates/rf-cart/src/snes.rs`) tries LoROM, then
+HiROM, then (only for images > 4 MiB) ExHiROM. For each: the RESET vector
+at that mapping's header block (`$FFFC`/`$FFFD`, WDC 65C816 datasheet /
+snes.nesdev.org "65c816 reference" Reset: PC loads from $FFFC/$FFFD in
+emulation mode on reset) must decode to an address `>= $8000` — below that
+is WRAM or hardware registers in every one of these maps, never mapped
+ROM, at bank $00 — and the FILE bytes that address maps to must look like
+a 65816 reset prologue: `SEI` ($78), `CLC`/`SEC` ($18/$38, priming the
+carry for `XCE`), `XCE` ($FB, the emulation/native mode swap), `JMP`/`JML`
+($4C/$5C), `REP`/`SEP` ($C2/$E2), `LDA #imm` ($A9), `STZ` ($9C), or a
+`CLC`/`XCE` pair within the first four bytes. Among mappings that qualify,
+prefers one whose own map-mode nibble agrees with the mapping tried, then
+(LoROM vs HiROM both qualifying) the one with a majority-printable-ASCII
+title — the same two extra signals `score_candidate` already uses, as a
+tie-break rather than a score. LoROM's file offset is `vector - $8000`
+(bank $00, file offset 0 is CPU $8000); HiROM's is `vector` directly (bank
+$00's upper half mirrors bank $C0, whose file offset equals the address);
+ExHiROM's is `$400000 + vector` (bank $00's upper half maps into the
+cartridge's second 4 MiB, matching where the $40FFC0 header itself lives).
+ExHiROM is still refused honestly (`UnsupportedChip`) even when the
+fallback finds it — `rf-snes` has no ExHiROM memory map regardless of how
+the header was located, so accepting it here would only move the
+half-boot this ticket exists to prevent from "bad header" to "bad map";
+no title in the local library's no-plausible-header population is large
+enough to exercise this branch (largest is 3 MiB), so it is cited and
+tested only lightly (`EXHIROM_MIN_SIZE` gate), not against a real archive.
+
+Once a fallback mapping is confirmed, the header's OWN fields are trusted
+far less than the scored path trusts them (that is, after all, why this
+cartridge needed the fallback): `rom_size` comes from the actual image
+length rather than the header's size byte (a real regression this ticket
+found and fixed, below); `ram_size` is clamped to the same $00-$0D
+plausible-exponent ceiling `score_candidate` uses for ROM size, defaulting
+to 0 on anything past it; the coprocessor is always reported `None` unless
+the chipset byte is exactly the plain ROM/ROM+RAM/ROM+RAM+battery values
+($00/$01/$02), per the ticket's own acceptance ("the title's chipset stays
+'none' unless the header says otherwise") — a chipset byte found this way
+has no more credibility than the map-mode byte that just failed. The
+fallback taken is recorded on `SnesHeader::header_fallback` (`None` for
+the ordinary scored path) purely as a diagnostic for the census/UI.
+
+**Bug found while building this (not shipped un-clamped):** Beta F-Zero
+(1991-05-13)'s real RAM-size byte at the LoROM fallback location is $24
+(exponent 36). `kb_pow2` only refuses an exponent that overflows `usize`
+outright (roughly >=54 on a 64-bit build) — nowhere near tight enough for
+a byte this ticket's whole premise says cannot be trusted — so the
+un-clamped first draft "successfully" decoded 64 TiB of cartridge RAM and
+a downstream allocation aborted the census child process (`Abort trap: 6`,
+`memory allocation of 70368744177664 bytes failed`). Root-caused via the
+boot-census child's own abort output (not guessed): the crash reproduced
+on exactly the one title whose header happens to carry an exponent in the
+30s, confirming the RAM-size byte as the cause before the fix, and the
+regression test `fallback_clamps_an_implausible_ram_size_exponent_to_zero`
+pins the exact byte pattern. Fixed by clamping `ram_size_byte` to
+`<= 0x0D` before calling `kb_pow2`, same ceiling `score_candidate` already
+uses for ROM size plausibility.
+
+### A second, narrower generalization: unassigned map-mode nibbles
+
+The population survey's retail sample turned up a related but DIFFERENT
+bug, not covered by the fallback above because these headers score
+*well*: `Super Adventure Island (USA)` (mode byte $44) and `HAL's Hole in
+One Golf (USA)` (mode byte $46) both have valid checksum/complement pairs,
+21-byte legible titles, and real reset-vector prologues at their LoROM
+location — `score_candidate` accepts them outright (score 5 of a minimum
+2) — but nibbles $4 and $6 are not $0/$1 (LoROM/HiROM) or $3 (SA-1), so
+the OLD downstream `match mode_nibble` fell through to its `_` arm and
+refused them as an "unrecognized map mode", even though fullsnes assigns
+**no real hardware meaning to nibble $4 or $6 at all**. Unlike $2/$5/$A
+(S-DD1/ExHiROM/SPC7110 — real, if unsupported, hardware this build must
+still name honestly per FR-CORE-013), an unassigned nibble can never
+legitimately identify a real board, so it now gets the same
+"location-wins" treatment W14-36 already gives $0/$1 collisions, rather
+than a hard refusal. `KNOWN_UNSUPPORTED_MAP_MODES` ($2/$5/$A) is
+unaffected and still refuses by name.
+
+### The seven retail titles named in the ticket
+
+| Title | Real mode byte | Outcome |
+|---|---|---|
+| Super Adventure Island (USA) | $44 (unassigned nibble $4) | **Renders** (LoROM, unassigned-nibble fix) |
+| HAL's Hole in One Golf (USA) | $46 (unassigned nibble $6) | **Renders** (LoROM, unassigned-nibble fix) |
+| Contra III - The Alien Wars (USA) | $53 (nibble $3 = SA-1) | Still refused — chipset byte is $00 (plain ROM), does not corroborate SA-1 |
+| Contra III - The Alien Wars (USA) (Virtual Console) | same shape | Still refused, same reason |
+| Krusty's Super Fun House (USA) | $45 (nibble $5 = ExHiROM) | Still refused — chipset $00 does not corroborate ExHiROM (also nowhere near 4 MiB) |
+| The Duel - Test Drive II (USA) | $32 (nibble $2 = S-DD1) | Still refused — chipset $00 does not corroborate S-DD1 |
+| Space Football - One on One (USA) | $45 (nibble $5 = ExHiROM) | Still refused — same as Krusty's |
+
+**Named, not fixed, on purpose (Bug Fix Discipline):** the four still-refused
+titles all collide with a nibble this build treats as naming a real
+(if unsupported) coprocessor map — SA-1 ($3), S-DD1 ($2), ExHiROM ($5) —
+and the code that refuses them when the chipset byte does not corroborate
+that chip is a DELIBERATE, previously-shipped ruling, not an oversight:
+`sa1_map_mode_without_sa1_chipset_still_refuses` (ticket W17-01, "both
+must agree") pins exactly the SA-1 half of it, and the same argument
+extends to S-DD1/ExHiROM's blanket refusal (this build has no S-DD1 or
+ExHiROM memory map at all, so even a genuine one of those carts could not
+run). Three possible fixes were considered and rejected without a ruling:
+(1) generalize "location wins" to $2/$3/$5/$A the same way it now does for
+unassigned nibbles — rejected because it would flip
+`sa1_map_mode_without_sa1_chipset_still_refuses`'s pinned expectation, and
+because a REAL SA-1/S-DD1/ExHiROM cart whose chipset byte happens to be
+corrupted in the same way would then silently mis-boot as plain LoROM
+instead of naming its real (unsupported) chip; (2) special-case these four
+exact titles by checksum, the way `known_non_dsp1_checksum` disambiguates
+DSP-4 — rejected by law 5's spirit (that mechanism exists to route a
+KNOWN-mismatched title to its real, still-refused chip name, not to
+silently accept one); (3) trust the RESET-vector fallback over the nibble
+even when `score_candidate` already accepted the header — rejected because
+it would make an already-strong signal (score 5, checksum valid, title
+legible) LESS authoritative than a heuristic built specifically for
+headers that field-level scoring could not read at all. All three remain
+open for a future ticket with Brad's ruling on which of them (if any) is
+worth the risk to real, correctly-detected SA-1/S-DD1/ExHiROM carts.
+
+### Tests
+
+`crates/rf-cart/src/snes.rs`, new tests (all in `mod tests`):
+`lorom_with_corrupted_checksum_loads_as_lorom_via_reset_vector_fallback`,
+`hirom_with_garbage_map_mode_byte_loads_as_hirom_via_reset_vector_fallback`,
+`copier_headered_lorom_loads_via_reset_vector_fallback`,
+`fallback_clamps_an_implausible_ram_size_exponent_to_zero`,
+`random_bytes_image_still_refused_by_reset_vector_fallback`. Every
+existing `rf-cart` test (60 before this ticket) passes unchanged;
+`cargo test -p rf-cart` is 65 passing (60 + 5 new), `cargo test -p
+rf-snes` is 440 passing/1 ignored, unchanged from main (this ticket never
+touches `rf-snes`).
+
+### Census (this ticket's own run, not the orchestrator's full census)
+
+Ran `boot_census_child` directly (newest `boot_census` binary, one child
+process per title, `RF_CENSUS_ROM` pointed at the archive) against all 120
+archives in the `refused (unsupported mapper or chip)` bucket of
+`census-main-w1806.tsv`, plus the 7 canaries named in the ticket:
+
+- **Canaries (7/7 exit 0, no regression):** Super Mario World, Wild Guns,
+  Super Mario RPG, Kirby Super Star, NHL 95, Star Fox (USA), WWF Super
+  WrestleMania.
+- **Of the 120 previously-refused archives: 80 moved (67%).** 65 now
+  render something (exit 0), 15 now render a uniform blank screen (exit
+  10 — the header parses and the cart loads; the game itself does not
+  draw within the 600-frame window, same as any other "blank" title, no
+  longer conflated with "cannot even identify this as a cartridge"), 40
+  remain refused (exit 12/11) — see the table above and the retained
+  named-chip population (Mega Man X2/X3: Cx4, W19-02; Metal Combat: OBC1,
+  W19-01; Top Gear 3000: DSP-4, the pre-existing checksum-keyed exception;
+  ST010: enhancement chip, unimplemented; the several `Super Game Boy`
+  dumps: not real SNES cartridges at all; the SA-1/S-DD1/ExHiROM
+  collisions above; a handful of betas/protos where neither RESET vector
+  survived).
+- No crash or timeout in the final run (the one abort found — Beta
+  F-Zero's RAM-size exponent — is fixed above, before this count).
+
+### Gate (all exit-checked)
+
+`cargo fmt --check` 0; `cargo clippy --workspace -- -D warnings` 0;
+`cargo test -p rf-cart -p rf-snes --release` 0 (rf-cart 65 passed, rf-snes
+440 passed/1 ignored, unchanged); `cargo test --workspace --release` 0
+except the same pre-existing flaky egui-kittest race already documented
+under W7-08 (`crates/retroforge/tests/app_opens_snes.rs::a_snes_rom_starts_and_reaches_the_screen`,
+reproduced failing under the full parallel run and passing cleanly under
+`--test-threads=1` in isolation — confirmed unrelated to this ticket's
+cart-loader-only changes); `peterlemon_golden`/`region_golden`/
+`spc700_vectors`/`gilyon_cputest` --ignored: 0 each, all pass; `scripts/
+validate-arch.sh`: `arch OK`.

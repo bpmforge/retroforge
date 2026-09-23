@@ -297,7 +297,15 @@ majority of games; per-dot upgrade path documented in code).
 - Header detection in `rf-cart`: score candidate headers at $7FC0/$FFC0
   (checksum/complement, mapper byte, reset vector sanity) — never trust the
   extension; 512-byte copier header stripped before hashing (see
-  game-identity research).
+  game-identity research). **W14-52 (2026-09-23):** real hardware never
+  reads the header at all, so when neither location scores as plausible,
+  `parse_snes_header` falls back to trying LoROM/HiROM/ExHiROM(>4 MiB) in
+  turn and accepting the first whose RESET vector decodes to a plausible
+  65816 reset prologue — the diagnostic lands on
+  `SnesHeader::header_fallback`. See `docs/TESTING.md`'s W14-52 section
+  for the cited rule, the population survey, and the one nibble-collision
+  class (SA-1/S-DD1/ExHiROM) this ticket named but deliberately did not
+  touch.
 - FastROM ($420D) speed switch. ExHiROM + Super FX (~16 games) and the
   one-off chips (Cx4, S-DD1, SPC7110, ST01x) stay **explicitly deferred**;
   `rf-cart` detects and reports "unsupported chip: <name>" rather than
