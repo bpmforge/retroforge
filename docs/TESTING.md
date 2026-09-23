@@ -1105,6 +1105,7 @@ First run, 2026-09-15, release build:
 | NES, after W14-16 | 1281 | **1222** | 6 | 53 | **0** | **0** |
 | NES, after W14-17 | 1281 | **1222** | 6 | 53 | **0** | **0** |
 | NES, after W14-50 | 1281 | **1226** | 6 | 49 | **0** | **0** |
+| NES, after W14-58/W14-59 | 1281 | **1234** | 7 | 40 | **0** | **0** |
 | SNES, after W14-19 slice 1 | 1265 | **1012** | 115 | 138 | **0** | **0** |
 | NES, after W14-22 | 1281 | **1222** | 6 | 53 | **0** | **0** |
 | SNES, after W14-21 | 1265 | **1012** | 115 | 138 | **0** | **0** |
@@ -1127,6 +1128,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-52/W19-01/W19-02 | 1265 | **1169** | 59 | 37 | **0** | **0** |
 | SNES, after W14-53/W19-03 | 1265 | **1180** | 60 | 25 | **0** | **0** |
 | SNES, after W19-04/W14-55/W14-56 | 1265 | **1182** | 59 | 24 | **0** | **0** |
+| SNES, after W14-57 | 1265 | **1192** | 60 | 13 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
