@@ -8013,6 +8013,108 @@ clock is accurate. Stunt Race FX and Dirt Trax FX are also GSU1
 which argues for (2) over a blanket "GSU1 is too slow" reading, but does
 not rule out (1) for Star Fox specifically.
 
+### W18-04 follow-up: tracing the Star Fox regression (coordinator-directed)
+
+The coordinator's hypothesis was that a bad interleave granularity lets a
+single `SnesSystem::step` hand the GSU an unbounded credit, starving the
+65C816 while the GSU spins. Traced with a new `title_probe`
+`PROBE_MODE=gsuhist` (a PC/opcode histogram sampled after every
+`Step::Instruction`, plus new diagnostic counters on `Gsu`: `cache_hits`,
+`cache_misses`, `rom_stall_events`, `ram_stall_events`,
+`go_set_events`/`go_clear_events`/`go_cleared_by_stop_events`) and a
+register watch (`PROBE_GSUHIST_REGS=1`).
+
+**The interleave hypothesis is disproven, with numbers.** Over 3,000,000
+`Step::Instruction` calls, `credit` never carries a multi-instruction
+burst: `run_credited`'s own per-call opcode count stayed in the 2-14
+range throughout (confirmed both by direct instrumentation and by the
+new `tests::system::gsu_credit_per_step_is_bounded_by_that_steps_own_
+instruction_cost` unit test, which pins it: no single `SnesSystem::step`
+call may run more than 50 GSU opcodes for a cheap `JMP $8000`/GSU-NOP-
+loop pair, and it must average at least ~1/step). GO was set exactly
+once (`go_set=1`) and never cleared (`go_clear=0`) in the sampled window
+— the GSU is not being stopped/restarted or fighting the SNES side over
+GO.
+
+**The hot loop is real, ROM-table-driven arithmetic, not a null spin.**
+Top PC-histogram entries (3M-instruction sample, `01:PPPP` = bank
+1:R15):
+
+| PBR:R15 | opcode | samples |
+|---|---|---|
+| 01:B38C | 09 (BEQ) | 333,971 |
+| 01:B389 | B2 (FROM R2) | 301,215 |
+| 01:B386 | 03 (LSR) | 257,192 |
+| 01:B38F | 04 (ROL) | 236,737 |
+| 01:B392 | 3C (LOOP) | 207,006 |
+| 01:B387 | 23 (WITH R3) | 175,092 |
+| 01:B384 | 01 (NOP) | 152,285 |
+| 01:B38A | C3 (OR) | 143,159 |
+
+276 distinct `(PBR:R15,opcode)` samples total, all within `$B380-$B3AC`
+— a single ~48-byte block. Hand-decoding those bytes directly from the
+ROM (`AC 08 2F 1D 22 03 23 97 B2 C3 09 12 01 26 04 25 04 3C 01 E1 B6 3D
+31 E4 08 E6 ...`) against the GSU opcode tables shows: `IBT R12,#8`;
+`MOV R13,R15` (the documented LOOP-address idiom); an 8-pass inner loop
+(`LSR`/`ROL`/`ROR` plus an `OR`-gated `BEQ`) that falls through to a
+second block reading 16-bit values from ROM via decrementing `R14` and
+`GETB`/`GETBH` pairs, and a `DEC R1`/`STB (R1)` write-back; the whole
+block is bounded by an outer `DEC R4`/`BNE $B380`. A register watch
+(`PROBE_GSUHIST_REGS=1`, sampled every 300,000 instructions) shows `R1`
+smoothly counting down and wrapping (16-bit) multiple times over the
+3M-instruction window, and `R14` actively decrementing through ROM —
+this is a genuine ROM-scan/table-processing pass (shape matches a boot-
+time ROM verification or a large coefficient-table load), not a data
+cell the GSU is idly polling.
+
+**Comparison against the W18-03 build** (`git worktree add` at
+`de1e5b4`, `PROBE_MODE=frames PROBE_FRAMES=600`): the OLD, provisional
+`STEP_BUDGET=64` model does NOT finish this quickly either — it first
+varies at **frame 547 of 600** (`total_instr_at_varied=8,386,343`), i.e.
+it needed the flat budget's full `8,386,343 * up to 64 ≈ 536M` opcode
+allowance, arriving with only 9% of the 600-frame window to spare. This
+project's new, real-hardware-accurate model produces ~35M opcodes (~107M
+real GSU cycles, matching a 10.74MHz GSU1 chip's exact 10-second budget)
+over the same window — roughly 15x short of what the old, admittedly
+inaccurate placeholder needed to finish. That 15x gap is the same order
+of magnitude as `STEP_BUDGET=64`'s own overprovisioning versus a real
+~3-4-opcodes-per-CPU-instruction hardware ratio, so the old "renders"
+result was arithmetic luck (a 15-20x-too-generous budget finishing with
+9% to spare), not evidence the timing was ever right.
+
+**Root cause is named, not fixed, in this session**: the hot loop
+(`$B380-$B3AC`) runs entirely OUTSIDE the code-cache window this run's
+`CBR` sits at (`$B3E0`, confirmed via `Gsu::peek(0x303E/0x303F)`) — every
+opcode/operand byte in it pays this ticket's `CACHE_MISS_EXTRA_GSU_
+CYCLES` surcharge on every pass (`cache_hits=209,575` vs
+`cache_misses=10,907,712`, a ~98% miss rate). If real hardware's own code
+never calls `CACHE` for this specific block either (plausible — a
+one-time boot-time ROM scan is a reasonable thing to leave uncached), the
+~3x uncached penalty is correct and real hardware would need the same
+proportionally long time; if it does and this project's `CBR` handling
+disagrees with real hardware about when/where that `CACHE` call lands,
+the fix would cut this loop's cost roughly 3x (bringing the 15x gap down
+to ~5x) — but this session found no evidence of a `CBR`-computation bug
+(the "CBR = R15 AND FFF0h" formula matches fullsnes exactly, and CACHE/
+LJMP both apply it correctly per their own unit tests). Distinguishing
+"real hardware also pays this cost" from "this project's cache logic
+disagrees with real hardware" needs either a real disassembly (ROM bytes
+decoded here are execution evidence only, not reproduced or committed)
+cross-referenced against a known Star Fox source/disassembly project, or
+a cycle-count comparison against a reference cycle-accurate GSU emulator
+— both out of scope for what this session could complete. Filed as the
+concrete, numbers-backed starting point for W18-05 rather than left as
+an unexplained regression.
+
+**What shipped this follow-up**: the diagnostic counters and
+`PROBE_MODE=gsuhist`/`PROBE_GSUHIST_REGS` tooling (permanent, opt-in,
+same "never gates, never saved" contract as `plot_calls`), and
+`tests::system::gsu_credit_per_step_is_bounded_by_that_steps_own_
+instruction_cost`, which pins the interleave-ratio finding above as a
+regression test. Census re-run after this follow-up (unchanged from
+before, since no execution-affecting code changed): identical
+exit-code table to the one above.
+
 **HEAD**: see the `feat(W18-04): ...` commit this entry ships with.
 
 ## W14-51 — Final Fight 2 / Battletoads: no register defect found; both

@@ -434,6 +434,94 @@ fn gsu_irq_flag_ors_into_the_cpu_and_clears_on_read() {
     );
 }
 
+/// Ticket W18-04 follow-up (coordinator-directed, tracing the Star Fox
+/// census regression): pins the credit-based interleave's actual
+/// granularity — a real concern the coordinator raised was "does a single
+/// `SnesSystem::step` call hand the GSU an unbounded credit, starving the
+/// 65C816 for millions of GSU opcodes at a time". It does not: every
+/// `SnesSystem::step` call executes exactly ONE 65C816 instruction, THEN
+/// deposits only THAT instruction's own master-cycle cost as GSU credit
+/// before returning — so the GSU can never run more opcodes in one call
+/// than that one instruction's worth of real 10.7/21.4MHz time affords,
+/// which for an ordinary (non-DMA-heavy) 65C816 instruction is a handful
+/// of GSU opcodes, not millions. This test runs the 65C816 on a tight
+/// `JMP $8000` loop (cheap, constant per-instruction cost) alongside a
+/// GSU `NOP;BRA;NOP` loop (ticket W18-04's own
+/// `clsr_1_runs_twice_the_opcodes_per_master_cycle_of_clsr_0` unit test
+/// uses the identical GSU program) and asserts, over many
+/// `SnesSystem::step` calls, that the GSU's `instructions_executed`
+/// counter never jumps by more than a small bound in any ONE call.
+#[test]
+fn gsu_credit_per_step_is_bounded_by_that_steps_own_instruction_cost() {
+    let mut rom = lorom_image(0x20, 0x15);
+    // 65C816 program at $00:8000 (the reset vector `lorom_image` sets):
+    // `JMP $8000` — an unconditional 3-byte jump back to itself, the
+    // cheapest possible "keeps stepping forever" loop.
+    rom[0] = 0x4C;
+    rom[1] = 0x00;
+    rom[2] = 0x80;
+    // GSU program at GSU address $0100 (bank 0, PBR's reset value):
+    // NOP; BRA -3 (back to the NOP); NOP (the branch's delay slot) — the
+    // same infinite loop `clsr_1_runs_twice_the_opcodes_per_master_cycle_
+    // of_clsr_0` already pins in isolation.
+    rom[0x100] = 0x01;
+    rom[0x101] = 0x05;
+    rom[0x102] = 0xFD;
+    rom[0x103] = 0x01;
+    let mut system = SnesSystem::load(&rom).expect("GSU cart loads");
+    // SNES-side: R15 = $0100, which also sets GO (fullsnes: R15.MSB write
+    // "does also set GO=1").
+    system.bus.write(0x00_301E, 0x00);
+    system.bus.write(0x00_301F, 0x01);
+    assert!(system.bus.gsu.as_ref().unwrap().regs.go());
+
+    // A real GSU opcode's cheapest documented cost is 1 GSU cycle; a
+    // `JMP $8000` instruction (an ordinary, uncontended 3-byte absolute
+    // jump, no DMA) spends only a handful of master cycles per step — a
+    // generous bound (`50`) catches an actual "one step hands out a
+    // massive credit" regression by orders of magnitude while leaving
+    // plenty of headroom over the ~2-6 opcodes/step this project's own
+    // census tracing (docs/TESTING.md W18-04) measured for real titles.
+    const MAX_GSU_OPS_PER_STEP: u64 = 50;
+    let mut total_gsu_ops = 0u64;
+    for _ in 0..5000 {
+        let before = system
+            .bus
+            .gsu
+            .as_ref()
+            .unwrap()
+            .regs
+            .instructions_executed();
+        system.step().expect("JMP is implemented");
+        let after = system
+            .bus
+            .gsu
+            .as_ref()
+            .unwrap()
+            .regs
+            .instructions_executed();
+        let this_step = after - before;
+        assert!(
+            this_step <= MAX_GSU_OPS_PER_STEP,
+            "one SnesSystem::step call ran {this_step} GSU opcodes -- \
+             the credit-based interleave must bound this to roughly one \
+             65C816 instruction's worth of real GSU time, not an \
+             unbounded burst"
+        );
+        total_gsu_ops += this_step;
+    }
+    // Sanity: the GSU is actually making progress (not starved to zero by
+    // an over-correction), at a rate in the same order of magnitude as
+    // the real hardware ratio (~3-4 GSU opcodes per 65C816 instruction
+    // for this cheap a loop, per this project's own clock-conversion
+    // constants).
+    assert!(
+        total_gsu_ops > 5000,
+        "the GSU should average at least ~1 opcode per step for a loop \
+         this cheap, got {total_gsu_ops} over 5000 steps"
+    );
+}
+
 /// Ticket W17-01 acceptance #3: "the SNES-side CPU can boot an SA-1 cart
 /// to its reset vector and run" — with the SA-1 CPU itself absent (W17-02
 /// adds it), which is the "uniform" bucket the ticket's census criterion

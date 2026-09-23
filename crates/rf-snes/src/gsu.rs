@@ -285,6 +285,36 @@ pub struct Gsu {
     /// with PC/opcode/instruction count").
     pub last_opcode: u8,
 
+    // --- Ticket W18-04 follow-up (coordinator-directed trace of the
+    // Star Fox census regression): diagnostic-only counters, same
+    // "never saved, never gates anything" contract as `plot_calls` above
+    // — a `title_probe` histogram/counter dump reads these, nothing in
+    // this crate's own behaviour depends on them.
+    /// [`GsuState::fetch_byte`] code-cache hits.
+    pub cache_hits: u64,
+    /// [`GsuState::fetch_byte`] code-cache misses (each one also carries
+    /// the [`CACHE_MISS_EXTRA_GSU_CYCLES`] surcharge already counted in
+    /// [`Self::last_cost`]).
+    pub cache_misses: u64,
+    /// Times a GETxx/GETC opcode paid [`rom_buffer_stall_cycles`] (ticket
+    /// W18-04's ROM-buffer stall).
+    pub rom_stall_events: u64,
+    /// Times a store opcode paid the RAM-buffer stall (ticket W18-04's
+    /// [`ram_word_drain_cycles`]/[`ram_byte_drain_cycles`]).
+    pub ram_stall_events: u64,
+    /// Times GO transitioned `0` -> `1` (an SNES-side `$301F` write with
+    /// GO already used to be `0`, or an SNES-side `$3030` SFR write with
+    /// bit 5 set) — see [`Self::write_register_word`]/[`Self::write_canonical`].
+    pub go_set_events: u64,
+    /// Times GO transitioned `1` -> `0`: either an SNES-side `SFR` write
+    /// with GO=0 ([`Self::write_canonical`]'s `SFR_LO` arm), or the GSU's
+    /// own `STOP` opcode ([`GsuState::exec_stop`]). The two are
+    /// distinguished by [`Self::go_cleared_by_stop_events`] below.
+    pub go_clear_events: u64,
+    /// The subset of [`Self::go_clear_events`] caused by the GSU's own
+    /// `STOP` opcode rather than an SNES-side `SFR` write.
+    pub go_cleared_by_stop_events: u64,
+
     // --- Ticket W18-03 (D-014, slice 3 of 5): the pixel cache. fullsnes
     // "SNES Cart GSU-n Pixel-Cache": "RAM-Pixel-Write-Cache (two 8-pixel
     // rows)... Primary Pixel Cache (written to by PLOT)... Secondary Pixel
@@ -382,6 +412,13 @@ impl Gsu {
             plot_calls: 0,
             rpix_calls: 0,
             last_opcode: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            rom_stall_events: 0,
+            ram_stall_events: 0,
+            go_set_events: 0,
+            go_clear_events: 0,
+            go_cleared_by_stop_events: 0,
             primary_cache: PixelCacheLine::EMPTY,
             secondary_cache: PixelCacheLine::EMPTY,
             cache_valid: Box::new([false; CACHE_LEN]),
@@ -616,7 +653,14 @@ impl Gsu {
             // byte (ALT1/ALT2/IL/IH/B/IRQ) is documented read-only from
             // the SNES side, so a write there is dropped.
             SFR_LO => {
+                let go_before = self.go();
                 self.sfr = (self.sfr & !0x003E) | (u16::from(value) & 0x003E);
+                let go_after = self.go();
+                if go_after && !go_before {
+                    self.go_set_events += 1;
+                } else if go_before && !go_after {
+                    self.go_clear_events += 1;
+                }
                 // fullsnes "303Eh/303Fh CBR": "the SNES can set CBR=0000h
                 // by writing GO=0". Ticket W18-04: the same write also
                 // empties every code-cache line (see
@@ -653,6 +697,9 @@ impl Gsu {
         } else {
             self.regs[idx] = u16::from_le_bytes([self.latch, value]);
             if idx == 15 {
+                if self.sfr & 0x0020 == 0 {
+                    self.go_set_events += 1;
+                }
                 self.sfr |= 0x0020; // GO=1 (fullsnes: "does also set GO=1").
             }
         }
@@ -1216,6 +1263,7 @@ impl GsuState {
         if (offset as usize) < CACHE_LEN {
             let idx = offset as usize;
             if self.regs.cache_valid[idx] {
+                self.regs.cache_hits += 1;
                 return self.regs.cache[idx];
             }
             let byte = if bank == 0x70 || bank == 0x71 {
@@ -1228,9 +1276,11 @@ impl GsuState {
             };
             self.regs.cache[idx] = byte;
             self.regs.cache_valid[idx] = true;
+            self.regs.cache_misses += 1;
             self.fetch_extra_cost += CACHE_MISS_EXTRA_GSU_CYCLES;
             return byte;
         }
+        self.regs.cache_misses += 1;
         self.fetch_extra_cost += CACHE_MISS_EXTRA_GSU_CYCLES;
         if bank == 0x70 || bank == 0x71 {
             match self.gsu_ram_index(bank, pc) {
@@ -1254,8 +1304,9 @@ impl GsuState {
     /// exactly when this instruction runs before
     /// [`Gsu::rom_buffer_ready_after`]'s watermark, i.e. immediately after
     /// R14 or ROMBR changed — see that field's doc.
-    fn rom_buffer_stall_cost(&self) -> u32 {
+    fn rom_buffer_stall_cost(&mut self) -> u32 {
         if self.regs.instructions_executed < self.regs.rom_buffer_ready_after {
+            self.regs.rom_stall_events += 1;
             rom_buffer_stall_cycles(self.regs.clsr)
         } else {
             0
@@ -1270,8 +1321,9 @@ impl GsuState {
     /// method does not do itself (each call site already computes its own
     /// `instructions_executed + 2`, since some stores need that value
     /// before the write and some after).
-    fn ram_buffer_stall_cost(&self, word: bool) -> u32 {
+    fn ram_buffer_stall_cost(&mut self, word: bool) -> u32 {
         if self.regs.instructions_executed < self.regs.ram_buffer_ready_after {
+            self.regs.ram_stall_events += 1;
             if word {
                 ram_word_drain_cycles(self.regs.clsr)
             } else {
@@ -2252,6 +2304,10 @@ impl GsuState {
     /// detect it.
     fn exec_stop(&mut self, rom: &[u8]) -> u32 {
         let _prefetched = self.fetch_byte(rom);
+        if self.regs.sfr & 0x0020 != 0 {
+            self.regs.go_clear_events += 1;
+            self.regs.go_cleared_by_stop_events += 1;
+        }
         self.regs.sfr &= !0x0020; // GO=0
         self.regs.sfr |= 0x8000; // IRQ=1, unconditionally (see `irq_pending`'s doc)
         self.regs.reset_prefix_state();
