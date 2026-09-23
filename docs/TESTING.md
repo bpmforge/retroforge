@@ -8115,7 +8115,109 @@ regression test. Census re-run after this follow-up (unchanged from
 before, since no execution-affecting code changed): identical
 exit-code table to the one above.
 
-**HEAD**: see the `feat(W18-04): ...` commit this entry ships with.
+### W18-04 follow-up #2: closing out the coordinator's opcode-semantics audit
+
+Re-opened per coordinator directive to check the `$B380-$B3AC` loop's own
+opcode semantics against fullsnes (not just its cost model), on the
+hypothesis that a delay-slot or LOOP/branch timing bug — not the already-
+named cache-miss cost — could be inflating the real iteration count.
+
+**Full decode.** The loop is not one flat block; it is a small subroutine.
+Hand-decoding the actual ROM bytes at `$B380` (a clean-room disassembly
+done here for verification only — the bytes are execution evidence, never
+reproduced or committed) against fullsnes's GSU opcode tables gives:
+`IBT R12,#8` / `WITH R15` / `MOVE R13,R15` (`$B380-$B383`, run once per
+call — this is the documented "LOOP-target" idiom, fullsnes "CPU Misc":
+R15 at a MOVE is "addr of next opcode", so R13 becomes `$B384`); an 8-pass
+`WITH R2/LSR` + `WITH R3/ROR` + `FROM R2/OR R3` + `BEQ` bit-scan
+(`$B384-$B392`, `LOOP` closing it); a `BEQ`-only exit at `$B38A` into a
+4-byte ROM read (`DEC R14`/`GETB`/`DEC R14`/`WITH+ALT1 GETBH`, twice,
+`$B39E-$B3AB`) feeding a second 8-pass `ROR`/`ROL` bit-scan reusing the
+same `R12`/`R13` pair (`$B3AC-$B3B7`); both paths converge on
+`DEC R1`/`FROM R6`/`ALT1 STB (R1)`/`DEC R4`/`BNE $B380` (`$B393-$B398` and
+`$B3B9-$B3BE`). This is a bit-unpacker/decompressor called repeatedly
+(`R4` reloaded fresh by whatever calls `$B380` each time it hits 0), not
+one giant flat loop — consistent with the prior follow-up's "boot-time
+ROM-scan/table-processing pass" read.
+
+**Register trace (temporary `PROBE_MODE=gsuloop`, watching
+`(PBR,R15)==(1,$B380)`, removed after this session): the shape is exactly
+right, no defect found.** Over a 5,000,000-`Step::Instruction` sample:
+`R13=$B384` and `R12=$0000` at every single arrival (LOOP always
+exhausts its 8-pass count exactly, confirming `LOOP`'s "R12=R12-1, if
+R12<>0 then R15=R13" is applied correctly every pass); `R4`, `R1`, and
+`R14` all decrease monotonically call-to-call with no resets, wraps, or
+reversals (`R4`: 0x3D3→0x3C7→0x3BF→0x3B3→...; matching deltas of −8/−12
+alternating on `R1`/`R14` too). Since the sample only lands on `$B380`
+once per `Step::Instruction` (CPU-granularity) but the loop body is only
+~13 GSU opcodes, most real passes fall between samples — the observed
+"64,344 hits" in this window undercounts the true pass count by roughly
+the −8/−12 deltas themselves (8-12 real passes per observed hit, so
+~500K-700K real passes in the 5M-instruction sample, not 64,344). The
+per-pass delta pattern is exactly self-consistent (one `DEC R4` and one
+`DEC R1` per pass; `DEC R14` fires 4 times only on the `BEQ`-taken path,
+matching the observed alternation) — a correctly-behaving decoder, not a
+runaway.
+
+**The delay-slot hypothesis is empirically inapplicable, not just
+theoretically fine.** All three delay-slot bytes in this loop —
+`$B38C` (BEQ's), `$B392` (LOOP's), `$B39A` (BNE's) — are `01` (NOP) in
+the ROM. A flag-changing delay-slot instruction flipping a branch's
+already-decided condition (task hypothesis 2a) cannot occur here
+regardless of `exec_opcode`'s own before/after ordering, since NOP
+changes no flags. (The ordering is correct anyway: `exec_branch` and
+`LOOP` both read/set flags before `step_one` applies the deferred
+`pending_jump`, matching fullsnes's "Bxx addr...branch opcodes (no
+change)" and `LOOP`'s own R12-decrement-then-test wording.) DEC/INC,
+LSR/ROL/ROR, the OR/WITH/FROM prefix lifetimes, GETB/GETBH's
+Dreg-preserving byte transforms, STB's RAMBR routing, and IBT/IWT's
+immediate-byte ordering were all re-checked against this exact byte
+sequence and matched fullsnes's tables with no deviation.
+
+**The remaining question from the last follow-up is now closed: real
+Star Fox code does not cache this loop either.** Instrumented every
+`CACHE`/`LJMP` CBR write (temporary `PROBE_GSU_CACHE_LOG`, removed after
+this session) over the same 5M-instruction window: `CACHE` executes 294
+times, 293 of them from the exact same opcode address (`$B3E6`, "R15
+post-fetch" `$B3E7`), setting `CBR=$B3E0` every time — never once from an
+address whose `R15 AND FFF0h` would cover `$B380-$B3AF`. The one other
+call sets `CBR=$B330`, also nowhere near the loop. This is the
+distinguishing measurement the previous follow-up filed as needing "a
+real disassembly or a cycle-accurate cross-check": Star Fox's own code
+never asks the GSU to cache this 44-byte decoder, on any of the ~pass
+counts sampled. Real hardware therefore pays the same uncached-ROM-read
+cost this project's model already charges here — **the ~3x cache-miss
+penalty (and the ROM-buffer stall on the DEC-R14-then-GETB pattern) are
+correct, not a CBR-computation bug.**
+
+**Conclusion: no GSU emulation defect found.** The loop is a correctly-
+implemented, ROM-table-driven decompressor that real hardware also runs
+uncached; the accurate GSU1 clock model (35M opcodes/~107M cycles over
+600 frames, matching a real 10.74MHz GSU1's 10-second budget — see the
+prior follow-up) is doing its job. Star Fox's boot decompression pass
+appears to need substantially more real GSU time than this project's
+600-frame boot-census window budgets for — which, given no defect was
+found in three follow-up sessions across the interleave granularity, the
+opcode semantics, and the code-cache targeting, now reads as a **census-
+fixture problem** (the window was tuned against the old, ~15-20x-
+overprovisioned `STEP_BUDGET=64` placeholder, not against real GSU1
+timing) rather than a GSU-core bug. Filed as the concrete next step for
+W18-05: either extend the GSU1 boot-census window, or accept that titles
+whose boot-time decompression exceeds it render later than frame 600
+on real hardware too, and adjust the census bucket accordingly — not
+another opcode-correctness audit.
+
+**What shipped this follow-up**: documentation only. The `PROBE_MODE=
+gsuloop` register-arrival watch and the `PROBE_GSU_CACHE_LOG` CACHE/LJMP
+logger were both temporary, env-gated additions used only to produce the
+numbers above; both were reverted before this commit (not left as
+permanent opt-in tooling like `gsuhist`/`plot_calls`, since neither
+answers a question this project expects to ask again the way a PC
+histogram does). No execution-affecting code changed. `cargo test
+-p rf-snes`: 437 passed, 0 failed (unchanged from the prior follow-up,
+since no source changed). Census re-run: identical exit-code table.
+
+**HEAD**: see the `chore(W18-04): ...` commit this entry ships with.
 
 ## W14-51 — Final Fight 2 / Battletoads: no register defect found; both
 titles' picture appears well outside the census window, the same
