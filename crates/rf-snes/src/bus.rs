@@ -365,6 +365,7 @@ impl SnesBus {
     /// one fixed 3 KiB RAM/ROM size for both known Cx4 titles.
     pub fn install_cx4(&mut self) {
         self.cx4 = Some(crate::cx4::Cx4::new());
+    }
 
     /// Wire up the cartridge's OBC1 registers (ticket W19-01). Called by
     /// [`crate::system::SnesSystem::load`] when the header reports
@@ -415,7 +416,9 @@ impl SnesBus {
         // (ticket W19-02). `cx4` is `None` for every non-Cx4 cartridge.
         if self.cx4.is_some() {
             if let Some(target) = crate::mapping::cx4_target(bank, offset) {
-
+                return target;
+            }
+        }
         // Checked BEFORE the generic map, same reasoning as SA-1/DSP-1/GSU
         // above: an OBC1 cart's register/redirect window sits inside
         // bank/offset space `map` would otherwise resolve as open bus
@@ -1229,7 +1232,7 @@ impl CpuBus for SnesBus {
             Target::Cx4Ram(i) => self.cx4.as_ref().map_or(self.open_bus, |c| c.ram[i]),
             Target::Cx4Register(offset) => {
                 self.cx4.as_ref().map_or(self.open_bus, |c| c.read(offset))
-
+            }
             // Ticket W19-01, fullsnes "SNES Cart OBC1": "$7FF4h... Reading
             // from 7FF4h does reportedly return the desired BYTE, but
             // WITHOUT isolating & shifting the desired BITS into place" —
@@ -1367,7 +1370,8 @@ impl CpuBus for SnesBus {
                     if offset == 0x7F47 {
                         crate::cx4::dma_transfer(c, self.mode, &self.rom, value);
                     }
-
+                }
+            }
             // Ticket W19-01, fullsnes "SNES Cart OBC1": "$7FF4h... Port
             // 7FF4h does read-modify-write operations" — only the 2 bits
             // at `(Index AND 3)*2..+1` of the addressed byte change; the
@@ -1452,7 +1456,7 @@ impl CpuBus for SnesBus {
             Target::Cx4Ram(i) => self.cx4.as_ref().map_or(self.open_bus, |c| c.ram[i]),
             Target::Cx4Register(offset) => {
                 self.cx4.as_ref().map_or(self.open_bus, |c| c.read(offset))
-
+            }
             // Non-perturbing by construction: both arms are plain reads
             // with no side effect either way (ticket W19-01).
             Target::Obc1Bits(i) => self.sram[i],

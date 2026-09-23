@@ -536,6 +536,8 @@ pub fn cx4_target(bank: u8, offset: u16) -> Option<Target> {
             Some(Target::Cx4Register(offset))
         }
         _ => None,
+    }
+}
 
 /// The live state [`obc1_target`] needs to resolve an address: the two
 /// register values that decide where in SRAM the `$7FF0-$7FF4` ports

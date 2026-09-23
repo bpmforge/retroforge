@@ -125,7 +125,7 @@ impl SnesSystem {
         // point SA-1/GSU slice 1 gave those chips.
         if matches!(header.coprocessor, rf_cart::Coprocessor::Cx4) {
             system.bus.install_cx4();
-
+        }
         // OBC1 (ticket W19-01, fullsnes "SNES Cart OBC1"): a pure register
         // window over the cart's own SRAM — `sram_len` above is already
         // `header.ram_size` for this cartridge (it does not fall into the

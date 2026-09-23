@@ -341,7 +341,8 @@ impl crate::system::SnesSystem {
                 o.bool(self.bus.cx4.is_some())?;
                 match &self.bus.cx4 {
                     Some(c) => c.save(o),
-
+                    None => Ok(()),
+                }?;
                 // OBC1 registers (ticket W19-01), same presence-flag
                 // pattern as SA-1/GSU above. No bulk buffer to append: the
                 // table this chip addresses is `self.bus.sram`, already
@@ -478,7 +479,9 @@ impl crate::system::SnesSystem {
                     (None, false) => Ok(()),
                     (Some(_), false) | (None, true) => Err(StateError::Corrupt(
                         "CX4 presence in the saved state disagrees with the mounted cartridge"
-
+                            .to_string(),
+                    )),
+                }?;
                 let obc1_present = i.bool()?;
                 match (self.bus.obc1.as_mut(), obc1_present) {
                     (Some(o), true) => o.load(i),

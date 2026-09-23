@@ -1032,7 +1032,6 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         // notation, the same arithmetic `superfx_expansion_ram_kib` uses
         // for `$FFBD` (`base - 3`).
         (Coprocessor::Cx4, false)
-
     } else if coprocessor_nibble == 0x2 && hw == 0x5 {
         // Ticket W19-01 / fullsnes "SNES Cart OBC1": chipset $25 only —
         // the sole assigned OBC1 combination (ROM+OBC1+RAM+battery).
@@ -1056,7 +1055,7 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         | Coprocessor::SuperFx { .. }
         | Coprocessor::Cx4 => None,
 
-        | Coprocessor::Obc1 => None,
+        Coprocessor::Obc1 => None,
     };
 
     Ok(SnesHeader {
