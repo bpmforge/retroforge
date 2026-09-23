@@ -1121,6 +1121,7 @@ First run, 2026-09-15, release build:
 | SNES, after W14-37/42/43 | 1265 | **1093** | 41 | 131 | **0** | **0** |
 | SNES, after W18-01 (+W7-08 stages 1-2) | 1265 | **1095** | 50 | 120 | **0** | **0** |
 | SNES, after W18-02 | 1265 | **1100** | 45 | 120 | **0** | **0** |
+| SNES, after W18-03 | 1265 | **1100** | 45 | 120 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -8159,3 +8160,12 @@ stub, so what renders is their SNES-side presentation. Still uniform:
 Star Fox (Rev 2), Star Fox 2, Super Star Fox Weekend (STOP cleanly,
 waiting on bitmap output — slice 3), Vortex (spins on `JMP R9` with GO
 set — a cache/buffer wait, slices 3-4). No other row moved.
+
+**Full SNES census (orchestrator, 2026-09-23, main after the W18-03
+merge, idle machine, per-title `RF_CENSUS_OUT` diff against the W18-02
+run):** **1100/45/120/0/0 -> 1100/45/120/0/0**, no row changed. The
+pixel cache and bitmap writeback change what the GSU titles draw, not
+whether the census sees variation (their SNES-side presentation already
+varied), so a per-title probe (`PROBE_GSUREGS`: Yoshi's Island 7,680
+PLOT and 120 RPIX calls in 600 frames) is the evidence for this slice,
+and by-eye is W18-05's.
