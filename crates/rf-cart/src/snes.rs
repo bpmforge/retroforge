@@ -49,17 +49,18 @@ const MAX_COUNTRY_CODE: u8 = 0x14;
 /// $00 and revisions stay in single digits.
 const MAX_ROM_VERSION: u8 = 0x0F;
 
-/// Map-mode nibbles fullsnes names that this build does not run: $2
-/// (S-DD1), $5 (ExHiROM), $A (SPC7110). $3 (SA-1) is no longer in this
-/// list — ticket W17-01 lifted it out (D-013); it is now a candidate map
-/// mode like LoROM/HiROM, scored and accepted (or refused by chipset byte,
-/// same as before) through the normal path. Ticket W14-53: a nibble in
-/// this list (or $3) only refuses when the chipset byte actually
-/// corroborates that chip — see `parse_snes_header`'s
-/// `coprocessor_nibble_corroborated`. An uncorroborated nibble is a
-/// mastering quirk, not evidence of real (if unsupported) hardware, and
-/// falls back to the winning header location instead.
-const KNOWN_UNSUPPORTED_MAP_MODES: [u8; 3] = [0x2, 0x5, 0xA];
+/// Map-mode nibbles fullsnes names that this build does not run: $5
+/// (ExHiROM), $A (SPC7110). $3 (SA-1) and $2 (S-DD1) are no longer in this
+/// list — ticket W17-01 lifted SA-1 out (D-013), ticket W19-03 lifts S-DD1
+/// out the same way; both are now candidate map modes like LoROM/HiROM,
+/// scored and accepted (or refused by chipset byte, same as before)
+/// through the normal path. Ticket W14-53: a nibble in this list only
+/// refuses when the chipset byte actually corroborates that chip — see
+/// `parse_snes_header`'s `coprocessor_nibble_corroborated`. An
+/// uncorroborated nibble is a mastering quirk, not evidence of real (if
+/// unsupported) hardware, and falls back to the winning header location
+/// instead.
+const KNOWN_UNSUPPORTED_MAP_MODES: [u8; 2] = [0x5, 0xA];
 /// RESET vector lives at file offset $FFFC/$7FFC, i.e. header_base + $3C.
 const RESET_VECTOR_OFFSET: usize = 0x3C;
 
@@ -78,6 +79,13 @@ pub enum SnesMapMode {
     /// Map mode $23 (fullsnes "SNES Cart SA-1"). See [`Coprocessor::Sa1`]
     /// for the board data rf-snes maps this against.
     Sa1,
+    /// Map mode $22, "LoROM/32K Banks + S-DD1" (fullsnes "ROM Speed and Map
+    /// Mode", `fullsnes.txt:6138`). Ticket W19-03, D-013's pattern applied
+    /// to a second chip: like SA-1, the header still sits at the ordinary
+    /// LoROM location and the base memory map is plain LoROM — only banks
+    /// `$C0-$FF` are special (see [`Coprocessor::Sdd1`] and
+    /// `rf_snes::mapping::sdd1_target`).
+    Sdd1,
 }
 
 /// Parsed SNES header fields (FR-CORE-010).
@@ -196,6 +204,18 @@ pub enum Coprocessor {
     /// SRAM, not a firmware coprocessor, so there is nothing to LLE or HLE
     /// against copyrighted code.
     Obc1,
+
+    /// Coprocessor nibble $4 ("S-DD1") with `hw` in `{3, 5}` (chipset $43
+    /// ROM+S-DD1, $45 ROM+S-DD1+RAM+Battery — fullsnes's own "in practice"
+    /// list gives only these two; there is no documented $4 "+RAM,
+    /// no battery" variant). Ticket W19-03, fullsnes "SNES Cart S-DD1
+    /// (Data Decompressor)": two retail titles (Street Fighter Alpha 2,
+    /// Star Ocean). Clean-room hardware emulation — the chip has no CPU
+    /// and runs no firmware of its own (see `rf_snes::sdd1`'s module doc),
+    /// so there is nothing to LLE or HLE against copyrighted code; the
+    /// whole decompression pipeline is transcribed from fullsnes's own
+    /// published pseudocode.
+    Sdd1,
 }
 
 /// Which physical GSU chip a cartridge carries. fullsnes "SNES Cart GSU-n
@@ -297,9 +317,10 @@ fn dsp_window_for(map_mode: SnesMapMode, rom_size: usize) -> DspWindow {
         },
         // Never reached: `parse_snes_header` only calls this for
         // `Coprocessor::Dsp1`, which its own branching only produces when
-        // `map_mode != Sa1` (ticket W17-01 — DSP-1 and SA-1 are mutually
-        // exclusive map modes).
+        // `map_mode` is neither `Sa1` (ticket W17-01) nor `Sdd1` (ticket
+        // W19-03) — each of the three chips claims its own map mode.
         SnesMapMode::Sa1 => unreachable!("DSP-1 window requested for an SA-1 map mode"),
+        SnesMapMode::Sdd1 => unreachable!("DSP-1 window requested for an S-DD1 map mode"),
     }
 }
 
@@ -880,18 +901,35 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
     // by the checksum/reset-vector/title scoring above) is what actually
     // governs the memory map on real hardware — a LoROM board's header
     // lives at $7FC0 no matter what its mode byte happens to say — so it
-    // takes priority over the nibble for $0/$1; only $3 (SA-1, which
-    // fullsnes documents as always headered at the LoROM location too) and
-    // the explicitly-unsupported nibbles keep reading the nibble itself.
+    // takes priority over the nibble for $0/$1; only $2/$3 (S-DD1/SA-1,
+    // which fullsnes documents as always headered at the LoROM location
+    // too) and the explicitly-unsupported nibbles keep reading the nibble
+    // itself.
     //
     // W14-52: this survey's population turned up the SAME shape for
     // nibbles fullsnes never assigns at all (`Super Adventure Island` ships
     // $44, `HAL's Hole in One Golf` ships $46 — both otherwise
     // excellent-scoring LoROM headers: valid checksum/complement, a
     // legible 21-byte title, a reset vector into real code). An
-    // UNASSIGNED nibble can never legitimately name a real board, so it
-    // gets the same location-wins treatment as $0/$1 rather than an
-    // "unrecognized map mode" refusal.
+    // UNASSIGNED nibble can never legitimately name a real board — unlike
+    // $5/$A, which name real (if unsupported) hardware this build must
+    // still refuse honestly per FR-CORE-013 — so it gets the same
+    // location-wins treatment as $0/$1 rather than an "unrecognized map
+    // mode" refusal. `KNOWN_UNSUPPORTED_MAP_MODES` ($5 ExHiROM, $A SPC7110)
+    // and $2/$3 (S-DD1/SA-1, both gated on the chipset byte separately
+    // below) are deliberately EXCLUDED from this: those nibbles collide
+    // with named chips this build cannot run (or, for $2/$3, can only run
+    // when the chipset byte corroborates), and `Contra III`/`The Duel`/
+    // `Krusty's Super Fun House`/`Space Football` in this same population
+    // happen to hit exactly the SA-1/ExHiROM collisions (a map-mode nibble
+    // with a chipset byte that does NOT corroborate the chip) — see
+    // `docs/TESTING.md`'s W14-52 section for why loosening THAT specific
+    // check is a separate call this ticket does not make unilaterally: the
+    // SA-1 corroboration requirement is W17-01's own deliberate "both must
+    // agree" ruling, pinned by
+    // `sa1_map_mode_without_sa1_chipset_still_refuses`, and ticket W19-03
+    // gives S-DD1 the identical treatment (see
+    // `sdd1_map_mode_without_sdd1_chipset_still_refuses` below).
     //
     // Needed before the map-mode decision itself now (moved up from its
     // previous read point below, W14-53): the chipset byte is what tells
@@ -948,9 +986,10 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
     //     instead.
     //
     // When a nibble IS corroborated, nothing changes from before this
-    // ticket: SA-1 is accepted (below), S-DD1/ExHiROM/SPC7110 are still
-    // refused by name — this build has no memory map or bus wiring for
-    // any of them (S-DD1 is W19-03, filed and not yet done). Only the
+    // ticket: SA-1 is accepted (below), and ticket W19-03 now accepts
+    // S-DD1 the same way (see the `Sdd1` arm of the coprocessor decision
+    // below); ExHiROM/SPC7110 are still refused by name — this build has
+    // no memory map or bus wiring for either of them. Only the
     // UNCORROBORATED case is new.
     let coprocessor_nibble_corroborated = match mode_nibble {
         0x3 => coprocessor_nibble == 0x3 && (0x3..=0x5).contains(&hw),
@@ -970,6 +1009,7 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
                 SnesMapMode::HiRom
             }
         }
+        0x2 if coprocessor_nibble_corroborated => SnesMapMode::Sdd1,
         0x3 if coprocessor_nibble_corroborated => SnesMapMode::Sa1,
         nibble
             if KNOWN_UNSUPPORTED_MAP_MODES.contains(&nibble) && coprocessor_nibble_corroborated =>
@@ -1022,7 +1062,39 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
     // "ROM-mirror mismatch"; tracing it with `title_probe`'s `PROBE_PEEK`
     // showed the polled byte was the DSP-1 HLE's own $80 sentinel, not a
     // ROM-mirroring bug at all.
-    let (coprocessor, battery) = if map_mode == SnesMapMode::Sa1 {
+    let (coprocessor, battery) = if map_mode == SnesMapMode::Sdd1 {
+        // Ticket W19-03, corrected by W14-53: map mode $22 is only reached
+        // here (see `coprocessor_nibble_corroborated` above) when the
+        // chipset byte already names S-DD1 (fullsnes "SNES Cartridge ROM
+        // Header", Chipset (FFD6h): coprocessor nibble $4, hw $3-$5, same
+        // generic "x3h ROM+Co-processor" .. "x5h ROM+Co-processor+RAM+
+        // Battery" shape SA-1 uses), so this check must match
+        // `coprocessor_nibble_corroborated`'s `0x2` arm exactly ($3..=$5,
+        // not just the two chipset bytes seen in the wild) — a narrower
+        // range here would let hw=$4 corroborate the map-mode decision
+        // above and then hit the `else` below as dead, mislabelled code.
+        // The "in practice" chipset list gives only two combinations: $43
+        // (ROM+S-DD1, no RAM/battery) and $45 (ROM+S-DD1+RAM+Battery); hw=$4
+        // ($44) is an assigned-shape combination fullsnes's own table
+        // allows but no known cart ships, same "in practice" gap SA-1
+        // documents for its own range. A header naming map mode $22
+        // WITHOUT a corroborating chipset byte no longer reaches this
+        // branch at all: `map_mode` itself falls back to the winning
+        // header LOCATION instead, the same location-wins treatment
+        // W14-36 gives $0/$1 collisions. This inner check is genuinely
+        // defense in depth (always true when reached), same shape as the
+        // DSP-1 hw check below.
+        if coprocessor_nibble == 0x4 && (0x3..=0x5).contains(&hw) {
+            (Coprocessor::Sdd1, hw == 0x5)
+        } else {
+            return Err(CartError::UnsupportedChip {
+                name: format!(
+                    "{} (SNES chipset ${chipset:02X})",
+                    coprocessor_name(chipset)
+                ),
+            });
+        }
+    } else if map_mode == SnesMapMode::Sa1 {
         // D-013 / ticket W17-01, corrected by W14-53: map mode $23 is only
         // reached here (see `coprocessor_nibble_corroborated` above) when
         // the chipset byte already names SA-1 (fullsnes "SNES Cartridge
@@ -1125,6 +1197,7 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         | Coprocessor::Cx4 => None,
 
         Coprocessor::Obc1 => None,
+        Coprocessor::Sdd1 => None,
     };
 
     Ok(SnesHeader {
@@ -1467,11 +1540,22 @@ mod tests {
     /// Ticket W14-05: filler whose nibble happens to name a real map mode
     /// is still refused — with the chip's name, which is what FR-CORE-013
     /// asks for, rather than as an unreadable file.
+    ///
+    /// Filler value $05 (ExHiROM), not $02: ticket W19-03 lifted S-DD1's
+    /// nibble ($2) out of `KNOWN_UNSUPPORTED_MAP_MODES` (the same move
+    /// W17-01 made for SA-1's nibble $3) — plain repeated-byte filler with
+    /// no corroborating chipset byte now falls through to the ordinary
+    /// candidate-scoring path and is refused as an implausible header
+    /// (`CartError::InvalidHeader`, exercised by
+    /// `sdd1_map_mode_without_sdd1_chipset_still_refuses` below via a
+    /// properly-shaped-but-uncorroborated header instead), not shortcut-
+    /// named here. ExHiROM ($5) stays in the always-refuse list, so it is
+    /// still the right filler value for this test's original intent.
     fn filler_matching_a_named_map_mode_is_refused_by_name() {
-        let data = vec![0x02u8; 0x10000];
+        let data = vec![0x05u8; 0x10000];
         match parse_snes_header(&data).unwrap_err() {
             CartError::UnsupportedChip { name } => {
-                assert!(name.contains("S-DD1"), "got: {name}");
+                assert!(name.contains("ExHiROM"), "got: {name}");
             }
             other => panic!("expected UnsupportedChip, got {other:?}"),
         }
@@ -1776,6 +1860,79 @@ mod tests {
     }
 
     #[test]
+    /// Ticket W19-03, fullsnes "SNES Cart S-DD1" `43h ROM+S-DD1`: no
+    /// RAM/battery.
+    fn sdd1_cart_chipset_43_parses_without_battery() {
+        let rom = lorom_image(0x22, 0x43);
+        let header = parse_snes_header(&rom).expect("S-DD1 cart must parse");
+        assert_eq!(header.map_mode, SnesMapMode::Sdd1);
+        assert_eq!(header.coprocessor, Coprocessor::Sdd1);
+        assert!(!header.battery, "hw=3 has no battery");
+        assert_eq!(header.dsp_window, None, "S-DD1 is not the DSP-1");
+    }
+
+    #[test]
+    /// fullsnes "SNES Cart S-DD1": `45h ROM+S-DD1+RAM+Battery`.
+    fn sdd1_cart_chipset_45_sets_battery() {
+        let rom = lorom_image(0x22, 0x45);
+        let header = parse_snes_header(&rom).expect("S-DD1+battery cart must parse");
+        assert!(header.battery);
+        assert_eq!(header.coprocessor, Coprocessor::Sdd1);
+    }
+
+    #[test]
+    /// Merge note (W19-03 into main, reconciled with W14-53): chipset $44
+    /// (coprocessor nibble $4, hw $4) is in the assigned x3h-x5h shape
+    /// `coprocessor_nibble_corroborated`'s `0x2` arm accepts — same generic
+    /// range SA-1 corroborates on — even though fullsnes's "in practice"
+    /// list names only $43/$45 as real S-DD1 boards. Pinned here so the
+    /// map-mode decision's corroboration gate and the coprocessor decision's
+    /// inner chipset check can never drift apart again: if `map_mode`
+    /// decides $44 corroborates S-DD1, the branch below MUST accept it
+    /// rather than treat it as unreachable dead code.
+    fn sdd1_cart_chipset_44_accepted_no_battery() {
+        let rom = lorom_image(0x22, 0x44);
+        let header = parse_snes_header(&rom).expect("assigned-shape S-DD1 chipset must parse");
+        assert_eq!(header.map_mode, SnesMapMode::Sdd1);
+        assert_eq!(header.coprocessor, Coprocessor::Sdd1);
+        assert!(!header.battery, "hw=4 has no battery");
+    }
+
+    #[test]
+    /// D-013's "both must agree" ruling, applied to S-DD1: map mode $22
+    /// without the corroborating chipset byte no longer refuses outright —
+    /// merged with W14-53's location-wins rule, `map_mode` itself falls
+    /// back to the winning header LOCATION instead (same flip W14-53 gave
+    /// `sa1_map_mode_without_sa1_chipset_still_refuses`, renamed
+    /// `sa1_nibble_without_sa1_chipset_defers_to_location_not_refused`
+    /// above). This is the exact same rom shape as
+    /// `lorom_location_with_sdd1_nibble_and_plain_chipset_is_lorom` above;
+    /// kept as its own test, under W19-03's original name pattern, as a
+    /// belt-and-suspenders regression check on the "both must agree" rule
+    /// specifically.
+    fn sdd1_nibble_without_sdd1_chipset_defers_to_location_not_refused() {
+        let rom = lorom_image(0x22, 0x00); // map mode S-DD1, chipset plain ROM
+        let header =
+            parse_snes_header(&rom).expect("uncorroborated S-DD1 nibble must defer to location");
+        assert_eq!(header.map_mode, SnesMapMode::LoRom);
+        assert_eq!(header.coprocessor, Coprocessor::None);
+    }
+
+    #[test]
+    /// An S-DD1 chipset byte under a plain LoROM map mode (not $22) still
+    /// refuses — real S-DD1 boards always declare map mode $22, so this
+    /// combination is not a shape any real cartridge uses (same reasoning
+    /// as `sa1_chipset_under_plain_lorom_map_mode_still_refuses`).
+    fn sdd1_chipset_under_plain_lorom_map_mode_still_refuses() {
+        let rom = lorom_image(0x20, 0x43);
+        let err = parse_snes_header(&rom).unwrap_err();
+        match &err {
+            CartError::UnsupportedChip { name } => assert!(name.contains("S-DD1"), "got: {name}"),
+            other => panic!("expected UnsupportedChip, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn non_dsp_cart_has_no_coprocessor_or_window() {
         let rom = lorom_image(0x20, 0x00);
         let header = parse_snes_header(&rom).expect("valid header");
@@ -1784,25 +1941,28 @@ mod tests {
     }
 
     #[test]
-    /// W14-53: an uncorroborated ExHiROM nibble at the LoROM location, tiny
-    /// image, no longer refuses at all (see
-    /// `lorom_location_with_exhirom_nibble_under_4mib_is_lorom` above) — but
-    /// a nibble this build genuinely cannot name any real hardware for
-    /// (nowhere in fullsnes's Map Mode table, unlike $2/$3/$5/$A) is
-    /// unaffected: `unsupported_exhirom_map_mode_reported_without_panicking`
-    /// is renamed here to cover the fifth shape W14-53 asks for instead — a
-    /// GENUINE S-DD1 header (nibble $2, chipset $43/$45) still refuses by
-    /// name, since this build has no S-DD1 bus wiring yet (W19-03).
-    fn genuine_sdd1_header_still_refuses_by_name_until_w19_03() {
-        for chipset in [0x43u8, 0x45] {
+    /// W14-53 originally named this the fifth shape its ruling asked for: a
+    /// GENUINE S-DD1 header (nibble $2, chipset $43/$45) refusing by name
+    /// since this build had no S-DD1 bus wiring yet. Ticket W19-03 lifts
+    /// that deferral (D-013's pattern applied a second time, same as SA-1
+    /// in W17-01) — a corroborated S-DD1 header is now accepted as
+    /// `Coprocessor::Sdd1` instead of refused. This flips the assertion
+    /// accordingly; `sdd1_cart_chipset_43_parses_without_battery` and
+    /// `sdd1_cart_chipset_45_sets_battery` above already cover the same
+    /// two chipset bytes individually — this test keeps W14-53's original
+    /// "both chipset bytes in one shape" framing as a belt-and-suspenders
+    /// check.
+    fn genuine_sdd1_header_accepted_as_of_w19_03() {
+        for (chipset, battery) in [(0x43u8, false), (0x45u8, true)] {
             let rom = lorom_image(0x22, chipset);
-            let err = parse_snes_header(&rom).unwrap_err();
-            match &err {
-                CartError::UnsupportedChip { name } => {
-                    assert!(name.contains("S-DD1"), "chipset ${chipset:02X}: got {name}")
-                }
-                other => panic!("chipset ${chipset:02X}: expected UnsupportedChip, got {other:?}"),
-            }
+            let header = parse_snes_header(&rom)
+                .unwrap_or_else(|e| panic!("chipset ${chipset:02X}: must parse, got {e:?}"));
+            assert_eq!(header.map_mode, SnesMapMode::Sdd1);
+            assert_eq!(header.coprocessor, Coprocessor::Sdd1);
+            assert_eq!(
+                header.battery, battery,
+                "chipset ${chipset:02X}: battery mismatch"
+            );
         }
     }
 

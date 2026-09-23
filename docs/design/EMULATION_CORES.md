@@ -996,6 +996,76 @@ combination) accepted as `Coprocessor::Obc1`, always battery-backed.
   pattern SA-1/GSU use — no bulk buffer to add, since the 220h-byte
   table lives in `SnesBus::sram`, already saved.
 
+### 3.9 S-DD1 (Data Decompressor)
+
+**S-DD1 (2 games: Street Fighter Alpha 2, Star Ocean; this project's
+library only carries the former; ticket W19-03, `crates/rf-snes/src/sdd1.rs`).**
+No CPU of its own and no firmware — clean-room from fullsnes "SNES Cart
+S-DD1 (Data Decompressor)" and "SNES Cart S-DD1 Decompression Algorithm"
+(`fullsnes.txt:10628-10757`; NFR-011, no emulator source). Detection
+(`rf-cart`): map mode `$22` ("LoROM/32K Banks + S-DD1") paired with
+chipset `$43`/`$45` (coprocessor nibble `$4`, hw `{3,5}` — fullsnes's
+"in practice" list gives only these two combinations), the same "both
+must agree" D-013 shape SA-1's map mode `$23` already has — map mode
+`$22` alone, or the chipset byte under plain LoROM, still refuses.
+
+- **Registers** (`crate::sdd1::Sdd1Regs`, `$4800-$4807`): `$4800`
+  DMA Enable 1 and `$4801` DMA Enable 2, one bit per DMA channel each —
+  a channel decompresses only while BOTH name it
+  (`channel_decompresses`); `$4801`'s bit self-clears once its DMA
+  completes ("automatically cleared after DMA"), `$4800` does not
+  ("unchanged after DMA"). `$4802`/`$4803` are fullsnes-hedged
+  "Unknown" ports, stored and read back verbatim, never branched on
+  (same convention as OBC1's `$7FF7`). `$4804-$4807` are the four 1 MiB
+  ROM bank selects for the `$C0-$CF`/`$D0-$DF`/`$E0-$EF`/`$F0-$FF`
+  groups. No reset values are documented; every register starts
+  zeroed.
+- **Mapping** (`crate::mapping::sdd1_target`): banks `$C0-$FF` are a
+  bank-register-selected, HiROM-fashion view of the ROM —
+  `banks[group] * 1Mi + (bank_within_group) * 0x10000 + offset`,
+  modulo the ROM length — checked before the generic `map`, the same
+  "coprocessor window wins" pattern SA-1/GSU/CX4/OBC1 already use.
+  Everywhere else (including bank `$00`'s exception-handler window
+  fullsnes calls out by name) is the cartridge's ordinary LoROM map,
+  which `SnesMapMode::Sdd1`'s arm in `map` reproduces directly.
+- **Decompression** (`crate::sdd1::Sdd1Decompressor`): a Golomb-coded
+  adaptive bitplane decoder, transcribed function for function from the
+  chapter's pseudocode — `decompress_init`'s header byte (top 2 bits
+  select 2/4/8bpp or "linear" raw mode via `num_planes`; the next 2
+  select the context-mixing constants), `GetBit`/`ProbGetBit`'s 32-state
+  context model with its `EvolutionCodeSize`/`EvolutionMpsNext`/
+  `EvolutionLpsNext` tables, `GetCodeword`'s run-length tables
+  (`RunTable`), and `decompress_byte`'s bitplane interleave (the
+  even/odd-plane toggle for 2/4/8bpp tile format, the flat 8-bits-per-
+  byte path for linear mode). One documented oddity is transcribed
+  literally rather than "corrected": `decompress_init`'s own indexing
+  reads the byte one past where the header's second byte would be,
+  which as literally written never consumes the header's own second
+  byte — see `Sdd1Decompressor::init`'s doc for the exact citation. This
+  is the clean-room mandate (implement the description, not a guessed
+  intent) at its most visible.
+- **DMA trigger** (`SnesBus::run_channel`): fullsnes's `<DMA>` row
+  ("DMA from ROM returns Decompressed Data, originated at DMA start
+  addr") is read as: a general-purpose DMA channel armed in both
+  `$4800`/`$4801`, whose A-bus start address resolves into the S-DD1
+  ROM window, gets a decompressor seeded ONCE at that address; every
+  byte of the transfer comes from `next_byte`, never a second ROM read,
+  regardless of how the visible A-bus register itself steps. HDMA is
+  not intercepted — fullsnes only ever writes "DMA", and every known
+  title's use is a one-shot general DMA streaming tiles/tilemaps.
+- **What is deliberately NOT modelled**: `$4802`/`$4803` (fullsnes
+  hedges both as "Unknown"); HDMA-sourced decompression (undocumented);
+  Star Ocean's LN3B board's extra SRAM (this project's library does not
+  carry the title).
+- **Save/load**: `StateRegion::Cart` gains the same presence-flag
+  pattern SA-1/GSU/CX4/OBC1 use for `Sdd1Regs`. The live decompressor
+  itself is NOT part of machine state — a general-purpose DMA always
+  runs to completion inside one `run_channel` call in this build, so no
+  decompression is ever mid-flight at a frame boundary; its own
+  save/load (used directly by `crate::sdd1`'s determinism test, not by
+  production code) proves the state IS resumable in isolation, per the
+  ticket's determinism/save-load requirement.
+
 ## 4. Cartridge layer boundary (`rf-cart`)
 
 `rf-cart` owns file parsing (iNES/NES 2.0 incl. submapper/PRG-RAM fields,

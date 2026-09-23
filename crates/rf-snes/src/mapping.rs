@@ -131,6 +131,46 @@ pub enum Target {
     Open,
 }
 
+/// The live state [`sdd1_target`] needs: the four 1 MiB ROM bank selects
+/// (`$4804-$4807`) and the cartridge's ROM length, for the modulo mirror
+/// (ticket W19-03).
+#[derive(Debug, Clone, Copy)]
+pub struct Sdd1Board {
+    /// `$4804-$4807`, in that order (`$C0`/`$D0`/`$E0`/`$F0` groups).
+    pub banks: [u8; 4],
+    pub rom_len: usize,
+}
+
+/// Resolve `(bank, offset)` against an S-DD1 cartridge's banked `$C0-$FF`
+/// ROM windows. Checked by [`crate::bus::SnesBus::target`] BEFORE [`map`],
+/// same reasoning as every other coprocessor window in this module: banks
+/// `$C0-$FF` would otherwise fall into `map`'s plain LoROM arm (which
+/// mirrors `$C0-$FF` onto `$40-$7F` via `bank & 0x7F`) — wrong for this
+/// cartridge, whose `$C0-$FF` is a SEPARATE, bank-register-selected view of
+/// the ROM (ticket W19-03, fullsnes "S-DD1 Memory Map",
+/// `fullsnes.txt:10649-10656`).
+///
+/// - `$C00000-$CFFFFF` -> `banks[0]` selects which 1 MiB of the cartridge
+///   ROM appears here, "in HiROM fashion" (linear within the selected
+///   megabyte): `banks[0] * 1Mi + (bank - 0xC0) * 0x10000 + offset`.
+/// - `$D00000-$DFFFFF`/`$E00000-$EFFFFF`/`$F00000-$FFFFFF` -> `banks[1..3]`
+///   the same way.
+/// - Every other bank (`$00-$BF`) is not this window; `None` here lets the
+///   cartridge's ordinary LoROM mapping (bank `$00`'s `$8000-$FFFF`
+///   included — fullsnes's own "Exception Handlers, mapped in
+///   LoROM-fashion" sentence, module doc) resolve it through [`map`].
+#[must_use]
+pub fn sdd1_target(board: &Sdd1Board, bank: u8, offset: u16) -> Option<Target> {
+    if !(0xC0..=0xFF).contains(&bank) || board.rom_len == 0 {
+        return None;
+    }
+    let group = usize::from((bank - 0xC0) >> 4);
+    let within_group = usize::from((bank - 0xC0) & 0x0F);
+    let index =
+        usize::from(board.banks[group]) * 0x0010_0000 + (within_group << 16) + usize::from(offset);
+    Some(Target::Rom(index % board.rom_len))
+}
+
 /// Total work RAM: 128 KiB, at banks `$7E`-`$7F`.
 pub const WRAM_LEN: usize = 128 * 1024;
 
@@ -686,5 +726,22 @@ pub fn map(mode: SnesMapMode, bank: u8, offset: u16, rom_len: usize, sram_len: u
         // never a plain-LoROM/HiROM guess through data that isn't really
         // shaped that way.
         SnesMapMode::Sa1 => Target::Open,
+        // An S-DD1 cartridge's base memory map is plain LoROM (fullsnes
+        // "S-DD1 Memory Map": the whole window outside `$C0-$FF` is
+        // ordinary LoROM ROM/SRAM, ticket W19-03's module doc). `sdd1_target`
+        // is checked first for `$C0-$FF`, so this arm only ever sees
+        // addresses plain LoROM already answers correctly — reuse it
+        // rather than duplicate the arithmetic.
+        SnesMapMode::Sdd1 => {
+            if (0x70..0x7E).contains(&bank) && offset < 0x8000 && sram_len > 0 {
+                let index = ((usize::from(bank) - 0x70) << 15) | usize::from(offset);
+                return Target::Sram(index % sram_len);
+            }
+            if rom_len == 0 {
+                return Target::Open;
+            }
+            let index = ((usize::from(bank) & 0x7F) << 15) | usize::from(offset & 0x7FFF);
+            Target::Rom(index % rom_len)
+        }
     }
 }

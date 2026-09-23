@@ -201,6 +201,13 @@ pub struct SnesBus {
     /// separate board buffer: the sprite/attribute table this chip
     /// addresses lives in `sram` itself (`crate::obc1`'s module doc).
     pub obc1: Option<crate::obc1::Obc1Regs>,
+
+    /// The S-DD1's registers (`None` for every cartridge that does not
+    /// report [`rf_cart::Coprocessor::Sdd1`]) — see [`Self::install_sdd1`].
+    /// Ticket W19-03. Unlike SA-1/GSU there is no board-shape struct to
+    /// carry alongside it: the only per-cartridge input `sdd1_target` and
+    /// the DMA hook below need (the ROM length) is already `self.rom.len()`.
+    pub sdd1: Option<crate::sdd1::Sdd1Regs>,
     /// Set whenever a SNES-side access this `SnesSystem::step` (main CPU
     /// instruction, its DMA, or its HDMA) has landed on the cartridge ROM
     /// window (ticket W17-04's cost model — see
@@ -319,6 +326,7 @@ impl SnesBus {
             cx4: None,
 
             obc1: None,
+            sdd1: None,
             sa1_rom_contended: false,
             sa1_bwram_contended: false,
         }
@@ -376,6 +384,15 @@ impl SnesBus {
         self.obc1 = Some(crate::obc1::Obc1Regs::new());
     }
 
+    /// Wire up the cartridge's S-DD1 registers (ticket W19-03). Called by
+    /// [`crate::system::SnesSystem::load`] when the header reports
+    /// [`rf_cart::Coprocessor::Sdd1`]; every other cartridge's `sdd1` stays
+    /// `None`, so `target`/`run_channel` never route through the S-DD1 arm
+    /// for it and every existing golden's mapping is unchanged.
+    pub fn install_sdd1(&mut self) {
+        self.sdd1 = Some(crate::sdd1::Sdd1Regs::new());
+    }
+
     fn target(&self, addr: u32) -> Target {
         let bank = ((addr >> 16) & 0xFF) as u8;
         let offset = addr as u16;
@@ -429,6 +446,20 @@ impl SnesBus {
             if let Some(target) =
                 crate::mapping::obc1_target(&obc1.board(self.sram.len()), bank, offset)
             {
+                return target;
+            }
+        }
+        // Checked BEFORE the generic map, same reasoning as the others
+        // above: an S-DD1 cart's `$C0-$FF` banked windows sit inside
+        // bank/offset space `map` would otherwise resolve as an ordinary
+        // LoROM mirror (ticket W19-03). `sdd1` is `None` for every non-S-DD1
+        // cartridge.
+        if let Some(sdd1) = &self.sdd1 {
+            let board = crate::mapping::Sdd1Board {
+                banks: sdd1.banks(),
+                rom_len: self.rom.len(),
+            };
+            if let Some(target) = crate::mapping::sdd1_target(&board, bank, offset) {
                 return target;
             }
         }
@@ -497,6 +528,13 @@ impl SnesBus {
             // W14-26: DMA/HDMA channel registers read back what was
             // written — see `read_dma_register`'s doc.
             0x4300..=0x437F => return self.read_dma_register(offset),
+            // Ticket W19-03: S-DD1 registers read back what was written,
+            // no side effect — see `crate::sdd1`'s module doc. Only
+            // reachable for a cartridge whose header reports
+            // `Coprocessor::Sdd1` (`sdd1` is `None` otherwise, so this
+            // returns `None` and the read falls through to open bus, same
+            // as every unmapped register on a non-S-DD1 cart).
+            0x4800..=0x4807 => return self.sdd1.as_ref().map(|s| s.read(offset)),
             _ => return None,
         })
     }
@@ -639,6 +677,13 @@ impl SnesBus {
                 }
             }
             0x4300..=0x437F => self.write_dma_register(offset, value),
+            // Ticket W19-03: only reachable for a cartridge whose header
+            // reports `Coprocessor::Sdd1` — see the read arm's comment.
+            0x4800..=0x4807 => {
+                if let Some(s) = self.sdd1.as_mut() {
+                    s.write(offset, value);
+                }
+            }
             _ => {}
         }
     }
@@ -746,6 +791,33 @@ impl SnesBus {
         }
         self.mdma_in_progress = true;
 
+        // Ticket W19-03, fullsnes "S-DD1 I/O Ports"/"S-DD1 Memory Map":
+        // "DMA from ROM returns Decompressed Data (originated at DMA start
+        // addr)" — a channel this build reads as "decompressing" when BOTH
+        // `$4800` and `$4801` name it AND its A-bus start address resolves
+        // into the S-DD1's banked ROM window (`$C0-$FF`, `sdd1_target`).
+        // Seeded ONCE, at the start address, before any byte moves — every
+        // subsequent byte of this transfer comes from the decompressor,
+        // never from a second `self.read(a)`, regardless of how `a` itself
+        // steps below (fullsnes's own sentence ties the whole run's output
+        // to the ONE start address, not to each stepped address).
+        let mut decompressor = if self
+            .sdd1
+            .as_ref()
+            .is_some_and(|s| s.channel_decompresses(ch))
+            && (0xC0..=0xFF).contains(&((a >> 16) as u8))
+        {
+            match self.target(a) {
+                Target::Rom(rom_index) => {
+                    self.sa1_rom_contended = true;
+                    Some(crate::sdd1::Sdd1Decompressor::init(&self.rom, rom_index))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         for i in 0..total {
             let b = 0x2100u32
                 + u32::from(
@@ -755,6 +827,9 @@ impl SnesBus {
             if c.reverse() {
                 let v = self.read(b);
                 self.write(a, v);
+            } else if let Some(d) = decompressor.as_mut() {
+                let v = d.next_byte(&self.rom);
+                self.write(b, v);
             } else {
                 let v = self.read(a);
                 self.write(b, v);
@@ -763,6 +838,15 @@ impl SnesBus {
             let low = ((a as u16) as i32 + step) as u16;
             a = (a & 0x00FF_0000) | u32::from(low);
             moved += 1;
+        }
+
+        // Fullsnes "S-DD1 I/O Ports": "$4801h... automatically cleared
+        // after DMA" — only for the channel this run actually decompressed
+        // (`$4800` itself is "unchanged after DMA", left alone).
+        if decompressor.is_some() {
+            if let Some(s) = self.sdd1.as_mut() {
+                s.clear_transfer_bit(ch);
+            }
         }
 
         self.mdma_in_progress = false;

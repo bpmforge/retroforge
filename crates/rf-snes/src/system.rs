@@ -134,6 +134,16 @@ impl SnesSystem {
         if matches!(header.coprocessor, rf_cart::Coprocessor::Obc1) {
             system.bus.install_obc1();
         }
+        // S-DD1 (ticket W19-03, fullsnes "SNES Cart S-DD1"): `rf-cart`
+        // already identified the chip from the header's chipset byte under
+        // map mode $22; this wires up the register window and the DMA
+        // decompression hook (`SnesBus::run_channel`). No board-shape
+        // struct is needed — `sdd1_target`/`run_channel` read the ROM
+        // length straight off `self.rom`, same as `install_cx4`'s fixed
+        // window needed no sizing input either.
+        if matches!(header.coprocessor, rf_cart::Coprocessor::Sdd1) {
+            system.bus.install_sdd1();
+        }
         system.reset();
         Ok(system)
     }
