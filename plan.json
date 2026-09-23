@@ -8256,6 +8256,29 @@
    "W14-55 done 2026-09-23: rule A honours a corroborated chipset byte (GSU/SA-1/S-DD1/OBC1/Cx4/DSP) when the RESET-vector fallback fires, fixing the three Star Fox 2 betas (kept SuperFx) while Zool (Beta) correctly stays None; rule B rejects a fallback candidate whose vector resolves into its own header block, fixing The Lion King (Beta 3) (loads as HiROM). cargo test -p rf-cart: 82 passed (79 + 3 new). Gate green (fmt/clippy/tests/ignored suites/validate-arch).",
    "W14-55 FILED 2026-09-23 by the orchestrator from W14-54's two root-caused newcomer families (4 + 1 titles)."
   ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-cart",
+  "depends_on": [
+   "W14-55"
+  ],
+  "points": 1,
+  "status": "done",
+  "stories": [],
+  "id": "W14-56",
+  "title": "Header fallback: rule B's own-header-block rejection must exempt the unassigned $FFE0-$FFE3 slot (Operation Thunderbolt (USA) (Beta) refused after W14-55)",
+  "write_scope": [
+   "crates/rf-cart/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-56: `resolves_into_own_header_block` rejects a fallback candidate only when its 4-byte read window overlaps the header fields ($00-$1F) or an assigned exception-vector slot; a window lying entirely inside $FFE0-$FFE3 (fullsnes \"CPU Exception Vectors\": Zerofilled / ID XBOO) passes through to the prologue check — pinned by a test using the Operation Thunderbolt (Beta) shape and a boundary test on the predicate",
+   "W14-56: The Lion King (Beta 3) shape still loads as HiROM (W14-55's test unchanged); Operation Thunderbolt (Beta) renders in the census child again; gate: fmt, clippy -D warnings, cargo test --workspace, validate-arch; the orchestrator's full census names every moved title"
+  ],
+  "notes": [
+   "W14-56 FILED and DONE 2026-09-23 by the orchestrator: the post-W14-55 census moved Operation Thunderbolt (USA) (Beta) from rendered to refused. Its HiROM RESET vector is $FFE0 and a real SEI/CLC/XCE/JML trampoline sits there (JML operand spilling into the unused COP/BRK slots); W14-55's doc claim that the whole 64-byte block is never executable was wrong for that slot. Rule narrowed with the fullsnes citation; cargo test -p rf-cart: 87 passed (85 + 2 new)."
+  ]
  }
 ]
 }

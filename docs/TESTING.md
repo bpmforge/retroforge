@@ -10606,3 +10606,40 @@ tests; `a_pal_frame_is_pixel_identical_to_its_ntsc_counterpart`).
 full census, per the ticket's acceptance, is the record of what moved
 project-wide); this ticket's own evidence is the five-title-plus-canaries
 run above.
+
+## W14-56 — Rule B's own-header-block rejection exempts the unassigned $FFE0-$FFE3 slot
+
+The full census after W14-55 moved one title the wrong way: Operation
+Thunderbolt (USA) (Beta) went from rendered to refused (child exit 12,
+`Cartridge::load` returning `InvalidHeader`). Its HiROM header fields are
+`$FF` filler but its RESET vector is genuine — `$FFE0` — and the bytes at
+file offset `$FFE0` are `78 18 FB 5C 22 00 C0`: `SEI CLC XCE JML $C00022`,
+a real trampoline whose JML operand spills into the COP/BRK vector slots
+the program never uses. W14-55's rule B rejected any fallback candidate
+whose 4-byte read window overlapped the 64-byte header block, on the
+stated premise that the whole block is "fixed-layout data, never
+executable". fullsnes ("CPU Exception Vectors (Area FFE0h..FFFFh)") does
+not support that premise for the first four bytes: `FFE0h Zerofilled (or
+ID "XBOO" for WRAM-Boot compatible files)` — not a vector, and free for a
+program to use.
+
+`resolves_into_own_header_block` now rejects only a window that overlaps
+the header fields ($00-$1F) or an assigned vector slot; a window lying
+entirely inside `$FFE0-$FFE3` passes through to `looks_like_reset_
+prologue`. The Lion King (Beta 3) shape is unaffected: its LoROM window
+starts at `$7FFF`, the IRQ/BRK slot, and stays rejected.
+
+### Tests
+
+`crates/rf-cart/src/snes.rs`, `mod tests`:
+`fallback_accepts_reset_trampoline_in_the_unassigned_ffe0_slot_operation_thunderbolt_beta_shape`
+(HiROM filler header, vector `$FFE0`, trampoline in the slot → HiROM via
+`HiRomResetVector`) and
+`own_header_block_rule_keeps_rejecting_windows_that_leave_the_ffe0_slot`
+(the predicate at `+$20` passes, `+$21`, `+$1E`, `+$3F` reject, `+$40` and
+`-4` pass). W14-55's Lion King test is unchanged and still green.
+`cargo test -p rf-cart`: 87 passed (85 + 2 new).
+
+Census child on the real dumps at this commit: Operation Thunderbolt
+(Beta), The Lion King (Beta 3) and F1-ROC II all exit 0 (rendered);
+Star Fox (USA) unmoved. The full-library row is in §0.

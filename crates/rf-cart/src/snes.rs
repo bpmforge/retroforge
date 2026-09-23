@@ -630,29 +630,46 @@ fn looks_like_reset_prologue(bytes: &[u8]) -> bool {
 /// exactly the two extra signals `score_candidate` already uses, just
 /// applied as a tie-break instead of a score.
 /// Ticket W14-55: does the reset-vector target this guess just validated
-/// fall INSIDE the very header block the guess is evaluating? Real code a
-/// RESET vector points at is always outside the 64-byte header/vector-table
-/// block (fullsnes "SNES Cartridge ROM Header" — the block is fixed-layout
-/// data, never executable), so a vector that resolves back into its own
-/// header is definitionally not a real reset target, whatever bytes happen
-/// to sit there. This is the fix for The Lion King (USA) (Beta 3) (v.21):
-/// its LoROM header block ($7FC0-$7FFF) is wholesale `$FF` filler,
-/// including the vector field itself (`$7FFC`/`$7FFD` = `$FF $FF`, i.e. the
-/// vector IS the filler value $FFFF, not a surviving real address) — which
-/// decodes to file offset `$7FFF`, the last byte of that same header block.
-/// The byte at `$7FFF` is `$FF` (still filler) and `looks_like_reset_
-/// prologue` only accepts it because the CLC/XCE pair it finds at
-/// `$7FFF+2..+4` (`$18 $FB`) actually belongs to the FOLLOWING bank's real
-/// content (which happens to be HiROM's own genuine reset prologue at
-/// `$8000`) — a one-byte-offset coincidence at the seam between the header
-/// block and the next bank, not code this candidate's own vector reaches.
-/// Rejecting any guess whose 4-byte read window overlaps its own header
-/// block closes exactly this coincidence without needing a title-keyed
-/// exception (law 5).
+/// fall on the header FIELDS or an ASSIGNED vector slot of the very header
+/// block the guess is evaluating? Those bytes are fixed-layout data (fullsnes
+/// "SNES Cartridge ROM Header" for $FFC0-$FFDF; "CPU Exception Vectors (Area
+/// FFE0h..FFFFh)" for the vector slots), so a vector that resolves onto them
+/// is definitionally not a real reset target, whatever bytes happen to sit
+/// there. This is the fix for The Lion King (USA) (Beta 3) (v.21): its LoROM
+/// header block ($7FC0-$7FFF) is wholesale `$FF` filler, including the
+/// vector field itself (`$7FFC`/`$7FFD` = `$FF $FF`, i.e. the vector IS the
+/// filler value $FFFF, not a surviving real address) — which decodes to file
+/// offset `$7FFF`, the IRQ/BRK vector slot of that same header block. The
+/// byte at `$7FFF` is `$FF` (still filler) and `looks_like_reset_prologue`
+/// only accepts it because the CLC/XCE pair it finds at `$7FFF+2..+4`
+/// (`$18 $FB`) actually belongs to the FOLLOWING bank's real content (which
+/// happens to be HiROM's own genuine reset prologue at `$8000`) — a
+/// one-byte-offset coincidence at the seam between the header block and the
+/// next bank, not code this candidate's own vector reaches.
+///
+/// Ticket W14-56 narrows the window: the four bytes at `$FFE0-$FFE3` are
+/// NOT a vector — fullsnes lists them as "Zerofilled (or ID "XBOO" for
+/// WRAM-Boot compatible files)" — and at least one commercial-era dump
+/// (Operation Thunderbolt (USA) (Beta)) points its RESET vector at exactly
+/// `$FFE0`, where a real `SEI CLC XCE JML` trampoline sits (its JML operand
+/// spilling into the COP/BRK slots the program never uses). W14-55's first
+/// cut rejected any overlap with the 64-byte block and so refused that
+/// dump; a read window that lies entirely inside the `$FFE0-$FFE3` slot is
+/// now allowed through to `looks_like_reset_prologue`. Both shapes are
+/// pinned by tests, and neither needs a title-keyed exception (law 5).
 fn resolves_into_own_header_block(base: usize, file_offset: usize) -> bool {
+    /// fullsnes "CPU Exception Vectors": `FFE0h Zerofilled (or ID "XBOO"
+    /// ...)` — the one four-byte run in the block that is neither a header
+    /// field nor an assigned vector.
+    const UNASSIGNED_SLOT: usize = 0x20;
+    const UNASSIGNED_SLOT_LEN: usize = 4;
     let header_end = base + HEADER_BLOCK_LEN;
     let read_end = file_offset + 4;
-    file_offset < header_end && read_end > base
+    let overlaps_block = file_offset < header_end && read_end > base;
+    let slot_start = base + UNASSIGNED_SLOT;
+    let inside_unassigned_slot =
+        file_offset >= slot_start && read_end <= slot_start + UNASSIGNED_SLOT_LEN;
+    overlaps_block && !inside_unassigned_slot
 }
 
 fn fallback_mapping_guess(data: &[u8]) -> Option<(SnesMapMode, usize, HeaderFallback)> {
@@ -2521,5 +2538,51 @@ mod tests {
             "the LoROM candidate's vector resolves into its own header block and must be rejected"
         );
         assert_eq!(header.map_mode, SnesMapMode::HiRom);
+    }
+
+    /// Ticket W14-56 — the Operation Thunderbolt (USA) (Beta) shape: a HiROM
+    /// dump whose RESET vector is `$FFE0`, the four-byte slot fullsnes lists
+    /// as "Zerofilled (or ID XBOO)" rather than a vector, holding a real
+    /// `SEI CLC XCE JML` trampoline. W14-55's block-wide rejection refused
+    /// this dump; the narrowed rule must let it through as HiROM while the
+    /// Lion King shape above stays rejected.
+    #[test]
+    fn fallback_accepts_reset_trampoline_in_the_unassigned_ffe0_slot_operation_thunderbolt_beta_shape(
+    ) {
+        let mut data = vec![0xFFu8; 0x180000];
+        let hirom_base = HIROM_HEADER_OFFSET;
+        // Real dump: header fields are filler, the trampoline sits at $FFE0
+        // and the RESET vector names it.
+        data[hirom_base + 0x20] = 0x78; // SEI
+        data[hirom_base + 0x21] = 0x18; // CLC
+        data[hirom_base + 0x22] = 0xFB; // XCE
+        data[hirom_base + 0x23] = 0x5C; // JML
+        data[hirom_base + 0x24] = 0x22;
+        data[hirom_base + 0x25] = 0x00;
+        data[hirom_base + 0x26] = 0xC0;
+        data[hirom_base + RESET_VECTOR_OFFSET] = 0xE0;
+        data[hirom_base + RESET_VECTOR_OFFSET + 1] = 0xFF;
+        // The LoROM candidate's vector is the $FFFF filler value, as in the
+        // Lion King shape, and its target bytes are filler too.
+        let header = parse_snes_header(&data)
+            .expect("a trampoline in the $FFE0 slot is a real reset target");
+        assert_eq!(
+            header.header_fallback,
+            Some(HeaderFallback::HiRomResetVector)
+        );
+        assert_eq!(header.map_mode, SnesMapMode::HiRom);
+    }
+
+    /// Ticket W14-56 — the narrowed rule still rejects a window that merely
+    /// touches the unassigned slot while overlapping an assigned vector.
+    #[test]
+    fn own_header_block_rule_keeps_rejecting_windows_that_leave_the_ffe0_slot() {
+        let base = HIROM_HEADER_OFFSET;
+        assert!(!resolves_into_own_header_block(base, base + 0x20));
+        assert!(resolves_into_own_header_block(base, base + 0x21));
+        assert!(resolves_into_own_header_block(base, base + 0x1E));
+        assert!(resolves_into_own_header_block(base, base + 0x3F));
+        assert!(!resolves_into_own_header_block(base, base + 0x40));
+        assert!(!resolves_into_own_header_block(base, base - 4));
     }
 }
