@@ -7703,6 +7703,161 @@ program is hand-assembled bytes the test itself writes).
 
 **HEAD**: see the `feat(W18-02): ...` commit this entry ships with.
 
+## W18-03 (Super FX / GSU slice 3: pixel cache, PLOT/RPIX, bitmap RAM writeback)
+
+**Pixel cache and RAM bitmap** (`crates/rf-snes/src/gsu.rs`,
+`PixelCacheLine`, `GsuState::exec_plot`/`exec_rpix`/`flush_primary`/
+`flush_line_to_ram`/`plot_pixel_bits`/`read_pixel_bits`/`tile_number`/
+`tile_row_addr`, cited section-by-section to fullsnes "SNES Cart GSU-n
+Bitmap I/O Ports" and "Pixel-Cache" in the code itself): PLOT now writes
+through a real 8-pixel primary cache (X/Y-aligned segment, per-pixel
+colour, an 8-bit pending mask) instead of only advancing R1; a flush (on
+a segment change, on the cache filling all 8 slots, or on RPIX) hands the
+line to a secondary cache and then read-modify-writes only the pending
+pixels into the RAM bitmap at the SCBR/SCMR-derived address, honouring
+POR's Transparent/Dither/High-Nibble/Freeze-High/OBJ-Mode bits exactly as
+`docs/design/EMULATION_CORES.md` §3.6's slice-3 subsection quotes
+verbatim (Tile Number and Tile-Row Address formulas, plane-pair byte
+layout, and why the address is bank-`$70`-relative rather than
+RAMBR-relative). RPIX force-flushes both caches and reads the pixel back
+from RAM, never from cache, matching fullsnes's "RPIX isn't cached".
+COLOR/GETC also gained POR's High-Nibble/Freeze-High transform on the
+*incoming* byte (`GsuState::write_colr`), which W18-02 had not yet
+applied.
+
+**Second cache**: `Gsu::secondary_cache` is real, saved state (a second
+`PixelCacheLine`), giving the documented primary-to-secondary-to-RAM
+hand-off its own field rather than collapsing straight to RAM — but the
+hand-off itself runs synchronously inside `flush_primary` (no WAIT/stall
+model exists yet), so `secondary_cache` is always empty again once that
+call returns. Slice 4 is where the overlap's timing becomes observable.
+
+**A pre-existing bug this ticket's own test caught**: the first
+implementation of PLOT's transparency-check mask computed `(1u16 <<
+check_bits) as u8 - 1`, which panics (`attempt to subtract with
+overflow`) for `check_bits == 8` — i.e. any ordinary 8bpp/256-color PLOT
+without Freeze-High set, exactly Doom's and Vortex's colour depth. Caught
+by `exec_tests::plot_bpp_and_height_mode_matrix` before this ticket's own
+commit, fixed by special-casing `check_bits >= 8` to `0xFF` rather than
+shifting.
+
+**Tests** (`crates/rf-snes/src/gsu.rs`, `mod exec_tests`, 15 new unit
+tests, total 37 GSU tests in the module): a hand-assembled program
+(`plot_program_fills_one_segment_and_autoflushes_on_stop`) that PLOTs
+eight known 2bpp colours across one segment, letting the "cache full"
+flush condition fire on its own, then STOPs — RAM bytes asserted exactly
+(`0x55`/`0x33`, the bit-packed planes); `rpix_reads_back_the_pixel_plot_
+just_wrote` (round trip); `plot_transparent_default_skips_color_zero`;
+`plot_dither_picks_high_nibble_on_odd_xy_parity`;
+`plot_freeze_high_narrows_256_color_transparency_check`;
+`color_high_nibble_and_freeze_high_transform_incoming_byte` (all four
+POR-bit combinations); `plot_flushes_old_segment_on_segment_change`
+(flush condition 1, asserting the OLD segment's RAM bytes before the new
+one is ever read back); `plot_bpp_and_height_mode_matrix` (2/4/8bpp x
+128/160/192-pixel height, plus the reserved MD value, each via a
+plot+RPIX round trip); `plot_obj_mode_via_scmr_and_via_por` (OBJ forced
+both ways); `pixel_cache_determinism_two_runs_match`;
+`save_load_preserves_a_pending_pixel_cache` (save/load with 5-of-8 pixels
+still only in the primary cache, mid-flush, then finish both an
+uninterrupted run and a save/load-restored one identically and compare
+RAM byte-for-byte). The pre-existing `cmode_color_getc_plot_rpix_stubs`
+test (W18-02) is renamed `..._dispatch` and its POR test value changed
+from `0x1F` (which now exercises real Freeze-High/High-Nibble semantics
+the old assertion didn't expect) to `0x10` (OBJ-only), keeping its scope
+to opcode dispatch rather than pixel semantics.
+
+**Census** (RELEASE, same `boot_census_child` direct-invocation method as
+W18-01/W18-02, all fifteen GSU archives plus the five canaries, this
+worktree's own freshly built `boot_census` binary):
+
+| title | exit | bucket |
+|---|---|---|
+| Star Fox (USA) | 0 | rendered something |
+| Star Fox (USA) (Rev 1) | 0 | rendered something |
+| Star Fox (USA) (Rev 2) | 10 | uniform (unchanged) |
+| Star Fox 2 (Classic Mini, Switch Online) | 10 | uniform (unchanged) |
+| Star Fox 2 (Beta) x3 | 12 | refused (malformed dump, pre-existing) |
+| Stunt Race FX (USA) (Rev 1) | **0** | **rendered something (was already 0 in W18-02; confirmed unregressed)** |
+| Yoshi's Island (USA) | 0 | rendered something |
+| Yoshi's Island (USA) (Rev 1) | 0 | rendered something |
+| Super Star Fox Weekend (Competition Cart) | 10 | uniform (unchanged) |
+| Vortex (USA) (En,Es) | 10 | uniform (unchanged — still parked on `JMP R9`, see below) |
+| Dirt Trax FX (USA) | 0 | rendered something |
+| Doom (USA) | 0 | rendered something |
+| Tommy Moe's Winter Extreme | 0 | rendered something |
+| Super Mario World (USA) canary | 0 | rendered something |
+| Wild Guns (USA) canary | 0 | rendered something |
+| Super Mario RPG (USA) canary | 0 | rendered something |
+| Kirby Super Star (USA) canary | 0 | rendered something |
+| NHL 95 (USA) canary | 0 | rendered something |
+
+No archive crashed, hung past its 30-second guard, or regressed from
+W18-02's bucket. The four still-uniform titles never call PLOT this
+frame window (`plot_calls=0` in every `PROBE_GSUREGS` dump below) — their
+blank screens are gated on something upstream of the pixel path (a boot
+sequence that never reaches PLOT at all), not on this ticket.
+
+**`PROBE_GSUREGS=1` core-state dump** (600 frames), the four
+still-uniform titles:
+
+| title | PBR:R15 | last opcode | instructions | GO | IRQ | plot | rpix |
+|---|---|---|---|---|---|---|---|
+| Star Fox (Rev 2) | `01:829F` | `$00` STOP | 236,501,353 | false | false | 0 | 0 |
+| Star Fox 2 (Classic Mini) | `0E:002C` | `$00` STOP | 5,794 | false | true | 0 | 0 |
+| Super Star Fox Weekend | `20:829F` | `$00` STOP | 524,122,575 | false | false | 0 | 0 |
+| Vortex | `06:0097` | `$99` JMP R9 | 1,835,424,155 | **true** | false | 0 | 0 |
+
+Identical to W18-02's own dump (same PC, same instruction counts) —
+**Vortex did not progress**: it is still parked on `JMP R9` with `GO`
+still set after 1.8 billion opcodes, `plot_calls=0`. This confirms W18-02's
+own prediction that Vortex's spin is not the pixel cache: with a real
+pixel cache now in place, a title genuinely blocked on a pixel-cache WAIT
+would still spin (no stall model exists to unblock it either way), so
+this result is consistent with, but does not by itself prove, that
+diagnosis — it only rules out "the pixel cache's mere absence" as the
+cause, since Vortex never even reaches a PLOT to be blocked on. The real
+cause remains a named, unresolved gap for a later slice (most likely
+slice 4's cycle-accurate WAIT modelling).
+
+For contrast, a title that now exercises the real pixel cache
+extensively: Yoshi's Island (USA) — `PBR:R15=09:8925`, GO=false,
+**`plot_calls=7,680`, `rpix_calls=120`** over 600 frames (3,762,977
+instructions) — the GSU renders its Mode-7-style terrain, PLOTting real
+pixels into RAM every frame, exactly the path this ticket implements.
+
+**Determinism**: `exec_tests::pixel_cache_determinism_two_runs_match`
+(two independent PLOT/dither/RPIX sequences, including a segment-change
+flush, produce byte-identical RAM) extends W18-02's register-only
+determinism coverage to the RAM bitmap; `save_load_preserves_a_pending_
+pixel_cache` covers the save-state half of the acceptance's "save-state
+round trip mid-GSU-run reproduces the same frames" criterion at the
+RAM-bitmap level (register-file level was W18-02's).
+
+**Gate**: `cargo fmt --check` clean; `cargo clippy --workspace -- -D
+warnings` clean; `cargo test -p rf-snes` — **455 passed, 0 failed, 16
+ignored** (37 of the lib's 426 are `gsu::exec_tests::*`, 15 new this
+ticket); `cargo test --workspace` — **2,305 passed, 0 failed, 157
+ignored**; `scripts/validate-arch.sh` — `arch OK`. Per the orchestrator's
+explicit instruction this session, the long ignored SNES suites
+(`singlestep_spc700_vectors`, `singlestep_65816_vectors`, `gilyon_
+cputest`, `spc_timer_reports_pass`, `peterlemon_bg_map_goldens_match`,
+`undisbeliever_goldens_match`) were **not** re-run here — the
+orchestrator runs that gate separately across the whole board rather than
+per-ticket, and this ticket touches no 65816/SPC700/DMA path those suites
+exercise. No ROM bytes or copyrighted titles anywhere in `gsu.rs` (every
+test program is hand-assembled bytes the test itself writes).
+
+**Not delivered this ticket, named rather than silently dropped**: an
+SNES-side golden-frame test DMAing the GSU RAM bitmap to VRAM (acceptance
+#2's "an SNES-side DMA of that RAM to VRAM renders in a golden frame
+test") — the unit-level RAM-byte assertions above and the real-title
+census/probe evidence (Yoshi's Island's 7,680 PLOTs) cover the pixel-cache
+mechanism itself, but a dedicated hand-assembled-GSU-program + DMA +
+golden-frame integration test was not written in the time available this
+session; filed as a follow-up rather than claimed done.
+
+**HEAD**: see the `feat(W18-03): ...` commit this entry ships with.
+
 ## W14-51 — Final Fight 2 / Battletoads: no register defect found; both
 titles' picture appears well outside the census window, the same
 "boot longer than window" class as Lagoon/Phalanx (W14-35). BLOCKED
