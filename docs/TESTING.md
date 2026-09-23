@@ -8992,11 +8992,128 @@ sentence fullsnes states GO+RON for), but the RAM case's extension and
 the change's real-world effect on Star Fox contradict it, and that
 contradiction needs a ruling, not a unilateral pick either way.
 
-**Left BLOCKED, unchanged from the verdict above** — both Vortex and
-Star Fox 2 remain not-rendering, and no shipped code changed this
-session (docs only).
+### D-016, second pass: the write-only rule two traces jointly support — SHIPPED
 
-**HEAD**: see the `docs(W18-06): ...` commit this entry ships with.
+The coordinator asked for one more trace before ruling, rather than
+picking a side: log every SNES-side READ into the GSU RAM/ROM ranges
+while GO=0, compare the patched value against main's, and find the
+first divergence. Re-applied the `GO && RAN`/`GO && RON` patch with a
+temporary divergence hook (env-gated `eprintln!` in `SnesBus::read`'s
+`Target::Rom`/`Target::GsuRam` arms, PC threaded in via a temporary
+`thread_local` the test harness set before every `core.step` — all
+removed before this commit) and ran it against Star Fox (USA) for
+3,000,000 instructions.
+
+**The first differing read**: `pc=7E4EFA addr=00FFEE patch=0C main=20`
+— a WRAM-resident routine (bank `$7E`, near the coordinator's cited
+`pc=$7E4EE7` R15/GO-write site) reading the native IRQ vector low byte.
+Under the patch (GO=0, RON=1, `owns_rom_bus` false) this returns real
+ROM (`$0C`, and the ROM file's own `$FFEE/$FFEF` bytes are `0C 01` —
+Star Fox's own vectors are deliberately set to fullsnes's fixed GSU
+override value, `$010C`, exactly as fullsnes's "It'd be best to set the
+Game Pak ROM vectors to the same addresses" recommends); under main
+(raw RON gate) this returns open bus (`$20`, whatever was last driven).
+**Total divergence count: 2,361 reads, ALL on the ROM side (`Target::
+Rom`), ZERO on the RAM side (`Target::GsuRam`)** — and they are not
+confined to the vector region: addresses like `$00852E`, `$00ACC8`,
+`$00D2BD`, `$02F484-$02F4BA`, `$038ACA-$038AE9`, `$03A8E0-$03A8E9`,
+`$03AB22-$03ABCB` are ordinary code/data scattered across the whole ROM,
+read while RON=1 and GO=0.
+
+**Where the SNES parks under the patch**: `PROBE_RINGP` at the end of
+the same 3,000,000-instruction run shows the CPU alternating between two
+WRAM addresses, `$000822-$000846` (climbing by 2 each pass) and
+`$00FF9A` (fixed), then finally landing at `$000000` and executing
+zero-initialized WRAM as opcodes (`cpu 000005: [a8] TAY`) until it hits
+a stray `STP` (`cpu.stopped=true`) — the CPU walked into garbage memory
+and halted. This is a real crash, not a stall: `boot_census_child`
+confirms it as Star Fox (USA)/(Rev 1)/(Rev 2) all flipping from
+`rendered` (exit `0`) to `uniform` (exit `10`), reproduced twice via a
+direct `git stash`/`stash pop` A/B on the identical binary and ROM.
+
+**The rule the two traces jointly support**: fullsnes's only
+GO-conditioned sentence ("SNES Cart GSU-n Memory Map"/"GSU Interrupt
+Vectors": "When the GSU is running (with GO=1 and RON=1), ROM isn't
+mapped to SNES memory") describes the FIXED VECTOR VALUES that appear
+at `$FFE4-$FFFF` specifically while GO=1 — it never states what a GO=0
+read sees, in that region or anywhere else, and Star Fox's trace shows
+that a real, shipped title relies on the ORDINARY raw-bit reading for
+ROM reads everywhere, GO=0 included. Vortex's trace, separately, shows a
+real, shipped title relying on GO-gating for RAM WRITES specifically
+(SCMR=$39, GO=0, an 8 KiB SNES-side RAM store that must land). The two
+traces do not conflict — they are about different bus operations (READ
+vs WRITE) on different address classes (ROM vs RAM) — so the rule that
+satisfies both is asymmetric and narrow: **`Gsu::ron`/`Gsu::ran`'s raw
+bits gate every SNES-side READ (of both ROM and GSU RAM) unconditionally,
+exactly as originally implemented in W18-01; only a SNES-side WRITE to
+GSU RAM is additionally gated by GO (`Gsu::owns_ram_bus`, `GO && RAN`,
+used solely in `SnesBus::write`'s `Target::GsuRam` arm)**. ROM has no
+SNES-side write path to gate (cartridge ROM is read-only), so no
+`owns_rom_bus` is needed or used anywhere — it was removed.
+
+**Shipped**: `Gsu::owns_ram_bus` (`GO && RAN`) added, used only in
+`SnesBus::write`'s `Target::GsuRam` arm; every read/peek site (both
+`Target::Rom` and `Target::GsuRam`, in both `read` and `peek`) reverted
+to the original raw `ron()`/`ran()` check, matching W18-01 exactly.
+`gsu_scmr_ron_ran_gate_the_snes_sides_own_reads` (W18-01's original
+pinned test) is UNCHANGED in its assertions — the raw-bit read rule it
+pins is still correct — with a doc-comment note explaining the two
+traces that confirmed it. A new test,
+`snes_ram_setup_write_lands_even_with_ran_set_while_the_gsu_is_stopped`,
+pins Vortex's exact shape: SCMR=$39, GO=0, the whole 8 KiB `$6000-$7FFF`
+block written by the SNES, then GO=1, and a GSU LDB reads the last byte
+back correctly.
+
+**Gate, all exit-checked**: `cargo fmt --check` 0; `cargo clippy
+--workspace -- -D warnings` 0; `cargo test -p rf-snes -p rf-cart
+--release` 0 (440 passed — one test's assertions changed, one new test
+added, count matches the intermediate reverted-patch commit exactly, 0
+failed, 1 ignored); `spc700_vectors`/`blargg_spc`/`gilyon_cputest`/
+`peterlemon_golden` `--ignored` 0 each; `scripts/validate-arch.sh` 0.
+
+**Census children, all 15 GSU archives + 5 canaries (17 distinct
+archives), RE-VERIFIED after the fix**: Star Fox (USA)/(Rev 1)/(Rev 2)
+back to exit `0` (rendered) — the regression from the reverted first
+attempt is gone. Star Fox 2 (Classic Mini/Switch Online), Super Star Fox
+Weekend, and Vortex remain exit `10` (uniform); the three Star Fox 2
+betas remain exit `12` (refused); every other archive and canary exit
+`0`, unchanged. No regression anywhere, confirmed against the full
+15+5 list.
+
+**First varied frame, both target titles**: Star Fox 2 unchanged
+(`varied_at=None` at 1800/6000 frames, `plot_calls=2`, identical to
+every prior measurement — this fix does not touch its own, separate
+defect). **Vortex materially changed**: `plot_calls=4` (up from `0` in
+every measurement this ticket ever took before this fix) and, pushed to
+an 80,000,000-instruction run, `forced_blank=false` and `vram_nonzero=
+7550` (both `true`/`0` in every prior measurement) — the GSU actually
+ran its render setup and the PPU actually got real tile data, a first
+for this whole investigation. Still `varied_at=None`: the GSU stops
+cleanly at `instructions=740,512` (`go=false`, clean, not a spin) and
+never restarts; the CPU parks permanently alternating between exactly
+two addresses, `$00:0000` (WRAM, a vector/dispatch trampoline cell) and
+`$00:FD21` (ROM — disassembled: a single `RTI` opcode followed by
+unused, `$FF`-filled ROM space) — consistent with an interrupt vector
+trampoline at WRAM `$0000` whose real handler was never installed,
+defaulting to an empty `RTI` stub, so every subsequent NMI/IRQ returns
+immediately without doing the work that would enable the display.
+**Named as the new, downstream cell for whoever picks this back up**:
+WRAM `$0000` (or wherever its own vector-install routine writes it) is
+the next value to trace — this is a DIFFERENT defect from the one this
+ticket diagnosed and fixed (the dropped RAM write), one level further
+into the boot sequence.
+
+**Status**: the dropped-8-KiB-write defect this ticket diagnosed for
+Vortex is FIXED and verified (spin gone, clean GSU stop, real PLOT
+activity, real VRAM data — all firsts). Vortex does not yet render a
+frame, blocked on a newly-exposed, different, downstream defect (the
+WRAM `$0000` vector trampoline, named above but not yet traced to a
+value). Star Fox 2 is unchanged and still fully open. Flipping this
+ticket to reflect the shipped fix while naming the new frontier, rather
+than holding the fix hostage to a problem it does not cause and cannot
+fix by construction.
+
+**HEAD**: see the `fix(W18-06): ...` commit this entry ships with.
 
 ## W14-51 — Final Fight 2 / Battletoads: no register defect found; both
 titles' picture appears well outside the census window, the same

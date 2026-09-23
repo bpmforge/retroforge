@@ -781,50 +781,51 @@ section.
 
 **W18-06 (this ticket) traced both remaining titles to their actual
 inputs — a RAM cell and a bus-ownership register — rather than more
-opcode auditing, per W18-04's own method lesson. No production fix
-shipped; both are BLOCKED with a named cell and both values. Full traces:
-docs/TESTING.md's own W18-06 section.**
+opcode auditing, per W18-04's own method lesson. Vortex's dropped-write
+defect is FIXED and shipped, verified by two divergence traces (one per
+title) that jointly pin the correct asymmetric rule. Star Fox 2 remains
+BLOCKED with a named cell and both values. Full traces: docs/TESTING.md's
+own W18-06 section.**
 
-- **Vortex, root cause found and named, fix NOT shipped.** A traced boot
-  writes `$303A` SCMR = `$39` (RON=1, RAN=1) while GO=0 (confirmed on
-  every SCMR write sampled across the boot — the GSU program has not
-  started yet), then stores its whole 8 KiB `$00:6000-$00:7FFF` GSU RAM
-  setup block (8192 consecutive SNES-side bytes, descending addresses,
-  an `85/89/00` tile-data pattern) through the ordinary CPU write path.
-  Every one of those 8192 writes is dropped: `SnesBus::write`'s
-  `Target::GsuRam` arm gates on the raw RAN bit (`Gsu::ran`), which reads
-  back `1` regardless of whether the GSU is actually running, so `!g.regs
-  .ran()` is `false` for the whole block. Traced independently: the block
-  is never rewritten afterward (grepped the full write log for a second
-  pass over `$6000-$7FFF` once RAN clears — zero hits), so the data is
-  genuinely lost, not merely delayed. The GSU's own program then reads
-  back `0` for cells the SNES had just written real bytes to, and spins
+- **Vortex, root cause found and FIXED.** A traced boot writes `$303A`
+  SCMR = `$39` (RON=1, RAN=1) while GO=0 (confirmed on every SCMR write
+  sampled across the boot — the GSU program has not started yet), then
+  stores its whole 8 KiB `$00:6000-$00:7FFF` GSU RAM setup block (8192
+  consecutive SNES-side bytes, descending addresses, an `85/89/00`
+  tile-data pattern) through the ordinary CPU write path. Every one of
+  those 8192 writes was dropped: `SnesBus::write`'s `Target::GsuRam` arm
+  gated on the raw RAN bit alone, which reads back `1` regardless of
+  whether the GSU is actually running. The GSU's own program then read
+  back `0` for cells the SNES had just written real bytes to, and spun
   forever inside a `JMP Rn`-family computed jump recomputed from that
-  zeroed RAM (the same `PBR:R15` region — `06:0097-06:00B0` — three prior
-  tickets traced without finding an opcode defect, because the defect
-  is upstream of every opcode in that loop). **A candidate fix was
-  written, tested, and REVERTED after review**: gating on `GO && RAN`
-  (added as `Gsu::owns_ram_bus`/`owns_rom_bus`) makes the write land and
-  measurably changes Vortex's own counters (`go_set`/`go_clear` go from
-  5/4 — GSU never stops — to 5/5 clean stops, `ram_stalls` 26,612,380 to
-  0), and Star Fox 2's too (`go_set` 18->26, `plot_calls` 2->138,
-  `rpix_calls` 0->2) — but it directly contradicts
-  `gsu_scmr_ron_ran_gate_the_snes_sides_own_reads`, a test pinning
-  W18-01's own deliberate acceptance that RAN/RON are a physical bus-mux
-  select (connection state), not an activity gate, and that reading is
-  what shipping emulators use too. Neither title's `varied_at` moved
-  under the candidate fix (`None` at both 1800 and 6000 frames, before
-  and after), so it is not a render fix regardless of the pinned-test
-  conflict — reverted in full (both `gsu.rs` and `bus.rs`, zero diff
-  against `main`), reported as a measured-but-not-shipped experiment.
-  **Open**: whether the real defect is the SNES-side handshake itself (the
-  `$39`/`$21` alternation traced nine times before the block IS fullsnes's
-  documented "RON/RAN can be temporarily cleared DURING GSU OPERATION"
-  wording, but every sampled instance has `GO=0` — a contradiction in
-  *values*, the W18-04 class, naming a real gap: no WAIT-status state
-  exists at all in this slice, so a mid-run RAN clear that should pause
-  the GSU currently does nothing to it) or something else in the SCMR
-  handshake this session did not reach.
+  zeroed RAM (the same `PBR:R15` region three prior tickets traced
+  without finding an opcode defect, because the defect was upstream of
+  every opcode in that loop). **Fix, shipped after two rounds of
+  verification**: `Gsu::owns_ram_bus` (`GO && RAN`) added, used ONLY in
+  `SnesBus::write`'s `Target::GsuRam` arm — every READ path (both ROM and
+  GSU RAM, in both `read` and `peek`) is UNCHANGED from W18-01's original
+  raw-bit gate. The first attempt applied `GO`-gating to reads too and
+  was reverted: a divergence trace against Star Fox (USA) found 2,361 ROM
+  reads (zero RAM reads) where GO=0/RON=1 and the raw gate was load-
+  bearing — Star Fox's own boot relies on seeing open bus at ordinary ROM
+  addresses scattered across its code, not just the exception-vector
+  region fullsnes's own GO-conditioned sentence describes — and
+  `boot_census_child` confirmed the regression directly (Star Fox (USA)/
+  (Rev 1)/(Rev 2) flipped from `rendered` to `uniform`, reproduced twice
+  via `git stash`). The two traces (Vortex's write-side, Star Fox's
+  read-side) do not conflict: they are about different bus operations on
+  different address classes, and the narrow, write-only rule satisfies
+  both. Verified: Vortex's GSU now stops cleanly (`go=false`, not a
+  spin), fires 4 `PLOT` calls (was `0` in every measurement this whole
+  investigation ever took), and — pushed to 80,000,000 instructions —
+  clears `forced_blank` and populates VRAM (`vram_nonzero=7550`), both
+  firsts. **Still does not render a frame**: the CPU parks permanently
+  alternating between `$00:0000` (WRAM, an interrupt-vector trampoline
+  cell) and `$00:FD21` (ROM, disassembled as a single `RTI` followed by
+  unused `$FF`-filled space) — a DIFFERENT, downstream defect this ticket
+  did not cause and did not fix: the real NMI/IRQ handler was apparently
+  never installed at that trampoline cell, so every interrupt returns
+  immediately. Named as the next cell for a follow-up ticket.
 - **Star Fox 2, named not fixed.** 18 clean GSU start/stop cycles
   complete (`go_set=18/go_clear=18/go_clear_by_stop=18`), matching
   W18-05's own finding. Traced further this ticket: the SNES CPU reads

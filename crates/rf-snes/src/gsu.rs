@@ -450,18 +450,36 @@ impl Gsu {
     }
 
     /// `$303Ah` SCMR bit 4 — RON, "Game Pak ROM bus access (0=SNES,
-    /// 1=GSU)". Read by [`crate::bus::SnesBus`] to decide whether an
-    /// SNES-side ROM read sees the cartridge or open bus (see
-    /// [`crate::mapping::gsu_target`]'s doc for why that decision is not
-    /// made in mapping itself).
+    /// 1=GSU)". Raw bit value only — see [`Self::owns_rom_bus`] for the
+    /// value [`crate::bus::SnesBus`] actually gates SNES-side ROM access
+    /// on.
     #[must_use]
     pub fn ron(&self) -> bool {
         self.scmr & 0x10 != 0
     }
-    /// `$303Ah` SCMR bit 3 — RAN, same rule for the RAM bus.
+    /// `$303Ah` SCMR bit 3 — RAN, same rule for the RAM bus. Raw bit value
+    /// only — see [`Self::owns_ram_bus`].
     #[must_use]
     pub fn ran(&self) -> bool {
         self.scmr & 0x08 != 0
+    }
+
+    /// Whether the GSU currently, actually holds the ROM bus away from the
+    /// SNES. Ticket W18-06 (Vortex trace, D-016 Brad's ruling
+    /// 2026-09-23): fullsnes "SNES Cart GSU-n Memory Map", "GSU Interrupt
+    /// Vectors" states the joint condition explicitly, in exactly these
+    /// words: "When the GSU is running (with GO=1 and RON=1), ROM isn't
+    /// mapped to SNES memory" — GO=1 **and** RON=1 together, not RON
+    /// alone.
+    #[must_use]
+    pub fn owns_rom_bus(&self) -> bool {
+        self.go() && self.ron()
+    }
+    /// Whether the GSU currently, actually holds the RAM bus away from the
+    /// SNES. See [`Self::owns_rom_bus`]'s doc.
+    #[must_use]
+    pub fn owns_ram_bus(&self) -> bool {
+        self.go() && self.ran()
     }
 
     /// `$3030/$3031` SFR bit 5 — GO. Set by writing R15's MSB (fullsnes),
