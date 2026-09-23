@@ -779,6 +779,85 @@ section.
   golden-frame test DMAing the GSU RAM bitmap to VRAM, named as a gap
   rather than claimed done back in slice 3 and still not written.
 
+**W18-06 (this ticket) traced both remaining titles to their actual
+inputs — a RAM cell and a bus-ownership register — rather than more
+opcode auditing, per W18-04's own method lesson. No production fix
+shipped; both are BLOCKED with a named cell and both values. Full traces:
+docs/TESTING.md's own W18-06 section.**
+
+- **Vortex, root cause found and named, fix NOT shipped.** A traced boot
+  writes `$303A` SCMR = `$39` (RON=1, RAN=1) while GO=0 (confirmed on
+  every SCMR write sampled across the boot — the GSU program has not
+  started yet), then stores its whole 8 KiB `$00:6000-$00:7FFF` GSU RAM
+  setup block (8192 consecutive SNES-side bytes, descending addresses,
+  an `85/89/00` tile-data pattern) through the ordinary CPU write path.
+  Every one of those 8192 writes is dropped: `SnesBus::write`'s
+  `Target::GsuRam` arm gates on the raw RAN bit (`Gsu::ran`), which reads
+  back `1` regardless of whether the GSU is actually running, so `!g.regs
+  .ran()` is `false` for the whole block. Traced independently: the block
+  is never rewritten afterward (grepped the full write log for a second
+  pass over `$6000-$7FFF` once RAN clears — zero hits), so the data is
+  genuinely lost, not merely delayed. The GSU's own program then reads
+  back `0` for cells the SNES had just written real bytes to, and spins
+  forever inside a `JMP Rn`-family computed jump recomputed from that
+  zeroed RAM (the same `PBR:R15` region — `06:0097-06:00B0` — three prior
+  tickets traced without finding an opcode defect, because the defect
+  is upstream of every opcode in that loop). **A candidate fix was
+  written, tested, and REVERTED after review**: gating on `GO && RAN`
+  (added as `Gsu::owns_ram_bus`/`owns_rom_bus`) makes the write land and
+  measurably changes Vortex's own counters (`go_set`/`go_clear` go from
+  5/4 — GSU never stops — to 5/5 clean stops, `ram_stalls` 26,612,380 to
+  0), and Star Fox 2's too (`go_set` 18->26, `plot_calls` 2->138,
+  `rpix_calls` 0->2) — but it directly contradicts
+  `gsu_scmr_ron_ran_gate_the_snes_sides_own_reads`, a test pinning
+  W18-01's own deliberate acceptance that RAN/RON are a physical bus-mux
+  select (connection state), not an activity gate, and that reading is
+  what shipping emulators use too. Neither title's `varied_at` moved
+  under the candidate fix (`None` at both 1800 and 6000 frames, before
+  and after), so it is not a render fix regardless of the pinned-test
+  conflict — reverted in full (both `gsu.rs` and `bus.rs`, zero diff
+  against `main`), reported as a measured-but-not-shipped experiment.
+  **Open**: whether the real defect is the SNES-side handshake itself (the
+  `$39`/`$21` alternation traced nine times before the block IS fullsnes's
+  documented "RON/RAN can be temporarily cleared DURING GSU OPERATION"
+  wording, but every sampled instance has `GO=0` — a contradiction in
+  *values*, the W18-04 class, naming a real gap: no WAIT-status state
+  exists at all in this slice, so a mid-run RAN clear that should pause
+  the GSU currently does nothing to it) or something else in the SCMR
+  handshake this session did not reach.
+- **Star Fox 2, named not fixed.** 18 clean GSU start/stop cycles
+  complete (`go_set=18/go_clear=18/go_clear_by_stop=18`), matching
+  W18-05's own finding. Traced further this ticket: the SNES CPU reads
+  `$3031` (SFR high byte, the IRQ flag) only 8 times in the entire run,
+  all clustered in the earliest few GSU cycles (offsets `3031`/`3021`/
+  `34B1`/`34A1` — SFR-high mirrors, consistent with one-time chip-version
+  probing) — so whatever gates the 19th GSU launch is NOT SFR/IRQ
+  polling; nothing reads it again for the rest of a 30,000,000-
+  instruction run. A large `$70:xxxx` STZ-loop (RAM bank `$70` clear,
+  `DBR=$70`, X climbing from ~`$5EF2` toward wraparound) found early in
+  this trace is NOT the hang — confirmed by running past it: VRAM/OAM/
+  CGRAM populate, NMI/IRQ fire repeatedly (13+ entries by frame 353),
+  frame count climbs to 2624 by 30,000,000 instructions — genuine
+  progress, just never with `forced_blank` cleared or brightness raised.
+  The GSU itself never restarts after its 18th STOP for the entire
+  30,000,000-instruction span (`go=false` unchanged). **Open**: which
+  cell/condition the main loop actually waits on to trigger GSU run #19
+  or enable the display — not yet found. The cart-fact mismatch already
+  on record (`GSU2_ROM_THRESHOLD_BYTES`'s strict `>` misdetects this
+  real 1 MiB GSU2 title as GSU1, acknowledged in `SuperFxVersion`'s own
+  doc) was NOT independently confirmed to matter this session: `$303B`
+  VCR is never read anywhere in the traced boot (the 8 SFR-mirror reads
+  above are the only register-window reads observed at all), so there is
+  no evidence yet that the GSU1/GSU2 misdetection is what blocks this
+  title, and the experiment to force GSU2 and re-check was not run given
+  that absence of evidence.
+- **Census, unchanged** (RELEASE, `boot_census_child` run individually
+  against Vortex, Star Fox 2, and all five canaries — Star Fox, Yoshi's
+  Island, Doom, Super Mario World, Wild Guns): Vortex and Star Fox 2 both
+  exit `10` (rendered a uniform screen); all five canaries exit `0`
+  (rendered something) — no regression, matching the pre-session state
+  exactly (this ticket shipped no production change).
+
 ## 4. Cartridge layer boundary (`rf-cart`)
 
 `rf-cart` owns file parsing (iNES/NES 2.0 incl. submapper/PRG-RAM fields,
