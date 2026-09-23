@@ -8167,14 +8167,12 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W14-53",
   "title": "Five retail carts still refused because the map-mode nibble names SA-1/S-DD1/ExHiROM while the chipset byte disagrees: Contra III (x2), Krusty's Super Fun House, The Duel: Test Drive II, Space Football",
   "write_scope": [
-   "crates/rf-snes/**",
    "crates/rf-cart/**",
-   "crates/rf-harness/**",
    "docs/TESTING.md",
    "docs/design/EMULATION_CORES.md"
   ],
