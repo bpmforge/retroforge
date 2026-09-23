@@ -144,6 +144,16 @@ impl SnesSystem {
         if matches!(header.coprocessor, rf_cart::Coprocessor::Sdd1) {
             system.bus.install_sdd1();
         }
+        // ST010 (ticket W19-04, fullsnes "SNES Cart DSP-n/ST010/ST011"):
+        // `rf-cart` already identified the chip from the header's chipset
+        // byte + extended-header sub-type (same two-field check as CX4).
+        // `header.ram_size` is not this chip's RAM — the chapter states
+        // the on-chip RAM "aren't counted in the... SRAM Size" entries —
+        // so `install_st010` gives it its own fixed 4096-byte buffer
+        // rather than reusing `sram_len` above, unlike OBC1.
+        if matches!(header.coprocessor, rf_cart::Coprocessor::St010) {
+            system.bus.install_st010();
+        }
         system.reset();
         Ok(system)
     }

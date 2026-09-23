@@ -18,6 +18,7 @@ pub mod ppu;
 pub mod regs;
 pub mod sa1;
 pub mod sdd1;
+pub mod st010;
 pub mod state;
 pub mod system;
 pub mod timing;

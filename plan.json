@@ -8213,7 +8213,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "id": "W19-04",
   "title": "ST010 (F1-ROC II: Race of Champions): the register window, the battery-backed on-chip RAM, and the documented commands per fullsnes 'ST010 Commands'",

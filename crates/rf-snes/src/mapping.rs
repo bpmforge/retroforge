@@ -127,6 +127,22 @@ pub enum Target {
     /// [`crate::bus::SnesBus`] resolves the bit position from the OBC1's
     /// current index at access time.
     Obc1Bits(usize),
+
+    /// The ST010's battery-backed on-chip RAM, at an offset already
+    /// reduced into `0..st010::ST010_RAM_LEN` (ticket W19-04, fullsnes
+    /// "SNES Cart DSP-n/ST010/ST011": `"680000h-6FFFFFh ST010/ST011
+    /// On-chip Battery-backed RAM"`, per-board table `"68-6F:0000-0FFF
+    /// (SRAM)"`). Carries the raw offset rather than a mask/index pair
+    /// because [`crate::st010::St010`] itself owns the command/busy word
+    /// living at bytes `$0020`/`$0021` inside this same buffer — see that
+    /// module's doc.
+    St010Ram(usize),
+    /// The ST010's separate, smaller `$60-$67:0000/0001` DR/SR pair the
+    /// generic per-board table names, kept mapped but inert — see
+    /// [`crate::st010::St010`]'s module doc for why no documented command
+    /// is reachable through it. Carries the raw one-bit offset (`0` or
+    /// `1`).
+    St010Register(u16),
     /// Nothing is mapped here. Reads see open bus; writes are dropped.
     Open,
 }
@@ -651,6 +667,41 @@ pub fn obc1_target(board: &Obc1Board, bank: u8, offset: u16) -> Option<Target> {
         }
         0x7FF5..=0x7FF7 => Some(Target::Obc1Register(offset)),
         _ => Some(Target::Sram(sram_idx % board.sram_len)),
+    }
+}
+
+/// Resolve `(bank, offset)` against an ST010 cartridge's SNES-side memory
+/// map. Checked BEFORE the generic [`map`] by [`crate::bus::SnesBus::target`],
+/// same reasoning as SA-1/GSU/CX4/OBC1 above (ticket W19-04): under plain
+/// LoROM, banks `$60-$6F` are NOT system area — [`map`]'s LoROM arm would
+/// otherwise resolve `$60:0000` as an ordinary ROM mirror
+/// (`Target::Rom(index % rom_len)`), which is why this must run first
+/// rather than fall back to "open bus".
+///
+/// Cited to fullsnes "SNES Cart DSP-n/ST010/ST011 - NEC uPD77C25 -
+/// Registers & Flags & Overview": the per-board table gives
+/// `"ST010 SHVC-1DS0B-01 LoROM 1M - 60h-6xh 0000h 0001h"` (DR/SR) and the
+/// SNES I/O Ports table `"ST010/ST011+LoROM 60-6x:0000 (DR)
+/// 60-6x:0001 (SR) 68-6F:0000-0FFF (SRAM)"`; "All banks in range 00-7F
+/// are also mirrored to 80-FF" folds `$E0-$EF` onto `$60-$6F`
+/// (`bank & 0x7F`).
+///
+/// - `$68-$6F:0000-0FFF` — the whole 4096-byte RAM, including the
+///   command/busy word, MIRRORED across all eight banks (the table gives
+///   one 4096-byte size for the whole `68-6F` range, the same "one window,
+///   several aliasing banks" shape CX4's `$00-$3F`/`$80-$BF` window uses)
+///   — [`Target::St010Ram`]; see [`crate::st010::St010`]'s module doc for
+///   why the RAM (not this table's separate DR/SR pair) is where this
+///   build routes the documented command protocol.
+/// - `$60-$67:0000/0001` — the separate DR/SR pair, kept mapped but inert
+///   — [`Target::St010Register`].
+#[must_use]
+pub fn st010_target(bank: u8, offset: u16) -> Option<Target> {
+    let folded_bank = bank & 0x7F;
+    match folded_bank {
+        0x68..=0x6F if offset <= 0x0FFF => Some(Target::St010Ram(usize::from(offset))),
+        0x60..=0x67 if offset <= 0x0001 => Some(Target::St010Register(offset)),
+        _ => None,
     }
 }
 
