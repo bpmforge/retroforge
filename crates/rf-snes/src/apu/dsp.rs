@@ -761,16 +761,31 @@ impl Echo {
     /// S  = S & 0xFFFF                 // WRAPAROUND, not saturation
     /// S += (FIR[7] * x[n] >> 6)
     /// S  = clamp(S, -32768, 32767)    // and THIS one saturates
-    /// out = S & 0xFFFE                // echo buffer is 15-bit, left-aligned
     /// ```
     ///
-    /// Three things that are easy to get wrong and were: the shift is
-    /// **per tap** (`>> 6`) and not one `>> 7` over the sum; taps 0-6 CLIP
-    /// by wrapping at 16 bits while tap 7 CLAMPS; and the result has bit 0
-    /// cleared because the echo buffer stores 15 bits left-aligned.
+    /// Two things that are easy to get wrong and were: the shift is
+    /// **per tap** (`>> 6`) and not one `>> 7` over the sum, and taps 0-6
+    /// CLIP by wrapping at 16 bits while tap 7 CLAMPS.
     ///
     /// `FIR[0]` (`$0F`) multiplies the OLDEST sample and `FIR[7]` (`$7F`)
     /// the newest — which this implementation already had right.
+    ///
+    /// **This `sum` is NOT the value that goes to the echo buffer**, and
+    /// used to be masked here — that was a real bug (found via
+    /// spc_dsp6.sfc's Echo/echo calc subtest, W7-08). fullsnes ("SNES APU
+    /// DSP", "xFh - FIRx" section) keeps `sum` and the write-back value
+    /// as two separate quantities:
+    ///
+    /// ```text
+    /// audio_output = NormalVoices + ((sum*EVOLx) SAR 7)   // uses sum AS-IS
+    /// echo_input   = EchoVoices   + ((sum*EFB) SAR 7)     // separate calc
+    /// echo_input   = echo_input AND FFFEh                 // masked HERE
+    /// ```
+    ///
+    /// `sum` (this function's return value, [`Echo::last_fir`]) feeds
+    /// `audio_output` via [`Echo::out`] and is never bit-0-masked; the
+    /// AND `FFFEh` belongs on `echo_input` alone, applied in
+    /// [`Echo::write_back`].
     fn fir_tap(history: [i16; 8], coef: [i8; 8]) -> i16 {
         let mut acc = 0i32;
         for i in 0..7 {
@@ -781,7 +796,7 @@ impl Echo {
         // is modelling.
         acc = i32::from(acc as i16);
         acc += (i32::from(history[7]) * i32::from(coef[7])) >> 6;
-        (acc.clamp(-0x8000, 0x7FFF) as i16) & !1
+        acc.clamp(-0x8000, 0x7FFF) as i16
     }
 
     /// Cycles 22-25: compute the pointer, read the delayed sample, run
@@ -794,6 +809,18 @@ impl Echo {
     /// therefore read AFTER the samples they multiply, which is why a
     /// program can rewrite `FFC7` between two samples and hear the change
     /// one sample earlier than a naive model predicts.
+    ///
+    /// **The 16-bit word read out of ARAM is halved (`SAR 1`) before it
+    /// enters the FIR history.** fullsnes, same section: "buf[(i-0) AND
+    /// 7] = EchoRAM[addr] SAR 1 ;-input 15bit from Echo RAM" — the echo
+    /// buffer's 16-bit word holds a 15-bit sample with bit 0 always zero
+    /// (see the `6Dh - ESA` register description: "Byte 0: Lower 7bit of
+    /// Left sample (stored in bit1-7) (bit0=unused/zero)"), so an
+    /// arithmetic shift right by one is what turns the stored word back
+    /// into the sample value the FIR operates on. This was missing
+    /// entirely — the delay line ran on the raw 16-bit word, doubling the
+    /// echo's effective amplitude every pass through the buffer — and is
+    /// what spc_dsp6.sfc's Echo/echo calc subtest measures.
     pub fn read_and_filter(&mut self, aram: &[u8]) -> (i16, i16) {
         // The LATCHED page, not the live register: a write to `$6D`
         // reaches the buffer a sample later than the program made it.
@@ -802,10 +829,12 @@ impl Echo {
         // the modulo is that wrap rather than a safety net bolted on.
         self.at = (base + self.offset) % aram.len().max(1);
 
+        // `>> 1` on `i16` is an arithmetic shift in Rust (sign-extending),
+        // which is exactly the documented `SAR 1`.
         let read = |a: &[u8], i: usize| -> i16 {
             let lo = a[i % a.len()];
             let hi = a[(i + 1) % a.len()];
-            (u16::from(lo) | (u16::from(hi) << 8)) as i16
+            ((u16::from(lo) | (u16::from(hi) << 8)) as i16) >> 1
         };
         let delayed = (read(aram, self.at), read(aram, self.at + 2));
 
@@ -836,6 +865,15 @@ impl Echo {
     /// channel at cycle 29 and the right at 30, each gated on its own
     /// re-read of `FLG` bit 5, so a program that flips `ECEN` between
     /// those two cycles freezes one channel and not the other.
+    ///
+    /// **The `AND FFFEh` mask belongs HERE, on `echo_input`, not on the
+    /// FIR `sum`.** fullsnes: `echo_input=EchoVoices+((sum*EFB) SAR 7)`
+    /// then `echo_input=echo_input AND FFFEh`. It moved off
+    /// [`Echo::fir_tap`] as part of the same fix that added the matching
+    /// `SAR 1` on read in [`Echo::read_and_filter`] — the two are one
+    /// hardware quirk (the echo buffer stores 15 significant bits with
+    /// bit 0 always zero) seen from its two sides, and getting only one
+    /// of them right still fails spc_dsp6.sfc's Echo/echo calc subtest.
     pub fn write_back(&mut self, aram: &mut [u8], dry: i16, channel: EchoChannel) {
         if self.write_disabled {
             return;
@@ -844,8 +882,9 @@ impl Echo {
             EchoChannel::Left => self.last_fir.0,
             EchoChannel::Right => self.last_fir.1,
         };
-        let v = (i32::from(dry) + ((i32::from(fir) * i32::from(self.feedback)) >> 7))
-            .clamp(-0x8000, 0x7FFF) as i16;
+        let v = ((i32::from(dry) + ((i32::from(fir) * i32::from(self.feedback)) >> 7))
+            .clamp(-0x8000, 0x7FFF) as i16)
+            & !1;
         let i = match channel {
             EchoChannel::Left => self.at,
             EchoChannel::Right => self.at + 2,
