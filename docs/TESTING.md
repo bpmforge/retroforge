@@ -11360,3 +11360,31 @@ unshifted, `$0460` is `CLRP` and nothing ever `TCALL`s into the boot ROM.
 Causes fixed: per-scanline INIDISP latch (Jungle Strike, Pagemaster and others); NMI held one opcode after the flag edge ($4210 wait loops); IPL data byte fetched after the counter echo; VRAM read ports $2139/$213A. W14-49 closed as superseded.
 
 Still open: W14-46/48 (Tekken 2 pirate, Batman proto), W14-51 (Final Fight 2, Battletoads: composition, not a wait target), W7-08 (Blackthorne, S-DSP), W19-02 (Cx4 command algorithms, blocked on documentation), W16-07 (hardware-gated).
+
+## W14-51 (2026-09-29) — TM/TS were read live, not latched per line; Final Fight 2 and Battletoads in Battlemaniacs render
+
+**Verdict: fixed.** Traced on the merged tree: Battletoads sits in its `WAI`
+loop at `$94:8090` with `forced_blank=false`, `bright=15`, VRAM 12.8k / CGRAM
+94 non-zero bytes, mode 1, yet `PROBE_RENDERNOW` composes 1 distinct palette
+index. `PROBE_MODE=ppuwrites` shows TM toggling by HDMA (channel 1, `$212C`):
+`0000 -> 0100 (BG2)` at the top of the table and back to `0000` at its last
+entry, every frame. The compositor read `bgs[].enabled`/`obj_enabled`/`ts`
+from the LIVE registers (only forced blank, scroll, windows, colour math and
+mosaic were in `LineState`), so every line was drawn with the frame's final
+TM = 0. fullsnes ("212Ch/212Dh"): the designation in force when the beam
+reaches a line is the one drawn.
+
+Fix (`crates/rf-snes/src/ppu/mod.rs`): `LineState.tm` and `.ts`, latched in
+`latch_line` (after that line's HDMA) and applied in `apply_line_state`; the
+existing `LineScratch`/`PpuRegs` restore already covers the layer flags and
+`ts`. Test `tm_and_ts_are_latched_per_scanline` (RED verified by disabling the apply: fails on
+"line 0 was latched with BG1 on"). Gate: 2,448 passed / 0 failed; ignored
+peterlemon 3/3, region, undisbeliever 2/2, gilyon, spc700_vectors green. The
+orchestrator census (RF_CENSUS_OUT) is still owed for the full-library diff.
+
+**Census children on the 35 uniform titles of the merged census:** moved to
+rendered: Final Fight 2 (USA), Final Fight 2 (USA) (Virtual Console),
+Battletoads in Battlemaniacs (USA), (USA) (Beta), and Undercover Cops (USA)
+(Retro-Bit). The other 30 stay uniform (not this cause). Canaries Wild Guns,
+Kirby Super Star, Super Mario World, Super Mario RPG, Super Bonk, Rival Turf!
+still render.

@@ -1670,3 +1670,38 @@ fn forced_blank_and_brightness_are_latched_per_scanline() {
     let l0 = p.line_state_for_test(1).expect("latched");
     assert_eq!((l0.forced_blank, l0.brightness), (false, 0x0F));
 }
+
+/// W14-51: `$212C` TM / `$212D` TS are per-line state. fullsnes ("212Ch -
+/// TM"): the layer designation in force when the beam reaches a line is
+/// the one that line is drawn with. Battletoads in Battlemaniacs and Final
+/// Fight 2 drive TM from HDMA (`$94:B17B`: 31 lines of 0, 162 of BG2, then
+/// 0 again); composing from the LIVE TM (left at 0 by the last table entry)
+/// blanked the whole picture.
+#[test]
+fn tm_and_ts_are_latched_per_scanline() {
+    let mut p = ppu_with_tile();
+    for i in 0..32 {
+        set_tilemap(&mut p, 0, i, 1);
+    }
+    p.write_register(0x212C, 0x01); // BG1 on the main screen
+    p.write_register(0x212D, 0x10); // OBJ on the sub screen
+    p.latch_line(1);
+    p.write_register(0x212C, 0x00); // HDMA turns the layer off for line 2
+    p.write_register(0x212D, 0x00);
+    p.latch_line(2);
+    // Live TM ends at 0, exactly like the last HDMA table entry.
+    let lit = |p: &mut Ppu, y: u16| {
+        p.render_scanline(y)
+            .pixels
+            .iter()
+            .filter(|px| px.layer != PixelLayer::Backdrop)
+            .count()
+    };
+    assert!(lit(&mut p, 0) > 0, "line 0 was latched with BG1 on");
+    assert_eq!(lit(&mut p, 1), 0, "line 1 was latched with TM = 0");
+    assert_eq!(p.ts, 0, "the live TS is restored after composition");
+    assert_eq!(
+        p.line_state_for_test(1).map(|l| (l.tm, l.ts)),
+        Some((0x01, 0x10))
+    );
+}

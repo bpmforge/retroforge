@@ -153,6 +153,14 @@ pub struct LineState {
     /// every line of the frame.
     pub forced_blank: bool,
     pub brightness: u8,
+    /// `$212C` TM (BG1-4 in bits 0-3, OBJ in bit 4) and `$212D` TS
+    /// (ticket W14-51). fullsnes ("212Ch/212Dh"): the designation in
+    /// force when the beam reaches a line is what that line is drawn
+    /// with. Battletoads in Battlemaniacs and Final Fight 2 HDMA TM per
+    /// line (0 for 31 lines, BG2 for 162, then 0 again); read live, the
+    /// final 0 blanked every line of the picture.
+    pub tm: u8,
+    pub ts: u8,
 }
 
 /// Every register a mid-line write can touch, snapshotted (ticket W7-15).
@@ -776,6 +784,7 @@ impl Ppu {
     ///
     /// Called once per visible scanline, after that line's HDMA has run.
     pub fn latch_line(&mut self, y: u16) {
+        let tm = self.tm_bits();
         if let Some(slot) = self.line_state.get_mut(usize::from(y)) {
             *slot = Some(LineState {
                 mode7: self.mode7,
@@ -798,6 +807,8 @@ impl Ppu {
                 mosaic: self.mosaic,
                 forced_blank: self.forced_blank,
                 brightness: self.brightness,
+                tm,
+                ts: self.ts,
             });
         }
     }
@@ -1043,7 +1054,22 @@ impl Ppu {
         self.mosaic = state.mosaic;
         self.forced_blank = state.forced_blank;
         self.brightness = state.brightness;
+        for (i, bg) in self.bgs.iter_mut().enumerate() {
+            bg.enabled = state.tm & (1 << i) != 0;
+        }
+        self.obj_enabled = state.tm & 0x10 != 0;
+        self.ts = state.ts;
         true
+    }
+
+    /// `$212C` TM as written, rebuilt from the decoded layer flags.
+    fn tm_bits(&self) -> u8 {
+        let bgs = self
+            .bgs
+            .iter()
+            .enumerate()
+            .fold(0u8, |acc, (i, bg)| acc | (u8::from(bg.enabled) << i));
+        bgs | (u8::from(self.obj_enabled) << 4)
     }
 
     /// `$213E` STAT77 — the hardware's own report of the two OBJ limits.
