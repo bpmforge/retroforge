@@ -11123,3 +11123,11 @@ it intends to. Result: **confirmed, and already fixed by W14-24** — W14-23's
 - No unit test or fix was added: the defect and its tests
   (`tick_completes_a_divide_after_its_real_master_cycle_latency` etc.)
   already exist from W14-24. No titles moved (nothing changed).
+
+## Full SNES census 2026-09-28 (feat/apu-handshake-family, release, `RF_CENSUS_OUT`)
+
+**1192 rendered / 60 uniform / 13 refused / 0 no-video / 0 crashed / 0 timed out**, 1265 titles in 1548 s. The previous recorded run (W14-28) was 1061/74/130. "Rendered something" means pixels changed within the census frame budget, not that the game is correct.
+
+Tickets closed on this evidence (named titles all render): W14-23, W14-25, W14-27, W14-29, W14-30, W14-33.
+
+Still uniform, by open ticket: W14-46/48/49 (Urban Strike, Tekken 2 Pirate, NBA Live 96, Battle Grand Prix, Blackthorne x3, Batman proto, Phalanx x2, Sonic Blast Man II), W14-32 (Jungle Strike), W14-38 (Lagoon, Phalanx, Goal!), W14-40 (The Pagemaster x4), W14-51 (Final Fight 2 x2, Battletoads x2). Refused (13): Super Game Boy x5, ST010, Top Gear 3000 and six unlicensed/proto carts.
