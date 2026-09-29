@@ -11132,6 +11132,7 @@ Tickets closed on this evidence (named titles all render): W14-23, W14-25, W14-2
 
 Still uniform, by open ticket: W14-46/48/49 (Urban Strike, Tekken 2 Pirate, NBA Live 96, Battle Grand Prix, Blackthorne x3, Batman proto, Phalanx x2, Sonic Blast Man II), W14-32 (Jungle Strike), W14-38 (Lagoon, Phalanx, Goal!), W14-40 (The Pagemaster x4), W14-51 (Final Fight 2 x2, Battletoads x2). Refused (13): Super Game Boy x5, ST010, Top Gear 3000 and six unlicensed/proto carts.
 
+
 ## W14-32 / W14-40 re-trace (2026-09-28) — the "991-frame boot" and the Pagemaster "idle" were one PPU defect: INIDISP was not latched per line
 
 **Verdict: emulator-side, fixed.** The W14-32 write-up above (and W14-40's
@@ -11350,3 +11351,4 @@ this tree):**
 
 W14-49's TCALL-trap branch (`ba9e979`) is not needed: with the image
 unshifted, `$0460` is `CLRP` and nothing ever `TCALL`s into the boot ROM.
+
