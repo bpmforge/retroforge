@@ -11145,21 +11145,37 @@ value without waiting for the counter echo, which races the ROM's own
 fetch on hardware too; it now spins on `$2140` like a real uploader.
 
 **Census children (release, `RF_CENSUS_ROM`), before -> after:**
-Urban Strike 10 -> 0 (rendered), NBA Live 96 10 -> 0 (rendered). Unmoved
-and still blank (exit 10): Tekken 2 (Pirate), Battle Grand Prix, Batman -
-Revenge of the Joker (Proto), Sonic Blast Man II. Canaries all still 0:
+Urban Strike 10 -> 0 (rendered), NBA Live 96 10 -> 0 (rendered). Battle Grand Prix 10 -> 0 too (second fix, below).
+Unmoved and still blank (exit 10): Tekken 2 (Pirate), Batman - Revenge of
+the Joker (Proto), Sonic Blast Man II. Also unmoved, still 0: NHL 95,
+Super Turrican, Tommy Moe's, Wario's Woods, Super Turrican 2. Canaries all still 0:
 Wild Guns, Kirby Super Star, Super Mario World, Super Mario RPG, Super
 Bonk, Rival Turf!.
 
 **The four remaining titles are not APU-handshake defects (re-traced on
 this tree):**
 
-- **Battle Grand Prix**: the APU boots and the SPC driver runs (480+
-  distinct SPC PCs, timers enabled). The 65816 loops in a per-frame
-  wait (routine at `$03:8077` polling `$4212` bit 7) feeding
-  VRAM by DMA from `$7F:6000` with `NMITIMEN=0`, `CGRAM` never written,
-  through 1,900+ frames: a game-flow question above the APU (what it
-  waits on is still unnamed). W14-48 Part A's conclusion stands.
+- **Battle Grand Prix: FIXED by a second, non-APU defect: `$2139`/`$213A`
+  (VMDATALREAD/VMDATAHREAD) were unimplemented (open bus / later a fresh
+  read of the current address), not the VRAM prefetch latch.** The APU
+  side was fine (SPC driver running, 480+ distinct SPC PCs). The 65816
+  main loop at `$03:AA71` DMAs `$7F:0000` (`$6000` bytes) to VRAM `$2000`
+  (word), sets `VMADD`, does one dummy 16-bit `LDA $2139`, then compares
+  `LDA $7F0000,X / CMP $2139` word by word (`$03:AAAC-AAB9`); on any
+  mismatch it re-runs the whole thing after a 5-vblank wait
+  (`$03:8077`), forever, with CGRAM never written. Traced with
+  `PROBE_SDUMP=03AAB0,03AAB3` plus a temporary print in the read arm:
+  the compare's stream ran one word AHEAD of what the game expects.
+  fullsnes "PPU Video Memory (VRAM)": a `VMADD` write loads a prefetch
+  latch; a read on the incrementing byte returns the OLD latch, reloads
+  it from the address BEFORE the increment, then increments. The dummy
+  read therefore primes the pipeline. Fix in `bus.rs`: `vram_prefetch`
+  (saved in `state.rs` after `vram_address`), reloaded on `$2116`/`$2117`
+  writes and on incrementing reads. RED test:
+  `vram_readback_returns_the_prefetch_latch_and_reloads_before_incrementing`
+  (tests/dma.rs). VMAIN address-translation bits remain unmodelled (as for
+  writes). `PROBE_VRAM=hexbyteaddr:len` added to `title_probe` for this
+  trace. Census child Battle Grand Prix 10 -> 0 (rendered).
 - **Tekken 2 (Pirate)**: the upload header words are `$CCCE`/`$0000`
   (destination `$CCCE`, then run address `$0000`): a 23-byte "block" to
   a nonsense address and a jump to `$0000`; the SPC then executes ARAM

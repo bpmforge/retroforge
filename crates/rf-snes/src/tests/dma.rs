@@ -196,3 +196,39 @@ fn dma_channel_registers_read_back_what_was_written() {
         "channel 1's scratch bytes must survive channel 0's own DMA"
     );
 }
+
+/// W14-46/48 cluster A (Battle Grand Prix): `$2139`/`$213A` return the
+/// VRAM PREFETCH LATCH, not the word at the current address. fullsnes "PPU
+/// Video Memory (VRAM)": a `VMADD` write loads the latch from the new
+/// address; a read on the incrementing byte returns the OLD latch, reloads
+/// it from the address BEFORE the increment, then increments. So a game's
+/// one dummy 16-bit read after setting `VMADD` shifts the stream by one
+/// word and every following read returns the words in order starting at
+/// `VMADD`. Battle Grand Prix DMAs 24 KB into VRAM and verifies it with
+/// exactly this idiom; reading the CURRENT address instead skips the first
+/// word and fails the compare forever.
+#[test]
+fn vram_readback_returns_the_prefetch_latch_and_reloads_before_incrementing() {
+    let mut b = bus();
+    b.ppu.vram[0x4000] = 0x11;
+    b.ppu.vram[0x4001] = 0x22;
+    b.ppu.vram[0x4002] = 0x33;
+    b.ppu.vram[0x4003] = 0x44;
+    b.write(0x00_2115, 0x80); // increment after the HIGH byte
+    b.write(0x00_2116, 0x00);
+    b.write(0x00_2117, 0x20); // VMADD = $2000 -> latch loaded from word $2000
+                              // The dummy 16-bit read: returns the latch (word $2000) and reloads it
+                              // from $2000, incrementing to $2001.
+    let _ = (b.read(0x00_2139), b.read(0x00_213A));
+    assert_eq!(b.vram_address, 0x2001);
+    // The next read returns the latch loaded BEFORE the increment: word
+    // $2000 again, and only then advances the latch to $2001.
+    let first = (b.read(0x00_2139), b.read(0x00_213A));
+    assert_eq!(first, (0x11, 0x22), "the first real read is word $2000");
+    let second = (b.read(0x00_2139), b.read(0x00_213A));
+    assert_eq!(second, (0x33, 0x44), "then word $2001");
+    // A low-byte read does not increment while VMAIN bit 7 is set.
+    let before = b.vram_address;
+    let _ = b.read(0x00_2139);
+    assert_eq!(b.vram_address, before);
+}

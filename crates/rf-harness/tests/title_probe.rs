@@ -1509,6 +1509,18 @@ fn probe() {
                 .collect();
             println!("    peek: {}", vals.join(" "));
         }
+        // PROBE_VRAM=hexbyteaddr:len dumps raw VRAM bytes (cluster A).
+        if let Ok(spec) = std::env::var("PROBE_VRAM") {
+            let (a, l) = spec.split_once(':').unwrap();
+            let a = usize::from_str_radix(a, 16).unwrap();
+            let l = l.parse::<usize>().unwrap();
+            println!(
+                "    vram {a:04X} (vmadd={:04X} vmain={:02X}): {:02x?}",
+                sys.bus.vram_address,
+                sys.bus.vmain,
+                &sys.bus.ppu.vram[a..(a + l).min(sys.bus.ppu.vram.len())]
+            );
+        }
         println!(
             "    timing: line={} dot={} frame={} hdmaen={:#04x}",
             sys.bus.timing.line,
