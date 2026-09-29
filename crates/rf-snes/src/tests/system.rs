@@ -1569,6 +1569,7 @@ fn nmi_dispatches_on_the_next_real_vblank_edge_once_enabled() {
     let mut rom = lorom_image(0x20, 0x00);
     rom[0x0000] = 0xEA;
     rom[0x0001] = 0xEA;
+    rom[0x0002] = 0xEA;
     rom[0x7FFA] = 0x50;
     rom[0x7FFB] = 0x80;
     rom[0x7FFC] = 0x00;
@@ -1596,9 +1597,62 @@ fn nmi_dispatches_on_the_next_real_vblank_edge_once_enabled() {
     system.bus.timing.line = system.bus.timing.vblank_start - 1;
     system.bus.timing.line_cycles = crate::timing::MASTER_PER_LINE - 1;
     system.step().expect("NOP is implemented");
+    assert!(
+        system.bus.timing.nmi_flag,
+        "the flag is readable the instant the edge lands"
+    );
+    assert_ne!(
+        system.cpu.pc, 0x8050,
+        "W14-38: the dispatch waits out the next opcode (fullsnes: `around \
+         after the next opcode`), so a `LDA $4210 / BPL` loop can read the flag"
+    );
+    system.step().expect("NOP is implemented");
     assert_eq!(
         system.cpu.pc, 0x8050,
-        "a real flag edge while NMI is enabled must still dispatch"
+        "a real flag edge while NMI is enabled must still dispatch, one opcode later"
+    );
+}
+
+/// W14-38: the reason for the one-opcode delay, end to end. A wait loop
+/// `LDA $4210 / BPL` (Lagoon, Phalanx, Goal!, Zool) runs with NMI enabled
+/// while its handler also reads `$4210`; when the NMI took effect at the
+/// end of the very instruction that raised the flag, the flag was always
+/// consumed by the handler before the loop's next read and the loop never
+/// left. With the delay the LDA that follows the edge reads bit 7 set.
+#[test]
+fn a_4210_wait_loop_sees_the_vblank_flag_before_the_nmi_handler_eats_it() {
+    let mut rom = lorom_image(0x20, 0x00);
+    // $8000: LDA $4210 ; BPL $8000 ; STP-ish marker: LDX #$55
+    rom[0x0000..0x0005].copy_from_slice(&[0xAD, 0x10, 0x42, 0x10, 0xFB]);
+    rom[0x0005..0x0007].copy_from_slice(&[0xA2, 0x55]);
+    // NMI handler at $8050: LDA $4210 (the usual acknowledge) ; RTI
+    rom[0x0050..0x0054].copy_from_slice(&[0xAD, 0x10, 0x42, 0x40]);
+    rom[0x7FFA] = 0x50;
+    rom[0x7FFB] = 0x80;
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("loads");
+    system.bus.write(0x4200, 0x80);
+    // Run the first LDA, then park the raster one master cycle before
+    // vblank: the edge lands at the end of the BPL, so the instruction
+    // after it is the LDA. (Were the edge to land on the LDA, the handler
+    // would eat the flag before the BPL -- the loop then catches the NEXT
+    // frame, as on hardware; this test pins the catching phase.)
+    system.step().expect("implemented");
+    system.bus.timing.line = system.bus.timing.vblank_start - 1;
+    system.bus.timing.line_cycles = crate::timing::MASTER_PER_LINE - 1;
+    let mut left_loop = false;
+    for _ in 0..8 {
+        system.step().expect("implemented");
+        if system.cpu.pc == 0x8005 {
+            left_loop = true;
+            break;
+        }
+    }
+    assert!(
+        left_loop,
+        "the wait loop must leave when the flag rises with NMI enabled (pc={:#06x})",
+        system.cpu.pc
     );
 }
 
@@ -1633,6 +1687,7 @@ fn disable_then_reenable_does_not_redispatch_while_the_flag_is_still_set() {
     system.bus.write(0x4200, 0x80);
     system.bus.timing.line = system.bus.timing.vblank_start - 1;
     system.bus.timing.line_cycles = crate::timing::MASTER_PER_LINE - 1;
+    system.step().expect("NOP is implemented");
     system.step().expect("NOP is implemented");
     assert_eq!(system.cpu.pc, 0x8050, "the ordinary flag-edge dispatch");
     system.cpu.pc = 0x8001;
