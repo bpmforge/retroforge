@@ -143,6 +143,16 @@ pub struct LineState {
     pub windows: window::Windows,
     pub color_math: window::ColorMath,
     pub mosaic: window::Mosaic,
+    /// `$2100` INIDISP bit 7 and bits 0-3 (ticket W14-32). fullsnes
+    /// ("2100h - INIDISP"): force blank shows black from the moment it is
+    /// written, and each line is drawn with the value in force when the
+    /// beam reached it. A write in HBLANK (dot >= 256, where H/V-IRQ
+    /// handlers run) is not a recorded mid-line write, so without this
+    /// latch composition read the LIVE value and one late blanking write
+    /// (Jungle Strike forces blank at line 220 for its OAM DMA) blanked
+    /// every line of the frame.
+    pub forced_blank: bool,
+    pub brightness: u8,
 }
 
 /// Every register a mid-line write can touch, snapshotted (ticket W7-15).
@@ -786,6 +796,8 @@ impl Ppu {
                 windows: self.windows,
                 color_math: self.color_math,
                 mosaic: self.mosaic,
+                forced_blank: self.forced_blank,
+                brightness: self.brightness,
             });
         }
     }
@@ -1029,6 +1041,8 @@ impl Ppu {
         self.windows = state.windows;
         self.color_math = state.color_math;
         self.mosaic = state.mosaic;
+        self.forced_blank = state.forced_blank;
+        self.brightness = state.brightness;
         true
     }
 

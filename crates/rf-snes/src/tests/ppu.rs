@@ -1626,3 +1626,47 @@ fn sub_screen_composition_leaves_the_live_ppu_untouched() {
     let _ = p.render_scanline(0);
     assert!(p.range_over, "the main screen's 33rd sprite still trips it");
 }
+
+/// **INIDISP written in HBLANK belongs to the NEXT line, and must not
+/// rewrite the lines already latched** (ticket W14-32).
+///
+/// Jungle Strike splits its frame with three H/V IRQs whose handlers write
+/// `$2100` at dot ~257 -- hblank, so `Timing::mid_line_position` reports no
+/// active-display position and nothing is recorded per line. It forces
+/// blank at line 220 (`$2100 = $80`) for its OAM DMA and restores the
+/// brightness at line 4 of the next frame. `LineState` did not latch
+/// `forced_blank`/`brightness`, so composition read the LIVE value: the
+/// frame ended with the line-220 write in place and all 224 lines came out
+/// as forced blank -- a uniform black picture for the whole intro (991
+/// frames in the census), while the fully visible sprite text sat in OAM.
+///
+/// Per fullsnes ("2100h - INIDISP") the force-blank bit blanks the picture
+/// from the moment it is written; a line latched while the screen was on
+/// keeps that state however the register moves afterwards.
+#[test]
+fn forced_blank_and_brightness_are_latched_per_scanline() {
+    let mut p = ppu_with_tile();
+    for i in 0..32 {
+        set_tilemap(&mut p, 0, i, 1);
+    }
+    p.write_register(0x212C, 0x01); // BG1 on the main screen
+    p.write_register(0x2100, 0x0F); // screen on, full brightness
+    p.latch_line(1);
+    // Line 220's IRQ handler blanks the screen (in hblank: no record).
+    p.write_register(0x2100, 0x80);
+    p.latch_line(2);
+
+    let px = |p: &mut Ppu, y: u16| p.render_scanline(y).pixels[0].layer;
+    assert_eq!(
+        px(&mut p, 0),
+        PixelLayer::Background(0),
+        "a line latched with the screen on was blanked by a LATER write"
+    );
+    assert_eq!(
+        px(&mut p, 1),
+        PixelLayer::Backdrop,
+        "a line latched during forced blank must stay blank"
+    );
+    let l0 = p.line_state_for_test(1).expect("latched");
+    assert_eq!((l0.forced_blank, l0.brightness), (false, 0x0F));
+}
