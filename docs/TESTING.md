@@ -11100,3 +11100,64 @@ Library archives targeted (per the ticket; the orchestrator's own census
 is the record of what actually moved): Videomation, Videomation (Alt)
 (CPROM/mapper 13), one UNROM 512/mapper 30 title, Magi Cube (Proto) and
 [BIOS] Demo Vision (NES 2.0 exponent-multiplier sizes).
+
+## W14-32 / W14-40 re-trace (2026-09-28) — the "991-frame boot" and the Pagemaster "idle" were one PPU defect: INIDISP was not latched per line
+
+**Verdict: emulator-side, fixed.** The W14-32 write-up above (and W14-40's
+notes) concluded "slow, hardware-accurate boot" from CPU-side evidence only
+and never looked at what the picture was composed from. Re-traced on the
+current tree with `title_probe` (`PROBE_WATCH`, `PROBE_DIS`, `PROBE_OAM`,
+`PROBE_RENDERNOW`, `PROBE_MODE=ppuwrites`):
+
+- Jungle Strike is not stalled. Its main loop (`$A0:8152`) is a per-frame
+  script interpreter: wait on `$0CAF`, then run script commands. Its
+  commands are authored fade-in (`$0C0A` 0->15, 8 frames a step), a
+  `$A0:CE52` "wait N passes" with N=$78 (measured: `$0CBD` 0x78 counting
+  down once per ~14.1k instructions), then a fade-out, repeated for several
+  screens. The screens are text drawn as 16x16 sprites (`PROBE_OAM`: sprites
+  at y=89/105, x=60..182, OBJ palette 6 a grey ramp) -- fully on-screen,
+  brightness 15, forced blank clear for those frames. The 16 s "boot" is the
+  game's own legal/logo sequence, displayed.
+- Yet every composed frame was uniform. `PROBE_RENDERNOW` (composition at an
+  arbitrary point) produced 16 distinct indices while the census sink saw 1.
+  `PROBE_MODE=ppuwrites` showed why: the game runs a three-way H/V-IRQ raster
+  split whose handlers write `$2100` at dot ~257 (HBLANK): `$80` (force
+  blank, for its OAM DMA) at line 220 and the restored brightness at line 4
+  of the next frame. `Timing::mid_line_position` returns `None` in hblank, so
+  those writes are not recorded per line, and `LineState` (the always-latched
+  per-line register set) did not carry `forced_blank`/`brightness`, so
+  `render_scanline` read the LIVE value. The frame's last `$2100` write is
+  the line-220 blank, so all 224 lines composed as forced blank -- a uniform
+  black picture, however visible the game meant it to be.
+- This also explains the earlier "205 vs 991": the pre-WAI-fix tree never ran
+  the line-220 IRQ handler, so forced blank was never set at frame end.
+
+**Fix.** `crates/rf-snes/src/ppu/mod.rs`: `LineState` gains `forced_blank`
+and `brightness`, captured in `latch_line` (line start, after HDMA) and
+applied in `apply_line_state`; the `LineScratch`/`PpuRegs` restore already
+covered both. Per fullsnes "2100h - INIDISP" each line is drawn with the
+value in force when the beam reached it. Regression test
+`tests::ppu::forced_blank_and_brightness_are_latched_per_scanline` (RED
+before: a line latched with the screen on came out `Backdrop` after a later
+`$2100=$80`; GREEN after). Layer enables (`$212C/D`), OBJ size and the like
+are still composed from live registers -- same class, not needed by these
+titles, deliberately not widened here.
+
+**Census children (release, this tree):** Jungle Strike (USA) 10 -> 0;
+The Pagemaster (USA), (Beta 1), (Beta 2), (Beta 3) 10 -> 0 (moved by this one
+change alone, so W14-40's "1660 idle frames" was a blanked composition, not a
+wait target -- inferred from the census move; their `$2100` write sites were
+not separately traced); Mega Man X2, X3 0 -> 0;
+canaries Wild Guns, Kirby Super Star, Super Mario World, Super Mario RPG,
+Super Bonk, Rival Turf! all 0 -> 0. The orchestrator's full census must name
+every other mover (any title that toggles `$2100` in hblank).
+
+## W19-02 status check (2026-09-28) — Cx4: still blocked, acceptance not met
+
+`crates/rf-snes/src/cx4.rs` (657 lines), bus wiring (`install_cx4`,
+`Target::Cx4Ram`/`Cx4Register`) and `rf-cart` `$F3` detection are in the tree
+and Mega Man X2/X3 render (census child exit 0). The ticket's own acceptance
+(per-command HLE, Cx4 wireframe/sprite scenes) is NOT met: the W19-02 write-up
+above records that fullsnes documents the register/DMA window and the math
+tables but no command algorithms. Nothing built; ticket stays blocked on
+documentation, not effort.
