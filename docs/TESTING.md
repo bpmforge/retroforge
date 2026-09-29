@@ -11131,3 +11131,128 @@ it intends to. Result: **confirmed, and already fixed by W14-24** — W14-23's
 Tickets closed on this evidence (named titles all render): W14-23, W14-25, W14-27, W14-29, W14-30, W14-33.
 
 Still uniform, by open ticket: W14-46/48/49 (Urban Strike, Tekken 2 Pirate, NBA Live 96, Battle Grand Prix, Blackthorne x3, Batman proto, Phalanx x2, Sonic Blast Man II), W14-32 (Jungle Strike), W14-38 (Lagoon, Phalanx, Goal!), W14-40 (The Pagemaster x4), W14-51 (Final Fight 2 x2, Battletoads x2). Refused (13): Super Game Boy x5, ST010, Top Gear 3000 and six unlicensed/proto carts.
+
+## W14-32 / W14-40 re-trace (2026-09-28) — the "991-frame boot" and the Pagemaster "idle" were one PPU defect: INIDISP was not latched per line
+
+**Verdict: emulator-side, fixed.** The W14-32 write-up above (and W14-40's
+notes) concluded "slow, hardware-accurate boot" from CPU-side evidence only
+and never looked at what the picture was composed from. Re-traced on the
+current tree with `title_probe` (`PROBE_WATCH`, `PROBE_DIS`, `PROBE_OAM`,
+`PROBE_RENDERNOW`, `PROBE_MODE=ppuwrites`):
+
+- Jungle Strike is not stalled. Its main loop (`$A0:8152`) is a per-frame
+  script interpreter: wait on `$0CAF`, then run script commands. Its
+  commands are authored fade-in (`$0C0A` 0->15, 8 frames a step), a
+  `$A0:CE52` "wait N passes" with N=$78 (measured: `$0CBD` 0x78 counting
+  down once per ~14.1k instructions), then a fade-out, repeated for several
+  screens. The screens are text drawn as 16x16 sprites (`PROBE_OAM`: sprites
+  at y=89/105, x=60..182, OBJ palette 6 a grey ramp) -- fully on-screen,
+  brightness 15, forced blank clear for those frames. The 16 s "boot" is the
+  game's own legal/logo sequence, displayed.
+- Yet every composed frame was uniform. `PROBE_RENDERNOW` (composition at an
+  arbitrary point) produced 16 distinct indices while the census sink saw 1.
+  `PROBE_MODE=ppuwrites` showed why: the game runs a three-way H/V-IRQ raster
+  split whose handlers write `$2100` at dot ~257 (HBLANK): `$80` (force
+  blank, for its OAM DMA) at line 220 and the restored brightness at line 4
+  of the next frame. `Timing::mid_line_position` returns `None` in hblank, so
+  those writes are not recorded per line, and `LineState` (the always-latched
+  per-line register set) did not carry `forced_blank`/`brightness`, so
+  `render_scanline` read the LIVE value. The frame's last `$2100` write is
+  the line-220 blank, so all 224 lines composed as forced blank -- a uniform
+  black picture, however visible the game meant it to be.
+- This also explains the earlier "205 vs 991": the pre-WAI-fix tree never ran
+  the line-220 IRQ handler, so forced blank was never set at frame end.
+
+**Fix.** `crates/rf-snes/src/ppu/mod.rs`: `LineState` gains `forced_blank`
+and `brightness`, captured in `latch_line` (line start, after HDMA) and
+applied in `apply_line_state`; the `LineScratch`/`PpuRegs` restore already
+covered both. Per fullsnes "2100h - INIDISP" each line is drawn with the
+value in force when the beam reached it. Regression test
+`tests::ppu::forced_blank_and_brightness_are_latched_per_scanline` (RED
+before: a line latched with the screen on came out `Backdrop` after a later
+`$2100=$80`; GREEN after). Layer enables (`$212C/D`), OBJ size and the like
+are still composed from live registers -- same class, not needed by these
+titles, deliberately not widened here.
+
+**Census children (release, this tree):** Jungle Strike (USA) 10 -> 0;
+The Pagemaster (USA), (Beta 1), (Beta 2), (Beta 3) 10 -> 0 (moved by this one
+change alone, so W14-40's "1660 idle frames" was a blanked composition, not a
+wait target -- inferred from the census move; their `$2100` write sites were
+not separately traced); Mega Man X2, X3 0 -> 0;
+canaries Wild Guns, Kirby Super Star, Super Mario World, Super Mario RPG,
+Super Bonk, Rival Turf! all 0 -> 0. The orchestrator's full census must name
+every other mover (any title that toggles `$2100` in hblank).
+
+## W19-02 status check (2026-09-28) — Cx4: still blocked, acceptance not met
+
+`crates/rf-snes/src/cx4.rs` (657 lines), bus wiring (`install_cx4`,
+`Target::Cx4Ram`/`Cx4Register`) and `rf-cart` `$F3` detection are in the tree
+and Mega Man X2/X3 render (census child exit 0). The ticket's own acceptance
+(per-command HLE, Cx4 wireframe/sprite scenes) is NOT met: the W19-02 write-up
+above records that fullsnes documents the register/DMA window and the math
+tables but no command algorithms. Nothing built; ticket stays blocked on
+documentation, not effort.
+
+## W14-38 / W14-51 (2026-09-28) — the vblank NMI is taken one opcode AFTER the flag edge
+
+**Root cause (Lagoon, Phalanx x2, Goal!, Zool (Beta), Sonic Blast Man II,
+Street Fighter Alpha 2, Tuff E Nuff): fixed.** These titles run a vblank wait
+`LDA $4210 / BPL` with NMI enabled while their NMI handler also reads `$4210`
+(Phalanx: `$00:811A` wait loop, handler `$00:8416` does `CMP $4210`). `SnesSystem::step`
+dispatched the NMI at the end of the very instruction that raised the flag, so
+the handler always consumed bit 7 before the wait loop's next read; the loop
+spun forever (9,915 of 20,000 sampled instructions at `$811A/$811D`, main
+`JSL`s never reached, `$2100` never left forced blank). fullsnes "SNES
+Interrupts": the internal NMI flag "gets cleared when the NMI gets executed,
+which should happen around after the next opcode" — the flag is readable for
+one opcode before the NMI is taken. Fix: `SnesSystem::nmi_hold` (set on the
+flag edge, promoted to `pending_nmi` after the next instruction, enable
+re-checked at dispatch; state byte bit 1, old saves load unchanged). Only the
+FLAG edge is touched — the `$4200`-write cases the W14-47 follow-up recorded
+(The Terminator, Super Black Bass, Magical Drop II) are unaffected.
+Tests: `a_4210_wait_loop_sees_the_vblank_flag_before_the_nmi_handler_eats_it`
+(RED with immediate dispatch, verified), plus the two W14-47 NMI tests updated
+for the one-opcode delay.
+
+**A/B, same binary with the delay switched off (frames mode):** Lagoon,
+Phalanx, Goal!, Zool (Beta) `varied_at=None` -> 165 / 226 / 33 / 21; Xardion
+(621) and Knights of the Round (950) unchanged (not this cause).
+**Census, all 1,265 archives, this tree vs the 2026-09-28 branch census:**
++8 rendered (the seven above and Phalanx (Beta)); 1 mover the other way,
+`Porky Pig's Haunted Holiday (Beta) (1993-11-10) (Subgames)`, which was never
+a real render: in both trees it crashes into WRAM (`$7DE00B..$7DE013` BRK loop,
+`vram_nonzero=9`), the old tree just painted noise while doing it.
+Canaries (Wild Guns, Kirby Super Star, Super Mario World, Super Mario RPG,
+Super Bonk, Rival Turf!, Terminator, Super Black Bass, Magical Drop II) 0 -> 0.
+
+**Stacked with the INIDISP per-line latch (b4ee1dd, other lane):** Brandish,
+Knights of the Round and the Firearm proto also census 0 (10 before).
+
+**Not the same cause, still uniform at 600 frames (verdicts, W14-51):**
+- Xardion: renders at ~frame 621 (`varied_at`), i.e. past the census window —
+  a slow boot, not a hang.
+- Final Fight 2 (x2), Battletoads in Battlemaniacs (x2): NOT waiting on any
+  hardware condition. Both sit in a `WAI` per-frame loop (FF2 `$808C0A`,
+  Battletoads `$94808F`) with NMI dispatching every frame; `apu_port_changes=0`.
+  Battletoads' scene index `$7E0810` steps 00->1D (30 scenes, first at
+  n=4.5M, last at n=97M) and wraps, i.e. the game is running its intro
+  cutscene sequence, and TM (`$212C`) is HDMA-driven (channel 1, table
+  `$94:B17B`: 31 lines TM=0 then 162 lines TM=BG2). So the picture is blank
+  while the game logic is progressing: a composition/content problem
+  (BG2 contents or the HDMA'd layer split), not a wait target. The scene
+  dispatcher is `$94:A2B2` (`JMP ($A2BA,X)` on `$0810`). Next step for a
+  future lane: dump BG2 tilemap/char VRAM and per-line composition at
+  scene 2 and compare to the HDMA'd TM lines; do not look at the APU.
+
+**Final stacked census (this branch = W14-38 NMI delay + b4ee1dd INIDISP latch,
+all 1,265 archives vs the 2026-09-28 branch census):** 22 uniform -> rendered
+(the 8 above; Brandish, Knights of the Round, Firearm proto, Jungle Strike,
+Pagemaster x4, Justice League Task Force x2, Dragon - Bruce Lee (Beta), Power
+Rangers Zeo Battle Racers, Spot Goes to Hollywood (Proto), WeaponLord), 1 the
+other way (the Porky Pig Subgames beta above, a WRAM crash in both trees).
+Gate: fmt clean, clippy -D warnings clean, `cargo test --workspace` 2,445
+passed / 0 failed, validate-arch OK; ignored suites (65816 vectors, SPC700
+vectors, blargg spc_timer, gilyon, peterlemon 3/3, region, undisbeliever 2/2)
+all green. Note: the 2026-09-28 census showed Xardion moving 562 -> 621
+frames (past the 600-frame window) from an earlier commit; not caused by this
+change (same 621 with the NMI delay off).
