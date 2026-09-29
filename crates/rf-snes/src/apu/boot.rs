@@ -125,6 +125,16 @@ pub const RUN_HANDOFF_IMMEDIATE_CYCLES: u16 = 42;
 /// Total: 3+2+3+4+7+2+4 = 25.
 pub const BYTE_HANDSHAKE_CYCLES: u16 = 25;
 
+/// SPC cycles from the boot ROM's observation of the new counter on `$F4`
+/// to its read of the data byte on `$F5`.
+///
+/// fullsnes "Boot ROM Disassembly": the matching `$FFDA cmp Y,$F4` (3
+/// cycles, `$F4` sampled on its last), `$FFDC jnz` (2), then `$FFDE mov
+/// A,$F5` (3, `$F5` sampled on its last): about 5 cycles after the
+/// `$F4` sample, which is why an uploader that writes `$2141` a few CPU
+/// cycles after `$2140` still has its byte stored.
+pub const BYTE_DATA_FETCH_CYCLES: u16 = 5;
+
 /// The HLE boot handshake.
 #[derive(Debug, Clone)]
 pub struct IplBoot {
@@ -262,7 +272,27 @@ impl IplBoot {
         // this deliberately does not fall through to `cpu_wrote` here.
         if let Some((left, action)) = self.pending {
             if left > 1 {
-                self.pending = Some((left - 1, action));
+                let left = left - 1;
+                // The boot ROM fetches the data byte from `$F5` (`$FFDE
+                // mov A,$F5`) [`BYTE_DATA_FETCH_CYCLES`] SPC cycles AFTER
+                // the compare that observed the counter on `$F4`, so a
+                // byte the CPU wrote to `$2141` after its `$2140` counter
+                // write (the `STA $2140 / XBA / STA $2141` order, ~2.7
+                // SPC cycles apart) is the one stored; the value the
+                // port held when the counter changed is stale.
+                let action = match action {
+                    BootAction::Store { address, echo, .. }
+                        if left == BYTE_HANDSHAKE_CYCLES - BYTE_DATA_FETCH_CYCLES =>
+                    {
+                        BootAction::Store {
+                            address,
+                            value: ports_in[1],
+                            echo,
+                        }
+                    }
+                    other => other,
+                };
+                self.pending = Some((left, action));
                 return BootAction::None;
             }
             self.pending = None;

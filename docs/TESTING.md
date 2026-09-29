@@ -11100,3 +11100,81 @@ Library archives targeted (per the ticket; the orchestrator's own census
 is the record of what actually moved): Videomation, Videomation (Alt)
 (CPROM/mapper 13), one UNROM 512/mapper 30 title, Magi Cube (Proto) and
 [BIOS] Demo Vision (NES 2.0 exponent-multiplier sizes).
+
+## W14-46 / W14-48 / W14-49 (cluster A, 2026-09-28) — the IPL fetched the data byte too early; Urban Strike and NBA Live 96 render
+
+**Verdict: fixed. Root cause is not a missing IPL residency, not a TCALL
+trap, and not a halted driver: the HLE stored every uploaded byte ONE
+POSITION LATE for uploaders that write `$2140` (counter) before `$2141`
+(data).** Both W14-48's "TCALL 0 through `$FFDE`" reading and W14-46's
+"stub control flow reaches `$EFF2`" were downstream symptoms of a shifted
+driver image.
+
+**Trace (Urban Strike, current tree, ROM bytes read at runtime with
+`PROBE_PEEK`/`PROBE_FINDROM`; no ROM bytes are in the tree, law 5):**
+
+1. The 65816 uploader at `$92:8000-$8065` is the standard Nintendo routine
+   (`STA $2140` counter, `XBA`, `STA $2141` data — counter FIRST). Its
+   first block header (ROM `$92:838F`) is length `$1383` (4,995 bytes),
+   destination `$0460`, and the terminator header (`$92:9716`) is length
+   0, run address `$0460`. The `Transferring(131)` seen in W14-46 is
+   4,995 mod 256: the block is the whole driver, not a 131-byte stub.
+2. The first data byte in ROM (`$92:8393`) is `$20` (`CLRP`), but ARAM
+   `$0460` held `$01` and `$0461` held `$20`: the image was shifted by one,
+   the `$01` being the previous `$2141` value (the block-start "kind"
+   flag). The driver's real entry is therefore `$0460` = `CLRP` on
+   hardware, and `$01` (`TCALL 0`) on ours — which is the `$FFDE`-vector
+   walk W14-48 traced, correct in every detail except its cause.
+3. Why: `IplBoot::poll` decides a `Store` the instant it sees the new
+   counter on port 0 and captured `ports_in[1]` at that instant. The
+   boot ROM does not read `$F5` at that instant: per fullsnes "Boot ROM
+   Disassembly", `$FFDA cmp Y,$F4` (3) / `$FFDC jnz` (2) / `$FFDE mov
+   A,$F5` (3) — the data byte is fetched ~5 SPC cycles (~105 master
+   cycles) after the counter is observed, while the CPU's `STA $2140 /
+   XBA / STA $2141` lands its second write ~2.7 SPC cycles after the
+   first. Uploaders that write data before the counter (most titles that
+   already booted) never exposed it.
+
+**Fix (`crates/rf-snes/src/apu/boot.rs`):** the pending `Store` re-samples
+`ports_in[1]` when `BYTE_DATA_FETCH_CYCLES` (5) have elapsed, instead of
+using the value at detection. RED test:
+`the_data_byte_is_fetched_after_the_counter_not_when_the_counter_changes`
+(failed 1 != 171 before the fix). One existing test,
+`real_65816_code_completes_the_boot_handshake`, wrote the next `$2141`
+value without waiting for the counter echo, which races the ROM's own
+fetch on hardware too; it now spins on `$2140` like a real uploader.
+
+**Census children (release, `RF_CENSUS_ROM`), before -> after:**
+Urban Strike 10 -> 0 (rendered), NBA Live 96 10 -> 0 (rendered). Unmoved
+and still blank (exit 10): Tekken 2 (Pirate), Battle Grand Prix, Batman -
+Revenge of the Joker (Proto), Sonic Blast Man II. Canaries all still 0:
+Wild Guns, Kirby Super Star, Super Mario World, Super Mario RPG, Super
+Bonk, Rival Turf!.
+
+**The four remaining titles are not APU-handshake defects (re-traced on
+this tree):**
+
+- **Battle Grand Prix**: the APU boots and the SPC driver runs (480+
+  distinct SPC PCs, timers enabled). The 65816 loops in a per-frame
+  wait (routine at `$03:8077` polling `$4212` bit 7) feeding
+  VRAM by DMA from `$7F:6000` with `NMITIMEN=0`, `CGRAM` never written,
+  through 1,900+ frames: a game-flow question above the APU (what it
+  waits on is still unnamed). W14-48 Part A's conclusion stands.
+- **Tekken 2 (Pirate)**: the upload header words are `$CCCE`/`$0000`
+  (destination `$CCCE`, then run address `$0000`): a 23-byte "block" to
+  a nonsense address and a jump to `$0000`; the SPC then executes ARAM
+  data at `$0005`. A bootleg cart whose expected extra hardware/patch is
+  not modelled; not an IPL fault.
+- **Batman - Revenge of the Joker (Proto)**: 1 MB HiROM-headered image
+  (`$FFC0` name valid, map `$31`) whose reset vector (file `$FFFC`) is
+  `$8011`, the middle of the shared upload routine, so the CPU starts
+  in emulation mode inside it (`REP #$30` no-ops) and spins at `$8021`
+  with A=0. A bank-order/dump problem or unmodelled proto layout, never
+  reaches an APU write. Not fixable in the APU.
+- **Sonic Blast Man II**: the "boot never started" premise is stale: the
+  APU boots, CGRAM has 42 non-zero entries, VRAM 17.6k, mode 7 with
+  `TM=$00` (nothing enabled on the main screen) and the CPU in a
+  `JSL $C0032D / INC $48` frame loop. PPU/game-side, not APU.
+
+W14-49's TCALL-trap branch (`ba9e979`) is not needed: with the image
+unshifted, `$0460` is `CLRP` and nothing ever `TCALL`s into the boot ROM.

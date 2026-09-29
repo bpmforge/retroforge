@@ -345,7 +345,15 @@ fn real_65816_code_completes_the_boot_handshake() {
         0xA9, 0x02, 0x8D, 0x43, 0x21, // LDA #$CC : STA $2140      (start)
         0xA9, 0xCC, 0x8D, 0x40, 0x21, // LDA #$5A : STA $2141      (data)
         0xA9, 0x5A, 0x8D, 0x41, 0x21, // LDA #$00 : STA $2140      (counter 0 -> store)
-        0xA9, 0x00, 0x8D, 0x40, 0x21, // LDA #$00 : STA $2141      (kind 0 = finish)
+        0xA9, 0x00, 0x8D, 0x40, 0x21,
+        // wait for the echo: LDA $2140 : CMP #$00 : BNE wait
+        //
+        // Real uploaders spin here, and it matters: the boot ROM reads
+        // the data byte from $F5 five SPC cycles after it sees the
+        // counter (`BYTE_DATA_FETCH_CYCLES`), so overwriting $2141 with
+        // the next value before the echo races the fetch on hardware too.
+        0xAD, 0x40, 0x21, 0xC9, 0x00, 0xD0, 0xF9,
+        // LDA #$00 : STA $2141      (kind 0 = finish)
         0xA9, 0x00, 0x8D, 0x41, 0x21, // LDA #$02 : STA $2143      (entry high -> $0200)
         0xA9, 0x02, 0x8D, 0x43, 0x21,
         // LDA #$02 : STA $2140      (counter SKIP -> run)
@@ -1189,4 +1197,42 @@ fn the_byte_handshake_is_not_observable_before_its_listed_cycles_elapse() {
         "and exactly at the count, both must have"
     );
     assert_eq!(apu.aram[0x0200], 0xAB);
+}
+
+/// W14-49/W14-50 (Urban Strike, `$2140` before `$2141`): the boot ROM
+/// fetches the data byte from `$F5` five SPC cycles AFTER it sees the
+/// counter change on `$F4` (fullsnes "Boot ROM Disassembly": `$FFDA cmp
+/// Y,$F4` 3, `$FFDC jnz` 2, `$FFDE mov A,$F5`), and the 65816 uploader
+/// that writes `STA $2140 / XBA / STA $2141` lands its second byte write
+/// only ~2.7 SPC cycles after the first. So the byte the IPL stores is
+/// the one written to `$2141` AFTER the counter, not the stale one that
+/// was on `$F5` when `$F4` changed. Sampling `$F5` at the instant of the
+/// `$F4` change stored every byte one position late: the whole 4995-byte
+/// driver landed shifted by one, with the previous `$2141` value (the
+/// block-start flag, `01`) at the entry point.
+#[test]
+fn the_data_byte_is_fetched_after_the_counter_not_when_the_counter_changes() {
+    let mut apu = Apu::new();
+    apu.cpu_write_port(1, 0x01);
+    apu.cpu_write_port(2, 0x00);
+    apu.cpu_write_port(3, 0x02);
+    apu.cpu_write_port(0, 0xCC);
+    apu.poll_boot();
+    for _ in 0..u16::from(RUN_HANDOFF_AFTER_TRANSFER_CYCLES) {
+        apu.poll_boot();
+    }
+    assert_eq!(apu.ports_out[0], 0xCC);
+
+    // Counter first, data second, with the poll running in between.
+    apu.cpu_write_port(0, 0x00);
+    apu.poll_boot();
+    apu.cpu_write_port(1, 0xAB);
+    for _ in 0..u16::from(BYTE_HANDSHAKE_CYCLES) {
+        apu.poll_boot();
+    }
+    assert_eq!(apu.ports_out[0], 0x00, "the byte was accepted");
+    assert_eq!(
+        apu.aram[0x0200], 0xAB,
+        "the stored byte is the one on $F5 when the ROM reads it, not the stale $01"
+    );
 }
