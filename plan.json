@@ -7840,7 +7840,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 3,
-  "status": "blocked",
+  "status": "done",
   "stories": [],
   "id": "W14-49",
   "title": "IPL HLE: a driver that TCALLs or jumps into the boot ROM's address range after handoff must reach the listed routine (Urban Strike's TCALL 0 through $FFDE/$FFDF)",
@@ -7857,7 +7857,8 @@
   "notes": [
    "CLUSTER A 2026-09-28: SUPERSEDED. Urban Strike's TCALL 0 came from a one-byte-shifted driver image (IplBoot data-fetch timing, fixed in boot.rs), not from a missing boot-ROM vector; with the image correct $0460 is CLRP and nothing TCALLs into the boot ROM. The ba9e979 TCALL trap is not needed. Closable as superseded by the orchestrator; left blocked because its literal acceptance (a TCALL-0 IPL trap) was deliberately not built.",
    "W14-49 FILED 2026-09-21 by the orchestrator from W14-48's Urban Strike chain (the CPU sends Run=$0460; $0460 is TCALL 0; $FFDE/$FFDF are zero under the HLE).",
-   "W14-49 HELD 2026-09-21 by the orchestrator: branch w14-49 (HEAD ba9e979) implements the TCALL-0 trap into the IPL HLE, gate-green, but no title moved once the census children were re-run with the newest binary (the six 'moved' titles already rendered on main; the lane had run a stale boot_census binary), and no source states the $FFDE/$FFDF vector value. Kept as a branch for reference; merge only if a title is shown to depend on it."
+   "W14-49 HELD 2026-09-21 by the orchestrator: branch w14-49 (HEAD ba9e979) implements the TCALL-0 trap into the IPL HLE, gate-green, but no title moved once the census children were re-run with the newest binary (the six 'moved' titles already rendered on main; the lane had run a stale boot_census binary), and no source states the $FFDE/$FFDF vector value. Kept as a branch for reference; merge only if a title is shown to depend on it.",
+   "CLOSED 2026-09-28 as SUPERSEDED (no code): the TCALL 0 / $FFDE vector that W14-48/49 chased was the shifted first byte of a mis-uploaded driver. IplBoot::poll sampled the data port before the boot ROM's own ~5-cycle read delay, so every byte landed one position late (fix commit 9e55585, test the_data_byte_is_fetched_after_the_counter_not_when_the_counter_changes). The run address was correct and no IPL residency is needed. Urban Strike and NBA Live 96 now render; merged census 1217/35/13, 25 titles moved, none regressed."
   ]
  },
  {

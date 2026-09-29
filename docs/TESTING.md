@@ -11352,3 +11352,11 @@ this tree):**
 W14-49's TCALL-trap branch (`ba9e979`) is not needed: with the image
 unshifted, `$0460` is `CLRP` and nothing ever `TCALL`s into the boot ROM.
 
+
+## Merged-tree SNES census 2026-09-28 (after clusters A, B, C)
+
+**1217 rendered / 35 uniform / 0 no-video / 13 refused / 0 crashed / 0 timed out**, 1265 titles in 1573 s (previous run this day: 1192/60/13). 25 titles moved uniform -> rendered, none moved the other way: Battle Grand Prix, Brandish, Dragon (Bruce Lee) Beta, Firearm proto, Goal!, Jungle Strike, Justice League Task Force x2, Knights of the Round, Lagoon, NBA Live 96, Pagemaster x4, Phalanx x2, Power Rangers Zeo, Sonic Blast Man II, Spot proto, SF Alpha 2, Tuff E Nuff, Urban Strike, WeaponLord, Zool Beta. "Rendered" is a pixels-changed signal, not a correctness claim.
+
+Causes fixed: per-scanline INIDISP latch (Jungle Strike, Pagemaster and others); NMI held one opcode after the flag edge ($4210 wait loops); IPL data byte fetched after the counter echo; VRAM read ports $2139/$213A. W14-49 closed as superseded.
+
+Still open: W14-46/48 (Tekken 2 pirate, Batman proto), W14-51 (Final Fight 2, Battletoads: composition, not a wait target), W7-08 (Blackthorne, S-DSP), W19-02 (Cx4 command algorithms, blocked on documentation), W16-07 (hardware-gated).
