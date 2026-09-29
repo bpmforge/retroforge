@@ -11100,3 +11100,26 @@ Library archives targeted (per the ticket; the orchestrator's own census
 is the record of what actually moved): Videomation, Videomation (Alt)
 (CPROM/mapper 13), one UNROM 512/mapper 30 title, Magi Cube (Proto) and
 [BIOS] Demo Vision (NES 2.0 exponent-multiplier sizes).
+
+**W14-23 packet-count verdict, 2026-09-28 (branch feat/apu-handshake-family; no crates change, tree re-verified).**
+Hypothesis tested: the 65C816 sends the SMRPG driver far more packets than
+it intends to. Result: **confirmed, and already fixed by W14-24** — W14-23's
+"needs a real-hardware capture" conclusion is superseded.
+
+- Side/port/value: the producer is the 65C816. No port read is stale; the
+  packet countdown `X` (loaded at `C4:0539`, spun on `$2140` at
+  `C4:0541`/`C4:0545`) is the quotient `(len+2)/3` from the `$4204-$4217`
+  divider, read at `C4:04FD` (`$4215`) and `C4:0505` (`$4214`). fullsnes
+  ("SNES Maths Multiply/Divide"): the result is valid 16 CPU cycles after
+  the `$4206` write. Pre-W14-24 the high-byte read landed mid-divide
+  (`rddiv=0x8010`), so `X=0x8021` = 32,801 packets vs the intended 33
+  (dividend `0x65`). The driver's `ADC/BCC` carry chain therefore ran ~200
+  page carries and stamped its own code (W14-23 stage 2's `$09B3-$09B5`).
+- Current tree (`PROBE_MATHPC=c404fd,c40539`, release): `busy=false` at
+  every `C404FD`; intended counts 6, 33, 15, 27, 66, 108, 168, 102, 165, 150
+  (`a=` at `C40539`), all matching `wrdiv/3`. `PROBE_STOP_ON_SPC_STOP=1` at
+  1,050,000 instructions: `spc.stopped=false`, SPC in the `$02xx-$03xx`
+  driver; `PROBE_MODE=frames PROBE_FRAMES=600`: `varied_at=Some(37)`.
+- No unit test or fix was added: the defect and its tests
+  (`tick_completes_a_divide_after_its_real_master_cycle_latency` etc.)
+  already exist from W14-24. No titles moved (nothing changed).
