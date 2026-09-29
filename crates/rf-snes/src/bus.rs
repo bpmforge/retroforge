@@ -70,6 +70,8 @@ pub struct SnesBus {
     /// while rendering read `ppu.vram`, so every game would draw a black
     /// screen with nothing obviously wrong anywhere.
     pub vram_address: u16,
+    /// VRAM read prefetch latch (`$2139`/`$213A` return it).
+    pub vram_prefetch: u16,
     /// `$2115` VMAIN — increment step and which port write advances it.
     pub vmain: u8,
     pub mode: SnesMapMode,
@@ -301,6 +303,7 @@ impl SnesBus {
             sram: vec![0; sram_len],
             wram: vec![0; WRAM_LEN],
             vram_address: 0,
+            vram_prefetch: 0,
             vmain: 0,
             mode,
             math: MathUnit::default(),
@@ -600,6 +603,28 @@ impl SnesBus {
                 self.wram_port.advance();
                 v
             }
+            // $2139/$213A VMDATALREAD/VMDATAHREAD (fullsnes "PPU Video
+            // Memory (VRAM)"): these return the PREFETCH LATCH, not the
+            // word at the current address. On the byte VMAIN bit 7
+            // selects, the latch is first reloaded from the address
+            // BEFORE the increment, then the address steps: the reason
+            // games issue one dummy read after setting VMADD. Battle
+            // Grand Prix verifies a 24 KB DMA with exactly that idiom;
+            // as open bus (or a fresh read of the current address) its
+            // compare fails on every retry and the game never starts.
+            0x2139 | 0x213A => {
+                let high = offset == 0x213A;
+                let v = if high {
+                    (self.vram_prefetch >> 8) as u8
+                } else {
+                    self.vram_prefetch as u8
+                };
+                if (self.vmain & 0x80 != 0) == high {
+                    self.reload_vram_prefetch();
+                    self.step_vram_address();
+                }
+                v
+            }
             // $2140-$2143: catch the APU up FIRST, so what the CPU reads
             // is a state the APU actually reached.
             0x2140..=0x2143 => {
@@ -632,8 +657,14 @@ impl SnesBus {
                 self.apu.cpu_write_port(usize::from(offset - 0x2140), value);
             }
             0x2115 => self.vmain = value,
-            0x2116 => self.vram_address = (self.vram_address & 0xFF00) | u16::from(value),
-            0x2117 => self.vram_address = (self.vram_address & 0x00FF) | (u16::from(value) << 8),
+            0x2116 => {
+                self.vram_address = (self.vram_address & 0xFF00) | u16::from(value);
+                self.reload_vram_prefetch();
+            }
+            0x2117 => {
+                self.vram_address = (self.vram_address & 0x00FF) | (u16::from(value) << 8);
+                self.reload_vram_prefetch();
+            }
             0x2118 => {
                 let at = (self.vram_address as usize * 2) % self.ppu.vram.len();
                 self.ppu.vram[at] = value;
@@ -1052,6 +1083,12 @@ impl SnesBus {
             // APU cannot drift ahead one instruction at a time.
             self.apu_overspent = spent - spc_cycles;
         }
+    }
+
+    /// Load the VRAM read latch from the word at `vram_address`.
+    fn reload_vram_prefetch(&mut self) {
+        let at = (self.vram_address as usize * 2) % self.ppu.vram.len();
+        self.vram_prefetch = u16::from(self.ppu.vram[at]) | (u16::from(self.ppu.vram[at + 1]) << 8);
     }
 
     /// VMAIN bits 0-1 select the address increment: 1, 32, 128, 128
