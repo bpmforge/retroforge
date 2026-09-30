@@ -128,6 +128,12 @@ pub enum Target {
     /// current index at access time.
     Obc1Bits(usize),
 
+    /// Cartridge RAM in the `$6000-$7FFF` window of the system banks, at
+    /// an offset already reduced into `0..0x2000` (ticket W14-60). Only
+    /// resolved when [`crate::bus::SnesBus::install_window_ram`] was
+    /// called; its own write-allocate semantics live on the bus.
+    WindowRam(usize),
+
     /// The ST010's battery-backed on-chip RAM, at an offset already
     /// reduced into `0..st010::ST010_RAM_LEN` (ticket W19-04, fullsnes
     /// "SNES Cart DSP-n/ST010/ST011": `"680000h-6FFFFFh ST010/ST011

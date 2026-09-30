@@ -61,6 +61,10 @@ pub struct Dsp1DrTrace {
 pub struct SnesBus {
     pub rom: Vec<u8>,
     pub sram: Vec<u8>,
+    /// Cartridge RAM in the `$6000-$7FFF` window of the system banks
+    /// (ticket W14-60). `None` on every cartridge but a LoROM board whose
+    /// header cannot declare its RAM.
+    window_ram: Option<Box<WindowRam>>,
     pub wram: Vec<u8>,
     /// `$2116`/`$2117` VMADD — a WORD address into the PPU's VRAM.
     ///
@@ -227,6 +231,34 @@ pub struct SnesBus {
     pub(crate) sa1_bwram_contended: bool,
 }
 
+/// The `$6000-$7FFF` cartridge RAM window (ticket W14-60).
+///
+/// Write-allocated: a byte reads back what was last written to it, and a
+/// byte never written reads as open bus, exactly what an undecoded window
+/// returns. A header-less LoROM board gives the emulator no way to know
+/// whether this RAM exists, so the never-written read is kept identical to
+/// the no-RAM answer; only a program that stores and then loads sees RAM.
+struct WindowRam {
+    data: [u8; 0x2000],
+    written: [bool; 0x2000],
+}
+
+impl Default for WindowRam {
+    fn default() -> Self {
+        Self {
+            data: [0; 0x2000],
+            written: [false; 0x2000],
+        }
+    }
+}
+
+impl WindowRam {
+    fn write(&mut self, i: usize, value: u8) {
+        self.data[i] = value;
+        self.written[i] = true;
+    }
+}
+
 impl SnesBus {
     /// Subscribe the consumer to a set of events (ticket W13-02h).
     ///
@@ -301,6 +333,7 @@ impl SnesBus {
             hdma_lanes: vec![0; 262],
             rom,
             sram: vec![0; sram_len],
+            window_ram: None,
             wram: vec![0; WRAM_LEN],
             vram_address: 0,
             vram_prefetch: 0,
@@ -411,9 +444,32 @@ impl SnesBus {
         self.st010 = Some(crate::st010::St010::new());
     }
 
+    /// Give the cartridge 8 KiB of RAM at `$6000-$7FFF` of banks
+    /// `$00-$3F`/`$80-$BF` (ticket W14-60). Write-allocated: see
+    /// [`WindowRam`].
+    pub fn install_window_ram(&mut self) {
+        self.window_ram = Some(Box::default());
+    }
+
+    fn window_ram_read(&self, i: usize) -> u8 {
+        match self.window_ram.as_ref() {
+            Some(w) if w.written[i] => w.data[i],
+            _ => self.open_bus,
+        }
+    }
+
     fn target(&self, addr: u32) -> Target {
         let bank = ((addr >> 16) & 0xFF) as u8;
         let offset = addr as u16;
+        // Checked BEFORE the generic map: `map` answers open bus for this
+        // window on LoROM. `window_ram` is `None` for every cartridge
+        // that did not ask for it, so nothing else's mapping moves.
+        if self.window_ram.is_some()
+            && (bank < 0x40 || (0x80..0xC0).contains(&bank))
+            && (0x6000..0x8000).contains(&offset)
+        {
+            return Target::WindowRam(usize::from(offset - 0x6000));
+        }
         // Checked BEFORE the generic map, same reasoning as the DSP-1
         // window below: an SA-1 cart's I-RAM, BW-RAM and register windows
         // sit inside bank/offset space `map` would otherwise resolve as
@@ -1294,6 +1350,7 @@ impl CpuBus for SnesBus {
             Target::Rom(i) => self.rom[i],
             Target::Wram(i) => self.wram[i],
             Target::Sram(i) => self.sram[i],
+            Target::WindowRam(i) => self.window_ram_read(i),
             Target::Register(offset) => self.read_register(offset),
             // DR reads advance the chip's output cursor (ticket W14-19);
             // `dsp1` is `Some` whenever `target` can return these
@@ -1437,6 +1494,11 @@ impl CpuBus for SnesBus {
         match target {
             Target::Wram(i) => self.wram[i] = value,
             Target::Sram(i) => self.sram[i] = value,
+            Target::WindowRam(i) => {
+                if let Some(w) = self.window_ram.as_mut() {
+                    w.write(i, value);
+                }
+            }
             Target::Register(offset) => self.write_register(offset, value),
             // DR writes feed the command/parameter protocol (ticket
             // W14-19). SR is documented read-only (snesdev/fullsnes name
@@ -1591,6 +1653,7 @@ impl CpuBus for SnesBus {
             Target::Rom(i) => self.rom[i],
             Target::Wram(i) => self.wram[i],
             Target::Sram(i) => self.sram[i],
+            Target::WindowRam(i) => self.window_ram_read(i),
             // Only the side-effect-free subset. An address whose read has
             // consequences reports open bus rather than firing them.
             Target::Register(offset) => self.read_register_pure(offset).unwrap_or(self.open_bus),

@@ -7780,7 +7780,8 @@
   "notes": [
    "CLUSTER A 2026-09-28 (Sonnet 5.5 lane): ROOT CAUSE FOUND for the halted sub-shape and FIXED in crates/rf-snes/src/apu/boot.rs: IplBoot::poll captured port 1 (the data byte) at the instant the counter changed on port 0, but the real IPL fetches $F5 about 5 SPC cycles later (fullsnes Boot ROM Disassembly: $FFDA cmp Y,$F4 / $FFDC jnz / $FFDE mov A,$F5), and the STA $2140 / XBA / STA $2141 uploader lands its second write ~2.7 SPC cycles after the first, so every byte of Urban Strike's 4,995-byte driver was stored one position late ($01 flag byte at $0460 = TCALL 0). Pinned by the_data_byte_is_fetched_after_the_counter_not_when_the_counter_changes; census children Urban Strike and NBA Live 96 now exit 0 (rendered); NHL 95, Super Turrican, Tommy Moe's, Wario's Woods unmoved (0), canaries Wild Guns/Kirby Super Star/SMW/SMRPG/Super Bonk/Rival Turf! unmoved. Battle Grand Prix is ALSO FIXED (census child 10 -> 0) by a non-APU defect: $2139/$213A VRAM readback was unimplemented; the game's DMA-verify loop ($03:AAAC) relies on the VMDATAREAD prefetch latch (reload before increment, fullsnes PPU Video Memory) and retried forever; fix is bus.rs vram_prefetch, RED test vram_readback_returns_the_prefetch_latch_and_reloads_before_incrementing. Remaining three titles re-traced and are NOT APU handshake defects: Tekken 2 Pirate (upload header dest $CCCE then run $0000: bootleg), Batman Proto (HiROM header, reset vector $8011 lands mid-uploader, CPU in emulation mode), Sonic Blast Man II (boots; mode 7 with TM=0). Ticket stays blocked for those four; each needs its own non-APU ticket. See docs/TESTING.md 'W14-46 / W14-48 / W14-49 (cluster A, 2026-09-28)'.",
    "W14-46 BLOCKED 2026-09-20: one title traced end to end per sub-shape. Halted (Urban Strike): SPC NOP-slides through unwritten ARAM ($F380-$FFB0, confirmed empty) into the IPL window, correctly re-arming IplBoot::Ready (reenter_ipl is hardware-accurate here); the CPU's next $2140 write is an ordinary command byte ($FE), silently dropped by boot.rs's Ready-state gate (needs literal $CC), stranding both sides. Root cause is upstream (why the 131-byte stub's control flow reaches $EFF2, outside anything transferred) - not isolated. Never-acking (Battle Grand Prix): genuine, progressing per-byte handshake ($0E1F driver loop decoded and verified against ops.rs), not completed in 3M instructions/1800 frames; rate-vs-catch_up_apu question open. Blackthorne x3 confirmed and routed to W7-08 (S-DSP ENVX poller at $19D3, $F2/$F3), not re-derived. Boot-never-started (Phalanx): confirmed genuine stall via PROBE_MODE=frames to 9000 frames (150s), not a slow boot; traces to WRAM flag $7E2C00 the NMI handler gates on, never set; APU never touched, upstream of this ticket's scope. Siblings named, same shape: NBA Live 96, Tekken 2 (lowest priority, named only), Phalanx (Beta), Sonic Blast Man II, Batman - Revenge of the Joker (Proto). No crates/** change (no fix confident enough to ship); baseline ignored suites (spc700_vectors, spc_timer, gilyon, singlestep_65816_vectors, peterlemon_golden) all green unmodified; fmt/clippy/test -p rf-snes all exit 0; boot_census_child exit codes: 11/11 traced titles still 10 (blank), 4/4 canaries still 0 (rendered). docs/TESTING.md W14-46 section has full per-sub-shape chains.",
-   "W14-46 FILED 2026-09-21 by the orchestrator from W14-45's family table (11 titles). The three sub-shapes may be three causes; one traced title per sub-shape is the minimum."
+   "W14-46 FILED 2026-09-21 by the orchestrator from W14-45's family table (11 titles). The three sub-shapes may be three causes; one traced title per sub-shape is the minimum.",
+   "W14-60 TRIAGE 2026-09-29: re-traced on the merged tree. Tekken 2 belongs to a 7-title bootleg SPC-loader family (Tekken 2, Soul Edge vs Samurai, SF EX Plus Alpha, KOF 98, KOF 2000, X-Men vs SF, Marvel vs SF): the stream the CPU sends has a garbage header (Tekken 2 dest $CCCE run $0000, KOF98 payload is 65816 code, MvsSF dest $5555). Filed as W14-61. Batman proto is a bad dump (category c: NMI vector 0001, reset lands mid-uploader). See docs/TESTING.md W14-60."
   ]
  },
  {
@@ -8222,7 +8223,8 @@
   ],
   "notes": [
    "W14-54 FILED 2026-09-23 by the orchestrator after the refused bucket fell from 120 to 25: 16 titles entered the uniform bucket today and have never been probed.",
-   "W14-54 DONE 2026-09-23. Ground truth is 19 newcomers, not 16 (comm -13 against wt-uniform-41.txt), plus the 41 carried from W14-45 (35 stuck, unchanged families/evidence -- none of W14-52/53/W19-01..03 touch their APU/raster/DMA machinery) and 6 unchanged slow boots. 1800-frame sweep across all 60: 7 slow boots (6 carried + Super Star Fox Weekend, new), 53 stuck. The 18 stuck newcomers got a default probe (PROBE_INSTR=3000000 PROBE_PORTS/RING/SPCRING=1) plus a PROBE_MODE=frames PROBE_FRAMES=600 PROBE_M7=1 line; header path (scored vs W14-52 fallback, and the mapping) came from a standalone scratch crate against rf-cart (Cartridge::load / SnesHeader::header_fallback), not a title_probe.rs edit -- W7-08 holds crates/rf-harness/** this session (its own notes are dated today), so this ticket's write_scope was narrowed to docs/TESTING.md at claim time (P8 concurrent-active overlap otherwise). Families found: 15 of 19 newcomers took the RESET-vector fallback (all LoRom). NEW families: pirate-cart shared bootloader stall (9, byte-identical PCs across unrelated titles -- Digimon Adventure/Pokemon Gold & Silver share one bootloader, King of Fighters 98/2000 share another); header-fallback strips a real coprocessor (4: three Star Fox 2 betas lose GSU, Zool (Beta) loses a chipset-byte-suggested SA-1, since the fallback's own rule reports coprocessor=None unconditionally); a wrong-fallback mapping guess (1: The Lion King (Beta 3) -- LoROM's prologue match is a one-byte-offset coincidence at a bank-mirror seam; HiROM's own header has a clean SEI/CLC/XCE/JML fallback never reaches because LoROM is tried first); GSU/SuperFX real execution not yet composing (2: Star Fox 2 Switch Online, Vortex -- both corroborated, both genuinely running, TM=0000 at frame 600); S-DD1 decompression still unverifiable without a golden (1: Street Fighter Alpha 2, W19-03's own named limitation, not re-derived); scattered execution joining the carried DMA/mapping family (Aladdin 2000). Three largest families proposed as next tickets: APU handshake (11, carried, unchanged), pirate-cart bootloader stall (9, NEW), raster/IRQ (9, carried, unchanged). No core code changed; cargo fmt --check clean (docs-only diff). Full tables, evidence and the smaller header-fallback bug findings: docs/TESTING.md 'W14-54 re-triage' section."
+   "W14-54 DONE 2026-09-23. Ground truth is 19 newcomers, not 16 (comm -13 against wt-uniform-41.txt), plus the 41 carried from W14-45 (35 stuck, unchanged families/evidence -- none of W14-52/53/W19-01..03 touch their APU/raster/DMA machinery) and 6 unchanged slow boots. 1800-frame sweep across all 60: 7 slow boots (6 carried + Super Star Fox Weekend, new), 53 stuck. The 18 stuck newcomers got a default probe (PROBE_INSTR=3000000 PROBE_PORTS/RING/SPCRING=1) plus a PROBE_MODE=frames PROBE_FRAMES=600 PROBE_M7=1 line; header path (scored vs W14-52 fallback, and the mapping) came from a standalone scratch crate against rf-cart (Cartridge::load / SnesHeader::header_fallback), not a title_probe.rs edit -- W7-08 holds crates/rf-harness/** this session (its own notes are dated today), so this ticket's write_scope was narrowed to docs/TESTING.md at claim time (P8 concurrent-active overlap otherwise). Families found: 15 of 19 newcomers took the RESET-vector fallback (all LoRom). NEW families: pirate-cart shared bootloader stall (9, byte-identical PCs across unrelated titles -- Digimon Adventure/Pokemon Gold & Silver share one bootloader, King of Fighters 98/2000 share another); header-fallback strips a real coprocessor (4: three Star Fox 2 betas lose GSU, Zool (Beta) loses a chipset-byte-suggested SA-1, since the fallback's own rule reports coprocessor=None unconditionally); a wrong-fallback mapping guess (1: The Lion King (Beta 3) -- LoROM's prologue match is a one-byte-offset coincidence at a bank-mirror seam; HiROM's own header has a clean SEI/CLC/XCE/JML fallback never reaches because LoROM is tried first); GSU/SuperFX real execution not yet composing (2: Star Fox 2 Switch Online, Vortex -- both corroborated, both genuinely running, TM=0000 at frame 600); S-DD1 decompression still unverifiable without a golden (1: Street Fighter Alpha 2, W19-03's own named limitation, not re-derived); scattered execution joining the carried DMA/mapping family (Aladdin 2000). Three largest families proposed as next tickets: APU handshake (11, carried, unchanged), pirate-cart bootloader stall (9, NEW), raster/IRQ (9, carried, unchanged). No core code changed; cargo fmt --check clean (docs-only diff). Full tables, evidence and the smaller header-fallback bug findings: docs/TESTING.md 'W14-54 re-triage' section.",
+   "W14-60 2026-09-29: the pirate 'shared bootloader stall' families are now split into W14-61 (SPC-loader, 7 titles) and W14-62 (NMI-off WAI restart, 6 titles); PowerFest 94 and Pokemon Stadium (Pirate) were a shared emulator defect (no cart RAM at $6000-$7FFF) and now render."
   ]
  },
  {
@@ -8374,6 +8376,120 @@
   "notes": [
    "W14-59 FILED 2026-09-23 by the orchestrator from the post-W14-50 NES refused list (49). Remaining refused after W14-58/W14-59: Racermate 168 x6, Action 52/Cheetahmen 228 x4, mapper 268 x6 and 446 x4 (modern re-release boards), Maxi 15 234 x2, Buzz & Waldog/Street Hero 156 x2, and singletons (41, 46, 68, 75 VRC1, 81, 86, 105 NWC, 158, 173, 19 Namco 163, 290, 389, 470, 487, 493, 555) — each its own ticket if ever wanted.",
    "W14-59 done 2026-09-23: CPROM (mapper 13) and UNROM 512 (mapper 30) implemented self-contained (no sight of W14-58) via one new default-no-op `Mapper::chr_writeback` hook (crates/rf-nes/src/mappers/mod.rs) that NesBus feeds `ppu.chr()` into at all four push sites BEFORE the mapper's own write handler can move the selected bank -- see docs/TESTING.md's new W14-59 section for the ordering argument and both mappers' module docs. NES 2.0 exponent-multiplier sizes decoded in rf-cart with checked_shl/checked_mul and a named 64 MiB InvalidHeader guard; parse_nes_header now carries byte sizes end-to-end instead of bank counts. The old `nes2_exponent_notation_is_reported_not_panicked` test was renamed to `nes2_exponent_notation_is_decoded_not_refused` (its assertion is the opposite of what the old name said) rather than kept verbatim -- content matches the acceptance criterion (asserts the decoded size). UNROM 512's one-screen-hardwired header signalling (flags6 bit3-with-bit0) is implemented per the ticket brief but not independently verified against a fetched nesdev page (none cached locally) -- named as an honest gap in both the module doc and docs/TESTING.md. Gate: cargo fmt --check, cargo clippy --workspace -D warnings, scripts/validate-arch.sh all clean; cargo test -p rf-nes -p rf-cart: rf-cart 91 passed (90 lib + 1 integration), rf-nes 383 passed (378 lib + 1 ignored + 4 emulator-core-contract), 0 failed. Full `cargo test --workspace` left to the orchestrator per instructions. Two pre-existing tests that used mapper 13 as a stand-in unsupported mapper were retargeted to mapper 15 (rf-cart's mapper28_tests, rf-nes's a_mapper_rf_cart_cannot_identify_is_refused_not_loaded). Census of the four named archives left to the orchestrator."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 2,
+  "status": "done",
+  "stories": [],
+  "id": "W14-60",
+  "title": "LoROM boards with an untrusted header: cart RAM at $6000-$7FFF (PowerFest 94, Pokemon Stadium Pirate)",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-60: a RED test pins a write-allocated 8 KiB RAM window at $6000-$7FFF of banks $00-$3F/$80-$BF that reads back written bytes, reads open bus for never-written bytes, and is absent unless installed",
+   "PowerFest 94 and Pokemon Stadium (Pirate) render under frames mode; a frames-mode before/after sweep of every header-less LoROM image shows no title moving the other way; canaries unchanged"
+  ],
+  "notes": [
+   "DONE 2026-09-29: SnesBus::install_window_ram, installed by SnesSystem::load for LoROM + no declared RAM + no coprocessor + untrusted header (fallback or blank checksums) + ROM over 1 MiB. Sweep of 108 images: exactly two movers, PowerFest 94 (frame 124) and Pokemon Stadium (26). Size gate is evidence-based, not a hardware rule: an unconditional install regressed Porky Pig Subgames (Beta, 512 KiB) which executes code it copies into the window. See docs/TESTING.md W14-60."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "blocked",
+  "stories": [],
+  "id": "W14-61",
+  "title": "Bootleg SPC-loader family: seven pirate fighters upload a garbage stream to the SPC (Tekken 2, Soul Edge vs Samurai, SF EX Plus Alpha, KOF 98, KOF 2000, X-Men vs SF, Marvel vs SF)",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-61: name the bootleg board's ROM layout or loader difference that makes the SPC upload stream valid (the ROM pointer chain: which bank/offset the loader reads, checked against a known-good header block of the same stream), with a citation; the fix lands as a mapping or loader rule keyed on hardware, not on a title",
+   "one family member renders under census; canaries unchanged; a BLOCKED verdict names which side, which port and which value"
+  ],
+  "notes": [
+   "FILED 2026-09-29 by W14-60 triage. Evidence: standard IPL protocol on both sides, so this is not the IPL. Tekken 2 sends 22 bytes to $CCCE then runs $0000; KOF 98's payload at ROM file $1807C is 65816 code (JML tables at file 0) and it runs $0000; Marvel vs SF sends dest $5555. The CPU-side pointer is $03:8000-style, read via LDA [$6E],Y with a bank table at $08:8002 (KOF 98). Either the stream bank differs from a plain LoROM layout on these boards or the dumps are bad. Blocked on identifying the pirate board. Not W14-46's IPL bug (fixed) and not W14-48."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 3,
+  "status": "blocked",
+  "stories": [],
+  "id": "W14-62",
+  "title": "Bootleg boot family: NMI disabled by a restart path, then WAI forever (Digimon Adventure, Pokemon Gold & Silver, A Bug's Life, Hercules, Aladdin 2000, Picachu)",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-62: trace one member to the first instruction whose result differs from hardware: Digimon/Pokemon Gold restart via JML $81D0 after a 32-frame WAI loop and park in WAI at $8491 with NMITIMEN=0; Bug's Life does STZ $4200 at $A9F2 then WAI; say what the game was waiting for that never happened",
+   "a fix cites fullsnes/snes.nesdev.org and is pinned by a test; canaries unchanged"
+  ],
+  "notes": [
+   "FILED 2026-09-29 by W14-60 triage. PROBE_NMIW (new) shows Digimon/Pokemon Gold write $4200 81->00 at PC $8109, the tail of a 'wait 32 frames then reboot' routine (WAI, DEX, BNE; LDA #0; STA $4200; JML $81D0). Why the game decides to reboot at n=4.45M (frame ~400) is the open question: candidates are a SPC handshake it sees as failed (SPC driver runs at $0856 polling timer 0), a RAM/hardware probe, or a protection check. Hercules ends in BRK at $0000; Aladdin 2000 fills $4200 and the DMA registers with $AB. Same 'SEI CLC XCE' boot code across the family."
+  ]
+ },
+ {
+  "phase": 19,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "id": "W19-05",
+  "title": "DSP-4 (Top Gear 3000, The Planet's Champ): refused as an unsupported chip",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W19-05: rf-cart accepts the DSP-4 chipset and the bus window; the command set is implemented from the DSP-4 documentation, cited, with unit tests for each command",
+   "Top Gear 3000 renders under census; canaries unchanged"
+  ],
+  "notes": [
+   "FILED 2026-09-29 by W14-60 triage: Top Gear 3000 (USA) is refused with UnsupportedChip DSP-4 (chipset $03 with the DSP-4 signature). Real coprocessor work, comparable to W14-19/21 for DSP-1; documentation must be located and verified first."
+  ]
+ },
+ {
+  "phase": 14,
+  "crate": "rf-snes",
+  "depends_on": [],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "id": "W14-63",
+  "title": "Header-detection follow-ups from the refused bucket: Porky Pig Beta (1994-05-24) mis-read as SPC7110, Super Noah's Ark 3D (Piko) chipset $0A read as DSP",
+  "write_scope": [
+   "crates/rf-snes/**",
+   "crates/rf-cart/**",
+   "crates/rf-harness/**",
+   "docs/TESTING.md"
+  ],
+  "acceptance": [
+   "W14-63: the Porky Pig 1994-05-24 beta header no longer names SPC7110 from a junk map-mode byte (its retail sibling has no chip), and the Piko Noah's Ark 3D header loads like its (Unl) sibling; each rule is a header-plausibility rule with a citation and a unit test, not a title check"
+  ],
+  "notes": [
+   "FILED 2026-09-29 by W14-60 triage. Both are refusals from a header byte the hardware never reads or that no cartridge assigns (see W14-57). Cheap; only worth it if the census count matters, since both games are betas or re-releases."
   ]
  }
 ]
