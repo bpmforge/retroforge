@@ -11388,3 +11388,32 @@ Battletoads in Battlemaniacs (USA), (USA) (Beta), and Undercover Cops (USA)
 (Retro-Bit). The other 30 stay uniform (not this cause). Canaries Wild Guns,
 Kirby Super Star, Super Mario World, Super Mario RPG, Super Bonk, Rival Turf!
 still render.
+
+## W18-07 (Super FX: RON/RAN gate the SNES side only while GO=1; fixed vector table)
+
+**Verdict: fixed.** Star Fox 2 (4 dumps), Super Star Fox Weekend and Vortex
+went from uniform to rendered (census children exit 0; `PROBE_MODE=frames`
+varied at frame 176/157/219 for Classic Mini/Vortex/Weekend).
+
+**Root cause (traced, not inferred).** `SnesBus::read`/`peek` gated SNES ROM
+and GSU-RAM reads on the raw SCMR RON/RAN bits regardless of GO. Star Fox 2
+and Vortex leave RON=1 after a GSU stop. Traced state at 8M instructions:
+`nmi_vec=2424 irq_vec=2424`, CPU executing `BIT $24` from open bus, forced
+blank forever. The vectors were open bus because the ROM was hidden from a
+stopped chip. Real rule (fullsnes "SNES Cart GSU-n Memory Map", "GSU
+Interrupt Vectors"): ROM is unmapped only while the GSU is running
+(GO=1 and RON=1), and then `$FFE0-$FFFF` reads a fixed table (COP `$0104`,
+NMI `$0108`, IRQ `$010C`, others `$0100`); RAM likewise for RAN.
+
+**Why W18-06 reverted the same idea.** Star Fox 1 regressed under bare GO
+gating because its second IRQ (H/V timer) arrives while GO=1: the vector read
+must return the fixed table (`$010C`), not open bus (`$2020`). The old raw-bit
+rule only looked right because Star Fox's ROM vectors equal the fixed table
+when GO=0. Adding `Gsu::fixed_vector_byte` for the GO=1 case makes the
+GO-gated read safe; Star Fox (3 revisions) also renders and now reaches
+frame 162.
+
+**Test.** `gsu_scmr_ron_gates_the_snes_sides_own_reads_only_while_go_is_set`
+(RED before, GREEN after; replaces the raw-bit test, whose doc had recorded
+the failed W18-06 attempt).
+
