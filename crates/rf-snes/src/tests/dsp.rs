@@ -2,8 +2,8 @@
 //! modulation (ticket W7-08).
 
 use crate::apu::dsp::{
-    counter_fires, decode_brr, gaussian, Dsp, Echo, EchoChannel, Envelope, EnvelopeStage, Noise,
-    COUNTER_MAX, COUNTER_RATES, GAUSS, LOOP_CYCLES,
+    counter_fires, decode_brr, gaussian, pmon_step, Dsp, Echo, EchoChannel, Envelope,
+    EnvelopeStage, Noise, COUNTER_MAX, COUNTER_RATES, GAUSS, LOOP_CYCLES,
 };
 use crate::apu::Apu;
 
@@ -1060,10 +1060,22 @@ fn a_standing_koff_releases_a_voice_that_was_keyed_once() {
     }
     assert!(dsp.voices[0].envelope.level > 0x600);
     dsp.write_register(0x5C, 0x01, &aram); // KOFF, left standing
-    // 0x7FF / 8 = 256 samples of release, plus the poll latency.
+                                           // 0x7FF / 8 = 256 samples of release, plus the poll latency.
     for _ in 0..300 {
         let _ = dsp.mix(&mut aram);
     }
     assert_eq!(dsp.voices[0].envelope.level, 0);
     assert_eq!(dsp.read_register(0x08), 0, "ENVX reads 0 once released");
+}
+
+/// PMON's step is the documented integer formula, not a float estimate
+/// (fullsnes "Pitch Counter": `Factor = (OUTX SAR 4) + 400h`,
+/// `Step = (Step * Factor) SAR 10`).
+#[test]
+fn pmon_step_is_the_documented_integer_formula() {
+    assert_eq!(pmon_step(0x1000, 0), 0x1000, "silence leaves pitch alone");
+    assert_eq!(pmon_step(0x1000, 0x2000), 0x1800, "factor 0x600");
+    assert_eq!(pmon_step(0x1000, -0x4000), 0, "factor 0");
+    assert_eq!(pmon_step(0x1000, 0x3FFF), 0x1FFC, "factor 0x7FF, exact");
+    assert_eq!(pmon_step(0x3000, 0x3FFF), 0x3FFF, "clamped to 14 bits");
 }

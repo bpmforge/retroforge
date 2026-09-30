@@ -583,6 +583,19 @@ impl Voice {
     }
 }
 
+/// Pitch-modulated step for one sample: integer, bit-exact.
+///
+/// fullsnes, "SNES APU DSP", `2Dh - PMON`, "Pitch Counter":
+/// `Factor = (VxOUTX(x-1) SAR 4) + 400h` (0..7FFh), then
+/// `Step = (Step * Factor) SAR 10`. The source flags the final cropping to
+/// 128 kHz as unresolved ("XXX ... cropped to 128kHz max"); the 14-bit
+/// clamp here is the register's own range and is the documented ceiling.
+#[must_use]
+pub fn pmon_step(pitch: u16, prev_out: i16) -> u16 {
+    let factor = i32::from(prev_out >> 4) + 0x400;
+    ((i32::from(pitch) * factor) >> 10).clamp(0, 0x3FFF) as u16
+}
+
 /// Apply the 4-tap Gaussian kernel to a voice's sample window.
 ///
 /// The taps are read at four mirrored offsets into [`GAUSS`], which is
@@ -1392,10 +1405,8 @@ impl Dsp {
             // S3a: load VxPITCHH, apply pitch modulation.
             VStep::S3a => {
                 if v > 0 && self.pitch_mod & bit != 0 {
-                    let base = self.voices[v].pitch;
-                    let factor = 1.0 + f64::from(self.prev_out) / f64::from(i16::MAX);
-                    let bent = (f64::from(base) * factor) as i32;
-                    self.voices[v].pitch_bent = Some(bent.clamp(0, 0x3FFF) as u16);
+                    self.voices[v].pitch_bent =
+                        Some(pmon_step(self.voices[v].pitch, self.prev_out));
                 }
             }
 
