@@ -1269,28 +1269,15 @@ impl CpuBus for SnesBus {
             _ => {}
         }
         let value = match target {
-            // Ticket W18-01/W18-06 (D-016, both traces): SCMR RON gates
-            // SNES-side ROM READS by the raw bit, unconditional on GO —
-            // NOT `owns_rom_bus`. A traced Star Fox (USA) boot sets RON=1
-            // with GO=0 over 2,361 distinct ROM reads scattered across
-            // ordinary code (not just the exception-vector region), every
-            // one expecting open bus; gating those on GO&&RON instead
-            // (this session's first, reverted attempt at the coordinator's
-            // ruling) showed the CPU real ROM bytes it did not expect,
-            // walked into zero-initialized WRAM through a resulting bad
-            // jump, and executed a stray STP — a real regression, measured
-            // by `boot_census_child` flipping Star Fox (USA)/(Rev 1)/
-            // (Rev 2) from `rendered` to `uniform`. fullsnes's own GO&&RON
-            // sentence ("SNES Cart GSU-n Memory Map"/"GSU Interrupt
-            // Vectors": "When the GSU is running (with GO=1 and RON=1),
-            // ROM isn't mapped to SNES memory") is scoped to describing
-            // the FIXED VECTOR VALUES that appear at `$FFE4-$FFFF`
-            // specifically while GO=1 — it says nothing about the GO=0
-            // case, and this trace shows Star Fox relying on the ordinary
-            // raw-bit reading for ROM reads everywhere, GO=0 included.
-            // `gsu` is `None` for every non-GSU cartridge, so this is a
-            // no-op for them.
-            Target::Rom(_) if self.gsu.as_ref().is_some_and(|g| g.regs.ron()) => self.open_bus,
+            // Ticket W18-07: the GSU unmaps ROM from the SNES only while it
+            // is running (`owns_rom_bus`, GO && RON; fullsnes "GSU Memory
+            // Map"). The vector page then reads a fixed table; every other
+            // ROM read is open bus. GO=0 with RON=1 (a stopped chip) shows
+            // real ROM -- see `Gsu::fixed_vector_byte`. `gsu` is `None` for
+            // every non-GSU cartridge, so this is a no-op for them.
+            Target::Rom(_) if self.gsu.as_ref().is_some_and(|g| g.regs.owns_rom_bus()) => {
+                crate::gsu::Gsu::fixed_vector_byte(addr).unwrap_or(self.open_bus)
+            }
             Target::Rom(i) => self.rom[i],
             Target::Wram(i) => self.wram[i],
             Target::Sram(i) => self.sram[i],
@@ -1362,7 +1349,7 @@ impl CpuBus for SnesBus {
             // contending for the bus for a WRITE the SNES needs to make
             // before ever starting it, which is exactly Vortex's shape.
             Target::GsuRam(i) => {
-                if self.gsu.as_ref().is_some_and(|g| g.regs.ran()) {
+                if self.gsu.as_ref().is_some_and(|g| g.regs.owns_ram_bus()) {
                     self.open_bus
                 } else {
                     self.gsu.as_ref().map_or(self.open_bus, |g| g.ram[i])
@@ -1585,9 +1572,11 @@ impl CpuBus for SnesBus {
 
     fn peek(&self, addr: u32) -> u8 {
         match self.target(addr) {
-            // Same raw-bit rule as `read` above (see that arm's doc):
-            // peek must agree with what a real read would show.
-            Target::Rom(_) if self.gsu.as_ref().is_some_and(|g| g.regs.ron()) => self.open_bus,
+            // Same GO && RON rule as `read` above: peek must agree with
+            // what a real read would show.
+            Target::Rom(_) if self.gsu.as_ref().is_some_and(|g| g.regs.owns_rom_bus()) => {
+                crate::gsu::Gsu::fixed_vector_byte(addr).unwrap_or(self.open_bus)
+            }
             Target::Rom(i) => self.rom[i],
             Target::Wram(i) => self.wram[i],
             Target::Sram(i) => self.sram[i],
@@ -1615,7 +1604,7 @@ impl CpuBus for SnesBus {
             Target::Sa1Bitmap(_) => self.open_bus,
             // Same raw-bit rule as `read` above.
             Target::GsuRam(i) => {
-                if self.gsu.as_ref().is_some_and(|g| g.regs.ran()) {
+                if self.gsu.as_ref().is_some_and(|g| g.regs.owns_ram_bus()) {
                     self.open_bus
                 } else {
                     self.gsu.as_ref().map_or(self.open_bus, |g| g.ram[i])
