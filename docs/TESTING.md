@@ -11505,3 +11505,9 @@ per-title hack the census forbids, and a global raise to 660 would move
 exactly this one title of the 1252 while costing ~10% of the 1573 s run.
 Recommendation: keep 600; Xardion is a census-window artefact, not a defect,
 and `PROBE_MODE=frames PROBE_FRAMES=700` is the way to see it render.
+
+## Final SNES census 2026-09-29 (all lanes merged: Super FX, S-DSP, triage)
+
+**1233 rendered / 19 uniform / 0 no-video / 13 refused / 0 crashed / 0 timed out**, 1265 titles in 1590 s. Session arc: 1061 (W14-28) -> 1192 -> 1217 -> 1222 -> **1233 rendered**; uniform 74 -> 19. Vs the previous run today (1222/30/13) 11 moved, none regressed: Blackthorne x3 (KON latch consumed at the poll), Star Fox 2 x4, Super Star Fox Weekend, Vortex (SCMR RON/RAN gated on GO, fixed vector table), PowerFest 94, Pokemon Stadium pirate (8 KiB window RAM). Workspace gate on the merged tree: 2455 passed / 0 failed. "Rendered" is a pixels-changed signal, not a correctness claim.
+
+Remaining 19 uniform: 13 unlicensed-board/protection pirates (W14-61 fighters, W14-62 WAI/NMI-off group), 5 bad/proto dumps (Batman proto, ClayFighter Beta, Daffy Duck Beta, Road Runner Beta), XBAND (modem hardware) and Xardion (first varies at frame 621, past the 600-frame cap by design). Open tickets: W7-08 (spc_dsp6 echo check 0A), W19-02 (Cx4 commands, doc gap), W19-05 (DSP-4), W14-61/62/63, W16-07.
