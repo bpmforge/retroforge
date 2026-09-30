@@ -11388,3 +11388,17 @@ Battletoads in Battlemaniacs (USA), (USA) (Beta), and Undercover Cops (USA)
 (Retro-Bit). The other 30 stay uniform (not this cause). Canaries Wild Guns,
 Kirby Super Star, Super Mario World, Super Mario RPG, Super Bonk, Rival Turf!
 still render.
+
+### 5d. W7-08 stage 5 — Blackthorne x3 (2026-09-29)
+
+Traced on the current tree: the SPC poller at ARAM `$19A9`-`$19B5` waits for
+a flagged voice's ENVX (`$F2`=`(v<<4)|8`) to fall below 8. DSP dump
+(`PROBE_DSP=1`): KON=`$10` and KOFF=`$10` both standing, voice 4 keyed and
+stuck in Attack at level 1024. Cause: the KON latch was re-loaded from the
+readable register at every cycle-30 poll, so a standing KON re-keyed the
+voice every other sample. fullsnes ("KON/KOFF Notes"): KON takes effect on
+write and the internal value is cleared after use; KOFF/FLG.7 are levels.
+Fix: the latch is consumed at the poll. Blackthorne (USA), (Beta), (Beta)
+(CES) moved uniform -> rendered; Super Mario World, Kirby Super Star, Wild
+Guns, Super Mario RPG unchanged (rendered). `spc_dsp6` unchanged at
+`Failed 0A`. Also: PMON now uses fullsnes's integer formula (`pmon_step`).

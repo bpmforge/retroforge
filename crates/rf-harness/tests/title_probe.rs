@@ -29,6 +29,7 @@
 //! PROBE_FIND=hex[,hex]              search ARAM for byte patterns
 //! PROBE_FINDROM=hex[,hex]           search the ROM file (LoROM address shown)
 //! PROBE_PORTS=1                     print the last 40 APU port changes with both PCs
+//! PROBE_DSP=1                      print the S-DSP register file and per-voice envelope state (W7-08)
 //! PROBE_RING=1 / PROBE_SPCRING=1    print the last distinct CPU / SPC PCs
 //! PROBE_ALLPC=1                     print every sampled CPU PC, sorted
 //! PROBE_STOP_ON_SPC_STOP=1          stop early when the SPC700 halts under a running program
