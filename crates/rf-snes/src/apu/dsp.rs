@@ -1621,6 +1621,13 @@ impl Dsp {
                     // "Load KOFF and internal KON."
                     self.koff_internal = self.koff_written;
                     self.kon_internal = self.kon_written;
+                    // fullsnes, "KON/KOFF Notes": KON "effectively takes effect
+                    // 'on write', even though a non-zero value can be read
+                    // back much later". The latch is consumed by the poll
+                    // (the readable value lives on in `regs`); KOFF, by
+                    // contrast, is a level and stays. Without this a
+                    // standing KON value re-keys the voice every poll.
+                    self.kon_written = 0;
                 }
             }
             _ => {}

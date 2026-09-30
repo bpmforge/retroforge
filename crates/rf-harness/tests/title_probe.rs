@@ -1540,6 +1540,15 @@ fn probe() {
             apu.dsp.echo.delay,
             apu.dsp.dir,
         );
+        if std::env::var("PROBE_DSP").is_ok() {
+            println!("    dsp regs: {:02x?}", &apu.dsp.regs[..]);
+            for (i, v) in apu.dsp.voices.iter().enumerate() {
+                println!(
+                    "    dsp v{i}: stage={:?} level={} adsr={} gain={:02x} keyed={} pitch={:04x} srcn={:02x}",
+                    v.envelope.stage, v.envelope.level, v.envelope.adsr_enabled, v.envelope.gain, v.keyed_on, v.pitch, v.srcn
+                );
+            }
+        }
         print_sa1_reg_report(&core);
         print_gsu_reg_report(&core);
     }
