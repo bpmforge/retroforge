@@ -28,6 +28,7 @@ mod sdd1_dma;
 mod system;
 mod timing;
 mod window;
+mod window_ram;
 
 #[test]
 fn crate_is_wired() {

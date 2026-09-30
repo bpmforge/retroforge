@@ -162,6 +162,27 @@ impl SnesSystem {
         if matches!(header.coprocessor, rf_cart::Coprocessor::St010) {
             system.bus.install_st010();
         }
+        // Ticket W14-60: a LoROM header that cannot be trusted (the
+        // reset-vector fallback chose the mapping, or the checksum pair is
+        // blank) cannot declare RAM either, and a board like that may
+        // carry RAM at `$6000-$7FFF`. The window is write-allocated, so a
+        // cart that never stores there sees plain open bus. Limited to
+        // images over 1 MiB (`WINDOW_RAM_MIN_ROM`): measured over the 108
+        // header-less LoROM images of the library, the two carts that run
+        // a RAM self-test there are both 2 MiB or larger, while a 512 KiB
+        // dev-cart beta that executes copied code from the window ran
+        // WORSE with RAM present (docs/TESTING.md, W14-60).
+        const WINDOW_RAM_MIN_ROM: usize = 1024 * 1024;
+        let header_untrusted = header.header_fallback.is_some()
+            || (header.checksum == 0 && header.checksum_complement == 0);
+        if header.map_mode == rf_cart::SnesMapMode::LoRom
+            && header.ram_size == 0
+            && matches!(header.coprocessor, rf_cart::Coprocessor::None)
+            && header_untrusted
+            && header.rom_size > WINDOW_RAM_MIN_ROM
+        {
+            system.bus.install_window_ram();
+        }
         system.reset();
         Ok(system)
     }

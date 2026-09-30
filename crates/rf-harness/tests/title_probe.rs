@@ -76,6 +76,9 @@
 //!                                    decimal instruction-count window (`n`, end
 //!                                    exclusive) — attributes an SP drift to the
 //!                                    exact opcode that moved it (W14-26)
+//! PROBE_NMIW=1                      print `n` and the PC after every instruction that changes
+//!                                    $4200 NMITIMEN (W14-60): names the writer of an NMI-disable
+//!                                    that a later WAI never wakes from
 //! PROBE_IRQLOG=N                    log the first N H/V-IRQ events (edge-
 //!                                    detected post-instruction, not a new
 //!                                    core field — see below), then totals
@@ -797,6 +800,16 @@ fn probe() {
                 } else {
                     0
                 };
+            if std::env::var("PROBE_NMIW").is_ok() {
+                let cur = sys.bus.nmitimen.0;
+                if cur != nmitimen_last {
+                    println!(
+                        "      NMIW n={n} pc_after={:06X} $4200 {nmitimen_last:02X}->{cur:02X}",
+                        sys.cpu.pc24()
+                    );
+                    nmitimen_last = cur;
+                }
+            }
             if irqlog_max > 0 {
                 let line = sys.bus.timing.line;
                 let dot = sys.bus.timing.dot();

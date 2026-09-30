@@ -11431,3 +11431,77 @@ frame 162.
 (RED before, GREEN after; replaces the raw-bit test, whose doc had recorded
 the failed W18-06 attempt).
 
+
+## W14-60 (2026-09-29) — triage of the 30 uniform + 13 refused titles left after the merged census; $6000-$7FFF cart RAM moves two
+
+Scope: the still-uniform pirates, betas, protos and one-offs, plus the 13
+refused carts (Super Game Boy x5 out of scope). Every row below was traced
+on the current tree with `title_probe` (PC sample, APU port log, `PROBE_RING`,
+`PROBE_NMIW`) and a header/mapping read through `rf-cart`; no ROM bytes are
+recorded. Categories: (a) emulator defect shared with other titles,
+(b) unlicensed board or protection needing per-cart work, (c) bad or proto
+dump, (d) out of scope.
+
+**Fixed (a): cart RAM at `$6000-$7FFF` of a LoROM board whose header cannot
+declare it.** PowerFest 94 runs a RAM self-test first (`STA $306000,X` /
+`LDA $306000,X` / `BNE`, retried until the byte reads back) and spun on open
+bus forever; Pokemon Stadium (Pirate) calls `JSR $62A5` into the window and
+returned into open bus (`$6061` -> `$0000` BRK). `SnesBus::install_window_ram`
+now gives 8 KiB there, write-allocated (a never-written byte still reads open
+bus, so a game that only probes the window sees what it always saw). Installed
+only for a LoROM image with no declared RAM, no coprocessor, an untrusted header
+(reset-vector fallback, or blank checksum pair) and a ROM over 1 MiB. Evidence:
+frames-mode sweep of all 108 header-less LoROM images, before/after = exactly
+two movers, both to rendered (PowerFest 94 at frame 124, Pokemon Stadium at 26),
+none the other way. The unconditional version moved Porky Pig Subgames (Beta,
+512 KiB) from frame 84 to never and Rock N' Roll Racing (Beta 2) to never (the
+latter cured by write-allocation, the former by the size gate: it executes code
+it copies into the window and then jumps to `$7D:E00B`; with RAM present it
+gets further into a dev-cart layout we do not model). The size gate is an
+evidence-based conservatism, not a hardware rule; 2 of 108 is the whole basis.
+Pinned by `tests/window_ram.rs` (RED first: the install did not exist).
+Canaries at frames mode 600 unchanged: Wild Guns 84, Kirby Super Star 103,
+Super Mario World 58, Super Mario RPG 38, Super Bonk 163, Rival Turf! 182,
+Star Fox 156, Final Fight 2 182, Jungle Strike 101.
+
+### Verdict table
+
+| Title | Header / board | What the CPU does | Cat |
+|---|---|---|---|
+| PowerFest 94 (Competition Cart) | LoROM 2.25 MiB, header fallback | RAM self-test at `$30:6000` never reads back | (a) FIXED, renders at frame 124 |
+| Pokemon Stadium (Pirate) | LoROM 8 MiB, blank header | `JSR $62A5` into open window, RTL into `$0000` | (a) FIXED, renders at frame 26 |
+| Tekken 2, Soul Edge vs Samurai, SF EX Plus Alpha, KOF 98, KOF 2000, X-Men vs SF, Marvel vs SF (all Pirate) | LoROM 2-8 MiB, blank/fallback header | Standard IPL upload whose stream header is garbage (Tekken 2: 22 bytes to `$CCCE`, run `$0000`; KOF98: 65816 code as SPC payload, run `$0000`; MvsSF: dest `$5555`); CPU then polls `$2142`/`$2140` for a driver that never starts | (b) bootleg SPC-loader family, 7 titles |
+| Digimon Adventure, Pokemon Gold & Silver (Pirate) | LoROM 2 MiB, fallback | Boot, SPC driver runs, then a 32-frame `WAI` loop, `STZ $4200`, `JML $81D0` restart; restart parks in `WAI` at `$8491` with NMITIMEN=0 (`PROBE_NMIW`: 81->00 at PC `$8109`) | (b) shared bootleg boot family |
+| A Bug's Life, Hercules (Pirate) | LoROM 2 MiB, no header | Bug's Life: `STZ $4200` at `$A9F2`, then `WAI` vblank wait forever; Hercules: control falls into `$0000` BRK | (b) same boot code (`SEI CLC XCE`) |
+| Picachu Pocket Monsters (Pirate) | LoROM 8 MiB, no header | Alive: 64 KiB VRAM fill loop `$0182C8`, forced blank; slow or waiting on hardware | (b) |
+| Aladdin 2000 (Pirate) | LoROM 2 MiB, fallback | `$4200` and all DMA registers hold `$AB` (a fill loop over the register block), IRQ storm on a bare `RTI` | (b) |
+| Batman: Revenge of the Joker (Proto) | HiROM $31, NMI vector 0001 | Polls `$2140` with the SPC parked in the IPL; reset lands mid-uploader | (c) (W14-46) |
+| ClayFighter (Beta 1) [b] | HiROM $31, [b] flagged | Self-loop `BNE $223D` in bank `$70`; V-IRQ time 483 is out of range | (c) |
+| Daffy Duck Marvin Missions (Beta), Road Runner (Beta) | HiROM $31, vectors zero | Control runs into zeroed memory, BRK storm | (c) |
+| XBAND v1.0.1 | HiROM 1 MiB, 64 KiB RAM | `WAI`-halted at `$D0:3AD9`, NMITIMEN=0; needs the modem/kali hardware | (d) hardware-gated |
+| Xardion | LoROM 1 MiB, battery | Fully alive; first varied frame is **621** (window is 600) | (d) census window |
+| ESPN Sunday Night NFL (Beta) [b] | 512 KiB, header bytes 0xFF | Refused: no plausible header | (c) |
+| Eurit (Proto) | 2 MiB, junk header | Refused: no plausible header or reset prologue | (c) |
+| Porky Pig's Haunted Holiday (Beta 1994-05-24) | junk header reads as map mode `$7A` | Refused as SPC7110; the retail game has no chip | (c) mis-detected proto header |
+| ST010 (Enhancement Chip) | 52 KiB | The chip's firmware dump, not a game | (d) |
+| Super 8 (Unl), Tri-Star (Unl) | 8 KiB | Refused: truncated (adapter firmware, not a cartridge) | (d) |
+| Super Noah's Ark 3D (Piko) | chipset byte `$0A` | Refused as DSP; the (Unl) sibling of the same game loads | (c) mis-declared chip |
+| Top Gear 3000 | chipset $03, DSP-4 | Refused: DSP-4 not implemented | (b) real coprocessor, ticket W19-05 |
+| Super Game Boy x5 | SGB | out of scope | (d) |
+
+Counts over the 34 titles in scope (21 uniform: the 30 uniform less Blackthorne
+x3, Star Fox 2 x4, Super Star Fox Weekend and Vortex, which belong to other
+lanes; plus the 13 refused): **(a) 2 fixed, (b) 14, (c) 8, (d) 10.** Of the
+21 uniform: (a) 2, (b) 13 (7 SPC-loader, 2 Digimon/Pokemon Gold, 2 Bug's
+Life/Hercules, Picachu, Aladdin 2000), (c) 4, (d) 2. Of the 13 refused: (b) 1
+(Top Gear 3000), (c) 4, (d) 8 (SGB x5, ST010, Super 8, Tri-Star).
+
+### Census FRAMES
+
+`FRAMES = 600` is the documented ten seconds of game time, chosen to stop
+short of an attract mode. Xardion's first varied frame is 621 (8.4M CPU
+instructions), 3.5% past the window. Raising it for this title would be the
+per-title hack the census forbids, and a global raise to 660 would move
+exactly this one title of the 1252 while costing ~10% of the 1573 s run.
+Recommendation: keep 600; Xardion is a census-window artefact, not a defect,
+and `PROBE_MODE=frames PROBE_FRAMES=700` is the way to see it render.
