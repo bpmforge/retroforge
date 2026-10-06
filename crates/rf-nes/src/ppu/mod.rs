@@ -334,6 +334,7 @@ mod mem;
 mod scroll;
 mod sprites;
 mod state;
+pub use state::migrate_ppu_payload;
 
 #[cfg(test)]
 mod tests;

@@ -2774,4 +2774,87 @@ mod tests {
             "the accuracy-exact frame changed while an enhancement observed it"
         );
     }
+
+    // ---- Ticket W2-22: NES save/load reproduces the next frame ---------
+
+    fn rf_scroller_rom() -> Option<Vec<u8>> {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/nes/rf-scroller/build/rf-scroller.nes");
+        std::fs::read(fixture).ok()
+    }
+
+    fn fnv64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// Receive the next frame, consuming it the way the UI does (W14-20's
+    /// back-pressure counter), or the core stops sending.
+    fn next_frame(core: &CoreHandle, wait: Duration) -> Option<Box<FrameMsg>> {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            if let Ok(CoreEvent::Frame(m)) = core.evt_rx.recv_timeout(Duration::from_millis(200)) {
+                core.pending_frames.fetch_sub(1, Ordering::AcqRel);
+                return Some(m);
+            }
+        }
+        None
+    }
+
+    /// Ticket W2-22: save at frame N, step, load that save, step again —
+    /// the two frames N+1 must be identical. Red before W2-22 on 1 of
+    /// these 5 probes (frame 171): the partly drawn scanline 0 was not
+    /// saved. Ported from branch ui/wave-17 under the same name.
+    #[test]
+    fn save_load_step_reproduces_the_next_frame() {
+        let Some(rom) = rf_scroller_rom() else {
+            eprintln!("SKIP: RF-Scroller fixture not built");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("rf_saveload_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = spawn(rom).unwrap();
+        let mut mismatches = Vec::new();
+        for start in [150u64, 157, 163, 170, 181] {
+            loop {
+                core.cmd_tx.send(CoreCommand::StepFrame).unwrap();
+                let m = next_frame(&core, Duration::from_secs(5)).expect("frame");
+                if m.frame_count >= start {
+                    break;
+                }
+            }
+            core.cmd_tx
+                .send(CoreCommand::SaveStateToSlot {
+                    dir: dir.clone(),
+                    stem: "slot1".into(),
+                })
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            core.cmd_tx.send(CoreCommand::StepFrame).unwrap();
+            let first = next_frame(&core, Duration::from_secs(5)).expect("frame");
+            let (container, _) = crate::state_slots::load(
+                &dir,
+                crate::state_slots::SlotId::Numbered(1),
+                &crate::save_state::nes_migrations(),
+            )
+            .unwrap();
+            core.cmd_tx
+                .send(CoreCommand::ApplyState(Box::new(container)))
+                .unwrap();
+            core.cmd_tx.send(CoreCommand::StepFrame).unwrap();
+            let again = next_frame(&core, Duration::from_secs(5)).expect("frame");
+            if fnv64(&first.rgba) != fnv64(&again.rgba) {
+                mismatches.push(first.frame_count);
+            }
+        }
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            mismatches.is_empty(),
+            "frames not reproduced after save/load: {mismatches:?}"
+        );
+    }
 }

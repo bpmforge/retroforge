@@ -11513,3 +11513,46 @@ and `PROBE_MODE=frames PROBE_FRAMES=700` is the way to see it render.
 **1233 rendered / 19 uniform / 0 no-video / 13 refused / 0 crashed / 0 timed out**, 1265 titles in 1590 s. Session arc: 1061 (W14-28) -> 1192 -> 1217 -> 1222 -> **1233 rendered**; uniform 74 -> 19. Vs the previous run today (1222/30/13) 11 moved, none regressed: Blackthorne x3 (KON latch consumed at the poll), Star Fox 2 x4, Super Star Fox Weekend, Vortex (SCMR RON/RAN gated on GO, fixed vector table), PowerFest 94, Pokemon Stadium pirate (8 KiB window RAM). Workspace gate on the merged tree: 2455 passed / 0 failed. "Rendered" is a pixels-changed signal, not a correctness claim.
 
 Remaining 19 uniform: 13 unlicensed-board/protection pirates (W14-61 fighters, W14-62 WAI/NMI-off group), 5 bad/proto dumps (Batman proto, ClayFighter Beta, Daffy Duck Beta, Road Runner Beta), XBAND (modem hardware) and Xardion (first varies at frame 621, past the 600-frame cap by design). Open tickets: W7-08 (spc_dsp6 echo check 0A), W19-02 (Cx4 commands, doc gap), W19-05 (DSP-4), W14-61/62/63, W16-07.
+
+## W2-22 (2026-10-06) — NES save/load did not reproduce the next frame
+
+**Repro** (ported from branch ui/wave-17's W20-22): on RF-Scroller, Save →
+StepFrame versus Load(that save) → StepFrame gave a different frame 171.
+A frame-by-frame probe (`stepper::save_load_determinism`) over 400 frames
+found the saved state reloading **byte-identically** and the state after the
+next frame **matching**. Only the next frame's **pixels** differed, on 66 of
+the first 200 frames (measured), and only on **scanline 0, the first 1-11 pixels**.
+
+**Root cause.** A NES frame ends at the pre-render → scanline 0 wrap, and
+the shell stops only after the CPU instruction that crosses it. By then
+the PPU has already output scanline 0's first few dots: visible pixels come
+out from dot 1 (nesdev "PPU rendering"), at three dots per CPU cycle. Those
+pixels sit in `Ppu::line_buffer`. The save skipped it as "per-scanline
+scratch: every element is written before the row is pushed", which is true
+only for a save at dot 0. After a load the drawn dots came back blank, or
+held the previous session's values, and they are never redrawn.
+
+**Fix.** `PPU_` v4 appends the 256-pixel line buffer (5 bytes per pixel).
+`rf_nes::ppu::migrate_ppu_payload` upgrades v3 by appending backdrop
+pixels, which is what a v3 load produced before. It is registered by
+`retroforge::save_state::nes_migrations` and used by the app's slot load.
+The overlay line buffer stays unsaved (it is enhancement output).
+`HASH_KIND` becomes `full-v2`, because the state hash now covers more; no
+checked-in replay carries `full-v1` hashes.
+
+**Tests.**
+- `core_thread::tests::save_load_step_reproduces_the_next_frame` was ported
+  under the UI branch's name. Mutation-checked: it goes red at `[171]` with
+  the line-buffer restore removed.
+- `stepper::save_load_determinism::save_load_step_reproduces_every_frame_on_nes_fixtures`
+  is the general guard. It checks save → step against load → step for 120
+  frames each of RF-Scroller and Action 53, comparing pixels and full state,
+  and also goes red under the same mutation.
+- `ppu::state::migration_tests::a_version_3_ppu_payload_gains_a_blank_line_buffer`
+  covers the migration.
+- The golden test now loads **both** `nrom-frame6.rfstate` (v3, via the
+  migration, reporting it) and the new `nrom-frame6-v4.rfstate`.
+
+`rewinding_shows_exactly_the_frame_that_was_originally_rendered` exists
+only on ui/wave-17, where the rewind feature lives; that branch can now
+un-ignore it.
