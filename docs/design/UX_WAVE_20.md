@@ -1,9 +1,9 @@
 # Design: UX Wave 20 — the play view tells the truth, then looks the part
 
 Status: **built on branch `ui/wave-17` (2026-10-06), merged to `main`
-(eeac457).** Tickets W20-01..W20-22 in `plan.json`: all done except
-**W20-17**, which is done for loading fast-forward and the fog pass and
-open for HUD separation (compositor work, reasons in its notes). **W20-22** (NES save state not
+(eeac457).** Tickets W20-01..W20-22 in `plan.json`: all done, the last being
+**W20-17** (loading fast-forward, the fog pass, and HUD separation over
+the ultrawide view, each with its recorded limits). **W20-22** (NES save state not
 reproducing the next frame) was superseded by `main`'s W2-22, merged
 here; rewind (W20-13) is exact since, and its test enforces it. §10 lists
 every deviation from the plan below.

@@ -503,6 +503,13 @@ pub struct RetroForgeApp {
     fog_started: Option<std::time::Instant>,
     fog_scroll: Option<((i64, i64), std::time::Instant)>,
     fog_drift: (f32, f32),
+    /// Ticket W20-17: HUD separation — the separator built from the
+    /// matched profile's `[camera.hud]` (`None` without one), why that
+    /// declaration could not be used (if so), and the band last cut from
+    /// the live frame to pin over the ultrawide view.
+    hud_separator: Option<rf_enhance::hud::HudSeparator>,
+    hud_error: Option<String>,
+    hud_band: Option<enhanced_view::PinnedHud>,
     /// Test-only: fingerprint every displayed frame (off otherwise — it
     /// would hash megabytes per frame for nothing).
     hash_display_for_test: bool,
@@ -1322,6 +1329,9 @@ impl RetroForgeApp {
             fog_started: None,
             fog_scroll: None,
             fog_drift: (0.0, 0.0),
+            hud_separator: None,
+            hud_error: None,
+            hud_band: None,
             hash_display_for_test: false,
             display_hash: None,
             library_search: String::new(),
@@ -3025,6 +3035,21 @@ impl RetroForgeApp {
         self.fog_started = None;
         self.fog_scroll = None;
         self.fog_drift = (0.0, 0.0);
+        // Ticket W20-17: a malformed `[camera.hud]` is refused, and said
+        // so, rather than silently pinning nothing (`hud::from_profile`).
+        let declared = matched
+            .as_ref()
+            .and_then(|(profile, _)| profile.camera.as_ref()?.hud.as_ref())
+            .map(rf_enhance::hud::from_profile);
+        self.hud_error = match &declared {
+            Some(Err(e)) => Some(e.to_string()),
+            _ => None,
+        };
+        self.hud_separator = match declared {
+            Some(Ok(region)) => Some(rf_enhance::hud::HudSeparator::new(Some(region))),
+            _ => None,
+        };
+        self.hud_band = None;
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -3372,6 +3397,7 @@ impl RetroForgeApp {
         if let Some(msg) = latest_frame {
             // Ticket W2-14: a stepped frame has now been consumed.
             self.awaiting_stepped_frame = false;
+            self.capture_hud_band(&msg.rgba, msg.width, msg.height, &latest_bundle_events);
             // Ticket W3-04: pair the two renderings of THIS frame.
             self.compare_buffers = latest_bundle_video.and_then(|(video, bw, bh)| {
                 // Geometry must agree, or there is a scaling decision to
@@ -3818,7 +3844,13 @@ impl RetroForgeApp {
         // FM-13 POLICY half (`crate::enhanced_view` module doc): the real
         // adapter limit, never a hardcoded constant.
         let policy_max_dim = gpu.adapter_limits.max_texture_dimension_2d;
-        let result = enhanced_view::compose_ultrawide(gpu, compositor, canvas, policy_max_dim);
+        let result = enhanced_view::compose_ultrawide(
+            gpu,
+            compositor,
+            canvas,
+            policy_max_dim,
+            self.hud_band.as_ref(),
+        );
 
         // Criterion 3: surface (never swallow) whatever the latest render
         // says about FM-13 — `None` here means the latest render genuinely
@@ -3900,6 +3932,70 @@ impl RetroForgeApp {
                 && self.fog_budget.is_enabled()
                 && !self.fog_failed,
         }
+    }
+
+    /// Ticket W20-17: whether a declared HUD is pinned over the ultrawide
+    /// view — Game-Aware with the matched profile, the profile being where
+    /// the declaration comes from.
+    fn hud_pinning_unlocked(&self) -> bool {
+        self.hud_separator.is_some()
+            && self
+                .current_game_settings
+                .mode
+                .profile_gated_features_unlocked(self.profile_matched)
+    }
+
+    /// Ticket W20-17: cut this frame's HUD band for the ultrawide view.
+    ///
+    /// The separator is given no scroll bands: those are computed on the
+    /// core thread (`crate::canvas_accum`), which reads every frame, and
+    /// this thread sees only the latest. A profile declaration wins
+    /// without them (`HudSeparator::observe`), so what is lost is the
+    /// heuristic's cross-check against it, not the pin.
+    fn capture_hud_band(
+        &mut self,
+        frame: &[u8],
+        width: usize,
+        height: usize,
+        events: &[rf_core_api::CoreEvent],
+    ) {
+        if self.camera != CameraToggle::Ultrawide || !self.hud_pinning_unlocked() {
+            self.hud_band = None;
+            return;
+        }
+        let Some(separator) = self.hud_separator.as_mut() else {
+            return;
+        };
+        let verdict = separator.observe(
+            &[],
+            events,
+            &mut self.current_game_settings.trust,
+            "ultrawide",
+        );
+        self.hud_band = verdict
+            .acted
+            .then(|| verdict.regions.first().copied())
+            .flatten()
+            .and_then(|r| enhanced_view::hud_band(frame, width, height, r.start, r.end));
+    }
+
+    /// Ticket W20-17: the HUD verdict in player words, for the
+    /// Enhancements panel; `None` when this game's profile says nothing
+    /// about a HUD.
+    pub(crate) fn hud_verdict(&self) -> Option<String> {
+        if let Some(e) = &self.hud_error {
+            return Some(format!(
+                "HUD: this game's profile describes its HUD in a way that cannot be used ({e}), so the wide view shows none."
+            ));
+        }
+        let separator = self.hud_separator.as_ref()?;
+        debug_assert!(separator.is_declared());
+        Some(if self.hud_pinning_unlocked() {
+            "HUD: kept pinned at the edge of the wide view, where this game's profile says it is."
+                .to_string()
+        } else {
+            "HUD: in Game-Aware mode, kept pinned at the edge of the wide view.".to_string()
+        })
     }
 
     /// Ticket W20-17: follow the fog plane's scroll. `scroll` is the
@@ -6703,6 +6799,9 @@ impl RetroForgeApp {
                     }
                 });
             ui.add_space(4.0);
+        }
+        if let Some(verdict) = self.hud_verdict() {
+            ui.label(egui::RichText::new(verdict).small().color(tokens.muted));
         }
         self.apply_enhance_actions(&actions);
     }
@@ -9989,6 +10088,30 @@ impl RetroForgeApp {
     pub fn set_ultrawide_for_test(&mut self) {
         self.camera = CameraToggle::Ultrawide;
         self.ultrawide_refresh_countdown = 0;
+    }
+
+    /// Ticket W20-17: the HUD band last cut for the ultrawide view, as
+    /// `(width, height, rgba)`.
+    #[doc(hidden)]
+    pub fn hud_band_for_test(&self) -> Option<(u32, u32, Vec<u8>)> {
+        self.hud_band
+            .as_ref()
+            .map(|b| (b.width, b.height, b.rgba.clone()))
+    }
+
+    /// Ticket W20-17: the last ultrawide render, as `(width, height, rgba)`.
+    #[doc(hidden)]
+    pub fn ultrawide_render_for_test(&self) -> Option<(u32, u32, Vec<u8>)> {
+        match &self.ultrawide_render {
+            Some(Ok(r)) => Some((r.width, r.height, r.rgba.clone())),
+            _ => None,
+        }
+    }
+
+    /// Ticket W20-17: the HUD line the Enhancements panel shows.
+    #[doc(hidden)]
+    pub fn hud_verdict_for_test(&self) -> Option<String> {
+        self.hud_verdict()
     }
 
     /// Set §3.1's search text directly (ticket W10-03).
