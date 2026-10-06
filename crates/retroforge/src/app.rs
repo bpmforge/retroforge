@@ -90,6 +90,11 @@ const RECORDING_LIMIT_BYTES: usize = 1 << 30;
 /// of history at 60 fps. Each step while held goes back one snapshot,
 /// every other UI frame: about 5x real speed.
 const REWIND_INTERVAL: u64 = 10;
+
+/// Ticket W20-17: how strongly fog covers its plane when the profile's
+/// `[atmosphere]` gives no `strength` — half, so the game's own art still
+/// reads through it. A look choice, not a measured value.
+const FOG_DEFAULT_STRENGTH: f32 = 0.5;
 const REWIND_DEPTH: usize = 600;
 
 /// Ticket W20-15: how many frame intervals the sparkline shows (2 s).
@@ -487,6 +492,24 @@ pub struct RetroForgeApp {
     shader_chain: Option<rf_renderer::ShaderChain>,
     shader_budget: rf_renderer::fog::BudgetGate,
     shader_note: Option<String>,
+    /// Ticket W20-17: the fog pass over the live picture — the plane the
+    /// matched profile's `[atmosphere]` names, the pass (built on first
+    /// use), its own budget gate, whether it failed, when it started
+    /// drifting, the plane's last scroll and when, and the drift it gives.
+    atmosphere_pin: Option<rf_enhance::atmosphere::AtmospherePin>,
+    fog_pass: Option<rf_renderer::fog::FogPass>,
+    fog_budget: rf_renderer::fog::BudgetGate,
+    fog_failed: bool,
+    fog_started: Option<std::time::Instant>,
+    fog_scroll: Option<((i64, i64), std::time::Instant)>,
+    fog_drift: (f32, f32),
+    /// Ticket W20-17: HUD separation — the separator built from the
+    /// matched profile's `[camera.hud]` (`None` without one), why that
+    /// declaration could not be used (if so), and the band last cut from
+    /// the live frame to pin over the ultrawide view.
+    hud_separator: Option<rf_enhance::hud::HudSeparator>,
+    hud_error: Option<String>,
+    hud_band: Option<enhanced_view::PinnedHud>,
     /// Test-only: fingerprint every displayed frame (off otherwise — it
     /// would hash megabytes per frame for nothing).
     hash_display_for_test: bool,
@@ -1299,6 +1322,16 @@ impl RetroForgeApp {
             shader_chain: None,
             shader_budget: rf_renderer::fog::BudgetGate::new(),
             shader_note: None,
+            atmosphere_pin: None,
+            fog_pass: None,
+            fog_budget: rf_renderer::fog::BudgetGate::new(),
+            fog_failed: false,
+            fog_started: None,
+            fog_scroll: None,
+            fog_drift: (0.0, 0.0),
+            hud_separator: None,
+            hud_error: None,
+            hud_band: None,
             hash_display_for_test: false,
             display_hash: None,
             library_search: String::new(),
@@ -2990,6 +3023,33 @@ impl RetroForgeApp {
             .map(|l| l.wait_loops.clone())
             .unwrap_or_default();
         self.loading_sent = None;
+        // Ticket W20-17: the fog plane comes from the matched profile
+        // itself, not from `level_session` (which exists only for a
+        // profile with a decodable level map) — until W20-17 the
+        // `[atmosphere]` pin below was applied only when there was one.
+        self.atmosphere_pin = matched
+            .as_ref()
+            .and_then(|(profile, _)| rf_enhance::atmosphere::AtmospherePin::from_profile(profile));
+        self.fog_budget = rf_renderer::fog::BudgetGate::new();
+        self.fog_failed = false;
+        self.fog_started = None;
+        self.fog_scroll = None;
+        self.fog_drift = (0.0, 0.0);
+        // Ticket W20-17: a malformed `[camera.hud]` is refused, and said
+        // so, rather than silently pinning nothing (`hud::from_profile`).
+        let declared = matched
+            .as_ref()
+            .and_then(|(profile, _)| profile.camera.as_ref()?.hud.as_ref())
+            .map(rf_enhance::hud::from_profile);
+        self.hud_error = match &declared {
+            Some(Err(e)) => Some(e.to_string()),
+            _ => None,
+        };
+        self.hud_separator = match declared {
+            Some(Ok(region)) => Some(rf_enhance::hud::HudSeparator::new(Some(region))),
+            _ => None,
+        };
+        self.hud_band = None;
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -3021,13 +3081,13 @@ impl RetroForgeApp {
         // Ticket W16-10: a profile that declares `[atmosphere]` pins the
         // fog plane and the heuristic's ladder rung before the per-game
         // settings are consulted, the one point where the loaded profile
-        // and the per-game trust ladder are both in scope. Absent table,
-        // absent pin: `apply_profile_pin` is a no-op then.
-        if let Some(session) = &self.level_session {
-            rf_enhance::atmosphere::apply_profile_pin(
-                &session.profile,
-                &mut self.current_game_settings.trust,
-            );
+        // and the per-game trust ladder are both in scope (what
+        // `rf_enhance::atmosphere::apply_profile_pin` does, from the pin
+        // kept above). Absent table, absent pin: nothing is pinned.
+        if let Some(pin) = &self.atmosphere_pin {
+            self.current_game_settings
+                .trust
+                .pin(rf_enhance::atmosphere::HEURISTIC_ID, pin.ladder);
         }
 
         // Ticket W15-02, acceptance 1: every launch records a play. This
@@ -3306,9 +3366,38 @@ impl RetroForgeApp {
             self.ultrawide_canvas = Some(canvas);
             self.refresh_ultrawide_render(ctx);
         }
+        // Ticket W20-17: the fog's density map, from the pinned plane's
+        // own pixels in the accuracy-exact frame (an effective fog row is
+        // an `enhancement_visible`, so the bundle video was taken above),
+        // and the plane's drift from its scroll writes this frame.
+        let fog_source = match (
+            self.fog_effective(),
+            &self.atmosphere_pin,
+            &latest_bundle_video,
+        ) {
+            (true, Some(pin), Some((video, bw, bh))) => {
+                let plane = pin.plane;
+                let scroll = latest_bundle_events.iter().rev().find_map(|ev| match ev {
+                    rf_core_api::CoreEvent::ScrollWrite { x, y, layer }
+                        if *layer == rf_core_api::PixelLayer::Background(plane) =>
+                    {
+                        Some((i64::from(*x), i64::from(*y)))
+                    }
+                    _ => None,
+                });
+                self.update_fog_drift(scroll, *bw, *bh);
+                Some((
+                    enhanced_view::atmosphere_density_rgba(video, plane),
+                    *bw,
+                    *bh,
+                ))
+            }
+            _ => None,
+        };
         if let Some(msg) = latest_frame {
             // Ticket W2-14: a stepped frame has now been consumed.
             self.awaiting_stepped_frame = false;
+            self.capture_hud_band(&msg.rgba, msg.width, msg.height, &latest_bundle_events);
             // Ticket W3-04: pair the two renderings of THIS frame.
             self.compare_buffers = latest_bundle_video.and_then(|(video, bw, bh)| {
                 // Geometry must agree, or there is a scaling decision to
@@ -3530,6 +3619,65 @@ impl RetroForgeApp {
                     (None, Some(resolved), Some((w, h))) => (resolved.as_slice(), w, h),
                     _ => (&msg.rgba, msg.width, msg.height),
                 };
+            // Ticket W20-17: fog over the picture the player sees, before
+            // peek (which wipes to the original) and the shader (a display
+            // look) — never over the compare pair and never into a capture,
+            // the shader's rules. The pass keeps to its own budget gate.
+            let fogged = match (&fog_source, &self.gpu) {
+                (Some((density, sw, sh)), Some(gpu)) if compare_rgba.is_none() => {
+                    let (w32, h32) = (
+                        u32::try_from(dw).unwrap_or(0),
+                        u32::try_from(dh).unwrap_or(0),
+                    );
+                    let density = enhanced_view::resample_nearest_rgba(density, *sw, *sh, w32, h32);
+                    let pass = self
+                        .fog_pass
+                        .get_or_insert_with(|| rf_renderer::fog::FogPass::new(gpu));
+                    let since = *self.fog_started.get_or_insert_with(std::time::Instant::now);
+                    let strength = self
+                        .atmosphere_pin
+                        .and_then(|p| p.strength)
+                        .unwrap_or(FOG_DEFAULT_STRENGTH);
+                    let params = rf_renderer::fog::FogParams::new(
+                        since.elapsed().as_secs_f32(),
+                        self.fog_drift.0,
+                        self.fog_drift.1,
+                        strength,
+                    );
+                    if density.is_empty() {
+                        None
+                    } else {
+                        let started = std::time::Instant::now();
+                        match pass.render(gpu, displayed, &density, w32, h32, params) {
+                            Ok(out) => {
+                                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                                if self.fog_budget.record_sample_ms(ms) {
+                                    self.current_game_settings.trust.record_contradiction(
+                                        rf_enhance::atmosphere::HEURISTIC_ID,
+                                        "fog pass over its frame budget",
+                                        "live view",
+                                    );
+                                    self.status =
+                                        "Fog paused: this machine cannot draw it at full speed."
+                                            .to_string();
+                                }
+                                Some(out)
+                            }
+                            Err(e) => {
+                                self.fog_failed = true;
+                                self.status =
+                                    format!("Fog failed ({e}); showing the plain picture.");
+                                None
+                            }
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let (displayed, dw, dh): (&[u8], usize, usize) = match &fogged {
+                Some(out) => (out.as_slice(), dw, dh),
+                None => (displayed, dw, dh),
+            };
             // Ticket W20-16: hold-to-peek wipes to the ACCURACY-EXACT frame.
             // Until W20-16 peek only switched the camera; the Original view
             // still drew the resolved frame, so sprite bypass, de-flicker
@@ -3696,7 +3844,13 @@ impl RetroForgeApp {
         // FM-13 POLICY half (`crate::enhanced_view` module doc): the real
         // adapter limit, never a hardcoded constant.
         let policy_max_dim = gpu.adapter_limits.max_texture_dimension_2d;
-        let result = enhanced_view::compose_ultrawide(gpu, compositor, canvas, policy_max_dim);
+        let result = enhanced_view::compose_ultrawide(
+            gpu,
+            compositor,
+            canvas,
+            policy_max_dim,
+            self.hud_band.as_ref(),
+        );
 
         // Criterion 3: surface (never swallow) whatever the latest render
         // says about FM-13 — `None` here means the latest render genuinely
@@ -3770,10 +3924,113 @@ impl RetroForgeApp {
             mode7_active: self.mode7_seen,
             widescreen_supported: self.console_label == "SNES",
             loading_declared: !self.loading_waits.is_empty(),
-            // Until W20-17 runs `rf_renderer::fog::FogPass` in the live
-            // view (ENHANCEMENT_AUDIT.md §2).
-            fog_rendered: false,
+            // Ticket W20-17: the live view draws fog only over a plane a
+            // profile names (no core emits the sub-screen the detector
+            // needs), on a GPU, while the pass keeps within its budget.
+            fog_rendered: self.atmosphere_pin.is_some()
+                && self.gpu.is_some()
+                && self.fog_budget.is_enabled()
+                && !self.fog_failed,
         }
+    }
+
+    /// Ticket W20-17: whether a declared HUD is pinned over the ultrawide
+    /// view — Game-Aware with the matched profile, the profile being where
+    /// the declaration comes from.
+    fn hud_pinning_unlocked(&self) -> bool {
+        self.hud_separator.is_some()
+            && self
+                .current_game_settings
+                .mode
+                .profile_gated_features_unlocked(self.profile_matched)
+    }
+
+    /// Ticket W20-17: cut this frame's HUD band for the ultrawide view.
+    ///
+    /// The separator is given no scroll bands: those are computed on the
+    /// core thread (`crate::canvas_accum`), which reads every frame, and
+    /// this thread sees only the latest. A profile declaration wins
+    /// without them (`HudSeparator::observe`), so what is lost is the
+    /// heuristic's cross-check against it, not the pin.
+    fn capture_hud_band(
+        &mut self,
+        frame: &[u8],
+        width: usize,
+        height: usize,
+        events: &[rf_core_api::CoreEvent],
+    ) {
+        if self.camera != CameraToggle::Ultrawide || !self.hud_pinning_unlocked() {
+            self.hud_band = None;
+            return;
+        }
+        let Some(separator) = self.hud_separator.as_mut() else {
+            return;
+        };
+        let verdict = separator.observe(
+            &[],
+            events,
+            &mut self.current_game_settings.trust,
+            "ultrawide",
+        );
+        self.hud_band = verdict
+            .acted
+            .then(|| verdict.regions.first().copied())
+            .flatten()
+            .and_then(|r| enhanced_view::hud_band(frame, width, height, r.start, r.end));
+    }
+
+    /// Ticket W20-17: the HUD verdict in player words, for the
+    /// Enhancements panel; `None` when this game's profile says nothing
+    /// about a HUD.
+    pub(crate) fn hud_verdict(&self) -> Option<String> {
+        if let Some(e) = &self.hud_error {
+            return Some(format!(
+                "HUD: this game's profile describes its HUD in a way that cannot be used ({e}), so the wide view shows none."
+            ));
+        }
+        let separator = self.hud_separator.as_ref()?;
+        debug_assert!(separator.is_declared());
+        Some(if self.hud_pinning_unlocked() {
+            "HUD: kept pinned at the edge of the wide view, where this game's profile says it is."
+                .to_string()
+        } else {
+            "HUD: in Game-Aware mode, kept pinned at the edge of the wide view.".to_string()
+        })
+    }
+
+    /// Ticket W20-17: follow the fog plane's scroll. `scroll` is the
+    /// plane's last scroll write this frame, if any; a jump of more than
+    /// half the frame is a register wrap or a scene cut, not motion, so
+    /// it keeps the drift it had. No writes (an SNES core subscribes to
+    /// none) leaves the fog where it is.
+    fn update_fog_drift(&mut self, scroll: Option<(i64, i64)>, width: u32, height: u32) {
+        let Some(cur) = scroll else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if let Some((prev, at)) = self.fog_scroll {
+            let (dx, dy) = (cur.0 - prev.0, cur.1 - prev.1);
+            if dx.abs() * 2 <= i64::from(width) && dy.abs() * 2 <= i64::from(height) {
+                self.fog_drift = enhanced_view::atmosphere_scroll_drift_per_second(
+                    prev,
+                    cur,
+                    u16::try_from(width).unwrap_or(u16::MAX),
+                    u16::try_from(height).unwrap_or(u16::MAX),
+                    (now - at).as_secs_f32(),
+                );
+            }
+        }
+        self.fog_scroll = Some((cur, now));
+    }
+
+    /// Ticket W20-17: whether the "Atmosphere: fog" row is EFFECTIVE —
+    /// `enhance_ui::feature_rows`, the single place it is computed (same
+    /// reason as [`Self::diorama_effective`]).
+    fn fog_effective(&self) -> bool {
+        crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+            .into_iter()
+            .find(|r| r.id == "atmosphere_fog")
+            .is_some_and(|r| r.effective())
     }
 
     /// Ticket W16-13: whether Diorama is currently EFFECTIVE — Game-Aware
@@ -6542,6 +6799,9 @@ impl RetroForgeApp {
                     }
                 });
             ui.add_space(4.0);
+        }
+        if let Some(verdict) = self.hud_verdict() {
+            ui.label(egui::RichText::new(verdict).small().color(tokens.muted));
         }
         self.apply_enhance_actions(&actions);
     }
@@ -9828,6 +10088,30 @@ impl RetroForgeApp {
     pub fn set_ultrawide_for_test(&mut self) {
         self.camera = CameraToggle::Ultrawide;
         self.ultrawide_refresh_countdown = 0;
+    }
+
+    /// Ticket W20-17: the HUD band last cut for the ultrawide view, as
+    /// `(width, height, rgba)`.
+    #[doc(hidden)]
+    pub fn hud_band_for_test(&self) -> Option<(u32, u32, Vec<u8>)> {
+        self.hud_band
+            .as_ref()
+            .map(|b| (b.width, b.height, b.rgba.clone()))
+    }
+
+    /// Ticket W20-17: the last ultrawide render, as `(width, height, rgba)`.
+    #[doc(hidden)]
+    pub fn ultrawide_render_for_test(&self) -> Option<(u32, u32, Vec<u8>)> {
+        match &self.ultrawide_render {
+            Some(Ok(r)) => Some((r.width, r.height, r.rgba.clone())),
+            _ => None,
+        }
+    }
+
+    /// Ticket W20-17: the HUD line the Enhancements panel shows.
+    #[doc(hidden)]
+    pub fn hud_verdict_for_test(&self) -> Option<String> {
+        self.hud_verdict()
     }
 
     /// Set §3.1's search text directly (ticket W10-03).

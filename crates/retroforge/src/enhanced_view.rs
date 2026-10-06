@@ -45,7 +45,7 @@ use rf_core_api::{PixelLayer, PpuPixel};
 use rf_enhance::camera::{
     fm13_apply_divisor, fm13_zoom_divisor, ultrawide_scene_over_canvas, FogMask, FogStyle,
 };
-use rf_enhance::scene_graph::{CanvasId, SceneLayer};
+use rf_enhance::scene_graph::{Anchor, CanvasId, HudRegion, SceneLayer};
 use rf_enhance::stitcher::Canvas;
 use rf_renderer::palette::palette_index_to_rgb;
 use rf_renderer::{CompositeLayer, EnhancedCompositor, GpuContext, TargetReduction};
@@ -114,6 +114,42 @@ impl UltrawideRender {
     }
 }
 
+/// Ticket W20-17: a HUD band cut from the live frame, to be pinned over
+/// the ultrawide view (`SceneLayer::HudPinned`'s pixels — this crate
+/// resolves the handle, as it does for `StitchedCanvas`). `bottom` says
+/// which edge of the screen it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedHud {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub bottom: bool,
+}
+
+/// Ticket W20-17: cut the scanlines `start..end` out of a `width`-wide
+/// RGBA frame. `None` when the band is empty or falls outside the frame.
+/// `bottom` is decided by which half of the frame the band starts in — a
+/// HUD sits at an edge (`rf_enhance::hud::detect`'s own rule).
+#[must_use]
+pub fn hud_band(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    start: u16,
+    end: u16,
+) -> Option<PinnedHud> {
+    let (start, end) = (usize::from(start), usize::from(end).min(height));
+    if width == 0 || start >= end || frame.len() != width * height * 4 {
+        return None;
+    }
+    Some(PinnedHud {
+        rgba: frame[start * width * 4..end * width * 4].to_vec(),
+        width: u32::try_from(width).ok()?,
+        height: u32::try_from(end - start).ok()?,
+        bottom: start * 2 >= height,
+    })
+}
+
 /// Render `canvas`'s entire visited extent as the Ultrawide camera view
 /// (module doc): builds `rf_enhance`'s `SceneGraph` (exactly one
 /// `SceneLayer::StitchedCanvas`, camera centered on the canvas), resolves
@@ -127,6 +163,12 @@ impl UltrawideRender {
 /// doc's "two halves" section); the live caller passes
 /// `gpu.adapter_limits.max_texture_dimension_2d` (`crate::app`'s wiring).
 ///
+/// `hud` (ticket W20-17), when given, becomes a `SceneLayer::HudPinned`
+/// over the canvas: centred, at its edge, shrunk by the same FM-13
+/// divisor as the world so it keeps its size relative to it. The stitcher
+/// already leaves HUD rows out of the canvas (`stitch_frame` skips
+/// `is_hud` bands), so without this the ultrawide view has no HUD at all.
+///
 /// # Errors
 /// - `"canvas is empty"` if nothing has been stitched yet — no producer
 ///   exists for an empty view; this is not a GPU failure.
@@ -137,6 +179,7 @@ pub fn compose_ultrawide(
     compositor: &EnhancedCompositor,
     canvas: &Canvas,
     policy_max_dim: u32,
+    hud: Option<&PinnedHud>,
 ) -> Result<UltrawideRender, String> {
     if canvas.width() == 0 || canvas.height() == 0 {
         return Err("canvas is empty -- nothing stitched yet".to_string());
@@ -158,7 +201,7 @@ pub fn compose_ultrawide(
     let (target_w, target_h) =
         fm13_apply_divisor(canvas.width() as u32, canvas.height() as u32, divisor);
 
-    let (scene_graph, fog) = ultrawide_scene_over_canvas(
+    let (mut scene_graph, fog) = ultrawide_scene_over_canvas(
         LIVE_CANVAS_ID,
         canvas,
         center_world,
@@ -168,6 +211,29 @@ pub fn compose_ultrawide(
             palette_index: FOG_PALETTE_INDEX,
         },
     );
+
+    // Ticket W20-17: the HUD band, at the divisor's scale, centred on its
+    // edge of the target.
+    let hud_scaled = hud.and_then(|h| {
+        let (w, hh) = ((h.width / divisor).max(1), (h.height / divisor).max(1));
+        let rgba = resample_nearest_rgba(&h.rgba, h.width, h.height, w, hh);
+        (!rgba.is_empty() && w <= target_w && hh <= target_h).then_some((rgba, w, hh, h.bottom))
+    });
+    if let Some((_, w, hh, bottom)) = &hud_scaled {
+        scene_graph.layers.push(SceneLayer::HudPinned {
+            region: HudRegion {
+                x: u16::try_from((target_w - w) / 2).unwrap_or(u16::MAX),
+                y: 0,
+                width: u16::try_from(*w).unwrap_or(u16::MAX),
+                height: u16::try_from(*hh).unwrap_or(u16::MAX),
+            },
+            anchor: if *bottom {
+                Anchor::BottomLeft
+            } else {
+                Anchor::TopLeft
+            },
+        });
+    }
 
     // A LAYER's own texture is bound by the same real wgpu per-axis limit
     // a render TARGET is (`create_texture` validates every texture, source
@@ -185,10 +251,12 @@ pub fn compose_ultrawide(
     let layer_w = target_w.min(layer_limit);
     let layer_h = target_h.min(layer_limit);
 
-    // Handle resolution (module doc): the only real producer today is
-    // `StitchedCanvas` (`rf_enhance::scene_graph` module doc) -- anything
-    // else here would be this crate faking a producer the brief forbids.
-    let mut layer_buffers: Vec<Vec<u8>> = Vec::with_capacity(scene_graph.layers.len());
+    // Handle resolution (module doc): the real producers are
+    // `StitchedCanvas` (`rf_enhance::scene_graph` module doc) and, since
+    // W20-17, `HudPinned` -- anything else here would be this crate faking
+    // a producer the brief forbids. Each entry: pixels, size, position.
+    let mut layer_buffers: Vec<(Vec<u8>, u32, u32, i32, i32)> =
+        Vec::with_capacity(scene_graph.layers.len());
     for layer in &scene_graph.layers {
         match layer {
             SceneLayer::StitchedCanvas {
@@ -196,14 +264,38 @@ pub fn compose_ultrawide(
                 fog: style,
             } => {
                 debug_assert_eq!(*id, LIVE_CANVAS_ID);
-                layer_buffers.push(render_canvas_window_rgba(
-                    canvas,
-                    &fog,
-                    center_world,
+                layer_buffers.push((
+                    render_canvas_window_rgba(
+                        canvas,
+                        &fog,
+                        center_world,
+                        layer_w,
+                        layer_h,
+                        *style,
+                        divisor,
+                    ),
                     layer_w,
                     layer_h,
-                    *style,
-                    divisor,
+                    0,
+                    0,
+                ));
+            }
+            SceneLayer::HudPinned { region, anchor } => {
+                let Some((rgba, w, h, _)) = &hud_scaled else {
+                    unreachable!("HudPinned is pushed only with its pixels above");
+                };
+                let y = match anchor {
+                    Anchor::TopLeft | Anchor::TopRight => i64::from(region.y),
+                    Anchor::BottomLeft | Anchor::BottomRight => {
+                        i64::from(target_h) - i64::from(*h) - i64::from(region.y)
+                    }
+                };
+                layer_buffers.push((
+                    rgba.clone(),
+                    *w,
+                    *h,
+                    i32::from(region.x),
+                    i32::try_from(y).unwrap_or(0),
                 ));
             }
             other => {
@@ -216,12 +308,12 @@ pub fn compose_ultrawide(
     }
     let layers: Vec<CompositeLayer<'_>> = layer_buffers
         .iter()
-        .map(|rgba| CompositeLayer {
+        .map(|(rgba, width, height, dst_x, dst_y)| CompositeLayer {
             rgba,
-            width: layer_w,
-            height: layer_h,
-            dst_x: 0,
-            dst_y: 0,
+            width: *width,
+            height: *height,
+            dst_x: *dst_x,
+            dst_y: *dst_y,
         })
         .collect();
 
@@ -561,6 +653,45 @@ pub fn atmosphere_scroll_drift_per_second(
     let dx_uv = dx_px / f32::from(width);
     let dy_uv = dy_px / f32::from(height);
     (dx_uv / dt_secs, dy_uv / dt_secs)
+}
+
+/// Ticket W20-17: resize an RGBA buffer nearest-neighbour. The fog's
+/// density map is stretched to the picture it is drawn over (an HD pack
+/// composites at a multiple of the core's frame, and
+/// `rf_renderer::fog::FogPass::render` needs both inputs the same size);
+/// a pinned HUD band is shrunk by the ultrawide view's FM-13 divisor.
+/// Each output pixel samples the source pixel it falls inside, so an
+/// integer multiple is an exact block upscale. Empty when any size is
+/// zero or `rgba` is not `src_w * src_h * 4` bytes.
+#[must_use]
+pub fn resample_nearest_rgba(
+    rgba: &[u8],
+    src_w: u32,
+    src_h: u32,
+    out_w: u32,
+    out_h: u32,
+) -> Vec<u8> {
+    let (sw, sh, ow, oh) = (
+        src_w as usize,
+        src_h as usize,
+        out_w as usize,
+        out_h as usize,
+    );
+    if sw == 0 || sh == 0 || ow == 0 || oh == 0 || rgba.len() != sw * sh * 4 {
+        return Vec::new();
+    }
+    if (sw, sh) == (ow, oh) {
+        return rgba.to_vec();
+    }
+    let mut out = Vec::with_capacity(ow * oh * 4);
+    for y in 0..oh {
+        let row = (y * sh / oh) * sw;
+        for x in 0..ow {
+            let i = (row + x * sw / ow) * 4;
+            out.extend_from_slice(&rgba[i..i + 4]);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------
@@ -1067,7 +1198,7 @@ mod tests {
         };
         let compositor = EnhancedCompositor::new(&gpu);
         let canvas = Canvas::new();
-        let result = compose_ultrawide(&gpu, &compositor, &canvas, 8192);
+        let result = compose_ultrawide(&gpu, &compositor, &canvas, 8192, None);
         assert!(result.is_err());
     }
 
@@ -1088,7 +1219,7 @@ mod tests {
         // though only indices 0 and 2 are `Some`.
         canvas.blit_row(0, 0, &[Some(bg(0)), None, Some(bg(0)), None]);
 
-        let render = compose_ultrawide(&gpu, &compositor, &canvas, 8192)
+        let render = compose_ultrawide(&gpu, &compositor, &canvas, 8192, None)
             .expect("a small in-bounds canvas must compose cleanly");
         assert_eq!(render.width, 4);
         assert_eq!(render.height, 1);
@@ -1172,7 +1303,7 @@ mod tests {
         // compositor's own ENFORCEMENT clamp catches this.
         let stale_policy_max_dim = requested_width + 8192;
 
-        let render = compose_ultrawide(&gpu, &compositor, &canvas, stale_policy_max_dim)
+        let render = compose_ultrawide(&gpu, &compositor, &canvas, stale_policy_max_dim, None)
             .expect("must fall back to a smaller target, never fail on our own oversized ask");
 
         assert!(
@@ -1226,7 +1357,86 @@ mod tests {
         assert!(message.contains("view too large for GPU, reduced"));
     }
 
+    // --- HUD pinned over the ultrawide view (ticket W20-17) ------------
+
+    #[test]
+    fn hud_band_cuts_the_declared_rows_and_knows_its_edge() {
+        // 2x4 frame; row y is filled with the value y.
+        let frame: Vec<u8> = (0..4u8).flat_map(|y| [y; 8]).collect();
+        let top = hud_band(&frame, 2, 4, 0, 1).expect("row 0");
+        assert_eq!((top.width, top.height, top.bottom), (2, 1, false));
+        assert_eq!(top.rgba, vec![0; 8]);
+        let bottom = hud_band(&frame, 2, 4, 3, 9).expect("clamped to the frame");
+        assert_eq!((bottom.height, bottom.bottom), (1, true));
+        assert_eq!(bottom.rgba, vec![3; 8]);
+        assert_eq!(hud_band(&frame, 2, 4, 2, 2), None, "empty band");
+        assert_eq!(hud_band(&frame, 2, 4, 5, 6), None, "outside the frame");
+        assert_eq!(hud_band(&frame[..8], 2, 4, 0, 1), None, "wrong length");
+    }
+
+    /// Mutation target: drop the `HudPinned` layer and the HUD colour
+    /// vanishes from the composite.
+    #[test]
+    fn a_pinned_hud_lands_centred_on_its_edge_over_the_canvas() {
+        let Some(gpu) = gpu_or_skip("a_pinned_hud_lands_centred_on_its_edge_over_the_canvas")
+        else {
+            return;
+        };
+        let compositor = EnhancedCompositor::new(&gpu);
+        let mut canvas = Canvas::new();
+        for y in 0..4 {
+            canvas.blit_row(0, y, &[Some(bg(0)); 8]);
+        }
+        let red = [250, 10, 10, 255];
+        let hud = |bottom| PinnedHud {
+            rgba: red.repeat(4),
+            width: 4,
+            height: 1,
+            bottom,
+        };
+        let world = palette_index_to_rgb(0);
+        for bottom in [false, true] {
+            let render = compose_ultrawide(&gpu, &compositor, &canvas, 8192, Some(&hud(bottom)))
+                .expect("compose");
+            assert_eq!((render.width, render.height), (8, 4));
+            let px = |x: usize, y: usize| {
+                let i = (y * 8 + x) * 4;
+                [render.rgba[i], render.rgba[i + 1], render.rgba[i + 2]]
+            };
+            let row = if bottom { 3 } else { 0 };
+            for x in 0..8 {
+                let want = if (2..6).contains(&x) {
+                    [250, 10, 10]
+                } else {
+                    world
+                };
+                assert_eq!(px(x, row), want, "bottom={bottom} x={x}");
+            }
+            let other = if bottom { 0 } else { 3 };
+            assert_eq!(px(3, other), world, "the far edge stays world");
+        }
+    }
+
     // --- Fog/steam pass conversions (ticket W16-04) ---------------------
+
+    #[test]
+    fn resample_nearest_rgba_is_a_block_upscale_and_refuses_bad_sizes() {
+        // 2x1 source: a dark pixel then a bright one.
+        let src = [10, 10, 10, 255, 200, 200, 200, 255];
+        assert_eq!(resample_nearest_rgba(&src, 2, 1, 2, 1), src.to_vec());
+        let up = resample_nearest_rgba(&src, 2, 1, 4, 2);
+        assert_eq!(up.len(), 4 * 2 * 4);
+        let reds: Vec<u8> = up.chunks_exact(4).map(|p| p[0]).collect();
+        assert_eq!(reds, [10, 10, 200, 200, 10, 10, 200, 200]);
+        assert!(
+            resample_nearest_rgba(&src, 3, 1, 4, 2).is_empty(),
+            "wrong length"
+        );
+        assert!(
+            resample_nearest_rgba(&src, 2, 1, 0, 2).is_empty(),
+            "zero size"
+        );
+    }
 
     fn bg_px(layer: u8, palette_index: u8) -> PpuPixel {
         PpuPixel {

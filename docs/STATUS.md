@@ -4293,3 +4293,14 @@ stories, 10 decisions).
   Open: W20-17's HUD separation and fog (compositor work). Gate: workspace
   **2509 passing / 0 failed / 43 ignored**, clippy clean (also with
   audio/gamepad/metalfx), arch OK, validators OK, docs-gate OK.
+
+- **W20-17 closed — fog and the HUD reach the picture** (2026-10-06,
+  branch `w20-17-fog`). The fog pass now draws over the live picture for
+  a plane a profile's `[atmosphere]` names, under its own budget gate,
+  and the fog row is available only when that can happen. A profile's
+  `[camera.hud]` is pinned over the ultrawide view in Game-Aware (the
+  first `SceneLayer::HudPinned` producer). Found on the way: no core emits
+  `CoreSink::sub_scanline`, so the atmosphere detector cannot run live,
+  and SNES colour math may not be drawn at all in live play (filed as a
+  follow-up to verify). Limits are in ENHANCEMENT_AUDIT.md §2.
+  Wave 20 is now complete. Gate: workspace **2514 passing / 0 failed / 43 ignored**, clippy clean, arch OK.
