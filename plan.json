@@ -1561,6 +1561,36 @@
    ]
   },
   {
+   "id": "W2-22",
+   "title": "NES save state does not reproduce the next frame (Load State and rewind exactness)",
+   "phase": 2,
+   "crate": "rf-nes",
+   "write_scope": [
+    "crates/rf-nes/**",
+    "crates/rf-state/src/tags.rs",
+    "crates/retroforge/src/save_state.rs",
+    "crates/retroforge/src/core_thread.rs",
+    "crates/retroforge/src/stepper.rs",
+    "crates/retroforge/src/app.rs",
+    "crates/retroforge/tests/save_state.rs",
+    "crates/retroforge/tests/fixtures/**",
+    "docs/design/SAVE_STATES.md",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "name the state the NES .rfstate omits (or restores wrongly) such that Save -> StepFrame and Load -> StepFrame differ, citing nesdev for the register/latch involved",
+    "core_thread::tests::save_load_step_reproduces_the_next_frame passes on main (ported from branch ui/wave-17, where it and rewinding_shows_exactly_the_frame_that_was_originally_rendered are #[ignore]d known-reds); a general guard checks save -> step == load -> step at every frame over every built NES fixture",
+    "existing save-state migration tests and the 10k-frame determinism double-run stay green; any container change bumps its version with a migration, and the previous golden .rfstate keeps loading"
+   ],
+   "points": 3,
+   "status": "in_progress",
+   "stories": [],
+   "notes": [
+    "FILED AND CLAIMED 2026-10-06 on main (Brad, decision card 'Core thread', relayed by the coordinator), from branch ui/wave-17's W20-22 (same defect; renumbered W2-22 because wave 2 owns save states and W20-22 is the UI branch's id). Evidence there: on RF-Scroller, Save -> StepFrame vs ApplyState -> StepFrame differ at frame 171."
+   ]
+  },
+  {
    "id": "W2-20",
    "title": "CPU: BRK/NMI interaction and the unstable $AB opcode",
    "phase": 2,
