@@ -133,6 +133,12 @@ pub struct VideoSettings {
     /// of failing to parse.
     pub shader: Option<String>,
     pub vsync: bool,
+    /// Ticket W20-15: the corner performance overlay (FPS, frame-time
+    /// sparkline, audio buffer). Off by default.
+    pub perf_overlay: bool,
+    /// Ticket W20-15: show the controller state sent to the core. Off by
+    /// default.
+    pub input_display: bool,
     /// MetalFX scaler choice (ticket W16-08). `Off` by default; see
     /// [`MetalFxSetting`].
     pub metalfx: MetalFxSetting,
@@ -148,6 +154,8 @@ impl Default for VideoSettings {
             // and W2-05's audio clock (not vsync) is what paces the
             // emulator, so leaving it on costs no timing accuracy.
             vsync: true,
+            perf_overlay: false,
+            input_display: false,
             metalfx: MetalFxSetting::default(),
         }
     }

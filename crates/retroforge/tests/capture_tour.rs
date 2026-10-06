@@ -204,6 +204,21 @@ fn photograph_every_major_surface() {
         harness.step();
     }
     shot(&mut harness, "18-play-chrome-hidden");
+
+    // W20-15: the optional performance overlay and input display.
+    {
+        let v = harness.state_mut().video_settings_mut_for_test();
+        v.perf_overlay = true;
+        v.input_display = true;
+    }
+    let target = harness.state().frame_count_for_test() + 30;
+    run_emulated_frames(&mut harness, target, Duration::from_secs(5));
+    shot(&mut harness, "19-perf-and-input-overlay");
+    {
+        let v = harness.state_mut().video_settings_mut_for_test();
+        v.perf_overlay = false;
+        v.input_display = false;
+    }
     // And back, so the rest of the tour has its menus.
     harness
         .input_mut()

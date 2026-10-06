@@ -8869,10 +8869,11 @@
    "neither overlay is ever painted into captures or compare buffers"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-15."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-15.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). Two new VideoSettings bools, off by default (serde default keeps old files loading): perf_overlay and input_display, toggled from video_controls() so both Settings > Video and the Quick Menu's Display section have them. Performance overlay (top-right of the picture, egui Area, non-interactive): FPS, a 120-sample frame-time sparkline (wall-clock between frames reaching the UI, recorded in note_frame) with the 16.7 ms budget line, the latest frame time, and the audio ring fill (or 'no device'). Input display (bottom-left): the eight NES-layout buttons, lit from frame.ports[0] -- the exact bits handed to the core (the app only produces NES-layout bits, for SNES too). Both are egui paint over the picture, never in a frame buffer, so no screenshot, recording or compare view can contain them (by construction: those are built from FrameMsg buffers). Hidden under the Quick Menu. Test: tests/play_overlays.rs (off by default; on shows fps/ms/audio readouts and all eight buttons; sparkline history > 10). Photo: target/ui-tour/19-perf-and-input-overlay.png (shows Right lit). Note: in the photo the FPS reads ~7 because the headless harness repaints slowly; the frame-time line shows ~17 ms per emulated frame."
   ]
  },
  {

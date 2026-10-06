@@ -85,6 +85,9 @@ const CHROME_EDGE_PX: f32 = 48.0;
 /// Frames are stored uncompressed until encoded (`crate::recording`'s
 /// module doc), ~240 KB each for an NES frame — 1 GiB is about 70 s.
 const RECORDING_LIMIT_BYTES: usize = 1 << 30;
+
+/// Ticket W20-15: how many frame intervals the sparkline shows (2 s).
+const FRAME_TIME_HISTORY: usize = 120;
 const SLOT_THUMB_HEIGHT: f32 = 126.0;
 
 /// How wide decoded widescreen renders, in dots (ticket W11-03).
@@ -490,6 +493,12 @@ pub struct RetroForgeApp {
     chrome_badge: String,
     chrome_badge_changed: f64,
     chrome_last_pointer: Option<egui::Pos2>,
+    /// Ticket W20-15: recent frame intervals (ms) for the performance
+    /// overlay, when the last frame reached the UI, and the port-1 button
+    /// bits most recently sent to the core.
+    frame_times_ms: std::collections::VecDeque<f32>,
+    last_frame_instant: Option<std::time::Instant>,
+    last_input_bits: u16,
     /// Ticket W20-14: the recording in progress, when it started
     /// (`Context::time`), and the worker encoding a finished one.
     recorder: Option<crate::recording::Recorder>,
@@ -1229,6 +1238,9 @@ impl RetroForgeApp {
             last_fullscreen_request: None,
             slot_textures: crate::slot_cards::SlotTextures::default(),
             osd: crate::toast::ToastStack::osd(),
+            frame_times_ms: std::collections::VecDeque::with_capacity(FRAME_TIME_HISTORY),
+            last_frame_instant: None,
+            last_input_bits: 0,
             recorder: None,
             record_started: 0.0,
             record_done: None,
@@ -1501,6 +1513,9 @@ impl RetroForgeApp {
             for (port, bits) in frame.ports.iter_mut().enumerate() {
                 *bits |= pads.ports[port];
             }
+            // Ticket W20-15: what the input display shows — exactly the
+            // bits handed to the core, not a re-reading of the keyboard.
+            self.last_input_bits = frame.ports[0];
             core.input.store(frame);
         }
 
@@ -4205,6 +4220,17 @@ impl RetroForgeApp {
     }
 
     fn note_frame(&mut self) {
+        // Ticket W20-15: the frame-time history the performance overlay
+        // draws — wall-clock between frames reaching the UI, which is what
+        // a player sees as smooth or not.
+        let now = std::time::Instant::now();
+        if let Some(prev) = self.last_frame_instant.replace(now) {
+            if self.frame_times_ms.len() == FRAME_TIME_HISTORY {
+                self.frame_times_ms.pop_front();
+            }
+            self.frame_times_ms
+                .push_back((now - prev).as_secs_f32() * 1000.0);
+        }
         self.fps_frames += 1;
         if self.fps_frames < FPS_WINDOW_FRAMES {
             return;
@@ -5566,6 +5592,19 @@ impl RetroForgeApp {
     /// two cannot drift. Returns whether anything changed.
     fn video_controls(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
+        // Ticket W20-15: the two optional readouts, first so they are
+        // easy to find in the Quick Menu's Display section too.
+        changed |= ui
+            .checkbox(&mut self.settings.video.perf_overlay, "Performance overlay")
+            .on_hover_text("Frame rate, frame-time graph and audio buffer, in the picture's corner")
+            .changed();
+        changed |= ui
+            .checkbox(
+                &mut self.settings.video.input_display,
+                "Show controller input",
+            )
+            .changed();
+        ui.add_space(4.0);
         ui.label("Scaling");
         for mode in crate::settings::ScaleMode::ALL {
             if ui
@@ -10162,6 +10201,119 @@ impl RetroForgeApp {
         self.last_recording.clone()
     }
 
+    /// Ticket W20-15 (`docs/design/UX_WAVE_20.md` §5): the optional
+    /// performance overlay (top-right of the picture) and input display
+    /// (bottom-left). Drawn by egui OVER the picture — never into a frame
+    /// buffer, so no capture, recording or compare view can contain them.
+    fn draw_play_overlays(&self, ctx: &egui::Context) {
+        let (Some(play), true) = (self.last_play_rect, self.core.is_some()) else {
+            return;
+        };
+        if self.show_overlay_menu {
+            return;
+        }
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let panel = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
+            egui::Frame::new()
+                .fill(egui::Color32::from_black_alpha(170))
+                .corner_radius(tokens.radius_sm)
+                .inner_margin(6.0)
+                .show(ui, |ui| add(ui));
+        };
+        if self.settings.video.perf_overlay {
+            egui::Area::new(egui::Id::new("rf-perf-overlay"))
+                .order(egui::Order::Foreground)
+                .interactable(false)
+                .pivot(egui::Align2::RIGHT_TOP)
+                .fixed_pos(play.right_top() + egui::vec2(-8.0, 8.0))
+                .show(ctx, |ui| {
+                    panel(ui, &mut |ui| {
+                        let fps = self
+                            .fps
+                            .map_or_else(|| "--.- fps".to_string(), |f| format!("{f:.1} fps"));
+                        ui.label(
+                            egui::RichText::new(fps)
+                                .monospace()
+                                .color(egui::Color32::WHITE),
+                        );
+                        // Sparkline: 0..33.3 ms, with the 16.7 ms frame budget
+                        // as a faint line. A spike above the line is a frame
+                        // that arrived late.
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(120.0, 28.0), egui::Sense::hover());
+                        let painter = ui.painter();
+                        let y_of =
+                            |ms: f32| rect.bottom() - (ms / 33.3).clamp(0.0, 1.0) * rect.height();
+                        painter.line_segment(
+                            [
+                                egui::pos2(rect.left(), y_of(16.7)),
+                                egui::pos2(rect.right(), y_of(16.7)),
+                            ],
+                            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(60)),
+                        );
+                        #[allow(clippy::cast_precision_loss)]
+                        let step = rect.width() / (FRAME_TIME_HISTORY as f32 - 1.0);
+                        #[allow(clippy::cast_precision_loss)]
+                        let points: Vec<egui::Pos2> = self
+                            .frame_times_ms
+                            .iter()
+                            .enumerate()
+                            .map(|(i, ms)| egui::pos2(rect.left() + i as f32 * step, y_of(*ms)))
+                            .collect();
+                        painter.add(egui::Shape::line(
+                            points,
+                            egui::Stroke::new(1.5, tokens.accent),
+                        ));
+                        let last = self.frame_times_ms.back().copied().unwrap_or(0.0);
+                        ui.label(
+                            egui::RichText::new(format!("{last:4.1} ms"))
+                                .small()
+                                .monospace()
+                                .color(egui::Color32::LIGHT_GRAY),
+                        );
+                        let audio = self.audio_fill.map_or_else(
+                            || "audio: no device".to_string(),
+                            |f| format!("audio buffer {:3.0}%", f * 100.0),
+                        );
+                        ui.label(
+                            egui::RichText::new(audio)
+                                .small()
+                                .color(egui::Color32::LIGHT_GRAY),
+                        );
+                    });
+                });
+        }
+        if self.settings.video.input_display {
+            egui::Area::new(egui::Id::new("rf-input-display"))
+                .order(egui::Order::Foreground)
+                .interactable(false)
+                .pivot(egui::Align2::LEFT_BOTTOM)
+                .fixed_pos(play.left_bottom() + egui::vec2(8.0, -8.0))
+                .show(ctx, |ui| {
+                    panel(ui, &mut |ui| {
+                        ui.horizontal(|ui| {
+                            for button in rf_input::NesButton::ALL {
+                                let held = self.last_input_bits & (1 << button.bit()) != 0;
+                                let text = egui::RichText::new(button.name()).small().monospace();
+                                ui.label(if held {
+                                    text.color(egui::Color32::BLACK)
+                                        .background_color(tokens.accent)
+                                } else {
+                                    text.color(egui::Color32::GRAY)
+                                });
+                            }
+                        });
+                    });
+                });
+        }
+    }
+
+    /// Ticket W20-15: the frame-time history (tests).
+    #[doc(hidden)]
+    pub fn frame_times_for_test(&self) -> usize {
+        self.frame_times_ms.len()
+    }
+
     /// Ticket W20-11: whether any window is open over the play view — the
     /// bars never hide while one is (it was opened from them).
     fn any_window_open(&self) -> bool {
@@ -10476,6 +10628,7 @@ impl eframe::App for RetroForgeApp {
         let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
         // Ticket W20-12: OSD cards inside the picture's top-left corner;
         // not over the Quick Menu (it is the thing being looked at then).
+        self.draw_play_overlays(&ctx);
         if self.core.is_some() && !self.show_overlay_menu {
             let corner = self
                 .last_play_rect
