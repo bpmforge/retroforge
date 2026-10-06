@@ -10889,10 +10889,6 @@ impl RetroForgeApp {
                 "Hold {key} in game. {secs:.0} s of history, {:.1} MB.",
                 status.bytes as f32 / (1024.0 * 1024.0)
             ));
-            // Honest about the known defect (plan.json W20-22): restoring
-            // a state does not yet reproduce every frame exactly, which
-            // shows as a shifted picture while rewinding.
-            ui.small("Experimental: some rewound frames show the picture shifted.");
         } else {
             ui.small(format!("Hold {key} in game to go back, up to 100 s."));
         }

@@ -236,6 +236,9 @@ fn photograph_every_major_surface() {
     harness.state_mut().set_rewind_setting_for_test(true);
     let target = harness.state().frame_count_for_test() + 200;
     run_emulated_frames(&mut harness, target, Duration::from_secs(10));
+    // The frame just before rewinding, so the scrub shot can be told
+    // apart from wherever the game itself has got to.
+    shot(&mut harness, "20a-before-rewind");
     harness.input_mut().events.push(egui::Event::Key {
         key: egui::Key::Backspace,
         physical_key: None,

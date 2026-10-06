@@ -1,12 +1,11 @@
 # Design: UX Wave 20 — the play view tells the truth, then looks the part
 
 Status: **built on branch `ui/wave-17` (2026-10-06), not merged.**
-Tickets W20-01..W20-22 in `plan.json`: W20-01..W20-12, W20-14..W20-16 and
-W20-18..W20-21 done; **W20-13** (rewind) built but *blocked* on exact
-restoration — the NES save state does not reproduce the next frame, filed
-as **W20-22** (rf-nes; being fixed on `main` per Brad's ruling of
-2026-10-06); **W20-17** done for loading fast-forward, open for HUD
-separation and fog (compositor work, reasons in its notes). §10 lists
+Tickets W20-01..W20-22 in `plan.json`: all done except **W20-17**, which
+is done for loading fast-forward and open for HUD separation and fog
+(compositor work, reasons in its notes). **W20-22** (NES save state not
+reproducing the next frame) was superseded by `main`'s W2-22, merged
+here; rewind (W20-13) is exact since, and its test enforces it. §10 lists
 every deviation from the plan below.
 
 Brad asked on 2026-10-06 to "write
@@ -371,8 +370,9 @@ Brad)** in the ticket notes, as this repo already does.
   (W20-13) rather than a placeholder.
 - **W20-12:** no separate "slot changed" card — nothing changes the active
   slot except saving or loading it, and those cards name the slot.
-- **W20-13:** blocked on W20-22 (exact restoration); shipped off by default
-  and labelled Experimental; NES only (`.rfstate` is a NES container).
+- **W20-13:** was blocked on exact restoration until main's W2-22 (merged
+  2026-10-06); now exact and tested. Off by default; NES only (`.rfstate`
+  is a NES container).
 - **W20-17:** HUD separation and the fog pass remain unwired —
   `SceneLayer::HudPinned` has no producer and the ultrawide compositor
   handles only stitched canvases; `ExtractedBg` is not produced per frame

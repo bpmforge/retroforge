@@ -3,10 +3,9 @@
 //!
 //! Off by default (it costs memory): holding the key then just says so.
 //! On: holding pauses the game, walks back through the history (the frame
-//! counter goes DOWN), and releasing resumes. The exact-restoration
-//! property is W20-22's open defect in the NES save state — see
-//! `core_thread`'s `#[ignore]`d known-red tests — so it is not asserted
-//! here.
+//! counter goes DOWN), and releasing resumes. Exact restoration (each
+//! rewound frame byte-identical to when it was first played) is
+//! `core_thread::tests::rewinding_shows_exactly_the_frame_that_was_originally_rendered`.
 
 use std::path::Path;
 use std::time::{Duration, Instant};

@@ -2000,32 +2000,6 @@ mod tests {
     /// use: all-zero PRG means the reset vector resolves to `$0000`, which
     /// is zeroed RAM (`BRK`) — a deterministic infinite loop that steps
     /// forever without needing real game code.
-    /// The RF-Scroller fixture's bytes, or `None` (skip) when not built.
-    fn rf_scroller_rom() -> Option<Vec<u8>> {
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/nes/rf-scroller/build/rf-scroller.nes");
-        std::fs::read(&fixture).ok()
-    }
-
-    fn fnv64(bytes: &[u8]) -> u64 {
-        bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-            (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
-        })
-    }
-
-    /// Receive the next frame, consuming it the way the UI does (W14-20's
-    /// back-pressure counter), or the core stops sending.
-    fn next_frame(core: &CoreHandle, wait: Duration) -> Option<Box<FrameMsg>> {
-        let deadline = std::time::Instant::now() + wait;
-        while std::time::Instant::now() < deadline {
-            if let Ok(CoreEvent::Frame(m)) = core.evt_rx.recv_timeout(Duration::from_millis(200)) {
-                core.pending_frames.fetch_sub(1, Ordering::AcqRel);
-                return Some(m);
-            }
-        }
-        None
-    }
-
     type RewindRun = (
         std::collections::HashMap<u64, u64>,
         Vec<(u64, u64)>,
@@ -2090,78 +2064,31 @@ mod tests {
         );
     }
 
-    /// Ticket W20-13 acceptance 3 — **KNOWN RED, `#[ignore]`d with
-    /// evidence** (plan.json W20-13 BLOCKED note; W20-22): a rewound frame
-    /// should be byte-identical to the frame first played at that number.
-    /// On RF-Scroller some are, some are a picture never displayed. The
-    /// cause is NOT the ring: `save_load_step_reproduces_the_next_frame`
-    /// shows the plain Save -> Load -> StepFrame path diverging the same
-    /// way (1 of 5 probes, frame 171, 2026-10-06), so the NES `.rfstate`
-    /// does not capture everything the next frame depends on.
+    /// Ticket W20-13 acceptance 3: rewinding restores the machine EXACTLY
+    /// — with no input, the frame a rewind step renders is byte-identical
+    /// to the frame first played at that number. Red (and `#[ignore]`d as
+    /// known-red evidence) until main's W2-22 saved `Ppu::line_buffer`;
+    /// green since the 2026-10-06 merge. Requires at least 5 compared
+    /// frames, so it cannot pass by comparing nothing.
     #[test]
-    #[ignore = "known red: NES save/load does not reproduce the next frame (W20-22)"]
     fn rewinding_shows_exactly_the_frame_that_was_originally_rendered() {
         let Some((seen, rewound, _)) = run_then_rewind(10) else {
+            eprintln!("SKIP: RF-Scroller fixture not built");
             return;
         };
-        for (frame, hash) in rewound {
-            if let Some(original) = seen.get(&frame) {
+        let mut compared = 0;
+        for (frame, hash) in &rewound {
+            if let Some(original) = seen.get(frame) {
                 assert_eq!(
-                    *original, hash,
+                    original, hash,
                     "frame {frame} after rewinding differs from when it was first played"
                 );
+                compared += 1;
             }
         }
-    }
-
-    /// W20-22's evidence, isolated from rewind: save at frame N, step,
-    /// load, step again — the two frames N+1 should be identical.
-    #[test]
-    #[ignore = "known red: NES save/load does not reproduce the next frame (W20-22)"]
-    fn save_load_step_reproduces_the_next_frame() {
-        let Some(rom) = rf_scroller_rom() else { return };
-        let dir = std::env::temp_dir().join(format!("rf_saveload_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let core = spawn(rom).unwrap();
-        let mut mismatches = Vec::new();
-        for start in [150u64, 157, 163, 170, 181] {
-            loop {
-                core.cmd_tx.send(CoreCommand::StepFrame).unwrap();
-                let m = next_frame(&core, Duration::from_secs(5)).expect("frame");
-                if m.frame_count >= start {
-                    break;
-                }
-            }
-            core.cmd_tx
-                .send(CoreCommand::SaveStateToSlot {
-                    dir: dir.clone(),
-                    stem: "slot1".into(),
-                })
-                .unwrap();
-            std::thread::sleep(Duration::from_millis(100));
-            core.cmd_tx.send(CoreCommand::StepFrame).unwrap();
-            let first = next_frame(&core, Duration::from_secs(5)).expect("frame");
-            let (container, _) = crate::state_slots::load(
-                &dir,
-                crate::state_slots::SlotId::Numbered(1),
-                &rf_state::MigrationRegistry::default(),
-            )
-            .unwrap();
-            core.cmd_tx
-                .send(CoreCommand::ApplyState(Box::new(container)))
-                .unwrap();
-            core.cmd_tx.send(CoreCommand::StepFrame).unwrap();
-            let again = next_frame(&core, Duration::from_secs(5)).expect("frame");
-            if fnv64(&first.rgba) != fnv64(&again.rgba) {
-                mismatches.push(first.frame_count);
-            }
-        }
-        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
-        let _ = core.join_handle.join();
         assert!(
-            mismatches.is_empty(),
-            "frames not reproduced after save/load: {mismatches:?}"
+            compared >= 5,
+            "compared only {compared} rewound frames: {rewound:?}"
         );
     }
 
