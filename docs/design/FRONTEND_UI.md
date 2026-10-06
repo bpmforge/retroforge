@@ -95,6 +95,14 @@ Library, Settings and Controls — were laid out past the right edge and
 could not be clicked. `crates/retroforge/tests/hud_fits.rs` now measures
 this against `app::WINDOW_SIZE` and fails if it recurs.
 
+**Superseded by Wave 20 (2026-10-06, `docs/design/UX_WAVE_20.md`).**
+The transport no longer lives in the status bar: launching a game plays
+it (W20-07), Space and the Quick Menu pause, and Run / Step Frame / Step
+Scanline plus the frame/scanline readout sit at the top of the Debug
+Viewers window. The status bar shows a Paused chip instead. It also
+auto-hides in play now (W20-11), and Esc opens the Quick Menu (W20-10).
+The paragraph above is kept as the W10-01 record.
+
 Still unbuilt from this section: the status bar does **not** auto-hide,
 and the profile chip does not click through to an inspector. §3.1's
 Library home is still a window rather than the app's home screen — the

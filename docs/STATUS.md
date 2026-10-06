@@ -4274,3 +4274,22 @@ stories, 10 decisions).
   becomes `full-v2`. This fixes Load State and rewind exactness: the
   ui/wave-17 known-reds pass with this fix applied. Gate: workspace **2459
   passing / 0 failed / 43 ignored**, clippy clean, arch OK, local-gate.sh.
+
+- **Wave 20 — the play view tells the truth, then looks the part**
+  (2026-10-06, branch `ui/wave-17`, `docs/design/UX_WAVE_20.md` and
+  `docs/design/ENHANCEMENT_AUDIT.md`). Brad, "write all these down and
+  build this out". W20-01..W20-22: scale mode/pixel shape/V-sync applied,
+  shader picker on `ShaderChain`, menu pauses (pad Guide / Select+Start),
+  fullscreen, Phosphor icons with a source-scanning glyph test, slot
+  screenshots, transport moved to Debug, player settings copy + real audio
+  device/latency/volume + Light theme, the audit's honesty fixes, Quick
+  Menu, auto-hiding chrome, OSD cards, rewind (exact since W2-22),
+  recording, performance/input overlays, peek as a wipe to the true
+  original, loading fast-forward, player Enhancements panel, shader
+  preview tiles + ambient glow, library Continue/shelves/chips, and a
+  25-photo tour. Found and fixed on the way: launches opened paused, all
+  three audio settings were never read, HD-pack art never reached the
+  screen, peek only switched the camera, the 8:7 shape never painted.
+  Open: W20-17's HUD separation and fog (compositor work). Gate: workspace
+  **2509 passing / 0 failed / 43 ignored**, clippy clean (also with
+  audio/gamepad/metalfx), arch OK, validators OK, docs-gate OK.
