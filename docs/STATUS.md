@@ -4265,3 +4265,12 @@ stories, 10 decisions).
   session on a week-stale checkout re-derived the same IPL root cause
   independently; that duplicate is kept unmerged on branch `w14-apu-ipl`
   for reference.
+
+- **W2-22 — NES save/load reproduces the next frame** (2026-10-06). The
+  partly drawn scanline 0 (`Ppu::line_buffer`) was not in the save state.
+  A frame ends after the instruction that crosses into scanline 0, so a
+  few dots are already drawn when a state is taken. `PPU_` v4 carries them,
+  with a v3 migration (the app's first registered migration); `HASH_KIND`
+  becomes `full-v2`. This fixes Load State and rewind exactness: the
+  ui/wave-17 known-reds pass with this fix applied. Gate: workspace **2459
+  passing / 0 failed / 43 ignored**, clippy clean, arch OK, local-gate.sh.
