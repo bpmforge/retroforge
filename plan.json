@@ -8635,10 +8635,11 @@
    "a kittest asserts a card appears after a save and is gone after its lifetime"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-12."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-12.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). Built on the existing crate::toast::ToastStack rather than a second overlay: it gains a per-stack duration and Area id, cards gain an optional thumbnail and an optional key (a keyed card replaces the live one with the same key), plus show_at(pos) with a fixed position. RetroForgeApp::osd = ToastStack::osd() (2 s + 0.3 s fade), drawn just inside the picture's top-left corner, not while the Quick Menu is open. Save -> 'Saved to Slot N' with a COPY of the frame saved (it used to set status 'Saving Slot N...' which never changed again -- removed); Load (hotkey, States window, Quick Menu) -> 'Loaded Slot N' (+ warning count) with the slot's sidecar picture; load failure -> error card; Screenshot -> 'Screenshot saved' with the frame; fast-forward held -> one keyed 'Fast-forward' card refreshed per frame, replacing the status bar's 'FF' chip. Library-level events keep their toasts. NOT DONE as listed: a 'slot change' card -- there is no slot-cycling control to fire it (the active slot only changes by saving/loading a slot, whose card already names it); it belongs with a future next/previous-slot hotkey. has_visible_toast_for_test now counts OSD cards too (same promise: appears, never pauses, expires) so toasts_and_modals.rs and app_hotkeys.rs keep their meaning. Tests: tests/osd_cards.rs (F5 card + no 'Saving' status, expiry, F9 card, Tab held 30 frames = exactly one card that fades after release), toast unit test for keyed replacement. Photo: target/ui-tour/17-osd-saved.png."
   ]
  },
  {

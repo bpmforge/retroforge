@@ -78,6 +78,13 @@ struct Toast {
     kind: ToastKind,
     /// `ctx.time()` when this toast was pushed.
     created_at: f64,
+    /// Ticket W20-12: an OSD card's picture (the frame saved, the slot
+    /// loaded, the screenshot taken).
+    thumb: Option<egui::TextureHandle>,
+    /// Ticket W20-12: a card with a key replaces any live card with the
+    /// same key instead of stacking — "Fast-forward" refreshed every frame
+    /// it is held is ONE card, not sixty.
+    key: Option<&'static str>,
 }
 
 /// A bottom-right stack of auto-expiring, non-blocking notifications.
@@ -85,21 +92,87 @@ struct Toast {
 /// Owned by `RetroForgeApp` and drawn once per frame from
 /// `impl eframe::App::ui` — see that call site's comment for why it runs
 /// after every window/modal, not before.
-#[derive(Default)]
 pub struct ToastStack {
     toasts: Vec<Toast>,
+    /// How long a toast stays fully visible before it fades.
+    duration: f64,
+    /// `egui::Area` id — the toast stack and the OSD stack must differ.
+    id: &'static str,
 }
+
+impl Default for ToastStack {
+    fn default() -> Self {
+        Self {
+            toasts: Vec::new(),
+            duration: DEFAULT_DURATION,
+            id: "rf_toast_stack",
+        }
+    }
+}
+
+/// Ticket W20-12 (`docs/design/UX_WAVE_20.md` §5): how long an
+/// on-screen-display card stays before fading — shorter than a toast; it
+/// reports something the player just did, over the picture they are
+/// looking at.
+pub const OSD_DURATION: f64 = 2.0;
+/// Where a stack is drawn: anchored to a screen corner (toasts) or at a
+/// fixed point (OSD cards, inside the game picture).
+enum Placement {
+    Anchor(egui::Align2, egui::Vec2),
+    At(egui::Pos2),
+}
+
+/// Thumbnail height on an OSD card.
+const OSD_THUMB_HEIGHT: f32 = 54.0;
 
 impl ToastStack {
     /// Queue a new toast. Newest renders at the bottom of the stack, so a
     /// rapid sequence (folder added, then the rescan it triggers
     /// finishing) reads top-to-bottom in the order it happened.
     pub fn push(&mut self, kind: ToastKind, text: impl Into<String>, ctx: &egui::Context) {
+        self.push_card(kind, text, None, None, ctx);
+    }
+
+    /// Ticket W20-12: the on-screen-display stack — the same mechanism as
+    /// the toasts (one fading, non-interactive, `Context::time`-driven
+    /// stack), drawn over the game picture's corner by [`Self::show_at`]
+    /// with a shorter life.
+    #[must_use]
+    pub fn osd() -> Self {
+        Self {
+            toasts: Vec::new(),
+            duration: OSD_DURATION,
+            id: "rf_osd_stack",
+        }
+    }
+
+    /// Push a card with an optional picture, replacing any live card that
+    /// carries the same `key`.
+    pub fn push_card(
+        &mut self,
+        kind: ToastKind,
+        text: impl Into<String>,
+        thumb: Option<egui::TextureHandle>,
+        key: Option<&'static str>,
+        ctx: &egui::Context,
+    ) {
+        if let Some(k) = key {
+            self.toasts.retain(|t| t.key != Some(k));
+        }
         self.toasts.push(Toast {
             text: text.into(),
             kind,
             created_at: ctx.time(),
+            thumb,
+            key,
         });
+    }
+
+    /// The texts currently live, oldest first (tests).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn texts(&self) -> Vec<String> {
+        self.toasts.iter().map(|t| t.text.clone()).collect()
     }
 
     /// Whether at least one toast is currently visible (unexpired).
@@ -121,9 +194,29 @@ impl ToastStack {
     /// were, now read through the token set every other W15 surface uses,
     /// so this is a signature change with no visual change.
     pub fn show(&mut self, ctx: &egui::Context, tokens: &crate::theme::Tokens) {
+        self.show_placed(
+            ctx,
+            tokens,
+            Placement::Anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0)),
+        );
+    }
+
+    /// Ticket W20-12: draw with the stack's top-left at `pos` — the OSD
+    /// cards sit just inside the game picture's top-left corner.
+    pub fn show_at(&mut self, ctx: &egui::Context, tokens: &crate::theme::Tokens, pos: egui::Pos2) {
+        self.show_placed(ctx, tokens, Placement::At(pos));
+    }
+
+    fn show_placed(
+        &mut self,
+        ctx: &egui::Context,
+        tokens: &crate::theme::Tokens,
+        placement: Placement,
+    ) {
         let now = ctx.time();
+        let duration = self.duration;
         self.toasts
-            .retain(|t| now - t.created_at < DEFAULT_DURATION + FADE_SECS);
+            .retain(|t| now - t.created_at < duration + FADE_SECS);
         if self.toasts.is_empty() {
             return;
         }
@@ -136,9 +229,12 @@ impl ToastStack {
         let text_colour = tokens.ink;
         let accent = tokens.accent;
 
-        egui::Area::new(egui::Id::new("rf_toast_stack"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0))
-            .order(egui::Order::Tooltip)
+        let area = egui::Area::new(egui::Id::new(self.id));
+        let area = match placement {
+            Placement::Anchor(align, offset) => area.anchor(align, offset),
+            Placement::At(pos) => area.fixed_pos(pos),
+        };
+        area.order(egui::Order::Tooltip)
             .interactable(false)
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
@@ -147,13 +243,26 @@ impl ToastStack {
                         // Fade over the last FADE_SECS; opaque before that.
                         // This is the ONE moving element a toast owns —
                         // nothing else about the stack animates.
-                        let remaining = DEFAULT_DURATION + FADE_SECS - age;
+                        let remaining = duration + FADE_SECS - age;
                         let alpha = (remaining / FADE_SECS).clamp(0.0, 1.0) as f32;
                         egui::Frame::popup(ui.style())
                             .fill(bg.gamma_multiply(alpha))
                             .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(alpha)))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
+                                    if let Some(tex) = &toast.thumb {
+                                        let [w, h] = tex.size();
+                                        #[allow(clippy::cast_precision_loss)]
+                                        let width = OSD_THUMB_HEIGHT * w as f32 / h.max(1) as f32;
+                                        ui.add(
+                                            egui::Image::from_texture(tex)
+                                                .fit_to_exact_size(egui::vec2(
+                                                    width,
+                                                    OSD_THUMB_HEIGHT,
+                                                ))
+                                                .tint(egui::Color32::WHITE.gamma_multiply(alpha)),
+                                        );
+                                    }
                                     ui.label(
                                         egui::RichText::new(toast.kind.glyph())
                                             .color(accent.gamma_multiply(alpha)),
@@ -181,6 +290,23 @@ mod tests {
     /// that never gets `show`n never expires. This is the pure half of
     /// that guarantee — the harness half lives in
     /// `tests/toasts_and_modals.rs`.
+    /// Ticket W20-12: a keyed card replaces its predecessor; unkeyed
+    /// cards stack.
+    #[test]
+    fn keyed_cards_replace_and_plain_cards_stack() {
+        let ctx = egui::Context::default();
+        let mut osd = ToastStack::osd();
+        for _ in 0..60 {
+            osd.push_card(ToastKind::Info, "Fast-forward", None, Some("ff"), &ctx);
+        }
+        osd.push(ToastKind::Success, "Saved to Slot 1", &ctx);
+        osd.push(ToastKind::Success, "Screenshot saved", &ctx);
+        assert_eq!(
+            osd.texts(),
+            vec!["Fast-forward", "Saved to Slot 1", "Screenshot saved"]
+        );
+    }
+
     #[test]
     fn a_pushed_toast_survives_until_its_duration_elapses() {
         let ctx = egui::Context::default();

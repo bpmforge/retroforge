@@ -467,6 +467,8 @@ pub struct RetroForgeApp {
     /// would hash megabytes per frame for nothing).
     hash_display_for_test: bool,
     display_hash: Option<u64>,
+    /// Ticket W20-12: on-screen-display cards over the game picture.
+    osd: crate::toast::ToastStack,
     /// Ticket W20-06: decoded save-slot thumbnails.
     slot_textures: crate::slot_cards::SlotTextures,
     /// Ticket W10-03: §3.1's search box, filtering the library home by
@@ -1197,6 +1199,7 @@ impl RetroForgeApp {
             fullscreen_pad_was_held: false,
             last_fullscreen_request: None,
             slot_textures: crate::slot_cards::SlotTextures::default(),
+            osd: crate::toast::ToastStack::osd(),
             shader_chain: None,
             shader_budget: rf_renderer::fog::BudgetGate::new(),
             shader_note: None,
@@ -1574,11 +1577,6 @@ impl RetroForgeApp {
                 .active_slot
                 .unwrap_or(crate::state_slots::SlotId::Numbered(1));
             self.load_from_slot(slot);
-            self.toasts.push(
-                crate::toast::ToastKind::Success,
-                format!("Loaded {}", slot.label()),
-                ctx,
-            );
         }
         if shot_pressed {
             // Deferred to the next frame, same as the Enhance workspace's
@@ -1592,6 +1590,18 @@ impl RetroForgeApp {
         if ff_down != self.fast_forward_held {
             self.fast_forward_held = ff_down;
             self.send_command(CoreCommand::SetPacingEnabled(!ff_down));
+        }
+        // Ticket W20-12: while held, ONE keyed OSD card (refreshed each
+        // frame, so it stays up and fades shortly after release) — it
+        // replaces the status bar's "FF" chip.
+        if ff_down && self.core.is_some() {
+            self.osd.push_card(
+                crate::toast::ToastKind::Info,
+                format!("{} Fast-forward", egui_phosphor::regular::FAST_FORWARD),
+                None,
+                Some("fast-forward"),
+                ctx,
+            );
         }
         self.peek_key_held = peek_down;
     }
@@ -2651,7 +2661,6 @@ impl RetroForgeApp {
             self.status = "No ROM open".to_string();
             return;
         };
-        self.status = format!("Saving {}\u{2026}", slot.label());
         self.send_command(CoreCommand::SaveStateToSlot {
             dir,
             stem: slot.stem(),
@@ -2664,9 +2673,15 @@ impl RetroForgeApp {
         // from the core thread to hang it off instead (the file write is
         // fire-and-forget; the next modal open re-scans and shows the
         // truth either way).
-        self.toasts.push(
+        // Ticket W20-12: an OSD card over the game, with the frame that
+        // was saved, instead of a toast in the far corner and a status
+        // string ("Saving Slot 1…") that never changed afterwards.
+        let thumb = self.frame_thumb(ctx);
+        self.osd.push_card(
             crate::toast::ToastKind::Success,
-            format!("Saved {}", slot.label()),
+            format!("Saved to {}", slot.label()),
+            thumb,
+            None,
             ctx,
         );
         // Ticket W15-04's quit-confirmation reads this: a save just
@@ -2695,9 +2710,49 @@ impl RetroForgeApp {
                     )
                 };
                 self.send_command(CoreCommand::ApplyState(Box::new(container)));
+                // Ticket W20-12: the slot's own picture on the card.
+                let thumb = crate::state_slots::scan(&dir)
+                    .into_iter()
+                    .find(|i| i.id == slot)
+                    .and_then(|i| i.saved)
+                    .and_then(|s| s.thumbnail);
+                let ctx = self.ctx.clone();
+                let tex = thumb.and_then(|path| self.slot_textures.get(&ctx, &path));
+                let text = if self.state_warnings.is_empty() {
+                    format!("Loaded {}", slot.label())
+                } else {
+                    format!(
+                        "Loaded {} ({} warning(s))",
+                        slot.label(),
+                        self.state_warnings.len()
+                    )
+                };
+                self.osd
+                    .push_card(crate::toast::ToastKind::Success, text, tex, None, &ctx);
             }
-            Err(e) => self.status = format!("Load failed: {e}"),
+            Err(e) => {
+                self.status = format!("Load failed: {e}");
+                let ctx = self.ctx.clone();
+                self.osd.push(
+                    crate::toast::ToastKind::Error,
+                    format!("Load failed: {e}"),
+                    &ctx,
+                );
+            }
         }
+    }
+
+    /// Ticket W20-12: a snapshot texture of the frame on screen now, for
+    /// an OSD card — a COPY, so the card keeps showing the moment it
+    /// reports while the game runs on.
+    fn frame_thumb(&self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        let rgba = self.last_frame_rgba.as_ref()?;
+        let (w, h) = self.last_frame_size?;
+        if rgba.len() != w * h * 4 {
+            return None;
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied([w, h], rgba);
+        Some(ctx.load_texture("osd-frame-thumb", image, egui::TextureOptions::NEAREST))
     }
 
     fn open_rom(&mut self) {
@@ -4761,13 +4816,6 @@ impl RetroForgeApp {
                                 }
                             };
                             self.av_sync_indicator(ui);
-                            // Ticket W15-06: "badge/status shows FF" while
-                            // the fast-forward hotkey is held. Shown only
-                            // then — a chip present at rest would read as
-                            // a permanent feature, not a momentary one.
-                            if self.fast_forward_held {
-                                ui.add(readout(egui::RichText::new("FF").strong().monospace()));
-                            }
                             self.profile_chip(ui);
                             // FM-13 criterion 3: "view too large for GPU,
                             // reduced" — surfaced plainly, never swallowed
@@ -9033,7 +9081,16 @@ impl RetroForgeApp {
     #[doc(hidden)]
     #[must_use]
     pub fn has_visible_toast_for_test(&self) -> bool {
-        !self.toasts.is_empty()
+        // Ticket W20-12: save/load/screenshot feedback moved from the toast
+        // stack to the OSD stack — the same promise (it appears, it does
+        // not pause emulation, it expires), drawn over the game instead.
+        !self.toasts.is_empty() || !self.osd.is_empty()
+    }
+
+    /// Ticket W20-12: the OSD cards currently live.
+    #[doc(hidden)]
+    pub fn osd_texts_for_test(&self) -> Vec<String> {
+        self.osd.texts()
     }
 
     /// Ticket W15-06: the current key bound to an App hotkey, so a test
@@ -9780,8 +9837,14 @@ impl RetroForgeApp {
         // Ticket W15-06: the App-hotkey screenshot (and the Enhance
         // workspace's identical button) both land here, so both get the
         // same confirmation rather than only the hotkey path having one.
-        self.toasts
-            .push(crate::toast::ToastKind::Success, "Screenshot saved", ctx);
+        let thumb = self.frame_thumb(ctx);
+        self.osd.push_card(
+            crate::toast::ToastKind::Success,
+            "Screenshot saved",
+            thumb,
+            None,
+            ctx,
+        );
     }
 
     /// Where screenshots land (ticket W15-06): `<config-dir>/retroforge/
@@ -10167,6 +10230,14 @@ impl eframe::App for RetroForgeApp {
         // which, never input. Painting them last is what keeps a toast
         // visible over a maximized window instead of tucked behind it.
         let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        // Ticket W20-12: OSD cards inside the picture's top-left corner;
+        // not over the Quick Menu (it is the thing being looked at then).
+        if self.core.is_some() && !self.show_overlay_menu {
+            let corner = self
+                .last_play_rect
+                .map_or(egui::pos2(16.0, 56.0), |r| r.min + egui::vec2(12.0, 12.0));
+            self.osd.show_at(&ctx, &tokens, corner);
+        }
         self.toasts.show(&ctx, &tokens);
     }
 

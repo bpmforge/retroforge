@@ -159,6 +159,10 @@ fn photograph_every_major_surface() {
     // ---- Wave 20: the Quick Menu over the paused game ----------------
     // Save first (F5) so the Save/Load sections have a screenshot to show.
     harness.key_press(egui::Key::F5);
+    // W20-12: the save's OSD card, over the picture — shot at once, since
+    // every harness step advances egui's clock by a whole step's dt.
+    harness.run_steps(1);
+    shot(&mut harness, "17-osd-saved");
     let target = harness.state().frame_count_for_test() + 20;
     run_emulated_frames(&mut harness, target, Duration::from_secs(5));
     harness.key_press(egui::Key::Escape);
