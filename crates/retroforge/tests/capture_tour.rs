@@ -285,6 +285,31 @@ fn photograph_every_major_surface() {
     shot(&mut harness, "22-library-continue");
     harness.state_mut().launch_rom(&rom);
     harness.run_steps(2);
+    let target = harness.state().frame_count_for_test() + 30;
+    run_emulated_frames(&mut harness, target, Duration::from_secs(5));
+
+    // W20-14: the recording indicator.
+    harness.key_press(egui::Key::F10);
+    let target = harness.state().frame_count_for_test() + 20;
+    run_emulated_frames(&mut harness, target, Duration::from_secs(5));
+    shot(&mut harness, "23-recording");
+    harness.key_press(egui::Key::F10);
+    harness.run_steps(2);
+
+    // W20-02: a shader on the live picture (CRT-class, default params).
+    harness.state_mut().video_settings_mut_for_test().shader = Some("crt".into());
+    let target = harness.state().frame_count_for_test() + 20;
+    run_emulated_frames(&mut harness, target, Duration::from_secs(5));
+    shot(&mut harness, "24-shader-crt");
+    harness.state_mut().video_settings_mut_for_test().shader = None;
+    harness.run_steps(2);
+
+    // W20-06: the save-state window with its slot screenshot.
+    harness.state_mut().open_states_modal();
+    harness.run_steps(4);
+    shot(&mut harness, "25-states-window");
+    harness.state_mut().close_states_for_test();
+    harness.run_steps(2);
 
     // And back, so the rest of the tour has its menus.
     harness

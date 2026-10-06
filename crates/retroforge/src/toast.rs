@@ -61,6 +61,9 @@ pub enum ToastKind {
     Info,
     Success,
     Error,
+    /// Ticket W20-14: a recording in progress — its own icon, so the card
+    /// does not carry an "info" glyph beside the record dot.
+    Recording,
 }
 
 impl ToastKind {
@@ -69,6 +72,7 @@ impl ToastKind {
             ToastKind::Info => crate::icons::INFO,
             ToastKind::Success => crate::icons::SUCCESS,
             ToastKind::Error => crate::icons::WARNING,
+            ToastKind::Recording => egui_phosphor::regular::RECORD,
         }
     }
 }
@@ -166,6 +170,15 @@ impl ToastStack {
             thumb,
             key,
         });
+    }
+
+    /// Drop every expired toast without drawing (ticket W20-12): a stack
+    /// that is hidden for a while — the OSD under the Quick Menu or a
+    /// window — must still expire on time, not reappear stale.
+    pub fn prune(&mut self, ctx: &egui::Context) {
+        let now = ctx.time();
+        let life = self.duration + FADE_SECS;
+        self.toasts.retain(|t| now - t.created_at < life);
     }
 
     /// The texts currently live, oldest first (tests).

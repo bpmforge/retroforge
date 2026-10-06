@@ -2400,6 +2400,12 @@ impl RetroForgeApp {
     }
 
     /// Refresh the slot listing and open the manager (ticket W4-11).
+    /// Close the States window (screenshot tour).
+    #[doc(hidden)]
+    pub fn close_states_for_test(&mut self) {
+        self.show_states = false;
+    }
+
     pub fn open_states_modal(&mut self) {
         self.refresh_state_slots();
         self.show_states = true;
@@ -2588,9 +2594,15 @@ impl RetroForgeApp {
         }
         let mut open = true;
         let mut action: Option<(crate::state_slots::SlotId, bool)> = None;
+        // Ticket W20-06: never wider than the window it sits in — the card
+        // grid sizes it, and a grid wider than the viewport put the last
+        // column off-screen at the default 768 px window (tour photo).
+        let max_width = (ctx.viewport_rect().width() - 32.0).max(240.0);
         egui::Window::new("Save states")
             .open(&mut open)
             .resizable(true)
+            .default_width(max_width.min(820.0))
+            .max_width(max_width)
             .show(ctx, |ui| {
                 // Ticket W10-04: ten slots plus auto-slots, each with a
                 // screenshot, a timestamp and a mode — taller than a
@@ -2601,7 +2613,11 @@ impl RetroForgeApp {
                         if self.states_dir().is_none() {
                             ui.label("No ROM open — save states are per game.");
                         }
-                        if let Some(chosen) = self.slot_card_grid(ui, true, true, None) {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let columns = ((ui.available_width() + 10.0) / (SLOT_CARD_WIDTH + 26.0))
+                            .floor()
+                            .max(1.0) as usize;
+                        if let Some(chosen) = self.slot_card_grid(ui, true, true, Some(columns)) {
                             action = Some(chosen);
                         }
                         if !self.state_warnings.is_empty() {
@@ -10954,14 +10970,13 @@ impl RetroForgeApp {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let secs = (ctx.time() - self.record_started).max(0.0) as u64;
             let text = format!(
-                "{} REC {}:{:02} \u{b7} {} MB",
-                egui_phosphor::regular::RECORD,
+                "REC {}:{:02} \u{b7} {} MB",
                 secs / 60,
                 secs % 60,
                 rec.estimated_bytes() / (1024 * 1024)
             );
             self.osd.push_card(
-                crate::toast::ToastKind::Info,
+                crate::toast::ToastKind::Recording,
                 text,
                 None,
                 Some("recording"),
@@ -11517,11 +11532,15 @@ impl eframe::App for RetroForgeApp {
         // not over the Quick Menu (it is the thing being looked at then).
         self.draw_play_overlays(&ctx);
         self.draw_rewind_bar(&ctx);
-        if self.core.is_some() && !self.show_overlay_menu {
+        // Not over a window either: it would cover the window's own
+        // content, and a window opened over the game shows its own result.
+        if self.core.is_some() && !self.show_overlay_menu && !self.any_window_open() {
             let corner = self
                 .last_play_rect
                 .map_or(egui::pos2(16.0, 56.0), |r| r.min + egui::vec2(12.0, 12.0));
             self.osd.show_at(&ctx, &tokens, corner);
+        } else {
+            self.osd.prune(&ctx);
         }
         self.toasts.show(&ctx, &tokens);
     }

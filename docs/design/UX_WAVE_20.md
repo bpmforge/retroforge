@@ -1,7 +1,15 @@
 # Design: UX Wave 20 — the play view tells the truth, then looks the part
 
-Status: **planned and in progress on branch `ui/wave-17` (2026-10-06).**
-Tickets W20-01..W20-21 in `plan.json`. Brad asked on 2026-10-06 to "write
+Status: **built on branch `ui/wave-17` (2026-10-06), not merged.**
+Tickets W20-01..W20-22 in `plan.json`: W20-01..W20-12, W20-14..W20-16 and
+W20-18..W20-21 done; **W20-13** (rewind) built but *blocked* on exact
+restoration — the NES save state does not reproduce the next frame, filed
+as **W20-22** (rf-nes; being fixed on `main` per Brad's ruling of
+2026-10-06); **W20-17** done for loading fast-forward, open for HUD
+separation and fog (compositor work, reasons in its notes). §10 lists
+every deviation from the plan below.
+
+Brad asked on 2026-10-06 to "write
 all these down and build this out, also review the feature enhancements
 we promised like full level view and all those super enhancements".
 
@@ -89,6 +97,14 @@ New for this wave:
 | 15 | P0 | **New (audit):** "Atmosphere: fog" reads ON and counts toward the badge at ladder rung Active, but `rf_renderer::fog::FogPass` is never constructed by the app. | enhance_ui.rs:204, enhanced_view.rs:522 | W20-09, W20-17 |
 | 16 | P0 | **New (audit):** MetalFX adds a badge suffix in a `metalfx` build, but `MetalFxScaler` is never constructed by the app. | enhance_ui.rs:270 | W20-09 |
 | 17 | P1 | **New (audit):** Mesen HD packs have no UI route — `load_hd_pack` is called only by a test, so W11-05's "a user can import a pack from the app" is not true. | app.rs:7632 | W20-09 |
+| 18 | P0 | **Found building W20-07:** every launch path opened the game PAUSED (the debugger's convention); a player's game sat frozen until they found the status bar's Run button. | `open_rom_path` | W20-07 |
+| 19 | P0 | **Found building W20-08:** all three Settings › Audio controls (device, buffer, volume) were saved and read by nothing. | app.rs settings_window, audio_out.rs | W20-08 |
+| 20 | P0 | **Found building W20-02:** an HD pack's composite never reached the screen — the texture was built from the core's raw frame; the HD test asserted on a buffer, not the display. | pump_core_events | W20-09 (follow-up) |
+| 21 | P0 | **Found from a tour photo:** egui's `Image` kept the texture's aspect, so the 8:7 TV shape never reached the screen; W20-01's first test measured the allocated rect, not the painted image. | play_view::show_frame | W20-01 (follow-up) |
+| 22 | P0 | **Found building W20-16:** hold-to-peek only switched the camera — sprite bypass, de-flicker and HD art stayed on screen while "peeking at the original". | video_panel | W20-16 |
+| 23 | P1 | **Found building W20-12:** a save set the status to "Saving Slot N…" and nothing ever changed it again. | save_to_slot | W20-12 |
+| 24 | P1 | **Found building W20-13:** NES Save → Step and Load → Step differ (frame 171 of 5 probes on RF-Scroller); rewound pictures show the HUD scroll split moved. | rf-nes state | W20-22 |
+| 25 | P2 | **Found building W20-17:** RF-Scroller's own profile declares a loading wait loop the fixture never runs (frame-boundary PCs $8012–$91xx, not $C000; `columns_streamed` stops at 63, not 95). | profiles/nes/rf-scroller | (profiles) |
 
 The review's claim that the widescreen toggle is wholly inert is
 **wrong** and is corrected here: since W11-03 the toggle sends
@@ -327,9 +343,8 @@ W20-21 last
 
 ## 8. Testing
 
-Every ticket: law-3 gate + `validate-plan` (+ `validate-traceability`,
-which carries two pre-existing F3 failures on `main` at `e80a883` — a
-decision id cited in plan.json and TESTING.md but not yet defined in DECISIONS.md — that this wave neither introduced nor touches).
+Every ticket: law-3 gate + `validate-plan` + `validate-traceability`
+(clean since the 2026-10-06 merge of `main`, which defines D-016).
 UI behaviour is asserted headlessly with `egui_kittest` where the
 harness can see it (pause sent on menu open, play rect sizes, glyph
 presence, settings copy); pixels are photographed by `capture_tour`, and
@@ -345,7 +360,35 @@ Brad)** in the ticket notes, as this repo already does.
 - No blur shader for the Quick Menu backdrop (egui has none; a GPU blur
   pass for one menu is not worth a new render path).
 
-## 10. Note on stories[]
+## 10. Deviations from this plan (as built)
+
+- **W20-03:** pad Home needed a new `rf_input::PadButton::Guide` (gilrs
+  `Button::Mode`); `crates/rf-input` scope widened, recorded in the ticket.
+- **W20-08:** making the audio device real needed device enumeration in
+  `crates/rf-audio` (scope widened, recorded). Device and buffer apply from
+  the next game started (audio opens per core), volume live.
+- **W20-10:** the Quick Menu's Rewind section shows the rewind controls
+  (W20-13) rather than a placeholder.
+- **W20-12:** no separate "slot changed" card — nothing changes the active
+  slot except saving or loading it, and those cards name the slot.
+- **W20-13:** blocked on W20-22 (exact restoration); shipped off by default
+  and labelled Experimental; NES only (`.rfstate` is a NES container).
+- **W20-17:** HUD separation and the fog pass remain unwired —
+  `SceneLayer::HudPinned` has no producer and the ultrawide compositor
+  handles only stitched canvases; `ExtractedBg` is not produced per frame
+  for the live view. The fog row stays unavailable (W20-09) until then.
+- **W20-18:** one before/after pair for the whole picture, not one per
+  feature (nothing renders a single enhancement alone).
+- **W20-20:** no NES/SNES shelves (the console filters are those views;
+  console identity is the card spine). No loading chip (row 25).
+- **`docs/design/FRONTEND_UI.md` §3.2** still describes Run/Step living in
+  the status bar (W10-01's note) — superseded by W20-07; left unedited
+  here because that file is outside this wave's write scope.
+- **`docs/STATUS.md`** has no Wave 20 lines: another session writes the
+  ledger on `main`, and appending here would conflict at merge. The
+  ledger lines are Brad's to add at merge time.
+
+## 11. Note on stories[]
 
 As with Wave 15 (UX_WAVE_15.md §15), no `USER_STORIES.md` entry is
 specific enough to cite for this shell-only work, so the W20 tickets
