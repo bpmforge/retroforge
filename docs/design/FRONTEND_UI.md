@@ -103,10 +103,13 @@ Viewers window. The status bar shows a Paused chip instead. It also
 auto-hides in play now (W20-11), and Esc opens the Quick Menu (W20-10).
 The paragraph above is kept as the W10-01 record.
 
-Still unbuilt from this section: the status bar does **not** auto-hide,
-and the profile chip does not click through to an inspector. §3.1's
-Library home is still a window rather than the app's home screen — the
-app boots to an empty play view, not to the grid.
+Still unbuilt from this section (checked 2026-10-06 against `main`):
+the profile chip shows the matched profile's name with its path on
+hover, but does not click through to an inspector
+(`RetroForgeApp::profile_chip`). Built since this list was first
+written: the status bar auto-hides in play (W20-11), and with no game
+open the main surface **is** the library grid (W10-03, the `core.is_none()`
+branch of the central panel), with W20-20's Continue hero and shelves.
 
 Save-state manager modal: 10 slots + auto-slots, each with screenshot,
 timestamp, mode-at-save, "contains mods" warning flag (PROF chunk); load
