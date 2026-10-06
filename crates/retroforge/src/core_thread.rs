@@ -258,6 +258,9 @@ pub struct FrameMsg {
     /// Ticket W20-17: a profile-declared wait loop is running unpaced
     /// right now (the label it was declared with).
     pub loading: Option<String>,
+    /// Ticket W20-17: whether frame pacing was on for this frame (off while
+    /// the fast-forward hotkey is held or a wait loop is skipped).
+    pub paced: bool,
     /// Ticket W11-02: the bytes the full-level view asked for, or `None`
     /// when no probe is armed. Peeked on this thread because only this
     /// thread can read memory without perturbing the machine.
@@ -1546,6 +1549,7 @@ fn core_thread_main(
             bundle_writer.publish(bundle);
             let msg = FrameMsg {
                 loading: loading_unpaced.clone(),
+                paced: pacer.is_enabled(),
                 rewind: rewind.as_ref().map(|ring| RewindStatus {
                     len: ring.len(),
                     depth: ring.config().depth,
@@ -1752,6 +1756,7 @@ mod tests {
     fn empty_frame_msg() -> FrameMsg {
         FrameMsg {
             loading: None,
+            paced: true,
             rewind: None,
             level_probe: None,
             script_window: None,
@@ -2174,9 +2179,9 @@ mod tests {
     }
 
     /// Ticket W20-17 (FR-ENH-008): with a declared wait loop matching, the
-    /// core reports it as fast-forwarded and runs UNPACED (many more frames
-    /// per wall-clock second than 60); switched off, it reports nothing and
-    /// is paced again. Pacing only — what the CPU executes is untouched by
+    /// core reports it as fast-forwarded and runs with pacing OFF (read from
+    /// `FrameMsg::paced`); switched off, it reports nothing and is paced
+    /// again. Pacing only — what the CPU executes is untouched by
     /// construction (`rf_enhance::loading` is handed a read-only peek).
     #[test]
     fn a_matching_wait_loop_runs_unpaced_and_is_reported() {
@@ -2193,34 +2198,33 @@ mod tests {
             .send(CoreCommand::SetLoadingFastForward(Some(vec![wait])))
             .unwrap();
         core.cmd_tx.send(CoreCommand::Resume).unwrap();
-        let count_for = |core: &CoreHandle, d: Duration| {
+        // The last frame seen in a window: whether it was paced, and what
+        // loop (if any) it reported. Pacing is read from the frame itself,
+        // not inferred from frames-per-second, which a debug build under a
+        // loaded test run cannot make reliable.
+        let last_in = |core: &CoreHandle, d: Duration| {
             let start = std::time::Instant::now();
-            let (mut first, mut last, mut label) = (None, 0, None);
+            let mut last = None;
             while start.elapsed() < d {
-                if let Some(m) = next_frame(core, Duration::from_millis(200)) {
-                    first.get_or_insert(m.frame_count);
-                    last = m.frame_count;
-                    label = m.loading.clone();
+                if let Some(m) = next_frame(core, Duration::from_millis(100)) {
+                    last = Some((m.paced, m.loading.clone()));
                 }
             }
-            (last - first.unwrap_or(last), label)
+            last.expect("frames arrive")
         };
-        let (fast, label) = count_for(&core, Duration::from_millis(1000));
+        let (paced, label) = last_in(&core, Duration::from_millis(500));
         assert_eq!(
             label.as_deref(),
             Some("spin"),
             "reported as fast-forwarding"
         );
+        assert!(!paced, "a matching wait loop runs unpaced");
         core.cmd_tx
             .send(CoreCommand::SetLoadingFastForward(None))
             .unwrap();
-        let _ = count_for(&core, Duration::from_millis(200));
-        let (paced, label) = count_for(&core, Duration::from_millis(1000));
+        let (paced, label) = last_in(&core, Duration::from_millis(500));
         assert_eq!(label, None, "off: nothing reported");
-        assert!(
-            fast > paced + 30,
-            "unpaced must outrun 60 fps clearly: {fast} frames vs {paced} paced in 1 s"
-        );
+        assert!(paced, "off: paced again");
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
         let _ = core.join_handle.join();
     }

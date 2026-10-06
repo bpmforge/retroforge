@@ -284,6 +284,63 @@ fn scrolled<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
+/// Ticket W20-18: turn feature `id` on or off — the settings write and
+/// the action the app applies (`RetroForgeApp::apply_enhance_actions`).
+/// Shared by this workspace's Features tab and the Quick Menu's player
+/// panel, so a toggle is wired one way only.
+pub fn apply_toggle(
+    settings: &mut crate::game_settings::GameSettings,
+    id: &str,
+    enabled: bool,
+    actions: &mut EnhanceActions,
+) {
+    let ctx_settings = settings;
+    match id {
+        "sprite_overlay" => {
+            ctx_settings.sprite_overlay = enabled;
+            actions.sprite_overlay_set = Some(enabled);
+        }
+        "deflicker" => {
+            ctx_settings.deflicker = enabled;
+            actions.deflicker_set = Some(enabled);
+        }
+        "widescreen_decoded" => {
+            // Until W11-03 this ONLY set the field: the toggle
+            // round-tripped to disk and changed nothing anyone
+            // could see, because no command existed to carry it
+            // to the core.
+            ctx_settings.widescreen_decoded = enabled;
+            actions.widescreen_set = Some(enabled);
+        }
+        "full_level_view" => {
+            ctx_settings.full_level_view = enabled;
+            actions.full_level_set = Some(enabled);
+        }
+        "diorama" => {
+            // Ticket W16-13: this arm was missing entirely
+            // (fell into `_ => {}` below) — the checkbox
+            // toggled its own LOCAL `enabled` copy and
+            // `ctx_settings.diorama` was never actually
+            // written, so Diorama could never be turned on
+            // through this UI at all (the same class of "row
+            // exists, wiring doesn't" bug W16-06 already found
+            // once for `profile_matched`).
+            ctx_settings.diorama = enabled;
+            actions.diorama_set = Some(enabled);
+        }
+        "mode7_ground" => {
+            ctx_settings.mode7_ground = enabled;
+            actions.mode7_ground_set = Some(enabled);
+        }
+        "loading_fast_forward" => {
+            ctx_settings.loading_fast_forward = enabled;
+            actions.loading_fast_forward_set = Some(enabled);
+        }
+        _ => {}
+    }
+    actions.settings_changed = true;
+}
+
 fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut EnhanceActions) {
     let rows = crate::enhance_ui::feature_rows(ctx.settings, &ctx.facts);
     for row in &rows {
@@ -306,49 +363,7 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                 .add_enabled(available, egui::Checkbox::new(&mut enabled, row.label))
                 .changed()
             {
-                match row.id {
-                    "sprite_overlay" => {
-                        ctx.settings.sprite_overlay = enabled;
-                        actions.sprite_overlay_set = Some(enabled);
-                    }
-                    "deflicker" => {
-                        ctx.settings.deflicker = enabled;
-                        actions.deflicker_set = Some(enabled);
-                    }
-                    "widescreen_decoded" => {
-                        // Until W11-03 this ONLY set the field: the toggle
-                        // round-tripped to disk and changed nothing anyone
-                        // could see, because no command existed to carry it
-                        // to the core.
-                        ctx.settings.widescreen_decoded = enabled;
-                        actions.widescreen_set = Some(enabled);
-                    }
-                    "full_level_view" => {
-                        ctx.settings.full_level_view = enabled;
-                        actions.full_level_set = Some(enabled);
-                    }
-                    "diorama" => {
-                        // Ticket W16-13: this arm was missing entirely
-                        // (fell into `_ => {}` below) — the checkbox
-                        // toggled its own LOCAL `enabled` copy and
-                        // `ctx.settings.diorama` was never actually
-                        // written, so Diorama could never be turned on
-                        // through this UI at all (the same class of "row
-                        // exists, wiring doesn't" bug W16-06 already found
-                        // once for `profile_matched`).
-                        ctx.settings.diorama = enabled;
-                        actions.diorama_set = Some(enabled);
-                    }
-                    "mode7_ground" => {
-                        ctx.settings.mode7_ground = enabled;
-                        actions.mode7_ground_set = Some(enabled);
-                    }
-                    "loading_fast_forward" => {
-                        ctx.settings.loading_fast_forward = enabled;
-                        actions.loading_fast_forward_set = Some(enabled);
-                    }
-                    _ => {}
-                }
+                apply_toggle(ctx.settings, row.id, enabled, actions);
                 actions.settings_changed = true;
             }
             ui.label(format!("({})", row.scope));

@@ -165,6 +165,14 @@ fn photograph_every_major_surface() {
     shot(&mut harness, "17-osd-saved");
     let target = harness.state().frame_count_for_test() + 20;
     run_emulated_frames(&mut harness, target, Duration::from_secs(5));
+    // Enhanced, with the sprite-limit bypass on, so the Enhancements
+    // panel (W20-18) has a before/after pair and a counted feature.
+    harness
+        .state_mut()
+        .set_mode_for_test(retroforge::game_settings::Mode::Enhanced);
+    harness.state_mut().set_sprite_overlay_for_test(true);
+    let target = harness.state().frame_count_for_test() + 20;
+    run_emulated_frames(&mut harness, target, Duration::from_secs(5));
     harness.key_press(egui::Key::Escape);
     harness.run_steps(4);
     shot(&mut harness, "12-quick-menu");
@@ -193,6 +201,10 @@ fn photograph_every_major_surface() {
     }
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
+    harness.state_mut().set_sprite_overlay_for_test(false);
+    harness
+        .state_mut()
+        .set_mode_for_test(retroforge::game_settings::Mode::Accuracy);
 
     // W20-11: in play, with the pointer still, the bars slide away.
     let centre = egui::pos2(WINDOW_SIZE[0] / 2.0, WINDOW_SIZE[1] / 2.0);

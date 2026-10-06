@@ -530,6 +530,9 @@ pub struct RetroForgeApp {
     last_recording: Option<(std::path::PathBuf, usize)>,
     /// Ticket W20-12: on-screen-display cards over the game picture.
     osd: crate::toast::ToastStack,
+    /// Ticket W20-18: the Enhancements panel's before/after textures and
+    /// the frame they were made from.
+    panel_thumbs: Option<(u64, egui::TextureHandle, egui::TextureHandle)>,
     /// Ticket W20-06: decoded save-slot thumbnails.
     slot_textures: crate::slot_cards::SlotTextures,
     /// Ticket W10-03: §3.1's search box, filtering the library home by
@@ -1260,6 +1263,7 @@ impl RetroForgeApp {
             fullscreen_pad_was_held: false,
             last_fullscreen_request: None,
             slot_textures: crate::slot_cards::SlotTextures::default(),
+            panel_thumbs: None,
             osd: crate::toast::ToastStack::osd(),
             loading_waits: Vec::new(),
             loading_sent: None,
@@ -6208,20 +6212,12 @@ impl RetroForgeApp {
                 }
             }
             Section::Enhancements => {
-                // The badge's hover breakdown, minus its last line — "hold
-                // to peek" describes the status-bar badge, not this menu.
-                for line in crate::enhance_ui::badge_breakdown(
-                    &self.current_game_settings,
-                    &self.game_facts(),
-                )
-                .into_iter()
-                .filter(|l| !l.starts_with("Hold to peek"))
-                {
-                    ui.label(line);
-                }
-                ui.add_space(6.0);
+                // Ticket W20-18 (`docs/design/UX_WAVE_20.md` §6): the
+                // player's panel. Same rows as the badge and the Enhance
+                // workspace (`feature_rows`), in plain words; the dense
+                // workspace stays the research surface.
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Game settings\u{2026}").clicked() {
+                    if ui.button("Mode and settings\u{2026}").clicked() {
                         self.game_settings_target = None;
                         self.show_game_settings = true;
                         leave_paused = true;
@@ -6238,6 +6234,8 @@ impl RetroForgeApp {
                         }
                     }
                 });
+                ui.add_space(8.0);
+                self.enhancements_panel(ui);
             }
             Section::Controls => {
                 // W15-06: bindings are learned by seeing them.
@@ -6289,6 +6287,124 @@ impl RetroForgeApp {
             }
         }
         (close, leave_paused)
+    }
+
+    /// Ticket W20-18: the before/after pair, then one card per feature.
+    fn enhancements_panel(&mut self, ui: &mut egui::Ui) {
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        ui.label(
+            egui::RichText::new(format!(
+                "Mode: {}",
+                self.current_game_settings.mode.display_name()
+            ))
+            .strong(),
+        );
+        // Before / after: the accuracy-exact frame next to what is on
+        // screen — ONE pair for the whole picture. Per-feature pairs would
+        // mean rendering each enhancement alone, which nothing does yet.
+        if let Some(b) = &self.compare_buffers {
+            let stale = self
+                .panel_thumbs
+                .as_ref()
+                .is_none_or(|(f, _, _)| Some(*f) != self.position.map(|p| p.0));
+            if stale {
+                let size = [b.width as usize, b.height as usize];
+                let ctx = ui.ctx().clone();
+                let before = ctx.load_texture(
+                    "panel-before",
+                    egui::ColorImage::from_rgba_unmultiplied(size, &b.original),
+                    egui::TextureOptions::NEAREST,
+                );
+                let after = ctx.load_texture(
+                    "panel-after",
+                    egui::ColorImage::from_rgba_unmultiplied(size, &b.enhanced),
+                    egui::TextureOptions::NEAREST,
+                );
+                self.panel_thumbs = Some((self.position.map_or(0, |p| p.0), before, after));
+            }
+        }
+        if let Some((_, before, after)) = &self.panel_thumbs {
+            ui.horizontal(|ui| {
+                for (tex, caption) in [(before, "Original"), (after, "What you see")] {
+                    ui.vertical(|ui| {
+                        ui.add(
+                            egui::Image::from_texture(tex)
+                                .fit_to_exact_size(egui::vec2(160.0, 150.0))
+                                .alt_text(caption),
+                        );
+                        ui.label(egui::RichText::new(caption).small().color(tokens.muted));
+                    });
+                }
+            });
+        }
+        ui.add_space(6.0);
+        let rows = crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts());
+        let mut actions = crate::enhance_dock::EnhanceActions::default();
+        for row in &rows {
+            egui::Frame::new()
+                .fill(tokens.bg)
+                .corner_radius(tokens.radius_sm)
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let available = row.availability == crate::enhance_ui::Availability::Available;
+                    let mut on = row.enabled;
+                    if ui
+                        .add_enabled(
+                            available,
+                            egui::Checkbox::new(&mut on, egui::RichText::new(row.label).strong()),
+                        )
+                        .changed()
+                    {
+                        crate::enhance_dock::apply_toggle(
+                            &mut self.current_game_settings,
+                            row.id,
+                            on,
+                            &mut actions,
+                        );
+                    }
+                    ui.label(crate::enhance_panel::describe(row.id));
+                    ui.label(
+                        egui::RichText::new(crate::enhance_panel::requirement(&row.availability))
+                            .small()
+                            .color(if available { tokens.ok } else { tokens.muted }),
+                    );
+                    if let Some(h) = row.heuristic {
+                        let state = self.current_game_settings.trust.state(h);
+                        ui.horizontal(|ui| {
+                            // The ladder governs the AUTOMATIC detector
+                            // behind the feature, not the toggle above —
+                            // say so, or "on" next to "Learning" reads
+                            // as a contradiction.
+                            ui.label(
+                                egui::RichText::new("Auto-detection:")
+                                    .small()
+                                    .color(tokens.muted),
+                            );
+                            for rung in [
+                                rf_enhance::trust::TrustState::Shadow,
+                                rf_enhance::trust::TrustState::Advisory,
+                                rf_enhance::trust::TrustState::Active,
+                            ] {
+                                if ui
+                                    .selectable_label(
+                                        state == rung,
+                                        crate::enhance_panel::trust_word(rung),
+                                    )
+                                    .on_hover_text(crate::enhance_panel::trust_meaning(rung))
+                                    .clicked()
+                                    && state != rung
+                                {
+                                    self.current_game_settings.trust.pin(h, rung);
+                                    actions.settings_changed = true;
+                                }
+                            }
+                        });
+                    }
+                });
+            ui.add_space(4.0);
+        }
+        self.apply_enhance_actions(&actions);
     }
 
     /// Ticket W20-10: power-cycle the running game — open the same file
@@ -8460,6 +8576,7 @@ impl RetroForgeApp {
         self.mode7_seen = true;
         let msg = core_thread::FrameMsg {
             loading: None,
+            paced: true,
             rewind: None,
             level_probe: None,
             script_window: None,
@@ -10138,6 +10255,14 @@ impl RetroForgeApp {
                 actions = self.enhance.ui(ui, &mut view);
             });
 
+        self.apply_enhance_actions(&actions);
+        self.show_enhance = open;
+    }
+
+    /// Apply what a feature toggle asked for — from the Enhance workspace
+    /// or the Quick Menu's Enhancements section (ticket W20-18): one path,
+    /// so the two can never wire a toggle differently.
+    fn apply_enhance_actions(&mut self, actions: &crate::enhance_dock::EnhanceActions) {
         if let Some(on) = actions.sprite_overlay_set {
             self.sprite_overlay = on;
             self.send_command(CoreCommand::SetSpriteOverlay(on));
@@ -10173,7 +10298,6 @@ impl RetroForgeApp {
             self.screenshot_pending = true;
             self.status = "Screenshot: capturing next frame\u{2026}".to_string();
         }
-        self.show_enhance = open;
     }
 
     /// Ticket W20-17: keep the core's loading fast-forward matching the
@@ -10205,6 +10329,20 @@ impl RetroForgeApp {
                 ctx,
             );
         }
+    }
+
+    /// Turn the sprite-limit bypass on or off exactly as its Features row
+    /// does (setting + command), for the screenshot tour.
+    #[doc(hidden)]
+    pub fn set_sprite_overlay_for_test(&mut self, on: bool) {
+        let mut actions = crate::enhance_dock::EnhanceActions::default();
+        crate::enhance_dock::apply_toggle(
+            &mut self.current_game_settings,
+            "sprite_overlay",
+            on,
+            &mut actions,
+        );
+        self.apply_enhance_actions(&actions);
     }
 
     /// Ticket W20-17: the wait loop currently fast-forwarded (tests).

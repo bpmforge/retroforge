@@ -8941,10 +8941,11 @@
    "reachable from the Quick Menu; the Enhance workspace remains the research surface"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-18."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-18.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). HANDOFF: depends_on narrowed in spirit -- W20-17's open parts (HUD separation, fog) are compositor work this panel does not need; it lists whatever feature_rows returns. The Quick Menu's Enhancements section is the player panel: mode, ONE before/after pair (CompareBuffers original vs enhanced, textures rebuilt only when the frame changes), then one card per feature_rows row -- strong label with a toggle (enabled only when Available), a plain sentence of what it does (crate::enhance_panel::describe), a plain requirement (requirement(): 'Ready.' / 'Needs Enhanced mode.' / 'Needs a profile for this game.' / 'Needs <game state>.'), and for heuristic rows the trust ladder as words -- 'Auto-detection: Learning / Suggesting / On' with tooltips (trust_meaning), pinning the ladder like Game Settings does. Toggles go through crate::enhance_dock::apply_toggle and RetroForgeApp::apply_enhance_actions, both EXTRACTED from the Enhance workspace so the two surfaces share one path. Buttons: Mode and settings..., Enhance workspace..., Author.... DEVIATION from acceptance 1: one before/after pair for the whole picture, not one per feature -- a per-feature pair would mean rendering each enhancement alone, which nothing in the pipeline does; recorded rather than faked. Tests: enhance_panel unit tests (every row described; no research jargon in any sentence; ladder words), tests/enhancements_panel.rs (cards show the sentences and plain requirement, ladder words present, no 'heuristic-gated', a toggle clicked in the panel makes the badge count it). Photo: target/ui-tour/15-quick-menu-enhancements.png."
   ]
  },
  {
