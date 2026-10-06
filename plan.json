@@ -8399,10 +8399,11 @@
    "a GPU test (skips without an adapter) asserts selecting Scanlines changes the presented texture and None restores byte-identical output"
   ],
   "points": 5,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-02."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-02.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). New crate::shader_select (GPU-free, unit-tested): KINDS (all six ShaderKind), kind_from_id via manifest ids, ShaderSettings ([shaders] settings section: per-shader name->value, clamped to each ShaderParamDescriptor's range, NaN/unsaved -> manifest default, reset), stage(kind, values) -> ChainStage, output_scale(play height, frame lines) in 1..=4. Settings > Video: ComboBox (None + manifest display names) and sliders generated from the selected shader's descriptors, Reset to defaults, plain notes when no GPU / unknown saved name / paused / failed. App: ShaderChain built lazily from the shared GpuContext; runs the selected stage over the RESOLVED frame (HD composite included) at an integer output scale, texture filtered LINEAR when shaded; skipped in compare mode, so compare/screenshot buffers stay pre-shader; timed into its own fog::BudgetGate (self-disables over p95 16.67 ms, says so); a render error falls back to the plain picture, clears the choice and says why. Not counted by the honesty badge (presentation, RENDERER.md §4). Test: tests/shader_chain_applies.rs on a REAL GPU (WgpuTestRenderer; skips without an adapter -- did not skip here): none = texture 256x240 and byte-identical to the resolved frame; Scanlines = upscaled (multiple of 256x240) and different; none again = identical. UNVERIFIED by eye: how each shader looks (photographed in the W20-21 tour); per-frame readback cost on slower GPUs (the budget gate is the guard)."
   ]
  },
  {

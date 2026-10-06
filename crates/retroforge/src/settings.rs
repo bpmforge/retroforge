@@ -127,8 +127,10 @@ pub struct VideoSettings {
     /// means a settings file written before this field existed loads as
     /// `Tv`.
     pub pixel_aspect: PixelAspect,
-    /// Shader name, `None` for the plain pipeline. A string because W3-02a
-    /// owns the shader set; this must not need changing when that lands.
+    /// Shader by manifest id (`crate::shader_select::kind_from_id`),
+    /// `None` for the plain picture. Still a string so a settings file
+    /// naming a shader this build lacks loads (and shows as none) instead
+    /// of failing to parse.
     pub shader: Option<String>,
     pub vsync: bool,
     /// MetalFX scaler choice (ticket W16-08). `Off` by default; see
@@ -286,6 +288,8 @@ pub struct AppSettings {
     pub library: LibrarySettings,
     /// Ticket W20-04.
     pub window: WindowSettings,
+    /// Ticket W20-02: per-shader parameter values.
+    pub shaders: crate::shader_select::ShaderSettings,
     /// Tables and keys this build does not know, kept verbatim so a newer
     /// build's settings survive an older build touching the file (module
     /// doc).
@@ -303,6 +307,7 @@ struct KnownSettings {
     accessibility: crate::accessibility::AccessibilitySettings,
     library: LibrarySettings,
     window: WindowSettings,
+    shaders: crate::shader_select::ShaderSettings,
 }
 
 impl AppSettings {
@@ -320,6 +325,7 @@ impl AppSettings {
             paths: self.paths.clone(),
             library: self.library,
             window: self.window,
+            shaders: self.shaders.clone(),
         };
         let mut table = toml::Table::try_from(known).map_err(|e| e.to_string())?;
         for (key, value) in &self.unknown {
@@ -342,7 +348,7 @@ impl AppSettings {
         for (key, value) in &table {
             if !matches!(
                 key.as_str(),
-                "video" | "audio" | "paths" | "accessibility" | "library" | "window"
+                "video" | "audio" | "paths" | "accessibility" | "library" | "window" | "shaders"
             ) {
                 unknown.insert(key.clone(), value.clone());
             }
@@ -371,6 +377,7 @@ impl AppSettings {
             paths: section("paths").try_into().unwrap_or_default(),
             library: section("library").try_into().unwrap_or_default(),
             window: section("window").try_into().unwrap_or_default(),
+            shaders: section("shaders").try_into().unwrap_or_default(),
             unknown,
         })
     }

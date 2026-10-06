@@ -457,6 +457,16 @@ pub struct RetroForgeApp {
     /// `ViewportCommand`s go to the windowing backend, which a headless
     /// test harness does not have, so this is what a test can read.
     last_fullscreen_request: Option<bool>,
+    /// Ticket W20-02: the shader chain, built on first use from the shared
+    /// `GpuContext`; its budget gate; and the one-line note Settings shows
+    /// when a shader was paused for speed or failed.
+    shader_chain: Option<rf_renderer::ShaderChain>,
+    shader_budget: rf_renderer::fog::BudgetGate,
+    shader_note: Option<String>,
+    /// Test-only: fingerprint every displayed frame (off otherwise — it
+    /// would hash megabytes per frame for nothing).
+    hash_display_for_test: bool,
+    display_hash: Option<u64>,
     /// Ticket W20-06: decoded save-slot thumbnails.
     slot_textures: crate::slot_cards::SlotTextures,
     /// Ticket W10-03: §3.1's search box, filtering the library home by
@@ -1179,6 +1189,11 @@ impl RetroForgeApp {
             fullscreen_pad_was_held: false,
             last_fullscreen_request: None,
             slot_textures: crate::slot_cards::SlotTextures::default(),
+            shader_chain: None,
+            shader_budget: rf_renderer::fog::BudgetGate::new(),
+            shader_note: None,
+            hash_display_for_test: false,
+            display_hash: None,
             library_search: String::new(),
             library_console_filter: None,
             library_scans: 0,
@@ -3246,12 +3261,76 @@ impl RetroForgeApp {
                     (None, Some(resolved), Some((w, h))) => (resolved.as_slice(), w, h),
                     _ => (&msg.rgba, msg.width, msg.height),
                 };
+            // Ticket W20-02: Settings › Video's shader, over the picture
+            // the player sees — never over the compare pair (a research
+            // view of the accuracy-exact frame) and never into a capture.
+            let shader = if compare_rgba.is_none() {
+                self.settings
+                    .video
+                    .shader
+                    .as_deref()
+                    .and_then(crate::shader_select::kind_from_id)
+            } else {
+                None
+            };
+            if shader.is_some() && self.shader_chain.is_none() {
+                if let Some(gpu) = &self.gpu {
+                    self.shader_chain = Some(rf_renderer::ShaderChain::new(gpu));
+                }
+            }
+            let shaded = match (shader, &self.shader_chain, &self.gpu) {
+                (Some(kind), Some(chain), Some(gpu)) if self.shader_budget.is_enabled() => {
+                    // Relative to the frame actually being shaded (an HD
+                    // pack's is already larger), so the shader draws at
+                    // about the size it will be shown.
+                    let n = crate::shader_select::output_scale(
+                        self.last_play_rect.map_or(0.0, |r| r.height()),
+                        dh,
+                    );
+                    let (w32, h32) = (
+                        u32::try_from(dw).unwrap_or(0),
+                        u32::try_from(dh).unwrap_or(0),
+                    );
+                    let stage =
+                        crate::shader_select::stage(kind, &self.settings.shaders.values(kind))
+                            .with_out_size(w32 * n, h32 * n);
+                    let started = std::time::Instant::now();
+                    let result = chain.render(gpu, displayed, w32, h32, &[stage]);
+                    let ms = started.elapsed().as_secs_f64() * 1000.0;
+                    match result {
+                        Ok(out) => {
+                            if self.shader_budget.record_sample_ms(ms) {
+                                self.shader_note = Some(
+                                    "Shader paused: this machine cannot run it at full speed."
+                                        .to_string(),
+                                );
+                            }
+                            Some((out, (w32 * n) as usize, (h32 * n) as usize))
+                        }
+                        Err(e) => {
+                            // FR-REND-007's shape: fall back to the plain
+                            // picture and say so once, never a black frame.
+                            self.shader_note =
+                                Some(format!("Shader failed ({e}); showing the plain picture."));
+                            self.settings.video.shader = None;
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let (displayed, dw, dh, filter) = match &shaded {
+                Some((out, w, h)) => (out.as_slice(), *w, *h, egui::TextureOptions::LINEAR),
+                None => (displayed, dw, dh, egui::TextureOptions::NEAREST),
+            };
+            if self.hash_display_for_test {
+                self.display_hash = Some(fnv1a_hash(displayed, &[]));
+            }
             let image = egui::ColorImage::from_rgba_unmultiplied([dw, dh], displayed);
             match &mut self.texture {
-                Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
+                Some(tex) => tex.set(image, filter),
                 None => {
-                    self.texture =
-                        Some(ctx.load_texture("nes-frame", image, egui::TextureOptions::NEAREST));
+                    self.texture = Some(ctx.load_texture("nes-frame", image, filter));
                 }
             }
             // Ticket W3-03a: empty means the core thread is not extracting
@@ -4984,19 +5063,65 @@ impl RetroForgeApp {
                                 }
                                 ui.separator();
 
+                                // Ticket W20-02: a picker over the shaders
+                                // that exist, each with the sliders its own
+                                // manifest declares — not a free-text box.
                                 ui.label("Shader");
-                                // W3-02a owns the shader set; until it lands the
-                                // only honest options are "none" and whatever a
-                                // config already names, so this is a text field
-                                // rather than a dropdown pretending to a catalogue.
-                                let mut shader =
-                                    self.settings.video.shader.clone().unwrap_or_default();
-                                if ui.text_edit_singleline(&mut shader).changed() {
-                                    self.settings.video.shader = (!shader.trim().is_empty())
-                                        .then(|| shader.trim().to_string());
-                                    changed = true;
+                                let selected = self
+                                    .settings
+                                    .video
+                                    .shader
+                                    .as_deref()
+                                    .and_then(crate::shader_select::kind_from_id);
+                                egui::ComboBox::from_id_salt("shader-picker")
+                                    .selected_text(
+                                        selected.map_or("None", |k| k.manifest().display_name),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        if ui.selectable_label(selected.is_none(), "None").clicked() {
+                                            self.settings.video.shader = None;
+                                            changed = true;
+                                        }
+                                        for kind in crate::shader_select::KINDS {
+                                            let m = kind.manifest();
+                                            if ui
+                                                .selectable_label(selected == Some(kind), m.display_name)
+                                                .clicked()
+                                            {
+                                                self.settings.video.shader = Some(m.id.to_string());
+                                                self.shader_budget = rf_renderer::fog::BudgetGate::new();
+                                                self.shader_note = None;
+                                                changed = true;
+                                            }
+                                        }
+                                    });
+                                if let Some(kind) = selected {
+                                    let values = self.settings.shaders.values(kind);
+                                    for (p, mut v) in kind.manifest().params.iter().zip(values) {
+                                        if ui
+                                            .add(egui::Slider::new(&mut v, p.min..=p.max).text(p.label))
+                                            .changed()
+                                        {
+                                            self.settings.shaders.set(kind, p.name, v);
+                                            changed = true;
+                                        }
+                                    }
+                                    if !kind.manifest().params.is_empty()
+                                        && ui.small_button("Reset to defaults").clicked()
+                                    {
+                                        self.settings.shaders.reset(kind);
+                                        changed = true;
+                                    }
+                                    if self.gpu.is_none() {
+                                        ui.small("No GPU available to this window, so shaders cannot run.");
+                                    }
+                                } else if self.settings.video.shader.is_some() {
+                                    ui.small("The saved shader is not in this version; showing the plain picture.");
                                 }
-                                ui.small("Leave empty for the plain picture.");
+                                if let Some(note) = &self.shader_note {
+                                    ui.small(note);
+                                }
+                                ui.small("Changes how the picture looks, not how the game runs.");
                                 ui.separator();
 
                                 if ui
@@ -8545,6 +8670,14 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn play_rect_for_test(&self) -> Option<(egui::Rect, (usize, usize))> {
         self.last_play_rect.zip(self.core_frame_size)
+    }
+
+    /// Ticket W20-02: fingerprint each displayed frame from now on, and
+    /// read the latest fingerprint.
+    #[doc(hidden)]
+    pub fn hash_display_for_test(&mut self) -> Option<u64> {
+        self.hash_display_for_test = true;
+        self.display_hash
     }
 
     /// The size of the texture the play view is actually drawing.
