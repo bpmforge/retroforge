@@ -11556,3 +11556,33 @@ checked-in replay carries `full-v1` hashes.
 `rewinding_shows_exactly_the_frame_that_was_originally_rendered` exists
 only on ui/wave-17, where the rewind feature lives; that branch can now
 un-ignore it.
+
+## W14-63 (2026-10-06) — two header bytes no board assigns
+
+Two refusals from W14-60's triage, both from header bytes rather than
+missing hardware. Each fix is a header-plausibility rule citing fullsnes
+"SNES Cartridge ROM Header", pinned by a synthetic-shape unit test in
+`crates/rf-cart/src/snes.rs` (no ROM bytes in git, law 5).
+
+| title | header read (real archive) | before | after |
+|---|---|---|---|
+| Porky Pig's Haunted Holiday (USA) (Beta) (1994-05-24) | 2034.7 KiB odd-size dump; neither location scores; `$FFD5=$7A`, `$FFD6=$65` | refused as SPC7110 (W14-05 fallback read the `$A` nibble) | loads; **uniform screen** (census exit 10) |
+| Super Noah's Ark 3D (USA) (Piko Interactive) (Unl) | legible HiROM header at `$FFC0`, map `$31`, chipset `$0A`, checksum pair valid | refused as DSP | **renders** (exit 0), as its (Unl) sibling already did |
+
+- **Map-mode byte shape** (`unsupported_map_mode_at_either_location`):
+  FFD5h "Bit7-6 Always 0". A byte with either bit set is not a map-mode
+  byte, so the fallback no longer names a chip from it. Bit 5 is not
+  checked (fullsnes hedges it, and W14-05's `$05`-filler test names
+  ExHiROM on purpose). Test:
+  `porky_pig_beta_shape_map_byte_outside_its_documented_shape_names_no_chip`
+  (a well-shaped `$3A` in the same image still refuses as SPC7110).
+- **DSP nibble with hw `$A`**: the xAh row is "ROM+Co-processor+RAM+
+  Battery+Overclocked GSU1", naming the GSU; under nibble `$0` it
+  contradicts itself, so it is no coprocessor. Narrow on purpose: DSP
+  with hw `$9` still refuses (`dsp_nibble_with_unassigned_hw_value_still_refuses`),
+  and `$06` still refuses as DSP. Test:
+  `noahs_ark_piko_shape_dsp_nibble_with_unassigned_hw_is_no_coprocessor`.
+
+Porky Pig's beta moving to the uniform bucket is expected: the dump is an
+odd size with no legible header at either location; its retail release
+already renders.
