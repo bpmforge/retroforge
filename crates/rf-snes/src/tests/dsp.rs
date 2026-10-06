@@ -2,8 +2,8 @@
 //! modulation (ticket W7-08).
 
 use crate::apu::dsp::{
-    counter_fires, decode_brr, gaussian, Dsp, Echo, EchoChannel, Envelope, EnvelopeStage, Noise,
-    COUNTER_MAX, COUNTER_RATES, GAUSS, LOOP_CYCLES,
+    counter_fires, decode_brr, gaussian, pmon_step, Dsp, Echo, EchoChannel, Envelope,
+    EnvelopeStage, Noise, COUNTER_MAX, COUNTER_RATES, GAUSS, LOOP_CYCLES,
 };
 use crate::apu::Apu;
 
@@ -998,4 +998,84 @@ fn brr_range_thirteen_to_fifteen_use_the_reserved_case_not_a_bigger_shift() {
              case, not keep shifting"
         );
     }
+}
+
+/// KON is consumed when it is polled: one write is ONE key-on, however
+/// long the value stays readable in the register (W7-08, Blackthorne's
+/// ENVX poller).
+///
+/// fullsnes, "KON/KOFF Notes": "KON effectively takes effect 'on write',
+/// even though a non-zero value can be read back much later. KOFF and
+/// FLG.7, on the other hand, exert their influence constantly until a new
+/// value is written", and the interaction list ends "Set the 'internal'
+/// value of KON to 0". A model that re-latches the register at every
+/// poll re-keys the voice every other sample for ever, so its envelope
+/// never gets past the first attack step and a KOFF written afterwards
+/// can never be seen to win — a driver that waits for the released voice's
+/// ENVX to fall below 8 then waits for ever.
+#[test]
+fn one_kon_write_keys_on_once_not_at_every_poll() {
+    let mut dsp = Dsp::new();
+    let mut aram = vec![0u8; 0x10000];
+    dsp.write_register(0x6C, 0x00, &aram); // FLG: leave reset (E0 = soft reset + mute)
+    dsp.write_register(0x05, 0x8F, &aram); // ADSR1: ADSR on, attack $F (fast)
+    dsp.write_register(0x06, 0xE0, &aram); // ADSR2: sustain level 7, rate 0 (hold)
+    dsp.write_register(0x4C, 0x01, &aram); // KON voice 0, never rewritten
+
+    let mut prev = 0i16;
+    for n in 0..400 {
+        let _ = dsp.mix(&mut aram);
+        let level = dsp.voices[0].envelope.level;
+        // Once the attack is over the level only ever creeps down through
+        // the decay step; a re-key would drop it to 0 and climb again.
+        if n >= 8 {
+            assert!(
+                level >= 0x700,
+                "sample {n}: level {level} (was {prev}); the stale KON value \
+                 re-keyed the voice"
+            );
+        }
+        prev = level;
+    }
+    assert!(
+        prev >= 0x700,
+        "a fast attack held at sustain level 7 must sit at the top; got {prev}"
+    );
+}
+
+/// The Blackthorne shape: KON and KOFF both left set for a voice. KON
+/// zeroes the envelope once, then KOFF wins and the release runs the level
+/// down to 0, where it stays (fullsnes: "Setting both KOFF and KON for a
+/// channel will turn the channel off much faster than just KOFF alone").
+#[test]
+fn a_standing_koff_releases_a_voice_that_was_keyed_once() {
+    let mut dsp = Dsp::new();
+    let mut aram = vec![0u8; 0x10000];
+    dsp.write_register(0x6C, 0x00, &aram); // FLG: leave reset (E0 = soft reset + mute)
+    dsp.write_register(0x05, 0x8F, &aram);
+    dsp.write_register(0x06, 0xE0, &aram);
+    dsp.write_register(0x4C, 0x01, &aram);
+    for _ in 0..40 {
+        let _ = dsp.mix(&mut aram);
+    }
+    assert!(dsp.voices[0].envelope.level > 0x600);
+    dsp.write_register(0x5C, 0x01, &aram); // KOFF, left standing
+                                           // 0x7FF / 8 = 256 samples of release, plus the poll latency.
+    for _ in 0..300 {
+        let _ = dsp.mix(&mut aram);
+    }
+    assert_eq!(dsp.voices[0].envelope.level, 0);
+    assert_eq!(dsp.read_register(0x08), 0, "ENVX reads 0 once released");
+}
+
+/// PMON's step is the documented integer formula, not a float estimate
+/// (fullsnes "Pitch Counter": `Factor = (OUTX SAR 4) + 400h`,
+/// `Step = (Step * Factor) SAR 10`).
+#[test]
+fn pmon_step_is_the_documented_integer_formula() {
+    assert_eq!(pmon_step(0x1000, 0), 0x1000, "silence leaves pitch alone");
+    assert_eq!(pmon_step(0x1000, 0x2000), 0x1800, "factor 0x600");
+    assert_eq!(pmon_step(0x1000, -0x4000), 0, "factor 0");
+    assert_eq!(pmon_step(0x1000, 0x3FFF), 0x1FFC, "factor 0x7FF, exact");
+    assert_eq!(pmon_step(0x3000, 0x3FFF), 0x3FFF, "clamped to 14 bits");
 }

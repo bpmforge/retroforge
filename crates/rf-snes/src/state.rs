@@ -223,9 +223,13 @@ impl crate::system::SnesSystem {
             StateRegion::Cpu => {
                 self.cpu.save(o)?;
                 o.u64(self.master_cycles)?;
-                o.bool(self.pending_nmi)?;
+                // Bit 0: an NMI awaiting dispatch. Bit 1: the vblank edge's
+                // one-opcode delay (`nmi_hold`, W14-38). A state written
+                // before that field holds 0/1, which loads unchanged.
+                o.u8(u8::from(self.pending_nmi) | (u8::from(self.nmi_hold) << 1))?;
                 let b = &self.bus;
                 o.u16(b.vram_address)?;
+                o.u16(b.vram_prefetch)?;
                 o.u8(b.vmain)?;
                 b.math.save(o)?;
                 o.u8(b.nmitimen.0)?;
@@ -400,8 +404,11 @@ impl crate::system::SnesSystem {
             StateRegion::Cpu => {
                 self.cpu.load(i)?;
                 self.master_cycles = i.u64()?;
-                self.pending_nmi = i.bool()?;
+                let nmi_bits = i.u8()?;
+                self.pending_nmi = nmi_bits & 1 != 0;
+                self.nmi_hold = nmi_bits & 2 != 0;
                 self.bus.vram_address = i.u16()?;
+                self.bus.vram_prefetch = i.u16()?;
                 self.bus.vmain = i.u8()?;
                 self.bus.math.load(i)?;
                 let nmitimen = i.u8()?;

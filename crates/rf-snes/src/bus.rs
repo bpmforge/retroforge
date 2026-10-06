@@ -61,6 +61,10 @@ pub struct Dsp1DrTrace {
 pub struct SnesBus {
     pub rom: Vec<u8>,
     pub sram: Vec<u8>,
+    /// Cartridge RAM in the `$6000-$7FFF` window of the system banks
+    /// (ticket W14-60). `None` on every cartridge but a LoROM board whose
+    /// header cannot declare its RAM.
+    window_ram: Option<Box<WindowRam>>,
     pub wram: Vec<u8>,
     /// `$2116`/`$2117` VMADD — a WORD address into the PPU's VRAM.
     ///
@@ -70,6 +74,8 @@ pub struct SnesBus {
     /// while rendering read `ppu.vram`, so every game would draw a black
     /// screen with nothing obviously wrong anywhere.
     pub vram_address: u16,
+    /// VRAM read prefetch latch (`$2139`/`$213A` return it).
+    pub vram_prefetch: u16,
     /// `$2115` VMAIN — increment step and which port write advances it.
     pub vmain: u8,
     pub mode: SnesMapMode,
@@ -225,6 +231,34 @@ pub struct SnesBus {
     pub(crate) sa1_bwram_contended: bool,
 }
 
+/// The `$6000-$7FFF` cartridge RAM window (ticket W14-60).
+///
+/// Write-allocated: a byte reads back what was last written to it, and a
+/// byte never written reads as open bus, exactly what an undecoded window
+/// returns. A header-less LoROM board gives the emulator no way to know
+/// whether this RAM exists, so the never-written read is kept identical to
+/// the no-RAM answer; only a program that stores and then loads sees RAM.
+struct WindowRam {
+    data: [u8; 0x2000],
+    written: [bool; 0x2000],
+}
+
+impl Default for WindowRam {
+    fn default() -> Self {
+        Self {
+            data: [0; 0x2000],
+            written: [false; 0x2000],
+        }
+    }
+}
+
+impl WindowRam {
+    fn write(&mut self, i: usize, value: u8) {
+        self.data[i] = value;
+        self.written[i] = true;
+    }
+}
+
 impl SnesBus {
     /// Subscribe the consumer to a set of events (ticket W13-02h).
     ///
@@ -299,8 +333,10 @@ impl SnesBus {
             hdma_lanes: vec![0; 262],
             rom,
             sram: vec![0; sram_len],
+            window_ram: None,
             wram: vec![0; WRAM_LEN],
             vram_address: 0,
+            vram_prefetch: 0,
             vmain: 0,
             mode,
             math: MathUnit::default(),
@@ -408,9 +444,32 @@ impl SnesBus {
         self.st010 = Some(crate::st010::St010::new());
     }
 
+    /// Give the cartridge 8 KiB of RAM at `$6000-$7FFF` of banks
+    /// `$00-$3F`/`$80-$BF` (ticket W14-60). Write-allocated: see
+    /// [`WindowRam`].
+    pub fn install_window_ram(&mut self) {
+        self.window_ram = Some(Box::default());
+    }
+
+    fn window_ram_read(&self, i: usize) -> u8 {
+        match self.window_ram.as_ref() {
+            Some(w) if w.written[i] => w.data[i],
+            _ => self.open_bus,
+        }
+    }
+
     fn target(&self, addr: u32) -> Target {
         let bank = ((addr >> 16) & 0xFF) as u8;
         let offset = addr as u16;
+        // Checked BEFORE the generic map: `map` answers open bus for this
+        // window on LoROM. `window_ram` is `None` for every cartridge
+        // that did not ask for it, so nothing else's mapping moves.
+        if self.window_ram.is_some()
+            && (bank < 0x40 || (0x80..0xC0).contains(&bank))
+            && (0x6000..0x8000).contains(&offset)
+        {
+            return Target::WindowRam(usize::from(offset - 0x6000));
+        }
         // Checked BEFORE the generic map, same reasoning as the DSP-1
         // window below: an SA-1 cart's I-RAM, BW-RAM and register windows
         // sit inside bank/offset space `map` would otherwise resolve as
@@ -600,6 +659,28 @@ impl SnesBus {
                 self.wram_port.advance();
                 v
             }
+            // $2139/$213A VMDATALREAD/VMDATAHREAD (fullsnes "PPU Video
+            // Memory (VRAM)"): these return the PREFETCH LATCH, not the
+            // word at the current address. On the byte VMAIN bit 7
+            // selects, the latch is first reloaded from the address
+            // BEFORE the increment, then the address steps: the reason
+            // games issue one dummy read after setting VMADD. Battle
+            // Grand Prix verifies a 24 KB DMA with exactly that idiom;
+            // as open bus (or a fresh read of the current address) its
+            // compare fails on every retry and the game never starts.
+            0x2139 | 0x213A => {
+                let high = offset == 0x213A;
+                let v = if high {
+                    (self.vram_prefetch >> 8) as u8
+                } else {
+                    self.vram_prefetch as u8
+                };
+                if (self.vmain & 0x80 != 0) == high {
+                    self.reload_vram_prefetch();
+                    self.step_vram_address();
+                }
+                v
+            }
             // $2140-$2143: catch the APU up FIRST, so what the CPU reads
             // is a state the APU actually reached.
             0x2140..=0x2143 => {
@@ -632,8 +713,14 @@ impl SnesBus {
                 self.apu.cpu_write_port(usize::from(offset - 0x2140), value);
             }
             0x2115 => self.vmain = value,
-            0x2116 => self.vram_address = (self.vram_address & 0xFF00) | u16::from(value),
-            0x2117 => self.vram_address = (self.vram_address & 0x00FF) | (u16::from(value) << 8),
+            0x2116 => {
+                self.vram_address = (self.vram_address & 0xFF00) | u16::from(value);
+                self.reload_vram_prefetch();
+            }
+            0x2117 => {
+                self.vram_address = (self.vram_address & 0x00FF) | (u16::from(value) << 8);
+                self.reload_vram_prefetch();
+            }
             0x2118 => {
                 let at = (self.vram_address as usize * 2) % self.ppu.vram.len();
                 self.ppu.vram[at] = value;
@@ -1054,6 +1141,12 @@ impl SnesBus {
         }
     }
 
+    /// Load the VRAM read latch from the word at `vram_address`.
+    fn reload_vram_prefetch(&mut self) {
+        let at = (self.vram_address as usize * 2) % self.ppu.vram.len();
+        self.vram_prefetch = u16::from(self.ppu.vram[at]) | (u16::from(self.ppu.vram[at + 1]) << 8);
+    }
+
     /// VMAIN bits 0-1 select the address increment: 1, 32, 128, 128
     /// words. Bit 7 selects which of the two data ports triggers it,
     /// which is why the callers above differ.
@@ -1232,31 +1325,19 @@ impl CpuBus for SnesBus {
             _ => {}
         }
         let value = match target {
-            // Ticket W18-01/W18-06 (D-016, both traces): SCMR RON gates
-            // SNES-side ROM READS by the raw bit, unconditional on GO —
-            // NOT `owns_rom_bus`. A traced Star Fox (USA) boot sets RON=1
-            // with GO=0 over 2,361 distinct ROM reads scattered across
-            // ordinary code (not just the exception-vector region), every
-            // one expecting open bus; gating those on GO&&RON instead
-            // (this session's first, reverted attempt at the coordinator's
-            // ruling) showed the CPU real ROM bytes it did not expect,
-            // walked into zero-initialized WRAM through a resulting bad
-            // jump, and executed a stray STP — a real regression, measured
-            // by `boot_census_child` flipping Star Fox (USA)/(Rev 1)/
-            // (Rev 2) from `rendered` to `uniform`. fullsnes's own GO&&RON
-            // sentence ("SNES Cart GSU-n Memory Map"/"GSU Interrupt
-            // Vectors": "When the GSU is running (with GO=1 and RON=1),
-            // ROM isn't mapped to SNES memory") is scoped to describing
-            // the FIXED VECTOR VALUES that appear at `$FFE4-$FFFF`
-            // specifically while GO=1 — it says nothing about the GO=0
-            // case, and this trace shows Star Fox relying on the ordinary
-            // raw-bit reading for ROM reads everywhere, GO=0 included.
-            // `gsu` is `None` for every non-GSU cartridge, so this is a
-            // no-op for them.
-            Target::Rom(_) if self.gsu.as_ref().is_some_and(|g| g.regs.ron()) => self.open_bus,
+            // Ticket W18-07: the GSU unmaps ROM from the SNES only while it
+            // is running (`owns_rom_bus`, GO && RON; fullsnes "GSU Memory
+            // Map"). The vector page then reads a fixed table; every other
+            // ROM read is open bus. GO=0 with RON=1 (a stopped chip) shows
+            // real ROM -- see `Gsu::fixed_vector_byte`. `gsu` is `None` for
+            // every non-GSU cartridge, so this is a no-op for them.
+            Target::Rom(_) if self.gsu.as_ref().is_some_and(|g| g.regs.owns_rom_bus()) => {
+                crate::gsu::Gsu::fixed_vector_byte(addr).unwrap_or(self.open_bus)
+            }
             Target::Rom(i) => self.rom[i],
             Target::Wram(i) => self.wram[i],
             Target::Sram(i) => self.sram[i],
+            Target::WindowRam(i) => self.window_ram_read(i),
             Target::Register(offset) => self.read_register(offset),
             // DR reads advance the chip's output cursor (ticket W14-19);
             // `dsp1` is `Some` whenever `target` can return these
@@ -1325,7 +1406,7 @@ impl CpuBus for SnesBus {
             // contending for the bus for a WRITE the SNES needs to make
             // before ever starting it, which is exactly Vortex's shape.
             Target::GsuRam(i) => {
-                if self.gsu.as_ref().is_some_and(|g| g.regs.ran()) {
+                if self.gsu.as_ref().is_some_and(|g| g.regs.owns_ram_bus()) {
                     self.open_bus
                 } else {
                     self.gsu.as_ref().map_or(self.open_bus, |g| g.ram[i])
@@ -1400,6 +1481,11 @@ impl CpuBus for SnesBus {
         match target {
             Target::Wram(i) => self.wram[i] = value,
             Target::Sram(i) => self.sram[i] = value,
+            Target::WindowRam(i) => {
+                if let Some(w) = self.window_ram.as_mut() {
+                    w.write(i, value);
+                }
+            }
             Target::Register(offset) => self.write_register(offset, value),
             // DR writes feed the command/parameter protocol (ticket
             // W14-19). SR is documented read-only (snesdev/fullsnes name
@@ -1548,12 +1634,15 @@ impl CpuBus for SnesBus {
 
     fn peek(&self, addr: u32) -> u8 {
         match self.target(addr) {
-            // Same raw-bit rule as `read` above (see that arm's doc):
-            // peek must agree with what a real read would show.
-            Target::Rom(_) if self.gsu.as_ref().is_some_and(|g| g.regs.ron()) => self.open_bus,
+            // Same GO && RON rule as `read` above: peek must agree with
+            // what a real read would show.
+            Target::Rom(_) if self.gsu.as_ref().is_some_and(|g| g.regs.owns_rom_bus()) => {
+                crate::gsu::Gsu::fixed_vector_byte(addr).unwrap_or(self.open_bus)
+            }
             Target::Rom(i) => self.rom[i],
             Target::Wram(i) => self.wram[i],
             Target::Sram(i) => self.sram[i],
+            Target::WindowRam(i) => self.window_ram_read(i),
             // Only the side-effect-free subset. An address whose read has
             // consequences reports open bus rather than firing them.
             Target::Register(offset) => self.read_register_pure(offset).unwrap_or(self.open_bus),
@@ -1578,7 +1667,7 @@ impl CpuBus for SnesBus {
             Target::Sa1Bitmap(_) => self.open_bus,
             // Same raw-bit rule as `read` above.
             Target::GsuRam(i) => {
-                if self.gsu.as_ref().is_some_and(|g| g.regs.ran()) {
+                if self.gsu.as_ref().is_some_and(|g| g.regs.owns_ram_bus()) {
                     self.open_bus
                 } else {
                     self.gsu.as_ref().map_or(self.open_bus, |g| g.ram[i])

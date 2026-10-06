@@ -1626,3 +1626,82 @@ fn sub_screen_composition_leaves_the_live_ppu_untouched() {
     let _ = p.render_scanline(0);
     assert!(p.range_over, "the main screen's 33rd sprite still trips it");
 }
+
+/// **INIDISP written in HBLANK belongs to the NEXT line, and must not
+/// rewrite the lines already latched** (ticket W14-32).
+///
+/// Jungle Strike splits its frame with three H/V IRQs whose handlers write
+/// `$2100` at dot ~257 -- hblank, so `Timing::mid_line_position` reports no
+/// active-display position and nothing is recorded per line. It forces
+/// blank at line 220 (`$2100 = $80`) for its OAM DMA and restores the
+/// brightness at line 4 of the next frame. `LineState` did not latch
+/// `forced_blank`/`brightness`, so composition read the LIVE value: the
+/// frame ended with the line-220 write in place and all 224 lines came out
+/// as forced blank -- a uniform black picture for the whole intro (991
+/// frames in the census), while the fully visible sprite text sat in OAM.
+///
+/// Per fullsnes ("2100h - INIDISP") the force-blank bit blanks the picture
+/// from the moment it is written; a line latched while the screen was on
+/// keeps that state however the register moves afterwards.
+#[test]
+fn forced_blank_and_brightness_are_latched_per_scanline() {
+    let mut p = ppu_with_tile();
+    for i in 0..32 {
+        set_tilemap(&mut p, 0, i, 1);
+    }
+    p.write_register(0x212C, 0x01); // BG1 on the main screen
+    p.write_register(0x2100, 0x0F); // screen on, full brightness
+    p.latch_line(1);
+    // Line 220's IRQ handler blanks the screen (in hblank: no record).
+    p.write_register(0x2100, 0x80);
+    p.latch_line(2);
+
+    let px = |p: &mut Ppu, y: u16| p.render_scanline(y).pixels[0].layer;
+    assert_eq!(
+        px(&mut p, 0),
+        PixelLayer::Background(0),
+        "a line latched with the screen on was blanked by a LATER write"
+    );
+    assert_eq!(
+        px(&mut p, 1),
+        PixelLayer::Backdrop,
+        "a line latched during forced blank must stay blank"
+    );
+    let l0 = p.line_state_for_test(1).expect("latched");
+    assert_eq!((l0.forced_blank, l0.brightness), (false, 0x0F));
+}
+
+/// W14-51: `$212C` TM / `$212D` TS are per-line state. fullsnes ("212Ch -
+/// TM"): the layer designation in force when the beam reaches a line is
+/// the one that line is drawn with. Battletoads in Battlemaniacs and Final
+/// Fight 2 drive TM from HDMA (`$94:B17B`: 31 lines of 0, 162 of BG2, then
+/// 0 again); composing from the LIVE TM (left at 0 by the last table entry)
+/// blanked the whole picture.
+#[test]
+fn tm_and_ts_are_latched_per_scanline() {
+    let mut p = ppu_with_tile();
+    for i in 0..32 {
+        set_tilemap(&mut p, 0, i, 1);
+    }
+    p.write_register(0x212C, 0x01); // BG1 on the main screen
+    p.write_register(0x212D, 0x10); // OBJ on the sub screen
+    p.latch_line(1);
+    p.write_register(0x212C, 0x00); // HDMA turns the layer off for line 2
+    p.write_register(0x212D, 0x00);
+    p.latch_line(2);
+    // Live TM ends at 0, exactly like the last HDMA table entry.
+    let lit = |p: &mut Ppu, y: u16| {
+        p.render_scanline(y)
+            .pixels
+            .iter()
+            .filter(|px| px.layer != PixelLayer::Backdrop)
+            .count()
+    };
+    assert!(lit(&mut p, 0) > 0, "line 0 was latched with BG1 on");
+    assert_eq!(lit(&mut p, 1), 0, "line 1 was latched with TM = 0");
+    assert_eq!(p.ts, 0, "the live TS is restored after composition");
+    assert_eq!(
+        p.line_state_for_test(1).map(|l| (l.tm, l.ts)),
+        Some((0x01, 0x10))
+    );
+}

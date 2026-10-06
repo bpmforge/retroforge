@@ -184,6 +184,7 @@ fn every_address_maps_within_bounds() {
                     | Target::Cx4Register(_)
                     | Target::Obc1Register(_)
                     | Target::Obc1Bits(_)
+                    | Target::WindowRam(_)
                     | Target::St010Ram(_)
                     | Target::St010Register(_)
                     | Target::Open => {}

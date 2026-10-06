@@ -11102,3 +11102,414 @@ Library archives targeted (per the ticket; the orchestrator's own census
 is the record of what actually moved): Videomation, Videomation (Alt)
 (CPROM/mapper 13), one UNROM 512/mapper 30 title, Magi Cube (Proto) and
 [BIOS] Demo Vision (NES 2.0 exponent-multiplier sizes).
+
+**W14-23 packet-count verdict, 2026-09-28 (branch feat/apu-handshake-family; no crates change, tree re-verified).**
+Hypothesis tested: the 65C816 sends the SMRPG driver far more packets than
+it intends to. Result: **confirmed, and already fixed by W14-24** — W14-23's
+"needs a real-hardware capture" conclusion is superseded.
+
+- Side/port/value: the producer is the 65C816. No port read is stale; the
+  packet countdown `X` (loaded at `C4:0539`, spun on `$2140` at
+  `C4:0541`/`C4:0545`) is the quotient `(len+2)/3` from the `$4204-$4217`
+  divider, read at `C4:04FD` (`$4215`) and `C4:0505` (`$4214`). fullsnes
+  ("SNES Maths Multiply/Divide"): the result is valid 16 CPU cycles after
+  the `$4206` write. Pre-W14-24 the high-byte read landed mid-divide
+  (`rddiv=0x8010`), so `X=0x8021` = 32,801 packets vs the intended 33
+  (dividend `0x65`). The driver's `ADC/BCC` carry chain therefore ran ~200
+  page carries and stamped its own code (W14-23 stage 2's `$09B3-$09B5`).
+- Current tree (`PROBE_MATHPC=c404fd,c40539`, release): `busy=false` at
+  every `C404FD`; intended counts 6, 33, 15, 27, 66, 108, 168, 102, 165, 150
+  (`a=` at `C40539`), all matching `wrdiv/3`. `PROBE_STOP_ON_SPC_STOP=1` at
+  1,050,000 instructions: `spc.stopped=false`, SPC in the `$02xx-$03xx`
+  driver; `PROBE_MODE=frames PROBE_FRAMES=600`: `varied_at=Some(37)`.
+- No unit test or fix was added: the defect and its tests
+  (`tick_completes_a_divide_after_its_real_master_cycle_latency` etc.)
+  already exist from W14-24. No titles moved (nothing changed).
+
+## Full SNES census 2026-09-28 (feat/apu-handshake-family, release, `RF_CENSUS_OUT`)
+
+**1192 rendered / 60 uniform / 13 refused / 0 no-video / 0 crashed / 0 timed out**, 1265 titles in 1548 s. The previous recorded run (W14-28) was 1061/74/130. "Rendered something" means pixels changed within the census frame budget, not that the game is correct.
+
+Tickets closed on this evidence (named titles all render): W14-23, W14-25, W14-27, W14-29, W14-30, W14-33.
+
+Still uniform, by open ticket: W14-46/48/49 (Urban Strike, Tekken 2 Pirate, NBA Live 96, Battle Grand Prix, Blackthorne x3, Batman proto, Phalanx x2, Sonic Blast Man II), W14-32 (Jungle Strike), W14-38 (Lagoon, Phalanx, Goal!), W14-40 (The Pagemaster x4), W14-51 (Final Fight 2 x2, Battletoads x2). Refused (13): Super Game Boy x5, ST010, Top Gear 3000 and six unlicensed/proto carts.
+
+
+## W14-32 / W14-40 re-trace (2026-09-28) — the "991-frame boot" and the Pagemaster "idle" were one PPU defect: INIDISP was not latched per line
+
+**Verdict: emulator-side, fixed.** The W14-32 write-up above (and W14-40's
+notes) concluded "slow, hardware-accurate boot" from CPU-side evidence only
+and never looked at what the picture was composed from. Re-traced on the
+current tree with `title_probe` (`PROBE_WATCH`, `PROBE_DIS`, `PROBE_OAM`,
+`PROBE_RENDERNOW`, `PROBE_MODE=ppuwrites`):
+
+- Jungle Strike is not stalled. Its main loop (`$A0:8152`) is a per-frame
+  script interpreter: wait on `$0CAF`, then run script commands. Its
+  commands are authored fade-in (`$0C0A` 0->15, 8 frames a step), a
+  `$A0:CE52` "wait N passes" with N=$78 (measured: `$0CBD` 0x78 counting
+  down once per ~14.1k instructions), then a fade-out, repeated for several
+  screens. The screens are text drawn as 16x16 sprites (`PROBE_OAM`: sprites
+  at y=89/105, x=60..182, OBJ palette 6 a grey ramp) -- fully on-screen,
+  brightness 15, forced blank clear for those frames. The 16 s "boot" is the
+  game's own legal/logo sequence, displayed.
+- Yet every composed frame was uniform. `PROBE_RENDERNOW` (composition at an
+  arbitrary point) produced 16 distinct indices while the census sink saw 1.
+  `PROBE_MODE=ppuwrites` showed why: the game runs a three-way H/V-IRQ raster
+  split whose handlers write `$2100` at dot ~257 (HBLANK): `$80` (force
+  blank, for its OAM DMA) at line 220 and the restored brightness at line 4
+  of the next frame. `Timing::mid_line_position` returns `None` in hblank, so
+  those writes are not recorded per line, and `LineState` (the always-latched
+  per-line register set) did not carry `forced_blank`/`brightness`, so
+  `render_scanline` read the LIVE value. The frame's last `$2100` write is
+  the line-220 blank, so all 224 lines composed as forced blank -- a uniform
+  black picture, however visible the game meant it to be.
+- This also explains the earlier "205 vs 991": the pre-WAI-fix tree never ran
+  the line-220 IRQ handler, so forced blank was never set at frame end.
+
+**Fix.** `crates/rf-snes/src/ppu/mod.rs`: `LineState` gains `forced_blank`
+and `brightness`, captured in `latch_line` (line start, after HDMA) and
+applied in `apply_line_state`; the `LineScratch`/`PpuRegs` restore already
+covered both. Per fullsnes "2100h - INIDISP" each line is drawn with the
+value in force when the beam reached it. Regression test
+`tests::ppu::forced_blank_and_brightness_are_latched_per_scanline` (RED
+before: a line latched with the screen on came out `Backdrop` after a later
+`$2100=$80`; GREEN after). Layer enables (`$212C/D`), OBJ size and the like
+are still composed from live registers -- same class, not needed by these
+titles, deliberately not widened here.
+
+**Census children (release, this tree):** Jungle Strike (USA) 10 -> 0;
+The Pagemaster (USA), (Beta 1), (Beta 2), (Beta 3) 10 -> 0 (moved by this one
+change alone, so W14-40's "1660 idle frames" was a blanked composition, not a
+wait target -- inferred from the census move; their `$2100` write sites were
+not separately traced); Mega Man X2, X3 0 -> 0;
+canaries Wild Guns, Kirby Super Star, Super Mario World, Super Mario RPG,
+Super Bonk, Rival Turf! all 0 -> 0. The orchestrator's full census must name
+every other mover (any title that toggles `$2100` in hblank).
+
+## W19-02 status check (2026-09-28) — Cx4: still blocked, acceptance not met
+
+`crates/rf-snes/src/cx4.rs` (657 lines), bus wiring (`install_cx4`,
+`Target::Cx4Ram`/`Cx4Register`) and `rf-cart` `$F3` detection are in the tree
+and Mega Man X2/X3 render (census child exit 0). The ticket's own acceptance
+(per-command HLE, Cx4 wireframe/sprite scenes) is NOT met: the W19-02 write-up
+above records that fullsnes documents the register/DMA window and the math
+tables but no command algorithms. Nothing built; ticket stays blocked on
+documentation, not effort.
+
+## W14-38 / W14-51 (2026-09-28) — the vblank NMI is taken one opcode AFTER the flag edge
+
+**Root cause (Lagoon, Phalanx x2, Goal!, Zool (Beta), Sonic Blast Man II,
+Street Fighter Alpha 2, Tuff E Nuff): fixed.** These titles run a vblank wait
+`LDA $4210 / BPL` with NMI enabled while their NMI handler also reads `$4210`
+(Phalanx: `$00:811A` wait loop, handler `$00:8416` does `CMP $4210`). `SnesSystem::step`
+dispatched the NMI at the end of the very instruction that raised the flag, so
+the handler always consumed bit 7 before the wait loop's next read; the loop
+spun forever (9,915 of 20,000 sampled instructions at `$811A/$811D`, main
+`JSL`s never reached, `$2100` never left forced blank). fullsnes "SNES
+Interrupts": the internal NMI flag "gets cleared when the NMI gets executed,
+which should happen around after the next opcode" — the flag is readable for
+one opcode before the NMI is taken. Fix: `SnesSystem::nmi_hold` (set on the
+flag edge, promoted to `pending_nmi` after the next instruction, enable
+re-checked at dispatch; state byte bit 1, old saves load unchanged). Only the
+FLAG edge is touched — the `$4200`-write cases the W14-47 follow-up recorded
+(The Terminator, Super Black Bass, Magical Drop II) are unaffected.
+Tests: `a_4210_wait_loop_sees_the_vblank_flag_before_the_nmi_handler_eats_it`
+(RED with immediate dispatch, verified), plus the two W14-47 NMI tests updated
+for the one-opcode delay.
+
+**A/B, same binary with the delay switched off (frames mode):** Lagoon,
+Phalanx, Goal!, Zool (Beta) `varied_at=None` -> 165 / 226 / 33 / 21; Xardion
+(621) and Knights of the Round (950) unchanged (not this cause).
+**Census, all 1,265 archives, this tree vs the 2026-09-28 branch census:**
++8 rendered (the seven above and Phalanx (Beta)); 1 mover the other way,
+`Porky Pig's Haunted Holiday (Beta) (1993-11-10) (Subgames)`, which was never
+a real render: in both trees it crashes into WRAM (`$7DE00B..$7DE013` BRK loop,
+`vram_nonzero=9`), the old tree just painted noise while doing it.
+Canaries (Wild Guns, Kirby Super Star, Super Mario World, Super Mario RPG,
+Super Bonk, Rival Turf!, Terminator, Super Black Bass, Magical Drop II) 0 -> 0.
+
+**Stacked with the INIDISP per-line latch (b4ee1dd, other lane):** Brandish,
+Knights of the Round and the Firearm proto also census 0 (10 before).
+
+**Not the same cause, still uniform at 600 frames (verdicts, W14-51):**
+- Xardion: renders at ~frame 621 (`varied_at`), i.e. past the census window —
+  a slow boot, not a hang.
+- Final Fight 2 (x2), Battletoads in Battlemaniacs (x2): NOT waiting on any
+  hardware condition. Both sit in a `WAI` per-frame loop (FF2 `$808C0A`,
+  Battletoads `$94808F`) with NMI dispatching every frame; `apu_port_changes=0`.
+  Battletoads' scene index `$7E0810` steps 00->1D (30 scenes, first at
+  n=4.5M, last at n=97M) and wraps, i.e. the game is running its intro
+  cutscene sequence, and TM (`$212C`) is HDMA-driven (channel 1, table
+  `$94:B17B`: 31 lines TM=0 then 162 lines TM=BG2). So the picture is blank
+  while the game logic is progressing: a composition/content problem
+  (BG2 contents or the HDMA'd layer split), not a wait target. The scene
+  dispatcher is `$94:A2B2` (`JMP ($A2BA,X)` on `$0810`). Next step for a
+  future lane: dump BG2 tilemap/char VRAM and per-line composition at
+  scene 2 and compare to the HDMA'd TM lines; do not look at the APU.
+
+**Final stacked census (this branch = W14-38 NMI delay + b4ee1dd INIDISP latch,
+all 1,265 archives vs the 2026-09-28 branch census):** 22 uniform -> rendered
+(the 8 above; Brandish, Knights of the Round, Firearm proto, Jungle Strike,
+Pagemaster x4, Justice League Task Force x2, Dragon - Bruce Lee (Beta), Power
+Rangers Zeo Battle Racers, Spot Goes to Hollywood (Proto), WeaponLord), 1 the
+other way (the Porky Pig Subgames beta above, a WRAM crash in both trees).
+Gate: fmt clean, clippy -D warnings clean, `cargo test --workspace` 2,445
+passed / 0 failed, validate-arch OK; ignored suites (65816 vectors, SPC700
+vectors, blargg spc_timer, gilyon, peterlemon 3/3, region, undisbeliever 2/2)
+all green. Note: the 2026-09-28 census showed Xardion moving 562 -> 621
+frames (past the 600-frame window) from an earlier commit; not caused by this
+change (same 621 with the NMI delay off).
+
+## W14-46 / W14-48 / W14-49 (cluster A, 2026-09-28) — the IPL fetched the data byte too early; Urban Strike and NBA Live 96 render
+
+**Verdict: fixed. Root cause is not a missing IPL residency, not a TCALL
+trap, and not a halted driver: the HLE stored every uploaded byte ONE
+POSITION LATE for uploaders that write `$2140` (counter) before `$2141`
+(data).** Both W14-48's "TCALL 0 through `$FFDE`" reading and W14-46's
+"stub control flow reaches `$EFF2`" were downstream symptoms of a shifted
+driver image.
+
+**Trace (Urban Strike, current tree, ROM bytes read at runtime with
+`PROBE_PEEK`/`PROBE_FINDROM`; no ROM bytes are in the tree, law 5):**
+
+1. The 65816 uploader at `$92:8000-$8065` is the standard Nintendo routine
+   (`STA $2140` counter, `XBA`, `STA $2141` data — counter FIRST). Its
+   first block header (ROM `$92:838F`) is length `$1383` (4,995 bytes),
+   destination `$0460`, and the terminator header (`$92:9716`) is length
+   0, run address `$0460`. The `Transferring(131)` seen in W14-46 is
+   4,995 mod 256: the block is the whole driver, not a 131-byte stub.
+2. The first data byte in ROM (`$92:8393`) is `$20` (`CLRP`), but ARAM
+   `$0460` held `$01` and `$0461` held `$20`: the image was shifted by one,
+   the `$01` being the previous `$2141` value (the block-start "kind"
+   flag). The driver's real entry is therefore `$0460` = `CLRP` on
+   hardware, and `$01` (`TCALL 0`) on ours — which is the `$FFDE`-vector
+   walk W14-48 traced, correct in every detail except its cause.
+3. Why: `IplBoot::poll` decides a `Store` the instant it sees the new
+   counter on port 0 and captured `ports_in[1]` at that instant. The
+   boot ROM does not read `$F5` at that instant: per fullsnes "Boot ROM
+   Disassembly", `$FFDA cmp Y,$F4` (3) / `$FFDC jnz` (2) / `$FFDE mov
+   A,$F5` (3) — the data byte is fetched ~5 SPC cycles (~105 master
+   cycles) after the counter is observed, while the CPU's `STA $2140 /
+   XBA / STA $2141` lands its second write ~2.7 SPC cycles after the
+   first. Uploaders that write data before the counter (most titles that
+   already booted) never exposed it.
+
+**Fix (`crates/rf-snes/src/apu/boot.rs`):** the pending `Store` re-samples
+`ports_in[1]` when `BYTE_DATA_FETCH_CYCLES` (5) have elapsed, instead of
+using the value at detection. RED test:
+`the_data_byte_is_fetched_after_the_counter_not_when_the_counter_changes`
+(failed 1 != 171 before the fix). One existing test,
+`real_65816_code_completes_the_boot_handshake`, wrote the next `$2141`
+value without waiting for the counter echo, which races the ROM's own
+fetch on hardware too; it now spins on `$2140` like a real uploader.
+
+**Census children (release, `RF_CENSUS_ROM`), before -> after:**
+Urban Strike 10 -> 0 (rendered), NBA Live 96 10 -> 0 (rendered). Battle Grand Prix 10 -> 0 too (second fix, below).
+Unmoved and still blank (exit 10): Tekken 2 (Pirate), Batman - Revenge of
+the Joker (Proto), Sonic Blast Man II. Also unmoved, still 0: NHL 95,
+Super Turrican, Tommy Moe's, Wario's Woods, Super Turrican 2. Canaries all still 0:
+Wild Guns, Kirby Super Star, Super Mario World, Super Mario RPG, Super
+Bonk, Rival Turf!.
+
+**The four remaining titles are not APU-handshake defects (re-traced on
+this tree):**
+
+- **Battle Grand Prix: FIXED by a second, non-APU defect: `$2139`/`$213A`
+  (VMDATALREAD/VMDATAHREAD) were unimplemented (open bus / later a fresh
+  read of the current address), not the VRAM prefetch latch.** The APU
+  side was fine (SPC driver running, 480+ distinct SPC PCs). The 65816
+  main loop at `$03:AA71` DMAs `$7F:0000` (`$6000` bytes) to VRAM `$2000`
+  (word), sets `VMADD`, does one dummy 16-bit `LDA $2139`, then compares
+  `LDA $7F0000,X / CMP $2139` word by word (`$03:AAAC-AAB9`); on any
+  mismatch it re-runs the whole thing after a 5-vblank wait
+  (`$03:8077`), forever, with CGRAM never written. Traced with
+  `PROBE_SDUMP=03AAB0,03AAB3` plus a temporary print in the read arm:
+  the compare's stream ran one word AHEAD of what the game expects.
+  fullsnes "PPU Video Memory (VRAM)": a `VMADD` write loads a prefetch
+  latch; a read on the incrementing byte returns the OLD latch, reloads
+  it from the address BEFORE the increment, then increments. The dummy
+  read therefore primes the pipeline. Fix in `bus.rs`: `vram_prefetch`
+  (saved in `state.rs` after `vram_address`), reloaded on `$2116`/`$2117`
+  writes and on incrementing reads. RED test:
+  `vram_readback_returns_the_prefetch_latch_and_reloads_before_incrementing`
+  (tests/dma.rs). VMAIN address-translation bits remain unmodelled (as for
+  writes). `PROBE_VRAM=hexbyteaddr:len` added to `title_probe` for this
+  trace. Census child Battle Grand Prix 10 -> 0 (rendered).
+- **Tekken 2 (Pirate)**: the upload header words are `$CCCE`/`$0000`
+  (destination `$CCCE`, then run address `$0000`): a 23-byte "block" to
+  a nonsense address and a jump to `$0000`; the SPC then executes ARAM
+  data at `$0005`. A bootleg cart whose expected extra hardware/patch is
+  not modelled; not an IPL fault.
+- **Batman - Revenge of the Joker (Proto)**: 1 MB HiROM-headered image
+  (`$FFC0` name valid, map `$31`) whose reset vector (file `$FFFC`) is
+  `$8011`, the middle of the shared upload routine, so the CPU starts
+  in emulation mode inside it (`REP #$30` no-ops) and spins at `$8021`
+  with A=0. A bank-order/dump problem or unmodelled proto layout, never
+  reaches an APU write. Not fixable in the APU.
+- **Sonic Blast Man II**: the "boot never started" premise is stale: the
+  APU boots, CGRAM has 42 non-zero entries, VRAM 17.6k, mode 7 with
+  `TM=$00` (nothing enabled on the main screen) and the CPU in a
+  `JSL $C0032D / INC $48` frame loop. PPU/game-side, not APU.
+
+W14-49's TCALL-trap branch (`ba9e979`) is not needed: with the image
+unshifted, `$0460` is `CLRP` and nothing ever `TCALL`s into the boot ROM.
+
+
+## Merged-tree SNES census 2026-09-28 (after clusters A, B, C)
+
+**1217 rendered / 35 uniform / 0 no-video / 13 refused / 0 crashed / 0 timed out**, 1265 titles in 1573 s (previous run this day: 1192/60/13). 25 titles moved uniform -> rendered, none moved the other way: Battle Grand Prix, Brandish, Dragon (Bruce Lee) Beta, Firearm proto, Goal!, Jungle Strike, Justice League Task Force x2, Knights of the Round, Lagoon, NBA Live 96, Pagemaster x4, Phalanx x2, Power Rangers Zeo, Sonic Blast Man II, Spot proto, SF Alpha 2, Tuff E Nuff, Urban Strike, WeaponLord, Zool Beta. "Rendered" is a pixels-changed signal, not a correctness claim.
+
+Causes fixed: per-scanline INIDISP latch (Jungle Strike, Pagemaster and others); NMI held one opcode after the flag edge ($4210 wait loops); IPL data byte fetched after the counter echo; VRAM read ports $2139/$213A. W14-49 closed as superseded.
+
+Still open: W14-46/48 (Tekken 2 pirate, Batman proto), W14-51 (Final Fight 2, Battletoads: composition, not a wait target), W7-08 (Blackthorne, S-DSP), W19-02 (Cx4 command algorithms, blocked on documentation), W16-07 (hardware-gated).
+
+## W14-51 (2026-09-29) — TM/TS were read live, not latched per line; Final Fight 2 and Battletoads in Battlemaniacs render
+
+**Verdict: fixed.** Traced on the merged tree: Battletoads sits in its `WAI`
+loop at `$94:8090` with `forced_blank=false`, `bright=15`, VRAM 12.8k / CGRAM
+94 non-zero bytes, mode 1, yet `PROBE_RENDERNOW` composes 1 distinct palette
+index. `PROBE_MODE=ppuwrites` shows TM toggling by HDMA (channel 1, `$212C`):
+`0000 -> 0100 (BG2)` at the top of the table and back to `0000` at its last
+entry, every frame. The compositor read `bgs[].enabled`/`obj_enabled`/`ts`
+from the LIVE registers (only forced blank, scroll, windows, colour math and
+mosaic were in `LineState`), so every line was drawn with the frame's final
+TM = 0. fullsnes ("212Ch/212Dh"): the designation in force when the beam
+reaches a line is the one drawn.
+
+Fix (`crates/rf-snes/src/ppu/mod.rs`): `LineState.tm` and `.ts`, latched in
+`latch_line` (after that line's HDMA) and applied in `apply_line_state`; the
+existing `LineScratch`/`PpuRegs` restore already covers the layer flags and
+`ts`. Test `tm_and_ts_are_latched_per_scanline` (RED verified by disabling the apply: fails on
+"line 0 was latched with BG1 on"). Gate: 2,448 passed / 0 failed; ignored
+peterlemon 3/3, region, undisbeliever 2/2, gilyon, spc700_vectors green. The
+orchestrator census (RF_CENSUS_OUT) is still owed for the full-library diff.
+
+**Census children on the 35 uniform titles of the merged census:** moved to
+rendered: Final Fight 2 (USA), Final Fight 2 (USA) (Virtual Console),
+Battletoads in Battlemaniacs (USA), (USA) (Beta), and Undercover Cops (USA)
+(Retro-Bit). The other 30 stay uniform (not this cause). Canaries Wild Guns,
+Kirby Super Star, Super Mario World, Super Mario RPG, Super Bonk, Rival Turf!
+still render.
+
+### 5d. W7-08 stage 5 — Blackthorne x3 (2026-09-29)
+
+Traced on the current tree: the SPC poller at ARAM `$19A9`-`$19B5` waits for
+a flagged voice's ENVX (`$F2`=`(v<<4)|8`) to fall below 8. DSP dump
+(`PROBE_DSP=1`): KON=`$10` and KOFF=`$10` both standing, voice 4 keyed and
+stuck in Attack at level 1024. Cause: the KON latch was re-loaded from the
+readable register at every cycle-30 poll, so a standing KON re-keyed the
+voice every other sample. fullsnes ("KON/KOFF Notes"): KON takes effect on
+write and the internal value is cleared after use; KOFF/FLG.7 are levels.
+Fix: the latch is consumed at the poll. Blackthorne (USA), (Beta), (Beta)
+(CES) moved uniform -> rendered; Super Mario World, Kirby Super Star, Wild
+Guns, Super Mario RPG unchanged (rendered). `spc_dsp6` unchanged at
+`Failed 0A`. Also: PMON now uses fullsnes's integer formula (`pmon_step`).
+
+## W18-07 (Super FX: RON/RAN gate the SNES side only while GO=1; fixed vector table)
+
+**Verdict: fixed.** Star Fox 2 (4 dumps), Super Star Fox Weekend and Vortex
+went from uniform to rendered (census children exit 0; `PROBE_MODE=frames`
+varied at frame 176/157/219 for Classic Mini/Vortex/Weekend).
+
+**Root cause (traced, not inferred).** `SnesBus::read`/`peek` gated SNES ROM
+and GSU-RAM reads on the raw SCMR RON/RAN bits regardless of GO. Star Fox 2
+and Vortex leave RON=1 after a GSU stop. Traced state at 8M instructions:
+`nmi_vec=2424 irq_vec=2424`, CPU executing `BIT $24` from open bus, forced
+blank forever. The vectors were open bus because the ROM was hidden from a
+stopped chip. Real rule (fullsnes "SNES Cart GSU-n Memory Map", "GSU
+Interrupt Vectors"): ROM is unmapped only while the GSU is running
+(GO=1 and RON=1), and then `$FFE0-$FFFF` reads a fixed table (COP `$0104`,
+NMI `$0108`, IRQ `$010C`, others `$0100`); RAM likewise for RAN.
+
+**Why W18-06 reverted the same idea.** Star Fox 1 regressed under bare GO
+gating because its second IRQ (H/V timer) arrives while GO=1: the vector read
+must return the fixed table (`$010C`), not open bus (`$2020`). The old raw-bit
+rule only looked right because Star Fox's ROM vectors equal the fixed table
+when GO=0. Adding `Gsu::fixed_vector_byte` for the GO=1 case makes the
+GO-gated read safe; Star Fox (3 revisions) also renders and now reaches
+frame 162.
+
+**Test.** `gsu_scmr_ron_gates_the_snes_sides_own_reads_only_while_go_is_set`
+(RED before, GREEN after; replaces the raw-bit test, whose doc had recorded
+the failed W18-06 attempt).
+
+
+## W14-60 (2026-09-29) — triage of the 30 uniform + 13 refused titles left after the merged census; $6000-$7FFF cart RAM moves two
+
+Scope: the still-uniform pirates, betas, protos and one-offs, plus the 13
+refused carts (Super Game Boy x5 out of scope). Every row below was traced
+on the current tree with `title_probe` (PC sample, APU port log, `PROBE_RING`,
+`PROBE_NMIW`) and a header/mapping read through `rf-cart`; no ROM bytes are
+recorded. Categories: (a) emulator defect shared with other titles,
+(b) unlicensed board or protection needing per-cart work, (c) bad or proto
+dump, (d) out of scope.
+
+**Fixed (a): cart RAM at `$6000-$7FFF` of a LoROM board whose header cannot
+declare it.** PowerFest 94 runs a RAM self-test first (`STA $306000,X` /
+`LDA $306000,X` / `BNE`, retried until the byte reads back) and spun on open
+bus forever; Pokemon Stadium (Pirate) calls `JSR $62A5` into the window and
+returned into open bus (`$6061` -> `$0000` BRK). `SnesBus::install_window_ram`
+now gives 8 KiB there, write-allocated (a never-written byte still reads open
+bus, so a game that only probes the window sees what it always saw). Installed
+only for a LoROM image with no declared RAM, no coprocessor, an untrusted header
+(reset-vector fallback, or blank checksum pair) and a ROM over 1 MiB. Evidence:
+frames-mode sweep of all 108 header-less LoROM images, before/after = exactly
+two movers, both to rendered (PowerFest 94 at frame 124, Pokemon Stadium at 26),
+none the other way. The unconditional version moved Porky Pig Subgames (Beta,
+512 KiB) from frame 84 to never and Rock N' Roll Racing (Beta 2) to never (the
+latter cured by write-allocation, the former by the size gate: it executes code
+it copies into the window and then jumps to `$7D:E00B`; with RAM present it
+gets further into a dev-cart layout we do not model). The size gate is an
+evidence-based conservatism, not a hardware rule; 2 of 108 is the whole basis.
+Pinned by `tests/window_ram.rs` (RED first: the install did not exist).
+Canaries at frames mode 600 unchanged: Wild Guns 84, Kirby Super Star 103,
+Super Mario World 58, Super Mario RPG 38, Super Bonk 163, Rival Turf! 182,
+Star Fox 156, Final Fight 2 182, Jungle Strike 101.
+
+### Verdict table
+
+| Title | Header / board | What the CPU does | Cat |
+|---|---|---|---|
+| PowerFest 94 (Competition Cart) | LoROM 2.25 MiB, header fallback | RAM self-test at `$30:6000` never reads back | (a) FIXED, renders at frame 124 |
+| Pokemon Stadium (Pirate) | LoROM 8 MiB, blank header | `JSR $62A5` into open window, RTL into `$0000` | (a) FIXED, renders at frame 26 |
+| Tekken 2, Soul Edge vs Samurai, SF EX Plus Alpha, KOF 98, KOF 2000, X-Men vs SF, Marvel vs SF (all Pirate) | LoROM 2-8 MiB, blank/fallback header | Standard IPL upload whose stream header is garbage (Tekken 2: 22 bytes to `$CCCE`, run `$0000`; KOF98: 65816 code as SPC payload, run `$0000`; MvsSF: dest `$5555`); CPU then polls `$2142`/`$2140` for a driver that never starts | (b) bootleg SPC-loader family, 7 titles |
+| Digimon Adventure, Pokemon Gold & Silver (Pirate) | LoROM 2 MiB, fallback | Boot, SPC driver runs, then a 32-frame `WAI` loop, `STZ $4200`, `JML $81D0` restart; restart parks in `WAI` at `$8491` with NMITIMEN=0 (`PROBE_NMIW`: 81->00 at PC `$8109`) | (b) shared bootleg boot family |
+| A Bug's Life, Hercules (Pirate) | LoROM 2 MiB, no header | Bug's Life: `STZ $4200` at `$A9F2`, then `WAI` vblank wait forever; Hercules: control falls into `$0000` BRK | (b) same boot code (`SEI CLC XCE`) |
+| Picachu Pocket Monsters (Pirate) | LoROM 8 MiB, no header | Alive: 64 KiB VRAM fill loop `$0182C8`, forced blank; slow or waiting on hardware | (b) |
+| Aladdin 2000 (Pirate) | LoROM 2 MiB, fallback | `$4200` and all DMA registers hold `$AB` (a fill loop over the register block), IRQ storm on a bare `RTI` | (b) |
+| Batman: Revenge of the Joker (Proto) | HiROM $31, NMI vector 0001 | Polls `$2140` with the SPC parked in the IPL; reset lands mid-uploader | (c) (W14-46) |
+| ClayFighter (Beta 1) [b] | HiROM $31, [b] flagged | Self-loop `BNE $223D` in bank `$70`; V-IRQ time 483 is out of range | (c) |
+| Daffy Duck Marvin Missions (Beta), Road Runner (Beta) | HiROM $31, vectors zero | Control runs into zeroed memory, BRK storm | (c) |
+| XBAND v1.0.1 | HiROM 1 MiB, 64 KiB RAM | `WAI`-halted at `$D0:3AD9`, NMITIMEN=0; needs the modem/kali hardware | (d) hardware-gated |
+| Xardion | LoROM 1 MiB, battery | Fully alive; first varied frame is **621** (window is 600) | (d) census window |
+| ESPN Sunday Night NFL (Beta) [b] | 512 KiB, header bytes 0xFF | Refused: no plausible header | (c) |
+| Eurit (Proto) | 2 MiB, junk header | Refused: no plausible header or reset prologue | (c) |
+| Porky Pig's Haunted Holiday (Beta 1994-05-24) | junk header reads as map mode `$7A` | Refused as SPC7110; the retail game has no chip | (c) mis-detected proto header |
+| ST010 (Enhancement Chip) | 52 KiB | The chip's firmware dump, not a game | (d) |
+| Super 8 (Unl), Tri-Star (Unl) | 8 KiB | Refused: truncated (adapter firmware, not a cartridge) | (d) |
+| Super Noah's Ark 3D (Piko) | chipset byte `$0A` | Refused as DSP; the (Unl) sibling of the same game loads | (c) mis-declared chip |
+| Top Gear 3000 | chipset $03, DSP-4 | Refused: DSP-4 not implemented | (b) real coprocessor, ticket W19-05 |
+| Super Game Boy x5 | SGB | out of scope | (d) |
+
+Counts over the 34 titles in scope (21 uniform: the 30 uniform less Blackthorne
+x3, Star Fox 2 x4, Super Star Fox Weekend and Vortex, which belong to other
+lanes; plus the 13 refused): **(a) 2 fixed, (b) 14, (c) 8, (d) 10.** Of the
+21 uniform: (a) 2, (b) 13 (7 SPC-loader, 2 Digimon/Pokemon Gold, 2 Bug's
+Life/Hercules, Picachu, Aladdin 2000), (c) 4, (d) 2. Of the 13 refused: (b) 1
+(Top Gear 3000), (c) 4, (d) 8 (SGB x5, ST010, Super 8, Tri-Star).
+
+### Census FRAMES
+
+`FRAMES = 600` is the documented ten seconds of game time, chosen to stop
+short of an attract mode. Xardion's first varied frame is 621 (8.4M CPU
+instructions), 3.5% past the window. Raising it for this title would be the
+per-title hack the census forbids, and a global raise to 660 would move
+exactly this one title of the 1252 while costing ~10% of the 1573 s run.
+Recommendation: keep 600; Xardion is a census-window artefact, not a defect,
+and `PROBE_MODE=frames PROBE_FRAMES=700` is the way to see it render.
+
+## Final SNES census 2026-09-29 (all lanes merged: Super FX, S-DSP, triage)
+
+**1233 rendered / 19 uniform / 0 no-video / 13 refused / 0 crashed / 0 timed out**, 1265 titles in 1590 s. Session arc: 1061 (W14-28) -> 1192 -> 1217 -> 1222 -> **1233 rendered**; uniform 74 -> 19. Vs the previous run today (1222/30/13) 11 moved, none regressed: Blackthorne x3 (KON latch consumed at the poll), Star Fox 2 x4, Super Star Fox Weekend, Vortex (SCMR RON/RAN gated on GO, fixed vector table), PowerFest 94, Pokemon Stadium pirate (8 KiB window RAM). Workspace gate on the merged tree: 2455 passed / 0 failed. "Rendered" is a pixels-changed signal, not a correctness claim.
+
+Remaining 19 uniform: 13 unlicensed-board/protection pirates (W14-61 fighters, W14-62 WAI/NMI-off group), 5 bad/proto dumps (Batman proto, ClayFighter Beta, Daffy Duck Beta, Road Runner Beta), XBAND (modem hardware) and Xardion (first varies at frame 621, past the 600-frame cap by design). Open tickets: W7-08 (spc_dsp6 echo check 0A), W19-02 (Cx4 commands, doc gap), W19-05 (DSP-4), W14-61/62/63, W16-07.

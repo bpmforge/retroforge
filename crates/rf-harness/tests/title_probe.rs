@@ -29,6 +29,7 @@
 //! PROBE_FIND=hex[,hex]              search ARAM for byte patterns
 //! PROBE_FINDROM=hex[,hex]           search the ROM file (LoROM address shown)
 //! PROBE_PORTS=1                     print the last 40 APU port changes with both PCs
+//! PROBE_DSP=1                      print the S-DSP register file and per-voice envelope state (W7-08)
 //! PROBE_RING=1 / PROBE_SPCRING=1    print the last distinct CPU / SPC PCs
 //! PROBE_ALLPC=1                     print every sampled CPU PC, sorted
 //! PROBE_STOP_ON_SPC_STOP=1          stop early when the SPC700 halts under a running program
@@ -75,6 +76,9 @@
 //!                                    decimal instruction-count window (`n`, end
 //!                                    exclusive) — attributes an SP drift to the
 //!                                    exact opcode that moved it (W14-26)
+//! PROBE_NMIW=1                      print `n` and the PC after every instruction that changes
+//!                                    $4200 NMITIMEN (W14-60): names the writer of an NMI-disable
+//!                                    that a later WAI never wakes from
 //! PROBE_IRQLOG=N                    log the first N H/V-IRQ events (edge-
 //!                                    detected post-instruction, not a new
 //!                                    core field — see below), then totals
@@ -796,6 +800,16 @@ fn probe() {
                 } else {
                     0
                 };
+            if std::env::var("PROBE_NMIW").is_ok() {
+                let cur = sys.bus.nmitimen.0;
+                if cur != nmitimen_last {
+                    println!(
+                        "      NMIW n={n} pc_after={:06X} $4200 {nmitimen_last:02X}->{cur:02X}",
+                        sys.cpu.pc24()
+                    );
+                    nmitimen_last = cur;
+                }
+            }
             if irqlog_max > 0 {
                 let line = sys.bus.timing.line;
                 let dot = sys.bus.timing.dot();
@@ -1509,6 +1523,18 @@ fn probe() {
                 .collect();
             println!("    peek: {}", vals.join(" "));
         }
+        // PROBE_VRAM=hexbyteaddr:len dumps raw VRAM bytes (cluster A).
+        if let Ok(spec) = std::env::var("PROBE_VRAM") {
+            let (a, l) = spec.split_once(':').unwrap();
+            let a = usize::from_str_radix(a, 16).unwrap();
+            let l = l.parse::<usize>().unwrap();
+            println!(
+                "    vram {a:04X} (vmadd={:04X} vmain={:02X}): {:02x?}",
+                sys.bus.vram_address,
+                sys.bus.vmain,
+                &sys.bus.ppu.vram[a..(a + l).min(sys.bus.ppu.vram.len())]
+            );
+        }
         println!(
             "    timing: line={} dot={} frame={} hdmaen={:#04x}",
             sys.bus.timing.line,
@@ -1528,6 +1554,15 @@ fn probe() {
             apu.dsp.echo.delay,
             apu.dsp.dir,
         );
+        if std::env::var("PROBE_DSP").is_ok() {
+            println!("    dsp regs: {:02x?}", &apu.dsp.regs[..]);
+            for (i, v) in apu.dsp.voices.iter().enumerate() {
+                println!(
+                    "    dsp v{i}: stage={:?} level={} adsr={} gain={:02x} keyed={} pitch={:04x} srcn={:02x}",
+                    v.envelope.stage, v.envelope.level, v.envelope.adsr_enabled, v.envelope.gain, v.keyed_on, v.pitch, v.srcn
+                );
+            }
+        }
         print_sa1_reg_report(&core);
         print_gsu_reg_report(&core);
     }

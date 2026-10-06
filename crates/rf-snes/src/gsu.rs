@@ -475,6 +475,20 @@ impl Gsu {
     pub fn owns_rom_bus(&self) -> bool {
         self.go() && self.ron()
     }
+    /// The byte the SNES reads at `$xxFFE0-$xxFFFF` while the GSU holds
+    /// the ROM bus (`GO && RON`). Ticket W18-07: fullsnes "SNES Cart GSU-n
+    /// Memory Map" / "GSU Interrupt Vectors" -- with ROM unmapped, the
+    /// vector page reads back a fixed table so exceptions land in WRAM:
+    /// COP `$0104`, NMI `$0108`, IRQ `$010C`, every other vector `$0100`.
+    /// `None` outside the vector page (ordinary reads see open bus).
+    #[must_use]
+    pub fn fixed_vector_byte(addr: u32) -> Option<u8> {
+        const TABLE: [u8; 16] = [
+            0x00, 0x01, 0x00, 0x01, 0x04, 0x01, 0x00, 0x01, 0x00, 0x01, 0x08, 0x01, 0x00, 0x01,
+            0x0C, 0x01,
+        ];
+        (addr & 0xFFE0 == 0xFFE0).then(|| TABLE[(addr & 0xF) as usize])
+    }
     /// Whether the GSU currently, actually holds the RAM bus away from the
     /// SNES. See [`Self::owns_rom_bus`]'s doc.
     #[must_use]

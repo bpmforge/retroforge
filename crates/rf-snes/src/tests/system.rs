@@ -484,51 +484,71 @@ fn gsu_cart_boots_and_go_reads_back_after_r15_write() {
     assert!(!system.bus.gsu.as_ref().unwrap().regs.go());
 }
 
-/// Ticket W18-01 acceptance: SCMR RON/RAN gate which side owns the
-/// ROM/RAM bus — while the GSU owns it, the SNES side's own read sees
-/// open bus rather than the cartridge.
-///
-/// Ticket W18-06 (D-016) tried and reverted a `GO && RON`/`GO && RAN`
-/// reading of this rule for READS too — a traced Star Fox (USA) boot
-/// sets RON=1 with GO=0 across 2,361 distinct ROM reads scattered
-/// through ordinary code (not just the exception-vector region) and
-/// expects open bus at every one of them; gating those on GO instead
-/// showed the CPU real ROM, which led it to a bad jump into
-/// zero-initialized WRAM and a stray STP, measured as `boot_census_child`
-/// flipping Star Fox (USA)/(Rev 1)/(Rev 2) from `rendered` to `uniform`.
-/// This test's ORIGINAL raw-bit assertion is therefore still correct and
-/// deliberately unchanged: RON/RAN gate SNES READS unconditionally. Only
-/// SNES WRITES to GSU RAM are gated by GO too (`Gsu::owns_ram_bus`,
-/// `SnesBus::write`'s `Target::GsuRam` arm) — see
-/// `snes_ram_setup_write_lands_even_with_ran_set_while_the_gsu_is_stopped`
-/// below for the write-side fix this asymmetry supports.
+/// Ticket W18-07: RON gates the SNES side's own ROM reads only while the
+/// GSU is actually running. fullsnes "SNES Cart GSU-n Memory Map"/"GSU
+/// Interrupt Vectors": "When the GSU is running (with GO=1 and RON=1), ROM
+/// isn't mapped to SNES memory" -- and while it is, the exception-vector
+/// page `$FFE0-$FFFF` reads back a fixed table (NMI -> `$0108`, IRQ ->
+/// `$010C`, COP -> `$0104`, the rest `$0100`) so the SNES lands in WRAM.
+/// A stopped chip (GO=0) with RON left at 1 -- Star Fox 2's and Vortex's
+/// idle state -- must show real ROM, vectors included; the previous
+/// raw-bit rule handed those titles open bus for their own vector reads
+/// (NMI/IRQ vector = `$2424`) and they never left forced blank.
 #[test]
-fn gsu_scmr_ron_ran_gate_the_snes_sides_own_reads() {
+fn gsu_scmr_ron_gates_the_snes_sides_own_reads_only_while_go_is_set() {
     let mut system = SnesSystem::load(&lorom_image(0x20, 0x15)).expect("GSU cart loads");
     system.bus.rom[0] = 0x77;
-    // Before RON is set, the SNES reads its own ROM normally.
+    system.bus.rom[0x7FEA] = 0xAA; // ROM NMI vector low byte, distinct from the fixed table's $08
+    system.bus.rom[0x7FEB] = 0xBB;
     assert_eq!(system.bus.read(0x00_8000), 0x77);
 
-    // $303Ah SCMR: bit 4 = RON, bit 3 = RAN. The write itself drives
-    // `open_bus` to the value written ($10), so a read right after would
-    // trivially "see open bus" whether or not RON gating works — drive a
-    // different, distinguishing sentinel first to prove the ROM byte
-    // really is being replaced by open bus, not just coincidentally equal
-    // to the SCMR write's own value.
+    // RON=1 but GO=0: the chip is idle, the SNES owns the ROM bus.
     system.bus.write(0x00_303A, 0x10);
     system.bus.open_bus = 0xAB;
     assert_eq!(
         system.bus.read(0x00_8000),
-        0xAB,
-        "RON=1: the SNES side must see open bus, not the cartridge"
+        0x77,
+        "RON=1 with GO=0: a stopped GSU does not hold the ROM bus"
+    );
+    assert_eq!(
+        system.bus.read(0x00_FFEA),
+        0xAA,
+        "GO=0 vectors are the real ROM's"
     );
 
-    system.bus.write(0x00_303A, 0x00);
+    // GO=1 (SFR bit 5) with RON=1: ROM is unmapped; vectors are the fixed table.
+    system.bus.write(0x00_3030, 0x20);
+    system.bus.open_bus = 0xAB;
     assert_eq!(
         system.bus.read(0x00_8000),
-        0x77,
-        "RON=0: the SNES side owns the ROM bus again"
+        0xAB,
+        "GO=1, RON=1: ordinary ROM reads see open bus"
     );
+    assert_eq!(
+        system.bus.read(0x00_FFEA),
+        0x08,
+        "NMI vector low, fixed table"
+    );
+    assert_eq!(
+        system.bus.read(0x00_FFEB),
+        0x01,
+        "NMI vector high, fixed table"
+    );
+    assert_eq!(
+        system.bus.read(0x00_FFEE),
+        0x0C,
+        "IRQ vector low, fixed table"
+    );
+    assert_eq!(
+        system.bus.read(0x00_FFE4),
+        0x04,
+        "COP vector low, fixed table"
+    );
+    assert_eq!(system.bus.peek(0x00_FFEA), 0x08, "peek agrees with read");
+
+    // RON=0 with GO=1: the SNES owns the ROM bus again.
+    system.bus.write(0x00_303A, 0x00);
+    assert_eq!(system.bus.read(0x00_8000), 0x77);
 }
 
 /// Ticket W18-01 acceptance #2: the GSU's IRQ flag (SFR bit 15) ORs into
@@ -807,12 +827,10 @@ fn dma_transfer_into_the_6000_mirror_reaches_gsu_ram() {
 /// its whole 8 KiB `$6000-$7FFF` GSU RAM mirror as plain SNES-side
 /// stores BEFORE ever setting GO — real hardware evidence that a
 /// stopped GSU (`GO=0`) is not actually contending for the RAM bus for
-/// a write no matter what SCMR says. A traced Star Fox (USA) boot,
-/// separately, showed the identical GO-gating applied to READS regresses
-/// (see `gsu_scmr_ron_ran_gate_the_snes_sides_own_reads`'s updated doc),
-/// so the two traces jointly support gating ONLY writes on GO, not reads
-/// — `Gsu::owns_ram_bus` (GO&&RAN), used only in `SnesBus::write`'s
-/// `Target::GsuRam` arm.
+/// a write no matter what SCMR says. W18-07 extends the same
+/// GO&&RAN / GO&&RON rule to SNES READS (see
+/// `gsu_scmr_ron_gates_the_snes_sides_own_reads_only_while_go_is_set`),
+/// once the fixed vector table covered the GO=1 case.
 #[test]
 fn snes_ram_setup_write_lands_even_with_ran_set_while_the_gsu_is_stopped() {
     let mut rom = lorom_image(0x20, 0x14); // Vortex's real chipset byte ($14: GSU+RAM, no battery).
@@ -1569,6 +1587,7 @@ fn nmi_dispatches_on_the_next_real_vblank_edge_once_enabled() {
     let mut rom = lorom_image(0x20, 0x00);
     rom[0x0000] = 0xEA;
     rom[0x0001] = 0xEA;
+    rom[0x0002] = 0xEA;
     rom[0x7FFA] = 0x50;
     rom[0x7FFB] = 0x80;
     rom[0x7FFC] = 0x00;
@@ -1596,9 +1615,62 @@ fn nmi_dispatches_on_the_next_real_vblank_edge_once_enabled() {
     system.bus.timing.line = system.bus.timing.vblank_start - 1;
     system.bus.timing.line_cycles = crate::timing::MASTER_PER_LINE - 1;
     system.step().expect("NOP is implemented");
+    assert!(
+        system.bus.timing.nmi_flag,
+        "the flag is readable the instant the edge lands"
+    );
+    assert_ne!(
+        system.cpu.pc, 0x8050,
+        "W14-38: the dispatch waits out the next opcode (fullsnes: `around \
+         after the next opcode`), so a `LDA $4210 / BPL` loop can read the flag"
+    );
+    system.step().expect("NOP is implemented");
     assert_eq!(
         system.cpu.pc, 0x8050,
-        "a real flag edge while NMI is enabled must still dispatch"
+        "a real flag edge while NMI is enabled must still dispatch, one opcode later"
+    );
+}
+
+/// W14-38: the reason for the one-opcode delay, end to end. A wait loop
+/// `LDA $4210 / BPL` (Lagoon, Phalanx, Goal!, Zool) runs with NMI enabled
+/// while its handler also reads `$4210`; when the NMI took effect at the
+/// end of the very instruction that raised the flag, the flag was always
+/// consumed by the handler before the loop's next read and the loop never
+/// left. With the delay the LDA that follows the edge reads bit 7 set.
+#[test]
+fn a_4210_wait_loop_sees_the_vblank_flag_before_the_nmi_handler_eats_it() {
+    let mut rom = lorom_image(0x20, 0x00);
+    // $8000: LDA $4210 ; BPL $8000 ; STP-ish marker: LDX #$55
+    rom[0x0000..0x0005].copy_from_slice(&[0xAD, 0x10, 0x42, 0x10, 0xFB]);
+    rom[0x0005..0x0007].copy_from_slice(&[0xA2, 0x55]);
+    // NMI handler at $8050: LDA $4210 (the usual acknowledge) ; RTI
+    rom[0x0050..0x0054].copy_from_slice(&[0xAD, 0x10, 0x42, 0x40]);
+    rom[0x7FFA] = 0x50;
+    rom[0x7FFB] = 0x80;
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut system = SnesSystem::load(&rom).expect("loads");
+    system.bus.write(0x4200, 0x80);
+    // Run the first LDA, then park the raster one master cycle before
+    // vblank: the edge lands at the end of the BPL, so the instruction
+    // after it is the LDA. (Were the edge to land on the LDA, the handler
+    // would eat the flag before the BPL -- the loop then catches the NEXT
+    // frame, as on hardware; this test pins the catching phase.)
+    system.step().expect("implemented");
+    system.bus.timing.line = system.bus.timing.vblank_start - 1;
+    system.bus.timing.line_cycles = crate::timing::MASTER_PER_LINE - 1;
+    let mut left_loop = false;
+    for _ in 0..8 {
+        system.step().expect("implemented");
+        if system.cpu.pc == 0x8005 {
+            left_loop = true;
+            break;
+        }
+    }
+    assert!(
+        left_loop,
+        "the wait loop must leave when the flag rises with NMI enabled (pc={:#06x})",
+        system.cpu.pc
     );
 }
 
@@ -1633,6 +1705,7 @@ fn disable_then_reenable_does_not_redispatch_while_the_flag_is_still_set() {
     system.bus.write(0x4200, 0x80);
     system.bus.timing.line = system.bus.timing.vblank_start - 1;
     system.bus.timing.line_cycles = crate::timing::MASTER_PER_LINE - 1;
+    system.step().expect("NOP is implemented");
     system.step().expect("NOP is implemented");
     assert_eq!(system.cpu.pc, 0x8050, "the ordinary flag-edge dispatch");
     system.cpu.pc = 0x8001;

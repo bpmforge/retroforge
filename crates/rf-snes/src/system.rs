@@ -24,6 +24,13 @@ pub struct SnesSystem {
     pub master_cycles: u64,
     /// An NMI edge seen but not yet dispatched.
     pub(crate) pending_nmi: bool,
+    /// The vblank NMI edge seen this instruction, dispatched after the
+    /// NEXT one (ticket W14-38): fullsnes "SNES Interrupts" says the
+    /// internal NMI flag is executed "around after the next opcode", not
+    /// at the end of the instruction that raised it. Between the two the
+    /// `$4210` flag is already readable, which is the window a
+    /// `LDA $4210 / BPL` wait loop needs to ever see it.
+    pub(crate) nmi_hold: bool,
     /// Diagnostic only, not part of save state (ticket W14-24): the most
     /// recently executed instruction's bus-access count and the master
     /// cycles charged for it. Exists so a probe can measure exactly what
@@ -84,6 +91,7 @@ impl SnesSystem {
             bus: SnesBus::new(rom, sram_len, header.map_mode),
             master_cycles: 0,
             pending_nmi: false,
+            nmi_hold: false,
             last_instr_accesses: 0,
             last_instr_master_cycles: 0,
         };
@@ -154,6 +162,27 @@ impl SnesSystem {
         if matches!(header.coprocessor, rf_cart::Coprocessor::St010) {
             system.bus.install_st010();
         }
+        // Ticket W14-60: a LoROM header that cannot be trusted (the
+        // reset-vector fallback chose the mapping, or the checksum pair is
+        // blank) cannot declare RAM either, and a board like that may
+        // carry RAM at `$6000-$7FFF`. The window is write-allocated, so a
+        // cart that never stores there sees plain open bus. Limited to
+        // images over 1 MiB (`WINDOW_RAM_MIN_ROM`): measured over the 108
+        // header-less LoROM images of the library, the two carts that run
+        // a RAM self-test there are both 2 MiB or larger, while a 512 KiB
+        // dev-cart beta that executes copied code from the window ran
+        // WORSE with RAM present (docs/TESTING.md, W14-60).
+        const WINDOW_RAM_MIN_ROM: usize = 1024 * 1024;
+        let header_untrusted = header.header_fallback.is_some()
+            || (header.checksum == 0 && header.checksum_complement == 0);
+        if header.map_mode == rf_cart::SnesMapMode::LoRom
+            && header.ram_size == 0
+            && matches!(header.coprocessor, rf_cart::Coprocessor::None)
+            && header_untrusted
+            && header.rom_size > WINDOW_RAM_MIN_ROM
+        {
+            system.bus.install_window_ram();
+        }
         system.reset();
         Ok(system)
     }
@@ -192,6 +221,7 @@ impl SnesSystem {
             bus: SnesBus::new(rom, sram_len, mode),
             master_cycles: 0,
             pending_nmi: false,
+            nmi_hold: false,
             last_instr_accesses: 0,
             last_instr_master_cycles: 0,
         };
@@ -213,6 +243,7 @@ impl SnesSystem {
         self.cpu.pbr = 0;
         self.master_cycles = 0;
         self.pending_nmi = false;
+        self.nmi_hold = false;
         self.bus.timing = crate::timing::Timing::new();
     }
 
@@ -451,8 +482,28 @@ impl SnesSystem {
         // follow-up traced were EVER explained or fixed by any version of
         // the enable-edge rule; the census only ever regressed under it.
         // See `docs/TESTING.md`'s dated entry for the full census diff.
+        //
+        // W14-38: the flag-edge dispatch itself is taken one opcode AFTER
+        // the instruction that raised the flag. fullsnes "SNES Interrupts"
+        // (the internal NMI flag "gets cleared when the NMI gets executed,
+        // which should happen around after the next opcode"). Lagoon,
+        // Phalanx, Goal!, Zool (Beta) sit in `LDA $4210 / BPL` with NMI
+        // enabled while their handler also reads `$4210`; NMI at the end
+        // of the raising instruction let the handler always consume the
+        // flag first, so those loops never left. The edge cases the
+        // enable-edge tickets recorded (Terminator, Super Black Bass,
+        // Magical Drop II) all concern `$4200` writes, which this does not
+        // touch: the flag edge is still the only dispatch source.
+        if self.nmi_hold {
+            self.nmi_hold = false;
+            // Enable is re-checked at dispatch: a `$4200` write that
+            // cleared bit 7 inside the window cancels it.
+            if self.bus.nmitimen.nmi_enabled() {
+                self.pending_nmi = true;
+            }
+        }
         if events.vblank_started && self.bus.nmitimen.nmi_enabled() {
-            self.pending_nmi = true;
+            self.nmi_hold = true;
         }
         // Ticket W17-02 acceptance #3: "the SNES CPU's IRQ line ORed with
         // the SA-1-raised IRQ". `$2209` bit 7 (SCNT) is a second, level
