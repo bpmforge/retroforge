@@ -43,6 +43,13 @@ fn boot() -> (Harness<'static, RetroForgeApp>, PathBuf) {
     #[allow(unsafe_code)]
     unsafe {
         std::env::set_var("RETROFORGE_CONFIG_DIR", &dir);
+        // Ticket W20-09: the reopen check goes through the real gate,
+        // which needs the fixture's profile to MATCH — and the default
+        // `profiles/` is relative to the process cwd (the crate dir).
+        std::env::set_var(
+            "RETROFORGE_PROFILES_DIR",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles"),
+        );
     }
     let snes = Path::new(env!("CARGO_MANIFEST_DIR")).join(SNES);
     assert!(snes.exists(), "SNES fixture missing: {}", snes.display());
@@ -93,7 +100,7 @@ fn assert_refusals_are_surfaced(harness: &mut Harness<'_, RetroForgeApp>) {
 
 #[test]
 fn widescreen_widens_the_app_and_surfaces_its_refusals() {
-    let (mut harness, _rom) = boot();
+    let (mut harness, rom) = boot();
 
     let before = harness
         .state()
@@ -137,5 +144,28 @@ fn widescreen_widens_the_app_and_surfaces_its_refusals() {
         harness.state().frame_size_for_test().map(|s| s.0),
         Some(256),
         "turning widescreen off must return to 4:3, not stay wide"
+    );
+
+    // Ticket W20-09: a saved "on" is re-applied when the game reopens.
+    // Until W20-09 `open_rom_path` restored sprite overlay, de-flicker and
+    // full-level view but not decoded widescreen, so a game saved with it
+    // on reopened with the box checked over a 4:3 picture
+    // (docs/design/ENHANCEMENT_AUDIT.md §3 row D). Asserted in this test,
+    // not a second one, for the `set_var` reason in `boot`'s doc.
+    harness
+        .state_mut()
+        .set_mode_for_test(retroforge::game_settings::Mode::GameAware);
+    harness
+        .state_mut()
+        .set_widescreen_setting_and_save_for_test(true);
+    harness.state_mut().open_rom_path(&rom);
+    harness.run_steps(2);
+    harness.state_mut().resume_for_test();
+    let target = harness.state().frame_count_for_test() + 30;
+    run_frames(&mut harness, target, Duration::from_secs(30));
+    assert_eq!(
+        harness.state().frame_size_for_test().map(|s| s.0),
+        Some(WIDESCREEN_WIDTH),
+        "the reopened game must be drawn wide without touching the toggle"
     );
 }

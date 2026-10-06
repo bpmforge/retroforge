@@ -52,6 +52,54 @@ impl Availability {
     }
 }
 
+/// What is true about the running game that decides whether a feature
+/// can actually do anything (ticket W20-09, `docs/design/ENHANCEMENT_AUDIT.md`
+/// §3).
+///
+/// One struct rather than a growing list of positional bools: until
+/// W20-09 every caller passed `(profile_matched, diorama_available,
+/// mode7_active)` in that order, and the audit needed three more facts —
+/// six adjacent `bool`s is a transposition waiting to happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct GameFacts {
+    /// A profile claims this ROM.
+    pub profile_matched: bool,
+    /// The matched profile decoded a level (`[decode]`; `LevelSession`
+    /// present). Only 2 of the 11 shipped profiles have one — the rest
+    /// match but have no level map, so "Full-level view" could not show
+    /// anything for them.
+    pub level_decoded: bool,
+    /// The decoded level carries collision (diorama walls).
+    pub diorama_available: bool,
+    /// BG mode 7 has been seen this session.
+    pub mode7_active: bool,
+    /// The running core can widen its picture (SNES only — the NES has no
+    /// widescreen path, `Stepper::set_widescreen`).
+    pub widescreen_supported: bool,
+    /// The fog pass actually runs in the live view. `false` until W20-17
+    /// wires `rf_renderer::fog::FogPass` into it: before that, a fog row
+    /// reading ON would make the badge claim an enhancement nothing draws.
+    pub fog_rendered: bool,
+}
+
+impl GameFacts {
+    /// The three facts every caller had before W20-09, with the newer
+    /// ones assumed true — "the profile is as good as it claims". Used by
+    /// tests about mode/profile gating; the app builds the real thing.
+    #[must_use]
+    pub const fn new(profile_matched: bool, diorama_available: bool, mode7_active: bool) -> Self {
+        Self {
+            profile_matched,
+            level_decoded: profile_matched,
+            diorama_available,
+            mode7_active,
+            widescreen_supported: true,
+            fog_rendered: true,
+        }
+    }
+}
+
 /// One row of FRONTEND_UI.md §3.3's Features tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeatureRow {
@@ -88,12 +136,15 @@ impl FeatureRow {
 /// ENHANCEMENT_WAVE_16.md` §5) — so a matched profile with no collision
 /// data must still show the row as `NeedsProfile`, not `Available`.
 #[must_use]
-pub fn feature_rows(
-    settings: &GameSettings,
-    profile_matched: bool,
-    diorama_available: bool,
-    mode7_active: bool,
-) -> Vec<FeatureRow> {
+pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRow> {
+    let GameFacts {
+        profile_matched,
+        level_decoded,
+        diorama_available,
+        mode7_active,
+        widescreen_supported,
+        fog_rendered,
+    } = *facts;
     let mode = settings.mode;
     let enhancement = mode.enhancement_active();
     let profile_gated = mode.profile_gated_features_unlocked(profile_matched);
@@ -132,8 +183,27 @@ pub fn feature_rows(
 
     let (sprite_av, sprite_on) = generic(settings.sprite_overlay);
     let (flicker_av, flicker_on) = generic(settings.deflicker);
-    let (wide_av, wide_on) = profiled(settings.widescreen_decoded);
-    let (level_av, level_on) = profiled(settings.full_level_view);
+    // Ticket W20-09: a profile match is necessary, not sufficient. These
+    // two rows also need the game to be able to do the thing at all —
+    // otherwise the toggle turns on, the badge counts it, and nothing on
+    // screen changes (docs/design/ENHANCEMENT_AUDIT.md §3 rows A and D).
+    let also = |(av, on): (Availability, bool), possible: bool, reason: &'static str| {
+        if av == Availability::Available && !possible {
+            (Availability::NeedsGameState(reason), on)
+        } else {
+            (av, on)
+        }
+    };
+    let (wide_av, wide_on) = also(
+        profiled(settings.widescreen_decoded),
+        widescreen_supported,
+        "an SNES game (the NES has no widescreen path)",
+    );
+    let (level_av, level_on) = also(
+        profiled(settings.full_level_view),
+        level_decoded,
+        "a level map in this game's profile",
+    );
     let (diorama_av, diorama_on) = diorama_profiled(settings.diorama);
     // Ticket W16-04: unlike the toggles above, this row's "on" state IS
     // the trust ladder's own rung (D-004/ENHANCEMENT_RUNTIME.md §2a) — the
@@ -146,7 +216,13 @@ pub fn feature_rows(
     // as "most likely to be got wrong later".
     let atmosphere_active =
         settings.trust.state(rf_enhance::atmosphere::HEURISTIC_ID) == TrustState::Active;
-    let (fog_av, fog_on) = generic(atmosphere_active);
+    // Ticket W20-09 (ENHANCEMENT_AUDIT.md §2): the fog pass is not run by
+    // the live view yet, so a ladder rung of Active must not read as ON.
+    let (fog_av, fog_on) = also(
+        generic(atmosphere_active),
+        fog_rendered,
+        "the fog renderer, which the live view does not run yet",
+    );
 
     // Ticket W16-14: gated on `enhancement` (leaves Accuracy — law 6, the
     // same bar every generic row clears) PLUS a live game-state fact (BG
@@ -234,15 +310,9 @@ pub fn feature_rows(
 /// claiming three active enhancements while two of them cannot run is
 /// precisely the dishonesty this badge exists to prevent.
 #[must_use]
-pub fn badge_text(
-    console: &str,
-    settings: &GameSettings,
-    profile_matched: bool,
-    diorama_available: bool,
-    mode7_active: bool,
-) -> String {
+pub fn badge_text(console: &str, settings: &GameSettings, facts: &GameFacts) -> String {
     let mode = settings.mode;
-    let active = feature_rows(settings, profile_matched, diorama_available, mode7_active)
+    let active = feature_rows(settings, facts)
         .iter()
         .filter(|r| r.effective())
         .count();
@@ -275,8 +345,13 @@ pub fn append_metalfx_badge_suffix(
     badge: String,
     metalfx: crate::settings::MetalFxSetting,
     availability: rf_renderer::MetalFxAvailability,
+    scaler_ran: bool,
 ) -> String {
-    let active = metalfx == crate::settings::MetalFxSetting::Spatial && availability.is_available();
+    // Ticket W20-09: and only when a scaler actually processed the frame —
+    // a setting the play view never acts on must not reach the badge.
+    let active = scaler_ran
+        && metalfx == crate::settings::MetalFxSetting::Spatial
+        && availability.is_available();
     if active {
         format!("{badge} · MetalFX")
     } else {
@@ -290,13 +365,8 @@ pub fn append_metalfx_badge_suffix(
 /// Lists what is actually on; when nothing is, says so rather than
 /// returning an empty tooltip a user reads as a broken control.
 #[must_use]
-pub fn badge_breakdown(
-    settings: &GameSettings,
-    profile_matched: bool,
-    diorama_available: bool,
-    mode7_active: bool,
-) -> Vec<String> {
-    let rows = feature_rows(settings, profile_matched, diorama_available, mode7_active);
+pub fn badge_breakdown(settings: &GameSettings, facts: &GameFacts) -> Vec<String> {
+    let rows = feature_rows(settings, facts);
     let mut out = vec![format!("Mode: {}", settings.mode.display_name())];
     let active: Vec<&FeatureRow> = rows.iter().filter(|r| r.effective()).collect();
     if active.is_empty() {
@@ -377,8 +447,24 @@ mod tests {
                 "NES · Accuracy".to_string(),
                 crate::settings::MetalFxSetting::Spatial,
                 rf_renderer::MetalFxAvailability::Available,
+                true,
             ),
             "NES · Accuracy · MetalFX"
+        );
+    }
+
+    /// Ticket W20-09: selected and available is not enough — the play view
+    /// must actually have run the scaler.
+    #[test]
+    fn metalfx_suffix_absent_when_no_scaler_ran() {
+        assert_eq!(
+            append_metalfx_badge_suffix(
+                "NES · Accuracy".to_string(),
+                crate::settings::MetalFxSetting::Spatial,
+                rf_renderer::MetalFxAvailability::Available,
+                false,
+            ),
+            "NES · Accuracy"
         );
     }
 
@@ -389,6 +475,7 @@ mod tests {
                 "NES · Accuracy".to_string(),
                 crate::settings::MetalFxSetting::Off,
                 rf_renderer::MetalFxAvailability::Available,
+                true,
             ),
             "NES · Accuracy"
         );
@@ -401,6 +488,7 @@ mod tests {
                 "NES · Accuracy".to_string(),
                 crate::settings::MetalFxSetting::Spatial,
                 rf_renderer::MetalFxAvailability::UnsupportedDevice,
+                true,
             ),
             "NES · Accuracy"
         );
@@ -428,20 +516,20 @@ mod tests {
     fn enhancement_is_never_on_silently() {
         let fresh = GameSettings::default();
         assert_eq!(fresh.mode, Mode::Accuracy);
-        assert!(feature_rows(&fresh, true, false, false)
+        assert!(feature_rows(&fresh, &GameFacts::new(true, false, false))
             .iter()
             .all(|r| !r.effective()));
 
         // Even with every flag on, Accuracy keeps them off.
         let all_flags_on = settings(Mode::Accuracy);
         assert!(
-            feature_rows(&all_flags_on, true, false, false)
+            feature_rows(&all_flags_on, &GameFacts::new(true, false, false))
                 .iter()
                 .all(|r| !r.effective()),
             "Accuracy must not run enhancements no matter what the file says"
         );
         assert_eq!(
-            badge_text("NES", &all_flags_on, true, false, false),
+            badge_text("NES", &all_flags_on, &GameFacts::new(true, false, false)),
             "NES · Accuracy"
         );
     }
@@ -452,11 +540,11 @@ mod tests {
     #[test]
     fn research_debug_does_not_turn_enhancement_on_by_itself() {
         let s = settings(Mode::ResearchDebug);
-        assert!(feature_rows(&s, true, false, false)
+        assert!(feature_rows(&s, &GameFacts::new(true, false, false))
             .iter()
             .all(|r| !r.effective()));
         assert_eq!(
-            badge_text("NES", &s, true, false, false),
+            badge_text("NES", &s, &GameFacts::new(true, false, false)),
             "NES · Research/Debug"
         );
     }
@@ -467,19 +555,19 @@ mod tests {
     fn the_badge_counts_only_what_can_actually_run() {
         let s = settings(Mode::Enhanced);
         assert_eq!(
-            badge_text("NES", &s, false, false, false),
+            badge_text("NES", &s, &GameFacts::new(false, false, false)),
             "NES · Enhanced \u{e2de}(2)",
             "the two generic features run; the two profile ones cannot"
         );
         // Game-Aware WITH a profile runs all four.
         let ga = settings(Mode::GameAware);
         assert_eq!(
-            badge_text("NES", &ga, true, false, false),
+            badge_text("NES", &ga, &GameFacts::new(true, false, false)),
             "NES · Game-Aware \u{e2de}(4)"
         );
         // Game-Aware WITHOUT a profile falls back to the generic two.
         assert_eq!(
-            badge_text("NES", &ga, false, false, false),
+            badge_text("NES", &ga, &GameFacts::new(false, false, false)),
             "NES · Game-Aware \u{e2de}(2)"
         );
     }
@@ -489,7 +577,10 @@ mod tests {
     /// told only "unavailable" cannot tell which they need.
     #[test]
     fn an_unavailable_row_says_which_thing_is_missing() {
-        let accuracy = feature_rows(&settings(Mode::Accuracy), true, false, false);
+        let accuracy = feature_rows(
+            &settings(Mode::Accuracy),
+            &GameFacts::new(true, false, false),
+        );
         let sprite = accuracy.iter().find(|r| r.id == "sprite_overlay").unwrap();
         assert_eq!(sprite.availability, Availability::NeedsMode("Enhanced"));
         assert_eq!(
@@ -497,7 +588,10 @@ mod tests {
             "requires Enhanced mode"
         );
 
-        let game_aware_no_profile = feature_rows(&settings(Mode::GameAware), false, false, false);
+        let game_aware_no_profile = feature_rows(
+            &settings(Mode::GameAware),
+            &GameFacts::new(false, false, false),
+        );
         let level = game_aware_no_profile
             .iter()
             .find(|r| r.id == "full_level_view")
@@ -511,7 +605,10 @@ mod tests {
 
         // And in Enhanced, a profile feature says to change MODE, not to
         // load a profile — the user's next action differs.
-        let enhanced = feature_rows(&settings(Mode::Enhanced), true, false, false);
+        let enhanced = feature_rows(
+            &settings(Mode::Enhanced),
+            &GameFacts::new(true, false, false),
+        );
         let level = enhanced.iter().find(|r| r.id == "full_level_view").unwrap();
         assert_eq!(level.availability, Availability::NeedsMode("Game-Aware"));
     }
@@ -520,18 +617,27 @@ mod tests {
     /// "rows disabled+explained when no profile capability".
     #[test]
     fn unavailable_rows_are_still_listed() {
-        let rows = feature_rows(&GameSettings::default(), false, false, false);
+        let rows = feature_rows(
+            &GameSettings::default(),
+            &GameFacts::new(false, false, false),
+        );
         assert_eq!(rows.len(), 7, "every feature is listed in every mode");
         assert!(rows.iter().all(|r| r.availability.explanation().is_some()));
     }
 
     #[test]
     fn the_breakdown_says_so_when_nothing_is_active() {
-        let lines = badge_breakdown(&GameSettings::default(), false, false, false);
+        let lines = badge_breakdown(
+            &GameSettings::default(),
+            &GameFacts::new(false, false, false),
+        );
         assert!(lines.iter().any(|l| l.contains("No enhancements active")));
         assert!(lines.iter().any(|l| l.contains("Hold to peek")));
 
-        let active = badge_breakdown(&settings(Mode::Enhanced), false, false, false);
+        let active = badge_breakdown(
+            &settings(Mode::Enhanced),
+            &GameFacts::new(false, false, false),
+        );
         assert!(active.iter().any(|l| l.contains("Sprite-limit bypass")));
         assert!(
             !active.iter().any(|l| l.contains("Full-level view")),
@@ -553,12 +659,12 @@ mod tests {
         s.full_level_view = false;
 
         // Shadow (default): not effective, not named.
-        assert!(!feature_rows(&s, false, false, false)
+        assert!(!feature_rows(&s, &GameFacts::new(false, false, false))
             .iter()
             .find(|r| r.id == "atmosphere_fog")
             .unwrap()
             .effective());
-        assert!(!badge_breakdown(&s, false, false, false)
+        assert!(!badge_breakdown(&s, &GameFacts::new(false, false, false))
             .iter()
             .any(|l| l.contains("Atmosphere: fog")));
 
@@ -566,24 +672,24 @@ mod tests {
         // is not an action.
         s.trust
             .set_state(rf_enhance::atmosphere::HEURISTIC_ID, TrustState::Advisory);
-        assert!(!feature_rows(&s, false, false, false)
+        assert!(!feature_rows(&s, &GameFacts::new(false, false, false))
             .iter()
             .find(|r| r.id == "atmosphere_fog")
             .unwrap()
             .effective());
-        assert!(!badge_breakdown(&s, false, false, false)
+        assert!(!badge_breakdown(&s, &GameFacts::new(false, false, false))
             .iter()
             .any(|l| l.contains("Atmosphere: fog")));
 
         // Active: effective, and the breakdown names it specifically.
         s.trust
             .set_state(rf_enhance::atmosphere::HEURISTIC_ID, TrustState::Active);
-        assert!(feature_rows(&s, false, false, false)
+        assert!(feature_rows(&s, &GameFacts::new(false, false, false))
             .iter()
             .find(|r| r.id == "atmosphere_fog")
             .unwrap()
             .effective());
-        assert!(badge_breakdown(&s, false, false, false)
+        assert!(badge_breakdown(&s, &GameFacts::new(false, false, false))
             .iter()
             .any(|l| l.contains("Atmosphere: fog")));
     }
@@ -603,20 +709,20 @@ mod tests {
         s.diorama = true;
 
         // Matched profile, but no collision -> NeedsProfile, not Available.
-        let rows = feature_rows(&s, true, false, false);
+        let rows = feature_rows(&s, &GameFacts::new(true, false, false));
         let diorama = rows.iter().find(|r| r.id == "diorama").unwrap();
         assert_eq!(diorama.availability, Availability::NeedsProfile);
         assert!(!diorama.effective());
-        assert!(!badge_breakdown(&s, true, false, false)
+        assert!(!badge_breakdown(&s, &GameFacts::new(true, false, false))
             .iter()
             .any(|l| l.contains("Diorama: walls")));
 
         // Matched profile WITH collision -> Available, named on the badge.
-        let rows = feature_rows(&s, true, true, false);
+        let rows = feature_rows(&s, &GameFacts::new(true, true, false));
         let diorama = rows.iter().find(|r| r.id == "diorama").unwrap();
         assert_eq!(diorama.availability, Availability::Available);
         assert!(diorama.effective());
-        assert!(badge_breakdown(&s, true, true, false)
+        assert!(badge_breakdown(&s, &GameFacts::new(true, true, false))
             .iter()
             .any(|l| l.contains("Diorama: walls")));
 
@@ -624,7 +730,7 @@ mod tests {
         // the MODE, not the profile, even with diorama_available true —
         // Enhanced simply cannot unlock a profile-gated feature.
         let enhanced = settings(Mode::Enhanced);
-        let rows = feature_rows(&enhanced, true, true, false);
+        let rows = feature_rows(&enhanced, &GameFacts::new(true, true, false));
         let diorama = rows.iter().find(|r| r.id == "diorama").unwrap();
         assert_eq!(diorama.availability, Availability::NeedsMode("Game-Aware"));
     }
@@ -640,7 +746,7 @@ mod tests {
         s.mode7_ground = true;
 
         // Accuracy, even with BG mode 7 seen -> NeedsMode, law 6.
-        let rows = feature_rows(&s, true, true, true);
+        let rows = feature_rows(&s, &GameFacts::new(true, true, true));
         let row = rows.iter().find(|r| r.id == "mode7_ground").unwrap();
         assert_eq!(row.availability, Availability::NeedsMode("Enhanced"));
         assert!(!row.effective());
@@ -648,24 +754,24 @@ mod tests {
         // Enhanced, BG mode 7 never seen -> NeedsGameState, not Available,
         // regardless of profile/diorama_available.
         s.mode = Mode::Enhanced;
-        let rows = feature_rows(&s, true, true, false);
+        let rows = feature_rows(&s, &GameFacts::new(true, true, false));
         let row = rows.iter().find(|r| r.id == "mode7_ground").unwrap();
         assert_eq!(
             row.availability,
             Availability::NeedsGameState("BG mode 7 active")
         );
         assert!(!row.effective());
-        assert!(!badge_breakdown(&s, true, true, false)
+        assert!(!badge_breakdown(&s, &GameFacts::new(true, true, false))
             .iter()
             .any(|l| l.contains("Diorama: Mode 7")));
 
         // Enhanced + BG mode 7 seen -> Available and named on the badge,
         // with NO profile matched and NO diorama collision at all.
-        let rows = feature_rows(&s, false, false, true);
+        let rows = feature_rows(&s, &GameFacts::new(false, false, true));
         let row = rows.iter().find(|r| r.id == "mode7_ground").unwrap();
         assert_eq!(row.availability, Availability::Available);
         assert!(row.effective());
-        assert!(badge_breakdown(&s, false, false, true)
+        assert!(badge_breakdown(&s, &GameFacts::new(false, false, true))
             .iter()
             .any(|l| l.contains("Diorama: Mode 7")));
     }
@@ -721,5 +827,67 @@ mod tests {
         let none = profile_inspector_lines(None, &[], &["base profile".to_string()]);
         assert!(none[0].contains("no profile matched"));
         assert!(none.iter().any(|l| l.contains("(none declared)")));
+    }
+
+    /// Ticket W20-09 (ENHANCEMENT_AUDIT.md §3 row A): a matched profile
+    /// with no `[decode]` table must not offer, or count, Full-level view.
+    #[test]
+    fn full_level_view_needs_a_decoded_level_not_just_a_profile() {
+        let mut s = settings(Mode::GameAware);
+        s.full_level_view = true;
+        let mut facts = GameFacts::new(true, false, false);
+        facts.level_decoded = false;
+        let row = feature_rows(&s, &facts)
+            .into_iter()
+            .find(|r| r.id == "full_level_view")
+            .unwrap();
+        assert!(!row.effective(), "{row:?}");
+        assert_eq!(
+            row.availability.explanation().as_deref(),
+            Some("requires a level map in this game's profile")
+        );
+        assert!(!badge_breakdown(&s, &facts)
+            .iter()
+            .any(|l| l.contains("Full-level view")));
+        facts.level_decoded = true;
+        assert!(feature_rows(&s, &facts)
+            .iter()
+            .any(|r| r.id == "full_level_view" && r.effective()));
+    }
+
+    /// Ticket W20-09 (§3 row D): the NES has no widescreen path.
+    #[test]
+    fn widescreen_is_snes_only() {
+        let mut s = settings(Mode::GameAware);
+        s.widescreen_decoded = true;
+        let mut facts = GameFacts::new(true, false, false);
+        facts.widescreen_supported = false;
+        let row = feature_rows(&s, &facts)
+            .into_iter()
+            .find(|r| r.id == "widescreen_decoded")
+            .unwrap();
+        assert!(!row.effective());
+        assert!(row.availability.explanation().unwrap().contains("SNES"));
+    }
+
+    /// Ticket W20-09 (§2): fog at ladder rung Active, with no fog pass in
+    /// the live view, must not read ON or count toward the badge.
+    #[test]
+    fn fog_is_not_counted_while_nothing_renders_it() {
+        let mut s = settings(Mode::Enhanced);
+        s.sprite_overlay = false;
+        s.deflicker = false;
+        s.trust
+            .pin(rf_enhance::atmosphere::HEURISTIC_ID, TrustState::Active);
+        let mut facts = GameFacts::new(false, false, false);
+        facts.fog_rendered = false;
+        let fog = feature_rows(&s, &facts)
+            .into_iter()
+            .find(|r| r.id == "atmosphere_fog")
+            .unwrap();
+        assert!(!fog.effective(), "{fog:?}");
+        assert_eq!(badge_text("SNES", &s, &facts), "SNES · Enhanced");
+        facts.fog_rendered = true;
+        assert!(badge_text("SNES", &s, &facts).contains('\u{e2de}'));
     }
 }

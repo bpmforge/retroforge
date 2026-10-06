@@ -57,16 +57,11 @@ pub enum EnhanceTab {
 /// What a tab needs to draw itself.
 pub struct EnhanceCtx<'a> {
     pub settings: &'a mut crate::game_settings::GameSettings,
-    pub profile_matched: bool,
-    /// Ticket W16-06: `crate::level_view::LevelSession::has_collision`'s
-    /// answer for the currently matched profile, `false` with no session —
-    /// the narrower fact the Diorama feature row is gated on.
-    pub diorama_available: bool,
-    /// Ticket W16-14: whether this session has seen a live BG-mode-7
-    /// `CoreEvent::Mode7` — `crate::enhance_ui::feature_rows`'s "mode7_ground"
-    /// row's own gating fact, narrower and orthogonal to `diorama_available`
-    /// (no collision profile is involved at all).
-    pub mode7_active: bool,
+    /// Ticket W20-09: what is true about the running game
+    /// (`crate::enhance_ui::GameFacts`) — profile match, decoded level,
+    /// collision, mode 7, widescreen support, fog renderer — replacing
+    /// three loose bools that every caller had to pass in the same order.
+    pub facts: crate::enhance_ui::GameFacts,
     pub compare_mode: &'a mut rf_renderer::CompareMode,
     pub compare_divider: &'a mut f32,
     /// The stitched-canvas texture, when one has been composited.
@@ -288,12 +283,7 @@ fn scrolled<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
 }
 
 fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut EnhanceActions) {
-    let rows = crate::enhance_ui::feature_rows(
-        ctx.settings,
-        ctx.profile_matched,
-        ctx.diorama_available,
-        ctx.mode7_active,
-    );
+    let rows = crate::enhance_ui::feature_rows(ctx.settings, &ctx.facts);
     for row in &rows {
         // **`horizontal_wrapped`, and the opposite call from the status
         // bar.** W10-01 refused wrapping for the bottom bar because three

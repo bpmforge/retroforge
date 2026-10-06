@@ -165,8 +165,17 @@ fn loading_a_pack_replaces_art_in_the_running_game() {
         "the pack's magenta tile must actually be visible in the drawn frame"
     );
 
+    // Ticket W20-09: replaced art is visible, so the honesty badge names
+    // it (before W20-09 it still read plain "Accuracy").
+    assert!(
+        harness.state().status_badge().contains("HD pack"),
+        "badge must name the pack: {}",
+        harness.state().status_badge()
+    );
+
     // 3. Unloading restores the original picture exactly.
     harness.state_mut().clear_hd_pack();
+    assert!(!harness.state().status_badge().contains("HD pack"));
     let target = harness.state().frame_count_for_test() + 10;
     run_frames(&mut harness, target, Duration::from_secs(30));
     assert_eq!(
@@ -174,4 +183,20 @@ fn loading_a_pack_replaces_art_in_the_running_game() {
         Some((256, 240)),
         "unloading a pack must return to the accuracy-sized picture"
     );
+
+    // 4. Ticket W20-09: a pack belongs to the game it was loaded for.
+    //    Opening a game drops it, rather than leaving a summary on screen
+    //    for a pack the new core never captures tiles for.
+    harness
+        .state_mut()
+        .load_hd_pack(&pack_dir)
+        .expect("reload the pack");
+    assert!(harness.state().hd_summary_for_test().is_some());
+    harness.state_mut().open_rom_path(&rom);
+    harness.run_steps(2);
+    assert!(
+        harness.state().hd_summary_for_test().is_none(),
+        "opening a game must drop the previous game's HD pack"
+    );
+    assert!(!harness.state().status_badge().contains("HD pack"));
 }

@@ -59,6 +59,13 @@ const CANVAS_SNAPSHOT_REFRESH_INTERVAL: u32 = 30;
 /// HUD tested at a size no user runs.
 pub const WINDOW_SIZE: [f32; 2] = [768.0, 720.0];
 
+/// Ticket W20-09 (`docs/design/ENHANCEMENT_AUDIT.md` §2): whether the play
+/// view actually runs `rf_renderer::metalfx::MetalFxScaler`. It does not
+/// yet — W16-08 shipped the scaler, the Settings radio and the badge
+/// suffix, and nothing constructs the scaler — so the badge must not
+/// claim MetalFX and the Settings radio says it is not used yet.
+pub const METALFX_SCALER_WIRED: bool = false;
+
 /// How wide decoded widescreen renders, in dots (ticket W11-03).
 ///
 /// 400 is 16:9 at the SNES's 224 visible lines (398.2, rounded to an even
@@ -2562,6 +2569,14 @@ impl RetroForgeApp {
     /// everything after the file picker is the shipped path rather than a
     /// test-only one.
     pub fn open_rom_path(&mut self, path: &std::path::Path) {
+        // Ticket W20-09: an HD pack belongs to the game it was loaded
+        // for. Kept across a ROM change it went quietly dead — the new
+        // core starts with tile capture off and nothing re-armed it — while
+        // the Enhance panel still showed its summary.
+        self.hd_pack = None;
+        self.hd_summary = None;
+        self.hd_unsatisfied.clear();
+        self.hd_report = None;
         let bytes = match rom_open::load_rom_bytes(path) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -2751,6 +2766,22 @@ impl RetroForgeApp {
                 }
                 if self.current_game_settings.full_level_view {
                     self.set_level_probe(true);
+                }
+                // Ticket W20-09 (ENHANCEMENT_AUDIT.md §3 row D): decoded
+                // widescreen was the one saved toggle NOT re-applied here,
+                // so a game saved with it on reopened showing the box
+                // checked over a 4:3 picture. Only when the row can act
+                // (SNES, Game-Aware, profile) — the same gate the badge
+                // counts by.
+                if self.current_game_settings.widescreen_decoded
+                    && crate::enhance_ui::feature_rows(
+                        &self.current_game_settings,
+                        &self.game_facts(),
+                    )
+                    .iter()
+                    .any(|r| r.id == "widescreen_decoded" && r.effective())
+                {
+                    self.set_widescreen(true);
                 }
                 // Ticket W3-03a: a fresh core thread starts with layer
                 // extraction OFF. If the Layers window was already open
@@ -3218,6 +3249,51 @@ impl RetroForgeApp {
         self.ultrawide_render = Some(result);
     }
 
+    /// The honesty badge exactly as the status bar draws it: mode, the
+    /// effective-enhancement count, then the MetalFX and HD-pack suffixes.
+    /// One function so the bar and the tests cannot disagree.
+    pub fn status_badge(&self) -> String {
+        let badge = crate::enhance_ui::append_metalfx_badge_suffix(
+            crate::enhance_ui::badge_text(
+                self.console_label,
+                &self.current_game_settings,
+                &self.game_facts(),
+            ),
+            self.settings.video.metalfx,
+            rf_renderer::metalfx_detect(),
+            METALFX_SCALER_WIRED,
+        );
+        // Ticket W20-09: replaced art is an enhancement the player can
+        // see, so the badge says so (principle 2) — until W20-09 a loaded
+        // pack changed the picture with the badge still reading
+        // "Accuracy".
+        if self.hd_pack.is_some() {
+            format!("{badge} · HD pack")
+        } else {
+            badge
+        }
+    }
+
+    /// Ticket W20-09: everything about the running game that decides
+    /// whether a feature row can actually act — the one place it is
+    /// computed, for the badge, the breakdown, the Features tab and the
+    /// diorama/mode-7 subscriptions alike.
+    pub(crate) fn game_facts(&self) -> crate::enhance_ui::GameFacts {
+        crate::enhance_ui::GameFacts {
+            profile_matched: self.profile_matched,
+            level_decoded: self.level_session.is_some(),
+            diorama_available: self
+                .level_session
+                .as_ref()
+                .is_some_and(crate::level_view::LevelSession::has_collision),
+            mode7_active: self.mode7_seen,
+            widescreen_supported: self.console_label == "SNES",
+            // Until W20-17 runs `rf_renderer::fog::FogPass` in the live
+            // view (ENHANCEMENT_AUDIT.md §2).
+            fog_rendered: false,
+        }
+    }
+
     /// Ticket W16-13: whether Diorama is currently EFFECTIVE — Game-Aware
     /// mode, a profile with collision, and the toggle on
     /// (`crate::enhance_ui::feature_rows`'s "diorama" row, the single
@@ -3226,19 +3302,10 @@ impl RetroForgeApp {
     /// `self.profile_matched` unassigned for a whole ticket, see the bug
     /// fix noted where `self.profile_matched` is set above).
     fn diorama_effective(&self) -> bool {
-        let diorama_available = self
-            .level_session
-            .as_ref()
-            .is_some_and(crate::level_view::LevelSession::has_collision);
-        crate::enhance_ui::feature_rows(
-            &self.current_game_settings,
-            self.profile_matched,
-            diorama_available,
-            self.mode7_seen,
-        )
-        .into_iter()
-        .find(|r| r.id == "diorama")
-        .is_some_and(|r| r.effective())
+        crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+            .into_iter()
+            .find(|r| r.id == "diorama")
+            .is_some_and(|r| r.effective())
     }
 
     /// Ticket W16-14: whether "Mode 7 as 3D" is currently EFFECTIVE —
@@ -3248,19 +3315,10 @@ impl RetroForgeApp {
     /// instead of calling it is exactly the drift that once left
     /// `self.profile_matched` unassigned for a whole ticket).
     fn mode7_ground_effective(&self) -> bool {
-        let diorama_available = self
-            .level_session
-            .as_ref()
-            .is_some_and(crate::level_view::LevelSession::has_collision);
-        crate::enhance_ui::feature_rows(
-            &self.current_game_settings,
-            self.profile_matched,
-            diorama_available,
-            self.mode7_seen,
-        )
-        .into_iter()
-        .find(|r| r.id == "mode7_ground")
-        .is_some_and(|r| r.effective())
+        crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+            .into_iter()
+            .find(|r| r.id == "mode7_ground")
+            .is_some_and(|r| r.effective())
     }
 
     /// Ticket W16-13 acceptance 1: keep [`Self::diorama_wanted`] in sync
@@ -4072,6 +4130,35 @@ impl RetroForgeApp {
                             ui.close();
                         }
                         ui.separator();
+                        // Ticket W20-09 (ENHANCEMENT_AUDIT.md §2): W11-05
+                        // built HD-pack import end to end and nothing in
+                        // the app called it — only a test did. Mesen's
+                        // pack format is NES-only (`hires.txt` keys NES
+                        // CHR tiles), so the item says so on SNES.
+                        let nes_running = self.core.is_some() && self.console_label == "NES";
+                        let load = ui
+                            .add_enabled(nes_running, egui::Button::new("Load HD pack\u{2026}"))
+                            .on_disabled_hover_text(
+                                "Open an NES game first (HD packs are NES-only)",
+                            );
+                        if load.clicked() {
+                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                let ctx = ui.ctx().clone();
+                                self.load_hd_pack_from_menu(&dir, &ctx);
+                            }
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                self.hd_pack.is_some(),
+                                egui::Button::new("Remove HD pack"),
+                            )
+                            .clicked()
+                        {
+                            self.clear_hd_pack();
+                            ui.close();
+                        }
+                        ui.separator();
                         // Ticket W10-03: the way BACK to the library.
                         // Without it the home is reachable exactly once
                         // per process — open a game and the only route to
@@ -4339,21 +4426,8 @@ impl RetroForgeApp {
                     // this is where a user finds out what they are looking
                     // at. It stays in the bar for exactly that reason: a
                     // badge behind a menu is a badge nobody reads.
-                    let diorama_available = self
-                        .level_session
-                        .as_ref()
-                        .is_some_and(crate::level_view::LevelSession::has_collision);
-                    let badge = crate::enhance_ui::append_metalfx_badge_suffix(
-                        crate::enhance_ui::badge_text(
-                            self.console_label,
-                            &self.current_game_settings,
-                            self.profile_matched,
-                            diorama_available,
-                            self.mode7_seen,
-                        ),
-                        self.settings.video.metalfx,
-                        rf_renderer::metalfx_detect(),
-                    );
+                    let facts = self.game_facts();
+                    let badge = self.status_badge();
                     // A CHIP, not a button. It is a status readout that
                     // happens to carry a hover breakdown and a hold-to-peek
                     // gesture — rendering it as a button put it in a row of
@@ -4369,12 +4443,11 @@ impl RetroForgeApp {
                                 ui.visuals().widgets.inactive.bg_fill,
                             )),
                     );
-                    let breakdown = crate::enhance_ui::badge_breakdown(
-                        &self.current_game_settings,
-                        self.profile_matched,
-                        diorama_available,
-                        self.mode7_seen,
-                    );
+                    let mut breakdown =
+                        crate::enhance_ui::badge_breakdown(&self.current_game_settings, &facts);
+                    if let Some(summary) = &self.hd_summary {
+                        breakdown.push(format!("HD pack: {summary}"));
+                    }
                     response.clone().on_hover_ui(|ui| {
                         for line in &breakdown {
                             ui.label(line);
@@ -4806,7 +4879,7 @@ impl RetroForgeApp {
                                 let availability = rf_renderer::metalfx_detect();
                                 if ui
                                     .add_enabled(
-                                        availability.is_available(),
+                                        availability.is_available() && METALFX_SCALER_WIRED,
                                         egui::RadioButton::new(
                                             self.settings.video.metalfx
                                                 == crate::settings::MetalFxSetting::Spatial,
@@ -4829,7 +4902,12 @@ impl RetroForgeApp {
                                 {
                                     changed = true;
                                 }
-                                if let Some(reason) = availability.reason() {
+                                if !METALFX_SCALER_WIRED {
+                                    ui.small(
+                                        "Not used by the play view yet: choosing it changes nothing \
+                                         you can see.",
+                                    );
+                                } else if let Some(reason) = availability.reason() {
                                     ui.small(reason);
                                 } else {
                                     ui.small(
@@ -7472,6 +7550,15 @@ impl RetroForgeApp {
         self.current_game_settings.mode = mode;
     }
 
+    /// Ticket W20-09: persist "Widescreen: decoded" for the open game the
+    /// way the Features row does, without sending the command — so a test
+    /// can prove the REOPEN path applies it.
+    #[doc(hidden)]
+    pub fn set_widescreen_setting_and_save_for_test(&mut self, on: bool) {
+        self.current_game_settings.widescreen_decoded = on;
+        self.save_current_game_settings();
+    }
+
     /// Ticket W16-06: turn Diorama on/off exactly as its Enhance-workspace
     /// row does (`crate::enhance_ui`'s "diorama" row) — a settings flip,
     /// no probe of its own (unlike full-level view) since the geometry is
@@ -7585,16 +7672,10 @@ impl RetroForgeApp {
     #[doc(hidden)]
     #[must_use]
     pub fn badge_text_for_test(&self) -> String {
-        let diorama_available = self
-            .level_session
-            .as_ref()
-            .is_some_and(crate::level_view::LevelSession::has_collision);
         crate::enhance_ui::badge_text(
             self.console_label,
             &self.current_game_settings,
-            self.profile_matched,
-            diorama_available,
-            self.mode7_seen,
+            &self.game_facts(),
         )
     }
 
@@ -7603,16 +7684,7 @@ impl RetroForgeApp {
     #[doc(hidden)]
     #[must_use]
     pub fn badge_breakdown_for_test(&self) -> Vec<String> {
-        let diorama_available = self
-            .level_session
-            .as_ref()
-            .is_some_and(crate::level_view::LevelSession::has_collision);
-        crate::enhance_ui::badge_breakdown(
-            &self.current_game_settings,
-            self.profile_matched,
-            diorama_available,
-            self.mode7_seen,
-        )
+        crate::enhance_ui::badge_breakdown(&self.current_game_settings, &self.game_facts())
     }
 
     /// The live camera position the probe reported, in level space.
@@ -7636,8 +7708,6 @@ impl RetroForgeApp {
         self.send_command(CoreCommand::Resume);
     }
 
-    /// Pause the core, as the Pause button does (ticket W13-02d).
-    #[doc(hidden)]
     /// Ticket W20-03: whether the shell believes the core is running, and
     /// whether the in-game menu is open.
     #[doc(hidden)]
@@ -7645,6 +7715,8 @@ impl RetroForgeApp {
         (self.running, self.show_overlay_menu)
     }
 
+    /// Pause the core, as the Pause button does (ticket W13-02d).
+    #[doc(hidden)]
     pub fn pause_for_test(&mut self) {
         self.running = false;
         self.send_command(CoreCommand::Pause);
@@ -7763,6 +7835,28 @@ impl RetroForgeApp {
         self.hd_pack = Some((import.pack().clone(), images));
         self.send_command(CoreCommand::SetTileCapture(true));
         Ok(())
+    }
+
+    /// Ticket W20-09: File › Load HD pack… — load, then say what happened
+    /// (the import summary, or why it failed) as a toast, never silently.
+    fn load_hd_pack_from_menu(&mut self, dir: &std::path::Path, ctx: &egui::Context) {
+        match self.load_hd_pack(dir) {
+            Ok(()) => {
+                let summary = self.hd_summary.clone().unwrap_or_default();
+                self.toasts.push(
+                    crate::toast::ToastKind::Info,
+                    format!("HD pack loaded: {summary}"),
+                    ctx,
+                );
+            }
+            Err(e) => {
+                self.toasts.push(
+                    crate::toast::ToastKind::Error,
+                    format!("HD pack not loaded: {e}"),
+                    ctx,
+                );
+            }
+        }
     }
 
     /// Unload the pack and stop paying for tile capture.
@@ -9098,6 +9192,7 @@ impl RetroForgeApp {
             .open(&mut open)
             .show(ctx, |ui| {
                 let level_texture = self.level_texture(ui.ctx());
+                let facts = self.game_facts();
                 let mut view = crate::enhance_dock::EnhanceCtx {
                     widescreen_decisions: self.widescreen_decisions,
                     hd_summary: self.hd_summary.as_deref(),
@@ -9136,12 +9231,7 @@ impl RetroForgeApp {
                         (s[0] as f32, s[1] as f32)
                     }),
                     settings: &mut self.current_game_settings,
-                    profile_matched: self.profile_matched,
-                    diorama_available: self
-                        .level_session
-                        .as_ref()
-                        .is_some_and(crate::level_view::LevelSession::has_collision),
-                    mode7_active: self.mode7_seen,
+                    facts,
                     compare_mode: &mut self.compare_mode,
                     compare_divider: &mut self.compare_divider,
                     map_texture: self.ultrawide_texture.as_ref(),

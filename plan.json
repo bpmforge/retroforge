@@ -8556,10 +8556,11 @@
    "docs/design/ENHANCEMENT_AUDIT.md rows A-D are updated to point at this ticket's commits"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-09."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-09.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). HANDOFF -- WRITE_SCOPE WIDENED to docs/design/ENHANCEMENT_AUDIT.md (acceptance line 6 requires updating it). enhance_ui::GameFacts replaces the three positional bools (profile_matched, diorama_available, mode7_active) and adds level_decoded, widescreen_supported, fog_rendered; RetroForgeApp::game_facts() is the one place they are computed. Rows: full-level needs a decoded level; widescreen needs SNES; fog needs a live fog pass (false until W20-17). MetalFX suffix needs scaler_ran (METALFX_SCALER_WIRED=false), Settings radio disabled with a plain note. Widescreen re-applied in open_rom_path when saved on and effective -- the new reopen check in widescreen_reaches_the_app FAILS with the fix disabled (checked) and needed RETROFORGE_PROFILES_DIR because profiles/ is cwd-relative. HD packs: File > Load HD pack... / Remove HD pack (NES only, summary or error as toast); FOUND: a pack outlived its game (new core never re-armed tile capture) -- now dropped on open; FOUND: a loaded pack changed the picture with the badge still reading Accuracy -- RetroForgeApp::status_badge() now appends '· HD pack' and the breakdown the import summary. Fixed a misplaced doc comment from W20-03 (pause_for_test). Tests: 4 new enhance_ui unit tests (+ metalfx args), hdpack_reaches_the_app (badge + reopen), widescreen_reaches_the_app (reopen). The File-menu route needs a native dialog, so it is verified by code only."
   ]
  },
  {

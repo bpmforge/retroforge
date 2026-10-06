@@ -72,6 +72,16 @@ excluding comments.
 | D | **Decoded widescreen is not re-applied on reopen.** `open_rom_path` restores sprite overlay, de-flicker and full-level view from the per-game settings but not `widescreen_decoded`, so a game saved with it on reopens showing the toggle ON and a 4:3 picture. And `Stepper::set_widescreen` only acts on the SNES core (stepper.rs:1028), so the row is meaningful only on SNES | verified (code) |
 | E | **SNES `WidescreenPolicies`** are set from the profile's `[widescreen]` table inside `set_widescreen` (app.rs:8122-8127) — user-facing only through that one toggle; no per-layer control is exposed (by design: the profile decides policy, the user decides on/off) | verified (code) |
 
+### Status after W20-09 (branch `ui/wave-17`)
+
+| Row | Fixed by W20-09 | Proof |
+|---|---|---|
+| A — full-level without `[decode]` | Row is `NeedsGameState("a level map in this game's profile")` unless a level decoded; never badge-counted otherwise | `enhance_ui` unit test `full_level_view_needs_a_decoded_level_not_just_a_profile` |
+| B — fog row | Row is unavailable ("the fog renderer, which the live view does not run yet") until W20-17 wires `FogPass`; never ON, never counted | `fog_is_not_counted_while_nothing_renders_it` |
+| C — MetalFX suffix | Suffix requires a scaler that actually ran (`METALFX_SCALER_WIRED = false`); the Settings radio is disabled with "Not used by the play view yet" | `metalfx_suffix_absent_when_no_scaler_ran` |
+| D — widescreen reopen / NES | Re-applied on ROM open when saved on and effective; row unavailable on NES | `widescreen_reaches_the_app` reopen check (fails with the fix disabled — checked); `widescreen_is_snes_only` |
+| §2 HD packs | File › Load HD pack… / Remove HD pack (NES only), import summary as a toast; a pack is dropped when another game opens; the badge gains "· HD pack" and the breakdown its summary | `hdpack_reaches_the_app` (badge names it; reopen drops it). The menu route itself needs a native folder dialog, so it is **verified (code)**, not driven by a test |
+
 ## 4. Not built
 
 - **W16-07** real-time AI pass — `todo`, `hold: true` (Brad, "stay with
