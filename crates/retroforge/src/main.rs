@@ -21,9 +21,16 @@ fn main() -> eframe::Result {
     // size, and a test with its own copy of the number would keep passing
     // after someone changed the window — which is how the bar came to
     // need 1539 px inside a 768 px window without a single red test.
+    // Ticket W20-04: reopen at the size the window was last left at
+    // (`settings::WindowSettings::startup_size` clamps it to at least
+    // `MIN_WINDOW_SIZE`, and falls back to `WINDOW_SIZE`).
+    let startup_size = retroforge::bindings_store::config_root()
+        .map_or(retroforge::app::WINDOW_SIZE, |root| {
+            retroforge::settings::load(&root).0.window.startup_size()
+        });
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size(retroforge::app::WINDOW_SIZE)
+            .with_inner_size(startup_size)
             .with_min_inner_size(retroforge::app::MIN_WINDOW_SIZE),
         ..Default::default()
     };

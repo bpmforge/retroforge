@@ -66,6 +66,10 @@ pub const WINDOW_SIZE: [f32; 2] = [768.0, 720.0];
 /// claim MetalFX and the Settings radio says it is not used yet.
 pub const METALFX_SCALER_WIRED: bool = false;
 
+/// Ticket W20-04: how long a resized window must hold still before its
+/// size is written to `settings.toml`.
+const WINDOW_SIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(750);
+
 /// How wide decoded widescreen renders, in dots (ticket W11-03).
 ///
 /// 400 is 16:9 at the SNES's 224 visible lines (398.2, rounded to an even
@@ -436,6 +440,18 @@ pub struct RetroForgeApp {
     audio_devices: Option<Vec<String>>,
     /// Ticket W20-01: where the picture was drawn last frame.
     last_play_rect: Option<egui::Rect>,
+    /// Ticket W20-04: a windowed size seen this frame that differs from
+    /// the saved one, and when it was first seen — saved once it has held
+    /// still for [`WINDOW_SIZE_SETTLE`], so a drag-resize writes the file
+    /// once rather than every frame.
+    pending_window_size: Option<([f32; 2], std::time::Instant)>,
+    /// Edge detector for a pad-bound Fullscreen (a pad button is polled
+    /// as held, not pressed).
+    fullscreen_pad_was_held: bool,
+    /// The last fullscreen state a hotkey/menu asked the window for —
+    /// `ViewportCommand`s go to the windowing backend, which a headless
+    /// test harness does not have, so this is what a test can read.
+    last_fullscreen_request: Option<bool>,
     /// Ticket W10-03: §3.1's search box, filtering the library home by
     /// title. Not persisted — a search is a gesture within a session, and
     /// an app that reopened tomorrow still filtered by "castle" would be
@@ -1152,6 +1168,9 @@ impl RetroForgeApp {
             applied_vsync: None,
             audio_devices: None,
             last_play_rect: None,
+            pending_window_size: None,
+            fullscreen_pad_was_held: false,
+            last_fullscreen_request: None,
             library_search: String::new(),
             library_console_filter: None,
             library_scans: 0,
@@ -1463,6 +1482,25 @@ impl RetroForgeApp {
         let peek_key = self
             .app_bindings
             .key_for(crate::app_bindings::AppAction::HoldToPeek);
+        let fullscreen_key = self
+            .app_bindings
+            .key_for(crate::app_bindings::AppAction::Fullscreen);
+        // Ticket W20-04: F11 (remappable) or the macOS convention
+        // Cmd+Ctrl+F (fixed, like the platform's own menu shortcut).
+        let fullscreen_pressed = ctx.input(|i| {
+            fullscreen_key.is_some_and(|k| i.key_pressed(k))
+                || (i.modifiers.mac_cmd && i.modifiers.ctrl && i.key_pressed(egui::Key::F))
+        }) || self
+            .app_bindings
+            .pad_for(crate::app_bindings::AppAction::Fullscreen)
+            .is_some_and(|b| self.pad_button_held(b) && !self.fullscreen_pad_was_held);
+        self.fullscreen_pad_was_held = self
+            .app_bindings
+            .pad_for(crate::app_bindings::AppAction::Fullscreen)
+            .is_some_and(|b| self.pad_button_held(b));
+        if fullscreen_pressed {
+            self.toggle_fullscreen(ctx);
+        }
 
         // One-shot actions use `key_pressed` (the edge) — `key_down`
         // would save/load/screenshot on every frame the key stays down.
@@ -4218,6 +4256,14 @@ impl RetroForgeApp {
                         // item opening a second copy of it in a floating
                         // window would be two routes to one surface — the
                         // duplication this ticket exists to remove.
+                        // Ticket W20-04: a checkbox, because it shows
+                        // state like the rest of this menu (UX_WAVE_15 §7).
+                        let mut fullscreen = ui.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                        if ui.checkbox(&mut fullscreen, "Fullscreen").changed() {
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
+                            ui.close();
+                        }
                         // Ticket W2-08: app-wide settings (FRONTEND_UI §2).
                         if ui
                             .checkbox(&mut self.show_settings, "Settings\u{2026}")
@@ -5493,6 +5539,10 @@ impl RetroForgeApp {
                 }
                 if ui.button("Controls\u{2026}").clicked() {
                     self.show_controls = true;
+                }
+                // Ticket W20-04.
+                if ui.button("Fullscreen").clicked() {
+                    self.toggle_fullscreen(ctx);
                 }
                 // W10-01: the disabled "Switch mode (W4-05)" placeholder is
                 // gone. W4-05 shipped — the mode preset is live under
@@ -8437,6 +8487,12 @@ impl RetroForgeApp {
         self.last_play_rect.zip(self.core_frame_size)
     }
 
+    /// Ticket W20-04: the last fullscreen state requested.
+    #[doc(hidden)]
+    pub fn last_fullscreen_request_for_test(&self) -> Option<bool> {
+        self.last_fullscreen_request
+    }
+
     /// Ticket W20-01: Settings › Video, for tests that need a mode set.
     #[doc(hidden)]
     pub fn video_settings_mut_for_test(&mut self) -> &mut crate::settings::VideoSettings {
@@ -9374,6 +9430,50 @@ impl RetroForgeApp {
         self.show_enhance = open;
     }
 
+    /// Ticket W20-04: borderless fullscreen on/off.
+    fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
+        let on = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!on));
+        self.last_fullscreen_request = Some(!on);
+    }
+
+    /// Ticket W20-04: remember the WINDOWED size once it settles (never
+    /// the fullscreen one — leaving fullscreen and quitting must not make
+    /// the next launch screen-sized).
+    fn track_window_size(&mut self, ctx: &egui::Context) {
+        let (fullscreen, size) = ctx.input(|i| {
+            let v = i.viewport();
+            (
+                v.fullscreen.unwrap_or(false),
+                v.inner_rect
+                    .map(|r| [r.width().round(), r.height().round()]),
+            )
+        });
+        let Some(size) = size.filter(|_| !fullscreen) else {
+            self.pending_window_size = None;
+            return;
+        };
+        if self.settings.window.inner_size == Some(size) {
+            self.pending_window_size = None;
+            return;
+        }
+        match self.pending_window_size {
+            Some((pending, since)) if pending == size => {
+                if since.elapsed() >= WINDOW_SIZE_SETTLE {
+                    self.settings.window.inner_size = Some(size);
+                    self.pending_window_size = None;
+                    self.save_settings();
+                } else {
+                    ctx.request_repaint_after(WINDOW_SIZE_SETTLE);
+                }
+            }
+            _ => {
+                self.pending_window_size = Some((size, std::time::Instant::now()));
+                ctx.request_repaint_after(WINDOW_SIZE_SETTLE);
+            }
+        }
+    }
+
     /// Ticket W20-01: hand Settings › Video's V-sync to the surface.
     ///
     /// Live, not at restart: eframe 0.35's `Frame::set_wgpu_surface_config`
@@ -9509,6 +9609,7 @@ impl eframe::App for RetroForgeApp {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         self.apply_vsync(frame);
+        self.track_window_size(&ctx);
         // Ticket W15-04: drain any script load/manifest failure queued
         // since the last frame into a toast — see
         // `script_error_toast_pending`'s doc for why this can't happen

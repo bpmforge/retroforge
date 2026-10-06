@@ -247,6 +247,29 @@ pub struct LibrarySettings {
     pub view: crate::library::LibraryView,
 }
 
+/// Ticket W20-04: the windowed size to reopen at. `None` = the built-in
+/// [`crate::app::WINDOW_SIZE`]. Not written while fullscreen, so leaving
+/// fullscreen and quitting does not make the next launch screen-sized.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WindowSettings {
+    pub inner_size: Option<[f32; 2]>,
+}
+
+impl WindowSettings {
+    /// The size to open at: the saved one, clamped to at least
+    /// [`crate::app::MIN_WINDOW_SIZE`] and to something finite, or the
+    /// default.
+    #[must_use]
+    pub fn startup_size(&self) -> [f32; 2] {
+        let [mw, mh] = crate::app::MIN_WINDOW_SIZE;
+        match self.inner_size {
+            Some([w, h]) if w.is_finite() && h.is_finite() => [w.max(mw), h.max(mh)],
+            _ => crate::app::WINDOW_SIZE,
+        }
+    }
+}
+
 /// Everything in `settings.toml`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AppSettings {
@@ -261,6 +284,8 @@ pub struct AppSettings {
     pub accessibility: crate::accessibility::AccessibilitySettings,
     /// Ticket W15-05: the Grid/List toggle, persisted (acceptance 2).
     pub library: LibrarySettings,
+    /// Ticket W20-04.
+    pub window: WindowSettings,
     /// Tables and keys this build does not know, kept verbatim so a newer
     /// build's settings survive an older build touching the file (module
     /// doc).
@@ -277,6 +302,7 @@ struct KnownSettings {
     paths: PathSettings,
     accessibility: crate::accessibility::AccessibilitySettings,
     library: LibrarySettings,
+    window: WindowSettings,
 }
 
 impl AppSettings {
@@ -293,6 +319,7 @@ impl AppSettings {
             audio: self.audio.clone(),
             paths: self.paths.clone(),
             library: self.library,
+            window: self.window,
         };
         let mut table = toml::Table::try_from(known).map_err(|e| e.to_string())?;
         for (key, value) in &self.unknown {
@@ -315,7 +342,7 @@ impl AppSettings {
         for (key, value) in &table {
             if !matches!(
                 key.as_str(),
-                "video" | "audio" | "paths" | "accessibility" | "library"
+                "video" | "audio" | "paths" | "accessibility" | "library" | "window"
             ) {
                 unknown.insert(key.clone(), value.clone());
             }
@@ -343,6 +370,7 @@ impl AppSettings {
             audio: section("audio").try_into().unwrap_or_default(),
             paths: section("paths").try_into().unwrap_or_default(),
             library: section("library").try_into().unwrap_or_default(),
+            window: section("window").try_into().unwrap_or_default(),
             unknown,
         })
     }
@@ -537,5 +565,27 @@ latency_ms = \"not a number\"
             settings.paths.library_folders
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Ticket W20-04: the window size round-trips, and a nonsense or tiny
+    /// one opens at something usable.
+    #[test]
+    fn window_size_round_trips_and_is_clamped_on_startup() {
+        let mut settings = AppSettings::default();
+        settings.window.inner_size = Some([1280.0, 900.0]);
+        let back = AppSettings::from_toml(&settings.to_toml().unwrap()).unwrap();
+        assert_eq!(back.window.startup_size(), [1280.0, 900.0]);
+        let tiny = WindowSettings {
+            inner_size: Some([10.0, 10.0]),
+        };
+        assert_eq!(tiny.startup_size(), crate::app::MIN_WINDOW_SIZE);
+        assert_eq!(
+            WindowSettings::default().startup_size(),
+            crate::app::WINDOW_SIZE
+        );
+        let nan = WindowSettings {
+            inner_size: Some([f32::NAN, 600.0]),
+        };
+        assert_eq!(nan.startup_size(), crate::app::WINDOW_SIZE);
     }
 }

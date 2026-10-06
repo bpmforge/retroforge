@@ -127,4 +127,22 @@ fn pressing_f12_writes_a_screenshot_and_raises_a_toast() {
         "the original/enhanced pair (FR-FE-005) must both land under the screenshots directory, \
          not the process's current directory"
     );
+
+    // ---- Ticket W20-04: F11 toggles fullscreen ----------------------
+    // (In this test rather than its own: one test per binary, for the
+    // `set_var` reason above.)
+    assert_eq!(
+        harness
+            .state()
+            .app_bindings_key_for_test(retroforge::app_bindings::AppAction::Fullscreen),
+        Some(egui::Key::F11)
+    );
+    assert_eq!(harness.state().last_fullscreen_request_for_test(), None);
+    harness.key_press(egui::Key::F11);
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state().last_fullscreen_request_for_test(),
+        Some(true),
+        "F11 must ask the window to go fullscreen"
+    );
 }

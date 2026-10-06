@@ -8442,10 +8442,11 @@
    "app_hotkeys.rs covers the new action's default binding and persistence round-trip"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-04."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-04.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). AppAction::Fullscreen (default F11, remappable, pad-bindable with an edge detector) plus the fixed macOS shortcut Cmd+Ctrl+F; View menu 'Fullscreen' checkbox (shows state, per UX_WAVE_15 §7) and an in-game menu entry; all send egui ViewportCommand::Fullscreen (egui-0.35.0 viewport.rs:1141). Bindings file v2 header + 'known=' line: a v1 file (pre-W20-04) gains defaults for actions it never knew, while an action a v2 file leaves unbound stays unbound (unit test both ways). Window size: new [window] settings section (WindowSettings::startup_size clamps to MIN_WINDOW_SIZE, NaN -> default, unit-tested); main.rs opens at it; the app writes the WINDOWED inner size after it holds still for 750 ms (never while fullscreen), so a drag writes once. Did not use eframe::App::on_exit because its signature depends on the glow feature. Tests: app_hotkeys.rs (F11 default bound; pressing it requests fullscreen), app_bindings and settings unit tests. UNVERIFIED by eye: real fullscreen on macOS (needs a window; headless harness has no windowing backend), and that the size restores at relaunch."
   ]
  },
  {

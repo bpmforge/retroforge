@@ -55,12 +55,26 @@ pub enum AppAction {
     FastForward,
     Screenshot,
     HoldToPeek,
+    /// Ticket W20-04: borderless fullscreen on/off.
+    Fullscreen,
 }
 
 impl AppAction {
     /// Declaration order — also the order the Controls window and the
     /// overlay menu list them in, matching §6's table.
-    pub const ALL: [AppAction; 5] = [
+    pub const ALL: [AppAction; 6] = [
+        AppAction::SaveState,
+        AppAction::LoadState,
+        AppAction::FastForward,
+        AppAction::Screenshot,
+        AppAction::HoldToPeek,
+        AppAction::Fullscreen,
+    ];
+
+    /// The actions a version-1 file (before W20-04) could know about —
+    /// what lets [`AppBindings::from_text`] tell "the user unbound this"
+    /// from "this action did not exist when the file was written".
+    const V1_ACTIONS: [AppAction; 5] = [
         AppAction::SaveState,
         AppAction::LoadState,
         AppAction::FastForward,
@@ -79,6 +93,7 @@ impl AppAction {
             AppAction::FastForward => "FastForward",
             AppAction::Screenshot => "Screenshot",
             AppAction::HoldToPeek => "HoldToPeek",
+            AppAction::Fullscreen => "Fullscreen",
         }
     }
 
@@ -98,6 +113,7 @@ impl AppAction {
             AppAction::FastForward => "Fast-forward (hold)",
             AppAction::Screenshot => "Screenshot",
             AppAction::HoldToPeek => "Hold-to-peek",
+            AppAction::Fullscreen => "Fullscreen",
         }
     }
 }
@@ -106,7 +122,9 @@ impl AppAction {
 /// a per-user config, not a `docs/design/CONTRACTS.md` format, so the
 /// version exists to let a future change refuse an old file politely,
 /// not to promise external readers anything.
-const MAGIC: &str = "RFAPPBIND 1";
+const MAGIC: &str = "RFAPPBIND 2";
+/// The pre-W20-04 header, still accepted on load.
+const MAGIC_V1: &str = "RFAPPBIND 1";
 
 /// App-namespaced key/pad bindings. See the module doc for why this is
 /// not `rf_input::KeyMap`/`PadMap`.
@@ -129,6 +147,7 @@ impl Default for AppBindings {
         b.bind_key(egui::Key::Tab, AppAction::FastForward);
         b.bind_key(egui::Key::F12, AppAction::Screenshot);
         b.bind_key(egui::Key::Backtick, AppAction::HoldToPeek);
+        b.bind_key(egui::Key::F11, AppAction::Fullscreen);
         b
     }
 }
@@ -209,6 +228,11 @@ impl AppBindings {
     pub fn to_text(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::from(MAGIC);
+        // Ticket W20-04: which actions this file was written knowing, so a
+        // later build can give an action added since then its default
+        // instead of reading its absence as "the user unbound it".
+        let known: Vec<&str> = AppAction::ALL.iter().map(|a| a.name()).collect();
+        let _ = write!(out, "\nknown={}", known.join(","));
         out.push_str("\n[Keyboard]\n");
         for (key, action) in &self.keys {
             let _ = writeln!(out, "{}={}", key.name(), action.name());
@@ -230,11 +254,17 @@ impl AppBindings {
     pub fn from_text(text: &str) -> Result<(Self, Vec<String>), String> {
         let mut lines = text.lines();
         let first = lines.next().unwrap_or_default().trim();
-        if first != MAGIC {
+        if first != MAGIC && first != MAGIC_V1 {
             return Err(format!(
                 "not an app-hotkey file: expected first line {MAGIC:?}, found {first:?}"
             ));
         }
+        // A v1 file knew exactly the original five; a v2 file says.
+        let mut known: Vec<AppAction> = if first == MAGIC_V1 {
+            AppAction::V1_ACTIONS.to_vec()
+        } else {
+            Vec::new()
+        };
         let mut out = AppBindings {
             keys: Vec::new(),
             pads: Vec::new(),
@@ -245,6 +275,10 @@ impl AppBindings {
             let line = raw.trim();
             let number = index + 2; // +1 for 1-based, +1 for the magic line already consumed
             if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(list) = line.strip_prefix("known=") {
+                known.extend(list.split(',').filter_map(AppAction::from_name));
                 continue;
             }
             match line {
@@ -275,6 +309,20 @@ impl AppBindings {
                 match egui::Key::from_name(name) {
                     Some(key) => out.bind_key(key, action),
                     None => warnings.push(format!("line {number}: unknown key {name:?}")),
+                }
+            }
+        }
+        // Ticket W20-04: actions this file never heard of get their
+        // default key — unless the user has since put that key to another
+        // use, which wins.
+        let defaults = AppBindings::default();
+        for action in AppAction::ALL {
+            if known.contains(&action) {
+                continue;
+            }
+            if let Some(key) = defaults.key_for(action) {
+                if out.action_for_key(key).is_none() {
+                    out.bind_key(key, action);
                 }
             }
         }
@@ -471,7 +519,7 @@ mod tests {
     #[test]
     fn a_file_with_the_wrong_magic_is_refused() {
         let err = AppBindings::from_text("not an app-hotkey file\n").expect_err("must be refused");
-        assert!(err.contains("RFAPPBIND 1"));
+        assert!(err.contains("RFAPPBIND 2"), "{err}");
     }
 
     #[test]
@@ -490,5 +538,23 @@ mod tests {
             Some(rf_input::PadButton::South)
         );
         assert_eq!(warnings.len(), 2, "{warnings:?}");
+    }
+
+    /// Ticket W20-04: a file from before Fullscreen existed gains its F11
+    /// default, while an action the user deliberately unbound in a v2
+    /// file stays unbound.
+    #[test]
+    fn new_actions_get_defaults_but_deliberate_unbinds_survive() {
+        let v1 = "RFAPPBIND 1\n[Keyboard]\nF5=SaveState\n[Gamepad]\n";
+        let (b, warnings) = AppBindings::from_text(v1).expect("v1 parses");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(b.key_for(AppAction::Fullscreen), Some(egui::Key::F11));
+        // v1 listed no LoadState key: the user unbound it — stays unbound.
+        assert_eq!(b.key_for(AppAction::LoadState), None);
+
+        let mut mine = AppBindings::default();
+        mine.unbind_key_for(AppAction::Fullscreen);
+        let (round, _) = AppBindings::from_text(&mine.to_text()).expect("v2 parses");
+        assert_eq!(round.key_for(AppAction::Fullscreen), None);
     }
 }
