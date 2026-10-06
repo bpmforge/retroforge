@@ -8775,10 +8775,11 @@
    "a kittest advances time and asserts both hide and re-show conditions"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-11."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-11.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). Menu and status bars use egui Panel::show_collapsible (slide animation, egui-0.35.0 panel.rs:389). update_chrome_visibility hides them only when: a game is RUNNING, the Quick Menu and every window are closed (any_window_open), the pointer has been still for 2.5 s (egui Context::time, so tests drive it by stepping) and is not within 48 px of the top/bottom edge, and the honesty badge has not changed in the last 3 s. Keyboard input deliberately does NOT count as activity (it is how the game is played). Armed only after a real pointer has moved this session -- the guard that keeps every other headless test's bars in place (retroforge suite: 484 passing, none disturbed). FOUND: the first pointer event has no previous position, so egui reports a zero delta; movement is detected by comparing with the last position seen. Test: tests/chrome_autohide.rs (unarmed never hides; still pointer in play hides; top edge shows; pause shows and keeps them; Quick Menu shows). Photo: target/ui-tour/18-play-chrome-hidden.png."
   ]
  },
  {

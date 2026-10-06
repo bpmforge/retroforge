@@ -194,6 +194,23 @@ fn photograph_every_major_surface() {
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
 
+    // W20-11: in play, with the pointer still, the bars slide away.
+    let centre = egui::pos2(WINDOW_SIZE[0] / 2.0, WINDOW_SIZE[1] / 2.0);
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(centre));
+    for _ in 0..40 {
+        harness.step();
+    }
+    shot(&mut harness, "18-play-chrome-hidden");
+    // And back, so the rest of the tour has its menus.
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(egui::pos2(centre.x, 8.0)));
+    harness.run_steps(4);
+
     // Ticket W11-04: the shipped Lua overlay, running in the app and
     // drawing over the live frame. FR-PLUG-001 and an MVP checklist item
     // — proven since W4-04 against the LIBRARY, and unreachable in the

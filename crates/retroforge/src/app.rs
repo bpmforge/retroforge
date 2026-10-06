@@ -73,6 +73,13 @@ const WINDOW_SIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis
 /// Ticket W20-06: a save-slot card's content width and thumbnail height
 /// (the thumbnail is fitted inside, letterboxed, whatever its aspect).
 const SLOT_CARD_WIDTH: f32 = 168.0;
+
+/// Ticket W20-11: seconds without pointer movement before the bars hide
+/// in play, how long a honesty-badge change keeps them up, and how close
+/// to the top/bottom edge the pointer brings them back.
+const CHROME_HIDE_AFTER: f64 = 2.5;
+const CHROME_BADGE_HOLD: f64 = 3.0;
+const CHROME_EDGE_PX: f32 = 48.0;
 const SLOT_THUMB_HEIGHT: f32 = 126.0;
 
 /// How wide decoded widescreen renders, in dots (ticket W11-03).
@@ -467,6 +474,17 @@ pub struct RetroForgeApp {
     /// would hash megabytes per frame for nothing).
     hash_display_for_test: bool,
     display_hash: Option<u64>,
+    /// Ticket W20-11: whether the menu and status bars are showing, and
+    /// what decides it — armed only once a REAL pointer has moved this
+    /// session (a headless harness that never moves one never hides the
+    /// bars out from under a test), the last pointer activity, and when
+    /// the honesty badge last changed (a change re-shows the bars).
+    chrome_visible: bool,
+    chrome_armed: bool,
+    chrome_last_activity: f64,
+    chrome_badge: String,
+    chrome_badge_changed: f64,
+    chrome_last_pointer: Option<egui::Pos2>,
     /// Ticket W20-12: on-screen-display cards over the game picture.
     osd: crate::toast::ToastStack,
     /// Ticket W20-06: decoded save-slot thumbnails.
@@ -1200,6 +1218,12 @@ impl RetroForgeApp {
             last_fullscreen_request: None,
             slot_textures: crate::slot_cards::SlotTextures::default(),
             osd: crate::toast::ToastStack::osd(),
+            chrome_visible: true,
+            chrome_armed: false,
+            chrome_last_activity: 0.0,
+            chrome_badge: String::new(),
+            chrome_badge_changed: 0.0,
+            chrome_last_pointer: None,
             shader_chain: None,
             shader_budget: rf_renderer::fog::BudgetGate::new(),
             shader_note: None,
@@ -4404,9 +4428,11 @@ impl RetroForgeApp {
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
+        // Ticket W20-11: slides away in play (`update_chrome_visibility`).
+        let mut visible = self.chrome_visible;
         egui::Panel::top("menu_bar")
             .frame(Self::chrome_frame(ui))
-            .show(ui, |ui| {
+            .show_collapsible(ui, &mut visible, |ui| {
                 ui.horizontal(|ui| {
                     ui.menu_button("File", |ui| {
                         if ui.button("Open ROM...").clicked() {
@@ -4712,9 +4738,11 @@ impl RetroForgeApp {
     /// from the next reader. The controls moved to menus instead
     /// ([`Self::menu_bar`]).
     fn controls_bar(&mut self, ui: &mut egui::Ui) {
+        // Ticket W20-11: slides away in play, like the menu bar.
+        let mut visible = self.chrome_visible;
         egui::Panel::bottom("controls")
             .frame(Self::chrome_frame(ui))
-            .show(ui, |ui| {
+            .show_collapsible(ui, &mut visible, |ui| {
                 ui.horizontal(|ui| {
                     // Ticket W20-07: Run / Step Frame / Step Scanline and
                     // the f/sl readout moved to the Debug Viewers window
@@ -9987,6 +10015,73 @@ impl RetroForgeApp {
         self.show_enhance = open;
     }
 
+    /// Ticket W20-11: whether any window is open over the play view — the
+    /// bars never hide while one is (it was opened from them).
+    fn any_window_open(&self) -> bool {
+        self.show_settings
+            || self.show_controls
+            || self.show_states
+            || self.show_enhance
+            || self.show_game_settings
+            || self.show_upscale_studio
+            || self.show_author
+            || self.show_layers
+            || self.debug_panels.visible
+    }
+
+    /// Ticket W20-11 (`docs/design/UX_WAVE_20.md` §5): decide whether the
+    /// menu and status bars show this frame.
+    ///
+    /// Hidden only while a game is RUNNING with nothing else open, the
+    /// pointer has been still for [`CHROME_HIDE_AFTER`] and is not near the
+    /// top or bottom edge, and the honesty badge has not changed in the
+    /// last [`CHROME_BADGE_HOLD`] (principle 2 outranks tidiness: a change
+    /// in what is enhanced is shown, not hidden). Keyboard input does NOT
+    /// count as activity — it is how the game is played, and counting it
+    /// would mean the bars never hide for a keyboard player.
+    fn update_chrome_visibility(&mut self, ctx: &egui::Context) {
+        let now = ctx.time();
+        // Compared with the last position seen rather than
+        // `pointer.delta()`: the first event after the pointer enters the
+        // window has no previous position, so egui reports a zero delta.
+        let (pressed, pos) = ctx.input(|i| (i.pointer.any_pressed(), i.pointer.hover_pos()));
+        let moved = pressed || (pos.is_some() && pos != self.chrome_last_pointer);
+        self.chrome_last_pointer = pos;
+        if moved {
+            self.chrome_armed = true;
+            self.chrome_last_activity = now;
+        }
+        let badge = self.status_badge();
+        if badge != self.chrome_badge {
+            self.chrome_badge = badge;
+            self.chrome_badge_changed = now;
+        }
+        let screen = ctx.viewport_rect();
+        let near_edge = pos.is_some_and(|p| {
+            p.y < screen.top() + CHROME_EDGE_PX || p.y > screen.bottom() - CHROME_EDGE_PX
+        });
+        let playing = self.core.is_some()
+            && self.running
+            && !self.show_overlay_menu
+            && !self.any_window_open();
+        let hide = self.chrome_armed
+            && playing
+            && !near_edge
+            && now - self.chrome_last_activity >= CHROME_HIDE_AFTER
+            && now - self.chrome_badge_changed >= CHROME_BADGE_HOLD;
+        self.chrome_visible = !hide;
+        if playing && self.chrome_visible {
+            // Wake up when the timer would expire even if nothing moves.
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(CHROME_HIDE_AFTER));
+        }
+    }
+
+    /// Ticket W20-11: whether the bars are showing (tests).
+    #[doc(hidden)]
+    pub fn chrome_visible_for_test(&self) -> bool {
+        self.chrome_visible
+    }
+
     /// Ticket W20-04: borderless fullscreen on/off.
     fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
         let on = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -10201,6 +10296,7 @@ impl eframe::App for RetroForgeApp {
         self.pump_memory_poke();
         self.pump_audio_scopes();
 
+        self.update_chrome_visibility(&ctx);
         self.menu_bar(ui);
         self.controls_bar(ui);
         self.video_panel(ui);
