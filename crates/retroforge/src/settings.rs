@@ -62,6 +62,30 @@ impl ScaleMode {
     }
 }
 
+/// Shape of one emulated pixel on screen (ticket W20-01;
+/// `crate::play_view`). `Tv` is the NTSC 8:7 pixel aspect RENDERER.md §2
+/// names as the default; `Square` is the raw 1:1 grid many players prefer
+/// for pixel art.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PixelAspect {
+    #[default]
+    Tv,
+    Square,
+}
+
+impl PixelAspect {
+    pub const ALL: [PixelAspect; 2] = [PixelAspect::Tv, PixelAspect::Square];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            PixelAspect::Tv => "TV (8:7)",
+            PixelAspect::Square => "Square pixels",
+        }
+    }
+}
+
 /// Which MetalFX mode (if any) Settings > Video should use (ticket W16-08;
 /// `docs/design/ENHANCEMENT_WAVE_16.md` §7 Path B). A **scaler** choice,
 /// not an enhancement-ladder toggle (CLAUDE.md law 6: it upscales the
@@ -99,6 +123,10 @@ pub enum MetalFxSetting {
 #[serde(default)]
 pub struct VideoSettings {
     pub scale_mode: ScaleMode,
+    /// Pixel aspect (ticket W20-01). `#[serde(default)]` on the struct
+    /// means a settings file written before this field existed loads as
+    /// `Tv`.
+    pub pixel_aspect: PixelAspect,
     /// Shader name, `None` for the plain pipeline. A string because W3-02a
     /// owns the shader set; this must not need changing when that lands.
     pub shader: Option<String>,
@@ -112,6 +140,7 @@ impl Default for VideoSettings {
     fn default() -> Self {
         Self {
             scale_mode: ScaleMode::default(),
+            pixel_aspect: PixelAspect::default(),
             shader: None,
             // On by default: tearing is the more objectionable artifact,
             // and W2-05's audio clock (not vsync) is what paces the

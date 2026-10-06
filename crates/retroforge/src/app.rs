@@ -409,6 +409,15 @@ pub struct RetroForgeApp {
     last_frame_rgba: Option<Vec<u8>>,
     /// Dimensions of `last_frame_rgba` (ticket W11-03).
     last_frame_size: Option<(usize, usize)>,
+    /// Ticket W20-01: the CORE's frame size, before any HD-pack upscale —
+    /// what `crate::play_view` sizes the picture from. `last_frame_size`
+    /// is the composited texture's size, which an HD pack multiplies.
+    core_frame_size: Option<(usize, usize)>,
+    /// Ticket W20-01: the present mode last handed to eframe, so V-sync is
+    /// re-applied only when the setting changes (and once at startup).
+    applied_vsync: Option<bool>,
+    /// Ticket W20-01: where the picture was drawn last frame.
+    last_play_rect: Option<egui::Rect>,
     /// Ticket W10-03: §3.1's search box, filtering the library home by
     /// title. Not persisted — a search is a gesture within a session, and
     /// an app that reopened tomorrow still filtered by "castle" would be
@@ -1117,6 +1126,9 @@ impl RetroForgeApp {
             run_hovered: false,
             last_frame_rgba: None,
             last_frame_size: None,
+            core_frame_size: None,
+            applied_vsync: None,
+            last_play_rect: None,
             library_search: String::new(),
             library_console_filter: None,
             library_scans: 0,
@@ -2922,6 +2934,7 @@ impl RetroForgeApp {
             self.maybe_capture_first_frame(&rgba, size.0, size.1);
             self.last_frame_rgba = Some(rgba);
             self.last_frame_size = Some(size);
+            self.core_frame_size = Some((msg.width, msg.height));
             // Ticket W11-02: the probe's bytes become a live camera. The
             // `read` closure is a lookup into what the CORE peeked, not a
             // read of anything on this thread — the UI never touches
@@ -4744,6 +4757,20 @@ impl RetroForgeApp {
                                         changed = true;
                                     }
                                 }
+                                ui.add_space(4.0);
+                                ui.label("Pixel shape");
+                                for aspect in crate::settings::PixelAspect::ALL {
+                                    if ui
+                                        .radio_value(
+                                            &mut self.settings.video.pixel_aspect,
+                                            aspect,
+                                            aspect.label(),
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                }
                                 ui.separator();
 
                                 ui.label("Shader");
@@ -4769,9 +4796,7 @@ impl RetroForgeApp {
                                 {
                                     changed = true;
                                 }
-                                ui.small(
-                            "Takes effect on restart (the window surface is created at startup).",
-                        );
+                                ui.small("Off can tear; on can add a frame of display latency.");
                                 ui.separator();
 
                                 // MetalFX (ticket W16-08): a scaler choice,
@@ -8157,6 +8182,19 @@ impl RetroForgeApp {
         self.last_frame_size
     }
 
+    /// Ticket W20-01: where the Original view's picture was drawn, and
+    /// the core frame size it was sized from.
+    #[doc(hidden)]
+    pub fn play_rect_for_test(&self) -> Option<(egui::Rect, (usize, usize))> {
+        self.last_play_rect.zip(self.core_frame_size)
+    }
+
+    /// Ticket W20-01: Settings › Video, for tests that need a mode set.
+    #[doc(hidden)]
+    pub fn video_settings_mut_for_test(&mut self) -> &mut crate::settings::VideoSettings {
+        &mut self.settings.video
+    }
+
     pub fn last_frame_rgba_for_test(&self) -> Option<Vec<u8>> {
         self.last_frame_rgba.clone()
     }
@@ -9016,7 +9054,35 @@ impl RetroForgeApp {
         self.show_enhance = open;
     }
 
+    /// Ticket W20-01: hand Settings › Video's V-sync to the surface.
+    ///
+    /// Live, not at restart: eframe 0.35's `Frame::set_wgpu_surface_config`
+    /// reconfigures the surface on the next paint (egui-wgpu
+    /// `winit.rs`, "Apply any runtime changes requested via
+    /// `RenderState::surface_config`"). `Auto*` rather than `Fifo`/
+    /// `Immediate` so a backend lacking one mode degrades instead of
+    /// failing surface configuration. Only called when the setting differs
+    /// from what was last applied, so the surface is not reconfigured
+    /// every frame.
+    fn apply_vsync(&mut self, frame: &mut eframe::Frame) {
+        let want = self.settings.video.vsync;
+        if self.applied_vsync == Some(want) {
+            return;
+        }
+        if let Some(mut config) = frame.wgpu_surface_config() {
+            config.present_mode = if want {
+                eframe::wgpu::PresentMode::AutoVsync
+            } else {
+                eframe::wgpu::PresentMode::AutoNoVsync
+            };
+            frame.set_wgpu_surface_config(config);
+        }
+        self.applied_vsync = Some(want);
+    }
+
     fn video_panel(&mut self, ui: &mut egui::Ui) {
+        let scale_mode = self.settings.video.scale_mode;
+        let par = crate::play_view::pixel_aspect_ratio(self.settings.video.pixel_aspect);
         egui::CentralPanel::default().show(ui, |ui| {
             // Ticket W4-05 (FRONTEND_UI.md §1): hold-to-peek forces the
             // ORIGINAL view for as long as the badge is held. Applied
@@ -9048,7 +9114,16 @@ impl RetroForgeApp {
                         // §2's IA puts Library at the root.
                         self.library_home(ui);
                     } else if let Some(texture) = &self.texture {
-                        let response = ui.add(egui::Image::from_texture(texture).shrink_to_fit());
+                        // Ticket W20-01: sized by Settings › Video, from the
+                        // core's own frame size (an HD pack's texture is
+                        // N times larger but covers the same picture).
+                        let [tw, th] = texture.size();
+                        let (fw, fh) = self.core_frame_size.unwrap_or((tw, th));
+                        #[allow(clippy::cast_precision_loss)]
+                        let grid = crate::play_view::DisplayGrid::for_frame(fw as f32, fh as f32);
+                        let response =
+                            crate::play_view::show_frame(ui, texture, grid, par, scale_mode);
+                        self.last_play_rect = Some(response.rect);
                         // Ticket W11-04: what the script asked to draw,
                         // painted OVER the frame and never into it. An
                         // overlay that modified the framebuffer would be
@@ -9068,7 +9143,12 @@ impl RetroForgeApp {
                 }
                 enhanced_view::ActiveView::Ultrawide { .. } => {
                     if let Some(texture) = &self.ultrawide_texture {
-                        ui.add(egui::Image::from_texture(texture).shrink_to_fit());
+                        // Console pixels at console line count, so the TV
+                        // aspect and integer rule apply as for Original.
+                        let [tw, th] = texture.size();
+                        #[allow(clippy::cast_precision_loss)]
+                        let grid = crate::play_view::DisplayGrid::for_frame(tw as f32, th as f32);
+                        crate::play_view::show_frame(ui, texture, grid, par, scale_mode);
                     } else {
                         ui.centered_and_justified(|ui| {
                             ui.label("Ultrawide view: preparing texture\u{2026}");
@@ -9087,7 +9167,12 @@ impl RetroForgeApp {
                 // events into the 3D scene at all.
                 enhanced_view::ActiveView::Diorama { .. } => {
                     if let Some(texture) = &self.diorama_texture {
-                        ui.add(egui::Image::from_texture(texture).shrink_to_fit());
+                        // A rendered 3D image: its pixels are already
+                        // display pixels, so no TV stretch.
+                        let [tw, th] = texture.size();
+                        #[allow(clippy::cast_precision_loss)]
+                        let grid = crate::play_view::DisplayGrid::exact(tw as f32, th as f32);
+                        crate::play_view::show_frame(ui, texture, grid, 1.0, scale_mode);
                     } else {
                         ui.centered_and_justified(|ui| {
                             ui.label("Diorama view: preparing texture\u{2026}");
@@ -9100,9 +9185,10 @@ impl RetroForgeApp {
 }
 
 impl eframe::App for RetroForgeApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
+        self.apply_vsync(frame);
         // Ticket W15-04: drain any script load/manifest failure queued
         // since the last frame into a toast — see
         // `script_error_toast_pending`'s doc for why this can't happen

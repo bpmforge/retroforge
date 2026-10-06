@@ -55,6 +55,7 @@ pub mod library_roots;
 pub mod mod_chunk;
 pub mod mode_invariant;
 pub mod pacer;
+pub mod play_view;
 pub mod profile_editor;
 pub mod recording;
 pub mod reveal;
