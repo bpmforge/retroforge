@@ -117,10 +117,18 @@ pub fn show_frame(
     mode: ScaleMode,
 ) -> egui::Response {
     let rect = play_rect(ui.available_rect_before_wrap(), grid, par, mode);
-    ui.put(
-        rect,
-        egui::Image::from_texture(texture).fit_to_exact_size(rect.size()),
-    )
+    // `maintain_aspect_ratio(false)`: egui's `Image` keeps the TEXTURE's
+    // aspect by default, which silently undid the 8:7 pixel shape — the
+    // rect was 8:7 and the picture inside it 16:15 (found from a tour
+    // photo, W20-12). The response reports the rect the image actually
+    // fills (`calc_size`), so a test of the response measures what is
+    // painted, not merely what was allocated.
+    let image = egui::Image::from_texture(texture)
+        .fit_to_exact_size(rect.size())
+        .maintain_aspect_ratio(false);
+    let drawn = image.calc_size(rect.size(), Some(texture.size_vec2()));
+    let response = ui.put(rect, image);
+    response.with_new_rect(egui::Rect::from_center_size(rect.center(), drawn))
 }
 
 fn fit(w: f32, h: f32, aw: f32, ah: f32) -> egui::Vec2 {
