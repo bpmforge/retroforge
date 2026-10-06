@@ -2472,7 +2472,7 @@ impl RetroForgeApp {
         let Some(dir) = self.states_dir() else {
             return;
         };
-        match crate::state_slots::load(&dir, slot, &rf_state::MigrationRegistry::default()) {
+        match crate::state_slots::load(&dir, slot, &crate::save_state::nes_migrations()) {
             Ok((container, warnings)) => {
                 // §3.2's last clause. Surfaced in the modal AND the status
                 // line: a warning only visible in a modal the user is

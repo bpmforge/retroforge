@@ -75,7 +75,7 @@
 //! all outside a frame boundary.
 //!
 //! Anything recording this hash in a `.rfreplay` writes
-//! `hash_kind=full-v1` ([`crate::save_state::HASH_KIND`]); the old
+//! `hash_kind=full-v2` ([`crate::save_state::HASH_KIND`]); the old
 //! `reachable-v1` names the narrower hash and must not be reused for this
 //! one (SAVE_STATES.md §3).
 use rf_core_api::{CoreSink, InputFrame};
@@ -1319,7 +1319,7 @@ impl EmuStepper {
     /// cannot see the PPU could not satisfy at any frame count.
     ///
     /// Callers that record this value in a `.rfreplay` must write
-    /// `hash_kind=full-v1` ([`crate::save_state::HASH_KIND`]), NOT the old
+    /// `hash_kind=full-v2` ([`crate::save_state::HASH_KIND`]), NOT the old
     /// `reachable-v1` — SAVE_STATES.md §3 requires the field to change
     /// rather than be silently redefined.
     ///
@@ -2159,5 +2159,82 @@ pub mod exec_control {
             }
         }
         StopReason::BudgetExhausted
+    }
+}
+
+#[cfg(test)]
+mod save_load_determinism {
+    //! Ticket W2-22: at every frame boundary, Save -> StepFrame must equal
+    //! Load(that save) -> StepFrame — the pixels of the next frame and the
+    //! whole machine state after it. This is the property Load State and
+    //! rewind rest on, checked frame by frame over every NES fixture that
+    //! is built (a missing fixture is skipped, not failed).
+    use super::EmuStepper;
+    use rf_core_api::{CoreSink, PpuPixel};
+
+    /// FNV-1a over every pixel of a frame, scanline number included.
+    #[derive(Default)]
+    struct FrameHash(u64);
+    impl CoreSink for FrameHash {
+        fn video_scanline(&mut self, y: u16, pixels: &[PpuPixel]) {
+            for p in pixels {
+                let layer = match p.layer {
+                    rf_core_api::PixelLayer::Backdrop => 0,
+                    rf_core_api::PixelLayer::Background(n) => 1 + u64::from(n),
+                    rf_core_api::PixelLayer::Sprite => 9,
+                };
+                for v in [
+                    u64::from(y),
+                    u64::from(p.palette_index),
+                    layer,
+                    u64::from(p.priority),
+                ] {
+                    self.0 = (self.0 ^ v).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        }
+        fn audio(&mut self, _samples: &[i16]) {}
+        fn event(&mut self, _ev: rf_core_api::CoreEvent) {}
+    }
+
+    const FIXTURES: [&str; 2] = [
+        "../../fixtures/nes/rf-scroller/build/rf-scroller.nes",
+        "../../fixtures/nes/action53/build/action53.nes",
+    ];
+
+    #[test]
+    fn save_load_step_reproduces_every_frame_on_nes_fixtures() {
+        let mut checked = 0;
+        for rel in FIXTURES {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+            let Ok(rom) = std::fs::read(&path) else {
+                eprintln!("SKIP: {rel} not built");
+                continue;
+            };
+            let mut s = EmuStepper::from_ines_bytes(&rom).expect("fixture loads");
+            let mut bad = Vec::new();
+            // A fixed trip count: terminates by construction (law 8).
+            for frame in 0..120u64 {
+                let saved = s.save_state(0).expect("frame-boundary save");
+                let before = s.full_state_bytes();
+                let mut played = FrameHash::default();
+                s.step_frame(&mut played);
+                let after_played = s.full_state_bytes();
+                s.load_state(&saved).expect("load own save");
+                let restored = s.full_state_bytes();
+                let mut replayed = FrameHash::default();
+                s.step_frame(&mut replayed);
+                let after_replayed = s.full_state_bytes();
+                if restored != before || played.0 != replayed.0 || after_played != after_replayed {
+                    bad.push((frame, restored == before, played.0 == replayed.0));
+                }
+            }
+            assert!(
+                bad.is_empty(),
+                "{rel}: (frame, state restored, picture reproduced) mismatches: {bad:?}"
+            );
+            checked += 1;
+        }
+        eprintln!("checked {checked} NES fixture(s)");
     }
 }

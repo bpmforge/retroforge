@@ -99,44 +99,68 @@ fn container_roundtrip_continues_hash_identical() {
     );
 }
 
-/// The golden fixture (acceptance criterion 3): a `.rfstate` written by this
-/// build, checked in, and loaded on every run. Its purpose is to fail when a
-/// future change alters the format or the encoding without anyone deciding
-/// to -- SAVE_STATES.md §2's "Golden `.rfstate` fixtures from each release
-/// are kept in the test suite; CI loads all of them."
+/// The golden fixtures (acceptance criterion 3): `.rfstate` files written by
+/// this project, checked in, and loaded on every run. Their purpose is to
+/// fail when a change alters the format or the encoding without anyone
+/// deciding to -- SAVE_STATES.md §2's "Golden `.rfstate` fixtures from each
+/// release are kept in the test suite; CI loads all of them."
 ///
-/// Regenerate deliberately (never to make this test go green) with:
-/// `cargo test -p retroforge --test save_state -- --ignored regenerate`
+/// `nrom-frame6.rfstate` is the `PPU_` version-3 fixture and is KEPT, not
+/// regenerated, when the format moves on: it must keep loading through
+/// `save_state::nes_migrations` (ticket W2-22, `PPU_` 3 -> 4) and report
+/// that migration. `nrom-frame6-v4.rfstate` is the current format and must
+/// load with no warning at all.
+///
+/// Regenerate the CURRENT one deliberately (never to make this test go
+/// green) with: `cargo test -p retroforge --test save_state -- --ignored
+/// regenerate`
 #[test]
 fn golden_fixture_loads_and_drives_the_machine_identically() {
-    let rom = test_rom(0x21);
-    let bytes = std::fs::read(fixture_path()).expect(
-        "golden fixture missing -- regenerate with: cargo test -p retroforge --test save_state \
-         -- --ignored regenerate",
-    );
-    let (container, warnings) =
-        rf_state::Container::decode_default(&bytes).expect("golden decodes");
-    assert!(warnings.is_empty(), "golden fixture warns: {warnings:?}");
+    let ppu_3_to_4 = [rf_state::LoadWarning::Migrated {
+        tag: *b"PPU_",
+        from: 3,
+        to: 4,
+    }];
+    for (name, expected_warnings) in [
+        ("nrom-frame6.rfstate", &ppu_3_to_4[..]),
+        (CURRENT_FIXTURE, &[][..]),
+    ] {
+        let rom = test_rom(0x21);
+        let bytes = std::fs::read(fixture_path(name)).unwrap_or_else(|e| {
+            panic!(
+                "golden fixture {name} missing ({e}) -- regenerate the current one with: \
+                 cargo test -p retroforge --test save_state -- --ignored regenerate"
+            )
+        });
+        let (container, warnings) =
+            rf_state::Container::decode(&bytes, &save_state::nes_migrations())
+                .unwrap_or_else(|e| panic!("{name} decodes: {e:?}"));
+        assert_eq!(warnings, expected_warnings, "{name}: load warnings");
 
-    let mut restored = EmuStepper::from_ines_bytes(&rom).expect("test rom loads");
-    restored.load_state(&container).expect("golden loads");
-    assert_eq!(
-        restored.frame_count(),
-        6,
-        "the fixture was taken six frames in"
-    );
+        let mut restored = EmuStepper::from_ines_bytes(&rom).expect("test rom loads");
+        restored.load_state(&container).expect("golden loads");
+        assert_eq!(
+            restored.frame_count(),
+            6,
+            "{name}: the fixture was taken six frames in"
+        );
 
-    // And it must still DRIVE: re-running from the fixture reproduces the
-    // same hash a live machine reaches at the same frame.
-    let mut live = EmuStepper::from_ines_bytes(&rom).expect("test rom loads");
-    advance(&mut live, 6);
-    advance(&mut live, 10);
-    advance(&mut restored, 10);
-    assert_eq!(restored.state_hash(), live.state_hash());
+        // And it must still DRIVE: re-running from the fixture reproduces
+        // the same hash a live machine reaches at the same frame.
+        let mut live = EmuStepper::from_ines_bytes(&rom).expect("test rom loads");
+        advance(&mut live, 6);
+        advance(&mut live, 10);
+        advance(&mut restored, 10);
+        assert_eq!(restored.state_hash(), live.state_hash(), "{name}");
+    }
 }
 
-/// Rewrites the golden fixture. Ignored so it never runs as part of the
-/// gate: a fixture that regenerates itself proves nothing.
+/// The current-format golden; see [`golden_fixture_loads_and_drives_the_machine_identically`].
+const CURRENT_FIXTURE: &str = "nrom-frame6-v4.rfstate";
+
+/// Rewrites the CURRENT golden fixture (never the release ones it
+/// supersedes). Ignored so it never runs as part of the gate: a fixture
+/// that regenerates itself proves nothing.
 #[test]
 #[ignore = "regenerates the checked-in golden .rfstate; run deliberately, never to fix a red test"]
 fn regenerate_golden_fixture() {
@@ -148,12 +172,15 @@ fn regenerate_golden_fixture() {
         .expect("save")
         .encode()
         .expect("encode");
-    std::fs::create_dir_all(fixture_path().parent().unwrap()).expect("fixture dir");
-    std::fs::write(fixture_path(), bytes).expect("write fixture");
+    let path = fixture_path(CURRENT_FIXTURE);
+    std::fs::create_dir_all(path.parent().unwrap()).expect("fixture dir");
+    std::fs::write(path, bytes).expect("write fixture");
 }
 
-fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nrom-frame6.rfstate")
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
 }
 
 /// FR-STATE-003: a state saved against one ROM must be refused against
@@ -291,3 +318,39 @@ fn battery_sram_persists_to_disk_and_reloads() {
 /// binary's tests in parallel threads sharing one pid, so a pid-only key
 /// races (the exact flake W1-03 fixed in `rf-harness`).
 static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// FR-STATE-005's payload half (ticket W2-22): every `.rfstate` archived
+/// under `fixtures/releases/` decodes through the migrations this build
+/// actually registers for NES loads, `save_state::nes_migrations`. The
+/// container-framing half lives in `crates/rf-state/tests/golden_fixture.rs`.
+#[test]
+fn every_archived_release_fixture_loads_through_nes_migrations() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/releases");
+    let mut checked = 0usize;
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rfstate") {
+                let bytes = std::fs::read(&path).expect("archived fixture readable");
+                rf_state::Container::decode(&bytes, &save_state::nes_migrations()).unwrap_or_else(
+                    |e| {
+                        panic!(
+                            "FR-STATE-005 VIOLATED: {} no longer loads: {e:?}",
+                            path.display()
+                        )
+                    },
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(
+        checked >= 2,
+        "fixtures/releases holds at least v0.1.0's two states"
+    );
+}

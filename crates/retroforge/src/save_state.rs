@@ -81,7 +81,14 @@ fn chunk_version(tag: [u8; 4]) -> u16 {
 /// gets a NEW VALUE rather than the old one quietly meaning something
 /// different: SAVE_STATES.md §3 says outright that a full-machine hash is
 /// "a later ticket's upgrade, **not a silent redefinition of this field**".
-pub const HASH_KIND: &str = "full-v1";
+///
+/// **`full-v2` as of ticket W2-22**: the `PPU_` region now also carries the
+/// partly drawn scanline (`Ppu::line_buffer`), so the same machine hashes
+/// differently than under `full-v1`. Same rule as above: a wider hash gets
+/// a new value. No checked-in replay carries `full-v1` hashes (the one
+/// `full-v1` replay, `fixtures/replays/unprofiled-scroller.rfreplay`, has
+/// an empty `[Hashes]` section).
+pub const HASH_KIND: &str = "full-v2";
 
 /// Region-to-tag mapping. The tags are `rf-state`'s registry values; the
 /// regions are `rf-nes`'s. This table is the whole of what this module
@@ -191,6 +198,17 @@ impl rf_core_api::StateReader for PayloadCursor<'_> {
         self.pos = end;
         Ok(())
     }
+}
+
+/// The chunk migrations a NES `.rfstate` load runs (ticket W2-22).
+///
+/// `PPU_` 3 -> 4 appends the partly drawn scanline; see
+/// [`rf_nes::ppu::migrate_ppu_payload`].
+#[must_use]
+pub fn nes_migrations() -> rf_state::MigrationRegistry {
+    let mut reg = rf_state::MigrationRegistry::new();
+    reg.register(*b"PPU_", rf_nes::ppu::migrate_ppu_payload);
+    reg
 }
 
 /// Builds a full `.rfstate` container from a machine.

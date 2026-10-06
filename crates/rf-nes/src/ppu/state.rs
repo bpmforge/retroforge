@@ -4,7 +4,7 @@
 //! this module leans on twice.
 
 use rf_cart::Mirroring;
-use rf_core_api::StateError;
+use rf_core_api::{PixelLayer, PpuPixel, StateError};
 
 use crate::ppu::{EvaluatedSprite, Ppu, SpriteUnit};
 use crate::state::{StateIn, StateOut};
@@ -92,13 +92,23 @@ impl Ppu {
             sprite_overlay_enabled: _,
             overlay_sprites: _,
             overlay_active_sprites: _,
-            // Per-scanline scratch, not state: every element of both line
-            // buffers is written before the row that reads them is pushed
-            // (`sprites.rs`'s `output_pixel` writes `line_buffer[x]` for
-            // every visible dot), so restoring them would restore values
-            // that are overwritten before they can be observed.
+            // **`line_buffer` IS state at a frame boundary** (ticket
+            // W2-22). This used to be skipped as "per-scanline scratch:
+            // every element is written before the row is pushed" — true
+            // only for a save taken at dot 0. A frame ends at the
+            // pre-render -> scanline 0 wrap, and the shell stops after the
+            // INSTRUCTION that crosses it, so up to ~21 dots of scanline 0
+            // are already drawn when a state is taken (nesdev "PPU
+            // rendering": visible pixels are output from dot 1). Those
+            // pixels are never redrawn; dropping them changed the first
+            // 1-11 pixels of the next frame on ~40% of RF-Scroller's
+            // frames, while every saved register still matched.
+            //
+            // `overlay_line_buffer` stays unsaved: it is enhancement
+            // output (the sprite-limit bypass), not machine state — see
+            // the `sprite_overlay_enabled` note above.
             overlay_line_buffer: _,
-            line_buffer: _,
+            line_buffer,
             // Output, not state — refused below rather than dropped.
             completed,
             dot_clock,
@@ -239,11 +249,19 @@ impl Ppu {
         out.opt_u64(*last_2007_read_dot)?;
         out.u8(*last_2007_read_value)?;
         out.opt_u64(*a12_low_since)?;
-        out.u32(*pending_a12_edges)
+        out.u32(*pending_a12_edges)?;
+        // Ticket W2-22 (version 4): the partly drawn scanline. Last, so
+        // `migrate_ppu_payload` can upgrade a version-3 payload by
+        // appending.
+        for pixel in line_buffer {
+            save_pixel(out, pixel)?;
+        }
+        Ok(())
     }
 
-    /// Restores the `PPU_` chunk. The two scratch line buffers and the two
-    /// output queues are left as they are (see [`Ppu::save_state`]); the
+    /// Restores the `PPU_` chunk, including the partly drawn scanline
+    /// (`line_buffer`, ticket W2-22). The enhancement-only overlay line
+    /// buffer is left as it is (see [`Ppu::save_state`]); the two output
     /// queues are cleared, because whatever they held belongs to the
     /// session being replaced, not to the one being restored.
     pub(crate) fn load_state(&mut self, inp: &mut StateIn<'_>) -> Result<(), StateError> {
@@ -289,6 +307,9 @@ impl Ppu {
         self.last_2007_read_value = inp.u8()?;
         self.a12_low_since = inp.opt_u64()?;
         self.pending_a12_edges = inp.u32()?;
+        for index in 0..self.line_buffer.len() {
+            self.line_buffer[index] = load_pixel(inp)?;
+        }
         self.completed.clear();
         self.events.clear();
         Ok(())
@@ -436,4 +457,97 @@ fn load_sprite_unit(inp: &mut StateIn<'_>) -> Result<SpriteUnit, StateError> {
         x: inp.u8()?,
         oam_index: inp.u8()?,
     })
+}
+
+/// One [`PpuPixel`] as five bytes: palette index, layer kind (0 backdrop,
+/// 1 background, 2 sprite), background plane, sprite id (`$FF` = none),
+/// priority.
+fn save_pixel(out: &mut StateOut<'_>, p: &PpuPixel) -> Result<(), StateError> {
+    for b in encode_pixel(p) {
+        out.u8(b)?;
+    }
+    Ok(())
+}
+
+fn encode_pixel(p: &PpuPixel) -> [u8; 5] {
+    let (kind, plane) = match p.layer {
+        PixelLayer::Backdrop => (0, 0),
+        PixelLayer::Background(n) => (1, n),
+        PixelLayer::Sprite => (2, 0),
+    };
+    [
+        p.palette_index,
+        kind,
+        plane,
+        p.sprite_id.unwrap_or(0xFF),
+        p.priority,
+    ]
+}
+
+fn load_pixel(inp: &mut StateIn<'_>) -> Result<PpuPixel, StateError> {
+    let palette_index = inp.u8()?;
+    let layer = match (inp.u8()?, inp.u8()?) {
+        (0, _) => PixelLayer::Backdrop,
+        (1, n) => PixelLayer::Background(n),
+        (2, _) => PixelLayer::Sprite,
+        (k, _) => {
+            return Err(StateError::Corrupt(format!(
+                "PPU line-buffer pixel layer kind {k} is not backdrop/background/sprite"
+            )))
+        }
+    };
+    let sprite_id = match inp.u8()? {
+        0xFF => None,
+        id => Some(id),
+    };
+    Ok(PpuPixel {
+        palette_index,
+        layer,
+        sprite_id,
+        priority: inp.u8()?,
+    })
+}
+
+/// Upgrade an older `PPU_` payload to the current version (ticket W2-22),
+/// for `rf_state::MigrationRegistry`.
+///
+/// Version 3 lacks only the partly drawn scanline appended in version 4;
+/// it is filled with backdrop pixels, which is exactly what loading a
+/// version-3 state produced before, so an old save restores no worse than
+/// it did. Earlier versions are refused by name (their decay/`$2007`
+/// latches cannot be reconstructed).
+///
+/// # Errors
+/// A message naming the version when it cannot be upgraded.
+pub fn migrate_ppu_payload(found_version: u16, payload: &[u8]) -> Result<Vec<u8>, String> {
+    if found_version != 3 {
+        return Err(format!(
+            "PPU_ version {found_version} cannot be upgraded; only version 3 can"
+        ));
+    }
+    let blank = encode_pixel(&super::BLANK_PIXEL);
+    let mut out = payload.to_vec();
+    for _ in 0..256 {
+        out.extend_from_slice(&blank);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::migrate_ppu_payload;
+
+    /// Ticket W2-22: a version-3 payload gains exactly the 256 backdrop
+    /// pixels version 4 appends; anything older is refused by name.
+    #[test]
+    fn a_version_3_ppu_payload_gains_a_blank_line_buffer() {
+        let v3 = vec![0xAB; 40];
+        let v4 = migrate_ppu_payload(3, &v3).expect("3 -> 4");
+        assert_eq!(&v4[..40], &v3[..]);
+        assert_eq!(v4.len(), 40 + 256 * 5);
+        assert!(v4[40..].chunks(5).all(|p| p == [0, 0, 0, 0xFF, 0]));
+        assert!(migrate_ppu_payload(2, &v3)
+            .unwrap_err()
+            .contains("version 2"));
+    }
 }

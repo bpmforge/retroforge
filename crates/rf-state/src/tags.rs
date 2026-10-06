@@ -57,8 +57,16 @@ pub const TAG_REGISTRY: &[TagInfo] = &[
         // would restore a wrong PPU silently. Nothing has shipped (the
         // tagged release is W5-05), so no such file exists outside a
         // working tree.
+        //
+        // Version 4 as of ticket W2-22, which appended the partly drawn
+        // scanline (`Ppu::line_buffer`, 256 x 5 bytes): a state taken at a
+        // frame boundary holds up to ~21 drawn dots of scanline 0, and
+        // dropping them changed the next frame. Releases now exist, so
+        // this bump ships a migration (`rf_nes::ppu::migrate_ppu_payload`,
+        // registered by `retroforge::save_state::nes_migrations`) instead
+        // of refusing version-3 files.
         required: true,
-        current_version: 3,
+        current_version: 4,
     },
     TagInfo {
         tag: *b"APU_",

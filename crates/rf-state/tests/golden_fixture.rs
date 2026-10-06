@@ -88,6 +88,28 @@ fn regenerate_golden_fixture() {
 /// recorded rather than silently skipped: a drill that quietly does
 /// nothing is how FR-STATE-005 becomes ceremonial, which is the failure
 /// R-F3 was written to prevent.
+/// A registry that upgrades every registered tag's version without touching
+/// its payload (ticket W2-22).
+///
+/// **This drill checks the CONTAINER layer** — header, chunk framing,
+/// checksums, the tag registry — which is what `rf-state` owns. A chunk
+/// PAYLOAD older than this build is migrated by the core crate that owns
+/// its layout (`PPU_` 3 -> 4 is `rf_nes::ppu::migrate_ppu_payload`), which
+/// this crate sits below and cannot call. The payload half of FR-STATE-005
+/// is drilled where those migrations are known:
+/// `crates/retroforge/tests/save_state.rs`'s
+/// `every_archived_release_fixture_loads_through_nes_migrations`.
+fn framing_only() -> rf_state::MigrationRegistry {
+    fn pass_through(_found: u16, payload: &[u8]) -> Result<Vec<u8>, String> {
+        Ok(payload.to_vec())
+    }
+    let mut reg = rf_state::MigrationRegistry::new();
+    for info in rf_state::TAG_REGISTRY {
+        reg.register(info.tag, pass_through);
+    }
+    reg
+}
+
 #[test]
 fn every_archived_release_fixture_still_loads() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/releases");
@@ -116,14 +138,15 @@ fn every_archived_release_fixture_still_loads() {
             }
             let bytes = std::fs::read(&path)
                 .unwrap_or_else(|e| panic!("archived fixture {} unreadable: {e}", path.display()));
-            let (_decoded, warnings) = Container::decode_default(&bytes).unwrap_or_else(|e| {
-                panic!(
-                    "FR-STATE-005 VIOLATED: {} no longer loads: {e:?}\n  \
+            let (_decoded, warnings) =
+                Container::decode(&bytes, &framing_only()).unwrap_or_else(|e| {
+                    panic!(
+                        "FR-STATE-005 VIOLATED: {} no longer loads: {e:?}\n  \
                      A released fixture that stops decoding is a migration this \
                      project owes its users, not a fixture to delete.",
-                    path.display()
-                )
-            });
+                        path.display()
+                    )
+                });
             // Warnings are allowed here and are not on the current-release
             // fixture: an older container legitimately lacks chunks that
             // were added since, and the loader reporting that is correct.
