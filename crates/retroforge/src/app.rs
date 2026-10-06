@@ -70,6 +70,11 @@ pub const METALFX_SCALER_WIRED: bool = false;
 /// size is written to `settings.toml`.
 const WINDOW_SIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(750);
 
+/// Ticket W20-06: a save-slot card's content width and thumbnail height
+/// (the thumbnail is fitted inside, letterboxed, whatever its aspect).
+const SLOT_CARD_WIDTH: f32 = 168.0;
+const SLOT_THUMB_HEIGHT: f32 = 126.0;
+
 /// How wide decoded widescreen renders, in dots (ticket W11-03).
 ///
 /// 400 is 16:9 at the SNES's 224 visible lines (398.2, rounded to an even
@@ -452,6 +457,8 @@ pub struct RetroForgeApp {
     /// `ViewportCommand`s go to the windowing backend, which a headless
     /// test harness does not have, so this is what a test can read.
     last_fullscreen_request: Option<bool>,
+    /// Ticket W20-06: decoded save-slot thumbnails.
+    slot_textures: crate::slot_cards::SlotTextures,
     /// Ticket W10-03: §3.1's search box, filtering the library home by
     /// title. Not persisted — a search is a gesture within a session, and
     /// an app that reopened tomorrow still filtered by "castle" would be
@@ -1171,6 +1178,7 @@ impl RetroForgeApp {
             pending_window_size: None,
             fullscreen_pad_was_held: false,
             last_fullscreen_request: None,
+            slot_textures: crate::slot_cards::SlotTextures::default(),
             library_search: String::new(),
             library_console_filter: None,
             library_scans: 0,
@@ -2281,82 +2289,124 @@ impl RetroForgeApp {
                         if self.states_dir().is_none() {
                             ui.label("No ROM open — save states are per game.");
                         }
-                        for info in &self.state_slots {
-                            ui.horizontal(|ui| {
-                                let _ = ui.selectable_label(false, info.id.label());
-                                match &info.saved {
-                                    Some(saved) => {
-                                        // The two flags FRONTEND_UI §3.2 names,
-                                        // plus the timestamp.
-                                        //
-                                        // `Label::sense(hover)` rather than a
-                                        // bare `ui.label`: a plain label
-                                        // contributes NO node to the
-                                        // accessibility tree, so a screen reader
-                                        // — and W4-09's harness, which is the
-                                        // same tree — cannot see the mode badge
-                                        // or the mods warning at all. Ticket
-                                        // W4-09 recorded this trap for the
-                                        // emulator viewport; it applies to any
-                                        // information-bearing label, and these
-                                        // three are the ones a user opens this
-                                        // modal to read.
-                                        // `selectable_label`, not `Label` with a
-                                        // hover sense: measured against the real
-                                        // accessibility tree, neither a bare
-                                        // `ui.label` NOR a hover-sensed `Label`
-                                        // contributes a node, so both are
-                                        // invisible to a screen reader and to
-                                        // W4-09's harness. A selectable label
-                                        // renders the same and is a real widget.
-                                        let badge = |ui: &mut egui::Ui, text: String| {
-                                            let _ = ui.selectable_label(false, text);
-                                        };
-                                        badge(ui, saved.mode.label().to_string());
-                                        if saved.contains_mods {
-                                            let _ = ui.selectable_label(
-                                                false,
-                                                egui::RichText::new(format!(
-                                                    "{} contains mods",
-                                                    crate::icons::WARNING
-                                                ))
-                                                .color(egui::Color32::from_rgb(0xE0, 0x80, 0x30)),
+                        // Ticket W20-06: cards with the slot's own
+                        // screenshot, drawn — until W20-06 this printed the
+                        // word "thumbnail" beside a selectable label.
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs());
+                        let tokens =
+                            crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+                        let slots = self.state_slots.clone();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                            for info in &slots {
+                                let thumb = info
+                                    .saved
+                                    .as_ref()
+                                    .and_then(|s| s.thumbnail.as_deref())
+                                    .and_then(|p| self.slot_textures.get(ui.ctx(), p));
+                                egui::Frame::new()
+                                    .fill(tokens.surface)
+                                    .corner_radius(tokens.radius_md)
+                                    .inner_margin(8.0)
+                                    .show(ui, |ui| {
+                                        ui.set_width(SLOT_CARD_WIDTH);
+                                        ui.vertical(|ui| {
+                                            let (rect, _) = ui.allocate_exact_size(
+                                                egui::vec2(SLOT_CARD_WIDTH, SLOT_THUMB_HEIGHT),
+                                                egui::Sense::hover(),
                                             );
-                                        }
-                                        badge(ui, Self::format_timestamp(saved.timestamp));
-                                        badge(
-                                            ui,
-                                            if saved.thumbnail.is_some() {
-                                                "thumbnail".to_string()
-                                            } else {
-                                                "no thumbnail".to_string()
-                                            },
-                                        );
-                                        if ui.button(format!("Load {}", info.id.label())).clicked()
-                                        {
-                                            action = Some((info.id, false));
-                                        }
-                                    }
-                                    None => {
-                                        let _ = ui.selectable_label(false, "empty");
-                                    }
-                                }
-                                if ui.button(format!("Save {}", info.id.label())).clicked() {
-                                    if info.saved.is_some() {
-                                        // Ticket W15-04: an occupied slot
-                                        // asks first — `overwrite_confirm_modal`
-                                        // does the actual save once
-                                        // confirmed. An empty slot has
-                                        // nothing to lose, so it saves
-                                        // immediately as it always did.
-                                        self.pending_overwrite = Some(info.id);
-                                        self.active_slot = Some(info.id);
-                                    } else {
-                                        action = Some((info.id, true));
-                                    }
-                                }
-                            });
-                        }
+                                            ui.painter().rect_filled(
+                                                rect,
+                                                tokens.radius_sm,
+                                                tokens.bg,
+                                            );
+                                            if let Some(tex) = &thumb {
+                                                let [w, h] = tex.size();
+                                                #[allow(clippy::cast_precision_loss)]
+                                                let fit = crate::play_view::play_rect(
+                                                    rect,
+                                                    crate::play_view::DisplayGrid::exact(
+                                                        w as f32, h as f32,
+                                                    ),
+                                                    1.0,
+                                                    crate::settings::ScaleMode::Fit,
+                                                );
+                                                ui.put(
+                                                    fit,
+                                                    egui::Image::from_texture(tex)
+                                                        .fit_to_exact_size(fit.size())
+                                                        .alt_text(format!(
+                                                            "{} screenshot",
+                                                            info.id.label()
+                                                        )),
+                                                );
+                                            }
+                                            ui.label(egui::RichText::new(info.id.label()).strong());
+                                            match &info.saved {
+                                                Some(saved) => {
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "{} \u{b7} {}",
+                                                            crate::slot_cards::relative_age(
+                                                                saved.timestamp,
+                                                                now,
+                                                                || Self::format_timestamp(
+                                                                    saved.timestamp
+                                                                ),
+                                                            ),
+                                                            saved.mode.label()
+                                                        ))
+                                                        .small()
+                                                        .color(tokens.muted),
+                                                    );
+                                                    if saved.contains_mods {
+                                                        ui.label(
+                                                            egui::RichText::new(format!(
+                                                                "{} contains mods",
+                                                                crate::icons::WARNING
+                                                            ))
+                                                            .small()
+                                                            .color(tokens.warn),
+                                                        );
+                                                    }
+                                                }
+                                                None => {
+                                                    ui.label(
+                                                        egui::RichText::new("Empty")
+                                                            .small()
+                                                            .color(tokens.muted),
+                                                    );
+                                                }
+                                            }
+                                            ui.horizontal(|ui| {
+                                                if info.saved.is_some()
+                                                    && ui
+                                                        .button(format!("Load {}", info.id.label()))
+                                                        .clicked()
+                                                {
+                                                    action = Some((info.id, false));
+                                                }
+                                                if ui
+                                                    .button(format!("Save {}", info.id.label()))
+                                                    .clicked()
+                                                {
+                                                    if info.saved.is_some() {
+                                                        // Ticket W15-04: an
+                                                        // occupied slot asks
+                                                        // first.
+                                                        self.pending_overwrite = Some(info.id);
+                                                        self.active_slot = Some(info.id);
+                                                    } else {
+                                                        action = Some((info.id, true));
+                                                    }
+                                                }
+                                            });
+                                        });
+                                    });
+                            }
+                        });
                         if !self.state_warnings.is_empty() {
                             ui.separator();
                             for line in &self.state_warnings {

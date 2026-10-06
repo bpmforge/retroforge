@@ -237,13 +237,20 @@ fn the_modal_lists_every_slot_and_shows_a_saved_slots_mode_and_flags() {
     harness.state_mut().open_states_modal();
     harness.run_steps(3);
 
+    // `label()` OR `value()`: ticket W20-06 draws the mode, date and
+    // mods flag as plain labels (they were `selectable_label`s used as
+    // decoration, i.e. buttons that did nothing), and a plain `Label`
+    // publishes its text as the node's value — see ui_smoke.rs `labels`.
     let labels: Vec<String> = harness
         .root()
         .children_recursive()
-        .filter_map(|n| n.accesskit_node().label())
+        .filter_map(|n| {
+            let a = n.accesskit_node();
+            a.label().or_else(|| a.value())
+        })
         .collect();
     assert!(
-        labels.iter().any(|l| l == "Enhanced"),
+        labels.iter().any(|l| l.contains("Enhanced")),
         "the saved slot's mode-at-save badge is missing from: {labels:?}"
     );
     assert!(

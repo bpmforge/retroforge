@@ -8490,10 +8490,11 @@
    "save_state.rs or a new kittest asserts a saved slot exposes an image widget and an empty slot does not"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-06."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-06.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). States window slots are now cards in a wrapping grid: the slot's own thumbnail sidecar drawn letterboxed inside a fixed 168x126 well (play_view::play_rect Fit), the slot name, 'relative age · mode' as plain small text (slot_cards::relative_age: just now / N min ago / N h ago / yesterday / N days ago / date, clock-skew safe, unit-tested), the contains-mods warning in the warn token, and Load (only when saved) / Save buttons; overwrite confirmation unchanged. New crate::slot_cards::SlotTextures decodes each sidecar PNG once and re-decodes only when its mtime changes. Images carry alt text '<Slot> screenshot' so they are in the accessibility tree. Test: tests/slot_thumbnails.rs saves through F5 on RF-Scroller and asserts 'Slot 1 screenshot' exists, 'Slot 2 screenshot' does not, and no 'thumbnail' placeholder words remain. Photographed in the W20-21 tour."
   ]
  },
  {
