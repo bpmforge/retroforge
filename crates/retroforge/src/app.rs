@@ -3234,9 +3234,19 @@ impl RetroForgeApp {
                     }
                 }
             };
-            let displayed: &[u8] = compare_rgba.as_deref().unwrap_or(&msg.rgba);
-            let image =
-                egui::ColorImage::from_rgba_unmultiplied([msg.width, msg.height], displayed);
+            // Ticket W20-09 follow-up: the picture on screen is the frame
+            // the shell RESOLVED this pass — with an HD pack composited in
+            // — not the core's raw `msg.rgba`. Until this fix the composite
+            // went only into `last_frame_rgba` (what `hdpack_reaches_the_
+            // app` asserts on), so a loaded pack changed nothing a player
+            // could see. Compare mode keeps its own same-geometry pair.
+            let (displayed, dw, dh): (&[u8], usize, usize) =
+                match (&compare_rgba, &self.last_frame_rgba, self.last_frame_size) {
+                    (Some(c), _, _) => (c.as_slice(), msg.width, msg.height),
+                    (None, Some(resolved), Some((w, h))) => (resolved.as_slice(), w, h),
+                    _ => (&msg.rgba, msg.width, msg.height),
+                };
+            let image = egui::ColorImage::from_rgba_unmultiplied([dw, dh], displayed);
             match &mut self.texture {
                 Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
                 None => {
@@ -8535,6 +8545,12 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn play_rect_for_test(&self) -> Option<(egui::Rect, (usize, usize))> {
         self.last_play_rect.zip(self.core_frame_size)
+    }
+
+    /// The size of the texture the play view is actually drawing.
+    #[doc(hidden)]
+    pub fn display_texture_size_for_test(&self) -> Option<[usize; 2]> {
+        self.texture.as_ref().map(egui::TextureHandle::size)
     }
 
     /// Ticket W20-04: the last fullscreen state requested.

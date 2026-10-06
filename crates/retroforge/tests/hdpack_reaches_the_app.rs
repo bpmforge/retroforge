@@ -146,6 +146,16 @@ fn loading_a_pack_replaces_art_in_the_running_game() {
     );
     let rgba = harness.state().last_frame_rgba_for_test().expect("a frame");
     assert_eq!(rgba.len(), after.0 * after.1 * 4, "buffer matches its size");
+    // Ticket W20-09 follow-up: and the SCREEN shows it. Until then the
+    // composite reached `last_frame_rgba` and the play view kept drawing
+    // the core's plain frame, so this test passed over an unchanged
+    // picture.
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().display_texture_size_for_test(),
+        Some([after.0, after.1]),
+        "the play view must draw the composited frame, not the core's raw one"
+    );
 
     // 2. Art was actually REPLACED, not merely upscaled. This is the
     //    assertion that separates "the pack applied" from "the frame got
