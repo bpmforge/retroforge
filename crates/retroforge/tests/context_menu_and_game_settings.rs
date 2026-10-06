@@ -190,6 +190,16 @@ fn context_menu_and_one_game_settings_window() {
     // ---- acceptance 3: "Game settings" from the library's context menu
     // targets THAT library entry (by hash), and a Mode change there
     // persists to its per-game settings file --------------------------
+    // Ticket W20-20: favouriting Alpha Quest above put it on the home's
+    // Favourites shelf, which moved the list down and added a second
+    // "Alpha Quest" label (the shelf tile). Re-find the LIST row, which is
+    // drawn after the shelves.
+    let title_pos = harness
+        .query_all_by_label("Alpha Quest")
+        .last()
+        .expect("Alpha Quest row")
+        .rect()
+        .center();
     right_click(&mut harness, title_pos);
     harness.run_steps(2);
     harness

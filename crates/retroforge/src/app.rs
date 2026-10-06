@@ -323,6 +323,9 @@ struct LibraryBadges {
     /// Normalized hashes a profile's identity list names by sha256
     /// (`crate::level_view::all_profile_sha256s`).
     profile_matched: std::collections::HashSet<String>,
+    /// Ticket W20-20: the enhancement chips each matched game shows
+    /// (`crate::level_view::profile_chips` — only what this build can do).
+    chips: std::collections::HashMap<String, Vec<&'static str>>,
 }
 
 /// Ticket W15-05, §3: card layout constants, shared between
@@ -6581,6 +6584,8 @@ impl RetroForgeApp {
         let library = self.library.clone().unwrap_or_default();
         let state = crate::library::first_run_state(&self.library_roots, &library);
         let mut rescan = false;
+        let mut resume_request: Option<(std::path::PathBuf, Option<crate::state_slots::SlotId>)> =
+            None;
         let mut to_play: Option<std::path::PathBuf> = None;
 
         match &state {
@@ -6615,6 +6620,16 @@ impl RetroForgeApp {
             crate::library::FirstRunState::Populated { count } => {
                 self.library_toolbar(ui, *count, &mut rescan);
                 ui.separator();
+                // Ticket W20-20: Continue + shelves on the unfiltered home
+                // only — a search or a filter is a request for the list.
+                if self.library_search.trim().is_empty()
+                    && self.library_console_filter.is_none()
+                    && self.library_recency_filter == crate::library::RecencyFilter::All
+                {
+                    if let Some((path, resume)) = self.library_continue_and_shelves(ui, &library) {
+                        resume_request = Some((path, resume));
+                    }
+                }
                 to_play = self.library_grid(ui, &library);
             }
         }
@@ -6637,6 +6652,202 @@ impl RetroForgeApp {
         if let Some(path) = to_play {
             self.launch_rom(&path);
         }
+        // Ticket W20-20: the Continue hero's Play / Resume.
+        if let Some((path, resume)) = resume_request {
+            self.launch_rom(&path);
+            if let Some(slot) = resume {
+                self.load_from_slot(slot);
+            }
+        }
+    }
+
+    /// Ticket W20-20 (`docs/design/UX_WAVE_20.md` §6): the most recently
+    /// played game as a "Continue" hero — Play, and Resume from its newest
+    /// save when there is one — then shelves of recently played and
+    /// favourite games. Returns the path to launch and, for Resume, the
+    /// slot to load.
+    fn library_continue_and_shelves(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &crate::library::Library,
+    ) -> Option<(std::path::PathBuf, Option<crate::state_slots::SlotId>)> {
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        // (entry, hash, console, last played, favourite) for recognised games.
+        let mut known: Vec<(
+            &crate::library::LibraryEntry,
+            String,
+            crate::library::Console,
+            Option<u64>,
+            bool,
+        )> = library
+            .entries
+            .iter()
+            .filter_map(|e| match &e.identity {
+                crate::library::EntryIdentity::Recognized {
+                    console,
+                    normalized_sha256,
+                } => {
+                    let meta = self
+                        .library_meta
+                        .get(normalized_sha256)
+                        .copied()
+                        .unwrap_or_default();
+                    Some((
+                        e,
+                        normalized_sha256.clone(),
+                        *console,
+                        meta.last_played_epoch_secs,
+                        meta.favourite,
+                    ))
+                }
+                crate::library::EntryIdentity::Unrecognized { .. } => None,
+            })
+            .collect();
+        known.sort_by(|a, b| b.3.cmp(&a.3));
+        let mut chosen = None;
+        let ctx = ui.ctx().clone();
+
+        if let Some((entry, hash, console, Some(last), _)) = known.first().cloned() {
+            let newest_save = self.config_root.as_ref().and_then(|root| {
+                crate::state_slots::scan(&crate::state_slots::slots_dir(root, &hash))
+                    .into_iter()
+                    .filter_map(|i| i.saved.map(|s| (i.id, s.timestamp)))
+                    .max_by_key(|(_, t)| *t)
+                    .map(|(id, _)| id)
+            });
+            egui::Frame::new()
+                .fill(tokens.surface)
+                .corner_radius(tokens.radius_md)
+                .inner_margin(10.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(128.0, 120.0), egui::Sense::hover());
+                        match self.library_thumbnail_texture(
+                            &ctx,
+                            &hash,
+                            &entry.title,
+                            Some(console),
+                        ) {
+                            Some(tex) => {
+                                ui.put(
+                                    rect,
+                                    egui::Image::from_texture(&tex).fit_to_exact_size(rect.size()),
+                                );
+                            }
+                            None => {
+                                ui.painter().rect_filled(
+                                    rect,
+                                    tokens.radius_sm,
+                                    crate::theme::console_tint(&tokens, false, &entry.identity),
+                                );
+                            }
+                        }
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new("Continue").small().color(tokens.muted));
+                            // Accessible name "Continue: <title>" — what a
+                            // screen reader should say, and distinct from
+                            // the same game's list row below.
+                            let title = ui.heading(&entry.title);
+                            let name = format!("Continue: {}", entry.title);
+                            title.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &name)
+                            });
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} \u{b7} last played {}",
+                                    console.name(),
+                                    crate::slot_cards::relative_age(last, now, || {
+                                        Self::format_timestamp(last)
+                                    }),
+                                ))
+                                .small()
+                                .color(tokens.muted),
+                            );
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if ui.button(egui::RichText::new("Play").strong()).clicked() {
+                                    chosen = Some((entry.path.clone(), None));
+                                }
+                                if let Some(slot) = newest_save {
+                                    if ui
+                                        .button(format!("Resume ({})", slot.label()))
+                                        .on_hover_text("Start the game and load its newest save")
+                                        .clicked()
+                                    {
+                                        chosen = Some((entry.path.clone(), Some(slot)));
+                                    }
+                                }
+                            });
+                        });
+                    });
+                });
+            ui.add_space(6.0);
+        }
+
+        // Shelves: the next few recently played, then favourites. Clicking
+        // a tile selects it (the grid's action bar launches), double-click
+        // launches — the grid's own gestures.
+        let recent: Vec<_> = known
+            .iter()
+            .skip(1)
+            .filter(|k| k.3.is_some())
+            .take(6)
+            .cloned()
+            .collect();
+        let favourites: Vec<_> = known.iter().filter(|k| k.4).take(6).cloned().collect();
+        for (title, items) in [("Recently played", recent), ("Favourites", favourites)] {
+            if items.is_empty() {
+                continue;
+            }
+            ui.label(egui::RichText::new(title).strong());
+            ui.horizontal(|ui| {
+                for (entry, hash, console, _, _) in &items {
+                    ui.vertical(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(96.0, 90.0), egui::Sense::hover());
+                        match self.library_thumbnail_texture(
+                            &ctx,
+                            hash,
+                            &entry.title,
+                            Some(*console),
+                        ) {
+                            Some(tex) => {
+                                ui.put(
+                                    rect,
+                                    egui::Image::from_texture(&tex).fit_to_exact_size(rect.size()),
+                                );
+                            }
+                            None => {
+                                ui.painter().rect_filled(
+                                    rect,
+                                    tokens.radius_sm,
+                                    crate::theme::console_tint(&tokens, false, &entry.identity),
+                                );
+                            }
+                        }
+                        let label = ui.add(
+                            egui::Label::new(egui::RichText::new(&entry.title).small())
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                        );
+                        if label.double_clicked() {
+                            chosen = Some((entry.path.clone(), None));
+                        } else if label.clicked() {
+                            self.library_selected = Some(entry.path.clone());
+                        }
+                    });
+                }
+            });
+            ui.add_space(4.0);
+        }
+        if chosen.is_some() || known.first().is_some_and(|k| k.3.is_some()) {
+            ui.label(egui::RichText::new("All games").strong());
+        }
+        chosen
     }
 
     /// The shared shape of the two empty states: a title, then the one
@@ -7385,6 +7596,28 @@ impl RetroForgeApp {
                                     card_clicked = title_response.clicked();
                                     card_double_clicked = title_response.double_clicked();
                                     card_response = Some(title_response);
+                                    // Ticket W20-20: what this game's profile lets
+                                    // RetroForge do, as chips.
+                                    if let Some(chips) =
+                                        hash.as_ref().and_then(|h| self.library_badges.chips.get(h))
+                                    {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 4.0;
+                                            for chip in chips {
+                                                egui::Frame::new()
+                                                    .fill(tokens.accent_soft)
+                                                    .corner_radius(tokens.radius_sm)
+                                                    .inner_margin(egui::Margin::symmetric(4, 1))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(*chip)
+                                                                .small()
+                                                                .color(tokens.ink),
+                                                        );
+                                                    });
+                                            }
+                                        });
+                                    }
 
                                     ui.horizontal(|ui| {
                                         match &entry.identity {
@@ -7514,6 +7747,26 @@ impl RetroForgeApp {
                         // interaction rather than creating a second,
                         // competing sense.
                         let hover_id = egui::Id::new("rf_card_hover").with(&entry.path);
+                        // Ticket W20-20: the console's colour as a spine down the card's
+                        // left edge — identity at a glance, not only in the small label.
+                        if let Some(spine) =
+                            crate::theme::console_spine(high_contrast, &entry.identity)
+                        {
+                            let r = card.response.rect;
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(
+                                    r.left_top(),
+                                    egui::vec2(4.0, r.height()),
+                                ),
+                                egui::CornerRadius {
+                                    nw: 4,
+                                    sw: 4,
+                                    ne: 0,
+                                    se: 0,
+                                },
+                                spine,
+                            );
+                        }
                         let hovered = ui
                             .interact(card.response.rect, hover_id, egui::Sense::hover())
                             .hovered();
@@ -8200,7 +8453,10 @@ impl RetroForgeApp {
         config_root: Option<&std::path::Path>,
     ) -> LibraryBadges {
         let profile_sha256s = crate::level_view::all_profile_sha256s(&Self::profiles_root());
-        let mut badges = LibraryBadges::default();
+        let mut badges = LibraryBadges {
+            chips: crate::level_view::profile_chips_by_sha256(&Self::profiles_root()),
+            ..LibraryBadges::default()
+        };
         let Some(root) = config_root else {
             return badges;
         };

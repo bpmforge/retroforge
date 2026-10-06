@@ -93,8 +93,10 @@ fn a_launched_and_closed_game_shows_up_first_under_recently_played() {
     );
     harness.state_mut().close_rom_for_test();
     harness.run_steps(3);
+    // `query_all`: since W20-20 the just-played game is ALSO the home's
+    // Continue hero, so its title appears twice on the unfiltered home.
     assert!(
-        harness.query_by_label("Played Once").is_some(),
+        harness.query_all_by_label("Played Once").count() > 0,
         "closing the ROM must return to the library home"
     );
 
@@ -139,5 +141,7 @@ fn a_launched_and_closed_game_shows_up_first_under_recently_played() {
         .click();
     harness.run_steps(2);
     assert!(harness.query_by_label("Never Played").is_some());
-    assert!(harness.query_by_label("Played Once").is_some());
+    // Back on the unfiltered home: the list row AND the Continue hero
+    // (W20-20) both name it.
+    assert!(harness.query_all_by_label("Played Once").count() > 0);
 }

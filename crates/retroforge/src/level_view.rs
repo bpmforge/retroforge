@@ -239,6 +239,59 @@ pub fn all_profile_sha256s(root: &Path) -> std::collections::HashSet<String> {
     out
 }
 
+/// Ticket W20-20 (`docs/design/UX_WAVE_20.md` §6): the enhancement chips
+/// a library card shows for a game with this profile — only what this
+/// build can actually DO for it, not what the profile claims:
+///
+/// * "Full level" needs a `[decode]` table (2 of 11 shipped profiles —
+///   the audit's row A; `capabilities.full_level` alone decodes nothing);
+/// * "3D walls" needs that decode to carry collision (diorama);
+/// * "Widescreen" needs an SNES profile (the NES has no widescreen path).
+///
+/// Loading fast-forward is NOT offered as a chip: the one shipped profile
+/// that declares it describes a loop its fixture never runs (W20-17's
+/// finding), and a chip promising it would be untrue.
+#[must_use]
+pub fn profile_chips(profile: &rf_profiles::schema::Profile) -> Vec<&'static str> {
+    let mut chips = Vec::new();
+    if let Some(decode) = &profile.decode {
+        chips.push("Full level");
+        if decode.collision.is_some() {
+            chips.push("3D walls");
+        }
+    }
+    if profile.meta.console == rf_profiles::schema::Console::Snes
+        && (profile.widescreen.is_some()
+            || profile.capabilities.widescreen != rf_profiles::schema::WidescreenMode::default())
+    {
+        chips.push("Widescreen");
+    }
+    chips
+}
+
+/// Ticket W20-20: [`profile_chips`] for every profile under `root`, keyed
+/// by each identity's normalized SHA-256.
+#[must_use]
+pub fn profile_chips_by_sha256(
+    root: &Path,
+) -> std::collections::HashMap<String, Vec<&'static str>> {
+    let mut found = Vec::new();
+    collect_profiles(root, &mut found);
+    let mut out = std::collections::HashMap::new();
+    for path in found {
+        let Ok(outcome) = rf_profiles::load_file(&path) else {
+            continue;
+        };
+        let chips = profile_chips(&outcome.profile);
+        for identity in &outcome.profile.identity {
+            if let Some(sha256) = &identity.sha256 {
+                out.insert(sha256.clone(), chips.clone());
+            }
+        }
+    }
+    out
+}
+
 fn collect_profiles(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -250,5 +303,30 @@ fn collect_profiles(dir: &Path, out: &mut Vec<PathBuf>) {
         } else if path.file_name().and_then(|n| n.to_str()) == Some("profile.toml") {
             out.push(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod chip_tests {
+    use super::*;
+
+    /// Ticket W20-20: chips reflect what the app can do, profile by
+    /// profile, on the shipped profiles.
+    #[test]
+    fn chips_follow_what_the_app_can_actually_do() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles");
+        let load = |rel: &str| rf_profiles::load_file(&root.join(rel)).expect(rel).profile;
+        assert_eq!(
+            profile_chips(&load("nes/rf-scroller/profile.toml")),
+            vec!["Full level", "3D walls"]
+        );
+        assert_eq!(
+            profile_chips(&load("snes/rf-scroller-s/profile.toml")),
+            vec!["Widescreen"]
+        );
+        assert!(
+            profile_chips(&load("nes/metroid/profile.toml")).is_empty(),
+            "a profile with no decode table promises nothing"
+        );
     }
 }

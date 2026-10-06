@@ -339,6 +339,26 @@ pub fn console_tint(
     }
 }
 
+/// Ticket W20-20: a library card's console spine — the console colour at
+/// full strength, as a 4-px stripe down the card's left edge. `None` in
+/// high contrast (colour-coding is exactly what that palette avoids) and
+/// for an unrecognized ROM.
+#[must_use]
+pub fn console_spine(
+    high_contrast: bool,
+    identity: &crate::library::EntryIdentity,
+) -> Option<egui::Color32> {
+    if high_contrast {
+        None
+    } else if is_console(identity, crate::library::Console::Nes) {
+        Some(NES_TINT)
+    } else if is_console(identity, crate::library::Console::Snes) {
+        Some(SNES_TINT)
+    } else {
+        None
+    }
+}
+
 /// A modal's current fade alpha, keyed by `id` (pass a stable, modal-
 /// specific `egui::Id` — the three call sites in `app.rs` each use their
 /// own).

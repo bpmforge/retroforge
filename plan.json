@@ -8988,10 +8988,11 @@
    "library_grid.rs, library_filters.rs and library_controller.rs stay green; the list view stays fully functional"
   ],
   "points": 5,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-20."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-20.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). On the UNFILTERED library home (no search, console filter All, recency All): a 'Continue' hero for the most recently played recognised game -- thumbnail, title, console + relative 'last played', Play, and 'Resume (Slot N)' when it has a save (newest by timestamp; launches then loads that slot through load_from_slot) -- then shelves 'Recently played' (next 6) and 'Favourites' (up to 6) as small tiles (click selects, double-click launches: the grid's own gestures), then 'All games' and the unchanged grid/list. Cards: a 4-px console spine down the left edge (theme::console_spine; NES/SNES tint at full strength; none in high contrast) and enhancement chips from level_view::profile_chips -- ONLY what this build can do: 'Full level' needs [decode], '3D walls' needs decode collision, 'Widescreen' needs an SNES profile; no loading chip (W20-17's finding: the one declaring profile's loop never matches its fixture). DEVIATION: no NES/SNES shelves -- the console filter chips already are those views, and a third and fourth copy of the grid above the grid would push the library off screen at the default window size; console identity is carried by the spine. Tests: level_view chip_tests (rf-scroller -> Full level + 3D walls; rf-scroller-s -> Widescreen; metroid -> none), tests/library_continue.rs (play + F5, back to library: Continue leads, chips shown, no loading chip; Resume runs the game and the OSD says Loaded Slot 1); context_menu test re-finds the list row after the Favourites shelf appears. Photo: target/ui-tour/22-library-continue.png."
   ]
  },
  {

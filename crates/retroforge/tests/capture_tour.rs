@@ -272,6 +272,20 @@ fn photograph_every_major_surface() {
         .video_settings_mut_for_test()
         .ambient_glow = false;
 
+    // W20-20: back on the library after playing — the Continue hero (with
+    // Resume from the save taken above), and the grid's chips and spines.
+    harness.state_mut().close_rom_for_test();
+    harness
+        .state_mut()
+        .set_library_roots_for_test(vec![games_dir.clone()]);
+    harness
+        .state_mut()
+        .set_library_view_for_test(retroforge::library::LibraryView::Grid);
+    harness.run_steps(4);
+    shot(&mut harness, "22-library-continue");
+    harness.state_mut().launch_rom(&rom);
+    harness.run_steps(2);
+
     // And back, so the rest of the tour has its menus.
     harness
         .input_mut()
