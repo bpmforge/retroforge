@@ -493,6 +493,10 @@ pub struct RetroForgeApp {
     chrome_badge: String,
     chrome_badge_changed: f64,
     chrome_last_pointer: Option<egui::Pos2>,
+    /// Ticket W20-16: how far the peek wipe is in (0 = enhanced, 1 =
+    /// original), and the amount the current texture reflects.
+    peek_amount: f32,
+    peek_applied: f32,
     /// Ticket W20-15: recent frame intervals (ms) for the performance
     /// overlay, when the last frame reached the UI, and the port-1 button
     /// bits most recently sent to the core.
@@ -1238,6 +1242,8 @@ impl RetroForgeApp {
             last_fullscreen_request: None,
             slot_textures: crate::slot_cards::SlotTextures::default(),
             osd: crate::toast::ToastStack::osd(),
+            peek_amount: 0.0,
+            peek_applied: 0.0,
             frame_times_ms: std::collections::VecDeque::with_capacity(FRAME_TIME_HISTORY),
             last_frame_instant: None,
             last_input_bits: 0,
@@ -3196,8 +3202,12 @@ impl RetroForgeApp {
         // the two halves cannot land a frame apart. Cloned only when
         // something actually needs them (W3-03a's rule: a closed feature
         // costs nothing on the frame path).
-        let want_compare_buffers =
-            self.compare_mode != rf_renderer::CompareMode::Off || self.screenshot_pending;
+        // Ticket W20-16: also whenever an enhancement is visible, so
+        // hold-to-peek has the accuracy-exact frame ready the moment it is
+        // pressed — including while paused, when no new frame will come.
+        let want_compare_buffers = self.compare_mode != rf_renderer::CompareMode::Off
+            || self.screenshot_pending
+            || self.enhancement_visible();
         let latest_bundle_video = if want_compare_buffers {
             let b = core.frame_bundle.latest();
             Some((b.video.clone(), u32::from(b.width), u32::from(b.height)))
@@ -3445,6 +3455,28 @@ impl RetroForgeApp {
                     (None, Some(resolved), Some((w, h))) => (resolved.as_slice(), w, h),
                     _ => (&msg.rgba, msg.width, msg.height),
                 };
+            // Ticket W20-16: hold-to-peek wipes to the ACCURACY-EXACT frame.
+            // Until W20-16 peek only switched the camera; the Original view
+            // still drew the resolved frame, so sprite bypass, de-flicker
+            // and HD art stayed on screen while "peeking at the original".
+            let peek = if compare_rgba.is_none() {
+                self.compare_buffers.as_ref().and_then(|b| {
+                    crate::play_view::peek_frame(
+                        &b.original,
+                        (b.width as usize, b.height as usize),
+                        displayed,
+                        (dw, dh),
+                        self.peek_amount,
+                    )
+                })
+            } else {
+                None
+            };
+            let (displayed, dw, dh): (&[u8], usize, usize) = match &peek {
+                Some((rgba, (w, h))) => (rgba.as_slice(), *w, *h),
+                None => (displayed, dw, dh),
+            };
+            self.peek_applied = self.peek_amount;
             // Ticket W20-02: Settings › Video's shader, over the picture
             // the player sees — never over the compare pair (a research
             // view of the accuracy-exact frame) and never into a capture.
@@ -10201,6 +10233,76 @@ impl RetroForgeApp {
         self.last_recording.clone()
     }
 
+    /// Ticket W20-16: whether anything on screen differs from the
+    /// accuracy-exact frame — an effective enhancement row, or HD art.
+    /// Peek is a no-op otherwise (Accuracy mode: nothing to peek past).
+    fn enhancement_visible(&self) -> bool {
+        self.hd_pack.is_some()
+            || crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+                .iter()
+                .any(crate::enhance_ui::FeatureRow::effective)
+    }
+
+    /// Ticket W20-16: advance the peek wipe (~200 ms each way) and, when
+    /// no new frame arrived to carry it (paused), rebuild the picture from
+    /// the frames already held.
+    fn update_peek(&mut self, ctx: &egui::Context) {
+        // With the status bar hidden (W20-11) its badge — which ORs the
+        // hotkey into `peeking_original` — is not drawn, so the hotkey
+        // must still reach peek on its own.
+        if !self.chrome_visible {
+            self.peeking_original = self.peek_key_held;
+        }
+        let want = self.peeking_original && self.enhancement_visible();
+        self.peek_amount = ctx.animate_bool_with_time(egui::Id::new("peek-wipe"), want, 0.2);
+    }
+
+    fn rebuild_peek_texture_if_stale(&mut self) {
+        if (self.peek_amount - self.peek_applied).abs() < 1e-3 {
+            return;
+        }
+        let (Some(enhanced), Some((w, h)), Some(tex)) = (
+            &self.last_frame_rgba,
+            self.last_frame_size,
+            &mut self.texture,
+        ) else {
+            return;
+        };
+        let peek = self.compare_buffers.as_ref().and_then(|b| {
+            crate::play_view::peek_frame(
+                &b.original,
+                (b.width as usize, b.height as usize),
+                enhanced,
+                (w, h),
+                self.peek_amount,
+            )
+        });
+        let (bytes, size): (&[u8], [usize; 2]) = match &peek {
+            Some((rgba, (pw, ph))) => (rgba.as_slice(), [*pw, *ph]),
+            None => (enhanced.as_slice(), [w, h]),
+        };
+        if self.hash_display_for_test {
+            self.display_hash = Some(fnv1a_hash(bytes, &[]));
+        }
+        tex.set(
+            egui::ColorImage::from_rgba_unmultiplied(size, bytes),
+            egui::TextureOptions::NEAREST,
+        );
+        self.peek_applied = self.peek_amount;
+    }
+
+    /// Ticket W20-16: peek state for tests — the wipe amount, and a
+    /// fingerprint of the accuracy-exact frame the wipe ends on.
+    #[doc(hidden)]
+    pub fn peek_for_test(&self) -> (f32, Option<u64>) {
+        (
+            self.peek_amount,
+            self.compare_buffers
+                .as_ref()
+                .map(|b| fnv1a_hash(&b.original, &[])),
+        )
+    }
+
     /// Ticket W20-15 (`docs/design/UX_WAVE_20.md` §5): the optional
     /// performance overlay (top-right of the picture) and input display
     /// (bottom-left). Drawn by egui OVER the picture — never into a frame
@@ -10584,7 +10686,9 @@ impl eframe::App for RetroForgeApp {
         // Diorama texture, and `video_panel` paints the flat view this
         // SAME repaint (acceptance 1).
         self.sync_diorama_subscription();
+        self.update_peek(&ctx);
         self.pump_core_events(&ctx);
+        self.rebuild_peek_texture_if_stale();
         self.maybe_request_canvas_snapshot();
         self.sync_event_subscription();
         self.pump_trace();

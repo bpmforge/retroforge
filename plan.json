@@ -8890,10 +8890,11 @@
    "no effect in Accuracy mode; badge behaviour unchanged"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-16."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-16.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). FOUND: hold-to-peek only switched the CAMERA to Original; the Original view still drew the resolved frame (FrameBuffer::overlay_scanline output, plus any HD composite), so sprite-limit bypass, de-flicker and HD art stayed on screen while 'peeking at the original' -- the honesty gesture showed the enhancement. Now: play_view::peek_frame (pure, unit-tested) wipes left-to-right from the displayed frame to CompareBuffers::original (rebuilt from the core's indexed video by rf_renderer::original_rgba_from_indexed) via rf_renderer::compose_split, ~200 ms each way (egui animate_bool_with_time); when geometry differs (HD pack / decoded widescreen) it cuts at the halfway point instead of faking a per-pixel wipe. The wipe is applied before any shader; compare mode keeps its own split. Compare buffers are now kept whenever an enhancement is visible, so peek works the moment it is pressed and while PAUSED (rebuild_peek_texture_if_stale redraws from held frames when no new frame arrives). enhancement_visible() = any effective feature row or a loaded HD pack; otherwise peek is a no-op (Accuracy). With the status bar hidden (W20-11) the hotkey reaches peek directly. Tests: play_view unit test (no peek / half / full byte-exact / size-mismatch cut); tests/peek_wipe.rs (Accuracy: amount stays 0; Enhanced+de-flicker, paused: holding Backtick completes the wipe and the screen equals the accuracy-exact frame byte for byte; release returns to the resolved frame byte for byte). Limitation: on RF-Scroller the de-flickered and original frames may coincide, so the pixel difference itself is proved by the unit test, not the app test."
   ]
  },
  {

@@ -145,6 +145,40 @@ pub fn integer_multiple(rect: egui::Rect, grid: DisplayGrid) -> Option<u32> {
     ((k - k.round()).abs() < 1e-3 && k >= 1.0).then(|| k.round() as u32)
 }
 
+/// Ticket W20-16: the frame to show while hold-to-peek is `amount` of the
+/// way in — a left-to-right wipe from `enhanced` to `original`
+/// (`rf_renderer::compose_split` puts `original` left of the divider).
+///
+/// When the two are not the same size (an HD pack or decoded widescreen
+/// changed the geometry) there is no honest per-pixel wipe, so it is a cut
+/// at the halfway point, returning `None` for "show the enhanced frame".
+#[must_use]
+pub fn peek_frame(
+    original: &[u8],
+    original_size: (usize, usize),
+    enhanced: &[u8],
+    enhanced_size: (usize, usize),
+    amount: f32,
+) -> Option<(Vec<u8>, (usize, usize))> {
+    if amount <= 0.0 {
+        return None;
+    }
+    if original_size == enhanced_size
+        && original.len() == enhanced.len()
+        && original.len() == original_size.0 * original_size.1 * 4
+    {
+        let (w, h) = original_size;
+        let (Ok(w32), Ok(h32)) = (u32::try_from(w), u32::try_from(h)) else {
+            return None;
+        };
+        return Some((
+            rf_renderer::compose_split(original, enhanced, w32, h32, amount),
+            original_size,
+        ));
+    }
+    (amount >= 0.5).then(|| (original.to_vec(), original_size))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +252,24 @@ mod tests {
         );
         // Decoded widescreen is genuinely wider and keeps its width.
         assert_eq!(DisplayGrid::for_frame(400.0, 224.0).columns, 400.0);
+    }
+
+    #[test]
+    fn peek_wipes_left_to_right_and_cuts_when_sizes_differ() {
+        let o = vec![1u8; 4 * 4 * 4];
+        let e = vec![9u8; 4 * 4 * 4];
+        assert!(
+            peek_frame(&o, (4, 4), &e, (4, 4), 0.0).is_none(),
+            "no peek: enhanced"
+        );
+        let (half, _) = peek_frame(&o, (4, 4), &e, (4, 4), 0.5).unwrap();
+        assert_eq!(&half[0..8], &[1u8; 8], "left half is the original");
+        assert_eq!(&half[8..16], &[9u8; 8], "right half still enhanced");
+        let (full, _) = peek_frame(&o, (4, 4), &e, (4, 4), 1.0).unwrap();
+        assert_eq!(full, o, "fully in: the original, byte for byte");
+        let big = vec![9u8; 8 * 8 * 4];
+        assert!(peek_frame(&o, (4, 4), &big, (8, 8), 0.3).is_none());
+        assert_eq!(peek_frame(&o, (4, 4), &big, (8, 8), 0.6).unwrap().1, (4, 4));
     }
 
     #[test]
