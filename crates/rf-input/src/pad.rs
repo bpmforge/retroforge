@@ -68,11 +68,15 @@ pub enum PadButton {
     LeftStickDown,
     LeftStickLeft,
     LeftStickRight,
+    /// The centre "home" button (SDL "Guide"/gilrs `Mode`: Xbox, PS,
+    /// Home). Ticket W20-03: opens the in-game menu. Never bound to an
+    /// emulated button by default — no NES/SNES pad has one.
+    Guide,
 }
 
 impl PadButton {
     /// Every variant, for iteration in a remap UI and in tests.
-    pub const ALL: [PadButton; 16] = [
+    pub const ALL: [PadButton; 17] = [
         PadButton::DpadUp,
         PadButton::DpadDown,
         PadButton::DpadLeft,
@@ -89,6 +93,7 @@ impl PadButton {
         PadButton::LeftStickDown,
         PadButton::LeftStickLeft,
         PadButton::LeftStickRight,
+        PadButton::Guide,
     ];
 
     /// Stable name, used by the on-disk binding file and by the remap UI.
@@ -113,6 +118,7 @@ impl PadButton {
             PadButton::LeftStickDown => "LeftStickDown",
             PadButton::LeftStickLeft => "LeftStickLeft",
             PadButton::LeftStickRight => "LeftStickRight",
+            PadButton::Guide => "Guide",
         }
     }
 

@@ -261,8 +261,45 @@ impl GamepadNav {
     }
 }
 
+/// Ticket W20-03: did this poll's events ask for the in-game menu?
+///
+/// Two gestures, both standard elsewhere: the pad's centre **Guide**
+/// button alone, or **Select + Start** together (the chord a pad without
+/// a Guide button falls back to; RetroArch's default menu combo). Only a
+/// *press* counts, never a hold, so holding the chord does not flicker
+/// the menu open and shut. `held` answers "is this button down right
+/// now", AFTER the events were applied.
+#[must_use]
+pub fn menu_requested(events: &[PadEvent], held: impl Fn(PadButton) -> bool) -> bool {
+    events.iter().any(|e| match *e {
+        PadEvent::ButtonDown(_, PadButton::Guide) => true,
+        PadEvent::ButtonDown(_, PadButton::Start) => held(PadButton::Select),
+        PadEvent::ButtonDown(_, PadButton::Select) => held(PadButton::Start),
+        _ => false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn guide_or_the_select_start_chord_requests_the_menu() {
+        use rf_input::PadId;
+        let id = PadId(0);
+        let down = |b| PadEvent::ButtonDown(id, b);
+        assert!(super::menu_requested(&[down(PadButton::Guide)], |_| false));
+        // Start alone: no (Start already means "context menu" in the
+        // library, W15-03).
+        assert!(!super::menu_requested(&[down(PadButton::Start)], |_| false));
+        // Start pressed while Select is held, and the reverse order.
+        assert!(super::menu_requested(&[down(PadButton::Start)], |b| b == PadButton::Select));
+        assert!(super::menu_requested(&[down(PadButton::Select)], |b| b == PadButton::Start));
+        // A release never counts.
+        assert!(!super::menu_requested(
+            &[PadEvent::ButtonUp(id, PadButton::Guide)],
+            |_| true
+        ));
+    }
+
     use super::*;
     use rf_input::PadId;
 

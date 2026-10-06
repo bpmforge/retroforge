@@ -8420,10 +8420,11 @@
    "a kittest scenario asserts the pause/resume commands and that a game already paused stays paused after the menu closes"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-03."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-03.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). HANDOFF -- WRITE_SCOPE WIDENED to crates/rf-input/src/{pad.rs,gilrs_backend.rs}: added PadButton::Guide (persisted name 'Guide', appended last in ALL so no existing name or order changes) mapped from gilrs Button::Mode (gilrs-0.11.2 src/ev/mod.rs:133); no default binding to any emulated button. App: set_overlay_menu(open) is the single open/close path -- opening pauses a RUNNING game and remembers it did; closing resumes only that case; Resume is explicit and always runs; leaving for States/Author/Game settings keeps the game paused. Esc, the window close box, pad Guide, and Select+Start (ui_nav::menu_requested, press-only, unit-tested both chord orders and that a release never counts) all route through it. Space keeps its pause-toggle meaning. Tests: tests/menu_pauses.rs (real Esc events on RF-Scroller: running -> Esc -> paused and frames stop -> Esc -> resumed and frames advance; a player-paused game stays paused across open/close); ui_nav unit test. clippy -p retroforge --features gamepad clean. UNVERIFIED by eye: Guide on a physical pad (macOS may reserve it for the Game Center overlay)."
   ]
  },
  {

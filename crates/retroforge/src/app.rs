@@ -657,6 +657,10 @@ pub struct RetroForgeApp {
     settings: crate::settings::AppSettings,
     /// Whether the Esc overlay menu is showing (FRONTEND_UI §2).
     show_overlay_menu: bool,
+    /// Ticket W20-03: the in-game menu paused a running game, so closing
+    /// it must resume. `false` when the game was already paused — the
+    /// menu must not start a game the player had stopped.
+    menu_paused_game: bool,
     /// Ticket W15-03 (`UX_WAVE_15.md` §5, §11): whether the one Game
     /// Settings window is open. Opened identically from the context menu,
     /// the Enhance menu, and the overlay menu — the SAME instance, which is
@@ -1179,6 +1183,7 @@ impl RetroForgeApp {
             settings_tab: SettingsTab::Video,
             settings: app_settings,
             show_overlay_menu: false,
+            menu_paused_game: false,
             show_game_settings: false,
             game_settings_target: None,
             pad_menu_requested: false,
@@ -1338,6 +1343,12 @@ impl RetroForgeApp {
             // same frame.
             if actions.contains(&crate::ui_nav::NavAction::Menu) {
                 self.pad_menu_requested = true;
+            }
+            // Ticket W20-03: Guide, or Select+Start, opens/closes the
+            // in-game menu — checked after `apply` so "held" is current.
+            if crate::ui_nav::menu_requested(&events, |b| self.pad_button_held(b)) {
+                self.pad_menu_requested = false;
+                self.set_overlay_menu(!self.show_overlay_menu);
             }
             self.push_nav_events(ctx, &actions);
         }
@@ -5247,9 +5258,40 @@ impl RetroForgeApp {
     /// Shown as a modal-ish window rather than a full-screen takeover
     /// because the point is to pause *access*, not to hide the game: a
     /// player pressing Esc mid-level wants to see where they were.
+    /// Ticket W20-03: the one way the in-game menu opens or closes.
+    ///
+    /// Opening pauses a RUNNING game; closing resumes only a game the menu
+    /// itself paused. Every route — Esc, the pad's Guide button or
+    /// Select+Start, the window's close box — goes through here, so "the
+    /// menu is open" and "the game is frozen" cannot disagree.
+    fn set_overlay_menu(&mut self, open: bool) {
+        if open == self.show_overlay_menu {
+            return;
+        }
+        self.show_overlay_menu = open;
+        if open {
+            if self.core.is_some() && self.running {
+                self.send_command(CoreCommand::Pause);
+                self.running = false;
+                self.menu_paused_game = true;
+            }
+        } else if std::mem::take(&mut self.menu_paused_game) && self.core.is_some() {
+            self.send_command(CoreCommand::Resume);
+            self.running = true;
+        }
+    }
+
+    /// Ticket W20-03: leave the menu for another window (States,
+    /// Settings, …) WITHOUT resuming — the player is still busy, and a game
+    /// that ran on behind a settings window is the bug this ticket fixes.
+    fn leave_overlay_menu_paused(&mut self) {
+        self.show_overlay_menu = false;
+        self.menu_paused_game = false;
+    }
+
     fn overlay_menu(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.show_overlay_menu = !self.show_overlay_menu;
+            self.set_overlay_menu(!self.show_overlay_menu);
         }
         if !self.show_overlay_menu {
             return;
@@ -5262,7 +5304,9 @@ impl RetroForgeApp {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 if ui.button("Resume").clicked() {
-                    self.show_overlay_menu = false;
+                    // Explicit: Resume runs the game even if it was paused
+                    // before the menu opened — that is what the word says.
+                    self.leave_overlay_menu_paused();
                     if self.core.is_some() {
                         self.send_command(CoreCommand::Resume);
                         self.running = true;
@@ -5272,7 +5316,7 @@ impl RetroForgeApp {
                 // says what it is waiting for rather than being silently
                 // absent from a menu FRONTEND_UI §2 enumerates.
                 if ui.button("States\u{2026}").clicked() {
-                    self.show_overlay_menu = false;
+                    self.leave_overlay_menu_paused();
                     self.open_states_modal();
                 }
                 if ui.button("Settings\u{2026}").clicked() {
@@ -5283,7 +5327,7 @@ impl RetroForgeApp {
                 // author against would be a control that does nothing.
                 if let Some(path) = self.matched_profile.clone() {
                     if ui.button("Author\u{2026}").clicked() {
-                        self.show_overlay_menu = false;
+                        self.leave_overlay_menu_paused();
                         self.open_author_workspace(path);
                     }
                 }
@@ -5303,7 +5347,7 @@ impl RetroForgeApp {
                 // running game, same as the Enhance menu's identically
                 // named command.
                 if ui.button("Game settings\u{2026}").clicked() {
-                    self.show_overlay_menu = false;
+                    self.leave_overlay_menu_paused();
                     self.game_settings_target = None;
                     self.show_game_settings = true;
                 }
@@ -5334,7 +5378,10 @@ impl RetroForgeApp {
                     self.request_quit(ctx);
                 }
             });
-        self.show_overlay_menu = open;
+        // The window's own close box: same path as Esc.
+        if !open {
+            self.set_overlay_menu(false);
+        }
     }
 
     /// **The library home** (ticket W10-03; `docs/design/FRONTEND_UI.md`
@@ -7587,6 +7634,13 @@ impl RetroForgeApp {
 
     /// Pause the core, as the Pause button does (ticket W13-02d).
     #[doc(hidden)]
+    /// Ticket W20-03: whether the shell believes the core is running, and
+    /// whether the in-game menu is open.
+    #[doc(hidden)]
+    pub fn running_and_menu_for_test(&self) -> (bool, bool) {
+        (self.running, self.show_overlay_menu)
+    }
+
     pub fn pause_for_test(&mut self) {
         self.running = false;
         self.send_command(CoreCommand::Pause);

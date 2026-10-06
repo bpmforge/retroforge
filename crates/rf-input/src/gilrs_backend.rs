@@ -144,6 +144,9 @@ fn map_button(button: Button) -> Option<PadButton> {
         Button::RightTrigger => PadButton::RightShoulder,
         Button::Start => PadButton::Start,
         Button::Select => PadButton::Select,
+        // gilrs `Mode` is the SDL "guide" button (gilrs-0.11.2
+        // src/ev/mod.rs:133, `Mode = BTN_MODE`).
+        Button::Mode => PadButton::Guide,
         _ => return None,
     })
 }
