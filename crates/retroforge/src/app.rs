@@ -430,6 +430,10 @@ pub struct RetroForgeApp {
     /// Ticket W20-01: the present mode last handed to eframe, so V-sync is
     /// re-applied only when the setting changes (and once at startup).
     applied_vsync: Option<bool>,
+    /// Ticket W20-08: cached output-device names for Settings › Audio;
+    /// cleared when the Settings window closes so a newly plugged device
+    /// shows up next time.
+    audio_devices: Option<Vec<String>>,
     /// Ticket W20-01: where the picture was drawn last frame.
     last_play_rect: Option<egui::Rect>,
     /// Ticket W10-03: §3.1's search box, filtering the library home by
@@ -1114,7 +1118,7 @@ impl RetroForgeApp {
         let art_cache = crate::art::open_art_cache(config_root.as_deref(), &app_settings.paths);
         let library_view = app_settings.library.view;
 
-        RetroForgeApp {
+        let app = RetroForgeApp {
             widescreen_decisions: [None; 4],
             hd_pack: None,
             hd_summary: None,
@@ -1146,6 +1150,7 @@ impl RetroForgeApp {
             last_frame_size: None,
             core_frame_size: None,
             applied_vsync: None,
+            audio_devices: None,
             last_play_rect: None,
             library_search: String::new(),
             library_console_filter: None,
@@ -1262,7 +1267,11 @@ impl RetroForgeApp {
             editor_form: crate::profile_editor::NewProfileForm::default(),
             editor_path: String::new(),
             editor_status: None,
-        }
+        };
+        // Ticket W20-08: saved audio choices reach the audio path before
+        // the first game starts.
+        app.publish_audio_settings();
+        app
     }
 
     /// Sample every bindable key once per repaint into
@@ -3893,7 +3902,14 @@ impl RetroForgeApp {
             tokens.accent,
         );
 
-        let mut v = egui::Visuals::dark();
+        // Ticket W20-08: start from egui's light visuals for the Light
+        // theme, so anything this function does not override (selection
+        // text, shadows, scrollbar ink) is drawn for a light surface.
+        let mut v = if !a.high_contrast && a.theme == crate::accessibility::ThemeChoice::Light {
+            egui::Visuals::light()
+        } else {
+            egui::Visuals::dark()
+        };
         v.panel_fill = bg;
         v.window_fill = bg;
         v.faint_bg_color = raised;
@@ -4786,10 +4802,31 @@ impl RetroForgeApp {
                                     changed = true;
                                 }
                                 ui.weak(
-                                    "Bounded deliberately: below 0.5x the UI is unreadable, and a \
-                             user who cannot read the UI cannot open this window to undo it \
-                             (crate::accessibility's module doc).",
+                                    "Limited to 0.5x\u{2013}4x so the window always stays \
+                                     readable enough to change it back.",
                                 );
+                                ui.separator();
+
+                                // Ticket W20-08: the Light palette and its
+                                // tokens existed with no way to choose them.
+                                ui.label("Theme");
+                                ui.horizontal(|ui| {
+                                    for (theme, label) in [
+                                        (crate::accessibility::ThemeChoice::Dark, "Dark"),
+                                        (crate::accessibility::ThemeChoice::Light, "Light"),
+                                    ] {
+                                        if ui
+                                            .add_enabled(
+                                                !a.high_contrast,
+                                                egui::RadioButton::new(a.theme == theme, label),
+                                            )
+                                            .clicked()
+                                        {
+                                            a.theme = theme;
+                                            changed = true;
+                                        }
+                                    }
+                                });
                                 ui.separator();
 
                                 ui.label("Contrast");
@@ -4809,10 +4846,7 @@ impl RetroForgeApp {
                                     p.accent_contrast(),
                                     crate::accessibility::WCAG_AAA,
                                 ));
-                                ui.weak(
-                                    "Off by default: high contrast is an accommodation, not an \
-                             improvement.",
-                                );
+                                ui.weak("Overrides the theme while on.");
                             }
                             SettingsTab::Video => {
                                 ui.label("Scaling");
@@ -4856,9 +4890,7 @@ impl RetroForgeApp {
                                         .then(|| shader.trim().to_string());
                                     changed = true;
                                 }
-                                ui.small(
-                            "Shader names arrive with W3-02a; empty means the plain pipeline.",
-                        );
+                                ui.small("Leave empty for the plain picture.");
                                 ui.separator();
 
                                 if ui
@@ -4921,33 +4953,69 @@ impl RetroForgeApp {
                                 // doc + plan.json W16-08 note).
                             }
                             SettingsTab::Audio => {
-                                let mut device =
-                                    self.settings.audio.device.clone().unwrap_or_default();
-                                ui.label("Output device (empty = system default)");
-                                if ui.text_edit_singleline(&mut device).changed() {
-                                    self.settings.audio.device = (!device.trim().is_empty())
-                                        .then(|| device.trim().to_string());
-                                    changed = true;
+                                // Ticket W20-08: a list of the devices the
+                                // system actually has, not a free-text box
+                                // a typo silently ignored — and, until
+                                // W20-08, a box nothing read at all.
+                                ui.label("Output device");
+                                let current = self
+                                    .settings
+                                    .audio
+                                    .device
+                                    .clone()
+                                    .unwrap_or_else(|| "System default".to_string());
+                                let devices = self.audio_device_names();
+                                let has_audio = cfg!(feature = "audio");
+                                ui.add_enabled_ui(has_audio, |ui| {
+                                    egui::ComboBox::from_id_salt("audio-device")
+                                        .selected_text(&current)
+                                        .show_ui(ui, |ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    self.settings.audio.device.is_none(),
+                                                    "System default",
+                                                )
+                                                .clicked()
+                                            {
+                                                self.settings.audio.device = None;
+                                                changed = true;
+                                            }
+                                            for name in &devices {
+                                                let selected = self.settings.audio.device.as_deref()
+                                                    == Some(name.as_str());
+                                                if ui.selectable_label(selected, name).clicked() {
+                                                    self.settings.audio.device = Some(name.clone());
+                                                    changed = true;
+                                                }
+                                            }
+                                        });
+                                });
+                                if !has_audio {
+                                    ui.small("This build has no sound output.");
+                                } else {
+                                    if let Some(opened) = crate::audio_out::opened_device_name() {
+                                        ui.small(format!("Playing through: {opened}"));
+                                    }
+                                    ui.small("Applies from the next game you start.");
                                 }
-                                ui.small("Takes effect on restart.");
                                 ui.separator();
 
                                 if ui
                                     .add(
                                         egui::Slider::new(
                                             &mut self.settings.audio.latency_ms,
-                                            10..=200,
+                                            crate::audio_out::LATENCY_RANGE_MS,
                                         )
-                                        .text("Buffer latency (ms)"),
+                                        .text("Buffer (ms)"),
                                     )
                                     .changed()
                                 {
                                     changed = true;
                                 }
                                 ui.small(
-                            "Lower is more responsive, higher survives a stalled frame. Takes \
-                             effect on restart.",
-                        );
+                                    "Lower answers your button presses sooner; higher keeps sound \
+                                     smooth on a busy machine. Applies from the next game you start.",
+                                );
                                 ui.separator();
 
                                 if ui
@@ -5144,6 +5212,11 @@ impl RetroForgeApp {
                 ui.small(&self.bindings_status);
             });
         self.show_settings = open;
+        if !open {
+            // Ticket W20-08: re-enumerate audio devices next time, so one
+            // plugged in meanwhile shows up.
+            self.audio_devices = None;
+        }
         if changed {
             self.save_settings();
             // The library screen reads its roots from here, so a folder
@@ -5155,7 +5228,29 @@ impl RetroForgeApp {
     }
 
     /// Persist app-wide settings, reporting failure rather than swallowing it.
+    /// Ticket W20-08: hand Settings › Audio to the audio path — device and
+    /// buffer for the next game started, volume immediately.
+    fn publish_audio_settings(&self) {
+        crate::audio_out::set_prefs(crate::audio_out::AudioPrefs {
+            device: self.settings.audio.device.clone(),
+            latency_ms: self.settings.audio.latency_ms,
+        });
+        crate::audio_out::set_volume(self.settings.audio.volume);
+    }
+
+    /// Ticket W20-08: output device names, enumerated once per Settings
+    /// session (enumeration talks to the OS audio service; not every
+    /// frame). Empty without the `audio` feature.
+    fn audio_device_names(&mut self) -> Vec<String> {
+        #[cfg(feature = "audio")]
+        if self.audio_devices.is_none() {
+            self.audio_devices = Some(rf_audio::output_device_names());
+        }
+        self.audio_devices.clone().unwrap_or_default()
+    }
+
     fn save_settings(&mut self) {
+        self.publish_audio_settings();
         let Some(root) = self.config_root.clone() else {
             self.status = "No config directory; settings apply to this session only.".to_string();
             return;

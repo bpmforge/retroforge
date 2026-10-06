@@ -74,6 +74,20 @@ pub struct AudioDevice {
     sample_rate: u32,
     channels: u16,
     underrun_samples: Arc<AtomicU64>,
+    /// The device's name as cpal prints it (`Display`, cpal-0.18.1
+    /// traits.rs: "For the device name as a string, use
+    /// `device.to_string()`").
+    device_name: String,
+}
+
+/// Names of every output device the default host offers, in host order.
+/// Empty when enumeration fails — the caller still has "System default".
+#[must_use]
+pub fn output_device_names() -> Vec<String> {
+    cpal::default_host()
+        .output_devices()
+        .map(|devices| devices.map(|d| d.to_string()).collect())
+        .unwrap_or_default()
 }
 
 impl AudioDevice {
@@ -88,11 +102,30 @@ impl AudioDevice {
     /// Returns [`DeviceError`] if there is no output device, the backend
     /// refuses to build the stream, or its sample format is not `f32`,
     /// `i16` or `u16`.
-    pub fn open(mut consumer: RingConsumer) -> Result<Self, DeviceError> {
+    pub fn open(consumer: RingConsumer) -> Result<Self, DeviceError> {
+        Self::open_named(consumer, None)
+    }
+
+    /// Open the output device whose name is `name` (as
+    /// [`output_device_names`] lists it), or the default device when
+    /// `name` is `None` **or no longer present** — a USB headset unplugged
+    /// since it was chosen must not leave the emulator silent (ticket
+    /// W20-08). [`AudioDevice::device_name`] reports which one opened, so
+    /// the caller can say so instead of pretending the choice took.
+    ///
+    /// # Errors
+    /// As [`AudioDevice::open`].
+    pub fn open_named(mut consumer: RingConsumer, name: Option<&str>) -> Result<Self, DeviceError> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
+        let chosen = name.and_then(|want| {
+            host.output_devices()
+                .ok()
+                .and_then(|mut devices| devices.find(|d| d.to_string() == want))
+        });
+        let device = chosen
+            .or_else(|| host.default_output_device())
             .ok_or(DeviceError::NoOutputDevice)?;
+        let device_name = device.to_string();
         let supported = device
             .default_output_config()
             .map_err(|e| DeviceError::Cpal(e.to_string()))?;
@@ -174,7 +207,15 @@ impl AudioDevice {
             sample_rate,
             channels,
             underrun_samples,
+            device_name,
         })
+    }
+
+    /// Which device actually opened — the requested one, or the default
+    /// when the request was absent or no longer present.
+    #[must_use]
+    pub fn device_name(&self) -> &str {
+        &self.device_name
     }
 
     /// The device's real sample rate — what the resampler must target.

@@ -8532,10 +8532,11 @@
    "Settings › Accessibility offers Theme: Dark / Light / High contrast, wired to the existing palettes and tokens; persisted"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-08."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-08.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). HANDOFF -- WRITE_SCOPE WIDENED to crates/rf-audio/src/{device.rs,lib.rs}: output_device_names() (cpal 0.18.1: devices named via Display, traits.rs 'use device.to_string()') and AudioDevice::open_named(consumer, Option<&str>) falling back to the default when the chosen device is gone, plus device_name(); open() delegates. FOUND: all three audio settings (device, buffer latency, volume) were saved and read by NOTHING -- the device was always the system default, the ring always LATENCY_MS, the volume slider moved nothing. Now audio_out::AudioPrefs is published by the app (startup + every settings save) and read when the core thread opens audio, i.e. from the next game started (copy says exactly that); volume is a live atomic applied per batch (apply_volume unit-tested); Settings shows 'Playing through: <device>' from the device that actually opened. Audio device is a ComboBox of enumerated devices (+ System default), disabled with 'This build has no sound output' without the audio feature; re-enumerated each time Settings reopens. Theme: AccessibilitySettings.theme (Dark default / Light; serde default), Palette/Tokens select LIGHT, apply_theme starts from egui::Visuals::light(); high contrast overrides. Copy: removed the ticket/module citations (W3-02a, crate::accessibility) and the restart notes that were untrue. Tests: tests/settings_copy.rs (walks all four tabs' labels/values; fails on ticket ids, crate::, rf_; Light offered; device list offers System default), accessibility unit test for Light/HC selection, audio_out volume test. clippy --features audio,gamepad clean. UNVERIFIED by ear: device switching and volume on real hardware; by eye: the Light theme."
   ]
  },
  {

@@ -45,6 +45,16 @@ pub const WCAG_AA: f32 = 4.5;
 /// WCAG 2.1 AAA minimum for body text.
 pub const WCAG_AAA: f32 = 7.0;
 
+/// Light or dark chrome (ticket W20-08). High contrast is separate and
+/// overrides both — it is an accommodation, not a colour preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeChoice {
+    #[default]
+    Dark,
+    Light,
+}
+
 /// The accessibility half of `[video]`-adjacent settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -55,6 +65,10 @@ pub struct AccessibilitySettings {
     pub ui_scale: f32,
     /// Whether the high-contrast palette is in use.
     pub high_contrast: bool,
+    /// Light or dark chrome (ticket W20-08); ignored while
+    /// `high_contrast` is on. `#[serde(default)]` on the struct keeps old
+    /// settings files loading as Dark.
+    pub theme: ThemeChoice,
 }
 
 impl Default for AccessibilitySettings {
@@ -68,6 +82,7 @@ impl Default for AccessibilitySettings {
             // improvement — imposing it on everyone would be the same
             // mistake as enabling an enhancement by default (law 6).
             high_contrast: false,
+            theme: ThemeChoice::Dark,
         }
     }
 }
@@ -89,6 +104,7 @@ impl AccessibilitySettings {
         Self {
             ui_scale: scale,
             high_contrast: self.high_contrast,
+            theme: self.theme,
         }
     }
 
@@ -97,6 +113,8 @@ impl AccessibilitySettings {
     pub fn palette(&self) -> Palette {
         if self.high_contrast {
             Palette::HIGH_CONTRAST
+        } else if self.theme == ThemeChoice::Light {
+            Palette::LIGHT
         } else {
             Palette::DEFAULT
         }
@@ -418,6 +436,7 @@ mod tests {
             let s = AccessibilitySettings {
                 ui_scale: input,
                 high_contrast: false,
+                theme: ThemeChoice::Dark,
             };
             assert_eq!(s.normalized().ui_scale, want, "input {input}");
         }
@@ -432,6 +451,7 @@ mod tests {
             let s = AccessibilitySettings {
                 ui_scale: bad,
                 high_contrast: false,
+                theme: ThemeChoice::Dark,
             };
             assert_eq!(s.normalized().ui_scale, 1.0, "input {bad}");
         }
@@ -473,7 +493,25 @@ mod tests {
         let s = AccessibilitySettings {
             ui_scale: 1.0,
             high_contrast: true,
+            theme: ThemeChoice::Dark,
         };
+        assert_eq!(s.palette(), Palette::HIGH_CONTRAST);
+    }
+
+    /// Ticket W20-08: Light selects `Palette::LIGHT`, and high contrast
+    /// still overrides it.
+    #[test]
+    fn the_light_theme_selects_the_light_palette_unless_high_contrast() {
+        let mut s = AccessibilitySettings {
+            theme: ThemeChoice::Light,
+            ..AccessibilitySettings::default()
+        };
+        assert_eq!(s.palette(), Palette::LIGHT);
+        assert_eq!(
+            crate::theme::Tokens::from_accessibility(&s),
+            crate::theme::Tokens::light()
+        );
+        s.high_contrast = true;
         assert_eq!(s.palette(), Palette::HIGH_CONTRAST);
     }
 }

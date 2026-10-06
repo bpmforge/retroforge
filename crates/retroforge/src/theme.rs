@@ -244,9 +244,8 @@ fn derive(palette: &Palette, semantics: &Semantics) -> Tokens {
 }
 
 impl Tokens {
-    /// Derived from `Palette::LIGHT`. Not wired to a settings toggle yet
-    /// (see module doc) — exists so the token table's Light column and
-    /// this suite's contrast tests have something real to check.
+    /// Derived from `Palette::LIGHT`. Selected by Settings › Accessibility
+    /// › Theme: Light (ticket W20-08).
     #[must_use]
     pub fn light() -> Tokens {
         derive(&Palette::LIGHT, &Semantics::LIGHT)
@@ -273,8 +272,11 @@ impl Tokens {
     /// `Palette`.
     #[must_use]
     pub fn from_accessibility(a: &crate::accessibility::AccessibilitySettings) -> Tokens {
-        if a.normalized().high_contrast {
+        let a = a.normalized();
+        if a.high_contrast {
             Tokens::high_contrast()
+        } else if a.theme == crate::accessibility::ThemeChoice::Light {
+            Tokens::light()
         } else {
             Tokens::dark()
         }

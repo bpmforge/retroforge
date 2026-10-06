@@ -32,6 +32,94 @@ use rf_audio::{AudioRing, Filters, RateController, RateStats, Resampler, RingPro
 /// lag stays under the ~50 ms most people notice on percussive sounds.
 pub const LATENCY_MS: u32 = 40;
 
+/// Ticket W20-08: Settings › Audio as the core thread reads it when it
+/// opens a device.
+///
+/// Until W20-08 the three audio settings were saved to `settings.toml`
+/// and read by nothing: the device was always the system default, the
+/// ring was always [`LATENCY_MS`], and the volume slider moved nothing.
+/// Audio opens on the core thread at every game start
+/// (`core_thread::run`), so the device and latency apply **from the next
+/// game started**; volume is read every batch and applies live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioPrefs {
+    /// Output device by name (as `rf_audio::output_device_names` lists
+    /// it); `None` = system default.
+    pub device: Option<String>,
+    pub latency_ms: u32,
+}
+
+impl Default for AudioPrefs {
+    fn default() -> Self {
+        Self {
+            device: None,
+            latency_ms: LATENCY_MS,
+        }
+    }
+}
+
+/// Bounds for a latency a settings file can ask for. Below 10 ms a single
+/// late frame underruns; above 250 ms sound visibly trails the picture.
+pub const LATENCY_RANGE_MS: std::ops::RangeInclusive<u32> = 10..=250;
+
+static PREFS: std::sync::Mutex<Option<AudioPrefs>> = std::sync::Mutex::new(None);
+static OPENED_DEVICE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// `f32` bits of the output volume (1.0 = unity), read every batch.
+static VOLUME_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F80_0000);
+
+/// Publish Settings › Audio for the next device open.
+pub fn set_prefs(prefs: AudioPrefs) {
+    if let Ok(mut slot) = PREFS.lock() {
+        *slot = Some(prefs);
+    }
+}
+
+#[cfg_attr(not(feature = "audio"), allow(dead_code))]
+fn prefs() -> AudioPrefs {
+    PREFS
+        .lock()
+        .ok()
+        .and_then(|p| p.clone())
+        .unwrap_or_default()
+}
+
+/// Set the output volume, live. Clamped to `[0, 1]`; NaN reads as unity.
+pub fn set_volume(volume: f32) {
+    let v = if volume.is_finite() {
+        volume.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    VOLUME_BITS.store(v.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The live output volume.
+#[must_use]
+pub fn volume() -> f32 {
+    f32::from_bits(VOLUME_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The name of the device the last game's audio actually opened on —
+/// which may be the default when the chosen one has gone away. `None`
+/// before any device opened (or in a build without the `audio` feature).
+#[must_use]
+pub fn opened_device_name() -> Option<String> {
+    OPENED_DEVICE.lock().ok().and_then(|n| n.clone())
+}
+
+/// Scale `samples` by `volume` in place. Unity leaves them untouched.
+fn apply_volume(samples: &mut [i16], volume: f32) {
+    if (volume - 1.0).abs() < f32::EPSILON {
+        return;
+    }
+    for s in samples {
+        // In range by construction: |s * v| <= |s| for v in [0, 1].
+        #[allow(clippy::cast_possible_truncation)]
+        let scaled = (f32::from(*s) * volume).round() as i16;
+        *s = scaled;
+    }
+}
+
 /// Resampler chunk size. ~5 ms at 48 kHz — small enough that a rate
 /// correction takes effect within a frame, large enough that the per-chunk
 /// overhead is negligible.
@@ -98,10 +186,18 @@ impl AudioOut {
         // after the device — hence the two-step: open with a placeholder
         // consumer, then rebuild. cpal reports its rate before the first
         // callback, so nothing is streamed in between.
+        let prefs = prefs();
+        let latency = prefs
+            .latency_ms
+            .clamp(*LATENCY_RANGE_MS.start(), *LATENCY_RANGE_MS.end());
         let probe_rate = rf_audio::CORE_SAMPLE_RATE;
-        let capacity = AudioRing::capacity_for_latency(probe_rate, LATENCY_MS, 1);
+        let capacity = AudioRing::capacity_for_latency(probe_rate, latency, 1);
         let (producer, consumer) = AudioRing::split(capacity);
-        let device = rf_audio::AudioDevice::open(consumer).map_err(|e| e.to_string())?;
+        let device = rf_audio::AudioDevice::open_named(consumer, prefs.device.as_deref())
+            .map_err(|e| e.to_string())?;
+        if let Ok(mut slot) = OPENED_DEVICE.lock() {
+            *slot = Some(device.device_name().to_string());
+        }
         let device_rate = device.sample_rate();
         let mut out = Self::from_parts(producer, device_rate).map_err(|e| e.to_string())?;
         out.device = Some(device);
@@ -122,6 +218,7 @@ impl AudioOut {
         self.scratch.clear();
         self.scratch.extend_from_slice(samples);
         self.filters.process_i16(&mut self.scratch);
+        apply_volume(&mut self.scratch, volume());
 
         let mut resampled = Vec::with_capacity(self.scratch.len() + CHUNK);
         if self
@@ -225,6 +322,18 @@ pub fn open_audio_out() -> Option<AudioOut> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn volume_scales_samples_and_unity_is_untouched() {
+        let mut a = [1000i16, -1000, i16::MAX, i16::MIN];
+        apply_volume(&mut a, 1.0);
+        assert_eq!(a, [1000, -1000, i16::MAX, i16::MIN]);
+        apply_volume(&mut a, 0.5);
+        assert_eq!(a, [500, -500, 16384, -16384]);
+        apply_volume(&mut a, 0.0);
+        assert_eq!(a, [0, 0, 0, 0]);
+    }
+
     use super::*;
 
     /// The chain must accept a realistic frame's worth of core samples and

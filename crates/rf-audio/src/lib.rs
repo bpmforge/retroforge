@@ -38,7 +38,7 @@ mod ring;
 mod device;
 
 #[cfg(feature = "device")]
-pub use device::{AudioDevice, DeviceError};
+pub use device::{output_device_names, AudioDevice, DeviceError};
 pub use filter::Filters;
 pub use rate::{RateController, RateStats, MAX_RATIO_DEVIATION, TARGET_FILL};
 pub use resample::{ResampleError, Resampler};
