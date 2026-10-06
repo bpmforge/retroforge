@@ -8948,7 +8948,7 @@
    "overlays (W8-12), smooth camera (W8-08) and interpolation (W8-09) stay unwired with reasons recorded in docs/design/ENHANCEMENT_AUDIT.md"
   ],
   "points": 5,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-17.",
