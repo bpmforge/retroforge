@@ -538,6 +538,17 @@ fn unsupported_map_mode_at_either_location(data: &[u8]) -> Option<CartError> {
         }
         let mode_byte = data[base + 0x15];
         let nibble = mode_byte & 0x0F;
+        // Ticket W14-63: fullsnes "SNES Cartridge ROM Header", FFD5h:
+        // "Bit7-6 Always 0". A byte with either set is not a map-mode byte
+        // at all, so its low nibble names no chip — the Porky Pig
+        // 1994-05-24 beta shape (`$7A` at $FFD5, inside unrelated data on
+        // an odd-size dump whose retail sibling has no chip) was refused
+        // as SPC7110 from it. Bit 5 ("Always 1, maybe meant to be MSB of
+        // bit4..0") is deliberately not checked: fullsnes hedges it, and
+        // W14-05's filler test names ExHiROM from a bare `$05` on purpose.
+        if mode_byte & 0xC0 != 0 {
+            continue;
+        }
         if KNOWN_UNSUPPORTED_MAP_MODES.contains(&nibble) {
             return Some(CartError::UnsupportedChip {
                 name: format!("{} (SNES map mode ${mode_byte:02X})", map_mode_name(nibble)),
@@ -1487,6 +1498,18 @@ pub fn parse_snes_header(raw: &[u8]) -> Result<SnesHeader, CartError> {
         // "$6-$D" wording; flagged as a deviation in the ticket close-out
         // note rather than silently widened.
         (Coprocessor::None, hw == 0x2)
+    } else if coprocessor_nibble == 0x0 && hw == 0xA {
+        // Ticket W14-63: fullsnes's Chipset (FFD6h) row xAh reads
+        // "ROM+Co-processor+RAM+Battery+Overclocked GSU1" — the row names
+        // its own coprocessor, the GSU (nibble $1, handled above). Under
+        // the DSP nibble it contradicts itself, so it names no board that
+        // shipped and falls to no coprocessor, the way rule B treats
+        // unassigned nibbles (Super Noah's Ark 3D, Piko re-release: a
+        // legible HiROM header with chipset $0A, whose (Unl) sibling has
+        // no chip at all). Narrow on purpose: other unusual DSP hw values
+        // (e.g. $09, `dsp_nibble_with_unassigned_hw_value_still_refuses`)
+        // stay refused by name.
+        (Coprocessor::None, false)
     } else if hw >= 0x3 {
         return Err(CartError::UnsupportedChip {
             name: format!(
@@ -2829,5 +2852,47 @@ mod tests {
             }
             other => panic!("expected UnsupportedChip, got {other:?}"),
         }
+    }
+
+    // ---- W14-63: header bytes no board assigns ------------------------
+
+    /// An image neither location can score, with `$FFD5` set to
+    /// `mode_byte` and plausible country/version bytes beside it — the
+    /// shape `unsupported_map_mode_at_either_location` reads.
+    fn unscorable_image_with_hirom_mode_byte(mode_byte: u8) -> Vec<u8> {
+        let mut data = vec![0x55u8; 0x10000];
+        let base = HIROM_HEADER_OFFSET;
+        data[base + 0x15] = mode_byte;
+        data[base + 0x16] = 0x65;
+        data[base + 0x19] = 0x00;
+        data[base + 0x1B] = 0x02;
+        data
+    }
+
+    #[test]
+    fn porky_pig_beta_shape_map_byte_outside_its_documented_shape_names_no_chip() {
+        let names_spc7110 = |r: Result<SnesHeader, CartError>| matches!(r, Err(CartError::UnsupportedChip { ref name }) if name.contains("SPC7110"));
+        // `$7A`: bit 6 set, which fullsnes says is always 0.
+        assert!(!names_spc7110(parse_snes_header(
+            &unscorable_image_with_hirom_mode_byte(0x7A)
+        )));
+        // The same nibble in a well-shaped byte still refuses by name.
+        assert!(names_spc7110(parse_snes_header(
+            &unscorable_image_with_hirom_mode_byte(0x3A)
+        )));
+    }
+
+    #[test]
+    fn noahs_ark_piko_shape_dsp_nibble_with_unassigned_hw_is_no_coprocessor() {
+        let header = parse_snes_header(&hirom_image(0x31, 0x0A)).expect("loads");
+        assert_eq!(header.map_mode, SnesMapMode::HiRom);
+        assert_eq!(header.coprocessor, Coprocessor::None);
+        assert!(!header.battery);
+        // DSP with a generic hw value stays a DSP: $06 is refused by name
+        // (this build runs DSP-1 on hw $3-$5 only), not waved through.
+        assert!(matches!(
+            parse_snes_header(&hirom_image(0x31, 0x06)),
+            Err(CartError::UnsupportedChip { ref name }) if name.contains("DSP")
+        ));
     }
 }

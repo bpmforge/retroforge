@@ -4304,3 +4304,9 @@ stories, 10 decisions).
   and SNES colour math may not be drawn at all in live play (filed as a
   follow-up to verify). Limits are in ENHANCEMENT_AUDIT.md §2.
   Wave 20 is now complete. Gate: workspace **2514 passing / 0 failed / 43 ignored**, clippy clean, arch OK.
+
+- **W14-63 — two SNES header misreads** (2026-10-06, branch
+  `w14-63-headers`). Super Noah's Ark 3D (Piko) now renders like its
+  (Unl) sibling; Porky Pig's 1994-05-24 beta is no longer refused as
+  SPC7110 (it loads to a uniform screen, a bad dump). Two narrow,
+  fullsnes-cited header rules; details in TESTING.md.

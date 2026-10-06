@@ -8536,7 +8536,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "id": "W14-63",
   "title": "Header-detection follow-ups from the refused bucket: Porky Pig Beta (1994-05-24) mis-read as SPC7110, Super Noah's Ark 3D (Piko) chipset $0A read as DSP",
@@ -8550,6 +8550,7 @@
    "W14-63: the Porky Pig 1994-05-24 beta header no longer names SPC7110 from a junk map-mode byte (its retail sibling has no chip), and the Piko Noah's Ark 3D header loads like its (Unl) sibling; each rule is a header-plausibility rule with a citation and a unit test, not a title check"
   ],
   "notes": [
+   "DONE 2026-10-06 (branch w14-63-headers): two fullsnes-cited plausibility rules in crates/rf-cart/src/snes.rs. (1) unsupported_map_mode_at_either_location skips a map-mode byte with bit 7 or 6 set (FFD5h 'Bit7-6 Always 0'): Porky Pig 1994-05-24 beta ($FFD5=$7A) is no longer refused as SPC7110; it now loads to a uniform screen (odd-size dump, no legible header). (2) DSP nibble with hw $A (row xAh names the overclocked GSU1) is Coprocessor::None: Super Noah's Ark 3D (Piko, chipset $0A) now renders like its (Unl) sibling. Both narrow: bit 5 unchecked (W14-05 filler test unchanged), DSP hw $9/$6 still refuse. Verified on the real archives with the census child (exit 11 -> 10 and 11 -> 0). docs/TESTING.md W14-63 section.",
    "FILED 2026-09-29 by W14-60 triage. Both are refusals from a header byte the hardware never reads or that no cartridge assigns (see W14-57). Cheap; only worth it if the census count matters, since both games are betas or re-releases."
   ]
  },
