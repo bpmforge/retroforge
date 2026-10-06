@@ -59,12 +59,14 @@ pub enum AppAction {
     Fullscreen,
     /// Ticket W20-14: start/stop recording the picture to an APNG.
     Record,
+    /// Ticket W20-13: rewind while held.
+    Rewind,
 }
 
 impl AppAction {
     /// Declaration order — also the order the Controls window and the
     /// overlay menu list them in, matching §6's table.
-    pub const ALL: [AppAction; 7] = [
+    pub const ALL: [AppAction; 8] = [
         AppAction::SaveState,
         AppAction::LoadState,
         AppAction::FastForward,
@@ -72,6 +74,7 @@ impl AppAction {
         AppAction::HoldToPeek,
         AppAction::Fullscreen,
         AppAction::Record,
+        AppAction::Rewind,
     ];
 
     /// The actions a version-1 file (before W20-04) could know about —
@@ -98,6 +101,7 @@ impl AppAction {
             AppAction::HoldToPeek => "HoldToPeek",
             AppAction::Fullscreen => "Fullscreen",
             AppAction::Record => "Record",
+            AppAction::Rewind => "Rewind",
         }
     }
 
@@ -119,6 +123,7 @@ impl AppAction {
             AppAction::HoldToPeek => "Hold-to-peek",
             AppAction::Fullscreen => "Fullscreen",
             AppAction::Record => "Record video",
+            AppAction::Rewind => "Rewind (hold)",
         }
     }
 }
@@ -154,6 +159,7 @@ impl Default for AppBindings {
         b.bind_key(egui::Key::Backtick, AppAction::HoldToPeek);
         b.bind_key(egui::Key::F11, AppAction::Fullscreen);
         b.bind_key(egui::Key::F10, AppAction::Record);
+        b.bind_key(egui::Key::Backspace, AppAction::Rewind);
         b
     }
 }

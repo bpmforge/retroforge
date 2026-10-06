@@ -280,6 +280,15 @@ impl WindowSettings {
     }
 }
 
+/// Ticket W20-13: play-session features with a cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PlaySettings {
+    /// Keep a rewind history (memory cost shown in Settings). Off by
+    /// default — SAVE_STATES.md §4 is explicit that the cost is real.
+    pub rewind: bool,
+}
+
 /// Everything in `settings.toml`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AppSettings {
@@ -298,6 +307,8 @@ pub struct AppSettings {
     pub window: WindowSettings,
     /// Ticket W20-02: per-shader parameter values.
     pub shaders: crate::shader_select::ShaderSettings,
+    /// Ticket W20-13.
+    pub play: PlaySettings,
     /// Tables and keys this build does not know, kept verbatim so a newer
     /// build's settings survive an older build touching the file (module
     /// doc).
@@ -316,6 +327,7 @@ struct KnownSettings {
     library: LibrarySettings,
     window: WindowSettings,
     shaders: crate::shader_select::ShaderSettings,
+    play: PlaySettings,
 }
 
 impl AppSettings {
@@ -334,6 +346,7 @@ impl AppSettings {
             library: self.library,
             window: self.window,
             shaders: self.shaders.clone(),
+            play: self.play,
         };
         let mut table = toml::Table::try_from(known).map_err(|e| e.to_string())?;
         for (key, value) in &self.unknown {
@@ -356,7 +369,14 @@ impl AppSettings {
         for (key, value) in &table {
             if !matches!(
                 key.as_str(),
-                "video" | "audio" | "paths" | "accessibility" | "library" | "window" | "shaders"
+                "video"
+                    | "audio"
+                    | "paths"
+                    | "accessibility"
+                    | "library"
+                    | "window"
+                    | "shaders"
+                    | "play"
             ) {
                 unknown.insert(key.clone(), value.clone());
             }
@@ -386,6 +406,7 @@ impl AppSettings {
             library: section("library").try_into().unwrap_or_default(),
             window: section("window").try_into().unwrap_or_default(),
             shaders: section("shaders").try_into().unwrap_or_default(),
+            play: section("play").try_into().unwrap_or_default(),
             unknown,
         })
     }

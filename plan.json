@@ -8823,10 +8823,11 @@
    "a determinism test: rewind N steps then replay the same input reproduces the original state hash"
   ],
   "points": 5,
-  "status": "todo",
+  "status": "blocked",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-13."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-13.",
+   "BLOCKED 2026-10-06 on acceptance 3 only; the feature is built, tested and committed (branch ui/wave-17). BUILT: the rf_state::RewindRing lives on the core thread (CoreCommand::SetRewind(Option<RewindConfig>), interval 10 running frames, depth 600 = 100 s); snapshots are EmuStepper::save_state(&self) encoded, taken only on RUNNING frames; CoreCommand::RewindStep pops one, decodes it, applies it through the same load_state as Load State, renders one frame and stays paused; FrameMsg::rewind carries RewindStatus {len, depth, interval, bytes}. App: [play] rewind setting (off by default; Settings > Video and the Quick Menu's Rewind section, with history length, MB, and an honest 'Experimental' note), AppAction::Rewind default Backspace (hold: pauses, a step every other UI frame, resumes on release; when off, an OSD card says so), scrub bar over the picture. NES only: save_state writes NES containers; SNES says 'not available'. Tests green: core_thread rewind_fills_while_running_and_each_step_goes_further_back; tests/rewind_hotkey.rs (off explains and keeps running; on: paused while held, frame counter walks back >= 20, resumes on release); photo target/ui-tour/20-rewind-scrub.png. ROOT CAUSE of the block: the NES save state does not reproduce the next frame. Proven without rewind: core_thread::tests::save_load_step_reproduces_the_next_frame (#[ignore]d known red) saves at frames 150/157/163/170/181, steps, loads, steps again -- frame 171 differs (2026-10-06); the rewound pictures in the tour photo show the HUD scroll split moved, consistent with scroll/raster state not restored (PPU frame_is_odd IS saved, rf-nes/src/ppu/state.rs:212). EXACT FIX NEEDED: find the missing NES state (W20-22) -- rf-nes is outside this UI wave. WHY WORKAROUNDS FAIL: rewinding by replaying input from an older snapshot inherits the same restore, and snapshotting more often only narrows the window. DO NOT RETRY without W20-22 done; then un-ignore core_thread::tests::rewinding_shows_exactly_the_frame_that_was_originally_rendered and close this."
   ]
  },
  {
@@ -9011,6 +9012,29 @@
   "stories": [],
   "notes": [
    "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-21."
+  ]
+ },
+ {
+  "id": "W20-22",
+  "title": "NES save state does not reproduce the next frame (Load State and rewind exactness)",
+  "phase": 20,
+  "crate": "rf-nes",
+  "write_scope": [
+   "crates/rf-nes/**",
+   "crates/retroforge/src/save_state.rs",
+   "crates/retroforge/src/core_thread.rs"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "name the state the NES .rfstate omits (or restores wrongly) such that Save -> StepFrame and Load -> StepFrame differ, citing nesdev for the register/latch involved",
+   "core_thread::tests::save_load_step_reproduces_the_next_frame and rewinding_shows_exactly_the_frame_that_was_originally_rendered pass with their #[ignore] removed",
+   "existing save-state migration tests and the 10k-frame determinism double-run stay green; any container change bumps its version with a migration"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 by W20-13 (branch ui/wave-17, docs/design/UX_WAVE_20.md). Evidence: on RF-Scroller, saving at frames 150/157/163/170/181 then StepFrame vs ApplyState + StepFrame gives a different frame 171 (1 of 5 probes); rewound pictures show the HUD scroll split moved (target/ui-tour/20-rewind-scrub.png). PPU frame_is_odd is already saved (rf-nes/src/ppu/state.rs:212), so look at scroll/raster latches, sprite-0/overflow state, mapper IRQ counters, or the shell frame boundary (save taken after tick_running_with_input vs replay via latch_and_advance_frame)."
   ]
  }
 ]

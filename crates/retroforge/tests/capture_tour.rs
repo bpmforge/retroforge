@@ -219,6 +219,33 @@ fn photograph_every_major_surface() {
         v.perf_overlay = false;
         v.input_display = false;
     }
+
+    // W20-13: rewind's scrub bar while Backspace is held.
+    harness.state_mut().set_rewind_setting_for_test(true);
+    let target = harness.state().frame_count_for_test() + 200;
+    run_emulated_frames(&mut harness, target, Duration::from_secs(10));
+    harness.input_mut().events.push(egui::Event::Key {
+        key: egui::Key::Backspace,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    });
+    for _ in 0..12 {
+        harness.run_steps(1);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    shot(&mut harness, "20-rewind-scrub");
+    harness.input_mut().events.push(egui::Event::Key {
+        key: egui::Key::Backspace,
+        physical_key: None,
+        pressed: false,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    });
+    harness.run_steps(2);
+    harness.state_mut().set_rewind_setting_for_test(false);
+
     // And back, so the rest of the tour has its menus.
     harness
         .input_mut()

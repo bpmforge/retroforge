@@ -238,7 +238,23 @@ pub struct SnesDebugFrame {
     pub voices: Vec<rf_snes::debug::VoiceView>,
 }
 
+/// Ticket W20-13: what the scrub bar draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RewindStatus {
+    /// Snapshots held (how far back rewind can go, in steps).
+    pub len: usize,
+    /// The most it will hold.
+    pub depth: usize,
+    /// Running frames between snapshots.
+    pub interval: u64,
+    /// Compressed memory in use.
+    pub bytes: usize,
+}
+
 pub struct FrameMsg {
+    /// Ticket W20-13: the rewind ring's extent after this frame, `None`
+    /// while rewind is off.
+    pub rewind: Option<RewindStatus>,
     /// Ticket W11-02: the bytes the full-level view asked for, or `None`
     /// when no probe is armed. Peeked on this thread because only this
     /// thread can read memory without perturbing the machine.
@@ -583,6 +599,14 @@ pub enum CoreCommand {
     /// time it reaches here the question "did this state have to be
     /// migrated?" has been asked and answered.
     ApplyState(Box<rf_state::Container>),
+    /// Ticket W20-13: turn rewind on (snapshot every `interval` running
+    /// frames, keep `depth` of them) or off (`None`, which frees the ring).
+    SetRewind(Option<rf_state::RewindConfig>),
+    /// Ticket W20-13: step back one snapshot and show it — load the state
+    /// through the same `load_state` as Load State (so the simulation is
+    /// never altered any other way), then render one frame from it and
+    /// stay paused, exactly as `StepFrame` does.
+    RewindStep,
     /// Ticket W4-10b: turn per-channel audio capture on or off. Off by
     /// default, so a session that never opens the scopes pays nothing
     /// (DEBUGGER.md §6).
@@ -1025,6 +1049,10 @@ fn core_thread_main(
     // is exercised, and `crate::pacer` stays in charge of frame timing —
     // see `crate::audio_out`'s module doc.
     let mut audio = crate::audio_out::open_audio_out();
+    // Ticket W20-13: the rewind ring lives HERE, on the thread that owns
+    // the machine — snapshots are taken and restored without the machine
+    // ever leaving this thread (ARCHITECTURE §6).
+    let mut rewind: Option<rf_state::RewindRing> = None;
     // Ticket W14-20 defect 1: how many frames this thread has dropped
     // (see the `pending_frames` check at the send site below) since the
     // last time it logged about it, and when that last log happened.
@@ -1212,6 +1240,30 @@ fn core_thread_main(
                 CoreCommand::ApplyState(container) => {
                     let _ = stepper.load_state(&container);
                 }
+                CoreCommand::SetRewind(config) => {
+                    rewind = config.map(rf_state::RewindRing::new);
+                }
+                CoreCommand::RewindStep => {
+                    let restored = rewind
+                        .as_mut()
+                        .and_then(|ring| ring.step_back().ok().flatten())
+                        .and_then(|(_, bytes)| rf_state::Container::decode_default(&bytes).ok())
+                        .is_some_and(|(container, _)| stepper.load_state(&container).is_ok());
+                    if restored {
+                        stepper.latch_and_advance_frame(
+                            input.load(),
+                            &mut FanoutSink {
+                                frame: &mut sink,
+                                layers: layers_enabled.then_some(&mut layers),
+                                bundle: &mut bundle_builder,
+                                audio: audio.as_mut(),
+                                overlay: overlay_capture.as_mut(),
+                            },
+                        );
+                        stepper.pause();
+                        stepped = true;
+                    }
+                }
                 CoreCommand::SetAudioChannelCapture(on) => {
                     stepper.set_audio_channel_capture(on);
                     audio_capture = on;
@@ -1346,6 +1398,24 @@ fn core_thread_main(
                 }
             }
         };
+        // Ticket W20-13: snapshot a RUNNING frame into the rewind ring at
+        // its interval. `save_state` only reads the machine (`&self`), so
+        // this cannot perturb it; a stepped (rewound/single-stepped) frame
+        // is not recorded, so rewinding does not refill the history it is
+        // walking back through.
+        if ran {
+            if let Some(ring) = rewind.as_mut() {
+                let frame = stepper.frame_count();
+                if ring.wants_snapshot(frame) {
+                    if let Ok(bytes) = stepper.save_state(0).and_then(|c| {
+                        c.encode()
+                            .map_err(|e| crate::save_state::SaveStateError::Io(e.to_string()))
+                    }) {
+                        let _ = ring.push(frame, &bytes);
+                    }
+                }
+            }
+        }
         if ran || stepped {
             // Ticket W4-03e: feed the enhanced-camera pipeline THIS exact
             // frame's bundle before it moves into `bundle_writer.publish`
@@ -1429,6 +1499,12 @@ fn core_thread_main(
             });
             bundle_writer.publish(bundle);
             let msg = FrameMsg {
+                rewind: rewind.as_ref().map(|ring| RewindStatus {
+                    len: ring.len(),
+                    depth: ring.config().depth,
+                    interval: ring.config().interval,
+                    bytes: ring.compressed_bytes(),
+                }),
                 audio_fill: audio.as_ref().map(crate::audio_out::AudioOut::fill),
                 level_probe: probe_data,
                 script_window: script_bytes,
@@ -1628,6 +1704,7 @@ mod tests {
     /// at.
     fn empty_frame_msg() -> FrameMsg {
         FrameMsg {
+            rewind: None,
             level_probe: None,
             script_window: None,
             audio_fill: None,
@@ -1870,6 +1947,171 @@ mod tests {
     /// use: all-zero PRG means the reset vector resolves to `$0000`, which
     /// is zeroed RAM (`BRK`) — a deterministic infinite loop that steps
     /// forever without needing real game code.
+    /// The RF-Scroller fixture's bytes, or `None` (skip) when not built.
+    fn rf_scroller_rom() -> Option<Vec<u8>> {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/nes/rf-scroller/build/rf-scroller.nes");
+        std::fs::read(&fixture).ok()
+    }
+
+    fn fnv64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// Receive the next frame, consuming it the way the UI does (W14-20's
+    /// back-pressure counter), or the core stops sending.
+    fn next_frame(core: &CoreHandle, wait: Duration) -> Option<Box<FrameMsg>> {
+        let deadline = std::time::Instant::now() + wait;
+        while std::time::Instant::now() < deadline {
+            if let Ok(CoreEvent::Frame(m)) = core.evt_rx.recv_timeout(Duration::from_millis(200)) {
+                core.pending_frames.fetch_sub(1, Ordering::AcqRel);
+                return Some(m);
+            }
+        }
+        None
+    }
+
+    type RewindRun = (
+        std::collections::HashMap<u64, u64>,
+        Vec<(u64, u64)>,
+        RewindStatus,
+    );
+
+    /// Ticket W20-13: run with rewind on, then step back. Returns the
+    /// per-frame fingerprints of the forward run, the rewound frames, and
+    /// the last ring status.
+    fn run_then_rewind(steps: usize) -> Option<RewindRun> {
+        let rom = rf_scroller_rom()?;
+        let core = spawn(rom).expect("fixture spawns");
+        core.cmd_tx
+            .send(CoreCommand::SetRewind(Some(
+                rf_state::RewindConfig::enabled(10, 50),
+            )))
+            .unwrap();
+        core.cmd_tx.send(CoreCommand::Resume).unwrap();
+        let mut seen = std::collections::HashMap::new();
+        let mut status = None;
+        while let Some(m) = next_frame(&core, Duration::from_secs(10)) {
+            seen.insert(m.frame_count, fnv64(&m.rgba));
+            status = m.rewind;
+            if m.frame_count >= 240 {
+                break;
+            }
+        }
+        core.cmd_tx.send(CoreCommand::Pause).unwrap();
+        while next_frame(&core, Duration::from_millis(150)).is_some() {}
+        let mut rewound = Vec::new();
+        for _ in 0..steps {
+            core.cmd_tx.send(CoreCommand::RewindStep).unwrap();
+            if let Some(m) = next_frame(&core, Duration::from_secs(5)) {
+                rewound.push((m.frame_count, fnv64(&m.rgba)));
+            }
+        }
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+        Some((seen, rewound, status?))
+    }
+
+    /// Ticket W20-13 (`docs/design/UX_WAVE_20.md` §5): the mechanics — a
+    /// ring fills while running, and each step goes further back and shows
+    /// a frame. Skips when the fixture is not built.
+    #[test]
+    fn rewind_fills_while_running_and_each_step_goes_further_back() {
+        let Some((seen, rewound, status)) = run_then_rewind(5) else {
+            eprintln!("SKIP: RF-Scroller fixture not built");
+            return;
+        };
+        assert!(
+            status.len >= 10,
+            "the ring filled while running: {status:?}"
+        );
+        assert!(status.bytes > 0);
+        assert!(seen.len() > 100, "the forward run delivered frames");
+        let frames: Vec<u64> = rewound.iter().map(|(f, _)| *f).collect();
+        assert_eq!(frames.len(), 5, "every step showed a frame: {frames:?}");
+        assert!(
+            frames.windows(2).all(|w| w[1] < w[0]),
+            "further back each step: {frames:?}"
+        );
+    }
+
+    /// Ticket W20-13 acceptance 3 — **KNOWN RED, `#[ignore]`d with
+    /// evidence** (plan.json W20-13 BLOCKED note; W20-22): a rewound frame
+    /// should be byte-identical to the frame first played at that number.
+    /// On RF-Scroller some are, some are a picture never displayed. The
+    /// cause is NOT the ring: `save_load_step_reproduces_the_next_frame`
+    /// shows the plain Save -> Load -> StepFrame path diverging the same
+    /// way (1 of 5 probes, frame 171, 2026-10-06), so the NES `.rfstate`
+    /// does not capture everything the next frame depends on.
+    #[test]
+    #[ignore = "known red: NES save/load does not reproduce the next frame (W20-22)"]
+    fn rewinding_shows_exactly_the_frame_that_was_originally_rendered() {
+        let Some((seen, rewound, _)) = run_then_rewind(10) else {
+            return;
+        };
+        for (frame, hash) in rewound {
+            if let Some(original) = seen.get(&frame) {
+                assert_eq!(
+                    *original, hash,
+                    "frame {frame} after rewinding differs from when it was first played"
+                );
+            }
+        }
+    }
+
+    /// W20-22's evidence, isolated from rewind: save at frame N, step,
+    /// load, step again — the two frames N+1 should be identical.
+    #[test]
+    #[ignore = "known red: NES save/load does not reproduce the next frame (W20-22)"]
+    fn save_load_step_reproduces_the_next_frame() {
+        let Some(rom) = rf_scroller_rom() else { return };
+        let dir = std::env::temp_dir().join(format!("rf_saveload_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = spawn(rom).unwrap();
+        let mut mismatches = Vec::new();
+        for start in [150u64, 157, 163, 170, 181] {
+            loop {
+                core.cmd_tx.send(CoreCommand::StepFrame).unwrap();
+                let m = next_frame(&core, Duration::from_secs(5)).expect("frame");
+                if m.frame_count >= start {
+                    break;
+                }
+            }
+            core.cmd_tx
+                .send(CoreCommand::SaveStateToSlot {
+                    dir: dir.clone(),
+                    stem: "slot1".into(),
+                })
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            core.cmd_tx.send(CoreCommand::StepFrame).unwrap();
+            let first = next_frame(&core, Duration::from_secs(5)).expect("frame");
+            let (container, _) = crate::state_slots::load(
+                &dir,
+                crate::state_slots::SlotId::Numbered(1),
+                &rf_state::MigrationRegistry::default(),
+            )
+            .unwrap();
+            core.cmd_tx
+                .send(CoreCommand::ApplyState(Box::new(container)))
+                .unwrap();
+            core.cmd_tx.send(CoreCommand::StepFrame).unwrap();
+            let again = next_frame(&core, Duration::from_secs(5)).expect("frame");
+            if fnv64(&first.rgba) != fnv64(&again.rgba) {
+                mismatches.push(first.frame_count);
+            }
+        }
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+        assert!(
+            mismatches.is_empty(),
+            "frames not reproduced after save/load: {mismatches:?}"
+        );
+    }
+
     fn synthetic_nrom() -> Vec<u8> {
         let mut data = Vec::new();
         data.extend_from_slice(&rf_cart::nes::INES_MAGIC);

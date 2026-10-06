@@ -86,6 +86,12 @@ const CHROME_EDGE_PX: f32 = 48.0;
 /// module doc), ~240 KB each for an NES frame — 1 GiB is about 70 s.
 const RECORDING_LIMIT_BYTES: usize = 1 << 30;
 
+/// Ticket W20-13: a snapshot every 10 running frames, 600 kept — 100 s
+/// of history at 60 fps. Each step while held goes back one snapshot,
+/// every other UI frame: about 5x real speed.
+const REWIND_INTERVAL: u64 = 10;
+const REWIND_DEPTH: usize = 600;
+
 /// Ticket W20-15: how many frame intervals the sparkline shows (2 s).
 const FRAME_TIME_HISTORY: usize = 120;
 const SLOT_THUMB_HEIGHT: f32 = 126.0;
@@ -493,6 +499,13 @@ pub struct RetroForgeApp {
     chrome_badge: String,
     chrome_badge_changed: f64,
     chrome_last_pointer: Option<egui::Pos2>,
+    /// Ticket W20-13: rewind — the ring status from the last frame, whether
+    /// the key is held (and whether the game was running before), and a
+    /// counter pacing steps.
+    rewind_status: Option<core_thread::RewindStatus>,
+    rewinding: bool,
+    rewind_resume: bool,
+    rewind_tick: u32,
     /// Ticket W20-16: how far the peek wipe is in (0 = enhanced, 1 =
     /// original), and the amount the current texture reflects.
     peek_amount: f32,
@@ -1242,6 +1255,10 @@ impl RetroForgeApp {
             last_fullscreen_request: None,
             slot_textures: crate::slot_cards::SlotTextures::default(),
             osd: crate::toast::ToastStack::osd(),
+            rewind_status: None,
+            rewinding: false,
+            rewind_resume: false,
+            rewind_tick: 0,
             peek_amount: 0.0,
             peek_applied: 0.0,
             frame_times_ms: std::collections::VecDeque::with_capacity(FRAME_TIME_HISTORY),
@@ -1601,6 +1618,15 @@ impl RetroForgeApp {
         if fullscreen_pressed {
             self.toggle_fullscreen(ctx);
         }
+        let rewind_key = self
+            .app_bindings
+            .key_for(crate::app_bindings::AppAction::Rewind);
+        let rewind_down = rewind_key.is_some_and(|k| ctx.input(|i| i.key_down(k)))
+            || self
+                .app_bindings
+                .pad_for(crate::app_bindings::AppAction::Rewind)
+                .is_some_and(|b| self.pad_button_held(b));
+        self.update_rewind(rewind_down, ctx);
         let record_key = self
             .app_bindings
             .key_for(crate::app_bindings::AppAction::Record);
@@ -3000,6 +3026,8 @@ impl RetroForgeApp {
             Ok(handle) => {
                 self.core = Some(handle);
                 self.current_rom_path = Some(path.to_path_buf());
+                // Ticket W20-13: a fresh core has no ring; arm it if on.
+                self.sync_rewind();
                 // A new ROM is a new debug session too — the previous
                 // ROM's OAM/events would otherwise linger onscreen against
                 // a completely different game (same reasoning the
@@ -3309,6 +3337,7 @@ impl RetroForgeApp {
                 );
             }
             self.core_frame_size = Some((msg.width, msg.height));
+            self.rewind_status = msg.rewind;
             // Ticket W11-02: the probe's bytes become a live camera. The
             // `read` closure is a lookup into what the CORE peeked, not a
             // read of anything on this thread — the UI never touches
@@ -5271,6 +5300,10 @@ impl RetroForgeApp {
                                 }
                                 ui.small("Off can tear; on can add a frame of display latency.");
                                 ui.separator();
+                                if self.rewind_controls(ui) {
+                                    changed = true;
+                                }
+                                ui.separator();
 
                                 // MetalFX (ticket W16-08): a scaler choice,
                                 // not an enhancement -- it lives here next
@@ -6095,7 +6128,7 @@ impl RetroForgeApp {
         let mut leave_paused = false;
         let needs_game = matches!(
             self.quick_section,
-            Section::Save | Section::Load | Section::Rewind | Section::Reset | Section::Quit
+            Section::Save | Section::Load | Section::Reset | Section::Quit
         );
         // Cards per row for the Save/Load grids at this panel's width.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -6142,7 +6175,9 @@ impl RetroForgeApp {
                 }
             }
             Section::Rewind => {
-                ui.label("Rewind isn't available in this version yet.");
+                if self.rewind_controls(ui) {
+                    self.save_settings();
+                }
             }
             Section::Display => {
                 if self.video_controls(ui) {
@@ -8406,6 +8441,7 @@ impl RetroForgeApp {
     ) {
         self.mode7_seen = true;
         let msg = core_thread::FrameMsg {
+            rewind: None,
             level_probe: None,
             script_window: None,
             audio_fill: None,
@@ -10121,6 +10157,169 @@ impl RetroForgeApp {
         self.show_enhance = open;
     }
 
+    /// Ticket W20-13: whether rewind can run for this game — on in
+    /// Settings, and an NES game (`EmuStepper::save_state` writes NES
+    /// containers only; SNES states are not wired into this path yet).
+    fn rewind_available(&self) -> bool {
+        self.settings.play.rewind && self.core.is_some() && self.console_label == "NES"
+    }
+
+    /// Ticket W20-13: hand the rewind setting to the core thread (at
+    /// launch and whenever it changes).
+    fn sync_rewind(&self) {
+        let config = self
+            .rewind_available()
+            .then(|| rf_state::RewindConfig::enabled(REWIND_INTERVAL, REWIND_DEPTH));
+        self.send_command(CoreCommand::SetRewind(config));
+    }
+
+    /// Ticket W20-13 (`docs/design/UX_WAVE_20.md` §5): hold to rewind.
+    /// Pressing pauses the game; while held, one snapshot back every other
+    /// UI frame (the core loads it through `load_state`, the same path as
+    /// Load State, and shows one frame from it); releasing resumes a game
+    /// that was running.
+    fn update_rewind(&mut self, held: bool, ctx: &egui::Context) {
+        if held && !self.rewinding {
+            if !self.rewind_available() || self.show_overlay_menu {
+                if held && self.core.is_some() && !self.settings.play.rewind {
+                    self.osd.push_card(
+                        crate::toast::ToastKind::Info,
+                        "Rewind is off \u{2014} turn it on in Settings \u{203a} Video",
+                        None,
+                        Some("rewind"),
+                        ctx,
+                    );
+                }
+                return;
+            }
+            self.rewinding = true;
+            self.rewind_resume = self.running;
+            self.rewind_tick = 0;
+            if self.running {
+                self.send_command(CoreCommand::Pause);
+                self.running = false;
+            }
+        } else if !held && self.rewinding {
+            self.rewinding = false;
+            if self.rewind_resume {
+                self.send_command(CoreCommand::Resume);
+                self.running = true;
+            }
+        }
+        if self.rewinding {
+            if self.rewind_tick.is_multiple_of(2) {
+                self.send_command(CoreCommand::RewindStep);
+            }
+            self.rewind_tick = self.rewind_tick.wrapping_add(1);
+            ctx.request_repaint();
+        }
+    }
+
+    /// Ticket W20-13: the scrub bar along the bottom of the picture while
+    /// rewinding — how much history there is, and how much is left.
+    fn draw_rewind_bar(&self, ctx: &egui::Context) {
+        let (true, Some(status), Some(play)) =
+            (self.rewinding, self.rewind_status, self.last_play_rect)
+        else {
+            return;
+        };
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        #[allow(clippy::cast_precision_loss)]
+        let secs = (status.len as u64 * status.interval) as f32 / 60.0;
+        egui::Area::new(egui::Id::new("rf-rewind-bar"))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            // Above the input display when that is showing (W20-15), so
+            // the two bottom-edge readouts never overlap.
+            .fixed_pos(
+                play.center_bottom()
+                    + egui::vec2(
+                        0.0,
+                        if self.settings.video.input_display {
+                            -52.0
+                        } else {
+                            -12.0
+                        },
+                    ),
+            )
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_black_alpha(180))
+                    .corner_radius(tokens.radius_sm)
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} Rewinding \u{b7} {secs:.1} s left",
+                                egui_phosphor::regular::CLOCK_COUNTER_CLOCKWISE
+                            ))
+                            .color(egui::Color32::WHITE),
+                        );
+                        let width = (play.width() * 0.6).max(160.0);
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(width, 6.0), egui::Sense::hover());
+                        ui.painter()
+                            .rect_filled(rect, 3.0, egui::Color32::from_white_alpha(40));
+                        #[allow(clippy::cast_precision_loss)]
+                        let fill = status.len as f32 / status.depth.max(1) as f32;
+                        let filled = egui::Rect::from_min_size(
+                            rect.min,
+                            egui::vec2(rect.width() * fill, rect.height()),
+                        );
+                        ui.painter().rect_filled(filled, 3.0, tokens.accent);
+                    });
+            });
+    }
+
+    /// Ticket W20-13: the rewind switch, its cost, and how to use it —
+    /// shared by Settings › Video and the Quick Menu's Rewind section.
+    fn rewind_controls(&mut self, ui: &mut egui::Ui) -> bool {
+        let changed = ui
+            .checkbox(&mut self.settings.play.rewind, "Rewind")
+            .on_hover_text("Keeps a history so you can hold a key to go back in time")
+            .changed();
+        if changed {
+            self.sync_rewind();
+        }
+        let key = self
+            .app_bindings
+            .key_for(crate::app_bindings::AppAction::Rewind)
+            .map_or_else(|| "the Rewind key".to_string(), |k| k.name().to_string());
+        if !self.settings.play.rewind {
+            ui.small("Off. Uses memory while on (a few MB per minute of history).");
+        } else if self.core.is_some() && self.console_label != "NES" {
+            ui.small("Not available for SNES games in this version.");
+        } else if let Some(status) = self.rewind_status {
+            #[allow(clippy::cast_precision_loss)]
+            let secs = (status.len as u64 * status.interval) as f32 / 60.0;
+            ui.small(format!(
+                "Hold {key} in game. {secs:.0} s of history, {:.1} MB.",
+                status.bytes as f32 / (1024.0 * 1024.0)
+            ));
+            // Honest about the known defect (plan.json W20-22): restoring
+            // a state does not yet reproduce every frame exactly, which
+            // shows as a shifted picture while rewinding.
+            ui.small("Experimental: some rewound frames show the picture shifted.");
+        } else {
+            ui.small(format!("Hold {key} in game to go back, up to 100 s."));
+        }
+        changed
+    }
+
+    /// Ticket W20-13: rewind state for tests.
+    #[doc(hidden)]
+    pub fn rewind_for_test(&self) -> (bool, Option<core_thread::RewindStatus>) {
+        (self.rewinding, self.rewind_status)
+    }
+
+    /// Ticket W20-13: Settings › Video's rewind switch (tests).
+    #[doc(hidden)]
+    pub fn set_rewind_setting_for_test(&mut self, on: bool) {
+        self.settings.play.rewind = on;
+        self.sync_rewind();
+    }
+
     /// Ticket W20-14: F10 — start recording the picture, or stop and save.
     fn toggle_recording(&mut self, ctx: &egui::Context) {
         if self.recorder.is_some() {
@@ -10733,6 +10932,7 @@ impl eframe::App for RetroForgeApp {
         // Ticket W20-12: OSD cards inside the picture's top-left corner;
         // not over the Quick Menu (it is the thing being looked at then).
         self.draw_play_overlays(&ctx);
+        self.draw_rewind_bar(&ctx);
         if self.core.is_some() && !self.show_overlay_menu {
             let corner = self
                 .last_play_rect
