@@ -80,6 +80,11 @@ const SLOT_CARD_WIDTH: f32 = 168.0;
 const CHROME_HIDE_AFTER: f64 = 2.5;
 const CHROME_BADGE_HOLD: f64 = 3.0;
 const CHROME_EDGE_PX: f32 = 48.0;
+
+/// Ticket W20-14: the most a recording may hold before it stops itself.
+/// Frames are stored uncompressed until encoded (`crate::recording`'s
+/// module doc), ~240 KB each for an NES frame — 1 GiB is about 70 s.
+const RECORDING_LIMIT_BYTES: usize = 1 << 30;
 const SLOT_THUMB_HEIGHT: f32 = 126.0;
 
 /// How wide decoded widescreen renders, in dots (ticket W11-03).
@@ -485,6 +490,12 @@ pub struct RetroForgeApp {
     chrome_badge: String,
     chrome_badge_changed: f64,
     chrome_last_pointer: Option<egui::Pos2>,
+    /// Ticket W20-14: the recording in progress, when it started
+    /// (`Context::time`), and the worker encoding a finished one.
+    recorder: Option<crate::recording::Recorder>,
+    record_started: f64,
+    record_done: Option<std::sync::mpsc::Receiver<Result<(std::path::PathBuf, usize), String>>>,
+    last_recording: Option<(std::path::PathBuf, usize)>,
     /// Ticket W20-12: on-screen-display cards over the game picture.
     osd: crate::toast::ToastStack,
     /// Ticket W20-06: decoded save-slot thumbnails.
@@ -1218,6 +1229,10 @@ impl RetroForgeApp {
             last_fullscreen_request: None,
             slot_textures: crate::slot_cards::SlotTextures::default(),
             osd: crate::toast::ToastStack::osd(),
+            recorder: None,
+            record_started: 0.0,
+            record_done: None,
+            last_recording: None,
             chrome_visible: true,
             chrome_armed: false,
             chrome_last_activity: 0.0,
@@ -1564,6 +1579,12 @@ impl RetroForgeApp {
             .is_some_and(|b| self.pad_button_held(b));
         if fullscreen_pressed {
             self.toggle_fullscreen(ctx);
+        }
+        let record_key = self
+            .app_bindings
+            .key_for(crate::app_bindings::AppAction::Record);
+        if record_key.is_some_and(|k| ctx.input(|i| i.key_pressed(k))) {
+            self.toggle_recording(ctx);
         }
 
         // One-shot actions use `key_pressed` (the edge) — `key_down`
@@ -3249,8 +3270,19 @@ impl RetroForgeApp {
             // hash with no thumbnail yet. Reads `rgba` before it moves
             // into `self.last_frame_rgba` below.
             self.maybe_capture_first_frame(&rgba, size.0, size.1);
+            // Ticket W20-14: every resolved frame while recording. A frame
+            // the recorder refuses (size change, or the size limit) ends
+            // the recording and saves what it has.
+            let refused = self.recorder.as_mut().is_some_and(|r| !r.push(&rgba));
             self.last_frame_rgba = Some(rgba);
             self.last_frame_size = Some(size);
+            if refused {
+                let ctx = self.ctx.clone();
+                self.stop_recording(
+                    &ctx,
+                    "Recording stopped (size limit or picture size changed)",
+                );
+            }
             self.core_frame_size = Some((msg.width, msg.height));
             // Ticket W11-02: the probe's bytes become a live camera. The
             // `read` closure is a lookup into what the CORE peeked, not a
@@ -7688,6 +7720,9 @@ impl RetroForgeApp {
     /// having played something, and re-walking the user's folders on every
     /// return would make going back feel expensive.
     fn close_rom(&mut self) {
+        // Ticket W20-14: a recording in progress is saved, not lost.
+        let ctx = self.ctx.clone();
+        self.stop_recording(&ctx, "Recording");
         // Ticket W20-10: Quit to library closes the Quick Menu with it.
         self.show_overlay_menu = false;
         self.menu_paused_game = false;
@@ -10015,6 +10050,118 @@ impl RetroForgeApp {
         self.show_enhance = open;
     }
 
+    /// Ticket W20-14: F10 — start recording the picture, or stop and save.
+    fn toggle_recording(&mut self, ctx: &egui::Context) {
+        if self.recorder.is_some() {
+            self.stop_recording(ctx, "Recording");
+            return;
+        }
+        let (Some(_), Some((w, h))) = (&self.core, self.last_frame_size) else {
+            self.osd
+                .push(crate::toast::ToastKind::Info, "Nothing to record yet", ctx);
+            return;
+        };
+        let (Ok(w), Ok(h)) = (u32::try_from(w), u32::try_from(h)) else {
+            return;
+        };
+        self.recorder =
+            Some(crate::recording::Recorder::new(w, h, 60).with_limit(RECORDING_LIMIT_BYTES));
+        self.record_started = ctx.time();
+    }
+
+    /// Ticket W20-14: stop, and encode + write on a worker thread — an
+    /// APNG of a minute of frames takes seconds to encode, which must not
+    /// freeze the window (FRONTEND_UI §1 principle 3).
+    fn stop_recording(&mut self, ctx: &egui::Context, why: &str) {
+        let Some(recorder) = self.recorder.take() else {
+            return;
+        };
+        let frames = recorder.frame_count();
+        let dir = self.screenshots_dir();
+        let name =
+            crate::recording::Recorder::suggested_filename(self.position.map_or(0, |(f, _)| f));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = match recorder.finish() {
+                None => Err("nothing was captured".to_string()),
+                Some(bytes) => std::fs::create_dir_all(&dir)
+                    .and_then(|()| std::fs::write(dir.join(&name), bytes))
+                    .map(|()| (dir.join(&name), frames))
+                    .map_err(|e| e.to_string()),
+            };
+            let _ = tx.send(result);
+        });
+        self.record_done = Some(rx);
+        self.osd.push_card(
+            crate::toast::ToastKind::Info,
+            format!("{why}: saving {frames} frames\u{2026}"),
+            None,
+            Some("recording"),
+            ctx,
+        );
+    }
+
+    /// Ticket W20-14: the REC card while recording, and the result once the
+    /// worker has written the file.
+    fn poll_recording(&mut self, ctx: &egui::Context) {
+        if let Some(rec) = &self.recorder {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let secs = (ctx.time() - self.record_started).max(0.0) as u64;
+            let text = format!(
+                "{} REC {}:{:02} \u{b7} {} MB",
+                egui_phosphor::regular::RECORD,
+                secs / 60,
+                secs % 60,
+                rec.estimated_bytes() / (1024 * 1024)
+            );
+            self.osd.push_card(
+                crate::toast::ToastKind::Info,
+                text,
+                None,
+                Some("recording"),
+                ctx,
+            );
+        }
+        let Some(rx) = &self.record_done else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok((path, frames))) => {
+                self.record_done = None;
+                self.last_recording = Some((path.clone(), frames));
+                let file = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |n| n.to_string_lossy().to_string(),
+                );
+                self.osd.push_card(
+                    crate::toast::ToastKind::Success,
+                    format!("Recording saved: {file}"),
+                    None,
+                    Some("recording"),
+                    ctx,
+                );
+            }
+            Ok(Err(e)) => {
+                self.record_done = None;
+                self.osd.push_card(
+                    crate::toast::ToastKind::Error,
+                    format!("Recording not saved: {e}"),
+                    None,
+                    Some("recording"),
+                    ctx,
+                );
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.record_done = None,
+        }
+    }
+
+    /// Ticket W20-14: the last recording written, and its frame count.
+    #[doc(hidden)]
+    pub fn last_recording_for_test(&self) -> Option<(std::path::PathBuf, usize)> {
+        self.last_recording.clone()
+    }
+
     /// Ticket W20-11: whether any window is open over the play view — the
     /// bars never hide while one is (it was opened from them).
     fn any_window_open(&self) -> bool {
@@ -10271,6 +10418,7 @@ impl eframe::App for RetroForgeApp {
         }
         self.poll_input(&ctx);
         self.poll_app_hotkeys(&ctx);
+        self.poll_recording(&ctx);
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.
         self.poll_library_scan(&ctx);

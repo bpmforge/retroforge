@@ -8846,10 +8846,11 @@
    "a test records a few frames through the app and asserts a decodable APNG with the right frame count"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-14."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-14.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). AppAction::Record (default F10, remappable; bindings files from before W20-14 gain it through W20-04's known= upgrade path). Start = crate::recording::Recorder::new(frame size, 60 fps).with_limit(1 GiB, ~70 s of NES frames uncompressed); every RESOLVED frame (HD composite included; never the shaded texture, never the UI) is pushed in pump_core_events; a refused frame (size limit, or the picture changing size e.g. widescreen/HD toggled) ends the recording and saves what it has. Stop = encode the APNG and write it to the screenshots folder on a WORKER thread (a minute of frames takes seconds to encode; the window must not freeze), result back over a channel. OSD: one keyed card '<record icon> REC m:ss · N MB' while recording, then 'Saving N frames...', then 'Recording saved: <file>' or the error. Closing the game saves a recording in progress. Test: tests/recording_hotkey.rs (F10 default; REC card shows; F10 again writes a file whose PNG signature is right and whose acTL chunk's num_frames equals the frames the app captured, >= 20). UNVERIFIED by eye: playback of the APNG in a browser."
   ]
  },
  {
