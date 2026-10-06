@@ -712,6 +712,14 @@ pub struct RetroForgeApp {
     /// it must resume. `false` when the game was already paused — the
     /// menu must not start a game the player had stopped.
     menu_paused_game: bool,
+    /// Ticket W20-10: the Quick Menu's selected section, and whether its
+    /// rail entry should take keyboard focus on the next draw (just opened).
+    quick_section: crate::quick_menu::Section,
+    quick_focus_pending: bool,
+    /// When `state_slots` was last read from disk.
+    state_slots_scanned: Option<std::time::Instant>,
+    /// Ticket W20-10: the file the running game was opened from (Reset).
+    current_rom_path: Option<std::path::PathBuf>,
     /// Ticket W15-03 (`UX_WAVE_15.md` §5, §11): whether the one Game
     /// Settings window is open. Opened identically from the context menu,
     /// the Enhance menu, and the overlay menu — the SAME instance, which is
@@ -1245,6 +1253,10 @@ impl RetroForgeApp {
             settings: app_settings,
             show_overlay_menu: false,
             menu_paused_game: false,
+            quick_section: crate::quick_menu::Section::Resume,
+            quick_focus_pending: false,
+            state_slots_scanned: None,
+            current_rom_path: None,
             show_game_settings: false,
             game_settings_target: None,
             pad_menu_requested: false,
@@ -1411,7 +1423,9 @@ impl RetroForgeApp {
             }
             // Ticket W20-03: Guide, or Select+Start, opens/closes the
             // in-game menu — checked after `apply` so "held" is current.
-            if crate::ui_nav::menu_requested(&events, |b| self.pad_button_held(b)) {
+            if self.show_overlay_menu && actions.contains(&crate::ui_nav::NavAction::Back) {
+                self.set_overlay_menu(false);
+            } else if crate::ui_nav::menu_requested(&events, |b| self.pad_button_held(b)) {
                 self.pad_menu_requested = false;
                 self.set_overlay_menu(!self.show_overlay_menu);
             }
@@ -2263,6 +2277,13 @@ impl RetroForgeApp {
 
     /// Refresh the slot listing and open the manager (ticket W4-11).
     pub fn open_states_modal(&mut self) {
+        self.refresh_state_slots();
+        self.show_states = true;
+    }
+
+    /// Re-read this game's slot directory into `state_slots`.
+    fn refresh_state_slots(&mut self) {
+        self.state_slots_scanned = Some(std::time::Instant::now());
         self.state_slots = match self.states_dir() {
             Some(dir) => crate::state_slots::scan(&dir),
             // No config directory (or no ROM open): show the empty grid
@@ -2272,7 +2293,19 @@ impl RetroForgeApp {
                 .map(|id| crate::state_slots::SlotInfo { id, saved: None })
                 .collect(),
         };
-        self.show_states = true;
+    }
+
+    /// Ticket W20-10: the Quick Menu's Save/Load sections re-read the slot
+    /// directory at most twice a second — the core thread writes a save
+    /// asynchronously (`save_to_slot`'s own doc), so a once-only scan
+    /// would never show the slot just saved.
+    fn refresh_state_slots_if_stale(&mut self) {
+        let stale = self
+            .state_slots_scanned
+            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(500));
+        if stale {
+            self.refresh_state_slots();
+        }
     }
 
     /// Where this game's states live, or `None` with no config dir or no
@@ -2285,6 +2318,146 @@ impl RetroForgeApp {
     }
 
     /// The save-state manager (FRONTEND_UI §3.2).
+    /// Ticket W20-06/W20-10: the save-slot cards, shared by the States
+    /// window (both buttons) and the Quick Menu's Save and Load sections
+    /// (one each). Returns the slot clicked and whether it was a save. A
+    /// Save on an occupied slot goes through `pending_overwrite` instead
+    /// (W15-04), so it returns nothing.
+    fn slot_card_grid(
+        &mut self,
+        ui: &mut egui::Ui,
+        allow_load: bool,
+        allow_save: bool,
+        columns: Option<usize>,
+    ) -> Option<(crate::state_slots::SlotId, bool)> {
+        let mut picked: Option<(crate::state_slots::SlotId, bool)> = None;
+        // Ticket W20-06: cards with the slot's own
+        // screenshot, drawn — until W20-06 this printed the
+        // word "thumbnail" beside a selectable label.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let slots = self.state_slots.clone();
+        // `columns` given: explicit rows (the Quick Menu, an Area with no
+        // width bound for `horizontal_wrapped` to wrap against — it grew
+        // the panel to ~2000 px). `None`: wrap (the resizable States window).
+        let rows: Vec<Vec<crate::state_slots::SlotInfo>> = match columns {
+            Some(n) => slots.chunks(n.max(1)).map(<[_]>::to_vec).collect(),
+            None => vec![slots.clone()],
+        };
+        for row in &rows {
+            let mut body = |ui: &mut egui::Ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                for info in row {
+                    let thumb = info
+                        .saved
+                        .as_ref()
+                        .and_then(|s| s.thumbnail.as_deref())
+                        .and_then(|p| self.slot_textures.get(ui.ctx(), p));
+                    egui::Frame::new()
+                        .fill(tokens.surface)
+                        .corner_radius(tokens.radius_md)
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            ui.set_width(SLOT_CARD_WIDTH);
+                            ui.vertical(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(SLOT_CARD_WIDTH, SLOT_THUMB_HEIGHT),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(rect, tokens.radius_sm, tokens.bg);
+                                if let Some(tex) = &thumb {
+                                    let [w, h] = tex.size();
+                                    #[allow(clippy::cast_precision_loss)]
+                                    let fit = crate::play_view::play_rect(
+                                        rect,
+                                        crate::play_view::DisplayGrid::exact(w as f32, h as f32),
+                                        1.0,
+                                        crate::settings::ScaleMode::Fit,
+                                    );
+                                    ui.put(
+                                        fit,
+                                        egui::Image::from_texture(tex)
+                                            .fit_to_exact_size(fit.size())
+                                            .alt_text(format!("{} screenshot", info.id.label())),
+                                    );
+                                }
+                                ui.label(egui::RichText::new(info.id.label()).strong());
+                                match &info.saved {
+                                    Some(saved) => {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{} \u{b7} {}",
+                                                crate::slot_cards::relative_age(
+                                                    saved.timestamp,
+                                                    now,
+                                                    || Self::format_timestamp(saved.timestamp),
+                                                ),
+                                                saved.mode.label()
+                                            ))
+                                            .small()
+                                            .color(tokens.muted),
+                                        );
+                                        if saved.contains_mods {
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{} contains mods",
+                                                    crate::icons::WARNING
+                                                ))
+                                                .small()
+                                                .color(tokens.warn),
+                                            );
+                                        }
+                                    }
+                                    None => {
+                                        ui.label(
+                                            egui::RichText::new("Empty")
+                                                .small()
+                                                .color(tokens.muted),
+                                        );
+                                    }
+                                }
+                                ui.horizontal(|ui| {
+                                    if allow_load
+                                        && info.saved.is_some()
+                                        && ui.button(format!("Load {}", info.id.label())).clicked()
+                                    {
+                                        picked = Some((info.id, false));
+                                    }
+                                    if allow_save
+                                        && ui.button(format!("Save {}", info.id.label())).clicked()
+                                    {
+                                        if info.saved.is_some() {
+                                            // Ticket W15-04: an
+                                            // occupied slot asks
+                                            // first.
+                                            self.pending_overwrite = Some(info.id);
+                                            self.active_slot = Some(info.id);
+                                        } else {
+                                            picked = Some((info.id, true));
+                                        }
+                                    }
+                                });
+                            });
+                        });
+                }
+            };
+            if columns.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                    body(ui);
+                });
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                    body(ui);
+                });
+            }
+        }
+        picked
+    }
+
     fn states_modal(&mut self, ctx: &egui::Context) {
         if !self.show_states {
             return;
@@ -2304,124 +2477,9 @@ impl RetroForgeApp {
                         if self.states_dir().is_none() {
                             ui.label("No ROM open — save states are per game.");
                         }
-                        // Ticket W20-06: cards with the slot's own
-                        // screenshot, drawn — until W20-06 this printed the
-                        // word "thumbnail" beside a selectable label.
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |d| d.as_secs());
-                        let tokens =
-                            crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
-                        let slots = self.state_slots.clone();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-                            for info in &slots {
-                                let thumb = info
-                                    .saved
-                                    .as_ref()
-                                    .and_then(|s| s.thumbnail.as_deref())
-                                    .and_then(|p| self.slot_textures.get(ui.ctx(), p));
-                                egui::Frame::new()
-                                    .fill(tokens.surface)
-                                    .corner_radius(tokens.radius_md)
-                                    .inner_margin(8.0)
-                                    .show(ui, |ui| {
-                                        ui.set_width(SLOT_CARD_WIDTH);
-                                        ui.vertical(|ui| {
-                                            let (rect, _) = ui.allocate_exact_size(
-                                                egui::vec2(SLOT_CARD_WIDTH, SLOT_THUMB_HEIGHT),
-                                                egui::Sense::hover(),
-                                            );
-                                            ui.painter().rect_filled(
-                                                rect,
-                                                tokens.radius_sm,
-                                                tokens.bg,
-                                            );
-                                            if let Some(tex) = &thumb {
-                                                let [w, h] = tex.size();
-                                                #[allow(clippy::cast_precision_loss)]
-                                                let fit = crate::play_view::play_rect(
-                                                    rect,
-                                                    crate::play_view::DisplayGrid::exact(
-                                                        w as f32, h as f32,
-                                                    ),
-                                                    1.0,
-                                                    crate::settings::ScaleMode::Fit,
-                                                );
-                                                ui.put(
-                                                    fit,
-                                                    egui::Image::from_texture(tex)
-                                                        .fit_to_exact_size(fit.size())
-                                                        .alt_text(format!(
-                                                            "{} screenshot",
-                                                            info.id.label()
-                                                        )),
-                                                );
-                                            }
-                                            ui.label(egui::RichText::new(info.id.label()).strong());
-                                            match &info.saved {
-                                                Some(saved) => {
-                                                    ui.label(
-                                                        egui::RichText::new(format!(
-                                                            "{} \u{b7} {}",
-                                                            crate::slot_cards::relative_age(
-                                                                saved.timestamp,
-                                                                now,
-                                                                || Self::format_timestamp(
-                                                                    saved.timestamp
-                                                                ),
-                                                            ),
-                                                            saved.mode.label()
-                                                        ))
-                                                        .small()
-                                                        .color(tokens.muted),
-                                                    );
-                                                    if saved.contains_mods {
-                                                        ui.label(
-                                                            egui::RichText::new(format!(
-                                                                "{} contains mods",
-                                                                crate::icons::WARNING
-                                                            ))
-                                                            .small()
-                                                            .color(tokens.warn),
-                                                        );
-                                                    }
-                                                }
-                                                None => {
-                                                    ui.label(
-                                                        egui::RichText::new("Empty")
-                                                            .small()
-                                                            .color(tokens.muted),
-                                                    );
-                                                }
-                                            }
-                                            ui.horizontal(|ui| {
-                                                if info.saved.is_some()
-                                                    && ui
-                                                        .button(format!("Load {}", info.id.label()))
-                                                        .clicked()
-                                                {
-                                                    action = Some((info.id, false));
-                                                }
-                                                if ui
-                                                    .button(format!("Save {}", info.id.label()))
-                                                    .clicked()
-                                                {
-                                                    if info.saved.is_some() {
-                                                        // Ticket W15-04: an
-                                                        // occupied slot asks
-                                                        // first.
-                                                        self.pending_overwrite = Some(info.id);
-                                                        self.active_slot = Some(info.id);
-                                                    } else {
-                                                        action = Some((info.id, true));
-                                                    }
-                                                }
-                                            });
-                                        });
-                                    });
-                            }
-                        });
+                        if let Some(chosen) = self.slot_card_grid(ui, true, true, None) {
+                            action = Some(chosen);
+                        }
                         if !self.state_warnings.is_empty() {
                             ui.separator();
                             for line in &self.state_warnings {
@@ -2443,7 +2501,6 @@ impl RetroForgeApp {
             }
         }
         self.show_states = open;
-        self.overwrite_confirm_modal(ctx);
     }
 
     /// Ticket W15-04: the overwrite-confirmation `egui::Modal` for a Save
@@ -2821,6 +2878,7 @@ impl RetroForgeApp {
         match core_thread::spawn_with_waker(bytes, Some(waker)) {
             Ok(handle) => {
                 self.core = Some(handle);
+                self.current_rom_path = Some(path.to_path_buf());
                 // A new ROM is a new debug session too — the previous
                 // ROM's OAM/events would otherwise linger onscreen against
                 // a completely different game (same reasoning the
@@ -3301,7 +3359,7 @@ impl RetroForgeApp {
                         Ok(out) => {
                             if self.shader_budget.record_sample_ms(ms) {
                                 self.shader_note = Some(
-                                    "Shader paused: this machine cannot run it at full speed."
+                                    "Shader paused: this machine cannot run it at full speed. Choose it again to retry."
                                         .to_string(),
                                 );
                             }
@@ -5034,94 +5092,9 @@ impl RetroForgeApp {
                                 ui.weak("Overrides the theme while on.");
                             }
                             SettingsTab::Video => {
-                                ui.label("Scaling");
-                                for mode in crate::settings::ScaleMode::ALL {
-                                    if ui
-                                        .radio_value(
-                                            &mut self.settings.video.scale_mode,
-                                            mode,
-                                            mode.label(),
-                                        )
-                                        .changed()
-                                    {
-                                        changed = true;
-                                    }
+                                if self.video_controls(ui) {
+                                    changed = true;
                                 }
-                                ui.add_space(4.0);
-                                ui.label("Pixel shape");
-                                for aspect in crate::settings::PixelAspect::ALL {
-                                    if ui
-                                        .radio_value(
-                                            &mut self.settings.video.pixel_aspect,
-                                            aspect,
-                                            aspect.label(),
-                                        )
-                                        .changed()
-                                    {
-                                        changed = true;
-                                    }
-                                }
-                                ui.separator();
-
-                                // Ticket W20-02: a picker over the shaders
-                                // that exist, each with the sliders its own
-                                // manifest declares — not a free-text box.
-                                ui.label("Shader");
-                                let selected = self
-                                    .settings
-                                    .video
-                                    .shader
-                                    .as_deref()
-                                    .and_then(crate::shader_select::kind_from_id);
-                                egui::ComboBox::from_id_salt("shader-picker")
-                                    .selected_text(
-                                        selected.map_or("None", |k| k.manifest().display_name),
-                                    )
-                                    .show_ui(ui, |ui| {
-                                        if ui.selectable_label(selected.is_none(), "None").clicked() {
-                                            self.settings.video.shader = None;
-                                            changed = true;
-                                        }
-                                        for kind in crate::shader_select::KINDS {
-                                            let m = kind.manifest();
-                                            if ui
-                                                .selectable_label(selected == Some(kind), m.display_name)
-                                                .clicked()
-                                            {
-                                                self.settings.video.shader = Some(m.id.to_string());
-                                                self.shader_budget = rf_renderer::fog::BudgetGate::new();
-                                                self.shader_note = None;
-                                                changed = true;
-                                            }
-                                        }
-                                    });
-                                if let Some(kind) = selected {
-                                    let values = self.settings.shaders.values(kind);
-                                    for (p, mut v) in kind.manifest().params.iter().zip(values) {
-                                        if ui
-                                            .add(egui::Slider::new(&mut v, p.min..=p.max).text(p.label))
-                                            .changed()
-                                        {
-                                            self.settings.shaders.set(kind, p.name, v);
-                                            changed = true;
-                                        }
-                                    }
-                                    if !kind.manifest().params.is_empty()
-                                        && ui.small_button("Reset to defaults").clicked()
-                                    {
-                                        self.settings.shaders.reset(kind);
-                                        changed = true;
-                                    }
-                                    if self.gpu.is_none() {
-                                        ui.small("No GPU available to this window, so shaders cannot run.");
-                                    }
-                                } else if self.settings.video.shader.is_some() {
-                                    ui.small("The saved shader is not in this version; showing the plain picture.");
-                                }
-                                if let Some(note) = &self.shader_note {
-                                    ui.small(note);
-                                }
-                                ui.small("Changes how the picture looks, not how the game runs.");
                                 ui.separator();
 
                                 if ui
@@ -5480,6 +5453,95 @@ impl RetroForgeApp {
         self.audio_devices.clone().unwrap_or_default()
     }
 
+    /// Ticket W20-10: scaling, pixel shape and shader — the controls
+    /// Settings › Video and the Quick Menu's Display section share, so the
+    /// two cannot drift. Returns whether anything changed.
+    fn video_controls(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut changed = false;
+        ui.label("Scaling");
+        for mode in crate::settings::ScaleMode::ALL {
+            if ui
+                .radio_value(&mut self.settings.video.scale_mode, mode, mode.label())
+                .changed()
+            {
+                changed = true;
+            }
+        }
+        ui.add_space(4.0);
+        ui.label("Pixel shape");
+        for aspect in crate::settings::PixelAspect::ALL {
+            if ui
+                .radio_value(
+                    &mut self.settings.video.pixel_aspect,
+                    aspect,
+                    aspect.label(),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+        }
+        ui.separator();
+
+        // Ticket W20-02: a picker over the shaders
+        // that exist, each with the sliders its own
+        // manifest declares — not a free-text box.
+        ui.label("Shader");
+        let selected = self
+            .settings
+            .video
+            .shader
+            .as_deref()
+            .and_then(crate::shader_select::kind_from_id);
+        egui::ComboBox::from_id_salt("shader-picker")
+            .selected_text(selected.map_or("None", |k| k.manifest().display_name))
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(selected.is_none(), "None").clicked() {
+                    self.settings.video.shader = None;
+                    changed = true;
+                }
+                for kind in crate::shader_select::KINDS {
+                    let m = kind.manifest();
+                    if ui
+                        .selectable_label(selected == Some(kind), m.display_name)
+                        .clicked()
+                    {
+                        self.settings.video.shader = Some(m.id.to_string());
+                        self.shader_budget = rf_renderer::fog::BudgetGate::new();
+                        self.shader_note = None;
+                        changed = true;
+                    }
+                }
+            });
+        if let Some(kind) = selected {
+            let values = self.settings.shaders.values(kind);
+            for (p, mut v) in kind.manifest().params.iter().zip(values) {
+                if ui
+                    .add(egui::Slider::new(&mut v, p.min..=p.max).text(p.label))
+                    .changed()
+                {
+                    self.settings.shaders.set(kind, p.name, v);
+                    changed = true;
+                }
+            }
+            if !kind.manifest().params.is_empty() && ui.small_button("Reset to defaults").clicked()
+            {
+                self.settings.shaders.reset(kind);
+                changed = true;
+            }
+            if self.gpu.is_none() {
+                ui.small("No GPU available to this window, so shaders cannot run.");
+            }
+        } else if self.settings.video.shader.is_some() {
+            ui.small("The saved shader is not in this version; showing the plain picture.");
+        }
+        if let Some(note) = &self.shader_note {
+            ui.small(note);
+        }
+        ui.small("Changes how the picture looks, not how the game runs.");
+        changed
+    }
+
     fn save_settings(&mut self) {
         self.publish_audio_settings();
         let Some(root) = self.config_root.clone() else {
@@ -5661,6 +5723,8 @@ impl RetroForgeApp {
         }
         self.show_overlay_menu = open;
         if open {
+            self.quick_section = crate::quick_menu::Section::Resume;
+            self.quick_focus_pending = true;
             if self.core.is_some() && self.running {
                 self.send_command(CoreCommand::Pause);
                 self.running = false;
@@ -5680,6 +5744,18 @@ impl RetroForgeApp {
         self.menu_paused_game = false;
     }
 
+    /// Ticket W20-10 (`docs/design/UX_WAVE_20.md` §5): the Quick Menu.
+    ///
+    /// Replaces the plain "Menu" window Esc opened before. The game is
+    /// paused (W20-03) and stays drawn underneath, dimmed by a scrim — egui
+    /// has no blur, and a GPU blur pass for one menu is not worth a render
+    /// path, so dim it is. A rail of sections on the left, the chosen
+    /// section on the right, the honesty badge in the header (principle 2:
+    /// even here, an enhanced picture says so), and a hint bar for the pad.
+    ///
+    /// Keyboard and pad drive it through egui focus, like the rest of the
+    /// shell (`crate::ui_nav`): moving focus along the rail selects that
+    /// section, so the right-hand side follows the cursor.
     fn overlay_menu(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.set_overlay_menu(!self.show_overlay_menu);
@@ -5687,96 +5763,311 @@ impl RetroForgeApp {
         if !self.show_overlay_menu {
             return;
         }
-        let mut open = self.show_overlay_menu;
-        egui::Window::new("Menu")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let screen = ctx.viewport_rect();
+
+        // The scrim: the frozen frame stays visible, dimmed, and clicks
+        // on it do nothing (a stray click must not reach the library or a
+        // window behind).
+        egui::Area::new(egui::Id::new("quick-menu-scrim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::hover());
+                let bg = tokens.bg;
+                ui.painter().rect_filled(
+                    rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 200),
+                );
+            });
+
+        let has_core = self.core.is_some();
+        // A FIXED size, not one derived from the content: an anchored Area
+        // sized from last frame's content re-centres every frame, and a
+        // scroll area that fills "available" height feeds that back — the
+        // panel crept 16 px a frame and clicks landed where a button used
+        // to be (found by tests/quick_menu.rs).
+        let width = (screen.width() - 32.0).clamp(320.0, 720.0);
+        let body_height = (screen.height() - 220.0).clamp(160.0, 440.0);
+        let mut close = false;
+        let mut leave_paused = false;
+        egui::Area::new(egui::Id::new("quick-menu"))
+            .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                if ui.button("Resume").clicked() {
-                    // Explicit: Resume runs the game even if it was paused
-                    // before the menu opened — that is what the word says.
-                    self.leave_overlay_menu_paused();
-                    if self.core.is_some() {
+                egui::Frame::new()
+                    .fill(tokens.surface)
+                    .stroke(egui::Stroke::new(1.0, tokens.line))
+                    .corner_radius(tokens.radius_md)
+                    .inner_margin(16.0)
+                    .show(ui, |ui| {
+                        ui.set_width(width);
+                        // Header: the mode pill (honesty badge) and state.
+                        ui.horizontal(|ui| {
+                            let badge = if has_core {
+                                self.status_badge()
+                            } else {
+                                "No game running".to_string()
+                            };
+                            egui::Frame::new()
+                                .fill(tokens.accent_soft)
+                                .corner_radius(tokens.radius_sm)
+                                .inner_margin(egui::Margin::symmetric(8, 3))
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new(badge).strong().color(tokens.ink));
+                                });
+                            // Bounded height: an unbounded right-to-left
+                            // layout in a row takes the AREA's height, which
+                            // is last frame's size — a feedback loop.
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(ui.available_width(), 24.0),
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if has_core {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{} Paused",
+                                                egui_phosphor::regular::PAUSE
+                                            ))
+                                            .color(tokens.muted),
+                                        );
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.horizontal_top(|ui| {
+                            // The rail.
+                            ui.vertical(|ui| {
+                                ui.set_width(180.0);
+                                ui.set_height(body_height);
+                                // Left-aligned, full-width entries: a rail
+                                // reads down its left edge.
+                                ui.with_layout(
+                                    egui::Layout::top_down_justified(egui::Align::Min),
+                                    |ui| {
+                                        for section in crate::quick_menu::Section::ALL {
+                                            let selected = self.quick_section == section;
+                                            let response = ui.add(
+                                                egui::Button::selectable(
+                                                    selected,
+                                                    section.rail_text(),
+                                                )
+                                                .min_size(egui::vec2(180.0, 30.0)),
+                                            );
+                                            // Follow focus only when it MOVES here
+                                            // (arrow keys / d-pad), so a mouse
+                                            // click elsewhere is not overruled by
+                                            // whichever entry still holds focus.
+                                            if response.clicked() || response.gained_focus() {
+                                                self.quick_section = section;
+                                            }
+                                            if self.quick_focus_pending && selected {
+                                                response.request_focus();
+                                                self.quick_focus_pending = false;
+                                            }
+                                        }
+                                    },
+                                );
+                            });
+                            ui.add_sized([1.0, body_height], egui::Separator::default().vertical());
+                            // The section.
+                            ui.vertical(|ui| {
+                                // Fixed width as well as height — a card
+                                // grid wrapping against "available" width
+                                // widened the panel and moved it.
+                                let content_width = width - 180.0 - 24.0;
+                                ui.set_width(content_width);
+                                ui.set_max_width(content_width);
+                                ui.set_height(body_height);
+                                egui::ScrollArea::vertical()
+                                    .max_height(body_height)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        let (c, l) = self.quick_section_body(ui, has_core);
+                                        close |= c;
+                                        leave_paused |= l;
+                                    });
+                            });
+                        });
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(crate::quick_menu::HINT)
+                                .small()
+                                .color(tokens.muted),
+                        );
+                    });
+            });
+        if leave_paused {
+            self.leave_overlay_menu_paused();
+        } else if close {
+            self.set_overlay_menu(false);
+        }
+    }
+
+    /// One Quick Menu section's content. Returns `(close, leave_paused)`:
+    /// close the menu (resuming a game it paused), or leave it for another
+    /// window with the game still paused.
+    fn quick_section_body(&mut self, ui: &mut egui::Ui, has_core: bool) -> (bool, bool) {
+        use crate::quick_menu::Section;
+        let mut close = false;
+        let mut leave_paused = false;
+        let needs_game = matches!(
+            self.quick_section,
+            Section::Save | Section::Load | Section::Rewind | Section::Reset | Section::Quit
+        );
+        // Cards per row for the Save/Load grids at this panel's width.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let quick_columns = ((ui.available_width() + 10.0) / (SLOT_CARD_WIDTH + 26.0))
+            .floor()
+            .max(1.0) as usize;
+        ui.heading(self.quick_section.label());
+        ui.add_space(6.0);
+        if needs_game && !has_core {
+            ui.label("No game is running.");
+            return (false, false);
+        }
+        match self.quick_section {
+            Section::Resume => {
+                ui.label("Back to the game.");
+                if ui.button(egui::RichText::new("Resume").strong()).clicked() {
+                    // Explicit, like the old menu: Resume runs the game
+                    // even if it was paused before the menu opened.
+                    leave_paused = true;
+                    if has_core {
                         self.send_command(CoreCommand::Resume);
                         self.running = true;
                     }
                 }
-                // Save states are W4-11's modal; the entry is present and
-                // says what it is waiting for rather than being silently
-                // absent from a menu FRONTEND_UI §2 enumerates.
-                if ui.button("States\u{2026}").clicked() {
-                    self.leave_overlay_menu_paused();
-                    self.open_states_modal();
+            }
+            Section::Save => {
+                self.refresh_state_slots_if_stale();
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(500));
+                if let Some((slot, _)) = self.slot_card_grid(ui, false, true, Some(quick_columns)) {
+                    self.active_slot = Some(slot);
+                    let ctx = ui.ctx().clone();
+                    self.save_to_slot(slot, &ctx);
                 }
-                if ui.button("Settings\u{2026}").clicked() {
-                    self.show_settings = true;
+            }
+            Section::Load => {
+                self.refresh_state_slots_if_stale();
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(500));
+                if let Some((slot, _)) = self.slot_card_grid(ui, true, false, Some(quick_columns)) {
+                    self.active_slot = Some(slot);
+                    self.load_from_slot(slot);
+                    close = true;
                 }
-                // Ticket W5-06: only offered when a profile actually
-                // claims this ROM — an author workspace with nothing to
-                // author against would be a control that does nothing.
-                if let Some(path) = self.matched_profile.clone() {
-                    if ui.button("Author\u{2026}").clicked() {
-                        self.leave_overlay_menu_paused();
-                        self.open_author_workspace(path);
+            }
+            Section::Rewind => {
+                ui.label("Rewind isn't available in this version yet.");
+            }
+            Section::Display => {
+                if self.video_controls(ui) {
+                    self.save_settings();
+                }
+                let mut fullscreen = ui.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                if ui.checkbox(&mut fullscreen, "Fullscreen").changed() {
+                    let ctx = ui.ctx().clone();
+                    self.toggle_fullscreen(&ctx);
+                }
+            }
+            Section::Enhancements => {
+                // The badge's hover breakdown, minus its last line — "hold
+                // to peek" describes the status-bar badge, not this menu.
+                for line in crate::enhance_ui::badge_breakdown(
+                    &self.current_game_settings,
+                    &self.game_facts(),
+                )
+                .into_iter()
+                .filter(|l| !l.starts_with("Hold to peek"))
+                {
+                    ui.label(line);
+                }
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Game settings\u{2026}").clicked() {
+                        self.game_settings_target = None;
+                        self.show_game_settings = true;
+                        leave_paused = true;
                     }
-                }
-                if ui.button("Controls\u{2026}").clicked() {
+                    if ui.button("Enhance workspace\u{2026}").clicked() {
+                        self.show_enhance = true;
+                        leave_paused = true;
+                    }
+                    // Ticket W5-06: only when a profile claims this ROM.
+                    if let Some(path) = self.matched_profile.clone() {
+                        if ui.button("Author\u{2026}").clicked() {
+                            self.open_author_workspace(path);
+                            leave_paused = true;
+                        }
+                    }
+                });
+            }
+            Section::Controls => {
+                // W15-06: bindings are learned by seeing them.
+                egui::Grid::new("quick-menu-hotkeys")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        for action in crate::app_bindings::AppAction::ALL {
+                            let key = self
+                                .app_bindings
+                                .key_for(action)
+                                .map(|k| k.name().to_string());
+                            let pad = self
+                                .app_bindings
+                                .pad_for(action)
+                                .map(|b| b.name().to_string());
+                            let binding = match (key, pad) {
+                                (Some(k), Some(p)) => format!("{k} / {p}"),
+                                (Some(k), None) => k,
+                                (None, Some(p)) => p,
+                                (None, None) => "\u{2014}".to_string(),
+                            };
+                            ui.label(action.label());
+                            ui.label(binding);
+                            ui.end_row();
+                        }
+                    });
+                if ui.button("Remap controls\u{2026}").clicked() {
                     self.show_controls = true;
+                    leave_paused = true;
                 }
-                // Ticket W20-04.
-                if ui.button("Fullscreen").clicked() {
-                    self.toggle_fullscreen(ctx);
+            }
+            Section::Settings => {
+                if ui.button("Open Settings\u{2026}").clicked() {
+                    self.show_settings = true;
+                    leave_paused = true;
                 }
-                // W10-01: the disabled "Switch mode (W4-05)" placeholder is
-                // gone. W4-05 shipped — the mode preset is live under
-                // Enhance > Mode — so what stood here was a permanently
-                // dead control advertising a ticket that had already
-                // closed, which is worse than an absent one: it tells the
-                // user the feature does not exist.
-                //
-                // Ticket W15-03: "Mode…" becomes "Game settings…" and opens
-                // the one Game Settings window (Mode, De-flicker,
-                // Heuristics) for the running game — `None` names the
-                // running game, same as the Enhance menu's identically
-                // named command.
-                if ui.button("Game settings\u{2026}").clicked() {
-                    self.leave_overlay_menu_paused();
-                    self.game_settings_target = None;
-                    self.show_game_settings = true;
+            }
+            Section::Reset => {
+                ui.label("Restart the game from power-on. Progress since your last save is lost.");
+                if ui.button("Reset").clicked() {
+                    self.reset_game();
                 }
-                ui.separator();
-                // Ticket W15-06 (`docs/design/UX_WAVE_15.md` §6): "the
-                // overlay menu shows each action's current binding next
-                // to it, so bindings are learned by seeing them rather
-                // than by reading a manual".
-                for action in crate::app_bindings::AppAction::ALL {
-                    let key_label = self
-                        .app_bindings
-                        .key_for(action)
-                        .map(|k| k.name().to_string());
-                    let pad_label = self
-                        .app_bindings
-                        .pad_for(action)
-                        .map(|b| b.name().to_string());
-                    let binding = match (key_label, pad_label) {
-                        (Some(k), Some(p)) => format!("{k} / {p}"),
-                        (Some(k), None) => k,
-                        (None, Some(p)) => p,
-                        (None, None) => "\u{2014}".to_string(),
-                    };
-                    ui.label(format!("{}  {binding}", action.label()));
+            }
+            Section::Quit => {
+                ui.label("Return to the library. Progress since your last save is lost.");
+                if ui.button("Quit to library").clicked() {
+                    self.close_rom();
                 }
-                ui.separator();
-                if ui.button("Quit").clicked() {
-                    self.request_quit(ctx);
-                }
-            });
-        // The window's own close box: same path as Esc.
-        if !open {
-            self.set_overlay_menu(false);
+            }
         }
+        (close, leave_paused)
+    }
+
+    /// Ticket W20-10: power-cycle the running game — open the same file
+    /// again, which is the shell's whole-machine reset (a fresh core).
+    fn reset_game(&mut self) {
+        let Some(path) = self.current_rom_path.clone() else {
+            return;
+        };
+        self.show_overlay_menu = false;
+        self.menu_paused_game = false;
+        self.launch_rom(&path);
     }
 
     /// **The library home** (ticket W10-03; `docs/design/FRONTEND_UI.md`
@@ -7321,6 +7612,10 @@ impl RetroForgeApp {
     /// having played something, and re-walking the user's folders on every
     /// return would make going back feel expensive.
     fn close_rom(&mut self) {
+        // Ticket W20-10: Quit to library closes the Quick Menu with it.
+        self.show_overlay_menu = false;
+        self.menu_paused_game = false;
+        self.current_rom_path = None;
         self.send_command(CoreCommand::Shutdown);
         self.core = None;
         self.texture = None;
@@ -9856,6 +10151,9 @@ impl eframe::App for RetroForgeApp {
         self.hash_info_window(&ctx);
         self.overlay_menu(&ctx);
         self.states_modal(&ctx);
+        // Ticket W20-10: drawn whenever a Save asked for it — from the
+        // States window OR the Quick Menu — not only inside the former.
+        self.overwrite_confirm_modal(&ctx);
         self.pump_authoring();
         self.author_window(&ctx);
         self.debug_panels_window(&ctx);

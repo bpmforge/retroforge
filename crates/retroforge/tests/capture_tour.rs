@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use egui_kittest::kittest::Queryable as _;
 use egui_kittest::Harness;
 use retroforge::app::{RetroForgeApp, WINDOW_SIZE};
 
@@ -154,6 +155,40 @@ fn photograph_every_major_surface() {
         harness.state().frame_count_for_test()
     );
     shot(&mut harness, "02-play-view");
+
+    // ---- Wave 20: the Quick Menu over the paused game ----------------
+    // Save first (F5) so the Save/Load sections have a screenshot to show.
+    harness.key_press(egui::Key::F5);
+    let target = harness.state().frame_count_for_test() + 20;
+    run_emulated_frames(&mut harness, target, Duration::from_secs(5));
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(4);
+    shot(&mut harness, "12-quick-menu");
+    for (section, name) in [
+        (retroforge::quick_menu::Section::Save, "13-quick-menu-save"),
+        (
+            retroforge::quick_menu::Section::Display,
+            "14-quick-menu-display",
+        ),
+        (
+            retroforge::quick_menu::Section::Enhancements,
+            "15-quick-menu-enhancements",
+        ),
+        (
+            retroforge::quick_menu::Section::Controls,
+            "16-quick-menu-controls",
+        ),
+    ] {
+        harness.get_by_label(&section.rail_text()).click();
+        // The Save section re-reads slots on a 500 ms cadence.
+        for _ in 0..8 {
+            harness.run_steps(2);
+            std::thread::sleep(Duration::from_millis(80));
+        }
+        shot(&mut harness, name);
+    }
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
 
     // Ticket W11-04: the shipped Lua overlay, running in the app and
     // drawing over the live frame. FR-PLUG-001 and an MVP checklist item

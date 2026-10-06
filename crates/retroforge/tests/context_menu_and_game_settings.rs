@@ -159,6 +159,13 @@ fn context_menu_and_one_game_settings_window() {
     // ---- the SAME window, opened from the overlay menu instead ----------
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
+    // Ticket W20-10: the overlay menu is the Quick Menu now; Game
+    // settings… lives in its Enhancements section.
+    harness
+        .query_by_label_contains("Enhancements")
+        .expect("the Quick Menu's Enhancements rail entry")
+        .click();
+    harness.run_steps(2);
     harness
         .query_by_label("Game settings\u{2026}")
         .expect("overlay menu's Game settings… command (formerly \"Mode…\")")
@@ -174,7 +181,10 @@ fn context_menu_and_one_game_settings_window() {
         "the overlay menu also targets \"the running game\" — same field, same meaning"
     );
     harness.state_mut().close_game_settings_for_test();
-    harness.key_press(egui::Key::Escape); // dismiss the overlay menu itself
+    // Ticket W20-10: leaving the Quick Menu for a window already closed
+    // it (the game stays paused), so there is no menu left to dismiss —
+    // an Esc here would OPEN it again.
+    assert!(!harness.state().running_and_menu_for_test().1);
     harness.run_steps(2);
 
     // ---- acceptance 3: "Game settings" from the library's context menu

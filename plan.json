@@ -8587,10 +8587,11 @@
    "navigable by keyboard and pad through ui_nav; a kittest walks every section and asserts the badge text matches badge_text_for_test"
   ],
   "points": 5,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-10."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-10.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). The Esc window is replaced by the Quick Menu: a full-screen scrim (dimmed frozen frame; egui has no blur, stated in the doc comment) under a fixed-size centred panel -- header with the honesty badge (RetroForgeApp::status_badge, same function as the status bar) and a Paused readout; a left rail of ten sections (crate::quick_menu::Section, Phosphor icons) whose selection follows keyboard/pad focus only when focus MOVES (gained_focus), so a mouse click is not overruled; the section on the right; a pad hint bar. Sections: Resume; Save / Load (the W20-06 slot cards, explicit rows, re-reading the slot dir at most every 500 ms because the core writes saves asynchronously -- the first build showed an empty Save grid); Rewind (honest 'not available in this version yet' until W20-13); Display (scale, pixel shape, shader -- one video_controls() shared with Settings -- and Fullscreen); Enhancements (badge breakdown + Game settings / Enhance workspace / Author); Controls (hotkey table + Remap); Settings; Reset (re-launch from the stored ROM path); Quit to library. Leaving for another window keeps the game paused; pad B closes the menu. overwrite_confirm_modal now runs every frame so a Save from the menu still confirms overwrites. FOUND AND FIXED while testing: the anchored Area sized itself from last frame's content and grew 16 px/frame (right-to-left header layout and a vertical separator taking 'available height', a card grid wrapping against an unbounded width), so the panel crept and clicks missed -- fixed by fixed panel/column sizes. Tests: tests/quick_menu.rs (Esc pauses + opens; header text == status_badge(); every section's heading shows on click and the menu stays open; Save from the menu writes Slot 1 and the menu shows its screenshot; Quit to library closes game and menu), quick_menu unit test; context_menu_and_game_settings.rs reaches Game settings via the Enhancements section. Photographed: target/ui-tour/12..16-quick-menu*.png."
   ]
  },
  {
