@@ -8964,10 +8964,11 @@
    "an ambient-glow option fills the letterbox with a darkened blur-free average of the frame edge colours; off by default"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-19."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-19.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). Quick Menu > Display opens with the paused frame through all six shaders as clickable tiles (ShaderChain at 2x with each shader's SAVED parameters, LINEAR-filtered textures, rebuilt only when the frame changes; selected tile outlined; clicking selects and saves; explicit rows since the Area gives horizontal_wrapped no width bound). Ambient glow: VideoSettings.ambient_glow (off by default) in the shared video_controls(); play_view::edge_colours (pure, unit-tested: 4-px strip average per side, black for malformed input) recomputed on each displayed-frame upload when on; play_view::paint_ambient_glow fills the four letterbox bars with each edge colour at 45% so the picture stays brightest; show_frame takes the colours. Tests: play_view edge_colours unit test; tests/display_panel.rs on a REAL GPU (skips without an adapter; did not skip): glow on -> edge colours tracked; Display shows 6 tiles; clicking 'Scanlines preview' selects scanlines. Photos: target/ui-tour/14-quick-menu-display.png, 21-ambient-glow.png."
   ]
  },
  {

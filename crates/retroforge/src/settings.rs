@@ -139,6 +139,9 @@ pub struct VideoSettings {
     /// Ticket W20-15: show the controller state sent to the core. Off by
     /// default.
     pub input_display: bool,
+    /// Ticket W20-19: fill the letterbox with a darkened average of the
+    /// picture's edges. Off by default.
+    pub ambient_glow: bool,
     /// MetalFX scaler choice (ticket W16-08). `Off` by default; see
     /// [`MetalFxSetting`].
     pub metalfx: MetalFxSetting,
@@ -156,6 +159,7 @@ impl Default for VideoSettings {
             vsync: true,
             perf_overlay: false,
             input_display: false,
+            ambient_glow: false,
             metalfx: MetalFxSetting::default(),
         }
     }

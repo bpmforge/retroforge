@@ -258,6 +258,20 @@ fn photograph_every_major_surface() {
     harness.run_steps(2);
     harness.state_mut().set_rewind_setting_for_test(false);
 
+    // W20-19: the ambient-glow letterbox, in a window wider than the
+    // picture so the side bars show.
+    harness
+        .state_mut()
+        .video_settings_mut_for_test()
+        .ambient_glow = true;
+    let target = harness.state().frame_count_for_test() + 20;
+    run_emulated_frames(&mut harness, target, Duration::from_secs(5));
+    shot(&mut harness, "21-ambient-glow");
+    harness
+        .state_mut()
+        .video_settings_mut_for_test()
+        .ambient_glow = false;
+
     // And back, so the rest of the tour has its menus.
     harness
         .input_mut()

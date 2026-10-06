@@ -530,6 +530,10 @@ pub struct RetroForgeApp {
     last_recording: Option<(std::path::PathBuf, usize)>,
     /// Ticket W20-12: on-screen-display cards over the game picture.
     osd: crate::toast::ToastStack,
+    /// Ticket W20-19: the edge colours of the last picture (ambient glow),
+    /// and the shader preview tiles for the frame they were made from.
+    edge_colours: Option<[egui::Color32; 4]>,
+    shader_previews: Option<(u64, Vec<(rf_renderer::ShaderKind, egui::TextureHandle)>)>,
     /// Ticket W20-18: the Enhancements panel's before/after textures and
     /// the frame they were made from.
     panel_thumbs: Option<(u64, egui::TextureHandle, egui::TextureHandle)>,
@@ -1264,6 +1268,8 @@ impl RetroForgeApp {
             last_fullscreen_request: None,
             slot_textures: crate::slot_cards::SlotTextures::default(),
             panel_thumbs: None,
+            edge_colours: None,
+            shader_previews: None,
             osd: crate::toast::ToastStack::osd(),
             loading_waits: Vec::new(),
             loading_sent: None,
@@ -3592,6 +3598,10 @@ impl RetroForgeApp {
             if self.hash_display_for_test {
                 self.display_hash = Some(fnv1a_hash(displayed, &[]));
             }
+            // Ticket W20-19: the letterbox glow follows the picture.
+            if self.settings.video.ambient_glow {
+                self.edge_colours = Some(crate::play_view::edge_colours(displayed, dw, dh));
+            }
             let image = egui::ColorImage::from_rgba_unmultiplied([dw, dh], displayed);
             match &mut self.texture {
                 Some(tex) => tex.set(image, filter),
@@ -5691,6 +5701,15 @@ impl RetroForgeApp {
                 "Show controller input",
             )
             .changed();
+        changed |= ui
+            .checkbox(
+                &mut self.settings.video.ambient_glow,
+                "Ambient glow in the borders",
+            )
+            .on_hover_text(
+                "Fills the bars around the picture with a dim version of its edge colours",
+            )
+            .changed();
         ui.add_space(4.0);
         ui.label("Scaling");
         for mode in crate::settings::ScaleMode::ALL {
@@ -6202,6 +6221,7 @@ impl RetroForgeApp {
                 }
             }
             Section::Display => {
+                self.shader_preview_tiles(ui);
                 if self.video_controls(ui) {
                     self.save_settings();
                 }
@@ -6287,6 +6307,106 @@ impl RetroForgeApp {
             }
         }
         (close, leave_paused)
+    }
+
+    /// Ticket W20-19 (`docs/design/UX_WAVE_20.md` §6): the paused frame
+    /// through every shader, as clickable tiles — choosing a look by
+    /// seeing it. Built once per frame shown (the Quick Menu pauses the
+    /// game, so normally once per opening), through the same
+    /// `ShaderChain` and saved parameters the play view uses.
+    fn shader_preview_tiles(&mut self, ui: &mut egui::Ui) {
+        let (Some(gpu), Some(rgba), Some((w, h))) =
+            (&self.gpu, &self.last_frame_rgba, self.last_frame_size)
+        else {
+            return;
+        };
+        let frame = self.position.map_or(0, |p| p.0);
+        if self
+            .shader_previews
+            .as_ref()
+            .is_none_or(|(f, _)| *f != frame)
+        {
+            if self.shader_chain.is_none() {
+                self.shader_chain = Some(rf_renderer::ShaderChain::new(gpu));
+            }
+            let (Some(chain), Ok(w32), Ok(h32)) =
+                (&self.shader_chain, u32::try_from(w), u32::try_from(h))
+            else {
+                return;
+            };
+            let mut tiles = Vec::new();
+            for kind in crate::shader_select::KINDS {
+                let stage = crate::shader_select::stage(kind, &self.settings.shaders.values(kind))
+                    .with_out_size(w32 * 2, h32 * 2);
+                if let Ok(out) = chain.render(gpu, rgba, w32, h32, &[stage]) {
+                    let tex = ui.ctx().load_texture(
+                        format!("shader-preview-{}", kind.manifest().id),
+                        egui::ColorImage::from_rgba_unmultiplied([w * 2, h * 2], &out),
+                        egui::TextureOptions::LINEAR,
+                    );
+                    tiles.push((kind, tex));
+                }
+            }
+            self.shader_previews = Some((frame, tiles));
+        }
+        let selected = self
+            .settings
+            .video
+            .shader
+            .as_deref()
+            .and_then(crate::shader_select::kind_from_id);
+        let mut pick = None;
+        if let Some((_, tiles)) = &self.shader_previews {
+            // Explicit rows: inside the Quick Menu's Area there is no width
+            // bound for `horizontal_wrapped` to wrap against (the same
+            // lesson as the save-slot cards, W20-10).
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let per_row = ((ui.available_width() + 8.0) / 124.0).floor().max(1.0) as usize;
+            for row in tiles.chunks(per_row) {
+                ui.horizontal(|ui| {
+                    for (kind, tex) in row {
+                        let name = kind.manifest().display_name;
+                        ui.vertical(|ui| {
+                            let image = egui::Image::from_texture(tex)
+                                .fit_to_exact_size(egui::vec2(112.0, 105.0))
+                                .alt_text(format!("{name} preview"))
+                                .sense(egui::Sense::click());
+                            let response = ui.add(image).on_hover_text(format!("Use {name}"));
+                            if selected == Some(*kind) {
+                                ui.painter().rect_stroke(
+                                    response.rect,
+                                    2.0,
+                                    egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
+                            if response.clicked() {
+                                pick = Some(*kind);
+                            }
+                            ui.label(egui::RichText::new(name).small());
+                        });
+                    }
+                });
+            }
+        }
+        if let Some(kind) = pick {
+            self.settings.video.shader = Some(kind.manifest().id.to_string());
+            self.shader_budget = rf_renderer::fog::BudgetGate::new();
+            self.shader_note = None;
+            self.save_settings();
+        }
+    }
+
+    /// Ticket W20-19: how many shader preview tiles are built (tests).
+    #[doc(hidden)]
+    pub fn shader_previews_for_test(&self) -> usize {
+        self.shader_previews.as_ref().map_or(0, |(_, t)| t.len())
+    }
+
+    /// Ticket W20-19: the letterbox edge colours (tests).
+    #[doc(hidden)]
+    pub fn edge_colours_for_test(&self) -> Option<[egui::Color32; 4]> {
+        self.edge_colours
     }
 
     /// Ticket W20-18: the before/after pair, then one card per feature.
@@ -10955,6 +11075,13 @@ impl RetroForgeApp {
     fn video_panel(&mut self, ui: &mut egui::Ui) {
         let scale_mode = self.settings.video.scale_mode;
         let par = crate::play_view::pixel_aspect_ratio(self.settings.video.pixel_aspect);
+        // Ticket W20-19: the ambient-glow letterbox, when on.
+        let glow = self
+            .settings
+            .video
+            .ambient_glow
+            .then_some(self.edge_colours)
+            .flatten();
         egui::CentralPanel::default().show(ui, |ui| {
             // Ticket W4-05 (FRONTEND_UI.md §1): hold-to-peek forces the
             // ORIGINAL view for as long as the badge is held. Applied
@@ -10994,7 +11121,7 @@ impl RetroForgeApp {
                         #[allow(clippy::cast_precision_loss)]
                         let grid = crate::play_view::DisplayGrid::for_frame(fw as f32, fh as f32);
                         let response =
-                            crate::play_view::show_frame(ui, texture, grid, par, scale_mode);
+                            crate::play_view::show_frame(ui, texture, grid, par, scale_mode, glow);
                         self.last_play_rect = Some(response.rect);
                         // Ticket W11-04: what the script asked to draw,
                         // painted OVER the frame and never into it. An
@@ -11020,7 +11147,7 @@ impl RetroForgeApp {
                         let [tw, th] = texture.size();
                         #[allow(clippy::cast_precision_loss)]
                         let grid = crate::play_view::DisplayGrid::for_frame(tw as f32, th as f32);
-                        crate::play_view::show_frame(ui, texture, grid, par, scale_mode);
+                        crate::play_view::show_frame(ui, texture, grid, par, scale_mode, glow);
                     } else {
                         ui.centered_and_justified(|ui| {
                             ui.label("Ultrawide view: preparing texture\u{2026}");
@@ -11044,7 +11171,7 @@ impl RetroForgeApp {
                         let [tw, th] = texture.size();
                         #[allow(clippy::cast_precision_loss)]
                         let grid = crate::play_view::DisplayGrid::exact(tw as f32, th as f32);
-                        crate::play_view::show_frame(ui, texture, grid, 1.0, scale_mode);
+                        crate::play_view::show_frame(ui, texture, grid, 1.0, scale_mode, glow);
                     } else {
                         ui.centered_and_justified(|ui| {
                             ui.label("Diorama view: preparing texture\u{2026}");

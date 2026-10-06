@@ -115,8 +115,13 @@ pub fn show_frame(
     grid: DisplayGrid,
     par: f32,
     mode: ScaleMode,
+    glow: Option<[egui::Color32; 4]>,
 ) -> egui::Response {
-    let rect = play_rect(ui.available_rect_before_wrap(), grid, par, mode);
+    let area = ui.available_rect_before_wrap();
+    let rect = play_rect(area, grid, par, mode);
+    if let Some(edges) = glow {
+        paint_ambient_glow(ui.painter(), area, rect, edges);
+    }
     // `maintain_aspect_ratio(false)`: egui's `Image` keeps the TEXTURE's
     // aspect by default, which silently undid the 8:7 pixel shape — the
     // rect was 8:7 and the picture inside it 16:15 (found from a tour
@@ -177,6 +182,82 @@ pub fn peek_frame(
         ));
     }
     (amount >= 0.5).then(|| (original.to_vec(), original_size))
+}
+
+/// Ticket W20-19: the average colour along each edge of an RGBA frame —
+/// `[left, right, top, bottom]` — for the ambient-glow letterbox, which
+/// fills the bars around an integer-scaled picture with a darkened version
+/// of what is next to them. A plain average (no blur pass): cheap enough
+/// to recompute on every frame upload, and steady enough not to strobe.
+///
+/// Samples a 4-pixel-deep strip on each side. Returns black for a
+/// malformed buffer rather than panicking.
+#[must_use]
+pub fn edge_colours(rgba: &[u8], width: usize, height: usize) -> [egui::Color32; 4] {
+    const DEPTH: usize = 4;
+    if width == 0 || height == 0 || rgba.len() != width * height * 4 {
+        return [egui::Color32::BLACK; 4];
+    }
+    let avg = |pixels: &mut dyn Iterator<Item = (usize, usize)>| {
+        let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+        for (x, y) in pixels {
+            let i = (y * width + x) * 4;
+            r += u64::from(rgba[i]);
+            g += u64::from(rgba[i + 1]);
+            b += u64::from(rgba[i + 2]);
+            n += 1;
+        }
+        let n = n.max(1);
+        #[allow(clippy::cast_possible_truncation)]
+        egui::Color32::from_rgb((r / n) as u8, (g / n) as u8, (b / n) as u8)
+    };
+    let dx = DEPTH.min(width);
+    let dy = DEPTH.min(height);
+    [
+        avg(&mut (0..height).flat_map(|y| (0..dx).map(move |x| (x, y)))),
+        avg(&mut (0..height).flat_map(|y| (width - dx..width).map(move |x| (x, y)))),
+        avg(&mut (0..dy).flat_map(|y| (0..width).map(move |x| (x, y)))),
+        avg(&mut (height - dy..height).flat_map(|y| (0..width).map(move |x| (x, y)))),
+    ]
+}
+
+/// Ticket W20-19: paint the letterbox bars around `picture` (inside
+/// `area`) with each edge's colour, darkened so the picture stays the
+/// brightest thing on screen.
+pub fn paint_ambient_glow(
+    painter: &egui::Painter,
+    area: egui::Rect,
+    picture: egui::Rect,
+    edges: [egui::Color32; 4],
+) {
+    let dim = |c: egui::Color32| c.gamma_multiply(0.45);
+    let [left, right, top, bottom] = edges;
+    painter.rect_filled(
+        egui::Rect::from_min_max(area.left_top(), egui::pos2(picture.left(), area.bottom())),
+        0.0,
+        dim(left),
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(picture.right(), area.top()), area.right_bottom()),
+        0.0,
+        dim(right),
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(picture.left(), area.top()),
+            egui::pos2(picture.right(), picture.top()),
+        ),
+        0.0,
+        dim(top),
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(picture.left(), picture.bottom()),
+            egui::pos2(picture.right(), area.bottom()),
+        ),
+        0.0,
+        dim(bottom),
+    );
 }
 
 #[cfg(test)]
@@ -270,6 +351,36 @@ mod tests {
         let big = vec![9u8; 8 * 8 * 4];
         assert!(peek_frame(&o, (4, 4), &big, (8, 8), 0.3).is_none());
         assert_eq!(peek_frame(&o, (4, 4), &big, (8, 8), 0.6).unwrap().1, (4, 4));
+    }
+
+    #[test]
+    fn edge_colours_average_each_side() {
+        // 8x8: left half red, right half blue, top row overwritten green.
+        let (w, h) = (8usize, 8usize);
+        let mut px = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let c = if y == 0 {
+                    [0, 200, 0]
+                } else if x < 4 {
+                    [200, 0, 0]
+                } else {
+                    [0, 0, 200]
+                };
+                px[i..i + 3].copy_from_slice(&c);
+                px[i + 3] = 255;
+            }
+        }
+        let [left, right, top, bottom] = edge_colours(&px, w, h);
+        assert!(left.r() > left.b() && left.r() > 100, "{left:?}");
+        assert!(right.b() > right.r() && right.b() > 100, "{right:?}");
+        assert!(
+            top.g() > 40,
+            "the top strip includes the green row: {top:?}"
+        );
+        assert_eq!(bottom.g(), 0);
+        assert_eq!(edge_colours(&px[..10], w, h), [egui::Color32::BLACK; 4]);
     }
 
     #[test]
