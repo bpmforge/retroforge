@@ -372,7 +372,7 @@ impl Apu {
         // NOT `Ready` yet, and NOT `$AA`/`$BB` yet: the real ROM clears
         // zero page first (`IPL_INIT_CYCLES`), and the echo of the jump's
         // counter stays on port 0 for the 65816 to read meanwhile.
-        self.boot = boot::IplBoot::rebooting();
+        self.boot = boot::IplBoot::rebooting_at(self.cpu.pc);
         // The HLE owns the machine again until it hands back.
         self.cpu.stopped = true;
     }
@@ -419,44 +419,73 @@ impl Apu {
         if self.boot.is_running() {
             return;
         }
-        match self.boot.poll(self.ports_in) {
+        match self.boot.poll(self.ports_in, &self.aram) {
             boot::BootAction::Echo(v) => self.ports_out[0] = v,
+            boot::BootAction::ClearZeroPage => {
+                // fullsnes "SNES APU Boot ROM": `MOV X,#$EF / MOV SP,X`,
+                // then `MOV (X),A / DEC X / BNE` from X = $EF clears
+                // $01-$EF ($00 is left alone). Only an entry at `$FFC0`
+                // runs this — see `IplBoot::rebooting_at`.
+                self.cpu.sp = 0xEF;
+                for addr in 0x01..=0xEFu16 {
+                    self.ipl_store(addr, 0);
+                }
+            }
             boot::BootAction::Publish => {
                 let ready = boot::IplBoot::ready_ports();
                 self.ports_out[0] = ready[0];
                 self.ports_out[1] = ready[1];
             }
-            boot::BootAction::Store {
-                address,
-                value,
-                echo,
-            } => {
-                self.aram[usize::from(address)] = value;
-                self.ports_out[0] = echo;
+            boot::BootAction::Store { address, value } => self.ipl_store(address, value),
+            boot::BootAction::SetPointer(word) => {
+                let [lo, hi] = word.to_le_bytes();
+                self.ipl_store(0x0000, lo);
+                self.ipl_store(0x0001, hi);
             }
-            boot::BootAction::Run { entry, echo } => {
-                // Echo FIRST, then hand over: the CPU is already spinning
-                // on `CMP $2140 / BNE` waiting for exactly this byte, and
-                // it never gets another chance to see it once the SPC700
-                // owns the ports.
-                self.ports_out[0] = echo;
-                // Hand over to the real SPC700 core. The IPL stays banked
-                // IN (ticket W14-10): fullsnes `$F1` — "bit 7: IPL ROM
-                // enable (0=Off, 1=On, initial value)" — and nothing but
-                // the program's own `$F1` write clears it. This used to
-                // clear the bit here "so the uploaded program owns the
-                // whole address space", and the cost was every title that
-                // reboots the APU by commanding a jump to `$FFC0` after an
-                // upload: Wild Guns, Bust-A-Move, Pocky & Rocky, Super
-                // Bonk, Uniracers, Yoshi's Cookie. The jump landed on
-                // zero-filled ARAM, the SPC700 slid into the port page,
-                // read the CPU's `$FF` as STOP, and the 65816 waited for
-                // `$AA`/`$BB` for ever. With the window still mapped the
-                // jump lands in it and [`Apu::reenter_ipl`] does its job.
+            boot::BootAction::Run {
+                entry,
+                a,
+                x,
+                y,
+                nzc,
+            } => {
+                // The kick echo already went out at `$FFF5`. Hand over
+                // with the registers the listing leaves (W14-48). SP is
+                // left alone: the ROM sets it only in its `$FFC0` init
+                // (`ClearZeroPage`), and a program that re-enters past
+                // that keeps its own stack.
+                //
+                // The IPL stays banked IN (ticket W14-10): fullsnes `$F1`
+                // — "bit 7: IPL ROM enable (0=Off, 1=On, initial value)" —
+                // and nothing but the program's own `$F1` write clears it.
+                // This used to clear the bit here "so the uploaded program
+                // owns the whole address space", and the cost was every
+                // title that reboots the APU by commanding a jump to
+                // `$FFC0` after an upload: Wild Guns, Bust-A-Move, Pocky &
+                // Rocky, Super Bonk, Uniracers, Yoshi's Cookie. With the
+                // window still mapped the jump lands in it and
+                // [`Apu::reenter_ipl`] does its job.
+                const NZC: u8 = spc700::flags::N | spc700::flags::Z | spc700::flags::C;
+                self.cpu.a = a;
+                self.cpu.x = x;
+                self.cpu.y = y;
+                self.cpu.psw = (self.cpu.psw & !NZC) | nzc;
                 self.cpu.pc = entry;
                 self.cpu.stopped = false;
             }
             boot::BootAction::None => {}
+        }
+    }
+
+    /// A store made by the boot ROM itself: the SPC700's write routing
+    /// (`$F0-$FF` are registers, `$F0` bit 1 gates RAM), without the
+    /// per-access clock tick — the HLE's cycle is already being paid by
+    /// the caller.
+    fn ipl_store(&mut self, addr: u16, value: u8) {
+        if (0x00F0..=0x00FF).contains(&addr) {
+            self.write_register(addr, value);
+        } else if self.ram_writes_enabled() {
+            self.aram[usize::from(addr)] = value;
         }
     }
 

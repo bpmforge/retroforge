@@ -2,10 +2,11 @@
 //! (ticket W6-04b).
 
 use crate::apu::boot::{
-    BootAction, BootState, IplBoot, BYTE_HANDSHAKE_CYCLES, IPL_INIT_CYCLES,
-    RUN_HANDOFF_AFTER_TRANSFER_CYCLES, RUN_HANDOFF_IMMEDIATE_CYCLES,
+    BootState, BYTE_HANDSHAKE_CYCLES, IPL_INIT_CYCLES, RUN_HANDOFF_AFTER_TRANSFER_CYCLES,
+    RUN_HANDOFF_IMMEDIATE_CYCLES,
 };
 use crate::apu::dsp::{decode_brr, Dsp};
+use crate::apu::spc700::flags;
 use crate::apu::Apu;
 // `read`/`write` are ApuBus methods; the trait must be in scope to call them.
 use crate::apu::spc700::ApuBus;
@@ -24,18 +25,21 @@ use rf_cart::SnesMapMode;
 fn write_port(apu: &mut Apu, index: usize, value: u8) {
     apu.cpu_write_port(index, value);
     apu.poll_boot();
-    // W14-37: a `Store`/`Run` the protocol just decided on is held back
-    // for the boot ROM's own documented instruction cost (see
-    // `IplBoot::poll`'s `pending`) before it becomes observable on the
-    // ports/ARAM/PC. `RUN_HANDOFF_AFTER_TRANSFER_CYCLES` (45) is the
-    // largest of the delays this can ever queue, so draining that many
-    // more polls always settles whatever this write just queued —
-    // matching this helper's own documented "assert against a machine
-    // that has run" contract, now extended to the new delay.
-    for _ in 0..RUN_HANDOFF_AFTER_TRANSFER_CYCLES {
+    // The HLE walks the boot ROM's listing at its documented cycle
+    // costs (W14-37, W14-48), so a write is only acted on when the ROM's
+    // next read of that port completes. Drain `SETTLE_CYCLES` so the
+    // helper keeps its "assert against a machine that has run" contract.
+    for _ in 0..SETTLE_CYCLES {
         apu.poll_boot();
     }
 }
+
+/// Enough SPC cycles for any single step of the handshake to settle: the
+/// longest listed tail (`RUN_HANDOFF_AFTER_TRANSFER_CYCLES`, 45) plus one
+/// lap of the slowest polling loop the CPU's write can land in (the
+/// `$FFDA` wait, 11 cycles), rounded up. Since W14-48 the HLE walks the
+/// listing, so a write is only seen when the ROM's next compare reads it.
+const SETTLE_CYCLES: u16 = 64;
 
 // ---------------------------------------------------------------------
 // The handshake
@@ -144,7 +148,8 @@ fn a_jump_to_ffc0_re_enters_the_boot_handshake() {
         0x02,
         "and is still there 100 cycles in"
     );
-    for _ in 0..IPL_INIT_CYCLES {
+    // The init, then the two `MOV dp,#imm` that publish (10 cycles).
+    for _ in 0..IPL_INIT_CYCLES + 10 {
         apu.poll_boot();
     }
     assert_eq!(apu.boot.state, BootState::Ready);
@@ -152,119 +157,178 @@ fn a_jump_to_ffc0_re_enters_the_boot_handshake() {
     assert_eq!(apu.cpu_read_port(1), 0xBB);
 }
 
+/// Start a one-block upload to `dest` and send `bytes` the documented way
+/// (data on port 1, then counter on port 0, from 0).
+fn upload(apu: &mut Apu, dest: u16, bytes: &[u8]) {
+    write_port(apu, 1, 0x01);
+    write_port(apu, 2, dest as u8);
+    write_port(apu, 3, (dest >> 8) as u8);
+    write_port(apu, 0, 0xCC);
+    for (i, b) in bytes.iter().enumerate() {
+        write_port(apu, 1, *b);
+        write_port(apu, 0, i as u8);
+    }
+}
+
 /// The counter SKIP is what distinguishes "new block" from "next byte" —
 /// the single easiest part of this protocol to get wrong.
 #[test]
 fn the_counter_distinguishes_the_next_byte_from_a_new_block() {
-    let mut boot = IplBoot::new();
-    // Start a transfer to $0300.
-    let p = [0u8, 0x01, 0x00, 0x03];
-    assert_eq!(boot.cpu_wrote(0, 0xCC, p), BootAction::Echo(0xCC));
-
-    // Counter 0 = store the first byte.
-    let p = [0u8, 0xAB, 0x00, 0x03];
-    assert_eq!(
-        boot.cpu_wrote(0, 0, p),
-        BootAction::Store {
-            address: 0x0300,
-            value: 0xAB,
-            echo: 0
-        }
-    );
-
-    // Counter 1 = the NEXT byte, not a new block.
-    assert_eq!(
-        boot.cpu_wrote(0, 1, p),
-        BootAction::Store {
-            address: 0x0301,
-            value: 0xAB,
-            echo: 1
-        }
-    );
+    let mut apu = Apu::new();
+    upload(&mut apu, 0x0300, &[0xAB, 0xCD]);
+    assert_eq!(&apu.aram[0x0300..0x0302], &[0xAB, 0xCD]);
+    assert_eq!(apu.boot.state, BootState::Transferring(2));
 
     // Counter skipping to 3 (expected is 2) = a new block at ports 2/3.
-    let p = [0u8, 0x01, 0x00, 0x08];
-    assert_eq!(boot.cpu_wrote(0, 3, p), BootAction::Echo(3));
-    assert_eq!(boot.state, BootState::AwaitingBlock(3));
-    assert_eq!(boot.address, 0x0800, "the new block's address was taken");
+    write_port(&mut apu, 1, 0x01);
+    write_port(&mut apu, 2, 0x00);
+    write_port(&mut apu, 3, 0x08);
+    write_port(&mut apu, 0, 3);
+    assert_eq!(apu.cpu_read_port(0), 3, "the kick is echoed");
+    assert_eq!(apu.boot.state, BootState::AwaitingBlock(3));
+    assert_eq!(
+        &apu.aram[0x0000..0x0002],
+        &[0x00, 0x08],
+        "the listing keeps the new block's address at $00/$01 (MOVW $00,YA)"
+    );
+    // The new block starts again from counter 0.
+    write_port(&mut apu, 1, 0xEE);
+    write_port(&mut apu, 0, 0);
+    assert_eq!(apu.aram[0x0800], 0xEE);
 }
 
-/// Ticket W14-06: the skip is a MISMATCH, not a particular distance, and
-/// this is the test that would have caught the bug that kept most
-/// commercial titles from booting at all.
-///
-/// The old rule accepted only `expected + 1` as a block boundary. Traced
-/// against a real cartridge, Super Mario World acknowledged counter `$3D`,
-/// wrote the next block's address to ports 2-3 and a non-zero kind to
-/// port 1, and then wrote **`$41`** — four past the last acknowledgement.
-/// That matched neither arm, so the handler did nothing and the game spun
-/// on `CMP $2140 / BNE` for ever, screen still in forced blank. The IPL
-/// does not check for a distance; it checks that the value is not the one
-/// it expects.
+/// Ticket W14-06: the skip is a MISMATCH, not a particular distance.
+/// Super Mario World acknowledged counter `$3D` and then wrote **`$41`**
+/// — four past it. The listing's rule (`CMP Y,$F4` then `BPL` back to
+/// polling, twice) is signed: a block ends when port 0 is 1-128 counts
+/// AHEAD of the expected counter, and only then (W14-48).
 #[test]
-fn any_counter_jump_starts_a_new_block_not_only_a_jump_of_one() {
-    for jump in [2u8, 3, 4, 9, 64] {
-        let mut boot = IplBoot::new();
-        let p = [0u8, 0x01, 0x00, 0x03];
-        assert_eq!(boot.cpu_wrote(0, 0xCC, p), BootAction::Echo(0xCC));
-        let p = [0u8, 0xAB, 0x00, 0x03];
-        assert!(matches!(boot.cpu_wrote(0, 0, p), BootAction::Store { .. }));
-        assert_eq!(boot.state, BootState::Transferring(1));
+fn any_counter_ahead_of_the_expected_one_starts_a_new_block() {
+    for jump in [2u8, 3, 4, 9, 64, 128, 129] {
+        let mut apu = Apu::new();
+        upload(&mut apu, 0x0300, &[0xAB]);
+        assert_eq!(apu.boot.state, BootState::Transferring(1));
 
-        // Expected is 1; anything else that is not a re-read ends the block.
-        let p = [0u8, 0x01, 0x70, 0x55];
+        write_port(&mut apu, 1, 0x01);
+        write_port(&mut apu, 2, 0x70);
+        write_port(&mut apu, 3, 0x55);
+        write_port(&mut apu, 0, jump);
         assert_eq!(
-            boot.cpu_wrote(0, jump, p),
-            BootAction::Echo(jump),
+            apu.boot.state,
+            BootState::AwaitingBlock(jump),
             "a jump to {jump} must start a new block"
         );
-        assert_eq!(boot.state, BootState::AwaitingBlock(jump));
-        assert_eq!(boot.address, 0x5570);
-
-        // ...and the new block's first byte arrives under whatever counter
-        // the uploader is now using, which need not be `jump + 1` either.
-        let p = [0u8, 0xCD, 0x70, 0x55];
-        assert!(matches!(
-            boot.cpu_wrote(0, jump.wrapping_add(7), p),
-            BootAction::Store {
-                address: 0x5570,
-                value: 0xCD,
-                ..
-            }
-        ));
+        write_port(&mut apu, 1, 0xCD);
+        write_port(&mut apu, 0, 0);
+        assert_eq!(
+            apu.aram[0x5570], 0xCD,
+            "jump {jump}: new block's first byte"
+        );
     }
 }
 
-/// The other half of the same rule, and the reason the old one was written
-/// too narrowly: `poll` feeds the CURRENT port-0 value in on a timer, so
-/// the value just consumed arrives again and again until the CPU writes
-/// the next one. Seeing it is "nothing new" — treating it as a mismatch
-/// would end every block after its first byte.
+/// The other half of the signed rule: a counter BEHIND the expected one
+/// is not a block boundary. That includes the value just acknowledged,
+/// which `poll` sees again and again until the CPU writes the next one —
+/// treating it as a mismatch would end every block after its first byte.
 #[test]
-fn re_reading_the_last_acknowledged_counter_is_not_a_block_boundary() {
-    let mut boot = IplBoot::new();
-    let p = [0u8, 0x01, 0x00, 0x03];
-    assert_eq!(boot.cpu_wrote(0, 0xCC, p), BootAction::Echo(0xCC));
-    let p = [0u8, 0xAB, 0x00, 0x03];
-    assert!(matches!(boot.cpu_wrote(0, 0, p), BootAction::Store { .. }));
-
-    // The same counter again, as `poll` will deliver it many times over.
-    for _ in 0..5 {
-        assert_eq!(boot.cpu_wrote(0, 0, p), BootAction::None);
+fn a_counter_behind_the_expected_one_is_not_a_block_boundary() {
+    let mut apu = Apu::new();
+    upload(&mut apu, 0x0300, &[0xAB]);
+    for behind in [0u8, 0xF0, 0x82] {
+        write_port(&mut apu, 1, 0x00);
+        write_port(&mut apu, 0, behind);
         assert_eq!(
-            boot.state,
+            apu.boot.state,
             BootState::Transferring(1),
-            "a re-read must not advance or end anything"
+            "port 0 = {behind:#04X} is behind counter 1 and must be ignored"
         );
     }
     // And the real next byte still lands.
-    assert!(matches!(
-        boot.cpu_wrote(0, 1, p),
-        BootAction::Store {
-            address: 0x0301,
-            ..
+    write_port(&mut apu, 1, 0x77);
+    write_port(&mut apu, 0, 1);
+    assert_eq!(apu.aram[0x0301], 0x77);
+}
+
+/// **Port 1 is read three cycles after the counter matches, not with it**
+/// (ticket W14-48). Shaped like Urban Strike's uploader (synthetic bytes,
+/// law 5): the counter goes to `$2140` FIRST and its data byte to `$2141`
+/// two SPC cycles later. The real ROM's `MOV A,$F5` comes after the
+/// matching `CMP Y,$F4` and a `BNE`, so it sees the new byte. Sampling all
+/// ports at the compare stored the PREVIOUS port 1 — the kind byte `$01`
+/// first — and shifted the whole upload by one.
+#[test]
+fn a_counter_written_before_its_data_byte_still_stores_the_data() {
+    let mut apu = Apu::new();
+    write_port(&mut apu, 1, 0x01);
+    write_port(&mut apu, 2, 0x60);
+    write_port(&mut apu, 3, 0x04);
+    write_port(&mut apu, 0, 0xCC);
+    let program = [0x20u8, 0xCD, 0xFF, 0xBD, 0xE8, 0x00];
+    for (i, b) in program.iter().enumerate() {
+        apu.cpu_write_port(0, i as u8);
+        apu.poll_boot();
+        apu.poll_boot();
+        apu.cpu_write_port(1, *b);
+        for _ in 0..SETTLE_CYCLES {
+            apu.poll_boot();
         }
-    ));
+    }
+    assert_eq!(
+        &apu.aram[0x0460..0x0466],
+        &program,
+        "every byte at its own address, none shifted by the stale port 1"
+    );
+}
+
+/// A block's first byte is counter **0**: after echoing `$CC` the ROM
+/// spins on `MOV Y,$F4 / BNE` until port 0 reads zero. The snapshot model
+/// read the `$CC` still sitting in port 0 one cycle after its own echo as
+/// a block-ending mismatch (W14-48 trace: `Echo(CC) st=AwaitingBlock(CC)`
+/// one poll after `Transferring(0)`).
+#[test]
+fn a_stale_cc_after_its_echo_is_waited_out_not_treated_as_a_block_end() {
+    let mut apu = Apu::new();
+    write_port(&mut apu, 1, 0x01);
+    write_port(&mut apu, 2, 0x00);
+    write_port(&mut apu, 3, 0x02);
+    write_port(&mut apu, 0, 0xCC);
+    assert_eq!(apu.cpu_read_port(0), 0xCC);
+    for _ in 0..500 {
+        apu.poll_boot();
+    }
+    assert_eq!(apu.boot.state, BootState::AwaitingBlock(0xCC));
+    assert_eq!(
+        apu.boot.transferred, 0,
+        "nothing stored while port 0 is $CC"
+    );
+    write_port(&mut apu, 1, 0x5A);
+    write_port(&mut apu, 0, 0);
+    assert_eq!(apu.aram[0x0200], 0x5A);
+}
+
+/// The hand-over leaves the register state the listing does: `A` = `X`
+/// = `Y` = 0 (the zero "kind", via `MOV A,Y / MOV X,A`), `SP` = `$EF` (from
+/// power-on, not forced at the jump), `Z` set by
+/// `MOV X,A`, and the entry address at `$00`/`$01`.
+#[test]
+fn the_hand_over_leaves_the_roms_register_state() {
+    let mut apu = Apu::new();
+    upload(&mut apu, 0x0400, &[0x00, 0x00]);
+    write_port(&mut apu, 1, 0x00);
+    write_port(&mut apu, 2, 0x00);
+    write_port(&mut apu, 3, 0x04);
+    write_port(&mut apu, 0, 0x04);
+    assert!(apu.boot.is_running());
+    assert_eq!(apu.cpu.pc, 0x0400);
+    assert_eq!(
+        (apu.cpu.a, apu.cpu.x, apu.cpu.y, apu.cpu.sp),
+        (0, 0, 0, 0xEF),
+        "A = Y = the zero kind (`MOV A,Y`), X = A (`MOV X,A`), SP from power-on"
+    );
+    assert!(apu.cpu.flag(flags::Z) && !apu.cpu.flag(flags::N));
+    assert_eq!(&apu.aram[0x0000..0x0002], &[0x00, 0x04]);
+    assert_eq!(apu.cpu_read_port(0), 0x04, "the kick was echoed");
 }
 
 /// A zero "kind" byte with the very first `$CC` means run immediately,
@@ -343,9 +407,16 @@ fn real_65816_code_completes_the_boot_handshake() {
         0xA9, 0x01, 0x8D, 0x41, 0x21, // LDA #$00 : STA $2142      (dest low)
         0xA9, 0x00, 0x8D, 0x42, 0x21, // LDA #$02 : STA $2143      (dest high -> $0200)
         0xA9, 0x02, 0x8D, 0x43, 0x21, // LDA #$CC : STA $2140      (start)
-        0xA9, 0xCC, 0x8D, 0x40, 0x21, // LDA #$5A : STA $2141      (data)
+        0xA9, 0xCC, 0x8D, 0x40, 0x21,
+        // wait: LDA $2140 : CMP #$CC : BNE wait   (the echo — W14-48: the
+        // HLE walks the listing now, so a CPU that overwrites port 0
+        // before the ROM's next compare reads it loses the write, exactly
+        // as on hardware; real uploaders always wait here)
+        0xAD, 0x40, 0x21, 0xC9, 0xCC, 0xD0, 0xF9, // LDA #$5A : STA $2141      (data)
         0xA9, 0x5A, 0x8D, 0x41, 0x21, // LDA #$00 : STA $2140      (counter 0 -> store)
-        0xA9, 0x00, 0x8D, 0x40, 0x21, // LDA #$00 : STA $2141      (kind 0 = finish)
+        0xA9, 0x00, 0x8D, 0x40, 0x21, // wait: LDA $2140 : CMP #$00 : BNE wait
+        0xAD, 0x40, 0x21, 0xC9, 0x00, 0xD0, 0xF9,
+        // LDA #$00 : STA $2141      (kind 0 = finish)
         0xA9, 0x00, 0x8D, 0x41, 0x21, // LDA #$02 : STA $2143      (entry high -> $0200)
         0xA9, 0x02, 0x8D, 0x43, 0x21,
         // LDA #$02 : STA $2140      (counter SKIP -> run)
@@ -374,13 +445,11 @@ fn real_65816_code_completes_the_boot_handshake() {
     s.run_until(10_000, None).expect("implemented");
 
     assert!(s.cpu.stopped, "the init routine reached its STP");
-    // W14-37: the final counter write no longer resolves in the same
-    // instant it is seen. The byte stored just before it is still paying
-    // off its own `BYTE_HANDSHAKE_CYCLES` (25) — during which `poll`
-    // does not even look at the ports again (see `IplBoot::poll`'s
-    // `pending`) — before the "counter skipped -> run" write can be
-    // noticed at all, and THEN the boot ROM's post-detection tail
-    // (`RUN_HANDOFF_AFTER_TRANSFER_CYCLES`, 45) has to run out too.
+    // W14-37/W14-48: the final counter write does not resolve the
+    // instant it lands. The ROM finishes its per-byte loop
+    // (`BYTE_HANDSHAKE_CYCLES`, 25) before its next compare reads port 0,
+    // and THEN runs its post-detection tail
+    // (`RUN_HANDOFF_AFTER_TRANSFER_CYCLES`, 45).
     // `run_until` stops the INSTANT the CPU hits its `STP`, well before
     // that many real cycles accrue from the handful of instructions
     // between the final write and the `STP`, and a stopped 65816 does
@@ -437,6 +506,8 @@ fn the_apu_keeps_running_while_the_cpu_never_touches_a_port() {
         0xAD, 0x40, 0x21, 0xC9, 0xAA, 0xD0, 0xF9, // kind 1, dest $0200, start
         0xA9, 0x01, 0x8D, 0x41, 0x21, 0xA9, 0x00, 0x8D, 0x42, 0x21, 0xA9, 0x02, 0x8D, 0x43, 0x21,
         0xA9, 0xCC, 0x8D, 0x40, 0x21,
+        // wait: LDA $2140 : CMP #$CC : BNE wait   (the start echo)
+        0xAD, 0x40, 0x21, 0xC9, 0xCC, 0xD0, 0xF9,
     ];
     for (counter, byte) in [0x3Au8, 0x10, 0x2F, 0xFC].into_iter().enumerate() {
         let counter = counter as u8;
@@ -540,20 +611,15 @@ fn a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo(
     // harmless to spend the rest of its cycles.
     let program: [u8; 4] = [0x8F, 0xF1, 0xF4, 0x00];
 
-    // Since W14-37, a `Store`/`Run` the protocol decides on on one
-    // `poll_boot` call is not delivered until its own pending countdown
-    // elapses (`IplBoot::poll`'s `pending`), and while it is pending the
-    // next call does not even look at the ports again. A setup helper
-    // that polled only once per write (as this closure used to) would
-    // leave most of this block's byte-accepts sitting in `pending`
-    // indefinitely, mangling the transfer instead of merely delaying it.
-    // Match the crate's own `write_port` free function above: drain
-    // `RUN_HANDOFF_AFTER_TRANSFER_CYCLES`, the largest delay any write
-    // can ever queue, after every write.
+    // The HLE only sees a write when the listed instruction that reads
+    // that port completes (W14-37, W14-48). A setup helper that polled
+    // once per write would overwrite port 0 before the ROM read it,
+    // mangling the transfer exactly as it would on hardware. Match the
+    // crate's own `write_port` helper: drain `SETTLE_CYCLES` per write.
     let write = |s: &mut SnesSystem, index: usize, value: u8| {
         s.bus.apu.cpu_write_port(index, value);
         s.bus.apu.poll_boot();
-        for _ in 0..RUN_HANDOFF_AFTER_TRANSFER_CYCLES {
+        for _ in 0..SETTLE_CYCLES {
             s.bus.apu.poll_boot();
         }
     };
@@ -580,9 +646,9 @@ fn a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo(
     // A large debt: what W14-39's corrected per-instruction charge hands
     // `catch_up_apu` after a heavier CPU instruction, not the handful of
     // access-only cycles a plain `STA` used to leave it. Since W14-37,
-    // `Run` is not delivered the instant `poll_boot` decides it: the
-    // pending countdown IS the boot ROM's own listed instruction tail
-    // (`RUN_HANDOFF_AFTER_TRANSFER_CYCLES` = 45, `boot.rs`), paid out of
+    // `Run` is not delivered the instant the ROM sees the counter skip:
+    // the boot ROM's own listed instruction tail
+    // (`RUN_HANDOFF_AFTER_TRANSFER_CYCLES` = 45, `boot.rs`) is paid out of
     // this exact call's SPC-cycle budget one poll per cycle — so the
     // budget must cover the full 45 cycles before the hand-over can
     // complete in a single call at all, with plenty left over to prove
@@ -640,57 +706,62 @@ fn a_large_catch_up_burst_does_not_let_the_freshly_run_program_clobber_its_echo(
 /// run and the port then reads back the driver's own value.
 #[test]
 fn a_port_read_immediately_after_hand_over_does_not_see_the_next_instruction_early() {
-    let mut s = system();
-    let dest: u16 = 0x0200;
-    // The exact Tommy Moe's driver shape from docs/TESTING.md.
-    let program: [u8; 10] = [
-        0x8F, 0xF1, 0xF4, // MOV $F4, #$F1
-        0x8F, 0xF1, 0xF5, // MOV $F5, #$F1
-        0xE4, 0xF4, // MOV A, $F4
-        0x68,
-        0xFF, // CMP A, #$FF
-              // BNE $0200 would follow on real hardware; omitted here since
-              // this test only needs the FIRST instruction to stay unexecuted.
-    ];
+    let build = || {
+        let mut s = system();
+        let dest: u16 = 0x0200;
+        // The exact Tommy Moe's driver shape from docs/TESTING.md.
+        let program: [u8; 10] = [
+            0x8F, 0xF1, 0xF4, // MOV $F4, #$F1
+            0x8F, 0xF1, 0xF5, // MOV $F5, #$F1
+            0xE4, 0xF4, // MOV A, $F4
+            0x68,
+            0xFF, // CMP A, #$FF
+                  // BNE $0200 would follow on real hardware; omitted here since
+                  // this test only needs the FIRST instruction to stay unexecuted.
+        ];
 
-    // See the drain rationale on the test above: a single poll per write
-    // leaves most of this block's byte-accepts stuck in `pending`.
-    let write = |s: &mut SnesSystem, index: usize, value: u8| {
-        s.bus.apu.cpu_write_port(index, value);
-        s.bus.apu.poll_boot();
-        for _ in 0..RUN_HANDOFF_AFTER_TRANSFER_CYCLES {
+        // See the drain rationale on the test above.
+        let write = |s: &mut SnesSystem, index: usize, value: u8| {
+            s.bus.apu.cpu_write_port(index, value);
             s.bus.apu.poll_boot();
+            for _ in 0..SETTLE_CYCLES {
+                s.bus.apu.poll_boot();
+            }
+        };
+        write(&mut s, 1, 0x01);
+        write(&mut s, 2, dest as u8);
+        write(&mut s, 3, (dest >> 8) as u8);
+        write(&mut s, 0, 0xCC);
+        for (i, b) in program.iter().enumerate() {
+            write(&mut s, 1, *b);
+            write(&mut s, 0, i as u8);
         }
+        write(&mut s, 1, 0x00);
+        write(&mut s, 2, dest as u8);
+        write(&mut s, 3, (dest >> 8) as u8);
+        let run_echo = program.len() as u8 + 1;
+        s.bus.apu.cpu_write_port(0, run_echo);
+        (s, run_echo)
     };
-    write(&mut s, 1, 0x01);
-    write(&mut s, 2, dest as u8);
-    write(&mut s, 3, (dest >> 8) as u8);
-    write(&mut s, 0, 0xCC);
-    for (i, b) in program.iter().enumerate() {
-        write(&mut s, 1, *b);
-        write(&mut s, 0, i as u8);
-    }
-    write(&mut s, 1, 0x00);
-    write(&mut s, 2, dest as u8);
-    write(&mut s, 3, (dest >> 8) as u8);
-    let run_echo = program.len() as u8 + 1;
-    s.bus.apu.cpu_write_port(0, run_echo);
+    let (mut s, run_echo) = build();
+    let dest: u16 = 0x0200;
 
-    // A debt sized so the hand-over itself happens but leaves a real,
-    // small carried remainder afterwards. Since W14-37 the `Run` action
-    // is not delivered the instant `catch_up_apu`'s first iteration
-    // decides it: that iteration itself spends one SPC cycle of the
-    // budget (it still ticks the shared clock and polls), and the
-    // decided action then sits in `IplBoot::poll`'s `pending` for
-    // `RUN_HANDOFF_AFTER_TRANSFER_CYCLES` (45) MORE polls before it is
-    // delivered — 46 SPC cycles total from this call's budget, confirmed
-    // against `the_immediate_run_handoff_is_not_observable_before_its_
-    // listed_cycles_elapse`'s own call-counting convention. One more
-    // (47) leaves the 1-cycle remainder this test's whole point depends
-    // on — too small to fund the driver's own first instruction (`MOV
-    // $F4,#$F1`, base cost 5 per `timing::CYCLES[0x8F]`), the shape
-    // W14-41's fix defers.
-    s.bus.apu_debt = 21 * 47;
+    // Since W14-48 the HLE walks the listing, so how many cycles the
+    // hand-over takes depends on where in its `$FFDA` polling loop the
+    // ROM was when the CPU wrote. Measure it on a copy rather than
+    // hard-coding a count, then fund exactly that plus ONE cycle — the
+    // 1-cycle remainder this test's whole point depends on: too small to
+    // fund the driver's own first instruction (`MOV $F4,#$F1`, base cost 5
+    // per `timing::CYCLES[0x8F]`), the shape W14-41's fix defers.
+    let (mut probe, _) = build();
+    let mut handover = 0u64;
+    while !probe.bus.apu.boot.is_running() {
+        probe.bus.apu.tick_clock(1);
+        probe.bus.apu.poll_boot();
+        handover += 1;
+        assert!(handover < 200, "the hand-over never happened");
+    }
+    s.bus.apu_debt = 21 * (handover + 1);
     s.bus.catch_up_apu();
     assert!(s.bus.apu.boot.is_running(), "the hand-over must happen");
     assert_eq!(
@@ -895,31 +966,23 @@ fn a_non_looping_sample_stops_at_its_end() {
 /// SPC700 happily runs the code it was just given: two live processors,
 /// each waiting on the other, from a handshake that otherwise completed.
 ///
-/// Asserted on the ACTION rather than through a whole boot, so the reason
-/// this byte exists is visible at the point that produces it.
 #[test]
 fn handing_control_to_the_spc700_still_echoes_the_final_counter() {
-    use crate::apu::boot::{BootAction, BootState, IplBoot};
-
-    // Mid-upload: one block transferred, counter at 2.
-    let mut boot = IplBoot::new();
-    boot.state = BootState::Transferring(2);
-    boot.address = 0x0300;
-
+    let mut apu = Apu::new();
+    upload(&mut apu, 0x0300, &[0x00, 0x00]);
     // The CPU signals "jump": port 1 = 0, entry in ports 2/3, counter+1.
-    let ports = [0u8, 0x00, 0x00, 0x03];
-    match boot.cpu_wrote(0, 3, ports) {
-        BootAction::Run { entry, echo } => {
-            assert_eq!(entry, 0x0300, "entry comes from ports 2/3");
-            assert_eq!(
-                echo, 3,
-                "the counter the CPU just wrote must come back, or its \
-                 CMP $2140 loop never exits"
-            );
-        }
-        other => panic!("expected a Run action, got {other:?}"),
-    }
-    assert_eq!(boot.state, BootState::Running);
+    write_port(&mut apu, 1, 0x00);
+    write_port(&mut apu, 2, 0x00);
+    write_port(&mut apu, 3, 0x03);
+    write_port(&mut apu, 0, 3);
+    assert!(apu.boot.is_running());
+    assert_eq!(apu.cpu.pc, 0x0300, "entry comes from ports 2/3");
+    assert_eq!(
+        apu.cpu_read_port(0),
+        3,
+        "the counter the CPU just wrote must come back, or its CMP $2140 \
+         loop never exits"
+    );
 }
 
 /// A 16-bit `STA $2140` must not be evaluated half-done.
@@ -952,7 +1015,9 @@ fn a_sixteen_bit_port_write_is_seen_settled_not_half_done() {
     // between them — the APU cannot run inside a single CPU instruction.
     apu.cpu_write_port(0, 0xCC);
     apu.cpu_write_port(1, 0x01);
-    apu.poll_boot();
+    for _ in 0..SETTLE_CYCLES {
+        apu.poll_boot();
+    }
 
     assert!(
         !apu.boot.is_running(),
@@ -962,8 +1027,8 @@ fn a_sixteen_bit_port_write_is_seen_settled_not_half_done() {
     );
     assert_eq!(
         apu.boot.state,
-        BootState::Transferring(0),
-        "the handshake must be waiting for the first byte's counter"
+        BootState::AwaitingBlock(0xCC),
+        "the handshake must be waiting for the first byte's counter (0)"
     );
     assert_eq!(apu.ports_out[0], 0xCC, "and must have echoed the $CC");
 }
@@ -980,9 +1045,9 @@ fn a_settled_zero_kind_still_runs_immediately() {
     apu.poll_boot();
     // W14-37: the immediate-run path is still not FREE — the boot ROM's
     // `jr main` fast path plus its shared jump tail costs
-    // `RUN_HANDOFF_IMMEDIATE_CYCLES` (42) SPC cycles, held in `pending`
-    // (see `IplBoot::poll`) — drain it before asserting the handoff
-    // completed.
+    // `RUN_HANDOFF_IMMEDIATE_CYCLES` (42) SPC cycles, walked one listed
+    // step at a time (see `IplBoot::poll`) — drain it before asserting
+    // the handoff completed.
     for _ in 0..crate::apu::boot::RUN_HANDOFF_IMMEDIATE_CYCLES {
         apu.poll_boot();
     }
@@ -1137,7 +1202,8 @@ fn the_immediate_run_handoff_is_not_observable_before_its_listed_cycles_elapse()
     apu.cpu_write_port(3, 0x04);
     apu.cpu_write_port(1, 0x00);
     apu.cpu_write_port(0, 0xCC);
-    apu.poll_boot();
+    // From power-on the ROM is at the start of its `$FFCF` compare, so
+    // the listed 42 cycles run from the very first poll.
     for _ in 0..u16::from(crate::apu::boot::RUN_HANDOFF_IMMEDIATE_CYCLES) - 1 {
         apu.poll_boot();
         assert!(
@@ -1153,40 +1219,97 @@ fn the_immediate_run_handoff_is_not_observable_before_its_listed_cycles_elapse()
     assert_eq!(apu.cpu.pc, 0x0400);
 }
 
-/// Same shape for the per-byte handshake: the echo/store must not be
-/// visible before `BYTE_HANDSHAKE_CYCLES` polls, and must be exactly at
-/// that count.
+/// The per-byte handshake at the listing's own intra-loop timing
+/// (W14-48): the echo goes out 9 cycles after the matching compare
+/// (`jnz` 2 + `mov A,$F5` 3 + `mov $F4,Y` 4), the store 7 cycles after
+/// that, and a counter written the instant the echo appears is answered
+/// exactly one loop — `BYTE_HANDSHAKE_CYCLES` — after the previous echo.
+/// The snapshot model delivered echo and store together, 25 cycles after
+/// the compare, which made every upload slower than hardware.
 #[test]
-fn the_byte_handshake_is_not_observable_before_its_listed_cycles_elapse() {
+fn the_byte_handshake_echoes_and_stores_at_the_listings_cycles() {
     let mut apu = Apu::new();
-    apu.cpu_write_port(1, 0x01);
-    apu.cpu_write_port(2, 0x00);
-    apu.cpu_write_port(3, 0x02);
-    apu.cpu_write_port(0, 0xCC);
-    apu.poll_boot();
-    for _ in 0..u16::from(RUN_HANDOFF_AFTER_TRANSFER_CYCLES) {
-        apu.poll_boot();
-    }
+    write_port(&mut apu, 1, 0x01);
+    write_port(&mut apu, 2, 0x00);
+    write_port(&mut apu, 3, 0x02);
+    write_port(&mut apu, 0, 0xCC);
     assert_eq!(apu.ports_out[0], 0xCC, "the $CC echo settled first");
 
-    apu.cpu_write_port(1, 0xAB);
-    apu.cpu_write_port(0, 0x00);
-    apu.poll_boot();
-    for _ in 0..u16::from(BYTE_HANDSHAKE_CYCLES) - 1 {
-        apu.poll_boot();
-        assert_eq!(
-            apu.ports_out[0], 0xCC,
-            "the byte's echo fired before its documented cycle count elapsed"
-        );
-        assert_eq!(
-            apu.aram[0x0200], 0,
-            "and the store hadn't landed yet either"
-        );
-    }
-    apu.poll_boot();
-    assert_eq!(
-        apu.ports_out[0], 0x00,
-        "and exactly at the count, both must have"
-    );
+    write_port(&mut apu, 1, 0xAB);
+    write_port(&mut apu, 0, 0x00);
+    assert_eq!(apu.ports_out[0], 0x00);
     assert_eq!(apu.aram[0x0200], 0xAB);
+
+    // Counter 1, written the cycle its predecessor's echo is visible.
+    let mut apu2 = Apu::new();
+    write_port(&mut apu2, 1, 0x01);
+    write_port(&mut apu2, 2, 0x00);
+    write_port(&mut apu2, 3, 0x02);
+    write_port(&mut apu2, 0, 0xCC);
+    apu2.cpu_write_port(1, 0xAB);
+    apu2.cpu_write_port(0, 0x00);
+    let mut n = 0u16;
+    while apu2.ports_out[0] != 0x00 {
+        apu2.poll_boot();
+        n += 1;
+        assert!(n < 100, "byte 0 was never echoed");
+    }
+    apu2.cpu_write_port(1, 0xCD);
+    apu2.cpu_write_port(0, 0x01);
+    let (mut echo_at, mut store_at) = (None, None);
+    for t in 1..=u16::from(BYTE_HANDSHAKE_CYCLES) + 10 {
+        apu2.poll_boot();
+        if echo_at.is_none() && apu2.ports_out[0] == 0x01 {
+            echo_at = Some(t);
+        }
+        if store_at.is_none() && apu2.aram[0x0201] == 0xCD {
+            store_at = Some(t);
+        }
+    }
+    assert_eq!(
+        echo_at,
+        Some(BYTE_HANDSHAKE_CYCLES),
+        "one loop from echo to echo"
+    );
+    assert_eq!(
+        store_at.zip(echo_at).map(|(s, e)| s - e),
+        Some(7),
+        "the store lands 7 cycles (mov [$00]+Y,A) after the echo"
+    );
+}
+
+/// A program that re-enters the boot ROM at `$FFC9` — past `MOV SP,X` and
+/// the zero-page clear — keeps its zero page and its stack (W14-48
+/// follow-up, Champions - World Class Soccer's shape: a stub jumps to
+/// `$FFC9`, then the uploaded "driver" is a lone `RET` that returns
+/// through the stub's own stack). Only an entry at `$FFC0` clears.
+#[test]
+fn re_entering_past_the_init_keeps_zero_page_and_the_stack() {
+    for (target, clears) in [(0xFFC9u16, false), (0xFFC0, true)] {
+        let mut apu = Apu::new();
+        write_port(&mut apu, 1, 0x00);
+        write_port(&mut apu, 2, 0x00);
+        write_port(&mut apu, 3, 0x04);
+        write_port(&mut apu, 0, 0xCC);
+        assert!(apu.boot.is_running());
+        apu.aram[0x0050] = 0x6F;
+        apu.cpu.sp = 0x80;
+        // The CPU has moved on from its `$CC` (else the ROM would see it
+        // again and run straight back out).
+        apu.cpu_write_port(0, 0x00);
+        // `JMP !target` at the entry point.
+        apu.aram[0x0400..0x0403].copy_from_slice(&[0x5F, target as u8, (target >> 8) as u8]);
+        let _ = apu.step_counted();
+        assert!(
+            !apu.boot.is_running(),
+            "{target:04X} re-enters the handshake"
+        );
+        for _ in 0..IPL_INIT_CYCLES + 10 {
+            apu.poll_boot();
+        }
+        assert_eq!(apu.boot.state, BootState::Ready, "{target:04X}");
+        assert_eq!(apu.cpu_read_port(0), 0xAA);
+        assert_eq!(apu.aram[0x0050] == 0, clears, "{target:04X}: zero page");
+        assert_eq!(apu.cpu.sp == 0xEF, clears, "{target:04X}: SP");
+    }
 }
