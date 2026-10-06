@@ -77,6 +77,8 @@ pub struct GameFacts {
     /// The running core can widen its picture (SNES only — the NES has no
     /// widescreen path, `Stepper::set_widescreen`).
     pub widescreen_supported: bool,
+    /// Ticket W20-17: the matched profile declares `[[loading.wait_loops]]`.
+    pub loading_declared: bool,
     /// The fog pass actually runs in the live view. `false` until W20-17
     /// wires `rf_renderer::fog::FogPass` into it: before that, a fog row
     /// reading ON would make the badge claim an enhancement nothing draws.
@@ -95,6 +97,7 @@ impl GameFacts {
             diorama_available,
             mode7_active,
             widescreen_supported: true,
+            loading_declared: profile_matched,
             fog_rendered: true,
         }
     }
@@ -143,6 +146,7 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         diorama_available,
         mode7_active,
         widescreen_supported,
+        loading_declared,
         fog_rendered,
     } = *facts;
     let mode = settings.mode;
@@ -203,6 +207,11 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         profiled(settings.full_level_view),
         level_decoded,
         "a level map in this game's profile",
+    );
+    let (loading_av, loading_on) = also(
+        profiled(settings.loading_fast_forward),
+        loading_declared,
+        "loading screens described in this game's profile",
     );
     let (diorama_av, diorama_on) = diorama_profiled(settings.diorama);
     // Ticket W16-04: unlike the toggles above, this row's "on" state IS
@@ -274,6 +283,14 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
             scope: "requires profile",
             enabled: level_on,
             availability: level_av,
+            heuristic: None,
+        },
+        FeatureRow {
+            id: "loading_fast_forward",
+            label: "Loading fast-forward",
+            scope: "requires profile",
+            enabled: loading_on,
+            availability: loading_av,
             heuristic: None,
         },
         FeatureRow {
@@ -621,7 +638,7 @@ mod tests {
             &GameSettings::default(),
             &GameFacts::new(false, false, false),
         );
-        assert_eq!(rows.len(), 7, "every feature is listed in every mode");
+        assert_eq!(rows.len(), 8, "every feature is listed in every mode");
         assert!(rows.iter().all(|r| r.availability.explanation().is_some()));
     }
 

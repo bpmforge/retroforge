@@ -499,6 +499,12 @@ pub struct RetroForgeApp {
     chrome_badge: String,
     chrome_badge_changed: f64,
     chrome_last_pointer: Option<egui::Pos2>,
+    /// Ticket W20-17: the matched profile's `[[loading.wait_loops]]`, what
+    /// was last sent to the core (`None` = nothing yet for this core), and
+    /// the wait loop running unpaced right now.
+    loading_waits: Vec<rf_profiles::schema::WaitLoop>,
+    loading_sent: Option<bool>,
+    loading_active: Option<String>,
     /// Ticket W20-13: rewind — the ring status from the last frame, whether
     /// the key is held (and whether the game was running before), and a
     /// counter pacing steps.
@@ -1255,6 +1261,9 @@ impl RetroForgeApp {
             last_fullscreen_request: None,
             slot_textures: crate::slot_cards::SlotTextures::default(),
             osd: crate::toast::ToastStack::osd(),
+            loading_waits: Vec::new(),
+            loading_sent: None,
+            loading_active: None,
             rewind_status: None,
             rewinding: false,
             rewind_resume: false,
@@ -2942,10 +2951,17 @@ impl RetroForgeApp {
                 .strip_prefix(b"NES\x1a")
                 .map_or_else(|| bytes.clone(), |_| bytes[16..].to_vec()),
         );
-        self.matched_profile = self.current_game_hashes.as_ref().and_then(|hashes| {
+        let matched = self.current_game_hashes.as_ref().and_then(|hashes| {
             crate::level_view::find_matching_profile(&Self::profiles_root(), hashes)
-                .map(|(_, path)| path)
         });
+        // Ticket W20-17: the profile's declared loading wait loops.
+        self.loading_waits = matched
+            .as_ref()
+            .and_then(|(profile, _)| profile.loading.as_ref())
+            .map(|l| l.wait_loops.clone())
+            .unwrap_or_default();
+        self.loading_sent = None;
+        self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
         // wired") was never actually assigned anywhere once the loader
@@ -3338,6 +3354,7 @@ impl RetroForgeApp {
             }
             self.core_frame_size = Some((msg.width, msg.height));
             self.rewind_status = msg.rewind;
+            self.loading_active.clone_from(&msg.loading);
             // Ticket W11-02: the probe's bytes become a live camera. The
             // `read` closure is a lookup into what the CORE peeked, not a
             // read of anything on this thread — the UI never touches
@@ -3719,6 +3736,7 @@ impl RetroForgeApp {
                 .is_some_and(crate::level_view::LevelSession::has_collision),
             mode7_active: self.mode7_seen,
             widescreen_supported: self.console_label == "SNES",
+            loading_declared: !self.loading_waits.is_empty(),
             // Until W20-17 runs `rf_renderer::fog::FogPass` in the live
             // view (ENHANCEMENT_AUDIT.md §2).
             fog_rendered: false,
@@ -8441,6 +8459,7 @@ impl RetroForgeApp {
     ) {
         self.mode7_seen = true;
         let msg = core_thread::FrameMsg {
+            loading: None,
             rewind: None,
             level_probe: None,
             script_window: None,
@@ -10157,6 +10176,49 @@ impl RetroForgeApp {
         self.show_enhance = open;
     }
 
+    /// Ticket W20-17: keep the core's loading fast-forward matching the
+    /// "Loading fast-forward" row's EFFECTIVE state (mode, profile, toggle
+    /// — the one gate in `enhance_ui::feature_rows`), sending only on a
+    /// change; and while a wait loop runs unpaced, say so on screen.
+    fn sync_loading(&mut self, ctx: &egui::Context) {
+        if self.core.is_none() {
+            return;
+        }
+        let want = crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+            .iter()
+            .any(|r| r.id == "loading_fast_forward" && r.effective());
+        if self.loading_sent != Some(want) {
+            self.send_command(CoreCommand::SetLoadingFastForward(
+                want.then(|| self.loading_waits.clone()),
+            ));
+            self.loading_sent = Some(want);
+        }
+        if let Some(label) = &self.loading_active {
+            self.osd.push_card(
+                crate::toast::ToastKind::Info,
+                format!(
+                    "{} Fast-forwarding: {label}",
+                    egui_phosphor::regular::FAST_FORWARD
+                ),
+                None,
+                Some("loading"),
+                ctx,
+            );
+        }
+    }
+
+    /// Ticket W20-17: the wait loop currently fast-forwarded (tests).
+    #[doc(hidden)]
+    pub fn loading_active_for_test(&self) -> Option<String> {
+        self.loading_active.clone()
+    }
+
+    /// Ticket W20-17: turn the per-game toggle on (tests).
+    #[doc(hidden)]
+    pub fn set_loading_fast_forward_for_test(&mut self, on: bool) {
+        self.current_game_settings.loading_fast_forward = on;
+    }
+
     /// Ticket W20-13: whether rewind can run for this game — on in
     /// Settings, and an NES game (`EmuStepper::save_state` writes NES
     /// containers only; SNES states are not wired into this path yet).
@@ -10872,6 +10934,7 @@ impl eframe::App for RetroForgeApp {
         self.poll_input(&ctx);
         self.poll_app_hotkeys(&ctx);
         self.poll_recording(&ctx);
+        self.sync_loading(&ctx);
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.
         self.poll_library_scan(&ctx);

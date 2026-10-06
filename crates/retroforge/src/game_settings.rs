@@ -166,6 +166,9 @@ pub struct GameSettings {
     /// from `diorama` even though both composite through the same live
     /// view slot.
     pub mode7_ground: bool,
+    /// Ticket W20-17: profile-declared loading fast-forward (FR-ENH-008,
+    /// `rf_enhance::loading`) — off by default (law 6).
+    pub loading_fast_forward: bool,
     /// Shader name, `None` for the default pipeline. A string rather than
     /// an enum because W3-02a owns the shader set and this must not have to
     /// change when that lands.
@@ -238,6 +241,7 @@ impl GameSettings {
             ("full_level_view", self.full_level_view),
             ("diorama", self.diorama),
             ("mode7_ground", self.mode7_ground),
+            ("loading_fast_forward", self.loading_fast_forward),
         ] {
             if on {
                 fields.insert(key.to_string(), "true".to_string());
@@ -306,6 +310,7 @@ impl GameSettings {
                 "full_level_view" => settings.full_level_view = value == "true",
                 "diorama" => settings.diorama = value == "true",
                 "mode7_ground" => settings.mode7_ground = value == "true",
+                "loading_fast_forward" => settings.loading_fast_forward = value == "true",
                 "trust" => {
                     settings.trust = rf_enhance::trust::TrustLadder::from_settings_value(value);
                 }

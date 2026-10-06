@@ -255,6 +255,9 @@ pub struct FrameMsg {
     /// Ticket W20-13: the rewind ring's extent after this frame, `None`
     /// while rewind is off.
     pub rewind: Option<RewindStatus>,
+    /// Ticket W20-17: a profile-declared wait loop is running unpaced
+    /// right now (the label it was declared with).
+    pub loading: Option<String>,
     /// Ticket W11-02: the bytes the full-level view asked for, or `None`
     /// when no probe is armed. Peeked on this thread because only this
     /// thread can read memory without perturbing the machine.
@@ -602,6 +605,10 @@ pub enum CoreCommand {
     /// Ticket W20-13: turn rewind on (snapshot every `interval` running
     /// frames, keep `depth` of them) or off (`None`, which frees the ring).
     SetRewind(Option<rf_state::RewindConfig>),
+    /// Ticket W20-17: profile-declared loading fast-forward on (with the
+    /// profile's wait loops) or off. Changes PACING only — never what the
+    /// CPU executes (FR-ENH-008; `rf_enhance::loading`'s module doc).
+    SetLoadingFastForward(Option<Vec<rf_profiles::schema::WaitLoop>>),
     /// Ticket W20-13: step back one snapshot and show it — load the state
     /// through the same `load_state` as Load State (so the simulation is
     /// never altered any other way), then render one frame from it and
@@ -1053,6 +1060,12 @@ fn core_thread_main(
     // the machine — snapshots are taken and restored without the machine
     // ever leaving this thread (ARCHITECTURE §6).
     let mut rewind: Option<rf_state::RewindRing> = None;
+    // Ticket W20-17: loading fast-forward, and the pacing the USER asked
+    // for (the fast-forward hotkey), kept apart so one cannot cancel the
+    // other.
+    let mut loading: Option<rf_enhance::loading::FastForward> = None;
+    let mut loading_unpaced: Option<String> = None;
+    let mut user_pacing = true;
     // Ticket W14-20 defect 1: how many frames this thread has dropped
     // (see the `pending_frames` check at the send site below) since the
     // last time it logged about it, and when that last log happened.
@@ -1272,7 +1285,19 @@ fn core_thread_main(
                 // held. `pacer.set_enabled` alone is not the whole story —
                 // see the branch below, which also has to skip the
                 // audio-clock wait.
-                CoreCommand::SetPacingEnabled(enabled) => pacer.set_enabled(enabled),
+                CoreCommand::SetPacingEnabled(enabled) => {
+                    user_pacing = enabled;
+                    pacer.set_enabled(user_pacing && loading_unpaced.is_none());
+                }
+                CoreCommand::SetLoadingFastForward(waits) => {
+                    loading = waits.map(|w| {
+                        let mut ff = rf_enhance::loading::FastForward::new(w);
+                        ff.set_enabled(true, stepper.frame_count());
+                        ff
+                    });
+                    loading_unpaced = None;
+                    pacer.set_enabled(user_pacing);
+                }
                 CoreCommand::Shutdown => return LoopControl::Stop,
             }
         }
@@ -1403,6 +1428,27 @@ fn core_thread_main(
         // this cannot perturb it; a stepped (rewound/single-stepped) frame
         // is not recorded, so rewinding does not refill the history it is
         // walking back through.
+        // Ticket W20-17: after each RUNNING frame, ask the profile's wait
+        // loops whether the game is sitting in one. The answer only flips
+        // the pacer (read-only peek; `rf_enhance::loading` is given no way
+        // to touch the machine).
+        if ran {
+            if let Some(ff) = loading.as_mut() {
+                let pacing = ff.update(stepper.frame_count(), u32::from(stepper.pc()), |addr| {
+                    u16::try_from(addr).map_or(0, |a| stepper.peek(a))
+                });
+                let now = match pacing {
+                    rf_enhance::loading::Pacing::Unpaced => {
+                        ff.ledger().last().map(|e| e.label.clone())
+                    }
+                    rf_enhance::loading::Pacing::Normal => None,
+                };
+                if now.is_some() != loading_unpaced.is_some() {
+                    pacer.set_enabled(user_pacing && now.is_none());
+                }
+                loading_unpaced = now;
+            }
+        }
         if ran {
             if let Some(ring) = rewind.as_mut() {
                 let frame = stepper.frame_count();
@@ -1499,6 +1545,7 @@ fn core_thread_main(
             });
             bundle_writer.publish(bundle);
             let msg = FrameMsg {
+                loading: loading_unpaced.clone(),
                 rewind: rewind.as_ref().map(|ring| RewindStatus {
                     len: ring.len(),
                     depth: ring.config().depth,
@@ -1704,6 +1751,7 @@ mod tests {
     /// at.
     fn empty_frame_msg() -> FrameMsg {
         FrameMsg {
+            loading: None,
             rewind: None,
             level_probe: None,
             script_window: None,
@@ -2110,6 +2158,71 @@ mod tests {
             mismatches.is_empty(),
             "frames not reproduced after save/load: {mismatches:?}"
         );
+    }
+
+    /// Ticket W20-17: an NROM that spins on `JMP $8000` forever, so the
+    /// PC at every frame boundary is exactly $8000 — a wait loop that
+    /// never ends, for proving the loading fast-forward wiring.
+    fn spinning_nrom() -> Vec<u8> {
+        let mut data = synthetic_nrom();
+        let prg = 16;
+        data[prg..prg + 3].copy_from_slice(&[0x4C, 0x00, 0x80]); // JMP $8000
+                                                                 // Reset vector -> $8000 (16 KiB PRG mirrored at $C000; vector at $FFFC).
+        data[prg + 0x3FFC] = 0x00;
+        data[prg + 0x3FFD] = 0x80;
+        data
+    }
+
+    /// Ticket W20-17 (FR-ENH-008): with a declared wait loop matching, the
+    /// core reports it as fast-forwarded and runs UNPACED (many more frames
+    /// per wall-clock second than 60); switched off, it reports nothing and
+    /// is paced again. Pacing only — what the CPU executes is untouched by
+    /// construction (`rf_enhance::loading` is handed a read-only peek).
+    #[test]
+    fn a_matching_wait_loop_runs_unpaced_and_is_reported() {
+        let core = spawn(spinning_nrom()).expect("spawns");
+        let wait = rf_profiles::schema::WaitLoop {
+            pc: 0x8000,
+            until: rf_profiles::schema::UntilSpec {
+                addr: 0x0000,
+                equals: 1,
+            },
+            label: "spin".to_string(),
+        };
+        core.cmd_tx
+            .send(CoreCommand::SetLoadingFastForward(Some(vec![wait])))
+            .unwrap();
+        core.cmd_tx.send(CoreCommand::Resume).unwrap();
+        let count_for = |core: &CoreHandle, d: Duration| {
+            let start = std::time::Instant::now();
+            let (mut first, mut last, mut label) = (None, 0, None);
+            while start.elapsed() < d {
+                if let Some(m) = next_frame(core, Duration::from_millis(200)) {
+                    first.get_or_insert(m.frame_count);
+                    last = m.frame_count;
+                    label = m.loading.clone();
+                }
+            }
+            (last - first.unwrap_or(last), label)
+        };
+        let (fast, label) = count_for(&core, Duration::from_millis(1000));
+        assert_eq!(
+            label.as_deref(),
+            Some("spin"),
+            "reported as fast-forwarding"
+        );
+        core.cmd_tx
+            .send(CoreCommand::SetLoadingFastForward(None))
+            .unwrap();
+        let _ = count_for(&core, Duration::from_millis(200));
+        let (paced, label) = count_for(&core, Duration::from_millis(1000));
+        assert_eq!(label, None, "off: nothing reported");
+        assert!(
+            fast > paced + 30,
+            "unpaced must outrun 60 fps clearly: {fast} frames vs {paced} paced in 1 s"
+        );
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
     }
 
     fn synthetic_nrom() -> Vec<u8> {

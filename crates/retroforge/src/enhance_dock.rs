@@ -131,6 +131,8 @@ pub struct EnhanceActions {
     /// `diorama_set` above (`RetroForgeApp::sync_diorama_subscription`
     /// picks it up alongside the walls toggle).
     pub mode7_ground_set: Option<bool>,
+    /// Ticket W20-17.
+    pub loading_fast_forward_set: Option<bool>,
     /// The Compare tab asked for a both-buffers screenshot.
     pub screenshot_requested: bool,
 }
@@ -340,6 +342,10 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                     "mode7_ground" => {
                         ctx.settings.mode7_ground = enabled;
                         actions.mode7_ground_set = Some(enabled);
+                    }
+                    "loading_fast_forward" => {
+                        ctx.settings.loading_fast_forward = enabled;
+                        actions.loading_fast_forward_set = Some(enabled);
                     }
                     _ => {}
                 }
