@@ -90,6 +90,11 @@ const RECORDING_LIMIT_BYTES: usize = 1 << 30;
 /// of history at 60 fps. Each step while held goes back one snapshot,
 /// every other UI frame: about 5x real speed.
 const REWIND_INTERVAL: u64 = 10;
+
+/// Ticket W20-17: how strongly fog covers its plane when the profile's
+/// `[atmosphere]` gives no `strength` — half, so the game's own art still
+/// reads through it. A look choice, not a measured value.
+const FOG_DEFAULT_STRENGTH: f32 = 0.5;
 const REWIND_DEPTH: usize = 600;
 
 /// Ticket W20-15: how many frame intervals the sparkline shows (2 s).
@@ -487,6 +492,17 @@ pub struct RetroForgeApp {
     shader_chain: Option<rf_renderer::ShaderChain>,
     shader_budget: rf_renderer::fog::BudgetGate,
     shader_note: Option<String>,
+    /// Ticket W20-17: the fog pass over the live picture — the plane the
+    /// matched profile's `[atmosphere]` names, the pass (built on first
+    /// use), its own budget gate, whether it failed, when it started
+    /// drifting, the plane's last scroll and when, and the drift it gives.
+    atmosphere_pin: Option<rf_enhance::atmosphere::AtmospherePin>,
+    fog_pass: Option<rf_renderer::fog::FogPass>,
+    fog_budget: rf_renderer::fog::BudgetGate,
+    fog_failed: bool,
+    fog_started: Option<std::time::Instant>,
+    fog_scroll: Option<((i64, i64), std::time::Instant)>,
+    fog_drift: (f32, f32),
     /// Test-only: fingerprint every displayed frame (off otherwise — it
     /// would hash megabytes per frame for nothing).
     hash_display_for_test: bool,
@@ -1299,6 +1315,13 @@ impl RetroForgeApp {
             shader_chain: None,
             shader_budget: rf_renderer::fog::BudgetGate::new(),
             shader_note: None,
+            atmosphere_pin: None,
+            fog_pass: None,
+            fog_budget: rf_renderer::fog::BudgetGate::new(),
+            fog_failed: false,
+            fog_started: None,
+            fog_scroll: None,
+            fog_drift: (0.0, 0.0),
             hash_display_for_test: false,
             display_hash: None,
             library_search: String::new(),
@@ -2990,6 +3013,18 @@ impl RetroForgeApp {
             .map(|l| l.wait_loops.clone())
             .unwrap_or_default();
         self.loading_sent = None;
+        // Ticket W20-17: the fog plane comes from the matched profile
+        // itself, not from `level_session` (which exists only for a
+        // profile with a decodable level map) — until W20-17 the
+        // `[atmosphere]` pin below was applied only when there was one.
+        self.atmosphere_pin = matched
+            .as_ref()
+            .and_then(|(profile, _)| rf_enhance::atmosphere::AtmospherePin::from_profile(profile));
+        self.fog_budget = rf_renderer::fog::BudgetGate::new();
+        self.fog_failed = false;
+        self.fog_started = None;
+        self.fog_scroll = None;
+        self.fog_drift = (0.0, 0.0);
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -3021,13 +3056,13 @@ impl RetroForgeApp {
         // Ticket W16-10: a profile that declares `[atmosphere]` pins the
         // fog plane and the heuristic's ladder rung before the per-game
         // settings are consulted, the one point where the loaded profile
-        // and the per-game trust ladder are both in scope. Absent table,
-        // absent pin: `apply_profile_pin` is a no-op then.
-        if let Some(session) = &self.level_session {
-            rf_enhance::atmosphere::apply_profile_pin(
-                &session.profile,
-                &mut self.current_game_settings.trust,
-            );
+        // and the per-game trust ladder are both in scope (what
+        // `rf_enhance::atmosphere::apply_profile_pin` does, from the pin
+        // kept above). Absent table, absent pin: nothing is pinned.
+        if let Some(pin) = &self.atmosphere_pin {
+            self.current_game_settings
+                .trust
+                .pin(rf_enhance::atmosphere::HEURISTIC_ID, pin.ladder);
         }
 
         // Ticket W15-02, acceptance 1: every launch records a play. This
@@ -3306,6 +3341,34 @@ impl RetroForgeApp {
             self.ultrawide_canvas = Some(canvas);
             self.refresh_ultrawide_render(ctx);
         }
+        // Ticket W20-17: the fog's density map, from the pinned plane's
+        // own pixels in the accuracy-exact frame (an effective fog row is
+        // an `enhancement_visible`, so the bundle video was taken above),
+        // and the plane's drift from its scroll writes this frame.
+        let fog_source = match (
+            self.fog_effective(),
+            &self.atmosphere_pin,
+            &latest_bundle_video,
+        ) {
+            (true, Some(pin), Some((video, bw, bh))) => {
+                let plane = pin.plane;
+                let scroll = latest_bundle_events.iter().rev().find_map(|ev| match ev {
+                    rf_core_api::CoreEvent::ScrollWrite { x, y, layer }
+                        if *layer == rf_core_api::PixelLayer::Background(plane) =>
+                    {
+                        Some((i64::from(*x), i64::from(*y)))
+                    }
+                    _ => None,
+                });
+                self.update_fog_drift(scroll, *bw, *bh);
+                Some((
+                    enhanced_view::atmosphere_density_rgba(video, plane),
+                    *bw,
+                    *bh,
+                ))
+            }
+            _ => None,
+        };
         if let Some(msg) = latest_frame {
             // Ticket W2-14: a stepped frame has now been consumed.
             self.awaiting_stepped_frame = false;
@@ -3530,6 +3593,65 @@ impl RetroForgeApp {
                     (None, Some(resolved), Some((w, h))) => (resolved.as_slice(), w, h),
                     _ => (&msg.rgba, msg.width, msg.height),
                 };
+            // Ticket W20-17: fog over the picture the player sees, before
+            // peek (which wipes to the original) and the shader (a display
+            // look) — never over the compare pair and never into a capture,
+            // the shader's rules. The pass keeps to its own budget gate.
+            let fogged = match (&fog_source, &self.gpu) {
+                (Some((density, sw, sh)), Some(gpu)) if compare_rgba.is_none() => {
+                    let (w32, h32) = (
+                        u32::try_from(dw).unwrap_or(0),
+                        u32::try_from(dh).unwrap_or(0),
+                    );
+                    let density = enhanced_view::resample_nearest_rgba(density, *sw, *sh, w32, h32);
+                    let pass = self
+                        .fog_pass
+                        .get_or_insert_with(|| rf_renderer::fog::FogPass::new(gpu));
+                    let since = *self.fog_started.get_or_insert_with(std::time::Instant::now);
+                    let strength = self
+                        .atmosphere_pin
+                        .and_then(|p| p.strength)
+                        .unwrap_or(FOG_DEFAULT_STRENGTH);
+                    let params = rf_renderer::fog::FogParams::new(
+                        since.elapsed().as_secs_f32(),
+                        self.fog_drift.0,
+                        self.fog_drift.1,
+                        strength,
+                    );
+                    if density.is_empty() {
+                        None
+                    } else {
+                        let started = std::time::Instant::now();
+                        match pass.render(gpu, displayed, &density, w32, h32, params) {
+                            Ok(out) => {
+                                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                                if self.fog_budget.record_sample_ms(ms) {
+                                    self.current_game_settings.trust.record_contradiction(
+                                        rf_enhance::atmosphere::HEURISTIC_ID,
+                                        "fog pass over its frame budget",
+                                        "live view",
+                                    );
+                                    self.status =
+                                        "Fog paused: this machine cannot draw it at full speed."
+                                            .to_string();
+                                }
+                                Some(out)
+                            }
+                            Err(e) => {
+                                self.fog_failed = true;
+                                self.status =
+                                    format!("Fog failed ({e}); showing the plain picture.");
+                                None
+                            }
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let (displayed, dw, dh): (&[u8], usize, usize) = match &fogged {
+                Some(out) => (out.as_slice(), dw, dh),
+                None => (displayed, dw, dh),
+            };
             // Ticket W20-16: hold-to-peek wipes to the ACCURACY-EXACT frame.
             // Until W20-16 peek only switched the camera; the Original view
             // still drew the resolved frame, so sprite bypass, de-flicker
@@ -3770,10 +3892,49 @@ impl RetroForgeApp {
             mode7_active: self.mode7_seen,
             widescreen_supported: self.console_label == "SNES",
             loading_declared: !self.loading_waits.is_empty(),
-            // Until W20-17 runs `rf_renderer::fog::FogPass` in the live
-            // view (ENHANCEMENT_AUDIT.md §2).
-            fog_rendered: false,
+            // Ticket W20-17: the live view draws fog only over a plane a
+            // profile names (no core emits the sub-screen the detector
+            // needs), on a GPU, while the pass keeps within its budget.
+            fog_rendered: self.atmosphere_pin.is_some()
+                && self.gpu.is_some()
+                && self.fog_budget.is_enabled()
+                && !self.fog_failed,
         }
+    }
+
+    /// Ticket W20-17: follow the fog plane's scroll. `scroll` is the
+    /// plane's last scroll write this frame, if any; a jump of more than
+    /// half the frame is a register wrap or a scene cut, not motion, so
+    /// it keeps the drift it had. No writes (an SNES core subscribes to
+    /// none) leaves the fog where it is.
+    fn update_fog_drift(&mut self, scroll: Option<(i64, i64)>, width: u32, height: u32) {
+        let Some(cur) = scroll else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if let Some((prev, at)) = self.fog_scroll {
+            let (dx, dy) = (cur.0 - prev.0, cur.1 - prev.1);
+            if dx.abs() * 2 <= i64::from(width) && dy.abs() * 2 <= i64::from(height) {
+                self.fog_drift = enhanced_view::atmosphere_scroll_drift_per_second(
+                    prev,
+                    cur,
+                    u16::try_from(width).unwrap_or(u16::MAX),
+                    u16::try_from(height).unwrap_or(u16::MAX),
+                    (now - at).as_secs_f32(),
+                );
+            }
+        }
+        self.fog_scroll = Some((cur, now));
+    }
+
+    /// Ticket W20-17: whether the "Atmosphere: fog" row is EFFECTIVE —
+    /// `enhance_ui::feature_rows`, the single place it is computed (same
+    /// reason as [`Self::diorama_effective`]).
+    fn fog_effective(&self) -> bool {
+        crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+            .into_iter()
+            .find(|r| r.id == "atmosphere_fog")
+            .is_some_and(|r| r.effective())
     }
 
     /// Ticket W16-13: whether Diorama is currently EFFECTIVE — Game-Aware

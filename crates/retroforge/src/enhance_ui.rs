@@ -79,9 +79,10 @@ pub struct GameFacts {
     pub widescreen_supported: bool,
     /// Ticket W20-17: the matched profile declares `[[loading.wait_loops]]`.
     pub loading_declared: bool,
-    /// The fog pass actually runs in the live view. `false` until W20-17
-    /// wires `rf_renderer::fog::FogPass` into it: before that, a fog row
-    /// reading ON would make the badge claim an enhancement nothing draws.
+    /// The live view can draw fog for this game: its profile names the
+    /// fog plane, there is a GPU, and the pass has kept to its budget
+    /// (ticket W20-17). Without it a fog row reading ON would make the
+    /// badge claim an enhancement nothing draws.
     pub fog_rendered: bool,
 }
 
@@ -225,12 +226,12 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
     // as "most likely to be got wrong later".
     let atmosphere_active =
         settings.trust.state(rf_enhance::atmosphere::HEURISTIC_ID) == TrustState::Active;
-    // Ticket W20-09 (ENHANCEMENT_AUDIT.md §2): the fog pass is not run by
-    // the live view yet, so a ladder rung of Active must not read as ON.
+    // Ticket W20-09 (ENHANCEMENT_AUDIT.md §2): a ladder rung of Active
+    // must not read as ON unless the live view can draw it (W20-17).
     let (fog_av, fog_on) = also(
         generic(atmosphere_active),
         fog_rendered,
-        "the fog renderer, which the live view does not run yet",
+        "a fog layer named in this game's profile",
     );
 
     // Ticket W16-14: gated on `enhancement` (leaves Accuracy — law 6, the
@@ -887,8 +888,9 @@ mod tests {
         assert!(row.availability.explanation().unwrap().contains("SNES"));
     }
 
-    /// Ticket W20-09 (§2): fog at ladder rung Active, with no fog pass in
-    /// the live view, must not read ON or count toward the badge.
+    /// Ticket W20-09 (§2): fog at ladder rung Active that the live view
+    /// cannot draw (no profile plane, no GPU, or over budget — W20-17)
+    /// must not read ON or count toward the badge.
     #[test]
     fn fog_is_not_counted_while_nothing_renders_it() {
         let mut s = settings(Mode::Enhanced);

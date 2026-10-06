@@ -1,9 +1,9 @@
 # Design: UX Wave 20 — the play view tells the truth, then looks the part
 
-Status: **built on branch `ui/wave-17` (2026-10-06), not merged.**
-Tickets W20-01..W20-22 in `plan.json`: all done except **W20-17**, which
-is done for loading fast-forward and open for HUD separation and fog
-(compositor work, reasons in its notes). **W20-22** (NES save state not
+Status: **built on branch `ui/wave-17` (2026-10-06), merged to `main`
+(eeac457).** Tickets W20-01..W20-22 in `plan.json`: all done except
+**W20-17**, which is done for loading fast-forward and the fog pass and
+open for HUD separation (compositor work, reasons in its notes). **W20-22** (NES save state not
 reproducing the next frame) was superseded by `main`'s W2-22, merged
 here; rewind (W20-13) is exact since, and its test enforces it. §10 lists
 every deviation from the plan below.
@@ -293,6 +293,11 @@ no-op.
 - **Loading fast-forward** (`rf_enhance::loading`, W8-07): for a profile
   with `[[loading.wait_loops]]`, the core thread unpaces while the PC is
   in a declared wait loop. Badge-counted, ledger-visible, off by default.
+- **Fog pass** (`rf_renderer::fog::FogPass`, W16-04): drawn over the
+  live picture when the "Atmosphere: fog" row is effective, which needs a
+  profile whose `[atmosphere]` names the plane (no core emits the
+  sub-screen the detector reads, so detection cannot run live). Own
+  budget gate; before peek and the shader; never in compare or captures.
 - **HUD separation** (`rf_enhance::hud`, W8-06): feeds the ultrawide /
   diorama HUD band from the profile's `[camera.hud]` (verdict surfaced
   in the Enhancements panel).

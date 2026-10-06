@@ -563,6 +563,45 @@ pub fn atmosphere_scroll_drift_per_second(
     (dx_uv / dt_secs, dy_uv / dt_secs)
 }
 
+/// Ticket W20-17: resize an RGBA buffer nearest-neighbour. The fog's
+/// density map is stretched to the picture it is drawn over (an HD pack
+/// composites at a multiple of the core's frame, and
+/// `rf_renderer::fog::FogPass::render` needs both inputs the same size);
+/// a pinned HUD band is shrunk by the ultrawide view's FM-13 divisor.
+/// Each output pixel samples the source pixel it falls inside, so an
+/// integer multiple is an exact block upscale. Empty when any size is
+/// zero or `rgba` is not `src_w * src_h * 4` bytes.
+#[must_use]
+pub fn resample_nearest_rgba(
+    rgba: &[u8],
+    src_w: u32,
+    src_h: u32,
+    out_w: u32,
+    out_h: u32,
+) -> Vec<u8> {
+    let (sw, sh, ow, oh) = (
+        src_w as usize,
+        src_h as usize,
+        out_w as usize,
+        out_h as usize,
+    );
+    if sw == 0 || sh == 0 || ow == 0 || oh == 0 || rgba.len() != sw * sh * 4 {
+        return Vec::new();
+    }
+    if (sw, sh) == (ow, oh) {
+        return rgba.to_vec();
+    }
+    let mut out = Vec::with_capacity(ow * oh * 4);
+    for y in 0..oh {
+        let row = (y * sh / oh) * sw;
+        for x in 0..ow {
+            let i = (row + x * sw / ow) * 4;
+            out.extend_from_slice(&rgba[i..i + 4]);
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------
 // Diorama pass (ticket W16-06; `docs/design/ENHANCEMENT_WAVE_16.md` §5):
 // the SceneGraph::Geometry -> rf_renderer::diorama_mesh resolution step,
@@ -1227,6 +1266,25 @@ mod tests {
     }
 
     // --- Fog/steam pass conversions (ticket W16-04) ---------------------
+
+    #[test]
+    fn resample_nearest_rgba_is_a_block_upscale_and_refuses_bad_sizes() {
+        // 2x1 source: a dark pixel then a bright one.
+        let src = [10, 10, 10, 255, 200, 200, 200, 255];
+        assert_eq!(resample_nearest_rgba(&src, 2, 1, 2, 1), src.to_vec());
+        let up = resample_nearest_rgba(&src, 2, 1, 4, 2);
+        assert_eq!(up.len(), 4 * 2 * 4);
+        let reds: Vec<u8> = up.chunks_exact(4).map(|p| p[0]).collect();
+        assert_eq!(reds, [10, 10, 200, 200, 10, 10, 200, 200]);
+        assert!(
+            resample_nearest_rgba(&src, 3, 1, 4, 2).is_empty(),
+            "wrong length"
+        );
+        assert!(
+            resample_nearest_rgba(&src, 2, 1, 0, 2).is_empty(),
+            "zero size"
+        );
+    }
 
     fn bg_px(layer: u8, palette_index: u8) -> PpuPixel {
         PpuPixel {
