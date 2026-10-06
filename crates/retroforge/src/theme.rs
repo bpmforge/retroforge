@@ -396,6 +396,26 @@ pub fn install_fonts(ctx: &egui::Context) {
         ],
     );
 
+    // Ticket W20-05: the Phosphor icon font, as a fallback right after the
+    // body face so every symbol resolves to an icon instead of a tofu box
+    // (`crate::icons`). `add_to_fonts` inserts at index 1 of Proportional
+    // (egui-phosphor-0.13.0 src/lib.rs), i.e. after the Plex body face
+    // inserted at 0 above. Fill gets its own named family for the icons
+    // whose on-state is drawn filled; it shares Regular's codepoints, so
+    // it is never a proportional fallback (it would shadow Regular).
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    fonts.font_data.insert(
+        crate::icons::FILL_FAMILY.to_owned(),
+        std::sync::Arc::new(egui_phosphor::Variant::Fill.font_data()),
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name(crate::icons::FILL_FAMILY.into()),
+        vec![
+            crate::icons::FILL_FAMILY.to_owned(),
+            "ibm_plex_sans_body".to_owned(),
+        ],
+    );
+
     ctx.set_fonts(fonts);
 }
 

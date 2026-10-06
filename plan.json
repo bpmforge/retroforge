@@ -8465,10 +8465,11 @@
    "glyphs_render.rs scans every .rs under crates/retroforge/src for non-ASCII characters and \\u{..} escapes inside string literals and asserts each exists in the installed fonts; a self-test proves the scan finds a known character"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-05."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-05.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). egui-phosphor =0.13.0 (regular+fill; 0.14 needs egui 0.36) with a TECH_STACK §2 'Icons' row; cargo deny check licenses 'licenses ok' before and after. theme::install_fonts adds Phosphor Regular at Proportional index 1 (after Plex body) and Fill as its own named family. New crate::icons: role-named constants + icon_button/icon_toggle/icon_label that give icon-only widgets a real accessible name (the favourite star's AccessKit name was the bare glyph). Replaced: grid/list toggle (were tofu, visible in target/ui-renders/home-populated.png before/after), favourite star (filled vs outline -- shape, not colour), profile/has-states/enhanced-set badges, profile chip, contains-mods/truncated/muted warnings, toast icons, upscale-studio arrows, and the honesty badge's lightning (badge-format tests updated deliberately). PROPORTIONAL_GLYPHS trimmed to punctuation. tests/glyphs_render.rs: new scan of every string/char literal in src/ (comments and #[cfg(test)] modules skipped; scanner loops advance on every arm per law 8) against the APP's installed fonts -- it failed first on 8 real tofu chars (U+2139 U+2261 U+25A6 U+25C6 U+26A0 U+26A1 U+2B50 U+2B51), now green; plus a self-test that the scan finds known chars and ignores comments. context_menu_and_game_settings.rs now queries the star by its accessible name."
   ]
  },
  {

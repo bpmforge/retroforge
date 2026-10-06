@@ -111,19 +111,24 @@ fn context_menu_and_one_game_settings_window() {
         .rect()
         .center();
     assert!(
-        harness.query_by_label("\u{2606}").is_some(),
-        "unfavourited star (☆) must be showing before the right-click"
+        harness.query_by_label("Favourite").is_some(),
+        "the unfavourited star (accessible name \"Favourite\") must be showing before the right-click"
     );
     right_click(&mut harness, title_pos);
     harness.run_steps(2);
+    // Two nodes are named "Favourite" now (ticket W20-05 gave the row's
+    // icon-only star button a real accessible name): the row's star and
+    // the context menu's item. The menu opened last, so its node is last.
     harness
-        .query_by_label("Favourite")
+        .query_all_by_label("Favourite")
+        .last()
         .expect("the context menu's Favourite item")
         .click();
     harness.run_steps(2);
     assert!(
-        harness.query_by_label("\u{2b50}").is_some(),
-        "the row's star must flip to favourited (⭐) after the context menu's Favourite item"
+        harness.query_by_label("Unfavourite").is_some(),
+        "the row's star must flip to favourited (accessible name \"Unfavourite\") after the \
+         context menu's Favourite item"
     );
 
     // ---- acceptance 3/4: "Game settings…" from the Enhance menu opens

@@ -150,7 +150,14 @@ const PROFILE_CHIP_BUDGET: usize = 20;
 ///
 /// Verified present (wider than this list): `·` `…` `—` `○` `■` `★` `☆` `›`.
 /// Verified ABSENT, do not use: `◆` `◇` `●` `▸` `▪` `▫` `□`.
-pub const PROPORTIONAL_GLYPHS: &str = "\u{b7}\u{2026}\u{2014}\u{2605}\u{2606}\u{203a}";
+///
+/// **Ticket W20-05: symbols no longer come from here at all.** Every
+/// symbol is a Phosphor icon named by role in [`crate::icons`]; this list
+/// is now typographic punctuation only (`★`/`☆` left it with the profile
+/// chip). And it is no longer the only guard: `tests/glyphs_render.rs`
+/// scans every string literal in `src/` against the installed fonts, so a
+/// character missing from this list can no longer ship as tofu unseen.
+pub const PROPORTIONAL_GLYPHS: &str = "\u{b7}\u{2026}\u{2014}\u{203a}";
 
 /// The non-ASCII characters drawn in the **monospace** font.
 ///
@@ -2255,10 +2262,11 @@ impl RetroForgeApp {
                                         if saved.contains_mods {
                                             let _ = ui.selectable_label(
                                                 false,
-                                                egui::RichText::new("\u{26a0} contains mods")
-                                                    .color(egui::Color32::from_rgb(
-                                                        0xE0, 0x80, 0x30,
-                                                    )),
+                                                egui::RichText::new(format!(
+                                                    "{} contains mods",
+                                                    crate::icons::WARNING
+                                                ))
+                                                .color(egui::Color32::from_rgb(0xE0, 0x80, 0x30)),
                                             );
                                         }
                                         badge(ui, Self::format_timestamp(saved.timestamp));
@@ -4516,14 +4524,20 @@ impl RetroForgeApp {
                     || path.display().to_string(),
                     |s| s.to_string_lossy().into(),
                 );
-                ui.add(readout(format!("\u{2605} {}", elide_front(&name))))
-                    .on_hover_text(path.display().to_string());
+                ui.add(readout(format!(
+                    "{} {}",
+                    crate::icons::PROFILE,
+                    elide_front(&name)
+                )))
+                .on_hover_text(path.display().to_string());
             }
             (None, true) => {
-                ui.add(readout("\u{2605} profile"));
+                ui.add(readout(format!("{} profile", crate::icons::PROFILE)));
             }
             (None, false) => {
-                ui.add(readout(egui::RichText::new("\u{2606} no profile").weak()));
+                ui.add(readout(
+                    egui::RichText::new(format!("{} no profile", crate::icons::PROFILE)).weak(),
+                ));
             }
         }
     }
@@ -5605,24 +5619,24 @@ impl RetroForgeApp {
                 // survive a restart without the user ever opening
                 // Settings.
                 let mut view_changed = false;
-                if ui
-                    .selectable_label(
-                        self.library_view == crate::library::LibraryView::List,
-                        "\u{2261}",
-                    )
-                    .on_hover_text("List view")
-                    .clicked()
+                if crate::icons::icon_toggle(
+                    ui,
+                    self.library_view == crate::library::LibraryView::List,
+                    crate::icons::LIST_VIEW,
+                    "List view",
+                )
+                .clicked()
                 {
                     self.library_view = crate::library::LibraryView::List;
                     view_changed = true;
                 }
-                if ui
-                    .selectable_label(
-                        self.library_view == crate::library::LibraryView::Grid,
-                        "\u{25A6}",
-                    )
-                    .on_hover_text("Grid view")
-                    .clicked()
+                if crate::icons::icon_toggle(
+                    ui,
+                    self.library_view == crate::library::LibraryView::Grid,
+                    crate::icons::GRID_VIEW,
+                    "Grid view",
+                )
+                .clicked()
                 {
                     self.library_view = crate::library::LibraryView::Grid;
                     view_changed = true;
@@ -5934,15 +5948,19 @@ impl RetroForgeApp {
                                                     .library_meta
                                                     .get(normalized_sha256)
                                                     .is_some_and(|m| m.favourite);
-                                                let star =
-                                                    if favourite { "\u{2b50}" } else { "\u{2606}" };
-                                                if ui
-                                                    .button(star)
-                                                    .on_hover_text(if favourite {
-                                                        "Unfavourite"
-                                                    } else {
-                                                        "Favourite"
-                                                    })
+                                                // W20-05: filled when on, outline when off —
+                                                // shape, not colour alone.
+                                                let star = if favourite {
+                                                    crate::icons::filled(crate::icons::FAVOURITE)
+                                                } else {
+                                                    egui::RichText::new(crate::icons::FAVOURITE)
+                                                };
+                                                let label = if favourite {
+                                                    "Unfavourite"
+                                                } else {
+                                                    "Favourite"
+                                                };
+                                                if crate::icons::icon_button(ui, star, label)
                                                     .clicked()
                                                 {
                                                     self.toggle_favourite(normalized_sha256);
@@ -6243,15 +6261,19 @@ impl RetroForgeApp {
                                                     .library_meta
                                                     .get(normalized_sha256)
                                                     .is_some_and(|m| m.favourite);
-                                                let star =
-                                                    if favourite { "\u{2b50}" } else { "\u{2606}" };
-                                                if ui
-                                                    .button(star)
-                                                    .on_hover_text(if favourite {
-                                                        "Unfavourite"
-                                                    } else {
-                                                        "Favourite"
-                                                    })
+                                                // W20-05: filled when on, outline when off —
+                                                // shape, not colour alone.
+                                                let star = if favourite {
+                                                    crate::icons::filled(crate::icons::FAVOURITE)
+                                                } else {
+                                                    egui::RichText::new(crate::icons::FAVOURITE)
+                                                };
+                                                let label = if favourite {
+                                                    "Unfavourite"
+                                                } else {
+                                                    "Favourite"
+                                                };
+                                                if crate::icons::icon_button(ui, star, label)
                                                     .clicked()
                                                 {
                                                     self.toggle_favourite(normalized_sha256);
@@ -6264,24 +6286,33 @@ impl RetroForgeApp {
                                                     .profile_matched
                                                     .contains(normalized_sha256)
                                                 {
-                                                    ui.label("\u{2b51}")
-                                                        .on_hover_text("Profile matched");
+                                                    crate::icons::icon_label(
+                                                        ui,
+                                                        crate::icons::PROFILE,
+                                                        "Profile matched",
+                                                    );
                                                 }
                                                 if self
                                                     .library_badges
                                                     .has_states
                                                     .contains(normalized_sha256)
                                                 {
-                                                    ui.label("\u{2713}")
-                                                        .on_hover_text("Has save states");
+                                                    crate::icons::icon_label(
+                                                        ui,
+                                                        crate::icons::HAS_STATES,
+                                                        "Has save states",
+                                                    );
                                                 }
                                                 if self
                                                     .library_badges
                                                     .enhanced
                                                     .contains(normalized_sha256)
                                                 {
-                                                    ui.label("\u{25c6}")
-                                                        .on_hover_text("Enhanced settings on");
+                                                    crate::icons::icon_label(
+                                                        ui,
+                                                        crate::icons::ENHANCED_SET,
+                                                        "Enhanced settings on",
+                                                    );
                                                 }
                                             }
                                             crate::library::EntryIdentity::Unrecognized {
@@ -8137,7 +8168,8 @@ impl RetroForgeApp {
                                 }
                                 if let crate::upscale_studio::Decision::Replaced(path) = decision {
                                     ui.label(format!(
-                                        "\u{2192} {}",
+                                        "{} {}",
+                                        crate::icons::ARROW,
                                         path.file_name().map_or_else(
                                             || path.display().to_string(),
                                             |n| n.to_string_lossy().to_string()
@@ -8160,7 +8192,7 @@ impl RetroForgeApp {
                         }
                     }
                     if let Some(dir) = &self.upscale_studio_write_dir {
-                        ui.label(format!("\u{2192} {}", dir.display()));
+                        ui.label(format!("{} {}", crate::icons::ARROW, dir.display()));
                     }
                 });
             });

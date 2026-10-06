@@ -1408,7 +1408,8 @@ fn trace_ui(
         ui.label(format!("{} entries", stats.held));
         if stats.dropped_from_scrollback > 0 {
             ui.label(format!(
-                "\u{2022} {} scrolled past",
+                "{} {} scrolled past",
+                crate::icons::BULLET,
                 stats.dropped_from_scrollback
             ));
         }
@@ -1420,7 +1421,8 @@ fn trace_ui(
             ui.colored_label(
                 egui::Color32::from_rgb(0xE0, 0x80, 0x30),
                 format!(
-                    "\u{26a0} TRUNCATED — {} entries lost; the trace has gaps",
+                    "{} TRUNCATED — {} entries lost; the trace has gaps",
+                    crate::icons::WARNING,
                     stats.dropped_in_transport
                 ),
             );
@@ -1551,7 +1553,7 @@ fn audio_ui(ui: &mut egui::Ui, data: Option<&mut AudioPanelData>) {
         if !data.mute.anything_audible() {
             let _ = ui.selectable_label(
                 false,
-                egui::RichText::new("\u{26a0} everything is muted")
+                egui::RichText::new(format!("{} everything is muted", crate::icons::WARNING))
                     .color(egui::Color32::from_rgb(0xE0, 0x80, 0x30)),
             );
         }

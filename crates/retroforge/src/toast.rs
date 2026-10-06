@@ -66,9 +66,9 @@ pub enum ToastKind {
 impl ToastKind {
     fn glyph(self) -> &'static str {
         match self {
-            ToastKind::Info => "\u{2139}", // information source
-            ToastKind::Success => "\u{2713}",
-            ToastKind::Error => "\u{26a0}",
+            ToastKind::Info => crate::icons::INFO,
+            ToastKind::Success => crate::icons::SUCCESS,
+            ToastKind::Error => crate::icons::WARNING,
         }
     }
 }

@@ -247,7 +247,11 @@ pub fn badge_text(
         .filter(|r| r.effective())
         .count();
     if mode.enhancement_active() && active > 0 {
-        format!("{console} · {} \u{26a1}({active})", mode.display_name())
+        format!(
+            "{console} · {} {}({active})",
+            mode.display_name(),
+            crate::icons::ENHANCED_BADGE
+        )
     } else {
         format!("{console} · {}", mode.display_name())
     }
@@ -260,7 +264,7 @@ pub fn badge_text(
 /// Video (`crate::settings::VideoSettings::metalfx`), not one of
 /// [`feature_rows`]'s enhancement-ladder entries, so it does not belong in
 /// that fn's "active count" at all (CLAUDE.md law 6 -- Accuracy Mode may
-/// use it, so folding it into the enhancement badge's `\u{26a1}(N)` count
+/// use it, so folding it into the enhancement badge's `\u{e2de}(N)` count
 /// would misreport an unmodified-simulation frame as "enhanced"). Suffixed
 /// after whatever [`badge_text`] already produced (e.g. `"NES · Accuracy"`
 /// -> `"NES · Accuracy · MetalFX"`), so the two facts -- "which mode/how
@@ -464,19 +468,19 @@ mod tests {
         let s = settings(Mode::Enhanced);
         assert_eq!(
             badge_text("NES", &s, false, false, false),
-            "NES · Enhanced \u{26a1}(2)",
+            "NES · Enhanced \u{e2de}(2)",
             "the two generic features run; the two profile ones cannot"
         );
         // Game-Aware WITH a profile runs all four.
         let ga = settings(Mode::GameAware);
         assert_eq!(
             badge_text("NES", &ga, true, false, false),
-            "NES · Game-Aware \u{26a1}(4)"
+            "NES · Game-Aware \u{e2de}(4)"
         );
         // Game-Aware WITHOUT a profile falls back to the generic two.
         assert_eq!(
             badge_text("NES", &ga, false, false, false),
-            "NES · Game-Aware \u{26a1}(2)"
+            "NES · Game-Aware \u{e2de}(2)"
         );
     }
 
