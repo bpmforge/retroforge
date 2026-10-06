@@ -8358,6 +8358,480 @@
    "W14-59 FILED 2026-09-23 by the orchestrator from the post-W14-50 NES refused list (49). Remaining refused after W14-58/W14-59: Racermate 168 x6, Action 52/Cheetahmen 228 x4, mapper 268 x6 and 446 x4 (modern re-release boards), Maxi 15 234 x2, Buzz & Waldog/Street Hero 156 x2, and singletons (41, 46, 68, 75 VRC1, 81, 86, 105 NWC, 158, 173, 19 Namco 163, 290, 389, 470, 487, 493, 555) — each its own ticket if ever wanted.",
    "W14-59 done 2026-09-23: CPROM (mapper 13) and UNROM 512 (mapper 30) implemented self-contained (no sight of W14-58) via one new default-no-op `Mapper::chr_writeback` hook (crates/rf-nes/src/mappers/mod.rs) that NesBus feeds `ppu.chr()` into at all four push sites BEFORE the mapper's own write handler can move the selected bank -- see docs/TESTING.md's new W14-59 section for the ordering argument and both mappers' module docs. NES 2.0 exponent-multiplier sizes decoded in rf-cart with checked_shl/checked_mul and a named 64 MiB InvalidHeader guard; parse_nes_header now carries byte sizes end-to-end instead of bank counts. The old `nes2_exponent_notation_is_reported_not_panicked` test was renamed to `nes2_exponent_notation_is_decoded_not_refused` (its assertion is the opposite of what the old name said) rather than kept verbatim -- content matches the acceptance criterion (asserts the decoded size). UNROM 512's one-screen-hardwired header signalling (flags6 bit3-with-bit0) is implemented per the ticket brief but not independently verified against a fetched nesdev page (none cached locally) -- named as an honest gap in both the module doc and docs/TESTING.md. Gate: cargo fmt --check, cargo clippy --workspace -D warnings, scripts/validate-arch.sh all clean; cargo test -p rf-nes -p rf-cart: rf-cart 91 passed (90 lib + 1 integration), rf-nes 383 passed (378 lib + 1 ignored + 4 emulator-core-contract), 0 failed. Full `cargo test --workspace` left to the orchestrator per instructions. Two pre-existing tests that used mapper 13 as a stand-in unsupported mapper were retargeted to mapper 15 (rf-cart's mapper28_tests, rf-nes's a_mapper_rf_cart_cannot_identify_is_refused_not_loaded). Census of the four named archives left to the orchestrator."
   ]
+ },
+ {
+  "id": "W20-01",
+  "title": "Scale mode and V-sync take effect in the play view",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "the play view sizes every ActiveView arm from settings.video.scale_mode via a pure play_rect(available, frame, mode) function: Integer (default, vertical whole multiple, horizontal y_scale*8/7 per RENDERER.md §2 rule (b)), Fit, Stretch; unit tests cover each mode at three window sizes",
+   "V-sync applies live through eframe::Frame::set_wgpu_surface_config (AutoVsync/AutoNoVsync) and at startup through NativeOptions::wgpu_options; the \"takes effect on restart\" copy is removed",
+   "hud_fits.rs and renders.rs stay green; a kittest asserts the frame image rect is an integer multiple vertically in Integer mode"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-01."
+  ]
+ },
+ {
+  "id": "W20-02",
+  "title": "Shader picker wired to rf_renderer::ShaderChain with per-shader parameters",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-01"
+  ],
+  "acceptance": [
+   "Settings › Video replaces the free-text shader field with a picker over None + every ShaderKind (manifest display_name), and sliders generated from that shader's ShaderParamDescriptor list; values persist per shader in settings.toml",
+   "the app constructs one ShaderChain from its shared GpuContext and runs the selected stage over the presented frame at an integer output scale (cap 4x), within a budget gate; failure falls back to the plain frame and is reported once, never a black screen",
+   "the shader is presentation, not enhancement: it does not light the honesty badge; compare/screenshot original buffers stay pre-shader",
+   "a GPU test (skips without an adapter) asserts selecting Scanlines changes the presented texture and None restores byte-identical output"
+  ],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-02."
+  ]
+ },
+ {
+  "id": "W20-03",
+  "title": "Opening the in-game menu pauses; closing it resumes; pad Home and Select+Start open it",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "Esc, pad Home, or Select+Start held together opens the menu and sends CoreCommand::Pause if the core was running; closing it by any route resumes only if the menu caused the pause",
+   "Space keeps its existing pause-toggle meaning without opening the menu",
+   "a kittest scenario asserts the pause/resume commands and that a game already paused stays paused after the menu closes"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-03."
+  ]
+ },
+ {
+  "id": "W20-04",
+  "title": "Borderless fullscreen toggle and remembered window size",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "F11 and Cmd+Ctrl+F (new remappable AppAction::Fullscreen) toggle ViewportCommand::Fullscreen; also reachable from the View menu and the in-game menu",
+   "the windowed inner size is persisted in settings.toml and restored at startup; a size smaller than MIN_WINDOW_SIZE is clamped",
+   "app_hotkeys.rs covers the new action's default binding and persistence round-trip"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-04."
+  ]
+ },
+ {
+  "id": "W20-05",
+  "title": "Phosphor icon font replaces every symbol glyph; the glyph test covers every drawn character",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**",
+   "deny.toml"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "egui-phosphor =0.13.0 (egui 0.35; MIT OR Apache-2.0, font MIT) added with a TECH_STACK §2 row; cargo deny check licenses run before and after with the result recorded",
+   "Phosphor Regular is registered as a proportional fallback after the body face in theme::install_fonts",
+   "every symbol glyph in crates/retroforge/src string literals (grid/list, favourite, profile, states, enhanced-set, warning, info, success, bullet, arrow, the badge lightning) is a Phosphor icon; the badge-format tests are updated deliberately",
+   "glyphs_render.rs scans every .rs under crates/retroforge/src for non-ASCII characters and \\u{..} escapes inside string literals and asserts each exists in the installed fonts; a self-test proves the scan finds a known character"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-05."
+  ]
+ },
+ {
+  "id": "W20-06",
+  "title": "Save-state window draws slot thumbnails",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-05"
+  ],
+  "acceptance": [
+   "each slot is a card showing the slot's stored screenshot as a texture, slot number, relative date and mode-at-save as plain labels; empty slots show an empty card",
+   "thumbnails are decoded once per slot change, not per frame",
+   "save_state.rs or a new kittest asserts a saved slot exposes an image widget and an empty slot does not"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-06."
+  ]
+ },
+ {
+  "id": "W20-07",
+  "title": "Run/Step controls and the frame/scanline readout move into the Debug workspace",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "the player status bar no longer shows Run, Step Frame, Step Scanline or the f/sl readout; the Debug workspace toolbar does",
+   "with no ROM open the status bar shows nothing that requires one",
+   "Space still pauses; hud_fits.rs, exec_control.rs and ui_smoke.rs stay green"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-07."
+  ]
+ },
+ {
+  "id": "W20-08",
+  "title": "Player-facing settings copy, audio device dropdown, Light theme",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "no player-facing Settings string contains a ticket id or module path; a test walks the rendered Settings tabs' labels and fails on /W\\d+-\\d+/ or \"crate::\"",
+   "audio output device is a dropdown of enumerated devices when the audio feature is on, and a disabled \"System default\" dropdown otherwise",
+   "Settings › Accessibility offers Theme: Dark / Light / High contrast, wired to the existing palettes and tokens; persisted"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-08."
+  ]
+ },
+ {
+  "id": "W20-09",
+  "title": "Audit honesty fixes: full-level, widescreen reopen, fog, MetalFX suffix, HD pack route",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "Full-level view is Available only when a level actually decoded (LevelSession present); otherwise it states why and never counts toward the badge (a test on a matched profile without [decode] fails first)",
+   "Widescreen: decoded is re-applied on ROM open when saved on, and is unavailable (\"SNES only\") on NES",
+   "Atmosphere: fog is not shown ON or badge-counted while no FogPass runs in the live view",
+   "the MetalFX badge suffix appears only when a MetalFxScaler processed the presented frame",
+   "File › Load HD pack… / Remove HD pack call load_hd_pack/clear_hd_pack and report the import summary; disabled on SNES",
+   "docs/design/ENHANCEMENT_AUDIT.md rows A-D are updated to point at this ticket's commits"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-09."
+  ]
+ },
+ {
+  "id": "W20-10",
+  "title": "Quick Menu replaces the Esc window",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-03",
+   "W20-06"
+  ],
+  "acceptance": [
+   "opens paused over the dimmed frozen frame; left rail Resume, Save state, Load state, Rewind, Display, Enhancements, Controls, Settings, Reset, Quit to library",
+   "Save/Load sections show the slot thumbnail grid; a pad hint bar names A/B/shoulder actions",
+   "the mode pill at the top shows the honesty badge text whenever any enhancement is active",
+   "navigable by keyboard and pad through ui_nav; a kittest walks every section and asserts the badge text matches badge_text_for_test"
+  ],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-10."
+  ]
+ },
+ {
+  "id": "W20-11",
+  "title": "Menu and status bars auto-hide in play",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-07"
+  ],
+  "acceptance": [
+   "with a core running, unpaused, and no window focused, both bars hide after 2.5 s without pointer movement and return on pointer near the edge or a menu action",
+   "never hidden while paused, on the library, or within 3 s of a honesty-badge change",
+   "a kittest advances time and asserts both hide and re-show conditions"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-11."
+  ]
+ },
+ {
+  "id": "W20-12",
+  "title": "On-screen display cards for save, load, screenshot, slot change and fast-forward",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-06"
+  ],
+  "acceptance": [
+   "save/load/screenshot/slot-change/fast-forward events show a 2 s fading card over the play rect, with the slot thumbnail where one exists",
+   "these events no longer rely on the status string; library-level events keep toasts",
+   "a kittest asserts a card appears after a save and is gone after its lifetime"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-12."
+  ]
+ },
+ {
+  "id": "W20-13",
+  "title": "Rewind hotkey and scrub bar over rf_state::rewind::RewindRing",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-10"
+  ],
+  "acceptance": [
+   "Settings toggle (off by default) with the memory cost shown; when on, the app feeds RewindRing at a fixed interval from the core's state snapshots",
+   "holding the new remappable AppAction::Rewind (default Backspace) steps back through the ring via the same load path as Load State; a scrub bar shows extent and position while held",
+   "a determinism test: rewind N steps then replay the same input reproduces the original state hash"
+  ],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-13."
+  ]
+ },
+ {
+  "id": "W20-14",
+  "title": "Recording start/stop hotkey wired to crate::recording::Recorder",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-12"
+  ],
+  "acceptance": [
+   "new remappable AppAction::Record (default F10) starts/stops a Recorder on the presented frame, with a size limit",
+   "while recording an OSD indicator shows elapsed time and estimated size; on stop the APNG is written to the screenshots folder and an OSD card names it",
+   "a test records a few frames through the app and asserts a decodable APNG with the right frame count"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-14."
+  ]
+ },
+ {
+  "id": "W20-15",
+  "title": "Optional performance overlay and input display",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-07"
+  ],
+  "acceptance": [
+   "Settings toggles (off by default) for a corner overlay with FPS, a 120-frame frame-time sparkline and audio buffer fill, and an input display of the pad state sent to the core",
+   "neither overlay is ever painted into captures or compare buffers"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-15."
+  ]
+ },
+ {
+  "id": "W20-16",
+  "title": "Hold-to-peek as an animated wipe",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "holding peek animates a vertical wipe between enhanced and original over ~200 ms using the existing compare-split composition, and back on release",
+   "no effect in Accuracy mode; badge behaviour unchanged"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §5 W20-16."
+  ]
+ },
+ {
+  "id": "W20-17",
+  "title": "Wire the safe unreachable enhancements: loading fast-forward, HUD separation, fog pass",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-09"
+  ],
+  "acceptance": [
+   "loading fast-forward (rf_enhance::loading) unpaces during profile-declared wait loops when enabled; off by default, badge-counted, ledger visible; mode-invariant state hashes unchanged",
+   "HUD separation (rf_enhance::hud) supplies the HUD band from [camera.hud] to the ultrawide/diorama path, verdict shown in the Enhancements panel",
+   "the fog pass runs in the live view under its BudgetGate when the atmosphere heuristic is Active, or the ticket records measured reasons it cannot",
+   "overlays (W8-12), smooth camera (W8-08) and interpolation (W8-09) stay unwired with reasons recorded in docs/design/ENHANCEMENT_AUDIT.md"
+  ],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-17."
+  ]
+ },
+ {
+  "id": "W20-18",
+  "title": "Player Enhancements panel",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-10",
+   "W20-17"
+  ],
+  "acceptance": [
+   "one card per feature with a before/after thumbnail pair, a plain sentence of what it does, a plain sentence of what it needs",
+   "trust ladder shown as Learning / Suggesting / On",
+   "reachable from the Quick Menu; the Enhance workspace remains the research surface"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-18."
+  ]
+ },
+ {
+  "id": "W20-19",
+  "title": "Display panel: live shader preview tiles and ambient-glow letterbox",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-02"
+  ],
+  "acceptance": [
+   "the Display section shows the current frame through each shader as small tiles, refreshed when opened",
+   "an ambient-glow option fills the letterbox with a darkened blur-free average of the frame edge colours; off by default"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-19."
+  ]
+ },
+ {
+  "id": "W20-20",
+  "title": "Library: Continue hero, shelves, enhancement chips, console spine colours",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-05"
+  ],
+  "acceptance": [
+   "a Continue hero for the most recently played game with Play and Resume (latest auto-state when one exists)",
+   "shelves for Recently played, Favourites, NES, SNES; enhancement chips on cards from the matched profile's capabilities; a console spine colour on each card from theme tokens",
+   "library_grid.rs, library_filters.rs and library_controller.rs stay green; the list view stays fully functional"
+  ],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-20."
+  ]
+ },
+ {
+  "id": "W20-21",
+  "title": "capture_tour photographs every Wave 20 surface",
+  "phase": 20,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W20-10",
+   "W20-12"
+  ],
+  "acceptance": [
+   "capture_tour.rs photographs the Quick Menu sections, OSD cards, rewind scrub bar, recording indicator, performance overlay, shader picker and shaders, auto-hidden chrome, Enhancements panel and Continue hero into target/ui-tour",
+   "every new photograph is listed in the ticket close note with what it shows; anything that only a human can judge is recorded as UNVERIFIED (by eye: Brad)"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §6 W20-21."
+  ]
  }
 ]
 }
