@@ -8510,10 +8510,11 @@
    "Space still pauses; hud_fits.rs, exec_control.rs and ui_smoke.rs stay green"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
-   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-07."
+   "FILED 2026-10-06 from the 2026-10-06 design review and docs/design/ENHANCEMENT_AUDIT.md; spec in docs/design/UX_WAVE_20.md §4 W20-07.",
+   "CLOSED 2026-10-06 (branch ui/wave-17). FOUND WHILE DOING IT: every launch path (library Play, double-click, Enter, pad A, File > Open ROM) went through open_rom_path, which opens PAUSED -- the debugger's convention -- so a player's game sat frozen until they found the status bar's Run button. Moving Run without fixing that would have made games unplayable. New RetroForgeApp::launch_rom = open_rom_path + Resume, used by the library and File > Open; it keeps opening paused when the Debug viewers window is open. open_rom_path is unchanged (tests and frame-stepping rely on it). Run/Pause (with its hover animation), Step Frame, Step Scanline and the f/sl readout moved into transport_controls(), drawn at the top of the Debug Viewers window. The status bar shows a 'Paused' chip (Phosphor PAUSE) when a loaded game is paused, and no transport at all on the library. Space still pauses (library_home's Space handler unchanged). Tests updated: ui_smoke (boot has no transport; launch_rom runs without a click; Pause/Step controls present in Debug Viewers; still running after panel toggles), library_selection (Enter-launched game is running), hud_fits/capture_tour/upscale_studio_capture_arms use resume_for_test instead of clicking Run. The honesty badge stays on the library (ui_smoke's law-6 boot assertion)."
   ]
  },
  {

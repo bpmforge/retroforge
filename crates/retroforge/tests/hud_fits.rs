@@ -262,7 +262,8 @@ fn the_hud_fits_the_window_the_app_actually_opens() {
     let rom = write_fixture_rom(&dir);
     harness.state_mut().open_rom_path(&rom);
     harness.run_steps(2);
-    harness.get_by_label("Run").click();
+    // W20-07: Run moved to the Debug viewers; start the core directly.
+    harness.state_mut().resume_for_test();
     // Run until a frame lands, so `position` and eventually `fps` are
     // populated — bounded, because a hang here is a denial of service,
     // not a failing test (project law 8).

@@ -2528,7 +2528,25 @@ impl RetroForgeApp {
         let Some(path) = rom_open::pick_rom_file() else {
             return; // user cancelled the dialog
         };
-        self.open_rom_path(&path);
+        self.launch_rom(&path);
+    }
+
+    /// Ticket W20-07: open a ROM **and play it** — what the library's
+    /// Play/double-click/Enter/pad-A and File › Open ROM… do.
+    ///
+    /// [`Self::open_rom_path`] opens paused: the debugger's convention,
+    /// so the first frame can be inspected before anything runs, and what
+    /// every test that drives the core frame-by-frame relies on. Until
+    /// W20-07 the player got that convention too — pressing Play showed a
+    /// paused game and the only way to start it was the status bar's Run
+    /// button. A player who launches a game wants to play it; the debugger
+    /// convention survives when the Debug viewers are open.
+    pub fn launch_rom(&mut self, path: &std::path::Path) {
+        self.open_rom_path(path);
+        if self.core.is_some() && !self.debug_panels.visible {
+            self.send_command(CoreCommand::Resume);
+            self.running = true;
+        }
     }
 
     /// Open a ROM by path (ticket W2-07: the library's Play button uses
@@ -4297,55 +4315,21 @@ impl RetroForgeApp {
             .frame(Self::chrome_frame(ui))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let has_core = self.core.is_some();
-                    let run_label = if self.running { "Pause" } else { "Run" };
-                    // The primary action, and the only one in the bar drawn
-                    // in the accent. Before W10-01 it was one of sixteen
-                    // identical grey rectangles; the eye had nothing to find.
-                    //
-                    // **Hand-animated, because egui will not do it for you.**
-                    // In an immediate-mode UI a button's fill is recomputed
-                    // from scratch every frame, so hover is a step function
-                    // unless something carries state across frames.
-                    // `animate_bool_responsive` is that something: it eases
-                    // toward the target over `style.animation_time` and snaps
-                    // in on the way. Applied HERE ONLY — one moving element
-                    // in a status bar is a highlight, five is a fidget.
-                    let accent = ui.visuals().selection.stroke.color;
-                    let base = ui.visuals().widgets.inactive.bg_fill;
-                    let warmth = ui
-                        .ctx()
-                        .animate_bool_responsive(egui::Id::new("run_hover"), self.run_hovered);
-                    let run = ui.add_enabled(
-                        has_core,
-                        egui::Button::new(egui::RichText::new(run_label).strong())
-                            .fill(base.lerp_to_gamma(accent, 0.30 + 0.22 * warmth))
-                            .stroke(egui::Stroke::new(1.0, accent)),
-                    );
-                    self.run_hovered = run.hovered();
-                    if run.clicked() {
-                        self.running = !self.running;
-                        self.send_command(if self.running {
-                            CoreCommand::Resume
-                        } else {
-                            CoreCommand::Pause
-                        });
-                    }
-                    if ui
-                        .add_enabled(has_core, egui::Button::new("Step Frame"))
-                        .clicked()
-                    {
-                        self.running = false;
-                        self.awaiting_stepped_frame = true;
-                        self.send_command(CoreCommand::StepFrame);
-                    }
-                    if ui
-                        .add_enabled(has_core, egui::Button::new("Step Scanline"))
-                        .clicked()
-                    {
-                        self.running = false;
-                        self.awaiting_stepped_frame = true;
-                        self.send_command(CoreCommand::StepScanline);
+                    // Ticket W20-07: Run / Step Frame / Step Scanline and
+                    // the f/sl readout moved to the Debug Viewers window
+                    // (`Self::transport_controls`). A player starts a game
+                    // by launching it (`Self::launch_rom` runs it) and
+                    // pauses with Space or the in-game menu; single-
+                    // stepping is a debugger's tool. What stays here is
+                    // the state, not the controls: a paused game says so.
+                    if self.core.is_some() && !self.running {
+                        ui.add(readout(
+                            egui::RichText::new(format!(
+                                "{} Paused",
+                                egui_phosphor::regular::PAUSE
+                            ))
+                            .strong(),
+                        ));
                     }
                     ui.separator();
 
@@ -4453,17 +4437,6 @@ impl RetroForgeApp {
                                 ui.add(readout(egui::RichText::new("FF").strong().monospace()));
                             }
                             self.profile_chip(ui);
-                            if let Some((frame, scanline)) = self.position {
-                                ui.add(readout(
-                                    egui::RichText::new(match scanline {
-                                        // ASCII only: the bundled
-                                        // monospace face has no `·`.
-                                        Some(y) => format!("f{frame} sl{y}"),
-                                        None => format!("f{frame} sl--"),
-                                    })
-                                    .monospace(),
-                                ));
-                            }
                             // FM-13 criterion 3: "view too large for GPU,
                             // reduced" — surfaced plainly, never swallowed
                             // (`Self::refresh_ultrawide_render`'s doc). The one
@@ -5495,7 +5468,7 @@ impl RetroForgeApp {
             self.rescan_library();
         }
         if let Some(path) = to_play {
-            self.open_rom_path(&path);
+            self.launch_rom(&path);
         }
     }
 
@@ -8869,6 +8842,80 @@ impl RetroForgeApp {
     /// (pattern/nametable/palette/OAM/event panels + persisted
     /// `egui_dock` layout). Same "own window, toggled by a checkbox" shape
     /// [`Self::layers_debug_window`] already uses.
+    /// Ticket W20-07: the debugger's transport — Run/Pause, Step Frame,
+    /// Step Scanline and the frame/scanline position — drawn at the top of
+    /// the Debug Viewers window rather than in the player's status bar.
+    ///
+    /// Unchanged behaviour, moved: until W20-07 these sat in the status
+    /// bar on every screen, including the library with no ROM open, where
+    /// all three were disabled buttons advertising nothing.
+    fn transport_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let has_core = self.core.is_some();
+            let run_label = if self.running { "Pause" } else { "Run" };
+            // The primary action, and the only one in the bar drawn
+            // in the accent. Before W10-01 it was one of sixteen
+            // identical grey rectangles; the eye had nothing to find.
+            //
+            // **Hand-animated, because egui will not do it for you.**
+            // In an immediate-mode UI a button's fill is recomputed
+            // from scratch every frame, so hover is a step function
+            // unless something carries state across frames.
+            // `animate_bool_responsive` is that something: it eases
+            // toward the target over `style.animation_time` and snaps
+            // in on the way. Applied HERE ONLY — one moving element
+            // in a status bar is a highlight, five is a fidget.
+            let accent = ui.visuals().selection.stroke.color;
+            let base = ui.visuals().widgets.inactive.bg_fill;
+            let warmth = ui
+                .ctx()
+                .animate_bool_responsive(egui::Id::new("run_hover"), self.run_hovered);
+            let run = ui.add_enabled(
+                has_core,
+                egui::Button::new(egui::RichText::new(run_label).strong())
+                    .fill(base.lerp_to_gamma(accent, 0.30 + 0.22 * warmth))
+                    .stroke(egui::Stroke::new(1.0, accent)),
+            );
+            self.run_hovered = run.hovered();
+            if run.clicked() {
+                self.running = !self.running;
+                self.send_command(if self.running {
+                    CoreCommand::Resume
+                } else {
+                    CoreCommand::Pause
+                });
+            }
+            if ui
+                .add_enabled(has_core, egui::Button::new("Step Frame"))
+                .clicked()
+            {
+                self.running = false;
+                self.awaiting_stepped_frame = true;
+                self.send_command(CoreCommand::StepFrame);
+            }
+            if ui
+                .add_enabled(has_core, egui::Button::new("Step Scanline"))
+                .clicked()
+            {
+                self.running = false;
+                self.awaiting_stepped_frame = true;
+                self.send_command(CoreCommand::StepScanline);
+            }
+            if let Some((frame, scanline)) = self.position {
+                ui.separator();
+                ui.add(readout(
+                    egui::RichText::new(match scanline {
+                        // ASCII only: the bundled
+                        // monospace face has no `·`.
+                        Some(y) => format!("f{frame} sl{y}"),
+                        None => format!("f{frame} sl--"),
+                    })
+                    .monospace(),
+                ));
+            }
+        });
+    }
+
     fn debug_panels_window(&mut self, ctx: &egui::Context) {
         if !self.debug_panels.visible {
             return;
@@ -8879,6 +8926,8 @@ impl RetroForgeApp {
             .resizable(true)
             .default_size([640.0, 480.0])
             .show(ctx, |ui| {
+                self.transport_controls(ui);
+                ui.separator();
                 self.debug_panels.ui(ui);
             });
     }

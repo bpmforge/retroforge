@@ -182,10 +182,16 @@ fn ui_smoke_boot_open_rom_present_a_frame_and_toggle_every_panel() {
     // The controls bar is the app's "interactive" surface; if these are
     // absent the window came up empty and every later query would be
     // querying nothing.
-    for control in ["File", "Run", "Step Frame", "Step Scanline"] {
+    assert!(
+        harness.query_by_label("File").is_some(),
+        "boot: the File menu is missing from the accessibility tree"
+    );
+    // Ticket W20-07: the transport is a debugger tool and lives in the
+    // Debug viewers window, not in the status bar of the library.
+    for control in ["Run", "Step Frame", "Step Scanline"] {
         assert!(
-            harness.query_by_label(control).is_some(),
-            "boot: control `{control}` is missing from the accessibility tree"
+            harness.query_by_label(control).is_none(),
+            "boot: `{control}` must not be in the player status bar any more"
         );
     }
 
@@ -203,7 +209,7 @@ fn ui_smoke_boot_open_rom_present_a_frame_and_toggle_every_panel() {
     // drive, so this calls what the dialog's callback calls — the same
     // body the library's Play button uses.
     let load_start = Instant::now();
-    harness.state_mut().open_rom_path(&rom);
+    harness.state_mut().launch_rom(&rom);
     harness.run_steps(2);
     assert!(
         harness.state().status().starts_with("Loaded "),
@@ -212,8 +218,7 @@ fn ui_smoke_boot_open_rom_present_a_frame_and_toggle_every_panel() {
     );
 
     // ---- first frame -----------------------------------------------
-    harness.get_by_label("Run").click();
-    harness.run_steps(2);
+    // Ticket W20-07: launching PLAYS the game — no Run click needed.
     let first_frame = wait_for_frame(&mut harness, Duration::from_secs(10));
     let rom_to_first_frame = load_start.elapsed();
     assert!(
@@ -221,13 +226,27 @@ fn ui_smoke_boot_open_rom_present_a_frame_and_toggle_every_panel() {
         "no frame reached the screen within 10 s of opening the ROM"
     );
 
-    // Clicking Run must actually have started the core, and the button
-    // must say so — a Run button that toggles nothing would still satisfy
-    // the frame assertion if a frame arrived for some other reason.
+    // Launching must actually have started the core, and the shell must
+    // believe so — no "Paused" chip, and the Debug viewers' transport
+    // button reads Pause once that window is open.
     assert!(
-        harness.query_by_label("Pause").is_some(),
-        "after Run, the transport button must read Pause"
+        harness.state().running_and_menu_for_test().0,
+        "launch did not start the core"
     );
+    assert!(
+        harness.query_by_label_contains("Paused").is_none(),
+        "a launched game must not show the Paused chip"
+    );
+    harness.state_mut().show_debug_panels_for_test(true);
+    harness.run_steps(2);
+    for control in ["Pause", "Step Frame", "Step Scanline"] {
+        assert!(
+            harness.query_by_label(control).is_some(),
+            "the Debug viewers window must carry `{control}`"
+        );
+    }
+    harness.state_mut().show_debug_panels_for_test(false);
+    harness.run_steps(2);
     // The badge still reads Accuracy: opening a ROM does not silently
     // move a fresh session out of the reference mode (law 6).
     assert!(
@@ -270,7 +289,8 @@ fn ui_smoke_boot_open_rom_present_a_frame_and_toggle_every_panel() {
     // the failure this flow exists to catch is a panel that takes the
     // shell down with it.
     assert!(
-        harness.query_by_label("Pause").is_some(),
+        harness.state().running_and_menu_for_test().0
+            && harness.query_by_label_contains("Paused").is_none(),
         "the core stopped running while panels were toggled"
     );
     assert!(

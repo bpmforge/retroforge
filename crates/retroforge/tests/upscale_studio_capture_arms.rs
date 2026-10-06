@@ -115,7 +115,8 @@ fn opening_the_studio_before_a_rom_still_captures_once_one_loads() {
     // studio capture off unless `open_rom_path` re-asserts it -----------
     harness.state_mut().open_rom_path(&rom_path);
     harness.run_steps(2);
-    harness.get_by_label("Run").click();
+    // W20-07: Run moved to the Debug viewers; start the core directly.
+    harness.state_mut().resume_for_test();
     run_emulated_frames(&mut harness, 20, Duration::from_secs(20));
     assert!(
         harness.state().has_presented_frame(),

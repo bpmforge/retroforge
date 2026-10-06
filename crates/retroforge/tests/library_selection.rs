@@ -129,6 +129,12 @@ fn double_click_enter_and_arrow_keys_all_drive_the_one_selection_state() {
         harness.query_by_label("Beta Racer").is_none(),
         "Enter must launch the row that was just selected by clicking it"
     );
+    // Ticket W20-07: launched means PLAYING — before W20-07 the game
+    // opened paused and only the status bar's Run button started it.
+    assert!(
+        harness.state().running_and_menu_for_test().0,
+        "a game launched from the library must start running"
+    );
     harness.state_mut().close_rom_for_test();
     harness.run_steps(3);
 

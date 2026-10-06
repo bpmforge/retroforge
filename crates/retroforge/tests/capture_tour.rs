@@ -130,7 +130,8 @@ fn photograph_every_major_surface() {
     // ---- the emulator, actually running -----------------------------
     harness.state_mut().open_rom_path(&rom);
     harness.run_steps(2);
-    harness.get_by_label("Run").click();
+    // W20-07: Run moved to the Debug viewers; start the core directly.
+    harness.state_mut().resume_for_test();
     // **Wall-clock, not repaints.** The first version of this loop called
     // `run_steps` 900 times and photographed a flat grey rectangle with
     // `f3 sl239` in the status bar. `run_steps` repaints the UI; the core
