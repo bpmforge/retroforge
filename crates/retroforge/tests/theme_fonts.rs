@@ -46,6 +46,41 @@ fn embedded_fonts_load_and_the_library_still_renders() {
         "theme::install_fonts must register a Name(\"display\") family; got {families:?}"
     );
 
+    // Ticket W21-01: the condensed title face is registered and lays
+    // out, and readouts are tabular — "1111" and "8888" lay out to the
+    // same width in the face `theme::numeric` names (Plex Sans's default
+    // figures), while letters do not.
+    assert!(
+        families.contains(&egui::FontFamily::Name(
+            retroforge::theme::CONDENSED_FAMILY.into()
+        )),
+        "theme::install_fonts must register the condensed family; got {families:?}"
+    );
+    let width = |text: &str, font: egui::FontId| {
+        harness.ctx.fonts_mut(|f| {
+            f.layout_no_wrap(text.to_owned(), font, egui::Color32::WHITE)
+                .size()
+                .x
+        })
+    };
+    let num = retroforge::theme::numeric(retroforge::theme::type_scale::CAPTION);
+    assert!(width("1111", num.clone()) > 0.0);
+    assert_eq!(width("1111", num.clone()), width("8888", num.clone()));
+    assert_ne!(
+        width("iiii", num.clone()),
+        width("WWWW", num),
+        "self-test: the face is proportional for letters, so the digit equality is a real check"
+    );
+    let title = retroforge::theme::condensed(retroforge::theme::type_scale::TITLE);
+    let semibold = egui::FontId::new(
+        retroforge::theme::type_scale::TITLE,
+        egui::FontFamily::Name("display".into()),
+    );
+    assert!(
+        width("Save state", title) < width("Save state", semibold),
+        "the condensed face must be narrower than the SemiBold display face"
+    );
+
     // The library is the home screen with zero clicks (ticket W10-03) —
     // a fresh config dir with no folders configured renders the first of
     // §3.1's three first-run states, exactly what `library_home.rs`

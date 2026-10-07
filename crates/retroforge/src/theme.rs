@@ -91,6 +91,120 @@ pub const SPACE: [f32; 5] = [2.0, 4.0, 6.0, 8.0, 10.0];
 /// animation" accessibility escape hatch egui itself already offers.
 pub const MODAL_FADE_SECS: f32 = 0.12;
 
+/// Ticket W21-01 (`docs/design/UX_WAVE_21.md` §4): the type scale from the
+/// 2026-10-06 design review's "Visual language" table — 12/14/16/22/32.
+/// `CAPTION` for hints and readouts, `BODY` for running text, `SUBHEAD`
+/// for card titles, `TITLE` for an overlay section title, `DISPLAY` for
+/// the library hero. Overlay surfaces name these; the shell-wide
+/// `TextStyle` sizes in `apply_theme` are left as they were (other tests
+/// measure them).
+pub mod type_scale {
+    pub const CAPTION: f32 = 12.0;
+    pub const BODY: f32 = 14.0;
+    pub const SUBHEAD: f32 = 16.0;
+    pub const TITLE: f32 = 22.0;
+    pub const DISPLAY: f32 = 32.0;
+}
+
+/// The condensed display family (IBM Plex Sans Condensed SemiBold), for
+/// overlay titles and the library hero — the review's "SemiBold Condensed
+/// for overlay titles and the hero".
+pub const CONDENSED_FAMILY: &str = "condensed";
+/// A condensed title at `size` (normally a [`type_scale`] step).
+#[must_use]
+pub fn condensed(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name(CONDENSED_FAMILY.into()))
+}
+
+/// A readout at `size`. IBM Plex Sans's default figures are already
+/// tabular (every digit the same advance — `tests/theme_fonts.rs` measures
+/// it), so a readout that changes every frame does not jitter; this names
+/// the intent at call sites rather than adding a monospaced face.
+#[must_use]
+pub fn numeric(size: f32) -> egui::FontId {
+    egui::FontId::proportional(size)
+}
+
+/// Ticket W21-01: three surface levels. `Base` is the window background
+/// (no frame drawn); `Raised` is a card; `Overlay` is anything that sits
+/// over the game (Quick Menu panel, Settings sheet, OSD card). Raised and
+/// Overlay carry a soft shadow and a 1-px inner highlight, never a hard
+/// window frame (principle 13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Elevation {
+    Base,
+    Raised,
+    Overlay,
+}
+
+impl Elevation {
+    /// The `egui::Frame` for this level in `tokens`' colours.
+    pub fn frame(self, tokens: &Tokens) -> egui::Frame {
+        let highlight = mix(tokens.surface, tokens.ink, 0.10);
+        match self {
+            Elevation::Base => egui::Frame::NONE.fill(tokens.bg),
+            Elevation::Raised => egui::Frame::NONE
+                .fill(tokens.surface)
+                .stroke(egui::Stroke::new(1.0, highlight))
+                .corner_radius(egui::CornerRadius::same(tokens.radius_md as u8))
+                .shadow(egui::Shadow {
+                    offset: [0, 2],
+                    blur: 8,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha(70),
+                })
+                .inner_margin(egui::Margin::same(tokens.space_5 as i8)),
+            Elevation::Overlay => egui::Frame::NONE
+                .fill(tokens.surface.gamma_multiply(0.94))
+                .stroke(egui::Stroke::new(1.0, highlight))
+                .corner_radius(egui::CornerRadius::same(OVERLAY_RADIUS))
+                .shadow(egui::Shadow {
+                    offset: [0, 8],
+                    blur: 24,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha(120),
+                })
+                .inner_margin(egui::Margin::same(OVERLAY_PADDING)),
+        }
+    }
+}
+
+/// Overlay corner radius and padding — larger than a card's, as in the
+/// review's mockups.
+pub const OVERLAY_RADIUS: u8 = 12;
+pub const OVERLAY_PADDING: i8 = 16;
+
+/// The scrim behind an overlay, as alpha over `bg`: 70 % (the review's
+/// "draw it stretched behind a 70% scrim").
+pub const SCRIM_ALPHA: u8 = 178;
+
+/// Ticket W21-01: motion tokens — the review's three moments. Each is
+/// read through [`motion_secs`], which returns zero when the user has
+/// turned animation off.
+pub mod motion {
+    /// Overlay open: fade plus a short rise.
+    pub const OVERLAY_OPEN_SECS: f32 = 0.12;
+    pub const OVERLAY_RISE_PX: f32 = 8.0;
+    /// Library card focus.
+    pub const CARD_FOCUS_SECS: f32 = 0.12;
+    pub const CARD_FOCUS_SCALE: f32 = 1.03;
+    /// OSD card slide-in.
+    pub const OSD_SLIDE_SECS: f32 = 0.18;
+    pub const OSD_SLIDE_PX: f32 = 12.0;
+}
+
+/// `secs`, or zero when `animation_time` is zero (egui's own "no
+/// animation" switch, which Settings › Accessibility's reduced motion
+/// sets).
+#[must_use]
+pub fn motion_secs(ctx: &egui::Context, secs: f32) -> f32 {
+    if ctx.global_style().animation_time <= 0.0 {
+        0.0
+    } else {
+        secs
+    }
+}
+
 /// The library selection ring's stroke width for a mouse/keyboard focus
 /// (ticket W15-08, `docs/design/UX_WAVE_15.md` §9) — unchanged from the
 /// literal `2.0` `library_rows`/`library_cards` drew before this ticket.
@@ -291,6 +405,14 @@ impl Tokens {
     pub fn modal_backdrop(&self) -> egui::Color32 {
         egui::Color32::from_rgba_unmultiplied(self.bg.r(), self.bg.g(), self.bg.b(), 140)
     }
+
+    /// Ticket W21-01: the overlay scrim — `bg` at [`SCRIM_ALPHA`]. Darker
+    /// than [`Self::modal_backdrop`]: a modal dims the shell behind a
+    /// question, a scrim takes the game out of focus entirely.
+    #[must_use]
+    pub fn scrim(&self) -> egui::Color32 {
+        egui::Color32::from_rgba_unmultiplied(self.bg.r(), self.bg.g(), self.bg.b(), SCRIM_ALPHA)
+    }
 }
 
 /// Whether `identity` is `console`, allowing for the case egui strips
@@ -415,6 +537,22 @@ pub fn install_fonts(ctx: &egui::Context) {
         vec![
             "ibm_plex_sans_display".to_owned(),
             "ibm_plex_sans_body".to_owned(),
+        ],
+    );
+
+    // Ticket W21-01: the condensed title face, falling back to the body
+    // face and then Phosphor for anything it lacks.
+    const CONDENSED: &[u8] = include_bytes!("../assets/fonts/IBMPlexSansCondensed-SemiBold.ttf");
+    fonts.font_data.insert(
+        "ibm_plex_sans_condensed".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(CONDENSED)),
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name(CONDENSED_FAMILY.into()),
+        vec![
+            "ibm_plex_sans_condensed".to_owned(),
+            "ibm_plex_sans_body".to_owned(),
+            "phosphor".to_owned(),
         ],
     );
 
@@ -722,5 +860,53 @@ mod tests {
             instant > 0.99,
             "animation_time == 0 must make the fade instant, got {instant}"
         );
+    }
+
+    /// Ticket W21-01: the type scale is the review's 12/14/16/22/32,
+    /// strictly increasing.
+    #[test]
+    fn type_scale_is_the_reviews() {
+        use super::type_scale::*;
+        assert_eq!(
+            [CAPTION, BODY, SUBHEAD, TITLE, DISPLAY],
+            [12.0, 14.0, 16.0, 22.0, 32.0]
+        );
+    }
+
+    /// Ticket W21-01: Raised and Overlay carry a shadow and a highlight
+    /// stroke; Overlay sits higher than Raised; Base draws no frame.
+    #[test]
+    fn elevation_levels_rise() {
+        let t = Tokens::dark();
+        let base = Elevation::Base.frame(&t);
+        let raised = Elevation::Raised.frame(&t);
+        let overlay = Elevation::Overlay.frame(&t);
+        assert_eq!(base.shadow, egui::Shadow::NONE);
+        assert_eq!(base.stroke, egui::Stroke::NONE);
+        assert!(raised.shadow.blur > 0 && raised.stroke.width > 0.0);
+        assert!(overlay.shadow.blur > raised.shadow.blur);
+        assert!(overlay.shadow.offset[1] > raised.shadow.offset[1]);
+    }
+
+    /// Ticket W21-01: the scrim is `bg` and darker than the modal backdrop.
+    #[test]
+    fn scrim_is_bg_and_darker_than_a_modal() {
+        for t in [Tokens::dark(), Tokens::light(), Tokens::high_contrast()] {
+            let s = t.scrim();
+            assert_eq!(s.a(), SCRIM_ALPHA);
+            assert!(s.a() > t.modal_backdrop().a());
+        }
+    }
+
+    /// Ticket W21-01: motion collapses to zero when animation is off.
+    #[test]
+    fn motion_respects_animation_off() {
+        let ctx = egui::Context::default();
+        assert_eq!(
+            motion_secs(&ctx, motion::OVERLAY_OPEN_SECS),
+            motion::OVERLAY_OPEN_SECS
+        );
+        ctx.all_styles_mut(|s| s.animation_time = 0.0);
+        assert_eq!(motion_secs(&ctx, motion::OVERLAY_OPEN_SECS), 0.0);
     }
 }
