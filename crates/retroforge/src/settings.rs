@@ -157,6 +157,10 @@ pub struct VideoSettings {
     /// by default; mutually exclusive with `ambient_glow` through
     /// [`VideoSettings::set_surround`].
     pub bezel: bool,
+    /// Ticket W21-12: when a game starts in a window, resize the window to
+    /// the picture so there is no black around it. On by default (Brad,
+    /// 2026-10-07).
+    pub fit_window: bool,
     /// MetalFX scaler choice (ticket W16-08). `Off` by default; see
     /// [`MetalFxSetting`].
     pub metalfx: MetalFxSetting,
@@ -176,6 +180,7 @@ impl Default for VideoSettings {
             input_display: false,
             ambient_glow: false,
             bezel: false,
+            fit_window: true,
             metalfx: MetalFxSetting::default(),
         }
     }

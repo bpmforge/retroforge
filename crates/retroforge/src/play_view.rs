@@ -246,6 +246,28 @@ pub fn crop_rows(rgba: &[u8], width: usize, rows: usize) -> &[u8] {
     &rgba[..(width * rows * 4).min(rgba.len())]
 }
 
+/// Ticket W21-12: the window inner size that makes the play area exactly
+/// the picture — the window shrinks (or grows) by however much empty
+/// space surrounds the picture now, so the scale already chosen is kept.
+/// `None` when it is already within a point of fitting, or for a
+/// degenerate input.
+#[must_use]
+pub fn fitted_window(
+    inner: egui::Vec2,
+    play_area: egui::Vec2,
+    picture: egui::Vec2,
+) -> Option<egui::Vec2> {
+    if !(picture.x >= 1.0 && picture.y >= 1.0 && inner.x > 0.0 && inner.y > 0.0) {
+        return None;
+    }
+    let spare = play_area - picture;
+    if spare.x.abs() < 1.0 && spare.y.abs() < 1.0 {
+        return None;
+    }
+    let want = (inner - spare).ceil();
+    (want.x >= 1.0 && want.y >= 1.0).then_some(want)
+}
+
 /// Ticket W21-04: what is drawn around the picture, resolved for one
 /// frame (the settings' `crate::settings::Surround` plus what it needs).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -505,5 +527,21 @@ mod tests {
         let rgba = vec![7u8; 4 * 2 * 3];
         assert_eq!(crop_rows(&rgba, 2, 2).len(), 16);
         assert_eq!(crop_rows(&rgba, 2, 9).len(), 24);
+    }
+
+    /// Ticket W21-12: the window loses exactly the empty space around the
+    /// picture; an already-fitting window is left alone.
+    #[test]
+    fn fitted_window_removes_the_borders() {
+        let inner = egui::vec2(892.0, 902.0);
+        // Menu + status bars take 66 px; the play area is the rest.
+        let area = egui::vec2(892.0, 836.0);
+        let snes_3x = egui::vec2(877.7, 672.0);
+        assert_eq!(
+            fitted_window(inner, area, snes_3x),
+            Some(egui::vec2(878.0, 738.0))
+        );
+        assert_eq!(fitted_window(inner, snes_3x, snes_3x), None);
+        assert_eq!(fitted_window(inner, area, egui::Vec2::ZERO), None);
     }
 }
