@@ -8513,7 +8513,7 @@
   "crate": "rf-snes",
   "depends_on": [],
   "points": 5,
-  "status": "todo",
+  "status": "blocked",
   "stories": [],
   "id": "W19-05",
   "title": "DSP-4 (Top Gear 3000, The Planet's Champ): refused as an unsupported chip",
@@ -8528,6 +8528,7 @@
    "Top Gear 3000 renders under census; canaries unchanged"
   ],
   "notes": [
+   "BLOCKED 2026-10-07 on documentation, on Brad's ask for the recommendation (same shape as W19-02 Cx4): no clean-room DSP-4 command set exists (see the 2026-10-06 docs check below). Top Gear 3000 stays refused by name as DSP-4. Unblocks if Brad names an approved source.",
    "DOCS CHECK 2026-10-06 (not started): fullsnes (https://problemkaputt.de/fullsnes.htm, 'DSP4 Commands (Top Gear 3000)') lists only 13h Test Transfer DATA ROM, 14h Test ROM Version (0400h=DSP4), 15h..1Fh unused and 'xxh Unknown' for every game command; it documents the 16-bit transfer convention and the FFFFh completion value. https://snes.nesdev.org/wiki/DSP-4 carries a command table, but its rows (16-bit Multiply $00, Inverse $10, Triangle $04, Radius $08, Rotate $0C, Polar $1C...) are the DSP-1 command set, not a DSP-4 one. So no clean-room DSP-4 command documentation was found; the only remaining sources are emulator implementations (not approved, D-018-style). Same shape as W19-02 (Cx4). Status left todo for Brad to rule blocked or name a source.",
    "FILED 2026-09-29 by W14-60 triage: Top Gear 3000 (USA) is refused with UnsupportedChip DSP-4 (chipset $03 with the DSP-4 signature). Real coprocessor work, comparable to W14-19/21 for DSP-1; documentation must be located and verified first."
   ]
