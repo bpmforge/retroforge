@@ -9165,6 +9165,177 @@
    "FILED 2026-10-06 by W20-13 (branch ui/wave-17, docs/design/UX_WAVE_20.md). Evidence: on RF-Scroller, saving at frames 150/157/163/170/181 then StepFrame vs ApplyState + StepFrame gives a different frame 171 (1 of 5 probes); rewound pictures show the HUD scroll split moved (target/ui-tour/20-rewind-scrub.png). PPU frame_is_odd is already saved (rf-nes/src/ppu/state.rs:212), so look at scroll/raster latches, sprite-0/overflow state, mapper IRQ counters, or the shell frame boundary (save taken after tick_running_with_input vs replay via latch_and_advance_frame).",
    "SUPERSEDED 2026-10-06 by main's W2-22 (632bc72..50a4b7a, merged into ui/wave-17): root cause Ppu::line_buffer (the partly drawn scanline 0) was not saved; PPU_ chunk v4 + v3 migration in retroforge::save_state::nes_migrations, HASH_KIND full-v2. Brad ruled 2026-10-06 that the fix happens on main, not this branch; no code under this ticket. Both acceptance tests pass here after the merge (save_load_step_reproduces_the_next_frame on main; rewinding_shows_exactly_the_frame_that_was_originally_rendered un-ignored on this branch)."
   ]
+ },
+ {
+  "id": "W21-01",
+  "title": "Visual tokens: condensed display face, type scale, elevation, scrim, motion",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "IBM Plex Sans Condensed SemiBold embedded (OFL) and registered as a named family",
+   "type scale 12/14/16/22/32 and tabular numerals for readouts exposed as theme tokens",
+   "Elevation Base/Raised/Overlay with soft shadow and 1px inner highlight, plus a scrim token",
+   "motion durations are tokens and become zero when animation_time is 0",
+   "unit tests cover the tokens; glyph/font test still green"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
+  ]
+ },
+ {
+  "id": "W21-02",
+  "title": "Quick Menu drawn as the mockup: frameless over a dimmed frozen frame",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W21-01"
+  ],
+  "acceptance": [
+   "menu covers the whole viewport on a scrim over the downscaled paused frame, built once on open",
+   "no egui window frame; menu bar and status bar hidden while it is open",
+   "each rail item shows its keyboard binding",
+   "section titles use the condensed display face",
+   "open animates (fade + rise) and is instant when animation_time is 0"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
+  ]
+ },
+ {
+  "id": "W21-03",
+  "title": "Save slots: rename, delete, overwrite with undo",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W21-02"
+  ],
+  "acceptance": [
+   "a slot can be renamed and the label persists with the state",
+   "a slot can be deleted after confirmation",
+   "saving over a used slot shows a 10 s undo toast that restores the previous state",
+   "pad hints show X delete and Y rename"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
+  ]
+ },
+ {
+  "id": "W21-04",
+  "title": "Display controls as designed: plain shader names, aspect, borders, apply-to scope",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W21-01"
+  ],
+  "acceptance": [
+   "shader tiles lead with plain names (Pixel perfect, Smooth pixels, Scanlines, CRT TV, Handheld LCD, Smoothed edges) with the technical name in small caps",
+   "Scaling and Aspect are segmented controls; Aspect offers 4:3 TV / 8:7 pixel / Widescreen, widescreen explains what it needs",
+   "Around the picture offers Black / Ambient glow / Bezel",
+   "Apply to offers This game / All of this console / Everything and the setting resolves in that order",
+   "tests cover scope resolution and every option taking effect"
+  ],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
+  ]
+ },
+ {
+  "id": "W21-05",
+  "title": "Library and Enhancements panel match the mockups",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W21-01"
+  ],
+  "acceptance": [
+   "Continue hero at mockup proportions with Resume as the primary action",
+   "shelves Recently played and Favourites above All games, pad moves within and between shelves",
+   "cards at 3:4 with console spine colour tokens and a focus scale",
+   "Enhancements section draws one card per feature with toggle and plain-word tag"
+  ],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
+  ]
+ },
+ {
+  "id": "W21-06",
+  "title": "Settings as a full sheet with search; no paths in player copy",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W21-01"
+  ],
+  "acceptance": [
+   "Settings opens as a frameless sheet over a scrim, not a floating window",
+   "a search field filters settings by label across all tabs",
+   "changing a video setting previews live behind the sheet",
+   "the status bar names the game, never a filesystem path; test greps for /var and /Users"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
+  ]
+ },
+ {
+  "id": "W21-07",
+  "title": "Tour photographs every Wave 21 surface",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W21-02",
+   "W21-03",
+   "W21-04",
+   "W21-05",
+   "W21-06"
+  ],
+  "acceptance": [
+   "capture_tour.rs photographs Quick Menu sections, slot rename/undo, Display controls, library shelves, Settings sheet and search",
+   "photos land in target/ui-tour/"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
+  ]
  }
 ]
 }
