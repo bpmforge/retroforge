@@ -9183,9 +9183,10 @@
    "unit tests cover the tokens; glyph/font test still green"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-07. theme.rs: type_scale (12/14/16/22/32), condensed() over a new Name(\"condensed\") family (IBM Plex Sans Condensed SemiBold 3.000, OFL, fetched from IBM/plex, sha256 in assets/fonts/NOTICE.md), numeric() (Plex Sans figures are already tabular, measured in tests/theme_fonts.rs, so no monospaced face was added), Elevation Base/Raised/Overlay frames, Tokens::scrim at 70%, motion tokens + motion_secs (zero when animation_time is 0). Shell-wide TextStyle sizes unchanged; consumers adopt the tokens from W21-02 on. Gate: workspace 2533 passing.",
    "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
   ]
  },
