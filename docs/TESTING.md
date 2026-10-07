@@ -11651,3 +11651,23 @@ de-flicker rebuild path and the compare/peek "original" (both rebuilt
 from indices, so they show the picture without math), and whether a
 forced-black dot keeps its own layer's `$2131` enable (it is composed as
 backdrop here).
+
+## W7-22 (2026-10-07) — SNES sound reaches the speaker
+
+W7-08 made the S-DSP correct and kept only `Apu::last_sample`, saying the
+route to `rf-audio` was not its job; nothing picked it up, so every SNES
+game was silent (and, in an `audio` build, unpaced — fixed separately in
+d2c178b). Now `Apu` queues each completed stereo sample (capped at
+`MAX_PENDING_SAMPLES`), and `SnesCore` emits them after each frame's
+picture as 48 kHz mono — the format the NES core already hands
+`CoreSink::audio` — by averaging the channels and interpolating linearly
+3 outputs per 2 inputs.
+
+Tests: `crates/rf-snes/tests/snes_emits_audio.rs` (~800 samples a frame
+over 120 frames), `core::audio_tests` (the 3:2 conversion and its phase
+across calls). Real archives over 600 frames: Super Mario World RMS 429,
+peak 5800; A Link to the Past RMS 717, peak 5320 — sound, not silence.
+
+Limits: stereo is downmixed (the host ring is mono); linear interpolation,
+not a band-limited resampler; the DSP's real ~32.04 kHz is treated as
+32 kHz (the host's rate controller absorbs the drift).
