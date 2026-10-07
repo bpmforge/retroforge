@@ -9285,7 +9285,7 @@
    "Enhancements section draws one card per feature with toggle and plain-word tag"
   ],
   "points": 5,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
