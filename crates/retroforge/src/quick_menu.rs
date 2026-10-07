@@ -83,10 +83,74 @@ impl Section {
     pub fn rail_text(self) -> String {
         format!("{}  {}", self.icon(), self.label())
     }
+
+    /// Ticket W21-02: the key shown beside this rail entry — the binding
+    /// that does the same thing outside the menu, so the menu teaches the
+    /// shortcut ("learn by seeing"). `None` where no key maps to it.
+    #[must_use]
+    pub fn key_hint(self, bindings: &crate::app_bindings::AppBindings) -> Option<String> {
+        use crate::app_bindings::AppAction;
+        let action = match self {
+            Section::Resume => return Some("Esc".to_owned()),
+            Section::Save => AppAction::SaveState,
+            Section::Load => AppAction::LoadState,
+            Section::Rewind => AppAction::Rewind,
+            _ => return None,
+        };
+        bindings.key_for(action).map(|k| k.name().to_owned())
+    }
 }
 
-/// The hint bar along the bottom: what each pad button does here.
-pub const HINT: &str = "A  Select     B  Back     LB / RB  Section     Esc  Resume";
+/// Ticket W21-02: the pad hint bar — button, its face colour (the
+/// review's A red, B yellow, X blue, Y green), and what it does here.
+pub const PAD_HINTS: [(&str, [u8; 3], &str); 3] = [
+    ("A", [0xE2, 0x6D, 0x5A], "Select"),
+    ("B", [0xE8, 0xC3, 0x4A], "Back"),
+    ("LB/RB", [0x5A, 0xA2, 0xE2], "Section"),
+];
+
+/// Ticket W21-02: how much smaller the Quick Menu backdrop is than the
+/// frame. Stretched back with linear filtering, 8x gives a soft blur of a
+/// 256x240 frame (32x30 texels) without a shader.
+pub const BACKDROP_DOWNSCALE: usize = 8;
+
+/// Box-average `rgba` (`w`x`h`, 4 bytes per pixel) down by `factor` in
+/// each direction; edge blocks that do not divide evenly are dropped.
+/// `None` for a malformed buffer, a zero factor, or a frame smaller than
+/// one block. Ranges only — no hand-indexed walk (law 8).
+#[must_use]
+pub fn downscale_box(
+    rgba: &[u8],
+    w: usize,
+    h: usize,
+    factor: usize,
+) -> Option<(Vec<u8>, usize, usize)> {
+    if factor == 0 || rgba.len() != w * h * 4 {
+        return None;
+    }
+    let (sw, sh) = (w / factor, h / factor);
+    if sw == 0 || sh == 0 {
+        return None;
+    }
+    let n = (factor * factor) as u32;
+    let mut out = Vec::with_capacity(sw * sh * 4);
+    for by in 0..sh {
+        for bx in 0..sw {
+            let mut sum = [0u32; 4];
+            for y in by * factor..(by + 1) * factor {
+                let row = (y * w + bx * factor) * 4;
+                for px in rgba[row..row + factor * 4].chunks_exact(4) {
+                    for (s, &c) in sum.iter_mut().zip(px) {
+                        *s += u32::from(c);
+                    }
+                }
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            out.extend(sum.iter().map(|s| (s / n) as u8));
+        }
+    }
+    Some((out, sw, sh))
+}
 
 #[cfg(test)]
 mod tests {
@@ -102,5 +166,36 @@ mod tests {
             Section::Resume,
             "Resume is the default focus"
         );
+    }
+
+    #[test]
+    fn downscale_averages_blocks_and_rejects_bad_input() {
+        // 4x2, factor 2: two blocks, left all 10s and 30s, right all 200.
+        let px = |v: u8| [v, v, v, 255];
+        let mut rgba = Vec::new();
+        for row in [[10, 30, 200, 200], [30, 10, 200, 200]] {
+            for v in row {
+                rgba.extend(px(v));
+            }
+        }
+        let (out, w, h) = downscale_box(&rgba, 4, 2, 2).unwrap();
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(out, vec![20, 20, 20, 255, 200, 200, 200, 255]);
+        assert!(downscale_box(&rgba, 4, 2, 0).is_none());
+        assert!(downscale_box(&rgba, 4, 2, 4).is_none());
+        assert!(downscale_box(&rgba[..8], 4, 2, 2).is_none());
+    }
+
+    #[test]
+    fn rail_shows_the_keys_that_do_the_same_thing() {
+        let b = crate::app_bindings::AppBindings::default();
+        assert_eq!(Section::Resume.key_hint(&b).as_deref(), Some("Esc"));
+        assert_eq!(
+            Section::Save.key_hint(&b),
+            b.key_for(crate::app_bindings::AppAction::SaveState)
+                .map(|k| k.name().to_owned())
+        );
+        assert!(Section::Save.key_hint(&b).is_some());
+        assert!(Section::Settings.key_hint(&b).is_none());
     }
 }
