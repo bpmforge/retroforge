@@ -9383,9 +9383,10 @@
    "tests cover the margin-free play rect"
   ],
   "points": 2,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-07. Play view: CentralPanel with Frame::NONE (panel fill kept) while a core is open, so the integer rule sees the whole area — Brad's 892x902 window now draws NES at 3x (878x720, was 2x 586x480); the library keeps its margin. Between Play and the first frame the play area shows the game title in the condensed face with \"<console> · Starting…\" under it (spoken \"Starting <game>\" so it is never mistaken for the library entry of the same name). Test: tests/play_area_is_whole.rs (3x in an 892x902 window). Gate: workspace 2544 passing.",
    "FILED 2026-10-07 from Brad's \"look at the game loading\" and a launch probe of his own SMB3 / Super Mario World zips (frames at 0/100/300/1000/3000/6000 ms)."
   ]
  },
@@ -9404,7 +9405,7 @@
    "test proves a later frame replaces the boot frame"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from Brad's \"look at the game loading\" and a launch probe of his own SMB3 / Super Mario World zips (frames at 0/100/300/1000/3000/6000 ms)."
