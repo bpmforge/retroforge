@@ -33,7 +33,7 @@ Nothing was stale: `main` (3e77778) and `~/Code/retroforge-ui`
 | Keyboard binding beside each Quick Menu item | **missing** | W21-02 |
 | Condensed SemiBold section titles, 12/14/16/22/32 type scale, tabular numerals | **missing**: Plex Sans Regular/SemiBold only, egui default sizes | W21-01 |
 | Elevation (base / raised / overlay, soft shadow, 1 px highlight), scrim | **missing** | W21-01 |
-| Motion: overlay 120 ms fade + 8 px rise, card focus scale 1.03, OSD slide | **missing** | W21-01, W21-02, W21-05 |
+| Motion: overlay 120 ms fade + 8 px rise, card focus scale 1.03, OSD slide | **missing** | W21-01, W21-02 (overlay only; see §7) |
 | Slot cards: rename, delete, overwrite with a 10 s undo | **missing** (save/load only) | W21-03 |
 | Shader tiles with plain names ("CRT TV", technical name in small caps) | tiles present, technical names only ("CRT-class") | W21-04 |
 | Shader parameter sliders | present (Settings and Display) | — |
@@ -48,7 +48,7 @@ Nothing was stale: `main` (3e77778) and `~/Code/retroforge-ui`
 | Enhancements panel: card per feature, toggle, plain tags | present as rows, not cards with tags | W21-05 |
 | Settings as a full sheet with search and live preview | **missing**: a floating window over the game | W21-06 |
 | Player copy never shows internal paths | **violated**: status bar prints `Loaded /var/folders/…` | W21-06 |
-| OSD cards / perf overlay / input display / rewind scrub | present, default styling | W21-01 tokens, W21-02 |
+| OSD cards / perf overlay / input display / rewind scrub | present, default styling | not restyled in this wave (§7) |
 
 ## 3. Principles
 
@@ -115,3 +115,8 @@ tickets carry `"stories": []`.
 - **W21-06:** search jumps to the tab holding a match rather than
   filtering widgets in place. The sheet sits between the menu bar and the
   status bar, so View › Settings still toggles it.
+- **Not restyled:** the OSD cards, performance overlay, input display and
+  rewind scrub bar keep their Wave 20 styling, and the card-focus scale and
+  OSD slide were not built; `theme::motion`'s `CARD_FOCUS_*` and
+  `OSD_SLIDE_*` tokens are defined but read by nothing yet. Next wave, or
+  delete them.
