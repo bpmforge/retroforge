@@ -9310,9 +9310,10 @@
    "the status bar names the game, never a filesystem path; test greps for /var and /Users"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-07. Settings is a frameless sheet down the right of the window (Elevation::Overlay, between the menu bar and status bar so View > Settings still toggles it), over a light scrim that leaves the picture visible so video changes preview live; Esc or a click on the scrim closes it; published to accessibility as a Window titled Settings. Condensed title, close button, tabs as a segmented control, and a search field over SETTINGS_INDEX (label + keywords, every word must match, case-insensitive) whose results jump to the tab. Status line names the game (file stem), never a path. Tests: app settings_search_matches_words_across_tabs; tests/settings_copy.rs checks every indexed label is drawn on its tab and that a search result opens its tab. Deviation: search jumps to a tab rather than filtering widgets in place. Photo: target/ui-tour/05-settings.png. UNVERIFIED (by eye: Brad). Gate: workspace 2542 passing.",
    "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
   ]
  },
@@ -9336,7 +9337,7 @@
    "photos land in target/ui-tour/"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
