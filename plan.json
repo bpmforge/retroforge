@@ -4220,6 +4220,29 @@
    ]
   },
   {
+   "id": "W7-22",
+   "title": "SNES sound reaches the speaker: the S-DSP's 32 kHz stereo output is emitted through CoreSink::audio as 48 kHz mono",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-snes/**",
+    "crates/retroforge/**",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "rf-snes queues every completed DSP sample (bounded) and emits it per frame through CoreSink::audio at rf_audio::CORE_SAMPLE_RATE, mono, the format the NES core already uses",
+    "a core-level test sees ~800 samples per frame; the 32->48 kHz conversion is unit-tested",
+    "limits recorded: stereo is downmixed (the host ring is mono), linear interpolation rather than a band-limited resampler"
+   ],
+   "points": 3,
+   "status": "in_progress",
+   "stories": [],
+   "notes": [
+    "FILED 2026-10-07 from Brad playing SNES with no sound. W7-08 kept only Apu::last_sample and said routing to rf-audio was not its job; no ticket picked it up, and rf-snes never called sink.audio. In an audio build that also left frames unpaced (fixed separately on main, d2c178b)."
+   ]
+  },
+  {
    "id": "W7-09",
    "title": "SNES save states: .rfstate chunks for the SNES core",
    "phase": 7,
