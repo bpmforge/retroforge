@@ -58,11 +58,25 @@ fn no_settings_tab_shows_a_ticket_id_or_module_path() {
     harness.run_steps(2);
 
     let mut seen = 0;
+    let index = retroforge::app::settings_index_for_test();
     for tab in ["Video", "Audio", "Paths", "Accessibility"] {
         harness.get_by_label(tab).click();
         harness.run_steps(3);
         let all = texts(&harness);
         seen += all.len();
+        // Ticket W21-06: every setting the search can jump to is on its
+        // tab ("Apply to" only exists with a game open; MetalFX only in a
+        // metalfx build).
+        for (label, _) in index
+            .iter()
+            .filter(|(l, t)| *t == tab && !matches!(*l, "Apply to" | "MetalFX"))
+        {
+            assert!(
+                all.iter()
+                    .any(|t| t.to_lowercase().contains(&label.to_lowercase())),
+                "search names {label:?} on {tab}, but {tab} does not draw it: {all:?}"
+            );
+        }
         let bad: Vec<&String> = all.iter().filter(|t| looks_internal(t)).collect();
         assert!(
             bad.is_empty(),
@@ -72,6 +86,25 @@ fn no_settings_tab_shows_a_ticket_id_or_module_path() {
     assert!(
         seen > 40,
         "the walk read almost nothing ({seen} texts) — it is not looking"
+    );
+
+    // Ticket W21-06: searching finds a setting on another tab and jumps
+    // there.
+    harness.get_by_label("Accessibility").click();
+    harness.run_steps(2);
+    harness
+        .get_by_role(eframe::egui::accesskit::Role::TextInput)
+        .click();
+    harness.run_steps(1);
+    harness
+        .get_by_role(eframe::egui::accesskit::Role::TextInput)
+        .type_text("crt");
+    harness.run_steps(2);
+    harness.get_by_label("Shader  \u{b7}  Video").click();
+    harness.run_steps(2);
+    assert!(
+        texts(&harness).iter().any(|t| t == "Shader"),
+        "the search result opened the Video tab"
     );
 
     // The Light theme is selectable (W20-08) and the Audio device is a

@@ -286,9 +286,10 @@ fn the_hud_fits_the_window_the_app_actually_opens() {
 
     // ---- 3b. a ROM at a DEEP path ----------------------------------
     //
-    // The status line is `format!("Loaded {}", path.display())`, so its
-    // width is decided by the user's directory depth, not by this
-    // codebase. A fixture called `fixture.nes` two levels down would keep
+    // The status line was `format!("Loaded {}", path.display())` until
+    // W21-06 (it now names the game, not the path), so its width was
+    // decided by the user's directory depth, not by this codebase. Kept:
+    // a deep path must still never break the bar. A fixture called `fixture.nes` two levels down would keep
     // this green forever while a real library — `~/Games/Consoles/NES/
     // Licensed/...` — re-created W10-01's exact failure at run time. This
     // is the case that makes `app::elide_front` load-bearing rather than

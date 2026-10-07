@@ -251,7 +251,7 @@ fn elide_front(text: &str) -> std::borrow::Cow<'_, str> {
 /// Settings tree). Input has its own window (W2-06's Controls) and Plugins
 /// belongs to W4-04, so this build's tabs are the three W2-08 owns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsTab {
+pub(crate) enum SettingsTab {
     Video,
     Audio,
     Paths,
@@ -259,6 +259,125 @@ enum SettingsTab {
     /// scale and a high-contrast palette and no way for a user to reach
     /// either. This tab is that way.
     Accessibility,
+}
+
+impl SettingsTab {
+    const ALL: [SettingsTab; 4] = [
+        SettingsTab::Video,
+        SettingsTab::Audio,
+        SettingsTab::Paths,
+        SettingsTab::Accessibility,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Video => "Video",
+            SettingsTab::Audio => "Audio",
+            SettingsTab::Paths => "Paths",
+            SettingsTab::Accessibility => "Accessibility",
+        }
+    }
+}
+
+/// Ticket W21-06: every setting a player can look for, with the tab that
+/// holds it and the other words they might type. Kept beside the tabs it
+/// indexes; `tests::settings_index_names_real_controls` checks that each
+/// label is drawn by the Settings sheet.
+const SETTINGS_INDEX: &[(&str, SettingsTab, &str)] = &[
+    (
+        "Apply to",
+        SettingsTab::Video,
+        "this game console everything scope",
+    ),
+    (
+        "Scaling",
+        SettingsTab::Video,
+        "integer fit stretch size zoom",
+    ),
+    (
+        "Aspect",
+        SettingsTab::Video,
+        "pixel shape tv square 8:7 4:3",
+    ),
+    (
+        "Around the picture",
+        SettingsTab::Video,
+        "black ambient glow bezel border letterbox",
+    ),
+    ("Performance overlay", SettingsTab::Video, "fps frame time"),
+    (
+        "Show controller input",
+        SettingsTab::Video,
+        "input display buttons pad",
+    ),
+    (
+        "Shader",
+        SettingsTab::Video,
+        "crt scanlines lcd filter smooth",
+    ),
+    ("V-sync", SettingsTab::Video, "vsync tearing latency"),
+    ("MetalFX", SettingsTab::Video, "upscale scaler"),
+    (
+        "Output device",
+        SettingsTab::Audio,
+        "speaker headphones sound",
+    ),
+    ("Volume", SettingsTab::Audio, "loudness sound mute"),
+    ("Buffer (ms)", SettingsTab::Audio, "latency crackle"),
+    (
+        "Library folders",
+        SettingsTab::Paths,
+        "roms games directory scan",
+    ),
+    ("Art folder", SettingsTab::Paths, "box art covers"),
+    (
+        "Fetch box art from the internet",
+        SettingsTab::Paths,
+        "download covers thumbnails",
+    ),
+    (
+        "UI scale",
+        SettingsTab::Accessibility,
+        "size zoom text bigger",
+    ),
+    (
+        "Theme",
+        SettingsTab::Accessibility,
+        "dark light system colours",
+    ),
+    (
+        "High-contrast palette",
+        SettingsTab::Accessibility,
+        "contrast colours vision",
+    ),
+];
+
+/// Ticket W21-06: the search index as (label, tab name), for the test
+/// that checks every indexed label is really drawn.
+#[doc(hidden)]
+#[must_use]
+pub fn settings_index_for_test() -> Vec<(&'static str, &'static str)> {
+    SETTINGS_INDEX
+        .iter()
+        .map(|(l, t, _)| (*l, t.label()))
+        .collect()
+}
+
+/// Ticket W21-06: the settings whose label or keywords contain every word
+/// of `query` (case-insensitive). Empty for an empty query.
+fn settings_search(query: &str) -> Vec<(&'static str, SettingsTab)> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    SETTINGS_INDEX
+        .iter()
+        .filter(|(label, _, keywords)| {
+            let hay = format!("{} {}", label.to_lowercase(), keywords);
+            words.iter().all(|w| hay.contains(w.as_str()))
+        })
+        .map(|(label, tab, _)| (*label, *tab))
+        .collect()
 }
 
 /// Ticket W15-03: which game the one Game Settings window is editing when
@@ -810,6 +929,10 @@ pub struct RetroForgeApp {
     show_settings: bool,
     /// Which Settings tab is showing.
     settings_tab: SettingsTab,
+    /// Ticket W21-06: the Settings sheet's search text.
+    settings_query: String,
+    /// Ticket W21-06: the area between the bars, last frame.
+    central_rect: Option<egui::Rect>,
     /// App-wide settings, loaded at startup and written back on change.
     settings: crate::settings::AppSettings,
     /// Ticket W21-04: the video settings in force now (the open game's,
@@ -1403,6 +1526,8 @@ impl RetroForgeApp {
             show_controls: false,
             show_settings: false,
             settings_tab: SettingsTab::Video,
+            settings_query: String::new(),
+            central_rect: None,
             video: app_settings.video.clone(),
             video_scope: crate::settings::VideoScope::Everything,
             settings: app_settings,
@@ -3477,7 +3602,13 @@ impl RetroForgeApp {
                 self.mode7_seen = false;
                 self.mode7_ground_wanted = false;
                 self.mode7_plane_cache = None;
-                self.status = format!("Loaded {}", path.display());
+                // Ticket W21-06: the game's name, never a filesystem path
+                // (principle 9 — a temp path is not player copy).
+                self.status = format!(
+                    "Loaded {}",
+                    path.file_stem()
+                        .map_or_else(|| "game".into(), |s| s.to_string_lossy().into_owned())
+                );
             }
             Err(e) => {
                 self.status = format!("Failed to load ROM: {e}");
@@ -5728,24 +5859,94 @@ impl RetroForgeApp {
         }
         let mut open = self.show_settings;
         let mut changed = false;
-        egui::Window::new("Settings")
-            .default_pos(egui::pos2(PANEL_WINDOW_ORIGIN[0], PANEL_WINDOW_ORIGIN[1]))
-            .open(&mut open)
-            .collapsible(true)
-            .resizable(true)
-            .default_width(460.0)
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        // Ticket W21-06: a sheet down the right of the window instead of a
+        // floating window — below the menu bar (so View › Settings still
+        // closes it), over a light scrim that leaves the picture visible
+        // behind, so a video change previews live as it is made.
+        let mut area = self.central_rect.unwrap_or_else(|| ctx.viewport_rect());
+        // Stop above the status bar (its readouts sit inside it; the
+        // bar's frame adds 6 px above them).
+        if let Some((readouts, _)) = self.status_readouts.filter(|_| self.chrome_visible) {
+            area.max.y = area.max.y.min(readouts.top() - 6.0);
+        }
+        let sheet_w = (area.width() * 0.55).clamp(360.0, 560.0);
+        let sheet = egui::Rect::from_min_max(
+            egui::pos2(area.right() - sheet_w, area.top()),
+            area.right_bottom(),
+        );
+        let scrim = egui::Area::new(egui::Id::new("settings-scrim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(area.min)
             .show(ctx, |ui| {
+                let (rect, response) = ui.allocate_exact_size(area.size(), egui::Sense::click());
+                ui.painter()
+                    .rect_filled(rect, 0.0, tokens.modal_backdrop().gamma_multiply(0.6));
+                response
+            });
+        if scrim.inner.clicked() || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            open = false;
+        }
+        egui::Area::new(egui::Id::new("settings-sheet"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(sheet.min)
+            .show(ctx, |ui| {
+                let frame = crate::theme::Elevation::Overlay.frame(&tokens).corner_radius(
+                    egui::CornerRadius {
+                        nw: crate::theme::OVERLAY_RADIUS,
+                        sw: 0,
+                        ne: 0,
+                        se: 0,
+                    },
+                );
+                let pad = f32::from(crate::theme::OVERLAY_PADDING) * 2.0;
+                let shown = frame.show(ui, |ui| {
+                ui.set_width(sheet.width() - pad);
+                ui.set_height(sheet.height() - pad);
                 ui.horizontal(|ui| {
-                    for (tab, label) in [
-                        (SettingsTab::Video, "Video"),
-                        (SettingsTab::Audio, "Audio"),
-                        (SettingsTab::Paths, "Paths"),
-                        (SettingsTab::Accessibility, "Accessibility"),
-                    ] {
-                        ui.selectable_value(&mut self.settings_tab, tab, label);
-                    }
+                    ui.label(
+                        egui::RichText::new("Settings")
+                            .font(crate::theme::condensed(crate::theme::type_scale::TITLE))
+                            .color(tokens.ink),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::icons::icon_button(
+                            ui,
+                            egui::RichText::new(egui_phosphor::regular::X),
+                            "Close settings",
+                        )
+                        .clicked()
+                        {
+                            open = false;
+                        }
+                    });
                 });
-                ui.separator();
+                // Search: every setting's label, across all tabs. A match
+                // is a jump to the tab that holds it.
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_query)
+                        .hint_text(format!("{} Search settings", egui_phosphor::regular::MAGNIFYING_GLASS))
+                        .desired_width(f32::INFINITY),
+                );
+                let hits = settings_search(&self.settings_query);
+                if !self.settings_query.trim().is_empty() {
+                    if hits.is_empty() {
+                        ui.label(egui::RichText::new("No setting matches.").color(tokens.muted));
+                    }
+                    for (label, tab) in hits {
+                        if ui
+                            .button(format!("{label}  \u{b7}  {}", tab.label()))
+                            .clicked()
+                        {
+                            self.settings_tab = tab;
+                            self.settings_query.clear();
+                        }
+                    }
+                    ui.separator();
+                }
+                let options: Vec<_> = SettingsTab::ALL.iter().map(|t| (*t, t.label().to_owned())).collect();
+                segmented(ui, &tokens, "settings-tabs", &mut self.settings_tab, &options);
+                ui.add_space(6.0);
 
                 // Ticket W10-04: the tab strip stays put; the CONTENT
                 // scrolls. Paths lists one row per configured library
@@ -6147,6 +6348,13 @@ impl RetroForgeApp {
 
                 ui.separator();
                 ui.small(&self.bindings_status);
+                });
+                // ui_smoke and screen readers find the sheet as a window
+                // titled "Settings", as they found the old floating one.
+                ctx.accesskit_node_builder(shown.response.id, |node| {
+                    node.set_role(egui::accesskit::Role::Window);
+                    node.set_label("Settings");
+                });
             });
         self.show_settings = open;
         if !open {
@@ -12163,6 +12371,9 @@ impl RetroForgeApp {
     }
 
     fn video_panel(&mut self, ui: &mut egui::Ui) {
+        // Ticket W21-06: where the Settings sheet may sit (between the
+        // menu bar and the status bar).
+        self.central_rect = Some(ui.available_rect_before_wrap());
         let scale_mode = self.video.scale_mode;
         let par = crate::play_view::pixel_aspect_ratio(self.video.pixel_aspect);
         // Ticket W20-19 / W21-04: what fills the letterbox.
@@ -12711,6 +12922,24 @@ mod compare_tests {
 mod hud_tests {
     /// `elide_front` keeps the tail, because the distinguishing part of a
     /// profile name is its end.
+    /// Ticket W21-06: search matches labels and keywords, needs every
+    /// word, ignores case, and finds nothing for nothing.
+    #[test]
+    fn settings_search_matches_words_across_tabs() {
+        let hits = super::settings_search("CRT");
+        assert_eq!(hits, vec![("Shader", super::SettingsTab::Video)]);
+        assert_eq!(
+            super::settings_search("dark")[0].1,
+            super::SettingsTab::Accessibility
+        );
+        assert!(super::settings_search("sound")
+            .iter()
+            .all(|(_, t)| *t == super::SettingsTab::Audio));
+        assert!(super::settings_search("glow bezel").len() == 1);
+        assert!(super::settings_search("glow nonsense").is_empty());
+        assert!(super::settings_search("   ").is_empty());
+    }
+
     #[test]
     fn elide_front_keeps_the_end_and_marks_the_cut() {
         let long = "an-extremely-verbose-profile-name-nobody-would-choose";
