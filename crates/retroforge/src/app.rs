@@ -12402,7 +12402,15 @@ impl RetroForgeApp {
                     .unwrap_or(egui::Color32::from_rgb(0x40, 0xC0, 0x60)),
             ),
         };
-        egui::CentralPanel::default().show(ui, |ui| {
+        // Ticket W21-09: in play the picture gets the whole area — the
+        // default panel margin cost a whole integer step (an 892-px window
+        // fit 2x instead of 3x). The library keeps its margin.
+        let panel = if self.core.is_some() {
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
+        } else {
+            egui::CentralPanel::default()
+        };
+        panel.show(ui, |ui| {
             // Ticket W4-05 (FRONTEND_UI.md §1): hold-to-peek forces the
             // ORIGINAL view for as long as the badge is held. Applied
             // here rather than by mutating `self.camera`, so releasing
@@ -12450,13 +12458,40 @@ impl RetroForgeApp {
                         // the line ARCHITECTURE §2 draws.
                         self.draw_script_overlay(ui, response.rect);
                     } else {
-                        // Core up, no frame yet. One line rather than an
-                        // empty rectangle, because a black screen is
-                        // exactly what a ROM that FAILED to start also
-                        // looks like.
+                        // Core up, no frame yet: the game's name, not an
+                        // empty rectangle — a black screen is exactly what
+                        // a ROM that FAILED to start also looks like
+                        // (W21-09: was one small status line).
+                        let tokens =
+                            crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+                        let title = self
+                            .current_rom_path
+                            .as_ref()
+                            .and_then(|p| p.file_stem())
+                            .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
                         ui.vertical_centered(|ui| {
-                            ui.add_space(ui.available_height() * 0.45);
-                            ui.add(readout(egui::RichText::new(&self.status).weak()));
+                            ui.add_space(ui.available_height() * 0.40);
+                            let spoken = format!("Starting {title}");
+                            ui.label(
+                                egui::RichText::new(title)
+                                    .font(crate::theme::condensed(crate::theme::type_scale::TITLE))
+                                    .color(tokens.ink),
+                            )
+                            // Heard as "Starting <game>" — and never mistaken
+                            // for the library's own entry of that name.
+                            .widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &spoken)
+                            });
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} \u{b7} Starting\u{2026}",
+                                    self.console_label
+                                ))
+                                .font(egui::FontId::proportional(
+                                    crate::theme::type_scale::CAPTION,
+                                ))
+                                .color(tokens.muted),
+                            );
                         });
                     }
                 }
