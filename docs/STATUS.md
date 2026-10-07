@@ -4351,3 +4351,12 @@ stories, 10 decisions).
   Settings sheet with search; the status line names the game, not a path.
   Gate: workspace **2542 passing / 0 failed**. Visuals UNVERIFIED (by eye:
   Brad).
+- **W21-08..13 — launch follow-ups** (2026-10-07, Brad: "look at the game
+  loading"; "render window ... exact size of the render so that there is
+  no black boarders"). SNES shows the 224 lines it draws (no blank band);
+  the play view has no panel margin (892-px window: 3x, was 2x); a
+  "Starting…" card before the first frame; library pictures from play (10 s
+  and on quit) instead of the boot frame; the library badge names no stale
+  console and folders are not listed twice; the window fits the game when
+  it starts (switch in Settings › Video); Esc in Settings no longer also
+  opens the Quick Menu. Gate: workspace **2549 passing / 0 failed**.
