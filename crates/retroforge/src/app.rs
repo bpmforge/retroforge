@@ -310,6 +310,11 @@ const SETTINGS_INDEX: &[(&str, SettingsTab, &str)] = &[
         SettingsTab::Video,
         "black ambient glow bezel border letterbox",
     ),
+    (
+        "Fit the window to the game",
+        SettingsTab::Video,
+        "window size borders black resize",
+    ),
     ("Performance overlay", SettingsTab::Video, "fps frame time"),
     (
         "Show controller input",
@@ -938,6 +943,10 @@ pub struct RetroForgeApp {
     /// Whether the level probe is armed: frames queued before a disarm
     /// still carry probe bytes, and are ignored once it is off.
     level_probe_armed: bool,
+    /// Ticket W21-12: this session's window was already fitted to the
+    /// picture (once per game, so a window the player resizes stays put).
+    window_fitted: bool,
+    last_window_fit: Option<egui::Vec2>,
     /// Ticket W21-10: this session already replaced the boot-frame
     /// picture with a gameplay frame.
     thumb_gameplay_taken: bool,
@@ -1541,6 +1550,8 @@ impl RetroForgeApp {
             settings_tab: SettingsTab::Video,
             settings_query: String::new(),
             thumb_gameplay_taken: false,
+            window_fitted: false,
+            last_window_fit: None,
             level_probe_armed: false,
             central_rect: None,
             video: app_settings.video.clone(),
@@ -3384,6 +3395,7 @@ impl RetroForgeApp {
             .unwrap_or_default();
         self.loading_sent = None;
         self.thumb_gameplay_taken = false;
+        self.window_fitted = false;
         // Ticket W20-17: the fog plane comes from the matched profile
         // itself, not from `level_session` (which exists only for a
         // profile with a decodable level map) — until W20-17 the
@@ -6517,6 +6529,13 @@ impl RetroForgeApp {
             changed = true;
         }
         ui.add_space(6.0);
+        // Ticket W21-12.
+        changed |= ui
+            .checkbox(&mut self.video.fit_window, "Fit the window to the game")
+            .on_hover_text(
+                "When a game starts, size the window to its picture so there are no black borders",
+            )
+            .changed();
         // Ticket W20-15: the two optional readouts.
         changed |= ui
             .checkbox(&mut self.video.perf_overlay, "Performance overlay")
@@ -12467,6 +12486,52 @@ impl RetroForgeApp {
     /// failing surface configuration. Only called when the setting differs
     /// from what was last applied, so the surface is not reconfigured
     /// every frame.
+    /// Ticket W21-12: once per game, after its picture is first drawn in a
+    /// window, resize the window so the play area is exactly the picture.
+    /// Not in fullscreen or when maximized (the OS owns that size), not
+    /// for Stretch (it has no border), and only once the bars are showing,
+    /// so their height is counted.
+    fn fit_window_to_game(&mut self, ctx: &egui::Context) {
+        if self.window_fitted || !self.video.fit_window || self.core.is_none() {
+            return;
+        }
+        if self.video.scale_mode == crate::settings::ScaleMode::Stretch {
+            self.window_fitted = true;
+            return;
+        }
+        let (Some(play), Some(area)) = (self.last_play_rect, self.central_rect) else {
+            return;
+        };
+        if !self.chrome_visible || self.show_overlay_menu {
+            return;
+        }
+        let (inner, fullscreen, maximized) = ctx.input(|i| {
+            let v = i.viewport();
+            (
+                v.inner_rect.map(|r| r.size()),
+                v.fullscreen.unwrap_or(false),
+                v.maximized.unwrap_or(false),
+            )
+        });
+        self.window_fitted = true;
+        if fullscreen || maximized {
+            return;
+        }
+        // The window's own report, else the viewport (they agree; a
+        // headless harness has only the latter).
+        let inner = inner.unwrap_or_else(|| ctx.viewport_rect().size());
+        if let Some(size) = crate::play_view::fitted_window(inner, area.size(), play.size()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            self.last_window_fit = Some(size);
+        }
+    }
+
+    /// Ticket W21-12: the last size the window was fitted to (tests).
+    #[doc(hidden)]
+    pub fn last_window_fit_for_test(&self) -> Option<egui::Vec2> {
+        self.last_window_fit
+    }
+
     fn apply_vsync(&mut self, frame: &mut eframe::Frame) {
         let want = self.video.vsync;
         if self.applied_vsync == Some(want) {
@@ -12642,6 +12707,7 @@ impl eframe::App for RetroForgeApp {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         self.apply_vsync(frame);
+        self.fit_window_to_game(&ctx);
         self.track_window_size(&ctx);
         // Ticket W15-04: drain any script load/manifest failure queued
         // since the last frame into a toast — see

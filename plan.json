@@ -9451,9 +9451,10 @@
    "the size computation is a pure tested function; an app test sees the resize request for NES and SNES pictures"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-07. VideoSettings.fit_window (default on; \"Fit the window to the game\" in Settings > Video and Quick Menu > Display, and in the settings search). fit_window_to_game runs once per game after its picture is first drawn with the bars showing: the window inner size drops (or grows) by the empty space around the picture, keeping the integer scale already chosen (play_view::fitted_window, pure and unit-tested). Skipped in fullscreen, when maximized, and for Stretch. Applies to NES and SNES alike (each gets its own picture shape). Test: tests/window_fits_the_game.rs (NES and SNES fitted to their own heights in an 892x902 window; switch off leaves it alone). Gate: workspace 2548 passing. UNVERIFIED (by eye: Brad) on a real macOS window.",
    "FILED 2026-10-07 from Brad: \"can we have the render window for the default snes be exact size of the render so that there is no black boarders? if so do that\"."
   ]
  }
