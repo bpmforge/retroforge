@@ -199,6 +199,17 @@ fn photograph_every_major_surface() {
         }
         shot(&mut harness, name);
     }
+    // W21-03: overwrite Slot 1 from the Quick Menu — saved at once, with
+    // the undo bar.
+    harness
+        .get_by_label(&retroforge::quick_menu::Section::Save.rail_text())
+        .click();
+    harness.run_steps(3);
+    if let Some(save) = harness.query_by_label("Save Slot 1") {
+        save.click();
+        harness.run_steps(3);
+        shot(&mut harness, "28-slot-undo");
+    }
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
     harness.state_mut().set_sprite_overlay_for_test(false);
@@ -307,6 +318,20 @@ fn photograph_every_major_surface() {
     harness.state_mut().video_settings_mut_for_test().shader = None;
     harness.run_steps(2);
 
+    // W21-04: the procedural bezel around the integer-scaled picture.
+    harness
+        .state_mut()
+        .video_settings_mut_for_test()
+        .set_surround(retroforge::settings::Surround::Bezel);
+    let target = harness.state().frame_count_for_test() + 10;
+    run_emulated_frames(&mut harness, target, Duration::from_secs(5));
+    shot(&mut harness, "27-bezel");
+    harness
+        .state_mut()
+        .video_settings_mut_for_test()
+        .set_surround(retroforge::settings::Surround::Black);
+    harness.run_steps(2);
+
     // W20-06: the save-state window with its slot screenshot.
     harness.state_mut().open_states_modal();
     harness.run_steps(4);
@@ -353,6 +378,16 @@ fn photograph_every_major_surface() {
     harness.state_mut().show_settings_for_test(true);
     harness.run_steps(3);
     shot(&mut harness, "05-settings");
+    // W21-06: search across tabs.
+    if let Some(field) = harness.query_by_role(egui::accesskit::Role::TextInput) {
+        field.click();
+        harness.run_steps(1);
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("sound");
+        harness.run_steps(3);
+        shot(&mut harness, "26-settings-search");
+    }
     harness.state_mut().show_settings_for_test(false);
 
     harness.state_mut().show_controls_for_test(true);

@@ -5954,8 +5954,11 @@ impl RetroForgeApp {
                 // Accessibility tab's contrast readouts sit below a
                 // slider — both can exceed a window bounded to the
                 // viewport.
+                // Leave room under the scroll area for the bindings line,
+                // so the sheet never grows past its rect (W21-06).
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
+                    .max_height((ui.available_height() - 36.0).max(80.0))
                     .show(ui, |ui| {
                         match self.settings_tab {
                             SettingsTab::Accessibility => {

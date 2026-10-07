@@ -1,7 +1,8 @@
 # Design: UX Wave 21 — the play view looks like the design
 
-Status: **filed 2026-10-07** on branch `ui/wave-21`. Tickets W21-01..W21-07
-in `plan.json`.
+Status: **built 2026-10-07** on branch `ui/wave-21`, each ticket merged to
+`main` as it closed. Tickets W21-01..W21-07 in `plan.json`; §7 lists the
+deviations. Everything visual is UNVERIFIED (by eye: Brad) until he looks.
 
 Brad, 2026-10-07: "the UI does not look updated to the style you designed,
 can you look at fresh design ui and make sure all the settings and such we
@@ -92,3 +93,25 @@ apply). Until Brad answers, the default stays off.
 
 As in `UX_WAVE_20.md` §11, no story is specific enough to cite; the W21
 tickets carry `"stories": []`.
+
+## 7. Deviations (as built)
+
+- **W21-01:** no monospaced numeric face — IBM Plex Sans's default figures
+  are already tabular (measured in `tests/theme_fonts.rs`), so
+  `theme::numeric` names the body face.
+- **W21-02:** the "blur" is the frozen frame box-downscaled 8x once on open
+  and stretched back with linear filtering (the review's own recipe).
+- **W21-03:** no X/Y pad hints for rename/delete: nothing binds X/Y in the
+  shell, and a hint for a button that does nothing would lie (principle 8).
+  The States window keeps W15-04's overwrite confirmation; only the Quick
+  Menu saves at once with an undo. Landed in one commit with W21-04.
+- **W21-04:** Aspect offers TV (8:7) / Square pixels; Widescreen is an
+  enhancement (it draws level the original never showed), so the Aspect
+  field says where to turn it on instead of offering an inert segment.
+  Shader parameter values stay global (only the choice is scoped).
+- **W21-05:** cards keep their W15 width (tests derive grid columns from
+  it), so no 3:4 box-art proportion and no focus scale; the hero uses the
+  library thumbnail. Grid is now the default library view.
+- **W21-06:** search jumps to the tab holding a match rather than
+  filtering widgets in place. The sheet sits between the menu bar and the
+  status bar, so View › Settings still toggles it.
