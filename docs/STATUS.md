@@ -4341,3 +4341,13 @@ stories, 10 decisions).
   output now reaches `CoreSink::audio` as 48 kHz mono (stereo downmixed —
   recorded limit). Gate: workspace **2529 passing / 0 failed / 43
   ignored**.
+- **W21-01..07 — the UI looks like the design** (2026-10-07, Brad: "the UI
+  does not look updated to the style you designed"). Wave 20 had built the
+  review's functions with egui defaults; Wave 21 adds the visual half
+  (`docs/design/UX_WAVE_21.md`): condensed titles, elevation, scrim and
+  motion tokens; a frameless Quick Menu over the blurred game with key
+  hints; slot rename/delete/undo; Display controls with Apply to, bezel and
+  plain shader names; Continue hero, grid by default, enhancement cards; a
+  Settings sheet with search; the status line names the game, not a path.
+  Gate: workspace **2542 passing / 0 failed**. Visuals UNVERIFIED (by eye:
+  Brad).
