@@ -4236,9 +4236,10 @@
     "limits recorded: stereo is downmixed (the host ring is mono), linear interpolation rather than a band-limited resampler"
    ],
    "points": 3,
-   "status": "in_progress",
+   "status": "done",
    "stories": [],
    "notes": [
+    "DONE 2026-10-07 (branch w7-22-snes-audio): Apu::out_samples (capped) + SnesCore AudioConverter (L/R mean, 3:2 linear) emit per frame via sink.audio. Tests: snes_emits_audio (~800/frame), core::audio_tests. SMW/ALttP produce non-silent output. Gate: workspace 2529 passing / 0 failed / 43 ignored, clippy clean, fmt, arch OK.",
     "FILED 2026-10-07 from Brad playing SNES with no sound. W7-08 kept only Apu::last_sample and said routing to rf-audio was not its job; no ticket picked it up, and rf-snes never called sink.audio. In an audio build that also left frames unpaced (fixed separately on main, d2c178b)."
    ]
   },

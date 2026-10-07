@@ -226,12 +226,22 @@ pub struct Apu {
     /// DSP being correct and reachable, not about the sound reaching a
     /// speaker.
     pub last_sample: (i16, i16),
+    /// Every stereo sample the DSP completed since the core last drained
+    /// them (ticket W7-22), so the sound reaches a speaker: W7-08 kept only
+    /// `last_sample`. Transient output, not machine state — never saved,
+    /// and capped at [`MAX_PENDING_SAMPLES`] so a caller that never
+    /// drains (a headless run) cannot grow it without bound.
+    pub out_samples: Vec<(i16, i16)>,
     /// `$F8`/`$F9`, two bytes of scratch with no hardware function.
     pub aux: [u8; 2],
     /// The HLE boot handshake (W6-04b).
     pub boot: boot::IplBoot,
     pub dsp: dsp::Dsp,
 }
+
+/// Two seconds of 32 kHz output: far more than one frame (~533 samples)
+/// can owe, so only a caller that never drains ever hits it (ticket W7-22).
+pub const MAX_PENDING_SAMPLES: usize = 64_000;
 
 impl Default for Apu {
     fn default() -> Self {
@@ -258,6 +268,7 @@ impl Apu {
             ipl: IPL_STUB,
             dsp_addr: 0,
             last_sample: (0, 0),
+            out_samples: Vec::new(),
             aux: [0; 2],
             boot: boot::IplBoot::new(),
             dsp: dsp::Dsp::new(),
@@ -556,12 +567,20 @@ impl Apu {
         self.tick_clock(1);
     }
 
+    /// Queue one completed DSP sample for the core to emit (ticket W7-22).
+    fn keep_sample(&mut self, s: (i16, i16)) {
+        if self.out_samples.len() < MAX_PENDING_SAMPLES {
+            self.out_samples.push(s);
+        }
+    }
+
     pub fn tick_clock(&mut self, cycles: u32) {
         if !self.timers_permitted() {
             // `$F0` has the timers held off; the DSP still runs.
             for _ in 0..cycles {
                 if let Some(s) = self.dsp.tick(&mut self.aram).sample {
                     self.last_sample = s;
+                    self.keep_sample(s);
                 }
             }
             return;
@@ -571,6 +590,7 @@ impl Apu {
             let t = self.dsp.tick(&mut self.aram);
             if let Some(s) = t.sample {
                 self.last_sample = s;
+                self.keep_sample(s);
             }
             if t.tick_slow {
                 self.timers[0].tick_stage1();

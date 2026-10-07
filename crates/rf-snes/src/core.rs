@@ -83,6 +83,48 @@ pub struct SnesCore {
     /// part of the request, not a separate setting the renderer could
     /// forget to consult.
     widescreen: (usize, crate::ppu::WidenMask),
+    /// Ticket W7-22: the S-DSP's 32 kHz stereo turned into the 48 kHz mono
+    /// stream every core hands `CoreSink::audio`.
+    audio: AudioConverter,
+}
+
+/// The S-DSP outputs stereo at 32 kHz (fullsnes "SNES APU DSP": one
+/// sample every 32 SPC700 cycles of ~1.024 MHz); `CoreSink::audio` takes
+/// mono at `rf_audio::CORE_SAMPLE_RATE`, 48 kHz — the rate the NES core
+/// already decimates to itself (`rf_nes::apu::OUTPUT_SAMPLE_RATE`). So:
+/// average the two channels, and interpolate linearly at 2/3 of an input
+/// sample per output, exactly 3 outputs per 2 inputs. Stereo is lost —
+/// the host ring is mono — which is recorded as a limit (ticket W7-22).
+#[derive(Debug, Clone, Default)]
+struct AudioConverter {
+    /// The last input sample of the previous batch.
+    prev: i32,
+    /// Position of the next output between `prev` and the next input, in
+    /// thirds of an input sample: always `0..3`.
+    thirds: u32,
+    out: Vec<i16>,
+}
+
+/// Output samples per input step, in thirds: 32 kHz -> 48 kHz is 3:2.
+const THIRDS_PER_OUTPUT: u32 = 2;
+
+impl AudioConverter {
+    fn convert(&mut self, input: &[(i16, i16)]) -> &[i16] {
+        self.out.clear();
+        for &(l, r) in input {
+            let cur = (i32::from(l) + i32::from(r)) / 2;
+            // Each pass emits one output and advances by 2/3, so at most
+            // two outputs per input: terminates (law 8).
+            while self.thirds < 3 {
+                let v = self.prev + (cur - self.prev) * self.thirds as i32 / 3;
+                self.out.push(v as i16);
+                self.thirds += THIRDS_PER_OUTPUT;
+            }
+            self.thirds -= 3;
+            self.prev = cur;
+        }
+        &self.out
+    }
 }
 
 impl SnesCore {
@@ -100,6 +142,7 @@ impl SnesCore {
             ppu_regs: Vec::new(),
             budget: FRAME_INSTRUCTION_BUDGET,
             widescreen: (crate::ppu::WIDTH, crate::ppu::WidenMask::ALL),
+            audio: AudioConverter::default(),
         })
     }
 
@@ -354,6 +397,14 @@ impl EmulatorCore for SnesCore {
                 frame_complete = self.system.bus.timing.frame != start_frame;
                 if frame_complete {
                     self.emit_frame(sink);
+                    // Ticket W7-22: the frame's sound, after its picture.
+                    let pending = std::mem::take(&mut self.system.bus.apu.out_samples);
+                    let out = self.audio.convert(&pending);
+                    if !out.is_empty() {
+                        sink.audio(out);
+                    }
+                    self.system.bus.apu.out_samples = pending;
+                    self.system.bus.apu.out_samples.clear();
                 }
             }
         }
@@ -483,5 +534,25 @@ impl EmulatorCore for SnesCore {
             | crate::mapping::Target::St010Register(_)
             | crate::mapping::Target::Open => 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::AudioConverter;
+
+    #[test]
+    fn two_inputs_make_three_outputs_interpolated_and_downmixed() {
+        let mut c = AudioConverter::default();
+        // Mono values 300 then 600 (each the mean of its pair).
+        let out = c.convert(&[(200, 400), (600, 600)]).to_vec();
+        // prev=0: outputs at 0, 2/3 of (0->300); then 1/3 of (300->600).
+        assert_eq!(out, vec![0, 200, 400]);
+        // The phase carries across calls: a steady stream stays 3:2.
+        let mut total = 0;
+        for _ in 0..1000 {
+            total += c.convert(&[(100, 100), (100, 100)]).len();
+        }
+        assert_eq!(total, 3000);
     }
 }

@@ -4336,3 +4336,8 @@ stories, 10 decisions).
   unaffected. **SNES audio output is not wired at all** (no
   `sink.audio` call in rf-snes) — the next ticket. Gate: workspace
   **2527 passing / 0 failed / 43 ignored**.
+
+- **W7-22 — SNES games have sound** (2026-10-07, Brad playing). The S-DSP
+  output now reaches `CoreSink::audio` as 48 kHz mono (stereo downmixed —
+  recorded limit). Gate: workspace **2529 passing / 0 failed / 43
+  ignored**.
