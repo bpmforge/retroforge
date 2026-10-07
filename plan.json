@@ -4158,6 +4158,35 @@
    ]
   },
   {
+   "id": "W7-20",
+   "title": "SNES colours reach the screen: the live view resolves SNES pixels through CGRAM and INIDISP brightness, not the NES palette",
+   "phase": 7,
+   "crate": "rf-renderer",
+   "write_scope": [
+    "crates/rf-core-api/**",
+    "crates/rf-snes/**",
+    "crates/rf-renderer/**",
+    "crates/retroforge/**",
+    "docs/design/CONTRACTS.md",
+    "docs/ARCHITECTURE.md",
+    "docs/TESTING.md"
+   ],
+   "depends_on": [],
+   "acceptance": [
+    "CoreSink gains a defaulted no-op per-line palette channel (palette words + effective brightness), modelled on W7-16's sub_scanline; NES and every existing implementor compile and behave unchanged",
+    "rf-snes latches CGRAM per visible line alongside LineState and emits it for each line before video_scanline; forced blank and brightness 0 resolve to black, brightness N scales by (N+1)/16 (fullsnes INIDISP)",
+    "FrameBuffer, LayeredFrame and the compare/peek original resolve SNES pixels through the line palette (BGR555 per fullsnes 'SNES Color Palette'); one converter, pinned equal to rf_snes::debug::cgram_rgb on all 32768 values",
+    "an app-level test on RF-Scroller-S fails today and passes after: every displayed pixel equals the CGRAM colour of its index; NES displayed frames are byte-identical before and after",
+    "limits recorded: mid-line CGRAM writes, direct-colour 8bpp, and colour math (separate ticket) are not covered"
+   ],
+   "points": 5,
+   "status": "in_progress",
+   "stories": [],
+   "notes": [
+    "FILED 2026-10-07 after Brad asked for the recommended next step. Measured: rf_renderer::FrameBuffer resolves every palette_index through the NES 2C02 palette, so on Super Noah's Ark 3D after 400 frames 57,344 of 57,344 pixels differed from CGRAM. Every SNES census row, screenshot and by-eye check to date was over NES-palette colours; the census only checks that something rendered. W7-16's sub-screen channel is also never emitted (no caller of CoreSink::sub_scanline); colour math is a follow-up ticket."
+   ]
+  },
+  {
    "id": "W7-09",
    "title": "SNES save states: .rfstate chunks for the SNES core",
    "phase": 7,
