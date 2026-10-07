@@ -717,6 +717,7 @@ mod tests {
             layer: PixelLayer::Backdrop,
             op: ColorMathOp::None,
             fixed: false,
+            main_black: false,
         }
     }
 
@@ -774,6 +775,7 @@ mod tests {
                     layer: PixelLayer::Background(layer),
                     op: this_op,
                     fixed: false,
+                    main_black: false,
                 });
             }
         }

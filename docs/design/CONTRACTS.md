@@ -14,7 +14,9 @@ constructs machine state. Pixels are indexed + metadata, never RGB (ADR-4).
 `state_view()` valid only between frames.
 `CoreSink`'s optional channels, each defaulted to a no-op and each one a
 wrapping sink must forward: `overlay_scanline` (W3-05a),
-`sub_scanline` (W7-16), and `palette_scanline` (W7-20) — a written
+`sub_scanline` (W7-16; first emitted and blended by W7-21, with
+`SubPixel::main_black` for Force Main Screen Black), and
+`palette_scanline` (W7-20) — a written
 palette's raw words (BGR555 for the SNES) plus master brightness, sent
 before each line's `video_scanline`. Palette RAM is register state, so
 the renderer still does every index-to-colour resolution.

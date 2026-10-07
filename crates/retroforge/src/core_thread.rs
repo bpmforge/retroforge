@@ -926,6 +926,12 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
         self.bundle.video_scanline(y, pixels);
     }
 
+    /// Ticket W7-21: the sub-screen, to the frame (the layer split is a
+    /// debug view of the indexed screens and does not blend).
+    fn sub_scanline(&mut self, y: u16, pixels: &[rf_core_api::SubPixel], fixed_color: u16) {
+        self.frame.sub_scanline(y, pixels, fixed_color);
+    }
+
     /// Ticket W7-20: the SNES line palette, to both RGB sinks.
     fn palette_scanline(&mut self, y: u16, palette: &[u16], brightness: u8) {
         self.frame.palette_scanline(y, palette, brightness);

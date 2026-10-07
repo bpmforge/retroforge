@@ -11617,3 +11617,37 @@ not CGRAM), colour math (W7-16's sub-screen is still not emitted — next
 ticket), and the stitched ultrawide/level canvases, the Lua overlay and
 the upscale studio's tile capture, which still resolve through the NES
 table.
+
+## W7-21 (2026-10-07) — SNES colour math reaches the screen
+
+W7-16 added `CoreSink::sub_scanline` and closed saying rf-snes emits it.
+Nothing ever called it (`git log -S "sink.sub_scanline"` finds no commit)
+and no sink blended it, so colour-math translucency and fades were never
+drawn. Now `rf_snes::core::emit_frame` sends `render_sub_scanline` for
+every non-hires visible line whose latched colour math can act
+(`Ppu::line_color_math_active`), between the line's palette and its
+pixels, and `FrameBuffer` blends in BGR555 (`rf_renderer::palette::
+color_math_bgr555`) before applying brightness. A row's sub-screen is
+consumed by that row, so a frame without math cannot inherit one.
+
+Reading `render_sub_scanline` against fullsnes "SNES PPU Color-Math"
+found four rule gaps, fixed with tests in `rf_snes::tests::ppu`:
+
+| rule (fullsnes) | before | test |
+|---|---|---|
+| `$2130` bit 1 clear: sub source is the fixed colour, Div2 allowed | fixed only where the sub pixel was backdrop | `fixed_colour_is_the_sub_source_when_subscreen_is_off_and_keeps_div2` |
+| transparent sub pixel: fixed colour, Div2 ignored | halved | `a_transparent_sub_pixel_uses_the_fixed_colour_without_div2` |
+| OBJ palettes 0-3 never take math | took math | `obj_palettes_0_to_3_never_take_colour_math` |
+| Force Main Screen Black: black, and Div2 ignored | backdrop index 0 (CGRAM[0] since W7-20), halved | `force_main_black_is_carried_and_ignores_div2` (`SubPixel::main_black`) |
+
+End to end: `crates/rf-harness/tests/snes_colour_math.rs` boots a
+synthetic LoROM that enables backdrop math with fixed red; every pixel
+must be red (fails with the emission disabled — checked). Real archives
+looked at after the change: Super Mario World title and A Link to the
+Past intro render normally; release stepping stays ~5 ms a frame.
+
+Not covered: colour math on true-hires and widescreen lines, the
+de-flicker rebuild path and the compare/peek "original" (both rebuilt
+from indices, so they show the picture without math), and whether a
+forced-black dot keeps its own layer's `$2131` enable (it is composed as
+backdrop here).

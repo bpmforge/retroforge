@@ -106,6 +106,12 @@ pub struct SubPixel {
     /// legitimate colour, so there is no value left over to mean "not an
     /// index".
     pub fixed: bool,
+    /// `$2130` "Force Main Screen Black" applies at this x (ticket W7-21):
+    /// the main-screen colour is black before any math. The main pixel
+    /// still carries its index (it is backdrop, index 0), but since W7-20
+    /// index 0 resolves to CGRAM[0], which need not be black — so the
+    /// renderer is told rather than left to guess.
+    pub main_black: bool,
 }
 
 /// One console's Mode 7 affine-transform register file for one frame

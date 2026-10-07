@@ -828,6 +828,22 @@ impl Ppu {
         }
     }
 
+    /// Whether line `y`'s latched colour math can change any pixel
+    /// (ticket W7-21): some layer enabled in `$2131` with math not
+    /// prevented everywhere, or force-black not "Never". When false the
+    /// line needs no sub-screen at all, which is most lines of most games.
+    #[must_use]
+    pub fn line_color_math_active(&self, y: u16) -> bool {
+        let idx = usize::from(y + 1);
+        let state = if self.line_uses_completed(idx) {
+            self.completed_line_state[idx]
+        } else {
+            self.line_state.get(idx).copied().flatten()
+        };
+        let math = state.map_or(self.color_math, |s| s.color_math);
+        (math.enable != 0 && math.prevent_mode != 3) || math.clip_mode != 0
+    }
+
     /// Line `y`'s palette and effective brightness (ticket W7-20), for
     /// [`rf_core_api::CoreSink::palette_scanline`]. `y` is the 0-based
     /// visible row, as [`Ppu::render_scanline`] takes it; the hardware
@@ -1167,11 +1183,13 @@ impl Ppu {
         // mistake here: the goldens hash palette indices and this decides
         // a `ColorMathOp`.)
         let main_phase = self.hires_phase(bg::HiresPhase::Odd);
-        let main_layers: Vec<rf_core_api::PixelLayer> = self
+        // The layer AND index: OBJ palettes 0-3 never take math (W7-21),
+        // and only the index says which palette a sprite pixel used.
+        let main_pixels: Vec<(rf_core_api::PixelLayer, u8)> = self
             .render_scanline_live(line, main_phase, WIDTH)
             .pixels
             .iter()
-            .map(|p| p.layer)
+            .map(|p| (p.layer, p.palette_index))
             .collect();
 
         // Swap TM for TS: same composition, the other screen's layers.
@@ -1205,16 +1223,31 @@ impl Ppu {
             .enumerate()
             .map(|(x, px)| {
                 let inside = windows.masks(5, x as u8);
-                let main_layer = match main_layers.get(x) {
-                    Some(rf_core_api::PixelLayer::Background(n)) => usize::from(*n),
-                    Some(rf_core_api::PixelLayer::Sprite) => 4,
-                    _ => 5,
+                let (main_layer, main_index) = match main_pixels.get(x) {
+                    Some((rf_core_api::PixelLayer::Background(n), i)) => (usize::from(*n), *i),
+                    Some((rf_core_api::PixelLayer::Sprite, i)) => (4, *i),
+                    Some((_, i)) => (5, *i),
+                    None => (5, 0),
                 };
-                let enabled = math.enable & (1 << main_layer) != 0;
+                // fullsnes "SNES PPU Color-Math", $2131: math on OBJ is
+                // "Palette4..7" only — "OBJ/Palette0..3 (Always=Off)". OBJ
+                // palettes start at CGRAM 128, 16 entries each, so 4-7 are
+                // 192-255.
+                let obj_low_palette = main_layer == 4 && main_index < 192;
+                let enabled = math.enable & (1 << main_layer) != 0 && !obj_low_palette;
+                let main_black = math.clip_to_black(inside);
+                // The sub source is the fixed colour when $2130 bit 1 says
+                // so, or when no sub-screen layer is opaque here.
+                let transparent_sub = matches!(px.layer, rf_core_api::PixelLayer::Backdrop);
+                let fixed = !math.use_subscreen || transparent_sub;
+                // Div2 is ignored "if Force Main Screen Black is used, also
+                // ... on transparent subscreen pixels" — but not when
+                // $2130 bit 1 selected the fixed colour on purpose.
+                let half = math.half && !main_black && !(math.use_subscreen && transparent_sub);
                 let op = if !enabled || math.prevented(inside) {
                     ColorMathOp::None
                 } else {
-                    match (math.subtract, math.half) {
+                    match (math.subtract, half) {
                         (false, false) => ColorMathOp::Add,
                         (false, true) => ColorMathOp::AddHalf,
                         (true, false) => ColorMathOp::Subtract,
@@ -1225,9 +1258,10 @@ impl Ppu {
                     palette_index: px.palette_index,
                     layer: px.layer,
                     op,
-                    // With no sub-screen layer opaque here, hardware uses
-                    // the fixed colour rather than the backdrop.
-                    fixed: matches!(px.layer, rf_core_api::PixelLayer::Backdrop),
+                    // With no sub-screen layer opaque here, or $2130 bit 1
+                    // clear, hardware uses the fixed colour.
+                    fixed,
+                    main_black,
                 }
             })
             .collect();
@@ -1440,8 +1474,15 @@ impl Ppu {
         for x in 0..width {
             // LEFT half-dot: the sub screen.
             let left = sub.get(x).map_or(main.pixels[x], |sp| PpuPixel {
-                // A fixed-colour sub pixel carries no index — see the doc.
-                palette_index: if sp.fixed { 0 } else { sp.palette_index },
+                // A transparent sub pixel carries no index. Keyed on the
+                // layer, not `fixed`: since W7-21 `fixed` also follows
+                // `$2130` bit 1, which picks the colour-math source and
+                // has nothing to do with which half-dots hires draws.
+                palette_index: if matches!(sp.layer, PixelLayer::Backdrop) {
+                    0
+                } else {
+                    sp.palette_index
+                },
                 layer: sp.layer,
                 sprite_id: None,
                 priority: 0,

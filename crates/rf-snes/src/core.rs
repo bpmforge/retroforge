@@ -162,6 +162,16 @@ impl SnesCore {
             // this line's indices against the CGRAM the beam saw.
             let (palette, brightness) = self.system.bus.ppu.line_palette(y);
             sink.palette_scanline(y, &palette, brightness);
+            // Ticket W7-21: the sub-screen, before the line it blends
+            // into, on lines whose colour math can act. A true-hires line
+            // already carries its sub-screen as half-dots of `line`, and
+            // math on hires is not modelled.
+            if line.pixels.len() == crate::ppu::WIDTH
+                && self.system.bus.ppu.line_color_math_active(y)
+            {
+                let (sub, fixed_color) = self.system.bus.ppu.render_sub_scanline(y);
+                sink.sub_scanline(y, &sub, fixed_color);
+            }
             sink.video_scanline(y, &line.pixels);
             sink.overlay_scanline(y, &line.overlay);
         }
