@@ -133,6 +133,12 @@ pub struct AudioOut {
     filters: Filters,
     scratch: Vec<i16>,
     device_rate: u32,
+    /// Whether the core has ever pushed a sample. A device whose ring the
+    /// core never feeds cannot be the frame clock: the ring never rises
+    /// above its target, so `should_wait` never holds and the emulator
+    /// runs unpaced. The SNES core emits no audio yet, and this is how it
+    /// ran at 200+ fps in an `audio` build.
+    fed: bool,
     /// `None` when running without a device: the chain still filters and
     /// resamples (so tests and headless runs exercise the same code), but
     /// nothing consumes the ring, and it must not become the frame clock.
@@ -169,6 +175,7 @@ impl AudioOut {
             filters: Filters::new(rf_audio::CORE_SAMPLE_RATE),
             scratch: Vec::with_capacity(CHUNK * 4),
             device_rate,
+            fed: false,
             #[cfg(feature = "audio")]
             device: None,
         })
@@ -215,6 +222,7 @@ impl AudioOut {
         if samples.is_empty() {
             return;
         }
+        self.fed = true;
         self.scratch.clear();
         self.scratch.extend_from_slice(samples);
         self.filters.process_i16(&mut self.scratch);
@@ -241,12 +249,13 @@ impl AudioOut {
     }
 
     /// Whether the audio device is the frame clock — true only when a
-    /// device is actually streaming.
+    /// device is actually streaming AND the core feeds it (see `fed`);
+    /// otherwise the caller paces by the wall clock.
     #[must_use]
     pub fn is_clock(&self) -> bool {
         #[cfg(feature = "audio")]
         {
-            self.device.is_some()
+            clock_ready(self.device.is_some(), self.fed)
         }
         #[cfg(not(feature = "audio"))]
         {
@@ -320,8 +329,21 @@ pub fn open_audio_out() -> Option<AudioOut> {
     AudioOut::headless(rf_audio::CORE_SAMPLE_RATE).ok()
 }
 
+/// The audio device paces frames only when it is open and the core has
+/// fed it — a ring nothing fills never asks the emulator to wait.
+#[cfg_attr(not(feature = "audio"), allow(dead_code))]
+const fn clock_ready(device_open: bool, fed: bool) -> bool {
+    device_open && fed
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_device_the_core_never_feeds_is_not_the_frame_clock() {
+        assert!(!super::clock_ready(true, false), "SNES: no samples yet");
+        assert!(super::clock_ready(true, true));
+        assert!(!super::clock_ready(false, true));
+    }
 
     #[test]
     fn volume_scales_samples_and_unity_is_untouched() {
