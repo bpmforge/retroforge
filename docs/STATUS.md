@@ -4319,3 +4319,11 @@ stories, 10 decisions).
   latched per line, with INIDISP brightness and forced blank. Colour
   math (translucency) is still not drawn — next ticket. Gate: workspace
   **2520 passing / 0 failed / 43 ignored**, clippy clean, arch OK.
+
+- **W7-21 — SNES colour math is drawn** (2026-10-07, branch
+  `w7-21-colour-math`). W7-16's sub-screen channel had never been called,
+  so translucency and colour-math fades were missing from every SNES
+  game. The core now emits it and the renderer blends it, with four
+  fullsnes rules fixed on the way (fixed-colour source, Div2 on
+  transparent pixels, OBJ palettes 0-3, force-black). Gate: workspace
+  **2526 passing / 0 failed / 43 ignored**, clippy clean, arch OK.

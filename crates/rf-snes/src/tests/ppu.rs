@@ -1705,3 +1705,81 @@ fn tm_and_ts_are_latched_per_scanline() {
         Some((0x01, 0x10))
     );
 }
+
+// ---- W7-21: fullsnes "SNES PPU Color-Math" rules on the sub channel ----
+
+#[test]
+fn fixed_colour_is_the_sub_source_when_subscreen_is_off_and_keeps_div2() {
+    use rf_core_api::ColorMathOp;
+    let mut p = ppu_full_line();
+    p.write_register(0x212C, 0x01); // TM: BG1
+    p.write_register(0x212D, 0x01); // TS: BG1 too — ignored, see below
+    p.write_register(0x2130, 0x00); // bit 1 clear: fixed colour, not sub
+    p.write_register(0x2131, 0x41); // BG1, add, half
+    let (sub, _) = p.render_sub_scanline(0);
+    assert!(sub.iter().all(|s| s.fixed), "$2130 bit 1 clear -> fixed");
+    assert!(
+        sub.iter().all(|s| s.op == ColorMathOp::AddHalf),
+        "Div2 allowed"
+    );
+}
+
+#[test]
+fn a_transparent_sub_pixel_uses_the_fixed_colour_without_div2() {
+    use rf_core_api::ColorMathOp;
+    let mut p = ppu_full_line();
+    p.write_register(0x212C, 0x01); // TM: BG1
+    p.write_register(0x212D, 0x00); // TS: nothing — the sub screen is backdrop
+    p.write_register(0x2130, 0x02); // use the sub screen
+    p.write_register(0x2131, 0x41); // BG1, add, half
+    let (sub, _) = p.render_sub_scanline(0);
+    assert!(sub.iter().all(|s| s.fixed));
+    assert!(
+        sub.iter().all(|s| s.op == ColorMathOp::Add),
+        "Div2 is ignored on transparent sub pixels"
+    );
+}
+
+#[test]
+fn force_main_black_is_carried_and_ignores_div2() {
+    use rf_core_api::ColorMathOp;
+    let mut p = ppu_full_line();
+    p.write_register(0x212C, 0x01);
+    p.write_register(0x2130, 0xC0); // force main black: always; fixed colour
+                                    // BG1 and the backdrop: a forced-black dot is composed as backdrop.
+    p.write_register(0x2131, 0x61);
+    let (sub, _) = p.render_sub_scanline(0);
+    assert!(sub.iter().all(|s| s.main_black));
+    assert!(sub.iter().all(|s| s.op == ColorMathOp::Add));
+}
+
+#[test]
+fn obj_palettes_0_to_3_never_take_colour_math() {
+    use rf_core_api::ColorMathOp;
+    let sprite_op = |attr: u8| {
+        let mut p = ppu_with_tile();
+        p.obj_size = 0;
+        for row in 0..8 {
+            p.vram[(16 + row) * 2] = 0xFF; // OBJ character 1, 4bpp
+        }
+        for i in 0..128usize {
+            p.oam[i * 4 + 1] = 100; // park them
+        }
+        p.oam[0] = 0;
+        p.oam[1] = 0;
+        p.oam[2] = 1;
+        p.oam[3] = attr;
+        p.write_register(0x212C, 0x10); // TM: OBJ
+        p.write_register(0x2130, 0x00);
+        p.write_register(0x2131, 0x10); // math on OBJ
+        let main = p.render_scanline(0);
+        assert_eq!(main.pixels[0].layer, PixelLayer::Sprite);
+        p.render_sub_scanline(0).0[0].op
+    };
+    assert_eq!(
+        sprite_op(0x30),
+        ColorMathOp::None,
+        "palette 0 (index < 192)"
+    );
+    assert_eq!(sprite_op(0x30 | (4 << 1)), ColorMathOp::Add, "palette 4");
+}

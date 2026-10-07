@@ -4188,6 +4188,38 @@
    ]
   },
   {
+   "id": "W7-21",
+   "title": "SNES colour math reaches the screen: the core emits the sub-screen (W7-16's channel had no caller) and the renderer blends it, with fullsnes's half/fixed/OBJ-palette/force-black rules",
+   "phase": 7,
+   "crate": "rf-snes",
+   "write_scope": [
+    "crates/rf-core-api/**",
+    "crates/rf-snes/**",
+    "crates/rf-renderer/**",
+    "crates/rf-enhance/**",
+    "crates/rf-harness/**",
+    "crates/retroforge/**",
+    "docs/TESTING.md",
+    "docs/design/CONTRACTS.md"
+   ],
+   "depends_on": [
+    "W7-20"
+   ],
+   "acceptance": [
+    "rf-snes emits sub_scanline for every non-hires visible line whose latched colour math can act, before video_scanline; a core-level test on a synthetic ROM that enables $2131 sees the calls",
+    "the core's per-dot decision follows fullsnes 'SNES PPU Color-Math': $2130 bit 1 clear means the fixed colour (halving allowed); a transparent sub pixel uses the fixed colour WITHOUT halving; OBJ palettes 0-3 never take math; Div2 is ignored where Force Main Screen Black applies; force-black is carried to the renderer (SubPixel::main_black) so it shows black, not the backdrop colour",
+    "FrameBuffer blends main and sub in BGR555 (add/sub clamp 0..31, optional half) and applies brightness after; a sub row is consumed by its line so a frame without math cannot inherit the previous frame's",
+    "indexed goldens unchanged; NES output unchanged"
+   ],
+   "points": 5,
+   "status": "done",
+   "stories": [],
+   "notes": [
+    "DONE 2026-10-07 (branch w7-21-colour-math). emit_frame sends render_sub_scanline for non-hires lines where Ppu::line_color_math_active; FrameBuffer blends via rf_renderer::palette::color_math_bgr555 then brightness; core_thread::FanoutSink forwards sub_scanline. Four fullsnes rule fixes in render_sub_scanline ($2130 bit 1 -> fixed, transparent sub -> no Div2, OBJ palettes 0-3 off, force-black carried as SubPixel::main_black and drops Div2); the hires path now keys transparent half-dots on layer, not `fixed`. Tests: 4 rule tests in rf_snes::tests::ppu, color_math unit test, rf-harness snes_colour_math (synthetic ROM, every pixel black+red; fails with emission disabled - checked). Real archives: SMW title, ALttP intro render normally; ~5 ms/frame release stepping. Limits in TESTING.md W7-21. Gate: workspace 2526 passing / 0 failed / 43 ignored, clippy clean, fmt, arch OK.",
+    "FILED 2026-10-07 after W7-20. W7-16 closed saying 'rf-snes emits it', but no code ever called CoreSink::sub_scanline (git log -S finds none) and no sink implemented it, so translucency has never been drawn. Reading render_sub_scanline against fullsnes also found: fixed only when the sub pixel is backdrop (ignores $2130 bit 1), half applied to transparent sub pixels, OBJ palettes 0-3 not exempted, force-black emitted as backdrop index 0 (CGRAM[0], not black, since W7-20)."
+   ]
+  },
+  {
    "id": "W7-09",
    "title": "SNES save states: .rfstate chunks for the SNES core",
    "phase": 7,

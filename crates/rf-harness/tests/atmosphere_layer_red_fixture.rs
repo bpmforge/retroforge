@@ -61,6 +61,7 @@ fn none_sub() -> SubPixel {
         layer: PixelLayer::Backdrop,
         op: ColorMathOp::None,
         fixed: false,
+        main_black: false,
     }
 }
 
@@ -104,6 +105,7 @@ fn fog_sub(base_palette: u8, period: usize, op: ColorMathOp, share: f32) -> Vec<
                 layer: PixelLayer::Background(1),
                 op: this_op,
                 fixed: false,
+                main_black: false,
             });
         }
     }

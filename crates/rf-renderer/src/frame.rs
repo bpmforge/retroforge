@@ -10,9 +10,9 @@
 //! acceptable pre-W3"). It does not touch the network, a GPU device, or
 //! `egui` at all — the `retroforge` crate's app layer is the only thing
 //! that turns [`FrameBuffer::rgba`] into an `egui::ColorImage`/texture.
-use rf_core_api::{CoreEvent, CoreSink, OverlayPixel, PpuPixel};
+use rf_core_api::{CoreEvent, CoreSink, OverlayPixel, PpuPixel, SubPixel};
 
-use crate::palette::{resolve_index, LinePalette};
+use crate::palette::{bgr555_to_rgb, color_math_bgr555, resolve_index, LinePalette};
 
 /// NES visible frame width in pixels (nesdev.org/wiki/PPU_rendering: 256
 /// dots of visible output per scanline).
@@ -42,6 +42,11 @@ pub struct FrameBuffer {
     /// Ticket W7-20: each row's written palette, when the core sent one
     /// (`CoreSink::palette_scanline`); `None` rows use the NES table.
     palettes: Vec<Option<LinePalette>>,
+    /// Ticket W7-21: the sub-screen sent for each row this frame, with
+    /// the row's fixed colour. Taken by that row's `video_scanline`, so a
+    /// row the core sends no sub-screen for (math off) never blends with
+    /// a previous frame's.
+    subs: Vec<Option<(Vec<SubPixel>, u16)>>,
 }
 
 impl FrameBuffer {
@@ -69,6 +74,7 @@ impl FrameBuffer {
         FrameBuffer {
             rgba,
             palettes: vec![None; height],
+            subs: vec![None; height],
             width,
             height,
         }
@@ -125,13 +131,40 @@ impl CoreSink for FrameBuffer {
         }
         let row_start = row * self.width * 4;
         let palette = self.palettes[row].as_ref();
+        let sub = self.subs[row].take();
         for (x, pixel) in pixels.iter().enumerate().take(self.width) {
-            let [r, g, b] = resolve_index(pixel.palette_index, palette);
+            let [r, g, b] = match (
+                palette,
+                sub.as_ref().and_then(|(s, f)| Some((s.get(x)?, *f))),
+            ) {
+                // Ticket W7-21: colour math, in BGR555, before brightness.
+                (Some(p), Some((sp, fixed_color))) => {
+                    let main = if sp.main_black {
+                        0
+                    } else {
+                        p.words[usize::from(pixel.palette_index)]
+                    };
+                    let sub_word = if sp.fixed {
+                        fixed_color
+                    } else {
+                        p.words[usize::from(sp.palette_index)]
+                    };
+                    bgr555_to_rgb(color_math_bgr555(main, sub_word, sp.op), p.brightness)
+                }
+                _ => resolve_index(pixel.palette_index, palette),
+            };
             let offset = row_start + x * 4;
             self.rgba[offset] = r;
             self.rgba[offset + 1] = g;
             self.rgba[offset + 2] = b;
             self.rgba[offset + 3] = 0xFF;
+        }
+    }
+
+    /// Ticket W7-21: keep row `y`'s sub-screen for its `video_scanline`.
+    fn sub_scanline(&mut self, y: u16, pixels: &[SubPixel], fixed_color: u16) {
+        if let Some(slot) = self.subs.get_mut(usize::from(y)) {
+            *slot = Some((pixels.to_vec(), fixed_color));
         }
     }
 
