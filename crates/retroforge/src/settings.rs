@@ -505,7 +505,16 @@ impl AppSettings {
             },
             video: section("video").try_into().unwrap_or_default(),
             audio: section("audio").try_into().unwrap_or_default(),
-            paths: section("paths").try_into().unwrap_or_default(),
+            paths: {
+                // Ticket W21-11: a folder listed twice (an older build let
+                // Add folder repeat one) is kept once, first place wins.
+                let mut paths: PathSettings = section("paths").try_into().unwrap_or_default();
+                let mut seen = std::collections::BTreeSet::new();
+                paths
+                    .library_folders
+                    .retain(|root| seen.insert(root.path().to_path_buf()));
+                paths
+            },
             library: section("library").try_into().unwrap_or_default(),
             window: section("window").try_into().unwrap_or_default(),
             shaders: section("shaders").try_into().unwrap_or_default(),
@@ -842,5 +851,19 @@ latency_ms = \"not a number\"
             Surround::Bezel,
             "bezel wins a hand-edited clash"
         );
+    }
+
+    /// Ticket W21-11: a folder saved twice loads once.
+    #[test]
+    fn duplicate_library_folders_load_once() {
+        let s = AppSettings::from_toml("[paths]\nlibrary_folders = [\"/a\", \"/b\", \"/a\"]\n")
+            .unwrap();
+        let paths: Vec<_> = s
+            .paths
+            .library_folders
+            .iter()
+            .map(|r| r.path().to_path_buf())
+            .collect();
+        assert_eq!(paths, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
     }
 }

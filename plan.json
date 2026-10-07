@@ -9427,9 +9427,10 @@
    "tests cover both"
   ],
   "points": 2,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-07. With no game open the badge is the mode alone (\"Accuracy\", still law 6) instead of the last game's \"SNES · Accuracy\", and the status line is empty (was \"No ROM loaded — File > Open ROM…\" / \"No ROM loaded\"). The library's Add folder refuses a folder already listed (toast); AppSettings::from_toml drops repeated library folders, first place wins (Brad's settings listed ~/Games/Roms twice). Tests: settings duplicate_library_folders_load_once; app_opens_snes asserts badge \"Accuracy\" and an empty status after quitting SNES; ui_smoke and hud_fits updated for the new boot state. Gate: workspace 2546 passing.",
    "FILED 2026-10-07 from Brad's \"look at the game loading\" and a launch probe of his own SMB3 / Super Mario World zips (frames at 0/100/300/1000/3000/6000 ms)."
   ]
  },
@@ -9450,7 +9451,7 @@
    "the size computation is a pure tested function; an app test sees the resize request for NES and SNES pictures"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from Brad: \"can we have the render window for the default snes be exact size of the render so that there is no black boarders? if so do that\"."

@@ -1428,7 +1428,8 @@ impl RetroForgeApp {
             texture: None,
             bg_layer_texture: None,
             sprite_layer_texture: None,
-            status: "No ROM loaded \u{2014} File > Open ROM...".to_string(),
+            // Ticket W21-11: nothing to report on the library.
+            status: String::new(),
             crash: None,
             crash_fade_cache: None,
             running: false,
@@ -4292,6 +4293,17 @@ impl RetroForgeApp {
             rf_renderer::metalfx_detect(),
             METALFX_SCALER_WIRED,
         );
+        // Ticket W21-11: with no game open there is no console to name —
+        // the last game's ("SNES · Accuracy") was showing on the library.
+        // The mode still shows (law 6: a fresh install says Accuracy).
+        let badge = if self.core.is_none() {
+            let prefix = format!("{} \u{b7} ", self.console_label);
+            badge
+                .strip_prefix(&prefix)
+                .map_or(badge.clone(), str::to_owned)
+        } else {
+            badge
+        };
         // Ticket W20-09: replaced art is an enhancement the player can
         // see, so the badge says so (principle 2) — until W20-09 a loaded
         // pack changed the picture with the badge still reading
@@ -9054,6 +9066,15 @@ impl RetroForgeApp {
         let Some(folder) = rfd::FileDialog::new().pick_folder() else {
             return false;
         };
+        // Ticket W21-11: a folder already listed is not added twice.
+        if self.library_roots.iter().any(|root| root.path() == folder) {
+            self.toasts.push(
+                crate::toast::ToastKind::Info,
+                "That folder is already in your library",
+                ctx,
+            );
+            return false;
+        }
         self.library_roots
             .push(crate::library::LibraryRoot::Bare(folder));
         self.save_library_roots();
@@ -9415,7 +9436,7 @@ impl RetroForgeApp {
         self.fps_frames = 0;
         self.audio_fill = None;
         self.crash = None;
-        self.status = "No ROM loaded".to_string();
+        self.status = String::new();
         // Ticket W21-04: back on the library, the global video settings.
         self.video = self.settings.video.clone();
         self.video_scope = crate::settings::VideoScope::Everything;
