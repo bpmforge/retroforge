@@ -4327,3 +4327,12 @@ stories, 10 decisions).
   fullsnes rules fixed on the way (fixed-colour source, Div2 on
   transparent pixels, OBJ palettes 0-3, force-black). Gate: workspace
   **2526 passing / 0 failed / 43 ignored**, clippy clean, arch OK.
+
+- **Fix — SNES ran at 200+ fps in an `audio` build** (2026-10-07, Brad
+  playing). The SNES core emits no audio samples, and with a device open
+  the core thread paced frames by the audio ring, which nothing filled,
+  so it never waited. `AudioOut::is_clock` now also requires that the
+  core has fed it; until then frames are paced by the wall clock. NES
+  unaffected. **SNES audio output is not wired at all** (no
+  `sink.audio` call in rf-snes) — the next ticket. Gate: workspace
+  **2527 passing / 0 failed / 43 ignored**.
