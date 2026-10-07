@@ -9457,6 +9457,30 @@
    "CLOSED 2026-10-07. VideoSettings.fit_window (default on; \"Fit the window to the game\" in Settings > Video and Quick Menu > Display, and in the settings search). fit_window_to_game runs once per game after its picture is first drawn with the bars showing: the window inner size drops (or grows) by the empty space around the picture, keeping the integer scale already chosen (play_view::fitted_window, pure and unit-tested). Skipped in fullscreen, when maximized, and for Stretch. Applies to NES and SNES alike (each gets its own picture shape). Test: tests/window_fits_the_game.rs (NES and SNES fitted to their own heights in an 892x902 window; switch off leaves it alone). Gate: workspace 2548 passing. UNVERIFIED (by eye: Brad) on a real macOS window.",
    "FILED 2026-10-07 from Brad: \"can we have the render window for the default snes be exact size of the render so that there is no black boarders? if so do that\"."
   ]
+ },
+ {
+  "id": "W21-13",
+  "title": "Esc closes the Settings sheet without opening the Quick Menu",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W21-06"
+  ],
+  "acceptance": [
+   "with Settings open, one Esc closes Settings and leaves the Quick Menu closed and the game state unchanged",
+   "Esc with nothing open still opens the Quick Menu",
+   "app test covers both"
+  ],
+  "points": 1,
+  "status": "done",
+  "stories": [],
+  "notes": [
+   "CLOSED 2026-10-07. settings_window consumes the Esc it closes on, and overlay_menu ignores Esc while Settings is open. Test: tests/esc_closes_settings.rs (one Esc closes Settings with the game still running and the menu shut; the next opens the menu), verified red without the fix. Gate: workspace 2549 passing.",
+   "FILED 2026-10-07: found reviewing W21-06 (both overlay_menu and settings_window acted on the same Esc press)."
+  ]
  }
 ]
 }

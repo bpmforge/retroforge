@@ -5945,7 +5945,11 @@ impl RetroForgeApp {
                     .rect_filled(rect, 0.0, tokens.modal_backdrop().gamma_multiply(0.6));
                 response
             });
-        if scrim.inner.clicked() || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // W21-13: consumed, so the Quick Menu (drawn later) does not see
+        // the same press and open.
+        if scrim.inner.clicked()
+            || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
             open = false;
         }
         egui::Area::new(egui::Id::new("settings-sheet"))
@@ -6836,7 +6840,9 @@ impl RetroForgeApp {
     /// shell (`crate::ui_nav`): moving focus along the rail selects that
     /// section, so the right-hand side follows the cursor.
     fn overlay_menu(&mut self, ctx: &egui::Context) {
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // W21-13: an Esc that closes the Settings sheet is not also a
+        // Quick Menu toggle.
+        if !self.show_settings && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.set_overlay_menu(!self.show_overlay_menu);
         }
         // Ticket W21-02: tracked every frame, open or not, so opening
