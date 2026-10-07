@@ -9337,9 +9337,10 @@
    "photos land in target/ui-tour/"
   ],
   "points": 2,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-07. capture_tour.rs now also photographs 26-settings-search, 27-bezel and 28-slot-undo; 12-16 (Quick Menu sections), 14 (Display controls), 15 (Enhancements cards), 05 (Settings sheet) and 22 (Continue hero) already cover the rest. Found by the photos and fixed here (W21-06 follow-up): the Settings sheet grew past the status bar because the bindings line sat under an unbounded scroll area. Gate: workspace 2542 passing.",
    "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
   ]
  }
