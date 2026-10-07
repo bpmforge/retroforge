@@ -226,6 +226,26 @@ pub fn edge_colours(rgba: &[u8], width: usize, height: usize) -> [egui::Color32;
 /// Ticket W20-19: paint the letterbox bars around `picture` (inside
 /// `area`) with each edge's colour, darkened so the picture stays the
 /// brightest thing on screen.
+/// Ticket W21-08: how many rows of a `height`-row host frame the console
+/// actually drew, from the last scanline it emitted. The host buffer is
+/// 240 rows, but an SNES frame without overscan draws 224 (fullsnes
+/// "PPU Ports", `$2133` bit 2) — showing all 240 put a 16-line black band
+/// under the picture. Only ever SHRINKS a non-interlaced frame; unknown
+/// input leaves it as is.
+#[must_use]
+pub fn visible_rows(height: usize, last_scanline: Option<u16>) -> usize {
+    match last_scanline {
+        Some(y) if height <= 240 => (usize::from(y) + 1).clamp(1, height),
+        _ => height,
+    }
+}
+
+/// The first `rows` rows of an RGBA frame `width` pixels wide.
+#[must_use]
+pub fn crop_rows(rgba: &[u8], width: usize, rows: usize) -> &[u8] {
+    &rgba[..(width * rows * 4).min(rgba.len())]
+}
+
 /// Ticket W21-04: what is drawn around the picture, resolved for one
 /// frame (the settings' `crate::settings::Surround` plus what it needs).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -470,5 +490,20 @@ mod tests {
         let tight = egui::Rect::from_center_size(area.center(), egui::vec2(512.0, 590.0));
         assert_eq!(bezel_rect(area, tight).unwrap(), tight.expand(5.0));
         assert!(bezel_rect(area, area).is_none());
+    }
+
+    /// Ticket W21-08: a 224-line SNES frame shows 224 rows; NES (all 240
+    /// drawn), overscan (239) and interlaced frames are not shrunk wrongly.
+    #[test]
+    fn visible_rows_follow_the_last_scanline() {
+        assert_eq!(visible_rows(240, Some(223)), 224);
+        assert_eq!(visible_rows(240, Some(239)), 240);
+        assert_eq!(visible_rows(240, Some(238)), 239);
+        assert_eq!(visible_rows(240, None), 240);
+        assert_eq!(visible_rows(478, Some(238)), 478, "interlace untouched");
+        assert_eq!(visible_rows(240, Some(400)), 240, "never grows");
+        let rgba = vec![7u8; 4 * 2 * 3];
+        assert_eq!(crop_rows(&rgba, 2, 2).len(), 16);
+        assert_eq!(crop_rows(&rgba, 2, 9).len(), 24);
     }
 }

@@ -84,6 +84,16 @@ fn a_snes_rom_starts_and_reaches_the_screen() {
         "the SNES core crashed: {:?}",
         harness.state().crash_message_for_test()
     );
+    // Ticket W21-08: the fixture runs without overscan, so the picture is
+    // the 224 lines the PPU drew, not the 240-row host buffer with a
+    // blank band under it.
+    let (rect, (w, h)) = harness.state().play_rect_for_test().expect("a play rect");
+    assert_eq!((w, h), (256, 224), "displayed frame size");
+    let ratio = rect.width() / rect.height();
+    assert!(
+        (ratio - 256.0 * 8.0 / 7.0 / 224.0).abs() < 0.02,
+        "the drawn rect has the 224-line shape: {rect:?}"
+    );
 }
 
 /// **The NES path is unharmed.** W11-10 through W11-12 rewrote how every

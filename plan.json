@@ -9359,9 +9359,10 @@
    "unit test for the visible-row crop; app test measures the displayed frame size for a 224-line SNES frame"
   ],
   "points": 2,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-07. Root cause verified: rf-snes emit_frame replays 0..setini.visible_lines() (224 without overscan) into a 240-row host FrameBuffer, so rows 224-239 stayed black and the picture sat high. play_view::visible_rows(height, last_scanline) (FrameMsg already carried last_scanline) and crop_rows crop the displayed frame and core_frame_size to the rows drawn; only shrinks, only non-interlaced (<=240), and the HD-pack path (NES) is untouched. Unit test in play_view; tests/app_opens_snes.rs asserts the displayed SNES frame is 256x224 with the 224-line shape. Probe on Super Mario World: rect 586x448 (was 586x480). Gate: workspace 2543 passing.",
    "FILED 2026-10-07 from Brad's \"look at the game loading\" and a launch probe of his own SMB3 / Super Mario World zips (frames at 0/100/300/1000/3000/6000 ms)."
   ]
  },
@@ -9382,7 +9383,7 @@
    "tests cover the margin-free play rect"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from Brad's \"look at the game loading\" and a launch probe of his own SMB3 / Super Mario World zips (frames at 0/100/300/1000/3000/6000 ms)."
