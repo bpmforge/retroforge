@@ -73,6 +73,9 @@ const WINDOW_SIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis
 /// Ticket W20-06: a save-slot card's content width and thumbnail height
 /// (the thumbnail is fitted inside, letterboxed, whatever its aspect).
 const SLOT_CARD_WIDTH: f32 = 168.0;
+/// Ticket W21-03: how long an overwrite stays undoable (the review's
+/// "Undo is available for 10 s").
+const SLOT_UNDO_SECS: f64 = 10.0;
 
 /// Ticket W20-11: seconds without pointer movement before the bars hide
 /// in play, how long a honesty-badge change keeps them up, and how close
@@ -715,6 +718,13 @@ pub struct RetroForgeApp {
     /// (`state_slots::SlotInfo::saved.is_none()`) never populate this —
     /// there is nothing to overwrite, so nothing to confirm.
     pending_overwrite: Option<crate::state_slots::SlotId>,
+    /// Ticket W21-03: a Quick Menu overwrite that can still be undone, and
+    /// until when (`ctx.time()`).
+    slot_undo: Option<(crate::state_slots::SlotId, f64)>,
+    /// Ticket W21-03: the slot being renamed and the text so far.
+    slot_renaming: Option<(crate::state_slots::SlotId, String)>,
+    /// Ticket W21-03: the slot whose Delete was pressed once.
+    slot_delete_armed: Option<crate::state_slots::SlotId>,
     /// Ticket W15-07: `pending_overwrite`'s last value, kept for
     /// `overwrite_confirm_modal`'s fade-out render only — see
     /// `crash_fade_cache`'s doc for why this is a separate field rather
@@ -802,6 +812,11 @@ pub struct RetroForgeApp {
     settings_tab: SettingsTab,
     /// App-wide settings, loaded at startup and written back on change.
     settings: crate::settings::AppSettings,
+    /// Ticket W21-04: the video settings in force now (the open game's,
+    /// its console's or everything's — `AppSettings::resolve_video`), and
+    /// the layer edits are written back to.
+    video: crate::settings::VideoSettings,
+    video_scope: crate::settings::VideoScope,
     /// Whether the Esc overlay menu is showing (FRONTEND_UI §2).
     show_overlay_menu: bool,
     /// Ticket W20-03: the in-game menu paused a running game, so closing
@@ -1365,6 +1380,9 @@ impl RetroForgeApp {
             toasts: crate::toast::ToastStack::default(),
             library_rescan_toast_pending: false,
             pending_overwrite: None,
+            slot_undo: None,
+            slot_renaming: None,
+            slot_delete_armed: None,
             pending_overwrite_fade_cache: None,
             pending_quit: false,
             last_save_frame: None,
@@ -1385,6 +1403,8 @@ impl RetroForgeApp {
             show_controls: false,
             show_settings: false,
             settings_tab: SettingsTab::Video,
+            video: app_settings.video.clone(),
+            video_scope: crate::settings::VideoScope::Everything,
             settings: app_settings,
             show_overlay_menu: false,
             menu_paused_game: false,
@@ -2484,6 +2504,152 @@ impl RetroForgeApp {
         ))
     }
 
+    /// Ticket W21-03: Rename and Delete under an occupied slot card.
+    /// Rename edits in place (Enter or Done keeps it, Esc-free: an empty
+    /// name clears it); Delete asks once, on the card itself.
+    fn slot_manage_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        slot: crate::state_slots::SlotId,
+        name: Option<&str>,
+    ) {
+        let Some(dir) = self.states_dir() else {
+            return;
+        };
+        let mut result: Option<Result<(), String>> = None;
+        if let Some((editing, text)) = &mut self.slot_renaming {
+            if *editing == slot {
+                let mut done = false;
+                ui.horizontal(|ui| {
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(text)
+                            .desired_width(SLOT_CARD_WIDTH - 60.0)
+                            .char_limit(crate::state_slots::MAX_NAME_CHARS)
+                            .hint_text("Name this save"),
+                    );
+                    edit.request_focus();
+                    done = ui.button("Done").clicked()
+                        || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                });
+                if done {
+                    result = Some(crate::state_slots::rename(&dir, slot, text));
+                    self.slot_renaming = None;
+                }
+                if let Some(r) = result {
+                    self.finish_slot_change(r);
+                }
+                return;
+            }
+        }
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        ui.horizontal(|ui| {
+            let label = slot.label();
+            // Accessible names say which slot: a pad or screen-reader user
+            // hears "Rename Slot 3", not ten identical "Rename"s.
+            let named = |r: &egui::Response, text: String| {
+                r.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, text.clone())
+                });
+            };
+            let rename = ui.button(format!("{} Rename", egui_phosphor::regular::PENCIL_SIMPLE));
+            named(&rename, format!("Rename {label}"));
+            if rename.clicked() {
+                self.slot_renaming = Some((slot, name.unwrap_or_default().to_owned()));
+                self.slot_delete_armed = None;
+            }
+            if self.slot_delete_armed == Some(slot) {
+                let confirm = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new(format!("Delete {label}?")).color(tokens.bg),
+                    )
+                    .fill(tokens.error),
+                );
+                if confirm.clicked() {
+                    result = Some(crate::state_slots::delete(&dir, slot));
+                    self.slot_delete_armed = None;
+                }
+            } else {
+                let delete = ui.button(format!("{} Delete", egui_phosphor::regular::TRASH));
+                named(&delete, format!("Delete {label}"));
+                if delete.clicked() {
+                    self.slot_delete_armed = Some(slot);
+                }
+            }
+        });
+        if let Some(r) = result {
+            self.finish_slot_change(r);
+        }
+    }
+
+    /// After a rename, delete or undo: re-read the slots now and report a
+    /// failure in the status line.
+    fn finish_slot_change(&mut self, result: Result<(), String>) {
+        if let Err(e) = result {
+            self.status = e;
+        }
+        self.state_slots_scanned = None;
+        self.refresh_state_slots_if_stale();
+    }
+
+    /// Ticket W21-03: the undo bar after a Quick Menu overwrite — bottom
+    /// centre, [`SLOT_UNDO_SECS`] long, with an Undo button (and Ctrl/Cmd+Z).
+    /// When it expires the kept copy is deleted.
+    fn slot_undo_bar(&mut self, ctx: &egui::Context) {
+        let Some((slot, deadline)) = self.slot_undo else {
+            return;
+        };
+        let Some(dir) = self.states_dir() else {
+            self.slot_undo = None;
+            return;
+        };
+        if ctx.time() >= deadline {
+            crate::state_slots::discard_undo(&dir, slot);
+            self.slot_undo = None;
+            return;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let mut undo = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z));
+        egui::Area::new(egui::Id::new("slot-undo-bar"))
+            .order(egui::Order::Tooltip)
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0])
+            .show(ctx, |ui| {
+                crate::theme::Elevation::Overlay
+                    .frame(&tokens)
+                    .inner_margin(egui::Margin::symmetric(14, 8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{} was overwritten.", slot.label()))
+                                    .color(tokens.ink),
+                            );
+                            undo |= ui.button(format!("Undo {}", slot.label())).clicked();
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let left = (deadline - ctx.time()).ceil().max(0.0) as u32;
+                            ui.label(
+                                egui::RichText::new(format!("{left} s"))
+                                    .font(crate::theme::numeric(crate::theme::type_scale::CAPTION))
+                                    .color(tokens.muted),
+                            );
+                        });
+                    });
+            });
+        if undo {
+            self.slot_undo = None;
+            let result = crate::state_slots::undo_overwrite(&dir, slot);
+            if result.is_ok() {
+                self.osd.push_card(
+                    crate::toast::ToastKind::Success,
+                    format!("Restored {}", slot.label()),
+                    None,
+                    None,
+                    ctx,
+                );
+            }
+            self.finish_slot_change(result);
+        }
+    }
+
     /// The save-state manager (FRONTEND_UI §3.2).
     /// Ticket W20-06/W20-10: the save-slot cards, shared by the States
     /// window (both buttons) and the Quick Menu's Save and Load sections
@@ -2496,6 +2662,7 @@ impl RetroForgeApp {
         allow_load: bool,
         allow_save: bool,
         columns: Option<usize>,
+        undo_instead_of_asking: bool,
     ) -> Option<(crate::state_slots::SlotId, bool)> {
         let mut picked: Option<(crate::state_slots::SlotId, bool)> = None;
         // Ticket W20-06: cards with the slot's own
@@ -2550,12 +2717,25 @@ impl RetroForgeApp {
                                             .alt_text(format!("{} screenshot", info.id.label())),
                                     );
                                 }
-                                ui.label(egui::RichText::new(info.id.label()).strong());
+                                // Ticket W21-03: the player's name for the
+                                // slot leads; the slot number follows it.
+                                let name = info.saved.as_ref().and_then(|s| s.name.clone());
+                                ui.label(
+                                    egui::RichText::new(
+                                        name.clone().unwrap_or_else(|| info.id.label()),
+                                    )
+                                    .strong(),
+                                );
                                 match &info.saved {
                                     Some(saved) => {
                                         ui.label(
                                             egui::RichText::new(format!(
-                                                "{} \u{b7} {}",
+                                                "{}{} \u{b7} {}",
+                                                if name.is_some() {
+                                                    format!("{} \u{b7} ", info.id.label())
+                                                } else {
+                                                    String::new()
+                                                },
                                                 crate::slot_cards::relative_age(
                                                     saved.timestamp,
                                                     now,
@@ -2595,7 +2775,35 @@ impl RetroForgeApp {
                                     if allow_save
                                         && ui.button(format!("Save {}", info.id.label())).clicked()
                                     {
-                                        if info.saved.is_some() {
+                                        if info.saved.is_some() && undo_instead_of_asking {
+                                            // Ticket W21-03: in the Quick
+                                            // Menu an overwrite saves at
+                                            // once and offers an undo.
+                                            if let Some(dir) = self.states_dir() {
+                                                match crate::state_slots::keep_for_undo(
+                                                    &dir, info.id,
+                                                ) {
+                                                    Ok(()) => {
+                                                        if let Some((old, _)) = self.slot_undo {
+                                                            if old != info.id {
+                                                                crate::state_slots::discard_undo(
+                                                                    &dir, old,
+                                                                );
+                                                            }
+                                                        }
+                                                        self.slot_undo = Some((
+                                                            info.id,
+                                                            ui.ctx().time() + SLOT_UNDO_SECS,
+                                                        ));
+                                                    }
+                                                    Err(e) => {
+                                                        self.status =
+                                                            format!("Undo unavailable: {e}")
+                                                    }
+                                                }
+                                            }
+                                            picked = Some((info.id, true));
+                                        } else if info.saved.is_some() {
                                             // Ticket W15-04: an
                                             // occupied slot asks
                                             // first.
@@ -2606,6 +2814,9 @@ impl RetroForgeApp {
                                         }
                                     }
                                 });
+                                if info.saved.is_some() {
+                                    self.slot_manage_row(ui, info.id, name.as_deref());
+                                }
                             });
                         });
                 }
@@ -2654,7 +2865,9 @@ impl RetroForgeApp {
                         let columns = ((ui.available_width() + 10.0) / (SLOT_CARD_WIDTH + 26.0))
                             .floor()
                             .max(1.0) as usize;
-                        if let Some(chosen) = self.slot_card_grid(ui, true, true, Some(columns)) {
+                        if let Some(chosen) =
+                            self.slot_card_grid(ui, true, true, Some(columns), false)
+                        {
                             action = Some(chosen);
                         }
                         if !self.state_warnings.is_empty() {
@@ -3007,6 +3220,9 @@ impl RetroForgeApp {
             Ok(rf_cart::Cartridge::Snes { .. }) => "SNES",
             _ => "NES",
         };
+        // Ticket W21-04: this game's video settings — its own, its
+        // console's, or everything's.
+        self.resolve_video();
         // Ticket W5-06: keep the header-stripped image and find the
         // profile that claims this ROM, so the author workspace has both
         // the bytes to decode and the file to watch. Both are `None` for
@@ -3715,8 +3931,7 @@ impl RetroForgeApp {
             // the player sees — never over the compare pair (a research
             // view of the accuracy-exact frame) and never into a capture.
             let shader = if compare_rgba.is_none() {
-                self.settings
-                    .video
+                self.video
                     .shader
                     .as_deref()
                     .and_then(crate::shader_select::kind_from_id)
@@ -3762,7 +3977,7 @@ impl RetroForgeApp {
                             // picture and say so once, never a black frame.
                             self.shader_note =
                                 Some(format!("Shader failed ({e}); showing the plain picture."));
-                            self.settings.video.shader = None;
+                            self.video.shader = None;
                             None
                         }
                     }
@@ -3777,7 +3992,7 @@ impl RetroForgeApp {
                 self.display_hash = Some(fnv1a_hash(displayed, &[]));
             }
             // Ticket W20-19: the letterbox glow follows the picture.
-            if self.settings.video.ambient_glow {
+            if self.video.ambient_glow {
                 self.edge_colours = Some(crate::play_view::edge_colours(displayed, dw, dh));
             }
             let image = egui::ColorImage::from_rgba_unmultiplied([dw, dh], displayed);
@@ -3905,7 +4120,7 @@ impl RetroForgeApp {
                 &self.current_game_settings,
                 &self.game_facts(),
             ),
-            self.settings.video.metalfx,
+            self.video.metalfx,
             rf_renderer::metalfx_detect(),
             METALFX_SCALER_WIRED,
         );
@@ -5612,7 +5827,7 @@ impl RetroForgeApp {
                                 ui.separator();
 
                                 if ui
-                                    .checkbox(&mut self.settings.video.vsync, "V-sync")
+                                    .checkbox(&mut self.video.vsync, "V-sync")
                                     .changed()
                                 {
                                     changed = true;
@@ -5635,20 +5850,20 @@ impl RetroForgeApp {
                                     .add_enabled(
                                         availability.is_available() && METALFX_SCALER_WIRED,
                                         egui::RadioButton::new(
-                                            self.settings.video.metalfx
+                                            self.video.metalfx
                                                 == crate::settings::MetalFxSetting::Spatial,
                                             "MetalFX spatial",
                                         ),
                                     )
                                     .clicked()
                                 {
-                                    self.settings.video.metalfx =
+                                    self.video.metalfx =
                                         crate::settings::MetalFxSetting::Spatial;
                                     changed = true;
                                 }
                                 if ui
                                     .radio_value(
-                                        &mut self.settings.video.metalfx,
+                                        &mut self.video.metalfx,
                                         crate::settings::MetalFxSetting::Off,
                                         "Off",
                                     )
@@ -5976,51 +6191,80 @@ impl RetroForgeApp {
     /// two cannot drift. Returns whether anything changed.
     fn video_controls(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
-        // Ticket W20-15: the two optional readouts, first so they are
-        // easy to find in the Quick Menu's Display section too.
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        // Ticket W21-04: "Apply to" first, so it is clear which games the
+        // rest of this section changes. Only with a game open — on the
+        // library there is no "this game".
+        if self.core.is_some() {
+            let console = Some(self.console_label);
+            let options: Vec<_> = crate::settings::VideoScope::ALL
+                .iter()
+                .map(|s| (*s, s.label(console)))
+                .collect();
+            field_label(ui, &tokens, "Apply to");
+            // Writing at the new layer happens in `save_settings`;
+            // widening drops this game's narrower overrides there.
+            changed |= segmented(ui, &tokens, "video-scope", &mut self.video_scope, &options);
+            ui.add_space(6.0);
+        }
+        field_label(ui, &tokens, "Scaling");
+        let options: Vec<_> = crate::settings::ScaleMode::ALL
+            .iter()
+            .map(|m| (*m, m.short_label().to_owned()))
+            .collect();
+        changed |= segmented(
+            ui,
+            &tokens,
+            "video-scaling",
+            &mut self.video.scale_mode,
+            &options,
+        );
+        ui.add_space(6.0);
+        field_label(ui, &tokens, "Aspect");
+        let options: Vec<_> = crate::settings::PixelAspect::ALL
+            .iter()
+            .map(|a| (*a, a.label().to_owned()))
+            .collect();
+        changed |= segmented(
+            ui,
+            &tokens,
+            "video-aspect",
+            &mut self.video.pixel_aspect,
+            &options,
+        );
+        // Widescreen is an enhancement, not a picture shape: it draws
+        // level the original never showed, so it lives with the other
+        // enhancements and lights the badge there (principle 2).
+        ui.label(
+            egui::RichText::new(
+                "Widescreen draws more of the level, so it is an enhancement: turn it on under \
+                 Enhancements (needs Enhanced mode and a profile for this game).",
+            )
+            .font(egui::FontId::proportional(
+                crate::theme::type_scale::CAPTION,
+            ))
+            .color(tokens.muted),
+        );
+        ui.add_space(6.0);
+        field_label(ui, &tokens, "Around the picture");
+        let mut surround = self.video.surround();
+        let options: Vec<_> = crate::settings::Surround::ALL
+            .iter()
+            .map(|s| (*s, s.label().to_owned()))
+            .collect();
+        if segmented(ui, &tokens, "video-surround", &mut surround, &options) {
+            self.video.set_surround(surround);
+            changed = true;
+        }
+        ui.add_space(6.0);
+        // Ticket W20-15: the two optional readouts.
         changed |= ui
-            .checkbox(&mut self.settings.video.perf_overlay, "Performance overlay")
+            .checkbox(&mut self.video.perf_overlay, "Performance overlay")
             .on_hover_text("Frame rate, frame-time graph and audio buffer, in the picture's corner")
             .changed();
         changed |= ui
-            .checkbox(
-                &mut self.settings.video.input_display,
-                "Show controller input",
-            )
+            .checkbox(&mut self.video.input_display, "Show controller input")
             .changed();
-        changed |= ui
-            .checkbox(
-                &mut self.settings.video.ambient_glow,
-                "Ambient glow in the borders",
-            )
-            .on_hover_text(
-                "Fills the bars around the picture with a dim version of its edge colours",
-            )
-            .changed();
-        ui.add_space(4.0);
-        ui.label("Scaling");
-        for mode in crate::settings::ScaleMode::ALL {
-            if ui
-                .radio_value(&mut self.settings.video.scale_mode, mode, mode.label())
-                .changed()
-            {
-                changed = true;
-            }
-        }
-        ui.add_space(4.0);
-        ui.label("Pixel shape");
-        for aspect in crate::settings::PixelAspect::ALL {
-            if ui
-                .radio_value(
-                    &mut self.settings.video.pixel_aspect,
-                    aspect,
-                    aspect.label(),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-        }
         ui.separator();
 
         // Ticket W20-02: a picker over the shaders
@@ -6028,25 +6272,31 @@ impl RetroForgeApp {
         // manifest declares — not a free-text box.
         ui.label("Shader");
         let selected = self
-            .settings
             .video
             .shader
             .as_deref()
             .and_then(crate::shader_select::kind_from_id);
         egui::ComboBox::from_id_salt("shader-picker")
-            .selected_text(selected.map_or("None", |k| k.manifest().display_name))
+            .selected_text(selected.map_or("None", crate::shader_select::player_name))
             .show_ui(ui, |ui| {
                 if ui.selectable_label(selected.is_none(), "None").clicked() {
-                    self.settings.video.shader = None;
+                    self.video.shader = None;
                     changed = true;
                 }
                 for kind in crate::shader_select::KINDS {
                     let m = kind.manifest();
                     if ui
-                        .selectable_label(selected == Some(kind), m.display_name)
+                        .selectable_label(
+                            selected == Some(kind),
+                            format!(
+                                "{}  ({})",
+                                crate::shader_select::player_name(kind),
+                                m.display_name
+                            ),
+                        )
                         .clicked()
                     {
-                        self.settings.video.shader = Some(m.id.to_string());
+                        self.video.shader = Some(m.id.to_string());
                         self.shader_budget = rf_renderer::fog::BudgetGate::new();
                         self.shader_note = None;
                         changed = true;
@@ -6072,7 +6322,7 @@ impl RetroForgeApp {
             if self.gpu.is_none() {
                 ui.small("No GPU available to this window, so shaders cannot run.");
             }
-        } else if self.settings.video.shader.is_some() {
+        } else if self.video.shader.is_some() {
             ui.small("The saved shader is not in this version; showing the plain picture.");
         }
         if let Some(note) = &self.shader_note {
@@ -6083,6 +6333,16 @@ impl RetroForgeApp {
     }
 
     fn save_settings(&mut self) {
+        // Ticket W21-04: the live video settings go to the layer chosen
+        // under "Apply to".
+        let game = self
+            .core
+            .is_some()
+            .then(|| self.current_game_hash.clone())
+            .flatten();
+        let console = self.core.is_some().then_some(self.console_label);
+        self.settings
+            .store_video(self.video_scope, &self.video, console, game.as_deref());
         self.publish_audio_settings();
         let Some(root) = self.config_root.clone() else {
             self.status = "No config directory; settings apply to this session only.".to_string();
@@ -6556,7 +6816,9 @@ impl RetroForgeApp {
                 self.refresh_state_slots_if_stale();
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(500));
-                if let Some((slot, _)) = self.slot_card_grid(ui, false, true, Some(quick_columns)) {
+                if let Some((slot, _)) =
+                    self.slot_card_grid(ui, false, true, Some(quick_columns), true)
+                {
                     self.active_slot = Some(slot);
                     let ctx = ui.ctx().clone();
                     self.save_to_slot(slot, &ctx);
@@ -6566,7 +6828,9 @@ impl RetroForgeApp {
                 self.refresh_state_slots_if_stale();
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(500));
-                if let Some((slot, _)) = self.slot_card_grid(ui, true, false, Some(quick_columns)) {
+                if let Some((slot, _)) =
+                    self.slot_card_grid(ui, true, false, Some(quick_columns), false)
+                {
                     self.active_slot = Some(slot);
                     self.load_from_slot(slot);
                     close = true;
@@ -6707,7 +6971,6 @@ impl RetroForgeApp {
             self.shader_previews = Some((frame, tiles));
         }
         let selected = self
-            .settings
             .video
             .shader
             .as_deref()
@@ -6740,14 +7003,25 @@ impl RetroForgeApp {
                             if response.clicked() {
                                 pick = Some(*kind);
                             }
-                            ui.label(egui::RichText::new(name).small());
+                            // Ticket W21-04: plain name first, the
+                            // technical name beside it in small caps.
+                            ui.label(
+                                egui::RichText::new(crate::shader_select::player_name(*kind)).font(
+                                    egui::FontId::proportional(crate::theme::type_scale::CAPTION),
+                                ),
+                            );
+                            ui.label(
+                                egui::RichText::new(name.to_uppercase())
+                                    .font(egui::FontId::proportional(9.0))
+                                    .color(ui.visuals().weak_text_color()),
+                            );
                         });
                     }
                 });
             }
         }
         if let Some(kind) = pick {
-            self.settings.video.shader = Some(kind.manifest().id.to_string());
+            self.video.shader = Some(kind.manifest().id.to_string());
             self.shader_budget = rf_renderer::fog::BudgetGate::new();
             self.shader_note = None;
             self.save_settings();
@@ -8716,6 +8990,18 @@ impl RetroForgeApp {
         self.audio_fill = None;
         self.crash = None;
         self.status = "No ROM loaded".to_string();
+        // Ticket W21-04: back on the library, the global video settings.
+        self.video = self.settings.video.clone();
+        self.video_scope = crate::settings::VideoScope::Everything;
+    }
+
+    /// Ticket W21-04: load the video settings in force for the open game.
+    fn resolve_video(&mut self) {
+        let (video, scope) = self
+            .settings
+            .resolve_video(Some(self.console_label), self.current_game_hash.as_deref());
+        self.video = video;
+        self.video_scope = scope;
     }
 
     /// Rescan the configured roots, on a worker thread (ticket W14-02).
@@ -10078,7 +10364,7 @@ impl RetroForgeApp {
     /// Ticket W20-01: Settings › Video, for tests that need a mode set.
     #[doc(hidden)]
     pub fn video_settings_mut_for_test(&mut self) -> &mut crate::settings::VideoSettings {
-        &mut self.settings.video
+        &mut self.video
     }
 
     pub fn last_frame_rgba_for_test(&self) -> Option<Vec<u8>> {
@@ -11194,7 +11480,7 @@ impl RetroForgeApp {
                 play.center_bottom()
                     + egui::vec2(
                         0.0,
-                        if self.settings.video.input_display {
+                        if self.video.input_display {
                             -52.0
                         } else {
                             -12.0
@@ -11474,7 +11760,7 @@ impl RetroForgeApp {
                 .inner_margin(6.0)
                 .show(ui, |ui| add(ui));
         };
-        if self.settings.video.perf_overlay {
+        if self.video.perf_overlay {
             egui::Area::new(egui::Id::new("rf-perf-overlay"))
                 .order(egui::Order::Foreground)
                 .interactable(false)
@@ -11537,7 +11823,7 @@ impl RetroForgeApp {
                     });
                 });
         }
-        if self.settings.video.input_display {
+        if self.video.input_display {
             egui::Area::new(egui::Id::new("rf-input-display"))
                 .order(egui::Order::Foreground)
                 .interactable(false)
@@ -11693,7 +11979,7 @@ impl RetroForgeApp {
     /// from what was last applied, so the surface is not reconfigured
     /// every frame.
     fn apply_vsync(&mut self, frame: &mut eframe::Frame) {
-        let want = self.settings.video.vsync;
+        let want = self.video.vsync;
         if self.applied_vsync == Some(want) {
             return;
         }
@@ -11709,15 +11995,20 @@ impl RetroForgeApp {
     }
 
     fn video_panel(&mut self, ui: &mut egui::Ui) {
-        let scale_mode = self.settings.video.scale_mode;
-        let par = crate::play_view::pixel_aspect_ratio(self.settings.video.pixel_aspect);
-        // Ticket W20-19: the ambient-glow letterbox, when on.
-        let glow = self
-            .settings
-            .video
-            .ambient_glow
-            .then_some(self.edge_colours)
-            .flatten();
+        let scale_mode = self.video.scale_mode;
+        let par = crate::play_view::pixel_aspect_ratio(self.video.pixel_aspect);
+        // Ticket W20-19 / W21-04: what fills the letterbox.
+        let glow = match self.video.surround() {
+            crate::settings::Surround::Black => crate::play_view::Surround::Black,
+            crate::settings::Surround::Glow => self.edge_colours.map_or(
+                crate::play_view::Surround::Black,
+                crate::play_view::Surround::Glow,
+            ),
+            crate::settings::Surround::Bezel => crate::play_view::Surround::Bezel(
+                crate::theme::console_colour(self.console_label)
+                    .unwrap_or(egui::Color32::from_rgb(0x40, 0xC0, 0x60)),
+            ),
+        };
         egui::CentralPanel::default().show(ui, |ui| {
             // Ticket W4-05 (FRONTEND_UI.md §1): hold-to-peek forces the
             // ORIGINAL view for as long as the badge is held. Applied
@@ -11876,6 +12167,7 @@ impl eframe::App for RetroForgeApp {
         self.upscale_studio_window(&ctx);
         self.hash_info_window(&ctx);
         self.overlay_menu(&ctx);
+        self.slot_undo_bar(&ctx);
         self.states_modal(&ctx);
         // Ticket W20-10: drawn whenever a Save asked for it — from the
         // States window OR the Quick Menu — not only inside the former.
@@ -12054,6 +12346,67 @@ fn quick_rail_item(
         painter.galley(cap.min + egui::vec2(5.0, 2.0), galley, tokens.muted);
     }
     response
+}
+
+/// Ticket W21-04: a small-caps field label over a control, as in the
+/// review's Display mockup.
+fn field_label(ui: &mut egui::Ui, tokens: &crate::theme::Tokens, text: &str) {
+    ui.label(
+        egui::RichText::new(text.to_uppercase())
+            .font(egui::FontId::proportional(11.0))
+            .color(tokens.muted),
+    );
+}
+
+/// Ticket W21-04: a segmented control — one row of equal options, the
+/// chosen one filled with the accent wash. Each option is a selectable
+/// widget with its own label (keyboard, pad and tests reach it like any
+/// button). Returns whether `value` changed.
+fn segmented<T: PartialEq + Clone>(
+    ui: &mut egui::Ui,
+    tokens: &crate::theme::Tokens,
+    id: &str,
+    value: &mut T,
+    options: &[(T, String)],
+) -> bool {
+    let mut changed = false;
+    egui::Frame::NONE
+        .fill(tokens.bg)
+        .stroke(egui::Stroke::new(1.0, tokens.line))
+        .corner_radius(egui::CornerRadius::same(7))
+        .inner_margin(egui::Margin::same(2))
+        .show(ui, |ui| {
+            ui.push_id(id, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for (option, label) in options {
+                        let on = value == option;
+                        let text = egui::RichText::new(label)
+                            .font(egui::FontId::proportional(
+                                crate::theme::type_scale::CAPTION,
+                            ))
+                            .color(if on { tokens.ink } else { tokens.muted });
+                        let button = egui::Button::selectable(on, text)
+                            .fill(if on {
+                                tokens.accent_soft
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            })
+                            .stroke(if on {
+                                egui::Stroke::new(1.0, tokens.accent.gamma_multiply(0.5))
+                            } else {
+                                egui::Stroke::NONE
+                            })
+                            .min_size(egui::vec2(64.0, 24.0));
+                        if ui.add(button).clicked() && !on {
+                            *value = option.clone();
+                            changed = true;
+                        }
+                    }
+                });
+            });
+        });
+    changed
 }
 
 /// Ticket W21-02: one hint in the Quick Menu's pad bar — a coloured

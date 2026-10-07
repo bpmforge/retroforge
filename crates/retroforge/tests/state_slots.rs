@@ -270,3 +270,59 @@ fn the_modal_lists_every_slot_and_shows_a_saved_slots_mode_and_flags() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Ticket W21-03: a slot can be named, the name survives a re-scan and a
+/// later overwrite can be undone back to the old state, picture and name;
+/// delete clears all three.
+#[test]
+fn slots_rename_undo_an_overwrite_and_delete() {
+    let dir = scratch("w21_03");
+    let slot = SlotId::Numbered(3);
+    let (plain, _) = real_container(false);
+    let (enhanced, _) = real_container(true);
+    let rgba = vec![200u8; 256 * 240 * 4];
+    state_slots::save(&dir, slot, &plain, Some((&rgba, 256, 240))).unwrap();
+    state_slots::rename(&dir, slot, "  Boss door  ").unwrap();
+    let read = |dir: &Path| state_slots::scan(dir)[2].saved.clone();
+    assert_eq!(read(&dir).unwrap().name.as_deref(), Some("Boss door"));
+
+    // Overwrite with an Enhanced save, no picture, then undo it.
+    state_slots::keep_for_undo(&dir, slot).unwrap();
+    state_slots::save(&dir, slot, &enhanced, None).unwrap();
+    state_slots::rename(&dir, slot, "").unwrap();
+    assert_eq!(read(&dir).unwrap().mode, ModeAtSave::Enhanced);
+    state_slots::undo_overwrite(&dir, slot).unwrap();
+    let back = read(&dir).unwrap();
+    assert_eq!(back.mode, ModeAtSave::Accuracy, "the old state is back");
+    assert!(back.thumbnail.is_some(), "its picture is back");
+    assert_eq!(back.name.as_deref(), Some("Boss door"), "its name is back");
+    assert!(
+        state_slots::undo_overwrite(&dir, slot).is_err(),
+        "an undo is used once"
+    );
+
+    // An overwrite of a slot with no picture: undo removes the new one.
+    state_slots::save(&dir, SlotId::Numbered(4), &plain, None).unwrap();
+    state_slots::keep_for_undo(&dir, SlotId::Numbered(4)).unwrap();
+    state_slots::save(&dir, SlotId::Numbered(4), &plain, Some((&rgba, 256, 240))).unwrap();
+    state_slots::undo_overwrite(&dir, SlotId::Numbered(4)).unwrap();
+    assert!(state_slots::scan(&dir)[3]
+        .saved
+        .as_ref()
+        .unwrap()
+        .thumbnail
+        .is_none());
+
+    state_slots::delete(&dir, slot).unwrap();
+    assert!(read(&dir).is_none(), "deleted");
+    assert_eq!(
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("slot3"))
+            .count(),
+        0
+    );
+    state_slots::delete(&dir, slot).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

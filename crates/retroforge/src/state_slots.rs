@@ -136,6 +136,10 @@ pub struct SavedState {
     pub contains_mods: bool,
     /// Sidecar PNG, if one was written.
     pub thumbnail: Option<PathBuf>,
+    /// Ticket W21-03: the player's name for this slot ("Boss door"), from
+    /// a `.name` text sidecar. Like the thumbnail, not machine state, so
+    /// not inside the container.
+    pub name: Option<String>,
 }
 
 /// Which mode a state was saved in, derived from its chunk list.
@@ -174,6 +178,112 @@ fn thumb_path(dir: &Path, slot: SlotId) -> PathBuf {
     dir.join(format!("{}.png", slot.stem()))
 }
 
+fn name_path(dir: &Path, slot: SlotId) -> PathBuf {
+    dir.join(format!("{}.name", slot.stem()))
+}
+
+/// The longest slot name kept, in characters.
+pub const MAX_NAME_CHARS: usize = 40;
+
+/// Every file a slot owns: state, thumbnail, name.
+fn slot_files(dir: &Path, slot: SlotId) -> [PathBuf; 3] {
+    [
+        state_path(dir, slot),
+        thumb_path(dir, slot),
+        name_path(dir, slot),
+    ]
+}
+
+/// The undo copy of a slot file: `<file>.undo`.
+fn undo_path(file: &Path) -> PathBuf {
+    let mut s = file.as_os_str().to_owned();
+    s.push(".undo");
+    PathBuf::from(s)
+}
+
+/// Ticket W21-03: name `slot`. Whitespace is trimmed and the name capped
+/// at [`MAX_NAME_CHARS`]; an empty name removes it (the card falls back
+/// to "Slot N").
+///
+/// # Errors
+/// Returns the OS error text.
+pub fn rename(dir: &Path, slot: SlotId, name: &str) -> Result<(), String> {
+    let path = name_path(dir, slot);
+    let name: String = name.trim().chars().take(MAX_NAME_CHARS).collect();
+    if name.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("{}: {e}", path.display()))
+            }
+            _ => Ok(()),
+        };
+    }
+    std::fs::write(&path, name).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Ticket W21-03: delete `slot` — state, thumbnail and name. A file
+/// already missing is not an error.
+///
+/// # Errors
+/// Returns the first OS error other than "not found".
+pub fn delete(dir: &Path, slot: SlotId) -> Result<(), String> {
+    for file in slot_files(dir, slot) {
+        match std::fs::remove_file(&file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("{}: {e}", file.display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Ticket W21-03: before saving over `slot`, keep a copy of what is there
+/// so the overwrite can be undone. Replaces any older undo copy; a slot
+/// file that does not exist leaves no copy (and clears a stale one, so
+/// undo cannot resurrect a thumbnail the overwritten state never had).
+///
+/// # Errors
+/// Returns the OS error text.
+pub fn keep_for_undo(dir: &Path, slot: SlotId) -> Result<(), String> {
+    for file in slot_files(dir, slot) {
+        let undo = undo_path(&file);
+        if file.exists() {
+            std::fs::copy(&file, &undo).map_err(|e| format!("{}: {e}", undo.display()))?;
+        } else {
+            let _ = std::fs::remove_file(&undo);
+        }
+    }
+    Ok(())
+}
+
+/// Ticket W21-03: put back what [`keep_for_undo`] kept. Files the new save
+/// created that the old slot did not have are removed.
+///
+/// # Errors
+/// Returns the OS error text, or an error when there is nothing to undo.
+pub fn undo_overwrite(dir: &Path, slot: SlotId) -> Result<(), String> {
+    if !undo_path(&state_path(dir, slot)).exists() {
+        return Err(format!("{}: nothing to undo", slot.label()));
+    }
+    for file in slot_files(dir, slot) {
+        let undo = undo_path(&file);
+        if undo.exists() {
+            std::fs::rename(&undo, &file).map_err(|e| format!("{}: {e}", file.display()))?;
+        } else {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
+    Ok(())
+}
+
+/// Ticket W21-03: drop the undo copy once the undo window has passed.
+pub fn discard_undo(dir: &Path, slot: SlotId) {
+    for file in slot_files(dir, slot) {
+        let _ = std::fs::remove_file(undo_path(&file));
+    }
+}
+
 /// Read the metadata of every slot, occupied or not.
 ///
 /// A slot whose file is present but unreadable or malformed comes back
@@ -200,7 +310,12 @@ fn read_slot(dir: &Path, slot: SlotId) -> Option<SavedState> {
     // actual load path (`load`, below) is where migration and its warning
     // belong.
     let (container, _) = Container::decode_default(&bytes).ok()?;
-    Some(describe(&container, path, thumb_path(dir, slot)))
+    let mut saved = describe(&container, path, thumb_path(dir, slot));
+    saved.name = std::fs::read_to_string(name_path(dir, slot))
+        .ok()
+        .map(|n| n.trim().to_owned())
+        .filter(|n| !n.is_empty());
+    Some(saved)
 }
 
 fn describe(container: &Container, path: PathBuf, thumb: PathBuf) -> SavedState {
@@ -215,6 +330,7 @@ fn describe(container: &Container, path: PathBuf, thumb: PathBuf) -> SavedState 
         },
         contains_mods: has(b"PROF"),
         thumbnail: thumb.exists().then_some(thumb),
+        name: None,
     }
 }
 

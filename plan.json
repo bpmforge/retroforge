@@ -9234,9 +9234,10 @@
    "pad hints show X delete and Y rename"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-07. state_slots: .name sidecar (rename, trimmed, 40 chars, empty clears), delete (state+png+name), keep_for_undo/undo_overwrite/discard_undo via .undo copies (undo restores state, picture and name, and removes a picture the old slot never had). Cards lead with the name; Rename edits in place, Delete asks once on the card (accessible names say which slot). In the Quick Menu an overwrite saves at once with a 10 s undo bar (button + Cmd/Ctrl+Z); the States window keeps W15-04's confirmation modal. Deviation: no X/Y pad hints, because X/Y are not bound to anything in the shell and a hint for a button that does nothing would lie (principle 8); Rename/Delete are focusable buttons the pad reaches with A. Tests: tests/state_slots.rs slots_rename_undo_an_overwrite_and_delete; tests/quick_menu.rs rename/overwrite-undo/delete. Gate on its own: workspace 2536 passing. Landed in ONE commit with W21-04 (joint gate: workspace 2541 passing; memory_editor_writes_the_machine timed out once under load in an earlier run, passed alone 3/3 and in the rerun) because W21-04 work started in the same file while this ticket's gate ran (law 1 deviation, recorded).",
    "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
   ]
  },
@@ -9259,9 +9260,10 @@
    "tests cover scope resolution and every option taking effect"
   ],
   "points": 5,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-07. Shader tiles and picker lead with plain names (shader_select::player_name: Pixel perfect, Smooth pixels, Scanlines, CRT TV, Handheld LCD, Smoothed edges) with the manifest name in small caps. Segmented controls (app.rs segmented()) for Apply to, Scaling, Aspect and Around the picture. Around the picture: Black / Ambient glow / Bezel (VideoSettings.bezel; play_view::paint_bezel, a plain procedural frame with a console-colour light, no product artwork). Apply to: AppSettings.video_by_console / video_by_game (keyed by ROM SHA-256) resolved game > console > everything at ROM open (resolve_video) and written by save_settings (store_video; widening drops narrower overrides); the app reads a live self.video. Deviations: Aspect offers TV (8:7) / Square pixels only; Widescreen is not a picture shape here but an enhancement that draws unseen level, so the Aspect field explains where to turn it on rather than offering an inert segment (principle 8). Shader parameter values stay global. Tests: settings video_scopes_resolve_narrowest_first_and_round_trip, surround_flags_are_exclusive, play_view bezel_fits_the_letterbox, shader_select every_shader_has_a_distinct_player_name, tests/video_scope.rs.",
    "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
   ]
  },

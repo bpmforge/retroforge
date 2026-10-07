@@ -115,12 +115,14 @@ pub fn show_frame(
     grid: DisplayGrid,
     par: f32,
     mode: ScaleMode,
-    glow: Option<[egui::Color32; 4]>,
+    surround: Surround,
 ) -> egui::Response {
     let area = ui.available_rect_before_wrap();
     let rect = play_rect(area, grid, par, mode);
-    if let Some(edges) = glow {
-        paint_ambient_glow(ui.painter(), area, rect, edges);
+    match surround {
+        Surround::Black => {}
+        Surround::Glow(edges) => paint_ambient_glow(ui.painter(), area, rect, edges),
+        Surround::Bezel(accent) => paint_bezel(ui.painter(), area, rect, accent),
     }
     // `maintain_aspect_ratio(false)`: egui's `Image` keeps the TEXTURE's
     // aspect by default, which silently undid the 8:7 pixel shape — the
@@ -224,6 +226,69 @@ pub fn edge_colours(rgba: &[u8], width: usize, height: usize) -> [egui::Color32;
 /// Ticket W20-19: paint the letterbox bars around `picture` (inside
 /// `area`) with each edge's colour, darkened so the picture stays the
 /// brightest thing on screen.
+/// Ticket W21-04: what is drawn around the picture, resolved for one
+/// frame (the settings' `crate::settings::Surround` plus what it needs).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Surround {
+    Black,
+    /// The four edge colours (left, right, top, bottom).
+    Glow([egui::Color32; 4]),
+    /// The console's identity colour, for the bezel's light.
+    Bezel(egui::Color32),
+}
+
+/// How much frame the bezel takes, at most, on each side.
+pub const BEZEL_MAX: f32 = 28.0;
+
+/// Ticket W21-04: the bezel rect around `picture` — up to [`BEZEL_MAX`] on
+/// each side, never past `area` (with Fit or Stretch there may be no
+/// room, and then there is no bezel). `None` when it would be thinner
+/// than 4 px.
+#[must_use]
+pub fn bezel_rect(area: egui::Rect, picture: egui::Rect) -> Option<egui::Rect> {
+    let room = (picture.left() - area.left())
+        .min(area.right() - picture.right())
+        .min(picture.top() - area.top())
+        .min(area.bottom() - picture.bottom())
+        .min(BEZEL_MAX);
+    (room >= 4.0).then(|| picture.expand(room))
+}
+
+/// Ticket W21-04: a plain procedural bezel — a dark rounded frame with a
+/// lighter top edge, an inset shadow line at the picture, and a small
+/// light in the console's colour under the picture. No artwork: nothing
+/// here imitates a real product's case.
+pub fn paint_bezel(
+    painter: &egui::Painter,
+    area: egui::Rect,
+    picture: egui::Rect,
+    accent: egui::Color32,
+) {
+    let Some(outer) = bezel_rect(area, picture) else {
+        return;
+    };
+    let radius =
+        egui::CornerRadius::same(((outer.width() - picture.width()) / 2.0).min(14.0) as u8);
+    painter.rect_filled(outer, radius, egui::Color32::from_rgb(0x1C, 0x1E, 0x23));
+    painter.rect_stroke(
+        outer,
+        radius,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(0x34, 0x37, 0x3F)),
+        egui::StrokeKind::Inside,
+    );
+    painter.rect_stroke(
+        picture.expand(1.0),
+        egui::CornerRadius::same(2),
+        egui::Stroke::new(2.0, egui::Color32::from_rgb(0x08, 0x09, 0x0B)),
+        egui::StrokeKind::Outside,
+    );
+    let gap = outer.bottom() - picture.bottom();
+    if gap >= 10.0 {
+        let led = egui::pos2(picture.left() + 18.0, picture.bottom() + gap / 2.0);
+        painter.circle_filled(led, 2.5, accent);
+    }
+}
+
 pub fn paint_ambient_glow(
     painter: &egui::Painter,
     area: egui::Rect,
@@ -392,5 +457,18 @@ mod tests {
         );
         let zero = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(0.0, 10.0));
         assert_eq!(play_rect(zero, NES, TV, ScaleMode::Integer), zero);
+    }
+
+    /// Ticket W21-04: the bezel takes what room the letterbox has, up to
+    /// its maximum, and none when the picture fills the area.
+    #[test]
+    fn bezel_fits_the_letterbox() {
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let pic = egui::Rect::from_center_size(area.center(), egui::vec2(512.0, 480.0));
+        let b = bezel_rect(area, pic).unwrap();
+        assert_eq!(b, pic.expand(BEZEL_MAX));
+        let tight = egui::Rect::from_center_size(area.center(), egui::vec2(512.0, 590.0));
+        assert_eq!(bezel_rect(area, tight).unwrap(), tight.expand(5.0));
+        assert!(bezel_rect(area, area).is_none());
     }
 }

@@ -461,6 +461,17 @@ pub fn console_tint(
     }
 }
 
+/// Ticket W21-04: a console's identity colour by name ("NES", "SNES"),
+/// for the bezel light; `None` for anything else.
+#[must_use]
+pub fn console_colour(name: &str) -> Option<egui::Color32> {
+    match name {
+        "NES" => Some(NES_TINT),
+        "SNES" => Some(SNES_TINT),
+        _ => None,
+    }
+}
+
 /// Ticket W20-20: a library card's console spine — the console colour at
 /// full strength, as a 4-px stripe down the card's left edge. `None` in
 /// high contrast (colour-coding is exactly what that palette avoids) and

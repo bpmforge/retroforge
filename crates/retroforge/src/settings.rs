@@ -27,6 +27,7 @@
 //! file, deliberately — they are a different shape (a table of
 //! key-to-button rows a user hand-edits) and a different lifetime.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,16 @@ pub enum ScaleMode {
 
 impl ScaleMode {
     pub const ALL: [ScaleMode; 3] = [ScaleMode::Integer, ScaleMode::Fit, ScaleMode::Stretch];
+
+    /// Ticket W21-04: the segmented control's one-word label.
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            ScaleMode::Integer => "Integer",
+            ScaleMode::Fit => "Fit",
+            ScaleMode::Stretch => "Stretch",
+        }
+    }
 
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -142,6 +153,10 @@ pub struct VideoSettings {
     /// Ticket W20-19: fill the letterbox with a darkened average of the
     /// picture's edges. Off by default.
     pub ambient_glow: bool,
+    /// Ticket W21-04: a procedural console bezel around the picture. Off
+    /// by default; mutually exclusive with `ambient_glow` through
+    /// [`VideoSettings::set_surround`].
+    pub bezel: bool,
     /// MetalFX scaler choice (ticket W16-08). `Off` by default; see
     /// [`MetalFxSetting`].
     pub metalfx: MetalFxSetting,
@@ -160,7 +175,78 @@ impl Default for VideoSettings {
             perf_overlay: false,
             input_display: false,
             ambient_glow: false,
+            bezel: false,
             metalfx: MetalFxSetting::default(),
+        }
+    }
+}
+
+/// Ticket W21-04: what fills the space around the picture — the review's
+/// "Around the picture: Black / Ambient glow / Bezel".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surround {
+    Black,
+    Glow,
+    Bezel,
+}
+
+impl Surround {
+    pub const ALL: [Surround; 3] = [Surround::Black, Surround::Glow, Surround::Bezel];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Surround::Black => "Black",
+            Surround::Glow => "Ambient glow",
+            Surround::Bezel => "Bezel",
+        }
+    }
+}
+
+impl VideoSettings {
+    /// Ticket W21-04: the surround these flags describe. Bezel wins if a
+    /// hand-edited file sets both.
+    #[must_use]
+    pub fn surround(&self) -> Surround {
+        if self.bezel {
+            Surround::Bezel
+        } else if self.ambient_glow {
+            Surround::Glow
+        } else {
+            Surround::Black
+        }
+    }
+
+    pub fn set_surround(&mut self, surround: Surround) {
+        self.ambient_glow = surround == Surround::Glow;
+        self.bezel = surround == Surround::Bezel;
+    }
+}
+
+/// Ticket W21-04: which layer a video change is written to — the review's
+/// "Apply to: This game / All NES / Everything". Read back in the order
+/// game, console, everything: the narrowest layer that exists wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoScope {
+    Game,
+    Console,
+    Everything,
+}
+
+impl VideoScope {
+    pub const ALL: [VideoScope; 3] = [
+        VideoScope::Game,
+        VideoScope::Console,
+        VideoScope::Everything,
+    ];
+
+    /// `console` is the running game's console name ("NES"), if known.
+    #[must_use]
+    pub fn label(self, console: Option<&str>) -> String {
+        match self {
+            VideoScope::Game => "This game".to_owned(),
+            VideoScope::Console => format!("All {}", console.unwrap_or("of this console")),
+            VideoScope::Everything => "Everything".to_owned(),
         }
     }
 }
@@ -313,6 +399,13 @@ pub struct AppSettings {
     pub shaders: crate::shader_select::ShaderSettings,
     /// Ticket W20-13.
     pub play: PlaySettings,
+    /// Ticket W21-04: video settings for one console ("NES", "SNES"),
+    /// overriding `video` for its games.
+    pub video_by_console: BTreeMap<String, VideoSettings>,
+    /// Ticket W21-04: video settings for one game, keyed by its normalized
+    /// ROM SHA-256 (principle 5: everything keyed by ROM hash), overriding
+    /// both of the above.
+    pub video_by_game: BTreeMap<String, VideoSettings>,
     /// Tables and keys this build does not know, kept verbatim so a newer
     /// build's settings survive an older build touching the file (module
     /// doc).
@@ -332,6 +425,8 @@ struct KnownSettings {
     window: WindowSettings,
     shaders: crate::shader_select::ShaderSettings,
     play: PlaySettings,
+    video_by_console: BTreeMap<String, VideoSettings>,
+    video_by_game: BTreeMap<String, VideoSettings>,
 }
 
 impl AppSettings {
@@ -351,6 +446,8 @@ impl AppSettings {
             window: self.window,
             shaders: self.shaders.clone(),
             play: self.play,
+            video_by_console: self.video_by_console.clone(),
+            video_by_game: self.video_by_game.clone(),
         };
         let mut table = toml::Table::try_from(known).map_err(|e| e.to_string())?;
         for (key, value) in &self.unknown {
@@ -381,6 +478,8 @@ impl AppSettings {
                     | "window"
                     | "shaders"
                     | "play"
+                    | "video_by_console"
+                    | "video_by_game"
             ) {
                 unknown.insert(key.clone(), value.clone());
             }
@@ -411,8 +510,60 @@ impl AppSettings {
             window: section("window").try_into().unwrap_or_default(),
             shaders: section("shaders").try_into().unwrap_or_default(),
             play: section("play").try_into().unwrap_or_default(),
+            video_by_console: section("video_by_console").try_into().unwrap_or_default(),
+            video_by_game: section("video_by_game").try_into().unwrap_or_default(),
             unknown,
         })
+    }
+
+    /// Ticket W21-04: the video settings in force for a game, and the
+    /// layer they came from — the game's own, else its console's, else
+    /// everything's.
+    #[must_use]
+    pub fn resolve_video(
+        &self,
+        console: Option<&str>,
+        game: Option<&str>,
+    ) -> (VideoSettings, VideoScope) {
+        if let Some(v) = game.and_then(|g| self.video_by_game.get(g)) {
+            return (v.clone(), VideoScope::Game);
+        }
+        if let Some(v) = console.and_then(|c| self.video_by_console.get(c)) {
+            return (v.clone(), VideoScope::Console);
+        }
+        (self.video.clone(), VideoScope::Everything)
+    }
+
+    /// Ticket W21-04: write `video` into `scope`'s layer. Choosing a wider
+    /// scope drops this game's narrower overrides, so what was chosen is
+    /// what applies.
+    pub fn store_video(
+        &mut self,
+        scope: VideoScope,
+        video: &VideoSettings,
+        console: Option<&str>,
+        game: Option<&str>,
+    ) {
+        match (scope, console, game) {
+            (VideoScope::Game, _, Some(g)) => {
+                self.video_by_game.insert(g.to_owned(), video.clone());
+            }
+            (VideoScope::Console, Some(c), _) => {
+                if let Some(g) = game {
+                    self.video_by_game.remove(g);
+                }
+                self.video_by_console.insert(c.to_owned(), video.clone());
+            }
+            _ => {
+                if let Some(g) = game {
+                    self.video_by_game.remove(g);
+                }
+                if let Some(c) = console {
+                    self.video_by_console.remove(c);
+                }
+                self.video = video.clone();
+            }
+        }
     }
 
     /// Keys this build did not recognize — exposed so a test can prove they
@@ -627,5 +778,69 @@ latency_ms = \"not a number\"
             inner_size: Some([f32::NAN, 600.0]),
         };
         assert_eq!(nan.startup_size(), crate::app::WINDOW_SIZE);
+    }
+
+    /// Ticket W21-04: game beats console beats everything; storing at a
+    /// wider scope removes this game's narrower overrides; both maps
+    /// round-trip through the file.
+    #[test]
+    fn video_scopes_resolve_narrowest_first_and_round_trip() {
+        let mut s = AppSettings::default();
+        let crt = VideoSettings {
+            shader: Some("crt".into()),
+            ..Default::default()
+        };
+        let fit = VideoSettings {
+            scale_mode: ScaleMode::Fit,
+            ..Default::default()
+        };
+        assert_eq!(
+            s.resolve_video(Some("NES"), Some("aa")).1,
+            VideoScope::Everything
+        );
+        s.store_video(VideoScope::Console, &crt, Some("NES"), Some("aa"));
+        assert_eq!(
+            s.resolve_video(Some("NES"), Some("bb")),
+            (crt.clone(), VideoScope::Console)
+        );
+        assert_eq!(
+            s.resolve_video(Some("SNES"), None).1,
+            VideoScope::Everything
+        );
+        s.store_video(VideoScope::Game, &fit, Some("NES"), Some("aa"));
+        assert_eq!(
+            s.resolve_video(Some("NES"), Some("aa")),
+            (fit.clone(), VideoScope::Game)
+        );
+
+        let back = AppSettings::from_toml(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(
+            back.resolve_video(Some("NES"), Some("aa")),
+            (fit, VideoScope::Game)
+        );
+        assert_eq!(back.resolve_video(Some("NES"), Some("bb")).0, crt);
+
+        s.store_video(VideoScope::Everything, &crt, Some("NES"), Some("aa"));
+        assert!(s.video_by_game.is_empty() && s.video_by_console.is_empty());
+        assert_eq!(
+            s.resolve_video(Some("NES"), Some("aa")),
+            (crt, VideoScope::Everything)
+        );
+    }
+
+    #[test]
+    fn surround_flags_are_exclusive() {
+        let mut v = VideoSettings::default();
+        assert_eq!(v.surround(), Surround::Black);
+        for s in Surround::ALL {
+            v.set_surround(s);
+            assert_eq!(v.surround(), s);
+        }
+        v.ambient_glow = true;
+        assert_eq!(
+            v.surround(),
+            Surround::Bezel,
+            "bezel wins a hand-edited clash"
+        );
     }
 }
