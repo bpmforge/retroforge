@@ -4180,9 +4180,10 @@
     "limits recorded: mid-line CGRAM writes, direct-colour 8bpp, and colour math (separate ticket) are not covered"
    ],
    "points": 5,
-   "status": "in_progress",
+   "status": "done",
    "stories": [],
    "notes": [
+    "DONE 2026-10-07 (branch w7-20-snes-colour). CoreSink::palette_scanline (defaulted no-op) carries a line's BGR555 words + effective brightness; rf-snes latches CGRAM per line beside LineState (Arc'd so shadow clones stay cheap) and sends it before each video_scanline; FrameBuffer/LayeredFrame resolve via rf_renderer::LinePalette; FrameMsg::line_palettes feeds the compare/peek original; stepper::CountingSink now forwards palette_scanline AND sub_scanline (it forwarded neither). Tests: snes_colours.rs (every pixel == CGRAM colour; fails if the wrapper drops the forward - checked), bgr555 == rf_snes::debug::cgram_rgb on all 32768 words, palette unit tests. Real archive check: Super Noah's Ark 3D frame 500 renders its title art in its own colours. Limits (TESTING.md W7-20): mid-line CGRAM writes, direct-colour 8bpp, colour math, and the stitched canvases / Lua overlay / studio capture still use the NES table. Gate: workspace 2520 passing / 0 failed / 43 ignored, clippy clean, fmt, arch OK.",
     "FILED 2026-10-07 after Brad asked for the recommended next step. Measured: rf_renderer::FrameBuffer resolves every palette_index through the NES 2C02 palette, so on Super Noah's Ark 3D after 400 frames 57,344 of 57,344 pixels differed from CGRAM. Every SNES census row, screenshot and by-eye check to date was over NES-palette colours; the census only checks that something rendered. W7-16's sub-screen channel is also never emitted (no caller of CoreSink::sub_scanline); colour math is a follow-up ticket."
    ]
   },

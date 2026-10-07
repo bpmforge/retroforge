@@ -4310,3 +4310,12 @@ stories, 10 decisions).
   (Unl) sibling; Porky Pig's 1994-05-24 beta is no longer refused as
   SPC7110 (it loads to a uniform screen, a bad dump). Two narrow,
   fullsnes-cited header rules; details in TESTING.md.
+
+- **W7-20 — SNES games were shown in NES colours** (2026-10-07, branch
+  `w7-20-snes-colour`). The renderer resolved every SNES pixel through
+  the NES palette; measured on a commercial title, every pixel was wrong.
+  **Every SNES screenshot, census row and by-eye check before this date
+  was over NES-palette colours.** SNES lines now resolve through CGRAM
+  latched per line, with INIDISP brightness and forced blank. Colour
+  math (translucency) is still not drawn — next ticket. Gate: workspace
+  **2520 passing / 0 failed / 43 ignored**, clippy clean, arch OK.

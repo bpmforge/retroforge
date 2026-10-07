@@ -1,4 +1,5 @@
-//! NES 2C02 palette-to-RGB lookup table (ticket W1-06).
+//! NES 2C02 palette-to-RGB lookup table (ticket W1-06), and the written
+//! SNES palette path beside it (ticket W7-20, [`LinePalette`]).
 //!
 //! [`rf_core_api::CoreSink`]/`PpuPixel` carry only a
 //! `palette_index: u8` — resolving that to a display color is explicitly
@@ -85,9 +86,99 @@ pub fn palette_index_to_rgb(index: u8) -> [u8; 3] {
     NES_PALETTE[(index & 0x3F) as usize]
 }
 
+/// Entries in a written palette: the SNES's CGRAM holds 256.
+pub const LINE_PALETTE_ENTRIES: usize = 256;
+
+/// One scanline's written palette and master brightness (ticket W7-20),
+/// as a core sends it through `CoreSink::palette_scanline`.
+///
+/// Until W7-20 every pixel was resolved through [`NES_PALETTE`], SNES
+/// ones included, so SNES games showed in NES colours. A line that has
+/// one of these is resolved through it; a line without (any NES frame)
+/// keeps the fixed table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinePalette {
+    /// Raw BGR555 words (fullsnes "SNES Color Palette").
+    pub words: [u16; LINE_PALETTE_ENTRIES],
+    /// Master brightness `0..=15`; `0` is black (fullsnes "2100h -
+    /// INIDISP").
+    pub brightness: u8,
+}
+
+impl LinePalette {
+    /// From what a core sent: entries past 256 are ignored, missing ones
+    /// read as black, brightness is clamped to 15.
+    #[must_use]
+    pub fn from_words(palette: &[u16], brightness: u8) -> Self {
+        let mut words = [0u16; LINE_PALETTE_ENTRIES];
+        for (slot, word) in words.iter_mut().zip(palette) {
+            *slot = *word;
+        }
+        LinePalette {
+            words,
+            brightness: brightness.min(15),
+        }
+    }
+
+    #[must_use]
+    pub fn rgb(&self, index: u8) -> [u8; 3] {
+        bgr555_to_rgb(self.words[usize::from(index)], self.brightness)
+    }
+}
+
+/// One BGR555 word as RGB888 at a master brightness (ticket W7-20).
+///
+/// Blue is in the HIGH bits (fullsnes "SNES Color Palette": "Bit 0-4 Red,
+/// 5-9 Green, 10-14 Blue"). Each channel scales by `*255/31` so 31 is 255,
+/// the same conversion `rf_snes::debug::cgram_rgb` uses (a test pins the
+/// two equal at full brightness). Brightness N in `1..=15` scales by
+/// `(N+1)/16` and 0 is black (fullsnes "2100h - INIDISP").
+#[must_use]
+pub fn bgr555_to_rgb(word: u16, brightness: u8) -> [u8; 3] {
+    if brightness == 0 {
+        return [0, 0, 0];
+    }
+    let scale = u32::from(brightness.min(15)) + 1;
+    let ch = |shift: u16| -> u8 {
+        let full = u32::from((word >> shift) & 0x1F) * 255 / 31;
+        (full * scale / 16) as u8
+    };
+    [ch(0), ch(5), ch(10)]
+}
+
+/// Resolve `index` through `palette` when the line has one, else through
+/// the fixed NES table — the one place every RGB-producing sink decides.
+#[must_use]
+pub fn resolve_index(index: u8, palette: Option<&LinePalette>) -> [u8; 3] {
+    match palette {
+        Some(p) => p.rgb(index),
+        None => palette_index_to_rgb(index),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bgr555_puts_blue_high_and_full_scale_at_255() {
+        assert_eq!(bgr555_to_rgb(0x001F, 15), [255, 0, 0]);
+        assert_eq!(bgr555_to_rgb(0x03E0, 15), [0, 255, 0]);
+        assert_eq!(bgr555_to_rgb(0x7C00, 15), [0, 0, 255]);
+        assert_eq!(bgr555_to_rgb(0x7FFF, 0), [0, 0, 0], "brightness 0 is black");
+        // (N+1)/16: brightness 7 is half.
+        assert_eq!(bgr555_to_rgb(0x001F, 7), [127, 0, 0]);
+    }
+
+    #[test]
+    fn a_line_palette_resolves_its_own_words_and_none_keeps_the_nes_table() {
+        let mut words = vec![0u16; 4];
+        words[3] = 0x7C00;
+        let p = LinePalette::from_words(&words, 15);
+        assert_eq!(resolve_index(3, Some(&p)), [0, 0, 255]);
+        assert_eq!(resolve_index(3, None), palette_index_to_rgb(3));
+        assert_eq!(p.rgb(200), [0, 0, 0], "missing entries are black");
+    }
 
     #[test]
     fn table_has_64_entries() {

@@ -287,6 +287,10 @@ pub struct FrameMsg {
     pub rgba: Vec<u8>,
     pub width: usize,
     pub height: usize,
+    /// Ticket W7-20: the palette each row of `rgba` was resolved through
+    /// (all `None` on the NES), so the UI thread's compare/peek
+    /// "original", rebuilt from indices, comes out in the same colours.
+    pub line_palettes: Vec<Option<rf_renderer::LinePalette>>,
     /// Machine position when this frame was produced (ticket W2-15):
     /// completed-frame count, and the last visible scanline drawn.
     /// Carried on the frame itself rather than as a separate event —
@@ -868,13 +872,16 @@ fn display_rgba(
     }
     let (w, h) = (sink.width(), sink.height());
     let reconstructed = historian.observe(&bundle.video, w as u16, h as u16);
-    let mut rgba = rf_renderer::original_rgba_from_indexed(&reconstructed, w as u32, h as u32);
+    let palettes = sink.line_palettes();
+    let mut rgba =
+        rf_renderer::original_rgba_from_indexed_with(&reconstructed, w as u32, h as u32, palettes);
     if let Some(overlay) = overlay {
         for (i, pixel) in overlay.iter().enumerate().take(w * h) {
             if !pixel.opaque {
                 continue;
             }
-            let [r, g, b] = rf_renderer::palette_index_to_rgb(pixel.palette_index);
+            let row = palettes.get(i / w.max(1)).and_then(Option::as_ref);
+            let [r, g, b] = rf_renderer::resolve_index(pixel.palette_index, row);
             let o = i * 4;
             rgba[o] = r;
             rgba[o + 1] = g;
@@ -917,6 +924,14 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
             layers.video_scanline(y, pixels);
         }
         self.bundle.video_scanline(y, pixels);
+    }
+
+    /// Ticket W7-20: the SNES line palette, to both RGB sinks.
+    fn palette_scanline(&mut self, y: u16, palette: &[u16], brightness: u8) {
+        self.frame.palette_scanline(y, palette, brightness);
+        if let Some(layers) = self.layers.as_mut() {
+            layers.palette_scanline(y, palette, brightness);
+        }
     }
 
     fn overlay_scanline(&mut self, y: u16, pixels: &[rf_core_api::OverlayPixel]) {
@@ -1583,6 +1598,7 @@ fn core_thread_main(
                     })
                 }),
                 rgba: display,
+                line_palettes: sink.line_palettes().to_vec(),
                 width: sink.width(),
                 height: sink.height(),
                 frame_count: stepper.frame_count(),
@@ -1763,6 +1779,7 @@ mod tests {
             audio_fill: None,
             hd: None,
             rgba: Vec::new(),
+            line_palettes: Vec::new(),
             width: 0,
             height: 0,
             frame_count: 0,

@@ -58,7 +58,10 @@ pub mod png;
 pub mod scale;
 pub mod shader_chain;
 
-pub use compare::{blink_shows_original, compose_split, original_rgba_from_indexed, CompareMode};
+pub use compare::{
+    blink_shows_original, compose_split, original_rgba_from_indexed,
+    original_rgba_from_indexed_with, CompareMode,
+};
 pub use composite::{CompositeLayer, CompositeOutcome, EnhancedCompositor, TargetReduction};
 pub use fallback::{render_with_fallback, RenderOutcome, RenderPath, FALLBACK_BUDGET};
 pub use frame::FrameBuffer;
@@ -66,7 +69,7 @@ pub use gpu::{GpuContext, GpuUnavailable};
 pub use layers::LayeredFrame;
 pub use metalfx::{availability_from, detect as metalfx_detect, MetalFxAvailability};
 pub use original_pipeline::{IndexedFrame, PalettePass};
-pub use palette::{palette_index_to_rgb, NES_PALETTE};
+pub use palette::{bgr555_to_rgb, palette_index_to_rgb, resolve_index, LinePalette, NES_PALETTE};
 pub use scale::{render_scaled_reference, FillMode, Overscan, ParRatio, ScaleGeometry, ScalePass};
 pub use shader_chain::{
     render_sharp_bilinear_reference, ChainStage, ShaderChain, ShaderKind, ShaderManifest,

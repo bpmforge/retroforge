@@ -138,6 +138,24 @@ pub trait CoreSink {
     /// the sub-screen vanishes at the wrapper exactly as the overlay would.
     fn sub_scanline(&mut self, _y: u16, _pixels: &[SubPixel], _fixed_color: u16) {}
 
+    /// The palette scanline `y` is to be coloured with, sent before that
+    /// line's [`Self::video_scanline`] (ticket W7-20).
+    ///
+    /// For a core whose `palette_index` addresses palette RAM the program
+    /// writes — the SNES's CGRAM — rather than a fixed hardware table like
+    /// the NES's. `palette` holds the raw words, **BGR555** for the SNES
+    /// (fullsnes "SNES Color Palette"), and `brightness` is the master
+    /// brightness in force on the line, `0..=15`, already `0` when the line
+    /// is force-blanked (fullsnes "2100h - INIDISP": 0 is screen black,
+    /// N scales by (N+1)/16). This is register state, not colour: the
+    /// renderer still does the resolving, so law 4 holds the same way it
+    /// does for [`Self::sub_scanline`]'s fixed colour.
+    ///
+    /// Defaulted to a no-op: a core that never calls it (the NES) keeps
+    /// its fixed palette, and every existing implementor compiles
+    /// unchanged. A sink that WRAPS another must forward it explicitly.
+    fn palette_scanline(&mut self, _y: u16, _palette: &[u16], _brightness: u8) {}
+
     /// A block of interleaved audio samples produced since the last call.
     fn audio(&mut self, samples: &[i16]);
 

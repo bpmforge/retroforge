@@ -158,6 +158,10 @@ impl SnesCore {
                 // means this code is not reached at all (law 6).
                 self.system.bus.ppu.render_scanline(y)
             };
+            // Ticket W7-20: the line's palette first, so a sink resolves
+            // this line's indices against the CGRAM the beam saw.
+            let (palette, brightness) = self.system.bus.ppu.line_palette(y);
+            sink.palette_scanline(y, &palette, brightness);
             sink.video_scanline(y, &line.pixels);
             sink.overlay_scanline(y, &line.overlay);
         }

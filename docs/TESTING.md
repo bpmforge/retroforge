@@ -11586,3 +11586,34 @@ missing hardware. Each fix is a header-plausibility rule citing fullsnes
 Porky Pig's beta moving to the uniform bucket is expected: the dump is an
 odd size with no legible header at either location; its retail release
 already renders.
+
+## W7-20 (2026-10-07) — SNES colours reach the screen
+
+Every SNES frame in the app was resolved through the NES 2C02 palette:
+`rf_renderer::FrameBuffer` (and `LayeredFrame`, and the compare/peek
+"original") called `palette_index_to_rgb` on a CGRAM index. Measured on
+Super Noah's Ark 3D (USA) (Unl) after 400 frames: 57,344 of 57,344
+pixels differed from CGRAM. The census never saw it — it buckets "drew
+something", not "drew the right colour".
+
+Fix: `CoreSink::palette_scanline(y, words, brightness)` (defaulted no-op);
+rf-snes latches CGRAM per line beside `LineState` and sends it before each
+line; `FrameBuffer`/`LayeredFrame` resolve a line through its
+`LinePalette` (BGR555, `*255/31`, brightness N scales by (N+1)/16, 0 and
+forced blank are black — fullsnes "SNES Color Palette", "2100h -
+INIDISP"); `FrameMsg::line_palettes` carries them to the UI thread for
+the compare/peek original. NES never sends a palette, so NES output is
+unchanged by construction.
+
+Tests (`crates/retroforge/tests/snes_colours.rs`):
+`every_snes_pixel_is_the_cgram_colour_of_its_index` (RF-Scroller-S
+through `EmuStepper`; fails if `CountingSink` drops the forward —
+checked), `bgr555_matches_the_debuggers_cgram_rgb_on_all_32768_words`;
+unit tests in `rf_renderer::palette`.
+
+Not covered (recorded): mid-line CGRAM writes (the palette is latched
+once per line), direct-colour 8bpp (`$2130` bit 0: the index is BGR233,
+not CGRAM), colour math (W7-16's sub-screen is still not emitted — next
+ticket), and the stitched ultrawide/level canvases, the Lua overlay and
+the upscale studio's tile capture, which still resolve through the NES
+table.
