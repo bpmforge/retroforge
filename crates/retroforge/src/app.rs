@@ -3800,7 +3800,14 @@ impl RetroForgeApp {
                     let s = pack.scale.max(1) as usize;
                     (out, (msg.width * s, msg.height * s))
                 }
-                _ => (msg.rgba.clone(), (msg.width, msg.height)),
+                _ => {
+                    // Ticket W21-08: only the rows the console drew.
+                    let rows = crate::play_view::visible_rows(msg.height, msg.last_scanline);
+                    (
+                        crate::play_view::crop_rows(&msg.rgba, msg.width, rows).to_vec(),
+                        (msg.width, rows),
+                    )
+                }
             };
             // Ticket W16-02: feed the Upscale Studio's accumulator
             // whenever it asked for tiles this frame (`msg.hd.studio_tiles`
@@ -3828,7 +3835,11 @@ impl RetroForgeApp {
                     "Recording stopped (size limit or picture size changed)",
                 );
             }
-            self.core_frame_size = Some((msg.width, msg.height));
+            // The picture's own grid: what was drawn, before any HD scale.
+            self.core_frame_size = Some((
+                msg.width,
+                crate::play_view::visible_rows(msg.height, msg.last_scanline),
+            ));
             self.rewind_status = msg.rewind;
             self.loading_active.clone_from(&msg.loading);
             // Ticket W11-02: the probe's bytes become a live camera. The

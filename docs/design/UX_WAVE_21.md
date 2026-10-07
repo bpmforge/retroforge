@@ -120,3 +120,19 @@ tickets carry `"stories": []`.
   OSD slide were not built; `theme::motion`'s `CARD_FOCUS_*` and
   `OSD_SLIDE_*` tokens are defined but read by nothing yet. Next wave, or
   delete them.
+
+## 8. Launch follow-ups (W21-08..W21-11)
+
+Brad, 2026-10-07: "look at the game loading and such". A probe launching
+his own Super Mario Bros. 3 and Super Mario World zips found loading fast
+(12–23 ms, 60 fps within a second) and four things around it wrong:
+
+- **W21-08** — the SNES draws 224 lines but the host frame is 240, so a
+  black 16-line band sits under the picture.
+- **W21-09** — Play shows a bare dark area with a small "Loaded …" line
+  until the first frame; and the play view's 8-px panel margin drops an
+  892-px window from 3x to 2x.
+- **W21-10** — library pictures are the boot frame (a grey blob,
+  "Nintendo Presents"); capture on quit or at 10 s instead.
+- **W21-11** — the library's status bar keeps the last game's console and
+  mode; a folder can be added twice.

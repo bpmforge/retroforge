@@ -9343,6 +9343,93 @@
    "CLOSED 2026-10-07. capture_tour.rs now also photographs 26-settings-search, 27-bezel and 28-slot-undo; 12-16 (Quick Menu sections), 14 (Display controls), 15 (Enhancements cards), 05 (Settings sheet) and 22 (Continue hero) already cover the rest. Found by the photos and fixed here (W21-06 follow-up): the Settings sheet grew past the status bar because the bindings line sat under an unbounded scroll area. Gate: workspace 2542 passing.",
    "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
   ]
+ },
+ {
+  "id": "W21-08",
+  "title": "SNES picture shows only the lines the console drew",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "a 224-line SNES frame is displayed 224 lines tall, with no blank band below it",
+   "an overscan (239-line) frame and every NES frame are unchanged",
+   "unit test for the visible-row crop; app test measures the displayed frame size for a 224-line SNES frame"
+  ],
+  "points": 2,
+  "status": "done",
+  "stories": [],
+  "notes": [
+   "CLOSED 2026-10-07. Root cause verified: rf-snes emit_frame replays 0..setini.visible_lines() (224 without overscan) into a 240-row host FrameBuffer, so rows 224-239 stayed black and the picture sat high. play_view::visible_rows(height, last_scanline) (FrameMsg already carried last_scanline) and crop_rows crop the displayed frame and core_frame_size to the rows drawn; only shrinks, only non-interlaced (<=240), and the HD-pack path (NES) is untouched. Unit test in play_view; tests/app_opens_snes.rs asserts the displayed SNES frame is 256x224 with the 224-line shape. Probe on Super Mario World: rect 586x448 (was 586x480). Gate: workspace 2543 passing.",
+   "FILED 2026-10-07 from Brad's \"look at the game loading\" and a launch probe of his own SMB3 / Super Mario World zips (frames at 0/100/300/1000/3000/6000 ms)."
+  ]
+ },
+ {
+  "id": "W21-09",
+  "title": "Launch looks intentional and uses the window",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W21-08"
+  ],
+  "acceptance": [
+   "between Play and the first frame the play area shows the game title and console in the display face, not a bare status line",
+   "the play view has no panel margin, so the largest integer scale that fits the window is used (an 892-px window shows NES at 3x)",
+   "tests cover the margin-free play rect"
+  ],
+  "points": 2,
+  "status": "in_progress",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from Brad's \"look at the game loading\" and a launch probe of his own SMB3 / Super Mario World zips (frames at 0/100/300/1000/3000/6000 ms)."
+  ]
+ },
+ {
+  "id": "W21-10",
+  "title": "Library pictures show the game, not its boot frame",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "a game's library picture is replaced by the frame on screen when the player quits it, or after 10 s of play, whichever comes first",
+   "the first-frame capture still fills a game that has no picture yet",
+   "test proves a later frame replaces the boot frame"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from Brad's \"look at the game loading\" and a launch probe of his own SMB3 / Super Mario World zips (frames at 0/100/300/1000/3000/6000 ms)."
+  ]
+ },
+ {
+  "id": "W21-11",
+  "title": "Library status bar and folders say only true things",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "with no game open the status bar shows no console or mode from the last game",
+   "adding a library folder that is already listed does not add it twice, and duplicates already saved are removed on load",
+   "tests cover both"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from Brad's \"look at the game loading\" and a launch probe of his own SMB3 / Super Mario World zips (frames at 0/100/300/1000/3000/6000 ms)."
+  ]
  }
 ]
 }
