@@ -74,7 +74,10 @@ fn cards_explain_each_feature_and_a_toggle_reaches_the_badge() {
 
     // Turn on the sprite-limit bypass from the panel: the badge counts it.
     assert!(!harness.state().status_badge().contains('\u{e2de}'));
-    harness.get_by_label("Sprite-limit bypass").click();
+    // W21-05: the card's switch, not its title label.
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::CheckBox, "Sprite-limit bypass")
+        .click();
     harness.run_steps(2);
     assert!(
         harness.state().status_badge().contains('\u{e2de}'),
