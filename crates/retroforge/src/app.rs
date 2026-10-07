@@ -76,6 +76,12 @@ const SLOT_CARD_WIDTH: f32 = 168.0;
 /// Ticket W21-03: how long an overwrite stays undoable (the review's
 /// "Undo is available for 10 s").
 const SLOT_UNDO_SECS: f64 = 10.0;
+/// Ticket W21-10: frames of play (10 s at 60 fps) before the library
+/// picture is retaken from the game itself.
+const THUMB_GAMEPLAY_FRAMES: u64 = 600;
+/// Ticket W21-10: a session shorter than this (1 s) does not replace the
+/// picture on quit.
+const THUMB_MIN_FRAMES: u64 = 60;
 
 /// Ticket W20-11: seconds without pointer movement before the bars hide
 /// in play, how long a honesty-badge change keeps them up, and how close
@@ -929,6 +935,12 @@ pub struct RetroForgeApp {
     show_settings: bool,
     /// Which Settings tab is showing.
     settings_tab: SettingsTab,
+    /// Whether the level probe is armed: frames queued before a disarm
+    /// still carry probe bytes, and are ignored once it is off.
+    level_probe_armed: bool,
+    /// Ticket W21-10: this session already replaced the boot-frame
+    /// picture with a gameplay frame.
+    thumb_gameplay_taken: bool,
     /// Ticket W21-06: the Settings sheet's search text.
     settings_query: String,
     /// Ticket W21-06: the area between the bars, last frame.
@@ -1527,6 +1539,8 @@ impl RetroForgeApp {
             show_settings: false,
             settings_tab: SettingsTab::Video,
             settings_query: String::new(),
+            thumb_gameplay_taken: false,
+            level_probe_armed: false,
             central_rect: None,
             video: app_settings.video.clone(),
             video_scope: crate::settings::VideoScope::Everything,
@@ -3368,6 +3382,7 @@ impl RetroForgeApp {
             .map(|l| l.wait_loops.clone())
             .unwrap_or_default();
         self.loading_sent = None;
+        self.thumb_gameplay_taken = false;
         // Ticket W20-17: the fog plane comes from the matched profile
         // itself, not from `level_session` (which exists only for a
         // profile with a decodable level map) — until W20-17 the
@@ -3822,6 +3837,11 @@ impl RetroForgeApp {
             // hash with no thumbnail yet. Reads `rgba` before it moves
             // into `self.last_frame_rgba` below.
             self.maybe_capture_first_frame(&rgba, size.0, size.1);
+            // Ticket W21-10: after THUMB_GAMEPLAY_FRAMES of play, the
+            // picture becomes a frame of the game rather than its boot.
+            if !self.thumb_gameplay_taken && msg.frame_count >= THUMB_GAMEPLAY_FRAMES {
+                self.thumb_gameplay_taken = self.capture_gameplay_thumbnail(&rgba, size.0, size.1);
+            }
             // Ticket W20-14: every resolved frame while recording. A frame
             // the recorder refuses (size change, or the size limit) ends
             // the recording and saves what it has.
@@ -3872,7 +3892,13 @@ impl RetroForgeApp {
                         console: host.log.lines(),
                     }));
             }
-            if let (Some(probe), Some(session)) = (&msg.level_probe, &self.level_session) {
+            // Frames already in flight when the probe was disarmed still
+            // carry its bytes; they must not bring the camera back.
+            if let (true, Some(probe), Some(session)) = (
+                self.level_probe_armed,
+                &msg.level_probe,
+                &self.level_session,
+            ) {
                 let addrs = Self::probe_addrs(session);
                 let values = probe.values.clone();
                 let read = move |addr: u32| -> u8 {
@@ -9312,6 +9338,7 @@ impl RetroForgeApp {
         // `None` when the feature is off OR no level decoded, so the core
         // stops peeking either way.
         self.send_command(CoreCommand::SetLevelProbe(probe));
+        self.level_probe_armed = on;
         if !on {
             self.level_camera = None;
         }
@@ -9354,6 +9381,15 @@ impl RetroForgeApp {
     /// having played something, and re-walking the user's folders on every
     /// return would make going back feel expensive.
     fn close_rom(&mut self) {
+        // Ticket W21-10: the frame on screen as the player quits becomes
+        // the game's library picture — where they were, not the boot
+        // logo. Not for a session that never got a second in.
+        if self.position.is_some_and(|(f, _)| f >= THUMB_MIN_FRAMES) {
+            if let (Some(rgba), Some((w, h))) = (self.last_frame_rgba.clone(), self.last_frame_size)
+            {
+                self.capture_gameplay_thumbnail(&rgba, w, h);
+            }
+        }
         // Ticket W20-14: a recording in progress is saved, not lost.
         let ctx = self.ctx.clone();
         self.stop_recording(&ctx, "Recording");
@@ -9551,6 +9587,32 @@ impl RetroForgeApp {
             // taken since would still win, correctly).
             self.library_thumbnail_textures.remove(&hash);
         }
+    }
+
+    /// Ticket W21-10: store `rgba` as this game's library picture,
+    /// replacing the boot-frame capture (the same cache entry, so the
+    /// library's source order is unchanged: a save screenshot still wins).
+    /// Returns whether it was stored. A flat frame (a fade, a black
+    /// screen) is never stored.
+    fn capture_gameplay_thumbnail(&mut self, rgba: &[u8], width: usize, height: usize) -> bool {
+        let Some(hash) = self.current_game_hash.clone() else {
+            return false;
+        };
+        let Some(cache) = self.thumbnail_cache.as_mut() else {
+            return false;
+        };
+        if !crate::thumbnail::frame_is_non_uniform(rgba) {
+            return false;
+        }
+        let (Ok(w), Ok(h)) = (u32::try_from(width), u32::try_from(height)) else {
+            return false;
+        };
+        let png = rf_renderer::png::encode_rgba(rgba, w, h);
+        let stored = crate::thumbnail::put_first_frame(cache, &hash, &png).is_ok();
+        if stored {
+            self.library_thumbnail_textures.remove(&hash);
+        }
+        stored
     }
 
     /// Ticket W15-05, §4: the most recent OCCUPIED save-state slot's
@@ -10743,6 +10805,22 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn display_texture_size_for_test(&self) -> Option<[usize; 2]> {
         self.texture.as_ref().map(egui::TextureHandle::size)
+    }
+
+    /// Ticket W21-10: the open game's ROM hash (tests).
+    #[doc(hidden)]
+    pub fn current_game_hash_for_test(&self) -> Option<String> {
+        self.current_game_hash.clone()
+    }
+
+    /// Ticket W21-10: the PNG bytes of a game's library picture capture
+    /// (tests).
+    #[doc(hidden)]
+    pub fn library_picture_for_test(&mut self, hash: &str) -> Option<Vec<u8>> {
+        let cache = self.thumbnail_cache.as_mut()?;
+        crate::thumbnail::get_first_frame(cache, hash)
+            .ok()
+            .flatten()
     }
 
     /// Ticket W20-04: the last fullscreen state requested.

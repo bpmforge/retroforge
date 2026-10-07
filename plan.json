@@ -9405,9 +9405,10 @@
    "test proves a later frame replaces the boot frame"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-07. capture_gameplay_thumbnail stores a frame as the game's library picture (same cache entry as the first-frame capture, so a save screenshot still wins): once at 600 frames (10 s) of play, and again from the frame on screen at quit when the session ran at least 60 frames; flat frames never stored. The first-frame capture still fills an empty picture. Found while gating: the level probe's in-flight frames re-set the live camera after a disarm (a pre-existing race the slower capture frame exposed, full_level_reaches_the_app 3/3 red); verified by moving the threshold out of reach (green), fixed at the root with level_probe_armed so stale probe bytes are ignored once off. Test: tests/library_picture_from_play.rs (the picture after quit is the frame on screen, decoded and compared). Gate: workspace 2545 passing.",
    "FILED 2026-10-07 from Brad's \"look at the game loading\" and a launch probe of his own SMB3 / Super Mario World zips (frames at 0/100/300/1000/3000/6000 ms)."
   ]
  },
@@ -9426,10 +9427,33 @@
    "tests cover both"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from Brad's \"look at the game loading\" and a launch probe of his own SMB3 / Super Mario World zips (frames at 0/100/300/1000/3000/6000 ms)."
+  ]
+ },
+ {
+  "id": "W21-12",
+  "title": "Window fits the game: no black borders around the picture",
+  "phase": 21,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W21-09"
+  ],
+  "acceptance": [
+   "when a game's first frame arrives in a window (not fullscreen, not maximized), the window resizes so the play area is exactly the picture at the integer scale that fits the screen",
+   "on by default; Settings › Video has a switch to turn it off",
+   "the size computation is a pure tested function; an app test sees the resize request for NES and SNES pictures"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from Brad: \"can we have the render window for the default snes be exact size of the render so that there is no black boarders? if so do that\"."
   ]
  }
 ]
