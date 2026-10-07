@@ -12,6 +12,12 @@ law: NFR-008 — all public formats versioned from first release.
 enhancement/debugger (observe). Cores: rf-nes, rf-snes, and nothing else
 constructs machine state. Pixels are indexed + metadata, never RGB (ADR-4).
 `state_view()` valid only between frames.
+`CoreSink`'s optional channels, each defaulted to a no-op and each one a
+wrapping sink must forward: `overlay_scanline` (W3-05a),
+`sub_scanline` (W7-16), and `palette_scanline` (W7-20) — a written
+palette's raw words (BGR555 for the SNES) plus master brightness, sent
+before each line's `video_scanline`. Palette RAM is register state, so
+the renderer still does every index-to-colour resolution.
 **Proof:** mock-core contract tests (W0-04); validate-arch.sh forbids any
 other crate importing cores directly.
 

@@ -12,7 +12,7 @@
 //! that turns [`FrameBuffer::rgba`] into an `egui::ColorImage`/texture.
 use rf_core_api::{CoreEvent, CoreSink, OverlayPixel, PpuPixel};
 
-use crate::palette::palette_index_to_rgb;
+use crate::palette::{resolve_index, LinePalette};
 
 /// NES visible frame width in pixels (nesdev.org/wiki/PPU_rendering: 256
 /// dots of visible output per scanline).
@@ -39,6 +39,9 @@ pub struct FrameBuffer {
     rgba: Vec<u8>,
     width: usize,
     height: usize,
+    /// Ticket W7-20: each row's written palette, when the core sent one
+    /// (`CoreSink::palette_scanline`); `None` rows use the NES table.
+    palettes: Vec<Option<LinePalette>>,
 }
 
 impl FrameBuffer {
@@ -65,6 +68,7 @@ impl FrameBuffer {
         }
         FrameBuffer {
             rgba,
+            palettes: vec![None; height],
             width,
             height,
         }
@@ -84,6 +88,14 @@ impl FrameBuffer {
     #[must_use]
     pub fn height(&self) -> usize {
         self.height
+    }
+
+    /// Ticket W7-20: the palette each row was resolved through (`None`
+    /// for the NES table), so a consumer resolving the same indices again
+    /// — the compare view's "original" — gets the same colours.
+    #[must_use]
+    pub fn line_palettes(&self) -> &[Option<LinePalette>] {
+        &self.palettes
     }
 
     /// Copy of [`Self::rgba`] for callers (e.g. a cross-thread channel)
@@ -112,13 +124,22 @@ impl CoreSink for FrameBuffer {
             return;
         }
         let row_start = row * self.width * 4;
+        let palette = self.palettes[row].as_ref();
         for (x, pixel) in pixels.iter().enumerate().take(self.width) {
-            let [r, g, b] = palette_index_to_rgb(pixel.palette_index);
+            let [r, g, b] = resolve_index(pixel.palette_index, palette);
             let offset = row_start + x * 4;
             self.rgba[offset] = r;
             self.rgba[offset + 1] = g;
             self.rgba[offset + 2] = b;
             self.rgba[offset + 3] = 0xFF;
+        }
+    }
+
+    /// Ticket W7-20: remember the palette row `y` is resolved through.
+    /// Arrives before that row's `video_scanline` (`rf_snes::core`).
+    fn palette_scanline(&mut self, y: u16, palette: &[u16], brightness: u8) {
+        if let Some(slot) = self.palettes.get_mut(usize::from(y)) {
+            *slot = Some(LinePalette::from_words(palette, brightness));
         }
     }
 
@@ -140,7 +161,7 @@ impl CoreSink for FrameBuffer {
             if !pixel.opaque {
                 continue;
             }
-            let [r, g, b] = palette_index_to_rgb(pixel.palette_index);
+            let [r, g, b] = resolve_index(pixel.palette_index, self.palettes[row].as_ref());
             let offset = row_start + x * 4;
             self.rgba[offset] = r;
             self.rgba[offset + 1] = g;
@@ -164,6 +185,7 @@ impl CoreSink for FrameBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::palette::palette_index_to_rgb;
     use rf_core_api::PixelLayer;
 
     fn solid_row(index: u8) -> Vec<PpuPixel> {
@@ -295,6 +317,7 @@ mod tests {
 #[cfg(test)]
 mod variable_size_tests {
     use super::*;
+    use crate::palette::palette_index_to_rgb;
     use rf_core_api::PixelLayer;
 
     /// **The default is unchanged.** Every existing caller uses `new()`,

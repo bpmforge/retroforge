@@ -152,6 +152,18 @@ impl CoreSink for CountingSink<'_> {
         self.inner.overlay_scanline(y, pixels);
     }
 
+    /// Ticket W7-20: forwarded for the same reason as the overlay — an
+    /// unforwarded default here left every SNES frame in NES colours.
+    /// The sub-screen (W7-16) is forwarded alongside it, which it never
+    /// was.
+    fn palette_scanline(&mut self, y: u16, palette: &[u16], brightness: u8) {
+        self.inner.palette_scanline(y, palette, brightness);
+    }
+
+    fn sub_scanline(&mut self, y: u16, pixels: &[rf_core_api::SubPixel], fixed_color: u16) {
+        self.inner.sub_scanline(y, pixels, fixed_color);
+    }
+
     fn audio(&mut self, samples: &[i16]) {
         self.inner.audio(samples);
     }

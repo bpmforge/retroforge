@@ -53,7 +53,7 @@
 use rf_core_api::{CoreEvent, CoreSink, PixelLayer, PpuPixel};
 
 use crate::frame::{NES_HEIGHT, NES_WIDTH};
-use crate::palette::palette_index_to_rgb;
+use crate::palette::{resolve_index, LinePalette};
 
 /// A fully transparent RGBA texel — the "nothing from this layer at this
 /// position" value both buffers start filled with and get explicitly
@@ -75,6 +75,8 @@ pub struct LayeredFrame {
     sprite_rgba: Vec<u8>,
     width: usize,
     height: usize,
+    /// Ticket W7-20: per-row written palette, as `FrameBuffer` keeps it.
+    palettes: Vec<Option<LinePalette>>,
 }
 
 impl LayeredFrame {
@@ -96,6 +98,7 @@ impl LayeredFrame {
         LayeredFrame {
             bg_rgba: vec![0u8; width * height * 4],
             sprite_rgba: vec![0u8; width * height * 4],
+            palettes: vec![None; height],
             width,
             height,
         }
@@ -146,7 +149,7 @@ impl CoreSink for LayeredFrame {
         for (x, pixel) in pixels.iter().enumerate().take(self.width) {
             let offset = row_start + x * 4;
             let resolved = {
-                let [r, g, b] = palette_index_to_rgb(pixel.palette_index);
+                let [r, g, b] = resolve_index(pixel.palette_index, self.palettes[row].as_ref());
                 [r, g, b, 0xFF]
             };
             // Route to exactly one buffer as opaque and the other as
@@ -166,6 +169,13 @@ impl CoreSink for LayeredFrame {
         }
     }
 
+    /// Ticket W7-20: same as `FrameBuffer::palette_scanline`.
+    fn palette_scanline(&mut self, y: u16, palette: &[u16], brightness: u8) {
+        if let Some(slot) = self.palettes.get_mut(usize::from(y)) {
+            *slot = Some(LinePalette::from_words(palette, brightness));
+        }
+    }
+
     fn audio(&mut self, _samples: &[i16]) {
         // Video-only sink, same as `FrameBuffer` — audio is a later ticket.
     }
@@ -179,6 +189,7 @@ impl CoreSink for LayeredFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::palette::palette_index_to_rgb;
 
     fn pixel(layer: PixelLayer, palette_index: u8) -> PpuPixel {
         PpuPixel {

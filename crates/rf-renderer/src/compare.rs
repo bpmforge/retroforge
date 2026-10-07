@@ -46,15 +46,35 @@ pub fn original_rgba_from_indexed(
     width: u32,
     height: u32,
 ) -> Vec<u8> {
+    original_rgba_from_indexed_with(pixels, width, height, &[])
+}
+
+/// [`original_rgba_from_indexed`] with each row's written palette
+/// (ticket W7-20): row `y` resolves through `palettes[y]` when it is
+/// `Some`, else the NES table — so an SNES frame's "original" is in its
+/// own colours. An empty slice is the NES behaviour.
+///
+/// # Panics
+/// As [`original_rgba_from_indexed`].
+#[must_use]
+pub fn original_rgba_from_indexed_with(
+    pixels: &[rf_core_api::PpuPixel],
+    width: u32,
+    height: u32,
+    palettes: &[Option<crate::palette::LinePalette>],
+) -> Vec<u8> {
     assert_eq!(
         pixels.len(),
         (width as usize) * (height as usize),
         "original_rgba_from_indexed: not {width}x{height} indexed pixels"
     );
     let mut out = Vec::with_capacity(pixels.len() * 4);
-    for px in pixels {
-        let [r, g, b] = crate::palette::palette_index_to_rgb(px.palette_index);
-        out.extend_from_slice(&[r, g, b, 0xFF]);
+    for (row, line) in pixels.chunks(width.max(1) as usize).enumerate() {
+        let palette = palettes.get(row).and_then(Option::as_ref);
+        for px in line {
+            let [r, g, b] = crate::palette::resolve_index(px.palette_index, palette);
+            out.extend_from_slice(&[r, g, b, 0xFF]);
+        }
     }
     out
 }

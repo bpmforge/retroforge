@@ -555,6 +555,15 @@ pub struct Ppu {
     completed_line_writes: Vec<Vec<(u16, u16, u8)>>,
     completed_line_regs: Vec<Option<PpuRegs>>,
 
+    /// CGRAM as it stood when each line was latched, live and completed
+    /// (ticket W7-20), indexed like `line_state`. Kept out of
+    /// [`LineState`] (which composition copies around) and behind an
+    /// `Arc` so the per-line shadow clones `render_sub_scanline` makes do
+    /// not copy 120 KiB each. HDMA rewrites CGRAM between lines for
+    /// gradients, so a per-frame palette would be wrong for those frames.
+    line_cgram: std::sync::Arc<Vec<Option<[u16; CGRAM_ENTRIES]>>>,
+    completed_line_cgram: std::sync::Arc<Vec<Option<[u16; CGRAM_ENTRIES]>>>,
+
     /// `$213E` bit 6: more than 32 sprites on a line.
     pub range_over: bool,
     /// `$213E` bit 7: more than 34 tile slivers on a line.
@@ -605,6 +614,8 @@ impl Ppu {
             completed_line_state: vec![None; VISIBLE_LINES_OVERSCAN as usize],
             completed_line_writes: vec![Vec::new(); VISIBLE_LINES_OVERSCAN as usize],
             completed_line_regs: vec![None; VISIBLE_LINES_OVERSCAN as usize],
+            line_cgram: std::sync::Arc::new(vec![None; VISIBLE_LINES_OVERSCAN as usize]),
+            completed_line_cgram: std::sync::Arc::new(vec![None; VISIBLE_LINES_OVERSCAN as usize]),
             direct_color: false,
             range_over: false,
             time_over: false,
@@ -811,6 +822,40 @@ impl Ppu {
                 ts: self.ts,
             });
         }
+        let cgram = self.cgram;
+        if let Some(slot) = std::sync::Arc::make_mut(&mut self.line_cgram).get_mut(usize::from(y)) {
+            *slot = Some(cgram);
+        }
+    }
+
+    /// Line `y`'s palette and effective brightness (ticket W7-20), for
+    /// [`rf_core_api::CoreSink::palette_scanline`]. `y` is the 0-based
+    /// visible row, as [`Ppu::render_scanline`] takes it; the hardware
+    /// line is one more. Reads the same set composition does (completed
+    /// frame first, then live, then the current registers), and returns
+    /// brightness `0` for a force-blanked line, which fullsnes "2100h -
+    /// INIDISP" shows as black whatever CGRAM holds.
+    #[must_use]
+    pub fn line_palette(&self, y: u16) -> ([u16; CGRAM_ENTRIES], u8) {
+        let idx = usize::from(y + 1);
+        let (state, cgram) = if self.line_uses_completed(idx) {
+            (
+                self.completed_line_state[idx],
+                self.completed_line_cgram.get(idx).copied().flatten(),
+            )
+        } else {
+            (
+                self.line_state.get(idx).copied().flatten(),
+                self.line_cgram.get(idx).copied().flatten(),
+            )
+        };
+        let (forced_blank, brightness) = state.map_or((self.forced_blank, self.brightness), |s| {
+            (s.forced_blank, s.brightness)
+        });
+        (
+            cgram.unwrap_or(self.cgram),
+            if forced_blank { 0 } else { brightness },
+        )
     }
 
     /// The state latched for line `y`, for tests.
@@ -841,6 +886,8 @@ impl Ppu {
             &mut self.completed_line_writes,
             &mut self.completed_line_regs,
         );
+        std::sync::Arc::make_mut(&mut self.line_cgram).fill(None);
+        std::sync::Arc::make_mut(&mut self.completed_line_cgram).fill(None);
     }
 
     fn clear_line_buffers(
@@ -874,11 +921,13 @@ impl Ppu {
         std::mem::swap(&mut self.line_state, &mut self.completed_line_state);
         std::mem::swap(&mut self.line_writes, &mut self.completed_line_writes);
         std::mem::swap(&mut self.line_regs, &mut self.completed_line_regs);
+        std::mem::swap(&mut self.line_cgram, &mut self.completed_line_cgram);
         Self::clear_line_buffers(
             &mut self.line_state,
             &mut self.line_writes,
             &mut self.line_regs,
         );
+        std::sync::Arc::make_mut(&mut self.line_cgram).fill(None);
     }
 
     /// Does the just-completed frame carry its own record for hardware

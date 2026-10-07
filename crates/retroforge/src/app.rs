@@ -3411,7 +3411,14 @@ impl RetroForgeApp {
                     return None;
                 }
                 Some(CompareBuffers {
-                    original: rf_renderer::original_rgba_from_indexed(&video, w, h),
+                    // Ticket W7-20: in the frame's own palette, so an
+                    // SNES "original" is not in NES colours.
+                    original: rf_renderer::original_rgba_from_indexed_with(
+                        &video,
+                        w,
+                        h,
+                        &msg.line_palettes,
+                    ),
                     enhanced: msg.rgba.clone(),
                     width: w,
                     height: h,
@@ -9235,6 +9242,7 @@ impl RetroForgeApp {
             audio_fill: None,
             hd: None,
             rgba: vec![0u8; width * height * 4],
+            line_palettes: Vec::new(),
             width,
             height,
             frame_count: 0,
