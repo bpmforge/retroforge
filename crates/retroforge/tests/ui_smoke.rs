@@ -196,9 +196,10 @@ fn ui_smoke_boot_open_rom_present_a_frame_and_toggle_every_panel() {
     }
 
     // Project law 6: a fresh install boots in Accuracy Mode, and the
-    // honesty badge must say so before any ROM is open.
+    // honesty badge must say so before any ROM is open — as the mode
+    // alone, since no console is running (W21-11).
     assert!(
-        harness.query_by_label("NES \u{b7} Accuracy").is_some(),
+        harness.query_by_label("Accuracy").is_some(),
         "boot: the mode badge must read Accuracy (law 6). Tree has: {:?}",
         labels(&harness)
     );

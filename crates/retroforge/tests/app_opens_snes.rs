@@ -94,6 +94,12 @@ fn a_snes_rom_starts_and_reaches_the_screen() {
         (ratio - 256.0 * 8.0 / 7.0 / 224.0).abs() < 0.02,
         "the drawn rect has the 224-line shape: {rect:?}"
     );
+    // Ticket W21-11: back on the library the badge names no console —
+    // it read "SNES · Accuracy" there after quitting an SNES game.
+    harness.state_mut().close_rom_for_test();
+    harness.run_steps(2);
+    assert_eq!(harness.state().status_badge(), "Accuracy");
+    assert!(harness.state().status().is_empty(), "no stale status line");
 }
 
 /// **The NES path is unharmed.** W11-10 through W11-12 rewrote how every

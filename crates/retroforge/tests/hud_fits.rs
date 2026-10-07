@@ -245,9 +245,12 @@ fn the_hud_fits_the_window_the_app_actually_opens() {
     // priority order §3.2 implies, and the opposite of what shipped
     // before. Asserted through the layout instrument, because a plain
     // label publishes no accessibility node here at all.
+    // Since W21-11 the library has no status text at all (it said "No
+    // ROM loaded — File > Open ROM…"); the long-status cases are covered
+    // with a ROM open below.
     assert!(
-        !harness.state().status().is_empty(),
-        "precondition: the app boots with a status message"
+        harness.state().status().is_empty(),
+        "the library boots with no status line (W21-11)"
     );
 
     // ---- 3. the bar in its WIDEST state ----------------------------
