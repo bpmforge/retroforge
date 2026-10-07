@@ -88,7 +88,9 @@ fn bars_hide_in_play_and_return_on_edge_pause_and_menu() {
     wait(&mut harness);
     assert!(harness.state().chrome_visible_for_test(), "paused: shown");
 
-    // Running again, hidden again, then the Quick Menu: shown.
+    // Running again, hidden again, then the Quick Menu: still hidden —
+    // since W21-02 the menu covers the whole window and carries the
+    // honesty badge itself.
     harness.state_mut().resume_for_test();
     pointer(&mut harness, cx, cy + 1.0);
     wait(&mut harness);
@@ -96,7 +98,7 @@ fn bars_hide_in_play_and_return_on_edge_pause_and_menu() {
     harness.key_press(egui::Key::Escape);
     harness.run_steps(1);
     assert!(
-        harness.state().chrome_visible_for_test(),
-        "menu open: shown"
+        !harness.state().chrome_visible_for_test(),
+        "menu open: the menu owns the window (W21-02)"
     );
 }

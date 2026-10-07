@@ -9209,9 +9209,10 @@
    "open animates (fade + rise) and is instant when animation_time is 0"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-07. overlay_menu redrawn frameless at fixed viewport fractions: the paused frame box-downscaled 8x once on open (quick_menu::downscale_box, unit-tested) and stretched over the play rect with LINEAR filtering as a blur, under Tokens::scrim (70%) covering the whole window; game title in the condensed face above the rail; custom rail rows (accent wash + 3px bar when selected, key cap from Section::key_hint: Esc/F5/F9/Backspace from the live bindings); section on an Elevation::Overlay surface with a condensed TITLE and the honesty pill; coloured pad hint faces. Opens with a fade + 8px rise via theme::motion (instant when animation_time is 0). Menu bar and status bar hidden while it is open (chrome_autohide.rs updated: W20-11 kept them shown under the menu). Deviation: the duplicate in-body section heading removed. Photo: target/ui-tour/12-quick-menu.png, 13-16. UNVERIFIED (by eye: Brad). Gate: workspace 2535 passing.",
    "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
   ]
  },

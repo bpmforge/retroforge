@@ -812,6 +812,9 @@ pub struct RetroForgeApp {
     /// rail entry should take keyboard focus on the next draw (just opened).
     quick_section: crate::quick_menu::Section,
     quick_focus_pending: bool,
+    /// Ticket W21-02: the blurred frozen frame behind the Quick Menu,
+    /// built on open and dropped on close.
+    quick_backdrop: Option<egui::TextureHandle>,
     /// When `state_slots` was last read from disk.
     state_slots_scanned: Option<std::time::Instant>,
     /// Ticket W20-10: the file the running game was opened from (Reset).
@@ -1387,6 +1390,7 @@ impl RetroForgeApp {
             menu_paused_game: false,
             quick_section: crate::quick_menu::Section::Resume,
             quick_focus_pending: false,
+            quick_backdrop: None,
             state_slots_scanned: None,
             current_rom_path: None,
             show_game_settings: false,
@@ -6296,68 +6300,143 @@ impl RetroForgeApp {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.set_overlay_menu(!self.show_overlay_menu);
         }
+        // Ticket W21-02: tracked every frame, open or not, so opening
+        // animates from 0 (an id first seen at `true` would jump there).
+        let shown = ctx.animate_bool_with_time(
+            egui::Id::new("quick-menu-open"),
+            self.show_overlay_menu,
+            crate::theme::motion_secs(ctx, crate::theme::motion::OVERLAY_OPEN_SECS),
+        );
         if !self.show_overlay_menu {
+            self.quick_backdrop = None;
             return;
         }
         let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
         let screen = ctx.viewport_rect();
+        if self.quick_backdrop.is_none() {
+            self.quick_backdrop = self.blurred_frame(ctx);
+        }
 
-        // The scrim: the frozen frame stays visible, dimmed, and clicks
-        // on it do nothing (a stray click must not reach the library or a
-        // window behind).
+        // The backdrop (W21-02, the review's own recipe): the frozen frame,
+        // downscaled once on open and stretched back over the play rect
+        // with linear filtering — a blur without a per-frame shader, since
+        // the game is paused — then the 70 % scrim over the whole window,
+        // menu bar and status bar included. Clicks on it do nothing.
+        let backdrop = self.quick_backdrop.as_ref().map(egui::TextureHandle::id);
+        let play = self.last_play_rect;
         egui::Area::new(egui::Id::new("quick-menu-scrim"))
             .order(egui::Order::Middle)
             .fixed_pos(screen.min)
             .show(ctx, |ui| {
                 let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::hover());
-                let bg = tokens.bg;
-                ui.painter().rect_filled(
-                    rect,
-                    0.0,
-                    egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 200),
-                );
+                if let (Some(tex), Some(play)) = (backdrop, play) {
+                    ui.painter().image(
+                        tex,
+                        play,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
+                ui.painter().rect_filled(rect, 0.0, tokens.scrim());
             });
 
         let has_core = self.core.is_some();
-        // A FIXED size, not one derived from the content: an anchored Area
-        // sized from last frame's content re-centres every frame, and a
-        // scroll area that fills "available" height feeds that back — the
-        // panel crept 16 px a frame and clicks landed where a button used
-        // to be (found by tests/quick_menu.rs).
-        let width = (screen.width() - 32.0).clamp(320.0, 720.0);
-        let body_height = (screen.height() - 220.0).clamp(160.0, 440.0);
+        let title = self
+            .current_rom_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().to_uppercase());
+        // FIXED rects from the viewport, not from content: an Area sized
+        // from last frame's content re-centres every frame and a scroll
+        // area feeds that back (found by tests/quick_menu.rs in W20-10).
+        let margin_x = (screen.width() * 0.04).max(16.0);
+        let top = screen.top() + (screen.height() * 0.06).max(16.0);
+        let bottom = screen.bottom() - (screen.height() * 0.06).max(16.0);
+        let rail_w = (screen.width() * 0.26).clamp(200.0, 280.0);
+        let rail = egui::Rect::from_min_max(
+            egui::pos2(screen.left() + margin_x, top),
+            egui::pos2(screen.left() + margin_x + rail_w, bottom - 40.0),
+        );
+        let panel = egui::Rect::from_min_max(
+            egui::pos2(rail.right() + 24.0, top),
+            egui::pos2(screen.right() - margin_x, bottom - 40.0),
+        );
+        let hint_row = egui::Rect::from_min_max(
+            egui::pos2(rail.left(), bottom - 28.0),
+            egui::pos2(panel.right(), bottom),
+        );
+        let rise = (1.0 - shown) * crate::theme::motion::OVERLAY_RISE_PX;
+        let bindings = self.app_bindings.clone();
+
         let mut close = false;
         let mut leave_paused = false;
         egui::Area::new(egui::Id::new("quick-menu"))
             .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .fixed_pos(screen.min)
             .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(tokens.surface)
-                    .stroke(egui::Stroke::new(1.0, tokens.line))
-                    .corner_radius(tokens.radius_md)
-                    .inner_margin(16.0)
-                    .show(ui, |ui| {
-                        ui.set_width(width);
-                        // Header: the mode pill (honesty badge) and state.
+                ui.set_opacity(shown);
+                ui.allocate_exact_size(screen.size(), egui::Sense::hover());
+                let shift = egui::vec2(0.0, rise);
+
+                // The rail: game title, then one row per section with its
+                // key beside it ("learn by seeing").
+                let mut rail_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rail.translate(shift))
+                        .layout(egui::Layout::top_down_justified(egui::Align::Min)),
+                );
+                if let Some(title) = &title {
+                    rail_ui.label(
+                        egui::RichText::new(title)
+                            .font(crate::theme::condensed(crate::theme::type_scale::SUBHEAD))
+                            .color(tokens.muted),
+                    );
+                    rail_ui.add_space(10.0);
+                }
+                for section in crate::quick_menu::Section::ALL {
+                    if matches!(section, crate::quick_menu::Section::Reset) {
+                        let (r, _) = rail_ui
+                            .allocate_exact_size(egui::vec2(rail_w, 13.0), egui::Sense::hover());
+                        rail_ui.painter().hline(
+                            r.x_range().shrink(4.0),
+                            r.center().y,
+                            egui::Stroke::new(1.0, tokens.line),
+                        );
+                    }
+                    let selected = self.quick_section == section;
+                    let key = section.key_hint(&bindings);
+                    let response =
+                        quick_rail_item(&mut rail_ui, &tokens, section, selected, key.as_deref());
+                    // Follow focus only when it MOVES here (arrow keys /
+                    // d-pad), so a click elsewhere is not overruled.
+                    if response.clicked() || response.gained_focus() {
+                        self.quick_section = section;
+                    }
+                    if self.quick_focus_pending && selected {
+                        response.request_focus();
+                        self.quick_focus_pending = false;
+                    }
+                }
+
+                // The section, on its own raised surface.
+                let mut panel_ui =
+                    ui.new_child(egui::UiBuilder::new().max_rect(panel.translate(shift)));
+                crate::theme::Elevation::Overlay
+                    .frame(&tokens)
+                    .show(&mut panel_ui, |ui| {
+                        let inner = panel.shrink(f32::from(crate::theme::OVERLAY_PADDING));
+                        ui.set_width(inner.width());
+                        ui.set_height(inner.height());
                         ui.horizontal(|ui| {
-                            let badge = if has_core {
-                                self.status_badge()
-                            } else {
-                                "No game running".to_string()
-                            };
-                            egui::Frame::new()
-                                .fill(tokens.accent_soft)
-                                .corner_radius(tokens.radius_sm)
-                                .inner_margin(egui::Margin::symmetric(8, 3))
-                                .show(ui, |ui| {
-                                    ui.label(egui::RichText::new(badge).strong().color(tokens.ink));
-                                });
-                            // Bounded height: an unbounded right-to-left
-                            // layout in a row takes the AREA's height, which
-                            // is last frame's size — a feedback loop.
+                            ui.label(
+                                egui::RichText::new(self.quick_section.label())
+                                    .font(crate::theme::condensed(crate::theme::type_scale::TITLE))
+                                    .color(tokens.ink),
+                            );
+                            // Bounded height: an unbounded right-to-left layout
+                            // in a row takes the parent's height (W20-10).
                             ui.allocate_ui_with_layout(
-                                egui::vec2(ui.available_width(), 24.0),
+                                egui::vec2(ui.available_width(), 28.0),
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if has_core {
@@ -6369,78 +6448,74 @@ impl RetroForgeApp {
                                             .color(tokens.muted),
                                         );
                                     }
+                                    // The mode pill: the honesty badge stays in
+                                    // the menu (principle 2).
+                                    let badge = if has_core {
+                                        self.status_badge()
+                                    } else {
+                                        "No game running".to_string()
+                                    };
+                                    egui::Frame::new()
+                                        .fill(tokens.accent_soft)
+                                        .corner_radius(99)
+                                        .inner_margin(egui::Margin::symmetric(10, 3))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(badge)
+                                                    .strong()
+                                                    .color(tokens.ink),
+                                            );
+                                        });
                                 },
                             );
                         });
                         ui.add_space(8.0);
-                        ui.separator();
-                        ui.horizontal_top(|ui| {
-                            // The rail.
-                            ui.vertical(|ui| {
-                                ui.set_width(180.0);
-                                ui.set_height(body_height);
-                                // Left-aligned, full-width entries: a rail
-                                // reads down its left edge.
-                                ui.with_layout(
-                                    egui::Layout::top_down_justified(egui::Align::Min),
-                                    |ui| {
-                                        for section in crate::quick_menu::Section::ALL {
-                                            let selected = self.quick_section == section;
-                                            let response = ui.add(
-                                                egui::Button::selectable(
-                                                    selected,
-                                                    section.rail_text(),
-                                                )
-                                                .min_size(egui::vec2(180.0, 30.0)),
-                                            );
-                                            // Follow focus only when it MOVES here
-                                            // (arrow keys / d-pad), so a mouse
-                                            // click elsewhere is not overruled by
-                                            // whichever entry still holds focus.
-                                            if response.clicked() || response.gained_focus() {
-                                                self.quick_section = section;
-                                            }
-                                            if self.quick_focus_pending && selected {
-                                                response.request_focus();
-                                                self.quick_focus_pending = false;
-                                            }
-                                        }
-                                    },
-                                );
+                        egui::ScrollArea::vertical()
+                            .max_height(ui.available_height())
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let (c, l) = self.quick_section_body(ui, has_core);
+                                close |= c;
+                                leave_paused |= l;
                             });
-                            ui.add_sized([1.0, body_height], egui::Separator::default().vertical());
-                            // The section.
-                            ui.vertical(|ui| {
-                                // Fixed width as well as height — a card
-                                // grid wrapping against "available" width
-                                // widened the panel and moved it.
-                                let content_width = width - 180.0 - 24.0;
-                                ui.set_width(content_width);
-                                ui.set_max_width(content_width);
-                                ui.set_height(body_height);
-                                egui::ScrollArea::vertical()
-                                    .max_height(body_height)
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-                                        let (c, l) = self.quick_section_body(ui, has_core);
-                                        close |= c;
-                                        leave_paused |= l;
-                                    });
-                            });
-                        });
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new(crate::quick_menu::HINT)
-                                .small()
-                                .color(tokens.muted),
-                        );
                     });
+
+                // The pad hint bar.
+                let mut hint_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(hint_row.translate(shift))
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                for (button, colour, what) in crate::quick_menu::PAD_HINTS {
+                    pad_hint(&mut hint_ui, &tokens, button, colour, what);
+                    hint_ui.add_space(14.0);
+                }
+                hint_ui.label(
+                    egui::RichText::new("Esc  Resume")
+                        .font(egui::FontId::proportional(
+                            crate::theme::type_scale::CAPTION,
+                        ))
+                        .color(tokens.muted),
+                );
             });
         if leave_paused {
             self.leave_overlay_menu_paused();
         } else if close {
             self.set_overlay_menu(false);
         }
+    }
+
+    /// Ticket W21-02: the Quick Menu backdrop — the frame on screen now,
+    /// box-downscaled by [`crate::quick_menu::BACKDROP_DOWNSCALE`] and
+    /// uploaded with linear filtering, so stretching it back over the play
+    /// rect blurs it. Built once per opening.
+    fn blurred_frame(&self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        let rgba = self.last_frame_rgba.as_ref()?;
+        let (w, h) = self.last_frame_size?;
+        let (small, sw, sh) =
+            crate::quick_menu::downscale_box(rgba, w, h, crate::quick_menu::BACKDROP_DOWNSCALE)?;
+        let image = egui::ColorImage::from_rgba_unmultiplied([sw, sh], &small);
+        Some(ctx.load_texture("quick-menu-backdrop", image, egui::TextureOptions::LINEAR))
     }
 
     /// One Quick Menu section's content. Returns `(close, leave_paused)`:
@@ -6459,8 +6534,7 @@ impl RetroForgeApp {
         let quick_columns = ((ui.available_width() + 10.0) / (SLOT_CARD_WIDTH + 26.0))
             .floor()
             .max(1.0) as usize;
-        ui.heading(self.quick_section.label());
-        ui.add_space(6.0);
+        // The section title is drawn by `overlay_menu`'s header (W21-02).
         if needs_game && !has_core {
             ui.label("No game is running.");
             return (false, false);
@@ -11548,7 +11622,10 @@ impl RetroForgeApp {
             && !near_edge
             && now - self.chrome_last_activity >= CHROME_HIDE_AFTER
             && now - self.chrome_badge_changed >= CHROME_BADGE_HOLD;
-        self.chrome_visible = !hide;
+        // Ticket W21-02: the Quick Menu owns the whole window — no menu
+        // bar or status bar behind its scrim. The honesty badge is in the
+        // menu's own header, so principle 2 still holds.
+        self.chrome_visible = !hide && !self.show_overlay_menu;
         if playing && self.chrome_visible {
             // Wake up when the timer would expire even if nothing moves.
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(CHROME_HIDE_AFTER));
@@ -11902,6 +11979,112 @@ pub(crate) struct CompareBuffers {
     pub enhanced: Vec<u8>,
     pub width: u32,
     pub height: u32,
+}
+
+/// Ticket W21-02: one Quick Menu rail entry as the review's mockup draws
+/// it — icon and label on the left, the key that does the same thing on
+/// the right in a small key cap, and when selected a soft accent wash
+/// with a 3-px accent bar down the left edge. Exposed to accessibility
+/// (and so to tests) as a selectable labelled `rail_text()`.
+fn quick_rail_item(
+    ui: &mut egui::Ui,
+    tokens: &crate::theme::Tokens,
+    section: crate::quick_menu::Section,
+    selected: bool,
+    key: Option<&str>,
+) -> egui::Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            true,
+            selected,
+            section.rail_text(),
+        )
+    });
+    let painter = ui.painter();
+    let radius = egui::CornerRadius::same(crate::theme::RADIUS_MD as u8 - 2);
+    if selected {
+        painter.rect_filled(rect, radius, tokens.accent.gamma_multiply(0.20));
+        painter.rect_filled(
+            egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
+            0.0,
+            tokens.accent,
+        );
+    } else if response.hovered() || response.has_focus() {
+        painter.rect_filled(rect, radius, tokens.surface);
+    }
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(crate::theme::FOCUS_RING_MOUSE, tokens.accent_strong),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let ink = if selected {
+        tokens.ink
+    } else {
+        tokens.ink.gamma_multiply(0.85)
+    };
+    painter.text(
+        egui::pos2(rect.left() + 12.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        section.rail_text(),
+        egui::FontId::proportional(crate::theme::type_scale::BODY),
+        ink,
+    );
+    if let Some(key) = key {
+        let galley =
+            painter.layout_no_wrap(key.to_owned(), crate::theme::numeric(11.0), tokens.muted);
+        let cap = egui::Rect::from_min_size(
+            egui::pos2(
+                rect.right() - 10.0 - galley.size().x - 10.0,
+                rect.center().y - galley.size().y / 2.0 - 2.0,
+            ),
+            galley.size() + egui::vec2(10.0, 4.0),
+        );
+        painter.rect_stroke(
+            cap,
+            egui::CornerRadius::same(4),
+            egui::Stroke::new(1.0, tokens.line),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley(cap.min + egui::vec2(5.0, 2.0), galley, tokens.muted);
+    }
+    response
+}
+
+/// Ticket W21-02: one hint in the Quick Menu's pad bar — a coloured
+/// button face with its letter, then what it does.
+fn pad_hint(
+    ui: &mut egui::Ui,
+    tokens: &crate::theme::Tokens,
+    button: &str,
+    colour: [u8; 3],
+    what: &str,
+) {
+    let font = egui::FontId::proportional(crate::theme::type_scale::CAPTION);
+    let galley = ui.painter().layout_no_wrap(
+        button.to_owned(),
+        egui::FontId::proportional(10.0),
+        egui::Color32::from_rgb(0x0B, 0x0D, 0x10),
+    );
+    let size = egui::vec2(galley.size().x.max(10.0) + 8.0, 18.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().rect_filled(
+        rect,
+        egui::CornerRadius::same(9),
+        egui::Color32::from_rgb(colour[0], colour[1], colour[2]),
+    );
+    ui.painter().galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        egui::Color32::from_rgb(0x0B, 0x0D, 0x10),
+    );
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(what).font(font).color(tokens.muted));
 }
 
 #[cfg(test)]
