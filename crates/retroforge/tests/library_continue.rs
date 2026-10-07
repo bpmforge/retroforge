@@ -73,7 +73,7 @@ fn continue_resumes_the_last_game_and_cards_show_honest_chips() {
 
     let all = texts(&harness);
     assert!(
-        all.iter().any(|t| t == "Continue"),
+        all.iter().any(|t| t == "CONTINUE PLAYING"),
         "the hero leads: {all:?}"
     );
     assert!(

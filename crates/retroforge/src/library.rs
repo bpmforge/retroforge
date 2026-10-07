@@ -72,14 +72,15 @@ pub enum EntryIdentity {
 /// The library screen's Grid/List toggle (ticket W15-05, `UX_WAVE_15.md`
 /// §3), persisted in `Settings` (`crate::settings::LibrarySettings`).
 ///
-/// `List` is the default: it is the pre-existing, fully-functional
-/// screen (§10's accessible fallback), so a settings file written before
-/// this ticket — or one with a malformed `[library]` section — opens on
-/// the exact screen it always has, never a new one nobody asked for.
+/// `Grid` is the default since W21-05 (the design review's library
+/// mockup). `List` stays the accessible fallback (§10) and a saved
+/// choice of it is kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum LibraryView {
-    #[default]
     List,
+    /// Ticket W21-05: the default since the design review's library
+    /// mockup ("Home · grid view"); a saved `list` choice is kept.
+    #[default]
     Grid,
 }
 

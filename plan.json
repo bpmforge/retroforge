@@ -9285,9 +9285,10 @@
    "Enhancements section draws one card per feature with toggle and plain-word tag"
   ],
   "points": 5,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-07. Continue hero redrawn as the mockup banner (168 px, game picture cropped over the right, dark shade behind the words, console spine, CONTINUE PLAYING eyebrow, condensed title, accent Resume as the primary action with Play beside it; the Resume button speaks as \"Resume (Slot N)\" without its icon codepoint). Shelf and All games headers in the condensed face. Library cards on Elevation::Raised instead of egui group outlines. Grid is now the default library view (LibraryView::default; a saved list choice is kept). Enhancements: one raised card per feature with an on/off switch (toggle_switch, a CheckBox to accessibility), plain sentence, requirement tag tinted ok/warn, and the ladder; two columns only from 620 px, one in the Quick Menu. Deviations: no 3:4 box-art cards and no card focus scale (cards keep W15 widths that tests/library_grid.rs derives columns from); the hero shows the library thumbnail, not the newest save screenshot. tests/library_continue.rs and tests/enhancements_panel.rs updated for the new copy and the switch. Photos: target/ui-tour/15, 22. UNVERIFIED (by eye: Brad). Gate: workspace 2541 passing.",
    "FILED 2026-10-07 from Brad's report that the UI does not match the 2026-10-06 design artifact; spec in docs/design/UX_WAVE_21.md §4."
   ]
  },

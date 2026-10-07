@@ -7091,74 +7091,131 @@ impl RetroForgeApp {
         ui.add_space(6.0);
         let rows = crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts());
         let mut actions = crate::enhance_dock::EnhanceActions::default();
-        for row in &rows {
-            egui::Frame::new()
-                .fill(tokens.bg)
-                .corner_radius(tokens.radius_sm)
-                .inner_margin(8.0)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    let available = row.availability == crate::enhance_ui::Availability::Available;
-                    let mut on = row.enabled;
-                    if ui
-                        .add_enabled(
-                            available,
-                            egui::Checkbox::new(&mut on, egui::RichText::new(row.label).strong()),
-                        )
-                        .changed()
-                    {
-                        crate::enhance_dock::apply_toggle(
-                            &mut self.current_game_settings,
-                            row.id,
-                            on,
-                            &mut actions,
-                        );
-                    }
-                    ui.label(crate::enhance_panel::describe(row.id));
-                    ui.label(
-                        egui::RichText::new(crate::enhance_panel::requirement(&row.availability))
-                            .small()
-                            .color(if available { tokens.ok } else { tokens.muted }),
+        // Ticket W21-05: one raised card per feature, two to a row, as the
+        // review's Enhancements mockup — switch, plain sentence, a tag
+        // saying what it needs, and the detector's ladder in words.
+        let columns = if ui.available_width() >= 620.0 { 2 } else { 1 };
+        let gap = 8.0;
+        // Explicit widths, not `ui.columns` (whose justified layout spread
+        // the sentences out) and not "available" width inside the Quick
+        // Menu's scroll area, which a scrollbar then overlaps.
+        #[allow(clippy::cast_precision_loss)]
+        let card_width =
+            ((ui.available_width() - 12.0 - gap * (columns - 1) as f32) / columns as f32).floor();
+        for pair in rows.chunks(columns) {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for row in pair {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(card_width, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(card_width);
+                            self.enhancement_card(ui, &tokens, row, &mut actions);
+                        },
                     );
-                    if let Some(h) = row.heuristic {
-                        let state = self.current_game_settings.trust.state(h);
-                        ui.horizontal(|ui| {
-                            // The ladder governs the AUTOMATIC detector
-                            // behind the feature, not the toggle above —
-                            // say so, or "on" next to "Learning" reads
-                            // as a contradiction.
-                            ui.label(
-                                egui::RichText::new("Auto-detection:")
-                                    .small()
-                                    .color(tokens.muted),
-                            );
-                            for rung in [
-                                rf_enhance::trust::TrustState::Shadow,
-                                rf_enhance::trust::TrustState::Advisory,
-                                rf_enhance::trust::TrustState::Active,
-                            ] {
-                                if ui
-                                    .selectable_label(
-                                        state == rung,
-                                        crate::enhance_panel::trust_word(rung),
-                                    )
-                                    .on_hover_text(crate::enhance_panel::trust_meaning(rung))
-                                    .clicked()
-                                    && state != rung
-                                {
-                                    self.current_game_settings.trust.pin(h, rung);
-                                    actions.settings_changed = true;
-                                }
-                            }
-                        });
-                    }
-                });
-            ui.add_space(4.0);
+                }
+            });
+            ui.add_space(gap);
         }
         if let Some(verdict) = self.hud_verdict() {
             ui.label(egui::RichText::new(verdict).small().color(tokens.muted));
         }
         self.apply_enhance_actions(&actions);
+    }
+
+    /// Ticket W21-05: one Enhancements card.
+    fn enhancement_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        tokens: &crate::theme::Tokens,
+        row: &crate::enhance_ui::FeatureRow,
+        actions: &mut crate::enhance_dock::EnhanceActions,
+    ) {
+        let available = row.availability == crate::enhance_ui::Availability::Available;
+        crate::theme::Elevation::Raised
+            .frame(tokens)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                if !available {
+                    ui.multiply_opacity(0.75);
+                }
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(row.label)
+                            .font(egui::FontId::proportional(crate::theme::type_scale::BODY))
+                            .strong()
+                            .color(tokens.ink),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let mut on = row.enabled;
+                        if toggle_switch(ui, tokens, &mut on, available, row.label) {
+                            crate::enhance_dock::apply_toggle(
+                                &mut self.current_game_settings,
+                                row.id,
+                                on,
+                                actions,
+                            );
+                        }
+                    });
+                });
+                ui.label(
+                    egui::RichText::new(crate::enhance_panel::describe(row.id))
+                        .font(egui::FontId::proportional(
+                            crate::theme::type_scale::CAPTION,
+                        ))
+                        .color(tokens.muted),
+                );
+                let (fill, ink) = if available {
+                    (tokens.ok_soft, tokens.ok)
+                } else {
+                    (tokens.warn_soft, tokens.warn)
+                };
+                egui::Frame::new()
+                    .fill(fill)
+                    .corner_radius(egui::CornerRadius::same(3))
+                    .inner_margin(egui::Margin::symmetric(6, 2))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(crate::enhance_panel::requirement(
+                                &row.availability,
+                            ))
+                            .font(egui::FontId::proportional(10.0))
+                            .color(ink),
+                        );
+                    });
+                if let Some(h) = row.heuristic {
+                    let state = self.current_game_settings.trust.state(h);
+                    ui.horizontal(|ui| {
+                        // The ladder governs the AUTOMATIC detector behind the
+                        // feature, not the switch above — say so, or "on" next
+                        // to "Learning" reads as a contradiction.
+                        ui.label(
+                            egui::RichText::new("Auto-detection:")
+                                .small()
+                                .color(tokens.muted),
+                        );
+                        for rung in [
+                            rf_enhance::trust::TrustState::Shadow,
+                            rf_enhance::trust::TrustState::Advisory,
+                            rf_enhance::trust::TrustState::Active,
+                        ] {
+                            if ui
+                                .selectable_label(
+                                    state == rung,
+                                    crate::enhance_panel::trust_word(rung),
+                                )
+                                .on_hover_text(crate::enhance_panel::trust_meaning(rung))
+                                .clicked()
+                                && state != rung
+                            {
+                                self.current_game_settings.trust.pin(h, rung);
+                                actions.settings_changed = true;
+                            }
+                        }
+                    });
+                }
+            });
     }
 
     /// Ticket W20-10: power-cycle the running game — open the same file
@@ -7349,73 +7406,171 @@ impl RetroForgeApp {
                     .max_by_key(|(_, t)| *t)
                     .map(|(id, _)| id)
             });
-            egui::Frame::new()
-                .fill(tokens.surface)
-                .corner_radius(tokens.radius_md)
-                .inner_margin(10.0)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(128.0, 120.0), egui::Sense::hover());
-                        match self.library_thumbnail_texture(
-                            &ctx,
-                            &hash,
-                            &entry.title,
-                            Some(console),
-                        ) {
-                            Some(tex) => {
-                                ui.put(
-                                    rect,
-                                    egui::Image::from_texture(&tex).fit_to_exact_size(rect.size()),
-                                );
-                            }
-                            None => {
-                                ui.painter().rect_filled(
-                                    rect,
-                                    tokens.radius_sm,
-                                    crate::theme::console_tint(&tokens, false, &entry.identity),
-                                );
-                            }
-                        }
-                        ui.vertical(|ui| {
-                            ui.label(egui::RichText::new("Continue").small().color(tokens.muted));
-                            // Accessible name "Continue: <title>" — what a
-                            // screen reader should say, and distinct from
-                            // the same game's list row below.
-                            let title = ui.heading(&entry.title);
-                            let name = format!("Continue: {}", entry.title);
-                            title.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &name)
-                            });
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} \u{b7} last played {}",
-                                    console.name(),
-                                    crate::slot_cards::relative_age(last, now, || {
-                                        Self::format_timestamp(last)
-                                    }),
-                                ))
-                                .small()
-                                .color(tokens.muted),
-                            );
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                if ui.button(egui::RichText::new("Play").strong()).clicked() {
-                                    chosen = Some((entry.path.clone(), None));
-                                }
-                                if let Some(slot) = newest_save {
-                                    if ui
-                                        .button(format!("Resume ({})", slot.label()))
-                                        .on_hover_text("Start the game and load its newest save")
-                                        .clicked()
-                                    {
-                                        chosen = Some((entry.path.clone(), Some(slot)));
-                                    }
-                                }
-                            });
-                        });
+            // Ticket W21-05: the Continue hero as the review drew it — a
+            // wide banner, the game's picture filling it behind a dark
+            // left-to-right shade, the words on the left.
+            let width = ui.available_width();
+            let (banner, _) =
+                ui.allocate_exact_size(egui::vec2(width, 168.0), egui::Sense::hover());
+            let radius = egui::CornerRadius::same(crate::theme::OVERLAY_RADIUS);
+            ui.painter().rect_filled(
+                banner,
+                radius,
+                crate::theme::console_tint(&tokens, false, &entry.identity),
+            );
+            if let Some(tex) =
+                self.library_thumbnail_texture(&ctx, &hash, &entry.title, Some(console))
+            {
+                // Cover the right two-thirds, cropped to the banner's shape.
+                let art = egui::Rect::from_min_max(
+                    egui::pos2(banner.left() + banner.width() * 0.30, banner.top()),
+                    banner.right_bottom(),
+                );
+                let [tw, th] = tex.size();
+                #[allow(clippy::cast_precision_loss)]
+                let (tw, th) = (tw as f32, th as f32);
+                let want = art.width() / art.height();
+                let have = tw / th;
+                let uv = if have > want {
+                    let w = want / have;
+                    egui::Rect::from_min_max(
+                        egui::pos2((1.0 - w) / 2.0, 0.0),
+                        egui::pos2((1.0 + w) / 2.0, 1.0),
+                    )
+                } else {
+                    let h = have / want;
+                    egui::Rect::from_min_max(
+                        egui::pos2(0.0, (1.0 - h) * 0.6),
+                        egui::pos2(1.0, (1.0 - h) * 0.6 + h),
+                    )
+                };
+                ui.painter().image(tex.id(), art, uv, egui::Color32::WHITE);
+            }
+            // The shade: opaque behind the text, clear over the art.
+            let shade = tokens.bg;
+            let steps = 24_u8;
+            for i in 0..steps {
+                let t = f32::from(i) / f32::from(steps);
+                let x0 = banner.left() + banner.width() * (0.28 + 0.40 * t);
+                let x1 =
+                    banner.left() + banner.width() * (0.28 + 0.40 * (t + 1.0 / f32::from(steps)));
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let alpha = (235.0 * (1.0 - t)) as u8;
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x0, banner.top()),
+                        egui::pos2(x1, banner.bottom()),
+                    ),
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(shade.r(), shade.g(), shade.b(), alpha),
+                );
+            }
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(
+                    banner.left_top(),
+                    egui::pos2(banner.left() + banner.width() * 0.28, banner.bottom()),
+                ),
+                egui::CornerRadius {
+                    nw: radius.nw,
+                    sw: radius.sw,
+                    ne: 0,
+                    se: 0,
+                },
+                egui::Color32::from_rgba_unmultiplied(shade.r(), shade.g(), shade.b(), 235),
+            );
+            if let Some(spine) = crate::theme::console_spine(false, &entry.identity) {
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(banner.left_top(), egui::vec2(4.0, banner.height())),
+                    egui::CornerRadius {
+                        nw: radius.nw,
+                        sw: radius.sw,
+                        ne: 0,
+                        se: 0,
+                    },
+                    spine,
+                );
+            }
+            ui.painter().rect_stroke(
+                banner,
+                radius,
+                egui::Stroke::new(1.0, tokens.line),
+                egui::StrokeKind::Inside,
+            );
+            let mut text_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_max(
+                        banner.left_top() + egui::vec2(22.0, 18.0),
+                        egui::pos2(
+                            banner.left() + banner.width() * 0.55,
+                            banner.bottom() - 16.0,
+                        ),
+                    ))
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            let ui = &mut text_ui;
+            ui.label(
+                egui::RichText::new("CONTINUE PLAYING")
+                    .font(egui::FontId::proportional(11.0))
+                    .color(tokens.accent),
+            );
+            // Accessible name "Continue: <title>" — what a screen reader
+            // should say, and distinct from the same game's card below.
+            let title = ui.label(
+                egui::RichText::new(&entry.title)
+                    .font(crate::theme::condensed(26.0))
+                    .color(tokens.ink),
+            );
+            let name = format!("Continue: {}", entry.title);
+            title.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &name));
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} \u{b7} last played {}",
+                    console.name(),
+                    crate::slot_cards::relative_age(last, now, || Self::format_timestamp(last)),
+                ))
+                .font(egui::FontId::proportional(
+                    crate::theme::type_scale::CAPTION,
+                ))
+                .color(tokens.muted),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                // The primary action is the one that puts the player back
+                // where they were: Resume when there is a save, else Play.
+                let primary = |text: String| {
+                    egui::Button::new(egui::RichText::new(text).strong().color(tokens.bg))
+                        .fill(tokens.accent)
+                        .min_size(egui::vec2(96.0, 30.0))
+                };
+                if let Some(slot) = newest_save {
+                    let resume = ui
+                        .add(primary(format!(
+                            "{} Resume ({})",
+                            egui_phosphor::regular::PLAY,
+                            slot.label()
+                        )))
+                        .on_hover_text("Start the game and load its newest save");
+                    // Spoken without the icon's private-use codepoint.
+                    let spoken = format!("Resume ({})", slot.label());
+                    resume.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &spoken)
                     });
-                });
+                    if resume.clicked() {
+                        chosen = Some((entry.path.clone(), Some(slot)));
+                    }
+                    if ui
+                        .add(egui::Button::new("Play").min_size(egui::vec2(72.0, 30.0)))
+                        .clicked()
+                    {
+                        chosen = Some((entry.path.clone(), None));
+                    }
+                } else if ui
+                    .add(primary(format!("{} Play", egui_phosphor::regular::PLAY)))
+                    .clicked()
+                {
+                    chosen = Some((entry.path.clone(), None));
+                }
+            });
             ui.add_space(6.0);
         }
 
@@ -7434,7 +7589,12 @@ impl RetroForgeApp {
             if items.is_empty() {
                 continue;
             }
-            ui.label(egui::RichText::new(title).strong());
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(title)
+                    .font(crate::theme::condensed(crate::theme::type_scale::SUBHEAD))
+                    .color(tokens.ink),
+            );
             ui.horizontal(|ui| {
                 for (entry, hash, console, _, _) in &items {
                     ui.vertical(|ui| {
@@ -7476,7 +7636,12 @@ impl RetroForgeApp {
             ui.add_space(4.0);
         }
         if chosen.is_some() || known.first().is_some_and(|k| k.3.is_some()) {
-            ui.label(egui::RichText::new("All games").strong());
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("All games")
+                    .font(crate::theme::condensed(crate::theme::type_scale::SUBHEAD))
+                    .color(tokens.ink),
+            );
         }
         chosen
     }
@@ -8102,7 +8267,10 @@ impl RetroForgeApp {
                             crate::library::EntryIdentity::Unrecognized { .. } => None,
                         };
 
-                        let card = egui::Frame::group(ui.style())
+                        // Ticket W21-05: a raised card (soft shadow, inner
+                        // highlight) rather than egui's group outline.
+                        let card = crate::theme::Elevation::Raised
+                            .frame(tokens)
                             .inner_margin(egui::Margin::same(6))
                             .show(ui, |ui| {
                                 ui.set_width(CARD_WIDTH);
@@ -12346,6 +12514,52 @@ fn quick_rail_item(
         painter.galley(cap.min + egui::vec2(5.0, 2.0), galley, tokens.muted);
     }
     response
+}
+
+/// Ticket W21-05: an on/off switch (the review's Enhancements toggle),
+/// exposed to accessibility as a checkbox named `label`. Returns whether
+/// it was flipped; does nothing when `enabled` is false.
+fn toggle_switch(
+    ui: &mut egui::Ui,
+    tokens: &crate::theme::Tokens,
+    on: &mut bool,
+    enabled: bool,
+    label: &str,
+) -> bool {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(34.0, 19.0), sense);
+    let value = *on;
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, value, label)
+    });
+    let flipped = enabled && response.clicked();
+    if flipped {
+        *on = !*on;
+    }
+    let t = ui.ctx().animate_bool_with_time(
+        response.id,
+        *on,
+        crate::theme::motion_secs(ui.ctx(), 0.12),
+    );
+    let track = if *on { tokens.accent } else { tokens.line };
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(10), track);
+    let x = egui::lerp(rect.left() + 9.5..=rect.right() - 9.5, t);
+    ui.painter()
+        .circle_filled(egui::pos2(x, rect.center().y), 7.0, egui::Color32::WHITE);
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            egui::CornerRadius::same(12),
+            egui::Stroke::new(crate::theme::FOCUS_RING_MOUSE, tokens.accent_strong),
+            egui::StrokeKind::Outside,
+        );
+    }
+    flipped
 }
 
 /// Ticket W21-04: a small-caps field label over a control, as in the
