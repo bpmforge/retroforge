@@ -104,6 +104,54 @@ fn every_section_shows_its_content_and_the_header_is_honest() {
         "Save from the menu wrote a slot, and the menu shows it"
     );
 
+    // Ticket W21-03: rename Slot 1; the name leads the card.
+    harness.get_by_label("Rename Slot 1").click();
+    harness.run_steps(2);
+    harness
+        .get_by_role(egui::accesskit::Role::TextInput)
+        .type_text("Boss door");
+    harness.run_steps(1);
+    harness.get_by_label("Done").click();
+    harness.run_steps(3);
+    assert!(
+        harness.query_by_label("Boss door").is_some(),
+        "the slot's name shows on its card"
+    );
+
+    // Saving over it does not ask: it saves and offers an undo.
+    harness.get_by_label("Save Slot 1").click();
+    harness.run_steps(3);
+    assert!(
+        harness.query_by_label("Undo Slot 1").is_some(),
+        "an overwrite from the Quick Menu offers an undo"
+    );
+    assert!(
+        !harness.state().pending_overwrite_for_test(),
+        "and does not open the confirmation modal"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    harness.get_by_label("Undo Slot 1").click();
+    harness.run_steps(3);
+    assert!(
+        harness.query_by_label("Undo Slot 1").is_none(),
+        "undo is used once"
+    );
+    assert!(
+        harness.query_by_label("Boss door").is_some(),
+        "undo put back the old slot, name included"
+    );
+
+    // Delete asks once on the card, then clears the slot.
+    harness.get_by_label("Delete Slot 1").click();
+    harness.run_steps(2);
+    harness.get_by_label("Delete Slot 1?").click();
+    harness.run_steps(3);
+    assert!(
+        harness.query_all_by_label("Slot 1 screenshot").count() == 0
+            && harness.query_by_label("Boss door").is_none(),
+        "deleted"
+    );
+
     // Quit to library closes the game and the menu together.
     harness
         .query_by_label(&Section::Quit.rail_text())

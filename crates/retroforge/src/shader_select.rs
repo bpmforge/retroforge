@@ -38,6 +38,21 @@ pub const KINDS: [ShaderKind; 6] = [
 /// without a per-frame readback that costs more than the frame itself.
 pub const MAX_OUTPUT_SCALE: u32 = 4;
 
+/// Ticket W21-04: the name a player sees first — what the shader looks
+/// like, not what it is ("CRT TV", not "CRT-class"). The manifest's
+/// `display_name` stays beside it, smaller, for people who know it.
+#[must_use]
+pub const fn player_name(kind: ShaderKind) -> &'static str {
+    match kind {
+        ShaderKind::Nearest => "Pixel perfect",
+        ShaderKind::SharpBilinear => "Smooth pixels",
+        ShaderKind::Scanlines => "Scanlines",
+        ShaderKind::Crt => "CRT TV",
+        ShaderKind::LcdGrid => "Handheld LCD",
+        ShaderKind::Xbr => "Smoothed edges",
+    }
+}
+
 /// The shader a saved id names (its manifest `id`), if any.
 #[must_use]
 pub fn kind_from_id(id: &str) -> Option<ShaderKind> {
@@ -172,5 +187,11 @@ mod tests {
         assert_eq!(output_scale(5000.0, 240), MAX_OUTPUT_SCALE);
         assert_eq!(output_scale(f32::NAN, 240), 1);
         assert_eq!(output_scale(720.0, 0), 1);
+    }
+
+    #[test]
+    fn every_shader_has_a_distinct_player_name() {
+        let names: std::collections::BTreeSet<_> = KINDS.iter().map(|k| player_name(*k)).collect();
+        assert_eq!(names.len(), KINDS.len());
     }
 }
