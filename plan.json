@@ -9359,7 +9359,7 @@
    "unit test for the visible-row crop; app test measures the displayed frame size for a 224-line SNES frame"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from Brad's \"look at the game loading\" and a launch probe of his own SMB3 / Super Mario World zips (frames at 0/100/300/1000/3000/6000 ms)."
