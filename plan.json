@@ -9670,6 +9670,97 @@
    "CLOSED 2026-10-08. Root cause verified (probe, then a test red before the fix): leave_overlay_menu_paused cleared menu_paused_game, so after Esc > Enhancements > Game settings… (or any window the menu opens) no later menu close resumed the game. It now keeps the flag, so the next menu close by any route resumes. Space pauses/resumes in play (poll_app_hotkeys) when no menu, window or text field has the keyboard and Space is not bound to a game button; it clears the menu's ownership of the pause. Test: tests/resume_after_menu.rs. Gate: workspace 2560 passing.",
    "FILED 2026-10-08 from Brad: \"when i go to enhancement and pause to get that screen I cant unpause and get back to playing\". Reproduced: Esc > Enhancements > Game settings… leaves the game paused (W20-03) and clears menu_paused_game, so every later Esc closes the menu without resuming; Space, documented as pause/resume since W20-03/W20-07 (FRONTEND_UI §3.2), was never implemented in play."
   ]
+ },
+ {
+  "id": "W23-01",
+  "title": "SNES games get the controller: all 12 buttons on keyboard and pad",
+  "phase": 23,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "a running SNES game receives port 1 buttons from the keyboard and a pad through $4218 auto-joypad",
+   "SNES keyboard defaults: arrows = D-pad, Z = B, X = A, A = Y, S = X, Q = L, W = R, Enter = Start, Right Shift = Select; pad defaults follow the standard layout (South B, East A, West Y, North X, shoulders L/R)",
+   "SNES bindings persist in the config dir and load forgivingly",
+   "tests: an app test presses Y on the keyboard and reads it back from the SNES's latched pad word"
+  ],
+  "points": 3,
+  "status": "in_progress",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-08 from Brad: \"what about settings for controller vs keyboard. Keyboard should have defaults set and I can navigate\". Audit: the SNES receives NO controller input in live play (Machine::set_controller is NES-only; rf-snes run_frame ignores input), the live key/pad maps know only the 8 NES buttons, the keyboard defaults are shown nowhere a player looks, and menu hints are pad-only."
+  ]
+ },
+ {
+  "id": "W23-02",
+  "title": "Controls screen: Keyboard / Controller, NES / SNES, diagram, rebind",
+  "phase": 23,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W23-01"
+  ],
+  "acceptance": [
+   "Settings › Controls and Quick Menu › Controls show a drawn controller for the chosen console with each button's key (Keyboard) or pad button (Controller)",
+   "clicking a button waits for the next key or pad button and rebinds it, refusing a key the app's shortcuts use",
+   "Restore defaults per console and device",
+   "tests drive a rebind for each console"
+  ],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-08 from Brad: \"what about settings for controller vs keyboard. Keyboard should have defaults set and I can navigate\". Audit: the SNES receives NO controller input in live play (Machine::set_controller is NES-only; rf-snes run_frame ignores input), the live key/pad maps know only the 8 NES buttons, the keyboard defaults are shown nowhere a player looks, and menu hints are pad-only."
+  ]
+ },
+ {
+  "id": "W23-03",
+  "title": "Keyboard navigation and keyboard hints in menus",
+  "phase": 23,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W23-02"
+  ],
+  "acceptance": [
+   "arrows move between Quick Menu rail items and section controls, Enter activates, Esc backs out",
+   "the hint bar shows keyboard keys after keyboard use and pad buttons after pad use",
+   "tests cover keyboard-only navigation through the Quick Menu"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-08 from Brad: \"what about settings for controller vs keyboard. Keyboard should have defaults set and I can navigate\". Audit: the SNES receives NO controller input in live play (Machine::set_controller is NES-only; rf-snes run_frame ignores input), the live key/pad maps know only the 8 NES buttons, the keyboard defaults are shown nowhere a player looks, and menu hints are pad-only."
+  ]
+ },
+ {
+  "id": "W23-04",
+  "title": "Tour photographs Wave 23",
+  "phase": 23,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W23-02",
+   "W23-03"
+  ],
+  "acceptance": [
+   "capture_tour.rs photographs the Controls screen for each device and console and the keyboard hint bar"
+  ],
+  "points": 1,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-08 from Brad: \"what about settings for controller vs keyboard. Keyboard should have defaults set and I can navigate\". Audit: the SNES receives NO controller input in live play (Machine::set_controller is NES-only; rf-snes run_frame ignores input), the live key/pad maps know only the 8 NES buttons, the keyboard defaults are shown nowhere a player looks, and menu hints are pad-only."
+  ]
  }
 ]
 }
