@@ -62,9 +62,16 @@ fn cards_explain_each_feature_and_a_toggle_reaches_the_badge() {
         let sentence = retroforge::enhance_panel::describe(id);
         assert!(all.iter().any(|t| t == sentence), "card for {id}: {all:?}");
     }
+    // W22-03: grouped, and a card held back only by the mode carries the
+    // switch to that mode instead of a dead-end tag.
+    assert!(all.iter().any(|t| t == "WORKS ON ANY GAME"), "{all:?}");
     assert!(
-        all.iter().any(|t| t == "Needs Game-Aware mode."),
-        "plain requirement: {all:?}"
+        all.iter().any(|t| t == "NEEDS A PROFILE FOR THIS GAME"),
+        "{all:?}"
+    );
+    assert!(
+        harness.query_all_by_label("Switch to Game-Aware").count() > 0,
+        "the fix is on the card: {all:?}"
     );
     assert!(all.iter().any(|t| t == "Learning"), "trust ladder in words");
     assert!(
@@ -76,12 +83,25 @@ fn cards_explain_each_feature_and_a_toggle_reaches_the_badge() {
     assert!(!harness.state().status_badge().contains('\u{e2de}'));
     // W21-05: the card's switch, not its title label.
     harness
-        .get_by_role_and_label(egui::accesskit::Role::CheckBox, "Sprite-limit bypass")
+        .get_by_role_and_label(egui::accesskit::Role::CheckBox, "No sprite dropout")
         .click();
     harness.run_steps(2);
     assert!(
         harness.state().status_badge().contains('\u{e2de}'),
         "the badge must count a feature turned on from the panel: {}",
+        harness.state().status_badge()
+    );
+
+    // W22-03: the card's button switches the mode.
+    harness
+        .query_all_by_label("Switch to Game-Aware")
+        .next()
+        .expect("a Switch to Game-Aware button")
+        .click();
+    harness.run_steps(2);
+    assert!(
+        harness.state().status_badge().contains("Game-Aware"),
+        "the card's button changed the mode: {}",
         harness.state().status_badge()
     );
 }

@@ -38,6 +38,22 @@ pub fn describe(id: &str) -> &'static str {
 
 /// One sentence: what the feature needs before it can do anything, or
 /// that it is ready.
+/// Ticket W22-03: whether a feature can work without a profile — the
+/// card's group. Mode 7 in 3D needs only the game to be showing Mode 7.
+#[must_use]
+pub fn works_on_any_game(id: &str) -> bool {
+    matches!(id, "sprite_overlay" | "deflicker" | "mode7_ground")
+}
+
+/// Ticket W22-03: the mode an `Availability::NeedsMode` names, for the
+/// card's "Switch to …" button.
+#[must_use]
+pub fn mode_named(name: &str) -> Option<crate::game_settings::Mode> {
+    crate::game_settings::Mode::all()
+        .into_iter()
+        .find(|m| m.display_name() == name)
+}
+
 /// Ticket W22-03 (Brad, 2026-10-07: plain names): the name a player sees
 /// for a feature. The research label (`FeatureRow::label`) stays in the
 /// Enhance workspace.
@@ -149,5 +165,15 @@ mod tests {
         let names: std::collections::BTreeSet<_> = rows.iter().map(|r| player_name(r.id)).collect();
         assert_eq!(names.len(), rows.len());
         assert!(!names.contains("Enhancement"));
+    }
+
+    /// Ticket W22-03: every NeedsMode the rows use names a real mode.
+    #[test]
+    fn needs_mode_names_resolve() {
+        use crate::game_settings::Mode;
+        assert_eq!(mode_named("Enhanced"), Some(Mode::Enhanced));
+        assert_eq!(mode_named("Game-Aware"), Some(Mode::GameAware));
+        assert_eq!(mode_named("Nope"), None);
+        assert!(works_on_any_game("sprite_overlay") && !works_on_any_game("widescreen_decoded"));
     }
 }

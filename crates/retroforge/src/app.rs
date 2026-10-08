@@ -7402,21 +7402,40 @@ impl RetroForgeApp {
         #[allow(clippy::cast_precision_loss)]
         let card_width =
             ((ui.available_width() - 12.0 - gap * (columns - 1) as f32) / columns as f32).floor();
-        for pair in rows.chunks(columns) {
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                for row in pair {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(card_width, 0.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui.set_width(card_width);
-                            self.enhancement_card(ui, &tokens, row, &mut actions);
-                        },
-                    );
-                }
-            });
-            ui.add_space(gap);
+        // Ticket W22-03: grouped by what a feature needs, so the reason a
+        // card is grey is in its heading.
+        for (heading, any_game) in [
+            ("WORKS ON ANY GAME", true),
+            ("NEEDS A PROFILE FOR THIS GAME", false),
+        ] {
+            let group: Vec<_> = rows
+                .iter()
+                .filter(|r| crate::enhance_panel::works_on_any_game(r.id) == any_game)
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            ui.label(
+                egui::RichText::new(heading)
+                    .font(egui::FontId::proportional(11.0))
+                    .color(tokens.muted),
+            );
+            for pair in group.chunks(columns) {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for row in pair {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(card_width, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_width(card_width);
+                                self.enhancement_card(ui, &tokens, row, &mut actions);
+                            },
+                        );
+                    }
+                });
+                ui.add_space(gap);
+            }
         }
         if let Some(verdict) = self.hud_verdict() {
             ui.label(egui::RichText::new(verdict).small().color(tokens.muted));
@@ -7440,16 +7459,17 @@ impl RetroForgeApp {
                 if !available {
                     ui.multiply_opacity(0.75);
                 }
+                let name = crate::enhance_panel::player_name(row.id);
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new(row.label)
+                        egui::RichText::new(name)
                             .font(egui::FontId::proportional(crate::theme::type_scale::BODY))
                             .strong()
                             .color(tokens.ink),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let mut on = row.enabled;
-                        if toggle_switch(ui, tokens, &mut on, available, row.label) {
+                        if toggle_switch(ui, tokens, &mut on, available, name) {
                             crate::enhance_dock::apply_toggle(
                                 &mut self.current_game_settings,
                                 row.id,
@@ -7466,6 +7486,29 @@ impl RetroForgeApp {
                         ))
                         .color(tokens.muted),
                 );
+                // Ticket W22-03: when only the mode is in the way, the card
+                // carries the switch to that mode.
+                if let crate::enhance_ui::Availability::NeedsMode(needed) = row.availability {
+                    if let Some(mode) = crate::enhance_panel::mode_named(needed) {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(format!(
+                                        "Switch to {}",
+                                        mode.player_name()
+                                    ))
+                                    .strong()
+                                    .color(tokens.bg),
+                                )
+                                .fill(tokens.accent),
+                            )
+                            .clicked()
+                        {
+                            self.set_game_mode(mode);
+                        }
+                        return;
+                    }
+                }
                 let (fill, ink) = if available {
                     (tokens.ok_soft, tokens.ok)
                 } else {
