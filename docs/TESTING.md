@@ -1068,6 +1068,26 @@ double-run, and **both five-minute replays** (NES and SNES).
 **If you add an `#[ignore]`d test that gates behaviour, add it to
 `local-gate.sh` in the same commit.** A gate nothing runs is not a gate.
 
+### The profile census (tickets W25-01, W26-01, W27-01)
+
+`crates/rf-harness/tests/profile_census.rs` follows the boot census's rules
+below exactly — `#[ignore]`d, one child process per dump under a
+wall-clock cap enforced by the parent, and `RF_PROFILE_GAMES` must be set —
+so it too is run by hand, attended, and never by a gate. It plays each
+listed dump with a scripted pad (an optional per-game opening recipe,
+then the direction of play) and scores work RAM against the scroll
+registers with `rf_enhance::camera_finder`, the same code the app runs
+while a player plays. Optional watched addresses (`RF_PCENSUS_WATCH`)
+report each cited item's range and changes in play, and
+`RF_PCENSUS_SHOTS` drops frames to show where a run got stuck.
+
+Its output is evidence for a person and for `scripts/profile-census.py` /
+`scripts/profile-items.py`, which write profiles only when the camera
+cleared the bar (150 scrolling frames, 70 %, 64 distinct values) and mark
+each item row as watched in play or only cited. **What the gate does
+cover** is the finder itself: `camera_finder`'s unit tests and the app's
+`camera_finder_flow` test on RF-Scroller-S.
+
 ### The one deliberate exception: the boot census (ticket W14-03)
 
 `crates/rf-harness/tests/boot_census.rs` is `#[ignore]`d and is **NOT** in

@@ -1,6 +1,15 @@
 # RetroForge
 
-ROADMAP P9's exit criterion is the reason this site exists:
+RetroForge is an NES and SNES emulator that runs your own games exactly as
+the console did, and can then add to them: no sprite flicker, widescreen,
+whole-level maps, 3D, and live game info such as lives and health.
+
+**Playing?** Start with [Getting started](getting-started.md), or look
+around first in the [screenshot tour](tour.md).
+
+## Building with RetroForge
+
+ROADMAP P9's exit criterion is the reason the second half of this site exists:
 
 > a third party ships a profile + pack + script without touching Rust or
 > asking us questions.

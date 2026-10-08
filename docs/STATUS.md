@@ -4405,3 +4405,7 @@ stories, 10 decisions).
   Game info lists a profile's items live and pins up to four as chips over
   the game; profile rows can say how a value reads (lives minus one, names,
   digits). Gate: workspace **2588 passing / 0 failed**, docs-gate green.
+- 2026-10-08 — **W28-01 (docs).** Player guide in the doc site (getting
+  started, controls, modes, game profiles, Game info) and a screenshot
+  tour of 30 shots from `capture_tour.rs` (fixtures only, no commercial
+  art); README refreshed; TESTING.md documents the profile census.
