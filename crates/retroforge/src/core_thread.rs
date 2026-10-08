@@ -407,6 +407,9 @@ const CAMERA_SEARCH_SNES: usize = 0x2000;
 /// games (and RF-Scroller) keep their variables.
 const CAMERA_SEARCH_NES: usize = 0x0800 + 0x2000;
 
+/// Ticket W27-02: one frame's scroll low bytes, `(x, y)` per layer.
+type LayerScroll = Vec<(Vec<u8>, Vec<u8>)>;
+
 /// Ticket W27-02: a NES search offset as a bus address.
 #[allow(clippy::cast_possible_truncation)]
 const fn nes_search_address(offset: usize) -> u32 {
@@ -1576,35 +1579,34 @@ fn core_thread_main(
             let mut camera_done = None;
             if let Some(finder) = camera_finder.as_mut() {
                 let pad = input.load().ports[0];
-                let (scroll, start): (Vec<(Vec<u8>, Vec<u8>)>, bool) =
-                    match stepper.bg_layer_views() {
-                        // SNES: BG1 then BG2 (the finder prefers the first).
-                        Some(bgs) => (
-                            (0..2)
-                                .map(|i| {
-                                    (
-                                        vec![(bgs[i].hofs & 0xFF) as u8],
-                                        vec![(bgs[i].vofs & 0xFF) as u8],
-                                    )
-                                })
-                                .collect(),
-                            pad & (1 << rf_input::SnesButton::Start.bit()) != 0,
-                        ),
-                        // NES: every $2005/$2006 scroll write this frame.
-                        None => {
-                            let (mut xs, mut ys) = (Vec::new(), Vec::new());
-                            for e in &bundle.events {
-                                if let rf_core_api::CoreEvent::ScrollWrite { x, y, .. } = e {
-                                    xs.push((x & 0xFF) as u8);
-                                    ys.push((y & 0xFF) as u8);
-                                }
+                let (scroll, start): (LayerScroll, bool) = match stepper.bg_layer_views() {
+                    // SNES: BG1 then BG2 (the finder prefers the first).
+                    Some(bgs) => (
+                        (0..2)
+                            .map(|i| {
+                                (
+                                    vec![(bgs[i].hofs & 0xFF) as u8],
+                                    vec![(bgs[i].vofs & 0xFF) as u8],
+                                )
+                            })
+                            .collect(),
+                        pad & (1 << rf_input::SnesButton::Start.bit()) != 0,
+                    ),
+                    // NES: every $2005/$2006 scroll write this frame.
+                    None => {
+                        let (mut xs, mut ys) = (Vec::new(), Vec::new());
+                        for e in &bundle.events {
+                            if let rf_core_api::CoreEvent::ScrollWrite { x, y, .. } = e {
+                                xs.push((x & 0xFF) as u8);
+                                ys.push((y & 0xFF) as u8);
                             }
-                            (
-                                vec![(xs, ys)],
-                                pad & (1 << rf_input::NesButton::Start.bit()) != 0,
-                            )
                         }
-                    };
+                        (
+                            vec![(xs, ys)],
+                            pad & (1 << rf_input::NesButton::Start.bit()) != 0,
+                        )
+                    }
+                };
                 let nes_ram: Vec<u8>;
                 let ram: &[u8] = match stepper.snes_work_ram_head(CAMERA_SEARCH_SNES) {
                     Some(r) => r,
