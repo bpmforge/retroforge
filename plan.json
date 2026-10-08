@@ -9592,9 +9592,10 @@
    "tests: every feature has an explainer; glyph/copy checks pass"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-08. New crate::explainers: long_text per feature and paint(), a diagram drawn from theme-coloured shapes (sprites on a scanline with the hidden ones dashed, a widened screen, a level strip with view box and dot, a tilted floor with a raised wall, a loading bar, fog bands, a fading sprite) — no game art. Each card has a folded \"What is <name>?\" that shows the diagram and text. Tests: explainers every_feature_is_explained; tests/enhancements_panel.rs opens one. Gate: workspace 2557 passing.",
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
   ]
  },
@@ -9615,7 +9616,7 @@
    "tests cover the click and once-only tip"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."

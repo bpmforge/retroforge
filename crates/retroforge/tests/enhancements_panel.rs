@@ -92,7 +92,26 @@ fn cards_explain_each_feature_and_a_toggle_reaches_the_badge() {
         harness.state().status_badge()
     );
 
+    // W22-05: every card has a "What is this?" that opens its explainer.
+    harness.get_by_label("What is No sprite dropout?").click();
+    harness.run_steps(2);
+    let opened = texts(&harness);
+    let explainer = retroforge::explainers::long_text("sprite_overlay");
+    assert!(
+        opened.iter().any(|t| t == explainer),
+        "the explainer opens: {opened:?}"
+    );
+    // Fold it again so the cards below stay where they were.
+    harness.get_by_label("What is No sprite dropout?").click();
+    harness.run_steps(3);
+
     // W22-03: the card's button switches the mode.
+    harness
+        .query_all_by_label("Switch to Game-Aware")
+        .next()
+        .expect("a Switch to Game-Aware button")
+        .scroll_to_me();
+    harness.run_steps(3);
     harness
         .query_all_by_label("Switch to Game-Aware")
         .next()

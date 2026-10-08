@@ -7480,6 +7480,24 @@ impl RetroForgeApp {
                         ))
                         .color(tokens.muted),
                 );
+                // Ticket W22-05: "What is this?" — the longer explanation
+                // and a diagram, folded away until asked for.
+                egui::CollapsingHeader::new(format!("What is {name}?"))
+                    .id_salt(("explainer", row.id))
+                    .show(ui, |ui| {
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width().min(260.0), 80.0),
+                            egui::Sense::hover(),
+                        );
+                        crate::explainers::paint(ui.painter(), rect, row.id, tokens);
+                        ui.label(
+                            egui::RichText::new(crate::explainers::long_text(row.id))
+                                .font(egui::FontId::proportional(
+                                    crate::theme::type_scale::CAPTION,
+                                ))
+                                .color(tokens.ink),
+                        );
+                    });
                 // Ticket W22-03: when only the mode is in the way, the card
                 // carries the switch to that mode.
                 if let crate::enhance_ui::Availability::NeedsMode(needed) = row.availability {
