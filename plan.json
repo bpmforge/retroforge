@@ -9712,9 +9712,10 @@
    "tests drive a rebind for each console"
   ],
   "points": 5,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-08. New crate::controls_panel: Console/Device/Button, the drawn pad layout per console (NES D-pad, Select/Start, B A; SNES adds L/R shoulders and the Y X B A diamond in the Super Famicom colours), draw() with each button a Button to accessibility named \"<button>: <binding>\". App controls_panel (Settings > Controls tab and Quick Menu > Controls, above the shortcuts list): Keyboard/Controller and NES/SNES segmented switches (console follows the running game), click a button then press a key (Esc cancels; keys the shortcuts use are refused) or a pad button (captured from the backend's next ButtonDown), Restore defaults per console and device; saves rf_input bindings and snes-bindings.txt. Player 2 and the full table stay in View > Controls. The input display now names SNES buttons for an SNES. Tests: controls_panel every_button_is_drawn_once; tests/controls_screen.rs (NES and SNES keyboard rebinds, refusal, SNES pad rebind, restore, persistence). Gate: workspace 2567 passing.",
    "FILED 2026-10-08 from Brad: \"what about settings for controller vs keyboard. Keyboard should have defaults set and I can navigate\". Audit: the SNES receives NO controller input in live play (Machine::set_controller is NES-only; rf-snes run_frame ignores input), the live key/pad maps know only the 8 NES buttons, the keyboard defaults are shown nowhere a player looks, and menu hints are pad-only."
   ]
  },
@@ -9735,7 +9736,7 @@
    "tests cover keyboard-only navigation through the Quick Menu"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-08 from Brad: \"what about settings for controller vs keyboard. Keyboard should have defaults set and I can navigate\". Audit: the SNES receives NO controller input in live play (Machine::set_controller is NES-only; rf-snes run_frame ignores input), the live key/pad maps know only the 8 NES buttons, the keyboard defaults are shown nowhere a player looks, and menu hints are pad-only."

@@ -40,6 +40,7 @@ pub mod audio_out;
 pub mod authoring;
 pub mod bindings_store;
 pub mod canvas_accum;
+pub mod controls_panel;
 pub mod core_thread;
 pub mod debug_dock;
 pub mod enhance_dock;
