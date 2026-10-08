@@ -7444,13 +7444,7 @@ impl RetroForgeApp {
     /// Ticket W20-18: the before/after pair, then one card per feature.
     fn enhancements_panel(&mut self, ui: &mut egui::Ui) {
         let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
-        ui.label(
-            egui::RichText::new(format!(
-                "Mode: {}",
-                self.current_game_settings.mode.display_name()
-            ))
-            .strong(),
-        );
+        // W22-01: the mode picker above says the mode; no second label.
         // Before / after: the accuracy-exact frame next to what is on
         // screen — ONE pair for the whole picture. Per-feature pairs would
         // mean rendering each enhancement alone, which nothing does yet.
@@ -7685,6 +7679,23 @@ impl RetroForgeApp {
             .floor()
             .max(96.0);
         let mut picked = None;
+        // Tall enough for the longest blurb at this width, so the count
+        // never sits on top of wrapped text.
+        let blurb_h = crate::game_settings::Mode::PICKER
+            .iter()
+            .map(|m| {
+                ui.painter()
+                    .layout(
+                        m.player_blurb().to_owned(),
+                        egui::FontId::proportional(11.5),
+                        tokens.muted,
+                        w - 20.0,
+                    )
+                    .size()
+                    .y
+            })
+            .fold(0.0_f32, f32::max);
+        let card_h = (24.0 + blurb_h + 26.0).max(92.0);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             for mode in crate::game_settings::Mode::PICKER {
@@ -7692,7 +7703,7 @@ impl RetroForgeApp {
                     crate::enhance_ui::features_unlocked(&self.current_game_settings, &facts, mode);
                 let selected = mode == current;
                 let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(w, 92.0), egui::Sense::click());
+                    ui.allocate_exact_size(egui::vec2(w, card_h), egui::Sense::click());
                 response.widget_info(|| {
                     egui::WidgetInfo::selected(
                         egui::WidgetType::RadioButton,
@@ -7766,8 +7777,8 @@ impl RetroForgeApp {
                 );
                 let count = match (mode, unlocked) {
                     (crate::game_settings::Mode::Accuracy, _) => "NOTHING ADDED".to_owned(),
-                    (_, 1) => "1 FEATURE FOR THIS GAME".to_owned(),
-                    (_, n) => format!("{n} FEATURES FOR THIS GAME"),
+                    (_, 1) => "1 FEATURE".to_owned(),
+                    (_, n) => format!("{n} FEATURES"),
                 };
                 painter.text(
                     inner.left_bottom(),
