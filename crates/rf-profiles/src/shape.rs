@@ -88,6 +88,11 @@ fn known_shape() -> Shape {
                 ("label", Shape::Leaf),
                 ("notes", Shape::Leaf),
                 ("source", Shape::Leaf),
+                // Ticket W27-04: how the value reads on screen.
+                ("show_add", Shape::Leaf),
+                ("show", Shape::Leaf),
+                ("names", Shape::Array(Box::new(Shape::Leaf))),
+                ("max_label", Shape::Leaf),
             ]),
         ),
         (

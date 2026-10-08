@@ -197,6 +197,51 @@ pub struct MemoryMapEntry {
     /// [`RomMapEntry::source`] for why it is typed `Option` and rejected
     /// by the loader rather than by serde (ticket W4-02a).
     pub source: Option<String>,
+    /// Ticket W27-04: how the value reads on screen — added to the raw
+    /// number (lives stored minus one: `show_add = 1`).
+    #[serde(default)]
+    pub show_add: i64,
+    /// Ticket W27-04: `"digits"` for one decimal digit per byte, most
+    /// significant first (a score kept as digits). Absent: a number.
+    pub show: Option<String>,
+    /// Ticket W27-04: the value as an index into names (a power-up kept
+    /// as 0, 1, 2 ...).
+    #[serde(default)]
+    pub names: Vec<String>,
+    /// Ticket W27-04: the `label` of the row holding this one's maximum
+    /// (health against heart containers), drawn as a bar.
+    pub max_label: Option<String>,
+}
+
+impl MemoryMapEntry {
+    /// Ticket W27-04: the value as the game shows it, from this row's
+    /// bytes (little-endian, `len` of them, at most four as a number).
+    #[must_use]
+    pub fn display(&self, bytes: &[u8]) -> String {
+        if self.show.as_deref() == Some("digits") {
+            return bytes.iter().map(|b| char::from(b'0' + (b % 10))).collect();
+        }
+        let raw = bytes
+            .iter()
+            .take(4)
+            .enumerate()
+            .fold(0i64, |v, (i, b)| v | (i64::from(*b) << (8 * i)));
+        if let Some(name) = usize::try_from(raw).ok().and_then(|i| self.names.get(i)) {
+            return name.clone();
+        }
+        (raw + self.show_add).to_string()
+    }
+
+    /// Ticket W27-04: the shown value as a number, for a bar.
+    #[must_use]
+    pub fn number(&self, bytes: &[u8]) -> i64 {
+        bytes
+            .iter()
+            .take(4)
+            .enumerate()
+            .fold(0i64, |v, (i, b)| v | (i64::from(*b) << (8 * i)))
+            + self.show_add
+    }
 }
 
 /// `[camera]` (§2).
@@ -739,5 +784,49 @@ mod tests {
             widescreen: None,
             text: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::MemoryMapEntry;
+
+    fn row(show_add: i64, show: Option<&str>, names: &[&str]) -> MemoryMapEntry {
+        MemoryMapEntry {
+            addr: 0,
+            len: 1,
+            ty: "u8".into(),
+            label: "x".into(),
+            notes: None,
+            source: Some("test".into()),
+            show_add,
+            show: show.map(str::to_owned),
+            names: names.iter().map(|s| (*s).to_owned()).collect(),
+            max_label: None,
+        }
+    }
+
+    /// Ticket W27-04: lives stored minus one, a digit score, a power-up.
+    #[test]
+    fn values_read_the_way_the_game_shows_them() {
+        assert_eq!(row(1, None, &[]).display(&[2]), "3");
+        assert_eq!(
+            row(0, Some("digits"), &[]).display(&[0, 0, 1, 2, 3, 4, 0]),
+            "0012340"
+        );
+        assert_eq!(
+            row(0, None, &["Small", "Super", "Fire", "Raccoon"]).display(&[3]),
+            "Raccoon"
+        );
+        assert_eq!(
+            row(0, None, &["Small"]).display(&[9]),
+            "9",
+            "out of range: the number"
+        );
+        assert_eq!(
+            row(0, None, &[]).display(&[0x34, 0x12]),
+            "4660",
+            "little-endian"
+        );
     }
 }

@@ -52,6 +52,9 @@ type = "u8"
 label = "player_x_screen"
 notes = "X within current screen"
 source = "https://datacrystal.tcrf.net/..."
+# optional, how Game info shows it (W27-04): show_add = 1 (stored minus
+# one), show = "digits" (a digit per byte), names = ["Small", "Super"]
+# (the value picks a name), max_label = "health_max" (drawn as a bar)
 
 [camera]
 mode = "side_scroller"               # side_scroller | top_down_rooms | static
