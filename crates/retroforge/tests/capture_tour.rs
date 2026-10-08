@@ -509,5 +509,40 @@ fn photograph_every_major_surface() {
         }
     }
 
+    // W27-02: the camera found while playing, on an SNES dump no profile
+    // knows (the last byte changed; it runs the same code).
+    let snes_fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/snes/rf-scroller-s/build/rf-scroller-s.sfc");
+    if let Ok(mut bytes) = std::fs::read(&snes_fixture) {
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        let other = games_dir.join("RF-Other-S.sfc");
+        std::fs::write(&other, &bytes).expect("write other snes");
+        harness.state_mut().launch_rom(&other);
+        let from = harness.state().frame_count_for_test();
+        run_emulated_frames(&mut harness, from + 10, Duration::from_secs(10));
+        // Start held for a few frames (the finder arms on it), then Right.
+        hold(&mut harness, egui::Key::Enter);
+        let from = harness.state().frame_count_for_test();
+        run_emulated_frames(&mut harness, from + 6, Duration::from_secs(5));
+        harness.input_mut().events.push(egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        hold(&mut harness, egui::Key::ArrowRight);
+        let started = Instant::now();
+        while !harness.state().camera_search_for_test().1
+            && started.elapsed() < Duration::from_secs(40)
+        {
+            let from = harness.state().frame_count_for_test();
+            run_emulated_frames(&mut harness, from + 30, Duration::from_secs(5));
+        }
+        harness.run_steps(2);
+        shot(&mut harness, "43-camera-found");
+    }
+
     println!("TOUR COMPLETE -> {}", out_dir().display());
 }

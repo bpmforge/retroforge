@@ -120,7 +120,8 @@ fn measure_fps_with_frame_bundle_assembly_enabled() {
             Ok(
                 CoreEvent::CanvasSnapshot(_)
                 | CoreEvent::WidescreenDecisions(_)
-                | CoreEvent::WorkRam(_),
+                | CoreEvent::WorkRam(_)
+                | CoreEvent::CameraFound(_),
             ) => {
                 // This test never sends `RequestCanvasSnapshot` or turns
                 // widescreen on; an unrelated event landing here would not

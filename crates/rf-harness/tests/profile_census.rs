@@ -262,6 +262,16 @@ impl CoreSink for ScrollSink {
     }
 }
 
+/// A NES search offset as a bus address: work RAM, then `$6000-$7FFF`.
+#[allow(clippy::cast_possible_truncation)]
+const fn nes_address(offset: usize) -> u32 {
+    if offset < 0x0800 {
+        offset as u32
+    } else {
+        0x6000 + (offset - 0x0800) as u32
+    }
+}
+
 enum Machine {
     Nes(Box<rf_nes::core::NesCore>),
     Snes(Box<rf_snes::core::SnesCore>),
@@ -307,7 +317,8 @@ fn profile_census_child() {
         }
     };
     let snes = matches!(m, Machine::Snes(_));
-    let len = if snes { SNES_SEARCH } else { 0x800 };
+    // NES: work RAM, then the cartridge RAM window (`$6000-$7FFF`).
+    let len = if snes { SNES_SEARCH } else { 0x800 + 0x2000 };
     // The scoring is the app's own finder (rf_enhance::camera_finder), so
     // the census and "Find the camera while you play" cannot disagree.
     let mut finder = CameraFinder::new(len, if snes { 2 } else { 1 });
@@ -414,7 +425,7 @@ fn profile_census_child() {
             }
         };
         let ram: Vec<u8> = match &m {
-            Machine::Nes(c) => (0..len).map(|a| c.peek(a as u32)).collect(),
+            Machine::Nes(c) => (0..len).map(|a| c.peek(nes_address(a))).collect(),
             Machine::Snes(c) => c.system().bus.wram[..len].to_vec(),
         };
         // Scored only once Start has been pressed (the finder's own rule).
@@ -480,7 +491,14 @@ fn profile_census_child() {
                 .best(3)
                 .into_iter()
                 .map(|(at, hits, distinct, wraps, carried)| {
-                    format!("{:X}:{hits}:{distinct}:{wraps}:{carried}", base + at as u32)
+                    format!(
+                        "{:X}:{hits}:{distinct}:{wraps}:{carried}",
+                        if snes {
+                            base + at as u32
+                        } else {
+                            nes_address(at)
+                        }
+                    )
                 })
                 .collect();
             out.push_str(&format!("\t{name}={}/{}", axis.moving(), cells.join(",")));

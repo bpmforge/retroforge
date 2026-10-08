@@ -214,6 +214,12 @@ pub fn pick(
     if ratio < MIN_RATIO {
         return None;
     }
+    // The width is only known once the byte has wrapped (did the next one
+    // carry?). Until then keep looking, up to four times the bar: a camera
+    // that never wraps in that long is one byte as far as anyone can tell.
+    if wraps == 0 && moving < 4 * min_moving {
+        return None;
+    }
     // 16-bit when the next byte carried on every wrap seen; a camera whose
     // page lives elsewhere is read as its low byte, which is what the
     // scroll register holds anyway.
@@ -400,6 +406,27 @@ mod tests {
             );
         }
         assert_eq!(f.verdict().expect("x").x.offset, 10);
+    }
+
+    /// Not sure of the width until the byte has wrapped once.
+    #[test]
+    fn waits_for_a_wrap_to_know_the_width() {
+        let mut f = CameraFinder::new(64, 1);
+        let mut ram = vec![0u8; 64];
+        // 0.5 px a frame for 320 frames: over the bar, no wrap yet.
+        for i in 0..320u32 {
+            let pos = (i / 2) as u16 + 20;
+            ram[10..12].copy_from_slice(&pos.to_le_bytes());
+            f.observe(&[(&[pos as u8][..], &[0][..])], &ram, i == 0);
+        }
+        assert!(f.moving() >= MIN_MOVING);
+        assert!(f.verdict().is_none(), "no wrap seen yet");
+        for i in 320..800u32 {
+            let pos = (i / 2) as u16 + 20;
+            ram[10..12].copy_from_slice(&pos.to_le_bytes());
+            f.observe(&[(&[pos as u8][..], &[0][..])], &ram, false);
+        }
+        assert_eq!(f.verdict().expect("x").x.width, Width::U16);
     }
 
     #[test]

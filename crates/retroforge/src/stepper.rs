@@ -638,6 +638,21 @@ impl EmuStepper {
         rf_snes::trace::format_trace_line(&core.system().cpu, &CorePeek(core))
     }
 
+    /// Ticket W27-02: the first `len` bytes of SNES work RAM, borrowed —
+    /// the camera finder reads `$7E0000-$7E1FFF` every frame, and copying
+    /// all 128 KiB sixty times a second would be waste. `None` on NES,
+    /// whose 2 KiB the frame message already reads.
+    #[must_use]
+    pub fn snes_work_ram_head(&self, len: usize) -> Option<&[u8]> {
+        match &self.machine {
+            Machine::Nes(_) => None,
+            Machine::Snes(core) => {
+                let wram = &core.system().bus.wram;
+                Some(&wram[..len.min(wram.len())])
+            }
+        }
+    }
+
     /// Ticket W24-03: a copy of the work RAM the profile finder searches —
     /// the NES's 2 KiB, the SNES's 128 KiB. Side-effect-free reads only.
     #[must_use]
