@@ -38,6 +38,24 @@ pub fn describe(id: &str) -> &'static str {
 
 /// One sentence: what the feature needs before it can do anything, or
 /// that it is ready.
+/// Ticket W22-03 (Brad, 2026-10-07: plain names): the name a player sees
+/// for a feature. The research label (`FeatureRow::label`) stays in the
+/// Enhance workspace.
+#[must_use]
+pub const fn player_name(id: &str) -> &'static str {
+    match id.as_bytes() {
+        b"sprite_overlay" => "No sprite dropout",
+        b"deflicker" => "Steady sprites",
+        b"widescreen_decoded" => "Widescreen",
+        b"full_level_view" => "Full-level map",
+        b"loading_fast_forward" => "Skip loading",
+        b"atmosphere_fog" => "Fog and mist",
+        b"diorama" => "3D diorama",
+        b"mode7_ground" => "Mode 7 in 3D",
+        _ => "Enhancement",
+    }
+}
+
 #[must_use]
 pub fn requirement(availability: &Availability) -> String {
     match availability {
@@ -117,5 +135,19 @@ mod tests {
             requirement(&Availability::NeedsMode("Enhanced")),
             "Needs Enhanced mode."
         );
+    }
+
+    /// Ticket W22-03: every feature the panel can show has its own plain
+    /// name.
+    #[test]
+    fn every_feature_has_a_player_name() {
+        let s = crate::game_settings::GameSettings::default();
+        let rows = crate::enhance_ui::feature_rows(
+            &s,
+            &crate::enhance_ui::GameFacts::new(true, true, true),
+        );
+        let names: std::collections::BTreeSet<_> = rows.iter().map(|r| player_name(r.id)).collect();
+        assert_eq!(names.len(), rows.len());
+        assert!(!names.contains("Enhancement"));
     }
 }

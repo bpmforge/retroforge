@@ -9522,9 +9522,10 @@
    "test covers matched and unmatched states"
   ],
   "points": 2,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-08. profile_strip under the mode picker: green \"Profile found: <meta title>\" with what it unlocks in Game-Aware (plain names, enhance_panel::player_name), or amber \"No profile matches this copy of the game\" with what still works; a \"What's a profile?\" collapsing explainer (one exact dump per profile). Deviation: no \"written for a different dump\" near-miss — the matcher reports only a match or none. Test: tests/profile_strip.rs (fixture matches; a one-byte-changed copy does not; explainer opens); enhance_panel every_feature_has_a_player_name. Gate: workspace 2554 passing.",
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
   ]
  },
@@ -9545,7 +9546,7 @@
    "tests: the fix button changes the mode and the card becomes available"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
