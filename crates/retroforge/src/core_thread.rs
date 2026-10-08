@@ -418,6 +418,9 @@ pub enum CoreEvent {
     /// every frame would be tens of MB/s at 60Hz for a level of any real
     /// size, so this only happens when the UI thread actually asks.
     CanvasSnapshot(rf_enhance::stitcher::Canvas),
+    /// Ticket W24-03: the reply to `CoreCommand::SnapshotRam` — the work
+    /// RAM (`EmuStepper::work_ram`) for the profile builder's finder.
+    WorkRam(Vec<u8>),
     /// Ticket W11-03 (FR-ENH-004): what the widescreen policy decided,
     /// per background, and WHY when the answer was no.
     ///
@@ -565,6 +568,10 @@ pub enum CoreCommand {
     /// (DEBUGGER.md §6): 64 KiB of VRAM plus 64 KiB of ARAM per frame is
     /// not something to pay for while nobody is looking.
     SetSnesDebugCapture(bool),
+    /// Ticket W24-03: attach one copy of the work RAM to the next frame —
+    /// the profile builder's finder. One-shot: 128 KiB on an SNES is not
+    /// something to copy every frame.
+    SnapshotRam,
     /// Ticket W4-03e: ask for a `CoreEvent::CanvasSnapshot` of the current
     /// scene's stitched canvas (see that variant's doc). Also flushes the
     /// canvas accumulator's cache (`CanvasAccumulator::flush`) — piggy-
@@ -1176,6 +1183,17 @@ fn core_thread_main(
                 }
                 CoreCommand::SetSnesDebugCapture(enabled) => {
                     snes_debug_capture = enabled;
+                }
+                CoreCommand::SnapshotRam => {
+                    // Its own reply, like `RequestCanvasSnapshot`: on a
+                    // frame it could be superseded in the UI's drain or
+                    // dropped at `MAX_PENDING_FRAMES`.
+                    if frame_tx
+                        .send(CoreEvent::WorkRam(stepper.work_ram()))
+                        .is_err()
+                    {
+                        return LoopControl::Stop; // UI thread hung up.
+                    }
                 }
                 CoreCommand::SetLayerExtraction(enabled) => {
                     layers_enabled = enabled;
@@ -1994,6 +2012,7 @@ mod tests {
             CoreEvent::CanvasSnapshot(_) => {
                 panic!("expected a crash report, got a canvas snapshot")
             }
+            CoreEvent::WorkRam(_) => panic!("expected a crash report, got a RAM snapshot"),
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a crash report, got widescreen decisions")
             }
@@ -2284,6 +2303,7 @@ mod tests {
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
+            CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
@@ -2325,6 +2345,7 @@ mod tests {
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
+            CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
@@ -2395,6 +2416,7 @@ mod tests {
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
+            CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
@@ -2439,6 +2461,7 @@ mod tests {
             }
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
+            CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
@@ -2477,6 +2500,7 @@ mod tests {
             CoreEvent::Frame(msg) => msg.frame_count,
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
+            CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }

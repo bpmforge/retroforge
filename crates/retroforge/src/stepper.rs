@@ -638,6 +638,16 @@ impl EmuStepper {
         rf_snes::trace::format_trace_line(&core.system().cpu, &CorePeek(core))
     }
 
+    /// Ticket W24-03: a copy of the work RAM the profile finder searches —
+    /// the NES's 2 KiB, the SNES's 128 KiB. Side-effect-free reads only.
+    #[must_use]
+    pub fn work_ram(&self) -> Vec<u8> {
+        match &self.machine {
+            Machine::Nes(_) => self.wram_snapshot().to_vec(),
+            Machine::Snes(core) => core.system().bus.wram.clone(),
+        }
+    }
+
     /// The SNES debug memories, or `None` on a NES session (ticket
     /// W13-02b).
     ///
