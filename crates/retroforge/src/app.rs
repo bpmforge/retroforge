@@ -7142,8 +7142,16 @@ impl RetroForgeApp {
                 // player's panel. Same rows as the badge and the Enhance
                 // workspace (`feature_rows`), in plain words; the dense
                 // workspace stays the research surface.
+                // Ticket W22-01: the mode is the first choice, in place
+                // (it was behind "Mode and settings…", a separate window).
+                if self.core.is_some() {
+                    self.mode_picker(ui);
+                    ui.add_space(8.0);
+                }
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Mode and settings\u{2026}").clicked() {
+                    // The full window: the other two modes (Compatibility,
+                    // Research/Debug) and the heuristics report card.
+                    if ui.button("Game settings\u{2026}").clicked() {
                         self.game_settings_target = None;
                         self.show_game_settings = true;
                         leave_paused = true;
@@ -7501,6 +7509,128 @@ impl RetroForgeApp {
                     });
                 }
             });
+    }
+
+    /// Ticket W22-01: three mode cards — Original, Enhanced, Game-Aware —
+    /// each with its one line and how many features it unlocks for this
+    /// game. One click changes and saves the mode. A RadioButton to
+    /// accessibility, named by the player name.
+    fn mode_picker(&mut self, ui: &mut egui::Ui) {
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let facts = self.game_facts();
+        let current = self.current_game_settings.mode;
+        let gap = 8.0;
+        #[allow(clippy::cast_precision_loss)]
+        let w = ((ui.available_width() - 12.0 - gap * 2.0) / 3.0)
+            .floor()
+            .max(96.0);
+        let mut picked = None;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for mode in crate::game_settings::Mode::PICKER {
+                let unlocked =
+                    crate::enhance_ui::features_unlocked(&self.current_game_settings, &facts, mode);
+                let selected = mode == current;
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(w, 92.0), egui::Sense::click());
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::RadioButton,
+                        true,
+                        selected,
+                        mode.player_name(),
+                    )
+                });
+                let painter = ui.painter();
+                let radius = egui::CornerRadius::same(10);
+                let fill = if selected {
+                    tokens.accent_soft
+                } else if response.hovered() {
+                    tokens.surface
+                } else {
+                    tokens.bg
+                };
+                painter.rect_filled(rect, radius, fill);
+                painter.rect_stroke(
+                    rect,
+                    radius,
+                    egui::Stroke::new(
+                        if selected { 2.0 } else { 1.0 },
+                        if selected { tokens.accent } else { tokens.line },
+                    ),
+                    egui::StrokeKind::Inside,
+                );
+                if response.has_focus() {
+                    painter.rect_stroke(
+                        rect.expand(2.0),
+                        radius,
+                        egui::Stroke::new(crate::theme::FOCUS_RING_MOUSE, tokens.accent_strong),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                let inner = rect.shrink2(egui::vec2(10.0, 8.0));
+                painter.text(
+                    inner.left_top(),
+                    egui::Align2::LEFT_TOP,
+                    mode.player_name(),
+                    crate::theme::condensed(crate::theme::type_scale::SUBHEAD),
+                    tokens.ink,
+                );
+                // The radio dot, top right.
+                let dot = egui::pos2(inner.right() - 6.0, inner.top() + 9.0);
+                painter.circle_stroke(
+                    dot,
+                    6.0,
+                    egui::Stroke::new(
+                        2.0,
+                        if selected {
+                            tokens.accent
+                        } else {
+                            tokens.muted
+                        },
+                    ),
+                );
+                if selected {
+                    painter.circle_filled(dot, 3.0, tokens.accent);
+                }
+                let blurb = painter.layout(
+                    mode.player_blurb().to_owned(),
+                    egui::FontId::proportional(11.5),
+                    tokens.muted,
+                    inner.width(),
+                );
+                painter.galley(
+                    inner.left_top() + egui::vec2(0.0, 24.0),
+                    blurb,
+                    tokens.muted,
+                );
+                let count = match (mode, unlocked) {
+                    (crate::game_settings::Mode::Accuracy, _) => "NOTHING ADDED".to_owned(),
+                    (_, 1) => "1 FEATURE FOR THIS GAME".to_owned(),
+                    (_, n) => format!("{n} FEATURES FOR THIS GAME"),
+                };
+                painter.text(
+                    inner.left_bottom(),
+                    egui::Align2::LEFT_BOTTOM,
+                    count,
+                    egui::FontId::proportional(10.0),
+                    tokens.accent,
+                );
+                if response.clicked() && !selected {
+                    picked = Some(mode);
+                }
+            }
+        });
+        if let Some(mode) = picked {
+            self.set_game_mode(mode);
+        }
+    }
+
+    /// Ticket W22-01/W22-03: change and save the open game's mode — the
+    /// same write the Game settings window makes.
+    fn set_game_mode(&mut self, mode: crate::game_settings::Mode) {
+        self.current_game_settings.mode = mode;
+        self.save_current_game_settings();
     }
 
     /// Ticket W20-10: power-cycle the running game — open the same file

@@ -98,7 +98,40 @@ impl Mode {
 }
 
 impl Mode {
-    /// Human-facing name for the badge and the mode picker.
+    /// Ticket W22-01 (`docs/design/UX_WAVE_22.md`, Brad 2026-10-07): the
+    /// name a PLAYER sees — "Original" for Accuracy, which reads as what it
+    /// is (the unmodified machine) rather than as a quality grade.
+    /// [`Self::display_name`] stays the code, docs and Debug name.
+    #[must_use]
+    pub const fn player_name(self) -> &'static str {
+        match self {
+            Mode::Accuracy => "Original",
+            Mode::Compatibility => "Compatibility",
+            Mode::Enhanced => "Enhanced",
+            Mode::ResearchDebug => "Research/Debug",
+            Mode::GameAware => "Game-Aware",
+        }
+    }
+
+    /// Ticket W22-01: the one line under each picker card.
+    #[must_use]
+    pub const fn player_blurb(self) -> &'static str {
+        match self {
+            Mode::Accuracy => "Exactly what the console drew. Nothing added.",
+            Mode::Enhanced => "Fixes that work on any game, like sprite dropout and flicker.",
+            Mode::GameAware => {
+                "Uses a profile of this game to widen it, map it and build it in 3D."
+            }
+            Mode::Compatibility => "Documented fast paths; still deterministic.",
+            Mode::ResearchDebug => "Everything on, for research.",
+        }
+    }
+
+    /// Ticket W22-01: the modes the player's picker offers, in order.
+    /// Compatibility and Research/Debug stay in Enhance › Game settings.
+    pub const PICKER: [Mode; 3] = [Mode::Accuracy, Mode::Enhanced, Mode::GameAware];
+
+    /// The code/docs/Debug name (Game settings window, Enhance workspace).
     #[must_use]
     pub const fn display_name(self) -> &'static str {
         match self {

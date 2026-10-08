@@ -9481,6 +9481,167 @@
    "CLOSED 2026-10-07. settings_window consumes the Esc it closes on, and overlay_menu ignores Esc while Settings is open. Test: tests/esc_closes_settings.rs (one Esc closes Settings with the game still running and the menu shut; the next opens the menu), verified red without the fix. Gate: workspace 2549 passing.",
    "FILED 2026-10-07: found reviewing W21-06 (both overlay_menu and settings_window acted on the same Esc press)."
   ]
+ },
+ {
+  "id": "W22-01",
+  "title": "Enhancements: mode picker with player names",
+  "phase": 22,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "Quick Menu › Enhancements opens with three mode cards (Original, Enhanced, Game-Aware) with a one-line meaning and the number of features each unlocks for this game",
+   "one click changes and saves the open game's mode",
+   "the badge shows the player name (\"SNES · Original\"); Mode::Accuracy stays the code and Debug name; a fresh install is still in it",
+   "tests: picker changes the mode; feature counts per mode are a pure tested function"
+  ],
+  "points": 3,
+  "status": "done",
+  "stories": [],
+  "notes": [
+   "CLOSED 2026-10-08. Mode::player_name (Original/Enhanced/Game-Aware...), player_blurb, PICKER; enhance_ui::features_unlocked counts rows usable per mode (unit-tested). Quick Menu > Enhancements opens with mode_picker: three painted cards (RadioButton to accessibility, player name) with the blurb and \"N FEATURES FOR THIS GAME\"; a click sets and saves the mode (set_game_mode, the Game settings window's write). The badge uses player names (\"NES · Original\"); display_name stays for code, Debug and the Game settings window, which stays reachable as \"Game settings…\" for Compatibility, Research/Debug and heuristics. Tests: enhance_ui features_unlocked_counts_per_mode and the_badge_uses_the_player_mode_name; tests/mode_picker.rs; ui_smoke, app_opens_snes and context_menu_and_game_settings updated. Gate: workspace 2552 passing.",
+   "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
+  ]
+ },
+ {
+  "id": "W22-02",
+  "title": "Enhancements: profile status strip",
+  "phase": 22,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W22-01"
+  ],
+  "acceptance": [
+   "Enhancements shows whether a profile matched this game, what it unlocks if so, and in plain words what it means if not",
+   "a What's a profile? explainer is reachable from the strip",
+   "test covers matched and unmatched states"
+  ],
+  "points": 2,
+  "status": "in_progress",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
+  ]
+ },
+ {
+  "id": "W22-03",
+  "title": "Enhancements: grouped cards with the fix on the card",
+  "phase": 22,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W22-01"
+  ],
+  "acceptance": [
+   "cards are grouped Works on any game / Needs a profile for this game, with plain player names",
+   "a card unavailable only because of the mode offers a button that switches to that mode",
+   "tests: the fix button changes the mode and the card becomes available"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
+  ]
+ },
+ {
+  "id": "W22-04",
+  "title": "Enhancements: drag-to-compare view",
+  "phase": 22,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W22-03"
+  ],
+  "acceptance": [
+   "clicking a card's picture opens a compare of the paused frame, original against what you see, with a draggable divider (arrow keys move it)",
+   "test drives the divider and reads the split"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
+  ]
+ },
+ {
+  "id": "W22-05",
+  "title": "Enhancements: What is this? explainers with illustrations",
+  "phase": 22,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W22-03"
+  ],
+  "acceptance": [
+   "each feature has an explainer with a short description, what it needs, and an illustration drawn from bundled sample art (no game art)",
+   "tests: every feature has an explainer; glyph/copy checks pass"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
+  ]
+ },
+ {
+  "id": "W22-06",
+  "title": "Badge explains itself; one-time tip per game",
+  "phase": 22,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W22-01"
+  ],
+  "acceptance": [
+   "hovering the status badge lists what is on in plain names with how to peek; clicking it opens Quick Menu › Enhancements",
+   "the first time a game opens, a small card says where enhancements are, once per game, dismissed by any key",
+   "tests cover the click and once-only tip"
+  ],
+  "points": 2,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
+  ]
+ },
+ {
+  "id": "W22-07",
+  "title": "Tour photographs Wave 22",
+  "phase": 22,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W22-02",
+   "W22-03",
+   "W22-04",
+   "W22-05",
+   "W22-06"
+  ],
+  "acceptance": [
+   "capture_tour.rs photographs the mode picker, profile strip, grouped cards, compare view, an explainer, the badge popover and the tip"
+  ],
+  "points": 1,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
+  ]
  }
 ]
 }

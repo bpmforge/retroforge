@@ -167,8 +167,8 @@ fn context_menu_and_one_game_settings_window() {
         .click();
     harness.run_steps(2);
     harness
-        .query_by_label("Mode and settings\u{2026}")
-        .expect("the Quick Menu's Mode and settings… command (formerly \"Mode…\", then \"Game settings…\")")
+        .query_by_label("Game settings\u{2026}")
+        .expect("the Quick Menu's Game settings… command (\"Mode…\", then \"Mode and settings…\" before W22-01 put the mode on the panel itself)")
         .click();
     harness.run_steps(2);
     assert!(
