@@ -9736,9 +9736,10 @@
    "tests cover keyboard-only navigation through the Quick Menu"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-08. Verified first (probe): in the Quick Menu the arrow keys did nothing, only Tab moved. quick_menu_keys: on the rail (or with nothing focused) Up/Down choose the section and focus its rail item, Right steps into the section (egui directional focus); inside a section the arrows move focus to the nearest control that way. Enter activates (egui), Esc closes. Because ui_nav turns the d-pad into arrow keys, the pad gets the same behaviour. The hint bar shows key caps (Up/Down Choose, Right Into section, Enter Select) after keyboard or mouse use and the pad faces after pad use. Deviation: library and Settings rely on egui's Tab order plus these arrows only inside the Quick Menu. Test: tests/keyboard_nav.rs (Down x4 = Display, back, Right + Enter resumes; keyboard hints showing). Gate: workspace 2568 passing.",
    "FILED 2026-10-08 from Brad: \"what about settings for controller vs keyboard. Keyboard should have defaults set and I can navigate\". Audit: the SNES receives NO controller input in live play (Machine::set_controller is NES-only; rf-snes run_frame ignores input), the live key/pad maps know only the 8 NES buttons, the keyboard defaults are shown nowhere a player looks, and menu hints are pad-only."
   ]
  },
@@ -9758,7 +9759,7 @@
    "capture_tour.rs photographs the Controls screen for each device and console and the keyboard hint bar"
   ],
   "points": 1,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-08 from Brad: \"what about settings for controller vs keyboard. Keyboard should have defaults set and I can navigate\". Audit: the SNES receives NO controller input in live play (Machine::set_controller is NES-only; rf-snes run_frame ignores input), the live key/pad maps know only the 8 NES buttons, the keyboard defaults are shown nowhere a player looks, and menu hints are pad-only."

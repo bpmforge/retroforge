@@ -109,6 +109,19 @@ pub const PAD_HINTS: [(&str, [u8; 3], &str); 3] = [
     ("LB/RB", [0x5A, 0xA2, 0xE2], "Section"),
 ];
 
+/// Ticket W23-03: the hint bar after keyboard or mouse use.
+pub const KEY_HINTS: [(&[&str], &str); 3] = [
+    (
+        &[
+            egui_phosphor::regular::ARROW_UP,
+            egui_phosphor::regular::ARROW_DOWN,
+        ],
+        "Choose",
+    ),
+    (&[egui_phosphor::regular::ARROW_RIGHT], "Into section"),
+    (&["Enter"], "Select"),
+];
+
 /// Ticket W21-02: how much smaller the Quick Menu backdrop is than the
 /// frame. Stretched back with linear filtering, 8x gives a soft blur of a
 /// 256x240 frame (32x30 texels) without a shader.
