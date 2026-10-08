@@ -4401,3 +4401,7 @@ stories, 10 decisions).
   for any game without a profile camera; a card offers to save it. Items-on-
   screen design (W27-03) published for Brad's OK. Gate: workspace **2583
   passing / 0 failed**, docs-gate green.
+- 2026-10-08 — **W27-03..05 closed (Game info on screen).** Quick Menu ›
+  Game info lists a profile's items live and pins up to four as chips over
+  the game; profile rows can say how a value reads (lives minus one, names,
+  digits). Gate: workspace **2588 passing / 0 failed**, docs-gate green.
