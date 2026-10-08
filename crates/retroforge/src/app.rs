@@ -1825,6 +1825,29 @@ impl RetroForgeApp {
             return;
         }
 
+        // W22-08: Space pauses and resumes in play, as FRONTEND_UI §3.2
+        // has said since W20-03 — never while a menu, window or text field
+        // has the keyboard, and never when the player bound Space to a
+        // game button.
+        if self.core.is_some()
+            && !self.show_overlay_menu
+            && !self.any_window_open()
+            && !ctx.text_edit_focused()
+            && crate::app_bindings::key_conflicts_with_game(&self.bindings, egui::Key::Space)
+                .is_none()
+            && ctx.input(|i| i.key_pressed(egui::Key::Space))
+        {
+            if self.running {
+                self.send_command(CoreCommand::Pause);
+                self.running = false;
+            } else {
+                self.send_command(CoreCommand::Resume);
+                self.running = true;
+            }
+            // Either way the menu no longer owns this pause.
+            self.menu_paused_game = false;
+        }
+
         let save_key = self
             .app_bindings
             .key_for(crate::app_bindings::AppAction::SaveState);
@@ -6928,9 +6951,13 @@ impl RetroForgeApp {
     /// Ticket W20-03: leave the menu for another window (States,
     /// Settings, …) WITHOUT resuming — the player is still busy, and a game
     /// that ran on behind a settings window is the bug this ticket fixes.
+    ///
+    /// W22-08: the flag that says "the menu paused this game" is KEPT, so
+    /// the next time the menu closes — by any route — the game resumes.
+    /// Clearing it here left a game paused for good: every later Esc
+    /// opened and closed the menu around a game nothing would restart.
     fn leave_overlay_menu_paused(&mut self) {
         self.show_overlay_menu = false;
-        self.menu_paused_game = false;
     }
 
     /// Ticket W20-10 (`docs/design/UX_WAVE_20.md` §5): the Quick Menu.

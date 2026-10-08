@@ -9648,6 +9648,28 @@
    "CLOSED 2026-10-08. capture_tour.rs photographs the explainer (29-enhancement-explainer); 15-quick-menu-enhancements now shows the mode picker, profile strip and compare picture, and 02-play-view the \"NES · Original\" badge. Fixes found by the photos: mode cards size to their longest blurb, the count reads \"N FEATURES\", and the redundant \"Mode: …\" line under the picker is gone. Gate: workspace 2559 passing. UNVERIFIED (by eye: Brad).",
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
   ]
+ },
+ {
+  "id": "W22-08",
+  "title": "A paused game can always be resumed",
+  "phase": 22,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "closing the Quick Menu by any route resumes a game the menu paused, including after leaving it for a window it opened (Game settings, Enhance workspace, Settings, States)",
+   "Space pauses and resumes a running game in play when no text field has focus and Space is not bound to a game button",
+   "test reproduces Brad's report and proves both routes"
+  ],
+  "points": 2,
+  "status": "done",
+  "stories": [],
+  "notes": [
+   "CLOSED 2026-10-08. Root cause verified (probe, then a test red before the fix): leave_overlay_menu_paused cleared menu_paused_game, so after Esc > Enhancements > Game settings… (or any window the menu opens) no later menu close resumed the game. It now keeps the flag, so the next menu close by any route resumes. Space pauses/resumes in play (poll_app_hotkeys) when no menu, window or text field has the keyboard and Space is not bound to a game button; it clears the menu's ownership of the pause. Test: tests/resume_after_menu.rs. Gate: workspace 2560 passing.",
+   "FILED 2026-10-08 from Brad: \"when i go to enhancement and pause to get that screen I cant unpause and get back to playing\". Reproduced: Esc > Enhancements > Game settings… leaves the game paused (W20-03) and clears menu_paused_game, so every later Esc closes the menu without resuming; Space, documented as pause/resume since W20-03/W20-07 (FRONTEND_UI §3.2), was never implemented in play."
+  ]
  }
 ]
 }
