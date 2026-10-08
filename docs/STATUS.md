@@ -4369,3 +4369,11 @@ stories, 10 decisions).
   this?" explainer with a diagram per feature; the badge's hover speaks
   plainly and a click opens Enhancements; a one-time tip per game. Gate:
   workspace **2559 passing / 0 failed**.
+- **W22-08, W23-01..04 — resume and controls** (2026-10-08). Closing the
+  Quick Menu always resumes a game it paused, and Space pauses/resumes.
+  SNES games get their controller (they received no input before), with all
+  twelve buttons on keyboard and pad and keyboard defaults; a Controls
+  screen (Settings and Quick Menu) draws the pad with each binding, switches
+  Keyboard/Controller and NES/SNES, and rebinds by click-then-press; the
+  Quick Menu moves with the arrow keys and shows key hints. Gate: workspace
+  **2568 passing / 0 failed**.

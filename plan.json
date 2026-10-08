@@ -9759,9 +9759,10 @@
    "capture_tour.rs photographs the Controls screen for each device and console and the keyboard hint bar"
   ],
   "points": 1,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-08. capture_tour.rs photographs Settings > Controls for NES keyboard, SNES keyboard and SNES controller (30-32). Fixes found by the photos: keys shown as arrows and short names (controls_panel::key_label; saved names unchanged), D-pad labels placed outward and the shoulder labels beside their bars so none overlap. Gate: workspace 2568 passing. UNVERIFIED (by eye: Brad).",
    "FILED 2026-10-08 from Brad: \"what about settings for controller vs keyboard. Keyboard should have defaults set and I can navigate\". Audit: the SNES receives NO controller input in live play (Machine::set_controller is NES-only; rf-snes run_frame ignores input), the live key/pad maps know only the 8 NES buttons, the keyboard defaults are shown nowhere a player looks, and menu hints are pad-only."
   ]
  }

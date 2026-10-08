@@ -276,9 +276,37 @@ pub fn draw(
         } else {
             bound
         };
+        // D-pad labels sit outward from the cross so they never collide.
+        let (at, align) = match short_name(button) {
+            x if x == egui_phosphor::regular::CARET_UP => (
+                egui::pos2(r.center().x, r.top() - 3.0),
+                egui::Align2::CENTER_BOTTOM,
+            ),
+            x if x == egui_phosphor::regular::CARET_LEFT => (
+                egui::pos2(r.left() - 5.0, r.center().y),
+                egui::Align2::RIGHT_CENTER,
+            ),
+            x if x == egui_phosphor::regular::CARET_RIGHT => (
+                egui::pos2(r.right() + 5.0, r.center().y),
+                egui::Align2::LEFT_CENTER,
+            ),
+            // Shoulders: beside, outward, clear of the D-pad's label.
+            _ if button == Button::Snes(SnesButton::L) => (
+                egui::pos2(r.left() - 6.0, r.center().y),
+                egui::Align2::RIGHT_CENTER,
+            ),
+            _ if button == Button::Snes(SnesButton::R) => (
+                egui::pos2(r.right() + 6.0, r.center().y),
+                egui::Align2::LEFT_CENTER,
+            ),
+            _ => (
+                egui::pos2(r.center().x, r.bottom() + 3.0),
+                egui::Align2::CENTER_TOP,
+            ),
+        };
         painter.text(
-            egui::pos2(r.center().x, r.bottom() + 3.0),
-            egui::Align2::CENTER_TOP,
+            at,
+            align,
             label,
             crate::theme::numeric(12.0),
             if is_waiting {
@@ -292,6 +320,27 @@ pub fn draw(
         }
     }
     clicked
+}
+
+/// A key as the Controls screen shows it: arrows as arrows, the long
+/// modifier names shortened. The saved name (`Key::name`) is unchanged.
+#[must_use]
+pub fn key_label(key: rf_input::Key) -> &'static str {
+    use rf_input::Key as K;
+    match key {
+        K::ArrowUp => egui_phosphor::regular::ARROW_UP,
+        K::ArrowDown => egui_phosphor::regular::ARROW_DOWN,
+        K::ArrowLeft => egui_phosphor::regular::ARROW_LEFT,
+        K::ArrowRight => egui_phosphor::regular::ARROW_RIGHT,
+        K::RightShift => "R Shift",
+        K::LeftShift => "L Shift",
+        K::RightCtrl => "R Ctrl",
+        K::LeftCtrl => "L Ctrl",
+        K::RightAlt => "R Alt",
+        K::LeftAlt => "L Alt",
+        K::Backspace => "Bksp",
+        other => other.name(),
+    }
 }
 
 /// The left stick's directions: an extra D-pad, never shown as "the"
