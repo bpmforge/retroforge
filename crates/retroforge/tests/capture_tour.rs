@@ -72,6 +72,23 @@ fn run_emulated_frames(harness: &mut Harness<'_, RetroForgeApp>, target: u64, de
     );
 }
 
+/// W22-05/07: open one card's "What is this?" and photograph it.
+fn h_explainer(harness: &mut Harness<'_, RetroForgeApp>) {
+    harness
+        .get_by_label(&retroforge::quick_menu::Section::Enhancements.rail_text())
+        .click();
+    harness.run_steps(3);
+    if let Some(n) = harness.query_by_label("What is No sprite dropout?") {
+        n.scroll_to_me();
+        harness.run_steps(2);
+        harness.get_by_label("What is No sprite dropout?").click();
+        harness.run_steps(3);
+        shot(harness, "29-enhancement-explainer");
+        harness.get_by_label("What is No sprite dropout?").click();
+        harness.run_steps(2);
+    }
+}
+
 fn shot(harness: &mut Harness<'_, RetroForgeApp>, name: &str) {
     match harness.render() {
         Ok(img) => {
@@ -199,6 +216,8 @@ fn photograph_every_major_surface() {
         }
         shot(&mut harness, name);
     }
+    // W22-05: an explainer opened on the Enhancements panel.
+    h_explainer(&mut harness);
     // W21-03: overwrite Slot 1 from the Quick Menu — saved at once, with
     // the undo bar.
     harness

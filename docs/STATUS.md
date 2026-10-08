@@ -4360,3 +4360,12 @@ stories, 10 decisions).
   console and folders are not listed twice; the window fits the game when
   it starts (switch in Settings › Video); Esc in Settings no longer also
   opens the Quick Menu. Gate: workspace **2549 passing / 0 failed**.
+- **W22-01..07 — enhancements the app explains itself** (2026-10-08, Brad:
+  "this should be designed and show examples"; design approved with "go").
+  Quick Menu › Enhancements opens with an Original / Enhanced / Game-Aware
+  picker (the badge says "Original" for Accuracy), a strip saying whether
+  this copy of the game has a profile, cards grouped by what they need with
+  "Switch to …" on the card, a drag-to-compare picture, and a "What is
+  this?" explainer with a diagram per feature; the badge's hover speaks
+  plainly and a click opens Enhancements; a one-time tip per game. Gate:
+  workspace **2559 passing / 0 failed**.
