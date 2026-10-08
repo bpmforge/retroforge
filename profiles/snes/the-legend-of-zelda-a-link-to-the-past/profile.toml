@@ -1,4 +1,4 @@
-# Legend of Zelda, The - A Link to the Past — made by RetroForge's profile census (W26-02).
+# The Legend of Zelda: A Link to the Past — made by RetroForge's profile census (W26-02).
 #
 # This dump's identity comes from hashing it; its RAM addresses are
 # cited from community maps (each row's `source`) and, where the
@@ -7,7 +7,7 @@
 
 [meta]
 profile_version = "0.1"
-title = "Legend of Zelda, The - A Link to the Past"
+title = "The Legend of Zelda: A Link to the Past"
 console = "snes"
 region = "ntsc"
 authors = ["RetroForge profile census"]
