@@ -950,6 +950,8 @@ pub struct RetroForgeApp {
     /// Ticket W21-10: this session already replaced the boot-frame
     /// picture with a gameplay frame.
     thumb_gameplay_taken: bool,
+    /// Ticket W22-04: where the Enhancements compare line sits (0..=1).
+    compare_cut: f32,
     /// Ticket W21-06: the Settings sheet's search text.
     settings_query: String,
     /// Ticket W21-06: the area between the bars, last frame.
@@ -1551,6 +1553,7 @@ impl RetroForgeApp {
             show_settings: false,
             settings_tab: SettingsTab::Video,
             settings_query: String::new(),
+            compare_cut: 0.5,
             thumb_gameplay_taken: false,
             window_fitted: false,
             last_window_fit: None,
@@ -7374,19 +7377,10 @@ impl RetroForgeApp {
                 self.panel_thumbs = Some((self.position.map_or(0, |p| p.0), before, after));
             }
         }
-        if let Some((_, before, after)) = &self.panel_thumbs {
-            ui.horizontal(|ui| {
-                for (tex, caption) in [(before, "Original"), (after, "What you see")] {
-                    ui.vertical(|ui| {
-                        ui.add(
-                            egui::Image::from_texture(tex)
-                                .fit_to_exact_size(egui::vec2(160.0, 150.0))
-                                .alt_text(caption),
-                        );
-                        ui.label(egui::RichText::new(caption).small().color(tokens.muted));
-                    });
-                }
-            });
+        // Ticket W22-04: one picture, original on the left of a line you
+        // drag (or move with the arrow keys), what you see on the right.
+        if let Some((_, before, after)) = self.panel_thumbs.clone() {
+            compare_slider(ui, &tokens, &before, &after, &mut self.compare_cut);
         }
         ui.add_space(6.0);
         let rows = crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts());
@@ -11102,6 +11096,12 @@ impl RetroForgeApp {
         self.texture.as_ref().map(egui::TextureHandle::size)
     }
 
+    /// Ticket W22-04: the compare line's position (tests).
+    #[doc(hidden)]
+    pub fn compare_cut_for_test(&self) -> f32 {
+        self.compare_cut
+    }
+
     /// Ticket W21-10: the open game's ROM hash (tests).
     #[doc(hidden)]
     pub fn current_game_hash_for_test(&self) -> Option<String> {
@@ -13194,6 +13194,130 @@ fn quick_rail_item(
         painter.galley(cap.min + egui::vec2(5.0, 2.0), galley, tokens.muted);
     }
     response
+}
+
+/// Ticket W22-04: a drag-to-compare picture — `before` left of the line,
+/// `after` right of it. Drag anywhere on it, or focus it and use the arrow
+/// keys. A Slider to accessibility ("Compare original and enhanced", its
+/// value the line's position in percent).
+fn compare_slider(
+    ui: &mut egui::Ui,
+    tokens: &crate::theme::Tokens,
+    before: &egui::TextureHandle,
+    after: &egui::TextureHandle,
+    cut: &mut f32,
+) {
+    let [tw, th] = before.size();
+    #[allow(clippy::cast_precision_loss)]
+    let aspect = (tw as f32 * 8.0 / 7.0) / th.max(1) as f32;
+    let width = ui.available_width().min(420.0);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, width / aspect),
+        egui::Sense::click_and_drag(),
+    );
+    if let Some(pos) = response.interact_pointer_pos() {
+        if response.dragged() || response.clicked() {
+            *cut = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        }
+    }
+    if response.clicked() || response.drag_started() {
+        response.request_focus();
+    }
+    if response.has_focus() {
+        // Left/right move the line, not the keyboard focus.
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                response.id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
+        ui.input(|i| {
+            if i.key_pressed(egui::Key::ArrowLeft) {
+                *cut = (*cut - 0.05).max(0.0);
+            }
+            if i.key_pressed(egui::Key::ArrowRight) {
+                *cut = (*cut + 0.05).min(1.0);
+            }
+        });
+    }
+    let value = f64::from((*cut * 100.0).round());
+    response.widget_info(|| {
+        let mut info = egui::WidgetInfo::labeled(
+            egui::WidgetType::Slider,
+            true,
+            "Compare original and enhanced",
+        );
+        info.value = Some(value);
+        info
+    });
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    let painter = ui.painter_at(rect);
+    painter.image(before.id(), rect, uv, egui::Color32::WHITE);
+    let x = rect.left() + rect.width() * *cut;
+    painter
+        .with_clip_rect(egui::Rect::from_min_max(
+            egui::pos2(x, rect.top()),
+            rect.max,
+        ))
+        .image(after.id(), rect, uv, egui::Color32::WHITE);
+    painter.vline(
+        x,
+        rect.y_range(),
+        egui::Stroke::new(2.0, egui::Color32::WHITE),
+    );
+    painter.circle_filled(egui::pos2(x, rect.center().y), 13.0, egui::Color32::WHITE);
+    painter.text(
+        egui::pos2(x, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        egui_phosphor::regular::ARROWS_LEFT_RIGHT,
+        egui::FontId::proportional(14.0),
+        egui::Color32::from_rgb(0x0B, 0x0D, 0x10),
+    );
+    for (text, align, at) in [
+        (
+            "ORIGINAL",
+            egui::Align2::LEFT_TOP,
+            rect.left_top() + egui::vec2(8.0, 8.0),
+        ),
+        (
+            "WHAT YOU SEE",
+            egui::Align2::RIGHT_TOP,
+            rect.right_top() + egui::vec2(-8.0, 8.0),
+        ),
+    ] {
+        let galley = painter.layout_no_wrap(
+            text.to_owned(),
+            egui::FontId::proportional(10.0),
+            egui::Color32::WHITE,
+        );
+        let r = align
+            .anchor_size(at, galley.size())
+            .expand2(egui::vec2(5.0, 2.0));
+        painter.rect_filled(
+            r,
+            egui::CornerRadius::same(3),
+            egui::Color32::from_black_alpha(170),
+        );
+        painter.galley(r.min + egui::vec2(5.0, 2.0), galley, egui::Color32::WHITE);
+    }
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect,
+            egui::CornerRadius::ZERO,
+            egui::Stroke::new(crate::theme::FOCUS_RING_MOUSE, tokens.accent_strong),
+            egui::StrokeKind::Inside,
+        );
+    }
+    ui.label(
+        egui::RichText::new("Drag the line to compare. The game itself is unchanged.")
+            .font(egui::FontId::proportional(
+                crate::theme::type_scale::CAPTION,
+            ))
+            .color(tokens.muted),
+    );
 }
 
 /// Ticket W21-05: an on/off switch (the review's Enhancements toggle),

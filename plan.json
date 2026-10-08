@@ -9569,9 +9569,10 @@
    "test drives the divider and reads the split"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-08. compare_slider replaces the side-by-side pair at the top of Enhancements: one 8:7 picture, original left of a white line with a knob, what you see right of it; click or drag moves the line, and once focused (click) the left/right arrows nudge it (focus-locked so they do not move keyboard focus). Slider to accessibility with its percent value. Deviations: one compare for the whole picture, not one per card (nothing renders one feature alone, as W20-18 recorded); the pair is the last frame drawn while an enhancement was visible, so a switch flipped inside the paused menu shows after the game resumes. Test: tests/compare_slider.rs. Gate: workspace 2556 passing.",
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
   ]
  },
@@ -9591,7 +9592,7 @@
    "tests: every feature has an explainer; glyph/copy checks pass"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
