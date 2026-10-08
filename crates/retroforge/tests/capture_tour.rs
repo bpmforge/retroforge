@@ -544,5 +544,32 @@ fn photograph_every_major_surface() {
         shot(&mut harness, "43-camera-found");
     }
 
+    // W27-05: Game info — the Quick Menu section, then pinned chips.
+    harness.state_mut().launch_rom(&rom);
+    let from = harness.state().frame_count_for_test();
+    run_emulated_frames(&mut harness, from + 30, Duration::from_secs(10));
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    if let Some(rail) =
+        harness.query_by_label(&retroforge::quick_menu::Section::GameInfo.rail_text())
+    {
+        rail.click();
+        harness.run_steps(3);
+        for item in ["Player X", "Camera x", "Frame counter"] {
+            if let Some(pin) = harness.query_by_label(item) {
+                pin.click();
+                harness.run_steps(1);
+            }
+        }
+        harness.run_steps(2);
+        shot(&mut harness, "44-game-info-menu");
+        harness.key_press(egui::Key::Escape);
+        harness.run_steps(2);
+        hold(&mut harness, egui::Key::ArrowRight);
+        let from = harness.state().frame_count_for_test();
+        run_emulated_frames(&mut harness, from + 90, Duration::from_secs(10));
+        shot(&mut harness, "45-game-info-chips");
+    }
+
     println!("TOUR COMPLETE -> {}", out_dir().display());
 }

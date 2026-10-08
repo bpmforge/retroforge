@@ -233,6 +233,10 @@ pub struct GameSettings {
     /// list, so a renamed or re-dumped cartridge keeps its favourite
     /// status the same way it keeps its mode.
     pub favourite: bool,
+    /// Ticket W27-05: the profile items pinned to the screen (their
+    /// `label`s), in the order pinned, and the corner they show in.
+    pub pinned_items: Vec<String>,
+    pub info_corner: InfoCorner,
     /// Keys this build does not know, kept verbatim (module doc).
     unknown: BTreeMap<String, String>,
 }
@@ -291,6 +295,15 @@ impl GameSettings {
         }
         if self.play_count > 0 {
             fields.insert("play_count".to_string(), self.play_count.to_string());
+        }
+        if !self.pinned_items.is_empty() {
+            fields.insert("pinned_items".to_string(), self.pinned_items.join(","));
+        }
+        if self.info_corner != InfoCorner::default() {
+            fields.insert(
+                "info_corner".to_string(),
+                self.info_corner.name().to_string(),
+            );
         }
         if self.favourite {
             fields.insert("favourite".to_string(), "true".to_string());
@@ -356,6 +369,16 @@ impl GameSettings {
                     settings.play_count = value.parse().unwrap_or(0);
                 }
                 "favourite" => settings.favourite = value == "true",
+                "pinned_items" => {
+                    settings.pinned_items = value
+                        .split(',')
+                        .filter(|l| !l.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
+                "info_corner" => {
+                    settings.info_corner = InfoCorner::from_name(value).unwrap_or_default()
+                }
                 other => {
                     settings
                         .unknown
@@ -376,6 +399,50 @@ impl GameSettings {
 
 /// Where one game's settings live under `root`.
 #[must_use]
+/// Ticket W27-05: where pinned Game info shows over the game.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InfoCorner {
+    #[default]
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl InfoCorner {
+    pub const ALL: [InfoCorner; 4] = [
+        InfoCorner::TopLeft,
+        InfoCorner::TopRight,
+        InfoCorner::BottomLeft,
+        InfoCorner::BottomRight,
+    ];
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            InfoCorner::TopLeft => "top_left",
+            InfoCorner::TopRight => "top_right",
+            InfoCorner::BottomLeft => "bottom_left",
+            InfoCorner::BottomRight => "bottom_right",
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            InfoCorner::TopLeft => "Top left",
+            InfoCorner::TopRight => "Top right",
+            InfoCorner::BottomLeft => "Bottom left",
+            InfoCorner::BottomRight => "Bottom right",
+        }
+    }
+
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.name() == name)
+    }
+}
+
 pub fn settings_path(root: &Path, normalized_sha256: &str) -> PathBuf {
     root.join(crate::bindings_store::APP_DIR)
         .join(GAMES_DIR)
@@ -747,5 +814,20 @@ mod mode_and_feature_persistence_tests {
             !restored.widescreen_decoded,
             "a toggle that was never set must stay off"
         );
+    }
+
+    /// Ticket W27-05: pins and their corner survive a save.
+    #[test]
+    fn pinned_items_round_trip() {
+        let mut s = GameSettings::default();
+        s.pinned_items = vec!["lives".into(), "coins".into()];
+        s.info_corner = InfoCorner::BottomRight;
+        let back = GameSettings::from_text(&s.to_text()).expect("parses");
+        assert_eq!(back.pinned_items, ["lives", "coins"]);
+        assert_eq!(back.info_corner, InfoCorner::BottomRight);
+        assert!(GameSettings::from_text(&GameSettings::default().to_text())
+            .expect("parses")
+            .pinned_items
+            .is_empty());
     }
 }

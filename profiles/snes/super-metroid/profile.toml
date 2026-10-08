@@ -94,6 +94,7 @@ addr = 0x7E079F
 len = 2
 type = "u16"
 label = "area_index"
+names = ["Crateria", "Brinstar", "Norfair", "Wrecked Ship", "Maridia", "Tourian", "Ceres Station"]
 notes = "0 Crateria, 1 Brinstar, 2 Norfair, 3 Wrecked Ship, 4 Maridia, 5 Tourian, 6 Ceres Station. Verified 6 (Ceres Station) during the game's opening sequence, matching the documented area numbering."
 source = "https://jathys.zophar.net/supermetroid/kejardon/RAMMap.txt"
 
