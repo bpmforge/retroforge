@@ -3908,7 +3908,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "retroforge"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "eframe",
@@ -3944,7 +3944,7 @@ dependencies = [
 
 [[package]]
 name = "retroforge-tool"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "rf-cart",
  "rf-core-api",
@@ -3955,7 +3955,7 @@ dependencies = [
 
 [[package]]
 name = "rf-ai"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "ort",
  "sha2 0.11.0",
@@ -3963,7 +3963,7 @@ dependencies = [
 
 [[package]]
 name = "rf-audio"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "audioadapter-buffers",
  "cpal",
@@ -3973,7 +3973,7 @@ dependencies = [
 
 [[package]]
 name = "rf-cache"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "bincode",
  "rf-core-api",
@@ -3983,7 +3983,7 @@ dependencies = [
 
 [[package]]
 name = "rf-cart"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "crc32fast",
  "md-5",
@@ -3994,11 +3994,11 @@ dependencies = [
 
 [[package]]
 name = "rf-core-api"
-version = "0.1.0"
+version = "0.9.0"
 
 [[package]]
 name = "rf-debugger"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "rf-core-api",
  "rf-profiles",
@@ -4010,7 +4010,7 @@ dependencies = [
 
 [[package]]
 name = "rf-enhance"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "rf-cache",
  "rf-core-api",
@@ -4019,7 +4019,7 @@ dependencies = [
 
 [[package]]
 name = "rf-harness"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "rf-cart",
  "rf-core-api",
@@ -4037,7 +4037,7 @@ dependencies = [
 
 [[package]]
 name = "rf-input"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "gilrs",
  "rf-core-api",
@@ -4045,7 +4045,7 @@ dependencies = [
 
 [[package]]
 name = "rf-nes"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "rf-cart",
@@ -4054,7 +4054,7 @@ dependencies = [
 
 [[package]]
 name = "rf-plugin-sdk"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "mlua",
  "wasmtime",
@@ -4063,7 +4063,7 @@ dependencies = [
 
 [[package]]
 name = "rf-profiles"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "rf-cart",
  "serde",
@@ -4072,7 +4072,7 @@ dependencies = [
 
 [[package]]
 name = "rf-renderer"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
@@ -4085,7 +4085,7 @@ dependencies = [
 
 [[package]]
 name = "rf-snes"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "rf-cart",
  "rf-core-api",
@@ -4095,7 +4095,7 @@ dependencies = [
 
 [[package]]
 name = "rf-state"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "bincode",
  "sha2 0.11.0",
