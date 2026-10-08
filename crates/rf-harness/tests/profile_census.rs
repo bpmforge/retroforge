@@ -22,7 +22,7 @@
 //!   cargo test --release -p rf-harness --test profile_census -- --ignored --nocapture
 //! ```
 //!
-//! `list.tsv` lines are `slug<TAB>archive path`. Each game runs in a child
+//! `list.tsv` lines are `slug<TAB>archive path[<TAB>recipe[<TAB>direction]]`. Each game runs in a child
 //! process under a wall-clock cap. No ROM bytes and no paths are written
 //! out — only slugs, hashes and addresses (law 5).
 
@@ -36,7 +36,93 @@ use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, EventMask, PpuPixel, Step};
 const GAMES_VAR: &str = "RF_PROFILE_GAMES";
 const ROM_VAR: &str = "RF_PCENSUS_ROM";
 const OUT_VAR: &str = "RF_CENSUS_OUT";
-const PER_ROM_TIMEOUT: Duration = Duration::from_secs(150);
+/// Per-game opening, `frames:buttons,...` (`-` for none): the menus the
+/// generic script cannot get through on its own.
+const RECIPE_VAR: &str = "RF_PCENSUS_RECIPE";
+/// The direction the game is played in, as buttons (default `R`).
+const DIR_VAR: &str = "RF_PCENSUS_DIR";
+/// A directory to drop a frame into every five seconds, to see where a
+/// run got stuck.
+const SHOTS_VAR: &str = "RF_PCENSUS_SHOTS";
+
+/// Logical buttons, in the NES's own bit order (nesdev "Standard
+/// controller"), plus the SNES's extra four.
+const BTN_A: u16 = 1;
+const BTN_B: u16 = 1 << 1;
+const BTN_SELECT: u16 = 1 << 2;
+const BTN_START: u16 = 1 << 3;
+const BTN_UP: u16 = 1 << 4;
+const BTN_DOWN: u16 = 1 << 5;
+const BTN_LEFT: u16 = 1 << 6;
+const BTN_RIGHT: u16 = 1 << 7;
+const BTN_X: u16 = 1 << 8;
+const BTN_Y: u16 = 1 << 9;
+const BTN_L: u16 = 1 << 10;
+const BTN_R: u16 = 1 << 11;
+
+/// `A B s(elect) S(tart) U D L R X Y l r` -> logical buttons.
+fn buttons(keys: &str) -> u16 {
+    keys.chars()
+        .map(|k| match k {
+            'A' => BTN_A,
+            'B' => BTN_B,
+            's' => BTN_SELECT,
+            'S' => BTN_START,
+            'U' => BTN_UP,
+            'D' => BTN_DOWN,
+            'L' => BTN_LEFT,
+            'R' => BTN_RIGHT,
+            'X' => BTN_X,
+            'Y' => BTN_Y,
+            'l' => BTN_L,
+            'r' => BTN_R,
+            _ => 0,
+        })
+        .fold(0, |a, b| a | b)
+}
+
+fn parse_recipe(text: &str) -> Vec<(u32, u16)> {
+    text.split(',')
+        .filter_map(|step| {
+            let (n, keys) = step.trim().split_once(':')?;
+            Some((n.parse().ok()?, buttons(keys)))
+        })
+        .collect()
+}
+
+fn recipe_at(recipe: &[(u32, u16)], f: u32) -> u16 {
+    let mut at = 0;
+    for &(n, pad) in recipe {
+        if f < at + n {
+            return pad;
+        }
+        at += n;
+    }
+    0
+}
+
+/// Logical buttons -> the `$4218` word (fullsnes "Joypad": B=15 Y=14
+/// Select=13 Start=12 Up=11 Down=10 Left=9 Right=8 A=7 X=6 L=5 R=4).
+fn snes_pad(pad: u16) -> u16 {
+    [
+        (BTN_B, 15),
+        (BTN_Y, 14),
+        (BTN_SELECT, 13),
+        (BTN_START, 12),
+        (BTN_UP, 11),
+        (BTN_DOWN, 10),
+        (BTN_LEFT, 9),
+        (BTN_RIGHT, 8),
+        (BTN_A, 7),
+        (BTN_X, 6),
+        (BTN_L, 5),
+        (BTN_R, 4),
+    ]
+    .iter()
+    .filter(|(b, _)| pad & b != 0)
+    .fold(0, |w, (_, bit)| w | 1 << bit)
+}
+const PER_ROM_TIMEOUT: Duration = Duration::from_secs(300);
 /// Ninety seconds of game time: through a title, a file select or an
 /// overworld map, and into play.
 const FRAMES: u32 = 5400;
@@ -45,15 +131,66 @@ const FRAMES: u32 = 5400;
 /// `$0000-$1FFF`, fullsnes "Memory Map").
 const SNES_SEARCH: usize = 0x2000;
 
-/// Collects the frame's NES scroll writes.
+/// Collects the frame's NES scroll writes, and its picture for the
+/// stuck-run screenshots.
 #[derive(Default)]
 struct ScrollSink {
     xs: Vec<u16>,
     ys: Vec<u16>,
+    rows: Vec<Vec<[u8; 3]>>,
+    line_palette: Option<rf_renderer::palette::LinePalette>,
+}
+
+impl ScrollSink {
+    fn begin_frame(&mut self) {
+        self.rows.clear();
+    }
+
+    /// A 24-bit BMP (no dependency for one debugging picture).
+    fn save_bmp(&self, path: &Path) {
+        let h = self.rows.len();
+        let w = self.rows.iter().map(Vec::len).max().unwrap_or(0);
+        if w == 0 {
+            return;
+        }
+        let stride = (w * 3 + 3) & !3;
+        let size = 54 + stride * h;
+        let mut out = Vec::with_capacity(size);
+        out.extend_from_slice(b"BM");
+        for v in [size as u32, 0, 54, 40, w as u32, h as u32] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&24u16.to_le_bytes());
+        for v in [0u32, (stride * h) as u32, 2835, 2835, 0, 0] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for row in self.rows.iter().rev() {
+            let mut line = vec![0u8; stride];
+            for (x, [r, g, b]) in row.iter().enumerate() {
+                line[x * 3..x * 3 + 3].copy_from_slice(&[*b, *g, *r]);
+            }
+            out.extend_from_slice(&line);
+        }
+        let _ = std::fs::write(path, out);
+    }
 }
 
 impl CoreSink for ScrollSink {
-    fn video_scanline(&mut self, _y: u16, _pixels: &[PpuPixel]) {}
+    fn video_scanline(&mut self, _y: u16, pixels: &[PpuPixel]) {
+        let pal = self.line_palette.as_ref();
+        self.rows.push(
+            pixels
+                .iter()
+                .map(|p| rf_renderer::palette::resolve_index(p.palette_index, pal))
+                .collect(),
+        );
+    }
+    fn palette_scanline(&mut self, _y: u16, palette: &[u16], brightness: u8) {
+        self.line_palette = Some(rf_renderer::palette::LinePalette::from_words(
+            palette, brightness,
+        ));
+    }
     fn audio(&mut self, _samples: &[i16]) {}
     fn event(&mut self, ev: CoreEvent) {
         if let CoreEvent::ScrollWrite { x, y, .. } = ev {
@@ -198,46 +335,61 @@ fn profile_census_child() {
     let (mut ax, mut ay) = (Axis::new(len), Axis::new(len));
     let mut prev = vec![0u8; len];
     let mut stalled = 0u32;
+    let mut armed = false;
     let mut history: Vec<Vec<u8>> = Vec::new();
     if let Machine::Nes(c) = &mut m {
         // The NES pushes its mask through the bus, not `CoreConfig`
         // (the shell's own `EmuStepper` does the same).
         c.bus_mut().set_event_mask(EventMask::SCROLL_WRITE);
     }
+    // A per-game opening (its menus), then the generic play script in
+    // the game's direction. Both come from the parent's game list.
+    let recipe = parse_recipe(&std::env::var(RECIPE_VAR).unwrap_or_default());
+    let recipe_len: u32 = recipe.iter().map(|(n, _)| n).sum();
+    let dir = buttons(&std::env::var(DIR_VAR).unwrap_or_else(|_| "R".into()));
+    let shots = std::env::var(SHOTS_VAR).ok();
+    let shot_every: u32 = std::env::var("RF_PCENSUS_SHOT_EVERY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(300);
     let mut sink = ScrollSink::default();
     // Bounded: exactly FRAMES iterations, each a cycle-budgeted frame (law 8).
-    for f in 0..FRAMES {
-        // Stuck (a title, a menu, a map, or a pause this script caused):
-        // cycle Start, A, Right, B — enough to leave most titles, pick a
-        // file and step onto a map's first level. Otherwise Right, with
-        // B held to run and A tapped to hop over things.
-        let menu = (stalled > 60).then_some((stalled / 40) % 4);
-        let phase = stalled % 40 < 6;
-        let start = menu == Some(0) && phase;
-        let menu_a = menu == Some(1) && phase;
-        let menu_b = menu == Some(3) && phase;
-        let right = (menu.is_none() && f > 240) || menu == Some(2);
-        let jump = (menu.is_none() && right && f % 48 < 18) || menu_a;
-        let run = (menu.is_none() && right) || menu_b;
+    // A longer run for a game with a long opening (`RF_PCENSUS_FRAMES`),
+    // still bounded and still under the parent's clock.
+    let frames: u32 = std::env::var("RF_PCENSUS_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(FRAMES, |n: u32| n.min(4 * FRAMES));
+    for f in 0..frames {
+        let pad = if f < recipe_len {
+            recipe_at(&recipe, f)
+        } else {
+            // Stuck (a title, a menu, a map, or a pause this script
+            // caused): cycle Start, A, the direction, B — enough to leave
+            // most titles, pick a file and step onto a map's first level.
+            // Otherwise the direction, running, hopping now and then.
+            let menu = (stalled > 60).then_some((stalled / 40) % 4);
+            let phase = stalled % 40 < 6;
+            let (jump, run) = if snes { (BTN_B, BTN_Y) } else { (BTN_A, BTN_B) };
+            match menu {
+                Some(0) if phase => BTN_START,
+                Some(1) if phase => BTN_A,
+                Some(3) if phase => BTN_B,
+                Some(2) => dir,
+                Some(_) => 0,
+                None if f % 48 < 18 => dir | run | jump,
+                None => dir | run,
+            }
+        };
         sink.xs.clear();
         sink.ys.clear();
+        sink.begin_frame();
         let (xs, ys) = match &mut m {
             Machine::Nes(c) => {
-                let mut pad = 0u8;
-                if start {
-                    pad |= 0x08;
-                }
-                if right {
-                    pad |= 0x80;
-                }
-                if run {
-                    pad |= 0x02;
-                }
-                if jump {
-                    pad |= 0x01;
-                }
+                // The logical bits are the NES's own order.
                 let input = rf_core_api::InputFrame {
-                    ports: [u16::from(pad), 0, 0, 0],
+                    ports: [pad & 0xFF, 0, 0, 0],
                 };
                 c.run_frame(&input, &mut sink);
                 (
@@ -252,30 +404,14 @@ fn profile_census_child() {
                 )
             }
             Machine::Snes(c) => {
-                // `$4218` layout (fullsnes "Joypad"): B=15, Start=12,
-                // Right=8, A=7, Y=14 (run).
-                let mut pad = 0u16;
-                if start {
-                    pad |= 1 << 12;
-                }
-                if right {
-                    pad |= 1 << 8;
-                }
-                if run {
-                    pad |= 1 << 14;
-                }
-                if jump {
-                    pad |= 1 << 15;
-                }
-                if menu_a {
-                    pad |= 1 << 7;
-                }
-                c.system_mut().bus.joypads.ports[0] = pad;
+                c.system_mut().bus.joypads.ports[0] = snes_pad(pad);
                 let _ = c.step(Step::Frame, &mut sink);
+                // BG1 and BG2: some games scroll the playfield on BG2
+                // (the Kirby titles), with BG1 as a foreground.
                 let bgs = &c.system().bus.ppu.bgs;
                 (
-                    vec![(bgs[0].hofs & 0xFF) as u8],
-                    vec![(bgs[0].vofs & 0xFF) as u8],
+                    vec![(bgs[0].hofs & 0xFF) as u8, (bgs[1].hofs & 0xFF) as u8],
+                    vec![(bgs[0].vofs & 0xFF) as u8, (bgs[1].vofs & 0xFF) as u8],
                 )
             }
         };
@@ -283,18 +419,41 @@ fn profile_census_child() {
             Machine::Nes(c) => (0..len).map(|a| c.peek(a as u32)).collect(),
             Machine::Snes(c) => c.system().bus.wram[..len].to_vec(),
         };
-        let moved_before = ax.moving;
-        ax.frame(&xs, &ram, &prev);
-        ay.frame(&ys, &ram, &prev);
-        stalled = if ax.moving > moved_before {
+        // Scored only once Start has been pressed: a title screen that
+        // scrolls in (Contra, Super Castlevania IV) keeps its own
+        // variable, and its frames would dilute the game's camera.
+        armed |= pad & BTN_START != 0;
+        let moved_before = ax.moving + ay.moving;
+        if armed {
+            ax.frame(&xs, &ram, &prev);
+            ay.frame(&ys, &ram, &prev);
+        } else {
+            ax.last.clear();
+            ay.last.clear();
+        }
+        stalled = if ax.moving + ay.moving > moved_before {
             0
         } else {
             stalled + 1
         };
+        if let Some(dir) = &shots {
+            if (f + 1) % shot_every == 0 {
+                sink.save_bmp(&Path::new(dir).join(format!("{f:04}.bmp")));
+            }
+        }
+        if let Ok(w) = std::env::var("RF_PCENSUS_PEEK") {
+            if pad != 0 {
+                let at = usize::from_str_radix(&w, 16).unwrap_or(0);
+                eprintln!(
+                    "PEEK f={f} pad={pad:#06x} [{w}]={:#04x}",
+                    prev.get(at).copied().unwrap_or(0)
+                );
+            }
+        }
         if std::env::var("RF_PCENSUS_DEBUG").is_ok() && f % 300 == 0 {
             eprintln!(
-                "DBG f={f} xs={xs:?} ys={ys:?} moving={} stalled={stalled}",
-                ax.moving
+                "DBG f={f} xs={xs:?} ys={ys:?} moving={}/{} stalled={stalled}",
+                ax.moving, ay.moving
             );
         }
         history.push(ram.clone());
@@ -341,11 +500,16 @@ fn profile_census() {
     let text = std::fs::read_to_string(&list).expect("game list");
     let out = std::env::var(OUT_VAR).ok();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let Some((slug, archive)) = line.split_once('\t') else {
+        // slug, archive, then optionally the opening recipe and the
+        // direction of play.
+        let cols: Vec<&str> = line.split('\t').collect();
+        let [slug, archive, rest @ ..] = cols.as_slice() else {
             continue;
         };
         let started = Instant::now();
-        let row = format!("{slug}\t{}", run_one(&exe, Path::new(archive)));
+        let recipe = rest.first().copied().unwrap_or("");
+        let dir = rest.get(1).copied().unwrap_or("R");
+        let row = format!("{slug}\t{}", run_one(&exe, Path::new(archive), recipe, dir));
         println!("{row}  ({:.0}s)", started.elapsed().as_secs_f32());
         if let Some(out) = &out {
             use std::io::Write as _;
@@ -361,7 +525,7 @@ fn profile_census() {
 }
 
 /// One title in a child process; its `RESULT` line, or why there is none.
-fn run_one(exe: &Path, archive: &Path) -> String {
+fn run_one(exe: &Path, archive: &Path, recipe: &str, dir: &str) -> String {
     let child = Command::new(exe)
         .args([
             "--exact",
@@ -370,6 +534,8 @@ fn run_one(exe: &Path, archive: &Path) -> String {
             "--nocapture",
         ])
         .env(ROM_VAR, archive)
+        .env(RECIPE_VAR, recipe)
+        .env(DIR_VAR, dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn();

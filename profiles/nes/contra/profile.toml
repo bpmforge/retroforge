@@ -1,0 +1,31 @@
+# Contra — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 99% of 244 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Contra"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "d41e28b1a33b3b6768e7c39c9fdfb1fda4b49940542d14085911fabd399e1ca9"
+sha1 = "979494e7869ac7ab4815fdbd1dc99f893f713fbf"
+md5 = "5a5c2f4f1cafb1f55a8dc0d5ad4550e5"
+crc32 = "f6035030"
+revision = "Contra (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x00FD, type = "u8" }

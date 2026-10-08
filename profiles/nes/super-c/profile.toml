@@ -1,0 +1,32 @@
+# Super C — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 715 scrolling frames; y 100% of 252.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Super C"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "3edd803db1cc88155720625ed8f3e362a5e3c660e7faf3285bbe3a2c6571511c"
+sha1 = "b630af147818fa61a1b45551f35c4fb4bc1357aa"
+md5 = "8782ba5a0b02aceb272757667af1066a"
+crc32 = "305b4e62"
+revision = "Super C (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x00FD, type = "u8" }
+y = { addr = 0x00FC, type = "u8" }
