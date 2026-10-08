@@ -417,6 +417,28 @@ pub fn badge_breakdown(settings: &GameSettings, facts: &GameFacts) -> Vec<String
     out
 }
 
+/// Ticket W22-06: the badge's hover in a player's words — the mode, what
+/// is on by its plain name, how to peek, how to change it.
+#[must_use]
+pub fn badge_explainer(settings: &GameSettings, facts: &GameFacts) -> Vec<String> {
+    let on: Vec<&'static str> = feature_rows(settings, facts)
+        .iter()
+        .filter(|r| r.effective())
+        .map(|r| crate::enhance_panel::player_name(r.id))
+        .collect();
+    let mut out = vec![if on.is_empty() {
+        format!("{} · nothing added", settings.mode.player_name())
+    } else {
+        format!("{} · {} on", settings.mode.player_name(), on.len())
+    }];
+    out.extend(on.iter().map(|n| format!("\u{2022} {n}")));
+    if !on.is_empty() {
+        out.push("Hold the badge or ` to see the original.".to_owned());
+    }
+    out.push("Click to choose what is on.".to_owned());
+    out
+}
+
 /// A per-heuristic ladder chip for the Features tab (§3.3's "ladder chip
 /// per heuristic: shadow/advisory/active").
 #[must_use]
@@ -474,6 +496,21 @@ pub fn profile_inspector_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ticket W22-06: the hover names what is on in plain words.
+    #[test]
+    fn badge_explainer_speaks_plainly() {
+        use crate::game_settings::{GameSettings, Mode};
+        let mut s = GameSettings::default();
+        let f = GameFacts::new(false, false, false);
+        assert_eq!(badge_explainer(&s, &f)[0], "Original · nothing added");
+        s.mode = Mode::Enhanced;
+        s.sprite_overlay = true;
+        let lines = badge_explainer(&s, &f);
+        assert_eq!(lines[0], "Enhanced · 1 on");
+        assert!(lines.iter().any(|l| l.contains("No sprite dropout")));
+        assert!(lines.iter().any(|l| l.contains("see the original")));
+    }
 
     /// Ticket W22-01: each picker card's count is the rows usable in that
     /// mode — Original none, Enhanced the generic ones, Game-Aware more

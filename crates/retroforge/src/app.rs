@@ -76,6 +76,8 @@ const SLOT_CARD_WIDTH: f32 = 168.0;
 /// Ticket W21-03: how long an overwrite stays undoable (the review's
 /// "Undo is available for 10 s").
 const SLOT_UNDO_SECS: f64 = 10.0;
+/// Ticket W22-06: how long the one-time enhancements tip stays up.
+const ENHANCE_TIP_SECS: f64 = 8.0;
 /// Ticket W21-10: frames of play (10 s at 60 fps) before the library
 /// picture is retaken from the game itself.
 const THUMB_GAMEPLAY_FRAMES: u64 = 600;
@@ -950,6 +952,8 @@ pub struct RetroForgeApp {
     /// Ticket W21-10: this session already replaced the boot-frame
     /// picture with a gameplay frame.
     thumb_gameplay_taken: bool,
+    /// Ticket W22-06: until when (`ctx.time()`) the one-time tip shows.
+    enhance_tip_until: Option<f64>,
     /// Ticket W22-04: where the Enhancements compare line sits (0..=1).
     compare_cut: f32,
     /// Ticket W21-06: the Settings sheet's search text.
@@ -1554,6 +1558,7 @@ impl RetroForgeApp {
             settings_tab: SettingsTab::Video,
             settings_query: String::new(),
             compare_cut: 0.5,
+            enhance_tip_until: None,
             thumb_gameplay_taken: false,
             window_fitted: false,
             last_window_fit: None,
@@ -5638,8 +5643,11 @@ impl RetroForgeApp {
                                 ui.visuals().widgets.inactive.bg_fill,
                             )),
                     );
+                    // Ticket W22-06: the hover speaks a player's words
+                    // (the research breakdown stays in the Enhance
+                    // workspace), and a click opens Enhancements.
                     let mut breakdown =
-                        crate::enhance_ui::badge_breakdown(&self.current_game_settings, &facts);
+                        crate::enhance_ui::badge_explainer(&self.current_game_settings, &facts);
                     if let Some(summary) = &self.hd_summary {
                         breakdown.push(format!("HD pack: {summary}"));
                     }
@@ -5656,6 +5664,9 @@ impl RetroForgeApp {
                     // frame) — either gesture forces the same view.
                     self.peeking_original =
                         response.is_pointer_button_down_on() || self.peek_key_held;
+                    if response.clicked() && self.core.is_some() {
+                        self.open_quick_menu_at(crate::quick_menu::Section::Enhancements);
+                    }
 
                     // §3.2's remaining three, right-aligned so the status
                     // text has the first claim on the space.
@@ -6825,6 +6836,93 @@ impl RetroForgeApp {
             self.send_command(CoreCommand::Resume);
             self.running = true;
         }
+    }
+
+    /// Ticket W22-06: open the Quick Menu on `section`.
+    fn open_quick_menu_at(&mut self, section: crate::quick_menu::Section) {
+        self.set_overlay_menu(true);
+        self.quick_section = section;
+        self.enhance_tip_until = None;
+    }
+
+    /// Ticket W22-06: the one-time "this game can be enhanced" card — shown
+    /// once per game (remembered in settings.toml), top right of the play
+    /// area, until any key or 8 s.
+    fn enhance_tip(&mut self, ctx: &egui::Context) {
+        let now = ctx.time();
+        if self.enhance_tip_until.is_none() {
+            let Some(hash) = self.current_game_hash.clone() else {
+                return;
+            };
+            let first_frames = self.position.is_some_and(|(f, _)| f >= 30);
+            if self.core.is_none()
+                || !first_frames
+                || self.show_overlay_menu
+                || self.settings.tips.enhance_tip_seen.contains(&hash)
+            {
+                return;
+            }
+            self.settings.tips.enhance_tip_seen.insert(hash);
+            self.save_settings();
+            self.enhance_tip_until = Some(now + ENHANCE_TIP_SECS);
+        }
+        let Some(until) = self.enhance_tip_until else {
+            return;
+        };
+        let key = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))
+        });
+        if now >= until || key || self.core.is_none() || self.show_overlay_menu {
+            self.enhance_tip_until = None;
+            return;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let anchor = self.last_play_rect.map_or_else(
+            || ctx.viewport_rect().right_top() + egui::vec2(-16.0, 48.0),
+            |r| r.right_top() + egui::vec2(-12.0, 12.0),
+        );
+        egui::Area::new(egui::Id::new("enhance-tip"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::RIGHT_TOP)
+            .fixed_pos(anchor)
+            .interactable(false)
+            .show(ctx, |ui| {
+                crate::theme::Elevation::Overlay
+                    .frame(&tokens)
+                    .inner_margin(egui::Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.set_max_width(280.0);
+                        ui.label(
+                            egui::RichText::new("This game can be enhanced")
+                                .font(crate::theme::condensed(crate::theme::type_scale::SUBHEAD))
+                                .color(tokens.ink),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Press Esc \u{203a} Enhancements to see what RetroForge can add. \
+                                 Nothing is on until you choose.",
+                            )
+                            .font(egui::FontId::proportional(
+                                crate::theme::type_scale::CAPTION,
+                            ))
+                            .color(tokens.ink),
+                        );
+                        ui.label(
+                            egui::RichText::new("Shown once for this game")
+                                .font(egui::FontId::proportional(11.0))
+                                .color(tokens.muted),
+                        );
+                    });
+            });
+    }
+
+    /// Ticket W22-06: whether the one-time tip is showing (tests).
+    #[doc(hidden)]
+    pub fn enhance_tip_showing_for_test(&self) -> bool {
+        self.enhance_tip_until.is_some()
     }
 
     /// Ticket W20-03: leave the menu for another window (States,
@@ -13034,6 +13132,7 @@ impl eframe::App for RetroForgeApp {
         self.hash_info_window(&ctx);
         self.overlay_menu(&ctx);
         self.slot_undo_bar(&ctx);
+        self.enhance_tip(&ctx);
         self.states_modal(&ctx);
         // Ticket W20-10: drawn whenever a Save asked for it — from the
         // States window OR the Quick Menu — not only inside the former.
