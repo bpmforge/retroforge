@@ -1,0 +1,72 @@
+# Super Castlevania IV — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 727 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Super Castlevania IV"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "0ef6f4cce5a2273fa49fe1ce724e0048a8e39c91da6b00dbb693fe1ba909177d"
+sha1 = "684c1dfaff8e5999422c24d48054d96bb12da2f4"
+md5 = "094f035993e9724647b61ddcba1e9a7a"
+crc32 = "b64ffb12"
+revision = "Super Castlevania IV (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+widescreen = "decoded"
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x7E128A, type = "u16" }
+
+[[memory_map]]
+addr = 0x7E13F4
+len = 1
+type = "u8"
+label = "health"
+notes = "Health bar. Watched in play on this dump: 0-16, changed 3 times over 867 frames."
+source = "https://tasvideos.org/UserFiles/Info/637936906489274046"
+
+[[memory_map]]
+addr = 0x7E13F2
+len = 1
+type = "u8"
+label = "hearts"
+notes = "Heart counter. Watched in play on this dump: 0-5, changed 1 times over 867 frames."
+source = "https://tasvideos.org/UserFiles/Info/637936906489274046"
+
+[[memory_map]]
+addr = 0x7E13F6
+len = 1
+type = "u8"
+label = "boss_health"
+notes = "Boss energy. Watched in play on this dump: 0-16, changed 1 times over 867 frames."
+source = "https://tasvideos.org/UserFiles/Info/637936906489274046"
+
+[[memory_map]]
+addr = 0x7E054A
+len = 2
+type = "u16"
+label = "player_x"
+notes = "X position. Watched in play on this dump: 0-666, changed 410 times over 867 frames."
+source = "https://tasvideos.org/UserFiles/Info/637936906489274046"
+
+[[memory_map]]
+addr = 0x7E054E
+len = 2
+type = "u16"
+label = "player_y"
+notes = "Y position (centre). Watched in play on this dump: 0-222, changed 234 times over 867 frames."
+source = "https://tasvideos.org/UserFiles/Info/637936906489274046"

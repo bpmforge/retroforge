@@ -1,0 +1,106 @@
+# Kid Icarus — made by RetroForge's profile census (W26-02).
+#
+# This dump's identity comes from hashing it; its RAM addresses are
+# cited from community maps (each row's `source`) and, where the
+# census reached play, watched there (each row's notes say which).
+# No camera: the census did not find one for this game yet.
+
+[meta]
+profile_version = "0.1"
+title = "Kid Icarus"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "56f1fe3a7881b2e9d69cd33a0971b2f26247e964c3c7dd4a6019715425ff2256"
+sha1 = "920b7e56f917690b89258a627edacf2a4650685d"
+md5 = "8c45f4401cdae82b6079f9740007c8c5"
+crc32 = "d9f0749f"
+revision = "Kid Icarus (USA, Europe), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[[memory_map]]
+addr = 0x0723
+len = 1
+type = "u8"
+label = "player_x_screen"
+notes = "Pit X pixel on screen. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/NES/KidIcarus"
+
+[[memory_map]]
+addr = 0x00A6
+len = 1
+type = "u8"
+label = "health"
+notes = "Pit current health. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kid_Icarus/RAM_map"
+
+[[memory_map]]
+addr = 0x00AA
+len = 1
+type = "u8"
+label = "health_max"
+notes = "Count of health containers. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kid_Icarus/RAM_map"
+
+[[memory_map]]
+addr = 0x006B
+len = 1
+type = "u8"
+label = "boss_health"
+notes = "Boss health remaining. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kid_Icarus/RAM_map"
+
+[[memory_map]]
+addr = 0x0131
+len = 3
+type = "bytes"
+label = "score"
+notes = "Current score, 3 bytes (encoding not stated). Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kid_Icarus/RAM_map"
+
+[[memory_map]]
+addr = 0x014A
+len = 2
+type = "bytes"
+label = "hearts"
+notes = "Heart currency, 2 bytes (byte order not stated). Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kid_Icarus/RAM_map"
+
+[[memory_map]]
+addr = 0x014F
+len = 1
+type = "u8"
+label = "hammers"
+notes = "Hammers held. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kid_Icarus/RAM_map"
+
+[[memory_map]]
+addr = 0x0150
+len = 1
+type = "u8"
+label = "feathers"
+notes = "Feathers held. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kid_Icarus/RAM_map"
+
+[[memory_map]]
+addr = 0x00A5
+len = 1
+type = "u8"
+label = "weapon"
+notes = "Activated sacred weapons. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kid_Icarus/RAM_map"
+
+[[memory_map]]
+addr = 0x0152
+len = 1
+type = "u8"
+label = "power_up"
+notes = "Strength level. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kid_Icarus/RAM_map"

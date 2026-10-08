@@ -4,8 +4,8 @@
 # ## What this is, and what it deliberately is NOT
 #
 # This is a PROFILE ONLY: no ROM bytes are in this repository or referenced
-# by path, no test decodes this profile, and `[[identity]]` is absent
-# because no ROM hash has been independently verified for this ticket.
+# by path, and no test decodes this profile. `[[identity]]` was absent
+# until W26-02 added the hash of the No-Intro USA dump (end of file).
 # CLAUDE.md law 5 ("no ROM bytes in git; no copyrighted titles hardcoded in
 # engine code") is why: a profile MAY name a commercial game (this file),
 # but no engine code anywhere may, and nothing here needs a byte of the
@@ -121,3 +121,91 @@ source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
 # the cited public documentation stops.
 [decode]
 kind = "room_grid"
+
+[[memory_map]]
+addr = 0x066F
+len = 1
+type = "u8"
+label = "health"
+notes = "Packed: low nibble filled hearts, high nibble containers minus one. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+[[memory_map]]
+addr = 0x066D
+len = 1
+type = "u8"
+label = "rupees"
+notes = "Rupee count. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+[[memory_map]]
+addr = 0x0658
+len = 1
+type = "u8"
+label = "bombs"
+notes = "Bomb count. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+[[memory_map]]
+addr = 0x067C
+len = 1
+type = "u8"
+label = "bombs_max"
+notes = "Bomb capacity; starts at 8. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+[[memory_map]]
+addr = 0x066E
+len = 1
+type = "u8"
+label = "keys"
+notes = "Key count. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+[[memory_map]]
+addr = 0x0657
+len = 1
+type = "u8"
+label = "weapon"
+notes = "Sword: 0 none, 1 wooden, 2 white, 3 magical. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+[[memory_map]]
+addr = 0x0671
+len = 1
+type = "u8"
+label = "triforce"
+notes = "Triforce pieces, one bit each. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+[[memory_map]]
+addr = 0x0010
+len = 1
+type = "u8"
+label = "level"
+notes = "Current level; 0 is overworld. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+[[memory_map]]
+addr = 0x0070
+len = 1
+type = "u8"
+label = "player_x_screen"
+notes = "Link X on screen (0-240). Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+[[memory_map]]
+addr = 0x0084
+len = 1
+type = "u8"
+label = "player_y_screen"
+notes = "Link Y on screen (61-221). Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/The_Legend_of_Zelda/RAM_map"
+
+# W26-02: identity added from the census's hash of this dump.
+[[identity]]
+sha256 = "085e5397a3487357c263dfa159fb0fe20a5f3ea8ef82d7af6a7e848d3b9364e8"
+sha1 = "a12d74c73a0481599a5d832361d168f4737bbcf6"
+md5 = "d9a1631d5c32d35594b9484862a26cba"
+crc32 = "3fe272fb"
+revision = "Legend of Zelda, The (USA), No-Intro"

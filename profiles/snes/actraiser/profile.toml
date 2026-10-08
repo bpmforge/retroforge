@@ -30,3 +30,75 @@ widescreen = "decoded"
 [camera]
 mode = "side_scroller"
 x = { addr = 0x7E0022, type = "u8" }
+
+[[memory_map]]
+addr = 0x7E001C
+len = 1
+type = "u8"
+label = "lives"
+notes = "Action stage lives. Cited; not yet watched in play."
+source = "https://datacrystal.romhacking.net/wiki/ActRaiser:RAM_map"
+
+[[memory_map]]
+addr = 0x7E001D
+len = 1
+type = "u8"
+label = "health"
+notes = "Action stage HP. Cited; not yet watched in play."
+source = "https://datacrystal.romhacking.net/wiki/ActRaiser:RAM_map"
+
+[[memory_map]]
+addr = 0x7E001E
+len = 1
+type = "u8"
+label = "health_max"
+notes = "Action stage max HP. Cited; not yet watched in play."
+source = "https://datacrystal.romhacking.net/wiki/ActRaiser:RAM_map"
+
+[[memory_map]]
+addr = 0x7E001F
+len = 2
+type = "bytes"
+label = "score"
+notes = "Action stage score; page says platformer values appear BCD. Cited; not yet watched in play."
+source = "https://datacrystal.romhacking.net/wiki/ActRaiser:RAM_map"
+
+[[memory_map]]
+addr = 0x7E0021
+len = 1
+type = "u8"
+label = "magic"
+notes = "Action stage MP. Cited; not yet watched in play."
+source = "https://datacrystal.romhacking.net/wiki/ActRaiser:RAM_map"
+
+[[memory_map]]
+addr = 0x7E00E6
+len = 2
+type = "bytes"
+label = "timer"
+notes = "Action stage time remaining. Cited; not yet watched in play."
+source = "https://datacrystal.romhacking.net/wiki/ActRaiser:RAM_map"
+
+[[memory_map]]
+addr = 0x7E0019
+len = 1
+type = "u8"
+label = "area"
+notes = "Current map number (low byte of map id). Cited; not yet watched in play."
+source = "https://datacrystal.romhacking.net/wiki/ActRaiser:RAM_map"
+
+[[memory_map]]
+addr = 0x7E07A2
+len = 2
+type = "u16"
+label = "player_x"
+notes = "Action segment X. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/SNES/ActRaiser"
+
+[[memory_map]]
+addr = 0x7E07A4
+len = 2
+type = "u16"
+label = "player_y"
+notes = "Action segment Y. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/SNES/ActRaiser"

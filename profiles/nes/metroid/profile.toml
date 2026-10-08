@@ -93,3 +93,67 @@ type = "u8"
 label = "samus_y_screen"
 notes = "Y position within the current screen; verified rising (0xB1 -> 0xC1) during the opening fall, then holding once Samus landed."
 source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"
+
+[[memory_map]]
+addr = 0x0106
+len = 2
+type = "bytes"
+label = "health"
+notes = "Fixed-point BCD; 0107 high nibble is filled tanks. Watched in play on this dump: 0-768, changed 7 times over 846 frames."
+source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"
+
+[[memory_map]]
+addr = 0x6877
+len = 1
+type = "u8"
+label = "energy_tanks"
+notes = "Number of energy tanks (WRAM). Watched in play on this dump: 0, changed 0 times over 846 frames."
+source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"
+
+[[memory_map]]
+addr = 0x6879
+len = 1
+type = "u8"
+label = "missiles"
+notes = "Missile count (WRAM). Watched in play on this dump: 0, changed 0 times over 846 frames."
+source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"
+
+[[memory_map]]
+addr = 0x687A
+len = 1
+type = "u8"
+label = "missiles_max"
+notes = "Missile capacity (WRAM). Watched in play on this dump: 0, changed 0 times over 846 frames."
+source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"
+
+[[memory_map]]
+addr = 0x6878
+len = 1
+type = "u8"
+label = "power_up"
+notes = "Equipment bitflags (WRAM). Watched in play on this dump: 0, changed 0 times over 846 frames."
+source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"
+
+[[memory_map]]
+addr = 0x0074
+len = 1
+type = "u8"
+label = "area"
+notes = "10 Brinstar, 11 Norfair, 12 Kraid, 13 Tourian, 14 Ridley. Watched in play on this dump: 0, changed 0 times over 846 frames."
+source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"
+
+[[memory_map]]
+addr = 0x004F
+len = 1
+type = "u8"
+label = "room_y"
+notes = "Map Y. Watched in play on this dump: 0-14, changed 3 times over 846 frames."
+source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"
+
+[[memory_map]]
+addr = 0x687D
+len = 3
+type = "bytes"
+label = "timer"
+notes = "Game time, low byte first (WRAM). Watched in play on this dump: 0-8, changed 5 times over 846 frames."
+source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"

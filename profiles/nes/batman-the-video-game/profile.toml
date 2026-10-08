@@ -29,3 +29,67 @@ entity_overlay = false
 [camera]
 mode = "side_scroller"
 x = { addr = 0x00DB, type = "u8" }
+
+[[memory_map]]
+addr = 0x00A6
+len = 1
+type = "u8"
+label = "weapon"
+notes = "00 none, 50 batarang, 60 stars, C0 gun. Watched in play on this dump: 0, changed 0 times over 2351 frames."
+source = "https://datacrystal.tcrf.net/wiki/Batman:_The_Video_Game_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x00B4
+len = 1
+type = "u8"
+label = "timer"
+notes = "Global frame timer. Watched in play on this dump: 0-255, changed 2115 times over 2351 frames."
+source = "https://datacrystal.tcrf.net/wiki/Batman:_The_Video_Game_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x00B7
+len = 1
+type = "u8"
+label = "health"
+notes = "watched in play on this dump: 0-8, changed 21 times over 2351 frames"
+source = "https://datacrystal.tcrf.net/wiki/Batman:_The_Video_Game_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x00B8
+len = 1
+type = "u8"
+label = "ammo"
+notes = "watched in play on this dump: 0, changed 0 times over 2351 frames"
+source = "https://datacrystal.tcrf.net/wiki/Batman:_The_Video_Game_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x00D4
+len = 1
+type = "u8"
+label = "player_x"
+notes = "Pixel within screen; screen number at 00D3. Watched in play on this dump: 0-255, changed 1973 times over 2351 frames."
+source = "https://datacrystal.tcrf.net/wiki/Batman:_The_Video_Game_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x00D1
+len = 1
+type = "u8"
+label = "player_y"
+notes = "Pixel within screen; screen number at 00D0. Watched in play on this dump: 0-175, changed 1149 times over 2351 frames."
+source = "https://datacrystal.tcrf.net/wiki/Batman:_The_Video_Game_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x00D7
+len = 1
+type = "u8"
+label = "player_x_screen"
+notes = "On-screen X. Watched in play on this dump: 0-112, changed 67 times over 2351 frames."
+source = "https://datacrystal.tcrf.net/wiki/Batman:_The_Video_Game_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x00D6
+len = 1
+type = "u8"
+label = "player_y_screen"
+notes = "On-screen Y. Watched in play on this dump: 0-160, changed 1172 times over 2351 frames."
+source = "https://datacrystal.tcrf.net/wiki/Batman:_The_Video_Game_(NES)/RAM_map"

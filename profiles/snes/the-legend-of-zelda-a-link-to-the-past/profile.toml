@@ -1,0 +1,122 @@
+# Legend of Zelda, The - A Link to the Past — made by RetroForge's profile census (W26-02).
+#
+# This dump's identity comes from hashing it; its RAM addresses are
+# cited from community maps (each row's `source`) and, where the
+# census reached play, watched there (each row's notes say which).
+# No camera: the census did not find one for this game yet.
+
+[meta]
+profile_version = "0.1"
+title = "Legend of Zelda, The - A Link to the Past"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "66871d66be19ad2c34c927d6b14cd8eb6fc3181965b6e517cb361f7316009cfb"
+sha1 = "6d4f10a8b10e10dbe624cb23cf03b88bb8252973"
+md5 = "608c22b8ff930c62dc2de54bcd6eba72"
+crc32 = "777aac2f"
+revision = "Legend of Zelda, The - A Link to the Past (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[[memory_map]]
+addr = 0x7E0022
+len = 2
+type = "u16"
+label = "player_x"
+notes = "Link X coordinate. Cited; not yet watched in play."
+source = "https://github.com/snesrev/zelda3/blob/master/src/variables.h"
+
+[[memory_map]]
+addr = 0x7E0020
+len = 2
+type = "u16"
+label = "player_y"
+notes = "Link Y coordinate. Cited; not yet watched in play."
+source = "https://github.com/snesrev/zelda3/blob/master/src/variables.h"
+
+[[memory_map]]
+addr = 0x7EF36D
+len = 1
+type = "u8"
+label = "health"
+notes = "Current health. Cited; not yet watched in play."
+source = "https://github.com/snesrev/zelda3/blob/master/src/variables.h"
+
+[[memory_map]]
+addr = 0x7EF36C
+len = 1
+type = "u8"
+label = "health_max"
+notes = "Health capacity. Cited; not yet watched in play."
+source = "https://github.com/snesrev/zelda3/blob/master/src/variables.h"
+
+[[memory_map]]
+addr = 0x7EF360
+len = 2
+type = "u16"
+label = "rupees"
+notes = "Rupee goal value; counter display lags at 7EF362. Cited; not yet watched in play."
+source = "https://github.com/snesrev/zelda3/blob/master/src/variables.h"
+
+[[memory_map]]
+addr = 0x7EF343
+len = 1
+type = "u8"
+label = "bombs"
+notes = "cited; not yet watched in play"
+source = "https://github.com/snesrev/zelda3/blob/master/src/variables.h"
+
+[[memory_map]]
+addr = 0x7EF377
+len = 1
+type = "u8"
+label = "arrows"
+notes = "cited; not yet watched in play"
+source = "https://github.com/snesrev/zelda3/blob/master/src/variables.h"
+
+[[memory_map]]
+addr = 0x7EF36F
+len = 1
+type = "u8"
+label = "keys"
+notes = "Current dungeon keys. Cited; not yet watched in play."
+source = "https://github.com/snesrev/zelda3/blob/master/src/variables.h"
+
+[[memory_map]]
+addr = 0x7EF36E
+len = 1
+type = "u8"
+label = "magic"
+notes = "Magic power. Cited; not yet watched in play."
+source = "https://github.com/snesrev/zelda3/blob/master/src/variables.h"
+
+[[memory_map]]
+addr = 0x7EF359
+len = 1
+type = "u8"
+label = "weapon"
+notes = "Sword type. Cited; not yet watched in play."
+source = "https://github.com/snesrev/zelda3/blob/master/src/variables.h"
+
+[[memory_map]]
+addr = 0x7E00A0
+len = 2
+type = "u16"
+label = "room"
+notes = "Dungeon room index. Cited; not yet watched in play."
+source = "https://github.com/snesrev/zelda3/blob/master/src/variables.h"
+
+[[memory_map]]
+addr = 0x7E008A
+len = 2
+type = "u16"
+label = "area"
+notes = "Overworld screen index. Cited; not yet watched in play."
+source = "https://github.com/snesrev/zelda3/blob/master/src/variables.h"

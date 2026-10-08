@@ -147,8 +147,12 @@ def main():
             skipped.append((slug, why))
             continue
         y, _ = pick(*parse_axis(cols[7]), MIN_MOVING_Y, MIN_DISTINCT_Y)
-        if y and abs(y[0] - x[0]) < 2:
-            y = None  # the same byte (or x's high byte) cannot be both axes
+        if y and (
+            y[0] == x[0]
+            or (x[1] == "u16" and y[0] == x[0] + 1)
+            or (y[1] == "u16" and x[0] == y[0] + 1)
+        ):
+            y = None  # one byte cannot be both axes
         path = os.path.join(ROOT, console, name, "profile.toml")
         width = 6 if console == "snes" else 4
         found = f"x ${x[0]:0{width}X} {x[1]} ({x[2]:.0%} of {x[3]})"

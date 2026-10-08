@@ -29,3 +29,27 @@ entity_overlay = false
 [camera]
 mode = "side_scroller"
 x = { addr = 0x0017, type = "u16" }
+
+[[memory_map]]
+addr = 0x0096
+len = 2
+type = "u16"
+label = "player_x"
+notes = "Player X pixel in level, low then high byte (subpixel at 0095). Watched in play on this dump: 0-1269, changed 802 times over 1858 frames."
+source = "https://tasvideos.org/GameResources/NES/DuckTales2"
+
+[[memory_map]]
+addr = 0x0099
+len = 2
+type = "u16"
+label = "player_y"
+notes = "Player Y pixel in level, low then high byte (subpixel at 0098). Watched in play on this dump: 0-959, changed 676 times over 1858 frames."
+source = "https://tasvideos.org/GameResources/NES/DuckTales2"
+
+[[memory_map]]
+addr = 0x00B9
+len = 1
+type = "u8"
+label = "boss_health"
+notes = "Boss HP as read by the page's Lua script. Watched in play on this dump: 0, changed 0 times over 1858 frames."
+source = "https://tasvideos.org/GameResources/NES/DuckTales2"

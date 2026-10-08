@@ -30,3 +30,59 @@ widescreen = "decoded"
 [camera]
 mode = "side_scroller"
 x = { addr = 0x7E00B4, type = "u8" }
+
+[[memory_map]]
+addr = 0x7E1F80
+len = 1
+type = "u8"
+label = "lives"
+notes = "Life counter, max 9. Watched in play on this dump: 0-2, changed 3 times over 1956 frames."
+source = "https://tasvideos.org/GameResources/SNES/MegaManX/RAMMap"
+
+[[memory_map]]
+addr = 0x7E0BCF
+len = 1
+type = "u8"
+label = "health"
+notes = "Current health. Watched in play on this dump: 0-141, changed 13 times over 1956 frames."
+source = "https://tasvideos.org/GameResources/SNES/MegaManX/RAMMap"
+
+[[memory_map]]
+addr = 0x7E1F9A
+len = 1
+type = "u8"
+label = "health_max"
+notes = "Max health; +2 per heart tank. Watched in play on this dump: 0-16, changed 1 times over 1956 frames."
+source = "https://tasvideos.org/GameResources/SNES/MegaManX/RAMMap"
+
+[[memory_map]]
+addr = 0x7E0BDB
+len = 1
+type = "u8"
+label = "weapon"
+notes = "Current weapon selected. Watched in play on this dump: 0, changed 0 times over 1956 frames."
+source = "https://tasvideos.org/GameResources/SNES/MegaManX/RAMMap"
+
+[[memory_map]]
+addr = 0x7E1F7A
+len = 1
+type = "u8"
+label = "stage"
+notes = "Level ID; 0 intro highway, 9-C Sigma stages. Watched in play on this dump: 0-35, changed 2 times over 1956 frames."
+source = "https://tasvideos.org/GameResources/SNES/MegaManX/RAMMap"
+
+[[memory_map]]
+addr = 0x7E0BAD
+len = 2
+type = "u16"
+label = "player_x"
+notes = "X pixels; subpixel at 7E0BAC. Watched in play on this dump: 0-65535, changed 1596 times over 1956 frames."
+source = "https://tasvideos.org/GameResources/SNES/MegaManX/RAMMap"
+
+[[memory_map]]
+addr = 0x7E0BB0
+len = 2
+type = "u16"
+label = "player_y"
+notes = "Y pixels; subpixel at 7E0BAF. Watched in play on this dump: 0-65535, changed 1201 times over 1956 frames."
+source = "https://tasvideos.org/GameResources/SNES/MegaManX/RAMMap"

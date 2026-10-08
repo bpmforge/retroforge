@@ -120,3 +120,67 @@ type = "u16"
 label = "samus_y"
 notes = "Verified climbing steadily during the opening cutscene, consistent with Samus falling before player control begins."
 source = "https://jathys.zophar.net/supermetroid/kejardon/RAMMap.txt"
+
+[[memory_map]]
+addr = 0x7E09C4
+len = 2
+type = "u16"
+label = "health_max"
+notes = "Samus max energy. Cited; not yet watched in play."
+source = "http://drewseph.zophar.net/Kejardon/RAMMap.txt"
+
+[[memory_map]]
+addr = 0x7E09C6
+len = 2
+type = "u16"
+label = "missiles"
+notes = "Missile count. Cited; not yet watched in play."
+source = "http://drewseph.zophar.net/Kejardon/RAMMap.txt"
+
+[[memory_map]]
+addr = 0x7E09C8
+len = 2
+type = "u16"
+label = "missiles_max"
+notes = "Missile capacity. Cited; not yet watched in play."
+source = "http://drewseph.zophar.net/Kejardon/RAMMap.txt"
+
+[[memory_map]]
+addr = 0x7E09CA
+len = 2
+type = "u16"
+label = "super_missiles"
+notes = "Super missile count. Cited; not yet watched in play."
+source = "http://drewseph.zophar.net/Kejardon/RAMMap.txt"
+
+[[memory_map]]
+addr = 0x7E09CE
+len = 2
+type = "u16"
+label = "power_bombs"
+notes = "Power bomb count. Cited; not yet watched in play."
+source = "http://drewseph.zophar.net/Kejardon/RAMMap.txt"
+
+[[memory_map]]
+addr = 0x7E09D6
+len = 2
+type = "u16"
+label = "health_reserve"
+notes = "Energy held in reserve tanks. Cited; not yet watched in play."
+source = "http://drewseph.zophar.net/Kejardon/RAMMap.txt"
+
+[[memory_map]]
+addr = 0x7E09D2
+len = 2
+type = "u16"
+label = "weapon"
+notes = "Status-bar item currently selected. Cited; not yet watched in play."
+source = "http://drewseph.zophar.net/Kejardon/RAMMap.txt"
+
+[[memory_map]]
+addr = 0x7E09DA
+len = 2
+type = "u16"
+label = "timer"
+notes = "In-game time, frames field (seconds/minutes/hours follow at 09DC/09DE/09E0). Cited; not yet watched in play."
+source = "http://drewseph.zophar.net/Kejardon/RAMMap.txt"
