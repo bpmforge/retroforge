@@ -9892,14 +9892,17 @@ impl RetroForgeApp {
         if let Some(dir) = std::env::var_os("RETROFORGE_PROFILES_DIR") {
             return std::path::PathBuf::from(dir);
         }
-        if let Some(beside) = std::env::current_exe()
+        // W24-01: next to the executable or in any folder above it (a
+        // build in `target/release` finds the repo's `profiles`), then
+        // the working directory. A bare relative fallback alone hid every
+        // profile from an app started anywhere but the repo root.
+        let exe_dir = std::env::current_exe()
             .ok()
-            .and_then(|exe| exe.parent().map(|p| p.join("profiles")))
-            .filter(|p| p.is_dir())
-        {
-            return beside;
-        }
-        std::path::PathBuf::from("profiles")
+            .and_then(|e| e.parent().map(std::path::Path::to_path_buf));
+        crate::level_view::locate_profiles_root(
+            exe_dir.as_deref(),
+            std::env::current_dir().ok().as_deref(),
+        )
     }
 
     /// The addresses the profile's `[camera]` spec will be read at.
