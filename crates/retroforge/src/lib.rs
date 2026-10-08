@@ -46,6 +46,7 @@ pub mod enhance_dock;
 pub mod enhance_panel;
 pub mod enhance_ui;
 pub mod enhanced_view;
+pub mod explainers;
 pub mod game_settings;
 pub mod hash;
 pub mod icons;
