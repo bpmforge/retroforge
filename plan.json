@@ -9546,9 +9546,10 @@
    "tests: the fix button changes the mode and the card becomes available"
   ],
   "points": 2,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-08. Cards grouped WORKS ON ANY GAME (sprite dropout, steady sprites, Mode 7 in 3D) / NEEDS A PROFILE FOR THIS GAME (enhance_panel::works_on_any_game); cards and their switches use player names (enhance_panel::player_name). A card held back only by the mode shows \"Switch to <mode>\" (enhance_panel::mode_named) which calls set_game_mode; otherwise the plain requirement tag. Tests: enhance_panel needs_mode_names_resolve; tests/enhancements_panel.rs (groups, the switch button changes the mode). Gate: workspace 2555 passing.",
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
   ]
  },
@@ -9568,7 +9569,7 @@
    "test drives the divider and reads the split"
   ],
   "points": 3,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
