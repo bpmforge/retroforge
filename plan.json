@@ -9616,9 +9616,10 @@
    "tests cover the click and once-only tip"
   ],
   "points": 2,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-08. enhance_ui::badge_explainer: the badge hover is now \"<mode> · N on\", the plain names of what is on, how to see the original and \"Click to choose what is on\" (badge_breakdown stays for research surfaces). Clicking the badge opens the Quick Menu on Enhancements (open_quick_menu_at). One-time tip: TipSettings.enhance_tip_seen (settings.toml [tips], by ROM hash) — after 30 frames of a game never tipped, an overlay card top-right of the picture says where enhancements are, for 8 s or until any key; never twice per game. Deviation: shown for every game, not only Accuracy-only setups (there is no such setting). Tests: enhance_ui badge_explainer_speaks_plainly; tests/badge_and_tip.rs (once per game, any key dismisses, badge click opens Enhancements). Gate: workspace 2559 passing.",
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
   ]
  },
@@ -9641,7 +9642,7 @@
    "capture_tour.rs photographs the mode picker, profile strip, grouped cards, compare view, an explainer, the badge popover and the tip"
   ],
   "points": 1,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."

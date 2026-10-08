@@ -384,6 +384,14 @@ pub struct PlaySettings {
     pub rewind: bool,
 }
 
+/// Ticket W22-06: one-time tips already shown, so they are never shown
+/// twice. Keyed by normalized ROM SHA-256.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct TipSettings {
+    pub enhance_tip_seen: std::collections::BTreeSet<String>,
+}
+
 /// Everything in `settings.toml`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AppSettings {
@@ -411,6 +419,8 @@ pub struct AppSettings {
     /// ROM SHA-256 (principle 5: everything keyed by ROM hash), overriding
     /// both of the above.
     pub video_by_game: BTreeMap<String, VideoSettings>,
+    /// Ticket W22-06.
+    pub tips: TipSettings,
     /// Tables and keys this build does not know, kept verbatim so a newer
     /// build's settings survive an older build touching the file (module
     /// doc).
@@ -432,6 +442,7 @@ struct KnownSettings {
     play: PlaySettings,
     video_by_console: BTreeMap<String, VideoSettings>,
     video_by_game: BTreeMap<String, VideoSettings>,
+    tips: TipSettings,
 }
 
 impl AppSettings {
@@ -453,6 +464,7 @@ impl AppSettings {
             play: self.play,
             video_by_console: self.video_by_console.clone(),
             video_by_game: self.video_by_game.clone(),
+            tips: self.tips.clone(),
         };
         let mut table = toml::Table::try_from(known).map_err(|e| e.to_string())?;
         for (key, value) in &self.unknown {
@@ -485,6 +497,7 @@ impl AppSettings {
                     | "play"
                     | "video_by_console"
                     | "video_by_game"
+                    | "tips"
             ) {
                 unknown.insert(key.clone(), value.clone());
             }
@@ -526,6 +539,7 @@ impl AppSettings {
             play: section("play").try_into().unwrap_or_default(),
             video_by_console: section("video_by_console").try_into().unwrap_or_default(),
             video_by_game: section("video_by_game").try_into().unwrap_or_default(),
+            tips: section("tips").try_into().unwrap_or_default(),
             unknown,
         })
     }
