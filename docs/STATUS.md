@@ -4382,3 +4382,8 @@ stories, 10 decisions).
   (camera left/right, camera up/down, player position, lives) writes the
   player's own profile and re-matches at once; tour shots 40–42. Gate:
   workspace **2574 passing / 0 failed**.
+- 2026-10-08 — **W25-01/02 closed (premade profiles).** The profile census
+  plays a dump headlessly and finds its camera from the scroll register;
+  44 new profiles for popular NES/SNES games, each camera verified in play
+  against the No-Intro dump; Metroid's camera corrected to `$00FD`. Gate:
+  workspace **2574 passing / 0 failed**, docs-gate green.

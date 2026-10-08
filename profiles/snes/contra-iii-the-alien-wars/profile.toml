@@ -1,0 +1,32 @@
+# Contra III - The Alien Wars — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 98% of 1452 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Contra III - The Alien Wars"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "a93ea87fc835c530b5135c5294433d15eef6dbf656144b387e89ac19cf864996"
+sha1 = "265886e3f665adf2507e7b2f08b6b2ed9d0018b2"
+md5 = "ede82658dafdd6febbfbe6a9c9082500"
+crc32 = "84da7cfe"
+revision = "Contra III - The Alien Wars (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+widescreen = "decoded"
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x7E138A, type = "u16" }

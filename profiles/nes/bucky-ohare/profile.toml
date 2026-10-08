@@ -1,0 +1,31 @@
+# Bucky O'Hare — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 2058 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Bucky O'Hare"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "d02b24e4ee8e639bf77af6746d6b3a92e996c0d2298861071851e2beec0ef812"
+sha1 = "9b51a9d91380d10df03da29788809f6024ece485"
+md5 = "2c14a62966411eef03ecd66b061156d5"
+crc32 = "e19ee99c"
+revision = "Bucky O'Hare (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x06E9, type = "u8" }

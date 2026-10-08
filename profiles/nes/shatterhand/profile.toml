@@ -1,0 +1,31 @@
+# Shatterhand — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 626 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Shatterhand"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "c3f361c4a1441101d6a3eb42f5776073c712198e7ed45d6ab5350816ea15aee4"
+sha1 = "503eb23955475d105029fdd6ae082bcc14e7306a"
+md5 = "7cccc9ad7b1097143435fcc6afcdf157"
+crc32 = "aa20f73d"
+revision = "Shatterhand (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x000A, type = "u8" }

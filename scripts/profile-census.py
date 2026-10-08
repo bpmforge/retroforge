@@ -42,8 +42,10 @@ def parse_axis(cell):
 
 
 def pick(moving, cands, min_moving, min_distinct):
-    if moving < min_moving or not cands:
+    if moving < min_moving:
         return None, f"only {moving} scrolling frames"
+    if not cands:
+        return None, f"no byte tracked the scroll over {moving} frames"
     addr, hits, distinct, wraps, carried = cands[0]
     ratio = hits / moving
     if ratio < MIN_RATIO:
@@ -113,11 +115,23 @@ def render(console, title, revision, hashes, x, y):
     return "\n".join(lines) + "\n"
 
 
+def shipped_hashes():
+    """sha256 -> profile path, for every profile already in the tree."""
+    out = {}
+    for d, _, files in os.walk(ROOT):
+        if "profile.toml" in files:
+            path = os.path.join(d, "profile.toml")
+            for m in re.finditer(r'^sha256 = "([0-9a-f]{64})"', open(path).read(), re.M):
+                out[m.group(1)] = os.path.relpath(path, ROOT)
+    return out
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     write = "--write" in sys.argv
     games = dict(l.rstrip("\n").split("\t", 1) for l in open(args[0]) if "\t" in l)
     written, skipped = [], []
+    shipped = shipped_hashes()
     for line in open(args[1]):
         cols = line.rstrip("\n").split("\t")
         slug = cols[0]
@@ -133,11 +147,14 @@ def main():
             skipped.append((slug, why))
             continue
         y, _ = pick(*parse_axis(cols[7]), MIN_MOVING_Y, MIN_DISTINCT_Y)
+        if y and abs(y[0] - x[0]) < 2:
+            y = None  # the same byte (or x's high byte) cannot be both axes
         path = os.path.join(ROOT, console, name, "profile.toml")
         width = 6 if console == "snes" else 4
         found = f"x ${x[0]:0{width}X} {x[1]} ({x[2]:.0%} of {x[3]})"
-        if os.path.exists(path):
-            skipped.append((slug, f"already shipped; census found {found}"))
+        if hashes[0] in shipped or os.path.exists(path):
+            where = shipped.get(hashes[0], os.path.relpath(path, ROOT))
+            skipped.append((slug, f"already shipped as {where}; census found {found}"))
             continue
         revision = os.path.splitext(os.path.basename(archive))[0]
         if write:

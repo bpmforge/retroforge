@@ -1,0 +1,32 @@
+# Super R-Type — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 1184 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Super R-Type"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "05c7f6461209020785fba33007e1830820aa44ada4b1a6f991d936bf2335b15b"
+sha1 = "44b0a3b66756b04ebc5753f78613feadb85d6b74"
+md5 = "cfcd1ff3da5309e5021efaa58012058d"
+crc32 = "8b22c830"
+revision = "Super R-Type (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+widescreen = "decoded"
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x7E1830, type = "u16" }

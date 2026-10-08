@@ -1,0 +1,31 @@
+# Gradius — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 2078 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Gradius"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "6918d7cbb81bfcd20d95bb08bcf137c7ea80ae9f0c12b92bfdcc90a6cf9752a0"
+sha1 = "9282e87c643557682aee674174821bf3a0fe3876"
+md5 = "49c0ffbd6fca692e7c567b4d72ae0847"
+crc32 = "350d835e"
+revision = "Gradius (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x0012, type = "u8" }

@@ -1,0 +1,31 @@
+# Rygar — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 93% of 2864 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Rygar"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "e3a7e0b559b18e8e2fd6f2bf0fdadbf9094be63a01bac50e5505413e1d7697a4"
+sha1 = "b76593a8fbd39447cc5a5d85e525427b9eceb6f8"
+md5 = "d77e12f6f3cabf1b705fb8ecdc1b8c62"
+crc32 = "b3783f2a"
+revision = "Rygar (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x0010, type = "u8" }

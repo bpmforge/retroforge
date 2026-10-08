@@ -1,0 +1,31 @@
+# Adventure Island — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 2464 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Adventure Island"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "53bfc94fce46a25188f84f102810406f686a7fb13fb5e4ae8f13760106acb969"
+sha1 = "e8ea2deb2d65fc64f0dc038a2c95ca6ce8ca31b9"
+md5 = "248ba1acbfed28be4e6839a858a5c60a"
+crc32 = "f8a713be"
+revision = "Adventure Island (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x0006, type = "u8" }

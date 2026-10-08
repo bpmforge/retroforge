@@ -1,0 +1,31 @@
+# Life Force — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 2321 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Life Force"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "dbd530e6ca07cc4b255b1b885cd5b6b2e23b8d3cac4733c3e4d96acd7d751c28"
+sha1 = "351edb1fdf4bce3bfc56d1eecccfdc6a21bb14f4"
+md5 = "99bfd6d0ff53d78e5126d274a0605d30"
+crc32 = "c4bc85a2"
+revision = "Life Force (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x00FD, type = "u8" }

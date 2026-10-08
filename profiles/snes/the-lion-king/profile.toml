@@ -1,0 +1,33 @@
+# The Lion King — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 358 scrolling frames; y 100% of 433.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "The Lion King"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "457abe634e0a8be03e29513a3dca8f3e9d0ddc6bf97d8931f2316094260f3712"
+sha1 = "e5319132495fd34d03f141962d9d6e3d76fe7b02"
+md5 = "6a5b2f9bde72f7d72db7dfe9afd0f47a"
+crc32 = "c8fbfaa8"
+revision = "Lion King, The (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+widescreen = "decoded"
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x7E004A, type = "u16" }
+y = { addr = 0x7E004C, type = "u16" }

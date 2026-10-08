@@ -1,0 +1,31 @@
+# Adventure Island 3 — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 97% of 2037 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Adventure Island 3"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "e8dc8c0441c54d09a1cfe0c112a3137bb6d709989b23e6528f8e30360e1ad910"
+sha1 = "f77eb86932844a92834ef12c059a3f5b815dac07"
+md5 = "c517ca2fd6199fde0ba4b3847d9bbecf"
+crc32 = "bfbfd25d"
+revision = "Adventure Island 3 (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x00B2, type = "u8" }

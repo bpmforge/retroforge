@@ -1,0 +1,31 @@
+# Mega Man 3 — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 1858 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Mega Man 3"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "5b85c1ff632c6ac34742ac87b9c8ddee9a13827caf1212ecfa1d11f1f9dece50"
+sha1 = "6780b3fcc547c013ee45afac6bb30c6fc6d8b46e"
+md5 = "4a53b6f58067d62c9a43404fe835dd5c"
+crc32 = "603aaa57"
+revision = "Mega Man 3 (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x0079, type = "u8" }

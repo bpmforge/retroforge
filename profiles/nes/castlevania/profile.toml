@@ -1,0 +1,31 @@
+# Castlevania — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 2700 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Castlevania"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "a35e846379ff252594ace83da2a1a1cb0692717b931055d1f6603812f18ad5cd"
+sha1 = "ee09b857c90916edd92a20c463485a610b0a76fd"
+md5 = "756170ba1e06fa26c60d10114dc6a5ae"
+crc32 = "0ac1aa8f"
+revision = "Castlevania (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x00FD, type = "u8" }
