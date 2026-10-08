@@ -291,9 +291,21 @@ impl Machine {
         }
     }
 
-    fn set_controller(&mut self, port: usize, buttons: u8) {
-        if let Some(bus) = self.nes_bus_mut() {
-            bus.set_controller_buttons(port, buttons);
+    /// The NES takes the low byte; the SNES (ticket W23-01) the whole
+    /// `$4218`-layout word, latched by auto-joypad like the hardware.
+    fn set_controller(&mut self, port: usize, buttons: u16) {
+        match self {
+            Machine::Nes(_) => {
+                if let Some(bus) = self.nes_bus_mut() {
+                    #[allow(clippy::cast_possible_truncation)]
+                    bus.set_controller_buttons(port, buttons as u8);
+                }
+            }
+            Machine::Snes(c) => {
+                if let Some(p) = c.system_mut().bus.joypads.ports.get_mut(port) {
+                    *p = buttons;
+                }
+            }
         }
     }
 
@@ -1286,8 +1298,8 @@ impl EmuStepper {
     /// [`Self::latch_and_advance_frame`], never this alone (module doc's
     /// "one shared latch-then-advance path").
     fn latch_input(&mut self, frame: InputFrame) {
-        self.machine.set_controller(0, frame.ports[0] as u8);
-        self.machine.set_controller(1, frame.ports[1] as u8);
+        self.machine.set_controller(0, frame.ports[0]);
+        self.machine.set_controller(1, frame.ports[1]);
     }
 
     /// THE one shared latch-then-advance path (module doc, ticket W1-07):
@@ -1537,6 +1549,30 @@ mod tests {
 
     fn stepper() -> EmuStepper {
         EmuStepper::from_ines_bytes(&synthetic_nrom()).expect("valid synthetic NROM image")
+    }
+
+    /// Ticket W23-01: an SNES gets its controller — the word reaches the
+    /// joypad port, and once the game's auto-joypad read runs, `$4218`'s
+    /// latched word (what the game reads) carries it too.
+    #[test]
+    fn snes_controller_reaches_auto_joypad() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/snes/rf-scroller-s/build/rf-scroller-s.sfc");
+        let raw = std::fs::read(&path).expect("SNES fixture");
+        let mut st = EmuStepper::from_snes_bytes(&raw).expect("opens");
+        let y = 1u16 << rf_input::SnesButton::Y.bit();
+        let mut frame = InputFrame::empty();
+        frame.ports[0] = y;
+        let mut sink = NullSink;
+        for _ in 0..30 {
+            st.latch_and_advance_frame(frame, &mut sink);
+        }
+        let Machine::Snes(c) = &mut st.machine else {
+            panic!("an SNES machine");
+        };
+        let pads = &c.system_mut().bus.joypads;
+        assert_eq!(pads.ports[0], y, "the word reached the port");
+        assert_eq!(pads.latched[0], y, "auto-joypad latched it for $4218");
     }
 
     #[test]

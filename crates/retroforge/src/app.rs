@@ -905,6 +905,8 @@ pub struct RetroForgeApp {
     /// config at startup and written back the moment a remap changes —
     /// see `crate::bindings_store`.
     bindings: rf_input::Bindings,
+    /// Ticket W23-01: SNES port-1 bindings, all twelve buttons.
+    snes_bindings: crate::snes_input::SnesBindings,
     /// Where those bindings live, `None` when the platform gave us no
     /// config directory (a sandboxed or headless run): remapping still
     /// works for the session, it just cannot be saved, and the UI says so.
@@ -1545,6 +1547,10 @@ impl RetroForgeApp {
             fps_frames: 0,
             fps_window_start: std::time::Instant::now(),
             input_latch: rf_input::InputLatch::new(),
+            snes_bindings: config_root.as_deref().map_or_else(
+                crate::snes_input::SnesBindings::default,
+                crate::snes_input::load,
+            ),
             bindings,
             config_root,
             pad_router: rf_input::PadRouter::new(),
@@ -1776,6 +1782,16 @@ impl RetroForgeApp {
             let pads = self.pad_router.sample(&self.bindings.pads);
             for (port, bits) in frame.ports.iter_mut().enumerate() {
                 *bits |= pads.ports[port];
+            }
+            // Ticket W23-01: an SNES takes its own twelve-button word on
+            // port 1 — never the NES bits, whose layout would land on the
+            // SNES's A/X/L/R.
+            if self.console_label == "SNES" {
+                let latch = &self.input_latch;
+                frame.ports[0] = self
+                    .snes_bindings
+                    .sample(|k| latch.is_held(k), |b| self.pad_button_held(b));
+                frame.ports[1] = 0;
             }
             // Ticket W20-15: what the input display shows — exactly the
             // bits handed to the core, not a re-reading of the keyboard.
@@ -11254,6 +11270,12 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn compare_cut_for_test(&self) -> f32 {
         self.compare_cut
+    }
+
+    /// Ticket W23-01: the SNES's latched port-1 word (tests).
+    #[doc(hidden)]
+    pub fn snes_input_word_for_test(&self) -> u16 {
+        self.last_input_bits
     }
 
     /// Ticket W21-10: the open game's ROM hash (tests).
