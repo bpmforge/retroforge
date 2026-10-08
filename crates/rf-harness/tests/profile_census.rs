@@ -436,6 +436,11 @@ fn profile_census_child() {
         .and_then(|v| v.parse().ok())
         .map_or(FRAMES, |n: u32| n.min(4 * FRAMES));
     for f in 0..frames {
+        if f == recipe_len {
+            // The opening just put us somewhere new (a level, past a
+            // menu); time spent standing still before it is not "stuck".
+            stalled = 0;
+        }
         let pad = if f < recipe_len {
             recipe_at(&recipe, f)
         } else {

@@ -99,7 +99,7 @@ addr = 0x0106
 len = 2
 type = "bytes"
 label = "health"
-notes = "Fixed-point BCD; 0107 high nibble is filled tanks. Watched in play on this dump: 0-768, changed 7 times over 846 frames."
+notes = "Fixed-point BCD; 0107 high nibble is filled tanks. Watched in play on this dump: changed 7 times over 846 frames."
 source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"
 
 [[memory_map]]
@@ -155,5 +155,5 @@ addr = 0x687D
 len = 3
 type = "bytes"
 label = "timer"
-notes = "Game time, low byte first (WRAM). Watched in play on this dump: 0-8, changed 5 times over 846 frames."
+notes = "Game time, low byte first (WRAM). Watched in play on this dump: changed 5 times over 846 frames."
 source = "https://datacrystal.tcrf.net/wiki/Metroid/RAM_map"

@@ -76,7 +76,7 @@ addr = 0x07E3
 len = 3
 type = "bytes"
 label = "score"
-notes = "P1 score BCD, low byte first. Watched in play on this dump: 0-6, changed 3 times over 829 frames."
+notes = "P1 score BCD, low byte first. Watched in play on this dump: changed 3 times over 829 frames."
 source = "https://github.com/vermiceli/nes-super-c/blob/main/src/ram.asm"
 
 [[memory_map]]

@@ -59,7 +59,7 @@ addr = 0x0048
 len = 2
 type = "bytes"
 label = "hearts"
-notes = "BCD; 0048 holds low two digits, 0049 high two digits. Watched in play on this dump: 0-80, changed 1 times over 780 frames."
+notes = "BCD; 0048 holds low two digits, 0049 high two digits. Watched in play on this dump: changed 1 times over 780 frames."
 source = "https://github.com/FoxCunning/Castlevania2/blob/main/globals.inc"
 
 [[memory_map]]
@@ -123,5 +123,5 @@ addr = 0x0053
 len = 2
 type = "bytes"
 label = "player_x"
-notes = "Simon X position in room, 2 bytes (byte order not stated). Watched in play on this dump: 0-768, changed 753 times over 780 frames."
+notes = "Simon X position in room, 2 bytes (byte order not stated). Watched in play on this dump: changed 753 times over 780 frames."
 source = "https://datacrystal.tcrf.net/wiki/Castlevania_II:_Simon%27s_Quest/RAM_map"
