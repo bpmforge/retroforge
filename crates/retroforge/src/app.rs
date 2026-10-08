@@ -1280,6 +1280,8 @@ pub struct RetroForgeApp {
     normalized_rom: Option<Vec<u8>>,
     /// Path of the profile matched to the open ROM, if any.
     matched_profile: Option<std::path::PathBuf>,
+    /// Ticket W22-02: that profile's title (`[meta] title`).
+    matched_profile_title: Option<String>,
     /// Ticket W9-02: the in-GUI profile editor. `None` until the author
     /// creates or opens one — the workspace is useful without it (the
     /// external-editor loop W5-06 built), so the editor is a mode of the
@@ -1624,6 +1626,7 @@ impl RetroForgeApp {
             show_author: false,
             normalized_rom: None,
             matched_profile: None,
+            matched_profile_title: None,
             editor_draft: None,
             editor_form: crate::profile_editor::NewProfileForm::default(),
             editor_path: String::new(),
@@ -3423,6 +3426,8 @@ impl RetroForgeApp {
             _ => None,
         };
         self.hud_band = None;
+        // Ticket W22-02: the matched profile's own title, for the strip.
+        self.matched_profile_title = matched.as_ref().map(|(p, _)| p.meta.title.clone());
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -7147,6 +7152,8 @@ impl RetroForgeApp {
                 if self.core.is_some() {
                     self.mode_picker(ui);
                     ui.add_space(8.0);
+                    self.profile_strip(ui);
+                    ui.add_space(8.0);
                 }
                 ui.horizontal_wrapped(|ui| {
                     // The full window: the other two modes (Compatibility,
@@ -7624,6 +7631,75 @@ impl RetroForgeApp {
         if let Some(mode) = picked {
             self.set_game_mode(mode);
         }
+    }
+
+    /// Ticket W22-02: whether this game has a profile, in plain words —
+    /// what it unlocks when matched, what that means when not — with a
+    /// "What's a profile?" explainer.
+    fn profile_strip(&mut self, ui: &mut egui::Ui) {
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let (fill, ink, icon, headline, body) = match &self.matched_profile_title {
+            Some(title) => {
+                let mut s = self.current_game_settings.clone();
+                s.mode = crate::game_settings::Mode::GameAware;
+                let unlocks: Vec<&str> = crate::enhance_ui::feature_rows(&s, &self.game_facts())
+                    .into_iter()
+                    .filter(|r| !r.scope.starts_with("generic") && r.availability == crate::enhance_ui::Availability::Available)
+                    .map(|r| crate::enhance_panel::player_name(r.id))
+                    .collect();
+                let body = if unlocks.is_empty() {
+                    "It is known to RetroForge, but its profile does not unlock a feature yet.".to_owned()
+                } else {
+                    format!("In Game-Aware mode it unlocks: {}.", unlocks.join(", "))
+                };
+                (tokens.ok_soft, tokens.ok, egui_phosphor::regular::CHECK_CIRCLE, format!("Profile found: {title}"), body)
+            }
+            None => (
+                tokens.warn_soft,
+                tokens.warn,
+                egui_phosphor::regular::INFO,
+                "No profile matches this copy of the game".to_owned(),
+                "Game-Aware features need one. The features that work on any game are still available.".to_owned(),
+            ),
+        };
+        egui::Frame::new()
+            .fill(fill)
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_top(|ui| {
+                    ui.label(egui::RichText::new(icon).size(18.0).color(ink));
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(headline).strong().color(tokens.ink));
+                        ui.label(
+                            egui::RichText::new(body)
+                                .font(egui::FontId::proportional(
+                                    crate::theme::type_scale::CAPTION,
+                                ))
+                                .color(tokens.ink),
+                        );
+                        egui::CollapsingHeader::new("What's a profile?")
+                            .id_salt("whats-a-profile")
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "A profile is a small description of one game: where its \
+                                         camera, levels and loading screens live in memory. With \
+                                         it RetroForge can widen the picture, map the level or \
+                                         build it in 3D using the game's own data. Profiles match \
+                                         one exact copy (dump) of a game, so a different release \
+                                         or revision of the same title may not match.",
+                                    )
+                                    .font(egui::FontId::proportional(
+                                        crate::theme::type_scale::CAPTION,
+                                    ))
+                                    .color(tokens.muted),
+                                );
+                            });
+                    });
+                });
+            });
     }
 
     /// Ticket W22-01/W22-03: change and save the open game's mode — the
