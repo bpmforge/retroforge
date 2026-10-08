@@ -67,7 +67,7 @@ addr = 0x0036
 len = 3
 type = "bytes"
 label = "score"
-notes = "3-byte score. Watched in play on this dump: 0, changed 0 times over 776 frames."
+notes = "3-byte score. Watched in play on this dump: changed 0 times over 776 frames."
 source = "https://datacrystal.tcrf.net/wiki/Castlevania_III:_Dracula%27s_Curse/RAM_map"
 
 [[memory_map]]
@@ -91,7 +91,7 @@ addr = 0x007E
 len = 2
 type = "bytes"
 label = "timer"
-notes = "2-byte time counter. Watched in play on this dump: 0-1280, changed 12 times over 776 frames."
+notes = "2-byte time counter. Watched in play on this dump: changed 12 times over 776 frames."
 source = "https://datacrystal.tcrf.net/wiki/Castlevania_III:_Dracula%27s_Curse/RAM_map"
 
 [[memory_map]]

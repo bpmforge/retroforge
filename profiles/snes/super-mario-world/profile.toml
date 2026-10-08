@@ -139,7 +139,7 @@ addr = 0x7E0F31
 len = 3
 type = "bytes"
 label = "timer"
-notes = "Hundreds, tens, ones digits. Watched in play on this dump: 0-591875, changed 52 times over 2124 frames."
+notes = "Hundreds, tens, ones digits. Watched in play on this dump: changed 52 times over 2124 frames."
 source = "https://github.com/IsoFrieze/SMWDisX/blob/master/SMW_U.sym"
 
 [[memory_map]]
@@ -147,7 +147,7 @@ addr = 0x7E0F34
 len = 6
 type = "bytes"
 label = "score"
-notes = "6-byte score field. Watched in play on this dump: 0-2150, changed 57 times over 2124 frames."
+notes = "6-byte score field. Watched in play on this dump: changed 57 times over 2124 frames."
 source = "https://github.com/IsoFrieze/SMWDisX/blob/master/SMW_U.sym"
 
 [[memory_map]]
@@ -155,7 +155,7 @@ addr = 0x7E0F48
 len = 2
 type = "bytes"
 label = "stars"
-notes = "Bonus stars block (2 bytes). Watched in play on this dump: 0, changed 0 times over 2124 frames."
+notes = "Bonus stars block (2 bytes). Watched in play on this dump: changed 0 times over 2124 frames."
 source = "https://github.com/IsoFrieze/SMWDisX/blob/master/SMW_U.sym"
 
 [[memory_map]]
@@ -179,5 +179,5 @@ addr = 0x7E13BF
 len = 2
 type = "bytes"
 label = "level"
-notes = "Translevel number (2-byte field). Watched in play on this dump: 0-42, changed 1 times over 2124 frames."
+notes = "Translevel number (2-byte field). Watched in play on this dump: changed 1 times over 2124 frames."
 source = "https://github.com/IsoFrieze/SMWDisX/blob/master/SMW_U.sym"

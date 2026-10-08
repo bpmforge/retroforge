@@ -83,7 +83,7 @@ addr = 0x0042
 len = 2
 type = "bytes"
 label = "timer"
-notes = "2-byte stage timer; encoding not documented. Watched in play on this dump: 0-768, changed 71 times over 4662 frames."
+notes = "2-byte stage timer; encoding not documented. Watched in play on this dump: changed 71 times over 4662 frames."
 source = "https://datacrystal.tcrf.net/wiki/Castlevania_(NES,_Famicom_Disk_System)/RAM_map"
 
 [[memory_map]]
@@ -91,7 +91,7 @@ addr = 0x07FC
 len = 3
 type = "bytes"
 label = "score"
-notes = "3-byte score; 07FE also used for 1UP checks. Watched in play on this dump: 0, changed 0 times over 4662 frames."
+notes = "3-byte score; 07FE also used for 1UP checks. Watched in play on this dump: changed 0 times over 4662 frames."
 source = "https://datacrystal.tcrf.net/wiki/Castlevania_(NES,_Famicom_Disk_System)/RAM_map"
 
 [[memory_map]]
@@ -107,7 +107,7 @@ addr = 0x0040
 len = 2
 type = "bytes"
 label = "player_x"
-notes = "X position in level (2 bytes; DC calls it a collision copy). Watched in play on this dump: 0-1519, changed 2125 times over 4662 frames."
+notes = "X position in level (2 bytes; DC calls it a collision copy). Watched in play on this dump: changed 2125 times over 4662 frames."
 source = "https://tasvideos.org/GameResources/NES/Castlevania"
 
 [[memory_map]]

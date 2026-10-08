@@ -72,12 +72,14 @@ def watchlist(games_path, item_paths):
         print("\t".join(cols + [watch]))
 
 
-def verdict(label, seen, lo, hi, distinct, changes):
+def verdict(label, seen, lo, hi, distinct, changes, ty="u8"):
     """(keep, note) for one watched address."""
     if seen < 100:
         return True, "cited; not yet watched in play"
-    what = f"{lo}" if lo == hi else f"{lo}-{hi}"
-    note = f"watched in play on this dump: {what}, changed {changes} times over {seen} frames"
+    # A `bytes` field (BCD digits, a 3-byte score) has no single number
+    # worth printing; say only that it was seen to change.
+    what = "" if ty == "bytes" else (f"{lo}, " if lo == hi else f"{lo}-{hi}, ")
+    note = f"watched in play on this dump: {what}changed {changes} times over {seen} frames"
     if any(k in label for k in STEADY) and changes > 12:
         return False, f"changed {changes} times in play, too often for {label}"
     if label.startswith(("lives", "continues")) and hi > 0x99:
@@ -161,7 +163,7 @@ def apply(games_path, census_path, item_paths, write):
         for _, addr, ln, ty, label, notes, source in rows:
             if addr in have or label in labels:
                 continue
-            keep, seen_note = verdict(label, *stats.get(addr, (0, 0, 0, 0, 0)))
+            keep, seen_note = verdict(label, *stats.get(addr, (0, 0, 0, 0, 0)), ty)
             if not keep:
                 dropped.append((slug, f"{label} ${addr:0{width}X}: {seen_note}"))
                 continue

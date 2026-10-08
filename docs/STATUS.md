@@ -4392,3 +4392,7 @@ stories, 10 decisions).
   them watched in play on the dump; new profiles for Contra, Super C,
   Castlevania II/IV (verified cameras) and Zelda I/II, A Link to the Past,
   SMB2/3, Yoshi's Island, DKC, Kid Icarus and more (identity + items).
+- 2026-10-08 — **SMB3 camera.** Brad's route (right, up, A on the World 1
+  map) gets the census into 1-1; `$FD` matched 183/183 scrolling frames and
+  SMB3's cited items were watched in play. Gate: workspace **2574 passing /
+  0 failed**, docs-gate green.

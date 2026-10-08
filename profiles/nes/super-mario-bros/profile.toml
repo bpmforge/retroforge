@@ -141,7 +141,7 @@ addr = 0x07DD
 len = 6
 type = "bytes"
 label = "score"
-notes = "BCD, one digit per byte. Watched in play on this dump: 0, changed 0 times over 354 frames."
+notes = "BCD, one digit per byte. Watched in play on this dump: changed 0 times over 354 frames."
 source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map"
 
 [[memory_map]]

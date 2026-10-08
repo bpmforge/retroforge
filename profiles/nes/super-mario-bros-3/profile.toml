@@ -1,9 +1,11 @@
-# Super Mario Bros. 3 — made by RetroForge's profile census (W26-02).
+# Super Mario Bros. 3 — made by RetroForge's profile census (W25-02).
 #
-# This dump's identity comes from hashing it; its RAM addresses are
-# cited from community maps (each row's `source`) and, where the
-# census reached play, watched there (each row's notes say which).
-# No camera: the census did not find one for this game yet.
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 183 scrolling frames.
+# The census reached World 1-1 through the map (Brad's route: right,
+# up, A). Item rows below are cited; their notes say what play showed.
 
 [meta]
 profile_version = "0.1"
@@ -25,12 +27,16 @@ full_level = false
 hud_separation = false
 entity_overlay = false
 
+[camera]
+mode = "side_scroller"
+x = { addr = 0x00FD, type = "u8" }
+
 [[memory_map]]
 addr = 0x0736
 len = 1
 type = "u8"
 label = "lives"
-notes = "Mario lives. Cited; not yet watched in play."
+notes = "Mario lives. Watched in play on this dump: 2-4, changed 2 times over 264 frames."
 source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
 
 [[memory_map]]
@@ -38,7 +44,7 @@ addr = 0x0737
 len = 1
 type = "u8"
 label = "lives_p2"
-notes = "Luigi lives. Cited; not yet watched in play."
+notes = "Luigi lives. Watched in play on this dump: 4, changed 0 times over 264 frames."
 source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
 
 [[memory_map]]
@@ -46,7 +52,7 @@ addr = 0x0715
 len = 3
 type = "bytes"
 label = "score"
-notes = "Score divided by 10. Cited; not yet watched in play."
+notes = "Score divided by 10. Watched in play on this dump: changed 0 times over 264 frames."
 source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
 
 [[memory_map]]
@@ -54,7 +60,7 @@ addr = 0x7DA2
 len = 1
 type = "u8"
 label = "coins"
-notes = "Mario coins. Cited; not yet watched in play."
+notes = "Mario coins. Watched in play on this dump: 0, changed 0 times over 264 frames."
 source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
 
 [[memory_map]]
@@ -62,7 +68,7 @@ addr = 0x00ED
 len = 1
 type = "u8"
 label = "power_up"
-notes = "Form: 0 small,1 super,2 fire,3 raccoon,4 frog,5 tanooki,6 hammer. Cited; not yet watched in play."
+notes = "Form: 0 small,1 super,2 fire,3 raccoon,4 frog,5 tanooki,6 hammer. Watched in play on this dump: 0, changed 0 times over 264 frames."
 source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
 
 [[memory_map]]
@@ -70,7 +76,7 @@ addr = 0x0727
 len = 1
 type = "u8"
 label = "world"
-notes = "World number minus one. Cited; not yet watched in play."
+notes = "World number minus one. Watched in play on this dump: 0, changed 0 times over 264 frames."
 source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
 
 [[memory_map]]
@@ -78,7 +84,7 @@ addr = 0x05EE
 len = 3
 type = "bytes"
 label = "timer"
-notes = "Time remaining. Cited; not yet watched in play."
+notes = "Time remaining. Watched in play on this dump: changed 11 times over 264 frames."
 source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
 
 [[memory_map]]
@@ -86,7 +92,7 @@ addr = 0x0090
 len = 1
 type = "u8"
 label = "player_x"
-notes = "Low byte of level X; high part at 0075. Cited; not yet watched in play."
+notes = "Low byte of level X; high part at 0075. Watched in play on this dump: 0-255, changed 176 times over 264 frames."
 source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
 
 [[memory_map]]
@@ -94,7 +100,7 @@ addr = 0x00A2
 len = 1
 type = "u8"
 label = "player_y"
-notes = "Level Y. Cited; not yet watched in play."
+notes = "Level Y. Watched in play on this dump: 0-162, changed 82 times over 264 frames."
 source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
 
 [[memory_map]]
@@ -102,7 +108,7 @@ addr = 0x00AB
 len = 1
 type = "u8"
 label = "player_x_screen"
-notes = "On-screen X. Cited; not yet watched in play."
+notes = "On-screen X. Watched in play on this dump: 0-128, changed 11 times over 264 frames."
 source = "https://tasvideos.org/UserFiles/Info/637936906462581196"
 
 [[memory_map]]
@@ -110,5 +116,5 @@ addr = 0x7CFA
 len = 1
 type = "u8"
 label = "boss_health"
-notes = "cited; not yet watched in play"
+notes = "watched in play on this dump: 0, changed 0 times over 264 frames"
 source = "https://tasvideos.org/UserFiles/Info/637936906462581196"
