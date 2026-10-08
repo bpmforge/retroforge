@@ -9664,9 +9664,10 @@
    "test reproduces Brad's report and proves both routes"
   ],
   "points": 2,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-08. Root cause verified (probe, then a test red before the fix): leave_overlay_menu_paused cleared menu_paused_game, so after Esc > Enhancements > Game settings… (or any window the menu opens) no later menu close resumed the game. It now keeps the flag, so the next menu close by any route resumes. Space pauses/resumes in play (poll_app_hotkeys) when no menu, window or text field has the keyboard and Space is not bound to a game button; it clears the menu's ownership of the pause. Test: tests/resume_after_menu.rs. Gate: workspace 2560 passing.",
    "FILED 2026-10-08 from Brad: \"when i go to enhancement and pause to get that screen I cant unpause and get back to playing\". Reproduced: Esc > Enhancements > Game settings… leaves the game paused (W20-03) and clears menu_paused_game, so every later Esc closes the menu without resuming; Space, documented as pause/resume since W20-03/W20-07 (FRONTEND_UI §3.2), was never implemented in play."
   ]
  }
