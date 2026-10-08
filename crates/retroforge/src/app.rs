@@ -983,6 +983,10 @@ pub struct RetroForgeApp {
     finder: Option<crate::profile_builder::Finder>,
     finder_pending: Option<Option<crate::profile_builder::Change>>,
     builder_note: Option<String>,
+    /// Ticket W27-02: frames scrolled while looking for this game's
+    /// camera (`None` when not looking), and the camera once found.
+    camera_search: Option<u32>,
+    camera_found: Option<core_thread::FoundCamera>,
     /// Ticket W22-06: until when (`ctx.time()`) the one-time tip shows.
     enhance_tip_until: Option<f64>,
     /// Ticket W22-04: where the Enhancements compare line sits (0..=1).
@@ -1603,6 +1607,8 @@ impl RetroForgeApp {
             finder: None,
             finder_pending: None,
             builder_note: None,
+            camera_search: None,
+            camera_found: None,
             quick_rail_ids: Vec::new(),
             thumb_gameplay_taken: false,
             window_fitted: false,
@@ -3518,6 +3524,13 @@ impl RetroForgeApp {
         self.loading_sent = None;
         self.thumb_gameplay_taken = false;
         self.window_fitted = false;
+        // A new game: the profile builder and its finder were the last
+        // game's (they would otherwise stay open over this one).
+        self.builder_open = false;
+        self.builder_step = crate::profile_builder::Step::CameraX;
+        self.finder = None;
+        self.finder_pending = None;
+        self.builder_note = None;
         self.apply_profile_match();
         self.level_texture = None;
         self.level_camera = None;
@@ -3582,6 +3595,11 @@ impl RetroForgeApp {
                 self.current_rom_path = Some(path.to_path_buf());
                 // Ticket W20-13: a fresh core has no ring; arm it if on.
                 self.sync_rewind();
+                // Ticket W27-02: the profile match above ran before this
+                // core existed, so its "look for the camera" went nowhere.
+                if self.camera_search.is_some() {
+                    self.send_command(CoreCommand::FindCamera(true));
+                }
                 // A new ROM is a new debug session too — the previous
                 // ROM's OAM/events would otherwise linger onscreen against
                 // a completely different game (same reasoning the
@@ -3758,6 +3776,11 @@ impl RetroForgeApp {
                 // function's own doc already gives for `latest_frame`.
                 CoreEvent::CanvasSnapshot(canvas) => latest_canvas = Some(canvas),
                 // Ticket W24-03: a RAM look the profile finder asked for.
+                // Ticket W27-02: the camera finder is sure.
+                CoreEvent::CameraFound(found) => {
+                    self.camera_search = None;
+                    self.camera_found = Some(found);
+                }
                 CoreEvent::WorkRam(ram) => {
                     if let Some(pending) = self.finder_pending.take() {
                         match (pending, self.finder.as_mut()) {
@@ -3859,6 +3882,7 @@ impl RetroForgeApp {
             _ => None,
         };
         if let Some(msg) = latest_frame {
+            self.camera_search = msg.camera_search;
             // Ticket W2-14: a stepped frame has now been consumed.
             self.awaiting_stepped_frame = false;
             self.capture_hud_band(&msg.rgba, msg.width, msg.height, &latest_bundle_events);
@@ -7991,6 +8015,17 @@ impl RetroForgeApp {
                                 ))
                                 .color(tokens.ink),
                         );
+                        // Ticket W27-02: the finder at work.
+                        if let Some(n) = self.camera_search {
+                            let pct = (n.saturating_mul(100) / rf_enhance::camera_finder::MIN_MOVING).min(99);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Looking for this game's camera as you play ({pct}%). Keep playing where the screen scrolls."
+                                ))
+                                .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
+                                .color(tokens.muted),
+                            );
+                        }
                         // Ticket W24-02: make one, right here.
                         if self.matched_profile_title.is_none()
                             && ui
@@ -9882,6 +9917,15 @@ impl RetroForgeApp {
             _ => None,
         };
         self.hud_band = None;
+        // Ticket W27-02: a game without a profile camera is looked at
+        // while it plays; one with a camera is not.
+        let has_camera = matched
+            .as_ref()
+            .is_some_and(|(p, _)| p.camera.as_ref().is_some_and(|c| c.x.is_some()));
+        let looking = self.current_game_hashes.is_some() && !has_camera;
+        self.camera_search = looking.then_some(0);
+        self.camera_found = None;
+        self.send_command(CoreCommand::FindCamera(looking));
         // Ticket W22-02: the matched profile's own title, for the strip.
         self.matched_profile_title = matched.as_ref().map(|(p, _)| p.meta.title.clone());
         self.matched_profile = matched.map(|(_, path)| path);
@@ -9940,6 +9984,118 @@ impl RetroForgeApp {
             }
             Err(e) => self.status = format!("Could not make a profile: {e}"),
         }
+    }
+
+    /// Ticket W27-02: save the camera the finder found into this game's
+    /// profile — made first if there is none — and match it again.
+    fn use_found_camera(&mut self) {
+        let Some(found) = self.camera_found.take() else {
+            return;
+        };
+        // Write the camera before matching again: matching a new profile
+        // that has no camera yet would start the search over.
+        let path = if let Some(path) = self.matched_profile.clone() {
+            path
+        } else {
+            let (Some(root), Some(hashes)) =
+                (self.config_root.clone(), self.current_game_hashes.clone())
+            else {
+                self.status = "Can't save the camera: no config folder or no game.".to_owned();
+                return;
+            };
+            let title = self
+                .current_rom_path
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .map_or_else(|| "Game".to_owned(), |s| s.to_string_lossy().into_owned());
+            let user = crate::profile_builder::user_profiles_root(&root);
+            match crate::profile_builder::create(
+                &user,
+                &title,
+                self.console_label == "SNES",
+                &hashes,
+            ) {
+                Ok(path) => path,
+                Err(e) => {
+                    self.status = format!("Could not make a profile: {e}");
+                    return;
+                }
+            }
+        };
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        match crate::profile_builder::apply_camera(&text, (found.x, found.x_type), found.y) {
+            Ok(new_text) => {
+                if let Err(e) = std::fs::write(&path, new_text) {
+                    self.status = format!("Could not save the camera: {e}");
+                    return;
+                }
+                self.apply_profile_match();
+                self.status = "Camera saved to this game's profile".to_owned();
+                let ctx = self.ctx.clone();
+                self.toasts.push(
+                    crate::toast::ToastKind::Success,
+                    "Camera saved. Widescreen and level maps can use it now.".to_owned(),
+                    &ctx,
+                );
+            }
+            Err(e) => self.status = format!("Could not save the camera: {e}"),
+        }
+    }
+
+    /// Ticket W27-02: the offer, once the finder is sure — a small card
+    /// beside the game that does not pause it.
+    fn camera_found_card(&mut self, ctx: &egui::Context) {
+        let Some(found) = self.camera_found else {
+            return;
+        };
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let snes = self.console_label == "SNES";
+        let mut use_it = false;
+        let mut not_now = false;
+        egui::Area::new(egui::Id::new("camera_found_card"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -48.0))
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(tokens.surface)
+                    .stroke(egui::Stroke::new(1.0, tokens.ok))
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .inner_margin(egui::Margin::same(14))
+                    .show(ui, |ui| {
+                        ui.set_max_width(320.0);
+                        ui.label(
+                            egui::RichText::new("Found this game's camera")
+                                .strong()
+                                .color(tokens.ink),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "RetroForge watched the screen scroll and found where the game keeps its camera ({}, matched {:.0}% of {} moving frames). Save it to unlock widescreen and level maps.",
+                                crate::profile_builder::show_address(snes, found.x),
+                                found.ratio * 100.0,
+                                found.moving
+                            ))
+                            .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
+                            .color(tokens.ink),
+                        );
+                        ui.horizontal(|ui| {
+                            use_it = ui
+                                .add(egui::Button::new(egui::RichText::new("Use it").strong()))
+                                .clicked();
+                            not_now = ui.button("Not now").clicked();
+                        });
+                    });
+            });
+        if use_it {
+            self.use_found_camera();
+        } else if not_now {
+            self.camera_found = None;
+        }
+    }
+
+    /// Ticket W27-02: frames scrolled so far while looking (tests).
+    #[doc(hidden)]
+    pub fn camera_search_for_test(&self) -> (Option<u32>, bool) {
+        (self.camera_search, self.camera_found.is_some())
     }
 
     /// Ticket W24-03: ask the core for a look at the work RAM.
@@ -11001,6 +11157,7 @@ impl RetroForgeApp {
             cpu_regs: Box::new(rf_core_api::CpuRegs::None),
             palette_ram: Box::new([0u8; 32]),
             wram: Box::new([0u8; 0x0800]),
+            camera_search: None,
             prg_ram: Box::new([0u8; 0x2000]),
             sprite_height_px: 8,
             mode7: Some(Box::new(frame)),
@@ -13915,6 +14072,7 @@ impl eframe::App for RetroForgeApp {
         self.overlay_menu(&ctx);
         self.slot_undo_bar(&ctx);
         self.profile_builder_panel(&ctx);
+        self.camera_found_card(&ctx);
         self.enhance_tip(&ctx);
         self.states_modal(&ctx);
         // Ticket W20-10: drawn whenever a Save asked for it — from the

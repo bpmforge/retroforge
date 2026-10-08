@@ -355,6 +355,9 @@ pub struct FrameMsg {
     /// `rf_debugger::memory_view`'s memory-hex panel. `Box`ed for the same
     /// `clippy::large_enum_variant` reason `oam` already is.
     pub wram: Box<[u8; 0x0800]>,
+    /// Ticket W27-02: frames the screen has moved while the camera finder
+    /// looks (for "looking..." progress); `None` when it is not looking.
+    pub camera_search: Option<u32>,
     /// Ticket W4-06b: the same frame's cartridge PRG-RAM window
     /// (`EmuStepper::prg_ram`, side-effect-free), the memory viewer's
     /// second live range — see `EmuStepper::prg_ram`'s own doc for why one
@@ -394,6 +397,41 @@ pub struct FrameMsg {
 /// exists to close.
 pub const MAX_PENDING_FRAMES: usize = 2;
 
+/// Ticket W27-02: the SNES work RAM the camera finder searches,
+/// `$7E0000-$7E1FFF` — the low 8 KiB every bank mirrors, where games keep
+/// their per-frame state (fullsnes "Memory Map").
+const CAMERA_SEARCH_SNES: usize = 0x2000;
+
+/// Ticket W27-02: the NES finder searches the 2 KiB of work RAM and then
+/// the 8 KiB cartridge RAM window (`$6000-$7FFF`), where many cartridge
+/// games (and RF-Scroller) keep their variables.
+const CAMERA_SEARCH_NES: usize = 0x0800 + 0x2000;
+
+/// Ticket W27-02: one frame's scroll low bytes, `(x, y)` per layer.
+type LayerScroll = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// Ticket W27-02: a NES search offset as a bus address.
+#[allow(clippy::cast_possible_truncation)]
+const fn nes_search_address(offset: usize) -> u32 {
+    if offset < 0x0800 {
+        offset as u32
+    } else {
+        0x6000 + (offset - 0x0800) as u32
+    }
+}
+
+/// Ticket W27-02: a camera the finder is sure of, in profile terms.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FoundCamera {
+    /// Bus address (`$7Exxxx` on an SNES).
+    pub x: u32,
+    pub x_type: &'static str,
+    pub y: Option<(u32, &'static str)>,
+    /// Share of scrolling frames the x byte matched, and how many.
+    pub ratio: f32,
+    pub moving: u32,
+}
+
 /// What the core thread reports back to the UI thread.
 pub enum CoreEvent {
     /// A new frame is ready to paint. Boxed (ticket W16-14): `FrameMsg`
@@ -421,6 +459,8 @@ pub enum CoreEvent {
     /// Ticket W24-03: the reply to `CoreCommand::SnapshotRam` — the work
     /// RAM (`EmuStepper::work_ram`) for the profile builder's finder.
     WorkRam(Vec<u8>),
+    /// Ticket W27-02: the camera `CoreCommand::FindCamera` found.
+    CameraFound(FoundCamera),
     /// Ticket W11-03 (FR-ENH-004): what the widescreen policy decided,
     /// per background, and WHY when the answer was no.
     ///
@@ -561,6 +601,10 @@ pub enum CoreCommand {
     /// [`CoreEvent::Frame`], so the first frame carrying layers is the
     /// next one the core produces anyway (≤16.6 ms later at 60 Hz).
     SetLayerExtraction(bool),
+    /// Ticket W27-02: look for this game's camera while it plays (a game
+    /// with no profile camera). Observer only; replies once with
+    /// `CoreEvent::CameraFound`. `false` stops looking.
+    FindCamera(bool),
     /// Ticket W13-02b: capture the SNES debug memories on each frame.
     ///
     /// Off by default and driven by whether a SNES-capable debug panel is
@@ -1048,6 +1092,8 @@ fn core_thread_main(
     // frame. Off until a panel asks — 128 KiB per frame is not a cost to
     // pay while nobody is looking.
     let mut snes_debug_capture = false;
+    // Ticket W27-02: looking for this game's camera, when asked.
+    let mut camera_finder: Option<rf_enhance::camera_finder::CameraFinder> = None;
     let mut last_decisions: Option<[Option<&'static str>; 4]> = None;
     // Ticket W4-10a: `None` is the shipped, untraced state. The run loop
     // below tests this once per frame and takes the ordinary path — the
@@ -1194,6 +1240,19 @@ fn core_thread_main(
                     {
                         return LoopControl::Stop; // UI thread hung up.
                     }
+                }
+                CoreCommand::FindCamera(on) => {
+                    camera_finder = on.then(|| {
+                        let snes = stepper.bg_layer_views().is_some();
+                        rf_enhance::camera_finder::CameraFinder::new(
+                            if snes {
+                                CAMERA_SEARCH_SNES
+                            } else {
+                                CAMERA_SEARCH_NES
+                            },
+                            if snes { 2 } else { 1 },
+                        )
+                    });
                 }
                 CoreCommand::SetLayerExtraction(enabled) => {
                     layers_enabled = enabled;
@@ -1515,6 +1574,80 @@ fn core_thread_main(
             // materialized bundle, so this cannot perturb core state
             // (Law 6).
             let bundle = bundle_builder.take(stepper.frame_count());
+            // Ticket W27-02: the camera finder, an observer of this frame's
+            // scroll and work RAM (rf_enhance::camera_finder). Reads only.
+            let mut camera_done = None;
+            if let Some(finder) = camera_finder.as_mut() {
+                let pad = input.load().ports[0];
+                let (scroll, start): (LayerScroll, bool) = match stepper.bg_layer_views() {
+                    // SNES: BG1 then BG2 (the finder prefers the first).
+                    Some(bgs) => (
+                        (0..2)
+                            .map(|i| {
+                                (
+                                    vec![(bgs[i].hofs & 0xFF) as u8],
+                                    vec![(bgs[i].vofs & 0xFF) as u8],
+                                )
+                            })
+                            .collect(),
+                        pad & (1 << rf_input::SnesButton::Start.bit()) != 0,
+                    ),
+                    // NES: every $2005/$2006 scroll write this frame.
+                    None => {
+                        let (mut xs, mut ys) = (Vec::new(), Vec::new());
+                        for e in &bundle.events {
+                            if let rf_core_api::CoreEvent::ScrollWrite { x, y, .. } = e {
+                                xs.push((x & 0xFF) as u8);
+                                ys.push((y & 0xFF) as u8);
+                            }
+                        }
+                        (
+                            vec![(xs, ys)],
+                            pad & (1 << rf_input::NesButton::Start.bit()) != 0,
+                        )
+                    }
+                };
+                let nes_ram: Vec<u8>;
+                let ram: &[u8] = match stepper.snes_work_ram_head(CAMERA_SEARCH_SNES) {
+                    Some(r) => r,
+                    None => {
+                        nes_ram = [&stepper.wram_snapshot()[..], &stepper.prg_ram()[..]].concat();
+                        &nes_ram
+                    }
+                };
+                let layers: Vec<(&[u8], &[u8])> = scroll
+                    .iter()
+                    .map(|(x, y)| (x.as_slice(), y.as_slice()))
+                    .collect();
+                finder.observe(&layers, ram, start);
+                if let Some(found) = finder.verdict() {
+                    let snes = stepper.bg_layer_views().is_some();
+                    #[allow(clippy::cast_possible_truncation)]
+                    let addr = |offset: usize| {
+                        if snes {
+                            0x7E_0000 + offset as u32
+                        } else {
+                            nes_search_address(offset)
+                        }
+                    };
+                    camera_done = Some(FoundCamera {
+                        x: addr(found.x.offset),
+                        x_type: found.x.width.as_str(),
+                        y: found.y.map(|y| (addr(y.offset), y.width.as_str())),
+                        ratio: found.x.ratio,
+                        moving: found.x.moving,
+                    });
+                }
+            }
+            let camera_search = camera_finder
+                .as_ref()
+                .map(rf_enhance::camera_finder::CameraFinder::moving);
+            if let Some(found) = camera_done {
+                camera_finder = None;
+                if frame_tx.send(CoreEvent::CameraFound(found)).is_err() {
+                    return LoopControl::Stop; // UI thread hung up.
+                }
+            }
             // Ticket W4-10a: the non-CPU chips' trace entries come from
             // the `CoreEvent` FIFO W4-00 already emits, NOT from new hooks
             // inside `rf-nes` — that crate is outside this ticket's write
@@ -1662,6 +1795,7 @@ fn core_thread_main(
                 cpu_regs: Box::new(stepper.cpu_regs()),
                 palette_ram: Box::new(*stepper.palette()),
                 wram: Box::new(stepper.wram_snapshot()),
+                camera_search,
                 prg_ram: Box::new(*stepper.prg_ram()),
                 sprite_height_px: stepper.sprite_height_px(),
                 mode7: mode7_event.map(Box::new),
@@ -1817,6 +1951,7 @@ mod tests {
             cpu_regs: Box::new(rf_core_api::CpuRegs::None),
             palette_ram: Box::new([0u8; 32]),
             wram: Box::new([0u8; 0x0800]),
+            camera_search: None,
             prg_ram: Box::new([0u8; 0x2000]),
             sprite_height_px: 8,
             mode7: None,
@@ -2013,6 +2148,7 @@ mod tests {
                 panic!("expected a crash report, got a canvas snapshot")
             }
             CoreEvent::WorkRam(_) => panic!("expected a crash report, got a RAM snapshot"),
+            CoreEvent::CameraFound(_) => panic!("expected a crash report, got a camera"),
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a crash report, got widescreen decisions")
             }
@@ -2304,6 +2440,7 @@ mod tests {
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
             CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
+            CoreEvent::CameraFound(_) => panic!("expected a frame, got a camera"),
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
@@ -2346,6 +2483,7 @@ mod tests {
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
             CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
+            CoreEvent::CameraFound(_) => panic!("expected a frame, got a camera"),
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
@@ -2417,6 +2555,7 @@ mod tests {
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
             CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
+            CoreEvent::CameraFound(_) => panic!("expected a frame, got a camera"),
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
@@ -2462,6 +2601,7 @@ mod tests {
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
             CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
+            CoreEvent::CameraFound(_) => panic!("expected a frame, got a camera"),
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
@@ -2501,6 +2641,7 @@ mod tests {
             CoreEvent::Crashed(r) => panic!("expected a frame, got a crash: {}", r.message),
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
             CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
+            CoreEvent::CameraFound(_) => panic!("expected a frame, got a camera"),
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }

@@ -147,6 +147,31 @@ impl Step {
 /// # Errors
 /// Returns why the text could not be parsed or the result would not load.
 pub fn apply_step(text: &str, step: Step, addr: u32) -> Result<String, String> {
+    // The finder searches 16-bit words, so a camera it finds is one.
+    apply_step_typed(text, step, addr, "u16")
+}
+
+/// Ticket W27-02: write the camera the in-play finder found, keeping the
+/// width it found — most NES cameras are one byte (`$FD`), and reading
+/// one as a word would take the next byte as its high half.
+///
+/// # Errors
+/// As [`apply_step`].
+pub fn apply_camera(text: &str, x: (u32, &str), y: Option<(u32, &str)>) -> Result<String, String> {
+    let text = apply_step_typed(text, Step::CameraX, x.0, x.1)?;
+    match y {
+        Some((addr, ty)) => apply_step_typed(&text, Step::CameraY, addr, ty),
+        None => Ok(text),
+    }
+}
+
+/// [`apply_step`], with the camera axis's type given.
+fn apply_step_typed(
+    text: &str,
+    step: Step,
+    addr: u32,
+    camera_type: &str,
+) -> Result<String, String> {
     let mut doc: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
     let snes = doc
         .get("meta")
@@ -156,7 +181,7 @@ pub fn apply_step(text: &str, step: Step, addr: u32) -> Result<String, String> {
     let axis = |addr: u32| {
         let mut t = toml::Table::new();
         t.insert("addr".into(), toml::Value::Integer(i64::from(addr)));
-        t.insert("type".into(), toml::Value::String("u16".into()));
+        t.insert("type".into(), toml::Value::String(camera_type.into()));
         toml::Value::Table(t)
     };
     match step {
@@ -395,5 +420,20 @@ mod tests {
         assert!(crate::level_view::profile_chips(&p).contains(&"Widescreen"));
         assert_eq!(Step::CameraX.next(), Step::CameraY);
         assert_eq!(Step::Lives.next(), Step::Lives);
+    }
+
+    /// Ticket W27-02: the found camera keeps its width.
+    #[test]
+    fn a_found_camera_keeps_its_width() {
+        let text = new_profile_text("Test Game", false, &hashes());
+        let text = apply_camera(&text, (0xFD, "u8"), Some((0xFC, "u8"))).unwrap();
+        let p = rf_profiles::load_str(&text).unwrap().profile;
+        let cam = p.camera.clone().expect("camera");
+        assert_eq!(
+            (cam.x.as_ref().unwrap().addr, cam.mode.as_str()),
+            (0xFD, "side_scroller")
+        );
+        assert!(text.contains("type = \"u8\""), "{text}");
+        assert_eq!(cam.y.unwrap().addr, 0xFC);
     }
 }

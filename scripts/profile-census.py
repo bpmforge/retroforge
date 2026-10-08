@@ -142,11 +142,19 @@ def main():
             skipped.append((slug, cols[1] if len(cols) > 1 else "no result"))
             continue
         hashes = cols[2:6]
-        x, why = pick(*parse_axis(cols[6]), MIN_MOVING, MIN_DISTINCT)
+        # Layer 1 first (x/y); an SNES game may keep its playfield on
+        # layer 2 (x2/y2), tried only when layer 1 finds nothing.
+        cells = {c.split("=", 1)[0]: c for c in cols[6:] if "=" in c}
+        x, why = pick(*parse_axis(cells["x"]), MIN_MOVING, MIN_DISTINCT)
+        ycell = cells.get("y")
+        if not x and "x2" in cells:
+            x2, _ = pick(*parse_axis(cells["x2"]), MIN_MOVING, MIN_DISTINCT)
+            if x2:
+                x, ycell = x2, cells.get("y2")
         if not x:
             skipped.append((slug, why))
             continue
-        y, _ = pick(*parse_axis(cols[7]), MIN_MOVING_Y, MIN_DISTINCT_Y)
+        y, _ = pick(*parse_axis(ycell), MIN_MOVING_Y, MIN_DISTINCT_Y) if ycell else (None, "")
         if y and (
             y[0] == x[0]
             or (x[1] == "u16" and y[0] == x[0] + 1)
