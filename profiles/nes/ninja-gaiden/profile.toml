@@ -1,0 +1,31 @@
+# Ninja Gaiden — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 412 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Ninja Gaiden"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "6799437d4122b81c86ae35cefe5b6ae6e10e6f9a9c7b3140dd569f717ba32b3d"
+sha1 = "15f245161179ab1959b7dc20e82add024d23aa3d"
+md5 = "07c1b92ae9b78f209075a8cc6d3eebf0"
+crc32 = "7c4a72d8"
+revision = "Ninja Gaiden (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x0051, type = "u16" }

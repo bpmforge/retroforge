@@ -1,0 +1,31 @@
+# DuckTales — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 2298 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "DuckTales"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "8ba8baed01a9fbaf1e9ff29e0c9825db1963ac2aff211d6f1f3bcfd3839e2013"
+sha1 = "6e700e8f72f767918b096f6a5f17f8cd1e2d0866"
+md5 = "b480855fff883b20ba403a2009a7f13c"
+crc32 = "efb09075"
+revision = "DuckTales (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x00F2, type = "u16" }

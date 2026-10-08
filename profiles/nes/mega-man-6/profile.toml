@@ -1,0 +1,31 @@
+# Mega Man 6 — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 1742 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Mega Man 6"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "2037babe50fed7a13b6f6559914cb81497245c9477592e6f8da183df09a3609a"
+sha1 = "26d33987cff21c651fe3d638f4a739c33a18c240"
+md5 = "00f8cbeba7db567d1083053b30a93ada"
+crc32 = "988798a8"
+revision = "Mega Man 6 (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x0056, type = "u16" }

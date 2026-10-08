@@ -1,0 +1,31 @@
+# Castlevania III - Dracula's Curse — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 772 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Castlevania III - Dracula's Curse"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "6e8d289635ac39479ff1d36733aa3f8b9650593ab972cedb8e2cdbfc03aaa739"
+sha1 = "23c4dafcc17fa75e8d682931702277659cd59735"
+md5 = "bfc4d9791d9fe9c181dad794d66def4f"
+crc32 = "ed2465be"
+revision = "Castlevania III - Dracula's Curse (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x0056, type = "u16" }

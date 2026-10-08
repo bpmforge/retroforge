@@ -1,0 +1,31 @@
+# Batman - The Video Game — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 1997 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Batman - The Video Game"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "f28821df0114eb6cff1d7b4eadcee87713591709da1dd8b3525cf250156111f1"
+sha1 = "a6c56ac787ff11a67921867ffc9f79a57a382657"
+md5 = "341f6fd28fcdc7e246ded2750dd1c1e9"
+crc32 = "13c6617e"
+revision = "Batman - The Video Game (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x00DB, type = "u8" }

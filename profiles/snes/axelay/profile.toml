@@ -1,0 +1,32 @@
+# Axelay — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 98% of 1752 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Axelay"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "2431f8dc067ba27c6c3a846929f3deac6a45aa53a9a9ac20ede8ec5ca6854ea2"
+sha1 = "5ef7d869547a47cfb73402151330140a83ffed45"
+md5 = "699bbdffab13c41fa8d4a9b3c25d60e7"
+crc32 = "f812b533"
+revision = "Axelay (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+widescreen = "decoded"
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x7E1E20, type = "u8" }

@@ -1,0 +1,32 @@
+# Sparkster — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 1887 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Sparkster"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "eaa06470734ea57eff9b888137aa468fcb7bb149a0870a85e68c9db123de4670"
+sha1 = "0ac5326401903212c6565a7a982f60a56017c1ef"
+md5 = "e00ef4c1b9e17d5fa2d8367402d28a08"
+crc32 = "40d11c94"
+revision = "Sparkster (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+widescreen = "decoded"
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x7E1504, type = "u8" }

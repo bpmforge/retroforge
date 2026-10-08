@@ -1,0 +1,31 @@
+# Blaster Master — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 2123 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Blaster Master"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "7a26c62a9b1605cbedf7cd5b2672aa0fc15b688b227a6cb57dbf74aa71a05f1c"
+sha1 = "98845d5716525e68ef7417e6fb55be30a4c7130d"
+md5 = "12b0dbc4f2b22a50d0bb53c4929217f0"
+crc32 = "3f0fd764"
+revision = "Blaster Master (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x00FD, type = "u8" }

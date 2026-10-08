@@ -1,0 +1,32 @@
+# Super Ghouls 'N Ghosts — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 75% of 1030 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Super Ghouls 'N Ghosts"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "7468c271d7240cf4e0d08c16e9969a1b1b1caf5adc0e5adc568d93c92651a057"
+sha1 = "f12280b13eea88ca03d700b75cf3c13a0e13f3bc"
+md5 = "19b2d7a555ecef4c453a819e67e61574"
+crc32 = "6aaba901"
+revision = "Super Ghouls 'N Ghosts (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+widescreen = "decoded"
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x7E19BD, type = "u16" }

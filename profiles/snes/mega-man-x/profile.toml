@@ -1,0 +1,32 @@
+# Mega Man X — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 97% of 1917 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Mega Man X"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "3e1209f473bff8cd4bcbf71d071e7f8df17a2d564e9a5c4c427ee8198cebb615"
+sha1 = "449a00631208fbcc8d58209e66d0d488674b7fb1"
+md5 = "a10071fa78554b57538d0b459e00d224"
+crc32 = "1033eba4"
+revision = "Mega Man X (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+widescreen = "decoded"
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x7E00B4, type = "u8" }

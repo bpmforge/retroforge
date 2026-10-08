@@ -1,0 +1,32 @@
+# Gradius III — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 1083 scrolling frames.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Gradius III"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "93da752a0c76167d0907efa832367e5d14aab8e835b864f345c386071a9af718"
+sha1 = "7e62203a4198e9404eb7b076802c09786e5a63f4"
+md5 = "ea30c4f341f6b7a6e290699460ba6c51"
+crc32 = "cd973979"
+revision = "Gradius III (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+widescreen = "decoded"
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x7E1282, type = "u16" }

@@ -1,0 +1,33 @@
+# Earthworm Jim 2 — made by RetroForge's profile census (W25-02).
+#
+# The camera was found by playing this exact dump headlessly
+# (crates/rf-harness/tests/profile_census.rs): every work-RAM byte was
+# scored by how often it held the low byte of the frame's scroll
+# register while the screen moved. x matched 100% of 759 scrolling frames; y 100% of 1295.
+# Only the camera is claimed; nothing else here was guessed.
+
+[meta]
+profile_version = "0.1"
+title = "Earthworm Jim 2"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "10eadaab168707829418702386e1bcedd2619d9bbefc37cf31c4118313bcf6de"
+sha1 = "e4446c9f9c541a0d698e00ecbbb553df165a34f6"
+md5 = "c3ff5fd4e3f46653fec94ba60d70281d"
+crc32 = "393de197"
+revision = "Earthworm Jim 2 (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+widescreen = "decoded"
+
+[camera]
+mode = "side_scroller"
+x = { addr = 0x7E0632, type = "u16" }
+y = { addr = 0x7E0634, type = "u16" }
