@@ -9687,9 +9687,10 @@
    "tests: an app test presses Y on the keyboard and reads it back from the SNES's latched pad word"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-08. Machine::set_controller now takes the u16 word: NES gets the low byte as before, SNES writes bus.joypads.ports[port] (rf-snes's existing public field), which its auto-joypad window latches for $4218 like the hardware — no rf-snes code changed. New crate::snes_input: SnesBindings (keys and pad buttons to SnesButton, port 1), defaults as Brad approved (arrows, Z=B, X=A, A=Y, S=X, Q=L, W=R, Enter=Start, Right Shift=Select; pad South B, East A, West Y, North X, shoulders L/R, Start/Select, left stick as D-pad), persisted as snes-bindings.txt (RFSNESBIND 1, forgiving parse). poll_input replaces port 1 with the SNES word when an SNES is running (the NES bits would land on A/X/L/R). Tests: snes_input defaults/sample/rebind round-trip; stepper snes_controller_reaches_auto_joypad (latched[0] carries Y); tests/snes_controls.rs (keyboard A gives the SNES Y). Known follow-up: the W20-15 input display still names NES buttons, fixed with the Controls screen (W23-02). Gate: workspace 2565 passing.",
    "FILED 2026-10-08 from Brad: \"what about settings for controller vs keyboard. Keyboard should have defaults set and I can navigate\". Audit: the SNES receives NO controller input in live play (Machine::set_controller is NES-only; rf-snes run_frame ignores input), the live key/pad maps know only the 8 NES buttons, the keyboard defaults are shown nowhere a player looks, and menu hints are pad-only."
   ]
  },
@@ -9711,7 +9712,7 @@
    "tests drive a rebind for each console"
   ],
   "points": 5,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-08 from Brad: \"what about settings for controller vs keyboard. Keyboard should have defaults set and I can navigate\". Audit: the SNES receives NO controller input in live play (Machine::set_controller is NES-only; rf-snes run_frame ignores input), the live key/pad maps know only the 8 NES buttons, the keyboard defaults are shown nowhere a player looks, and menu hints are pad-only."
