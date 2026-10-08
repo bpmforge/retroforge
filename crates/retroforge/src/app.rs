@@ -3503,67 +3503,10 @@ impl RetroForgeApp {
                 .strip_prefix(b"NES\x1a")
                 .map_or_else(|| bytes.clone(), |_| bytes[16..].to_vec()),
         );
-        let matched = self.current_game_hashes.as_ref().and_then(|hashes| {
-            crate::level_view::find_matching_profile(&Self::profiles_root(), hashes)
-        });
-        // Ticket W20-17: the profile's declared loading wait loops.
-        self.loading_waits = matched
-            .as_ref()
-            .and_then(|(profile, _)| profile.loading.as_ref())
-            .map(|l| l.wait_loops.clone())
-            .unwrap_or_default();
         self.loading_sent = None;
         self.thumb_gameplay_taken = false;
         self.window_fitted = false;
-        // Ticket W20-17: the fog plane comes from the matched profile
-        // itself, not from `level_session` (which exists only for a
-        // profile with a decodable level map) — until W20-17 the
-        // `[atmosphere]` pin below was applied only when there was one.
-        self.atmosphere_pin = matched
-            .as_ref()
-            .and_then(|(profile, _)| rf_enhance::atmosphere::AtmospherePin::from_profile(profile));
-        self.fog_budget = rf_renderer::fog::BudgetGate::new();
-        self.fog_failed = false;
-        self.fog_started = None;
-        self.fog_scroll = None;
-        self.fog_drift = (0.0, 0.0);
-        // Ticket W20-17: a malformed `[camera.hud]` is refused, and said
-        // so, rather than silently pinning nothing (`hud::from_profile`).
-        let declared = matched
-            .as_ref()
-            .and_then(|(profile, _)| profile.camera.as_ref()?.hud.as_ref())
-            .map(rf_enhance::hud::from_profile);
-        self.hud_error = match &declared {
-            Some(Err(e)) => Some(e.to_string()),
-            _ => None,
-        };
-        self.hud_separator = match declared {
-            Some(Ok(region)) => Some(rf_enhance::hud::HudSeparator::new(Some(region))),
-            _ => None,
-        };
-        self.hud_band = None;
-        // Ticket W22-02: the matched profile's own title, for the strip.
-        self.matched_profile_title = matched.as_ref().map(|(p, _)| p.meta.title.clone());
-        self.matched_profile = matched.map(|(_, path)| path);
-        // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
-        // struct's own doc comment calls "false until a profile loader is
-        // wired") was never actually assigned anywhere once the loader
-        // above WAS wired (W5-06/W11-02) -- `self.matched_profile`
-        // (`Option<PathBuf>`) became the real signal and this bool was
-        // simply left behind, always false. That silently broke every
-        // profile-gated feature row's `Availability` (`crate::enhance_ui::
-        // feature_rows`/`badge_text`/`badge_breakdown` all take this bool)
-        // regardless of whether a profile genuinely matched — found while
-        // wiring the Diorama row, which inherits the same gating. Kept in
-        // sync with the real signal here, the one place `matched_profile`
-        // itself is (re)computed.
-        self.profile_matched = self.matched_profile.is_some();
-        // Ticket W11-02: decode the level now, once. `None` when no
-        // profile matched or it declares no decodable level — both
-        // ordinary, neither an error (`LevelSession::open`'s own doc).
-        self.level_session = self.current_game_hashes.as_ref().and_then(|hashes| {
-            crate::level_view::LevelSession::open(&Self::profiles_root(), &bytes, hashes)
-        });
+        self.apply_profile_match();
         self.level_texture = None;
         self.level_camera = None;
 
@@ -8027,6 +7970,21 @@ impl RetroForgeApp {
                                 ))
                                 .color(tokens.ink),
                         );
+                        // Ticket W24-02: make one, right here.
+                        if self.matched_profile_title.is_none()
+                            && ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Make a profile for this game")
+                                            .strong()
+                                            .color(tokens.bg),
+                                    )
+                                    .fill(tokens.accent),
+                                )
+                                .clicked()
+                        {
+                            self.make_profile_for_this_game();
+                        }
                         egui::CollapsingHeader::new("What's a profile?")
                             .id_salt("whats-a-profile")
                             .show(ui, |ui| {
@@ -9583,11 +9541,9 @@ impl RetroForgeApp {
                 rf_cart::Cartridge::Nes { identity, .. }
                 | rf_cart::Cartridge::Snes { identity, .. },
             ) => {
-                let profile = crate::level_view::find_matching_profile(
-                    &Self::profiles_root(),
-                    &identity.normalized,
-                )
-                .map(|(_, path)| path);
+                let profile = self
+                    .find_profile(&identity.normalized)
+                    .map(|(_, path)| path);
                 (Some(identity.normalized), profile)
             }
             Err(_) => (None, None),
@@ -9864,6 +9820,126 @@ impl RetroForgeApp {
             .unwrap_or_default()
     }
 
+    /// Ticket W24-02: find this game's profile and apply everything that
+    /// follows from it — at ROM open, and again after the player makes a
+    /// profile, without restarting the game.
+    fn apply_profile_match(&mut self) {
+        let matched = self
+            .current_game_hashes
+            .clone()
+            .and_then(|hashes| self.find_profile(&hashes));
+        // Ticket W20-17: the profile's declared loading wait loops.
+        self.loading_waits = matched
+            .as_ref()
+            .and_then(|(profile, _)| profile.loading.as_ref())
+            .map(|l| l.wait_loops.clone())
+            .unwrap_or_default();
+        // Ticket W20-17: the fog plane comes from the matched profile
+        // itself, not from `level_session` (which exists only for a
+        // profile with a decodable level map) — until W20-17 the
+        // `[atmosphere]` pin below was applied only when there was one.
+        self.atmosphere_pin = matched
+            .as_ref()
+            .and_then(|(profile, _)| rf_enhance::atmosphere::AtmospherePin::from_profile(profile));
+        self.fog_budget = rf_renderer::fog::BudgetGate::new();
+        self.fog_failed = false;
+        self.fog_started = None;
+        self.fog_scroll = None;
+        self.fog_drift = (0.0, 0.0);
+        // Ticket W20-17: a malformed `[camera.hud]` is refused, and said
+        // so, rather than silently pinning nothing (`hud::from_profile`).
+        let declared = matched
+            .as_ref()
+            .and_then(|(profile, _)| profile.camera.as_ref()?.hud.as_ref())
+            .map(rf_enhance::hud::from_profile);
+        self.hud_error = match &declared {
+            Some(Err(e)) => Some(e.to_string()),
+            _ => None,
+        };
+        self.hud_separator = match declared {
+            Some(Ok(region)) => Some(rf_enhance::hud::HudSeparator::new(Some(region))),
+            _ => None,
+        };
+        self.hud_band = None;
+        // Ticket W22-02: the matched profile's own title, for the strip.
+        self.matched_profile_title = matched.as_ref().map(|(p, _)| p.meta.title.clone());
+        self.matched_profile = matched.map(|(_, path)| path);
+        // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
+        // struct's own doc comment calls "false until a profile loader is
+        // wired") was never actually assigned anywhere once the loader
+        // above WAS wired (W5-06/W11-02) -- `self.matched_profile`
+        // (`Option<PathBuf>`) became the real signal and this bool was
+        // simply left behind, always false. That silently broke every
+        // profile-gated feature row's `Availability` (`crate::enhance_ui::
+        // feature_rows`/`badge_text`/`badge_breakdown` all take this bool)
+        // regardless of whether a profile genuinely matched — found while
+        // wiring the Diorama row, which inherits the same gating. Kept in
+        // sync with the real signal here, the one place `matched_profile`
+        // itself is (re)computed.
+        self.profile_matched = self.matched_profile.is_some();
+        // Ticket W11-02: decode the level now, once. `None` when no
+        // profile matched or it declares no decodable level — both
+        // ordinary, neither an error (`LevelSession::open`'s own doc).
+        let bytes = self.normalized_rom.clone().unwrap_or_default();
+        self.level_session = self.current_game_hashes.as_ref().and_then(|hashes| {
+            self.profile_roots()
+                .iter()
+                .find_map(|root| crate::level_view::LevelSession::open(root, &bytes, hashes))
+        });
+    }
+
+    /// Ticket W24-02: write a profile for the dump being played into the
+    /// player's own folder, and match it at once.
+    fn make_profile_for_this_game(&mut self) {
+        let (Some(root), Some(hashes)) =
+            (self.config_root.clone(), self.current_game_hashes.clone())
+        else {
+            self.status = "Can't make a profile: no config folder or no game.".to_owned();
+            return;
+        };
+        let title = self
+            .current_rom_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map_or_else(|| "Game".to_owned(), |s| s.to_string_lossy().into_owned());
+        let user = crate::profile_builder::user_profiles_root(&root);
+        match crate::profile_builder::create(&user, &title, self.console_label == "SNES", &hashes) {
+            Ok(_) => {
+                self.apply_profile_match();
+                self.status = format!("Profile made for {title}");
+                let ctx = self.ctx.clone();
+                self.toasts.push(
+                    crate::toast::ToastKind::Success,
+                    format!("Profile made for {title}"),
+                    &ctx,
+                );
+            }
+            Err(e) => self.status = format!("Could not make a profile: {e}"),
+        }
+    }
+
+    /// Ticket W24-02: where profiles are looked for, the player's own
+    /// folder first so a profile they made wins over a shipped one.
+    fn profile_roots(&self) -> Vec<std::path::PathBuf> {
+        self.config_root
+            .as_deref()
+            .map(crate::profile_builder::user_profiles_root)
+            .into_iter()
+            .chain(std::iter::once(Self::profiles_root()))
+            .collect()
+    }
+
+    /// Ticket W24-02: the first profile, over [`Self::profile_roots`], that
+    /// claims `hashes`.
+    fn find_profile(
+        &self,
+        hashes: &rf_cart::RomHashes,
+    ) -> Option<(rf_profiles::schema::Profile, std::path::PathBuf)> {
+        self.profile_roots()
+            .iter()
+            .find_map(|root| crate::level_view::find_matching_profile(root, hashes))
+    }
+
     /// Where game profiles live.
     ///
     /// **This was `Path::new("profiles")` until W11-02 — a path relative
@@ -10124,9 +10200,20 @@ impl RetroForgeApp {
         library: &crate::library::Library,
         config_root: Option<&std::path::Path>,
     ) -> LibraryBadges {
-        let profile_sha256s = crate::level_view::all_profile_sha256s(&Self::profiles_root());
+        // W24-02: the player's own profiles count too (theirs first).
+        let roots: Vec<std::path::PathBuf> = config_root
+            .map(crate::profile_builder::user_profiles_root)
+            .into_iter()
+            .chain(std::iter::once(Self::profiles_root()))
+            .collect();
+        let mut profile_sha256s = std::collections::HashSet::new();
+        let mut chips = std::collections::HashMap::new();
+        for root in roots.iter().rev() {
+            profile_sha256s.extend(crate::level_view::all_profile_sha256s(root));
+            chips.extend(crate::level_view::profile_chips_by_sha256(root));
+        }
         let mut badges = LibraryBadges {
-            chips: crate::level_view::profile_chips_by_sha256(&Self::profiles_root()),
+            chips,
             ..LibraryBadges::default()
         };
         let Some(root) = config_root else {

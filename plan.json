@@ -9805,9 +9805,10 @@
    "test: make a profile for a one-byte-changed fixture and see Profile found"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-08. crate::profile_builder: user_profiles_root (<config>/retroforge/profiles), slug, new_profile_text (the editor's SKELETON plus an [[identity]] with all four hashes; loads with zero warnings), create. App: profile_roots() searches the player's folder first, then the shipped root; find_profile, and apply_profile_match() extracted from open_rom_path so a new profile matches without restarting the game; library badges/chips union both roots. The amber strip offers \"Make a profile for this game\". Tests: profile_builder slugs and a_new_profile_loads_cleanly_and_matches_its_dump; tests/profile_strip.rs makes one for a one-byte-changed fixture and sees Profile found. Gate: workspace 2571 passing.",
    "FILED 2026-10-08 from Brad (\"ok so how do we profile the games?\" then \"go\"); design https://claude.ai/artifact/6a89VhM41WY7Ryqaw5pt7k."
   ]
  },
@@ -9828,7 +9829,7 @@
    "pure tested narrowing; an app test finds a known RAM counter in a fixture"
   ],
   "points": 5,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-08 from Brad (\"ok so how do we profile the games?\" then \"go\"); design https://claude.ai/artifact/6a89VhM41WY7Ryqaw5pt7k."
