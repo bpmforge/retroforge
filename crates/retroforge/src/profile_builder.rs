@@ -288,6 +288,17 @@ impl Finder {
     }
 }
 
+/// How the builder shows an address: `$021E` on a NES, `$7E001A` on an
+/// SNES — the widths the consoles' own documentation uses.
+#[must_use]
+pub fn show_address(snes: bool, addr: u32) -> String {
+    if snes {
+        format!("${addr:06X}")
+    } else {
+        format!("${addr:04X}")
+    }
+}
+
 /// The address a work-RAM offset has in a profile: NES WRAM is `$0000`,
 /// SNES WRAM `$7E0000` (fullsnes "Memory Map").
 #[must_use]
@@ -358,6 +369,8 @@ mod tests {
         assert!(f.remaining() <= 4, "{}", f.remaining());
         assert_eq!(ram_address(true, 0x1A), 0x7E_001A);
         assert_eq!(ram_address(false, 0x1A), 0x1A);
+        assert_eq!(show_address(false, 0x21E), "$021E");
+        assert_eq!(show_address(true, 0x7E_001A), "$7E001A");
     }
 
     /// Ticket W24-04: each step writes what it found, and the result

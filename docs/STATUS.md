@@ -4377,3 +4377,8 @@ stories, 10 decisions).
   Keyboard/Controller and NES/SNES, and rebinds by click-then-press; the
   Quick Menu moves with the arrow keys and shows key hints. Gate: workspace
   **2568 passing / 0 failed**.
+- 2026-10-08 — **W24-03..05 closed (profile builder).** The guided finder
+  narrows work RAM by went up / went down / didn't change; each step
+  (camera left/right, camera up/down, player position, lives) writes the
+  player's own profile and re-matches at once; tour shots 40–42. Gate:
+  workspace **2574 passing / 0 failed**.

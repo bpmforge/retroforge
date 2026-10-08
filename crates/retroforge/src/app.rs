@@ -10050,10 +10050,14 @@ impl RetroForgeApp {
                                     for (at, value) in f.top(6) {
                                         ui.horizontal(|ui| {
                                             ui.label(
-                                                egui::RichText::new(format!(
-                                                    "${:06X}",
-                                                    crate::profile_builder::ram_address(snes, at)
-                                                ))
+                                                egui::RichText::new(
+                                                    crate::profile_builder::show_address(
+                                                        snes,
+                                                        crate::profile_builder::ram_address(
+                                                            snes, at,
+                                                        ),
+                                                    ),
+                                                )
                                                 .font(crate::theme::numeric(12.0)),
                                             );
                                             ui.label(
@@ -10123,8 +10127,9 @@ impl RetroForgeApp {
                 }
                 self.apply_profile_match();
                 self.builder_note = Some(format!(
-                    "{} saved as ${addr:06X}.",
-                    self.builder_step.label()
+                    "{} saved as {}.",
+                    self.builder_step.label(),
+                    crate::profile_builder::show_address(snes, addr)
                 ));
                 self.builder_step = self.builder_step.next();
                 self.finder = None;
