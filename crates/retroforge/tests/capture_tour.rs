@@ -407,6 +407,20 @@ fn photograph_every_major_surface() {
         harness.run_steps(3);
         shot(&mut harness, "26-settings-search");
     }
+    // W23-02: the Controls tab, each device and console.
+    if let Some(tab) = harness.query_by_label("Controls") {
+        tab.click();
+        harness.run_steps(3);
+        for (snes, pad, name) in [
+            (false, false, "30-controls-nes-keyboard"),
+            (true, false, "31-controls-snes-keyboard"),
+            (true, true, "32-controls-snes-controller"),
+        ] {
+            harness.state_mut().set_controls_for_test(snes, pad);
+            harness.run_steps(3);
+            shot(&mut harness, name);
+        }
+    }
     harness.state_mut().show_settings_for_test(false);
 
     harness.state_mut().show_controls_for_test(true);

@@ -12050,10 +12050,11 @@ impl RetroForgeApp {
                     .entries()
                     .iter()
                     .find(|(_, p, x)| *p == 0 && *x == n)
-                    .map(|(k, ..)| k.name()),
-                (Device::Keyboard, Button::Snes(n)) => {
-                    self.snes_bindings.key_for(n).map(rf_input::Key::name)
-                }
+                    .map(|(k, ..)| crate::controls_panel::key_label(*k)),
+                (Device::Keyboard, Button::Snes(n)) => self
+                    .snes_bindings
+                    .key_for(n)
+                    .map(crate::controls_panel::key_label),
                 (Device::Controller, Button::Nes(n)) => self
                     .bindings
                     .pads
