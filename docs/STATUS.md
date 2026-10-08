@@ -4396,3 +4396,8 @@ stories, 10 decisions).
   map) gets the census into 1-1; `$FD` matched 183/183 scrolling frames and
   SMB3's cited items were watched in play. Gate: workspace **2574 passing /
   0 failed**, docs-gate green.
+- 2026-10-08 — **W27-01/02 closed (find the camera while you play).** The
+  census's scoring is now `rf_enhance::camera_finder`, run on the core thread
+  for any game without a profile camera; a card offers to save it. Items-on-
+  screen design (W27-03) published for Brad's OK. Gate: workspace **2583
+  passing / 0 failed**, docs-gate green.
