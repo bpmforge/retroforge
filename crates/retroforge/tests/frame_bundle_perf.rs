@@ -117,7 +117,11 @@ fn measure_fps_with_frame_bundle_assembly_enabled() {
             Ok(CoreEvent::Crashed(r)) => {
                 panic!("core thread crashed mid-measurement: {}", r.message)
             }
-            Ok(CoreEvent::CanvasSnapshot(_) | CoreEvent::WidescreenDecisions(_)) => {
+            Ok(
+                CoreEvent::CanvasSnapshot(_)
+                | CoreEvent::WidescreenDecisions(_)
+                | CoreEvent::WorkRam(_),
+            ) => {
                 // This test never sends `RequestCanvasSnapshot` or turns
                 // widescreen on; an unrelated event landing here would not
                 // invalidate the FPS measurement.

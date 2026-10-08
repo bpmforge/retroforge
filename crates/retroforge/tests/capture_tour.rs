@@ -457,5 +457,57 @@ fn photograph_every_major_surface() {
         shot(&mut harness, "11-snes-play-view");
     }
 
+    // W24-05: the profile builder, on a dump no profile knows (the last
+    // CHR byte changed, so the code still runs).
+    let mut other = std::fs::read(&fixture).expect("fixture");
+    let last = other.len() - 1;
+    other[last] ^= 0xFF;
+    let other_rom = games_dir.join("RF-Other.nes");
+    std::fs::write(&other_rom, &other).expect("write other");
+    harness.state_mut().launch_rom(&other_rom);
+    let from = harness.state().frame_count_for_test();
+    run_emulated_frames(&mut harness, from + 30, Duration::from_secs(20));
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    if let Some(rail) =
+        harness.query_by_label(&retroforge::quick_menu::Section::Enhancements.rail_text())
+    {
+        rail.click();
+        harness.run_steps(3);
+        shot(&mut harness, "40-profile-make-offer");
+        if let Some(make) = harness.query_by_label("Make a profile for this game") {
+            make.click();
+            harness.run_steps(2);
+            harness.key_press(egui::Key::Escape);
+            harness.run_steps(2);
+            harness.get_by_label("Take the first look").click();
+            for _ in 0..10 {
+                let from = harness.state().frame_count_for_test();
+                run_emulated_frames(&mut harness, from + 8, Duration::from_secs(10));
+                if harness
+                    .state()
+                    .finder_remaining_for_test()
+                    .is_some_and(|n| n <= 12)
+                {
+                    break;
+                }
+                harness.get_by_label("It went up").click();
+                harness.run_steps(1);
+            }
+            let from = harness.state().frame_count_for_test();
+            run_emulated_frames(&mut harness, from + 4, Duration::from_secs(10));
+            shot(&mut harness, "41-profile-builder-finding");
+            if harness.query_all_by_label("Use this").next().is_some() {
+                harness
+                    .query_all_by_label("Use this")
+                    .next()
+                    .expect("a candidate")
+                    .click();
+                harness.run_steps(3);
+                shot(&mut harness, "42-profile-builder-saved");
+            }
+        }
+    }
+
     println!("TOUR COMPLETE -> {}", out_dir().display());
 }

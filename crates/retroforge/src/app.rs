@@ -976,6 +976,13 @@ pub struct RetroForgeApp {
     thumb_gameplay_taken: bool,
     /// Ticket W23-03: the Quick Menu rail items' ids, last frame.
     quick_rail_ids: Vec<egui::Id>,
+    /// Ticket W24-03: the profile builder panel, its finder, and a look
+    /// asked of the core (`None` = a first look, `Some` = narrow by it).
+    builder_open: bool,
+    builder_step: crate::profile_builder::Step,
+    finder: Option<crate::profile_builder::Finder>,
+    finder_pending: Option<Option<crate::profile_builder::Change>>,
+    builder_note: Option<String>,
     /// Ticket W22-06: until when (`ctx.time()`) the one-time tip shows.
     enhance_tip_until: Option<f64>,
     /// Ticket W22-04: where the Enhancements compare line sits (0..=1).
@@ -1591,6 +1598,11 @@ impl RetroForgeApp {
             settings_query: String::new(),
             compare_cut: 0.5,
             enhance_tip_until: None,
+            builder_open: false,
+            builder_step: crate::profile_builder::Step::CameraX,
+            finder: None,
+            finder_pending: None,
+            builder_note: None,
             quick_rail_ids: Vec::new(),
             thumb_gameplay_taken: false,
             window_fitted: false,
@@ -3745,6 +3757,15 @@ impl RetroForgeApp {
                 // stale by the time we'd paint them" reasoning this
                 // function's own doc already gives for `latest_frame`.
                 CoreEvent::CanvasSnapshot(canvas) => latest_canvas = Some(canvas),
+                // Ticket W24-03: a RAM look the profile finder asked for.
+                CoreEvent::WorkRam(ram) => {
+                    if let Some(pending) = self.finder_pending.take() {
+                        match (pending, self.finder.as_mut()) {
+                            (Some(change), Some(f)) => f.narrow(ram, change),
+                            _ => self.finder = Some(crate::profile_builder::Finder::start(ram)),
+                        }
+                    }
+                }
                 // Ticket W11-03: keep the policy's reasons so the Enhance
                 // panel can say WHY a layer stayed narrow. Stored rather
                 // than logged: a refusal the user cannot see is the same
@@ -9906,6 +9927,9 @@ impl RetroForgeApp {
         match crate::profile_builder::create(&user, &title, self.console_label == "SNES", &hashes) {
             Ok(_) => {
                 self.apply_profile_match();
+                // W24-03: straight into the builder.
+                self.builder_open = true;
+                self.finder = None;
                 self.status = format!("Profile made for {title}");
                 let ctx = self.ctx.clone();
                 self.toasts.push(
@@ -9916,6 +9940,216 @@ impl RetroForgeApp {
             }
             Err(e) => self.status = format!("Could not make a profile: {e}"),
         }
+    }
+
+    /// Ticket W24-03: ask the core for a look at the work RAM.
+    fn finder_look(&mut self, change: Option<crate::profile_builder::Change>) {
+        self.finder_pending = Some(change);
+        self.send_command(CoreCommand::SnapshotRam);
+    }
+
+    /// Ticket W24-03/W24-04: the profile builder — a panel at the right of
+    /// the game that does NOT pause it (the player has to move). Steps on
+    /// the left, the finder for the current step on the right.
+    fn profile_builder_panel(&mut self, ctx: &egui::Context) {
+        use crate::profile_builder::{Change, Step};
+        if !self.builder_open || self.core.is_none() || self.show_overlay_menu {
+            return;
+        }
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let snes = self.console_label == "SNES";
+        let mut close = false;
+        let mut look: Option<Option<Change>> = None;
+        let mut use_offset: Option<usize> = None;
+        egui::Area::new(egui::Id::new("profile-builder"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_TOP, [-12.0, 48.0])
+            .show(ctx, |ui| {
+                crate::theme::Elevation::Overlay
+                    .frame(&tokens)
+                    .show(ui, |ui| {
+                        ui.set_width(330.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Make a profile")
+                                    .font(crate::theme::condensed(crate::theme::type_scale::TITLE))
+                                    .color(tokens.ink),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if crate::icons::icon_button(
+                                        ui,
+                                        egui::RichText::new(egui_phosphor::regular::X),
+                                        "Close the profile builder",
+                                    )
+                                    .clicked()
+                                    {
+                                        close = true;
+                                    }
+                                },
+                            );
+                        });
+                        // The steps, as chips.
+                        ui.horizontal_wrapped(|ui| {
+                            for step in Step::ALL {
+                                if ui
+                                    .selectable_label(self.builder_step == step, step.label())
+                                    .clicked()
+                                    && self.builder_step != step
+                                {
+                                    self.builder_step = step;
+                                    self.finder = None;
+                                    self.builder_note = None;
+                                }
+                            }
+                        });
+                        ui.label(
+                            egui::RichText::new(self.builder_step.instructions())
+                                .font(egui::FontId::proportional(
+                                    crate::theme::type_scale::CAPTION,
+                                ))
+                                .color(tokens.ink),
+                        );
+                        let waiting = self.finder_pending.is_some();
+                        match &self.finder {
+                            None => {
+                                if ui
+                                    .add_enabled(!waiting, egui::Button::new("Take the first look"))
+                                    .clicked()
+                                {
+                                    look = Some(None);
+                                }
+                            }
+                            Some(f) => {
+                                ui.horizontal(|ui| {
+                                    for (label, change) in [
+                                        ("It went up", Change::Up),
+                                        ("It went down", Change::Down),
+                                        ("It didn't change", Change::Same),
+                                    ] {
+                                        if ui
+                                            .add_enabled(!waiting, egui::Button::new(label))
+                                            .clicked()
+                                        {
+                                            look = Some(Some(change));
+                                        }
+                                    }
+                                });
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} addresses still match",
+                                        f.remaining()
+                                    ))
+                                    .font(crate::theme::condensed(
+                                        crate::theme::type_scale::SUBHEAD,
+                                    ))
+                                    .color(tokens.ink),
+                                );
+                                if f.remaining() <= 12 && f.rounds > 0 {
+                                    for (at, value) in f.top(6) {
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    crate::profile_builder::show_address(
+                                                        snes,
+                                                        crate::profile_builder::ram_address(
+                                                            snes, at,
+                                                        ),
+                                                    ),
+                                                )
+                                                .font(crate::theme::numeric(12.0)),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(format!("{value}"))
+                                                    .font(crate::theme::numeric(12.0))
+                                                    .color(tokens.muted),
+                                            );
+                                            if ui.small_button("Use this").clicked() {
+                                                use_offset = Some(at);
+                                            }
+                                        });
+                                    }
+                                } else if f.rounds > 0 {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Keep going: do it again and answer again.",
+                                        )
+                                        .font(egui::FontId::proportional(
+                                            crate::theme::type_scale::CAPTION,
+                                        ))
+                                        .color(tokens.muted),
+                                    );
+                                }
+                                if ui.small_button("Start this step over").clicked() {
+                                    self.finder = None;
+                                }
+                            }
+                        }
+                        if let Some(note) = &self.builder_note {
+                            ui.label(
+                                egui::RichText::new(note)
+                                    .font(egui::FontId::proportional(
+                                        crate::theme::type_scale::CAPTION,
+                                    ))
+                                    .color(tokens.ok),
+                            );
+                        }
+                    });
+            });
+        if let Some(change) = look {
+            self.finder_look(change);
+        }
+        if let Some(at) = use_offset {
+            self.use_found_address(at);
+        }
+        if close {
+            self.builder_open = false;
+            self.finder = None;
+        }
+    }
+
+    /// Ticket W24-04: write the chosen address into this game's profile
+    /// for the current step, re-match, and move to the next step.
+    fn use_found_address(&mut self, offset: usize) {
+        let snes = self.console_label == "SNES";
+        let addr = crate::profile_builder::ram_address(snes, offset);
+        let Some(path) = self.matched_profile.clone() else {
+            self.builder_note = Some("No profile to write to.".to_owned());
+            return;
+        };
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        match crate::profile_builder::apply_step(&text, self.builder_step, addr) {
+            Ok(new_text) => {
+                if let Err(e) = std::fs::write(&path, new_text) {
+                    self.builder_note = Some(format!("Could not save: {e}"));
+                    return;
+                }
+                self.apply_profile_match();
+                self.builder_note = Some(format!(
+                    "{} saved as {}.",
+                    self.builder_step.label(),
+                    crate::profile_builder::show_address(snes, addr)
+                ));
+                self.builder_step = self.builder_step.next();
+                self.finder = None;
+            }
+            Err(e) => self.builder_note = Some(e),
+        }
+    }
+
+    /// Ticket W24-03: open the profile builder (tests).
+    #[doc(hidden)]
+    pub fn open_profile_builder_for_test(&mut self) {
+        self.builder_open = true;
+    }
+
+    /// Ticket W24-03: candidates left in the finder (tests).
+    #[doc(hidden)]
+    pub fn finder_remaining_for_test(&self) -> Option<usize> {
+        self.finder
+            .as_ref()
+            .map(crate::profile_builder::Finder::remaining)
     }
 
     /// Ticket W24-02: where profiles are looked for, the player's own
@@ -13680,6 +13914,7 @@ impl eframe::App for RetroForgeApp {
         self.hash_info_window(&ctx);
         self.overlay_menu(&ctx);
         self.slot_undo_bar(&ctx);
+        self.profile_builder_panel(&ctx);
         self.enhance_tip(&ctx);
         self.states_modal(&ctx);
         // Ticket W20-10: drawn whenever a Save asked for it — from the
