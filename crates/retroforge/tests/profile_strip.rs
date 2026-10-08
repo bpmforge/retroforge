@@ -77,5 +77,33 @@ fn the_strip_says_whether_a_profile_matched() {
             .any(|t| t == "No profile matches this copy of the game"),
         "{unmatched:?}"
     );
+
+    // W24-02: make one for this copy, and it matches at once.
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(980.0, 900.0))
+        .build_eframe(|cc| RetroForgeApp::new(cc));
+    h.run();
+    h.state_mut().launch_rom(&other);
+    let start = Instant::now();
+    while h.state().frame_count_for_test() < 10 && start.elapsed() < Duration::from_secs(20) {
+        h.run_steps(1);
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.get_by_label(&Section::Enhancements.rail_text()).click();
+    h.run_steps(3);
+    h.get_by_label("Make a profile for this game").click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("Profile found: rf-scroller-other-dump")
+            .is_some(),
+        "the new profile matched this copy"
+    );
+    assert!(
+        dir.join("retroforge/profiles/nes/rf-scroller-other-dump/profile.toml")
+            .exists(),
+        "written into the player's own folder"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

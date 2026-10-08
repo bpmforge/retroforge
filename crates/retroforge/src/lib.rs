@@ -60,6 +60,7 @@ pub mod mod_chunk;
 pub mod mode_invariant;
 pub mod pacer;
 pub mod play_view;
+pub mod profile_builder;
 pub mod profile_editor;
 pub mod quick_menu;
 pub mod recording;
