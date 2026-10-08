@@ -974,6 +974,8 @@ pub struct RetroForgeApp {
     /// Ticket W21-10: this session already replaced the boot-frame
     /// picture with a gameplay frame.
     thumb_gameplay_taken: bool,
+    /// Ticket W23-03: the Quick Menu rail items' ids, last frame.
+    quick_rail_ids: Vec<egui::Id>,
     /// Ticket W22-06: until when (`ctx.time()`) the one-time tip shows.
     enhance_tip_until: Option<f64>,
     /// Ticket W22-04: where the Enhancements compare line sits (0..=1).
@@ -1589,6 +1591,7 @@ impl RetroForgeApp {
             settings_query: String::new(),
             compare_cut: 0.5,
             enhance_tip_until: None,
+            quick_rail_ids: Vec::new(),
             thumb_gameplay_taken: false,
             window_fitted: false,
             last_window_fit: None,
@@ -7076,6 +7079,8 @@ impl RetroForgeApp {
         }
         let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
         let screen = ctx.viewport_rect();
+        self.quick_menu_keys(ctx);
+        let mut rail_ids = Vec::new();
         if self.quick_backdrop.is_none() {
             self.quick_backdrop = self.blurred_frame(ctx);
         }
@@ -7130,6 +7135,7 @@ impl RetroForgeApp {
         );
         let rise = (1.0 - shown) * crate::theme::motion::OVERLAY_RISE_PX;
         let bindings = self.app_bindings.clone();
+        let pad_active = self.last_active_input == crate::ui_nav::InputDevice::Gamepad;
 
         let mut close = false;
         let mut leave_paused = false;
@@ -7170,6 +7176,7 @@ impl RetroForgeApp {
                     let key = section.key_hint(&bindings);
                     let response =
                         quick_rail_item(&mut rail_ui, &tokens, section, selected, key.as_deref());
+                    rail_ids.push(response.id);
                     // Follow focus only when it MOVES here (arrow keys /
                     // d-pad), so a click elsewhere is not overruled.
                     if response.clicked() || response.gained_focus() {
@@ -7249,9 +7256,18 @@ impl RetroForgeApp {
                         .max_rect(hint_row.translate(shift))
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
-                for (button, colour, what) in crate::quick_menu::PAD_HINTS {
-                    pad_hint(&mut hint_ui, &tokens, button, colour, what);
-                    hint_ui.add_space(14.0);
+                // Ticket W23-03: the hints speak the device in use — key
+                // caps after keyboard or mouse use, pad faces after a pad.
+                if pad_active {
+                    for (button, colour, what) in crate::quick_menu::PAD_HINTS {
+                        pad_hint(&mut hint_ui, &tokens, button, colour, what);
+                        hint_ui.add_space(14.0);
+                    }
+                } else {
+                    for (keys, what) in crate::quick_menu::KEY_HINTS {
+                        key_hint(&mut hint_ui, &tokens, keys, what);
+                        hint_ui.add_space(14.0);
+                    }
                 }
                 hint_ui.label(
                     egui::RichText::new("Esc  Resume")
@@ -7261,10 +7277,55 @@ impl RetroForgeApp {
                         .color(tokens.muted),
                 );
             });
+        self.quick_rail_ids = rail_ids;
         if leave_paused {
             self.leave_overlay_menu_paused();
         } else if close {
             self.set_overlay_menu(false);
+        }
+    }
+
+    /// Ticket W23-03: the Quick Menu by keyboard (and so by d-pad, which
+    /// `ui_nav` turns into arrow keys). On the rail, Up/Down choose the
+    /// section and Right steps into it; inside a section the arrows move
+    /// focus to the nearest control that way, and Left from the left edge
+    /// lands back on the rail. Enter activates (egui's own), Esc closes.
+    fn quick_menu_keys(&mut self, ctx: &egui::Context) {
+        let focus = ctx.memory(|m| m.focused());
+        let on_rail = focus.is_none_or(|f| self.quick_rail_ids.contains(&f));
+        let (up, down, left, right) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+            )
+        });
+        let all = crate::quick_menu::Section::ALL;
+        let at = all
+            .iter()
+            .position(|s| *s == self.quick_section)
+            .unwrap_or(0);
+        if on_rail {
+            if down || up {
+                let next = if down {
+                    (at + 1).min(all.len() - 1)
+                } else {
+                    at.saturating_sub(1)
+                };
+                self.quick_section = all[next];
+                self.quick_focus_pending = true;
+            } else if right {
+                ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::Right));
+            }
+        } else if up {
+            ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::Up));
+        } else if down {
+            ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::Down));
+        } else if left {
+            ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::Left));
+        } else if right {
+            ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::Right));
         }
     }
 
@@ -12126,6 +12187,12 @@ impl RetroForgeApp {
         }
     }
 
+    /// Ticket W23-03: the Quick Menu's selected section (tests).
+    #[doc(hidden)]
+    pub fn quick_section_for_test(&self) -> crate::quick_menu::Section {
+        self.quick_section
+    }
+
     /// Ticket W23-02: drive the Controls screen (tests).
     #[doc(hidden)]
     pub fn set_controls_for_test(&mut self, snes: bool, controller: bool) {
@@ -13932,6 +13999,31 @@ fn segmented<T: PartialEq + Clone>(
             });
         });
     changed
+}
+
+/// Ticket W23-03: one keyboard hint — key caps, then what they do.
+fn key_hint(ui: &mut egui::Ui, tokens: &crate::theme::Tokens, keys: &[&str], what: &str) {
+    for key in keys {
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(1.0, tokens.line))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(5, 1))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(*key)
+                        .font(crate::theme::numeric(11.0))
+                        .color(tokens.ink),
+                );
+            });
+    }
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new(what)
+            .font(egui::FontId::proportional(
+                crate::theme::type_scale::CAPTION,
+            ))
+            .color(tokens.muted),
+    );
 }
 
 /// Ticket W21-02: one hint in the Quick Menu's pad bar — a coloured
