@@ -358,6 +358,9 @@ pub struct FrameMsg {
     /// Ticket W27-02: frames the screen has moved while the camera finder
     /// looks (for "looking..." progress); `None` when it is not looking.
     pub camera_search: Option<u32>,
+    /// Ticket W27-05: the bytes of each `CoreCommand::WatchItems` row
+    /// this frame (at most eight per row), in the order asked.
+    pub items: Vec<Vec<u8>>,
     /// Ticket W4-06b: the same frame's cartridge PRG-RAM window
     /// (`EmuStepper::prg_ram`, side-effect-free), the memory viewer's
     /// second live range — see `EmuStepper::prg_ram`'s own doc for why one
@@ -605,6 +608,9 @@ pub enum CoreCommand {
     /// with no profile camera). Observer only; replies once with
     /// `CoreEvent::CameraFound`. `false` stops looking.
     FindCamera(bool),
+    /// Ticket W27-05: read these `(address, length)` rows every frame
+    /// for Game info (`FrameMsg::items`); empty stops.
+    WatchItems(Vec<(u32, u32)>),
     /// Ticket W13-02b: capture the SNES debug memories on each frame.
     ///
     /// Off by default and driven by whether a SNES-capable debug panel is
@@ -1094,6 +1100,8 @@ fn core_thread_main(
     let mut snes_debug_capture = false;
     // Ticket W27-02: looking for this game's camera, when asked.
     let mut camera_finder: Option<rf_enhance::camera_finder::CameraFinder> = None;
+    // Ticket W27-05: the profile items Game info shows.
+    let mut item_watches: Vec<(u32, u32)> = Vec::new();
     let mut last_decisions: Option<[Option<&'static str>; 4]> = None;
     // Ticket W4-10a: `None` is the shipped, untraced state. The run loop
     // below tests this once per frame and takes the ordinary path — the
@@ -1240,6 +1248,9 @@ fn core_thread_main(
                     {
                         return LoopControl::Stop; // UI thread hung up.
                     }
+                }
+                CoreCommand::WatchItems(rows) => {
+                    item_watches = rows;
                 }
                 CoreCommand::FindCamera(on) => {
                     camera_finder = on.then(|| {
@@ -1796,6 +1807,14 @@ fn core_thread_main(
                 palette_ram: Box::new(*stepper.palette()),
                 wram: Box::new(stepper.wram_snapshot()),
                 camera_search,
+                items: item_watches
+                    .iter()
+                    .map(|&(addr, len)| {
+                        (0..len.min(8))
+                            .map(|i| stepper.peek_bus(addr + i))
+                            .collect()
+                    })
+                    .collect(),
                 prg_ram: Box::new(*stepper.prg_ram()),
                 sprite_height_px: stepper.sprite_height_px(),
                 mode7: mode7_event.map(Box::new),
@@ -1952,6 +1971,7 @@ mod tests {
             palette_ram: Box::new([0u8; 32]),
             wram: Box::new([0u8; 0x0800]),
             camera_search: None,
+            items: Vec::new(),
             prg_ram: Box::new([0u8; 0x2000]),
             sprite_height_px: 8,
             mode7: None,

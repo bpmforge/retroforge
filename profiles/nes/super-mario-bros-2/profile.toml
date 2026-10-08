@@ -118,5 +118,6 @@ addr = 0x008F
 len = 1
 type = "u8"
 label = "character"
+names = ["Mario", "Princess", "Toad", "Luigi"]
 notes = "0 Mario, 1 Princess, 2 Toad, 3 Luigi. Cited; not yet watched in play."
 source = "https://github.com/Xkeeper0/smb2/blob/master/src/ram.asm"

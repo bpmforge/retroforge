@@ -567,6 +567,13 @@ impl EmuStepper {
         self.machine.as_core_ref().peek(u32::from(addr))
     }
 
+    /// Ticket W27-05: [`Self::peek`] at a full bus address — the SNES's
+    /// `$7Exxxx` work RAM included — for the Game info values.
+    #[must_use]
+    pub fn peek_bus(&self, addr: u32) -> u8 {
+        self.machine.as_core_ref().peek(addr)
+    }
+
     /// Out-of-band bus write — the write-side counterpart to
     /// [`Self::peek`], routed through the same `rf_nes::CpuBus::write` a
     /// real CPU instruction uses (already public `rf-nes` API; this does

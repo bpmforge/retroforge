@@ -54,6 +54,7 @@ addr = 0x0073
 len = 1
 type = "u8"
 label = "weapon"
+names = ["None", "Stars", "Triple", "Boomerang", "Scroll"]
 notes = "Leonardo special weapon: 0 none, 1 stars, 2 triple, 3 boomerang, 4 scroll. Cited; not yet watched in play."
 source = "https://datacrystal.tcrf.net/wiki/Teenage_Mutant_Ninja_Turtles_(NES)/RAM_map"
 

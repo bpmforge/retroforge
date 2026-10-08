@@ -987,6 +987,10 @@ pub struct RetroForgeApp {
     /// camera (`None` when not looking), and the camera once found.
     camera_search: Option<u32>,
     camera_found: Option<core_thread::FoundCamera>,
+    /// Ticket W27-05: the matched profile's showable items, and the bytes
+    /// the core read for them this frame (same order).
+    profile_items: Vec<rf_profiles::schema::MemoryMapEntry>,
+    item_values: Vec<Vec<u8>>,
     /// Ticket W22-06: until when (`ctx.time()`) the one-time tip shows.
     enhance_tip_until: Option<f64>,
     /// Ticket W22-04: where the Enhancements compare line sits (0..=1).
@@ -1609,6 +1613,8 @@ impl RetroForgeApp {
             builder_note: None,
             camera_search: None,
             camera_found: None,
+            profile_items: Vec::new(),
+            item_values: Vec::new(),
             quick_rail_ids: Vec::new(),
             thumb_gameplay_taken: false,
             window_fitted: false,
@@ -3600,6 +3606,7 @@ impl RetroForgeApp {
                 if self.camera_search.is_some() {
                     self.send_command(CoreCommand::FindCamera(true));
                 }
+                self.send_command(CoreCommand::WatchItems(self.item_rows()));
                 // A new ROM is a new debug session too — the previous
                 // ROM's OAM/events would otherwise linger onscreen against
                 // a completely different game (same reasoning the
@@ -3883,6 +3890,7 @@ impl RetroForgeApp {
         };
         if let Some(msg) = latest_frame {
             self.camera_search = msg.camera_search;
+            self.item_values.clone_from(&msg.items);
             // Ticket W2-14: a stepped frame has now been consumed.
             self.awaiting_stepped_frame = false;
             self.capture_hud_band(&msg.rgba, msg.width, msg.height, &latest_bundle_events);
@@ -7440,6 +7448,11 @@ impl RetroForgeApp {
                 ui.add_space(8.0);
                 self.enhancements_panel(ui);
             }
+            Section::GameInfo => {
+                if self.game_info_panel(ui) {
+                    self.save_current_game_settings();
+                }
+            }
             Section::Controls => {
                 // Ticket W23-02: the game's buttons first, as a drawn pad.
                 self.controls_panel(ui);
@@ -9926,6 +9939,13 @@ impl RetroForgeApp {
         self.camera_search = looking.then_some(0);
         self.camera_found = None;
         self.send_command(CoreCommand::FindCamera(looking));
+        // Ticket W27-05: Game info reads the profile's items every frame.
+        self.profile_items = matched
+            .as_ref()
+            .map(|(p, _)| crate::game_info::showable(&p.memory_map))
+            .unwrap_or_default();
+        self.item_values.clear();
+        self.send_command(CoreCommand::WatchItems(self.item_rows()));
         // Ticket W22-02: the matched profile's own title, for the strip.
         self.matched_profile_title = matched.as_ref().map(|(p, _)| p.meta.title.clone());
         self.matched_profile = matched.map(|(_, path)| path);
@@ -9984,6 +10004,199 @@ impl RetroForgeApp {
             }
             Err(e) => self.status = format!("Could not make a profile: {e}"),
         }
+    }
+
+    /// Ticket W27-05: the `(address, length)` rows the core reads.
+    fn item_rows(&self) -> Vec<(u32, u32)> {
+        self.profile_items.iter().map(|r| (r.addr, r.len)).collect()
+    }
+
+    /// Ticket W27-05: the Quick Menu's Game info — every item with its
+    /// live value and a switch that pins it to the screen, then the
+    /// corner. Returns whether a pin or the corner changed.
+    fn game_info_panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let all = crate::game_info::items(&self.profile_items, &self.item_values);
+        if all.is_empty() {
+            let why = if self.matched_profile.is_some() {
+                "This game's profile does not list any items yet."
+            } else {
+                "No profile matches this game, so there is nothing to show yet. Make one under Enhancements."
+            };
+            ui.label(egui::RichText::new(why).color(tokens.muted));
+            return false;
+        }
+        ui.label(
+            egui::RichText::new("Pin items to show them over the game while you play. Reading them never changes the game.")
+                .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
+                .color(tokens.muted),
+        );
+        ui.add_space(4.0);
+        let mut changed = false;
+        egui::Grid::new("game-info-items")
+            .num_columns(3)
+            .striped(true)
+            .show(ui, |ui| {
+                for item in &all {
+                    let mut pinned = self
+                        .current_game_settings
+                        .pinned_items
+                        .contains(&item.label);
+                    let toggle = ui.checkbox(&mut pinned, item.name.as_str()).on_hover_text(
+                        if item.checked {
+                            "Checked in play on this copy of the game."
+                        } else {
+                            "From a community RAM map; not checked in play yet."
+                        },
+                    );
+                    if toggle.changed() {
+                        let pins = &mut self.current_game_settings.pinned_items;
+                        pins.retain(|l| l != &item.label);
+                        if pinned {
+                            pins.push(item.label.clone());
+                        }
+                        changed = true;
+                    }
+                    ui.label(
+                        egui::RichText::new(&item.value)
+                            .font(crate::theme::numeric(14.0))
+                            .color(tokens.ink),
+                    );
+                    ui.label(
+                        egui::RichText::new(if item.checked {
+                            "checked in play"
+                        } else {
+                            "community map"
+                        })
+                        .font(egui::FontId::proportional(
+                            crate::theme::type_scale::CAPTION,
+                        ))
+                        .color(if item.checked {
+                            tokens.ok
+                        } else {
+                            tokens.muted
+                        }),
+                    );
+                    ui.end_row();
+                }
+            });
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Where it shows").color(tokens.muted));
+            for corner in crate::game_settings::InfoCorner::ALL {
+                if ui
+                    .selectable_label(
+                        self.current_game_settings.info_corner == corner,
+                        corner.label(),
+                    )
+                    .clicked()
+                {
+                    self.current_game_settings.info_corner = corner;
+                    changed = true;
+                }
+            }
+        });
+        changed
+    }
+
+    /// Ticket W27-05: the pinned items as chips in the chosen corner of
+    /// the picture. Read-only, drawn over the frame, never into it.
+    fn draw_game_info_chips(&self, ui: &egui::Ui, rect: egui::Rect) {
+        let all = crate::game_info::items(&self.profile_items, &self.item_values);
+        let chips = crate::game_info::chips(&all, &self.current_game_settings.pinned_items);
+        if chips.is_empty() {
+            return;
+        }
+        use crate::game_settings::InfoCorner;
+        let (align, pos) = match self.current_game_settings.info_corner {
+            InfoCorner::TopLeft => (
+                egui::Align2::LEFT_TOP,
+                rect.left_top() + egui::vec2(8.0, 8.0),
+            ),
+            InfoCorner::TopRight => (
+                egui::Align2::RIGHT_TOP,
+                rect.right_top() + egui::vec2(-8.0, 8.0),
+            ),
+            InfoCorner::BottomLeft => (
+                egui::Align2::LEFT_BOTTOM,
+                rect.left_bottom() + egui::vec2(8.0, -8.0),
+            ),
+            InfoCorner::BottomRight => (
+                egui::Align2::RIGHT_BOTTOM,
+                rect.right_bottom() + egui::vec2(-8.0, -8.0),
+            ),
+        };
+        egui::Area::new(egui::Id::new("game_info_chips"))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .pivot(align)
+            .fixed_pos(pos)
+            .show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    for chip in &chips {
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgba_unmultiplied(10, 12, 16, 210))
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                egui::Color32::from_rgb(0x39, 0x40, 0x4C),
+                            ))
+                            .corner_radius(egui::CornerRadius::same(255))
+                            .inner_margin(egui::Margin::symmetric(9, 3))
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.x = 5.0;
+                                ui.label(
+                                    egui::RichText::new(chip.name.to_uppercase())
+                                        .font(egui::FontId::monospace(10.0))
+                                        .color(egui::Color32::from_rgb(0xA6, 0xAF, 0xBE)),
+                                );
+                                match chip.bar {
+                                    Some((v, max)) if max > 0 && max <= 40 => {
+                                        let (r, painter) = ui.allocate_painter(
+                                            egui::vec2(max as f32 * 6.0, 10.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        for i in 0..max {
+                                            let x = r.rect.left() + i as f32 * 6.0;
+                                            let cell = egui::Rect::from_min_size(
+                                                egui::pos2(x, r.rect.top()),
+                                                egui::vec2(4.0, 10.0),
+                                            );
+                                            let on = i < v;
+                                            painter.rect_filled(
+                                                cell,
+                                                1.0,
+                                                if on {
+                                                    egui::Color32::from_rgb(0xE5, 0x48, 0x4D)
+                                                } else {
+                                                    egui::Color32::from_rgb(0x3A, 0x22, 0x26)
+                                                },
+                                            );
+                                        }
+                                    }
+                                    _ => {
+                                        ui.label(
+                                            egui::RichText::new(&chip.value)
+                                                .font(crate::theme::numeric(14.0))
+                                                .strong()
+                                                .color(egui::Color32::WHITE),
+                                        );
+                                    }
+                                }
+                            });
+                    }
+                });
+            });
+    }
+
+    /// Ticket W27-05: the chips now shown, as "NAME value" (tests).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn game_info_chips_for_test(&self) -> Vec<String> {
+        let all = crate::game_info::items(&self.profile_items, &self.item_values);
+        crate::game_info::chips(&all, &self.current_game_settings.pinned_items)
+            .into_iter()
+            .map(|c| format!("{} {}", c.name, c.value))
+            .collect()
     }
 
     /// Ticket W27-02: save the camera the finder found into this game's
@@ -11158,6 +11371,7 @@ impl RetroForgeApp {
             palette_ram: Box::new([0u8; 32]),
             wram: Box::new([0u8; 0x0800]),
             camera_search: None,
+            items: Vec::new(),
             prg_ram: Box::new([0u8; 0x2000]),
             sprite_height_px: 8,
             mode7: Some(Box::new(frame)),
@@ -13931,6 +14145,10 @@ impl RetroForgeApp {
                         // an enhancement pretending to be an observer —
                         // the line ARCHITECTURE §2 draws.
                         self.draw_script_overlay(ui, response.rect);
+                        // Ticket W27-05: pinned Game info, over the game.
+                        if !self.show_overlay_menu {
+                            self.draw_game_info_chips(ui, response.rect);
+                        }
                     } else {
                         // Core up, no frame yet: the game's name, not an
                         // empty rectangle — a black screen is exactly what
