@@ -30,3 +30,67 @@ entity_overlay = false
 mode = "side_scroller"
 x = { addr = 0x00FD, type = "u8" }
 y = { addr = 0x00FC, type = "u8" }
+
+[[memory_map]]
+addr = 0x0050
+len = 1
+type = "u8"
+label = "level"
+notes = "Current level 0-7. Watched in play on this dump: 0-255, changed 3 times over 829 frames."
+source = "https://github.com/vermiceli/nes-super-c/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x0053
+len = 1
+type = "u8"
+label = "lives"
+notes = "P1 lives; 0 = last life. Watched in play on this dump: 0-3, changed 9 times over 829 frames."
+source = "https://github.com/vermiceli/nes-super-c/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x0054
+len = 1
+type = "u8"
+label = "lives_p2"
+notes = "P2 lives. Watched in play on this dump: 0, changed 0 times over 829 frames."
+source = "https://github.com/vermiceli/nes-super-c/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x0059
+len = 1
+type = "u8"
+label = "continues"
+notes = "watched in play on this dump: 0-2, changed 2 times over 829 frames"
+source = "https://github.com/vermiceli/nes-super-c/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x00B8
+len = 1
+type = "u8"
+label = "weapon"
+notes = "0 regular,1 M,2 S,3 L,4 F; bit7 rapid fire. Watched in play on this dump: 0, changed 0 times over 829 frames."
+source = "https://github.com/vermiceli/nes-super-c/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x07E3
+len = 3
+type = "bytes"
+label = "score"
+notes = "P1 score BCD, low byte first. Watched in play on this dump: 0-6, changed 3 times over 829 frames."
+source = "https://github.com/vermiceli/nes-super-c/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x054C
+len = 1
+type = "u8"
+label = "player_x_screen"
+notes = "P1 sprite X on screen. Watched in play on this dump: 0-128, changed 13 times over 829 frames."
+source = "https://github.com/vermiceli/nes-super-c/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x0532
+len = 1
+type = "u8"
+label = "player_y_screen"
+notes = "P1 sprite Y on screen. Watched in play on this dump: 0-190, changed 370 times over 829 frames."
+source = "https://github.com/vermiceli/nes-super-c/blob/main/src/ram.asm"

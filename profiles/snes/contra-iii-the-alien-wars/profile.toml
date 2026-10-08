@@ -30,3 +30,19 @@ widescreen = "decoded"
 [camera]
 mode = "side_scroller"
 x = { addr = 0x7E138A, type = "u16" }
+
+[[memory_map]]
+addr = 0x7E020A
+len = 2
+type = "u16"
+label = "player_x"
+notes = "P1 X (BizHawk watch, signed word). Watched in play on this dump: 0-129, changed 824 times over 1236 frames."
+source = "https://tasvideos.org/UserFiles/Info/637936906512950631"
+
+[[memory_map]]
+addr = 0x7E020E
+len = 2
+type = "u16"
+label = "player_y"
+notes = "P1 Y (BizHawk watch, signed word). Watched in play on this dump: 0-205, changed 815 times over 1236 frames."
+source = "https://tasvideos.org/UserFiles/Info/637936906512950631"

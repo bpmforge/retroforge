@@ -29,3 +29,43 @@ entity_overlay = false
 [camera]
 mode = "side_scroller"
 x = { addr = 0x0012, type = "u8" }
+
+[[memory_map]]
+addr = 0x0044
+len = 1
+type = "u8"
+label = "weapon"
+notes = "0 normal, 1 laser, 2 double. Watched in play on this dump: 0, changed 0 times over 2062 frames."
+source = "https://datacrystal.tcrf.net/wiki/Gradius_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x0040
+len = 1
+type = "u8"
+label = "power_up"
+notes = "Speed-up level. Watched in play on this dump: 0, changed 0 times over 2062 frames."
+source = "https://datacrystal.tcrf.net/wiki/Gradius_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x0041
+len = 1
+type = "u8"
+label = "missiles"
+notes = "Missiles enabled flag. Watched in play on this dump: 0, changed 0 times over 2062 frames."
+source = "https://datacrystal.tcrf.net/wiki/Gradius_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x0045
+len = 1
+type = "u8"
+label = "options"
+notes = "Option count; values above 2 glitch. Watched in play on this dump: 0, changed 0 times over 2062 frames."
+source = "https://datacrystal.tcrf.net/wiki/Gradius_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x0046
+len = 1
+type = "u8"
+label = "shield"
+notes = "Shield strength. Watched in play on this dump: 0, changed 0 times over 2062 frames."
+source = "https://datacrystal.tcrf.net/wiki/Gradius_(NES)/RAM_map"

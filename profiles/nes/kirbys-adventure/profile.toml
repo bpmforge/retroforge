@@ -1,0 +1,74 @@
+# Kirby's Adventure — made by RetroForge's profile census (W26-02).
+#
+# This dump's identity comes from hashing it; its RAM addresses are
+# cited from community maps (each row's `source`) and, where the
+# census reached play, watched there (each row's notes say which).
+# No camera: the census did not find one for this game yet.
+
+[meta]
+profile_version = "0.1"
+title = "Kirby's Adventure"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "a6b81fec11c24a33fd763db5c28005e760a1614e70c1bb5ccde0bd4242431000"
+sha1 = "32473799f96406d73aa37d5cf66e0e27f1f339da"
+md5 = "36ffa102acba11b5c57427d8ac5ad98e"
+crc32 = "d7794afc"
+revision = "Kirby's Adventure (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[[memory_map]]
+addr = 0x0593
+len = 3
+type = "bytes"
+label = "score"
+notes = "Score in units of 10 points. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kirby%27s_Adventure/RAM_map"
+
+[[memory_map]]
+addr = 0x0596
+len = 1
+type = "u8"
+label = "health_max"
+notes = "Counts in steps of 8. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kirby%27s_Adventure/RAM_map"
+
+[[memory_map]]
+addr = 0x0597
+len = 1
+type = "u8"
+label = "health"
+notes = "Counts in steps of 8. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kirby%27s_Adventure/RAM_map"
+
+[[memory_map]]
+addr = 0x0599
+len = 1
+type = "u8"
+label = "lives"
+notes = "cited; not yet watched in play"
+source = "https://datacrystal.tcrf.net/wiki/Kirby%27s_Adventure/RAM_map"
+
+[[memory_map]]
+addr = 0x05E3
+len = 1
+type = "u8"
+label = "power_up"
+notes = "Current copy ability. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kirby%27s_Adventure/RAM_map"
+
+[[memory_map]]
+addr = 0x0528
+len = 1
+type = "u8"
+label = "world"
+notes = "Current level 0-6 (8/9 = cleared). Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Kirby%27s_Adventure/RAM_map"

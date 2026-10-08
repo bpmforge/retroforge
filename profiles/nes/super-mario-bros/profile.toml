@@ -127,3 +127,27 @@ type = "u8"
 label = "player_y_screen"
 notes = "Player y position on screen; verified 0xB0 once gameplay begins."
 source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map"
+
+[[memory_map]]
+addr = 0x0756
+len = 1
+type = "u8"
+label = "power_up"
+notes = "0 small, 1 big, 2+ fiery. Watched in play on this dump: 0, changed 0 times over 354 frames."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map"
+
+[[memory_map]]
+addr = 0x07DD
+len = 6
+type = "bytes"
+label = "score"
+notes = "BCD, one digit per byte. Watched in play on this dump: 0, changed 0 times over 354 frames."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map"
+
+[[memory_map]]
+addr = 0x006D
+len = 1
+type = "u8"
+label = "player_x_page"
+notes = "Horizontal page in level. Watched in play on this dump: 0-2, changed 2 times over 354 frames."
+source = "https://gist.github.com/1wErt3r/4048722"

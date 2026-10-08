@@ -31,3 +31,67 @@ widescreen = "decoded"
 mode = "side_scroller"
 x = { addr = 0x7E004A, type = "u16" }
 y = { addr = 0x7E004C, type = "u16" }
+
+[[memory_map]]
+addr = 0x7FFFAA
+len = 2
+type = "u16"
+label = "lives"
+notes = "Simba lives. Watched in play on this dump: 2-3, changed 1 times over 2060 frames."
+source = "https://datacrystal.tcrf.net/wiki/The_Lion_King_(SNES)/RAM_map"
+
+[[memory_map]]
+addr = 0x7E2004
+len = 2
+type = "u16"
+label = "health"
+notes = "Simba health. Watched in play on this dump: 4, changed 0 times over 2060 frames."
+source = "https://datacrystal.tcrf.net/wiki/The_Lion_King_(SNES)/RAM_map"
+
+[[memory_map]]
+addr = 0x7FFFAC
+len = 2
+type = "u16"
+label = "health_max"
+notes = "Simba max health. Watched in play on this dump: 4, changed 0 times over 2060 frames."
+source = "https://datacrystal.tcrf.net/wiki/The_Lion_King_(SNES)/RAM_map"
+
+[[memory_map]]
+addr = 0x7FFFA8
+len = 2
+type = "u16"
+label = "continues"
+notes = "Continues. Watched in play on this dump: 1-3, changed 1 times over 2060 frames."
+source = "https://datacrystal.tcrf.net/wiki/The_Lion_King_(SNES)/RAM_map"
+
+[[memory_map]]
+addr = 0x7FFF9E
+len = 2
+type = "u16"
+label = "level"
+notes = "Current level. Watched in play on this dump: 0-14, changed 1 times over 2060 frames."
+source = "https://datacrystal.tcrf.net/wiki/The_Lion_King_(SNES)/RAM_map"
+
+[[memory_map]]
+addr = 0x7EB21B
+len = 2
+type = "u16"
+label = "player_x"
+notes = "Simba X. Watched in play on this dump: 16-1237, changed 317 times over 2060 frames."
+source = "https://datacrystal.tcrf.net/wiki/The_Lion_King_(SNES)/RAM_map"
+
+[[memory_map]]
+addr = 0x7EB21D
+len = 2
+type = "u16"
+label = "player_y"
+notes = "Simba Y. Watched in play on this dump: 0-1261, changed 1357 times over 2060 frames."
+source = "https://datacrystal.tcrf.net/wiki/The_Lion_King_(SNES)/RAM_map"
+
+[[memory_map]]
+addr = 0x7E2002
+len = 2
+type = "u16"
+label = "roar"
+notes = "Simba roar meter. Watched in play on this dump: 0-17, changed 183 times over 2060 frames."
+source = "https://datacrystal.tcrf.net/wiki/The_Lion_King_(SNES)/RAM_map"

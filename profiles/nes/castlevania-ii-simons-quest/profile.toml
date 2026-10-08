@@ -29,3 +29,99 @@ entity_overlay = false
 [camera]
 mode = "side_scroller"
 x = { addr = 0x0074, type = "u8" }
+
+[[memory_map]]
+addr = 0x0031
+len = 1
+type = "u8"
+label = "lives"
+notes = "Remaining lives. Watched in play on this dump: 0-3, changed 1 times over 780 frames."
+source = "https://github.com/FoxCunning/Castlevania2/blob/main/globals.inc"
+
+[[memory_map]]
+addr = 0x0080
+len = 1
+type = "u8"
+label = "health"
+notes = "Simon current HP. Watched in play on this dump: 0-48, changed 1 times over 780 frames."
+source = "https://github.com/FoxCunning/Castlevania2/blob/main/globals.inc"
+
+[[memory_map]]
+addr = 0x0081
+len = 1
+type = "u8"
+label = "health_max"
+notes = "Simon max HP. Watched in play on this dump: 0-48, changed 1 times over 780 frames."
+source = "https://github.com/FoxCunning/Castlevania2/blob/main/globals.inc"
+
+[[memory_map]]
+addr = 0x0048
+len = 2
+type = "bytes"
+label = "hearts"
+notes = "BCD; 0048 holds low two digits, 0049 high two digits. Watched in play on this dump: 0-80, changed 1 times over 780 frames."
+source = "https://github.com/FoxCunning/Castlevania2/blob/main/globals.inc"
+
+[[memory_map]]
+addr = 0x008B
+len = 1
+type = "u8"
+label = "level"
+notes = "Current level id. Watched in play on this dump: 0, changed 0 times over 780 frames."
+source = "https://github.com/FoxCunning/Castlevania2/blob/main/globals.inc"
+
+[[memory_map]]
+addr = 0x0051
+len = 1
+type = "u8"
+label = "room"
+notes = "Sub-room number. Watched in play on this dump: 0, changed 0 times over 780 frames."
+source = "https://github.com/FoxCunning/Castlevania2/blob/main/globals.inc"
+
+[[memory_map]]
+addr = 0x004C
+len = 1
+type = "u8"
+label = "laurels"
+notes = "Laurels in inventory. Watched in play on this dump: 0, changed 0 times over 780 frames."
+source = "https://github.com/FoxCunning/Castlevania2/blob/main/globals.inc"
+
+[[memory_map]]
+addr = 0x004D
+len = 1
+type = "u8"
+label = "garlic"
+notes = "Garlic in inventory. Watched in play on this dump: 0, changed 0 times over 780 frames."
+source = "https://github.com/FoxCunning/Castlevania2/blob/main/globals.inc"
+
+[[memory_map]]
+addr = 0x0434
+len = 1
+type = "u8"
+label = "power_up"
+notes = "Whip level. Watched in play on this dump: 0, changed 0 times over 780 frames."
+source = "https://github.com/FoxCunning/Castlevania2/blob/main/globals.inc"
+
+[[memory_map]]
+addr = 0x0030
+len = 1
+type = "u8"
+label = "area"
+notes = "Region: 0 town, 1 mansion, 2 woods, 3 graveyard, 4 mountains, 5 ruins. Watched in play on this dump: 0, changed 0 times over 780 frames."
+source = "https://datacrystal.tcrf.net/wiki/Castlevania_II:_Simon%27s_Quest/RAM_map"
+
+[[memory_map]]
+addr = 0x0090
+len = 1
+type = "u8"
+label = "weapon"
+notes = "Equipped sub-weapon; 0 none, 1-7 in menu order. Watched in play on this dump: 0, changed 0 times over 780 frames."
+source = "https://datacrystal.tcrf.net/wiki/Castlevania_II:_Simon%27s_Quest/RAM_map"
+
+[[memory_map]]
+addr = 0x0053
+len = 2
+type = "bytes"
+label = "player_x"
+notes = "Simon X position in room, 2 bytes (byte order not stated). Watched in play on this dump: 0-768, changed 753 times over 780 frames."
+source = "https://datacrystal.tcrf.net/wiki/Castlevania_II:_Simon%27s_Quest/RAM_map"

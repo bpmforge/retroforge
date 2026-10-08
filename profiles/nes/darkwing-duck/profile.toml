@@ -29,3 +29,11 @@ entity_overlay = false
 [camera]
 mode = "side_scroller"
 x = { addr = 0x00FC, type = "u16" }
+
+[[memory_map]]
+addr = 0x00EE
+len = 1
+type = "u8"
+label = "boss_health"
+notes = "Named boss HP in page Lua script. Watched in play on this dump: 0, changed 0 times over 599 frames."
+source = "https://tasvideos.org/GameResources/NES/DarkwingDuck"

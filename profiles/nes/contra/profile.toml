@@ -29,3 +29,67 @@ entity_overlay = false
 [camera]
 mode = "side_scroller"
 x = { addr = 0x00FD, type = "u8" }
+
+[[memory_map]]
+addr = 0x0032
+len = 1
+type = "u8"
+label = "lives"
+notes = "P1; 0 means last life. Watched in play on this dump: 0-2, changed 3 times over 247 frames."
+source = "https://github.com/vermiceli/nes-contra-us/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x0033
+len = 1
+type = "u8"
+label = "lives_p2"
+notes = "P2; 0 means last life. Watched in play on this dump: 0, changed 0 times over 247 frames."
+source = "https://github.com/vermiceli/nes-contra-us/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x0030
+len = 1
+type = "u8"
+label = "stage"
+notes = "0-based level index (0-7); 9 = game over sequence. Watched in play on this dump: 0, changed 0 times over 247 frames."
+source = "https://github.com/vermiceli/nes-contra-us/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x003A
+len = 1
+type = "u8"
+label = "continues"
+notes = "Continues remaining. Watched in play on this dump: 0-3, changed 2 times over 247 frames."
+source = "https://github.com/vermiceli/nes-contra-us/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x00AA
+len = 1
+type = "u8"
+label = "weapon"
+notes = "P1 weapon in low nibble (0 regular,1 M,2 F,3 S,4 L); bit 4 rapid fire. Watched in play on this dump: 0, changed 0 times over 247 frames."
+source = "https://github.com/vermiceli/nes-contra-us/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x0334
+len = 1
+type = "u8"
+label = "player_x_screen"
+notes = "P1 sprite X on screen (first entry of player sprite array). Watched in play on this dump: 0-128, changed 5 times over 247 frames."
+source = "https://github.com/vermiceli/nes-contra-us/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x031A
+len = 1
+type = "u8"
+label = "player_y_screen"
+notes = "P1 sprite Y on screen, 0 at top. Watched in play on this dump: 0-162, changed 133 times over 247 frames."
+source = "https://github.com/vermiceli/nes-contra-us/blob/main/src/ram.asm"
+
+[[memory_map]]
+addr = 0x07E2
+len = 2
+type = "u16"
+label = "score"
+notes = "P1 score, low byte then high byte. Watched in play on this dump: 0, changed 0 times over 247 frames."
+source = "https://github.com/vermiceli/nes-contra-us/blob/main/src/ram.asm"

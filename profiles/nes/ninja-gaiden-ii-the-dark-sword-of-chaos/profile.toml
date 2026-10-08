@@ -1,0 +1,114 @@
+# Ninja Gaiden II - The Dark Sword of Chaos — made by RetroForge's profile census (W26-02).
+#
+# This dump's identity comes from hashing it; its RAM addresses are
+# cited from community maps (each row's `source`) and, where the
+# census reached play, watched there (each row's notes say which).
+# No camera: the census did not find one for this game yet.
+
+[meta]
+profile_version = "0.1"
+title = "Ninja Gaiden II - The Dark Sword of Chaos"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "21c51dc47a458a7de66544533d56eb9a69de0190d012b1645699e816d2cb5008"
+sha1 = "951a19474a1d9c2984f3d966fbc41c0f0360105e"
+md5 = "2ec92e60e033b4d8aa5caa6b1f7838b5"
+crc32 = "b780521c"
+revision = "Ninja Gaiden II - The Dark Sword of Chaos (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[[memory_map]]
+addr = 0x00A5
+len = 1
+type = "u8"
+label = "lives"
+notes = "cited; not yet watched in play"
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden2"
+
+[[memory_map]]
+addr = 0x0080
+len = 1
+type = "u8"
+label = "health"
+notes = "Ryu HP. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden2"
+
+[[memory_map]]
+addr = 0x060F
+len = 1
+type = "u8"
+label = "boss_health"
+notes = "Read as boss HP by page Lua script during boss fights. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden2"
+
+[[memory_map]]
+addr = 0x007D
+len = 1
+type = "u8"
+label = "weapon"
+notes = "Current sub-weapon. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden2"
+
+[[memory_map]]
+addr = 0x007E
+len = 1
+type = "u8"
+label = "level"
+notes = "Level data index (1-1A = 0, 7-5 = 2F). Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden2"
+
+[[memory_map]]
+addr = 0x00A1
+len = 4
+type = "bytes"
+label = "score"
+notes = "Four score bytes. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden2"
+
+[[memory_map]]
+addr = 0x00AB
+len = 3
+type = "bytes"
+label = "timer"
+notes = "Ones, tens, hundreds digits. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden2"
+
+[[memory_map]]
+addr = 0x00AE
+len = 1
+type = "u8"
+label = "ammo"
+notes = "Current ninpo. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden2"
+
+[[memory_map]]
+addr = 0x00AF
+len = 1
+type = "u8"
+label = "ammo_max"
+notes = "Max ninpo. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden2"
+
+[[memory_map]]
+addr = 0x0550
+len = 1
+type = "u8"
+label = "player_x_screen"
+notes = "Ryu X pixel (slot 0). Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden2"
+
+[[memory_map]]
+addr = 0x0580
+len = 1
+type = "u8"
+label = "player_y_screen"
+notes = "Ryu Y pixel (slot 0). Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden2"

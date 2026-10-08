@@ -29,3 +29,91 @@ entity_overlay = false
 [camera]
 mode = "side_scroller"
 x = { addr = 0x0051, type = "u16" }
+
+[[memory_map]]
+addr = 0x0060
+len = 2
+type = "u16"
+label = "score"
+notes = "Little-endian; display adds static trailing 00. Watched in play on this dump: 0, changed 0 times over 823 frames."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden"
+
+[[memory_map]]
+addr = 0x0063
+len = 1
+type = "u8"
+label = "timer"
+notes = "Level timer; ticks when fraction at 0062 wraps. Watched in play on this dump: 0-150, changed 14 times over 823 frames."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden"
+
+[[memory_map]]
+addr = 0x0064
+len = 1
+type = "u8"
+label = "ammo"
+notes = "Ninpo points spent on special attacks. Watched in play on this dump: 0, changed 0 times over 823 frames."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden"
+
+[[memory_map]]
+addr = 0x0065
+len = 1
+type = "u8"
+label = "health"
+notes = "Ryu hit points. Watched in play on this dump: 0-16, changed 7 times over 823 frames."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden"
+
+[[memory_map]]
+addr = 0x0066
+len = 1
+type = "u8"
+label = "boss_health"
+notes = "Enemy HP as displayed (real HP kept at 0490-0497). Watched in play on this dump: 0-16, changed 1 times over 823 frames."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden"
+
+[[memory_map]]
+addr = 0x0076
+len = 1
+type = "u8"
+label = "lives"
+notes = "Ryu lives. Watched in play on this dump: 0-2, changed 1 times over 823 frames."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden"
+
+[[memory_map]]
+addr = 0x0086
+len = 1
+type = "u8"
+label = "player_x_screen"
+notes = "Ryu X on screen, whole pixels (fraction at 0085). Watched in play on this dump: 0-128, changed 1 times over 823 frames."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden"
+
+[[memory_map]]
+addr = 0x008A
+len = 1
+type = "u8"
+label = "player_y_screen"
+notes = "Ryu Y on screen. Watched in play on this dump: 0-208, changed 487 times over 823 frames."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden"
+
+[[memory_map]]
+addr = 0x00C9
+len = 1
+type = "u8"
+label = "weapon"
+notes = "Special weapon id; 00 none, 80 fire wheel, 81 star, 82 windmill star, 84 invincible fire wheel, 85 jump-slash. Watched in play on this dump: 0, changed 0 times over 823 frames."
+source = "https://tasvideos.org/GameResources/NES/NinjaGaiden"
+
+[[memory_map]]
+addr = 0x006D
+len = 1
+type = "u8"
+label = "stage"
+notes = "Current stage. Watched in play on this dump: 0, changed 0 times over 823 frames."
+source = "https://datacrystal.tcrf.net/wiki/Ninja_Gaiden_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x006E
+len = 1
+type = "u8"
+label = "room"
+notes = "Room within stage. Watched in play on this dump: 0, changed 0 times over 823 frames."
+source = "https://datacrystal.tcrf.net/wiki/Ninja_Gaiden_(NES)/RAM_map"

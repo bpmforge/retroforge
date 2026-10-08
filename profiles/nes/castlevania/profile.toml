@@ -29,3 +29,91 @@ entity_overlay = false
 [camera]
 mode = "side_scroller"
 x = { addr = 0x00FD, type = "u8" }
+
+[[memory_map]]
+addr = 0x002A
+len = 1
+type = "u8"
+label = "lives"
+notes = "1 means last life; HUD caps display at 99. Watched in play on this dump: 0-4, changed 1 times over 4662 frames."
+source = "https://datacrystal.tcrf.net/wiki/Castlevania_(NES,_Famicom_Disk_System)/RAM_map"
+
+[[memory_map]]
+addr = 0x0045
+len = 1
+type = "u8"
+label = "health"
+notes = "Actual health; 0044 is the HUD copy. Watched in play on this dump: 0-64, changed 8 times over 4662 frames."
+source = "https://datacrystal.tcrf.net/wiki/Castlevania_(NES,_Famicom_Disk_System)/RAM_map"
+
+[[memory_map]]
+addr = 0x0071
+len = 1
+type = "u8"
+label = "hearts"
+notes = "Subweapon ammo (hearts). Watched in play on this dump: 0-5, changed 1 times over 4662 frames."
+source = "https://datacrystal.tcrf.net/wiki/Castlevania_(NES,_Famicom_Disk_System)/RAM_map"
+
+[[memory_map]]
+addr = 0x015B
+len = 1
+type = "u8"
+label = "weapon"
+notes = "Subweapon ID: 08 dagger, 09 boomerang, 0B holy water, 0D axe, 0F stopwatch. Watched in play on this dump: 0, changed 0 times over 4662 frames."
+source = "https://datacrystal.tcrf.net/wiki/Castlevania_(NES,_Famicom_Disk_System)/RAM_map"
+
+[[memory_map]]
+addr = 0x0070
+len = 1
+type = "u8"
+label = "power_up"
+notes = "Whip level. Watched in play on this dump: 0, changed 0 times over 4662 frames."
+source = "https://datacrystal.tcrf.net/wiki/Castlevania_(NES,_Famicom_Disk_System)/RAM_map"
+
+[[memory_map]]
+addr = 0x0028
+len = 1
+type = "u8"
+label = "stage"
+notes = "Current stage. Watched in play on this dump: 0-1, changed 1 times over 4662 frames."
+source = "https://datacrystal.tcrf.net/wiki/Castlevania_(NES,_Famicom_Disk_System)/RAM_map"
+
+[[memory_map]]
+addr = 0x0042
+len = 2
+type = "bytes"
+label = "timer"
+notes = "2-byte stage timer; encoding not documented. Watched in play on this dump: 0-768, changed 71 times over 4662 frames."
+source = "https://datacrystal.tcrf.net/wiki/Castlevania_(NES,_Famicom_Disk_System)/RAM_map"
+
+[[memory_map]]
+addr = 0x07FC
+len = 3
+type = "bytes"
+label = "score"
+notes = "3-byte score; 07FE also used for 1UP checks. Watched in play on this dump: 0, changed 0 times over 4662 frames."
+source = "https://datacrystal.tcrf.net/wiki/Castlevania_(NES,_Famicom_Disk_System)/RAM_map"
+
+[[memory_map]]
+addr = 0x01A9
+len = 1
+type = "u8"
+label = "boss_health"
+notes = "Actual boss health; 01AA is the HUD copy. Watched in play on this dump: 0-64, changed 1 times over 4662 frames."
+source = "https://datacrystal.tcrf.net/wiki/Castlevania_(NES,_Famicom_Disk_System)/RAM_map"
+
+[[memory_map]]
+addr = 0x0040
+len = 2
+type = "bytes"
+label = "player_x"
+notes = "X position in level (2 bytes; DC calls it a collision copy). Watched in play on this dump: 0-1519, changed 2125 times over 4662 frames."
+source = "https://tasvideos.org/GameResources/NES/Castlevania"
+
+[[memory_map]]
+addr = 0x003F
+len = 1
+type = "u8"
+label = "player_y_screen"
+notes = "Y on screen; larger is lower. Watched in play on this dump: 0-196, changed 2576 times over 4662 frames."
+source = "https://tasvideos.org/GameResources/NES/Castlevania"

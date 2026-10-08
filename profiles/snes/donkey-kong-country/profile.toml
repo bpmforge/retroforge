@@ -1,0 +1,66 @@
+# Donkey Kong Country — made by RetroForge's profile census (W26-02).
+#
+# This dump's identity comes from hashing it; its RAM addresses are
+# cited from community maps (each row's `source`) and, where the
+# census reached play, watched there (each row's notes say which).
+# No camera: the census did not find one for this game yet.
+
+[meta]
+profile_version = "0.1"
+title = "Donkey Kong Country"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "fa8cacf5bbfc39ee6bbaa557adf89133d60d42f6cf9e1db30d5a36a469f74d15"
+sha1 = "0fcee45d9af5d2f62995ed4b04d22146b906c86b"
+md5 = "30c5f292ff4cbbfcc00fd8fa96c2de3b"
+crc32 = "c946dca0"
+revision = "Donkey Kong Country (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[[memory_map]]
+addr = 0x7E003E
+len = 1
+type = "u8"
+label = "level"
+notes = "Current level id. Watched in play on this dump: 0, changed 0 times over 1179 frames."
+source = "https://datacrystal.tcrf.net/wiki/Donkey_Kong_Country_(SNES)/RAM_map"
+
+[[memory_map]]
+addr = 0x7E0575
+len = 2
+type = "u16"
+label = "lives"
+notes = "Current life count. Watched in play on this dump: 0, changed 0 times over 1179 frames."
+source = "https://github.com/Yoshifanatic1/Donkey-Kong-Country-1-Disassembly/blob/main/DKC1/RAM_Map_DKC1.asm"
+
+[[memory_map]]
+addr = 0x7E057B
+len = 2
+type = "u16"
+label = "bananas"
+notes = "Current banana count. Watched in play on this dump: 0, changed 0 times over 1179 frames."
+source = "https://github.com/Yoshifanatic1/Donkey-Kong-Country-1-Disassembly/blob/main/DKC1/RAM_Map_DKC1.asm"
+
+[[memory_map]]
+addr = 0x7E057F
+len = 2
+type = "u16"
+label = "kong_letters"
+notes = "Collected K-O-N-G letters. Watched in play on this dump: 0, changed 0 times over 1179 frames."
+source = "https://github.com/Yoshifanatic1/Donkey-Kong-Country-1-Disassembly/blob/main/DKC1/RAM_Map_DKC1.asm"
+
+[[memory_map]]
+addr = 0x7E056F
+len = 2
+type = "u16"
+label = "character"
+notes = "Current Kong. Watched in play on this dump: 0, changed 0 times over 1179 frames."
+source = "https://github.com/Yoshifanatic1/Donkey-Kong-Country-1-Disassembly/blob/main/DKC1/RAM_Map_DKC1.asm"

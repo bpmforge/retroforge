@@ -22,7 +22,7 @@
 //!   cargo test --release -p rf-harness --test profile_census -- --ignored --nocapture
 //! ```
 //!
-//! `list.tsv` lines are `slug<TAB>archive path[<TAB>recipe[<TAB>direction]]`. Each game runs in a child
+//! `list.tsv` lines are `slug<TAB>archive path[<TAB>recipe[<TAB>direction[<TAB>watches]]]`. Each game runs in a child
 //! process under a wall-clock cap. No ROM bytes and no paths are written
 //! out — only slugs, hashes and addresses (law 5).
 
@@ -44,6 +44,67 @@ const DIR_VAR: &str = "RF_PCENSUS_DIR";
 /// A directory to drop a frame into every five seconds, to see where a
 /// run got stuck.
 const SHOTS_VAR: &str = "RF_PCENSUS_SHOTS";
+/// Cited addresses to watch while the game scrolls, `addr:len,...` (hex
+/// addresses as a profile writes them).
+const WATCH_VAR: &str = "RF_PCENSUS_WATCH";
+
+/// One watched address: what it held on the frames the game was moving.
+struct Watch {
+    addr: u32,
+    len: u32,
+    min: u32,
+    max: u32,
+    changes: u32,
+    seen: u32,
+    last: Option<u32>,
+    distinct: std::collections::BTreeSet<u32>,
+}
+
+impl Watch {
+    fn new(addr: u32, len: u32) -> Self {
+        Self {
+            addr,
+            len: len.clamp(1, 4),
+            min: u32::MAX,
+            max: 0,
+            changes: 0,
+            seen: 0,
+            last: None,
+            distinct: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Little-endian value of `len` bytes (at most four).
+    fn read(&self, peek: impl Fn(u32) -> u8) -> u32 {
+        (0..self.len).fold(0, |v, i| v | u32::from(peek(self.addr + i)) << (8 * i))
+    }
+
+    fn see(&mut self, v: u32) {
+        self.seen += 1;
+        self.min = self.min.min(v);
+        self.max = self.max.max(v);
+        if self.last.is_some_and(|l| l != v) {
+            self.changes += 1;
+        }
+        self.last = Some(v);
+        if self.distinct.len() < 256 {
+            self.distinct.insert(v);
+        }
+    }
+
+    /// `ADDR:seen:min:max:distinct:changes`.
+    fn cell(&self) -> String {
+        format!(
+            "{:X}:{}:{}:{}:{}:{}",
+            self.addr,
+            self.seen,
+            if self.seen == 0 { 0 } else { self.min },
+            self.max,
+            self.distinct.len(),
+            self.changes
+        )
+    }
+}
 
 /// Logical buttons, in the NES's own bit order (nesdev "Standard
 /// controller"), plus the SNES's extra four.
@@ -353,6 +414,19 @@ fn profile_census_child() {
         .and_then(|v| v.parse().ok())
         .filter(|&n| n > 0)
         .unwrap_or(300);
+    // Cited addresses to watch in play (`addr:len,...`, hex): each gets
+    // its range and how often it changed while the game was scrolling.
+    let mut watches: Vec<Watch> = std::env::var(WATCH_VAR)
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|w| {
+            let (a, l) = w.split_once(':')?;
+            Some(Watch::new(
+                u32::from_str_radix(a, 16).ok()?,
+                l.parse().ok()?,
+            ))
+        })
+        .collect();
     let mut sink = ScrollSink::default();
     // Bounded: exactly FRAMES iterations, each a cycle-budgeted frame (law 8).
     // A longer run for a game with a long opening (`RF_PCENSUS_FRAMES`),
@@ -456,6 +530,22 @@ fn profile_census_child() {
                 ax.moving, ay.moving
             );
         }
+        if armed && ax.moving + ay.moving > moved_before {
+            for w in &mut watches {
+                let v = match &m {
+                    Machine::Nes(c) => w.read(|a| c.peek(a)),
+                    Machine::Snes(c) => {
+                        let wram = &c.system().bus.wram;
+                        w.read(|a| {
+                            wram.get((a.wrapping_sub(0x7E_0000)) as usize)
+                                .copied()
+                                .unwrap_or(0)
+                        })
+                    }
+                };
+                w.see(v);
+            }
+        }
         history.push(ram.clone());
         prev = ram;
     }
@@ -483,6 +573,8 @@ fn profile_census_child() {
         }
         out.push_str(&format!("\t{name}={}/{}", axis.moving, cells.join(",")));
     }
+    let cells: Vec<String> = watches.iter().map(Watch::cell).collect();
+    out.push_str(&format!("\tw={}", cells.join(",")));
     println!("RESULT\t{out}");
 }
 
@@ -508,8 +600,16 @@ fn profile_census() {
         };
         let started = Instant::now();
         let recipe = rest.first().copied().unwrap_or("");
-        let dir = rest.get(1).copied().unwrap_or("R");
-        let row = format!("{slug}\t{}", run_one(&exe, Path::new(archive), recipe, dir));
+        let dir = rest
+            .get(1)
+            .copied()
+            .filter(|d| !d.is_empty())
+            .unwrap_or("R");
+        let watch = rest.get(2).copied().unwrap_or("");
+        let row = format!(
+            "{slug}\t{}",
+            run_one(&exe, Path::new(archive), recipe, dir, watch)
+        );
         println!("{row}  ({:.0}s)", started.elapsed().as_secs_f32());
         if let Some(out) = &out {
             use std::io::Write as _;
@@ -525,7 +625,7 @@ fn profile_census() {
 }
 
 /// One title in a child process; its `RESULT` line, or why there is none.
-fn run_one(exe: &Path, archive: &Path, recipe: &str, dir: &str) -> String {
+fn run_one(exe: &Path, archive: &Path, recipe: &str, dir: &str, watch: &str) -> String {
     let child = Command::new(exe)
         .args([
             "--exact",
@@ -536,6 +636,7 @@ fn run_one(exe: &Path, archive: &Path, recipe: &str, dir: &str) -> String {
         .env(ROM_VAR, archive)
         .env(RECIPE_VAR, recipe)
         .env(DIR_VAR, dir)
+        .env(WATCH_VAR, watch)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn();

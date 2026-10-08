@@ -4387,3 +4387,8 @@ stories, 10 decisions).
   44 new profiles for popular NES/SNES games, each camera verified in play
   against the No-Intro dump; Metroid's camera corrected to `$00FD`. Gate:
   workspace **2574 passing / 0 failed**, docs-gate green.
+- 2026-10-08 — **W26-01/02 closed (items and franchise profiles).** 326 cited
+  item rows (lives, health, positions, score, stage…) across 43 games, 194 of
+  them watched in play on the dump; new profiles for Contra, Super C,
+  Castlevania II/IV (verified cameras) and Zelda I/II, A Link to the Past,
+  SMB2/3, Yoshi's Island, DKC, Kid Icarus and more (identity + items).

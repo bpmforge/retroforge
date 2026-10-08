@@ -1,0 +1,90 @@
+# Goof Troop — made by RetroForge's profile census (W26-02).
+#
+# This dump's identity comes from hashing it; its RAM addresses are
+# cited from community maps (each row's `source`) and, where the
+# census reached play, watched there (each row's notes say which).
+# No camera: the census did not find one for this game yet.
+
+[meta]
+profile_version = "0.1"
+title = "Goof Troop"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "2bb368c47189ce813ad716eef16c01cd47685cb98e2c1cb35fa6f0173c97dd7c"
+sha1 = "b38560d091801db5e833d17393fe1df1398909b6"
+md5 = "bb6a1198e291c8ae58e9581a4296ed4d"
+crc32 = "4aafa462"
+revision = "Goof Troop (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[[memory_map]]
+addr = 0x7E0111
+len = 1
+type = "u8"
+label = "player_x"
+notes = "Goofy X pixel (subpixel at 7E0110). Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/SNES/GoofTroop"
+
+[[memory_map]]
+addr = 0x7E0114
+len = 1
+type = "u8"
+label = "player_y"
+notes = "Goofy Y pixel (subpixel at 7E0113). Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/SNES/GoofTroop"
+
+[[memory_map]]
+addr = 0x7E011D
+len = 1
+type = "u8"
+label = "health"
+notes = "Goofy HP. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/SNES/GoofTroop"
+
+[[memory_map]]
+addr = 0x7E0157
+len = 1
+type = "u8"
+label = "lives"
+notes = "Goofy lives. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/SNES/GoofTroop"
+
+[[memory_map]]
+addr = 0x7E0142
+len = 1
+type = "u8"
+label = "weapon"
+notes = "Item Goofy is holding. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/SNES/GoofTroop"
+
+[[memory_map]]
+addr = 0x7E0067
+len = 1
+type = "u8"
+label = "room"
+notes = "Room id. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/SNES/GoofTroop"
+
+[[memory_map]]
+addr = 0x7E0191
+len = 1
+type = "u8"
+label = "player_x_p2"
+notes = "Max X pixel. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/SNES/GoofTroop"
+
+[[memory_map]]
+addr = 0x7E0194
+len = 1
+type = "u8"
+label = "player_y_p2"
+notes = "Max Y pixel. Cited; not yet watched in play."
+source = "https://tasvideos.org/GameResources/SNES/GoofTroop"

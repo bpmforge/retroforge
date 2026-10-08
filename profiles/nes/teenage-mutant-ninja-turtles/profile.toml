@@ -1,0 +1,114 @@
+# Teenage Mutant Ninja Turtles — made by RetroForge's profile census (W26-02).
+#
+# This dump's identity comes from hashing it; its RAM addresses are
+# cited from community maps (each row's `source`) and, where the
+# census reached play, watched there (each row's notes say which).
+# No camera: the census did not find one for this game yet.
+
+[meta]
+profile_version = "0.1"
+title = "Teenage Mutant Ninja Turtles"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "892468d05a1097769d14e0ed4822267760d85dbfc79d83a0235878109f839dd1"
+sha1 = "b239c2d48e84ca676dee4461d4d6a1f77f34255d"
+md5 = "2dddc2cae0a7fe890235aef72a9a86ae"
+crc32 = "ee921d8e"
+revision = "Teenage Mutant Ninja Turtles (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[[memory_map]]
+addr = 0x0077
+len = 1
+type = "u8"
+label = "health"
+notes = "Leonardo energy (00-80); others at 0078-007A. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Teenage_Mutant_Ninja_Turtles_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x0046
+len = 1
+type = "u8"
+label = "continues"
+notes = "Starts at 3. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Teenage_Mutant_Ninja_Turtles_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x0048
+len = 1
+type = "u8"
+label = "world"
+notes = "World number. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Teenage_Mutant_Ninja_Turtles_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x0073
+len = 1
+type = "u8"
+label = "weapon"
+notes = "Leonardo special weapon: 0 none, 1 stars, 2 triple, 3 boomerang, 4 scroll. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Teenage_Mutant_Ninja_Turtles_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x00A8
+len = 1
+type = "u8"
+label = "ammo"
+notes = "Leonardo special weapon quantity. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Teenage_Mutant_Ninja_Turtles_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x00A7
+len = 1
+type = "u8"
+label = "ropes"
+notes = "Rope count. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Teenage_Mutant_Ninja_Turtles_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x00BF
+len = 1
+type = "u8"
+label = "missiles"
+notes = "Turtle Van missiles. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Teenage_Mutant_Ninja_Turtles_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x00C0
+len = 3
+type = "bytes"
+label = "score"
+notes = "Two decimal digits per byte, most significant first. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Teenage_Mutant_Ninja_Turtles_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x00BA
+len = 2
+type = "bytes"
+label = "timer"
+notes = "Dam timer; byte 0 countdown, byte 1 display. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Teenage_Mutant_Ninja_Turtles_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x0480
+len = 1
+type = "u8"
+label = "player_x_screen"
+notes = "Turtle X. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Teenage_Mutant_Ninja_Turtles_(NES)/RAM_map"
+
+[[memory_map]]
+addr = 0x0460
+len = 1
+type = "u8"
+label = "player_y_screen"
+notes = "Turtle Y. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Teenage_Mutant_Ninja_Turtles_(NES)/RAM_map"

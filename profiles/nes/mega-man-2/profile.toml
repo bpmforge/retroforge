@@ -29,3 +29,123 @@ entity_overlay = false
 [camera]
 mode = "side_scroller"
 x = { addr = 0x001F, type = "u16" }
+
+[[memory_map]]
+addr = 0x06C0
+len = 1
+type = "u8"
+label = "health"
+notes = "Mega Man HP. Watched in play on this dump: 0-28, changed 12 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x06C1
+len = 1
+type = "u8"
+label = "boss_health"
+notes = "Boss HP. Watched in play on this dump: 0, changed 0 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x00A8
+len = 1
+type = "u8"
+label = "lives"
+notes = "Lives remaining. Watched in play on this dump: 2-3, changed 1 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x00A7
+len = 1
+type = "u8"
+label = "energy_tanks"
+notes = "Energy tanks held. Watched in play on this dump: 0, changed 0 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x0460
+len = 1
+type = "u8"
+label = "player_x"
+notes = "Mega Man X location. Watched in play on this dump: 0-255, changed 1672 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x04A0
+len = 1
+type = "u8"
+label = "player_y"
+notes = "Mega Man Y location. Watched in play on this dump: 0-180, changed 1236 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x009A
+len = 1
+type = "u8"
+label = "weapons_unlocked"
+notes = "Bitfield of weapons/stages beaten (01 Atomic Fire ... 80 Crash Bomb). Watched in play on this dump: 0, changed 0 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x009C
+len = 1
+type = "u8"
+label = "ammo_atomic_fire"
+notes = "Atomic Fire energy. Watched in play on this dump: 0-28, changed 1 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x009D
+len = 1
+type = "u8"
+label = "ammo_air_shooter"
+notes = "Air Shooter energy. Watched in play on this dump: 0-28, changed 1 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x009E
+len = 1
+type = "u8"
+label = "ammo_leaf_shield"
+notes = "Leaf Shield energy. Watched in play on this dump: 0-28, changed 1 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x009F
+len = 1
+type = "u8"
+label = "ammo_bubble_lead"
+notes = "Bubble Lead energy. Watched in play on this dump: 0-28, changed 1 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x00A0
+len = 1
+type = "u8"
+label = "ammo_quick_boomerang"
+notes = "Quick Boomerang energy. Watched in play on this dump: 0-28, changed 1 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x00A1
+len = 1
+type = "u8"
+label = "ammo_time_stopper"
+notes = "Time Stopper energy. Watched in play on this dump: 0-28, changed 1 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x00A2
+len = 1
+type = "u8"
+label = "ammo_metal_blade"
+notes = "Metal Blade energy. Watched in play on this dump: 0-28, changed 1 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+[[memory_map]]
+addr = 0x00A3
+len = 1
+type = "u8"
+label = "ammo_crash_bomb"
+notes = "Crash Bomb energy. Watched in play on this dump: 0-28, changed 1 times over 1876 frames."
+source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"

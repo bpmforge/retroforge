@@ -1,0 +1,114 @@
+# Super Mario Bros. 3 — made by RetroForge's profile census (W26-02).
+#
+# This dump's identity comes from hashing it; its RAM addresses are
+# cited from community maps (each row's `source`) and, where the
+# census reached play, watched there (each row's notes say which).
+# No camera: the census did not find one for this game yet.
+
+[meta]
+profile_version = "0.1"
+title = "Super Mario Bros. 3"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "d77d17d34af24871d7ce1160ccd3330555835c8e940b7100e095ac38973d927a"
+sha1 = "a611b90b4833b20a364bf06ee3be3b9093ea4df9"
+md5 = "b76f978ad3076ea67f2b0aca7399c9e9"
+crc32 = "a0b0b742"
+revision = "Super Mario Bros. 3 (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[[memory_map]]
+addr = 0x0736
+len = 1
+type = "u8"
+label = "lives"
+notes = "Mario lives. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
+
+[[memory_map]]
+addr = 0x0737
+len = 1
+type = "u8"
+label = "lives_p2"
+notes = "Luigi lives. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
+
+[[memory_map]]
+addr = 0x0715
+len = 3
+type = "bytes"
+label = "score"
+notes = "Score divided by 10. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
+
+[[memory_map]]
+addr = 0x7DA2
+len = 1
+type = "u8"
+label = "coins"
+notes = "Mario coins. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
+
+[[memory_map]]
+addr = 0x00ED
+len = 1
+type = "u8"
+label = "power_up"
+notes = "Form: 0 small,1 super,2 fire,3 raccoon,4 frog,5 tanooki,6 hammer. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
+
+[[memory_map]]
+addr = 0x0727
+len = 1
+type = "u8"
+label = "world"
+notes = "World number minus one. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
+
+[[memory_map]]
+addr = 0x05EE
+len = 3
+type = "bytes"
+label = "timer"
+notes = "Time remaining. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
+
+[[memory_map]]
+addr = 0x0090
+len = 1
+type = "u8"
+label = "player_x"
+notes = "Low byte of level X; high part at 0075. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
+
+[[memory_map]]
+addr = 0x00A2
+len = 1
+type = "u8"
+label = "player_y"
+notes = "Level Y. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map"
+
+[[memory_map]]
+addr = 0x00AB
+len = 1
+type = "u8"
+label = "player_x_screen"
+notes = "On-screen X. Cited; not yet watched in play."
+source = "https://tasvideos.org/UserFiles/Info/637936906462581196"
+
+[[memory_map]]
+addr = 0x7CFA
+len = 1
+type = "u8"
+label = "boss_health"
+notes = "cited; not yet watched in play"
+source = "https://tasvideos.org/UserFiles/Info/637936906462581196"

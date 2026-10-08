@@ -1,0 +1,138 @@
+# Zelda II - The Adventure of Link — made by RetroForge's profile census (W26-02).
+#
+# This dump's identity comes from hashing it; its RAM addresses are
+# cited from community maps (each row's `source`) and, where the
+# census reached play, watched there (each row's notes say which).
+# No camera: the census did not find one for this game yet.
+
+[meta]
+profile_version = "0.1"
+title = "Zelda II - The Adventure of Link"
+console = "nes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "4cfc55e1521e58039d502f2a5ff16c233b84c0a05b1048185c75c971f3814c16"
+sha1 = "11333adb723a5975e0ecca3aee8f4747aa8d2d26"
+md5 = "88c0493fb1146834836c0ff4f3e06e45"
+crc32 = "ba322865"
+revision = "Zelda II - The Adventure of Link (USA), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[[memory_map]]
+addr = 0x0700
+len = 1
+type = "u8"
+label = "lives"
+notes = "Current lives. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x0774
+len = 1
+type = "u8"
+label = "health"
+notes = "Life remaining in meter. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x0784
+len = 1
+type = "u8"
+label = "health_max"
+notes = "Heart container count. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x0773
+len = 1
+type = "u8"
+label = "magic"
+notes = "Magic remaining in meter. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x0783
+len = 1
+type = "u8"
+label = "magic_max"
+notes = "Magic container count. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x0775
+len = 2
+type = "bytes"
+label = "experience"
+notes = "Big-endian: 0775 MSB, 0776 LSB. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x0793
+len = 1
+type = "u8"
+label = "keys"
+notes = "Keys held. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x0794
+len = 1
+type = "u8"
+label = "crystals"
+notes = "Crystals left to place. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x0777
+len = 1
+type = "u8"
+label = "power_up"
+notes = "Attack level. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x004D
+len = 1
+type = "u8"
+label = "player_x"
+notes = "Side-scroll X low byte; map page at 003B. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x0029
+len = 1
+type = "u8"
+label = "player_y"
+notes = "Side-scroll Y position. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x0561
+len = 1
+type = "u8"
+label = "room"
+notes = "Current scene/map index. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x0748
+len = 1
+type = "u8"
+label = "area"
+notes = "Area location index. Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
+
+[[memory_map]]
+addr = 0x0707
+len = 1
+type = "u8"
+label = "world"
+notes = "World group (0 overworld, 1-2 towns, 3-4 palaces, 5 great palace). Cited; not yet watched in play."
+source = "https://datacrystal.tcrf.net/wiki/Zelda_II:_The_Adventure_of_Link/RAM_map"
