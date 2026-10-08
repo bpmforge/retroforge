@@ -168,6 +168,22 @@ impl LevelSession {
     }
 }
 
+/// Ticket W24-01: where the shipped profiles are — a `profiles` folder
+/// holding `nes` or `snes`, beside `exe_dir` or in any folder above it,
+/// else in `cwd`, else the bare relative path (which then finds nothing,
+/// as before).
+#[must_use]
+pub fn locate_profiles_root(exe_dir: Option<&Path>, cwd: Option<&Path>) -> PathBuf {
+    let is_root = |p: &Path| p.join("nes").is_dir() || p.join("snes").is_dir();
+    exe_dir
+        .into_iter()
+        .flat_map(Path::ancestors)
+        .chain(cwd)
+        .map(|d| d.join("profiles"))
+        .find(|p| is_root(p))
+        .unwrap_or_else(|| PathBuf::from("profiles"))
+}
+
 /// Walk `profiles_root` for a `profile.toml` whose identity matches.
 ///
 /// `pub` since ticket W5-06: the author workspace needs the PATH of the
@@ -328,5 +344,28 @@ mod chip_tests {
             profile_chips(&load("nes/metroid/profile.toml")).is_empty(),
             "a profile with no decode table promises nothing"
         );
+    }
+
+    /// Ticket W24-01: a binary in `target/release` finds the repo's
+    /// profiles two folders up; a working directory still works; nothing
+    /// found falls back to the relative path.
+    #[test]
+    fn profiles_root_is_found_above_the_executable() {
+        let tmp = std::env::temp_dir().join(format!("rf_profroot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("profiles/snes")).unwrap();
+        std::fs::create_dir_all(tmp.join("target/release")).unwrap();
+        let exe = tmp.join("target/release");
+        assert_eq!(locate_profiles_root(Some(&exe), None), tmp.join("profiles"));
+        assert_eq!(locate_profiles_root(None, Some(&tmp)), tmp.join("profiles"));
+        let elsewhere =
+            std::env::temp_dir().join(format!("rf_profroot_none_{}", std::process::id()));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        assert_eq!(
+            locate_profiles_root(Some(&elsewhere), Some(&elsewhere)),
+            PathBuf::from("profiles")
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&elsewhere);
     }
 }

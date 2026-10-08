@@ -9765,6 +9765,118 @@
    "CLOSED 2026-10-08. capture_tour.rs photographs Settings > Controls for NES keyboard, SNES keyboard and SNES controller (30-32). Fixes found by the photos: keys shown as arrows and short names (controls_panel::key_label; saved names unchanged), D-pad labels placed outward and the shoulder labels beside their bars so none overlap. Gate: workspace 2568 passing. UNVERIFIED (by eye: Brad).",
    "FILED 2026-10-08 from Brad: \"what about settings for controller vs keyboard. Keyboard should have defaults set and I can navigate\". Audit: the SNES receives NO controller input in live play (Machine::set_controller is NES-only; rf-snes run_frame ignores input), the live key/pad maps know only the 8 NES buttons, the keyboard defaults are shown nowhere a player looks, and menu hints are pad-only."
   ]
+ },
+ {
+  "id": "W24-01",
+  "title": "Profiles are found wherever the app is started from",
+  "phase": 24,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [],
+  "acceptance": [
+   "the profiles folder is found next to the executable or in any folder above it (a cargo build in target/ finds the repo's profiles) before falling back to the working directory",
+   "a pure tested function decides the root",
+   "Brad's Super Mario World, Super Metroid and Metroid dumps match when the app starts from any directory"
+  ],
+  "points": 1,
+  "status": "done",
+  "stories": [],
+  "notes": [
+   "CLOSED 2026-10-08. level_view::locate_profiles_root: env RETROFORGE_PROFILES_DIR still first; then a profiles folder holding nes/ or snes/ beside the executable or in any folder above it (target/release finds the repo's), then the working directory, then the old relative path. Verified with a probe that Brad's SMW, Super Metroid and Metroid dumps match the shipped profiles once found. Test: level_view profiles_root_is_found_above_the_executable. Gate: workspace 2569 passing.",
+   "FILED 2026-10-08 from Brad's \"No profile matches this copy of the game\": his SMW (sha256 0838e531…), Super Metroid and Metroid dumps DO match the shipped profiles, but profiles_root() fell back to a relative \"profiles\" folder, so an app started from any other directory matched nothing."
+  ]
+ },
+ {
+  "id": "W24-02",
+  "title": "Your own profiles folder and Make a profile for this game",
+  "phase": 24,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W24-01"
+  ],
+  "acceptance": [
+   "profiles in <config>/retroforge/profiles are searched before the shipped ones",
+   "the amber profile strip offers Make a profile for this game, which writes a valid profile stamped with this dump's hashes, title and console into that folder and matches it at once",
+   "test: make a profile for a one-byte-changed fixture and see Profile found"
+  ],
+  "points": 3,
+  "status": "in_progress",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-08 from Brad (\"ok so how do we profile the games?\" then \"go\"); design https://claude.ai/artifact/6a89VhM41WY7Ryqaw5pt7k."
+  ]
+ },
+ {
+  "id": "W24-03",
+  "title": "Guided address finder",
+  "phase": 24,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W24-02"
+  ],
+  "acceptance": [
+   "a finder snapshots the game's work RAM and narrows candidates by went up / went down / didn't change, with live values",
+   "works for NES (2 KB) and SNES (128 KB) work RAM",
+   "pure tested narrowing; an app test finds a known RAM counter in a fixture"
+  ],
+  "points": 5,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-08 from Brad (\"ok so how do we profile the games?\" then \"go\"); design https://claude.ai/artifact/6a89VhM41WY7Ryqaw5pt7k."
+  ]
+ },
+ {
+  "id": "W24-04",
+  "title": "Profile builder steps with live preview",
+  "phase": 24,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W24-03"
+  ],
+  "acceptance": [
+   "steps Camera left/right, Camera up/down, Player position, Lives, each writing the profile; Use this saves the address",
+   "after the camera is set the game re-matches and widescreen/map can be tried live",
+   "test drives the camera step to a saved profile with [camera] x"
+  ],
+  "points": 3,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-08 from Brad (\"ok so how do we profile the games?\" then \"go\"); design https://claude.ai/artifact/6a89VhM41WY7Ryqaw5pt7k."
+  ]
+ },
+ {
+  "id": "W24-05",
+  "title": "Profile builder tour and relaunch",
+  "phase": 24,
+  "crate": "retroforge",
+  "write_scope": [
+   "crates/retroforge/**"
+  ],
+  "depends_on": [
+   "W24-04"
+  ],
+  "acceptance": [
+   "capture_tour.rs photographs the strip button, the finder mid-search and the saved state"
+  ],
+  "points": 1,
+  "status": "todo",
+  "stories": [],
+  "notes": [
+   "FILED 2026-10-08 from Brad (\"ok so how do we profile the games?\" then \"go\"); design https://claude.ai/artifact/6a89VhM41WY7Ryqaw5pt7k."
+  ]
  }
 ]
 }
