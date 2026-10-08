@@ -267,12 +267,15 @@ pub(crate) enum SettingsTab {
     /// scale and a high-contrast palette and no way for a user to reach
     /// either. This tab is that way.
     Accessibility,
+    /// Ticket W23-02: keyboard and controller bindings.
+    Controls,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 4] = [
+    const ALL: [SettingsTab; 5] = [
         SettingsTab::Video,
         SettingsTab::Audio,
+        SettingsTab::Controls,
         SettingsTab::Paths,
         SettingsTab::Accessibility,
     ];
@@ -283,6 +286,7 @@ impl SettingsTab {
             SettingsTab::Audio => "Audio",
             SettingsTab::Paths => "Paths",
             SettingsTab::Accessibility => "Accessibility",
+            SettingsTab::Controls => "Controls",
         }
     }
 }
@@ -330,6 +334,16 @@ const SETTINGS_INDEX: &[(&str, SettingsTab, &str)] = &[
     ),
     ("V-sync", SettingsTab::Video, "vsync tearing latency"),
     ("MetalFX", SettingsTab::Video, "upscale scaler"),
+    (
+        "Keyboard",
+        SettingsTab::Controls,
+        "keys buttons controls rebind remap",
+    ),
+    (
+        "Controller",
+        SettingsTab::Controls,
+        "gamepad pad joystick buttons remap",
+    ),
     (
         "Output device",
         SettingsTab::Audio,
@@ -907,6 +921,12 @@ pub struct RetroForgeApp {
     bindings: rf_input::Bindings,
     /// Ticket W23-01: SNES port-1 bindings, all twelve buttons.
     snes_bindings: crate::snes_input::SnesBindings,
+    /// Ticket W23-02: the Controls screen's choices, the button waiting
+    /// for a key or pad press, and its last message.
+    controls_console: crate::controls_panel::Console,
+    controls_device: crate::controls_panel::Device,
+    controls_waiting: Option<crate::controls_panel::Button>,
+    controls_note: Option<String>,
     /// Where those bindings live, `None` when the platform gave us no
     /// config directory (a sandboxed or headless run): remapping still
     /// works for the session, it just cannot be saved, and the UI says so.
@@ -1547,6 +1567,10 @@ impl RetroForgeApp {
             fps_frames: 0,
             fps_window_start: std::time::Instant::now(),
             input_latch: rf_input::InputLatch::new(),
+            controls_console: crate::controls_panel::Console::Nes,
+            controls_device: crate::controls_panel::Device::Keyboard,
+            controls_waiting: None,
+            controls_note: None,
             snes_bindings: config_root.as_deref().map_or_else(
                 crate::snes_input::SnesBindings::default,
                 crate::snes_input::load,
@@ -1671,6 +1695,28 @@ impl RetroForgeApp {
             (keyboard, mouse)
         });
 
+        // Ticket W23-02: a Controls-screen rebind waiting for a key takes
+        // the next key press (Esc cancels) and nothing else sees it.
+        if self.controls_waiting.is_some()
+            && self.controls_device == crate::controls_panel::Device::Keyboard
+        {
+            let pressed = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    } => Some(*key),
+                    _ => None,
+                })
+            });
+            if let Some(key) = pressed {
+                self.finish_key_rebind(key);
+                ctx.input_mut(|i| i.events.clear());
+            }
+        }
+
         // Ticket W2-06: poll every key a binding could name, not W1-07's
         // fixed eight — a user who binds Start to `Q` must have `Q` reach
         // the keymap, and before this the translation dropped it first.
@@ -1732,6 +1778,20 @@ impl RetroForgeApp {
             // it — verify with `--features gamepad`.
             let events = rf_input::PadBackend::poll(backend);
             pad_active_this_frame = !events.is_empty();
+            // Ticket W23-02: a rebind waiting for a pad button takes the
+            // next press.
+            if self.controls_waiting.is_some()
+                && self.controls_device == crate::controls_panel::Device::Controller
+            {
+                if let Some(button) = events.iter().find_map(|e| match e {
+                    rf_input::PadEvent::ButtonDown(_, b) if *b != rf_input::PadButton::Guide => {
+                        Some(*b)
+                    }
+                    _ => None,
+                }) {
+                    self.finish_pad_rebind(button);
+                }
+            }
             self.pad_router.apply(&events);
             let actions = self.ui_nav.on_events(&events);
             // Ticket W15-03: `Start` (`NavAction::Menu`) opens the library's
@@ -3424,6 +3484,12 @@ impl RetroForgeApp {
         // Ticket W21-04: this game's video settings — its own, its
         // console's, or everything's.
         self.resolve_video();
+        // Ticket W23-02: the Controls screen opens on this game's console.
+        self.controls_console = if self.console_label == "SNES" {
+            crate::controls_panel::Console::Snes
+        } else {
+            crate::controls_panel::Console::Nes
+        };
         // Ticket W5-06: keep the header-stripped image and find the
         // profile that claims this ROM, so the author workspace has both
         // the bytes to decode and the file to watch. Both are `None` for
@@ -6084,6 +6150,9 @@ impl RetroForgeApp {
                     .max_height((ui.available_height() - 36.0).max(80.0))
                     .show(ui, |ui| {
                         match self.settings_tab {
+                            SettingsTab::Controls => {
+                                self.controls_panel(ui);
+                            }
                             SettingsTab::Accessibility => {
                                 let a = &mut self.settings.accessibility;
                                 ui.label("UI scale");
@@ -7323,6 +7392,14 @@ impl RetroForgeApp {
                 self.enhancements_panel(ui);
             }
             Section::Controls => {
+                // Ticket W23-02: the game's buttons first, as a drawn pad.
+                self.controls_panel(ui);
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("SHORTCUTS")
+                        .font(egui::FontId::proportional(11.0))
+                        .color(ui.visuals().weak_text_color()),
+                );
                 // W15-06: bindings are learned by seeing them.
                 egui::Grid::new("quick-menu-hotkeys")
                     .num_columns(2)
@@ -7347,7 +7424,10 @@ impl RetroForgeApp {
                             ui.end_row();
                         }
                     });
-                if ui.button("Remap controls\u{2026}").clicked() {
+                if ui
+                    .button("All controls (player 2, shortcuts)\u{2026}")
+                    .clicked()
+                {
                     self.show_controls = true;
                     leave_paused = true;
                 }
@@ -11850,6 +11930,244 @@ impl RetroForgeApp {
         }
     }
 
+    /// Ticket W23-02: the Controls screen — device and console switches,
+    /// the drawn pad with each button's binding, click to rebind, restore
+    /// defaults. Shared by Settings › Controls and Quick Menu › Controls.
+    fn controls_panel(&mut self, ui: &mut egui::Ui) {
+        use crate::controls_panel::{Button, Console, Device};
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        ui.horizontal_wrapped(|ui| {
+            let devices = [
+                (Device::Keyboard, "Keyboard".to_owned()),
+                (Device::Controller, "Controller".to_owned()),
+            ];
+            if segmented(
+                ui,
+                &tokens,
+                "ctl-device",
+                &mut self.controls_device,
+                &devices,
+            ) {
+                self.controls_waiting = None;
+            }
+            let consoles = [
+                (Console::Nes, "NES".to_owned()),
+                (Console::Snes, "SNES".to_owned()),
+            ];
+            if segmented(
+                ui,
+                &tokens,
+                "ctl-console",
+                &mut self.controls_console,
+                &consoles,
+            ) {
+                self.controls_waiting = None;
+            }
+        });
+        if self.controls_device == Device::Controller {
+            ui.label(
+                egui::RichText::new(match self.pad_router.connected_count() {
+                    0 => {
+                        "No controller connected. Connect one to test it; bindings can be set now."
+                            .to_owned()
+                    }
+                    1 => "1 controller connected.".to_owned(),
+                    n => format!("{n} controllers connected."),
+                })
+                .font(egui::FontId::proportional(
+                    crate::theme::type_scale::CAPTION,
+                ))
+                .color(tokens.muted),
+            );
+        }
+        let device = self.controls_device;
+        let binding = |b: Button| -> String {
+            let name = match (device, b) {
+                (Device::Keyboard, Button::Nes(n)) => self
+                    .bindings
+                    .keys
+                    .entries()
+                    .iter()
+                    .find(|(_, p, x)| *p == 0 && *x == n)
+                    .map(|(k, ..)| k.name()),
+                (Device::Keyboard, Button::Snes(n)) => {
+                    self.snes_bindings.key_for(n).map(rf_input::Key::name)
+                }
+                (Device::Controller, Button::Nes(n)) => self
+                    .bindings
+                    .pads
+                    .entries()
+                    .iter()
+                    .find(|(p, x)| *x == n && !crate::controls_panel::is_stick(*p))
+                    .map(|(p, _)| p.name()),
+                (Device::Controller, Button::Snes(n)) => {
+                    self.snes_bindings.pad_for(n).map(rf_input::PadButton::name)
+                }
+            };
+            name.unwrap_or("\u{2014}").to_owned()
+        };
+        if let Some(clicked) = crate::controls_panel::draw(
+            ui,
+            &tokens,
+            self.controls_console,
+            &binding,
+            self.controls_waiting,
+        ) {
+            self.controls_waiting = Some(clicked);
+            self.controls_note = Some(match device {
+                Device::Keyboard => format!("Press a key for {} (Esc cancels).", clicked.name()),
+                Device::Controller => format!("Press a controller button for {}.", clicked.name()),
+            });
+        }
+        if let Some(note) = &self.controls_note {
+            ui.label(
+                egui::RichText::new(note)
+                    .font(egui::FontId::proportional(
+                        crate::theme::type_scale::CAPTION,
+                    ))
+                    .color(tokens.ink),
+            );
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Restore defaults").clicked() {
+                match (self.controls_console, device) {
+                    (Console::Nes, Device::Keyboard) => {
+                        self.bindings.keys = rf_input::Bindings::default().keys
+                    }
+                    (Console::Nes, Device::Controller) => {
+                        self.bindings.pads = rf_input::Bindings::default().pads
+                    }
+                    (Console::Snes, Device::Keyboard) => {
+                        self.snes_bindings.keys = crate::snes_input::SnesBindings::default().keys;
+                    }
+                    (Console::Snes, Device::Controller) => {
+                        self.snes_bindings.pads = crate::snes_input::SnesBindings::default().pads;
+                    }
+                }
+                self.controls_waiting = None;
+                self.controls_note = Some("Defaults restored.".to_owned());
+                self.save_all_game_bindings();
+            }
+            if self.controls_waiting.is_some() && ui.button("Cancel").clicked() {
+                self.controls_waiting = None;
+                self.controls_note = None;
+            }
+        });
+    }
+
+    /// Ticket W23-02: finish a keyboard rebind with `key`.
+    fn finish_key_rebind(&mut self, key: egui::Key) {
+        use crate::controls_panel::Button;
+        let Some(button) = self.controls_waiting.take() else {
+            return;
+        };
+        if key == egui::Key::Escape {
+            self.controls_note = None;
+            return;
+        }
+        let Some(game_key) = input_map::map_key(key) else {
+            self.controls_note = Some(format!("{} can't be used for a game button.", key.name()));
+            return;
+        };
+        if let Some(conflict) =
+            crate::app_bindings::game_key_conflicts_with_app(&self.app_bindings, game_key)
+        {
+            self.controls_note = Some(conflict);
+            return;
+        }
+        match button {
+            Button::Nes(n) => self.bindings.keys.rebind(game_key, 0, n),
+            Button::Snes(n) => self.snes_bindings.bind_key(game_key, n),
+        }
+        self.controls_note = Some(format!("{} is now {}.", button.name(), game_key.name()));
+        self.save_all_game_bindings();
+    }
+
+    /// Ticket W23-02: finish a controller rebind with `pad`.
+    fn finish_pad_rebind(&mut self, pad: rf_input::PadButton) {
+        use crate::controls_panel::Button;
+        let Some(button) = self.controls_waiting.take() else {
+            return;
+        };
+        if let Some(conflict) =
+            crate::app_bindings::game_pad_conflicts_with_app(&self.app_bindings, pad)
+        {
+            self.controls_note = Some(conflict);
+            return;
+        }
+        match button {
+            Button::Nes(n) => {
+                let others: Vec<_> = self
+                    .bindings
+                    .pads
+                    .entries()
+                    .iter()
+                    .filter(|(p, x)| *x == n && !crate::controls_panel::is_stick(*p))
+                    .map(|(p, _)| *p)
+                    .collect();
+                for p in others {
+                    self.bindings.pads.unbind(p);
+                }
+                self.bindings.pads.bind(pad, n);
+            }
+            Button::Snes(n) => self.snes_bindings.bind_pad(pad, n),
+        }
+        self.controls_note = Some(format!("{} is now {}.", button.name(), pad.name()));
+        self.save_all_game_bindings();
+    }
+
+    /// Ticket W23-02: save both consoles' game bindings.
+    fn save_all_game_bindings(&mut self) {
+        self.save_bindings();
+        if let Some(root) = self.config_root.clone() {
+            if let Err(e) = crate::snes_input::save(&root, &self.snes_bindings) {
+                self.controls_note = Some(format!("Could not save SNES controls: {e}"));
+            }
+        }
+    }
+
+    /// Ticket W23-02: drive the Controls screen (tests).
+    #[doc(hidden)]
+    pub fn set_controls_for_test(&mut self, snes: bool, controller: bool) {
+        self.controls_console = if snes {
+            crate::controls_panel::Console::Snes
+        } else {
+            crate::controls_panel::Console::Nes
+        };
+        self.controls_device = if controller {
+            crate::controls_panel::Device::Controller
+        } else {
+            crate::controls_panel::Device::Keyboard
+        };
+    }
+
+    /// Ticket W23-02: a pad press as the backend would report it (tests).
+    #[doc(hidden)]
+    pub fn controls_pad_press_for_test(&mut self, pad: rf_input::PadButton) {
+        if self.controls_waiting.is_some()
+            && self.controls_device == crate::controls_panel::Device::Controller
+        {
+            self.finish_pad_rebind(pad);
+        }
+    }
+
+    /// Ticket W23-02: the SNES key bound to `button` (tests).
+    #[doc(hidden)]
+    pub fn snes_key_for_test(&self, button: rf_input::SnesButton) -> Option<rf_input::Key> {
+        self.snes_bindings.key_for(button)
+    }
+
+    /// Ticket W23-02: the NES port-1 key bound to `button` (tests).
+    #[doc(hidden)]
+    pub fn nes_key_for_test(&self, button: rf_input::NesButton) -> Option<rf_input::Key> {
+        self.bindings
+            .keys
+            .entries()
+            .iter()
+            .find(|(_, p, b)| *p == 0 && *b == button)
+            .map(|(k, ..)| *k)
+    }
+
     /// Persist the App hotkeys, same shape as [`Self::save_bindings`].
     fn save_app_bindings(&mut self) {
         let Some(root) = self.config_root.clone() else {
@@ -12771,9 +13089,21 @@ impl RetroForgeApp {
                 .show(ctx, |ui| {
                     panel(ui, &mut |ui| {
                         ui.horizontal(|ui| {
-                            for button in rf_input::NesButton::ALL {
-                                let held = self.last_input_bits & (1 << button.bit()) != 0;
-                                let text = egui::RichText::new(button.name()).small().monospace();
+                            // W23-01: an SNES word names SNES buttons.
+                            let names: Vec<(&str, u8)> = if self.console_label == "SNES" {
+                                rf_input::SnesButton::ALL
+                                    .iter()
+                                    .map(|b| (b.name(), b.bit()))
+                                    .collect()
+                            } else {
+                                rf_input::NesButton::ALL
+                                    .iter()
+                                    .map(|b| (b.name(), b.bit()))
+                                    .collect()
+                            };
+                            for (name, bit) in names {
+                                let held = self.last_input_bits & (1 << bit) != 0;
+                                let text = egui::RichText::new(name).small().monospace();
                                 ui.label(if held {
                                     text.color(egui::Color32::BLACK)
                                         .background_color(tokens.accent)
