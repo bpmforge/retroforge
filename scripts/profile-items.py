@@ -116,7 +116,11 @@ def apply(games_path, census_path, item_paths, write):
         # "Watched in play" only where the census actually reached play:
         # its camera cleared the bar. A run stuck in menus (or a scrolling
         # title) watched nothing worth claiming.
-        played = ok and census.pick(*census.parse_axis(cols[6]), census.MIN_MOVING, census.MIN_DISTINCT)[0] is not None
+        played = ok and any(
+            census.pick(*census.parse_axis(c), census.MIN_MOVING, census.MIN_DISTINCT)[0] is not None
+            for c in cols[6:]
+            if c.startswith(("x=", "x2="))
+        )
         if not played:
             stats = {}
         path = None

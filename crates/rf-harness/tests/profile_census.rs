@@ -32,6 +32,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, EventMask, PpuPixel, Step};
+use rf_enhance::camera_finder::CameraFinder;
 
 const GAMES_VAR: &str = "RF_PROFILE_GAMES";
 const ROM_VAR: &str = "RF_PCENSUS_ROM";
@@ -261,92 +262,6 @@ impl CoreSink for ScrollSink {
     }
 }
 
-/// Per-offset evidence for one axis.
-struct Axis {
-    /// Matches on moving frames, same-frame and one-frame-late RAM.
-    hits: Vec<[u32; 2]>,
-    /// Which low-byte values matched, so a byte stuck at 0 cannot win by
-    /// sitting under a scroll of 0.
-    seen: Vec<[u64; 4]>,
-    moving: u32,
-    last: Vec<u8>,
-}
-
-impl Axis {
-    fn new(len: usize) -> Self {
-        Self {
-            hits: vec![[0; 2]; len],
-            seen: vec![[0; 4]; len],
-            moving: 0,
-            last: Vec::new(),
-        }
-    }
-
-    /// Score this frame: `scroll` is every value the frame wrote, `ram`
-    /// the RAM at its end, `prev` the RAM at the previous frame's end.
-    fn frame(&mut self, scroll: &[u8], ram: &[u8], prev: &[u8]) {
-        let now: Vec<u8> = {
-            let mut v = scroll.to_vec();
-            v.sort_unstable();
-            v.dedup();
-            v
-        };
-        if now.is_empty() || now == self.last {
-            self.last = now;
-            return;
-        }
-        self.moving += 1;
-        for (at, (hit, seen)) in self.hits.iter_mut().zip(&mut self.seen).enumerate() {
-            for (lag, src) in [ram, prev].into_iter().enumerate() {
-                let Some(&b) = src.get(at) else { continue };
-                if now.binary_search(&b).is_ok() {
-                    hit[lag] += 1;
-                    seen[usize::from(b >> 6)] |= 1 << (b & 63);
-                }
-            }
-        }
-        self.last = now;
-    }
-
-    /// The best offsets: `(offset, hits, distinct values)`.
-    fn best(&self, n: usize) -> Vec<(usize, u32, u32)> {
-        let mut v: Vec<(usize, u32, u32)> = self
-            .hits
-            .iter()
-            .zip(&self.seen)
-            .enumerate()
-            .map(|(at, (h, s))| (at, h[0].max(h[1]), s.iter().map(|w| w.count_ones()).sum()))
-            .filter(|&(_, _, distinct)| distinct >= 16)
-            .collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
-        v.truncate(n);
-        v
-    }
-}
-
-/// Whether the byte after `at` carries when `at` wraps — the difference
-/// between a 16-bit camera and an 8-bit one with its page kept elsewhere.
-fn carries(history: &[(u8, u8)]) -> (u32, u32) {
-    let (mut wraps, mut carried) = (0, 0);
-    for pair in history.windows(2) {
-        let ((lo0, hi0), (lo1, hi1)) = (pair[0], pair[1]);
-        let fwd = lo0 >= 0xC0 && lo1 < 0x40;
-        let back = lo0 < 0x40 && lo1 >= 0xC0;
-        if fwd || back {
-            wraps += 1;
-            let want = if fwd {
-                hi0.wrapping_add(1)
-            } else {
-                hi0.wrapping_sub(1)
-            };
-            if hi1 == want {
-                carried += 1;
-            }
-        }
-    }
-    (wraps, carried)
-}
-
 enum Machine {
     Nes(Box<rf_nes::core::NesCore>),
     Snes(Box<rf_snes::core::SnesCore>),
@@ -393,11 +308,11 @@ fn profile_census_child() {
     };
     let snes = matches!(m, Machine::Snes(_));
     let len = if snes { SNES_SEARCH } else { 0x800 };
-    let (mut ax, mut ay) = (Axis::new(len), Axis::new(len));
+    // The scoring is the app's own finder (rf_enhance::camera_finder), so
+    // the census and "Find the camera while you play" cannot disagree.
+    let mut finder = CameraFinder::new(len, if snes { 2 } else { 1 });
     let mut prev = vec![0u8; len];
     let mut stalled = 0u32;
-    let mut armed = false;
-    let mut history: Vec<Vec<u8>> = Vec::new();
     if let Machine::Nes(c) = &mut m {
         // The NES pushes its mask through the bus, not `CoreConfig`
         // (the shell's own `EmuStepper` does the same).
@@ -464,14 +379,14 @@ fn profile_census_child() {
         sink.xs.clear();
         sink.ys.clear();
         sink.begin_frame();
-        let (xs, ys) = match &mut m {
+        let layers: Vec<(Vec<u8>, Vec<u8>)> = match &mut m {
             Machine::Nes(c) => {
                 // The logical bits are the NES's own order.
                 let input = rf_core_api::InputFrame {
                     ports: [pad & 0xFF, 0, 0, 0],
                 };
                 c.run_frame(&input, &mut sink);
-                (
+                vec![(
                     sink.xs
                         .iter()
                         .map(|v| (v & 0xFF) as u8)
@@ -480,41 +395,35 @@ fn profile_census_child() {
                         .iter()
                         .map(|v| (v & 0xFF) as u8)
                         .collect::<Vec<u8>>(),
-                )
+                )]
             }
             Machine::Snes(c) => {
                 c.system_mut().bus.joypads.ports[0] = snes_pad(pad);
                 let _ = c.step(Step::Frame, &mut sink);
-                // BG1 and BG2: some games scroll the playfield on BG2
+                // BG1, then BG2: some games scroll the playfield on BG2
                 // (the Kirby titles), with BG1 as a foreground.
                 let bgs = &c.system().bus.ppu.bgs;
-                (
-                    vec![(bgs[0].hofs & 0xFF) as u8, (bgs[1].hofs & 0xFF) as u8],
-                    vec![(bgs[0].vofs & 0xFF) as u8, (bgs[1].vofs & 0xFF) as u8],
-                )
+                (0..2)
+                    .map(|i| {
+                        (
+                            vec![(bgs[i].hofs & 0xFF) as u8],
+                            vec![(bgs[i].vofs & 0xFF) as u8],
+                        )
+                    })
+                    .collect()
             }
         };
         let ram: Vec<u8> = match &m {
             Machine::Nes(c) => (0..len).map(|a| c.peek(a as u32)).collect(),
             Machine::Snes(c) => c.system().bus.wram[..len].to_vec(),
         };
-        // Scored only once Start has been pressed: a title screen that
-        // scrolls in (Contra, Super Castlevania IV) keeps its own
-        // variable, and its frames would dilute the game's camera.
-        armed |= pad & BTN_START != 0;
-        let moved_before = ax.moving + ay.moving;
-        if armed {
-            ax.frame(&xs, &ram, &prev);
-            ay.frame(&ys, &ram, &prev);
-        } else {
-            ax.last.clear();
-            ay.last.clear();
-        }
-        stalled = if ax.moving + ay.moving > moved_before {
-            0
-        } else {
-            stalled + 1
-        };
+        // Scored only once Start has been pressed (the finder's own rule).
+        let scroll: Vec<(&[u8], &[u8])> = layers
+            .iter()
+            .map(|(x, y)| (x.as_slice(), y.as_slice()))
+            .collect();
+        let moved = finder.observe(&scroll, &ram, pad & BTN_START != 0);
+        stalled = if moved { 0 } else { stalled + 1 };
         if let Some(dir) = &shots {
             if (f + 1) % shot_every == 0 {
                 sink.save_bmp(&Path::new(dir).join(format!("{f:04}.bmp")));
@@ -531,11 +440,11 @@ fn profile_census_child() {
         }
         if std::env::var("RF_PCENSUS_DEBUG").is_ok() && f % 300 == 0 {
             eprintln!(
-                "DBG f={f} xs={xs:?} ys={ys:?} moving={}/{} stalled={stalled}",
-                ax.moving, ay.moving
+                "DBG f={f} scroll={layers:?} moving={} stalled={stalled}",
+                finder.moving()
             );
         }
-        if armed && ax.moving + ay.moving > moved_before {
+        if moved {
             for w in &mut watches {
                 let v = match &m {
                     Machine::Nes(c) => w.read(|a| c.peek(a)),
@@ -551,7 +460,6 @@ fn profile_census_child() {
                 w.see(v);
             }
         }
-        history.push(ram.clone());
         prev = ram;
     }
 
@@ -563,20 +471,20 @@ fn profile_census_child() {
         hashes.normalized.md5,
         hashes.normalized.crc32
     );
-    for (name, axis) in [("x", &ax), ("y", &ay)] {
-        let mut cells = Vec::new();
-        for (at, hits, distinct) in axis.best(3) {
-            let pairs: Vec<(u8, u8)> = history
-                .iter()
-                .map(|r| (r[at], r.get(at + 1).copied().unwrap_or(0)))
+    // Layer 1 as x/y (what scripts/profile-census.py reads first), any
+    // further layer as x2/y2.
+    let names = [("x", "y"), ("x2", "y2")];
+    for ((nx, ny), (ax, ay)) in names.iter().zip(&finder.layers) {
+        for (name, axis) in [(nx, ax), (ny, ay)] {
+            let cells: Vec<String> = axis
+                .best(3)
+                .into_iter()
+                .map(|(at, hits, distinct, wraps, carried)| {
+                    format!("{:X}:{hits}:{distinct}:{wraps}:{carried}", base + at as u32)
+                })
                 .collect();
-            let (wraps, carried) = carries(&pairs);
-            cells.push(format!(
-                "{:X}:{hits}:{distinct}:{wraps}:{carried}",
-                base + at as u32
-            ));
+            out.push_str(&format!("\t{name}={}/{}", axis.moving(), cells.join(",")));
         }
-        out.push_str(&format!("\t{name}={}/{}", axis.moving, cells.join(",")));
     }
     let cells: Vec<String> = watches.iter().map(Watch::cell).collect();
     out.push_str(&format!("\tw={}", cells.join(",")));

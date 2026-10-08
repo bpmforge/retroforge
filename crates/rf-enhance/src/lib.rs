@@ -12,6 +12,7 @@
 pub mod atmosphere;
 pub mod bus;
 pub mod camera;
+pub mod camera_finder;
 pub mod decode;
 pub mod distribution;
 pub mod experiments;
