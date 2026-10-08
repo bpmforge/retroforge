@@ -98,7 +98,7 @@ fn a_snes_rom_starts_and_reaches_the_screen() {
     // it read "SNES · Accuracy" there after quitting an SNES game.
     harness.state_mut().close_rom_for_test();
     harness.run_steps(2);
-    assert_eq!(harness.state().status_badge(), "Accuracy");
+    assert_eq!(harness.state().status_badge(), "Original");
     assert!(harness.state().status().is_empty(), "no stale status line");
 }
 

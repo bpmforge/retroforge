@@ -337,12 +337,29 @@ pub fn badge_text(console: &str, settings: &GameSettings, facts: &GameFacts) -> 
     if mode.enhancement_active() && active > 0 {
         format!(
             "{console} · {} {}({active})",
-            mode.display_name(),
+            mode.player_name(),
             crate::icons::ENHANCED_BADGE
         )
     } else {
-        format!("{console} · {}", mode.display_name())
+        format!("{console} · {}", mode.player_name())
     }
+}
+
+/// Ticket W22-01: how many features would be usable if this game were in
+/// `mode` — the count on each mode card. Same rows and rules as the
+/// badge (`feature_rows`), with only the mode changed.
+#[must_use]
+pub fn features_unlocked(
+    settings: &GameSettings,
+    facts: &GameFacts,
+    mode: crate::game_settings::Mode,
+) -> usize {
+    let mut s = settings.clone();
+    s.mode = mode;
+    feature_rows(&s, facts)
+        .iter()
+        .filter(|r| r.availability == Availability::Available)
+        .count()
 }
 
 /// Appends a "MetalFX" suffix to an existing badge string (ticket W16-08
@@ -458,6 +475,35 @@ pub fn profile_inspector_lines(
 mod tests {
     use super::*;
 
+    /// Ticket W22-01: each picker card's count is the rows usable in that
+    /// mode — Original none, Enhanced the generic ones, Game-Aware more
+    /// only when a profile matched.
+    #[test]
+    fn features_unlocked_counts_per_mode() {
+        use crate::game_settings::{GameSettings, Mode};
+        let s = GameSettings::default();
+        let none = GameFacts::new(false, false, false);
+        let matched = GameFacts::new(true, true, false);
+        assert_eq!(features_unlocked(&s, &none, Mode::Accuracy), 0);
+        let enhanced = features_unlocked(&s, &none, Mode::Enhanced);
+        assert!(enhanced >= 2, "sprite bypass and de-flicker: {enhanced}");
+        assert_eq!(
+            features_unlocked(&s, &none, Mode::GameAware),
+            enhanced,
+            "no profile, nothing more"
+        );
+        assert!(features_unlocked(&s, &matched, Mode::GameAware) > enhanced);
+    }
+
+    #[test]
+    fn the_badge_uses_the_player_mode_name() {
+        let s = crate::game_settings::GameSettings::default();
+        assert_eq!(
+            badge_text("SNES", &s, &GameFacts::new(false, false, false)),
+            "SNES · Original"
+        );
+    }
+
     #[test]
     fn metalfx_suffix_appears_only_when_spatial_and_available() {
         assert_eq!(
@@ -548,7 +594,7 @@ mod tests {
         );
         assert_eq!(
             badge_text("NES", &all_flags_on, &GameFacts::new(true, false, false)),
-            "NES · Accuracy"
+            "NES · Original"
         );
     }
 

@@ -9498,9 +9498,10 @@
    "tests: picker changes the mode; feature counts per mode are a pure tested function"
   ],
   "points": 3,
-  "status": "in_progress",
+  "status": "done",
   "stories": [],
   "notes": [
+   "CLOSED 2026-10-08. Mode::player_name (Original/Enhanced/Game-Aware...), player_blurb, PICKER; enhance_ui::features_unlocked counts rows usable per mode (unit-tested). Quick Menu > Enhancements opens with mode_picker: three painted cards (RadioButton to accessibility, player name) with the blurb and \"N FEATURES FOR THIS GAME\"; a click sets and saves the mode (set_game_mode, the Game settings window's write). The badge uses player names (\"NES · Original\"); display_name stays for code, Debug and the Game settings window, which stays reachable as \"Game settings…\" for Compatibility, Research/Debug and heuristics. Tests: enhance_ui features_unlocked_counts_per_mode and the_badge_uses_the_player_mode_name; tests/mode_picker.rs; ui_smoke, app_opens_snes and context_menu_and_game_settings updated. Gate: workspace 2552 passing.",
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."
   ]
  },
@@ -9521,7 +9522,7 @@
    "test covers matched and unmatched states"
   ],
   "points": 2,
-  "status": "todo",
+  "status": "in_progress",
   "stories": [],
   "notes": [
    "FILED 2026-10-07 from the approved Enhancements UX design (https://claude.ai/artifact/Vr29wk2tuW76FTDhQCGqPr); spec in docs/design/UX_WAVE_22.md."

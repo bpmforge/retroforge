@@ -199,8 +199,8 @@ fn ui_smoke_boot_open_rom_present_a_frame_and_toggle_every_panel() {
     // honesty badge must say so before any ROM is open — as the mode
     // alone, since no console is running (W21-11).
     assert!(
-        harness.query_by_label("Accuracy").is_some(),
-        "boot: the mode badge must read Accuracy (law 6). Tree has: {:?}",
+        harness.query_by_label("Original").is_some(),
+        "boot: the mode badge must read Original, the Accuracy mode (law 6). Tree has: {:?}",
         labels(&harness)
     );
 
@@ -251,8 +251,8 @@ fn ui_smoke_boot_open_rom_present_a_frame_and_toggle_every_panel() {
     // The badge still reads Accuracy: opening a ROM does not silently
     // move a fresh session out of the reference mode (law 6).
     assert!(
-        harness.query_by_label("NES \u{b7} Accuracy").is_some(),
-        "the mode badge must still read Accuracy after a ROM opens (law 6)"
+        harness.query_by_label("NES \u{b7} Original").is_some(),
+        "the mode badge must still read Original (Accuracy) after a ROM opens (law 6)"
     );
 
     // ---- every panel, opened and closed ----------------------------
