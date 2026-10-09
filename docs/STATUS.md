@@ -4413,3 +4413,9 @@ stories, 10 decisions).
   migration drill pass over the 3 v0.1.0 fixtures; macOS (aarch64) only.
   Tagged on both remotes; GitHub release carries the packaged app with its
   profiles. Gate: workspace **2588 passing / 0 failed**, local gate 31/31.
+- 2026-10-09 — **W29 closed (Linux, Windows, Vulkan).** Settings › Video ›
+  Graphics chooses Vulkan, DirectX 12, Metal or OpenGL (Auto by default,
+  falls back to Auto if the choice cannot start). `release.yml` builds and
+  attaches Linux, Windows and macOS archives on a tag; the Windows and Linux
+  builds are compiled by CI, not yet run on hardware. Gate: workspace
+  **2591 passing / 0 failed**.

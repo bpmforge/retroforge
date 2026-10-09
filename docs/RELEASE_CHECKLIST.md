@@ -17,6 +17,7 @@ a script that tags is a script that can tag the wrong thing.
 | 5 | Host artifacts built | `target/release-artifacts/<version>/` |
 | 6 | Release notes with the accuracy table | `docs/releases/<version>/RELEASE_NOTES.md` |
 | 7 | Tag and push — **by hand** | `git tag <version> && git push github <version> && git push origin <version>` |
+| 8 | Publish | `gh release create <version> --notes-file docs/releases/<version>/RELEASE_NOTES.md`; the tag push runs `.github/workflows/release.yml`, which attaches the Linux, Windows and macOS archives (W29-02) |
 
 ## Why the drill runs before the archive
 
@@ -33,6 +34,12 @@ establishes the baseline; from v1 the drill does real work. A synthetic
 would make the evidence a lie.
 
 ## What this release process cannot do, and why
+
+> **Updated 2026-10-09 (W29-02).** The repository is public, so GitHub
+> Actions runs at no cost and `.github/workflows/release.yml` now builds
+> and attaches Linux, Windows and macOS archives on every `v*` tag. Those
+> Windows and Linux artifacts are compiled, not run: the section below still
+> holds for *testing* them, and the release notes say so.
 
 **Artifacts for macOS + Windows + Linux.** Criterion 1 was amended
 2026-08-23 to "every platform that can actually be built and run here,
