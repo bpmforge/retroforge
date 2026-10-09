@@ -7,12 +7,24 @@ downloads none: you point it at your own copies.
 
 ## Install
 
-Download the macOS build from the release page and run `retroforge`. A
-fresh install starts in **Original** mode, which shows exactly what the
+Download the archive for your computer from the release page, unpack it,
+and run `retroforge` (`retroforge.exe` on Windows). Keep the `profiles`
+folder next to it: that is where the app finds its game profiles.
+
+| Computer | Download | Notes |
+|---|---|---|
+| macOS, Apple silicon | `…-macos-arm64.zip` | Not signed: allow it once under System Settings › Privacy & Security |
+| Windows, 64-bit | `…-windows-x86_64.zip` | Not signed: choose "More info", then "Run anyway" |
+| Linux, x86-64 | `…-linux-x86_64.tar.gz` | Needs a Vulkan or OpenGL driver, and ALSA for sound |
+
+A fresh install starts in **Original** mode, which shows exactly what the
 console drew, with nothing added.
 
-Windows and Linux builds are not published yet: the project has no
-machines to build and test them on.
+**Graphics.** RetroForge draws with Vulkan on Linux, DirectX 12 or Vulkan on
+Windows and Metal on macOS, picking the best one by itself. To choose,
+open **Settings › Video › Graphics**; it also says which one is running
+and on which GPU. The change applies the next time RetroForge starts, and
+if the chosen one cannot start, RetroForge starts on Auto instead.
 
 ## Add your games
 

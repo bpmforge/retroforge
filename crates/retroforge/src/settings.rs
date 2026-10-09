@@ -129,6 +129,67 @@ pub enum MetalFxSetting {
     Temporal,
 }
 
+/// Ticket W29-01: which graphics backend RetroForge asks for when it
+/// starts. The wgpu instance is created once, before the window exists, so
+/// a change here is applied the next time the app starts. `Auto` leaves the
+/// choice to wgpu (and to the `WGPU_BACKEND` environment variable, which
+/// always wins over this setting).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphicsBackend {
+    /// Let the graphics library pick. Default.
+    #[default]
+    Auto,
+    Vulkan,
+    #[serde(rename = "dx12")]
+    Dx12,
+    Metal,
+    #[serde(rename = "opengl")]
+    Gl,
+}
+
+impl GraphicsBackend {
+    /// Player-facing name.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            GraphicsBackend::Auto => "Auto",
+            GraphicsBackend::Vulkan => "Vulkan",
+            GraphicsBackend::Dx12 => "DirectX 12",
+            GraphicsBackend::Metal => "Metal",
+            GraphicsBackend::Gl => "OpenGL",
+        }
+    }
+
+    /// The choices this operating system can honor: macOS has Metal,
+    /// Windows has Vulkan, DirectX 12 and OpenGL, everything else has
+    /// Vulkan and OpenGL.
+    #[must_use]
+    pub fn available() -> &'static [GraphicsBackend] {
+        use GraphicsBackend::{Auto, Dx12, Gl, Metal, Vulkan};
+        if cfg!(target_os = "macos") {
+            &[Auto, Metal]
+        } else if cfg!(target_os = "windows") {
+            &[Auto, Vulkan, Dx12, Gl]
+        } else {
+            &[Auto, Vulkan, Gl]
+        }
+    }
+
+    /// The wgpu backend set to request, or `None` for `Auto`.
+    #[must_use]
+    pub fn wgpu_backends(self) -> Option<eframe::wgpu::Backends> {
+        use eframe::wgpu::Backends;
+        match self {
+            GraphicsBackend::Auto => None,
+            GraphicsBackend::Vulkan => Some(Backends::VULKAN),
+            GraphicsBackend::Dx12 => Some(Backends::DX12),
+            GraphicsBackend::Metal => Some(Backends::METAL),
+            GraphicsBackend::Gl => Some(Backends::GL),
+        }
+    }
+}
+
 /// Video settings (FRONTEND_UI §2: "scaling, shaders, vsync, display mode").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -164,6 +225,10 @@ pub struct VideoSettings {
     /// MetalFX scaler choice (ticket W16-08). `Off` by default; see
     /// [`MetalFxSetting`].
     pub metalfx: MetalFxSetting,
+    /// Graphics backend (ticket W29-01). App-wide: it is read once at
+    /// startup from the "everything" layer, never per game. `Auto` by
+    /// default, so an older settings file loads unchanged.
+    pub graphics_backend: GraphicsBackend,
 }
 
 impl Default for VideoSettings {
@@ -182,6 +247,7 @@ impl Default for VideoSettings {
             bezel: false,
             fit_window: true,
             metalfx: MetalFxSetting::default(),
+            graphics_backend: GraphicsBackend::default(),
         }
     }
 }
@@ -655,6 +721,56 @@ mod tests {
             std::env::temp_dir().join(format!("rf-w2-08-{label}-{}-{unique}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// Ticket W29-01: the choice survives a save/load, and a file written
+    /// before the field existed loads as Auto.
+    #[test]
+    fn graphics_backend_round_trips_and_defaults_to_auto() {
+        let root = temp_root("graphics-backend");
+        let mut settings = AppSettings::default();
+        settings.video.graphics_backend = GraphicsBackend::Gl;
+        save(&root, &settings).expect("save");
+        let (reloaded, problem) = load(&root);
+        assert!(problem.is_none());
+        assert_eq!(reloaded.video.graphics_backend, GraphicsBackend::Gl);
+
+        std::fs::write(settings_path(&root), "[video]\nvsync = false\n").expect("write");
+        let (old, problem) = load(&root);
+        assert!(problem.is_none());
+        assert_eq!(old.video.graphics_backend, GraphicsBackend::Auto);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn graphics_backend_maps_to_wgpu_backends() {
+        use eframe::wgpu::Backends;
+        assert_eq!(GraphicsBackend::Auto.wgpu_backends(), None);
+        assert_eq!(
+            GraphicsBackend::Vulkan.wgpu_backends(),
+            Some(Backends::VULKAN)
+        );
+        assert_eq!(GraphicsBackend::Dx12.wgpu_backends(), Some(Backends::DX12));
+        assert_eq!(
+            GraphicsBackend::Metal.wgpu_backends(),
+            Some(Backends::METAL)
+        );
+        assert_eq!(GraphicsBackend::Gl.wgpu_backends(), Some(Backends::GL));
+    }
+
+    #[test]
+    fn graphics_backend_offers_auto_and_the_native_backend() {
+        let list = GraphicsBackend::available();
+        assert!(list.contains(&GraphicsBackend::Auto));
+        let native = if cfg!(target_os = "macos") {
+            GraphicsBackend::Metal
+        } else {
+            GraphicsBackend::Vulkan
+        };
+        assert!(list.contains(&native));
+        assert!(list
+            .iter()
+            .all(|b| b.wgpu_backends().is_some() || *b == GraphicsBackend::Auto));
     }
 
     #[test]

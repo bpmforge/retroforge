@@ -496,6 +496,10 @@ const CARD_THUMB_HEIGHT: f32 = (CARD_WIDTH - 12.0) * 15.0 / 16.0;
 
 /// The whole application's UI-thread-owned state.
 pub struct RetroForgeApp {
+    /// Ticket W29-01: the backend and adapter actually running, e.g.
+    /// "Vulkan - NVIDIA GeForce RTX 3060". `None` when there is no wgpu
+    /// render state.
+    running_graphics: Option<String>,
     /// Ticket W11-03: why each background did or did not widen. `Some` is
     /// a refusal with its reason; `None` means widened (or off).
     widescreen_decisions: [Option<&'static str>; 4],
@@ -1466,6 +1470,10 @@ impl RetroForgeApp {
 
         let app = RetroForgeApp {
             widescreen_decisions: [None; 4],
+            running_graphics: cc.wgpu_render_state.as_ref().map(|rs| {
+                let info = rs.adapter.get_info();
+                format!("{} \u{2014} {}", backend_label(info.backend), info.name)
+            }),
             hd_pack: None,
             hd_summary: None,
             hd_unsatisfied: Vec::new(),
@@ -6676,6 +6684,34 @@ impl RetroForgeApp {
             .changed();
         ui.separator();
 
+        // Ticket W29-01: graphics backend. App-wide, so it is edited on the
+        // global layer and `save_settings` keeps per-game copies from
+        // shadowing it.
+        ui.label("Graphics");
+        let mut backend = self.settings.video.graphics_backend;
+        egui::ComboBox::from_id_salt("graphics-backend")
+            .selected_text(backend.label())
+            .show_ui(ui, |ui| {
+                for b in crate::settings::GraphicsBackend::available() {
+                    ui.selectable_value(&mut backend, *b, b.label());
+                }
+            });
+        if backend != self.settings.video.graphics_backend {
+            self.settings.video.graphics_backend = backend;
+            changed = true;
+        }
+        let running = self.running_graphics.as_deref().unwrap_or("unknown");
+        ui.label(
+            egui::RichText::new(format!(
+                "Running on {running}. Changes apply the next time RetroForge starts."
+            ))
+            .font(egui::FontId::proportional(
+                crate::theme::type_scale::CAPTION,
+            ))
+            .color(tokens.muted),
+        );
+        ui.separator();
+
         // Ticket W20-02: a picker over the shaders
         // that exist, each with the sliders its own
         // manifest declares — not a free-text box.
@@ -6750,8 +6786,12 @@ impl RetroForgeApp {
             .then(|| self.current_game_hash.clone())
             .flatten();
         let console = self.core.is_some().then_some(self.console_label);
+        // Ticket W29-01: the backend is app-wide; `store_video` may replace
+        // the global layer with the (scope-resolved) working copy.
+        let graphics_backend = self.settings.video.graphics_backend;
         self.settings
             .store_video(self.video_scope, &self.video, console, game.as_deref());
+        self.settings.video.graphics_backend = graphics_backend;
         self.publish_audio_settings();
         let Some(root) = self.config_root.clone() else {
             self.status = "No config directory; settings apply to this session only.".to_string();
@@ -14872,5 +14912,17 @@ mod hud_tests {
         let out = super::elide_front(&name);
         assert_eq!(out.chars().count(), super::PROFILE_CHIP_BUDGET);
         assert!(out.chars().all(|c| c == '\u{2026}' || c == '\u{e9}'));
+    }
+}
+
+/// Ticket W29-01: player-facing name of a wgpu backend.
+fn backend_label(backend: eframe::wgpu::Backend) -> &'static str {
+    use eframe::wgpu::Backend;
+    match backend {
+        Backend::Vulkan => "Vulkan",
+        Backend::Dx12 => "DirectX 12",
+        Backend::Metal => "Metal",
+        Backend::Gl => "OpenGL",
+        _ => "Software",
     }
 }

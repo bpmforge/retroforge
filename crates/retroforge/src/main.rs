@@ -28,15 +28,56 @@ fn main() -> eframe::Result {
         .map_or(retroforge::app::WINDOW_SIZE, |root| {
             retroforge::settings::load(&root).0.window.startup_size()
         });
-    let native_options = eframe::NativeOptions {
+    let mut native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(startup_size)
             .with_min_inner_size(retroforge::app::MIN_WINDOW_SIZE),
         ..Default::default()
     };
-    eframe::run_native(
+    let chosen = apply_graphics_backend(&mut native_options);
+    let fallback_options = native_options.clone();
+    let result = eframe::run_native(
         "RetroForge",
         native_options,
         Box::new(|cc| Ok(Box::new(retroforge::app::RetroForgeApp::new(cc)))),
-    )
+    );
+    // Ticket W29-01: a backend this machine cannot start (Vulkan with no
+    // Vulkan driver) must not lock the player out — the only other way
+    // back would be editing the settings file. Start again on Auto.
+    match result {
+        Err(e) if chosen => {
+            log::warn!("graphics backend failed to start ({e}); retrying with Auto");
+            let mut options = fallback_options;
+            options.wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
+            eframe::run_native(
+                "RetroForge",
+                options,
+                Box::new(|cc| Ok(Box::new(retroforge::app::RetroForgeApp::new(cc)))),
+            )
+        }
+        other => other,
+    }
+}
+
+/// Ticket W29-01: honor the saved graphics backend. `WGPU_BACKEND` in the
+/// environment wins, and a saved choice this OS cannot offer is ignored.
+/// Returns whether a backend other than Auto was applied.
+fn apply_graphics_backend(options: &mut eframe::NativeOptions) -> bool {
+    use retroforge::settings::GraphicsBackend;
+    if std::env::var_os("WGPU_BACKEND").is_some() {
+        return false;
+    }
+    let choice = retroforge::bindings_store::config_root().map_or(GraphicsBackend::Auto, |root| {
+        retroforge::settings::load(&root).0.video.graphics_backend
+    });
+    if !GraphicsBackend::available().contains(&choice) {
+        return false;
+    }
+    let Some(backends) = choice.wgpu_backends() else {
+        return false;
+    };
+    let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = backends;
+    options.wgpu_options.wgpu_setup = eframe::egui_wgpu::WgpuSetup::CreateNew(setup);
+    true
 }
