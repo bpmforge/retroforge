@@ -1,0 +1,93 @@
+# Release builds for Linux, Windows and macOS (ticket W29-02).
+#
+# Builds the tagged commit on each OS and attaches one archive per
+# platform to that tag's GitHub release: the app and `retroforge-tool`,
+# the `profiles/` folder (the app looks for it beside its executable),
+# README, licences and the release notes.
+#
+# The local gate stays the authority on whether a commit is good
+# (CLAUDE.md → Build); this workflow only builds and packages. GitHub runs
+# it at no cost since the repository went public (2026-10-09).
+#
+# Run it by pushing a `v*` tag, or by hand for an existing tag:
+#   gh workflow run release.yml -f tag=v0.9.1
+name: Release builds
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, e.g. v0.9.1"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: package (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not hide another's result.
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04, not latest: an older glibc runs on more distributions.
+          - os: ubuntu-22.04
+            label: linux-x86_64
+            features: audio,gamepad
+            exe: ""
+          - os: windows-latest
+            label: windows-x86_64
+            features: audio,gamepad
+            exe: ".exe"
+          - os: macos-latest
+            label: macos-arm64
+            features: audio,gamepad,metalfx
+            exe: ""
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.label }}
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        # ALSA and udev headers for the audio and gamepad features; the
+        # Vulkan loader comes from the user's graphics driver at run time.
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+
+      - name: build
+        run: cargo build --release -p retroforge -p retroforge-tool --features retroforge/${{ matrix.features }}
+        shell: bash
+
+      - name: package
+        shell: bash
+        run: |
+          name="retroforge-${TAG}-${{ matrix.label }}"
+          mkdir -p "dist/$name"
+          cp "target/release/retroforge${{ matrix.exe }}" "target/release/retroforge-tool${{ matrix.exe }}" "dist/$name/"
+          cp -R profiles "dist/$name/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          if [ -f "docs/releases/${TAG}/RELEASE_NOTES.md" ]; then
+            cp "docs/releases/${TAG}/RELEASE_NOTES.md" "dist/$name/"
+          fi
+          cd dist
+          case "${{ runner.os }}" in
+            Linux)   tar -czf "$name.tar.gz" "$name"; echo "ASSET=dist/$name.tar.gz" >> "$GITHUB_ENV" ;;
+            Windows) 7z a -tzip "$name.zip" "$name" > /dev/null; echo "ASSET=dist/$name.zip" >> "$GITHUB_ENV" ;;
+            macOS)   ditto -c -k --keepParent "$name" "$name.zip"; echo "ASSET=dist/$name.zip" >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ASSET" --clobber --repo "${{ github.repository }}"
