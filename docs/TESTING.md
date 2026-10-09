@@ -4813,9 +4813,8 @@ orchestrator flagged as blocking (not budget-edge like Power Rangers Zeo,
 branch not within 2400) and **Tommy Moe's Winter Extreme** (main frame
 31, branch not within 2400), using `title_probe` (`PROBE_MODE=frames`,
 `PROBE_RING`/`PROBE_RINGP`/`PROBE_DIS`/`PROBE_ARAM`/`PROBE_PORTS`)
-against both this worktree's release build and `/Users/bmatthews/Code/
-retroforge`'s existing release `title_probe` binary (read-only, main's
-HEAD).
+against both this worktree's release build and the main checkout's
+existing release `title_probe` binary (read-only, main's HEAD).
 
 ### Pagemaster: not a stall — the fixed 2400-frame probe window is too tight
 

@@ -71,6 +71,9 @@ drill_status="pass"
   echo "--- .rfreplay drill (rf-input) ---"
   cargo test --release -p rf-input --test release_replay_drill -- --nocapture 2>&1 || echo "REPLAY_DRILL_FAILED"
 } > "$drill_log"
+# The log is committed: keep the builder's home directory out of it
+# (cargo prints absolute paths), so the record names the repository only.
+sed -i.bak "s#$repo_root#<repo>#g" "$drill_log" && rm -f "$drill_log.bak"
 if grep -q "STATE_DRILL_FAILED\|REPLAY_DRILL_FAILED" "$drill_log"; then
   drill_status="FAIL"
 fi

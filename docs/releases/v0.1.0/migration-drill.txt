@@ -12,7 +12,7 @@ test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 
 --- .rfreplay drill (rf-input) ---
-   Compiling rf-input v0.1.0 (/Users/bmatthews/Code/retroforge/crates/rf-input)
+   Compiling rf-input v0.1.0 (<repo>/crates/rf-input)
     Finished `release` profile [optimized] target(s) in 1.73s
      Running tests/release_replay_drill.rs (target/release/deps/release_replay_drill-1073e043a7527b1f)
 
