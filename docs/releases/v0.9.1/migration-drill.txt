@@ -1,0 +1,34 @@
+--- .rfstate drill (rf-state) ---
+   Compiling rf-state v0.9.1 (<repo>/crates/rf-state)
+    Finished `release` profile [optimized] target(s) in 3.20s
+     Running tests/golden_fixture.rs (target/release/deps/golden_fixture-f7892d26cb04f20e)
+
+running 3 tests
+test regenerate_golden_fixture ... ignored, run explicitly to intentionally regenerate the checked-in fixture
+test golden_fixture_loads_on_current_main_and_matches_expected_state ... ok
+  <repo>/crates/rf-state/../../fixtures/releases/v0.1.0/nrom-frame6.rfstate loaded with 1 warning(s)
+  <repo>/crates/rf-state/../../fixtures/releases/v0.1.0/golden_v1.rfstate loaded with 1 warning(s)
+  <repo>/crates/rf-state/../../fixtures/releases/v0.9.0/nrom-frame6.rfstate loaded with 1 warning(s)
+migration drill: 4 archived fixture(s) still load
+    <repo>/crates/rf-state/../../fixtures/releases/v0.1.0/golden_v1.rfstate
+    <repo>/crates/rf-state/../../fixtures/releases/v0.1.0/nrom-frame6.rfstate
+    <repo>/crates/rf-state/../../fixtures/releases/v0.9.0/golden_v1.rfstate
+    <repo>/crates/rf-state/../../fixtures/releases/v0.9.0/nrom-frame6.rfstate
+test every_archived_release_fixture_still_loads ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+--- .rfreplay drill (rf-input) ---
+   Compiling rf-input v0.9.1 (<repo>/crates/rf-input)
+    Finished `release` profile [optimized] target(s) in 2.07s
+     Running tests/release_replay_drill.rs (target/release/deps/release_replay_drill-f12d7905c44371ab)
+
+running 1 test
+replay drill: 2 archived replay(s) still parse
+    <repo>/crates/rf-input/../../fixtures/releases/v0.1.0/unprofiled-scroller.rfreplay
+    <repo>/crates/rf-input/../../fixtures/releases/v0.9.0/unprofiled-scroller.rfreplay
+test every_archived_release_replay_still_parses ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
