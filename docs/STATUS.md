@@ -4405,3 +4405,11 @@ stories, 10 decisions).
   Game info lists a profile's items live and pins up to four as chips over
   the game; profile rows can say how a value reads (lives minus one, names,
   digits). Gate: workspace **2588 passing / 0 failed**, docs-gate green.
+- 2026-10-08 — **W28-01 (docs).** Player guide in the doc site (getting
+  started, controls, modes, game profiles, Game info) and a screenshot
+  tour of 30 shots from `capture_tour.rs` (fixtures only, no commercial
+  art); README refreshed; TESTING.md documents the profile census.
+- 2026-10-08 — **v0.9.0 released (W28-02).** `scripts/release.sh v0.9.0`:
+  migration drill pass over the 3 v0.1.0 fixtures; macOS (aarch64) only.
+  Tagged on both remotes; GitHub release carries the packaged app with its
+  profiles. Gate: workspace **2588 passing / 0 failed**, local gate 31/31.
