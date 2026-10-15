@@ -236,6 +236,11 @@ pub struct SnesDebugFrame {
     pub hdma_lanes: Vec<u8>,
     /// Ticket W13-02c: the eight DSP voices.
     pub voices: Vec<rf_snes::debug::VoiceView>,
+    /// Ticket W30-06: BG1-BG4 `(HOFS, VOFS)` as the PPU holds them when the
+    /// frame ends. `$210D-$2114` are write-only, so `ppu_regs` cannot carry
+    /// them; the live-screen diorama needs them to keep its walls on the
+    /// tiles they were raised from (`crate::live_heights`).
+    pub bg_scroll: [(u16, u16); 4],
 }
 
 /// Ticket W20-13: what the scrub bar draws.

@@ -19,7 +19,7 @@ pub use error::ProfileError;
 pub use loader::{load_file, load_str, LoadOutcome};
 pub use schema::{
     AntiFlicker, Atmosphere, AtmosphereLadder, AxisSpec, Camera, Capabilities, CollisionSpec,
-    Console, Decode, Entities, EntityTable, FieldSpec, HudSpec, IdentityEntry, Loading,
+    Console, Decode, Entities, EntityTable, FieldSpec, Heights, HudSpec, IdentityEntry, Loading,
     MemoryMapEntry, Meta, MetatileSpec, ModPatch, Mods, PageSpec, PalettesSpec, Plugins, Profile,
     Requires, RomMapEntry, ScreensSpec, UntilSpec, WaitLoop, WidescreenMode,
     SUPPORTED_PROFILE_MAJOR,

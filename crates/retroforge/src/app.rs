@@ -1340,6 +1340,16 @@ pub struct RetroForgeApp {
     /// re-derived every repaint by [`Self::sync_diorama_subscription`],
     /// this field only exists to detect the change.
     mode7_ground_wanted: bool,
+    /// Ticket W30-06: the matched SNES profile's `[heights]` table, which
+    /// lets Diorama raise walls from the tilemap on screen with no decoded
+    /// level (`crate::live_heights`). `None` for any other game. Set by
+    /// [`Self::apply_profile_match`].
+    live_heights: Option<crate::live_heights::HeightTable>,
+    /// Ticket W30-06 part B: the open height painter, if any.
+    height_painter: Option<crate::profile_builder::PainterSession>,
+    /// Ticket W30-06 part B: what the HD-2D preset replaced, so turning it
+    /// off puts the player's own values back.
+    hd2d_remembered: Option<crate::hd2d_preset::Remembered>,
     /// The Mode 7 ground texture built from the live VRAM/CGRAM snapshot
     /// (`rf_snes::debug::render_mode7_plane_rgba`), cached by a cheap hash
     /// of the plane's own bytes so a VRAM snapshot that has not changed
@@ -1782,6 +1792,9 @@ impl RetroForgeApp {
             diorama_budget: rf_renderer::fog::BudgetGate::new(),
             mode7_seen: false,
             mode7_ground_wanted: false,
+            live_heights: None,
+            height_painter: None,
+            hd2d_remembered: None,
             mode7_plane_cache: None,
             ultrawide_refresh_countdown: 0,
             awaiting_canvas_snapshot: false,
@@ -3662,6 +3675,8 @@ impl RetroForgeApp {
         // A new game: the profile builder and its finder were the last
         // game's (they would otherwise stay open over this one).
         self.builder_open = false;
+        self.height_painter = None;
+        self.hd2d_remembered = None;
         self.builder_step = crate::profile_builder::Step::CameraX;
         self.finder = None;
         self.finder_pending = None;
@@ -4691,10 +4706,10 @@ impl RetroForgeApp {
         crate::enhance_ui::GameFacts {
             profile_matched: self.profile_matched,
             level_decoded: self.level_session.is_some(),
-            diorama_available: self
-                .level_session
-                .as_ref()
-                .is_some_and(crate::level_view::LevelSession::has_collision),
+            // A decoded level with collision, or (W30-06) a painted height
+            // table to raise the live screen from.
+            diorama_available: self.decoded_diorama_available()
+                || self.live_heights.as_ref().is_some_and(|h| !h.is_empty()),
             mode7_active: self.mode7_seen,
             widescreen_supported: self.console_label == "SNES",
             loading_declared: !self.loading_waits.is_empty(),
@@ -4721,6 +4736,21 @@ impl RetroForgeApp {
                 && self.lens_budget.is_enabled()
                 && !self.lens_failed,
         }
+    }
+
+    /// Whether the decoded level carries collision (the walls tier's own
+    /// source; a profile with one keeps using it even if it also has
+    /// `[heights]`).
+    fn decoded_diorama_available(&self) -> bool {
+        self.level_session
+            .as_ref()
+            .is_some_and(crate::level_view::LevelSession::has_collision)
+    }
+
+    /// Ticket W30-06: Diorama is wanted AND is being raised from the live
+    /// screen's tilemap rather than a decoded level.
+    fn live_diorama_active(&self) -> bool {
+        self.diorama_wanted && self.live_heights.is_some() && !self.decoded_diorama_available()
     }
 
     /// Ticket W20-17: whether a declared HUD is pinned over the ultrawide
@@ -5018,6 +5048,10 @@ impl RetroForgeApp {
             self.refresh_mode7_ground_render(msg);
             return;
         }
+        if self.live_diorama_active() {
+            self.refresh_live_diorama(msg);
+            return;
+        }
         if !self.diorama_wanted || msg.sprite_rgba.is_empty() {
             return;
         }
@@ -5078,6 +5112,84 @@ impl RetroForgeApp {
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
 
+        self.store_diorama_result(result);
+    }
+
+    /// Ticket W30-06: [`Self::refresh_diorama_render`] for a game with no
+    /// decoder — the walls come from the BG tilemap on screen right now and
+    /// the profile's `[heights]` table (`crate::live_heights`), the ground is
+    /// this frame's own picture, and the sprites are billboards from the live
+    /// OAM. Recomputed every frame, so the walls track scrolling.
+    ///
+    /// Anything it cannot do (no snapshot yet, a hi-res or widescreen frame
+    /// whose width is not the SNES's 256, a BG mode with no plain tilemap, no
+    /// GPU, a blown budget) clears the render, so the player sees the flat
+    /// picture rather than a stale diorama.
+    fn refresh_live_diorama(&mut self, msg: &core_thread::FrameMsg) {
+        let (width, height) = (
+            u32::try_from(msg.width).unwrap_or(0),
+            u32::try_from(msg.height).unwrap_or(0),
+        );
+        let grid = match (&self.live_heights, &msg.snes) {
+            (Some(table), Some(snes)) if width == 256 => crate::live_heights::build_grid(
+                table,
+                &snes.vram,
+                &snes.ppu_regs,
+                snes.bg_scroll,
+                (width, height),
+            ),
+            _ => None,
+        };
+        let usable = grid.is_some()
+            && !msg.sprite_rgba.is_empty()
+            && self.diorama_budget.is_enabled()
+            && self.gpu.is_some();
+        let (Some(grid), Some(snes), true) = (grid, &msg.snes, usable) else {
+            self.diorama_render = None;
+            self.diorama_texture = None;
+            return;
+        };
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        if self.diorama_pass.is_none() {
+            self.diorama_pass = Some(rf_renderer::diorama::DioramaPass::new(gpu));
+        }
+        let pass = self
+            .diorama_pass
+            .as_ref()
+            .expect("just constructed above when absent");
+
+        let sprites = rf_snes::debug::decode_oam(&snes.oam);
+        // `$2101` bits 5-7 (`ppu_regs[n]` is `$21nn`).
+        let obj_size_select = snes.ppu_regs.get(0x01).copied().unwrap_or(0) >> 5;
+
+        let start = std::time::Instant::now();
+        let result = enhanced_view::compose_live_diorama(
+            gpu,
+            pass,
+            &grid,
+            &msg.rgba,
+            width,
+            height,
+            &sprites,
+            obj_size_select,
+            &msg.sprite_rgba,
+            width,
+            height,
+            width,
+            height,
+            enhanced_view::DioramaView::from_settings(&self.current_game_settings),
+        );
+        self.diorama_budget
+            .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
+        self.store_diorama_result(result);
+    }
+
+    /// Upload a finished diorama frame as [`Self::diorama_texture`], or fall
+    /// back to the flat view silently (`enhanced_view::select_active_view`'s
+    /// own doc) when it failed.
+    fn store_diorama_result(&mut self, result: Result<enhanced_view::DioramaRender, String>) {
         match result {
             Ok(render) => {
                 let image = egui::ColorImage::from_rgba_unmultiplied(
@@ -5097,10 +5209,6 @@ impl RetroForgeApp {
                 self.diorama_render = Some(render);
             }
             Err(_) => {
-                // Silent fallback to the flat view (`enhanced_view::
-                // select_active_view`'s own doc: Diorama degrades quietly
-                // rather than blocking play or showing an error box over
-                // the game).
                 self.diorama_render = None;
                 self.diorama_texture = None;
             }
@@ -5217,31 +5325,7 @@ impl RetroForgeApp {
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
 
-        match result {
-            Ok(render) => {
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [render.width as usize, render.height as usize],
-                    &render.rgba,
-                );
-                match &mut self.diorama_texture {
-                    Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
-                    None => {
-                        self.diorama_texture = Some(self.ctx.load_texture(
-                            "diorama-frame",
-                            image,
-                            egui::TextureOptions::NEAREST,
-                        ));
-                    }
-                }
-                self.diorama_render = Some(render);
-            }
-            Err(_) => {
-                // Same silent-degrade posture `refresh_diorama_render`'s
-                // own doc states.
-                self.diorama_render = None;
-                self.diorama_texture = None;
-            }
-        }
+        self.store_diorama_result(result);
     }
 
     /// Ticket W4-03e: keep the Ultrawide view live while it's the active
@@ -7767,6 +7851,21 @@ impl RetroForgeApp {
                             leave_paused = true;
                         }
                     }
+                    // Ticket W30-06 part B: paint wall heights on the live
+                    // picture (SNES). Leaves the menu with the game paused.
+                    if self.core.is_some()
+                        && self.console_label == "SNES"
+                        && ui
+                            .button("Paint tile heights\u{2026}")
+                            .on_hover_text(
+                                "Profile Builder: click tiles on the picture to set how tall \
+                                 Diorama raises them.",
+                            )
+                            .clicked()
+                    {
+                        self.open_height_painter();
+                        leave_paused = self.height_painter.is_some();
+                    }
                 });
                 ui.add_space(8.0);
                 self.enhancements_panel(ui);
@@ -7985,6 +8084,8 @@ impl RetroForgeApp {
         ui.add_space(6.0);
         let rows = crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts());
         let mut actions = crate::enhance_dock::EnhanceActions::default();
+        self.hd2d_preset_card(ui, &tokens, &mut actions);
+        ui.add_space(8.0);
         // Ticket W21-05: one raised card per feature, two to a row, as the
         // review's Enhancements mockup — switch, plain sentence, a tag
         // saying what it needs, and the detector's ladder in words.
@@ -10397,6 +10498,15 @@ impl RetroForgeApp {
                 target_hz: overclock.as_ref().and_then(|o| o.target_tick_hz),
             },
         ));
+        // Ticket W30-06: a SNES profile's `[heights]` table. NES has no
+        // scroll snapshot to align a live grid with yet, so a NES profile's
+        // table is not claimed (the Diorama row must not read Available for
+        // something that cannot render).
+        self.live_heights = matched
+            .as_ref()
+            .filter(|(p, _)| p.meta.console == rf_profiles::Console::Snes)
+            .and_then(|(p, _)| p.heights.as_ref())
+            .map(crate::live_heights::HeightTable::from_profile);
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -10771,12 +10881,17 @@ impl RetroForgeApp {
     /// the left, the finder for the current step on the right.
     fn profile_builder_panel(&mut self, ctx: &egui::Context) {
         use crate::profile_builder::{Change, Step};
-        if !self.builder_open || self.core.is_none() || self.show_overlay_menu {
+        if !self.builder_open
+            || self.core.is_none()
+            || self.show_overlay_menu
+            || self.height_painter.is_some()
+        {
             return;
         }
         let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
         let snes = self.console_label == "SNES";
         let mut close = false;
+        let mut paint_heights = false;
         let mut look: Option<Option<Change>> = None;
         let mut use_offset: Option<usize> = None;
         egui::Area::new(egui::Id::new("profile-builder"))
@@ -10913,8 +11028,25 @@ impl RetroForgeApp {
                                     .color(tokens.ok),
                             );
                         }
+                        // Ticket W30-06 part B: the other tool.
+                        if snes {
+                            ui.separator();
+                            if ui
+                                .button("Paint tile heights\u{2026}")
+                                .on_hover_text(
+                                    "Click tiles on the picture to say how tall they are, \
+                                     so Diorama can raise them into walls.",
+                                )
+                                .clicked()
+                            {
+                                paint_heights = true;
+                            }
+                        }
                     });
             });
+        if paint_heights {
+            self.open_height_painter();
+        }
         if let Some(change) = look {
             self.finder_look(change);
         }
@@ -10925,6 +11057,518 @@ impl RetroForgeApp {
             self.builder_open = false;
             self.finder = None;
         }
+    }
+
+    /// Ticket W30-06 part B: open the height painter on the live picture
+    /// (SNES). Makes this game a profile first if it has none, starts from
+    /// the table the profile already holds, and pauses a running game.
+    fn open_height_painter(&mut self) {
+        if self.core.is_none() || self.console_label != "SNES" {
+            self.status = "The height painter needs a running SNES game.".to_owned();
+            return;
+        }
+        if self.height_painter.is_some() {
+            return;
+        }
+        if self.matched_profile.is_none() {
+            self.make_profile_for_this_game();
+            if self.matched_profile.is_none() {
+                return;
+            }
+        }
+        let from_profile = self
+            .matched_profile
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| crate::profile_builder::heights_from_text(&t));
+        let painter = from_profile.unwrap_or_else(|| {
+            crate::profile_builder::HeightPainter::new(1, 8, Default::default())
+        });
+        let paused_game = self.core.is_some() && self.running;
+        if paused_game {
+            self.send_command(CoreCommand::Pause);
+            self.running = false;
+        }
+        self.live_heights = Some(painter.height_table());
+        self.height_painter = Some(crate::profile_builder::PainterSession {
+            painter,
+            pick_armed: false,
+            preview: false,
+            note: None,
+            paused_game,
+            need_frame: self.debug_panels.data.snes.is_none(),
+            dirty: false,
+        });
+    }
+
+    /// Ticket W30-06 part B: close the painter. Unsaved painting is dropped
+    /// (the profile on disk is read again), and a game the painter paused
+    /// runs again.
+    fn close_height_painter(&mut self) {
+        let Some(session) = self.height_painter.take() else {
+            return;
+        };
+        if session.dirty {
+            self.apply_profile_match();
+        }
+        if self.core.is_some() {
+            if session.paused_game {
+                if !self.running {
+                    self.send_command(CoreCommand::Resume);
+                    self.running = true;
+                }
+            } else if session.preview && self.running {
+                // The preview ran a game the painter found paused.
+                self.send_command(CoreCommand::Pause);
+                self.running = false;
+            }
+        }
+    }
+
+    /// Ticket W30-06 part B: "Save heights" — write the painted table into
+    /// the player's own copy of this game's profile and match it again.
+    /// Returns the file written.
+    fn save_painted_heights(
+        &mut self,
+        painter: &crate::profile_builder::HeightPainter,
+    ) -> Result<std::path::PathBuf, String> {
+        let root = self
+            .config_root
+            .clone()
+            .ok_or("no config folder to save into")?;
+        let user = crate::profile_builder::user_profiles_root(&root);
+        let source = self
+            .matched_profile
+            .clone()
+            .ok_or("this game has no profile to save into")?;
+        let title = self.matched_profile_title.clone().unwrap_or_else(|| {
+            self.current_rom_path
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .map_or_else(|| "Game".to_owned(), |s| s.to_string_lossy().into_owned())
+        });
+        let target = crate::profile_builder::heights_save_path(&user, Some(&source), &title);
+        let base =
+            std::fs::read_to_string(&source).map_err(|e| format!("{}: {e}", source.display()))?;
+        let text = crate::profile_builder::apply_heights(
+            &base,
+            painter.layer,
+            painter.tile_px,
+            painter.tiles(),
+        )?;
+        if let Some(dir) = target.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        std::fs::write(&target, text).map_err(|e| format!("{}: {e}", target.display()))?;
+        self.apply_profile_match();
+        Ok(target)
+    }
+
+    /// Ticket W30-06 part B: the height painter. A grid over the live
+    /// picture, locked to the chosen layer's scroll by `live_heights`' own
+    /// grid math, and a panel beside it. Click paints, right-click or
+    /// Alt-click clears, Pick copies a tile's height into the brush.
+    fn height_painter_window(&mut self, ctx: &egui::Context) {
+        if self.height_painter.is_none() || self.show_overlay_menu {
+            return;
+        }
+        if self.core.is_none() {
+            self.height_painter = None;
+            return;
+        }
+        let Some(mut session) = self.height_painter.take() else {
+            return;
+        };
+        // A paused game sends nothing, so ask for the one frame that carries
+        // the snapshot, once the capture switch has gone out.
+        if session.need_frame && self.snes_capture_active && !self.running {
+            session.need_frame = false;
+            self.send_command(CoreCommand::StepFrame);
+        }
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let frame = self
+            .core_frame_size
+            .map(|(w, h)| (u32::try_from(w).unwrap_or(0), u32::try_from(h).unwrap_or(0)));
+        let grid = self
+            .debug_panels
+            .data
+            .snes
+            .as_deref()
+            .zip(frame)
+            .filter(|(_, (w, _))| *w == 256)
+            .and_then(|(snes, screen)| {
+                crate::live_heights::character_grid(
+                    session.painter.layer,
+                    session.painter.tile_px,
+                    &snes.vram,
+                    &snes.ppu_regs,
+                    snes.bg_scroll,
+                    screen,
+                )
+            });
+        let mut hovered: Option<u16> = None;
+        let mut changed = false;
+        let mut close = false;
+        let mut save = false;
+        let mut preview_toggled = false;
+
+        // The grid, over the picture.
+        if let (Some(play), Some(grid), Some((fw, fh))) = (self.last_play_rect, &grid, frame) {
+            #[allow(clippy::cast_precision_loss)]
+            let (fw, fh) = (fw as f32, fh as f32);
+            egui::Area::new(egui::Id::new("height-painter-grid"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(play.min)
+                .show(ctx, |ui| {
+                    let (rect, response) =
+                        ui.allocate_exact_size(play.size(), egui::Sense::click());
+                    let (sx, sy) = (rect.width() / fw, rect.height() / fh);
+                    let painter = ui.painter_at(rect);
+                    let p = grid.tile_px as f32;
+                    let line = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(46));
+                    let to_screen =
+                        |x: f32, y: f32| egui::pos2(rect.left() + x * sx, rect.top() + y * sy);
+                    let cell_rect = |col: u32, row: u32| {
+                        let (ox, oy) = grid.cell_screen_origin(col, row);
+                        egui::Rect::from_min_max(
+                            to_screen(ox as f32, oy as f32),
+                            to_screen(ox as f32 + p, oy as f32 + p),
+                        )
+                    };
+                    for row in 0..grid.rows {
+                        for col in 0..grid.cols {
+                            let Some(tile) = grid.char_at(col, row) else {
+                                continue;
+                            };
+                            let h = session.painter.height_of(tile);
+                            let cell = cell_rect(col, row);
+                            if h > 0 {
+                                let alpha = 60 + u32::from(h) * 2;
+                                painter.rect_filled(
+                                    cell,
+                                    0.0,
+                                    egui::Color32::from_rgba_unmultiplied(
+                                        255,
+                                        140,
+                                        30,
+                                        alpha.min(190) as u8,
+                                    ),
+                                );
+                                if cell.width() >= 20.0 {
+                                    painter.text(
+                                        cell.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        h.to_string(),
+                                        egui::FontId::monospace(11.0),
+                                        egui::Color32::WHITE,
+                                    );
+                                }
+                            }
+                            painter.rect_stroke(cell, 0.0, line, egui::StrokeKind::Inside);
+                        }
+                    }
+                    let tile_under = response.hover_pos().and_then(|pos| {
+                        let (fx, fy) = ((pos.x - rect.left()) / sx, (pos.y - rect.top()) / sy);
+                        let (col, row) = grid.cell_at(fx, fy)?;
+                        Some((col, row, grid.char_at(col, row)?))
+                    });
+                    if let Some((col, row, tile)) = tile_under {
+                        hovered = Some(tile);
+                        painter.rect_stroke(
+                            cell_rect(col, row),
+                            0.0,
+                            egui::Stroke::new(2.0, tokens.accent),
+                            egui::StrokeKind::Inside,
+                        );
+                        let alt = ui.input(|i| i.modifiers.alt);
+                        let ctrl = ui.input(|i| i.modifiers.command);
+                        if response.secondary_clicked() || (response.clicked() && alt) {
+                            changed |= session.painter.clear(tile);
+                        } else if response.clicked() {
+                            if session.pick_armed || ctrl {
+                                session.painter.pick(tile);
+                                session.pick_armed = false;
+                            } else {
+                                changed |= session.painter.paint(tile);
+                            }
+                        }
+                    }
+                });
+        }
+
+        // The panel.
+        egui::Area::new(egui::Id::new("height-painter"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_TOP, [-12.0, 48.0])
+            .show(ctx, |ui| {
+                crate::theme::Elevation::Overlay.frame(&tokens).show(ui, |ui| {
+                    ui.set_width(330.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Paint tile heights")
+                                .font(crate::theme::condensed(crate::theme::type_scale::TITLE))
+                                .color(tokens.ink),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if crate::icons::icon_button(
+                                ui,
+                                egui::RichText::new(egui_phosphor::regular::X),
+                                "Close the height painter (unsaved painting is dropped)",
+                            )
+                            .clicked()
+                            {
+                                close = true;
+                            }
+                        });
+                    });
+                    ui.label(
+                        egui::RichText::new(
+                            "Click a tile to set its height, right-click (or Alt-click) to clear it. \
+                             Every tile with the same character number shares one height.",
+                        )
+                        .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
+                        .color(tokens.ink),
+                    );
+                    if grid.is_none() {
+                        ui.label(
+                            egui::RichText::new(if frame.is_some_and(|(w, _)| w != 256) {
+                                "The painter needs the plain 256-pixel picture: turn widescreen and HD packs off."
+                            } else {
+                                "Waiting for the game's tile map\u{2026} (this layer may not exist in the current screen mode)."
+                            })
+                            .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
+                            .color(tokens.warn),
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Layer");
+                        for layer in 1..=4u8 {
+                            if ui
+                                .selectable_label(session.painter.layer == layer, format!("BG{layer}"))
+                                .clicked()
+                                && session.painter.layer != layer
+                            {
+                                session.painter.layer = layer;
+                                changed = true;
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Grid");
+                        for px in [8u8, 16] {
+                            if ui
+                                .selectable_label(session.painter.tile_px == px, format!("{px} px"))
+                                .clicked()
+                                && session.painter.tile_px != px
+                            {
+                                session.painter.tile_px = px;
+                                changed = true;
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Height");
+                        let mut brush = session.painter.brush;
+                        if ui
+                            .add(egui::Slider::new(&mut brush, 0..=crate::profile_builder::HEIGHT_MAX))
+                            .changed()
+                        {
+                            session.painter.set_brush(brush);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        for quick in [0u8, 8, 16, 32] {
+                            if ui.button(quick.to_string()).clicked() {
+                                session.painter.set_brush(quick);
+                            }
+                        }
+                        let label = if session.pick_armed { "Pick: click a tile" } else { "Pick" };
+                        if ui
+                            .selectable_label(session.pick_armed, label)
+                            .on_hover_text("Click a tile to copy its height into the brush (Ctrl-click does the same).")
+                            .clicked()
+                        {
+                            session.pick_armed = !session.pick_armed;
+                        }
+                    });
+                    let readout = match hovered {
+                        Some(tile) => format!(
+                            "Tile 0x{tile:03X}: height {} (brush {})",
+                            session.painter.height_of(tile),
+                            session.painter.brush
+                        ),
+                        None => format!("Hover a tile. Brush {}.", session.painter.brush),
+                    };
+                    ui.label(egui::RichText::new(readout).font(crate::theme::numeric(12.0)).color(tokens.ink));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                session.painter.undo_len() > 0,
+                                egui::Button::new(format!("Undo ({})", session.painter.undo_len())),
+                            )
+                            .clicked()
+                            && session.painter.undo()
+                        {
+                            changed = true;
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("{} tiles painted", session.painter.painted()))
+                                .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
+                                .color(tokens.muted),
+                        );
+                    });
+                    if ui
+                        .checkbox(&mut session.preview, "Show the Diorama beside this (runs the game)")
+                        .changed()
+                    {
+                        preview_toggled = true;
+                    }
+                    if session.preview {
+                        match &self.diorama_texture {
+                            Some(tex) => {
+                                ui.add(egui::Image::from_texture(tex).max_width(306.0));
+                            }
+                            None => {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Nothing to show yet. Diorama needs Game-Aware mode and a painted tile (the HD-2D preset turns it on).",
+                                    )
+                                    .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
+                                    .color(tokens.muted),
+                                );
+                            }
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new("Save heights").strong()))
+                            .clicked()
+                        {
+                            save = true;
+                        }
+                        if session.dirty {
+                            ui.label(
+                                egui::RichText::new("unsaved")
+                                    .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
+                                    .color(tokens.warn),
+                            );
+                        }
+                    });
+                    if let Some(note) = &session.note {
+                        ui.label(
+                            egui::RichText::new(note)
+                                .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
+                                .color(tokens.ok),
+                        );
+                    }
+                });
+            });
+
+        if changed {
+            session.dirty = true;
+            session.note = None;
+            self.live_heights = Some(session.painter.height_table());
+        }
+        if preview_toggled && self.core.is_some() {
+            if session.preview {
+                self.send_command(CoreCommand::Resume);
+                self.running = true;
+            } else {
+                self.send_command(CoreCommand::Pause);
+                self.running = false;
+            }
+        }
+        if save {
+            session.note = Some(match self.save_painted_heights(&session.painter) {
+                Ok(path) => {
+                    session.dirty = false;
+                    format!("Saved to {}", path.display())
+                }
+                Err(e) => format!("Could not save: {e}"),
+            });
+        }
+        if close {
+            self.height_painter = Some(session);
+            self.close_height_painter();
+        } else {
+            self.height_painter = Some(session);
+        }
+    }
+
+    /// Ticket W30-06 part B: the one-click HD-2D card at the top of the
+    /// Enhancements panel.
+    fn hd2d_preset_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        tokens: &crate::theme::Tokens,
+        actions: &mut crate::enhance_dock::EnhanceActions,
+    ) {
+        let why_not =
+            crate::hd2d_preset::unavailable_reason(&self.current_game_settings, &self.game_facts());
+        let applied = crate::hd2d_preset::is_applied(&self.current_game_settings);
+        let mut toggle = false;
+        crate::theme::Elevation::Raised.frame(tokens).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("HD-2D look")
+                        .font(egui::FontId::proportional(crate::theme::type_scale::BODY))
+                        .strong()
+                        .color(tokens.ink),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if applied { "Turn off" } else { "Turn on" };
+                    if ui
+                        .add_enabled(why_not.is_none() || applied, egui::Button::new(label))
+                        .clicked()
+                    {
+                        toggle = true;
+                    }
+                });
+            });
+            ui.label(
+                egui::RichText::new(
+                    "One click: soft glow, miniature focus and shadows, Diorama walls, and a tilted \
+                     camera that follows the player. Turning it off puts your settings back.",
+                )
+                .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
+                .color(tokens.muted),
+            );
+            if let (Some(why), false) = (&why_not, applied) {
+                ui.label(
+                    egui::RichText::new(why)
+                        .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
+                        .color(tokens.warn),
+                );
+            }
+        });
+        if toggle {
+            self.toggle_hd2d_preset(actions);
+        }
+    }
+
+    /// Ticket W30-06 part B: turn the HD-2D preset on (remembering what it
+    /// replaces) or off (putting that back). Settings only.
+    fn toggle_hd2d_preset(&mut self, actions: &mut crate::enhance_dock::EnhanceActions) {
+        if crate::hd2d_preset::is_applied(&self.current_game_settings) {
+            match self.hd2d_remembered.take() {
+                Some(before) => {
+                    crate::hd2d_preset::restore(&mut self.current_game_settings, &before);
+                }
+                None => crate::hd2d_preset::reset(&mut self.current_game_settings),
+            }
+        } else if crate::hd2d_preset::unavailable_reason(
+            &self.current_game_settings,
+            &self.game_facts(),
+        )
+        .is_none()
+        {
+            self.hd2d_remembered = Some(crate::hd2d_preset::apply(&mut self.current_game_settings));
+        } else {
+            return;
+        }
+        actions.settings_changed = true;
+        actions.diorama_set = Some(self.current_game_settings.diorama);
     }
 
     /// Ticket W24-04: write the chosen address into this game's profile
@@ -11934,7 +12578,117 @@ impl RetroForgeApp {
         height: usize,
     ) {
         self.mode7_seen = true;
-        let msg = core_thread::FrameMsg {
+        let snes = core_thread::SnesDebugFrame {
+            vram,
+            cgram,
+            oam: vec![0u8; 544],
+            ppu_regs: vec![0u8; 0x40],
+            aram: Vec::new(),
+            mode7: rf_snes::ppu::mode7::Mode7::default(),
+            hdma_lanes: Vec::new(),
+            voices: Vec::new(),
+            bg_scroll: [(0, 0); 4],
+        };
+        let msg = Self::synthetic_frame_msg(
+            vec![0u8; width * height * 4],
+            sprite_rgba,
+            width,
+            height,
+            snes,
+            Some(Box::new(frame)),
+        );
+        self.refresh_diorama_render(&msg);
+    }
+
+    /// Ticket W30-06: give the app a SNES profile's `[heights]` table the
+    /// way a matched profile would (and mark a profile matched), so the
+    /// Diorama row can become available with no decoder.
+    #[doc(hidden)]
+    pub fn set_live_heights_for_test(&mut self, table: crate::live_heights::HeightTable) {
+        self.live_heights = Some(table);
+        self.profile_matched = true;
+    }
+
+    /// Ticket W30-06 part B: click the HD-2D preset's button; `false` when
+    /// it declined (unavailable here).
+    #[doc(hidden)]
+    pub fn toggle_hd2d_for_test(&mut self) -> bool {
+        let before = self.current_game_settings.clone();
+        let mut actions = crate::enhance_dock::EnhanceActions::default();
+        self.toggle_hd2d_preset(&mut actions);
+        self.apply_enhance_actions(&actions);
+        self.current_game_settings != before
+    }
+
+    /// Ticket W30-06 part B: why the HD-2D preset cannot be used now.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn hd2d_unavailable_for_test(&self) -> Option<String> {
+        crate::hd2d_preset::unavailable_reason(&self.current_game_settings, &self.game_facts())
+    }
+
+    /// Ticket W30-06 part B: this game's settings, as saved.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn game_settings_for_test(&self) -> &crate::game_settings::GameSettings {
+        &self.current_game_settings
+    }
+
+    /// Ticket W30-06 part B: set the settings the preset owns to values a
+    /// player might have chosen themselves.
+    #[doc(hidden)]
+    pub fn edit_game_settings_for_test(
+        &mut self,
+        edit: impl FnOnce(&mut crate::game_settings::GameSettings),
+    ) {
+        edit(&mut self.current_game_settings);
+    }
+
+    /// Ticket W30-06 part B: press "Paint tile heights" (tests).
+    #[doc(hidden)]
+    pub fn open_height_painter_for_test(&mut self) {
+        self.open_height_painter();
+    }
+
+    /// Ticket W30-06 part B: whether the painter is open (tests).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn height_painter_open_for_test(&self) -> bool {
+        self.height_painter.is_some()
+    }
+
+    /// Ticket W30-06: whether the Diorama row is currently effective (what
+    /// a repaint's `sync_diorama_subscription` last saw).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diorama_wanted_for_test(&self) -> bool {
+        self.diorama_wanted
+    }
+
+    /// Ticket W30-06: deliver one synthetic SNES frame — the picture, the
+    /// sprite layer and the PPU snapshot — through the identical private
+    /// path a real frame takes to the live-screen diorama.
+    #[doc(hidden)]
+    pub fn inject_snes_live_frame_for_test(
+        &mut self,
+        rgba: Vec<u8>,
+        sprite_rgba: Vec<u8>,
+        snes: core_thread::SnesDebugFrame,
+    ) {
+        let msg = Self::synthetic_frame_msg(rgba, sprite_rgba, 256, 224, snes, None);
+        self.refresh_diorama_render(&msg);
+    }
+
+    /// A `FrameMsg` with only the fields the diorama paths read filled in.
+    fn synthetic_frame_msg(
+        rgba: Vec<u8>,
+        sprite_rgba: Vec<u8>,
+        width: usize,
+        height: usize,
+        snes: core_thread::SnesDebugFrame,
+        mode7: Option<Box<rf_core_api::Mode7Frame>>,
+    ) -> core_thread::FrameMsg {
+        core_thread::FrameMsg {
             governors: crate::clock_governor::GovernorReport::default(),
             loading: None,
             paced: true,
@@ -11945,7 +12699,7 @@ impl RetroForgeApp {
             hd: None,
             hd_mode7: None,
             mode7_shown: false,
-            rgba: vec![0u8; width * height * 4],
+            rgba,
             line_palettes: Vec::new(),
             width,
             height,
@@ -11955,16 +12709,7 @@ impl RetroForgeApp {
             sprite_rgba,
             oam: Box::new([0u8; 256]),
             audio_traces: Vec::new(),
-            snes: Some(Box::new(core_thread::SnesDebugFrame {
-                vram,
-                cgram,
-                oam: vec![0u8; 544],
-                ppu_regs: vec![0u8; 0x40],
-                aram: Vec::new(),
-                mode7: rf_snes::ppu::mode7::Mode7::default(),
-                hdma_lanes: Vec::new(),
-                voices: Vec::new(),
-            })),
+            snes: Some(Box::new(snes)),
             vram: Box::new([0u8; 0x1000]),
             cpu_regs: Box::new(rf_core_api::CpuRegs::None),
             palette_ram: Box::new([0u8; 32]),
@@ -11973,10 +12718,9 @@ impl RetroForgeApp {
             items: Vec::new(),
             prg_ram: Box::new([0u8; 0x2000]),
             sprite_height_px: 8,
-            mode7: Some(Box::new(frame)),
+            mode7,
             canvas_frame: None,
-        };
-        self.refresh_diorama_render(&msg);
+        }
     }
 
     /// Ticket W16-13: whether this build has a real GPU device
@@ -12011,6 +12755,15 @@ impl RetroForgeApp {
             hash = hash.wrapping_mul(0x0100_0000_01b3);
         }
         Some(hash)
+    }
+
+    /// Ticket W30-06: how many pixels of the current Diorama render are not
+    /// fully transparent, or `None` when there is no render.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diorama_opaque_pixels_for_test(&self) -> Option<usize> {
+        let render = self.diorama_render.as_ref()?;
+        Some(render.rgba.chunks_exact(4).filter(|px| px[3] != 0).count())
     }
 
     /// The status-bar badge text exactly as the toolbar renders it
@@ -13777,7 +14530,12 @@ impl RetroForgeApp {
         // Ticket W16-14: Mode 7 ground needs the live VRAM/CGRAM snapshot
         // (`FrameMsg::snes`) to build its plane texture, same OR-safety
         // shape as `sync_event_subscription`'s own `wants` just below.
-        let wants = self.debug_panels.wants_snes_capture() || self.mode7_ground_wanted;
+        // Ticket W30-06: the live-screen diorama reads VRAM, the registers
+        // and the scroll from the same snapshot.
+        let wants = self.debug_panels.wants_snes_capture()
+            || self.mode7_ground_wanted
+            || self.live_diorama_active()
+            || self.height_painter.is_some();
         if wants == self.snes_capture_active {
             return;
         }
@@ -14895,7 +15653,9 @@ impl RetroForgeApp {
             // here rather than by mutating `self.camera`, so releasing
             // restores whatever the user had chosen without this having
             // to remember it.
-            let camera = if self.peeking_original {
+            // Ticket W30-06 part B: the painter works on the flat picture.
+            let flat = self.peeking_original || self.height_painter.is_some();
+            let camera = if flat {
                 CameraToggle::Original
             } else {
                 self.camera
@@ -14904,7 +15664,7 @@ impl RetroForgeApp {
                 camera,
                 self.ultrawide_render.as_ref(),
                 self.diorama_render.as_ref(),
-                self.peeking_original,
+                flat,
             ) {
                 enhanced_view::ActiveView::Original => {
                     // Ticket W10-03. Which surface this is depends on
@@ -15084,6 +15844,7 @@ impl eframe::App for RetroForgeApp {
         self.overlay_menu(&ctx);
         self.slot_undo_bar(&ctx);
         self.profile_builder_panel(&ctx);
+        self.height_painter_window(&ctx);
         self.camera_found_card(&ctx);
         self.enhance_tip(&ctx);
         self.states_modal(&ctx);

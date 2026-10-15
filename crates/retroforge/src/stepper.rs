@@ -732,6 +732,13 @@ impl EmuStepper {
             mode7: core.system().bus.ppu.mode7,
             hdma_lanes: core.system().bus.hdma_lanes().to_vec(),
             voices: rf_snes::debug::voice_views(&core.system().bus.apu.dsp),
+            bg_scroll: core
+                .system()
+                .bus
+                .ppu
+                .bgs
+                .each_ref()
+                .map(|bg| (bg.hofs, bg.vofs)),
         })
     }
 
