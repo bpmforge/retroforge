@@ -39,6 +39,14 @@ pub struct SnesSystem {
     pub last_instr_accesses: u64,
     /// See [`Self::last_instr_accesses`].
     pub last_instr_master_cycles: u64,
+    /// Ticket W30-01: how many master cycles of GSU credit each master
+    /// cycle buys — `1` is the cartridge's own clock and the default. An
+    /// opt-in Enhanced-mode setting, not machine state (never saved); a
+    /// value above `1` changes what the game does, so the shell flags the
+    /// run as not Accuracy, the same rule `[mods]` patches follow. Whole
+    /// multiples only, so the credit stays an exact integer and a save/
+    /// load round trip cannot lose a fractional remainder.
+    pub gsu_clock_multiplier: u64,
 }
 
 impl SnesSystem {
@@ -94,6 +102,7 @@ impl SnesSystem {
             nmi_hold: false,
             last_instr_accesses: 0,
             last_instr_master_cycles: 0,
+            gsu_clock_multiplier: 1,
         };
         system.bus.fast_rom = header.fast_rom;
         // DSP-1 HLE (ticket W14-19; D-010, FR-CORE-038): `rf-cart`
@@ -224,6 +233,7 @@ impl SnesSystem {
             nmi_hold: false,
             last_instr_accesses: 0,
             last_instr_master_cycles: 0,
+            gsu_clock_multiplier: 1,
         };
         system.reset();
         system
@@ -641,7 +651,10 @@ impl SnesSystem {
         // MDMA/HDMA). `bus.rom` is borrowed the same disjoint-field way
         // the SA-1 loop above already borrows it alongside `bus.sa1`.
         if let Some(gsu) = bus.gsu.as_mut() {
-            gsu.run_credited(&bus.rom, master_this_step);
+            // Ticket W30-01: the overclock is applied here, to the credit,
+            // so the GSU's own documented per-opcode costs stay untouched
+            // and `1` is exactly the pre-W30-01 call.
+            gsu.run_credited(&bus.rom, master_this_step * self.gsu_clock_multiplier);
         }
 
         result
