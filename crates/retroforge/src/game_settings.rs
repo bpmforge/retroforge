@@ -221,6 +221,27 @@ pub struct GameSettings {
     /// Ticket W30-02: blend the Mode 7 matrix between scanlines. On by
     /// default; only the OFF state is persisted.
     pub hd_mode7_perspective: bool,
+    /// Ticket W30-04: the HD-2D lens and lighting effects (presentation
+    /// only, applied to the finished picture). Each is off by default
+    /// (law 6) and has a strength stored as an integer percent `0..=100`
+    /// (`*_pct`; an `f32` would cost this struct its `Eq`).
+    pub lens_bloom: bool,
+    pub lens_bloom_pct: u8,
+    pub lens_tiltshift: bool,
+    pub lens_tiltshift_pct: u8,
+    pub lens_shadows: bool,
+    pub lens_shadows_pct: u8,
+    pub lens_grade: bool,
+    pub lens_grade_pct: u8,
+    /// The weather overlay: `Weather::None` is off; the percent is its
+    /// density.
+    pub lens_weather: rf_renderer::lens::Weather,
+    pub lens_weather_pct: u8,
+    /// Time of day for the grade, percent of a day: 0 midnight, 50 noon.
+    pub lens_time_of_day: u8,
+    /// Take the time of day from the clock instead of
+    /// [`Self::lens_time_of_day`].
+    pub lens_follow_clock: bool,
     /// Ticket W30-03: the screen shape decoded widescreen aims for. 16:9
     /// by default; only a non-default choice is persisted.
     pub widescreen_aspect: rf_enhance::widescreen::Aspect,
@@ -273,6 +294,12 @@ const HD_MODE7_SCALE_MIN: u8 = 2;
 const HD_MODE7_SCALE_MAX: u8 = 4;
 const HD_MODE7_SCALE_DEFAULT: u8 = 2;
 
+/// Ticket W30-04: every lens strength defaults to half; the time of day to
+/// noon.
+const LENS_PCT_DEFAULT: u8 = 50;
+const LENS_PCT_MAX: u8 = 100;
+const LENS_TIME_DEFAULT: u8 = 50;
+
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
@@ -290,6 +317,18 @@ impl Default for GameSettings {
             hd_mode7_scale: HD_MODE7_SCALE_DEFAULT,
             hd_mode7_supersample: false,
             hd_mode7_perspective: true,
+            lens_bloom: false,
+            lens_bloom_pct: LENS_PCT_DEFAULT,
+            lens_tiltshift: false,
+            lens_tiltshift_pct: LENS_PCT_DEFAULT,
+            lens_shadows: false,
+            lens_shadows_pct: LENS_PCT_DEFAULT,
+            lens_grade: false,
+            lens_grade_pct: LENS_PCT_DEFAULT,
+            lens_weather: rf_renderer::lens::Weather::None,
+            lens_weather_pct: LENS_PCT_DEFAULT,
+            lens_time_of_day: LENS_TIME_DEFAULT,
+            lens_follow_clock: false,
             widescreen_aspect: rf_enhance::widescreen::Aspect::default(),
             shader: None,
             trust: rf_enhance::trust::TrustLadder::default(),
@@ -321,6 +360,36 @@ impl GameSettings {
 }
 
 impl GameSettings {
+    /// Ticket W30-04: whether any lens effect is switched on. The
+    /// "HD-2D lens and lighting" row reads as on exactly when this is.
+    #[must_use]
+    pub fn lens_any(&self) -> bool {
+        self.lens_bloom
+            || self.lens_tiltshift
+            || self.lens_shadows
+            || self.lens_grade
+            || self.lens_weather != rf_renderer::lens::Weather::None
+    }
+
+    /// Ticket W30-04: switch every lens effect off (the row's own toggle).
+    pub fn lens_clear(&mut self) {
+        self.lens_bloom = false;
+        self.lens_tiltshift = false;
+        self.lens_shadows = false;
+        self.lens_grade = false;
+        self.lens_weather = rf_renderer::lens::Weather::None;
+    }
+
+    /// Ticket W30-04: the row's toggle turned on with nothing chosen yet
+    /// starts with the miniature look (glow and tilt-shift); a player who
+    /// already picked effects keeps their picks.
+    pub fn lens_start(&mut self) {
+        if !self.lens_any() {
+            self.lens_bloom = true;
+            self.lens_tiltshift = true;
+        }
+    }
+
     /// Serialize. Keys are sorted so a settings file does not churn between
     /// saves, which matters for anyone keeping their config in git.
     #[must_use]
@@ -367,6 +436,40 @@ impl GameSettings {
         }
         if !self.hd_mode7_perspective {
             fields.insert("hd_mode7_perspective".to_string(), "false".to_string());
+        }
+        // Ticket W30-04: same rule -- only what differs from the default.
+        for (key, on) in [
+            ("lens_bloom", self.lens_bloom),
+            ("lens_tiltshift", self.lens_tiltshift),
+            ("lens_shadows", self.lens_shadows),
+            ("lens_grade", self.lens_grade),
+            ("lens_follow_clock", self.lens_follow_clock),
+        ] {
+            if on {
+                fields.insert(key.to_string(), "true".to_string());
+            }
+        }
+        for (key, pct, default) in [
+            ("lens_bloom_pct", self.lens_bloom_pct, LENS_PCT_DEFAULT),
+            (
+                "lens_tiltshift_pct",
+                self.lens_tiltshift_pct,
+                LENS_PCT_DEFAULT,
+            ),
+            ("lens_shadows_pct", self.lens_shadows_pct, LENS_PCT_DEFAULT),
+            ("lens_grade_pct", self.lens_grade_pct, LENS_PCT_DEFAULT),
+            ("lens_weather_pct", self.lens_weather_pct, LENS_PCT_DEFAULT),
+            ("lens_time_of_day", self.lens_time_of_day, LENS_TIME_DEFAULT),
+        ] {
+            if pct != default {
+                fields.insert(key.to_string(), pct.to_string());
+            }
+        }
+        if self.lens_weather != rf_renderer::lens::Weather::None {
+            fields.insert(
+                "lens_weather".to_string(),
+                self.lens_weather.key().to_string(),
+            );
         }
         // Ticket W30-03: 16:9 is the default and is never written.
         if self.widescreen_aspect != rf_enhance::widescreen::Aspect::default() {
@@ -471,6 +574,23 @@ impl GameSettings {
                             scale.clamp(HD_MODE7_SCALE_MIN, HD_MODE7_SCALE_MAX);
                     }
                 }
+                "lens_bloom" => settings.lens_bloom = value == "true",
+                "lens_tiltshift" => settings.lens_tiltshift = value == "true",
+                "lens_shadows" => settings.lens_shadows = value == "true",
+                "lens_grade" => settings.lens_grade = value == "true",
+                "lens_follow_clock" => settings.lens_follow_clock = value == "true",
+                // An unknown sky keeps the default (clear).
+                "lens_weather" => {
+                    if let Some(w) = rf_renderer::lens::Weather::from_key(value) {
+                        settings.lens_weather = w;
+                    }
+                }
+                "lens_bloom_pct" => parse_pct(value, &mut settings.lens_bloom_pct),
+                "lens_tiltshift_pct" => parse_pct(value, &mut settings.lens_tiltshift_pct),
+                "lens_shadows_pct" => parse_pct(value, &mut settings.lens_shadows_pct),
+                "lens_grade_pct" => parse_pct(value, &mut settings.lens_grade_pct),
+                "lens_weather_pct" => parse_pct(value, &mut settings.lens_weather_pct),
+                "lens_time_of_day" => parse_pct(value, &mut settings.lens_time_of_day),
                 "trust" => {
                     settings.trust = rf_enhance::trust::TrustLadder::from_settings_value(value);
                 }
@@ -508,6 +628,14 @@ impl GameSettings {
     #[must_use]
     pub fn unknown_keys(&self) -> &BTreeMap<String, String> {
         &self.unknown
+    }
+}
+
+/// Ticket W30-04: read a `0..=100` percent, clamping a larger number and
+/// leaving `target` alone for text that is not a number.
+fn parse_pct(value: &str, target: &mut u8) {
+    if let Ok(n) = value.parse::<u32>() {
+        *target = u8::try_from(n.min(u32::from(LENS_PCT_MAX))).unwrap_or(LENS_PCT_MAX);
     }
 }
 
@@ -908,6 +1036,7 @@ mod mode_and_feature_persistence_tests {
             "superfx_overclock",
             "superfx_overclock_pct",
             "hd_mode7",
+            "lens_",
         ] {
             assert!(
                 !untouched.contains(key),
@@ -988,6 +1117,65 @@ mod mode_and_feature_persistence_tests {
             !restored.widescreen_decoded,
             "a toggle that was never set must stay off"
         );
+    }
+
+    /// Ticket W30-04: every lens setting round-trips, only non-defaults are
+    /// written, strengths clamp to 0..=100, and junk falls back.
+    #[test]
+    fn lens_settings_persist_clamp_and_write_only_non_defaults() {
+        use rf_renderer::lens::Weather;
+        let untouched = GameSettings::default().to_text();
+        assert!(!untouched.contains("lens_"), "{untouched}");
+        let all = GameSettings {
+            lens_bloom: true,
+            lens_bloom_pct: 80,
+            lens_tiltshift: true,
+            lens_tiltshift_pct: 0,
+            lens_shadows: true,
+            lens_shadows_pct: 100,
+            lens_grade: true,
+            lens_grade_pct: 25,
+            lens_weather: Weather::Snow,
+            lens_weather_pct: 70,
+            lens_time_of_day: 0,
+            lens_follow_clock: true,
+            ..GameSettings::default()
+        };
+        assert_eq!(
+            GameSettings::from_text(&all.to_text()).expect("parses"),
+            all,
+            "every lens field survives a save"
+        );
+        // On with the default strength: just the flag is written.
+        let on = GameSettings {
+            lens_bloom: true,
+            ..GameSettings::default()
+        }
+        .to_text();
+        assert!(on.contains("lens_bloom=true"));
+        assert!(!on.contains("lens_bloom_pct"), "default strength: {on}");
+        assert!(!on.contains("lens_weather"), "clear sky: {on}");
+        // Clamp wild values; ignore junk.
+        let wild = GameSettings::from_text(&format!(
+            "{MAGIC}\nlens_bloom_pct=250\nlens_grade_pct=abc\nlens_time_of_day=999\nlens_weather=hail\n"
+        ))
+        .expect("parses");
+        assert_eq!(wild.lens_bloom_pct, 100);
+        assert_eq!(wild.lens_grade_pct, 50, "junk keeps the default");
+        assert_eq!(wild.lens_time_of_day, 100);
+        assert_eq!(wild.lens_weather, Weather::None);
+        // The row switch helpers.
+        let mut s = GameSettings::default();
+        assert!(!s.lens_any());
+        s.lens_start();
+        assert!(s.lens_bloom && s.lens_tiltshift && !s.lens_grade && s.lens_any());
+        s.lens_grade = true;
+        s.lens_bloom = false;
+        s.lens_tiltshift = false;
+        s.lens_start();
+        assert!(!s.lens_bloom, "picks already made are kept");
+        s.lens_clear();
+        assert!(!s.lens_any());
     }
 
     /// Ticket W27-05: pins and their corner survive a save.

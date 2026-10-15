@@ -92,6 +92,10 @@ pub struct GameFacts {
     /// means "no overclock", so the row is unavailable rather than an ON
     /// row the badge would count while nothing changes.
     pub superfx_max: u16,
+    /// Ticket W30-04: the HD-2D lens can draw -- there is a GPU, and the
+    /// pass has kept to its frame budget and not failed. Like
+    /// `fog_rendered`, so the badge never counts a row nothing draws.
+    pub lens_available: bool,
 }
 
 impl GameFacts {
@@ -110,6 +114,7 @@ impl GameFacts {
             fog_rendered: true,
             superfx: true,
             superfx_max: 800,
+            lens_available: true,
         }
     }
 }
@@ -161,6 +166,7 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         fog_rendered,
         superfx,
         superfx_max,
+        lens_available,
     } = *facts;
     let mode = settings.mode;
     let enhancement = mode.enhancement_active();
@@ -223,6 +229,14 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         generic(settings.superfx_overclock),
         superfx && superfx_max > 100,
         "a Super FX cartridge whose profile allows overclocking",
+    );
+    // Ticket W30-04: presentation-only and generic (no profile, NES and
+    // SNES alike); it just needs a GPU to draw on. The row reads as on
+    // exactly when at least one of its effects is.
+    let (lens_av, lens_on) = also(
+        generic(settings.lens_any()),
+        lens_available,
+        "a graphics card that can draw it",
     );
     let (level_av, level_on) = also(
         profiled(settings.full_level_view),
@@ -355,6 +369,15 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
             scope: "generic, requires live BG mode 7",
             enabled: settings.hd_mode7,
             availability: mode7_av,
+            heuristic: None,
+        },
+        // Ticket W30-04: bloom, tilt-shift, shadows, day/night and weather.
+        FeatureRow {
+            id: "hd2d_lens",
+            label: "HD-2D lens and lighting",
+            scope: "generic, needs a GPU",
+            enabled: lens_on,
+            availability: lens_av,
             heuristic: None,
         },
     ]
@@ -761,7 +784,7 @@ mod tests {
             &GameSettings::default(),
             &GameFacts::new(false, false, false),
         );
-        assert_eq!(rows.len(), 10, "every feature is listed in every mode");
+        assert_eq!(rows.len(), 11, "every feature is listed in every mode");
         assert!(rows.iter().all(|r| r.availability.explanation().is_some()));
     }
 
@@ -951,6 +974,62 @@ mod tests {
 
         s.hd_mode7 = false;
         assert!(!find(&s, &seen).effective());
+    }
+
+    /// Ticket W30-04: the lens row is Enhanced-only, needs no profile and
+    /// no particular game state (so it works on the NES as well as the
+    /// SNES), needs a GPU, and counts toward the badge only when at least
+    /// one effect is on and the row is available.
+    #[test]
+    fn hd2d_lens_gating_and_badge() {
+        let find = |s: &GameSettings, f: &GameFacts| {
+            feature_rows(s, f)
+                .into_iter()
+                .find(|r| r.id == "hd2d_lens")
+                .unwrap()
+        };
+        let mut s = settings(Mode::Accuracy);
+        s.lens_bloom = true;
+        let ready = GameFacts::new(false, false, false);
+        assert_eq!(
+            find(&s, &ready).availability,
+            Availability::NeedsMode("Enhanced")
+        );
+        assert!(!find(&s, &ready).effective());
+
+        s.mode = Mode::Enhanced;
+        assert!(find(&s, &ready).effective(), "no profile, no Mode 7 needed");
+        assert!(badge_breakdown(&s, &ready)
+            .iter()
+            .any(|l| l.contains("HD-2D lens")));
+
+        let no_gpu = GameFacts {
+            lens_available: false,
+            ..ready
+        };
+        assert_eq!(
+            find(&s, &no_gpu).availability,
+            Availability::NeedsGameState("a graphics card that can draw it")
+        );
+        assert!(!find(&s, &no_gpu).effective());
+        assert!(!badge_breakdown(&s, &no_gpu)
+            .iter()
+            .any(|l| l.contains("HD-2D lens")));
+
+        // Every effect counts; none on means the row reads off.
+        for set in [
+            (|s: &mut GameSettings| s.lens_tiltshift = true) as fn(&mut GameSettings),
+            |s| s.lens_shadows = true,
+            |s| s.lens_grade = true,
+            |s| s.lens_weather = rf_renderer::lens::Weather::Rain,
+        ] {
+            let mut one = settings(Mode::Enhanced);
+            set(&mut one);
+            assert!(find(&one, &ready).effective());
+        }
+        s.lens_bloom = false;
+        assert!(!find(&s, &ready).effective(), "no effect chosen");
+        assert!(!find(&s, &ready).enabled);
     }
 
     /// A "suppressed" heuristic is not acting, so the chip must say so —

@@ -33,6 +33,9 @@ pub fn describe(id: &str) -> &'static str {
         "diorama" => "Raises the level's walls into a 3D diorama.",
         "mode7_ground" => "Turns a Mode 7 floor into a 3D ground you look across.",
         "hd_mode7" => "Redraws Mode 7 floors at 2-4x resolution, with smooth perspective.",
+        "hd2d_lens" => {
+            "Adds a soft glow, a miniature-model focus blur, day and night light, and rain or snow."
+        }
         "superfx_overclock" => {
             "Runs the Super FX chip faster, so 3D games draw more frames. Some games speed up too \u{2014} turn it off if one does."
         }
@@ -48,7 +51,12 @@ pub fn describe(id: &str) -> &'static str {
 pub fn works_on_any_game(id: &str) -> bool {
     matches!(
         id,
-        "sprite_overlay" | "deflicker" | "mode7_ground" | "superfx_overclock" | "hd_mode7"
+        "sprite_overlay"
+            | "deflicker"
+            | "mode7_ground"
+            | "superfx_overclock"
+            | "hd_mode7"
+            | "hd2d_lens"
     )
 }
 
@@ -77,6 +85,7 @@ pub const fn player_name(id: &str) -> &'static str {
         b"mode7_ground" => "Mode 7 in 3D",
         b"superfx_overclock" => "Faster Super FX",
         b"hd_mode7" => "Sharper Mode 7",
+        b"hd2d_lens" => "Lens and lighting",
         _ => "Enhancement",
     }
 }

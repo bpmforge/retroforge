@@ -344,6 +344,16 @@ pub fn apply_toggle(
         "superfx_overclock" => ctx_settings.superfx_overclock = enabled,
         // Ticket W30-02: likewise read every frame by `sync_hd_mode7`.
         "hd_mode7" => ctx_settings.hd_mode7 = enabled,
+        // Ticket W30-04: the row reads on when any effect is, so its own
+        // switch turns the whole set on (a starting look) or off. The app
+        // reads the settings every frame; no command exists to send.
+        "hd2d_lens" => {
+            if enabled {
+                ctx_settings.lens_start();
+            } else {
+                ctx_settings.lens_clear();
+            }
+        }
         _ => {}
     }
     actions.settings_changed = true;
@@ -366,6 +376,75 @@ pub fn aspect_picker(ui: &mut egui::Ui, aspect: &mut rf_enhance::widescreen::Asp
                 changed = true;
             }
         }
+    });
+    changed
+}
+
+/// Ticket W30-04: the HD-2D lens controls -- a checkbox and a strength
+/// slider per effect, the weather picker, and the time of day with its
+/// "follow my clock" switch. `true` when anything changed. Shared by the
+/// Enhance workspace and the Enhancements cards so the two cannot drift.
+pub fn lens_controls(ui: &mut egui::Ui, s: &mut crate::game_settings::GameSettings) -> bool {
+    let mut changed = false;
+    for (label, on, pct) in [
+        ("Glow (bloom)", &mut s.lens_bloom, &mut s.lens_bloom_pct),
+        (
+            "Miniature focus (tilt-shift)",
+            &mut s.lens_tiltshift,
+            &mut s.lens_tiltshift_pct,
+        ),
+        (
+            "Soft shadows under sprites",
+            &mut s.lens_shadows,
+            &mut s.lens_shadows_pct,
+        ),
+        (
+            "Day and night light",
+            &mut s.lens_grade,
+            &mut s.lens_grade_pct,
+        ),
+    ] {
+        ui.horizontal_wrapped(|ui| {
+            changed |= ui.checkbox(on, label).changed();
+            changed |= ui
+                .add_enabled(*on, egui::Slider::new(pct, 0..=100).suffix("%"))
+                .changed();
+        });
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Weather");
+        for choice in rf_renderer::lens::Weather::ALL {
+            if ui
+                .selectable_label(s.lens_weather == choice, choice.label())
+                .clicked()
+                && s.lens_weather != choice
+            {
+                s.lens_weather = choice;
+                changed = true;
+            }
+        }
+        changed |= ui
+            .add_enabled(
+                s.lens_weather != rf_renderer::lens::Weather::None,
+                egui::Slider::new(&mut s.lens_weather_pct, 0..=100).suffix("%"),
+            )
+            .changed();
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Time of day");
+        changed |= ui
+            .add_enabled(
+                s.lens_grade && !s.lens_follow_clock,
+                egui::Slider::new(&mut s.lens_time_of_day, 0..=100)
+                    .custom_formatter(|n, _| crate::lens_view::clock_label(n as u8)),
+            )
+            .changed();
+        changed |= ui
+            .add_enabled(
+                s.lens_grade,
+                egui::Checkbox::new(&mut s.lens_follow_clock, "Follow my clock"),
+            )
+            .changed();
     });
     changed
 }
@@ -443,6 +522,14 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                 }
             });
             ui.label("Some games run faster than intended at higher speeds.");
+        }
+        // Ticket W30-04: the lens options, whenever the row can act (so a
+        // player can tick the first effect, which is what turns it on).
+        if row.id == "hd2d_lens"
+            && row.availability == crate::enhance_ui::Availability::Available
+            && lens_controls(ui, ctx.settings)
+        {
+            actions.settings_changed = true;
         }
         // Ticket W30-02: the HD Mode 7 options, right under its toggle.
         if row.id == "hd_mode7" && row.enabled {

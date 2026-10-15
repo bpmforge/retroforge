@@ -53,6 +53,7 @@ pub mod game_settings;
 pub mod hash;
 pub mod icons;
 pub mod input_map;
+pub mod lens_view;
 pub mod level_view;
 pub mod library;
 pub mod library_cache;

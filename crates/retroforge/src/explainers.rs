@@ -60,6 +60,13 @@ pub fn long_text(id: &str) -> &'static str {
              finer step, so the floor is sharper. Perspective smoothing blends between \
              scanlines; supersampling smooths edges at some CPU cost."
         }
+        "hd2d_lens" => {
+            "A set of picture effects laid over the finished frame, each on its own switch \
+             and strength: a glow around bright spots, a miniature-model blur above and below \
+             a sharp band, soft drop shadows under sprites, a day-to-night tint you can set \
+             or let follow the clock, and rain or snow. The game itself is untouched; it \
+             needs a graphics card."
+        }
         _ => "An enhancement.",
     }
 }
@@ -211,6 +218,35 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, id: &str, tokens: &crate
                     );
                 }
             }
+        }
+        "hd2d_lens" => {
+            // A sharp middle band between soft, fading bands, and a glow.
+            for i in 0..3 {
+                let h = r.height() * 0.14;
+                for (y, fade) in [
+                    (r.top() + 2.0 + h * i as f32, 0.10 + 0.07 * (2 - i) as f32),
+                    (
+                        r.bottom() - 2.0 - h * (i + 1) as f32,
+                        0.10 + 0.07 * (2 - i) as f32,
+                    ),
+                ] {
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(r.left() + 4.0, y),
+                            egui::vec2(r.width() - 8.0, h),
+                        ),
+                        egui::CornerRadius::ZERO,
+                        ink.gamma_multiply(fade),
+                    );
+                }
+            }
+            let band = egui::Rect::from_center_size(
+                r.center(),
+                egui::vec2(r.width() - 8.0, r.height() * 0.28),
+            );
+            painter.rect_filled(band, egui::CornerRadius::same(2), faint);
+            painter.circle_filled(band.center(), 5.0, accent);
+            painter.circle_filled(band.center(), 10.0, accent.gamma_multiply(0.25));
         }
         "hd_mode7" => {
             // The same floor sampled coarsely (left) and finely (right).
