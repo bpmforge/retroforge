@@ -221,6 +221,9 @@ pub struct GameSettings {
     /// Ticket W30-02: blend the Mode 7 matrix between scanlines. On by
     /// default; only the OFF state is persisted.
     pub hd_mode7_perspective: bool,
+    /// Ticket W30-03: the screen shape decoded widescreen aims for. 16:9
+    /// by default; only a non-default choice is persisted.
+    pub widescreen_aspect: rf_enhance::widescreen::Aspect,
     /// Shader name, `None` for the default pipeline. A string rather than
     /// an enum because W3-02a owns the shader set and this must not have to
     /// change when that lands.
@@ -287,6 +290,7 @@ impl Default for GameSettings {
             hd_mode7_scale: HD_MODE7_SCALE_DEFAULT,
             hd_mode7_supersample: false,
             hd_mode7_perspective: true,
+            widescreen_aspect: rf_enhance::widescreen::Aspect::default(),
             shader: None,
             trust: rf_enhance::trust::TrustLadder::default(),
             last_played_epoch_secs: None,
@@ -363,6 +367,13 @@ impl GameSettings {
         }
         if !self.hd_mode7_perspective {
             fields.insert("hd_mode7_perspective".to_string(), "false".to_string());
+        }
+        // Ticket W30-03: 16:9 is the default and is never written.
+        if self.widescreen_aspect != rf_enhance::widescreen::Aspect::default() {
+            fields.insert(
+                "widescreen_aspect".to_string(),
+                self.widescreen_aspect.key().to_string(),
+            );
         }
         if let Some(shader) = &self.shader {
             fields.insert("shader".to_string(), shader.clone());
@@ -443,6 +454,12 @@ impl GameSettings {
                         // Round down to the 100 step, then clamp (W30-01).
                         settings.superfx_overclock_pct =
                             (pct / 100 * 100).clamp(SUPERFX_PCT_MIN, SUPERFX_PCT_MAX);
+                    }
+                }
+                // An unknown aspect keeps the default rather than failing.
+                "widescreen_aspect" => {
+                    if let Some(a) = rf_enhance::widescreen::Aspect::from_key(value) {
+                        settings.widescreen_aspect = a;
                     }
                 }
                 "hd_mode7" => settings.hd_mode7 = value == "true",
@@ -909,9 +926,24 @@ mod mode_and_feature_persistence_tests {
             hd_mode7_scale: 4,
             hd_mode7_supersample: true,
             hd_mode7_perspective: false,
+            widescreen_aspect: rf_enhance::widescreen::Aspect::Wide32x9,
             ..GameSettings::default()
         };
         let restored = GameSettings::from_text(&s.to_text()).expect("parses");
+        // Ticket W30-03: the aspect round-trips; the default is never written.
+        assert_eq!(
+            restored.widescreen_aspect,
+            rf_enhance::widescreen::Aspect::Wide32x9
+        );
+        assert!(!GameSettings::default()
+            .to_text()
+            .contains("widescreen_aspect"));
+        let junk =
+            GameSettings::from_text(&format!("{MAGIC}\nwidescreen_aspect=5:4\n")).expect("parses");
+        assert_eq!(
+            junk.widescreen_aspect,
+            rf_enhance::widescreen::Aspect::Wide16x9
+        );
         // Ticket W30-02: HD Mode 7 round-trips; only non-defaults are written.
         assert!(restored.hd_mode7 && restored.hd_mode7_supersample);
         assert_eq!(restored.hd_mode7_scale, 4);

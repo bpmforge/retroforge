@@ -116,6 +116,9 @@ pub struct EnhanceActions {
     /// Ticket W11-03: decoded widescreen was toggled; the core must be
     /// told, with the profile's policies.
     pub widescreen_set: Option<bool>,
+    /// Ticket W30-03: the widescreen aspect picker changed; the core must
+    /// be re-asked for the new width.
+    pub widescreen_aspect_changed: bool,
     /// Ticket W11-02: the full-level view was toggled; the level probe
     /// must be armed or disarmed.
     pub full_level_set: Option<bool>,
@@ -346,6 +349,27 @@ pub fn apply_toggle(
     actions.settings_changed = true;
 }
 
+/// Ticket W30-03: the widescreen aspect choices (16:9 / 21:9 / 32:9) as a
+/// row of selectable labels. `true` when the choice changed. Shared by the
+/// Enhance workspace and the Enhancements cards so the two cannot drift.
+pub fn aspect_picker(ui: &mut egui::Ui, aspect: &mut rf_enhance::widescreen::Aspect) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Aspect");
+        for choice in rf_enhance::widescreen::Aspect::ALL {
+            if ui
+                .selectable_label(*aspect == choice, choice.label())
+                .clicked()
+                && *aspect != choice
+            {
+                *aspect = choice;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
 fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut EnhanceActions) {
     let rows = crate::enhance_ui::feature_rows(ctx.settings, &ctx.facts);
     for row in &rows {
@@ -393,6 +417,11 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                 if let Some(why) = reason {
                     ui.label(format!("    BG{}: kept 4:3 \u{2014} {why}", i + 1));
                 }
+            }
+            // Ticket W30-03: the screen shape to aim for.
+            if aspect_picker(ui, &mut ctx.settings.widescreen_aspect) {
+                actions.settings_changed = true;
+                actions.widescreen_aspect_changed = true;
             }
         }
         // Ticket W30-01: the overclock amount, right under its toggle, with

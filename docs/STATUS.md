@@ -4428,3 +4428,9 @@ stories, 10 decisions).
   supersampling and per-line perspective smoothing; 1x is pixel-identical.
   Also fixed: `mode7_seen` was only set by an event that needed it set, so
   the Mode 7 rows were unreachable in the app. Gate: workspace **2616 passing**.
+- **W30-03 — Widescreen edges up to 32:9** (2026-10-15). Aspect picker
+  16:9/21:9/32:9 (400/528/800 dots); the core widens from VRAM up to 512 and
+  the margins beyond come from the current scene's stitched canvas (SNES
+  stitcher now fed the widened layer's scroll), else VRAM, else black. Scene
+  change drops canvas fill. Decoded-level fill is wired but unreachable until
+  an SNES decoder exists. Gate: workspace **2628 passing**.

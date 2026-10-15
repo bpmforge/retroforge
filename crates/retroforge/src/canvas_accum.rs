@@ -39,12 +39,21 @@
 use std::collections::HashMap;
 
 use rf_cache::Cache;
-use rf_core_api::FrameBundle;
+use rf_core_api::{CoreEvent, FrameBundle, PixelLayer};
 use rf_enhance::persistence::{load_canvas, save_canvas};
 use rf_enhance::scene_identity::SceneId;
 use rf_enhance::scene_tracker::SceneTracker;
 use rf_enhance::scroll_tracker::ScrollTracker;
 use rf_enhance::stitcher::{stitch_frame, Canvas};
+
+/// Where the frame just observed sits on its scene's canvas (ticket
+/// W30-03): the scene it was attributed to, and the world position of the
+/// left edge of the console's own 256-dot picture (top row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FramePosition {
+    pub scene: u64,
+    pub origin: (i64, i64),
+}
 
 /// Stateful per-ROM accumulator (module doc). One instance per loaded ROM
 /// session, same lifetime shape as `crate::stepper::EmuStepper` itself.
@@ -60,6 +69,9 @@ pub struct CanvasAccumulator {
     cache: Option<Cache>,
     rom_sha256: String,
     last_scene_id: Option<SceneId>,
+    /// Ticket W30-03: where the latest frame landed, `None` when it had no
+    /// scrolling band to place.
+    last_position: Option<FramePosition>,
 }
 
 impl CanvasAccumulator {
@@ -72,6 +84,7 @@ impl CanvasAccumulator {
             cache,
             rom_sha256,
             last_scene_id: None,
+            last_position: None,
         }
     }
 
@@ -86,12 +99,64 @@ impl CanvasAccumulator {
     /// yet — the same inherited gap `rf_enhance::scene_tracker`'s own
     /// module doc names, not a new one this ticket introduces).
     pub fn observe_frame(&mut self, bundle: &FrameBundle, mapper_bank_state: &[u8]) -> SceneId {
-        let bands = self.scroll.observe_frame(&bundle.events);
+        self.observe_frame_with_scroll(bundle, mapper_bank_state, None)
+    }
+
+    /// [`Self::observe_frame`] for a core whose own scroll events do not
+    /// describe the level layer (the SNES, ticket W30-03: its one
+    /// `ScrollWrite` per frame is not the scrolling background's, so
+    /// bands built from it never move): `scroll` is the scrolling layer's
+    /// registers, which replace the frame's own `ScrollWrite`s (and its
+    /// `Scanline` run, reduced to the visible rows' first and last) with
+    /// one band at the top of the frame.
+    pub fn observe_frame_with_scroll(
+        &mut self,
+        bundle: &FrameBundle,
+        mapper_bank_state: &[u8],
+        scroll: Option<(u16, u16)>,
+    ) -> SceneId {
+        let injected: Vec<CoreEvent>;
+        let events: &[CoreEvent] = match scroll {
+            Some((x, y)) => {
+                // One band over the visible rows. The core's own
+                // `Scanline` run is not usable as is: it also carries a
+                // stray row from the neighbouring frame, which closes the
+                // band at that row's number and leaves it empty.
+                let mut rows = bundle.events.iter().filter_map(|e| match e {
+                    CoreEvent::Scanline(sy) if *sy < bundle.height => Some(*sy),
+                    _ => None,
+                });
+                let first = rows.next();
+                let (lo, hi) = rows.fold((first, first), |(lo, hi), sy| {
+                    (lo.map(|l| l.min(sy)), hi.map(|h| h.max(sy)))
+                });
+                injected = std::iter::once(CoreEvent::ScrollWrite {
+                    x,
+                    y,
+                    layer: PixelLayer::Background(0),
+                })
+                .chain(lo.map(CoreEvent::Scanline))
+                .chain(hi.map(CoreEvent::Scanline))
+                .chain(
+                    bundle
+                        .events
+                        .iter()
+                        .filter(|e| {
+                            !matches!(e, CoreEvent::ScrollWrite { .. } | CoreEvent::Scanline(_))
+                        })
+                        .cloned(),
+                )
+                .collect();
+                &injected
+            }
+            None => &bundle.events,
+        };
+        let bands = self.scroll.observe_frame(events);
         let scene_id = self.scene_tracker.observe_frame(
             &bundle.video,
             bundle.width,
             bundle.height,
-            &bundle.events,
+            events,
             mapper_bank_state,
         );
 
@@ -108,8 +173,31 @@ impl CanvasAccumulator {
             .expect("just inserted above if it was missing");
         stitch_frame(canvas, &bundle.video, bundle.width, &bands);
 
+        // Ticket W30-03: the largest non-HUD band is the one that carries
+        // the level (the same pick the stitcher's world position follows).
+        // Stitched column `c` is world `world_x + c`; a widened frame's
+        // 256-dot picture starts `(width - 256) / 2` columns in.
+        let pad = i64::from(bundle.width.saturating_sub(256) / 2);
+        self.last_position = bands
+            .iter()
+            .filter(|(band, _)| !band.is_hud && band.end > band.start)
+            .max_by_key(|(band, _)| band.end - band.start)
+            .map(|(band, pos)| FramePosition {
+                scene: scene_id.0,
+                origin: (
+                    pos.world_x + pad,
+                    pos.world_y_at_start - i64::from(band.start),
+                ),
+            });
+
         self.last_scene_id = Some(scene_id);
         scene_id
+    }
+
+    /// Ticket W30-03: where the latest observed frame sits on its canvas.
+    #[must_use]
+    pub fn frame_position(&self) -> Option<FramePosition> {
+        self.last_position
     }
 
     /// The current scene id, if at least one frame has been observed.
@@ -202,6 +290,53 @@ mod tests {
         let acc = CanvasAccumulator::new("rom-a".to_string(), None);
         assert_eq!(acc.current_scene_id(), None);
         assert_eq!(acc.current_canvas(), None);
+    }
+
+    /// Ticket W30-03: the position names the scene, follows the scroll, and
+    /// changes scene on a cut (so the app can drop a stale canvas fill).
+    #[test]
+    fn the_frame_position_follows_the_scroll_and_the_scene() {
+        let mut acc = CanvasAccumulator::new("rom-a".to_string(), None);
+        assert_eq!(acc.frame_position(), None);
+        let id = acc.observe_frame(&frame_bundle(0, 0, 3), &[]);
+        let first = acc.frame_position().expect("a frame with a band");
+        assert_eq!(first.scene, id.0);
+        let id2 = acc.observe_frame(&frame_bundle(1, 4, 3), &[]);
+        let second = acc.frame_position().unwrap();
+        assert_eq!(second.scene, id2.0);
+        if id == id2 {
+            assert_eq!(second.origin.0 - first.origin.0, 4, "scrolled 4 dots right");
+        }
+        let cut = acc.observe_frame(&frame_bundle(2, 300, 250), &[]);
+        assert_ne!(cut, id, "a cut is a different scene");
+        assert_eq!(acc.frame_position().unwrap().scene, cut.0);
+    }
+
+    /// Ticket W30-03: a core that emits no scroll events (the SNES) is fed
+    /// the scrolling layer's registers and still gets a position and canvas.
+    #[test]
+    fn injected_scroll_places_frames_when_the_core_emits_none() {
+        let mut acc = CanvasAccumulator::new("rom-a".to_string(), None);
+        let no_scroll = |frame: u64, shift: i64| {
+            let b = frame_bundle(frame, shift, 5);
+            // The SNES core's run: rows 1.., then a stray row 0 from the
+            // neighbouring frame, which would close the band empty.
+            let events = (1..HEIGHT)
+                .chain(std::iter::once(0))
+                .map(CoreEvent::Scanline)
+                .collect();
+            FrameBundle::new(frame, WIDTH, HEIGHT, b.video, events)
+        };
+        for frame in 0..12u64 {
+            let shift = frame as i64 * 3;
+            acc.observe_frame_with_scroll(&no_scroll(frame, shift), &[], Some((shift as u16, 0)));
+        }
+        let pos = acc
+            .frame_position()
+            .expect("the scrolling layer places the frame");
+        assert!(pos.origin.0 >= 30, "{pos:?}");
+        let canvas = acc.current_canvas().unwrap();
+        assert!(canvas.width() > WIDTH as usize, "{}", canvas.width());
     }
 
     #[test]
