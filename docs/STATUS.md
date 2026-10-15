@@ -4521,3 +4521,6 @@ stories, 10 decisions).
   0x0780-0x0A3F; 23% of intro vertex candidates and 15% in attract play match
   exactly vs 0-1.3% control. Face lists not found yet. Report:
   docs/research/W30-10-starfox-polygon-spike.md. No Phase B build.
+- **W30-01d — Star Fox governor target** (2026-10-15). Profile pins
+  `target_tick_hz = 30` (light 3D scenes hold 30/s at 100%; heavy flight
+  15-20). Attract demo: seconds below 30 went 32 -> 22, never above.

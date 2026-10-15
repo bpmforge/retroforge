@@ -385,7 +385,22 @@ fn gsu_run(
     use rf_enhance::speed_governor::{Observation, SpeedGovernor};
     let mut core = SnesCore::load(bytes).expect("dump loads");
     assert!(core.has_gsu(), "RF_GSU_GOV_ROMS lists a non-Super FX dump");
-    let mut governor = ceiling.map(|c| SpeedGovernor::new(c, None));
+    let mut governor = ceiling.map(|c| {
+        SpeedGovernor::new(
+            c,
+            std::env::var("RF_GSU_TARGET_HZ")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+        )
+    });
+    if ceiling.is_none() {
+        if let Some(p) = std::env::var("RF_GSU_FIXED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            core.set_gsu_overclock(p);
+        }
+    }
     let mut sink = FrameHasher::new();
     let (mut last, mut last_counter) = (0, None);
     let mut ticks = vec![0u32; (frames as usize).div_ceil(60)];
