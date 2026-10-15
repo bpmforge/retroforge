@@ -4461,3 +4461,7 @@ stories, 10 decisions).
   tracing, watchpoints, fast-forward, captures, de-flicker or video
   recording. About 3.2 ms per frame extra at 2 frames (synthetic SNES).
   Gate: workspace **2685 passing**.
+- **A Link to the Past profile stripped (D-021)** (2026-10-15). All 12 RAM
+  rows cited the zelda3 decompilation; removed per Brad ("Strip and
+  re-find"). Seven other profiles cite game disassemblies — reported, not
+  stripped. Gate: rf-profiles 39 passing; profile validates.
