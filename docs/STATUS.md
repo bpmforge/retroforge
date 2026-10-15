@@ -4478,3 +4478,10 @@ stories, 10 decisions).
   `memory_map` rows across SMB2, Super C, Contra, Castlevania II, Super Mario
   World, Mega Man 7 and Donkey Kong Country; observed camera tables kept. All
   seven validate.
+- **Profile re-find by observation (D-021)** (2026-10-15). Scripted headless
+  play recovered rows with evidence notes: tick counters for Super Mario World
+  (7E0014, also `[overclock]`), Mega Man 7 (7E0C46, also `[overclock]`), Super
+  C (0x5B) and SMB2 (0x10); frame counters for A Link to the Past, Contra and
+  Castlevania II; player x for Mega Man 7, SMB2 and Contra; SMW timer digits.
+  Donkey Kong Country never reached play. Harness: tests/profile_refind.rs
+  (`RF_REFIND_ROMS`).

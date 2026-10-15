@@ -113,3 +113,23 @@ label = "player_y"
 notes = "Player y position within the level (16-bit); same verification as player_x."
 source = "https://sites.google.com/site/smwrammap"
 
+
+[[memory_map]]
+label = "tick_counter"
+addr = 0x7E0014
+len = 1
+type = "u8"
+notes = "Increments by exactly 1 (mod 256) on 100% of 7000 in-level frames = 60.0/s, 72 wraps; changed on 0% of 480 paused frames (a per-logic-tick counter)."
+source = "observed: RetroForge re-find pass (W30, 2026-10-15)"
+
+[[memory_map]]
+label = "timer_digits"
+addr = 0x7E0F25
+len = 3
+type = "bytes"
+show = "digits"
+notes = "Observed while idling (no input): the last digit steps down by 1 (9 after 0) every 41 frames (1.46/s), 98 steps in a row with no other change; the digit before it steps every 410 frames; the hundreds digit (at -1 from the tens) stepped in the same frame the tens wrapped 0 to 9. Mirrors with identical steps: 0x7E0F33."
+source = "observed: RetroForge re-find pass (W30, 2026-10-15)"
+
+[overclock]
+tick_counter = 0x7E0014

@@ -33,3 +33,22 @@ widescreen = "decoded"
 mode = "side_scroller"
 x = { addr = 0x7E00AE, type = "u16" }
 
+
+[[memory_map]]
+label = "tick_counter"
+addr = 0x7E0C46
+len = 1
+type = "u8"
+notes = "Increments by exactly 1 (mod 256) on 98% of 7000 in-level frames = 59.0/s, 65 wraps; changed on 0% of 480 paused frames (a per-logic-tick counter)."
+source = "observed: RetroForge re-find pass (W30, 2026-10-15)"
+
+[[memory_map]]
+label = "player_x"
+addr = 0x7E0C05
+len = 2
+type = "u16"
+notes = "Observed: right+ 10/10 left- 10/10 idle-still 59/59 vert-still 100%; high byte carries on low-byte wraps (7/7); value spans 3954 over the run. Identical probe outcomes at 0x7E0C1F (a mirrored copy)."
+source = "observed: RetroForge re-find pass (W30, 2026-10-15)"
+
+[overclock]
+tick_counter = 0x7E0C46

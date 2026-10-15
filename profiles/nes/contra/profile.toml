@@ -32,3 +32,19 @@ entity_overlay = false
 mode = "side_scroller"
 x = { addr = 0x00FD, type = "u8" }
 
+
+[[memory_map]]
+label = "frame_counter"
+addr = 0x00001A
+len = 1
+type = "u8"
+notes = "Increments by exactly 1 (mod 256) on 86% of 7000 in-level frames = 51.8/s, 87 wraps; changed on 99% of 480 paused frames; it runs on while paused, so it is the frame counter, not a logic tick."
+source = "observed: RetroForge re-find pass (W30, 2026-10-15)"
+
+[[memory_map]]
+label = "player_x"
+addr = 0x000334
+len = 1
+type = "u8"
+notes = "Observed: right+ 10/10 left- 10/10 idle-still 59/59 vert-still 100%; single byte (a 16-bit pair was not evidenced)."
+source = "observed: RetroForge re-find pass (W30, 2026-10-15)"
