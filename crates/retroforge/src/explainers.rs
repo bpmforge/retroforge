@@ -48,6 +48,12 @@ pub fn long_text(id: &str) -> &'static str {
              maps. This turns that floor into real 3D ground with a horizon. It appears \
              only while the game is using Mode 7."
         }
+        "superfx_overclock" => {
+            "Cartridges with a Super FX chip draw their 3D scenes in software on that chip, \
+             which is why they run at low frame rates. This runs the chip faster so more \
+             frames are drawn. Unlike the other options it changes the simulation, so some \
+             games also run faster than intended; it is off until you turn it on."
+        }
         _ => "An enhancement.",
     }
 }
@@ -180,6 +186,24 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, id: &str, tokens: &crate
                     egui::vec2(24.0, 20.0),
                 );
                 painter.rect_filled(wall, egui::CornerRadius::same(2), accent);
+            }
+        }
+        "superfx_overclock" => {
+            // Two clock traces: the original period and a faster one.
+            for (i, ticks) in [(0, 4), (1, 8)] {
+                let y = r.top() + r.height() * (0.35 + 0.35 * i as f32);
+                let w = r.width() / ticks as f32;
+                for t in 0..ticks {
+                    let x = r.left() + w * t as f32;
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(x + w * 0.1, y - 6.0),
+                            egui::vec2(w * 0.5, 12.0),
+                        ),
+                        egui::CornerRadius::same(1),
+                        if i == 0 { faint } else { accent },
+                    );
+                }
             }
         }
         _ => {}

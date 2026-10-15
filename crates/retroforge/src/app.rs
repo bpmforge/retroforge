@@ -684,6 +684,12 @@ pub struct RetroForgeApp {
     loading_waits: Vec<rf_profiles::schema::WaitLoop>,
     loading_sent: Option<bool>,
     loading_active: Option<String>,
+    /// Ticket W30-01: the Super FX overclock percent last sent to the core
+    /// (`None` = nothing yet for this core), whether the loaded cartridge
+    /// has a Super FX, and the matched profile's `[overclock].superfx_max`.
+    superfx_sent: Option<u16>,
+    superfx_cart: bool,
+    superfx_cap: Option<u16>,
     /// Ticket W20-13: rewind — the ring status from the last frame, whether
     /// the key is held (and whether the game was running before), and a
     /// counter pacing steps.
@@ -1517,6 +1523,9 @@ impl RetroForgeApp {
             osd: crate::toast::ToastStack::osd(),
             loading_waits: Vec::new(),
             loading_sent: None,
+            superfx_sent: None,
+            superfx_cart: false,
+            superfx_cap: None,
             loading_active: None,
             rewind_status: None,
             rewinding: false,
@@ -3536,6 +3545,13 @@ impl RetroForgeApp {
                 .map_or_else(|| bytes.clone(), |_| bytes[16..].to_vec()),
         );
         self.loading_sent = None;
+        self.superfx_sent = None;
+        self.superfx_cart = matches!(
+            rf_cart::Cartridge::load(&bytes),
+            Ok(rf_cart::Cartridge::Snes { header, .. })
+                if matches!(header.coprocessor, rf_cart::Coprocessor::SuperFx { .. })
+        );
+        self.superfx_cap = None;
         self.thumb_gameplay_taken = false;
         self.window_fitted = false;
         // A new game: the profile builder and its finder were the last
@@ -4470,6 +4486,8 @@ impl RetroForgeApp {
             // Ticket W20-17: the live view draws fog only over a plane a
             // profile names (no core emits the sub-screen the detector
             // needs), on a GPU, while the pass keeps within its budget.
+            superfx: self.superfx_cart,
+            superfx_max: self.superfx_cap.unwrap_or(800),
             fog_rendered: self.atmosphere_pin.is_some()
                 && self.gpu.is_some()
                 && self.fog_budget.is_enabled()
@@ -7797,6 +7815,31 @@ impl RetroForgeApp {
                         ))
                         .color(tokens.muted),
                 );
+                // Ticket W30-01: the overclock amount and its caveat.
+                if row.id == "superfx_overclock" && row.enabled {
+                    if ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.current_game_settings.superfx_overclock_pct,
+                                200..=self.superfx_cap.unwrap_or(800).max(200),
+                            )
+                            .step_by(100.0)
+                            .suffix("%"),
+                        )
+                        .changed()
+                    {
+                        actions.settings_changed = true;
+                    }
+                    ui.label(
+                        egui::RichText::new(
+                            "Some games run faster than intended at higher speeds.",
+                        )
+                        .font(egui::FontId::proportional(
+                            crate::theme::type_scale::CAPTION,
+                        ))
+                        .color(tokens.warn),
+                    );
+                }
                 // Ticket W22-05: "What is this?" — the longer explanation
                 // and a diagram, folded away until asked for.
                 egui::CollapsingHeader::new(format!("What is {name}?"))
@@ -9988,6 +10031,10 @@ impl RetroForgeApp {
         self.send_command(CoreCommand::WatchItems(self.item_rows()));
         // Ticket W22-02: the matched profile's own title, for the strip.
         self.matched_profile_title = matched.as_ref().map(|(p, _)| p.meta.title.clone());
+        // Ticket W30-01: a profile may cap the Super FX overclock.
+        self.superfx_cap = matched
+            .as_ref()
+            .and_then(|(p, _)| p.overclock.as_ref()?.superfx_max);
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -13435,6 +13482,30 @@ impl RetroForgeApp {
         }
     }
 
+    /// Ticket W30-01: keep the core's Super FX clock matching the overclock
+    /// row's EFFECTIVE state (Enhanced mode, Super FX cartridge, toggle on),
+    /// capped by the matched profile's `[overclock].superfx_max`; sends only
+    /// on a change.
+    fn sync_superfx_overclock(&mut self) {
+        if self.core.is_none() {
+            return;
+        }
+        let on = crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+            .iter()
+            .any(|r| r.id == "superfx_overclock" && r.effective());
+        let want = if on {
+            self.current_game_settings
+                .superfx_overclock_pct
+                .min(self.superfx_cap.unwrap_or(800))
+        } else {
+            100
+        };
+        if self.superfx_sent != Some(want) {
+            self.send_command(CoreCommand::SetGsuOverclock(want));
+            self.superfx_sent = Some(want);
+        }
+    }
+
     /// Turn the sprite-limit bypass on or off exactly as its Features row
     /// does (setting + command), for the screenshot tour.
     #[doc(hidden)]
@@ -14288,6 +14359,7 @@ impl eframe::App for RetroForgeApp {
         self.poll_app_hotkeys(&ctx);
         self.poll_recording(&ctx);
         self.sync_loading(&ctx);
+        self.sync_superfx_overclock();
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.
         self.poll_library_scan(&ctx);

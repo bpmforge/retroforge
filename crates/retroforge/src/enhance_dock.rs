@@ -336,6 +336,9 @@ pub fn apply_toggle(
             ctx_settings.loading_fast_forward = enabled;
             actions.loading_fast_forward_set = Some(enabled);
         }
+        // Ticket W30-01: the app's `sync_superfx_overclock` reads the
+        // setting every frame, so no dedicated action is needed.
+        "superfx_overclock" => ctx_settings.superfx_overclock = enabled,
         _ => {}
     }
     actions.settings_changed = true;
@@ -389,6 +392,26 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                     ui.label(format!("    BG{}: kept 4:3 \u{2014} {why}", i + 1));
                 }
             }
+        }
+        // Ticket W30-01: the overclock amount, right under its toggle, with
+        // the honest caveat that it changes the simulation.
+        if row.id == "superfx_overclock" && row.enabled {
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Slider::new(
+                            &mut ctx.settings.superfx_overclock_pct,
+                            200..=ctx.facts.superfx_max.max(200),
+                        )
+                        .step_by(100.0)
+                        .suffix("%"),
+                    )
+                    .changed()
+                {
+                    actions.settings_changed = true;
+                }
+            });
+            ui.label("Some games run faster than intended at higher speeds.");
         }
     }
 

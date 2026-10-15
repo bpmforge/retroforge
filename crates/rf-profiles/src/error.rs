@@ -69,6 +69,9 @@ pub enum ProfileError {
     /// `[atmosphere].tint` was not `"#rrggbb"` (six hex digits after a
     /// leading `#`).
     AtmosphereInvalidTint(String),
+    /// `[overclock].superfx_max` was outside `100..=800` or not a multiple
+    /// of 100 (ticket W30-01).
+    OverclockSuperfxMaxInvalid(u16),
 }
 
 impl fmt::Display for ProfileError {
@@ -114,6 +117,10 @@ impl fmt::Display for ProfileError {
             ProfileError::AtmosphereStrengthOutOfRange(v) => write!(
                 f,
                 "`[atmosphere].strength` = {v} is out of range (valid: 0.0..=1.0)"
+            ),
+            ProfileError::OverclockSuperfxMaxInvalid(v) => write!(
+                f,
+                "`[overclock].superfx_max` = {v} is invalid (valid: 100..=800 in steps of 100)"
             ),
             ProfileError::AtmosphereInvalidTint(v) => write!(
                 f,

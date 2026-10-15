@@ -32,6 +32,9 @@ pub fn describe(id: &str) -> &'static str {
         "atmosphere_fog" => "Adds drifting fog where the game draws a fog layer.",
         "diorama" => "Raises the level's walls into a 3D diorama.",
         "mode7_ground" => "Turns a Mode 7 floor into a 3D ground you look across.",
+        "superfx_overclock" => {
+            "Runs the Super FX chip faster, so 3D games draw more frames. Some games speed up too \u{2014} turn it off if one does."
+        }
         _ => "An enhancement.",
     }
 }
@@ -42,7 +45,10 @@ pub fn describe(id: &str) -> &'static str {
 /// card's group. Mode 7 in 3D needs only the game to be showing Mode 7.
 #[must_use]
 pub fn works_on_any_game(id: &str) -> bool {
-    matches!(id, "sprite_overlay" | "deflicker" | "mode7_ground")
+    matches!(
+        id,
+        "sprite_overlay" | "deflicker" | "mode7_ground" | "superfx_overclock"
+    )
 }
 
 /// Ticket W22-03: the mode an `Availability::NeedsMode` names, for the
@@ -68,6 +74,7 @@ pub const fn player_name(id: &str) -> &'static str {
         b"atmosphere_fog" => "Fog and mist",
         b"diorama" => "3D diorama",
         b"mode7_ground" => "Mode 7 in 3D",
+        b"superfx_overclock" => "Faster Super FX",
         _ => "Enhancement",
     }
 }

@@ -81,6 +81,9 @@ pub const CORPUS: &[CorpusEntry] = &[CorpusEntry {
     name: "w3-05a-sprite-limit-bypass-overlay",
     rom: many_sprites_rom,
     frames: 20,
+    // Ticket W30-01: the Super FX overclock changes the simulation by design
+    // and must NEVER be added to `enable_enhancement`; this invariant covers
+    // presentation enhancements only.
     enable_enhancement: |s| s.set_sprite_overlay_enabled(true),
 }];
 
