@@ -271,6 +271,205 @@ impl WidescreenPolicies {
     }
 }
 
+// ---------------------------------------------------------------------
+// Ticket W30-03: how wide, and where the margins come from.
+// ---------------------------------------------------------------------
+
+/// The widest picture the SNES PPU path will draw for itself, in dots
+/// (mirrors `rf_snes::ppu::MAX_WIDTH`, which this crate cannot import).
+/// An aspect wider than this is finished by [`fill_margins`], not the PPU.
+pub const CORE_MAX_WIDTH: usize = 512;
+
+/// A target screen shape for the widened picture (ticket W30-03). 16:9 is
+/// the default and the only one a fresh install ever uses; the wider two
+/// are opt-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Aspect {
+    /// 16:9 - the ordinary widescreen TV.
+    #[default]
+    Wide16x9,
+    /// 21:9 - ultrawide monitors.
+    Wide21x9,
+    /// 32:9 - super-ultrawide monitors.
+    Wide32x9,
+}
+
+impl Aspect {
+    /// Every choice, narrowest first (the order the picker lists them).
+    pub const ALL: [Aspect; 3] = [Aspect::Wide16x9, Aspect::Wide21x9, Aspect::Wide32x9];
+
+    /// Width : height as integers.
+    #[must_use]
+    pub const fn ratio(self) -> (u32, u32) {
+        match self {
+            Aspect::Wide16x9 => (16, 9),
+            Aspect::Wide21x9 => (21, 9),
+            Aspect::Wide32x9 => (32, 9),
+        }
+    }
+
+    /// The label a picker shows.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Aspect::Wide16x9 => "16:9",
+            Aspect::Wide21x9 => "21:9",
+            Aspect::Wide32x9 => "32:9",
+        }
+    }
+
+    /// The key a settings file stores. 16:9 is the default and is never
+    /// written.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Aspect::Wide16x9 => "16:9",
+            Aspect::Wide21x9 => "21:9",
+            Aspect::Wide32x9 => "32:9",
+        }
+    }
+
+    /// Parse a stored key; an unknown one is `None` (the caller keeps the
+    /// default rather than guessing).
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        Aspect::ALL.into_iter().find(|a| a.key() == key)
+    }
+
+    /// Dots across for a picture `height` lines tall.
+    ///
+    /// The arithmetic: the screen is `ratio.0 : ratio.1`, one dot is
+    /// `pixel_aspect` times as wide as it is tall on screen (`1.0` for
+    /// square dots, `8/7` for the TV setting), so
+    ///
+    /// ```text
+    /// width = height * (ratio.0 / ratio.1) / pixel_aspect
+    /// ```
+    ///
+    /// rounded UP to a multiple of 8 - a whole tile, and so also even, so
+    /// the margin splits evenly either side of the 256-dot picture. At 224
+    /// lines and square dots that gives 400 / 528 / 800 (from 398.2 /
+    /// 522.7 / 796.4). A zero height or a non-positive or non-finite
+    /// `pixel_aspect` is treated as `1.0` / refused (`0`) respectively, so
+    /// a bad input can never produce a runaway width.
+    #[must_use]
+    pub fn output_width(self, height: usize, pixel_aspect: f32) -> usize {
+        if height == 0 {
+            return 0;
+        }
+        let par = if pixel_aspect.is_finite() && pixel_aspect > 0.0 {
+            f64::from(pixel_aspect)
+        } else {
+            1.0
+        };
+        let (num, den) = self.ratio();
+        let exact = height as f64 * f64::from(num) / f64::from(den) / par;
+        // Subtract a hair before the ceiling so an exact multiple (e.g.
+        // 288 lines at 16:9 = 512.0) is not bumped by float noise.
+        let tiles = ((exact - 1e-6) / 8.0).ceil().max(1.0);
+        tiles as usize * 8
+    }
+}
+
+/// Where the widescreen margins' pixels come from, best first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarginSource {
+    /// A decoded level image, indexed by the live camera.
+    DecodedLevel,
+    /// The stitched canvas of the scene being played.
+    StitchedCanvas,
+    /// What the PPU drew from VRAM - the fallback, and the whole story
+    /// when nothing better is known.
+    Vram,
+}
+
+/// What is known right now, for [`choose_margin_source`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarginFacts {
+    /// A profile decoded this game's level and its image is available.
+    pub level_decoded: bool,
+    /// The live camera (the level position of the picture) was read.
+    pub camera_known: bool,
+    /// The stitcher placed the current frame on its canvas.
+    pub canvas_has_frame_position: bool,
+    /// The canvas snapshot belongs to the scene being shown now. False
+    /// right after a scene change, until the canvas has re-stitched it.
+    pub scene_fresh: bool,
+}
+
+/// Pick the margin source. Pure.
+///
+/// A decoded level wins when it is decoded and the camera is known (it is
+/// complete; a stitched canvas only has what was visited). Otherwise the
+/// stitched canvas, but only when it has this frame's position **and**
+/// belongs to the current scene - a canvas from the previous room would
+/// paint the wrong level into the margins. Otherwise VRAM.
+#[must_use]
+pub fn choose_margin_source(facts: MarginFacts) -> MarginSource {
+    if facts.level_decoded && facts.camera_known {
+        MarginSource::DecodedLevel
+    } else if facts.canvas_has_frame_position && facts.scene_fresh {
+        MarginSource::StitchedCanvas
+    } else {
+        MarginSource::Vram
+    }
+}
+
+/// Compose a widescreen frame of `out_w` x `h` RGBA with its margins taken
+/// from a world image rather than VRAM.
+///
+/// `native` is the console's own picture (`native_w` x `h` RGBA, possibly
+/// already VRAM-widened) placed in the centre. The console's unwidened
+/// 256-column picture sits at `pad_256 = (out_w - 256) / 2`; its left
+/// edge is `frame_world_origin` in world space. Every output pixel
+/// OUTSIDE those 256 columns comes from
+/// `world(origin.x + (x - pad_256), origin.y + y)` when that is `Some`;
+/// else from the native pixel if `x` falls inside the native picture; else
+/// opaque black. Rows where `keep_native_row(y)` is true (HUD bands) never
+/// take world pixels. The result is always `out_w * h * 4` bytes.
+#[must_use]
+pub fn fill_margins(
+    native: &[u8],
+    native_w: usize,
+    h: usize,
+    out_w: usize,
+    frame_world_origin: (i64, i64),
+    world: &dyn Fn(i64, i64) -> Option<[u8; 3]>,
+    keep_native_row: &dyn Fn(usize) -> bool,
+) -> Vec<u8> {
+    let mut out = vec![0u8; out_w * h * 4];
+    let pad = (out_w as i64 - native_w as i64).div_euclid(2);
+    let pad_256 = (out_w as i64 - i64::from(NARROW_WIDTH)).div_euclid(2);
+    let central = pad_256..pad_256 + i64::from(NARROW_WIDTH);
+    // Bounded `for` ranges only (law 8): every pixel is visited once.
+    for y in 0..h {
+        let keep = keep_native_row(y);
+        for x in 0..out_w {
+            let xi = x as i64;
+            let at = (y * out_w + x) * 4;
+            let from_world = if keep || central.contains(&xi) {
+                None
+            } else {
+                world(
+                    frame_world_origin.0 + (xi - pad_256),
+                    frame_world_origin.1 + y as i64,
+                )
+            };
+            let rgb = from_world.or_else(|| {
+                let nx = xi - pad;
+                if nx < 0 || nx >= native_w as i64 {
+                    return None;
+                }
+                let src = (y * native_w + nx as usize) * 4;
+                native.get(src..src + 3).map(|p| [p[0], p[1], p[2]])
+            });
+            let [r, g, b] = rgb.unwrap_or([0, 0, 0]);
+            out[at..at + 4].copy_from_slice(&[r, g, b, 0xFF]);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,5 +636,172 @@ bg1 = "sideways"
         let outcome = rf_profiles::load_str(toml).expect("the TOML itself is fine");
         let err = WidescreenPolicies::from_profile(&outcome.profile).unwrap_err();
         assert!(err.to_string().contains("sideways"), "{err}");
+    }
+
+    // ---- Ticket W30-03 ----
+
+    #[test]
+    fn aspect_widths_at_224_lines_square_dots() {
+        assert_eq!(Aspect::Wide16x9.output_width(224, 1.0), 400);
+        assert_eq!(Aspect::Wide21x9.output_width(224, 1.0), 528);
+        assert_eq!(Aspect::Wide32x9.output_width(224, 1.0), 800);
+    }
+
+    #[test]
+    fn tv_pixels_need_fewer_dots_and_bad_inputs_are_safe() {
+        // 224 * 16/9 / (8/7) = 348.4 -> 352.
+        assert_eq!(Aspect::Wide16x9.output_width(224, 8.0 / 7.0), 352);
+        assert_eq!(Aspect::Wide16x9.output_width(0, 1.0), 0);
+        assert_eq!(
+            Aspect::Wide16x9.output_width(224, 0.0),
+            400,
+            "a zero pixel aspect falls back to square dots"
+        );
+        assert_eq!(Aspect::Wide16x9.output_width(224, f32::NAN), 400);
+        // An exact multiple is not bumped: 288 * 16/9 = 512.
+        assert_eq!(Aspect::Wide16x9.output_width(288, 1.0), 512);
+        for a in Aspect::ALL {
+            assert_eq!(a.output_width(224, 1.0) % 8, 0, "{a:?}");
+        }
+    }
+
+    #[test]
+    fn aspect_keys_round_trip_and_default_is_16_9() {
+        assert_eq!(Aspect::default(), Aspect::Wide16x9);
+        for a in Aspect::ALL {
+            assert_eq!(Aspect::from_key(a.key()), Some(a));
+        }
+        assert_eq!(Aspect::from_key("4:3"), None);
+    }
+
+    fn facts(level: bool, cam: bool, pos: bool, fresh: bool) -> MarginFacts {
+        MarginFacts {
+            level_decoded: level,
+            camera_known: cam,
+            canvas_has_frame_position: pos,
+            scene_fresh: fresh,
+        }
+    }
+
+    #[test]
+    fn margin_source_choice_covers_every_branch() {
+        use MarginSource::*;
+        // Decoded level wins when decoded AND the camera is known, even
+        // if the canvas is also good.
+        assert_eq!(
+            choose_margin_source(facts(true, true, true, true)),
+            DecodedLevel
+        );
+        assert_eq!(
+            choose_margin_source(facts(true, true, false, false)),
+            DecodedLevel
+        );
+        // Decoded but no camera: cannot index it - fall to the canvas.
+        assert_eq!(
+            choose_margin_source(facts(true, false, true, true)),
+            StitchedCanvas
+        );
+        assert_eq!(choose_margin_source(facts(true, false, false, false)), Vram);
+        // No decoded level: canvas only with position AND a fresh scene.
+        assert_eq!(
+            choose_margin_source(facts(false, true, true, true)),
+            StitchedCanvas
+        );
+        assert_eq!(
+            choose_margin_source(facts(false, false, true, true)),
+            StitchedCanvas
+        );
+        assert_eq!(choose_margin_source(facts(false, false, false, true)), Vram);
+        // A scene change: never the canvas until it has re-stitched.
+        assert_eq!(choose_margin_source(facts(false, false, true, false)), Vram);
+        assert_eq!(choose_margin_source(facts(false, true, true, false)), Vram);
+        assert_eq!(
+            choose_margin_source(facts(false, false, false, false)),
+            Vram
+        );
+    }
+
+    /// A 4-wide native frame of one colour, 2 rows.
+    fn native_of(rgb: [u8; 3], w: usize, h: usize) -> Vec<u8> {
+        (0..w * h)
+            .flat_map(|_| [rgb[0], rgb[1], rgb[2], 0xFF])
+            .collect()
+    }
+
+    fn px(out: &[u8], out_w: usize, x: usize, y: usize) -> [u8; 3] {
+        let i = (y * out_w + x) * 4;
+        [out[i], out[i + 1], out[i + 2]]
+    }
+
+    #[test]
+    fn margins_come_from_the_world_and_the_centre_stays_native() {
+        // out 300 wide, native 256: pad 22. World colour encodes the
+        // world x so the mapping is checkable.
+        let native = native_of([9, 9, 9], 256, 2);
+        let world = |wx: i64, _wy: i64| Some([(wx & 0xFF) as u8, 1, 2]);
+        let out = fill_margins(&native, 256, 2, 300, (1000, 0), &world, &|_| false);
+        assert_eq!(out.len(), 300 * 2 * 4);
+        // x = 0 is 22 columns left of the picture's left edge (world 1000).
+        assert_eq!(px(&out, 300, 0, 0), [((1000 - 22) & 0xFF) as u8, 1, 2]);
+        assert_eq!(px(&out, 300, 21, 0), [((1000 - 1) & 0xFF) as u8, 1, 2]);
+        // The central 256 are the console's own picture.
+        assert_eq!(px(&out, 300, 22, 0), [9, 9, 9]);
+        assert_eq!(px(&out, 300, 277, 1), [9, 9, 9]);
+        // Right margin starts at world 1000 + 256.
+        assert_eq!(px(&out, 300, 278, 0), [((1000 + 256) & 0xFF) as u8, 1, 2]);
+    }
+
+    #[test]
+    fn without_world_pixels_vram_shows_then_black() {
+        // native 300 wide (VRAM-widened), out 400: pad 50, pad_256 72.
+        let native = native_of([5, 6, 7], 300, 1);
+        let none = |_: i64, _: i64| None;
+        let out = fill_margins(&native, 300, 1, 400, (0, 0), &none, &|_| false);
+        assert_eq!(px(&out, 400, 0, 0), [0, 0, 0], "beyond the VRAM width");
+        assert_eq!(px(&out, 400, 49, 0), [0, 0, 0]);
+        assert_eq!(px(&out, 400, 50, 0), [5, 6, 7], "within the VRAM width");
+        assert_eq!(px(&out, 400, 349, 0), [5, 6, 7]);
+        assert_eq!(px(&out, 400, 350, 0), [0, 0, 0]);
+        assert_eq!(out[3], 0xFF, "opaque");
+    }
+
+    #[test]
+    fn hud_rows_never_take_world_pixels() {
+        let native = native_of([5, 6, 7], 256, 3);
+        let world = |_: i64, _: i64| Some([200, 200, 200]);
+        let out = fill_margins(&native, 256, 3, 300, (0, 0), &world, &|y| y == 1);
+        assert_eq!(px(&out, 300, 0, 0), [200, 200, 200]);
+        assert_eq!(
+            px(&out, 300, 0, 1),
+            [0, 0, 0],
+            "HUD row: no native there, so black"
+        );
+        assert_eq!(px(&out, 300, 30, 1), [5, 6, 7], "HUD row keeps native");
+        assert_eq!(px(&out, 300, 0, 2), [200, 200, 200]);
+    }
+
+    #[test]
+    fn world_gaps_fall_back_to_native_and_origin_y_is_applied() {
+        let native = native_of([5, 6, 7], 300, 2);
+        // Only row world-y == 11 has data.
+        let world = |_: i64, wy: i64| (wy == 11).then_some([1, 2, 3]);
+        let out = fill_margins(&native, 300, 2, 400, (0, 10), &world, &|_| false);
+        assert_eq!(
+            px(&out, 400, 60, 0),
+            [5, 6, 7],
+            "y=0 -> world 10: gap -> native"
+        );
+        assert_eq!(px(&out, 400, 60, 1), [1, 2, 3], "y=1 -> world 11");
+    }
+
+    #[test]
+    fn degenerate_sizes_do_not_panic() {
+        let none = |_: i64, _: i64| None;
+        assert!(fill_margins(&[], 0, 0, 0, (0, 0), &none, &|_| false).is_empty());
+        // Short native buffer: missing pixels are black, no panic.
+        let out = fill_margins(&[1, 2, 3, 255], 256, 1, 256, (0, 0), &none, &|_| false);
+        assert_eq!(out.len(), 256 * 4);
+        assert_eq!(px(&out, 256, 0, 0), [1, 2, 3]);
+        assert_eq!(px(&out, 256, 1, 0), [0, 0, 0]);
     }
 }

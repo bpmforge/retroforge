@@ -407,6 +407,35 @@ pub struct FrameMsg {
     /// (`ScrollWrite`, `MemWatch`, ...) to a consumer that reads none of
     /// them.
     pub mode7: Option<Box<rf_core_api::Mode7Frame>>,
+    /// Ticket W30-03: which scene's canvas this frame belongs to and where
+    /// it sits on it (`CanvasAccumulator::frame_position`), for filling the
+    /// widescreen margins. 24 bytes; `None` when no band could be placed.
+    pub canvas_frame: Option<crate::canvas_accum::FramePosition>,
+}
+
+/// Ticket W30-03: the scroll of the first background the widescreen policy
+/// widens (the scrolling level layer), wrapped to its tilemap, for the
+/// stitcher. `None` on the NES (its core emits scroll events itself) or when
+/// no layer scrolls, in which case nothing can be placed on a canvas and the
+/// margins stay VRAM.
+fn snes_scroll_for_stitcher(stepper: &EmuStepper, req: &WidescreenRequest) -> Option<(u16, u16)> {
+    let views = stepper.bg_layer_views()?;
+    let decisions = req.policies.decide_all(views);
+    let layer = (0..4).find(|&i| decisions[i].widens())?;
+    let v = views[layer];
+    Some((
+        v.hofs % v.tilemap_width.max(1),
+        v.vofs % v.tilemap_height.max(1),
+    ))
+}
+
+/// Ticket W30-03: a stitched canvas together with the scene it belongs to,
+/// so the UI thread can tell a canvas of the room being shown from one of
+/// the room it just left.
+pub struct SceneCanvas {
+    pub canvas: rf_enhance::stitcher::Canvas,
+    /// `None` before any frame has been observed.
+    pub scene: Option<u64>,
 }
 
 /// Ticket W14-20 defect 1: the most `CoreEvent::Frame`s the core thread
@@ -479,7 +508,7 @@ pub enum CoreEvent {
     /// (`crate::canvas_accum`'s own module doc): cloning a whole `Canvas`
     /// every frame would be tens of MB/s at 60Hz for a level of any real
     /// size, so this only happens when the UI thread actually asks.
-    CanvasSnapshot(rf_enhance::stitcher::Canvas),
+    CanvasSnapshot(SceneCanvas),
     /// Ticket W24-03: the reply to `CoreCommand::SnapshotRam` — the work
     /// RAM (`EmuStepper::work_ram`) for the profile builder's finder.
     WorkRam(Vec<u8>),
@@ -1363,7 +1392,10 @@ fn core_thread_main(
                 }
                 CoreCommand::RequestCanvasSnapshot => {
                     canvas_accum.flush();
-                    let snapshot = canvas_accum.current_canvas().unwrap_or_default();
+                    let snapshot = SceneCanvas {
+                        canvas: canvas_accum.current_canvas().unwrap_or_default(),
+                        scene: canvas_accum.current_scene_id().map(|id| id.0),
+                    };
                     if frame_tx.send(CoreEvent::CanvasSnapshot(snapshot)).is_err() {
                         return LoopControl::Stop; // UI thread hung up.
                     }
@@ -1713,7 +1745,14 @@ fn core_thread_main(
             if let Some(producer) = trace.as_mut() {
                 push_event_traces(producer, &bundle);
             }
-            canvas_accum.observe_frame(&bundle, &[]);
+            // Ticket W30-03: the SNES core's scroll events are not the
+            // level layer's, so the stitcher would see one static band
+            // (classed HUD) and place nothing. While widescreen is on,
+            // feed it the scrolling layer's registers, once per frame.
+            let scroll = widescreen
+                .as_ref()
+                .and_then(|req| snes_scroll_for_stitcher(&stepper, req));
+            canvas_accum.observe_frame_with_scroll(&bundle, &[], scroll);
             // Ticket W4-01: publish before sending `FrameMsg` so a reader
             // that wakes on the `FrameMsg` channel never sees a
             // `frame_bundle` older than the frame it was just notified
@@ -1881,6 +1920,7 @@ fn core_thread_main(
                 prg_ram: Box::new(*stepper.prg_ram()),
                 sprite_height_px: stepper.sprite_height_px(),
                 mode7: mode7_event.map(Box::new),
+                canvas_frame: canvas_accum.frame_position(),
             };
             if publish_frame(
                 &frame_tx,
@@ -2040,6 +2080,7 @@ mod tests {
             prg_ram: Box::new([0u8; 0x2000]),
             sprite_height_px: 8,
             mode7: None,
+            canvas_frame: None,
         }
     }
 

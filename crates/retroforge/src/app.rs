@@ -114,11 +114,18 @@ const SLOT_THUMB_HEIGHT: f32 = 126.0;
 
 /// How wide decoded widescreen renders, in dots (ticket W11-03).
 ///
-/// 400 is 16:9 at the SNES's 224 visible lines (398.2, rounded to an even
-/// number so the 72-dot margin splits evenly either side of the 256-dot
-/// picture). The PPU clamps to its own `MAX_WIDTH`, so this cannot ask
-/// for something the renderer will not deliver.
+/// 400 is 16:9 at the SNES's 224 visible lines (398.2, rounded up to a
+/// whole tile so the 72-dot margin splits evenly either side of the
+/// 256-dot picture) - exactly `Aspect::Wide16x9.output_width(224, 1.0)`,
+/// pinned by a test. Ticket W30-03 made the width follow the chosen
+/// aspect; this stays as the 16:9 default. The PPU clamps to its own
+/// `MAX_WIDTH`, so this cannot ask for something the renderer will not
+/// deliver.
 pub const WIDESCREEN_WIDTH: usize = 400;
+
+/// Ticket W30-03: the visible SNES lines the widescreen width is computed
+/// from (NTSC, no overscan).
+const WIDESCREEN_LINES: usize = 224;
 
 /// Floor for manual resizing. Below this the status bar cannot hold its
 /// own contents and would start clipping again — the exact failure
@@ -829,6 +836,12 @@ pub struct RetroForgeApp {
     /// that moves is the viewport outline, and that is painted over the
     /// texture rather than baked into it.
     level_texture: Option<egui::TextureHandle>,
+    /// Ticket W30-03: the decoded level's RGBA (and size), built once like
+    /// [`Self::level_texture`] and shared with it. `level_image_tried`
+    /// stops a game with no CHR ROM (every SNES game) re-attempting it
+    /// every frame.
+    level_image: Option<(Vec<u8>, usize, usize)>,
+    level_image_tried: bool,
     /// Where the live camera is in level space, from the bounded probe.
     level_camera: Option<(i64, i64)>,
     /// Which console the running ROM is (ticket W11-12).
@@ -1172,6 +1185,26 @@ pub struct RetroForgeApp {
     /// (`CoreEvent::CanvasSnapshot`), if the Ultrawide camera has ever been
     /// requested this session.
     ultrawide_canvas: Option<rf_enhance::stitcher::Canvas>,
+    /// Ticket W30-03: the scene [`Self::ultrawide_canvas`] was snapshotted
+    /// from. The widescreen margins use the canvas only while this equals
+    /// the scene of the frame being shown.
+    ultrawide_canvas_scene: Option<u64>,
+    /// Ticket W30-03: decoded widescreen is on (SNES only), so the
+    /// presentation fills the margins.
+    widescreen_on: bool,
+    /// Ticket W30-03: the scene of the last widescreen frame; a change asks
+    /// for a fresh canvas snapshot straight away.
+    widescreen_scene: Option<u64>,
+    /// Ticket W30-03: which source filled the margins of the last frame.
+    widescreen_source: rf_enhance::widescreen::MarginSource,
+    /// Ticket W30-03: the profile-declared HUD rows, kept native in the
+    /// margins.
+    declared_hud: Option<rf_enhance::hud::HudRegion>,
+    /// Ticket W30-03 (tests): never use a world source.
+    force_vram_margins: bool,
+    /// Ticket W30-03 (tests): keep the core's own frame, before any fill.
+    keep_core_frame: bool,
+    core_frame_copy: Option<Vec<u8>>,
     /// The most recent [`enhanced_view::compose_ultrawide`] result over
     /// [`Self::ultrawide_canvas`] — `Err` (e.g. "canvas is empty") is kept
     /// distinct from `None` ("never even tried yet") so
@@ -1584,7 +1617,17 @@ impl RetroForgeApp {
             art_fetch_failure_toast_shown: false,
             level_session: None,
             level_texture: None,
+            level_image: None,
+            level_image_tried: false,
             level_camera: None,
+            widescreen_on: false,
+            widescreen_scene: None,
+            widescreen_source: rf_enhance::widescreen::MarginSource::Vram,
+            ultrawide_canvas_scene: None,
+            declared_hud: None,
+            force_vram_margins: false,
+            keep_core_frame: false,
+            core_frame_copy: None,
             console_label: "NES",
             script_host: None,
             script_overlay: Vec::new(),
@@ -3568,7 +3611,12 @@ impl RetroForgeApp {
         self.builder_note = None;
         self.apply_profile_match();
         self.level_texture = None;
+        self.level_image = None;
+        self.level_image_tried = false;
         self.level_camera = None;
+        self.widescreen_on = false;
+        self.widescreen_scene = None;
+        self.widescreen_source = rf_enhance::widescreen::MarginSource::Vram;
 
         self.current_game_settings = match (&self.config_root, &self.current_game_hash) {
             (Some(root), Some(hash)) => crate::game_settings::load(root, hash),
@@ -3737,6 +3785,7 @@ impl RetroForgeApp {
                 // matching "a fresh install boots in Accuracy Mode" (law 6).
                 self.camera = CameraToggle::Original;
                 self.ultrawide_canvas = None;
+                self.ultrawide_canvas_scene = None;
                 self.ultrawide_render = None;
                 self.ultrawide_texture = None;
                 self.fm13_message = None;
@@ -3810,7 +3859,7 @@ impl RetroForgeApp {
                 // Ticket W4-03e: keep only the latest, same "older ones are
                 // stale by the time we'd paint them" reasoning this
                 // function's own doc already gives for `latest_frame`.
-                CoreEvent::CanvasSnapshot(canvas) => latest_canvas = Some(canvas),
+                CoreEvent::CanvasSnapshot(snapshot) => latest_canvas = Some(snapshot),
                 // Ticket W24-03: a RAM look the profile finder asked for.
                 // Ticket W27-02: the camera finder is sure.
                 CoreEvent::CameraFound(found) => {
@@ -3883,11 +3932,16 @@ impl RetroForgeApp {
             self.status = "Core crashed (FM-01) — open a ROM to start a fresh session".to_string();
             return;
         }
-        if let Some(canvas) = latest_canvas {
+        if let Some(snapshot) = latest_canvas {
             // Ticket W2-14's lesson, mirrored: the reply has now landed.
             self.awaiting_canvas_snapshot = false;
-            self.ultrawide_canvas = Some(canvas);
-            self.refresh_ultrawide_render(ctx);
+            self.ultrawide_canvas = Some(snapshot.canvas);
+            self.ultrawide_canvas_scene = snapshot.scene;
+            // Ticket W30-03: a snapshot the widescreen margins asked for
+            // must not pay for a GPU compose nobody will look at.
+            if self.camera == CameraToggle::Ultrawide || self.show_enhance {
+                self.refresh_ultrawide_render(ctx);
+            }
         }
         // Ticket W20-17: the fog's density map, from the pinned plane's
         // own pixels in the accuracy-exact frame (an effective fog row is
@@ -3986,10 +4040,23 @@ impl RetroForgeApp {
                             (w, rows),
                         )
                     } else {
-                        (
+                        let native = (
                             crate::play_view::crop_rows(&msg.rgba, msg.width, rows).to_vec(),
                             (msg.width, rows),
-                        )
+                        );
+                        // Ticket W30-03: margins of a native-scale frame
+                        // (an HD pack or HD Mode 7 frame is already at a
+                        // different scale, so it is left alone).
+                        if self.widescreen_on {
+                            self.widen_margins(
+                                native.0,
+                                native.1,
+                                msg.canvas_frame,
+                                &msg.line_palettes,
+                            )
+                        } else {
+                            native
+                        }
                     }
                 }
             };
@@ -5137,7 +5204,13 @@ impl RetroForgeApp {
         // any real size", W4-03e), so driving it from tab visibility must
         // keep the interval, not drop it — which is why this is one
         // condition and not a second request path.
-        let wanted = self.camera == CameraToggle::Ultrawide || self.show_enhance;
+        // Ticket W30-03: and the widescreen margins, unless a decoded level
+        // already supplies them. Same interval: the canvas is only ever
+        // used for margins (world positions are stable within a scene),
+        // so a snapshot up to a second old is as good as a fresh one.
+        let wanted = self.camera == CameraToggle::Ultrawide
+            || self.show_enhance
+            || (self.widescreen_on && !self.force_vram_margins && self.level_camera.is_none());
         if !wanted {
             return;
         }
@@ -7855,6 +7928,17 @@ impl RetroForgeApp {
                         .color(tokens.warn),
                     );
                 }
+                // Ticket W30-03: the widescreen aspect.
+                if row.id == "widescreen_decoded"
+                    && row.enabled
+                    && crate::enhance_dock::aspect_picker(
+                        ui,
+                        &mut self.current_game_settings.widescreen_aspect,
+                    )
+                {
+                    actions.settings_changed = true;
+                    actions.widescreen_aspect_changed = true;
+                }
                 // Ticket W30-02: the HD Mode 7 options.
                 if row.id == "hd_mode7" && row.enabled {
                     let settings = &mut self.current_game_settings;
@@ -10042,6 +10126,10 @@ impl RetroForgeApp {
             Some(Err(e)) => Some(e.to_string()),
             _ => None,
         };
+        self.declared_hud = match &declared {
+            Some(Ok(region)) => Some(*region),
+            _ => None,
+        };
         self.hud_separator = match declared {
             Some(Ok(region)) => Some(rf_enhance::hud::HudSeparator::new(Some(region))),
             _ => None,
@@ -10747,11 +10835,18 @@ impl RetroForgeApp {
         }
     }
 
-    /// The decoded level as a texture, built once per ROM.
-    fn level_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
-        if let Some(tex) = &self.level_texture {
-            return Some(tex.clone());
+    /// Ticket W30-03: the decoded level's RGBA, rendered once per ROM and
+    /// cached. `None` when there is no decoded level or no CHR ROM to draw
+    /// it from (every SNES cartridge: the decoder is the NES metatile one).
+    fn level_image(&mut self) -> Option<&(Vec<u8>, usize, usize)> {
+        if self.level_image.is_none() && !self.level_image_tried {
+            self.level_image_tried = true;
+            self.level_image = self.render_level_image();
         }
+        self.level_image.as_ref()
+    }
+
+    fn render_level_image(&self) -> Option<(Vec<u8>, usize, usize)> {
         let session = self.level_session.as_ref()?;
         let chr = self.debug_panels.data.chr_rom.as_deref()?;
         let rgba = enhanced_view::render_level_rgba(
@@ -10765,13 +10860,105 @@ impl RetroForgeApp {
             session.geometry.width_px as usize,
             session.geometry.height_px as usize,
         );
-        if w == 0 || h == 0 || rgba.len() != w * h * 4 {
-            return None;
+        (w != 0 && h != 0 && rgba.len() == w * h * 4).then_some((rgba, w, h))
+    }
+
+    /// The decoded level as a texture, built once per ROM.
+    fn level_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        if let Some(tex) = &self.level_texture {
+            return Some(tex.clone());
         }
-        let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+        let (rgba, w, h) = self.level_image()?;
+        let image = egui::ColorImage::from_rgba_unmultiplied([*w, *h], rgba);
         let tex = ctx.load_texture("decoded-level", image, egui::TextureOptions::NEAREST);
         self.level_texture = Some(tex.clone());
         Some(tex)
+    }
+
+    /// Ticket W30-03: fill the widescreen margins of a native-scale frame
+    /// from the best world source (`rf_enhance::widescreen::
+    /// choose_margin_source`): the decoded level under the live camera,
+    /// else the stitched canvas of the scene being shown, else what the PPU
+    /// drew from VRAM. Presentation only: the core is never touched.
+    ///
+    /// The frame is the post-crop, native-scale picture; `palettes` are its
+    /// rows' palettes, used to resolve canvas cells (which are indexed).
+    fn widen_margins(
+        &mut self,
+        rgba: Vec<u8>,
+        size: (usize, usize),
+        position: Option<crate::canvas_accum::FramePosition>,
+        palettes: &[Option<rf_renderer::LinePalette>],
+    ) -> (Vec<u8>, (usize, usize)) {
+        use rf_enhance::widescreen::{
+            choose_margin_source, fill_margins, MarginFacts, MarginSource,
+        };
+        let (w, h) = size;
+        if self.keep_core_frame {
+            self.core_frame_copy = Some(rgba.clone());
+        }
+        let out_w = self.widescreen_out_width(h);
+        // A scene change asks for the new scene's canvas at once instead of
+        // waiting out the refresh interval; until it lands `scene_fresh`
+        // is false and the margins fall back to VRAM.
+        let scene = position.map(|p| p.scene);
+        if scene != self.widescreen_scene {
+            self.widescreen_scene = scene;
+            self.ultrawide_refresh_countdown = 0;
+        }
+        let have_level = !self.force_vram_margins && self.level_image().is_some();
+        let canvas_ready = self
+            .ultrawide_canvas
+            .as_ref()
+            .is_some_and(|c| c.width() > 0 && c.height() > 0);
+        let facts = MarginFacts {
+            level_decoded: have_level,
+            camera_known: self.level_camera.is_some(),
+            canvas_has_frame_position: !self.force_vram_margins
+                && canvas_ready
+                && position.is_some(),
+            scene_fresh: scene.is_some() && scene == self.ultrawide_canvas_scene,
+        };
+        let source = choose_margin_source(facts);
+        self.widescreen_source = source;
+        if source == MarginSource::Vram && out_w <= w {
+            return (rgba, size);
+        }
+        let hud = self.declared_hud;
+        let keep =
+            move |y: usize| hud.is_some_and(|r| u16::try_from(y).is_ok_and(|y| r.contains(y)));
+        let filled = match (source, position) {
+            (MarginSource::DecodedLevel, _) => {
+                let (cx, cy) = self.level_camera.unwrap_or((0, 0));
+                let Some((img, iw, ih)) = self.level_image.as_ref() else {
+                    return (rgba, size);
+                };
+                let world = |wx: i64, wy: i64| -> Option<[u8; 3]> {
+                    let (x, y) = (usize::try_from(wx).ok()?, usize::try_from(wy).ok()?);
+                    if x >= *iw || y >= *ih {
+                        return None;
+                    }
+                    let i = (y * iw + x) * 4;
+                    Some([img[i], img[i + 1], img[i + 2]])
+                };
+                fill_margins(&rgba, w, h, out_w, (cx, cy), &world, &keep)
+            }
+            (MarginSource::StitchedCanvas, Some(pos)) => {
+                let Some(canvas) = self.ultrawide_canvas.as_ref() else {
+                    return (rgba, size);
+                };
+                let top = pos.origin.1;
+                let world = |wx: i64, wy: i64| -> Option<[u8; 3]> {
+                    let cell = canvas.get(wx, wy)?;
+                    let row = usize::try_from(wy - top).unwrap_or(0);
+                    let palette = palettes.get(row).and_then(Option::as_ref);
+                    Some(rf_renderer::resolve_index(cell.palette_index, palette))
+                };
+                fill_margins(&rgba, w, h, out_w, pos.origin, &world, &keep)
+            }
+            _ => fill_margins(&rgba, w, h, out_w, (0, 0), &|_, _| None, &keep),
+        };
+        (filled, (out_w, h))
     }
 
     /// Stop the running core and return to the library home (ticket
@@ -11507,6 +11694,7 @@ impl RetroForgeApp {
             prg_ram: Box::new([0u8; 0x2000]),
             sprite_height_px: 8,
             mode7: Some(Box::new(frame)),
+            canvas_frame: None,
         };
         self.refresh_diorama_render(&msg);
     }
@@ -12170,6 +12358,7 @@ impl RetroForgeApp {
     /// (law 6), which `WidescreenPolicies::from_profile` enforces by
     /// leaving `enabled` false whatever the file says.
     pub fn set_widescreen(&mut self, on: bool) {
+        self.widescreen_on = on;
         if !on {
             self.widescreen_decisions = [None; 4];
             self.send_command(CoreCommand::SetWidescreen(None));
@@ -12181,12 +12370,73 @@ impl RetroForgeApp {
             .and_then(|s| rf_enhance::widescreen::WidescreenPolicies::from_profile(&s.profile).ok())
             .unwrap_or_default();
         policies.enabled = true;
+        // Ticket W30-03: the stitcher behind the canvas margins is fed by
+        // the scroll/scanline events, which a SNES core only emits once it
+        // has been sent a mask (the stepper re-asserts the camera baseline
+        // on every `set_event_mask`). Re-send the current subscription so
+        // the baseline is in force.
+        self.send_command(CoreCommand::SetEventMask(
+            if self.event_subscription_active {
+                rf_core_api::EventMask::ALL
+            } else {
+                rf_core_api::EventMask::NONE
+            },
+        ));
         self.send_command(CoreCommand::SetWidescreen(Some(
             crate::core_thread::WidescreenRequest {
-                width: WIDESCREEN_WIDTH,
+                // Ticket W30-03: the chosen aspect, capped at what the PPU
+                // path can draw; anything wider is finished by the margin
+                // fill. 16:9 is `WIDESCREEN_WIDTH`.
+                width: self
+                    .widescreen_out_width(WIDESCREEN_LINES)
+                    .min(rf_enhance::widescreen::CORE_MAX_WIDTH),
                 policies,
             },
         )));
+    }
+
+    /// Ticket W30-03: dots across the widescreen picture for `lines` lines
+    /// at the chosen aspect. Square dots: this counts console dots, and the
+    /// display stage applies the TV pixel aspect on top, as it always has.
+    fn widescreen_out_width(&self, lines: usize) -> usize {
+        self.current_game_settings
+            .widescreen_aspect
+            .output_width(lines, 1.0)
+    }
+
+    /// Ticket W30-03: which source filled the margins of the last frame.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn widescreen_source_for_test(&self) -> rf_enhance::widescreen::MarginSource {
+        self.widescreen_source
+    }
+
+    /// Ticket W30-03: stop using any world source (VRAM-only margins), and
+    /// keep the core's own frame, before any fill, for comparison.
+    #[doc(hidden)]
+    pub fn force_vram_margins_for_test(&mut self, on: bool) {
+        self.force_vram_margins = on;
+        self.keep_core_frame = on;
+    }
+
+    /// Ticket W30-03: the core's own frame (RGBA, `frame_size`'s height,
+    /// before the margin fill) from the last widescreen frame.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn core_frame_for_test(&self) -> Option<&[u8]> {
+        self.core_frame_copy.as_deref()
+    }
+
+    /// Ticket W30-03: pick the widescreen aspect as the picker does.
+    #[doc(hidden)]
+    pub fn set_widescreen_aspect_for_test(&mut self, aspect: rf_enhance::widescreen::Aspect) {
+        self.current_game_settings.widescreen_aspect = aspect;
+        let actions = crate::enhance_dock::EnhanceActions {
+            settings_changed: true,
+            widescreen_aspect_changed: true,
+            ..Default::default()
+        };
+        self.apply_enhance_actions(&actions);
     }
 
     /// What the widescreen policy last decided, per background: `Some`
@@ -13483,6 +13733,9 @@ impl RetroForgeApp {
         }
         if let Some(on) = actions.widescreen_set {
             self.set_widescreen(on);
+        } else if actions.widescreen_aspect_changed && self.widescreen_on {
+            // Ticket W30-03: a new aspect is a new width for the core.
+            self.set_widescreen(true);
         }
         if actions.settings_changed {
             self.save_current_game_settings();
