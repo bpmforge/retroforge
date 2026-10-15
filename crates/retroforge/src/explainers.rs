@@ -54,6 +54,12 @@ pub fn long_text(id: &str) -> &'static str {
              frames are drawn. Unlike the other options it changes the simulation, so some \
              games also run faster than intended; it is off until you turn it on."
         }
+        "hd_mode7" => {
+            "Mode 7 floors are drawn one sample per screen pixel, so racetracks and world \
+             maps look blocky up close. This re-runs the console's own Mode 7 maths at a \
+             finer step, so the floor is sharper. Perspective smoothing blends between \
+             scanlines; supersampling smooths edges at some CPU cost."
+        }
         _ => "An enhancement.",
     }
 }
@@ -203,6 +209,32 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, id: &str, tokens: &crate
                         egui::CornerRadius::same(1),
                         if i == 0 { faint } else { accent },
                     );
+                }
+            }
+        }
+        "hd_mode7" => {
+            // The same floor sampled coarsely (left) and finely (right).
+            let half = r.width() / 2.0;
+            let grid = (half - 8.0).min(r.height() - 8.0);
+            for (side, cells) in [(0, 3), (1, 6)] {
+                let cell = grid / cells as f32;
+                let left = r.left() + half * side as f32 + 4.0;
+                for cy in 0..cells {
+                    for cx in 0..cells {
+                        if (cx + cy) % 2 == 0 {
+                            painter.rect_filled(
+                                egui::Rect::from_min_size(
+                                    egui::pos2(
+                                        left + cell * cx as f32,
+                                        r.center().y - grid / 2.0 + cell * cy as f32,
+                                    ),
+                                    egui::vec2(cell, cell),
+                                ),
+                                egui::CornerRadius::ZERO,
+                                if side == 0 { faint } else { accent },
+                            );
+                        }
+                    }
                 }
             }
         }

@@ -211,6 +211,16 @@ pub struct GameSettings {
     /// [`Self::superfx_overclock`] is on. Valid 200..=800 in steps of 100;
     /// clamped on load. Defaults to 200.
     pub superfx_overclock_pct: u16,
+    /// Ticket W30-02: redraw Mode 7 floors at a finer step (presentation
+    /// only; the simulation is untouched). Off by default (law 6).
+    pub hd_mode7: bool,
+    /// Ticket W30-02: output pixels per native pixel, 2..=4; clamped on load.
+    pub hd_mode7_scale: u8,
+    /// Ticket W30-02: average 2x2 sub-samples per output pixel (costs CPU).
+    pub hd_mode7_supersample: bool,
+    /// Ticket W30-02: blend the Mode 7 matrix between scanlines. On by
+    /// default; only the OFF state is persisted.
+    pub hd_mode7_perspective: bool,
     /// Shader name, `None` for the default pipeline. A string rather than
     /// an enum because W3-02a owns the shader set and this must not have to
     /// change when that lands.
@@ -255,6 +265,11 @@ const SUPERFX_PCT_MIN: u16 = 200;
 const SUPERFX_PCT_MAX: u16 = 800;
 const SUPERFX_PCT_DEFAULT: u16 = 200;
 
+/// Ticket W30-02: bounds and default of the stored HD Mode 7 scale.
+const HD_MODE7_SCALE_MIN: u8 = 2;
+const HD_MODE7_SCALE_MAX: u8 = 4;
+const HD_MODE7_SCALE_DEFAULT: u8 = 2;
+
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
@@ -268,6 +283,10 @@ impl Default for GameSettings {
             loading_fast_forward: false,
             superfx_overclock: false,
             superfx_overclock_pct: SUPERFX_PCT_DEFAULT,
+            hd_mode7: false,
+            hd_mode7_scale: HD_MODE7_SCALE_DEFAULT,
+            hd_mode7_supersample: false,
+            hd_mode7_perspective: true,
             shader: None,
             trust: rf_enhance::trust::TrustLadder::default(),
             last_played_epoch_secs: None,
@@ -319,6 +338,8 @@ impl GameSettings {
             ("mode7_ground", self.mode7_ground),
             ("loading_fast_forward", self.loading_fast_forward),
             ("superfx_overclock", self.superfx_overclock),
+            ("hd_mode7", self.hd_mode7),
+            ("hd_mode7_supersample", self.hd_mode7_supersample),
         ] {
             if on {
                 fields.insert(key.to_string(), "true".to_string());
@@ -331,6 +352,17 @@ impl GameSettings {
                 "superfx_overclock_pct".to_string(),
                 self.superfx_overclock_pct.to_string(),
             );
+        }
+        // Ticket W30-02: the scale and perspective flag are written only
+        // when they differ from their defaults (2, on).
+        if self.hd_mode7_scale != HD_MODE7_SCALE_DEFAULT {
+            fields.insert(
+                "hd_mode7_scale".to_string(),
+                self.hd_mode7_scale.to_string(),
+            );
+        }
+        if !self.hd_mode7_perspective {
+            fields.insert("hd_mode7_perspective".to_string(), "false".to_string());
         }
         if let Some(shader) = &self.shader {
             fields.insert("shader".to_string(), shader.clone());
@@ -411,6 +443,15 @@ impl GameSettings {
                         // Round down to the 100 step, then clamp (W30-01).
                         settings.superfx_overclock_pct =
                             (pct / 100 * 100).clamp(SUPERFX_PCT_MIN, SUPERFX_PCT_MAX);
+                    }
+                }
+                "hd_mode7" => settings.hd_mode7 = value == "true",
+                "hd_mode7_supersample" => settings.hd_mode7_supersample = value == "true",
+                "hd_mode7_perspective" => settings.hd_mode7_perspective = value != "false",
+                "hd_mode7_scale" => {
+                    if let Ok(scale) = value.parse::<u8>() {
+                        settings.hd_mode7_scale =
+                            scale.clamp(HD_MODE7_SCALE_MIN, HD_MODE7_SCALE_MAX);
                     }
                 }
                 "trust" => {
@@ -849,6 +890,7 @@ mod mode_and_feature_persistence_tests {
             "mode7_ground",
             "superfx_overclock",
             "superfx_overclock_pct",
+            "hd_mode7",
         ] {
             assert!(
                 !untouched.contains(key),
@@ -863,9 +905,41 @@ mod mode_and_feature_persistence_tests {
             mode7_ground: true,
             superfx_overclock: true,
             superfx_overclock_pct: 400,
+            hd_mode7: true,
+            hd_mode7_scale: 4,
+            hd_mode7_supersample: true,
+            hd_mode7_perspective: false,
             ..GameSettings::default()
         };
         let restored = GameSettings::from_text(&s.to_text()).expect("parses");
+        // Ticket W30-02: HD Mode 7 round-trips; only non-defaults are written.
+        assert!(restored.hd_mode7 && restored.hd_mode7_supersample);
+        assert_eq!(restored.hd_mode7_scale, 4);
+        assert!(!restored.hd_mode7_perspective);
+        let on_only = GameSettings {
+            hd_mode7: true,
+            ..GameSettings::default()
+        }
+        .to_text();
+        assert!(on_only.contains("hd_mode7=true"));
+        for key in [
+            "hd_mode7_scale",
+            "hd_mode7_supersample",
+            "hd_mode7_perspective",
+        ] {
+            assert!(
+                !on_only.contains(key),
+                "default `{key}` must not be written"
+            );
+        }
+        let back = GameSettings::from_text(&on_only).expect("parses");
+        assert_eq!(back.hd_mode7_scale, 2);
+        assert!(back.hd_mode7_perspective, "perspective defaults on");
+        for (raw, want) in [("9", 4), ("1", 2), ("0", 2), ("3", 3)] {
+            let t = GameSettings::from_text(&format!("{MAGIC}\nhd_mode7_scale={raw}\n"))
+                .expect("parses");
+            assert_eq!(t.hd_mode7_scale, want, "scale {raw}");
+        }
         assert!(restored.superfx_overclock);
         assert_eq!(restored.superfx_overclock_pct, 400);
         let wild = GameSettings::from_text(&format!("{MAGIC}\nsuperfx_overclock_pct=9999\n"))

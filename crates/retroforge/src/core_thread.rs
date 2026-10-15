@@ -251,6 +251,18 @@ pub struct RewindStatus {
     pub bytes: usize,
 }
 
+/// Ticket W30-02: the native frame with the HD Mode 7 layer composited over
+/// its nearest-neighbour upscale (`rf_renderer::hd_layer::composite_hd_layer`).
+pub struct HdMode7Frame {
+    /// Straight RGBA8, `width * scale` by `height * scale`, alpha 255.
+    pub rgba: Vec<u8>,
+    /// Native frame width and height (rows are all of the sink's, not just
+    /// the visible ones; the UI crops).
+    pub width: usize,
+    pub height: usize,
+    pub scale: usize,
+}
+
 pub struct FrameMsg {
     /// Ticket W20-13: the rewind ring's extent after this frame, `None`
     /// while rewind is off.
@@ -284,6 +296,15 @@ pub struct FrameMsg {
     /// of the pair, and shipping decoded tilesets across the channel
     /// every frame would not be.
     pub hd: Option<Box<HdFrame>>,
+    /// Ticket W30-02: this frame's HD Mode 7 composite, or `None` when the
+    /// feature is off, the game is a NES one, or no visible line was in
+    /// Mode 7. Built on the core thread (only it may read the PPU) and
+    /// boxed to keep this message small.
+    pub hd_mode7: Option<Box<HdMode7Frame>>,
+    /// Ticket W30-02: the game has drawn a Mode 7 line at some point this
+    /// session ([`EmuStepper::mode7_shown`]; sticky). Unlike `mode7`, it
+    /// needs no event subscription, so it can unlock the Mode 7 rows.
+    pub mode7_shown: bool,
     pub rgba: Vec<u8>,
     pub width: usize,
     pub height: usize,
@@ -534,6 +555,12 @@ pub enum CoreCommand {
     /// the shell only sends a value above 100 when the Enhanced-only
     /// "Super FX overclock" row is effective. A no-op without a Super FX.
     SetGsuOverclock(u16),
+    /// Ticket W30-02: HD Mode 7 options (`None` = off). Presentation only:
+    /// the core's state is never touched, so unlike `SetGsuOverclock` this
+    /// is safe in any mode; the shell sends `Some` only while the
+    /// Enhanced-only "HD Mode 7" row is effective. Turns the frame sink's
+    /// BG1 mask capture on and off with it.
+    SetHdMode7(Option<rf_snes::ppu::hd_mode7::HdMode7Options>),
     /// Ticket W11-01 (FR-ENH-002): temporal de-flicker on/off.
     ///
     /// A SECOND enhancement command, and until W11-01 there was exactly
@@ -1225,6 +1252,10 @@ fn core_thread_main(
                 CoreCommand::SetGsuOverclock(pct) => {
                     stepper.set_gsu_overclock(pct);
                 }
+                CoreCommand::SetHdMode7(options) => {
+                    stepper.set_hd_mode7(options);
+                    sink.set_mode7_mask_capture(options.is_some());
+                }
                 CoreCommand::SetLevelProbe(probe) => {
                     level_probe = probe;
                 }
@@ -1297,6 +1328,8 @@ fn core_thread_main(
                     });
                     if width != sink.width() {
                         sink = rf_renderer::FrameBuffer::with_size(width, height);
+                        // The new buffer starts with mask capture off.
+                        sink.set_mode7_mask_capture(stepper.hd_mode7_on());
                     }
                     if let Some(buf) = overlay_capture.as_mut() {
                         buf.resize(
@@ -1713,6 +1746,26 @@ fn core_thread_main(
                     .collect::<Vec<u8>>()
             });
             let display = display_rgba(&mut historian, &bundle, &sink, overlay_capture.as_deref());
+            // Ticket W30-02: composite the HD Mode 7 layer over `display`
+            // (the frame as it will be shown), on this thread because only
+            // it may read the PPU.
+            let hd_mode7_frame = stepper.render_hd_mode7(sink.width()).and_then(|layer| {
+                let scale = layer.width / sink.width();
+                let mask = sink.mode7_mask()?;
+                Some(Box::new(HdMode7Frame {
+                    rgba: rf_renderer::hd_layer::composite_hd_layer(
+                        &display,
+                        sink.width(),
+                        sink.height(),
+                        mask,
+                        &layer.rgba,
+                        scale,
+                    ),
+                    width: sink.width(),
+                    height: sink.height(),
+                    scale,
+                }))
+            });
             // Ticket W11-14: read the layer map BEFORE the bundle is
             // handed off — it is moved by `publish`, and the mask is a
             // cheap projection of it rather than a second copy of the
@@ -1773,6 +1826,8 @@ fn core_thread_main(
                         },
                     })
                 }),
+                hd_mode7: hd_mode7_frame,
+                mode7_shown: stepper.mode7_shown(),
                 rgba: display,
                 line_palettes: sink.line_palettes().to_vec(),
                 width: sink.width(),
@@ -1963,6 +2018,8 @@ mod tests {
             script_window: None,
             audio_fill: None,
             hd: None,
+            hd_mode7: None,
+            mode7_shown: false,
             rgba: Vec::new(),
             line_palettes: Vec::new(),
             width: 0,

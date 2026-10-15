@@ -4419,3 +4419,12 @@ stories, 10 decisions).
   attaches Linux, Windows and macOS archives on a tag; the Windows and Linux
   builds are compiled by CI, not yet run on hardware. Gate: workspace
   **2591 passing / 0 failed**.
+- **W30-01 — Super FX overclock** (2026-10-14). Enhanced-only row, 200-800%,
+  Super FX cartridges only, profile cap `[overclock].superfx_max`. Star Fox
+  GSU work 1.49x at 200%. Found while checking: Super FX 3D output does not
+  draw correctly at 100% (Star Fox, Stunt Race FX) — ruling pending. Gate:
+  workspace **2597 passing**.
+- **W30-02 — HD Mode 7** (2026-10-14). 2-4x re-sampled Mode 7, optional 2x2
+  supersampling and per-line perspective smoothing; 1x is pixel-identical.
+  Also fixed: `mode7_seen` was only set by an event that needed it set, so
+  the Mode 7 rows were unreachable in the app. Gate: workspace **2616 passing**.

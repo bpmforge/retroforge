@@ -343,6 +343,17 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
             label: "Diorama: Mode 7",
             scope: "generic, requires live BG mode 7",
             enabled: settings.mode7_ground,
+            availability: mode7_av.clone(),
+            heuristic: None,
+        },
+        // Ticket W30-02: presentation-only, generic (no profile), and
+        // available exactly when the 3D ground is: Enhanced plus a game
+        // that has shown BG mode 7.
+        FeatureRow {
+            id: "hd_mode7",
+            label: "HD Mode 7",
+            scope: "generic, requires live BG mode 7",
+            enabled: settings.hd_mode7,
             availability: mode7_av,
             heuristic: None,
         },
@@ -750,7 +761,7 @@ mod tests {
             &GameSettings::default(),
             &GameFacts::new(false, false, false),
         );
-        assert_eq!(rows.len(), 9, "every feature is listed in every mode");
+        assert_eq!(rows.len(), 10, "every feature is listed in every mode");
         assert!(rows.iter().all(|r| r.availability.explanation().is_some()));
     }
 
@@ -903,6 +914,43 @@ mod tests {
         assert!(badge_breakdown(&s, &GameFacts::new(false, false, true))
             .iter()
             .any(|l| l.contains("Diorama: Mode 7")));
+    }
+
+    /// Ticket W30-02: HD Mode 7 is Enhanced-only, needs a game that has
+    /// shown Mode 7, never a profile, and counts toward the badge only
+    /// when effective.
+    #[test]
+    fn hd_mode7_gating_and_badge() {
+        let find = |s: &GameSettings, f: &GameFacts| {
+            feature_rows(s, f)
+                .into_iter()
+                .find(|r| r.id == "hd_mode7")
+                .unwrap()
+        };
+        let mut s = settings(Mode::Accuracy);
+        s.hd_mode7 = true;
+        let seen = GameFacts::new(false, false, true);
+        assert_eq!(
+            find(&s, &seen).availability,
+            Availability::NeedsMode("Enhanced")
+        );
+        assert!(!find(&s, &seen).effective());
+
+        s.mode = Mode::Enhanced;
+        let unseen = GameFacts::new(true, true, false);
+        assert_eq!(
+            find(&s, &unseen).availability,
+            Availability::NeedsGameState("BG mode 7 active")
+        );
+        assert!(!find(&s, &unseen).effective());
+
+        assert!(find(&s, &seen).effective(), "no profile needed");
+        assert!(badge_breakdown(&s, &seen)
+            .iter()
+            .any(|l| l.contains("HD Mode 7")));
+
+        s.hd_mode7 = false;
+        assert!(!find(&s, &seen).effective());
     }
 
     /// A "suppressed" heuristic is not acting, so the chip must say so —
