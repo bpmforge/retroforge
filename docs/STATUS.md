@@ -4474,3 +4474,7 @@ stories, 10 decisions).
   no signal (stays 100%); Contra III and Kirby Super Star no slowdown removed
   with the idle signal — they need a profile `tick_counter`. Gate: workspace
   **2742 passing**.
+- **Disassembly-cited profile rows stripped (D-021)** (2026-10-15). 52
+  `memory_map` rows across SMB2, Super C, Contra, Castlevania II, Super Mario
+  World, Mega Man 7 and Donkey Kong Country; observed camera tables kept. All
+  seven validate.
