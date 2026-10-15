@@ -1217,14 +1217,23 @@ impl GsuState {
         self.fetch_extra_cost = 0;
         let opcode = self.fetch_byte(rom);
         self.regs.last_opcode = opcode;
-        let base_cost = self.exec_opcode(rom, opcode);
-        let total_cost = base_cost + self.fetch_extra_cost;
-        self.regs.last_cost = total_cost;
-        self.regs.instructions_executed += 1;
+        // Ticket W30-00: the jump takes effect right after the delay-slot
+        // OPCODE byte is fetched, before that opcode runs. fullsnes "GSU
+        // Jump Opcodes": "in case of multi-byte opcodes, this results in a
+        // 1-byte-fragment being located after the jump-origin, and the
+        // remaining byte(s) at the destination". Applying it after the
+        // whole opcode (as this did) read a delay-slot IWT's immediate from
+        // the bytes after the branch instead of the target -- Star Fox's
+        // `BEQ; IWT R7` select-a-constant idiom then mis-decoded the target
+        // bytes as an IWT R2 and fed garbage edge lengths to its rasteriser.
         if let Some((bank, pc)) = had_pending {
             self.regs.pbr = bank;
             self.regs.regs[15] = pc;
         }
+        let base_cost = self.exec_opcode(rom, opcode);
+        let total_cost = base_cost + self.fetch_extra_cost;
+        self.regs.last_cost = total_cost;
+        self.regs.instructions_executed += 1;
         total_cost
     }
 
@@ -2197,13 +2206,20 @@ impl GsuState {
             }
 
             // --- FROM Rn (prefix) / MOVES Rd,Rs (if B set) --------------
+            // fullsnes "2d Bs MOVES Rd,Rs": the WITH byte names the
+            // DESTINATION and this byte the SOURCE -- the opposite of
+            // "2s 1d MOVE Rd,Rs" above. Ticket W30-00: this arm used to copy
+            // the other way (Rn = WITH-reg), which zeroed Star Fox's span
+            // length before its `LOOP`/`PLOT` fill (WITH R12; FROM R3 was
+            // R3 = R12 = 0), so every fill ran 65536 pixels along one row
+            // and no polygon was ever drawn.
             0xB0..=0xBF => {
                 let n = op & 0x0F;
                 if self.regs.b_flag {
-                    let v = self.regs.reg(self.regs.sreg);
+                    let v = self.regs.reg(n);
                     self.regs.set_ov(v & 0x0080 != 0); // fullsnes "OV=bit7"
                     self.regs.set_zs(v);
-                    self.regs.commit_to(n, v);
+                    self.regs.commit_to(self.regs.dreg, v);
                     self.regs.reset_prefix_state();
                     2
                 } else {
@@ -2427,15 +2443,15 @@ mod exec_tests {
 
     #[test]
     fn mov_move_moves_ibt_iwt() {
-        // WITH R3; MOVE R2,R3 (0x23,0x12); WITH R2; MOVES R5,R2 (0x22,0xB5);
+        // WITH R3; MOVE R2,R3 (0x23,0x12); WITH R5; MOVES R5,R2 (0x25,0xB2);
         // IBT R4,#-2 (0xA4,0xFE); IWT R6,#1234h (0xF6,0x34,0x12).
-        let (mut g, rom) = program(&[0x23, 0x12, 0x22, 0xB5, 0xA4, 0xFE, 0xF6, 0x34, 0x12]);
+        let (mut g, rom) = program(&[0x23, 0x12, 0x25, 0xB2, 0xA4, 0xFE, 0xF6, 0x34, 0x12]);
         g.regs.regs[3] = 0x1234;
         g.regs.regs[2] = 0x8000; // bit7 set, for MOVES's OV=bit7 check
         step_n(&mut g, &rom, 2); // WITH R3; MOVE R2,R3
         assert_eq!(g.regs.reg(2), 0x1234);
         assert!(!g.regs.b_flag, "MOVE resets prefix state");
-        step_n(&mut g, &rom, 2); // WITH R2; MOVES R5,R2
+        step_n(&mut g, &rom, 2); // WITH R5; MOVES R5,R2 (R5 = R2)
         assert_eq!(g.regs.reg(5), 0x1234); // R2 was overwritten above
         assert!(!g.regs.ov_flag(), "bit7 of 0x1234 is 0");
         step_n(&mut g, &rom, 1); // IBT R4,#-2
@@ -2859,6 +2875,26 @@ mod exec_tests {
             0x1234,
             "pending jump overwrites R15 with the target verbatim"
         );
+    }
+
+    /// Ticket W30-00: a multi-byte opcode in a delay slot takes only its
+    /// first byte from after the branch; its operands come from the target
+    /// (fullsnes "GSU Jump Opcodes": "a 1-byte-fragment being located after
+    /// the jump-origin, and the remaining byte(s) at the destination").
+    ///   0: BRA +3        (05 03)    -> target 5
+    ///   2: IWT R7 (byte) (F7)       <- delay slot opcode only
+    ///   3: 11 22                    <- never read
+    ///   5: 34 12                    <- IWT's immediate, from the target
+    ///   7: INC R1        (D1)
+    #[test]
+    fn delay_slot_multi_byte_opcode_reads_operands_at_the_target() {
+        let bytes = [0x05, 0x03, 0xF7, 0x11, 0x22, 0x34, 0x12, 0xD1];
+        let (mut g, rom) = program(&bytes);
+        step_n(&mut g, &rom, 2); // BRA; IWT R7 fragment
+        assert_eq!(g.regs.reg(7), 0x1234);
+        assert_eq!(g.regs.reg(15), 7);
+        step_n(&mut g, &rom, 1); // INC R1
+        assert_eq!(g.regs.reg(1), 1);
     }
 
     #[test]

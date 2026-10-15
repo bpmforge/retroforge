@@ -4478,3 +4478,10 @@ stories, 10 decisions).
   `memory_map` rows across SMB2, Super C, Contra, Castlevania II, Super Mario
   World, Mega Man 7 and Donkey Kong Country; observed camera tables kept. All
   seven validate.
+- **W30-00 — Super FX 3D output fixed** (2026-10-15). Two GSU bugs, found by
+  PC sampling and instruction traces against fullsnes: MOVES copied the wrong
+  way (zeroing Star Fox's span lengths, so each fill ran 65536 pixels), and
+  jumps applied after the whole delay-slot opcode instead of after its first
+  byte (a delay-slot IWT read the wrong immediate). Star Fox and Stunt Race FX
+  now draw their 3D; Star Fox's tick counter runs ~18/s (was ~3). Open:
+  Yoshi's Island's intro text box shows striped bars.
