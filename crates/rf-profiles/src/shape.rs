@@ -204,6 +204,10 @@ fn known_shape() -> Shape {
             ]),
         ),
         (
+            "overclock",
+            Shape::Object(vec![("superfx_max", Shape::Leaf)]),
+        ),
+        (
             "loading",
             Shape::Object(vec![(
                 "wait_loops",

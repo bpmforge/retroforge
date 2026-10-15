@@ -103,6 +103,9 @@ tint = "#336699"                     # optional, "#rrggbb"
 strength = 0.6                       # optional, 0.0..=1.0
 ladder = "active"                    # optional: shadow | advisory | active (default active)
 
+[overclock]
+superfx_max = 300   # ticket W30-01: cap the Super FX overclock (100..=800, step 100)
+
 [loading]
 [[loading.wait_loops]]
 pc = 0xC12A
@@ -215,6 +218,15 @@ flag; there is no ALttP profile in this repository to add one to either.
 A future commercial profile earns this table the same way `[antiflicker]`
 or a `[decode]` row does — a cited, checkable source naming the plane, not
 an assumption.
+
+### `[overclock]` (ticket W30-01)
+
+`[overclock]` (`rf_profiles::schema::Overclock`) is optional. Its one key,
+`superfx_max`, caps the Super FX overclock a player may apply to a game
+known to speed up when the chip runs faster (a whole-hundred percent in
+`100..=800`; the loader rejects anything else, naming the key). Omit the
+table to leave the overclock uncapped. The overclock itself is a per-game,
+off-by-default, Enhanced-only player setting; the profile only limits it.
 
 ### `room_grid`'s collision field (ticket W16-05)
 

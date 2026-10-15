@@ -84,6 +84,14 @@ pub struct GameFacts {
     /// (ticket W20-17). Without it a fog row reading ON would make the
     /// badge claim an enhancement nothing draws.
     pub fog_rendered: bool,
+    /// Ticket W30-01: the loaded cartridge has a Super FX (GSU) chip. The
+    /// overclock row is meaningless on any other cartridge.
+    pub superfx: bool,
+    /// Ticket W30-01: the highest overclock percent the matched profile
+    /// allows (`[overclock].superfx_max`; 800 when uncapped). A cap of 100
+    /// means "no overclock", so the row is unavailable rather than an ON
+    /// row the badge would count while nothing changes.
+    pub superfx_max: u16,
 }
 
 impl GameFacts {
@@ -100,6 +108,8 @@ impl GameFacts {
             widescreen_supported: true,
             loading_declared: profile_matched,
             fog_rendered: true,
+            superfx: true,
+            superfx_max: 800,
         }
     }
 }
@@ -149,6 +159,8 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         widescreen_supported,
         loading_declared,
         fog_rendered,
+        superfx,
+        superfx_max,
     } = *facts;
     let mode = settings.mode;
     let enhancement = mode.enhancement_active();
@@ -203,6 +215,14 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         profiled(settings.widescreen_decoded),
         widescreen_supported,
         "an SNES game (the NES has no widescreen path)",
+    );
+    // Ticket W30-01: a generic feature (no profile needed) that also needs
+    // a Super FX cartridge. Unlike every presentation toggle it changes the
+    // simulation, which is why it is off by default and Enhanced-only.
+    let (superfx_av, superfx_on) = also(
+        generic(settings.superfx_overclock),
+        superfx && superfx_max > 100,
+        "a Super FX cartridge whose profile allows overclocking",
     );
     let (level_av, level_on) = also(
         profiled(settings.full_level_view),
@@ -276,6 +296,14 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
             scope: "requires profile",
             enabled: wide_on,
             availability: wide_av,
+            heuristic: None,
+        },
+        FeatureRow {
+            id: "superfx_overclock",
+            label: "Super FX overclock",
+            scope: "generic, Super FX cartridges",
+            enabled: superfx_on,
+            availability: superfx_av,
             heuristic: None,
         },
         FeatureRow {
@@ -722,7 +750,7 @@ mod tests {
             &GameSettings::default(),
             &GameFacts::new(false, false, false),
         );
-        assert_eq!(rows.len(), 8, "every feature is listed in every mode");
+        assert_eq!(rows.len(), 9, "every feature is listed in every mode");
         assert!(rows.iter().all(|r| r.availability.explanation().is_some()));
     }
 
@@ -954,6 +982,51 @@ mod tests {
         assert!(feature_rows(&s, &facts)
             .iter()
             .any(|r| r.id == "full_level_view" && r.effective()));
+    }
+
+    /// Ticket W30-01: the Super FX overclock row — Enhanced only, needs a
+    /// Super FX cartridge, and counts toward the badge only when effective.
+    #[test]
+    fn superfx_overclock_gating_and_badge() {
+        let find = |s: &GameSettings, f: &GameFacts| {
+            feature_rows(s, f)
+                .into_iter()
+                .find(|r| r.id == "superfx_overclock")
+                .unwrap()
+        };
+        let facts = GameFacts::new(false, false, false);
+
+        let mut s = GameSettings::default();
+        s.mode = Mode::Accuracy;
+        s.superfx_overclock = true;
+        assert_eq!(
+            find(&s, &facts).availability,
+            Availability::NeedsMode("Enhanced")
+        );
+        assert!(!find(&s, &facts).effective());
+
+        s.mode = Mode::Enhanced;
+        let mut no_gsu = facts;
+        no_gsu.superfx = false;
+        assert!(matches!(
+            find(&s, &no_gsu).availability,
+            Availability::NeedsGameState(_)
+        ));
+        assert!(!find(&s, &no_gsu).effective());
+
+        assert!(find(&s, &facts).effective());
+        assert!(badge_text("SNES", &s, &facts).contains('1'));
+
+        // A profile cap of 100 allows no overclock: unavailable, not an
+        // ON row the badge counts while nothing changes.
+        let mut capped = facts;
+        capped.superfx_max = 100;
+        assert!(!find(&s, &capped).effective());
+        capped.superfx_max = 300;
+        assert!(find(&s, &capped).effective());
+
+        s.superfx_overclock = false;
+        assert!(!find(&s, &facts).effective());
     }
 
     /// Ticket W20-09 (§3 row D): the NES has no widescreen path.

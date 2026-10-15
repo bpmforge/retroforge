@@ -136,6 +136,13 @@ pub fn load_str(text: &str) -> Result<LoadOutcome, ProfileError> {
         }
     }
 
+    // `[overclock]` (ticket W30-01): the cap is a whole-hundred percent.
+    if let Some(max) = profile.overclock.as_ref().and_then(|o| o.superfx_max) {
+        if !(100..=800).contains(&max) || max % 100 != 0 {
+            return Err(ProfileError::OverclockSuperfxMaxInvalid(max));
+        }
+    }
+
     Ok(LoadOutcome { profile, warnings })
 }
 
@@ -368,6 +375,21 @@ mod tests {
         assert_eq!(atm.tint.as_deref(), Some("#336699"));
         assert_eq!(atm.strength, Some(0.5));
         assert_eq!(atm.ladder, Some(crate::schema::AtmosphereLadder::Shadow));
+    }
+
+    /// Ticket W30-01: `[overclock].superfx_max` loads when valid and is
+    /// rejected (naming the key) when out of range or not a multiple of 100.
+    #[test]
+    fn overclock_superfx_max_is_validated() {
+        let ok = format!("{VALID}\n[overclock]\nsuperfx_max = 300\n");
+        let outcome = load_str(&ok).expect("300 is a valid cap");
+        assert_eq!(outcome.profile.overclock.unwrap().superfx_max, Some(300));
+        for bad in [0, 50, 150, 900, 1000] {
+            let text = format!("{VALID}\n[overclock]\nsuperfx_max = {bad}\n");
+            let err = load_str(&text).expect_err("invalid cap must be rejected");
+            assert!(matches!(err, ProfileError::OverclockSuperfxMaxInvalid(v) if v == bad));
+            assert!(err.to_string().contains("[overclock].superfx_max"));
+        }
     }
 
     /// A minimal `[atmosphere]` table (`plane` only) also loads clean —

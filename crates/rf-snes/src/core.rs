@@ -54,6 +54,11 @@ pub const FRAME_INSTRUCTION_BUDGET: u64 = 4_000_000;
 /// (ticket W13-02a).
 pub const PPU_REG_COUNT: usize = 0x40;
 
+/// Ticket W30-01: the Super FX's own clock, i.e. no overclock.
+pub const GSU_OVERCLOCK_DEFAULT: u16 = 100;
+/// Ticket W30-01: the highest Super FX overclock offered, 8x.
+pub const GSU_OVERCLOCK_MAX: u16 = 800;
+
 pub struct SnesCore {
     system: SnesSystem,
     config: CoreConfig,
@@ -83,6 +88,12 @@ pub struct SnesCore {
     /// part of the request, not a separate setting the renderer could
     /// forget to consult.
     widescreen: (usize, crate::ppu::WidenMask),
+    /// Ticket W30-01: the Super FX overclock, in percent of the
+    /// cartridge's own clock. Held here rather than only on
+    /// [`SnesSystem`] because a cartridge load or a state restore rebuilds
+    /// the system; `step` pushes it down every time, so there is one place
+    /// the two can disagree and it is corrected before any GSU code runs.
+    gsu_overclock_percent: u16,
     /// Ticket W7-22: the S-DSP's 32 kHz stereo turned into the 48 kHz mono
     /// stream every core hands `CoreSink::audio`.
     audio: AudioConverter,
@@ -142,6 +153,7 @@ impl SnesCore {
             ppu_regs: Vec::new(),
             budget: FRAME_INSTRUCTION_BUDGET,
             widescreen: (crate::ppu::WIDTH, crate::ppu::WidenMask::ALL),
+            gsu_overclock_percent: GSU_OVERCLOCK_DEFAULT,
             audio: AudioConverter::default(),
         })
     }
@@ -165,6 +177,32 @@ impl SnesCore {
     /// path exactly. Clamped to the PPU's `MAX_WIDTH`.
     pub fn set_widescreen(&mut self, width: usize, mask: crate::ppu::WidenMask) {
         self.widescreen = (width.clamp(crate::ppu::WIDTH, crate::ppu::MAX_WIDTH), mask);
+    }
+
+    /// Ticket W30-01: run the Super FX at `percent` of its own clock.
+    ///
+    /// Rounded down to a whole multiple of 100 and clamped to
+    /// [`GSU_OVERCLOCK_DEFAULT`]`..=`[`GSU_OVERCLOCK_MAX`]: whole multiples
+    /// keep the GSU's master-cycle credit an exact integer (see
+    /// [`SnesSystem::gsu_clock_multiplier`]). A cartridge without a GSU
+    /// ignores it. Returns the value actually in force.
+    pub fn set_gsu_overclock(&mut self, percent: u16) -> u16 {
+        self.gsu_overclock_percent =
+            (percent / 100 * 100).clamp(GSU_OVERCLOCK_DEFAULT, GSU_OVERCLOCK_MAX);
+        self.gsu_overclock_percent
+    }
+
+    /// The Super FX overclock in force, in percent (100 is off).
+    #[must_use]
+    pub fn gsu_overclock(&self) -> u16 {
+        self.gsu_overclock_percent
+    }
+
+    /// Whether the loaded cartridge carries a Super FX (GSU), i.e. whether
+    /// [`Self::set_gsu_overclock`] can do anything.
+    #[must_use]
+    pub fn has_gsu(&self) -> bool {
+        self.system.bus.gsu.is_some()
     }
 
     /// The width this core is currently emitting.
@@ -363,6 +401,7 @@ impl EmulatorCore for SnesCore {
             self.system.bus.set_watches(self.config.watches);
             self.pushed_watches = self.config.watches;
         }
+        self.system.gsu_clock_multiplier = u64::from(self.gsu_overclock_percent / 100);
         let start_frame = self.system.bus.timing.frame;
         let mut instructions = 0u64;
         let frame_complete;
@@ -554,5 +593,38 @@ mod audio_tests {
             total += c.convert(&[(100, 100), (100, 100)]).len();
         }
         assert_eq!(total, 3000);
+    }
+}
+
+#[cfg(test)]
+mod overclock_tests {
+    use super::{SnesCore, GSU_OVERCLOCK_DEFAULT, GSU_OVERCLOCK_MAX};
+
+    /// A bare LoROM image with a Super FX chipset byte when `gsu`.
+    fn image(gsu: bool) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        let base = 0x7FC0;
+        rom[base + 0x15] = 0x20;
+        rom[base + 0x16] = if gsu { 0x15 } else { 0x00 };
+        rom[base + 0x17] = 0x08;
+        rom[base + 0x1C..base + 0x1E].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        rom[base + 0x3C] = 0x00;
+        rom[base + 0x3D] = 0x80;
+        rom
+    }
+
+    /// Ticket W30-01: whole multiples of 100, clamped to 100..=800, and a
+    /// fresh core runs the cartridge's own clock.
+    #[test]
+    fn overclock_defaults_off_and_rounds_and_clamps() {
+        let mut core = SnesCore::load(&image(true)).expect("GSU image loads");
+        assert!(core.has_gsu());
+        assert_eq!(core.gsu_overclock(), GSU_OVERCLOCK_DEFAULT);
+        assert_eq!(core.set_gsu_overclock(250), 200);
+        assert_eq!(core.set_gsu_overclock(0), GSU_OVERCLOCK_DEFAULT);
+        assert_eq!(core.set_gsu_overclock(5000), GSU_OVERCLOCK_MAX);
+        assert!(!SnesCore::load(&image(false))
+            .expect("plain image loads")
+            .has_gsu());
     }
 }

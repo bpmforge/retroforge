@@ -60,6 +60,9 @@ pub struct Profile {
     /// `[atmosphere]` — pins the atmosphere-layer heuristic's plane
     /// directly (ticket W16-10).
     pub atmosphere: Option<Atmosphere>,
+    /// `[overclock]` — caps the player's Super FX overclock for this game
+    /// (ticket W30-01).
+    pub overclock: Option<Overclock>,
     pub loading: Option<Loading>,
     pub plugins: Option<Plugins>,
     pub mods: Option<Mods>,
@@ -476,6 +479,15 @@ pub struct Atmosphere {
     pub ladder: Option<AtmosphereLadder>,
 }
 
+/// `[overclock]` (§2, ticket W30-01): the highest Super FX overclock the
+/// player may apply to this game, for a title known to speed up when the
+/// chip runs faster. Omitted = uncapped (the shell's own 800% maximum).
+/// Validated in `crate::loader`: 100..=800 and a multiple of 100.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Overclock {
+    pub superfx_max: Option<u16>,
+}
+
 /// `[loading]` (§2).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Loading {
@@ -778,6 +790,7 @@ mod tests {
             decode: None,
             antiflicker: None,
             atmosphere: None,
+            overclock: None,
             loading: None,
             plugins: None,
             mods: None,

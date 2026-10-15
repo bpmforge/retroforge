@@ -669,6 +669,75 @@ fn gsu_credit_per_step_is_bounded_by_that_steps_own_instruction_cost() {
     );
 }
 
+/// Ticket W30-01: the `JMP $8000` / GSU `NOP;BRA;NOP` pair above, run
+/// for the same number of 65C816 steps at a given GSU clock multiplier;
+/// returns the GSU opcode count and a full-machine snapshot.
+fn gsu_ops_and_hash_at(multiplier: Option<u64>) -> (u64, Vec<u8>) {
+    let mut rom = lorom_image(0x20, 0x15);
+    rom[..3].copy_from_slice(&[0x4C, 0x00, 0x80]);
+    rom[0x100..0x104].copy_from_slice(&[0x01, 0x05, 0xFD, 0x01]);
+    let mut system = SnesSystem::load(&rom).expect("GSU cart loads");
+    if let Some(m) = multiplier {
+        system.gsu_clock_multiplier = m;
+    }
+    system.bus.write(0x00_301E, 0x00);
+    system.bus.write(0x00_301F, 0x01);
+    for _ in 0..2000 {
+        system.step().expect("JMP is implemented");
+    }
+    let ops = system
+        .bus
+        .gsu
+        .as_ref()
+        .unwrap()
+        .regs
+        .instructions_executed();
+    let mut snapshot = Vec::new();
+    for region in crate::state::StateRegion::ALL {
+        let mut w = SnapshotWriter(Vec::new());
+        system.save_region(region, &mut w).expect("save region");
+        snapshot.extend_from_slice(&w.0);
+    }
+    (ops, snapshot)
+}
+
+struct SnapshotWriter(Vec<u8>);
+impl rf_core_api::StateWriter for SnapshotWriter {
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), rf_core_api::StateError> {
+        self.0.extend_from_slice(bytes);
+        Ok(())
+    }
+}
+
+/// Ticket W30-01: an overclock of 1x is the cartridge's own clock, bit for
+/// bit — law 6 needs the default to be indistinguishable from a build that
+/// never had the setting.
+#[test]
+fn gsu_overclock_of_one_is_byte_identical_to_no_overclock() {
+    assert_eq!(gsu_ops_and_hash_at(None), gsu_ops_and_hash_at(Some(1)));
+}
+
+/// Ticket W30-01: 2x and 4x buy the GSU twice and four times the work for
+/// the same 65C816 time, and change the machine (which is why the shell
+/// flags an overclocked run as not Accuracy).
+#[test]
+fn gsu_overclock_scales_gsu_work_per_cpu_step() {
+    let (one, h1) = gsu_ops_and_hash_at(Some(1));
+    let (two, h2) = gsu_ops_and_hash_at(Some(2));
+    let (four, _) = gsu_ops_and_hash_at(Some(4));
+    for (n, got) in [(2.0, two), (4.0, four)] {
+        let ratio = got as f64 / one as f64;
+        assert!(
+            (n * 0.95..=n * 1.05).contains(&ratio),
+            "{n}x overclock ran {ratio:.3}x the GSU opcodes ({one} -> {got})"
+        );
+    }
+    assert_ne!(
+        h1, h2,
+        "an overclock that changes nothing would be a lie on the card"
+    );
+}
+
 /// Ticket W18-04 follow-up 5: the actual Star Fox boot regression's root
 /// cause was `rf_cart::snes::superfx_expansion_ram_kib` defaulting a real
 /// dump's unpopulated extended header (a `$FF` fill byte, exactly Star

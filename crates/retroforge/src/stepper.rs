@@ -1087,6 +1087,21 @@ impl EmuStepper {
         }
     }
 
+    /// Ticket W30-01: set the Super FX overclock in percent (100 = stock).
+    /// SNES-only and a no-op on a cartridge without a Super FX; the NES has
+    /// nothing to clock.
+    pub fn set_gsu_overclock(&mut self, percent: u16) {
+        if let Machine::Snes(core) = &mut self.machine {
+            core.set_gsu_overclock(percent);
+        }
+    }
+
+    /// Ticket W30-01: whether the loaded cartridge has a Super FX.
+    #[must_use]
+    pub fn has_gsu(&self) -> bool {
+        matches!(&self.machine, Machine::Snes(core) if core.has_gsu())
+    }
+
     /// Turn widescreen off, restoring the accuracy path exactly.
     pub fn set_widescreen_off(&mut self) {
         if let Machine::Snes(core) = &mut self.machine {

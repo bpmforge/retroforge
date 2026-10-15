@@ -177,7 +177,7 @@ impl Mode {
 }
 
 /// One game's settings.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameSettings {
     pub mode: Mode,
     /// The W3-05a sprite-limit-bypass overlay, per game.
@@ -202,6 +202,15 @@ pub struct GameSettings {
     /// Ticket W20-17: profile-declared loading fast-forward (FR-ENH-008,
     /// `rf_enhance::loading`) — off by default (law 6).
     pub loading_fast_forward: bool,
+    /// Ticket W30-01: run the Super FX chip faster than the cartridge's
+    /// 21.4 MHz. This changes what the game does (a simulation change, like
+    /// a `[mods]` patch), so it is off by default (law 6) and only takes
+    /// effect in Enhanced-class modes.
+    pub superfx_overclock: bool,
+    /// Ticket W30-01: the overclock percentage used when
+    /// [`Self::superfx_overclock`] is on. Valid 200..=800 in steps of 100;
+    /// clamped on load. Defaults to 200.
+    pub superfx_overclock_pct: u16,
     /// Shader name, `None` for the default pipeline. A string rather than
     /// an enum because W3-02a owns the shader set and this must not have to
     /// change when that lands.
@@ -239,6 +248,36 @@ pub struct GameSettings {
     pub info_corner: InfoCorner,
     /// Keys this build does not know, kept verbatim (module doc).
     unknown: BTreeMap<String, String>,
+}
+
+/// Ticket W30-01: the lowest/highest/step of the stored overclock percent.
+const SUPERFX_PCT_MIN: u16 = 200;
+const SUPERFX_PCT_MAX: u16 = 800;
+const SUPERFX_PCT_DEFAULT: u16 = 200;
+
+impl Default for GameSettings {
+    fn default() -> Self {
+        Self {
+            mode: Mode::default(),
+            sprite_overlay: false,
+            deflicker: false,
+            widescreen_decoded: false,
+            full_level_view: false,
+            diorama: false,
+            mode7_ground: false,
+            loading_fast_forward: false,
+            superfx_overclock: false,
+            superfx_overclock_pct: SUPERFX_PCT_DEFAULT,
+            shader: None,
+            trust: rf_enhance::trust::TrustLadder::default(),
+            last_played_epoch_secs: None,
+            play_count: 0,
+            favourite: false,
+            pinned_items: Vec::new(),
+            info_corner: InfoCorner::default(),
+            unknown: BTreeMap::new(),
+        }
+    }
 }
 
 impl GameSettings {
@@ -279,10 +318,19 @@ impl GameSettings {
             ("diorama", self.diorama),
             ("mode7_ground", self.mode7_ground),
             ("loading_fast_forward", self.loading_fast_forward),
+            ("superfx_overclock", self.superfx_overclock),
         ] {
             if on {
                 fields.insert(key.to_string(), "true".to_string());
             }
+        }
+        // Ticket W30-01: the percentage is only written when it differs
+        // from the default, same "restate nothing" rule.
+        if self.superfx_overclock_pct != SUPERFX_PCT_DEFAULT {
+            fields.insert(
+                "superfx_overclock_pct".to_string(),
+                self.superfx_overclock_pct.to_string(),
+            );
         }
         if let Some(shader) = &self.shader {
             fields.insert("shader".to_string(), shader.clone());
@@ -357,6 +405,14 @@ impl GameSettings {
                 "diorama" => settings.diorama = value == "true",
                 "mode7_ground" => settings.mode7_ground = value == "true",
                 "loading_fast_forward" => settings.loading_fast_forward = value == "true",
+                "superfx_overclock" => settings.superfx_overclock = value == "true",
+                "superfx_overclock_pct" => {
+                    if let Ok(pct) = value.parse::<u16>() {
+                        // Round down to the 100 step, then clamp (W30-01).
+                        settings.superfx_overclock_pct =
+                            (pct / 100 * 100).clamp(SUPERFX_PCT_MIN, SUPERFX_PCT_MAX);
+                    }
+                }
                 "trust" => {
                     settings.trust = rf_enhance::trust::TrustLadder::from_settings_value(value);
                 }
@@ -791,6 +847,8 @@ mod mode_and_feature_persistence_tests {
             "full_level_view",
             "diorama",
             "mode7_ground",
+            "superfx_overclock",
+            "superfx_overclock_pct",
         ] {
             assert!(
                 !untouched.contains(key),
@@ -803,9 +861,19 @@ mod mode_and_feature_persistence_tests {
             full_level_view: true,
             diorama: true,
             mode7_ground: true,
+            superfx_overclock: true,
+            superfx_overclock_pct: 400,
             ..GameSettings::default()
         };
         let restored = GameSettings::from_text(&s.to_text()).expect("parses");
+        assert!(restored.superfx_overclock);
+        assert_eq!(restored.superfx_overclock_pct, 400);
+        let wild = GameSettings::from_text(&format!("{MAGIC}\nsuperfx_overclock_pct=9999\n"))
+            .expect("parses");
+        assert_eq!(wild.superfx_overclock_pct, 800);
+        let low = GameSettings::from_text(&format!("{MAGIC}\nsuperfx_overclock_pct=50\n"))
+            .expect("parses");
+        assert_eq!(low.superfx_overclock_pct, 200);
         assert!(restored.deflicker);
         assert!(restored.full_level_view);
         assert!(restored.diorama);

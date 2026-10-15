@@ -529,6 +529,11 @@ pub enum CoreCommand {
     /// produce a `CoreEvent::Frame`; the next running/stepped frame simply
     /// reflects the new setting.
     SetSpriteOverlay(bool),
+    /// Ticket W30-01: Super FX overclock, in percent (100 = stock). A
+    /// simulation change by design (unlike every presentation command), so
+    /// the shell only sends a value above 100 when the Enhanced-only
+    /// "Super FX overclock" row is effective. A no-op without a Super FX.
+    SetGsuOverclock(u16),
     /// Ticket W11-01 (FR-ENH-002): temporal de-flicker on/off.
     ///
     /// A SECOND enhancement command, and until W11-01 there was exactly
@@ -1216,6 +1221,9 @@ fn core_thread_main(
                 }
                 CoreCommand::SetSpriteOverlay(enabled) => {
                     stepper.set_sprite_overlay_enabled(enabled);
+                }
+                CoreCommand::SetGsuOverclock(pct) => {
+                    stepper.set_gsu_overclock(pct);
                 }
                 CoreCommand::SetLevelProbe(probe) => {
                     level_probe = probe;
