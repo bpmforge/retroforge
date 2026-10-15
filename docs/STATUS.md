@@ -4516,3 +4516,8 @@ stories, 10 decisions).
   Enhanced-only "Smoother sound" row (Cubic/Linear/None) changes only the main
   mix; echo, OUTX, pitch modulation and saved state keep the hardware
   Gaussian. Gate: workspace **2787 passing**.
+- **W30-10 — Star Fox polygon spike (report only)** (2026-10-15). Projected
+  vertices are findable by observation: 6-byte records (x, y, ?) in GSU RAM
+  0x0780-0x0A3F; 23% of intro vertex candidates and 15% in attract play match
+  exactly vs 0-1.3% control. Face lists not found yet. Report:
+  docs/research/W30-10-starfox-polygon-spike.md. No Phase B build.
