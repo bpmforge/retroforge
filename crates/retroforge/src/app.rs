@@ -5026,6 +5026,7 @@ impl RetroForgeApp {
             msg.sprite_height_px,
             width,
             height,
+            enhanced_view::DioramaView::from_settings(&self.current_game_settings),
         );
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
@@ -5164,6 +5165,7 @@ impl RetroForgeApp {
             height,
             width,
             height,
+            enhanced_view::DioramaView::from_settings(&self.current_game_settings),
         );
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
@@ -8073,6 +8075,18 @@ impl RetroForgeApp {
                     if crate::enhance_dock::lens_controls(ui, &mut self.current_game_settings) {
                         actions.settings_changed = true;
                     }
+                }
+                // Ticket W30-05: the diorama camera, under both rows that use
+                // it (no "follow" for the Mode 7 ground).
+                if (row.id == "diorama" || row.id == "mode7_ground")
+                    && row.enabled
+                    && crate::enhance_dock::diorama_controls(
+                        ui,
+                        &mut self.current_game_settings,
+                        row.id == "diorama",
+                    )
+                {
+                    actions.settings_changed = true;
                 }
                 // Ticket W30-02: the HD Mode 7 options.
                 if row.id == "hd_mode7" && row.enabled {
@@ -11753,6 +11767,17 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn set_diorama_for_test(&mut self, on: bool) {
         self.current_game_settings.diorama = on;
+    }
+
+    /// Ticket W30-05: set the diorama camera exactly as its sliders do
+    /// (settings only; the next repaint acts on them).
+    #[doc(hidden)]
+    pub fn set_diorama_camera_for_test(&mut self, pitch: u8, yaw: i8, zoom_pct: u16, follow: bool) {
+        let s = &mut self.current_game_settings;
+        s.diorama_pitch = pitch;
+        s.diorama_yaw = yaw;
+        s.diorama_zoom = zoom_pct;
+        s.diorama_follow = follow;
     }
 
     /// Ticket W16-14: turn "Mode 7 as 3D" on/off exactly as its Enhance-

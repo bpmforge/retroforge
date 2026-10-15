@@ -242,6 +242,15 @@ pub struct GameSettings {
     /// Take the time of day from the clock instead of
     /// [`Self::lens_time_of_day`].
     pub lens_follow_clock: bool,
+    /// Ticket W30-05: the diorama / Mode 7 ground camera (presentation
+    /// only). Pitch in degrees (20..=80), yaw in degrees (-30..=30), zoom
+    /// as an integer percent (100..=400, so this struct keeps its `Eq`),
+    /// and whether the view follows the game's own camera. Each is
+    /// persisted only when it differs from the default.
+    pub diorama_pitch: u8,
+    pub diorama_yaw: i8,
+    pub diorama_zoom: u16,
+    pub diorama_follow: bool,
     /// Ticket W30-03: the screen shape decoded widescreen aims for. 16:9
     /// by default; only a non-default choice is persisted.
     pub widescreen_aspect: rf_enhance::widescreen::Aspect,
@@ -300,6 +309,16 @@ const LENS_PCT_DEFAULT: u8 = 50;
 const LENS_PCT_MAX: u8 = 100;
 const LENS_TIME_DEFAULT: u8 = 50;
 
+/// Ticket W30-05: the diorama camera's defaults and ranges. The pitch
+/// default is `rf_renderer::diorama::PITCH_DEG` (52), so a fresh game looks
+/// exactly as it did before the camera was adjustable.
+pub const DIORAMA_PITCH_DEFAULT: u8 = 52;
+pub const DIORAMA_PITCH_MIN: u8 = 20;
+pub const DIORAMA_PITCH_MAX: u8 = 80;
+pub const DIORAMA_YAW_LIMIT: i8 = 30;
+pub const DIORAMA_ZOOM_DEFAULT: u16 = 100;
+pub const DIORAMA_ZOOM_MAX: u16 = 400;
+
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
@@ -329,6 +348,10 @@ impl Default for GameSettings {
             lens_weather_pct: LENS_PCT_DEFAULT,
             lens_time_of_day: LENS_TIME_DEFAULT,
             lens_follow_clock: false,
+            diorama_pitch: DIORAMA_PITCH_DEFAULT,
+            diorama_yaw: 0,
+            diorama_zoom: DIORAMA_ZOOM_DEFAULT,
+            diorama_follow: false,
             widescreen_aspect: rf_enhance::widescreen::Aspect::default(),
             shader: None,
             trust: rf_enhance::trust::TrustLadder::default(),
@@ -471,6 +494,19 @@ impl GameSettings {
                 self.lens_weather.key().to_string(),
             );
         }
+        // Ticket W30-05: the diorama camera, only what differs.
+        if self.diorama_pitch != DIORAMA_PITCH_DEFAULT {
+            fields.insert("diorama_pitch".to_string(), self.diorama_pitch.to_string());
+        }
+        if self.diorama_yaw != 0 {
+            fields.insert("diorama_yaw".to_string(), self.diorama_yaw.to_string());
+        }
+        if self.diorama_zoom != DIORAMA_ZOOM_DEFAULT {
+            fields.insert("diorama_zoom".to_string(), self.diorama_zoom.to_string());
+        }
+        if self.diorama_follow {
+            fields.insert("diorama_follow".to_string(), "true".to_string());
+        }
         // Ticket W30-03: 16:9 is the default and is never written.
         if self.widescreen_aspect != rf_enhance::widescreen::Aspect::default() {
             fields.insert(
@@ -585,6 +621,29 @@ impl GameSettings {
                         settings.lens_weather = w;
                     }
                 }
+                // Ticket W30-05: clamp into range; junk keeps the default.
+                "diorama_pitch" => {
+                    if let Ok(v) = value.parse::<i64>() {
+                        settings.diorama_pitch = v
+                            .clamp(i64::from(DIORAMA_PITCH_MIN), i64::from(DIORAMA_PITCH_MAX))
+                            as u8;
+                    }
+                }
+                "diorama_yaw" => {
+                    if let Ok(v) = value.parse::<i64>() {
+                        settings.diorama_yaw = v
+                            .clamp(-i64::from(DIORAMA_YAW_LIMIT), i64::from(DIORAMA_YAW_LIMIT))
+                            as i8;
+                    }
+                }
+                "diorama_zoom" => {
+                    if let Ok(v) = value.parse::<i64>() {
+                        settings.diorama_zoom = v
+                            .clamp(i64::from(DIORAMA_ZOOM_DEFAULT), i64::from(DIORAMA_ZOOM_MAX))
+                            as u16;
+                    }
+                }
+                "diorama_follow" => settings.diorama_follow = value == "true",
                 "lens_bloom_pct" => parse_pct(value, &mut settings.lens_bloom_pct),
                 "lens_tiltshift_pct" => parse_pct(value, &mut settings.lens_tiltshift_pct),
                 "lens_shadows_pct" => parse_pct(value, &mut settings.lens_shadows_pct),
@@ -621,6 +680,20 @@ impl GameSettings {
             }
         }
         Some(settings)
+    }
+
+    /// The camera these settings describe (ticket W30-05), without a follow
+    /// point: the live camera is known only at render time, so the shell
+    /// fills `follow` in when [`Self::diorama_follow`] is set.
+    #[must_use]
+    pub fn diorama_camera(&self) -> rf_renderer::diorama::DioramaCamera {
+        rf_renderer::diorama::DioramaCamera {
+            pitch_deg: f32::from(self.diorama_pitch),
+            yaw_deg: f32::from(self.diorama_yaw),
+            zoom: f32::from(self.diorama_zoom) / 100.0,
+            follow: None,
+        }
+        .clamped()
     }
 
     /// Keys this build did not recognize — exposed so a test (and a curious
@@ -1176,6 +1249,55 @@ mod mode_and_feature_persistence_tests {
         assert!(!s.lens_bloom, "picks already made are kept");
         s.lens_clear();
         assert!(!s.lens_any());
+    }
+
+    /// Ticket W30-05: the diorama camera persists only when non-default,
+    /// clamps wild values, and the default settings give the default camera.
+    #[test]
+    fn diorama_camera_settings_persist_clamp_and_write_only_non_defaults() {
+        let untouched = GameSettings::default().to_text();
+        assert!(!untouched.contains("diorama_"), "{untouched}");
+        assert_eq!(
+            GameSettings::default().diorama_camera(),
+            rf_renderer::diorama::DioramaCamera::default(),
+            "default settings must reproduce the pre-W30-05 camera"
+        );
+        let tuned = GameSettings {
+            diorama_pitch: 30,
+            diorama_yaw: -20,
+            diorama_zoom: 250,
+            diorama_follow: true,
+            ..GameSettings::default()
+        };
+        let text = tuned.to_text();
+        assert!(text.contains("diorama_pitch=30") && text.contains("diorama_yaw=-20"));
+        assert!(text.contains("diorama_zoom=250") && text.contains("diorama_follow=true"));
+        assert_eq!(GameSettings::from_text(&text).expect("parses"), tuned);
+        // Only the changed field is written.
+        let only_yaw = GameSettings {
+            diorama_yaw: 5,
+            ..GameSettings::default()
+        }
+        .to_text();
+        assert!(only_yaw.contains("diorama_yaw=5"));
+        assert!(!only_yaw.contains("diorama_pitch") && !only_yaw.contains("diorama_zoom"));
+        assert!(!only_yaw.contains("diorama_follow"));
+        // Wild values clamp, junk keeps the default.
+        let wild = GameSettings::from_text(&format!(
+            "{MAGIC}\ndiorama_pitch=200\ndiorama_yaw=-99\ndiorama_zoom=9000\n"
+        ))
+        .expect("parses");
+        assert_eq!(wild.diorama_pitch, DIORAMA_PITCH_MAX);
+        assert_eq!(wild.diorama_yaw, -DIORAMA_YAW_LIMIT);
+        assert_eq!(wild.diorama_zoom, DIORAMA_ZOOM_MAX);
+        let junk = GameSettings::from_text(&format!("{MAGIC}\ndiorama_pitch=abc\ndiorama_zoom=\n"))
+            .expect("parses");
+        assert_eq!(junk.diorama_pitch, DIORAMA_PITCH_DEFAULT);
+        assert_eq!(junk.diorama_zoom, DIORAMA_ZOOM_DEFAULT);
+        let low = GameSettings::from_text(&format!("{MAGIC}\ndiorama_pitch=0\ndiorama_zoom=10\n"))
+            .expect("parses");
+        assert_eq!(low.diorama_pitch, DIORAMA_PITCH_MIN);
+        assert_eq!(low.diorama_zoom, DIORAMA_ZOOM_DEFAULT);
     }
 
     /// Ticket W27-05: pins and their corner survive a save.

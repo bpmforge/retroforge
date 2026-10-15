@@ -35,6 +35,19 @@
 //! `crate::diorama::camera_matrices`'s fixed placement sits at negative Z,
 //! looking toward +Z), which is what makes "farthest row first" the
 //! correct back-to-front draw order.
+//!
+//! ## Orbiting cameras (ticket W30-05)
+//!
+//! "Farthest row first" is only right while the camera sits straight
+//! behind the grid. [`build_vertices_oriented`] is the general case for a
+//! camera that has yawed or moved off-centre: it takes the camera's yaw and
+//! its horizontal eye position, sorts boxes and billboards by Manhattan
+//! distance from that eye (far first — an order that respects "a nearer
+//! cell may hide a farther one" for any eye position over a tile grid),
+//! draws only the box sides the eye can actually see, and turns each
+//! billboard to face the yaw. The default camera never takes this path
+//! ([`crate::diorama::vertices_for_camera`]), so the pinned goldens keep
+//! the original [`build_vertices`] bytes.
 
 /// One vertex: position (world space), texture UV, an RGBA tint/alpha,
 /// and `kind` selecting which fragment behaviour `shaders/diorama.wgsl`
@@ -212,6 +225,170 @@ pub fn build_vertices(scene: &DioramaScene<'_>) -> Vec<Vertex> {
     }
 
     verts
+}
+
+/// [`build_vertices`] for a camera that has yawed or moved off-centre
+/// (module doc, "Orbiting cameras"). `yaw_deg` is the camera's orbit
+/// angle (billboards face it); `eye_xz` is its world-pixel `(x, z)`
+/// ground position, from `crate::diorama::camera_matrices::placement`.
+///
+/// Billboards are **cylindrical**: each is a vertical quad (top and bottom
+/// edges share the same ground x/z) whose width runs along the screen-right
+/// direction for `yaw_deg`, so it turns to face the camera's yaw and never
+/// leans back with the pitch.
+///
+/// # Panics
+/// Same length checks as [`build_vertices`].
+#[must_use]
+pub fn build_vertices_oriented(
+    scene: &DioramaScene<'_>,
+    yaw_deg: f32,
+    eye_xz: [f32; 2],
+) -> Vec<Vertex> {
+    let (w, h) = (scene.tiles_w as usize, scene.tiles_h as usize);
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    assert_eq!(
+        scene.solid.len(),
+        w * h,
+        "build_vertices_oriented: solid mask length does not match tiles_w*tiles_h"
+    );
+    assert_eq!(
+        scene.depth.len(),
+        w * h,
+        "build_vertices_oriented: depth field length does not match tiles_w*tiles_h"
+    );
+    let tile_px = scene.tile_px;
+    let ground_w = tile_px * scene.tiles_w as f32;
+    let ground_h = tile_px * scene.tiles_h as f32;
+    let mut verts = Vec::new();
+    push_quad_xz(
+        &mut verts,
+        [0.0, 0.0],
+        [ground_w, ground_h],
+        0.0,
+        [0.0, 0.0, 1.0, 1.0],
+        [1.0, 1.0, 1.0, 1.0],
+        kind::GROUND,
+    );
+
+    enum Item {
+        Box { row: usize, col: usize },
+        Sprite(usize),
+    }
+    let dist = |x: f32, z: f32| (x - eye_xz[0]).abs() + (z - eye_xz[1]).abs();
+    // (far-first key, boxes before sprites on a tie, index for a stable order, item)
+    let mut items: Vec<(f32, u8, usize, Item)> = Vec::new();
+    // One pass over a fixed-size grid and one over the billboard slice:
+    // both are plain bounded iterators (law 8).
+    for row in 0..h {
+        for col in 0..w {
+            if scene.solid[row * w + col] == 1 {
+                let cx = (col as f32 + 0.5) * tile_px;
+                let cz = (row as f32 + 0.5) * tile_px;
+                items.push((dist(cx, cz), 0, row * w + col, Item::Box { row, col }));
+            }
+        }
+    }
+    for (i, b) in scene.billboards.iter().enumerate() {
+        items.push((dist(b.center_x_px, b.center_z_px), 1, i, Item::Sprite(i)));
+    }
+    // Far first. `total_cmp` keeps this a total order even for a NaN.
+    items.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    for (_, _, _, item) in items {
+        match item {
+            Item::Box { row, col } => {
+                let i = row * w + col;
+                push_box_visible(
+                    &mut verts,
+                    row,
+                    col,
+                    (w, h),
+                    tile_px,
+                    wall_height_px(scene.depth[i], tile_px),
+                    eye_xz,
+                );
+            }
+            Item::Sprite(i) => {
+                let b = scene.billboards[i];
+                push_shadow(&mut verts, b);
+                push_billboard_facing(&mut verts, b, yaw_deg);
+            }
+        }
+    }
+    verts
+}
+
+/// A cylindrical billboard: the quad's two bottom corners sit `width/2`
+/// either side of the footprint centre along the screen-right direction
+/// `(cos yaw, sin yaw)` (world X at yaw 0, matching [`push_billboard`]),
+/// and the top edge is directly above them.
+fn push_billboard_facing(out: &mut Vec<Vertex>, b: Billboard, yaw_deg: f32) {
+    let yaw = yaw_deg.to_radians();
+    let (rx, rz) = (yaw.cos() * b.width_px / 2.0, yaw.sin() * b.width_px / 2.0);
+    push_quad_vertical_xz(
+        out,
+        [b.center_x_px - rx, 0.0, b.center_z_px - rz],
+        [b.center_x_px + rx, 0.0, b.center_z_px + rz],
+        0.0,
+        b.height_px,
+        b.uv,
+        [1.0, 1.0, 1.0, 1.0],
+        kind::SPRITE,
+    );
+}
+
+/// [`push_box`] with every side the eye can see (a face is visible when the
+/// eye is on its outward side) instead of the fixed front/right pair.
+fn push_box_visible(
+    out: &mut Vec<Vertex>,
+    row: usize,
+    col: usize,
+    grid: (usize, usize),
+    tile_px: f32,
+    height_px: f32,
+    eye_xz: [f32; 2],
+) {
+    if height_px <= 0.0 {
+        return;
+    }
+    let (x0, z0) = (col as f32 * tile_px, row as f32 * tile_px);
+    let (x1, z1) = (x0 + tile_px, z0 + tile_px);
+    push_quad_xz(
+        out,
+        [x0, z0],
+        [tile_px, tile_px],
+        height_px,
+        box_top_uv(row, col, grid.0, grid.1),
+        [1.0, 1.0, 1.0, 1.0],
+        kind::GROUND,
+    );
+    let side_color = [SIDE_SHADE, SIDE_SHADE, SIDE_SHADE, 1.0];
+    let mut side = |p0: [f32; 3], p1: [f32; 3]| {
+        push_quad_vertical_xz(
+            out,
+            p0,
+            p1,
+            0.0,
+            height_px,
+            [0.0, 0.0, 1.0, 1.0],
+            side_color,
+            kind::SIDE,
+        );
+    };
+    if eye_xz[1] < z0 {
+        side([x0, 0.0, z0], [x1, 0.0, z0]); // front, -Z
+    }
+    if eye_xz[1] > z1 {
+        side([x0, 0.0, z1], [x1, 0.0, z1]); // back, +Z
+    }
+    if eye_xz[0] < x0 {
+        side([x0, 0.0, z0], [x0, 0.0, z1]); // left, -X
+    }
+    if eye_xz[0] > x1 {
+        side([x1, 0.0, z0], [x1, 0.0, z1]); // right, +X
+    }
 }
 
 /// Two triangles (6 vertices, no index buffer -- this crate's other
@@ -523,5 +700,150 @@ mod tests {
             row1_z > row0_z,
             "row 1 (farther) must be emitted before row 0 (nearer): row1_z={row1_z} row0_z={row0_z}"
         );
+    }
+
+    // --- ticket W30-05: orbiting-camera mesh ---------------------------
+
+    fn one_sprite(x: f32, z: f32) -> Billboard {
+        Billboard {
+            center_x_px: x,
+            center_z_px: z,
+            width_px: 8.0,
+            height_px: 16.0,
+            uv: [0.0, 0.0, 1.0, 1.0],
+        }
+    }
+
+    fn sprite_quad(yaw: f32) -> Vec<Vertex> {
+        let scene = DioramaScene {
+            tiles_w: 4,
+            tiles_h: 4,
+            tile_px: 16.0,
+            solid: &[0; 16],
+            depth: &[0; 16],
+            billboards: &[one_sprite(32.0, 32.0)],
+        };
+        let verts = build_vertices_oriented(&scene, yaw, [32.0, -100.0]);
+        verts
+            .into_iter()
+            .filter(|v| v.kind == kind::SPRITE)
+            .collect()
+    }
+
+    #[test]
+    fn billboards_stay_vertical_at_every_yaw() {
+        for yaw in [-30.0f32, 0.0, 17.0, 30.0] {
+            let q = sprite_quad(yaw);
+            assert_eq!(q.len(), 6);
+            // Every vertex with y == 0 has a partner at y == height with the
+            // SAME ground x/z: the quad is perpendicular to the ground.
+            for v in q.iter().filter(|v| v.pos[1] == 0.0) {
+                assert!(
+                    q.iter().any(|t| t.pos[1] == 16.0
+                        && (t.pos[0] - v.pos[0]).abs() < 1e-5
+                        && (t.pos[2] - v.pos[2]).abs() < 1e-5),
+                    "yaw {yaw}: bottom vertex {:?} has no vertex straight above it",
+                    v.pos
+                );
+            }
+            assert!(q.iter().all(|v| v.pos[1] == 0.0 || v.pos[1] == 16.0));
+        }
+    }
+
+    #[test]
+    fn a_billboard_at_yaw_zero_matches_the_original_upright_quad() {
+        let scene = DioramaScene {
+            tiles_w: 4,
+            tiles_h: 4,
+            tile_px: 16.0,
+            solid: &[0; 16],
+            depth: &[0; 16],
+            billboards: &[one_sprite(32.0, 32.0)],
+        };
+        let old: Vec<Vertex> = build_vertices(&scene)
+            .into_iter()
+            .filter(|v| v.kind == kind::SPRITE)
+            .collect();
+        assert_eq!(sprite_quad(0.0), old);
+    }
+
+    #[test]
+    fn a_billboard_turns_to_face_the_camera_yaw() {
+        // Width runs along (cos yaw, sin yaw): at yaw 30 the right edge is
+        // further in +Z than the left, and the quad is still 8 wide.
+        let q = sprite_quad(30.0);
+        let bottoms: Vec<[f32; 3]> = q
+            .iter()
+            .filter(|v| v.pos[1] == 0.0)
+            .map(|v| v.pos)
+            .collect();
+        let (xs, zs) = (
+            bottoms
+                .iter()
+                .map(|p| p[0])
+                .fold((f32::MAX, f32::MIN), |a, x| (a.0.min(x), a.1.max(x))),
+            bottoms
+                .iter()
+                .map(|p| p[2])
+                .fold((f32::MAX, f32::MIN), |a, z| (a.0.min(z), a.1.max(z))),
+        );
+        let (dx, dz) = (xs.1 - xs.0, zs.1 - zs.0);
+        assert!(
+            (dx - 8.0 * 30f32.to_radians().cos()).abs() < 1e-4,
+            "dx {dx}"
+        );
+        assert!(
+            (dz - 8.0 * 30f32.to_radians().sin()).abs() < 1e-4,
+            "dz {dz}"
+        );
+        assert!(((dx * dx + dz * dz).sqrt() - 8.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_nearer_wall_is_drawn_after_a_farther_one_when_the_eye_moves_sideways() {
+        // Two walls on one row. With the eye far off to +X the col-1 wall
+        // is the nearer one, so col 0 is emitted first; mirror the eye and
+        // the order flips (the row-ordered builder cannot do that).
+        let solid = [1u8, 1];
+        let depth = [8u8, 8];
+        let scene = DioramaScene {
+            tiles_w: 2,
+            tiles_h: 1,
+            tile_px: 16.0,
+            solid: &solid,
+            depth: &depth,
+            billboards: &[],
+        };
+        let tops = |eye_x: f32| -> Vec<f32> {
+            build_vertices_oriented(&scene, 0.0, [eye_x, -50.0])
+                .iter()
+                .filter(|v| v.kind == kind::GROUND && v.pos[1] > 0.0)
+                .map(|v| v.pos[0])
+                .collect()
+        };
+        assert!(tops(200.0)[0] < 16.0, "eye at +X: col 0 first");
+        assert!(tops(-200.0)[0] >= 16.0, "eye at -X: col 1 first");
+    }
+
+    #[test]
+    fn only_the_sides_the_eye_can_see_are_drawn() {
+        let scene = DioramaScene {
+            tiles_w: 1,
+            tiles_h: 1,
+            tile_px: 16.0,
+            solid: &[1],
+            depth: &[8],
+            billboards: &[],
+        };
+        let sides = |eye: [f32; 2]| {
+            build_vertices_oriented(&scene, 0.0, eye)
+                .iter()
+                .filter(|v| v.kind == kind::SIDE)
+                .count()
+                / 6
+        };
+        assert_eq!(sides([8.0, -50.0]), 1, "dead ahead: front only");
+        assert_eq!(sides([60.0, -50.0]), 2, "front + the +X side");
+        assert_eq!(sides([-60.0, -50.0]), 2, "front + the -X side");
     }
 }
