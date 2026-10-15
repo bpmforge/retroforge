@@ -41,6 +41,7 @@
 //! superseded line about NES sprites did. See the W6-03a close note.
 
 pub mod bg;
+pub mod hd_mode7;
 pub mod mode7;
 pub mod obj;
 pub mod window;

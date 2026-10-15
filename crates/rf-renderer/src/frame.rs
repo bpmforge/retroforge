@@ -10,7 +10,7 @@
 //! acceptable pre-W3"). It does not touch the network, a GPU device, or
 //! `egui` at all — the `retroforge` crate's app layer is the only thing
 //! that turns [`FrameBuffer::rgba`] into an `egui::ColorImage`/texture.
-use rf_core_api::{CoreEvent, CoreSink, OverlayPixel, PpuPixel, SubPixel};
+use rf_core_api::{ColorMathOp, CoreEvent, CoreSink, OverlayPixel, PixelLayer, PpuPixel, SubPixel};
 
 use crate::palette::{bgr555_to_rgb, color_math_bgr555, resolve_index, LinePalette};
 
@@ -47,6 +47,10 @@ pub struct FrameBuffer {
     /// row the core sends no sub-screen for (math off) never blends with
     /// a previous frame's.
     subs: Vec<Option<(Vec<SubPixel>, u16)>>,
+    /// Ticket W30-02: per pixel, "this is `PixelLayer::Background(0)` and
+    /// no colour math touched it". `None` (the default) means capture is
+    /// off: nothing is allocated or written.
+    mode7_mask: Option<Vec<bool>>,
 }
 
 impl FrameBuffer {
@@ -75,6 +79,7 @@ impl FrameBuffer {
             rgba,
             palettes: vec![None; height],
             subs: vec![None; height],
+            mode7_mask: None,
             width,
             height,
         }
@@ -102,6 +107,26 @@ impl FrameBuffer {
     #[must_use]
     pub fn line_palettes(&self) -> &[Option<LinePalette>] {
         &self.palettes
+    }
+
+    /// Ticket W30-02: turn per-pixel BG1 mask capture on or off. Off (the
+    /// default) costs nothing; on, every `video_scanline` also records
+    /// whether the pixel is the BG1 layer with no colour math applied --
+    /// the pixels an HD Mode 7 layer may replace without discarding a
+    /// blend (see [`Self::mode7_mask`]). Turning it on starts all-false.
+    pub fn set_mode7_mask_capture(&mut self, on: bool) {
+        self.mode7_mask = on.then(|| vec![false; self.width * self.height]);
+    }
+
+    /// Ticket W30-02: `width() * height()` flags, row major, when capture
+    /// is on. `true` = the pixel is `PixelLayer::Background(0)` and its
+    /// colour-math operation was a no-op (none requested, or no sub-screen
+    /// sent for the row); a pixel the sub-screen blended, or forced to
+    /// black, is `false`. Rows not yet drawn this frame keep last frame's
+    /// flags, like [`Self::rgba`].
+    #[must_use]
+    pub fn mode7_mask(&self) -> Option<&[bool]> {
+        self.mode7_mask.as_deref()
     }
 
     /// Copy of [`Self::rgba`] for callers (e.g. a cross-thread channel)
@@ -132,7 +157,22 @@ impl CoreSink for FrameBuffer {
         let row_start = row * self.width * 4;
         let palette = self.palettes[row].as_ref();
         let sub = self.subs[row].take();
+        if let Some(mask) = &mut self.mode7_mask {
+            // Pixels the core did not send this row are not BG1.
+            mask[row * self.width..(row + 1) * self.width].fill(false);
+        }
         for (x, pixel) in pixels.iter().enumerate().take(self.width) {
+            if let Some(mask) = &mut self.mode7_mask {
+                // Colour math only runs when a palette AND a sub-screen
+                // exist for the row (the arm below); a no-op op or an
+                // absent sub-screen leaves the pixel unblended.
+                let blended = palette.is_some()
+                    && sub
+                        .as_ref()
+                        .and_then(|(s, _)| s.get(x))
+                        .is_some_and(|sp| sp.op != ColorMathOp::None || sp.main_black);
+                mask[row * self.width + x] = pixel.layer == PixelLayer::Background(0) && !blended;
+            }
             let [r, g, b] = match (
                 palette,
                 sub.as_ref().and_then(|(s, f)| Some((s.get(x)?, *f))),
@@ -219,7 +259,6 @@ impl CoreSink for FrameBuffer {
 mod tests {
     use super::*;
     use crate::palette::palette_index_to_rgb;
-    use rf_core_api::PixelLayer;
 
     fn solid_row(index: u8) -> Vec<PpuPixel> {
         vec![
@@ -428,5 +467,61 @@ mod variable_size_tests {
         let fb = FrameBuffer::with_size(0, 0);
         assert_eq!((fb.width(), fb.height()), (1, 1));
         assert_eq!(fb.rgba().len(), 4);
+    }
+
+    /// Ticket W30-02: the BG1 mask is opt-in, and a blended pixel is not in it.
+    #[test]
+    fn mode7_mask_is_off_by_default_and_excludes_blended_pixels() {
+        let row = |layer| {
+            vec![
+                PpuPixel {
+                    palette_index: 1,
+                    layer,
+                    sprite_id: None,
+                    priority: 0,
+                };
+                NES_WIDTH
+            ]
+        };
+        let sub = |op| {
+            vec![
+                SubPixel {
+                    palette_index: 2,
+                    layer: PixelLayer::Backdrop,
+                    op,
+                    fixed: false,
+                    main_black: false,
+                };
+                NES_WIDTH
+            ]
+        };
+        let mut fb = FrameBuffer::new();
+        assert!(fb.mode7_mask().is_none(), "off by default");
+        fb.video_scanline(0, &row(PixelLayer::Background(0)));
+        assert!(fb.mode7_mask().is_none(), "no capture while off");
+
+        fb.set_mode7_mask_capture(true);
+        let words = [0u16; 256];
+        for y in 0..4 {
+            fb.palette_scanline(y, &words, 15);
+        }
+        // Row 0: BG1, no sub-screen. Row 1: BG2. Row 2: BG1 with a
+        // blending op. Row 3: BG1 with a sub-screen whose op is a no-op.
+        fb.video_scanline(0, &row(PixelLayer::Background(0)));
+        fb.video_scanline(1, &row(PixelLayer::Background(1)));
+        fb.sub_scanline(2, &sub(ColorMathOp::Add), 0);
+        fb.video_scanline(2, &row(PixelLayer::Background(0)));
+        fb.sub_scanline(3, &sub(ColorMathOp::None), 0);
+        fb.video_scanline(3, &row(PixelLayer::Background(0)));
+        let mask = fb.mode7_mask().expect("capture on");
+        assert_eq!(mask.len(), NES_WIDTH * NES_HEIGHT);
+        let at = |y: usize| mask[y * NES_WIDTH];
+        assert!(at(0), "unblended BG1");
+        assert!(!at(1), "not BG1");
+        assert!(!at(2), "colour math applied");
+        assert!(at(3), "no-op colour math counts as unblended");
+
+        fb.set_mode7_mask_capture(false);
+        assert!(fb.mode7_mask().is_none());
     }
 }

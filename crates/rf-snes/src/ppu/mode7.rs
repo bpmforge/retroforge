@@ -223,13 +223,23 @@ pub fn render_scanline(
 
 /// Sample the playfield at a pixel coordinate, applying screen-over.
 fn sample(ppu: &Ppu, px: i32, py: i32) -> Option<u8> {
+    sample_with(&ppu.vram, ppu.mode7.screen_over, px, py)
+}
+
+/// [`sample`] against explicit VRAM and a `$211A` screen-over setting.
+///
+/// Ticket W30-02: the single implementation of the playfield fetch.
+/// `render_scanline` reaches it through [`sample`] with the live
+/// registers; `hd_mode7` reaches it with a latched line's `screen_over`,
+/// so the HD sampler cannot drift from the hardware path.
+pub(crate) fn sample_with(vram: &[u8], screen_over: u8, px: i32, py: i32) -> Option<u8> {
     let outside = !(0..1024).contains(&px) || !(0..1024).contains(&py);
-    let (px, py) = match (outside, ppu.mode7.screen_over) {
+    let (px, py) = match (outside, screen_over) {
         // Transparent outside the playfield.
         (true, 2) => return None,
         // Repeat character 0 outside the playfield.
         (true, 3) => {
-            let colour = character_pixel(ppu, 0, (px & 7) as u16, (py & 7) as u16);
+            let colour = character_pixel(vram, 0, (px & 7) as u16, (py & 7) as u16);
             return (colour != 0).then_some(colour);
         }
         // Wrap: the playfield repeats.
@@ -239,14 +249,14 @@ fn sample(ppu: &Ppu, px: i32, py: i32) -> Option<u8> {
     // Tilemap in the EVEN bytes, character data in the ODD bytes of the
     // same VRAM words — interleaved, not two separate regions.
     let tile_index = ((py as u16) / 8) * 128 + (px as u16) / 8;
-    let tile = ppu.vram[(usize::from(tile_index) * 2) % ppu.vram.len()];
-    let colour = character_pixel(ppu, tile, (px & 7) as u16, (py & 7) as u16);
+    let tile = vram[(usize::from(tile_index) * 2) % vram.len()];
+    let colour = character_pixel(vram, tile, (px & 7) as u16, (py & 7) as u16);
     (colour != 0).then_some(colour)
 }
 
 /// One pixel of a mode-7 character: 8bpp, read from the ODD bytes.
-fn character_pixel(ppu: &Ppu, tile: u8, x: u16, y: u16) -> u8 {
-    crate::debug::mode7_character_pixel(&ppu.vram, tile, x, y)
+fn character_pixel(vram: &[u8], tile: u8, x: u16, y: u16) -> u8 {
+    crate::debug::mode7_character_pixel(vram, tile, x, y)
 }
 
 impl Mode7 {
