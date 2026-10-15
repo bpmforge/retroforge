@@ -379,6 +379,12 @@ pub struct EmuStepper {
     /// (ticket W2-15). `None` until the first visible line completes.
     /// See [`Self::last_scanline`] for the deliberate limitation.
     last_scanline: Option<u16>,
+    /// Ticket W30-02: HD Mode 7 options while the Enhanced-only row is on
+    /// (`None` = off). Presentation only: nothing here touches the machine.
+    hd_mode7: Option<rf_snes::ppu::hd_mode7::HdMode7Options>,
+    /// Ticket W30-02: a probe has found a Mode 7 line in some frame this
+    /// session (sticky; see [`Self::mode7_shown`]).
+    mode7_latched: bool,
 }
 
 impl EmuStepper {
@@ -431,6 +437,8 @@ impl EmuStepper {
             state: RunState::Paused,
             cycle_budget: CYCLE_BUDGET,
             last_scanline: None,
+            hd_mode7: None,
+            mode7_latched: false,
             rom_sha256,
         })
     }
@@ -466,6 +474,8 @@ impl EmuStepper {
             cycle_budget: CYCLE_BUDGET,
             rom_sha256,
             last_scanline: None,
+            hd_mode7: None,
+            mode7_latched: false,
         })
     }
 
@@ -1100,6 +1110,60 @@ impl EmuStepper {
     #[must_use]
     pub fn has_gsu(&self) -> bool {
         matches!(&self.machine, Machine::Snes(core) if core.has_gsu())
+    }
+
+    /// Ticket W30-02: turn HD Mode 7 on (`Some`) or off (`None`). Records
+    /// the options only; [`Self::render_hd_mode7`] reads them after a frame.
+    pub fn set_hd_mode7(&mut self, options: Option<rf_snes::ppu::hd_mode7::HdMode7Options>) {
+        self.hd_mode7 = options;
+    }
+
+    /// Ticket W30-02: has this session's SNES game drawn a visible line in
+    /// BG mode 7 yet? Sticky once true. The shell's "Mode 7" feature rows
+    /// stay unavailable until it is, and nothing else tells it: the
+    /// `CoreEvent::Mode7` event is only subscribed while a Mode 7 feature is
+    /// already on. While false it probes every eighth frame with the same
+    /// sampler the HD layer uses, at native scale (a read of the PPU; it
+    /// changes no machine state). The NES is always false.
+    pub fn mode7_shown(&mut self) -> bool {
+        if !self.mode7_latched && self.frames.is_multiple_of(8) {
+            if let Machine::Snes(core) = &self.machine {
+                let native = rf_snes::ppu::hd_mode7::HdMode7Options {
+                    scale: 1,
+                    supersample: 1,
+                    perspective: false,
+                };
+                self.mode7_latched = rf_snes::ppu::hd_mode7::render_hd_mode7(
+                    &core.system().bus.ppu,
+                    native,
+                    rf_snes::ppu::WIDTH,
+                )
+                .is_some();
+            }
+        }
+        self.mode7_latched
+    }
+
+    /// Ticket W30-02: whether HD Mode 7 is on.
+    #[must_use]
+    pub fn hd_mode7_on(&self) -> bool {
+        self.hd_mode7.is_some()
+    }
+
+    /// Ticket W30-02: the HD Mode 7 layer for the frame just completed, at
+    /// `out_width` native pixels wide. Read-only (`&self`: the PPU is only
+    /// borrowed). `None` when HD Mode 7 is off, on the NES, or when no
+    /// visible line was in Mode 7 this frame.
+    #[must_use]
+    pub fn render_hd_mode7(
+        &self,
+        out_width: usize,
+    ) -> Option<rf_snes::ppu::hd_mode7::HdMode7Layer> {
+        let opts = self.hd_mode7?;
+        let Machine::Snes(core) = &self.machine else {
+            return None;
+        };
+        rf_snes::ppu::hd_mode7::render_hd_mode7(&core.system().bus.ppu, opts, out_width)
     }
 
     /// Turn widescreen off, restoring the accuracy path exactly.

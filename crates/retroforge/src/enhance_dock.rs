@@ -339,6 +339,8 @@ pub fn apply_toggle(
         // Ticket W30-01: the app's `sync_superfx_overclock` reads the
         // setting every frame, so no dedicated action is needed.
         "superfx_overclock" => ctx_settings.superfx_overclock = enabled,
+        // Ticket W30-02: likewise read every frame by `sync_hd_mode7`.
+        "hd_mode7" => ctx_settings.hd_mode7 = enabled,
         _ => {}
     }
     actions.settings_changed = true;
@@ -412,6 +414,35 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                 }
             });
             ui.label("Some games run faster than intended at higher speeds.");
+        }
+        // Ticket W30-02: the HD Mode 7 options, right under its toggle.
+        if row.id == "hd_mode7" && row.enabled {
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Slider::new(&mut ctx.settings.hd_mode7_scale, 2..=4).suffix("x"))
+                    .changed()
+                {
+                    actions.settings_changed = true;
+                }
+            });
+            if ui
+                .checkbox(
+                    &mut ctx.settings.hd_mode7_supersample,
+                    "Supersample (smoother edges)",
+                )
+                .changed()
+            {
+                actions.settings_changed = true;
+            }
+            if ui
+                .checkbox(
+                    &mut ctx.settings.hd_mode7_perspective,
+                    "Perspective smoothing",
+                )
+                .changed()
+            {
+                actions.settings_changed = true;
+            }
         }
     }
 

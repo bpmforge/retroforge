@@ -77,15 +77,34 @@ pub struct CorpusEntry {
 /// The real corpus: today, exactly the one enhancement that exists. See
 /// module doc's honesty constraint before adding claims about what this
 /// proves.
-pub const CORPUS: &[CorpusEntry] = &[CorpusEntry {
-    name: "w3-05a-sprite-limit-bypass-overlay",
-    rom: many_sprites_rom,
-    frames: 20,
-    // Ticket W30-01: the Super FX overclock changes the simulation by design
-    // and must NEVER be added to `enable_enhancement`; this invariant covers
-    // presentation enhancements only.
-    enable_enhancement: |s| s.set_sprite_overlay_enabled(true),
-}];
+pub const CORPUS: &[CorpusEntry] = &[
+    CorpusEntry {
+        name: "w3-05a-sprite-limit-bypass-overlay",
+        rom: many_sprites_rom,
+        frames: 20,
+        // Ticket W30-01: the Super FX overclock changes the simulation by
+        // design and must NEVER be added to `enable_enhancement`; this
+        // invariant covers presentation enhancements only.
+        enable_enhancement: |s| s.set_sprite_overlay_enabled(true),
+    },
+    // Ticket W30-02: HD Mode 7 is presentation only. `run` renders the HD
+    // layer after every enhanced frame (a `&self` read of the PPU), so this
+    // entry proves rendering it leaves the core's state and its indexed
+    // picture byte-identical to the run that never asked for it. The ROM
+    // is SNES, so the HD path really runs (on the NES it is a no-op).
+    CorpusEntry {
+        name: "w30-02-hd-mode7",
+        rom: mode7_floor_rom,
+        frames: 20,
+        enable_enhancement: |s| {
+            s.set_hd_mode7(Some(rf_snes::ppu::hd_mode7::HdMode7Options {
+                scale: 4,
+                supersample: 2,
+                perspective: true,
+            }));
+        },
+    },
+];
 
 const INES_MAGIC: [u8; 4] = [0x4E, 0x45, 0x53, 0x1A]; // "NES\x1A"
 
@@ -177,6 +196,68 @@ pub fn many_sprites_rom() -> Vec<u8> {
     data
 }
 
+/// Ticket W30-02: a synthetic LoROM SNES cartridge that puts the PPU in BG
+/// mode 7 with a half-zoom identity matrix over a small tilemap and tile,
+/// then spins -- enough for `render_hd_mode7` to find Mode 7 lines on every
+/// frame. No game code, no copyrighted data.
+///
+/// The program runs in emulation mode from `$8000`: forced blank on; a
+/// 256-entry tilemap of tile 1 (`$2118`, VMAIN increment on the low byte);
+/// tile 1's 64 pixels, palette index = pixel number (`$2119`, increment on
+/// the high byte); 64 CGRAM colours; M7A = M7D = `$0080`; BG mode 7; BG1 on
+/// the main screen; forced blank off; `JMP` to itself. Every loop counts X
+/// up to a bound, so each terminates.
+#[must_use]
+pub fn mode7_floor_rom() -> Vec<u8> {
+    // `LDA #v : STA reg`.
+    fn store(code: &mut Vec<u8>, reg: u16, v: u8) {
+        code.extend_from_slice(&[0xA9, v, 0x8D, reg as u8, (reg >> 8) as u8]);
+    }
+    let mut code = vec![0x78]; // SEI
+    store(&mut code, 0x2100, 0x8F); // forced blank
+    store(&mut code, 0x2115, 0x00); // VMAIN: +1 word after the LOW byte
+    store(&mut code, 0x2116, 0x00); // VMADD = 0
+    store(&mut code, 0x2117, 0x00);
+    // LDX #0 ; loop: LDA #1 ; STA $2118 ; INX ; BNE loop   (256 writes)
+    code.extend_from_slice(&[0xA2, 0x00, 0xA9, 0x01, 0x8D, 0x18, 0x21, 0xE8, 0xD0, 0xF8]);
+    store(&mut code, 0x2115, 0x80); // VMAIN: +1 word after the HIGH byte
+    store(&mut code, 0x2116, 0x40); // VMADD = 64 (tile 1's first pixel)
+    store(&mut code, 0x2117, 0x00);
+    // LDX #0 ; loop: TXA ; STA $2119 ; INX ; CPX #$40 ; BNE loop
+    code.extend_from_slice(&[
+        0xA2, 0x00, 0x8A, 0x8D, 0x19, 0x21, 0xE8, 0xE0, 0x40, 0xD0, 0xF7,
+    ]);
+    store(&mut code, 0x2121, 0x00); // CGADD = 0
+                                    // LDX #0 ; loop: TXA ; STA $2122 ; STA $2122 ; INX ; CPX #$40 ; BNE loop
+    code.extend_from_slice(&[
+        0xA2, 0x00, 0x8A, 0x8D, 0x22, 0x21, 0x8D, 0x22, 0x21, 0xE8, 0xE0, 0x40, 0xD0, 0xF4,
+    ]);
+    // M7A and M7D = $0080 (each register takes low then high).
+    for reg in [0x211B, 0x211E] {
+        store(&mut code, reg, 0x80);
+        store(&mut code, reg, 0x00);
+    }
+    store(&mut code, 0x2105, 0x07); // BG mode 7
+    store(&mut code, 0x212C, 0x01); // main screen: BG1
+    store(&mut code, 0x2100, 0x0F); // display on, full brightness
+    let spin = 0x8000 + code.len() as u16;
+    code.extend_from_slice(&[0x4C, spin as u8, (spin >> 8) as u8]); // JMP spin
+
+    let mut rom = vec![0u8; 0x8000];
+    rom[..code.len()].copy_from_slice(&code);
+    // A self-consistent LoROM header (the shape rf-snes's own tests use).
+    let base = 0x7FC0;
+    rom[base + 0x15] = 0x20; // LoROM, SlowROM
+    rom[base + 0x17] = 6;
+    rom[base + 0x18] = 3;
+    let checksum: u16 = 0xBEEF;
+    rom[base + 0x1C..base + 0x1E].copy_from_slice(&(checksum ^ 0xFFFF).to_le_bytes());
+    rom[base + 0x1E..base + 0x20].copy_from_slice(&checksum.to_le_bytes());
+    rom[base + 0x3C] = 0x00; // reset vector -> $8000
+    rom[base + 0x3D] = 0x80;
+    rom
+}
+
 /// Both checks for one frame — kept as a pair, never collapsed into one
 /// bool, so a divergence report can say which check(s) actually caught it
 /// (module doc's honesty point about `state_hash`'s blind spot).
@@ -245,8 +326,7 @@ pub fn hash_indexed_video(pixels: &[PpuPixel]) -> String {
 /// configuration, returning one [`FrameHashes`] pair per frame plus the
 /// input log driven (today always empty — see module doc).
 fn run(entry: &CorpusEntry, enhanced: bool) -> (Vec<FrameHashes>, Vec<rf_core_api::InputFrame>) {
-    let mut stepper =
-        EmuStepper::from_ines_bytes(&(entry.rom)()).expect("corpus ROM must be a valid iNES image");
+    let mut stepper = EmuStepper::open(&(entry.rom)()).expect("corpus ROM must be a valid image");
     let mut builder = rf_core_api::FrameBundleBuilder::new(
         rf_renderer::frame::NES_WIDTH as u16,
         rf_renderer::frame::NES_HEIGHT as u16,
@@ -259,6 +339,9 @@ fn run(entry: &CorpusEntry, enhanced: bool) -> (Vec<FrameHashes>, Vec<rf_core_ap
         }
         let input = rf_core_api::InputFrame::empty();
         stepper.latch_and_advance_frame(input, &mut builder);
+        // Ticket W30-02: where an entry turned HD Mode 7 on, render it as
+        // the core thread does; the hashes below prove it perturbed nothing.
+        std::hint::black_box(stepper.render_hd_mode7(rf_renderer::frame::NES_WIDTH));
         inputs.push(input);
         let bundle = builder.take(stepper.frame_count());
         hashes.push(FrameHashes {

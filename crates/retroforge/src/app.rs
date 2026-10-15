@@ -688,6 +688,9 @@ pub struct RetroForgeApp {
     /// (`None` = nothing yet for this core), whether the loaded cartridge
     /// has a Super FX, and the matched profile's `[overclock].superfx_max`.
     superfx_sent: Option<u16>,
+    /// Ticket W30-02: the HD Mode 7 options last sent to the core
+    /// (outer `None` = nothing sent yet for this core).
+    hd_mode7_sent: Option<Option<rf_snes::ppu::hd_mode7::HdMode7Options>>,
     superfx_cart: bool,
     superfx_cap: Option<u16>,
     /// Ticket W20-13: rewind — the ring status from the last frame, whether
@@ -1524,6 +1527,7 @@ impl RetroForgeApp {
             loading_waits: Vec::new(),
             loading_sent: None,
             superfx_sent: None,
+            hd_mode7_sent: None,
             superfx_cart: false,
             superfx_cap: None,
             loading_active: None,
@@ -3546,6 +3550,7 @@ impl RetroForgeApp {
         );
         self.loading_sent = None;
         self.superfx_sent = None;
+        self.hd_mode7_sent = None;
         self.superfx_cart = matches!(
             rf_cart::Cartridge::load(&bytes),
             Ok(rf_cart::Cartridge::Snes { header, .. })
@@ -3972,10 +3977,20 @@ impl RetroForgeApp {
                 _ => {
                     // Ticket W21-08: only the rows the console drew.
                     let rows = crate::play_view::visible_rows(msg.height, msg.last_scanline);
-                    (
-                        crate::play_view::crop_rows(&msg.rgba, msg.width, rows).to_vec(),
-                        (msg.width, rows),
-                    )
+                    if let Some(hd) = &msg.hd_mode7 {
+                        // Ticket W30-02: the HD Mode 7 composite (an HD
+                        // pack, handled above, wins over it).
+                        let (w, rows) = (hd.width * hd.scale, rows * hd.scale);
+                        (
+                            crate::play_view::crop_rows(&hd.rgba, w, rows).to_vec(),
+                            (w, rows),
+                        )
+                    } else {
+                        (
+                            crate::play_view::crop_rows(&msg.rgba, msg.width, rows).to_vec(),
+                            (msg.width, rows),
+                        )
+                    }
                 }
             };
             // Ticket W16-02: feed the Upscale Studio's accumulator
@@ -4069,7 +4084,7 @@ impl RetroForgeApp {
             // least once" — sticky rather than re-derived every frame
             // (`Self::mode7_seen`'s own doc: a menu/pause screen must not
             // flicker the feature row unavailable).
-            if msg.mode7.is_some() {
+            if msg.mode7.is_some() || msg.mode7_shown {
                 self.mode7_seen = true;
             }
             // Ticket W16-13 acceptance 1: refresh the Diorama compositor's
@@ -7840,6 +7855,25 @@ impl RetroForgeApp {
                         .color(tokens.warn),
                     );
                 }
+                // Ticket W30-02: the HD Mode 7 options.
+                if row.id == "hd_mode7" && row.enabled {
+                    let settings = &mut self.current_game_settings;
+                    let mut changed = ui
+                        .add(egui::Slider::new(&mut settings.hd_mode7_scale, 2..=4).suffix("x"))
+                        .changed();
+                    changed |= ui
+                        .checkbox(
+                            &mut settings.hd_mode7_supersample,
+                            "Supersample (smoother edges)",
+                        )
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut settings.hd_mode7_perspective, "Perspective smoothing")
+                        .changed();
+                    if changed {
+                        actions.settings_changed = true;
+                    }
+                }
                 // Ticket W22-05: "What is this?" — the longer explanation
                 // and a diagram, folded away until asked for.
                 egui::CollapsingHeader::new(format!("What is {name}?"))
@@ -11402,6 +11436,15 @@ impl RetroForgeApp {
         self.current_game_settings.mode7_ground = on;
     }
 
+    /// Ticket W30-02: turn "HD Mode 7" on/off at `scale` (2..=4) exactly as
+    /// its Features row and slider do (settings only; `sync_hd_mode7` sends
+    /// the command on the next repaint).
+    #[doc(hidden)]
+    pub fn set_hd_mode7_for_test(&mut self, on: bool, scale: u8) {
+        self.current_game_settings.hd_mode7 = on;
+        self.current_game_settings.hd_mode7_scale = scale;
+    }
+
     /// Ticket W16-14: feed a synthetic [`rf_core_api::Mode7Frame`] plus a
     /// VRAM/CGRAM snapshot through the SAME `refresh_diorama_render` path
     /// a real running SNES core's `FrameMsg` would — the kittest hook this
@@ -11433,6 +11476,8 @@ impl RetroForgeApp {
             script_window: None,
             audio_fill: None,
             hd: None,
+            hd_mode7: None,
+            mode7_shown: false,
             rgba: vec![0u8; width * height * 4],
             line_palettes: Vec::new(),
             width,
@@ -13506,6 +13551,32 @@ impl RetroForgeApp {
         }
     }
 
+    /// Ticket W30-02: keep the core's HD Mode 7 matching the row's
+    /// EFFECTIVE state (Enhanced mode, Mode 7 seen, toggle on), with the
+    /// saved options; sends only on a change. An HD pack wins over it, so
+    /// while one is loaded nothing is rendered.
+    fn sync_hd_mode7(&mut self) {
+        if self.core.is_none() {
+            return;
+        }
+        let on = self.hd_pack.is_none()
+            && crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+                .iter()
+                .any(|r| r.id == "hd_mode7" && r.effective());
+        let want = on.then(|| {
+            let s = &self.current_game_settings;
+            rf_snes::ppu::hd_mode7::HdMode7Options {
+                scale: u32::from(s.hd_mode7_scale.clamp(2, 4)),
+                supersample: if s.hd_mode7_supersample { 2 } else { 1 },
+                perspective: s.hd_mode7_perspective,
+            }
+        });
+        if self.hd_mode7_sent != Some(want) {
+            self.send_command(CoreCommand::SetHdMode7(want));
+            self.hd_mode7_sent = Some(want);
+        }
+    }
+
     /// Turn the sprite-limit bypass on or off exactly as its Features row
     /// does (setting + command), for the screenshot tour.
     #[doc(hidden)]
@@ -14360,6 +14431,7 @@ impl eframe::App for RetroForgeApp {
         self.poll_recording(&ctx);
         self.sync_loading(&ctx);
         self.sync_superfx_overclock();
+        self.sync_hd_mode7();
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.
         self.poll_library_scan(&ctx);

@@ -236,3 +236,36 @@ fn dump_divergence_evidence_writes_a_summary_and_a_replay_slice() {
     rf_input::ReplayLog::parse(&replay)
         .expect("dumped replay slice must parse as a valid .rfreplay log");
 }
+
+/// Ticket W30-02: the HD Mode 7 corpus entry is only worth its place if the
+/// HD path actually runs on its ROM. The synthetic cartridge must reach BG
+/// mode 7, so `render_hd_mode7` returns a layer, at the requested scale; and
+/// with HD Mode 7 off the stepper renders nothing.
+#[test]
+fn the_hd_mode7_corpus_entry_really_exercises_the_hd_path() {
+    let entry = CORPUS
+        .iter()
+        .find(|e| e.name == "w30-02-hd-mode7")
+        .expect("the HD Mode 7 entry is in the corpus");
+    let mut stepper = EmuStepper::open(&(entry.rom)()).expect("SNES ROM opens");
+    let mut builder = rf_core_api::FrameBundleBuilder::new(256, 240);
+    for _ in 0..10 {
+        stepper.latch_and_advance_frame(rf_core_api::InputFrame::empty(), &mut builder);
+        let _ = builder.take(stepper.frame_count());
+    }
+    assert!(
+        stepper.render_hd_mode7(256).is_none(),
+        "off until asked for"
+    );
+    (entry.enable_enhancement)(&mut stepper);
+    stepper.latch_and_advance_frame(rf_core_api::InputFrame::empty(), &mut builder);
+    let layer = stepper
+        .render_hd_mode7(256)
+        .expect("the synthetic ROM is in Mode 7");
+    assert_eq!(layer.width, 256 * 4, "scale 4");
+    assert!(layer.mode7_lines.iter().any(|&m| m));
+    assert!(
+        layer.rgba.chunks_exact(4).any(|p| p[3] != 0),
+        "some texel is opaque, so the compositor has something to place"
+    );
+}
