@@ -317,7 +317,7 @@ pub fn render_mode7_ground_frame(
         crate::diorama_mesh::build_vertices_oriented(
             &scene,
             camera.clamped().yaw_deg,
-            [extent / 2.0, -extent],
+            [extent / 2.0, 2.0 * extent],
         )
     };
 
@@ -630,5 +630,52 @@ mod tests {
             (pitch - TOP_DOWN_PITCH_DEG).abs() < 1e-6,
             "pitch={pitch}, an inverted matrix must fall back to exactly TOP_DOWN_PITCH_DEG"
         );
+    }
+
+    /// W30-05b: the Mode 7 ground shares the diorama camera, so it must not
+    /// be mirrored either: playfield-left is screen-left and playfield-top
+    /// (small vy, the top of the hardware screen) is screen-top, at the
+    /// default camera and at yaw +-30.
+    #[test]
+    fn the_mode7_ground_is_not_mirrored() {
+        use crate::diorama::probe_support::{assert_quadrants_upright, quadrant_ground};
+        let gpu = match GpuContext::request_headless() {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                eprintln!("SKIP the_mode7_ground_is_not_mirrored: no wgpu adapter ({e})");
+                return;
+            }
+        };
+        let pass = DioramaPass::new(&gpu);
+        let m = identity();
+        let plane = quadrant_ground(64);
+        let flat = render_mode7_ground(&pass, &gpu, &m, &plane, 64, 64, 256.0, 128, 128)
+            .expect("mode 7 ground renders");
+        assert_quadrants_upright(&flat, 128, "render_mode7_ground");
+        for yaw in [0.0f32, 30.0, -30.0] {
+            let camera = DioramaCamera {
+                yaw_deg: yaw,
+                ..DioramaCamera::default()
+            };
+            let out = render_mode7_ground_frame(
+                &pass,
+                &gpu,
+                &m,
+                &m,
+                &plane,
+                64,
+                64,
+                256.0,
+                &[],
+                &[0, 0, 0, 0],
+                1,
+                1,
+                128,
+                128,
+                &camera,
+            )
+            .expect("mode 7 frame renders");
+            assert_quadrants_upright(&out, 128, &format!("render_mode7_ground_frame yaw {yaw}"));
+        }
     }
 }

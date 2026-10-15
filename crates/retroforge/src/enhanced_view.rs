@@ -714,7 +714,11 @@ pub struct DioramaRender {
     pub height: u32,
 }
 
-/// One sprite's world-space billboard footprint (ticket W16-13: honours
+/// One sprite's world-space billboard footprint, anchored at its FEET (ticket
+/// W30-05b: `center_z_px` is the sprite's bottom edge, `world_y + height`,
+/// because [`rf_renderer::diorama_mesh::Billboard`] stands the quad up from
+/// that ground point; before, it was the vertical centre, so every sprite
+/// stood half its height too far up the screen). Ticket W16-13: honours
 /// PPUCTRL bit 5 via `sprite_height_px`, replacing W16-06's fixed 8x8 —
 /// [`SPRITE_WIDTH_PX`]'s own doc explains why only the height varies). A
 /// pure function so the 8x16 behaviour is unit-testable with no GPU and no
@@ -737,7 +741,7 @@ fn sprite_billboard(
     let v1 = (screen_y + height) / f32::from(viewport.1);
     rf_renderer::diorama_mesh::Billboard {
         center_x_px: world_x as f32 + SPRITE_WIDTH_PX / 2.0,
-        center_z_px: world_y as f32 + height / 2.0,
+        center_z_px: world_y as f32 + height,
         width_px: SPRITE_WIDTH_PX,
         height_px: height,
         uv: [u0, v0, u1, v1],
@@ -950,8 +954,9 @@ fn mode7_sprite_billboard(
     let u1 = (screen_x + w) / screen_w.max(1.0);
     let v1 = (screen_y + h) / screen_h.max(1.0);
     rf_renderer::diorama_mesh::Billboard {
-        center_x_px: u0.clamp(0.0, 1.0) * extent,
-        center_z_px: v0.clamp(0.0, 1.0) * extent,
+        center_x_px: ((u0 + u1) * 0.5).clamp(0.0, 1.0) * extent,
+        // Feet (bottom edge) -- W30-05b; see `sprite_billboard`.
+        center_z_px: v1.clamp(0.0, 1.0) * extent,
         width_px: w,
         height_px: h,
         uv: [u0, v0, u1, v1],
@@ -1220,7 +1225,7 @@ mod tests {
         assert_eq!(b.width_px, 8.0);
         assert_eq!(b.height_px, 8.0);
         assert_eq!(b.center_x_px, 14.0);
-        assert_eq!(b.center_z_px, 24.0);
+        assert_eq!(b.center_z_px, 28.0, "feet: world_y + height (W30-05b)");
         assert_eq!(
             b.uv,
             [10.0 / 256.0, 20.0 / 240.0, 18.0 / 256.0, 28.0 / 240.0]
@@ -1259,6 +1264,41 @@ mod tests {
             at_origin.uv, with_camera.uv,
             "the camera offset must actually reach the UV rect, not just the world-space centre"
         );
+    }
+
+    /// W30-05b: the billboard's ground point is the sprite's FEET -- its
+    /// bottom edge -- at every sprite height, so the standing quad's bottom
+    /// lands where the 2D sprite's bottom was.
+    #[test]
+    fn sprite_billboard_anchors_at_the_feet_for_both_heights() {
+        for h in [8u8, 16] {
+            let b = sprite_billboard(10, 20, 0, 0, (256, 240), h);
+            assert_eq!(b.center_z_px, 20.0 + f32::from(h), "height {h}");
+            assert_eq!(
+                b.center_x_px, 14.0,
+                "x stays the sprite's horizontal centre"
+            );
+        }
+    }
+
+    #[test]
+    fn mode7_sprite_billboard_anchors_at_the_feet() {
+        let sprite = rf_snes::debug::SpriteEntry {
+            index: 0,
+            x: 64,
+            y: 96,
+            tile: 0,
+            palette: 0,
+            priority: 0,
+            flip_x: false,
+            flip_y: false,
+            large: false,
+            second_page: false,
+        };
+        // obj_size_select 0 => small 8x8; a 256x224 sprite layer on a 512 quad.
+        let b = mode7_sprite_billboard(&sprite, 0, 256.0, 224.0, 512.0);
+        assert_eq!(b.center_z_px, (96.0 + 8.0) / 224.0 * 512.0);
+        assert!(b.center_z_px > 96.0 / 224.0 * 512.0, "below the top edge");
     }
 
     // --- compose_ultrawide: empty canvas is an error, not a panic -------

@@ -4448,3 +4448,9 @@ stories, 10 decisions).
   sorting, default camera byte-identical to before. Found: the diorama view
   is mirrored left-right and billboards anchor at the sprite centre (W30-05b).
   Gate: workspace **2674 passing**.
+- **W30-05b — Diorama no longer mirrored; sprites on their feet**
+  (2026-10-15). The camera sat at -Z looking +Z, turning the view 180° (left
+  on the right, top at the bottom) for Diorama walls and Mode 7 in 3D; it now
+  sits at +Z. Billboards anchor at the sprite's feet and the Mode 7 sprite is
+  centred. Re-pinned: diorama_golden and mode7_plane_golden ON_HASH. Gate:
+  workspace **2679 passing**.

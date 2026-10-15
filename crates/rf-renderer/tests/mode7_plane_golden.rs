@@ -93,7 +93,9 @@ const OFF_HASH: u64 = 0xa087_4faf_a6fe_a325; // synthetic_plane_rgba's own bytes
 /// [`OFF_HASH`] -- regenerate with `--nocapture` if this is intentional.
 /// Pinned on an Apple M4 Max, Metal backend (same posture as
 /// `diorama_golden.rs`'s own `ON_HASH`).
-const ON_HASH: u64 = 0x3d51_9e12_1df0_a435;
+/// Re-pinned for W30-05b: the shared diorama camera now looks along -Z, so the
+/// playfield is no longer mirrored/turned half way round on screen.
+const ON_HASH: u64 = 0x1ed3_53db_8224_2735;
 const ON_HASH_PLACEHOLDER_NOTE: &str =
     "regenerate by running with --nocapture and pasting the printed on_hash";
 
