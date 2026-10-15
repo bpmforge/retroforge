@@ -10,6 +10,15 @@
 //! and this module is the app. The split also keeps `rf-audio` testable
 //! without a device, which is most of why its tests exist at all.
 //!
+//! ## Stereo (ticket W30-09)
+//!
+//! The chain is always interleaved stereo end to end: two filter chains,
+//! a two-channel resampler and a ring of `[L, R]` frames
+//! (`rf_audio::RING_CHANNELS`). A mono core ([`AudioOut::push`]) is
+//! written as `L == R`; each channel is processed independently, so the
+//! result is the same sample the old mono chain produced, on both sides.
+//! The SNES core hands over real stereo ([`AudioOut::push_stereo`]).
+//!
 //! ## The audio clock (ARCHITECTURE §8's `pacing.wait_for_next_frame()`)
 //!
 //! `crate::pacer`'s wall-clock deadline is the interim mechanism and says so
@@ -25,7 +34,9 @@
 //! ~19x real speed. Which one is in charge is explicit in
 //! [`AudioOut::is_clock`].
 
-use rf_audio::{AudioRing, Filters, RateController, RateStats, Resampler, RingProducer};
+use rf_audio::{
+    AudioRing, Filters, RateController, RateStats, Resampler, RingProducer, RING_CHANNELS,
+};
 
 /// Latency target. 40 ms is two and a half NTSC frames: enough that a
 /// single slow frame cannot empty the ring, short enough that input-to-sound
@@ -130,7 +141,9 @@ pub struct AudioOut {
     producer: RingProducer,
     resampler: Resampler,
     rate: RateController,
-    filters: Filters,
+    /// One chain per channel (left, right): the filters carry state.
+    filters: [Filters; 2],
+    /// Interleaved `[L, R]` frames being processed.
     scratch: Vec<i16>,
     device_rate: u32,
     /// Whether the core has ever pushed a sample. A device whose ring the
@@ -154,7 +167,7 @@ impl AudioOut {
     /// # Errors
     /// Returns the resampler's construction error for a nonsensical rate.
     pub fn headless(device_rate: u32) -> Result<Self, rf_audio::ResampleError> {
-        let capacity = AudioRing::capacity_for_latency(device_rate, LATENCY_MS, 1);
+        let capacity = AudioRing::capacity_for_latency(device_rate, LATENCY_MS, RING_CHANNELS);
         let (producer, _consumer) = AudioRing::split(capacity);
         Self::from_parts(producer, device_rate)
     }
@@ -165,15 +178,19 @@ impl AudioOut {
     ) -> Result<Self, rf_audio::ResampleError> {
         Ok(Self {
             producer,
-            resampler: Resampler::new(
+            resampler: Resampler::with_channels(
                 rf_audio::CORE_SAMPLE_RATE,
                 device_rate,
                 CHUNK,
                 rf_audio::rate_deviation(),
+                RING_CHANNELS,
             )?,
             rate: RateController::new(),
-            filters: Filters::new(rf_audio::CORE_SAMPLE_RATE),
-            scratch: Vec::with_capacity(CHUNK * 4),
+            filters: [
+                Filters::new(rf_audio::CORE_SAMPLE_RATE),
+                Filters::new(rf_audio::CORE_SAMPLE_RATE),
+            ],
+            scratch: Vec::with_capacity(CHUNK * 4 * RING_CHANNELS),
             device_rate,
             fed: false,
             #[cfg(feature = "audio")]
@@ -198,7 +215,7 @@ impl AudioOut {
             .latency_ms
             .clamp(*LATENCY_RANGE_MS.start(), *LATENCY_RANGE_MS.end());
         let probe_rate = rf_audio::CORE_SAMPLE_RATE;
-        let capacity = AudioRing::capacity_for_latency(probe_rate, latency, 1);
+        let capacity = AudioRing::capacity_for_latency(probe_rate, latency, RING_CHANNELS);
         let (producer, consumer) = AudioRing::split(capacity);
         let device = rf_audio::AudioDevice::open_named(consumer, prefs.device.as_deref())
             .map_err(|e| e.to_string())?;
@@ -222,10 +239,31 @@ impl AudioOut {
         if samples.is_empty() {
             return;
         }
-        self.fed = true;
         self.scratch.clear();
-        self.scratch.extend_from_slice(samples);
-        self.filters.process_i16(&mut self.scratch);
+        self.scratch.extend(samples.iter().flat_map(|&s| [s, s]));
+        self.process_scratch();
+    }
+
+    /// Ticket W30-09: feed one batch of stereo `[L, R]` frames through the
+    /// same chain as [`AudioOut::push`].
+    pub fn push_stereo(&mut self, frames: &[[i16; 2]]) {
+        if frames.is_empty() {
+            return;
+        }
+        self.scratch.clear();
+        self.scratch.extend(frames.iter().flatten());
+        self.process_scratch();
+    }
+
+    /// Filter, scale, resample and queue the interleaved frames in
+    /// `scratch`.
+    fn process_scratch(&mut self) {
+        self.fed = true;
+        for frame in self.scratch.chunks_exact_mut(RING_CHANNELS) {
+            for (sample, filters) in frame.iter_mut().zip(self.filters.iter_mut()) {
+                *sample = filters.process_i16_one(*sample);
+            }
+        }
         apply_volume(&mut self.scratch, volume());
 
         let mut resampled = Vec::with_capacity(self.scratch.len() + CHUNK);
@@ -239,7 +277,7 @@ impl AudioOut {
             // rather than taking the emulator down with it.
             return;
         }
-        let written = rf_audio::push_samples(&mut self.producer, &resampled);
+        let written = rf_audio::push_frames(&mut self.producer, &resampled, RING_CHANNELS);
         self.rate.note_underrun(0);
         let _ = written;
 
@@ -357,6 +395,38 @@ mod tests {
     }
 
     use super::*;
+
+    /// Ticket W30-09: a mono push is written as L == R, and a stereo push
+    /// keeps its channels apart (a left-only signal leaves the right
+    /// silent) — through the filters and resampler, not just the ring.
+    #[test]
+    fn mono_is_duplicated_and_stereo_keeps_its_sides() {
+        let tone = |i: usize| ((i as f32 / 9.0).sin() * 9_000.0) as i16;
+        let (tx, mut rx) = AudioRing::split(1 << 16);
+        let mut mono = AudioOut::from_parts(tx, 48_000).expect("chain builds");
+        mono.push(&(0..4000).map(tone).collect::<Vec<_>>());
+        let mut got = vec![0i16; 4000];
+        let n = rf_audio::pop_frames(&mut rx, &mut got, RING_CHANNELS);
+        assert!(n > 1000, "mono produced {n}");
+        for f in got[..n].chunks_exact(2) {
+            assert_eq!(f[0], f[1], "mono must be L == R");
+        }
+
+        let (tx, mut rx) = AudioRing::split(1 << 16);
+        let mut st = AudioOut::from_parts(tx, 48_000).expect("chain builds");
+        st.push_stereo(&(0..4000).map(|i| [tone(i), 0]).collect::<Vec<_>>());
+        let mut got = vec![0i16; 4000];
+        let n = rf_audio::pop_frames(&mut rx, &mut got, RING_CHANNELS);
+        assert!(n > 1000);
+        assert!(
+            got[..n].chunks_exact(2).all(|f| f[1] == 0),
+            "right must be silent"
+        );
+        assert!(
+            got[..n].chunks_exact(2).any(|f| f[0].abs() > 1000),
+            "left carries it"
+        );
+    }
 
     /// The chain must accept a realistic frame's worth of core samples and
     /// actually move them into the ring — the whole path, not each piece.

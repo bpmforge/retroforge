@@ -713,6 +713,8 @@ pub struct RetroForgeApp {
     /// Ticket W30-02: the HD Mode 7 options last sent to the core
     /// (outer `None` = nothing sent yet for this core).
     hd_mode7_sent: Option<Option<rf_snes::ppu::hd_mode7::HdMode7Options>>,
+    /// Ticket W30-09: the S-DSP interpolation last sent to the core.
+    interpolation_sent: Option<rf_snes::apu::dsp::Interpolation>,
     superfx_cart: bool,
     superfx_cap: Option<u16>,
     /// Ticket W30-08: the CPU / SA-1 clock policies and NES extra-line count
@@ -1600,6 +1602,7 @@ impl RetroForgeApp {
             gsu_clock_sent: None,
             run_ahead_sent: None,
             hd_mode7_sent: None,
+            interpolation_sent: None,
             superfx_cart: false,
             superfx_cap: None,
             cpu_clock_sent: None,
@@ -3651,6 +3654,7 @@ impl RetroForgeApp {
         self.gsu_clock_sent = None;
         self.run_ahead_sent = None;
         self.hd_mode7_sent = None;
+        self.interpolation_sent = None;
         self.superfx_cart = matches!(
             rf_cart::Cartridge::load(&bytes),
             Ok(rf_cart::Cartridge::Snes { header, .. })
@@ -8261,6 +8265,16 @@ impl RetroForgeApp {
                         ui,
                         &mut self.current_game_settings,
                         row.id == "diorama",
+                    )
+                {
+                    actions.settings_changed = true;
+                }
+                // Ticket W30-09: which smoother filter.
+                if row.id == "snes_interpolation"
+                    && row.enabled
+                    && crate::enhance_dock::interpolation_controls(
+                        ui,
+                        &mut self.current_game_settings,
                     )
                 {
                     actions.settings_changed = true;
@@ -14918,6 +14932,27 @@ impl RetroForgeApp {
         }
     }
 
+    /// Ticket W30-09: keep the core's S-DSP interpolation matching the
+    /// row's EFFECTIVE state (Enhanced mode, SNES, toggle on); hardware
+    /// Gaussian otherwise. Sends only on a change.
+    fn sync_snes_interpolation(&mut self) {
+        if self.core.is_none() {
+            return;
+        }
+        let on = crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+            .iter()
+            .any(|r| r.id == "snes_interpolation" && r.effective());
+        let want = if on {
+            self.current_game_settings.snes_interpolation_mode
+        } else {
+            rf_snes::apu::dsp::Interpolation::Gaussian
+        };
+        if self.interpolation_sent != Some(want) {
+            self.send_command(CoreCommand::SetSnesInterpolation(want));
+            self.interpolation_sent = Some(want);
+        }
+    }
+
     /// Ticket W30-02: keep the core's HD Mode 7 matching the row's
     /// EFFECTIVE state (Enhanced mode, Mode 7 seen, toggle on), with the
     /// saved options; sends only on a change. An HD pack wins over it, so
@@ -15801,6 +15836,7 @@ impl eframe::App for RetroForgeApp {
         self.sync_loading(&ctx);
         self.sync_clocks();
         self.sync_hd_mode7();
+        self.sync_snes_interpolation();
         self.sync_run_ahead();
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.

@@ -438,6 +438,82 @@ impl Envelope {
     }
 }
 
+/// Ticket W30-09: how a voice's decoded samples are interpolated up to its
+/// pitch, for the MAIN L/R mix only.
+///
+/// [`Interpolation::Gaussian`] is the hardware's 4-point filter
+/// ([`gaussian`], fullsnes "4-Point Gaussian Interpolation") and the
+/// default. The others are presentation alternatives: the machine stays
+/// exact whichever is chosen, because the voice's hardware sample (what
+/// the echo send, `OUTX`, and the next voice's pitch modulation read)
+/// is still the Gaussian one — see [`Voice::present`]. The hardware has no
+/// such modes; this is an opt-in sound-quality choice, not accuracy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Interpolation {
+    /// The hardware filter.
+    #[default]
+    Gaussian,
+    /// Straight line between the two samples bracketing the position.
+    Linear,
+    /// Catmull-Rom cubic through the same four-sample window.
+    Cubic,
+    /// The nearer of the two bracketing samples (sample-and-hold).
+    Nearest,
+}
+
+impl Interpolation {
+    /// The name the per-game settings file stores.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Gaussian => "gaussian",
+            Self::Linear => "linear",
+            Self::Cubic => "cubic",
+            Self::Nearest => "none",
+        }
+    }
+
+    /// The inverse of [`Self::name`]; `None` for an unknown name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "gaussian" => Some(Self::Gaussian),
+            "linear" => Some(Self::Linear),
+            "cubic" => Some(Self::Cubic),
+            "none" => Some(Self::Nearest),
+            _ => None,
+        }
+    }
+}
+
+/// Interpolate a voice's four-sample window at the 12-bit `fraction`.
+///
+/// Alignment matters: the Gaussian kernel's dominant tap is `GAUSS[511]`
+/// on `history[1]` at fraction 0 and moves to `history[2]` as the fraction
+/// approaches 1, so the interval being interpolated is `history[1]` to
+/// `history[2]` and `history[0]`/`history[3]` are its outer neighbours.
+/// Every mode uses that same interval, so switching modes does not shift
+/// the voice by a sample.
+#[must_use]
+pub fn interpolate(mode: Interpolation, history: &[i16; 4], fraction: u16) -> i16 {
+    let f = i64::from(fraction & 0x0FFF);
+    let [h0, h1, h2, h3] = history.map(i64::from);
+    match mode {
+        Interpolation::Gaussian => gaussian(history, fraction),
+        Interpolation::Linear => (h1 + (((h2 - h1) * f) >> 12)) as i16,
+        Interpolation::Nearest => (if f < 0x800 { h1 } else { h2 }) as i16,
+        Interpolation::Cubic => {
+            // Catmull-Rom: 0.5 * (2*h1 + c*t + b*t^2 + a*t^3), t = f/4096.
+            let a = -h0 + 3 * h1 - 3 * h2 + h3;
+            let b = 2 * h0 - 5 * h1 + 4 * h2 - h3;
+            let c = h2 - h0;
+            let t3 = 1i64 << 36;
+            let sum = 2 * h1 * t3 + c * f * (1 << 24) + b * f * f * (1 << 12) + a * f * f * f;
+            (sum >> 37).clamp(-0x8000, 0x7FFF) as i16
+        }
+    }
+}
+
 /// One of the eight voices.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Voice {
@@ -453,6 +529,12 @@ pub struct Voice {
     pub start: u16,
     /// Where to jump on a looping block's end.
     pub loop_addr: u16,
+    /// Ticket W30-09: the voice's sample as the MAIN mix hears it — equal to
+    /// [`Self::last_output`] unless a non-Gaussian [`Interpolation`] is
+    /// selected. Presentation only: never saved, never read by the echo
+    /// send, `OUTX` or pitch modulation, which keep using the hardware
+    /// sample.
+    pub present: i16,
     /// Left/right volume, signed.
     pub vol_left: i8,
     pub vol_right: i8,
@@ -521,8 +603,16 @@ impl Voice {
     /// `noise` replaces the BRR source entirely when the voice's noise
     /// bit is set — the DSP substitutes the shared noise generator for
     /// the sample stream rather than mixing it in.
-    pub fn next_output(&mut self, aram: &[u8], noise: i16, use_noise: bool, counter: u16) -> i16 {
+    pub fn next_output(
+        &mut self,
+        aram: &[u8],
+        noise: i16,
+        use_noise: bool,
+        counter: u16,
+        interp: Interpolation,
+    ) -> i16 {
         if self.envelope.is_silent() && !self.keyed_on {
+            self.present = 0;
             return 0;
         }
         // Advance the pitch counter; every overflow of the 12-bit
@@ -549,7 +639,17 @@ impl Voice {
         };
 
         self.envelope.step(counter);
-        ((i32::from(filtered) * i32::from(self.envelope.level)) >> 11) as i16
+        let level = i32::from(self.envelope.level);
+        let out = ((i32::from(filtered) * level) >> 11) as i16;
+        // Ticket W30-09: the presentation sample. Noise is not resampled,
+        // so it has nothing to interpolate.
+        self.present = if use_noise || interp == Interpolation::Gaussian {
+            out
+        } else {
+            let alt = interpolate(interp, &self.history, self.pitch_counter);
+            ((i32::from(alt) * level) >> 11) as i16
+        };
+        out
     }
 
     /// Decode the next raw BRR sample, reading through `aram`.
@@ -1119,9 +1219,22 @@ pub struct Dsp {
     envx_pending: [u8; 8],
     /// This sample's accumulators, reset at the top of the loop.
     acc: (i32, i32),
+    /// Ticket W30-09: the same sum built from each voice's
+    /// [`Voice::present`] sample. Only the DAC reads it, and only when
+    /// [`Self::interpolation`] is not Gaussian; the echo send never does.
+    acc_present: (i32, i32),
+    /// Ticket W30-09: how voices are interpolated for the main mix. Not
+    /// part of the saved state (it is a presentation choice, not
+    /// machine state) and not a DSP register.
+    pub interpolation: Interpolation,
     echo_send: (i32, i32),
     /// The DAC output latched at cycles 26 and 27.
     dac: (i16, i16),
+    /// Ticket W30-09: the sample actually handed to the host — `dac` itself
+    /// unless a non-Gaussian [`Interpolation`] is set, in which case the
+    /// DAC value rebuilt from the presentation sum. `dac` stays the
+    /// hardware value because it is saved state.
+    dac_present: (i16, i16),
     /// The previous voice's output, for pitch modulation.
     prev_out: i16,
     /// The noise sample, regenerated at cycle 30.
@@ -1204,8 +1317,11 @@ impl Dsp {
             outx_pending: [0; 8],
             envx_pending: [0; 8],
             acc: (0, 0),
+            acc_present: (0, 0),
+            interpolation: Interpolation::Gaussian,
             echo_send: (0, 0),
             dac: (0, 0),
+            dac_present: (0, 0),
             prev_out: 0,
             noise_out: 0,
             kon_written: 0,
@@ -1452,7 +1568,13 @@ impl Dsp {
                 if let Some(bent) = self.voices[v].pitch_bent.take() {
                     self.voices[v].pitch = bent;
                 }
-                let out = self.voices[v].next_output(aram, self.noise_out, use_noise, self.counter);
+                let out = self.voices[v].next_output(
+                    aram,
+                    self.noise_out,
+                    use_noise,
+                    self.counter,
+                    self.interpolation,
+                );
                 self.voices[v].pitch = saved;
                 self.voices[v].last_output = out;
                 // "This is the value used for modulating the next voice's
@@ -1469,6 +1591,8 @@ impl Dsp {
                 let s = i32::from(self.voices[v].last_output);
                 let sl = (s * i32::from(self.voices[v].vol_left)) >> 7;
                 self.acc.0 += sl;
+                self.acc_present.0 +=
+                    (i32::from(self.voices[v].present) * i32::from(self.voices[v].vol_left)) >> 7;
                 if self.echo_enable & bit != 0 {
                     self.echo_send.0 += sl;
                 }
@@ -1479,6 +1603,8 @@ impl Dsp {
                 let s = i32::from(self.voices[v].last_output);
                 let sr = (s * i32::from(self.voices[v].vol_right)) >> 7;
                 self.acc.1 += sr;
+                self.acc_present.1 +=
+                    (i32::from(self.voices[v].present) * i32::from(self.voices[v].vol_right)) >> 7;
                 if self.echo_enable & bit != 0 {
                     self.echo_send.1 += sr;
                 }
@@ -1503,6 +1629,18 @@ impl Dsp {
         }
     }
 
+    /// The voice sum the DAC scales by MVOL: the hardware accumulators, or
+    /// the presentation ones when a non-Gaussian [`Interpolation`] is set
+    /// (ticket W30-09).
+    fn main_sum(&self) -> (i32, i32) {
+        // (Gaussian: the hardware accumulators, as they always were.)
+        if self.interpolation == Interpolation::Gaussian {
+            self.acc
+        } else {
+            self.acc_present
+        }
+    }
+
     /// Advance the DSP by ONE SPC cycle.
     ///
     /// **This is the engine; [`Dsp::mix`] is a wrapper that runs 32 of
@@ -1522,6 +1660,7 @@ impl Dsp {
             // The accumulators for the NEXT sample open here, because
             // voice 0's S4 lands on this cycle and belongs to it.
             self.acc = (0, 0);
+            self.acc_present = (0, 0);
             self.echo_send = (0, 0);
         }
 
@@ -1577,24 +1716,34 @@ impl Dsp {
             // cycle; only the value that would have reached the speaker
             // is replaced.
             26 => {
-                let main = (self.acc.0 * i32::from(self.main_vol_left)) >> 7;
                 let echo = i32::from(self.echo.out().0);
-                self.dac.0 = if self.mute {
-                    0
-                } else {
-                    (main + echo).clamp(-0x8000, 0x7FFF) as i16
+                let dac = |sum: i32, vol: i8| {
+                    if self.mute {
+                        0
+                    } else {
+                        (((sum * i32::from(vol)) >> 7) + echo).clamp(-0x8000, 0x7FFF) as i16
+                    }
                 };
+                self.dac.0 = dac(self.acc.0, self.main_vol_left);
+                self.dac_present.0 = dac(self.main_sum().0, self.main_vol_left);
             }
             // Same for the right channel, plus PMON.
             27 => {
-                let main = (self.acc.1 * i32::from(self.main_vol_right)) >> 7;
                 let echo = i32::from(self.echo.out().1);
-                self.dac.1 = if self.mute {
-                    0
-                } else {
-                    (main + echo).clamp(-0x8000, 0x7FFF) as i16
+                let dac = |sum: i32, vol: i8| {
+                    if self.mute {
+                        0
+                    } else {
+                        (((sum * i32::from(vol)) >> 7) + echo).clamp(-0x8000, 0x7FFF) as i16
+                    }
                 };
-                out.sample = Some(self.dac);
+                self.dac.1 = dac(self.acc.1, self.main_vol_right);
+                self.dac_present.1 = dac(self.main_sum().1, self.main_vol_right);
+                out.sample = Some(if self.interpolation == Interpolation::Gaussian {
+                    self.dac
+                } else {
+                    self.dac_present
+                });
             }
             // "Load NON, EON, and DIR." Eagerly decoded on write.
             28 => {}
@@ -1657,7 +1806,11 @@ impl Dsp {
     /// implementation, so the two cannot drift: there is exactly one
     /// model of what a sample is.
     pub fn mix(&mut self, aram: &mut [u8]) -> (i16, i16) {
-        let mut out = self.dac;
+        let mut out = if self.interpolation == Interpolation::Gaussian {
+            self.dac
+        } else {
+            self.dac_present
+        };
         for _ in 0..32 {
             // Fixed trip count: terminates by construction (law 8).
             if let Some(s) = self.tick(aram).sample {

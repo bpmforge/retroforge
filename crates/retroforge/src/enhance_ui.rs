@@ -270,6 +270,13 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         "an NES game whose profile allows extra vblank lines",
     );
     let (run_ahead_av, run_ahead_on) = generic(settings.run_ahead > 0);
+    // Ticket W30-09: SNES sound only (the NES has no S-DSP). Presentation,
+    // so no cartridge or profile condition.
+    let (interp_av, interp_on) = also(
+        generic(settings.snes_interpolation),
+        snes,
+        "an SNES game (only the SNES has this sound chip)",
+    );
     let (superfx_av, superfx_on) = also(
         generic(settings.superfx_overclock),
         superfx && superfx_max > 100,
@@ -397,6 +404,14 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
             scope: "generic, any console",
             enabled: run_ahead_on,
             availability: run_ahead_av,
+            heuristic: None,
+        },
+        FeatureRow {
+            id: "snes_interpolation",
+            label: "Audio interpolation",
+            scope: "generic, SNES",
+            enabled: interp_on,
+            availability: interp_av,
             heuristic: None,
         },
         FeatureRow {
@@ -863,7 +878,7 @@ mod tests {
             &GameSettings::default(),
             &GameFacts::new(false, false, false),
         );
-        assert_eq!(rows.len(), 15, "every feature is listed in every mode");
+        assert_eq!(rows.len(), 16, "every feature is listed in every mode");
         assert!(rows.iter().all(|r| r.availability.explanation().is_some()));
     }
 
@@ -1269,6 +1284,43 @@ mod tests {
         assert_ne!(badge_text("NES", &s, &facts), with, "the badge counts it");
         s.run_ahead = 2;
         assert!(find(&s).effective(), "2 frames is on too");
+    }
+
+    /// Ticket W30-09: the audio interpolation row — Enhanced-only, SNES
+    /// only, and counted by the badge only when effective.
+    #[test]
+    fn snes_interpolation_row_gating_and_badge() {
+        let find = |s: &GameSettings, f: &GameFacts| {
+            feature_rows(s, f)
+                .into_iter()
+                .find(|r| r.id == "snes_interpolation")
+                .unwrap()
+        };
+        let facts = GameFacts::new(false, false, false);
+        let mut s = GameSettings::default();
+        s.mode = Mode::Accuracy;
+        s.snes_interpolation = true;
+        assert_eq!(
+            find(&s, &facts).availability,
+            Availability::NeedsMode("Enhanced")
+        );
+        assert!(!find(&s, &facts).effective());
+
+        s.mode = Mode::Enhanced;
+        assert!(find(&s, &facts).effective());
+        assert!(badge_text("SNES", &s, &facts).contains('1'));
+
+        let mut nes = facts;
+        nes.snes = false;
+        assert!(matches!(
+            find(&s, &nes).availability,
+            Availability::NeedsGameState(_)
+        ));
+        assert!(!find(&s, &nes).effective());
+
+        s.snes_interpolation = false;
+        assert!(!find(&s, &facts).effective(), "off by default (law 6)");
+        assert!(!GameSettings::default().snes_interpolation);
     }
 
     /// Ticket W30-08: the CPU overclock, SA-1 overclock and NES extra-lines

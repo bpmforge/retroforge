@@ -168,6 +168,16 @@ impl CoreSink for CountingSink<'_> {
         self.inner.audio(samples);
     }
 
+    /// Ticket W30-09: this wrapper sits between the core and the real
+    /// sink, so an unforwarded default would pin every core to mono here.
+    fn wants_stereo(&self) -> bool {
+        self.inner.wants_stereo()
+    }
+
+    fn audio_stereo(&mut self, frames: &[[i16; 2]]) {
+        self.inner.audio_stereo(frames);
+    }
+
     fn event(&mut self, ev: rf_core_api::CoreEvent) {
         self.inner.event(ev);
     }
@@ -1218,6 +1228,14 @@ impl EmuStepper {
     #[must_use]
     pub fn has_gsu(&self) -> bool {
         matches!(&self.machine, Machine::Snes(core) if core.has_gsu())
+    }
+
+    /// Ticket W30-09: choose the S-DSP's voice interpolation for the main
+    /// mix. SNES-only; the NES has no S-DSP.
+    pub fn set_snes_interpolation(&mut self, mode: rf_snes::apu::dsp::Interpolation) {
+        if let Machine::Snes(core) = &mut self.machine {
+            core.set_interpolation(mode);
+        }
     }
 
     /// Ticket W30-02: turn HD Mode 7 on (`Some`) or off (`None`). Records

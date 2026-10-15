@@ -108,6 +108,10 @@ pub struct SnesCore {
     sa1_overclock_percent: u16,
     /// Ticket W30-08: the 65816 overclock, likewise.
     cpu_overclock_percent: u16,
+    /// Ticket W30-09: how the S-DSP interpolates voices for the main mix
+    /// (presentation only; the machine stays exact), held here and pushed
+    /// down every step for the same reason as the overclocks.
+    interpolation: crate::apu::dsp::Interpolation,
     /// Ticket W7-22: the S-DSP's 32 kHz stereo turned into the 48 kHz mono
     /// stream every core hands `CoreSink::audio`.
     audio: AudioConverter,
@@ -120,14 +124,22 @@ pub struct SnesCore {
 /// average the two channels, and interpolate linearly at 2/3 of an input
 /// sample per output, exactly 3 outputs per 2 inputs. Stereo is lost —
 /// the host ring is mono — which is recorded as a limit (ticket W7-22).
+/// Ticket W30-09 lifts that limit for a sink that asks
+/// (`CoreSink::wants_stereo`): the same resampling, per channel.
 #[derive(Debug, Clone, Default)]
 struct AudioConverter {
     /// The last input sample of the previous batch.
     prev: i32,
+    /// Ticket W30-09: the same, per channel, for the stereo path. Both
+    /// paths advance `thirds` identically and keep all three `prev`
+    /// values current, so a sink that switches between them mid-run
+    /// picks up in phase.
+    prev_lr: (i32, i32),
     /// Position of the next output between `prev` and the next input, in
     /// thirds of an input sample: always `0..3`.
     thirds: u32,
     out: Vec<i16>,
+    out_stereo: Vec<[i16; 2]>,
 }
 
 /// Output samples per input step, in thirds: 32 kHz -> 48 kHz is 3:2.
@@ -147,8 +159,32 @@ impl AudioConverter {
             }
             self.thirds -= 3;
             self.prev = cur;
+            self.prev_lr = (i32::from(l), i32::from(r));
         }
         &self.out
+    }
+
+    /// Ticket W30-09: the same 3:2 linear scheme and phase as
+    /// [`Self::convert`], on each channel separately (stereo is kept).
+    fn convert_stereo(&mut self, input: &[(i16, i16)]) -> &[[i16; 2]] {
+        self.out_stereo.clear();
+        for &(l, r) in input {
+            let (l, r) = (i32::from(l), i32::from(r));
+            let (pl, pr) = self.prev_lr;
+            // As in `convert`: at most two outputs per input (law 8).
+            while self.thirds < 3 {
+                let t = self.thirds as i32;
+                self.out_stereo.push([
+                    (pl + (l - pl) * t / 3) as i16,
+                    (pr + (r - pr) * t / 3) as i16,
+                ]);
+                self.thirds += THIRDS_PER_OUTPUT;
+            }
+            self.thirds -= 3;
+            self.prev_lr = (l, r);
+            self.prev = (l + r) / 2;
+        }
+        &self.out_stereo
     }
 }
 
@@ -170,6 +206,7 @@ impl SnesCore {
             gsu_overclock_percent: GSU_OVERCLOCK_DEFAULT,
             sa1_overclock_percent: SA1_OVERCLOCK_DEFAULT,
             cpu_overclock_percent: CPU_OVERCLOCK_DEFAULT,
+            interpolation: crate::apu::dsp::Interpolation::default(),
             audio: AudioConverter::default(),
         })
     }
@@ -193,6 +230,21 @@ impl SnesCore {
     /// path exactly. Clamped to the PPU's `MAX_WIDTH`.
     pub fn set_widescreen(&mut self, width: usize, mask: crate::ppu::WidenMask) {
         self.widescreen = (width.clamp(crate::ppu::WIDTH, crate::ppu::MAX_WIDTH), mask);
+    }
+
+    /// Ticket W30-09: choose how the S-DSP interpolates voices for the main
+    /// L/R mix. [`Interpolation::Gaussian`](crate::apu::dsp::Interpolation)
+    /// is the hardware filter and the default; the others change only what
+    /// reaches the speakers, never the echo, `OUTX`, pitch modulation or
+    /// any state a save captures.
+    pub fn set_interpolation(&mut self, mode: crate::apu::dsp::Interpolation) {
+        self.interpolation = mode;
+    }
+
+    /// The interpolation mode in force.
+    #[must_use]
+    pub fn interpolation(&self) -> crate::apu::dsp::Interpolation {
+        self.interpolation
     }
 
     /// Ticket W30-01: run the Super FX at `percent` of its own clock.
@@ -498,6 +550,7 @@ impl EmulatorCore for SnesCore {
         self.system.gsu_clock_multiplier = u64::from(self.gsu_overclock_percent / 100);
         self.system.sa1_clock_multiplier = u64::from(self.sa1_overclock_percent / 100);
         self.system.cpu_clock_multiplier = u64::from(self.cpu_overclock_percent / 100);
+        self.system.bus.apu.dsp.interpolation = self.interpolation;
         let start_frame = self.system.bus.timing.frame;
         let mut instructions = 0u64;
         let frame_complete;
@@ -534,9 +587,18 @@ impl EmulatorCore for SnesCore {
                     self.emit_frame(sink);
                     // Ticket W7-22: the frame's sound, after its picture.
                     let pending = std::mem::take(&mut self.system.bus.apu.out_samples);
-                    let out = self.audio.convert(&pending);
-                    if !out.is_empty() {
-                        sink.audio(out);
+                    // Ticket W30-09: stereo only for a sink that asked; every
+                    // other sink takes the unchanged mono path.
+                    if sink.wants_stereo() {
+                        let out = self.audio.convert_stereo(&pending);
+                        if !out.is_empty() {
+                            sink.audio_stereo(out);
+                        }
+                    } else {
+                        let out = self.audio.convert(&pending);
+                        if !out.is_empty() {
+                            sink.audio(out);
+                        }
                     }
                     self.system.bus.apu.out_samples = pending;
                     self.system.bus.apu.out_samples.clear();
@@ -689,6 +751,65 @@ mod audio_tests {
             total += c.convert(&[(100, 100), (100, 100)]).len();
         }
         assert_eq!(total, 3000);
+    }
+
+    /// Ticket W30-09: the stereo path keeps L and R apart, resampled with
+    /// the same phase as the mono path (3 outputs per 2 inputs).
+    #[test]
+    fn stereo_path_keeps_channels_apart_and_in_phase() {
+        let mut c = AudioConverter::default();
+        let out = c.convert_stereo(&[(300, 0), (600, 0)]).to_vec();
+        assert_eq!(out, vec![[0, 0], [200, 0], [400, 0]]);
+        let mut total = 0;
+        for _ in 0..1000 {
+            total += c.convert_stereo(&[(1, 2), (3, 4)]).len();
+        }
+        assert_eq!(total, 3000);
+    }
+
+    /// Ticket W30-09: a sink that never asks for stereo hears exactly what
+    /// it always did, whatever the stereo path does to the same input.
+    #[test]
+    fn mono_path_is_unchanged_by_the_stereo_path_existing() {
+        // A fixed, lopsided stream; the pinned sum guards the mono output.
+        let input: Vec<(i16, i16)> = (0..4000i32)
+            .map(|i| {
+                (
+                    (i * 37 % 20011 - 9000) as i16,
+                    (i * 91 % 15013 - 7000) as i16,
+                )
+            })
+            .collect();
+        let mut a = AudioConverter::default();
+        let mono: Vec<i16> = input
+            .chunks(333)
+            .flat_map(|c| a.convert(c).to_vec())
+            .collect();
+        let mut b = AudioConverter::default();
+        let mut mixed = Vec::new();
+        for (i, c) in input.chunks(333).enumerate() {
+            if i % 2 == 0 {
+                mixed.extend_from_slice(b.convert(c));
+            } else {
+                // Interleaving stereo batches must not disturb the phase.
+                let st = b.convert_stereo(c).to_vec();
+                mixed.extend(
+                    st.iter()
+                        .map(|f| ((i32::from(f[0]) + i32::from(f[1])) / 2) as i16),
+                );
+            }
+        }
+        assert_eq!(mono.len(), mixed.len());
+        // Even batches are byte-identical to the pure-mono run.
+        let mut ofs = 0;
+        let mut a2 = AudioConverter::default();
+        for (i, c) in input.chunks(333).enumerate() {
+            let n = a2.convert(c).len();
+            if i % 2 == 0 {
+                assert_eq!(&mono[ofs..ofs + n], &mixed[ofs..ofs + n], "batch {i}");
+            }
+            ofs += n;
+        }
     }
 }
 

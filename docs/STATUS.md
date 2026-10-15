@@ -4507,3 +4507,12 @@ stories, 10 decisions).
   "HD-2D look" card turns lens, Diorama and the tilted follow camera on
   together. Painter not yet tried on a real game. Gate: workspace **2774
   passing**.
+- **W30-09 — Stereo SNES audio; selectable S-DSP interpolation** (2026-10-15).
+  The app's audio chain is now stereo end to end (a ring of [L,R] frames, a
+  2-channel resampler, per-channel filters); the SNES core hands it real
+  stereo through `CoreSink::wants_stereo`/`audio_stereo`, while every other
+  sink keeps the unchanged mono path. A presentation change: SNES output on a
+  stereo device is now stereo by default (NES and mono devices unchanged).
+  Enhanced-only "Smoother sound" row (Cubic/Linear/None) changes only the main
+  mix; echo, OUTX, pitch modulation and saved state keep the hardware
+  Gaussian. Gate: workspace **2787 passing**.

@@ -42,7 +42,10 @@ pub use device::{output_device_names, AudioDevice, DeviceError};
 pub use filter::Filters;
 pub use rate::{RateController, RateStats, MAX_RATIO_DEVIATION, TARGET_FILL};
 pub use resample::{ResampleError, Resampler};
-pub use ring::{fill_fraction, pop_samples, push_samples, AudioRing, RingConsumer, RingProducer};
+pub use ring::{
+    fill_fraction, pop_frames, pop_samples, push_frames, push_samples, AudioRing, RingConsumer,
+    RingProducer, RING_CHANNELS,
+};
 
 /// The rate loop's authority, as the resampler's constructor wants it.
 /// A function rather than a re-exported constant so the two crates cannot

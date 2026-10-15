@@ -265,6 +265,17 @@ pub struct GameSettings {
     pub sa1_overclock: bool,
     pub sa1_overclock_pct: u16,
     pub sa1_overclock_mode: OverclockMode,
+    /// Ticket W30-09: smoother SNES sound — interpolate the S-DSP's voices
+    /// with [`Self::snes_interpolation_mode`] instead of the hardware
+    /// Gaussian filter, for what you hear only. Presentation, not
+    /// simulation (the echo and every register keep the hardware values),
+    /// but the hardware filter is the reference, so it is off by default
+    /// (law 6) and Enhanced-only.
+    pub snes_interpolation: bool,
+    /// Ticket W30-09: which smoother filter. Never
+    /// [`rf_snes::apu::dsp::Interpolation::Gaussian`] (that is "off");
+    /// defaults to cubic and is coerced to it on load.
+    pub snes_interpolation_mode: rf_snes::apu::dsp::Interpolation,
     /// Ticket W30-08: extra CPU-only vblank lines for the NES, 0 (off)
     /// ..=240; clamped on load.
     pub nes_extra_lines: u16,
@@ -411,6 +422,8 @@ impl Default for GameSettings {
             sa1_overclock: false,
             sa1_overclock_pct: CLOCK_PCT_DEFAULT,
             sa1_overclock_mode: OverclockMode::Governed,
+            snes_interpolation: false,
+            snes_interpolation_mode: rf_snes::apu::dsp::Interpolation::Cubic,
             nes_extra_lines: 0,
             run_ahead: 0,
             hd_mode7: false,
@@ -517,6 +530,7 @@ impl GameSettings {
             ("superfx_overclock", self.superfx_overclock),
             ("cpu_overclock", self.cpu_overclock),
             ("sa1_overclock", self.sa1_overclock),
+            ("snes_interpolation", self.snes_interpolation),
             ("hd_mode7", self.hd_mode7),
             ("hd_mode7_supersample", self.hd_mode7_supersample),
         ] {
@@ -550,6 +564,13 @@ impl GameSettings {
             fields.insert(
                 "superfx_overclock_mode".to_string(),
                 self.superfx_overclock_mode.key().to_string(),
+            );
+        }
+        // Ticket W30-09: the filter is written only when it is not cubic.
+        if self.snes_interpolation_mode != rf_snes::apu::dsp::Interpolation::Cubic {
+            fields.insert(
+                "snes_interpolation_mode".to_string(),
+                self.snes_interpolation_mode.name().to_string(),
             );
         }
         if self.nes_extra_lines > 0 {
@@ -703,6 +724,16 @@ impl GameSettings {
                 "superfx_overclock" => settings.superfx_overclock = value == "true",
                 "cpu_overclock" => settings.cpu_overclock = value == "true",
                 "sa1_overclock" => settings.sa1_overclock = value == "true",
+                "snes_interpolation" => settings.snes_interpolation = value == "true",
+                // Ticket W30-09: an unknown name, or "gaussian" (which is
+                // what OFF means), keeps the default smoother filter.
+                "snes_interpolation_mode" => {
+                    if let Some(mode) = rf_snes::apu::dsp::Interpolation::from_name(value) {
+                        if mode != rf_snes::apu::dsp::Interpolation::Gaussian {
+                            settings.snes_interpolation_mode = mode;
+                        }
+                    }
+                }
                 // Ticket W30-08: whole hundreds, clamped; an unknown mode
                 // keeps the safe default (governed).
                 "cpu_overclock_pct" | "sa1_overclock_pct" => {
@@ -1257,6 +1288,7 @@ mod mode_and_feature_persistence_tests {
             "superfx_overclock_mode",
             "cpu_overclock",
             "sa1_overclock",
+            "snes_interpolation",
             "nes_extra_lines",
             "run_ahead",
             "hd_mode7",
@@ -1281,6 +1313,8 @@ mod mode_and_feature_persistence_tests {
             cpu_overclock_mode: OverclockMode::Fixed,
             sa1_overclock: true,
             sa1_overclock_pct: 400,
+            snes_interpolation: true,
+            snes_interpolation_mode: rf_snes::apu::dsp::Interpolation::Linear,
             nes_extra_lines: 120,
             run_ahead: 2,
             hd_mode7: true,
@@ -1351,6 +1385,28 @@ mod mode_and_feature_persistence_tests {
         assert_eq!(restored.sa1_overclock_pct, 400);
         assert_eq!(restored.sa1_overclock_mode, OverclockMode::Governed);
         assert!(!s.to_text().contains("sa1_overclock_mode"));
+        // Ticket W30-09: the toggle and the filter round-trip; the cubic
+        // default writes no mode key; "gaussian"/junk keep the default.
+        assert!(restored.snes_interpolation);
+        assert_eq!(
+            restored.snes_interpolation_mode,
+            rf_snes::apu::dsp::Interpolation::Linear
+        );
+        let on = GameSettings {
+            snes_interpolation: true,
+            ..GameSettings::default()
+        }
+        .to_text();
+        assert!(on.contains("snes_interpolation=true") && !on.contains("_mode"));
+        for raw in ["gaussian", "bogus"] {
+            let t = GameSettings::from_text(&format!("{MAGIC}\nsnes_interpolation_mode={raw}\n"))
+                .expect("parses");
+            assert_eq!(
+                t.snes_interpolation_mode,
+                rf_snes::apu::dsp::Interpolation::Cubic,
+                "{raw}"
+            );
+        }
         assert_eq!(restored.nes_extra_lines, 120);
         for (raw, want) in [("9999", 400), ("50", 200), ("350", 300), ("x", 200)] {
             let t = GameSettings::from_text(&format!("{MAGIC}\ncpu_overclock_pct={raw}\n"))

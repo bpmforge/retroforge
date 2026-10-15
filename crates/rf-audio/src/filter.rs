@@ -57,11 +57,17 @@ impl Filters {
     /// Filter a block of `i16` samples in place.
     pub fn process_i16(&mut self, samples: &mut [i16]) {
         for sample in samples {
-            let filtered = self.process(f32::from(*sample));
-            #[allow(clippy::cast_possible_truncation)]
-            let clamped = filtered.clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
-            *sample = clamped;
+            *sample = self.process_i16_one(*sample);
         }
+    }
+
+    /// Filter one `i16` sample (ticket W30-09: for callers that interleave
+    /// channels and so hold one chain per channel).
+    pub fn process_i16_one(&mut self, sample: i16) -> i16 {
+        let filtered = self.process(f32::from(sample));
+        #[allow(clippy::cast_possible_truncation)]
+        let clamped = filtered.clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+        clamped
     }
 }
 

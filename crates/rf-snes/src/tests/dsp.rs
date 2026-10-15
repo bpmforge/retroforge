@@ -1079,3 +1079,288 @@ fn pmon_step_is_the_documented_integer_formula() {
     assert_eq!(pmon_step(0x1000, 0x3FFF), 0x1FFC, "factor 0x7FF, exact");
     assert_eq!(pmon_step(0x3000, 0x3FFF), 0x3FFF, "clamped to 14 bits");
 }
+
+// ---- Ticket W30-09: selectable interpolation, stereo mix ----
+
+mod interpolation {
+    use crate::apu::dsp::{interpolate, Dsp, Interpolation};
+    use crate::state::StateOut;
+    use rf_core_api::{StateError, StateWriter};
+
+    struct Bytes(Vec<u8>);
+    impl StateWriter for Bytes {
+        fn write_all(&mut self, b: &[u8]) -> Result<(), StateError> {
+            self.0.extend_from_slice(b);
+            Ok(())
+        }
+    }
+
+    const ALL: [Interpolation; 4] = [
+        Interpolation::Gaussian,
+        Interpolation::Linear,
+        Interpolation::Cubic,
+        Interpolation::Nearest,
+    ];
+
+    /// fullsnes's own "FULL-volume SINE-wave" BRR block (nibbles
+    /// `77997799`, range 12, filter 0), looping on itself at ARAM `$10`.
+    fn aram() -> Vec<u8> {
+        let mut a = vec![0u8; 0x1_0000];
+        a[0x10] = (12 << 4) | 0x03;
+        for (i, b) in a[0x11..0x19].iter_mut().enumerate() {
+            *b = if i % 2 == 0 { 0x77 } else { 0x99 };
+        }
+        a
+    }
+
+    /// Voice 1 playing at 3/4 speed (so the fraction sweeps) with echo send
+    /// on, echo writes enabled, feedback on and a non-zero echo volume.
+    fn dsp(a: &[u8], vol_l: i8, vol_r: i8, mode: Interpolation) -> Dsp {
+        let mut d = Dsp::new();
+        d.interpolation = mode;
+        d.write_register(0x6C, 0x00, a); // unmuted, echo writes enabled
+        d.write_register(0x4D, 0x02, a); // EON: voice 1
+        d.write_register(0x2C, 0x40, a); // EVOL L
+        d.write_register(0x3C, 0x40, a); // EVOL R
+        d.write_register(0x0D, 0x40, a); // EFB
+        d.write_register(0x0F, 0x7F, a); // FIR tap 0
+        d.write_register(0x7D, 0x01, a); // EDL
+        d.write_register(0x6D, 0x02, a); // ESA: page $200
+        d.voices[1].start = 0x10;
+        d.voices[1].loop_addr = 0x10;
+        d.voices[1].vol_left = vol_l;
+        d.voices[1].vol_right = vol_r;
+        d.voices[1].envelope.gain = 0x7F;
+        d.voices[1].pitch = 0x0C00;
+        d.key_on(0x02);
+        d
+    }
+
+    struct Run {
+        out: Vec<(i16, i16)>,
+        aram: Vec<u8>,
+        state: Vec<u8>,
+        regs: Vec<u8>,
+    }
+
+    fn run(mode: Interpolation, vol_l: i8, vol_r: i8) -> Run {
+        let mut a = aram();
+        let mut d = dsp(&a, vol_l, vol_r, mode);
+        let out: Vec<_> = (0..3000).map(|_| d.mix(&mut a)).collect();
+        let mut w = Bytes(Vec::new());
+        d.save(&mut StateOut::new(&mut w)).expect("save");
+        Run {
+            out,
+            aram: a,
+            state: w.0,
+            regs: d.regs.to_vec(),
+        }
+    }
+
+    /// Ticket W30-09 mode invariant at the DSP: whichever interpolation is
+    /// chosen, everything the machine owns (ARAM including the echo
+    /// buffer, the saved DSP state, the register file with OUTX/ENVX) is
+    /// byte-identical to the hardware-Gaussian run; only the main output
+    /// differs for the non-Gaussian modes.
+    #[test]
+    fn machine_state_is_identical_across_modes_but_output_differs() {
+        let base = run(Interpolation::Gaussian, 100, 100);
+        assert!(
+            base.out.iter().any(|&(l, _)| l.abs() > 100),
+            "vacuous: the voice must actually make sound"
+        );
+        assert!(
+            base.aram[0x200..0x208].iter().any(|&b| b != 0),
+            "vacuous: the echo must actually write ARAM"
+        );
+        for mode in [
+            Interpolation::Linear,
+            Interpolation::Cubic,
+            Interpolation::Nearest,
+        ] {
+            let r = run(mode, 100, 100);
+            assert_eq!(r.aram, base.aram, "{mode:?}: ARAM (echo) must not change");
+            assert_eq!(r.state, base.state, "{mode:?}: saved DSP state");
+            assert_eq!(r.regs, base.regs, "{mode:?}: registers (OUTX/ENVX)");
+            assert_ne!(r.out, base.out, "{mode:?}: the main output must differ");
+        }
+    }
+
+    /// Without any opt-in the DSP is the hardware Gaussian one.
+    #[test]
+    fn gaussian_is_the_default() {
+        assert_eq!(Interpolation::default(), Interpolation::Gaussian);
+        assert_eq!(Dsp::new().interpolation, Interpolation::Gaussian);
+        let explicit = run(Interpolation::Gaussian, 100, 100);
+        let mut a = aram();
+        let mut d = dsp(&a, 100, 100, Interpolation::Gaussian);
+        d.interpolation = Dsp::new().interpolation;
+        let out: Vec<_> = (0..3000).map(|_| d.mix(&mut a)).collect();
+        assert_eq!(out, explicit.out);
+    }
+
+    /// A voice panned hard left (L=127, R=0) puts its sound in the left
+    /// channel only, in every mode; the right carries just the echo's
+    /// own (here zero-input) tail, so it stays silent.
+    #[test]
+    fn hard_left_voice_is_left_only() {
+        for mode in ALL {
+            let r = run(mode, 127, 0);
+            let peak_l = r.out.iter().map(|&(l, _)| l.abs()).max().unwrap();
+            let peak_r = r.out.iter().map(|&(_, r)| r.abs()).max().unwrap();
+            assert!(
+                peak_l > 500,
+                "{mode:?}: left must carry the voice, {peak_l}"
+            );
+            assert!(peak_r <= 1, "{mode:?}: right must be silent, {peak_r}");
+        }
+    }
+
+    /// The interpolators agree with the hardware filter's shape: constant
+    /// in is constant out, and they sit between neighbours on a ramp.
+    #[test]
+    fn alternatives_pass_dc_and_stay_between_neighbours() {
+        for mode in ALL {
+            for f in [0u16, 0x400, 0x800, 0xFFF] {
+                let out = interpolate(mode, &[1000; 4], f);
+                assert!((i32::from(out) - 1000).abs() <= 4, "{mode:?} {f:#X}: {out}");
+            }
+            let mid = interpolate(mode, &[0, 0, 1000, 1000], 0x800);
+            assert!((0..=1000).contains(&mid), "{mode:?}: {mid}");
+        }
+        // Linear is exact at the ends of its interval; Nearest picks a side.
+        assert_eq!(
+            interpolate(Interpolation::Linear, &[7, 100, 300, 9], 0),
+            100
+        );
+        assert_eq!(
+            interpolate(Interpolation::Linear, &[7, 100, 300, 9], 0x800),
+            200
+        );
+        assert_eq!(
+            interpolate(Interpolation::Nearest, &[7, 100, 300, 9], 0x7FF),
+            100
+        );
+        assert_eq!(
+            interpolate(Interpolation::Nearest, &[7, 100, 300, 9], 0x800),
+            300
+        );
+        // Catmull-Rom passes through its interval's end samples.
+        assert_eq!(interpolate(Interpolation::Cubic, &[7, 100, 300, 9], 0), 100);
+    }
+
+    /// Ticket W30-09 end to end through the core: with a voice playing,
+    /// the whole machine (every save-state region) is byte-identical across
+    /// interpolation modes, the stereo and mono paths agree on length, the
+    /// mono path ignores the mode's left/right split, and a hard-left voice
+    /// is left-only in the stereo frames.
+    #[test]
+    fn core_state_is_mode_invariant_and_stereo_matches_mono_length() {
+        use crate::core::SnesCore;
+        use crate::state::StateRegion;
+        use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, PpuPixel, Step};
+
+        #[derive(Default)]
+        struct Sink {
+            stereo: bool,
+            mono: Vec<i16>,
+            frames: Vec<[i16; 2]>,
+        }
+        impl CoreSink for Sink {
+            fn video_scanline(&mut self, _y: u16, _p: &[PpuPixel]) {}
+            fn audio(&mut self, s: &[i16]) {
+                self.mono.extend_from_slice(s);
+            }
+            fn wants_stereo(&self) -> bool {
+                self.stereo
+            }
+            fn audio_stereo(&mut self, f: &[[i16; 2]]) {
+                self.frames.extend_from_slice(f);
+            }
+            fn event(&mut self, _e: CoreEvent) {}
+        }
+
+        // A bare LoROM that just spins (`BRA *`), reset vector $8000.
+        let mut rom = vec![0u8; 0x8000];
+        rom[0] = 0x80;
+        rom[1] = 0xFE;
+        rom[0x7FC0 + 0x15] = 0x20;
+        rom[0x7FC0 + 0x17] = 6;
+        rom[0x7FFC] = 0x00;
+        rom[0x7FFD] = 0x80;
+
+        let run = |mode: Interpolation, stereo: bool| {
+            let mut core = SnesCore::load(&rom).expect("loads");
+            core.set_interpolation(mode);
+            {
+                let apu = &mut core.system_mut().bus.apu;
+                apu.aram[0x10] = (12 << 4) | 0x03;
+                for (i, b) in apu.aram[0x11..0x19].iter_mut().enumerate() {
+                    *b = if i % 2 == 0 { 0x77 } else { 0x99 };
+                }
+                let aram = apu.aram.clone();
+                let d = &mut apu.dsp;
+                d.write_register(0x6C, 0x20, &aram);
+                d.voices[1].start = 0x10;
+                d.voices[1].loop_addr = 0x10;
+                d.voices[1].vol_left = 127;
+                d.voices[1].vol_right = 0;
+                d.voices[1].envelope.gain = 0x7F;
+                d.voices[1].pitch = 0x0C00;
+                d.key_on(0x02);
+            }
+            let mut sink = Sink {
+                stereo,
+                ..Sink::default()
+            };
+            for _ in 0..6 {
+                let _ = core.step(Step::Frame, &mut sink);
+            }
+            let mut h = Vec::new();
+            for region in StateRegion::ALL {
+                struct W<'a>(&'a mut Vec<u8>);
+                impl rf_core_api::StateWriter for W<'_> {
+                    fn write_all(&mut self, b: &[u8]) -> Result<(), rf_core_api::StateError> {
+                        self.0.extend_from_slice(b);
+                        Ok(())
+                    }
+                }
+                core.system()
+                    .save_region(region, &mut W(&mut h))
+                    .expect("save");
+            }
+            (h, sink)
+        };
+
+        let (base_state, base_mono) = run(Interpolation::Gaussian, false);
+        assert!(base_mono.mono.iter().any(|s| s.abs() > 100), "vacuous");
+        let (_, base_st) = run(Interpolation::Gaussian, true);
+        assert_eq!(base_st.frames.len(), base_mono.mono.len());
+        assert!(base_st.mono.is_empty() && base_mono.frames.is_empty());
+        assert!(
+            base_st.frames.iter().any(|f| f[0].abs() > 100),
+            "left carries"
+        );
+        assert!(
+            base_st.frames.iter().all(|f| f[1].abs() <= 1),
+            "right silent"
+        );
+        for mode in [
+            Interpolation::Linear,
+            Interpolation::Cubic,
+            Interpolation::Nearest,
+        ] {
+            let (state, st) = run(mode, true);
+            assert!(state == base_state, "{mode:?}: save-state regions differ");
+            assert_ne!(st.frames, base_st.frames, "{mode:?}: output must differ");
+        }
+    }
+
+    #[test]
+    fn names_round_trip() {
+        for mode in ALL {
+            assert_eq!(Interpolation::from_name(mode.name()), Some(mode));
+        }
+        assert_eq!(Interpolation::from_name("bogus"), None);
+    }
+}

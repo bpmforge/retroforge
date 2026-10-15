@@ -49,6 +49,9 @@ pub fn describe(id: &str) -> &'static str {
             "Removes slowdown by giving the SA-1 chip more speed only when the game needs it."
         }
         "nes_extra_lines" => "Removes slowdown by giving the processor extra time between frames.",
+        "snes_interpolation" => {
+            "Smooths the SNES's sound with a gentler filter than the original chip's."
+        }
         _ => "An enhancement.",
     }
 }
@@ -71,6 +74,7 @@ pub fn works_on_any_game(id: &str) -> bool {
             | "run_ahead"
             | "hd_mode7"
             | "hd2d_lens"
+            | "snes_interpolation"
     )
 }
 
@@ -104,6 +108,7 @@ pub const fn player_name(id: &str) -> &'static str {
         b"run_ahead" => "Less input lag",
         b"hd_mode7" => "Sharper Mode 7",
         b"hd2d_lens" => "Lens and lighting",
+        b"snes_interpolation" => "Smoother sound",
         _ => "Enhancement",
     }
 }
