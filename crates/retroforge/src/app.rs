@@ -707,7 +707,7 @@ pub struct RetroForgeApp {
     /// Ticket W30-01: the Super FX overclock percent last sent to the core
     /// (`None` = nothing yet for this core), whether the loaded cartridge
     /// has a Super FX, and the matched profile's `[overclock].superfx_max`.
-    superfx_sent: Option<u16>,
+    gsu_clock_sent: Option<crate::clock_governor::ClockPolicy>,
     /// Ticket W30-07: the run-ahead frames last sent to the core.
     run_ahead_sent: Option<u8>,
     /// Ticket W30-02: the HD Mode 7 options last sent to the core
@@ -1587,7 +1587,7 @@ impl RetroForgeApp {
             osd: crate::toast::ToastStack::osd(),
             loading_waits: Vec::new(),
             loading_sent: None,
-            superfx_sent: None,
+            gsu_clock_sent: None,
             run_ahead_sent: None,
             hd_mode7_sent: None,
             superfx_cart: false,
@@ -3635,7 +3635,7 @@ impl RetroForgeApp {
                 .map_or_else(|| bytes.clone(), |_| bytes[16..].to_vec()),
         );
         self.loading_sent = None;
-        self.superfx_sent = None;
+        self.gsu_clock_sent = None;
         self.run_ahead_sent = None;
         self.hd_mode7_sent = None;
         self.superfx_cart = matches!(
@@ -8080,31 +8080,6 @@ impl RetroForgeApp {
                         ))
                         .color(tokens.muted),
                 );
-                // Ticket W30-01: the overclock amount and its caveat.
-                if row.id == "superfx_overclock" && row.enabled {
-                    if ui
-                        .add(
-                            egui::Slider::new(
-                                &mut self.current_game_settings.superfx_overclock_pct,
-                                200..=self.superfx_cap.unwrap_or(800).max(200),
-                            )
-                            .step_by(100.0)
-                            .suffix("%"),
-                        )
-                        .changed()
-                    {
-                        actions.settings_changed = true;
-                    }
-                    ui.label(
-                        egui::RichText::new(
-                            "Some games run faster than intended at higher speeds.",
-                        )
-                        .font(egui::FontId::proportional(
-                            crate::theme::type_scale::CAPTION,
-                        ))
-                        .color(tokens.warn),
-                    );
-                }
                 // Ticket W30-08: each clock's ceiling, mode and live status,
                 // and the NES line count.
                 if row.enabled {
@@ -8127,6 +8102,14 @@ impl RetroForgeApp {
                             &mut settings.sa1_overclock_mode,
                             facts.sa1_max,
                             governors.sa1.as_ref(),
+                            muted,
+                        ),
+                        "superfx_overclock" => crate::overclock_ui::clock_controls(
+                            ui,
+                            &mut settings.superfx_overclock_pct,
+                            &mut settings.superfx_overclock_mode,
+                            facts.superfx_max,
+                            governors.gsu.as_ref(),
                             muted,
                         ),
                         "nes_extra_lines" => crate::overclock_ui::nes_lines_controls(
@@ -14078,32 +14061,8 @@ impl RetroForgeApp {
         }
     }
 
-    /// Ticket W30-01: keep the core's Super FX clock matching the overclock
-    /// row's EFFECTIVE state (Enhanced mode, Super FX cartridge, toggle on),
-    /// capped by the matched profile's `[overclock].superfx_max`; sends only
-    /// on a change.
-    fn sync_superfx_overclock(&mut self) {
-        if self.core.is_none() {
-            return;
-        }
-        let on = crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
-            .iter()
-            .any(|r| r.id == "superfx_overclock" && r.effective());
-        let want = if on {
-            self.current_game_settings
-                .superfx_overclock_pct
-                .min(self.superfx_cap.unwrap_or(800))
-        } else {
-            100
-        };
-        if self.superfx_sent != Some(want) {
-            self.send_command(CoreCommand::SetGsuOverclock(want));
-            self.superfx_sent = Some(want);
-        }
-    }
-
-    /// Ticket W30-08: keep the core's CPU and SA-1 clock policies and the NES
-    /// extra-line count matching the rows' EFFECTIVE state (Enhanced mode,
+    /// Ticket W30-08 / W30-01c: keep the core's CPU, SA-1 and Super FX clock
+    /// policies and the NES extra-line count matching the rows' EFFECTIVE state (Enhanced mode,
     /// the right console or chip, toggle on), capped by the matched
     /// profile's `[overclock]` keys; sends only on a change. The slider is
     /// the governor's ceiling (Governed, the default) or the fixed speed.
@@ -14137,6 +14096,14 @@ impl RetroForgeApp {
             s.sa1_overclock_mode,
             facts.sa1_max,
         );
+        // Ticket W30-01c: the Super FX joins the governor; the profile's
+        // `superfx_max` is its cap, as before.
+        let gsu = policy(
+            effective("superfx_overclock"),
+            s.superfx_overclock_pct,
+            s.superfx_overclock_mode,
+            facts.superfx_max,
+        );
         let lines = if effective("nes_extra_lines") {
             s.nes_extra_lines.min(facts.nes_lines_max)
         } else {
@@ -14155,6 +14122,13 @@ impl RetroForgeApp {
                 sa1,
             ));
             self.sa1_clock_sent = Some(sa1);
+        }
+        if self.gsu_clock_sent != Some(gsu) {
+            self.send_command(CoreCommand::SetClockPolicy(
+                crate::clock_governor::ClockChip::Gsu,
+                gsu,
+            ));
+            self.gsu_clock_sent = Some(gsu);
         }
         if self.nes_lines_sent != Some(lines) {
             self.send_command(CoreCommand::SetNesExtraLines(lines));
@@ -15065,7 +15039,6 @@ impl eframe::App for RetroForgeApp {
         self.poll_app_hotkeys(&ctx);
         self.poll_recording(&ctx);
         self.sync_loading(&ctx);
-        self.sync_superfx_overclock();
         self.sync_clocks();
         self.sync_hd_mode7();
         self.sync_run_ahead();

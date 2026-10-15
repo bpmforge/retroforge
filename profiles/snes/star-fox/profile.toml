@@ -1,0 +1,37 @@
+# Star Fox - made by RetroForge's profile census, then given its one
+# speed-governor row by hand (W30-01c).
+#
+# These dumps' identity comes from hashing them (No-Intro "Star Fox (USA)"
+# and "(Rev 1)"). The only row is `[overclock].tick_counter`, so the Super FX
+# overclock can be governed; no RAM map, no camera.
+
+[meta]
+profile_version = "0.1"
+title = "Star Fox"
+console = "snes"
+region = "ntsc"
+authors = ["RetroForge profile census"]
+sources = []
+
+[[identity]]
+sha256 = "3857b5294ea8f7468849437bb2d8271564e8a0ff30774622e9c872bcbd53a84d"
+sha1 = "1f5355534ccfaf26ae6c8f055f3e4768f9d72a7e"
+md5 = "9dce6a9dcbe4e304d67b9e8fd8999e7e"
+crc32 = "0bae0941"
+revision = "Star Fox (USA), No-Intro"
+
+[[identity]]
+sha256 = "34dfe668ec1a19594738a0f865b8b5778f62674ae8eaa01619dc3bd6d7460bfd"
+sha1 = "1d1ccfff6b4eb5389c28a91f754c12b7614158c3"
+md5 = "5c911468efdcb9e3c6a7c4ddd0740550"
+crc32 = "b18676b2"
+revision = "Star Fox (USA) (Rev 1), No-Intro"
+
+[capabilities]
+full_level = false
+hud_separation = false
+entity_overlay = false
+
+[overclock]
+# Found by observation 2026-10-15 (W30-00 probe): a WRAM byte that steps once per game tick — ~3/s, 5-6/s, 8-9/s at GSU 100/200/400% before the W30-00 fix, ~18/s at 100% after it.
+tick_counter = 0x7E15BD

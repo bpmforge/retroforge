@@ -248,6 +248,10 @@ pub struct GameSettings {
     /// [`Self::superfx_overclock`] is on. Valid 200..=800 in steps of 100;
     /// clamped on load. Defaults to 200.
     pub superfx_overclock_pct: u16,
+    /// Ticket W30-01c: whether the speed governor chooses the Super FX
+    /// clock (the default; [`Self::superfx_overclock_pct`] is then its
+    /// ceiling) or it is fixed at that speed.
+    pub superfx_overclock_mode: OverclockMode,
     /// Ticket W30-08: run the SNES main CPU (65816) faster to remove
     /// slowdown. A simulation change by design, so off by default (law 6)
     /// and Enhanced-only. [`Self::cpu_overclock_pct`] is the ceiling
@@ -400,6 +404,7 @@ impl Default for GameSettings {
             loading_fast_forward: false,
             superfx_overclock: false,
             superfx_overclock_pct: SUPERFX_PCT_DEFAULT,
+            superfx_overclock_mode: OverclockMode::Governed,
             cpu_overclock: false,
             cpu_overclock_pct: CLOCK_PCT_DEFAULT,
             cpu_overclock_mode: OverclockMode::Governed,
@@ -530,6 +535,7 @@ impl GameSettings {
         // Ticket W30-08: only what differs from the default (200%,
         // governed, no extra lines).
         for (key, pct, mode) in [
+            // Ticket W30-01c: the Super FX's pct is written above.
             ("cpu", self.cpu_overclock_pct, self.cpu_overclock_mode),
             ("sa1", self.sa1_overclock_pct, self.sa1_overclock_mode),
         ] {
@@ -539,6 +545,12 @@ impl GameSettings {
             if mode != OverclockMode::Governed {
                 fields.insert(format!("{key}_overclock_mode"), mode.key().to_string());
             }
+        }
+        if self.superfx_overclock_mode != OverclockMode::Governed {
+            fields.insert(
+                "superfx_overclock_mode".to_string(),
+                self.superfx_overclock_mode.key().to_string(),
+            );
         }
         if self.nes_extra_lines > 0 {
             fields.insert(
@@ -703,12 +715,12 @@ impl GameSettings {
                         }
                     }
                 }
-                "cpu_overclock_mode" | "sa1_overclock_mode" => {
+                "cpu_overclock_mode" | "sa1_overclock_mode" | "superfx_overclock_mode" => {
                     if let Some(mode) = OverclockMode::from_key(value) {
-                        if key == "cpu_overclock_mode" {
-                            settings.cpu_overclock_mode = mode;
-                        } else {
-                            settings.sa1_overclock_mode = mode;
+                        match key {
+                            "cpu_overclock_mode" => settings.cpu_overclock_mode = mode,
+                            "sa1_overclock_mode" => settings.sa1_overclock_mode = mode,
+                            _ => settings.superfx_overclock_mode = mode,
                         }
                     }
                 }
@@ -1242,6 +1254,7 @@ mod mode_and_feature_persistence_tests {
             "mode7_ground",
             "superfx_overclock",
             "superfx_overclock_pct",
+            "superfx_overclock_mode",
             "cpu_overclock",
             "sa1_overclock",
             "nes_extra_lines",
@@ -1262,6 +1275,7 @@ mod mode_and_feature_persistence_tests {
             mode7_ground: true,
             superfx_overclock: true,
             superfx_overclock_pct: 400,
+            superfx_overclock_mode: OverclockMode::Fixed,
             cpu_overclock: true,
             cpu_overclock_pct: 300,
             cpu_overclock_mode: OverclockMode::Fixed,
@@ -1321,6 +1335,14 @@ mod mode_and_feature_persistence_tests {
         }
         assert!(restored.superfx_overclock);
         assert_eq!(restored.superfx_overclock_pct, 400);
+        // Ticket W30-01c: the Super FX mode round-trips; governed writes no key.
+        assert_eq!(restored.superfx_overclock_mode, OverclockMode::Fixed);
+        assert!(!GameSettings {
+            superfx_overclock_mode: OverclockMode::Governed,
+            ..s.clone()
+        }
+        .to_text()
+        .contains("superfx_overclock_mode"));
         // Ticket W30-08: the trio and the line count round-trip; the
         // governed default writes no mode key; junk clamps or is ignored.
         assert!(restored.cpu_overclock && restored.sa1_overclock);
