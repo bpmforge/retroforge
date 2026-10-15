@@ -15,6 +15,11 @@
 //!   frames with Start held for 4 frames every 2 s; per second (60 frames)
 //!   it prints how many frames reported idle, at CPU 100% and 200% — and,
 //!   for an SA-1 cartridge, with the SA-1 at 100% and 200% instead.
+//! - `RF_GSU_GOV_ROMS` (`:`-separated Super FX dumps, W30-01c): the Super FX
+//!   under the speed governor, fed a profile's `tick_counter` (a WRAM byte
+//!   that steps once per game tick; `RF_GSU_TICK_ADDR`, default
+//!   `0x7E15BD`, Star Fox). Per dump, 3600 frames with the census Start
+//!   pattern AND with no input, at GSU 100% and governed up to 800%.
 
 use std::io::Read;
 use std::path::Path;
@@ -362,5 +367,131 @@ fn speed_governor_on_real_cartridges() {
             over, 0,
             "{n}: the governor made the game faster than normal"
         );
+    }
+}
+
+/// W30-01c: one Super FX run. `ceiling` `None` is plain 100%; `Some` runs a
+/// [`SpeedGovernor`] up to that ceiling on the GSU, fed the profile's tick
+/// counter (the byte at `tick_addr` having moved by +1 since the previous
+/// frame) and the picture-changed flag, as the shell's core thread does.
+/// `start` presses Start on the census pattern; otherwise no input.
+fn gsu_run(
+    bytes: &[u8],
+    ceiling: Option<u16>,
+    tick_addr: usize,
+    start: bool,
+    frames: u32,
+) -> GovRun {
+    use rf_enhance::speed_governor::{Observation, SpeedGovernor};
+    let mut core = SnesCore::load(bytes).expect("dump loads");
+    assert!(core.has_gsu(), "RF_GSU_GOV_ROMS lists a non-Super FX dump");
+    let mut governor = ceiling.map(|c| SpeedGovernor::new(c, None));
+    let mut sink = FrameHasher::new();
+    let (mut last, mut last_counter) = (0, None);
+    let mut ticks = vec![0u32; (frames as usize).div_ceil(60)];
+    let mut multipliers = vec![100u16; ticks.len()];
+    for f in 0..frames {
+        if start {
+            press_start(&mut core, f);
+        }
+        let _ = core.step(Step::Frame, &mut sink);
+        let picture = sink.take();
+        let now = core.system().bus.wram[tick_addr & 0x1_FFFF];
+        let tick = last_counter == Some(now.wrapping_sub(1));
+        last_counter = Some(now);
+        let obs = Observation {
+            tick,
+            picture_changed: picture != last,
+        };
+        last = picture;
+        let second = (f / 60) as usize;
+        ticks[second] += u32::from(tick);
+        if let Some(g) = governor.as_mut() {
+            let m = g.observe(obs);
+            core.set_gsu_overclock(m);
+            multipliers[second] = m;
+        }
+    }
+    GovRun {
+        ticks_per_second: ticks,
+        multiplier_per_second: multipliers,
+        status: governor.map(|g| g.status()),
+    }
+}
+
+/// W30-01c: the Super FX under the speed governor on real cartridges (Star
+/// Fox, with its `[overclock].tick_counter`). For each dump and each input
+/// (census Start pattern, then none), prints per-second tick counts at 100%
+/// and governed (ceiling 800%), the target, the multiplier timeline and the
+/// seconds below the target; asserts the governed run never ticks above
+/// target+1 in a second where 100% was at the target (within
+/// one tick of it; a scene that ticks faster than the target on its own, such
+/// as a menu counting every frame, is the game's rate, not the governor's).
+#[test]
+fn superfx_governor_on_real_cartridges() {
+    let Some(paths) = list("RF_GSU_GOV_ROMS") else {
+        return;
+    };
+    let frames: u32 = std::env::var("RF_GOV_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3600);
+    // The WRAM address of the tick byte (bus address 0x7Exxxx -> WRAM offset).
+    let tick_addr = std::env::var("RF_GSU_TICK_ADDR")
+        .ok()
+        .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(0x7E_15BD);
+    let offset = (tick_addr - 0x7E_0000) as usize;
+    for path in paths {
+        let n = name(&path);
+        let Some(bytes) = rom_bytes(Path::new(&path)) else {
+            println!("{n}: no cartridge found, skipped");
+            continue;
+        };
+        for (input, start) in [("Start pattern", true), ("no input", false)] {
+            let plain = gsu_run(&bytes, None, offset, start, frames);
+            let gov = gsu_run(&bytes, Some(800), offset, start, frames);
+            let status = gov.status.expect("governed run reports");
+            println!("{n} [{input}]: 100% ticks/s : {:?}", plain.ticks_per_second);
+            println!(
+                "{n} [{input}]: governed ticks/s: {:?}",
+                gov.ticks_per_second
+            );
+            println!(
+                "{n} [{input}]: multiplier/s  : {:?}",
+                gov.multiplier_per_second
+            );
+            println!(
+                "{n} [{input}]: target {:?} ({:?}), notice {:?}, final {}%",
+                status.target, status.target_source, status.notice, status.multiplier
+            );
+            let Some(target) = status.target else {
+                println!("{n} [{input}]: no target learned, governor held 100%");
+                assert!(
+                    gov.multiplier_per_second.iter().all(|m| *m == 100),
+                    "{n}: no target, no overclock"
+                );
+                continue;
+            };
+            let below = |run: &GovRun| {
+                run.ticks_per_second
+                    .iter()
+                    .filter(|t| **t + 2 <= target)
+                    .count()
+            };
+            let over = plain
+                .ticks_per_second
+                .iter()
+                .zip(&gov.ticks_per_second)
+                .filter(|(p, g)| (target..=target + 1).contains(*p) && **g > target + 1)
+                .count();
+            println!(
+                "{n} [{input}]: seconds below target {target}: 100% = {}, governed = {}; \
+                 governed above target in {over} seconds that 100% hit it",
+                below(&plain),
+                below(&gov)
+            );
+            assert_eq!(over, 0, "{n} [{input}]: the governor made the game faster");
+        }
     }
 }

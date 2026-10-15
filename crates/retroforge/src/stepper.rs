@@ -1182,6 +1182,15 @@ impl EmuStepper {
         }
     }
 
+    /// Ticket W30-01c: the Super FX clock in force (100 without one).
+    #[must_use]
+    pub fn gsu_overclock(&self) -> u16 {
+        match &self.machine {
+            Machine::Snes(core) => core.gsu_overclock(),
+            Machine::Nes(_) => 100,
+        }
+    }
+
     #[must_use]
     pub fn sa1_overclock(&self) -> u16 {
         match &self.machine {

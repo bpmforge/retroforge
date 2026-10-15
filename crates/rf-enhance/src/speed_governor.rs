@@ -73,8 +73,9 @@ use std::collections::VecDeque;
 pub const NOTCH: u16 = 100;
 /// The clock the console shipped with.
 pub const NORMAL: u16 = 100;
-/// The highest multiplier any governor will ask for.
-pub const MAX_CEILING: u16 = 400;
+/// The highest multiplier any governor will ask for (the Super FX goes to
+/// 800%; the callers cap the 65816 and the SA-1 at 400% themselves).
+pub const MAX_CEILING: u16 = 800;
 
 /// Frames in the tick-rate window ("ticks over the last 60 frames").
 pub const RATE_WINDOW: usize = 60;
@@ -199,7 +200,7 @@ pub struct SpeedGovernor {
 
 impl SpeedGovernor {
     /// A governor at normal speed with the given ceiling (percent; clamped
-    /// to a whole multiple of 100 in 100..=400) and an optional profile
+    /// to a whole multiple of 100 in 100..=800) and an optional profile
     /// target (ticks per second).
     #[must_use]
     pub fn new(ceiling: u16, profile_target_hz: Option<u32>) -> Self {

@@ -2,8 +2,8 @@
 //!
 //! [`rf_enhance::speed_governor::SpeedGovernor`] is pure: it is fed one
 //! observation per real frame and answers with a multiplier. This module
-//! owns what it cannot: one governor per overclocked chip (the S-CPU and the
-//! SA-1), the tick signal and the picture-changed signal it is fed from, and
+//! owns what it cannot: one governor per overclocked chip (the S-CPU, the
+//! SA-1 and the Super FX), the tick signal and the picture-changed signal it is fed from, and
 //! applying the answer to the machine.
 //!
 //! It lives on the CORE thread because only that thread sees every real
@@ -34,6 +34,8 @@ pub enum ClockChip {
     Cpu,
     /// The SA-1 coprocessor.
     Sa1,
+    /// The Super FX (GSU) coprocessor (W30-01c); up to 800%.
+    Gsu,
 }
 
 /// How one chip's clock is chosen.
@@ -63,6 +65,7 @@ pub struct ClockSignal {
 pub struct GovernorReport {
     pub cpu: Option<GovernorStatus>,
     pub sa1: Option<GovernorStatus>,
+    pub gsu: Option<GovernorStatus>,
 }
 
 #[derive(Debug, Default)]
@@ -118,6 +121,7 @@ impl Chip {
 pub struct ClockGovernors {
     cpu: Chip,
     sa1: Chip,
+    gsu: Chip,
     signal: ClockSignal,
     last_counter: Option<u8>,
     last_picture: Option<u64>,
@@ -130,6 +134,7 @@ impl ClockGovernors {
         match chip {
             ClockChip::Cpu => self.cpu.set_policy(policy, signal),
             ClockChip::Sa1 => self.sa1.set_policy(policy, signal),
+            ClockChip::Gsu => self.gsu.set_policy(policy, signal),
         }
         self.apply(stepper);
     }
@@ -141,7 +146,7 @@ impl ClockGovernors {
             self.last_counter = None;
         }
         self.signal = signal;
-        for chip in [&mut self.cpu, &mut self.sa1] {
+        for chip in [&mut self.cpu, &mut self.sa1, &mut self.gsu] {
             if let Some(g) = chip.governor.as_mut() {
                 g.set_profile_target(signal.target_hz);
             }
@@ -151,7 +156,7 @@ impl ClockGovernors {
     /// Whether any governor needs the picture and tick of each real frame.
     #[must_use]
     pub fn wants_observation(&self) -> bool {
-        self.cpu.governed() || self.sa1.governed()
+        self.cpu.governed() || self.sa1.governed() || self.gsu.governed()
     }
 
     /// Feed one real frame. `picture` is the frame's resolved RGBA.
@@ -165,7 +170,7 @@ impl ClockGovernors {
             tick,
             picture_changed,
         };
-        for chip in [&mut self.cpu, &mut self.sa1] {
+        for chip in [&mut self.cpu, &mut self.sa1, &mut self.gsu] {
             if chip.governed() {
                 if let Some(g) = chip.governor.as_mut() {
                     g.observe(obs);
@@ -193,6 +198,7 @@ impl ClockGovernors {
         GovernorReport {
             cpu: status(&self.cpu),
             sa1: status(&self.sa1),
+            gsu: status(&self.gsu),
         }
     }
 
@@ -225,6 +231,11 @@ impl ClockGovernors {
         if sa1 != self.sa1.applied || !self.sa1.governed() && sa1 != stepper.sa1_overclock() {
             stepper.set_sa1_overclock(sa1);
             self.sa1.applied = sa1;
+        }
+        let gsu = self.gsu.wanted();
+        if gsu != self.gsu.applied || !self.gsu.governed() && gsu != stepper.gsu_overclock() {
+            stepper.set_gsu_overclock(gsu);
+            self.gsu.applied = gsu;
         }
     }
 }
@@ -335,6 +346,16 @@ mod tests {
         assert_eq!(stepper.cpu_overclock(), 300);
         clocks.set_policy(ClockChip::Sa1, ClockPolicy::Fixed(200), &mut stepper);
         assert_eq!(stepper.sa1_overclock(), 200);
+        // The Super FX is a no-op on this cartridge, but the policy is held
+        // and governed like the others (W30-01c).
+        clocks.set_policy(
+            ClockChip::Gsu,
+            ClockPolicy::Governed { ceiling: 800 },
+            &mut stepper,
+        );
+        assert!(clocks.report().gsu.is_some());
+        clocks.set_policy(ClockChip::Gsu, ClockPolicy::Off, &mut stepper);
+        assert!(clocks.report().gsu.is_none());
         // Governed starts at stock speed, whatever the ceiling.
         clocks.set_policy(
             ClockChip::Cpu,

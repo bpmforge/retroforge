@@ -582,16 +582,11 @@ pub enum CoreCommand {
     /// produce a `CoreEvent::Frame`; the next running/stepped frame simply
     /// reflects the new setting.
     SetSpriteOverlay(bool),
-    /// Ticket W30-01: Super FX overclock, in percent (100 = stock). A
-    /// simulation change by design (unlike every presentation command), so
-    /// the shell only sends a value above 100 when the Enhanced-only
-    /// "Super FX overclock" row is effective. A no-op without a Super FX.
-    SetGsuOverclock(u16),
     /// Ticket W30-08: one chip's clock policy -- off, fixed at a speed, or
-    /// governed (the speed governor chooses, up to a ceiling). Like
-    /// `SetGsuOverclock` a simulation change by design, so the shell only
-    /// sends anything but `Off` while the Enhanced-only row is effective.
-    /// The governor runs on THIS thread because only it sees every real
+    /// governed (the speed governor chooses, up to a ceiling). A
+    /// simulation change by design, so the shell only sends anything but
+    /// `Off` while the Enhanced-only row is effective (the Super FX,
+    /// W30-01c, included). The governor runs on THIS thread because only it sees every real
     /// frame; its status comes back on [`FrameMsg::governors`].
     SetClockPolicy(
         crate::clock_governor::ClockChip,
@@ -604,7 +599,7 @@ pub enum CoreCommand {
     /// the SNES.
     SetNesExtraLines(u16),
     /// Ticket W30-02: HD Mode 7 options (`None` = off). Presentation only:
-    /// the core's state is never touched, so unlike `SetGsuOverclock` this
+    /// the core's state is never touched, so unlike `SetClockPolicy` this
     /// is safe in any mode; the shell sends `Some` only while the
     /// Enhanced-only "HD Mode 7" row is effective. Turns the frame sink's
     /// BG1 mask capture on and off with it.
@@ -1341,9 +1336,6 @@ fn core_thread_main(
                 }
                 CoreCommand::SetSpriteOverlay(enabled) => {
                     stepper.set_sprite_overlay_enabled(enabled);
-                }
-                CoreCommand::SetGsuOverclock(pct) => {
-                    stepper.set_gsu_overclock(pct);
                 }
                 CoreCommand::SetClockPolicy(chip, policy) => {
                     clocks.set_policy(chip, policy, &mut stepper);

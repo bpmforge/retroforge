@@ -50,9 +50,10 @@ pub fn long_text(id: &str) -> &'static str {
         }
         "superfx_overclock" => {
             "Cartridges with a Super FX chip draw their 3D scenes in software on that chip, \
-             which is why they run at low frame rates. This runs the chip faster so more \
-             frames are drawn. Unlike the other options it changes the simulation, so some \
-             games also run faster than intended; it is off until you turn it on."
+             which is why they run at low frame rates. This gives the chip more speed in the \
+             same way as the CPU option: Governed (the default) only while the game is \
+             running slow, Fixed always, which makes some games run faster than intended. \
+             It changes the simulation, so it is off until you turn it on."
         }
         "cpu_overclock" => {
             "Some SNES games slow down when too much happens at once, because the main \

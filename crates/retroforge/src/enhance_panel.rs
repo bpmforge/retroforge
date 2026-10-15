@@ -40,7 +40,7 @@ pub fn describe(id: &str) -> &'static str {
             "Hides 1-2 frames of the game's own input lag by showing a frame from slightly ahead."
         }
         "superfx_overclock" => {
-            "Runs the Super FX chip faster, so 3D games draw more frames. Some games speed up too \u{2014} turn it off if one does."
+            "Removes slowdown by giving the Super FX chip more speed only when the game needs it."
         }
         "cpu_overclock" => {
             "Removes slowdown by giving the main processor more speed only when the game needs it."

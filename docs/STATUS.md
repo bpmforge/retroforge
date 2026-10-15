@@ -4485,3 +4485,10 @@ stories, 10 decisions).
   byte (a delay-slot IWT read the wrong immediate). Star Fox and Stunt Race FX
   now draw their 3D; Star Fox's tick counter runs ~18/s (was ~3). Open:
   Yoshi's Island's intro text box shows striped bars.
+- **W30-01c — Super FX overclock governed** (2026-10-15). Super FX row is
+  Governed by default (Fixed advanced) through the CPU/SA-1 governor; Star Fox
+  profile added with observed tick counter 7E15BD. Never ticks above normal in
+  any run. Star Fox no-input: 43 -> 40 seconds below target (learned 60/s);
+  Start pattern: 45 vs 46 (learned 30/s). 7E15BD runs ~60/s in attract scenes
+  and 15-30/s in play, so a `target_tick_hz` for Star Fox would help. Gate:
+  workspace **2744 passing**.
