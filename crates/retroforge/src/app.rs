@@ -663,6 +663,19 @@ pub struct RetroForgeApp {
     fog_started: Option<std::time::Instant>,
     fog_scroll: Option<((i64, i64), std::time::Instant)>,
     fog_drift: (f32, f32),
+    /// Ticket W30-04: the HD-2D lens pass over the live picture (built on
+    /// first use), its own budget gate, whether it failed, the "follow my
+    /// clock" reader, and whether the core is currently asked for the
+    /// sprite layer on the shadows' behalf (see
+    /// [`Self::sync_diorama_subscription`], which shares that extraction).
+    lens_pass: Option<rf_renderer::lens::LensPass>,
+    lens_budget: rf_renderer::fog::BudgetGate,
+    lens_failed: bool,
+    lens_clock: crate::lens_view::LensClock,
+    lens_shadows_wanted: bool,
+    /// Ticket W30-04 (tests): how many core commands other than the
+    /// layer-extraction toggle have been sent, to prove the lens sends none.
+    core_commands_sent: std::sync::atomic::AtomicU64,
     /// Ticket W20-17: HUD separation — the separator built from the
     /// matched profile's `[camera.hud]` (`None` without one), why that
     /// declaration could not be used (if so), and the band last cut from
@@ -1593,6 +1606,12 @@ impl RetroForgeApp {
             fog_started: None,
             fog_scroll: None,
             fog_drift: (0.0, 0.0),
+            lens_pass: None,
+            lens_budget: rf_renderer::fog::BudgetGate::new(),
+            lens_failed: false,
+            lens_clock: crate::lens_view::LensClock::default(),
+            lens_shadows_wanted: false,
+            core_commands_sent: std::sync::atomic::AtomicU64::new(0),
             hud_separator: None,
             hud_error: None,
             hud_band: None,
@@ -3808,6 +3827,9 @@ impl RetroForgeApp {
                 // still read Available from the PREVIOUS game's BG mode 7.
                 self.mode7_seen = false;
                 self.mode7_ground_wanted = false;
+                // Ticket W30-04: a fresh core has layer extraction off, so
+                // the shadows' want re-arms it on the next repaint.
+                self.lens_shadows_wanted = false;
                 self.mode7_plane_cache = None;
                 // Ticket W21-06: the game's name, never a filesystem path
                 // (principle 9 — a temp path is not player copy).
@@ -3824,6 +3846,10 @@ impl RetroForgeApp {
     }
 
     fn send_command(&self, cmd: CoreCommand) {
+        if !matches!(cmd, CoreCommand::SetLayerExtraction(_)) {
+            self.core_commands_sent
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(core) = &self.core {
             // The core thread only ever disappears if it already crashed
             // (FM-01) and drained its channel; a send failing here just
@@ -4309,6 +4335,74 @@ impl RetroForgeApp {
                 Some(out) => (out.as_slice(), dw, dh),
                 None => (displayed, dw, dh),
             };
+            // Ticket W30-04: the HD-2D lens over the picture the player
+            // sees -- after fog, before peek and the shader, and never over
+            // the compare pair. Presentation only: it reads this frame's
+            // bytes and sends the core nothing. Its own budget gate and
+            // error path mirror fog's.
+            let lensed = match &self.gpu {
+                Some(gpu) if compare_rgba.is_none() && self.lens_effective() => {
+                    let (w32, h32) = (
+                        u32::try_from(dw).unwrap_or(0),
+                        u32::try_from(dh).unwrap_or(0),
+                    );
+                    let settings = &self.current_game_settings;
+                    let clock = (settings.lens_grade && settings.lens_follow_clock)
+                        .then(|| self.lens_clock.fraction());
+                    let params = crate::lens_view::lens_params(
+                        settings,
+                        clock,
+                        u32::try_from(msg.frame_count % 65_536).unwrap_or(0),
+                    );
+                    let sprite = settings
+                        .lens_shadows
+                        .then(|| {
+                            let rows =
+                                crate::play_view::visible_rows(msg.height, msg.last_scanline);
+                            crate::lens_view::fit_sprite_layer(
+                                &msg.sprite_rgba,
+                                msg.width,
+                                msg.height,
+                                rows,
+                                dw,
+                                dh,
+                            )
+                        })
+                        .flatten()
+                        .map(|(rgba, width, height)| rf_renderer::lens::SpriteLayer {
+                            rgba,
+                            width,
+                            height,
+                        });
+                    let pass = self
+                        .lens_pass
+                        .get_or_insert_with(|| rf_renderer::lens::LensPass::new(gpu));
+                    let started = std::time::Instant::now();
+                    match pass.render(gpu, displayed, w32, h32, sprite, &params) {
+                        Ok(out) => {
+                            let ms = started.elapsed().as_secs_f64() * 1000.0;
+                            if self.lens_budget.record_sample_ms(ms) {
+                                self.status =
+                                    "Lens and lighting paused: this machine cannot draw it at full speed."
+                                        .to_string();
+                            }
+                            Some(out)
+                        }
+                        Err(e) => {
+                            self.lens_failed = true;
+                            self.status = format!(
+                                "Lens and lighting failed ({e}); showing the plain picture."
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let (displayed, dw, dh): (&[u8], usize, usize) = match &lensed {
+                Some(out) => (out.as_slice(), dw, dh),
+                None => (displayed, dw, dh),
+            };
             // Ticket W20-16: hold-to-peek wipes to the ACCURACY-EXACT frame.
             // Until W20-16 peek only switched the camera; the Original view
             // still drew the resolved frame, so sprite bypass, de-flicker
@@ -4574,6 +4668,11 @@ impl RetroForgeApp {
                 && self.gpu.is_some()
                 && self.fog_budget.is_enabled()
                 && !self.fog_failed,
+            // Ticket W30-04: the lens draws on the UI thread's GPU, and
+            // gives up (like fog) if it cannot keep within its budget.
+            lens_available: self.gpu.is_some()
+                && self.lens_budget.is_enabled()
+                && !self.lens_failed,
         }
     }
 
@@ -4738,7 +4837,7 @@ impl RetroForgeApp {
                 // extraction (billboards on its ground, same as walls) —
                 // an OR-safety check, same shape `!self.show_layers`
                 // already is.
-                if !self.show_layers && !self.mode7_ground_wanted {
+                if !self.show_layers && !self.mode7_ground_wanted && !self.lens_shadows_wanted {
                     self.send_command(CoreCommand::SetLayerExtraction(false));
                 }
                 if !self.current_game_settings.full_level_view {
@@ -4767,13 +4866,40 @@ impl RetroForgeApp {
             if mode7_wants {
                 self.send_command(CoreCommand::SetLayerExtraction(true));
             } else {
-                if !self.show_layers && !self.diorama_wanted {
+                if !self.show_layers && !self.diorama_wanted && !self.lens_shadows_wanted {
                     self.send_command(CoreCommand::SetLayerExtraction(false));
                 }
                 self.diorama_render = None;
                 self.diorama_texture = None;
             }
         }
+
+        // Ticket W30-04: the lens's soft shadows are cast from the same
+        // sprite layer. Armed only while the row is effective AND shadows
+        // are ticked, so a session that never uses them never pays for the
+        // two layer copies per frame; same OR-safety as the two tiers above.
+        let shadows_wants = self.lens_shadows_effective();
+        if shadows_wants != self.lens_shadows_wanted {
+            self.lens_shadows_wanted = shadows_wants;
+            if shadows_wants {
+                self.send_command(CoreCommand::SetLayerExtraction(true));
+            } else if !self.show_layers && !self.diorama_wanted && !self.mode7_ground_wanted {
+                self.send_command(CoreCommand::SetLayerExtraction(false));
+            }
+        }
+    }
+
+    /// Ticket W30-04: whether the HD-2D lens row is effective right now
+    /// (Enhanced, a GPU within budget, at least one effect on).
+    fn lens_effective(&self) -> bool {
+        crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+            .iter()
+            .any(|r| r.id == "hd2d_lens" && r.effective())
+    }
+
+    /// Ticket W30-04: the lens is effective and its shadows are ticked.
+    fn lens_shadows_effective(&self) -> bool {
+        self.current_game_settings.lens_shadows && self.lens_effective()
     }
 
     /// The decoded level's Diorama ground texture, computed once per ROM
@@ -5684,7 +5810,9 @@ impl RetroForgeApp {
                             // effective Diorama, which reads the identical
                             // `FrameMsg::sprite_rgba`.
                             self.send_command(core_thread::CoreCommand::SetLayerExtraction(
-                                self.show_layers || self.diorama_effective(),
+                                self.show_layers
+                                    || self.diorama_effective()
+                                    || self.lens_shadows_wanted,
                             ));
                             ui.close();
                         }
@@ -7939,6 +8067,13 @@ impl RetroForgeApp {
                     actions.settings_changed = true;
                     actions.widescreen_aspect_changed = true;
                 }
+                // Ticket W30-04: the lens effects, whenever the row can act.
+                if row.id == "hd2d_lens" && available {
+                    ui.add_space(4.0);
+                    if crate::enhance_dock::lens_controls(ui, &mut self.current_game_settings) {
+                        actions.settings_changed = true;
+                    }
+                }
                 // Ticket W30-02: the HD Mode 7 options.
                 if row.id == "hd_mode7" && row.enabled {
                     let settings = &mut self.current_game_settings;
@@ -10113,6 +10248,9 @@ impl RetroForgeApp {
             .and_then(|(profile, _)| rf_enhance::atmosphere::AtmospherePin::from_profile(profile));
         self.fog_budget = rf_renderer::fog::BudgetGate::new();
         self.fog_failed = false;
+        // Ticket W30-04: a new game starts the lens with a clean record.
+        self.lens_budget = rf_renderer::fog::BudgetGate::new();
+        self.lens_failed = false;
         self.fog_started = None;
         self.fog_scroll = None;
         self.fog_drift = (0.0, 0.0);
@@ -10999,6 +11137,7 @@ impl RetroForgeApp {
         self.diorama_texture = None;
         self.diorama_ground_rgba = None;
         self.diorama_wanted = false;
+        self.lens_shadows_wanted = false;
         self.running = false;
         self.position = None;
         self.fps = None;
@@ -11621,6 +11760,33 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn set_mode7_ground_for_test(&mut self, on: bool) {
         self.current_game_settings.mode7_ground = on;
+    }
+
+    /// Ticket W30-04: change the lens settings exactly as its controls do
+    /// (settings only; the next repaint acts on them).
+    #[doc(hidden)]
+    pub fn edit_lens_for_test(
+        &mut self,
+        edit: impl FnOnce(&mut crate::game_settings::GameSettings),
+    ) {
+        edit(&mut self.current_game_settings);
+    }
+
+    /// Ticket W30-04 (tests): the core commands sent so far, other than
+    /// the layer-extraction toggle the shadows share with Diorama.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn core_commands_sent_for_test(&self) -> u64 {
+        self.core_commands_sent
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Ticket W30-04 (tests): whether the shadows currently hold the
+    /// core's layer extraction open.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn lens_shadows_wanted_for_test(&self) -> bool {
+        self.lens_shadows_wanted
     }
 
     /// Ticket W30-02: turn "HD Mode 7" on/off at `scale` (2..=4) exactly as

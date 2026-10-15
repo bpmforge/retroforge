@@ -50,6 +50,7 @@ pub mod frame;
 pub mod gpu;
 pub mod hd_layer;
 pub mod layers;
+pub mod lens;
 pub mod metalfx;
 pub mod mode7_plane;
 pub mod original_pipeline;

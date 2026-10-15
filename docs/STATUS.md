@@ -4434,3 +4434,11 @@ stories, 10 decisions).
   stitcher now fed the widened layer's scroll), else VRAM, else black. Scene
   change drops canvas fill. Decoded-level fill is wired but unreachable until
   an SNES decoder exists. Gate: workspace **2628 passing**.
+- **W30-04 — HD-2D lens and lighting** (2026-10-15). Enhanced-only row on any
+  game with a GPU: bloom, tilt-shift, soft sprite shadows, day/night grade and
+  rain/snow, each opt-in with a strength; one WGSL pass over the finished
+  frame on the UI thread, behind its own budget gate, sending the core
+  nothing (shadows share the sprite-layer extraction). About 1.8 ms/frame at
+  256x224 and 4.6 ms at 1024x896 (release, Metal, all five on). "Follow my
+  clock" reads local time through the `date` command, UTC where that fails.
+  Gate: workspace **2657 passing**.
